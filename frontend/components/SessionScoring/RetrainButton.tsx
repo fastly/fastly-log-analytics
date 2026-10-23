@@ -21,6 +21,7 @@ import type { components } from '@/types/api.generated'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
 import { formatCount } from '@/lib/format'
+import { invalidateServiceScoringQueries } from './useScoringQuery'
 type RetrainResult = components['schemas']['ScoringRetrainResponse']
 
 interface RetrainButtonProps {
@@ -63,13 +64,7 @@ export function RetrainButton({ serviceId }: RetrainButtonProps) {
     onSuccess: (data) => {
       setResult(data)
       // Refresh the AUC field + health card after retrain.
-      queryClient.invalidateQueries({
-        predicate: (q) =>
-          Array.isArray(q.queryKey) &&
-          typeof q.queryKey[0] === 'string' &&
-          (q.queryKey[0] as string).startsWith('scoring-') &&
-          q.queryKey[1] === serviceId,
-      })
+      invalidateServiceScoringQueries(queryClient, serviceId)
     },
   })
 

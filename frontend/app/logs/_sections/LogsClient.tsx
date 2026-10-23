@@ -4,6 +4,7 @@ import React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import dynamic from 'next/dynamic'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { cronCacheBust } from '@/lib/cron-cache-bust'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
@@ -234,9 +235,9 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
         onStartSync={async (range) => {
           const apiRange = range ? { start_time: range.start, end_time: range.end } : {}
           try {
-            const { data } = await client.POST("/api/admin/ingest-logs", {
+            const data = await unwrapClient(client.POST("/api/admin/ingest-logs", {
               params: { query: apiRange }
-            })
+            }))
             s.setSseTitle('Syncing from Cloud')
             s.setSseDescription('Fetching latest snapshots and downloading new data files from the cloud...')
             s.setIsSSEModalOpen(true)

@@ -11,6 +11,7 @@ import {
 } from 'lucide-react'
 import { Button } from "@/components/ui/button"
 import { client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { showToast } from '@/lib/toast'
 import { cronCacheBust } from '@/lib/cron-cache-bust'
 import { queryKeys } from '@/lib/query-keys'
@@ -66,7 +67,7 @@ export function QuickActionsBar({
             disabled={status?.access_level === 'read_only'}
             onClick={async () => {
               try {
-                const { data } = await client.POST("/api/admin/ingest-logs", {})
+                const data = await unwrapClient(client.POST("/api/admin/ingest-logs", {}))
                 // 200 body is an opaque dict; the run_id keys the SSE stream.
                 const runId = data?.run_id
                 if (!runId) { showToast('No run id returned'); return }
@@ -100,7 +101,7 @@ export function QuickActionsBar({
             disabled={status?.access_level === 'read_only'}
             onClick={async () => {
               try {
-                const { data } = await client.POST("/api/admin/commit-iceberg", {})
+                const data = await unwrapClient(client.POST("/api/admin/commit-iceberg", {}))
                 const runId = data?.run_id
                 if (!runId) { showToast('No run id returned'); return }
                 setSseTitle('Committing Buffer')

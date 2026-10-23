@@ -2,11 +2,12 @@
 
 import { useDerivedState } from '@/hooks/useDerivedState'
 import * as React from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { SlidersHorizontal } from 'lucide-react'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { ThresholdSliderHelp } from '@/components/SessionScoring/help-content'
+import { useScoringQuery } from '../useScoringQuery'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { client } from '@/lib/api'
@@ -69,38 +70,29 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
     | null
   >(null)
 
-  const { data, isLoading, error } = useQuery({
-    queryKey: ['scoring-threshold-preview', serviceId, threshold, sinceHours],
-    queryFn: async () => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/threshold-preview',
-        {
-          params: {
-            path: { service_id: serviceId },
-            query: { threshold, since_hours: sinceHours },
-          },
+  const { data: rawPreviewData, isLoading, error } = useScoringQuery(
+    ['scoring-threshold-preview', serviceId, threshold, sinceHours],
+    () =>
+      client.GET('/api/services/{service_id}/scoring/threshold-preview', {
+        params: {
+          path: { service_id: serviceId },
+          query: { threshold, since_hours: sinceHours },
         },
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as ThresholdPreviewResponse
-    },
-    staleTime: 30_000,
-  })
+      }),
+    { staleTime: 30_000 },
+  )
+  const data = rawPreviewData as ThresholdPreviewResponse | undefined
 
   // The operator's previously-committed threshold (persisted in cfg —
   // NOT enforced by the live scorer; just a remembered preference).
-  const { data: committed } = useQuery({
-    queryKey: ['scoring-threshold-committed', serviceId],
-    queryFn: async () => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/threshold',
-        { params: { path: { service_id: serviceId } } },
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data
-    },
-    staleTime: 30_000,
-  })
+  const { data: committed } = useScoringQuery(
+    ['scoring-threshold-committed', serviceId],
+    () =>
+      client.GET('/api/services/{service_id}/scoring/threshold', {
+        params: { path: { service_id: serviceId } },
+      }),
+    { staleTime: 30_000 },
+  )
 
   // One-shot per service: when the committed threshold loads, jump the slider
   // to it so the operator isn't staring at a misleading default of 75. Guarded
@@ -134,18 +126,14 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
   const isAlreadyCommitted = committed?.threshold === thresholdRaw
 
   // Live enforcement (writes to Compute ConfigStore via Fastly API)
-  const { data: enforce } = useQuery({
-    queryKey: ['scoring-enforce-threshold', serviceId],
-    queryFn: async () => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/enforce-threshold',
-        { params: { path: { service_id: serviceId } } },
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data
-    },
-    staleTime: 30_000,
-  })
+  const { data: enforce } = useScoringQuery(
+    ['scoring-enforce-threshold', serviceId],
+    () =>
+      client.GET('/api/services/{service_id}/scoring/enforce-threshold', {
+        params: { path: { service_id: serviceId } },
+      }),
+    { staleTime: 30_000 },
+  )
 
   const enforceMutation = useMutation({
     mutationFn: async (newThreshold: number | null) => {
@@ -172,18 +160,14 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
 
   // Operator-overridable HTTP status code returned by the enforce snippet.
   // Default 429. Reads back cfg.scoring.enforce_status_code via the backend.
-  const { data: statusCode } = useQuery({
-    queryKey: ['scoring-enforce-status-code', serviceId],
-    queryFn: async () => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/enforce-status-code',
-        { params: { path: { service_id: serviceId } } },
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data
-    },
-    staleTime: 30_000,
-  })
+  const { data: statusCode } = useScoringQuery(
+    ['scoring-enforce-status-code', serviceId],
+    () =>
+      client.GET('/api/services/{service_id}/scoring/enforce-status-code', {
+        params: { path: { service_id: serviceId } },
+      }),
+    { staleTime: 30_000 },
+  )
 
   const statusCodeMutation = useMutation({
     mutationFn: async (newCode: number | null) => {

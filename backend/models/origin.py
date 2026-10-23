@@ -103,31 +103,55 @@ class OriginSummaryResponse(_OriginSummaryMetricsMixin, HasDataMixin, BaseRespon
     pass
 
 
-class OriginTimeseriesResponse(HasDataMixin, BaseResponse):
+class _OriginTimeseriesMixin(BaseModel):
     series: list[OriginTimeseriesPoint] = []
 
 
-class OriginSlowUrlsResponse(HasDataMixin, BaseResponse):
+class _OriginSlowUrlsMixin(BaseModel):
     rows: list[OriginSlowUrlRow] = []
 
 
-class OriginStatusCodesResponse(HasDataMixin, BaseResponse):
+class _OriginStatusCodesMixin(BaseModel):
     rows: list[OriginStatusCodeRow] = []
 
 
-class OriginPathBreakdownResponse(HasDataMixin, BaseResponse):
+class _OriginPathBreakdownMixin(BaseModel):
     shielding_detected: bool = False
     rows: list[OriginPathRow] = []
 
 
-class OriginPopLatencyResponse(HasDataMixin, BaseResponse):
+class _OriginPopLatencyMixin(BaseModel):
     requires_group_c: bool = False
     median_p95_ms: float | int | None = None
     rows: list[OriginPopLatencyRow] = []
 
 
-class OriginIpHealthResponse(HasDataMixin, BaseResponse):
+class _OriginIpHealthMixin(BaseModel):
     rows: list[OriginIpHealthRow] = []
+
+
+class OriginTimeseriesResponse(_OriginTimeseriesMixin, HasDataMixin, BaseResponse):
+    pass
+
+
+class OriginSlowUrlsResponse(_OriginSlowUrlsMixin, HasDataMixin, BaseResponse):
+    pass
+
+
+class OriginStatusCodesResponse(_OriginStatusCodesMixin, HasDataMixin, BaseResponse):
+    pass
+
+
+class OriginPathBreakdownResponse(_OriginPathBreakdownMixin, HasDataMixin, BaseResponse):
+    pass
+
+
+class OriginPopLatencyResponse(_OriginPopLatencyMixin, HasDataMixin, BaseResponse):
+    pass
+
+
+class OriginIpHealthResponse(_OriginIpHealthMixin, HasDataMixin, BaseResponse):
+    pass
 
 
 class OriginShieldingAnalysisResponse(HasDataMixin, BaseResponse):
@@ -158,47 +182,32 @@ class OriginSummarySection(_OriginSummaryMetricsMixin, _HasDataOnlyMixin, WireSa
     approx_note: str | None = Field(default=None, alias="_approx_note")
 
 
-class OriginTimeseriesSection(WireSafeModel):
-    has_data: bool = False
-    series: list[OriginTimeseriesPoint] = []
+class OriginTimeseriesSection(_OriginTimeseriesMixin, _HasDataOnlyMixin, WireSafeModel):
     approx: bool | None = Field(default=None, alias="_approx")
     approx_note: str | None = Field(default=None, alias="_approx_note")
 
 
-class OriginSlowUrlsSection(WireSafeModel):
-    has_data: bool = False
-    rows: list[OriginSlowUrlRow] = []
+class OriginSlowUrlsSection(_OriginSlowUrlsMixin, _HasDataOnlyMixin, WireSafeModel):
     approx: bool | None = Field(default=None, alias="_approx")
     approx_note: str | None = Field(default=None, alias="_approx_note")
 
 
-class OriginStatusCodesSection(WireSafeModel):
-    has_data: bool = False
-    rows: list[OriginStatusCodeRow] = []
+class OriginStatusCodesSection(_OriginStatusCodesMixin, _HasDataOnlyMixin, WireSafeModel):
     approx: bool | None = Field(default=None, alias="_approx")
     approx_note: str | None = Field(default=None, alias="_approx_note")
 
 
-class OriginPathBreakdownSection(WireSafeModel):
-    has_data: bool = False
-    shielding_detected: bool = False
-    rows: list[OriginPathRow] = []
+class OriginPathBreakdownSection(_OriginPathBreakdownMixin, _HasDataOnlyMixin, WireSafeModel):
     approx: bool | None = Field(default=None, alias="_approx")
     approx_note: str | None = Field(default=None, alias="_approx_note")
 
 
-class OriginPopLatencySection(WireSafeModel):
-    has_data: bool = False
-    requires_group_c: bool = False
-    median_p95_ms: float | int | None = None
-    rows: list[OriginPopLatencyRow] = []
+class OriginPopLatencySection(_OriginPopLatencyMixin, _HasDataOnlyMixin, WireSafeModel):
     approx: bool | None = Field(default=None, alias="_approx")
     approx_note: str | None = Field(default=None, alias="_approx_note")
 
 
-class OriginIpHealthSection(WireSafeModel):
-    has_data: bool = False
-    rows: list[OriginIpHealthRow] = []
+class OriginIpHealthSection(_OriginIpHealthMixin, _HasDataOnlyMixin, WireSafeModel):
     approx: bool | None = Field(default=None, alias="_approx")
     approx_note: str | None = Field(default=None, alias="_approx_note")
 

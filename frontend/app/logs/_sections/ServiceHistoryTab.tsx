@@ -5,15 +5,9 @@ import { useQueryClient } from '@tanstack/react-query'
 import type { components } from '@/types/api.generated'
 import {
   RefreshCw,
-  ChevronDown,
 } from 'lucide-react'
-import { Button, buttonVariants } from "@/components/ui/button"
-import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+import { Button } from "@/components/ui/button"
+import { ColumnVisibilityDropdown } from '@/components/DataTable/ColumnVisibilityDropdown'
 import {
   Select,
   SelectContent,
@@ -75,34 +69,7 @@ export function ServiceHistoryTab({
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <DropdownMenu>
-                <DropdownMenuTrigger
-                  className={buttonVariants({ variant: "outline", size: "sm", className: "h-8" })}
-                >
-                  <span className="flex items-center text-xs">
-                    Columns <ChevronDown className="ml-2 h-4 w-4" />
-                  </span>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-auto min-w-[200px]">
-                  {table
-                    .getAllColumns()
-                    .filter((column) => column.getCanHide())
-                    .map((column) => {
-                      return (
-                        <DropdownMenuCheckboxItem
-                          key={column.id}
-                          className="capitalize whitespace-nowrap"
-                          checked={column.getIsVisible()}
-                          onCheckedChange={(value) =>
-                            column.toggleVisibility(!!value)
-                          }
-                        >
-                          {column.id.replace(/_/g, ' ')}
-                        </DropdownMenuCheckboxItem>
-                      )
-                    })}
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <ColumnVisibilityDropdown table={table} />
               <Button
                 variant="outline"
                 size="sm"

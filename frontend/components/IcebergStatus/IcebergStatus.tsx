@@ -3,6 +3,7 @@
 import React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { useServiceStore } from '@/stores/serviceStore'
 import {
   Card,
@@ -43,8 +44,7 @@ export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
   const { data: info, isLoading, error } = useQuery({
     queryKey: queryKeys.admin.iceberg(activeServiceId),
     queryFn: async () => {
-      const { data } = await client.GET("/api/admin/iceberg-info")
-      return data
+      return unwrapClient(client.GET("/api/admin/iceberg-info"))
     },
     enabled: !!activeServiceId,
     staleTime: 60_000,

@@ -541,7 +541,8 @@ def reset_service_rum(
             (service_id,),
         )
         con.execute(
-            "DELETE FROM committed_buffers WHERE buffer_filename LIKE 'client_vitals%' OR buffer_filename LIKE 'client_errors%'"
+            "DELETE FROM committed_buffers WHERE buffer_filename LIKE ? OR buffer_filename LIKE ?",
+            ("client_vitals%", "client_errors%"),
         )
         con.execute(
             "DELETE FROM local_compacted_files WHERE (service_id = ? OR service_id = '' OR service_id IS NULL) AND (file_name LIKE 'client_vitals%' OR file_name LIKE 'client_errors%')",

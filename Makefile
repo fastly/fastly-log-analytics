@@ -1,4 +1,4 @@
-.PHONY: test test-ci fast-ci lint lint-frontend format typecheck ci install install-hooks dev clean gen-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit test-frontend-ci openapi-drift e2e e2e-all deploy-validate stray-file-gate stack-restart stack-up stack-down stack-ps stack-logs stack-health otel-guard urllib-guard dateparse-guard retry-guard coalesce-guard audit audit-watch
+.PHONY: test test-ci fast-ci lint lint-frontend format typecheck ci install install-hooks dev clean gen-types openapi-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit test-frontend-ci openapi-drift e2e e2e-all deploy-validate stray-file-gate stack-restart stack-up stack-down stack-ps stack-logs stack-health otel-guard urllib-guard dateparse-guard retry-guard coalesce-guard audit audit-watch
 
 # Prevent a VIRTUAL_ENV from another project leaking into uv commands
 unexport VIRTUAL_ENV
@@ -82,6 +82,8 @@ import-contracts:
 
 gen-types:
 	cd frontend && npm run gen:types
+
+openapi-types: gen-types
 
 test-frontend:
 	cd frontend && npm test
@@ -341,7 +343,7 @@ clickhouse-prototype-benchmark:
 # own `build:` block, so compose gives it its OWN image rather than reusing
 # the backend's. Omitting it meant `up` started it from a stale image and it
 # died with ModuleNotFoundError on a module that had just been added.
-COMPOSE_APP := backend worker beat frontend metadata-schema-init
+COMPOSE_APP := backend worker frontend metadata-schema-init
 
 # Rebuild the app images and recreate those containers. Use after ANY code
 # change. --force-recreate is what picks up new images and changed env.

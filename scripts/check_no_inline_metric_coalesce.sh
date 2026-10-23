@@ -14,7 +14,10 @@
 #
 # When you migrate a site, lower its count (delete the row at zero).
 set -euo pipefail
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR/.."
+# shellcheck source=scripts/lib/ratchet_common.sh
+source "$SCRIPT_DIR/lib/ratchet_common.sh"
 
 PATTERN='COALESCE\('
 
@@ -38,20 +41,9 @@ backend/repositories/sessions.py 1
 counts=$(git grep -nE "$PATTERN" -- 'backend/core/rollups/*.py' 'backend/repositories/*.py' ':!backend/repositories/_sql/*' 2>/dev/null \
   | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | cut -d: -f1 | sort | uniq -c || true)
 
-fail=0
-while read -r count file; do
-  [ -z "${file:-}" ] && continue
-  allowed=$(printf '%s\n' "$BASELINE" | awk -v f="$file" '$1 == f { print $2 }')
-  allowed=${allowed:-0}
-  if [ "$count" -gt "$allowed" ]; then
-    echo "ERROR: $file has $count inline COALESCE( site(s), baseline allows $allowed (B3/B6)." >&2
-    echo "  Use backend/core/metric_expressions.py helpers (sum_or_zero, column_or_default, coalesce, origin_latency_us)." >&2
-    fail=1
-  fi
-done <<< "$counts"
-
-if [ "$fail" -ne 0 ]; then
-  exit 1
-fi
-
-echo "OK: inline COALESCE( in repositories + rollup writers is within the ratchet baseline."
+check_ratchet_counts \
+  "$counts" \
+  "$BASELINE" \
+  "inline COALESCE( site(s), baseline allows __ALLOWED__ (B3/B6)." \
+  "Use backend/core/metric_expressions.py helpers (sum_or_zero, column_or_default, coalesce, origin_latency_us)." \
+  "OK: inline COALESCE( in repositories + rollup writers is within the ratchet baseline."

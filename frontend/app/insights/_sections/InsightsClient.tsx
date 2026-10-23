@@ -4,6 +4,8 @@ import React, { useState, useMemo } from 'react'
 import Link from 'next/link'
 import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
+import { queryKeys } from '@/lib/query-keys'
 import type { FiltersPayload } from '@/types/filters'
 import { cn } from '@/lib/utils'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -271,15 +273,14 @@ function InsightsBody({
       ? ['insights', activeServiceId, windowHours, baselineHours, filterPayload]
       : ['insights', activeServiceId, windowHours, baselineHours],
     queryFn: async ({ signal }) => {
-      const { data } = await client.POST("/api/insights", { signal,
+      return unwrapClient(client.POST("/api/insights", { signal,
         body: {
           window_size_hrs: parseFloat(windowHours),
           baseline_hours: parseFloat(baselineHours),
           filters: filterPayload ?? {},
           force_refresh: false,
         }
-      })
-      return data
+      }))
     },
     enabled: !!activeServiceId,
     staleTime: 60000,
@@ -289,8 +290,7 @@ function InsightsBody({
   const { data: availability, error: availabilityError } = useQuery({
     queryKey: ['insights', 'availability', activeServiceId],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/insight-availability", { signal })
-      return data
+      return unwrapClient(client.GET("/api/insight-availability", { signal }))
     },
     enabled: !!activeServiceId,
     // The active-insights list is derived from the service's column schema
@@ -488,10 +488,9 @@ export default function InsightsClient({
 
   const queryClient = useQueryClient()
   const { data: extentsData } = useQuery({
-    queryKey: ['log-extents', activeServiceId],
+    queryKey: queryKeys.logExtents(activeServiceId),
     queryFn: async () => {
-      const { data } = await client.GET('/api/log-extents')
-      return data
+      return unwrapClient(client.GET('/api/log-extents'))
     },
     enabled: !!activeServiceId,
     staleTime: 60_000,
@@ -505,7 +504,7 @@ export default function InsightsClient({
       queryClient.prefetchQuery({
         queryKey: ['insights', activeServiceId, '24', '720'],
         queryFn: async ({ signal }) => {
-          const { data } = await client.POST('/api/insights', {
+          return unwrapClient(client.POST('/api/insights', {
             signal,
             body: {
               window_size_hrs: 24,
@@ -513,8 +512,7 @@ export default function InsightsClient({
               filters: {},
               force_refresh: false,
             },
-          })
-          return data
+          }))
         },
         staleTime: 60_000,
       })
@@ -540,14 +538,14 @@ export default function InsightsClient({
     setIsRescanning(true)
     const hasActiveFilters = Boolean(filterPayload && Object.keys(filterPayload).length > 0)
     try {
-      const { data } = await client.POST('/api/insights', {
+      const data = await unwrapClient(client.POST('/api/insights', {
         body: {
           window_size_hrs: parseFloat(appliedWindowHours),
           baseline_hours: parseFloat(appliedBaselineHours),
           filters: filterPayload ?? {},
           force_refresh: true,
         },
-      })
+      }))
       if (data) {
         queryClient.setQueryData(
           hasActiveFilters

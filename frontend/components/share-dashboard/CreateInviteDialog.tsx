@@ -23,6 +23,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { cn } from '@/lib/utils'
 import { panelDialogContent, panelDialogHeaderSolid } from '@/lib/panel-dialog'
 
@@ -112,23 +113,25 @@ function CreateInviteDialogInner({
     setError('')
     setCreating(true)
     try {
-      await client.POST('/api/admin/share/invites', {
-        body: {
-          name,
-          email,
-          // OAuth invites carry no passcode — the backend synthesizes an
-          // unguessable argon2id placeholder for the NOT NULL column.
-          ...(authMode === 'passcode' ? { passcode } : {}),
-          auth_method: authMode,
-          ...(authMode === 'oauth' ? { oauth_provider: oauthProvider } : {}),
-          duration_hours: duration || null,
-          ip_whitelist: ipWhitelist || null,
-          service_ids: serviceIds,
-          pii_policy: { mask_ips: maskIps },
-          query_window_hours: queryWindow || null,
-          allow_concurrent_sessions: allowConcurrent,
-        },
-      })
+      await unwrapClient(
+        client.POST('/api/admin/share/invites', {
+          body: {
+            name,
+            email,
+            // OAuth invites carry no passcode — the backend synthesizes an
+            // unguessable argon2id placeholder for the NOT NULL column.
+            ...(authMode === 'passcode' ? { passcode } : {}),
+            auth_method: authMode,
+            ...(authMode === 'oauth' ? { oauth_provider: oauthProvider } : {}),
+            duration_hours: duration || null,
+            ip_whitelist: ipWhitelist || null,
+            service_ids: serviceIds,
+            pii_policy: { mask_ips: maskIps },
+            query_window_hours: queryWindow || null,
+            allow_concurrent_sessions: allowConcurrent,
+          },
+        }),
+      )
       await onCreated()
       onOpenChange(false)
     } catch (e) {

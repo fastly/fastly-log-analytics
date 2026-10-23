@@ -3,7 +3,9 @@ from pathlib import Path
 
 
 def test_clickhouse_dashboard_uses_exact_metrics_and_existing_datasource():
-    dashboard = json.loads(Path("observability/dashboards/fla-multipod.json").read_text())
+    dashboard = json.loads(
+        Path("deploy/chart/fastly-log-analytics/files/observability/dashboards/fla-multipod.json").read_text()
+    )
     panels = [p for p in dashboard["panels"] if p["title"].startswith("ClickHouse")]
     assert len(panels) >= 9
     queries = " ".join(target["expr"] for panel in panels for target in panel.get("targets", []))

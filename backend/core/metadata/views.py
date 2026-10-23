@@ -58,6 +58,20 @@ def delete_view(service_id: str, view_id: str) -> dict:
     return {"status": "success"}
 
 
+def _view_row_tuple(v: dict) -> tuple:
+    return (
+        v.get("id"),
+        v.get("service_id"),
+        v.get("name"),
+        v.get("filters_json"),
+        v.get("time_range_type"),
+        v.get("start_time"),
+        v.get("end_time"),
+        v.get("page"),
+        v.get("created_at"),
+    )
+
+
 def replace_views_for_service(service_id: str, views: list[dict]) -> None:
     """Replace all saved views for a service. Used by state_sync.import_admin_state."""
     con = get_con(service_id)
@@ -66,20 +80,7 @@ def replace_views_for_service(service_id: str, views: list[dict]) -> None:
         con.executemany(
             "INSERT INTO views (id, service_id, name, filters_json, time_range_type, start_time, end_time, page, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                (
-                    v.get("id"),
-                    v.get("service_id"),
-                    v.get("name"),
-                    v.get("filters_json"),
-                    v.get("time_range_type"),
-                    v.get("start_time"),
-                    v.get("end_time"),
-                    v.get("page"),
-                    v.get("created_at"),
-                )
-                for v in views
-            ],
+            [_view_row_tuple(v) for v in views],
         )
     con.commit()
 
@@ -104,19 +105,6 @@ def upsert_views_for_service(service_id: str, views: list[dict]) -> None:
         "name=excluded.name, filters_json=excluded.filters_json, "
         "time_range_type=excluded.time_range_type, start_time=excluded.start_time, "
         "end_time=excluded.end_time, page=excluded.page, created_at=excluded.created_at",
-        [
-            (
-                v.get("id"),
-                v.get("service_id"),
-                v.get("name"),
-                v.get("filters_json"),
-                v.get("time_range_type"),
-                v.get("start_time"),
-                v.get("end_time"),
-                v.get("page"),
-                v.get("created_at"),
-            )
-            for v in views
-        ],
+        [_view_row_tuple(v) for v in views],
     )
     con.commit()

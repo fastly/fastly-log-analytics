@@ -2,7 +2,9 @@
 
 import React, { useState, useMemo, useEffect } from 'react'
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
-import { client, extractApiError } from '@/lib/api'
+import { adminFetch, client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
+import { downloadBlob } from '@/lib/download'
 import type { components } from '@/types/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { DataTable } from '@/components/DataTable/DataTable'
@@ -181,9 +183,9 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
   async function purgeAll() {
     setPurging(true)
     try {
-      await client.DELETE('/api/admin/usage-log', {
+      await unwrapClient(client.DELETE('/api/admin/usage-log', {
         params: { query: { service_id: activeServiceId || '' } },
-      })
+      }))
       setPurgeOpen(false)
       refetch()
     } finally {
@@ -265,6 +267,12 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
             data-testid="admin-usage-log-export-btn"
             href={mounted ? exportUrl : undefined}
             download="usage_log.csv"
+            onClick={(e) => {
+              e.preventDefault()
+              void adminFetch(exportUrl).then(async (res) => {
+                if (res.ok) downloadBlob(await res.blob(), 'usage_log.csv')
+              })
+            }}
             className={buttonVariants({ variant: 'outline', size: 'sm' })}
           >
             <Download className="h-3.5 w-3.5 mr-1.5" /> Export CSV

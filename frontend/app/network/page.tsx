@@ -7,6 +7,7 @@ import { TransportSection } from './_sections/TransportSection'
 import { AsnLeaderboardTable, MetroLeaderboardTable } from './_sections/LeaderboardTables'
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import type { components } from '@/types/api'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
@@ -44,9 +45,8 @@ const ShieldingMap = dynamic(() => import('@/components/Map/ShieldingMap').then(
   loading: () => <Skeleton className="w-full h-[420px] rounded-xl" />,
 })
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
-import { quantizeAnchor } from '@/lib/time-window'
+import { useReportRangeAnchor } from '@/hooks/useReportRangeAnchor'
 import type { RangeWireArgs } from '@/lib/range-wire'
-import { useFilterStore } from '@/stores/filterStore'
 import { LazyMount } from '@/components/LazyMount'
 import { StatCard } from '@/components/ui/stat-card'
 import { Button } from '@/components/ui/button'
@@ -154,20 +154,7 @@ export default function NetworkPage() {
   // custom absolute range (relativeRange null + isAutoRange false) → no token, so
   // the backend falls back to the absolute start/end we always send, scanning
   // exactly what the chart x-axis (hard-clamped to startTime/endTime) displays.
-  const relativeRange = useFilterStore((s) => s.relativeRange)
-  const isAutoRange = useFilterStore((s) => s.isAutoRange)
-  const storeEndTime = useFilterStore((s) => s.endTime)
-  // Anchor the keyed path to the SELECTED window's end (floored to the 60s
-  // grid), not to mount time: every explicit range selection writes a fresh
-  // endTime (ReportLayout's ctx times ARE the store times), so a preset clicked
-  // in a long-lived tab re-anchors at click time and scans [click−N, click] —
-  // matching the hard-clamped x-axis — instead of a mount-pinned window that,
-  // for the short presets (1h..12h), could be fully disjoint from the display.
-  // Memoized on endTime so a cross-minute re-render still can't advance the key
-  // (no scan refire); on cold load endTime is the store-init default (≈ mount
-  // now), so behavior there is unchanged. quantizeAnchor mirrors the backend's
-  // quantize_anchor byte-for-byte (lib/time-window.ts ≡ backend/utils/time_window.py).
-  const anchor = React.useMemo(() => quantizeAnchor(storeEndTime), [storeEndTime])
+  const { relativeRange, isAutoRange, anchor } = useReportRangeAnchor()
 
   return (
     <ReportLayout
@@ -261,7 +248,7 @@ function NetworkBody({
     range,
     keyParts: [animBucketSeconds, metric],
     queryFn: async ({ rangeToken, signal }) => {
-      const { data } = await client.POST("/api/network-health", { signal,
+      return unwrapClient(client.POST("/api/network-health", { signal,
         body: {
           start_time: startTime!,
           end_time: endTime!,
@@ -277,8 +264,7 @@ function NetworkBody({
           range_token: rangeToken,
           anchor,
         }
-      })
-      return data
+      }))
     },
   })
 
@@ -292,7 +278,7 @@ function NetworkBody({
       enabled: mapAsn !== 'all',
     },
     queryFn: async ({ rangeToken, signal }) => {
-      const { data } = await client.POST("/api/network-health", { signal,
+      return unwrapClient(client.POST("/api/network-health", { signal,
         body: {
           start_time: startTime!,
           end_time: endTime!,
@@ -305,8 +291,7 @@ function NetworkBody({
           range_token: rangeToken,
           anchor,
         }
-      })
-      return data
+      }))
     },
   })
 
@@ -316,7 +301,7 @@ function NetworkBody({
     filterPayload,
     range,
     queryFn: async ({ rangeToken, signal }) => {
-      const { data } = await client.POST("/api/network-health", { signal,
+      return unwrapClient(client.POST("/api/network-health", { signal,
         body: {
           start_time: startTime!,
           end_time: endTime!,
@@ -329,8 +314,7 @@ function NetworkBody({
           range_token: rangeToken,
           anchor,
         }
-      })
-      return data
+      }))
     },
   })
 
@@ -340,15 +324,14 @@ function NetworkBody({
   const qualityQuery = useServiceQuery(
     ['network', 'quality', activeServiceId, startTime, endTime, filterPayload, regionCountry],
     async ({ signal }) => {
-      const { data } = await client.POST("/api/network-quality", { signal,
+      return unwrapClient(client.POST("/api/network-quality", { signal,
         body: {
           start_time: startTime!,
           end_time: endTime!,
           filters: filterPayload,
           region_country: regionCountry,
         }
-      })
-      return data
+      }))
     },
   )
 

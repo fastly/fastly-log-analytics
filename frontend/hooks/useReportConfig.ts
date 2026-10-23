@@ -82,22 +82,18 @@ export function useReportConfig(options: ReportConfigOptions = {}) {
     }
   }, [startTime, endTime, chartInterval, manualInterval])
 
-  // Derive-during-render resets (React's sanctioned alternative to an effect that sets state).
-  if (config.effectiveInterval !== chartInterval) {
-    setChartInterval(config.effectiveInterval)
-  } else if (!config.validTrends.has(trend)) {
-    setTrend('off')
-  }
+  const effectiveInterval = config.effectiveInterval
+  const effectiveTrend = config.validTrends.has(trend) ? trend : 'off'
 
   return {
     metric,
     setMetric,
-    chartInterval,
+    chartInterval: effectiveInterval,
     setChartInterval: (val: ChartInterval) => {
       setChartInterval(val)
       setManualInterval(val)
     },
-    trend,
+    trend: effectiveTrend,
     setTrend,
     config
   }

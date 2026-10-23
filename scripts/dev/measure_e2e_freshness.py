@@ -48,6 +48,7 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.lib.admin_tls import admin_origin, admin_urlopen, is_admin_url, validate_admin_tls_config  # noqa: E402
+from scripts.lib.environments import parse_iso_utc  # noqa: E402
 
 ENVIRONMENTS = {
     "local-std": "Local Standard",
@@ -219,16 +220,7 @@ def rum_beacon_count(response: Any) -> int | None:
 
 
 def parse_iso(ts_str: str | None) -> datetime | None:
-    if not ts_str:
-        return None
-    try:
-        clean = ts_str.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(clean)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
-        return dt
-    except Exception:
-        return None
+    return parse_iso_utc(ts_str)
 
 
 def http_get(url: str, headers: dict[str, str] | None = None, timeout: float = 35.0) -> tuple[int, Any]:

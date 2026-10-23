@@ -59,7 +59,9 @@ def test_network_30d_navigation_tolerates_portforward_resets() -> None:
     # bounded retry helper (which absorbs a reset with backoff before giving
     # up) exactly like RUM 30d.
     src = _src()
-    assert "gotoWithShellReady(networkPage, networkUrl30d" in src, (
+    assert "gotoWithShellReady(networkPage, networkUrl30d" in src or (
+        "gotoWithShellReady(routePage, targetUrl" in src and "routePath: '/network'" in src
+    ), (
         "Network 30d navigation must go through the bounded retry helper so a "
         "transient port-forward reset is retried, not reported as missing data"
     )

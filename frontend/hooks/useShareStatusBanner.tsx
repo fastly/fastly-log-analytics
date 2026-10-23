@@ -5,9 +5,11 @@ import { useRouter } from 'next/navigation'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { queryKeys } from '@/lib/query-keys'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useSessionRoleStore } from '@/stores/sessionRoleStore'
+import { useIsAnalyst } from '@/hooks/useIsAnalyst'
 import { buildServiceHref } from '@/lib/navigation'
 import type { BootstrapResponse, ShareBanner } from '@/types/api'
 
@@ -35,8 +37,7 @@ export function useShareStatusBanner({ enabled }: Options) {
   const queryClient = useQueryClient()
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const isRemoteAnalyst = useSessionRoleStore((s) => s.isRemoteAnalyst)
-  const isBootstrapAnalyst =
-    queryClient.getQueryData<BootstrapResponse>(queryKeys.bootstrap())?.settings?.is_remote_analyst === true
+  const isAnalyst = useIsAnalyst()
   // Background tabs don't poll (AGENTS.md: refetchIntervalInBackground=false).
   const hidden = React.useSyncExternalStore(
     subscribeVisibility,
@@ -70,7 +71,7 @@ export function useShareStatusBanner({ enabled }: Options) {
       // Lean /api/admin/share/banner (~80B) instead of /status (~11KB): the
       // banner only needs sharing_active + public_url and this polls every
       // 15s on every page with AppLayout.
-      const { data } = await client.GET('/api/admin/share/banner', { signal })
+      const data = await unwrapClient(client.GET('/api/admin/share/banner', { signal }))
       return toBanner(data)
     },
     initialData: seeded ?? undefined,
@@ -78,7 +79,7 @@ export function useShareStatusBanner({ enabled }: Options) {
     refetchInterval: POLL_MS,
     refetchIntervalInBackground: false,
     retry: false,
-    enabled: enabled && !hidden && !isRemoteAnalyst && !isBootstrapAnalyst,
+    enabled: enabled && !hidden && !isRemoteAnalyst && !isAnalyst,
   })
 
   const node = enabled && status?.sharing_active ? (

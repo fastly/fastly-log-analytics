@@ -592,9 +592,14 @@ def rum_hex_id(rng: Any, chars: int = 16) -> str:
     return f"{rng.getrandbits(chars * 4):0{chars}x}"
 
 
+_RESERVED_FIRST_OCTETS = frozenset({10, 100, 127, 169, 172, 192, 198, 203})
+_PUBLIC_FIRST_OCTETS = tuple(o for o in range(12, 224) if o not in _RESERVED_FIRST_OCTETS)
+
+
 def random_source_ip(rng: Any = random) -> str:
     """Public-looking IPv4 used to spoof geography/ASN via ``X-Source-Ip``."""
-    return f"{rng.randint(12, 223)}.{rng.randint(1, 254)}.{rng.randint(1, 254)}.{rng.randint(1, 254)}"
+    first = rng.choice(_PUBLIC_FIRST_OCTETS)
+    return f"{first}.{rng.randint(1, 254)}.{rng.randint(1, 254)}.{rng.randint(1, 254)}"
 
 
 def _draw_file_metric(rng: Any) -> tuple[str, float]:

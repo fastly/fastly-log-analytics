@@ -8,10 +8,6 @@ export const RETENTION_OPTIONS = [
   { value: '0', label: 'Forever' },
 ]
 
-export const RETENTION_LABELS: Record<string, string> = Object.fromEntries(
-  RETENTION_OPTIONS.map(o => [o.value, o.label])
-)
-
 export const COMMIT_INTERVAL_OPTIONS = [
   { value: '1',  label: 'Every 1 min  — most fresh, most snapshots' },
   { value: '2',  label: 'Every 2 min' },

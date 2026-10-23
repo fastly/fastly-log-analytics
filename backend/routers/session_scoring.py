@@ -48,6 +48,7 @@ from backend.models.session_scoring import (
     ScoringTokenBody,
     ScoringTopFlaggedResponse,
 )
+from backend.utils.auth import require_service_in_scope
 from backend.utils.remote_access import clamp_or_400, get_analyst_time_bounds
 from backend.utils.router_utils import make_error, not_found, resolve_fastly_token, stored_fastly_token
 from backend.utils.sse import sse_response
@@ -59,6 +60,14 @@ router = APIRouter(prefix="/api/services", tags=["session-scoring"], responses=D
 # the config so it must be stripped before any response that surfaces the
 # scoring block (status endpoint, enable SSE done event, etc.).
 _SECRET_KEYS = frozenset({"aes_key_hex", "request_secret"})
+
+
+def _enforce_scoring_service_scope(request: Request | None, service_id: str) -> None:
+    """Enforce analyst service-scope tenancy on session-scoring endpoints."""
+    if request is not None and hasattr(request, "state"):
+        analyst_session = getattr(request.state, "analyst_session", None)
+        if analyst_session is None or hasattr(analyst_session, "service_ids"):
+            require_service_in_scope(request, service_id)
 
 
 # ── In-process TTL cache for analytics endpoints ─────────────────────────────
@@ -641,6 +650,7 @@ def scoring_analytics_composite(
     """
     # Cast params to plain ints — FastAPI resolves Query() objects when
     # called via HTTP, but direct Python calls receive the Query wrapper.
+    _enforce_scoring_service_scope(request, service_id)
     sh = int(since_hours)
 
     result = {
@@ -653,7 +663,7 @@ def scoring_analytics_composite(
     if not _is_analyst_request(request):
         from backend.routers.session_scoring_admin import scoring_evaluation_per_reason
 
-        result["evaluation"] = scoring_evaluation(service_id=service_id)
+        result["evaluation"] = scoring_evaluation(request=request, service_id=service_id)
         result["evaluation_per_reason"] = scoring_evaluation_per_reason(service_id=service_id)
     return result
 
@@ -889,6 +899,7 @@ def scoring_labels_list(
     """Return all session labels for a service, most recent first."""
     from backend.scoring import labels as _labels
 
+    _enforce_scoring_service_scope(request, service_id)
     rows = _labels.list_labels(service_id, limit=limit)
     counts = _labels.counts_by_label(service_id)
     if _is_analyst_request(request):
@@ -959,6 +970,7 @@ def scoring_labels_update(
 ) -> dict:
     from backend.scoring import labels as _labels
 
+    _enforce_scoring_service_scope(request, service_id)
     _strip_pii_fields_for_analyst(request, body)
     try:
         row = _labels.update_label(
@@ -1039,6 +1051,7 @@ def scoring_top_flagged(
     JOIN cost server-side)."""
     from backend.core.duckdb import _safe_table_name
 
+    _enforce_scoring_service_scope(request, service_id)
     table = _safe_table_name(service_id)
     src = _scoring_source(table, _table_columns(service_id))
     ts_pred, win_disc = _scoring_time_window(request, since_hours)
@@ -1069,6 +1082,7 @@ def scoring_score_distribution(
     histogram."""
     from backend.core.duckdb import _safe_table_name
 
+    _enforce_scoring_service_scope(request, service_id)
     table = _safe_table_name(service_id)
     src = _scoring_source(table, _table_columns(service_id))
     ts_pred, win_disc = _scoring_time_window(request, since_hours)
@@ -1095,6 +1109,7 @@ def scoring_compliance_breakdown(
     tampered / expired / unknown)."""
     from backend.core.duckdb import _safe_table_name
 
+    _enforce_scoring_service_scope(request, service_id)
     table = _safe_table_name(service_id)
     src = _scoring_source(table, _table_columns(service_id))
     ts_pred, win_disc = _scoring_time_window(request, since_hours)
@@ -1139,6 +1154,7 @@ def scoring_latency_timeseries(
     """
     from backend.core.duckdb import _safe_table_name
 
+    _enforce_scoring_service_scope(request, service_id)
     table = _safe_table_name(service_id)
     ts_pred, win_disc = _scoring_time_window(request, since_hours)
 
@@ -1184,6 +1200,7 @@ def scoring_health(
     """
     from backend.core.duckdb import _safe_table_name
 
+    _enforce_scoring_service_scope(request, service_id)
     table = _safe_table_name(service_id)
     ts_pred, win_disc = _scoring_time_window(request, since_hours)
 
@@ -1288,6 +1305,7 @@ _MIN_LABELS_PER_CLASS = 3
 )
 def scoring_evaluation(
     service_id: str = Path(...),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict:
     """Compute the live matrix's ROC-AUC against the operator's accumulated
     good/bad labels and return the result for the StatusPanel.
@@ -1309,6 +1327,7 @@ def scoring_evaluation(
     """
     from backend.scoring import labels as _labels
 
+    _enforce_scoring_service_scope(request, service_id)
     counts = _labels.counts_by_label(service_id)
     n_good = counts.get("good", 0)
     n_bad = counts.get("bad", 0)
@@ -1389,6 +1408,7 @@ def scoring_evaluation(
 @router.get("/{service_id}/scoring/curves", response_model=ScoringCurvesResponse, response_model_exclude_unset=True)
 def scoring_curves(
     service_id: str = Path(...),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict:
     """ROC + PR curve points for the operator's labeled sessions.
 
@@ -1410,6 +1430,7 @@ def scoring_curves(
     """
     from backend.scoring import labels as _labels
 
+    _enforce_scoring_service_scope(request, service_id)
     counts = _labels.counts_by_label(service_id)
     n_good = counts.get("good", 0)
     n_bad = counts.get("bad", 0)
@@ -1531,6 +1552,7 @@ def scoring_threshold_preview(
     from backend.core.duckdb import _safe_table_name
     from backend.scoring import labels as _labels
 
+    _enforce_scoring_service_scope(request, service_id)
     table = _safe_table_name(service_id)
     src = _scoring_source(table, _table_columns(service_id))
     ts_pred, win_disc = _scoring_time_window(request, since_hours)

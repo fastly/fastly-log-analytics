@@ -27,6 +27,9 @@ TASK_MAP = {
     "rollup_heal": "rollup_hour_heal",
     "rollup_compact": "rollup_compact_daily",
     "ledger_sweep": "ledger_sweep",
+    "partial_hour_merge": "partial_hour_merge",
+    "rum_discovery": "rum_discovery",
+    "ledger_rum_sweep": "ledger_rum_sweep",
 }
 _TASK_MAP = TASK_MAP
 

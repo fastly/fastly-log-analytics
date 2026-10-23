@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useFilterStore } from '@/stores/filterStore'
 import { useEffectiveServiceId } from '@/hooks/useIsDataReady'
@@ -140,7 +141,7 @@ export function useLogsPageState(initialTab?: string) {
   const { data: cronLogs, isLoading: isLoadingCron, isFetching: isFetchingCron } = useQuery({
     queryKey: queryKeys.admin.cronLogs(activeServiceId, taskFilter, statusFilter),
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/cron-runs", { signal,
+      return unwrapClient(client.GET("/api/cron-runs", { signal,
         params: {
           query: {
             page: 1,
@@ -149,8 +150,7 @@ export function useLogsPageState(initialTab?: string) {
             status: statusFilter === 'all' ? undefined : statusFilter
           }
         }
-      })
-      return data
+      }))
     },
     enabled: !!activeServiceId && activeTab === 'cron',
     // Primary update path is the /api/admin/events/stream cron-runs channel
@@ -179,7 +179,7 @@ export function useLogsPageState(initialTab?: string) {
     queryFn: async ({ signal }) => {
       const max = maxSeenIdRef.current
       const sinceId = max != null ? Math.max(0, max - 1) : undefined
-      const { data } = await client.GET("/api/cron-runs", { signal,
+      return unwrapClient(client.GET("/api/cron-runs", { signal,
         params: {
           query: {
             page: 1,
@@ -187,8 +187,7 @@ export function useLogsPageState(initialTab?: string) {
             since_id: sinceId,
           }
         }
-      })
-      return data
+      }))
     },
     enabled: !!activeServiceId, // Tab independent polling!
     // Primary update path is the /api/admin/events/stream cron-runs channel
@@ -336,8 +335,7 @@ export function useLogsPageState(initialTab?: string) {
   const { data: cronSchedule, isLoading: isLoadingSchedule } = useQuery({
     queryKey: queryKeys.admin.cronSchedule(activeServiceId),
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/cron-schedule", { signal })
-      return data
+      return unwrapClient(client.GET("/api/cron-schedule", { signal }))
     },
     enabled: !!activeServiceId && activeTab === 'cron',
     // Freshness via useAdminEventStream (wired in SyncStatusBadge):
@@ -424,7 +422,7 @@ export function useLogsPageState(initialTab?: string) {
   const { data: auditLogs, isLoading: isLoadingAudit, isFetching: isFetchingAudit } = useQuery({
     queryKey: queryKeys.admin.auditLogs(activeServiceId, eventFilter),
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/audit-logs", { signal,
+      return unwrapClient(client.GET("/api/audit-logs", { signal,
         params: {
           query: {
             page: 1,
@@ -432,8 +430,7 @@ export function useLogsPageState(initialTab?: string) {
             event_type: eventFilter === 'all' ? undefined : eventFilter
           }
         }
-      })
-      return data
+      }))
     },
     enabled: !!activeServiceId && activeTab === 'service_history',
     // Kept fresh by useAdminEventStream (invalidates ['admin','audit-logs',svc]
@@ -446,8 +443,7 @@ export function useLogsPageState(initialTab?: string) {
   const { data: ingestedFiles, isLoading: isLoadingIngested } = useQuery({
     queryKey: queryKeys.admin.ingestedFiles(activeServiceId),
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/admin/ingested-files", { signal })
-      return data
+      return unwrapClient(client.GET("/api/admin/ingested-files", { signal }))
     },
     enabled: !!activeServiceId && activeTab === 'ingestion',
     // Freshness via useAdminEventStream (invalidates
@@ -459,8 +455,7 @@ export function useLogsPageState(initialTab?: string) {
   const { data: schemaData, isLoading: isLoadingSchema } = useQuery({
     queryKey: queryKeys.admin.schema(activeServiceId),
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/schema", { signal })
-      return data
+      return unwrapClient(client.GET("/api/schema", { signal }))
     },
     enabled: !!activeServiceId && activeTab === 'schema',
     // Freshness via useAdminEventStream (invalidates ['admin','schema',svc]
@@ -471,7 +466,7 @@ export function useLogsPageState(initialTab?: string) {
 
   const purgeMutation = useMutation({
     mutationFn: async () => {
-      await client.DELETE("/api/cron-runs", {})
+      await unwrapClient(client.DELETE("/api/cron-runs", {}))
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsFor(activeServiceId) })

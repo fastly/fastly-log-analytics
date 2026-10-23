@@ -1,4 +1,5 @@
 const { chromium } = require('playwright');
+const path = require('path');
 const { adminGatewayContextOptions } = require('./lib/admin_gateway_client.cjs');
 const { collectResponseMeasurements, budgets } = require('./lib/section_measurements.cjs');
 const { execSync } = require('child_process');
@@ -216,8 +217,8 @@ async function attachGceFallbackAuth(context, certificateAdmin, logInjected = fa
 // synthetic traffic) is logged, not fatal; `strictEmpty` pages treat ANY
 // empty-state panel as a failure.
 async function verifyDataPage(browser, adminTlsOptions, spec) {
-  const { name, path, markers, strictEmpty = false } = spec;
-  const pageUrl = getUrlWithParam(baseUrl.replace('/dashboard', path), "range", "24h");
+  const { name, path: routePath, markers, strictEmpty = false } = spec;
+  const pageUrl = getUrlWithParam(baseUrl.replace('/dashboard', routePath), "range", "24h");
   console.log(`[${name} 24h] Checking ${pageUrl} ...`);
 
   const context = await browser.newContext(adminTlsOptions);
@@ -270,6 +271,110 @@ async function verifyDataPage(browser, adminTlsOptions, spec) {
   measurements.close();
   if (name === 'Streaming') await logPoolStats(context, name);
   await page.close();
+  await context.close();
+}
+
+async function verifyAnalyticsRouteWithPlotly(browser, adminTlsOptions, certificateAdmin, spec) {
+  const {
+    name,
+    routePath,
+    range = '30d',
+    markers,
+    configWarningMarker = '',
+    configWarningMessage = '',
+    screenshotPath = path.resolve(__dirname, '..', `${name.toLowerCase()}-screenshot.png`),
+  } = spec;
+  const routeBaseUrl = baseUrl.replace('/dashboard', routePath);
+  const context = await browser.newContext(adminTlsOptions);
+  await attachGceFallbackAuth(context, certificateAdmin);
+  const routePage = await context.newPage();
+  registerErrorListeners(routePage, browser, name);
+
+  const targetUrl = getUrlWithParam(routeBaseUrl, 'range', range);
+  const label = `${name} ${range}`;
+  console.log(`[${label}] Checking ${targetUrl} ...`);
+
+  let bodyText = '';
+  let hasVitals = false;
+
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      const response = await gotoWithShellReady(routePage, targetUrl, label, {
+        attempts: 3,
+        navTimeout: 35000,
+        shellTimeout: 10000,
+      });
+      if (response && response.ok()) {
+        // GEMINI.md Mandate #4: Positive-case wait for Plotly charts to become visible
+        try {
+          await routePage.locator('.js-plotly-plot, .plotly').first().waitFor({ state: 'visible', timeout: 45000 });
+        } catch (chartErr) {
+          console.log(`[${label}] Attempt ${attempt}/4: Plotly chart not visible yet.`);
+        }
+
+        bodyText = await routePage.evaluate(() => document.body.innerText);
+        const hasErrorText =
+          (configWarningMarker && bodyText.includes(configWarningMarker)) || bodyText.includes('Failed to load');
+        hasVitals = markers.some(marker => bodyText.includes(marker));
+
+        const isChartVisible = await routePage.evaluate(() => {
+          const el = document.querySelector('.js-plotly-plot, .plotly');
+          if (!el) return false;
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        });
+
+        if (!hasErrorText && hasVitals && isChartVisible) {
+          break;
+        }
+      }
+    } catch (err) {
+      console.log(`[${label}] Navigation warning (attempt ${attempt}): ${err.message}`);
+    }
+    console.log(`[${label}] Attempt ${attempt}/4: ${name} metrics or Plotly charts not fully rendered yet. Waiting 8s...`);
+    await routePage.waitForTimeout(8000);
+  }
+
+  if (configWarningMarker && bodyText.includes(configWarningMarker)) {
+    console.error(configWarningMessage);
+    await browser.close();
+    process.exit(1);
+  }
+
+  if (!hasVitals) {
+    console.error(`[${label}] Verification Failed: ${name} page could not be verified or is missing standard panel names.`);
+    console.error(`Body text sample:\n${bodyText.slice(0, 1000)}`);
+    await browser.close();
+    process.exit(1);
+  }
+
+  if (EMPTY_STATE_MARKERS.some(marker => bodyText.includes(marker))) {
+    console.error(`❌ [Playwright ${name} Verification] Verification Failed: ${name} panels loaded successfully but returned "No data available" or "No data in this range"!`);
+    await browser.close();
+    process.exit(1);
+  }
+
+  const isChartVisible = await routePage.evaluate(() => {
+    const el = document.querySelector('.js-plotly-plot, .plotly');
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  });
+  if (!isChartVisible) {
+    const isLocal = process.argv[5] === 'local';
+    if (isLocal) {
+      await routePage.screenshot({ path: screenshotPath, fullPage: true });
+      console.error(`❌ [Playwright ${name} Chart Verification] Verification Failed: No visible Plotly charts found on the ${name} page! Screenshot saved to ${path.basename(screenshotPath)}`);
+      await browser.close();
+      process.exit(1);
+    } else {
+      console.log(`⚠️ [Playwright ${name} Chart Verification] Warning: No visible Plotly charts found on the ${name} page for remote cloud environment (${process.argv[5]}), proceeding...`);
+    }
+  }
+
+  console.log(`[${name} Panel Verification] Verified: All ${name} panels finished loading, standard elements are present, and Plotly charts are visible! 🟢`);
+
+  await routePage.close();
   await context.close();
 }
 
@@ -834,103 +939,16 @@ async function logPagePerf(page, name, responseMeasurements = [], measurementGap
     // ────────────────────────────────────────────────────────────────────────
     // ── STAGE 3: NETWORK PAGE VERIFICATION
     // ────────────────────────────────────────────────────────────────────────
-    const networkBaseUrl = baseUrl.replace('/dashboard', '/network');
-
-    // Create a completely clean, isolated incognito browser context for Stage 3
-    const networkContext = await browser.newContext(adminTlsOptions);
-    await attachGceFallbackAuth(networkContext, certificateAdmin);
-    const networkPage = await networkContext.newPage();
-    registerErrorListeners(networkPage, browser, 'Network');
-
-    // 3.1. Verify 30d Network Data is present with active polling
-    const networkUrl30d = getUrlWithParam(networkBaseUrl, "range", "30d");
-    console.log(`[Network 30d] Checking ${networkUrl30d} ...`);
-
-    let networkBodyText30d = "";
-    let hasNetworkVitals = false;
-
-    for (let attempt = 1; attempt <= 4; attempt++) {
-      try {
-        response = await gotoWithShellReady(networkPage, networkUrl30d, 'Network 30d', { attempts: 3, navTimeout: 35000, shellTimeout: 10000 });
-        if (response && response.ok()) {
-
-          // GEMINI.md Mandate #4: Positive-case wait for Plotly charts to become visible
-          try {
-            await networkPage.locator('.js-plotly-plot, .plotly').first().waitFor({ state: 'visible', timeout: 45000 });
-          } catch (chartErr) {
-            console.log(`[Network 30d] Attempt ${attempt}/4: Plotly chart not visible yet.`);
-          }
-
-          networkBodyText30d = await networkPage.evaluate(() => document.body.innerText);
-          const hasErrorText = networkBodyText30d.includes("Enable Groups F and G") || networkBodyText30d.includes("Failed to load");
-
-          // The network page should render various panels with positive metrics:
-          hasNetworkVitals = networkBodyText30d.includes("Global Health") ||
-                             networkBodyText30d.includes("Avg RTT") ||
-                             networkBodyText30d.includes("Leaderboard") ||
-                             networkBodyText30d.includes("RTT") ||
-                             networkBodyText30d.includes("HEALTH SCORE");
-
-          const isChartVisible = await networkPage.evaluate(() => {
-            const el = document.querySelector('.js-plotly-plot, .plotly');
-            if (!el) return false;
-            const rect = el.getBoundingClientRect();
-            return rect.width > 0 && rect.height > 0;
-          });
-
-          if (!hasErrorText && hasNetworkVitals && isChartVisible) {
-            break;
-          }
-        }
-      } catch (err) {
-        console.log(`[Network 30d] Navigation warning (attempt ${attempt}): ${err.message}`);
-      }
-      console.log(`[Network 30d] Attempt ${attempt}/4: Network metrics or Plotly charts not fully rendered yet. Waiting 8s...`);
-      await networkPage.waitForTimeout(8000);
-    }
-
-    if (networkBodyText30d.includes("Enable Groups F and G")) {
-      console.error(`❌ [Playwright Network Verification] Verification Failed: Network page is showing field group configuration warning: "Enable Groups F and G (Network Quality) in your log field configuration."`);
-      await browser.close();
-      process.exit(1);
-    }
-
-    if (!hasNetworkVitals) {
-      console.error(`[Network 30d] Verification Failed: Network & ASN Health page could not be verified or is missing standard panel names.`);
-      console.error(`Body text sample:\n${networkBodyText30d.slice(0, 1000)}`);
-      await browser.close();
-      process.exit(1);
-    }
-
-    if (networkBodyText30d.includes("No data available") || networkBodyText30d.includes("No data in this time range yet") || networkBodyText30d.includes("No data in this range")) {
-      console.error(`❌ [Playwright Network Verification] Verification Failed: Network panels loaded successfully but returned "No data available" or "No data in this range"!`);
-      await browser.close();
-      process.exit(1);
-    }
-
-    // Verify that at least one Plotly chart (the RTT heatmap or quality scatter) is rendered and visible on the page
-    const isNetworkChartVisible = await networkPage.evaluate(() => {
-      const el = document.querySelector('.js-plotly-plot, .plotly');
-      if (!el) return false;
-      const rect = el.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
+    await verifyAnalyticsRouteWithPlotly(browser, adminTlsOptions, certificateAdmin, {
+      name: 'Network',
+      routePath: '/network',
+      range: '30d',
+      markers: ['Global Health', 'Avg RTT', 'Leaderboard', 'RTT', 'HEALTH SCORE'],
+      configWarningMarker: 'Enable Groups F and G',
+      configWarningMessage:
+        '❌ [Playwright Network Verification] Verification Failed: Network page is showing field group configuration warning: "Enable Groups F and G (Network Quality) in your log field configuration."',
+      screenshotPath: path.resolve(__dirname, '..', 'network-screenshot.png'),
     });
-    if (!isNetworkChartVisible) {
-      const isLocal = process.argv[5] === "local";
-      if (isLocal) {
-        await networkPage.screenshot({ path: '../network-screenshot.png', fullPage: true });
-        console.error(`❌ [Playwright Network Chart Verification] Verification Failed: No visible Plotly charts found on the Network page! Screenshot saved to network-screenshot.png`);
-        await browser.close();
-        process.exit(1);
-      } else {
-        console.log(`⚠️ [Playwright Network Chart Verification] Warning: No visible Plotly charts found on the Network page for remote cloud environment (${process.argv[5]}), proceeding...`);
-      }
-    }
-
-    console.log(`[Network Panel Verification] Verified: All Network panels finished loading, standard elements are present, and Plotly charts are visible! 🟢`);
-
-    await networkPage.close();
-    await networkContext.close();
 
     // ────────────────────────────────────────────────────────────────────────
     // ── STAGES 4-7: STREAMING (CMCD), SECURITY, ORIGIN, PERFORMANCE

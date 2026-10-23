@@ -17,6 +17,7 @@ import { AlertTriangle, AlertCircle, HardDrive, Cloud } from 'lucide-react'
 import { useSSE } from '@/hooks/useSSE'
 import { SSEProgressView } from '@/components/SSEModal'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { formatBytes, formatCount } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import {
@@ -66,10 +67,9 @@ export function DeleteDataDialog({ service, open, onOpenChange, onComplete }: De
       // (it arrives via the shared `Depends(get_source)` chain, which the
       // OpenAPI codegen doesn't surface as a named param) — same escape
       // hatch UsageLogClient uses for the same endpoint shape.
-      const { data } = await client.GET('/api/admin/iceberg-info', {
+      return unwrapClient(client.GET('/api/admin/iceberg-info', {
         params: { query: { service_id: serviceId } as Record<string, string> },
-      })
-      return data
+      }))
     },
     enabled: open && !isExecuting && !!serviceId,
     staleTime: 30_000,

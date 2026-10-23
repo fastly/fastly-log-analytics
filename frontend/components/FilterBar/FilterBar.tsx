@@ -28,6 +28,7 @@ import { ViewSelector } from './ViewSelector'
 
 import { useShallow } from 'zustand/react/shallow'
 import { useMounted } from '@/hooks/useMounted'
+import { useServiceSwitchReset } from '@/hooks/useServiceSwitchReset'
 
 // First-element of every React Query key whose results depend on the
 // global start/end time range. Used by the active-pill loading dot's
@@ -129,13 +130,9 @@ export const FilterBar = React.memo(function FilterBar() {
 
   // Reset extents sync state ONLY when the user explicitly switches services,
   // not on initial page load or hydration.
-  const prevServiceId = React.useRef(activeServiceId)
-  React.useEffect(() => {
-    if (activeServiceId && prevServiceId.current && activeServiceId !== prevServiceId.current) {
-      resetRange()
-    }
-    prevServiceId.current = activeServiceId
-  }, [activeServiceId, resetRange])
+  useServiceSwitchReset(activeServiceId, () => {
+    resetRange()
+  })
 
   // Sync local inputs with global store state
   const { timezone } = useTimezoneStore()

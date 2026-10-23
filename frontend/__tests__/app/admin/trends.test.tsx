@@ -1,7 +1,7 @@
 import React from 'react'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { renderWithQuery } from '@/__tests__/helpers/renderWithQuery'
 
 const { mockGet } = vi.hoisted(() => ({
   mockGet: vi.fn(),
@@ -20,17 +20,6 @@ vi.mock('@/lib/api', async (importOriginal) => {
 
 import AdminTrendsClient from '@/app/admin/trends/_sections/AdminTrendsClient'
 import Loading from '@/app/admin/trends/loading'
-
-function renderWithQuery(ui: React.ReactElement) {
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      queries: {
-        retry: false,
-      },
-    },
-  })
-  return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>)
-}
 
 const SAMPLE_SERIES = {
   cpu_load_1m: [

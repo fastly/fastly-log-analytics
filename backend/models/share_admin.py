@@ -7,11 +7,18 @@ single canonical home for them.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from backend.models._base import PassthroughModel, WireSafeModel
+
+
+class PiiPolicyPayload(WireSafeModel):
+    """Body for ``PATCH /api/share-admin/invites/{id}/pii`` — toggle the
+    invite's PII policy (currently just ``mask_ips``) after creation."""
+
+    mask_ips: bool = False
 
 
 class ShareStartPayload(BaseModel):
@@ -40,7 +47,7 @@ class InvitePayload(BaseModel):
     duration_hours: int | None = Field(default=24)
     ip_whitelist: str | None = None
     service_ids: list[str] = Field(default_factory=list)
-    pii_policy: dict | None = None
+    pii_policy: PiiPolicyPayload | None = None
     query_window_hours: int | None = None
     query_start_time: str | None = None
     query_end_time: str | None = None
@@ -76,13 +83,6 @@ class PasscodePayload(BaseModel):
     the invite's passcode in-place (keeps audit history + TOS acceptance)."""
 
     passcode: str
-
-
-class PiiPolicyPayload(BaseModel):
-    """Body for ``PATCH /api/share-admin/invites/{id}/pii`` — toggle the
-    invite's PII policy (currently just ``mask_ips``) after creation."""
-
-    mask_ips: bool
 
 
 class SharingPolicyPayload(BaseModel):
@@ -143,7 +143,7 @@ class InviteRecord(PassthroughModel):
     email: str | None = None
     expires_at: str | None = None
     ip_whitelist: str | None = None
-    pii_policy: dict[str, Any] | None = None
+    pii_policy: PiiPolicyPayload | None = None
     query_window_hours: int | None = None
     query_start_time: str | None = None
     query_end_time: str | None = None
@@ -180,7 +180,7 @@ class ShareSessionRecord(PassthroughModel):
     ip_address: str
     user_agent: str
     fingerprint_signature: str
-    pii_policy: dict[str, Any]
+    pii_policy: PiiPolicyPayload
     query_window_hours: int | None
     query_start_time: str | None
     query_end_time: str | None

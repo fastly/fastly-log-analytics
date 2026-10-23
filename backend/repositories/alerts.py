@@ -129,13 +129,7 @@ def evaluate_alert(
         def _window_offset(minutes_ago: float) -> str:
             return f"{max_ts_literal} - INTERVAL '{minutes_ago} minutes'"
 
-        def build_metric_query(
-            window_start_expr: str, window_end_expr: str, start_dt: datetime, end_dt: datetime
-        ) -> str:
-            agg_or_sel = get_metric_sql(metric, status_codes)
-            where_clause = f"timestamp >= {window_start_expr} AND timestamp <= {window_end_expr}"
-
-            # Partition pruning via dt/timestamp_hour virtual columns (if present)
+        def _append_partition_bounds(where_clause: str, start_dt: datetime, end_dt: datetime) -> str:
             st_utc = start_dt.astimezone(UTC)
             et_utc = end_dt.astimezone(UTC)
             if "dt" in existing_cols:
@@ -144,6 +138,17 @@ def evaluate_alert(
             if "timestamp_hour" in existing_cols:
                 where_clause += f" AND timestamp_hour >= '{st_utc.strftime('%Y-%m-%d-%H')}'"
                 where_clause += f" AND timestamp_hour <= '{et_utc.strftime('%Y-%m-%d-%H')}'"
+            return where_clause
+
+        def build_metric_query(
+            window_start_expr: str, window_end_expr: str, start_dt: datetime, end_dt: datetime
+        ) -> str:
+            agg_or_sel = get_metric_sql(metric, status_codes)
+            where_clause = _append_partition_bounds(
+                f"timestamp >= {window_start_expr} AND timestamp <= {window_end_expr}",
+                start_dt,
+                end_dt,
+            )
 
             if eval_scope == "edge":
                 where_clause += " AND edge = true"
@@ -169,15 +174,11 @@ def evaluate_alert(
         # Request count is only used for relative alerts to ensure minimum traffic floor
         if eval_type in ("relative_increase", "relative_decrease") and comp_period:
             if metric != "requests":
-                q_req_where = f"timestamp >= {current_start} AND timestamp <= {current_end}"
-                st_utc = start_dt_current.astimezone(UTC)
-                et_utc = end_dt_current.astimezone(UTC)
-                if "dt" in existing_cols:
-                    q_req_where += f" AND dt >= '{st_utc.strftime('%Y-%m-%d')}'"
-                    q_req_where += f" AND dt <= '{et_utc.strftime('%Y-%m-%d')}'"
-                if "timestamp_hour" in existing_cols:
-                    q_req_where += f" AND timestamp_hour >= '{st_utc.strftime('%Y-%m-%d-%H')}'"
-                    q_req_where += f" AND timestamp_hour <= '{et_utc.strftime('%Y-%m-%d-%H')}'"
+                q_req_where = _append_partition_bounds(
+                    f"timestamp >= {current_start} AND timestamp <= {current_end}",
+                    start_dt_current,
+                    end_dt_current,
+                )
 
                 q_req = f"SELECT count(*) FROM {table_name} WHERE {q_req_where}"
                 with track_query(con, q_req, [], "alerts") as cursor:
@@ -207,13 +208,11 @@ def evaluate_alert(
                 val = ((hist_val - val) / hist_val) * 100.0
         elif eval_type == "anomaly_zscore":
             if metric != "requests":
-                q_req_where = f"timestamp >= {current_start} AND timestamp <= {current_end}"
-                st_utc = start_dt_current.astimezone(UTC)
-                et_utc = end_dt_current.astimezone(UTC)
-                if "dt" in existing_cols:
-                    q_req_where += f" AND dt >= '{st_utc.strftime('%Y-%m-%d')}'"
-                if "timestamp_hour" in existing_cols:
-                    q_req_where += f" AND timestamp_hour >= '{st_utc.strftime('%Y-%m-%d-%H')}'"
+                q_req_where = _append_partition_bounds(
+                    f"timestamp >= {current_start} AND timestamp <= {current_end}",
+                    start_dt_current,
+                    end_dt_current,
+                )
 
                 q_req = f"SELECT count(*) FROM {table_name} WHERE {q_req_where}"
                 with track_query(con, q_req, [], "alerts") as cursor:
@@ -231,15 +230,12 @@ def evaluate_alert(
             baseline_end_expr = f"{max_ts_literal} - INTERVAL '1 hours'"
 
             agg_or_sel = get_metric_sql(metric, status_codes)
-            where_clause = (
+            where_clause = _append_partition_bounds(
                 f"timestamp >= {baseline_start_expr} AND timestamp <= {baseline_end_expr} "
-                f"AND EXTRACT(hour FROM timestamp) = EXTRACT(hour FROM {max_ts_literal})"
+                f"AND EXTRACT(hour FROM timestamp) = EXTRACT(hour FROM {max_ts_literal})",
+                baseline_start_dt,
+                baseline_end_dt,
             )
-
-            st_utc = baseline_start_dt.astimezone(UTC)
-            et_utc = baseline_end_dt.astimezone(UTC)
-            if "dt" in existing_cols:
-                where_clause += f" AND dt >= '{st_utc.strftime('%Y-%m-%d')}'"
 
             if agg_or_sel.strip().lower().startswith("select"):
                 agg_expr = agg_or_sel.replace(f"FROM {table_name}", "").replace("SELECT", "").strip()

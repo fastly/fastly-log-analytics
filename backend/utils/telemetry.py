@@ -169,7 +169,10 @@ def process_context_scope(name: str):
     try:
         yield
     finally:
-        _PROCESS_CONTEXT.reset(token)
+        try:
+            _PROCESS_CONTEXT.reset(token)
+        except ValueError:
+            _PROCESS_CONTEXT.set(None)
         if attribution_set:
             try:
                 from backend.core.query_attribution import current_attribution
@@ -567,29 +570,11 @@ class track_query:
         _QUERIES.set(queries)
 
         # New persistent SQLite recording
-        plid = get_page_load_id()
-        if plid:
-            token = _RECORDING_TELEMETRY.set(True)
-            try:
-                from backend import config as svcconfig
-
-                sid = svcconfig.get_active_service_id()
-                if sid:
-                    from backend.core.metadata import usage_log
-
-                    request_id = "unknown"
-                    usage_log.log_telemetry_query(
-                        service_id=sid,
-                        page_load_id=plid,
-                        request_id=request_id,
-                        engine="duckdb",
-                        sql=self.query.strip(),
-                        duration_ms=elapsed,
-                    )
-            except Exception as e:
-                logger.debug("Failed to record query to SQLite telemetry: %s", e)
-            finally:
-                _RECORDING_TELEMETRY.reset(token)
+        record_telemetry_query(
+            engine="duckdb",
+            sql=self.query.strip(),
+            duration_ms=elapsed,
+        )
 
         # Phase 1 telemetry bridge — surface as a span event when inside
         # an active section span.

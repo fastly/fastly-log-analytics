@@ -14,8 +14,9 @@ def _run(root: Path) -> subprocess.CompletedProcess[str]:
 
 
 def _repo(tmp_path: Path, files: dict[str, str]) -> Path:
-    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "lib").mkdir(parents=True)
     shutil.copy(SCRIPT, tmp_path / "scripts" / SCRIPT.name)
+    shutil.copy(SCRIPT.parent / "lib" / "ratchet_common.sh", tmp_path / "scripts" / "lib" / "ratchet_common.sh")
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     for rel, body in files.items():
         f = tmp_path / rel

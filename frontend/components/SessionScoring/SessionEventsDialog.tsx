@@ -1,8 +1,8 @@
 'use client'
 
 import * as React from 'react'
-import { useQuery } from '@tanstack/react-query'
 import { Activity, ChevronRight, X } from 'lucide-react'
+import { useScoringQuery } from './useScoringQuery'
 
 import {
   Dialog,
@@ -50,24 +50,17 @@ export function SessionEventsDialog({
 }: SessionEventsDialogProps) {
   const [open, setOpen] = React.useState(false)
 
-  const { data, isLoading, isError, error } = useQuery({
-    queryKey: ['scoring-session-events', serviceId, sid],
-    enabled: open,
-    queryFn: async () => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/sessions/{sid}/events',
-        {
-          params: {
-            path: { service_id: serviceId, sid },
-            query: { since_days: 30 },
-          },
+  const { data, isLoading, isError, error } = useScoringQuery(
+    ['scoring-session-events', serviceId, sid],
+    () =>
+      client.GET('/api/services/{service_id}/scoring/sessions/{sid}/events', {
+        params: {
+          path: { service_id: serviceId, sid },
+          query: { since_days: 30 },
         },
-      )
-      if (!response.ok || !data) throw new Error(`status ${response.status}`)
-      return data
-    },
-    staleTime: 30_000,
-  })
+      }),
+    { enabled: open, staleTime: 30_000 },
+  )
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>

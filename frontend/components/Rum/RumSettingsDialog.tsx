@@ -15,14 +15,8 @@ import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { ArrowRight, Settings2, Sparkles } from 'lucide-react'
+import { RumVersionPicker } from '@/components/ProvisionWizard/RumVersionPicker'
 import { useSSE, type SSELine } from '@/hooks/useSSE'
 import { useDerivedState } from '@/hooks/useDerivedState'
 import { SSEProgressView } from '@/components/SSEModal'
@@ -401,41 +395,14 @@ function RumSettingsDialogBody({
 
               {/* Version picker section */}
               <div className="space-y-4 border-t pt-5">
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between mb-2">
-                    <Label htmlFor="upgrade-faro-version" className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
-                      Faro Web SDK Version
-                    </Label>
-                    <a
-                      href="https://github.com/grafana/faro-web-sdk/releases"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs text-primary hover:underline flex items-center gap-1 font-semibold"
-                    >
-                      Release Notes &rarr;
-                    </a>
-                  </div>
-                  <Select value={selectedVersion} onValueChange={(v) => setSelectedVersion(v ?? '')}>
-                    <SelectTrigger
-                      id="upgrade-faro-version"
-                      className="h-9 text-sm w-full"
-                      aria-label="Target Faro Web SDK version"
-                    >
-                      <SelectValue placeholder="Select a version" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {availableVersions.map((v) => {
-                        const tags = [v === latestVersion && 'latest', v === currentVersion && 'current'].filter(Boolean)
-                        return (
-                          <SelectItem key={v} value={v}>
-                            {v}
-                            {tags.length > 0 ? ` (${tags.join(', ')})` : ''}
-                          </SelectItem>
-                        )
-                      })}
-                    </SelectContent>
-                  </Select>
-                </div>
+                <RumVersionPicker
+                  serviceId={serviceId}
+                  value={selectedVersion || null}
+                  onChange={(v) => setSelectedVersion(v ?? '')}
+                  availableVersions={availableVersions}
+                  currentVersion={currentVersion}
+                  latestVersion={latestVersion}
+                />
 
                 {selectedVersion !== currentVersion && (
                   <div className="flex items-center justify-center gap-3 rounded-md bg-muted/40 border p-4 text-sm font-mono animate-in fade-in duration-300">

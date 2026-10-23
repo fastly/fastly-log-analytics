@@ -18,25 +18,10 @@
  *      telemetry attribution.
  */
 import { test, expect } from '@playwright/test';
-import { adminGatewayContextOptions } from '../../../scripts/lib/admin_gateway_client.cjs';
-import { clsInitScript } from '../cls-observer';
+import { clsInitScript, readClsScore } from '../cls-observer';
+import { resolveFirstServiceId, configureExternalAdminOrigin } from './helpers';
 
-const externalOrigin = process.env.PLAYWRIGHT_BASE_URL || '';
-if (externalOrigin) {
-  test.use({
-    baseURL: externalOrigin,
-    ...adminGatewayContextOptions(externalOrigin),
-  });
-}
-
-async function resolveFirstServiceId(page: import('@playwright/test').Page): Promise<string> {
-  const res = await page.request.get('/api/bootstrap');
-  expect(res.status()).toBe(200);
-  const body = await res.json();
-  const services = Array.isArray(body?.services) ? body.services : [];
-  expect(services.length).toBeGreaterThan(0);
-  return services[0].service_id as string;
-}
+configureExternalAdminOrigin();
 
 test.describe('Page Spec: /admin/clickhouse (Admin ClickHouse Replay & Cluster Operations)', () => {
   test('1. Route accessibility, ServerFooter identity, and ClickHouse Admin layout mount', async ({
@@ -86,16 +71,18 @@ test.describe('Page Spec: /admin/clickhouse (Admin ClickHouse Replay & Cluster O
     await expect(healthBadge).toHaveText(/^(ok|disabled|unavailable)$/);
     await page.waitForTimeout(300);
 
+    const clsScore = await readClsScore(page);
     const vitalsPerf = await page.evaluate(() => {
       const fcpEntry = performance.getEntriesByName('first-contentful-paint')[0] as
         | PerformanceEntry
         | undefined;
       return {
-        cls: Number((window as unknown as { __cls?: number }).__cls ?? 0),
+        cls: Number(window.__clsScore ?? 0),
         fcpMs: fcpEntry ? fcpEntry.startTime : 0,
       };
     });
 
+    expect(clsScore).toBeLessThanOrEqual(0.05);
     expect(vitalsPerf.cls).toBeLessThanOrEqual(0.05);
     if (vitalsPerf.fcpMs > 0) {
       expect(vitalsPerf.fcpMs).toBeLessThan(1200);

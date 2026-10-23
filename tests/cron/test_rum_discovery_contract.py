@@ -915,3 +915,80 @@ def test_manual_trigger_rum_discovery_busy_503():
     finally:
         app.dependency_overrides.pop(get_source, None)
         app.dependency_overrides.pop(get_service_id, None)
+
+
+# =============================================================================
+# 12. Broker Configuration & Availability Error Tests (Restored from test_rum_discovery.py)
+# =============================================================================
+
+
+def test_rum_discovery_missing_broker_error(monkeypatch):
+    """When CELERY_BROKER_URL is empty, rum_discovery logs an error run and exits without discovering."""
+    log_calls = []
+
+    monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_HIGH_SCALE)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "")
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 99)
+    monkeypatch.setattr(
+        "backend.core.duckdb.log_cron_run",
+        lambda src, task, elapsed, status, **kw: log_calls.append((task, elapsed, status, kw)),
+    )
+    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", lambda *a, **kw: None)
+    monkeypatch.setattr("backend.cron.jobs.rum_sync._reconcile_faro_bundle", lambda sid, rid: True)
+    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+
+    discover_calls = []
+    monkeypatch.setattr(
+        "backend.core.ingest.discover_rum_prefix",
+        lambda *a, **kw: discover_calls.append(a),
+    )
+
+    rum_ledger_mod._run_rum_discovery_cron.__wrapped__(SERVICE_ID)
+
+    assert len(discover_calls) == 0, "Should not attempt discovery without broker URL"
+    assert len(log_calls) == 1
+    task, _elapsed, status, kw = log_calls[0]
+    assert task == "rum_discovery"
+    assert status == "error"
+    assert "no broker URL" in (kw.get("summary") or "")
+    assert "CELERY_BROKER_URL" in (kw.get("error_message") or "")
+    assert kw.get("run_id") == 99
+
+
+def test_rum_discovery_broker_unavailable_error(monkeypatch):
+    """When broker enqueue fails during prefix discovery, rum_discovery records error status and error_message."""
+    log_calls = []
+
+    monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_HIGH_SCALE)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "redis://localhost:6379/0")
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 100)
+    monkeypatch.setattr(
+        "backend.core.duckdb.log_cron_run",
+        lambda src, task, elapsed, status, **kw: log_calls.append((task, elapsed, status, kw)),
+    )
+    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", lambda *a, **kw: None)
+    monkeypatch.setattr("backend.cron.jobs.rum_sync._reconcile_faro_bundle", lambda sid, rid: True)
+    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+
+    def _raise_broker_err(*_a, **_kw):
+        raise ConnectionError("Valkey broker connection refused")
+
+    monkeypatch.setattr("backend.core.ingest.discover_rum_prefix", _raise_broker_err)
+
+    rum_ledger_mod._run_rum_discovery_cron.__wrapped__(SERVICE_ID)
+
+    assert len(log_calls) == 1
+    task, _elapsed, status, kw = log_calls[0]
+    assert task == "rum_discovery"
+    assert status == "error"
+    assert kw.get("summary") == "RUM discovery failed"
+    assert "Valkey broker connection refused" in (kw.get("error_message") or "")
+    assert kw.get("run_id") == 100

@@ -1,8 +1,9 @@
 'use client'
 
 import * as React from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Copy, History, Info, RotateCcw } from 'lucide-react'
+import { invalidateServiceScoringQueries, useScoringQuery } from './useScoringQuery'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { MatrixHistoryHelp } from '@/components/SessionScoring/help-content'
@@ -33,19 +34,13 @@ export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
   const [restoreResult, setRestoreResult] = React.useState<RestoreResponse | null>(null)
   const { copied, copy: copyText } = useCopyToClipboard(1500)
 
-  const { data, isLoading, isFetching, isError, error } = useQuery({
-    queryKey: ['scoring-matrix-versions', serviceId],
-    queryFn: async () => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/matrix-versions',
-        {
-          params: { path: { service_id: serviceId } },
-        },
-      )
-      if (!response.ok || !data) throw new Error(`status ${response.status}`)
-      return data
-    },
-  })
+  const { data, isLoading, isFetching, isError, error } = useScoringQuery(
+    ['scoring-matrix-versions', serviceId],
+    () =>
+      client.GET('/api/services/{service_id}/scoring/matrix-versions', {
+        params: { path: { service_id: serviceId } },
+      }),
+  )
 
   const restore = useMutation({
     mutationFn: async (version: string): Promise<RestoreResponse> => {
@@ -68,13 +63,7 @@ export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
       setPendingVersion(null)
       // Refresh AUC / status / versions list — every card keyed on
       // 'scoring-*' for this service should refetch.
-      qc.invalidateQueries({
-        predicate: (q) =>
-          Array.isArray(q.queryKey) &&
-          typeof q.queryKey[0] === 'string' &&
-          (q.queryKey[0] as string).startsWith('scoring-') &&
-          q.queryKey[1] === serviceId,
-      })
+      invalidateServiceScoringQueries(qc, serviceId)
     },
   })
 

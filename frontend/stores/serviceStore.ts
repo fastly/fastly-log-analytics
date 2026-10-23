@@ -10,6 +10,7 @@ export interface Service {
   rum_enabled?: boolean
   analystPathASupported?: boolean
   analystPathAReason?: string | null
+  is_high_scale?: boolean
 }
 
 interface ServiceState {

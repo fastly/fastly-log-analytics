@@ -1,6 +1,7 @@
 "use client";
 
 import { client } from "@/lib/api";
+import { unwrapClient } from "@/lib/api-client";
 import type { components } from "@/types/api.generated";
 import type {
   FosStatus,
@@ -27,10 +28,11 @@ export interface ValidateMutationDeps {
 
 export const validateMutationFn = (token: string) =>
   async (serviceId: string) => {
-    const { data } = await client.POST("/api/provision/validate", {
-      body: { token, service_id: serviceId },
-    });
-    return data;
+    return await unwrapClient(
+      client.POST("/api/provision/validate", {
+        body: { token, service_id: serviceId },
+      }),
+    );
   };
 
 export function buildValidateOnSuccess(deps: ValidateMutationDeps) {
@@ -71,10 +73,7 @@ export interface CheckConfigArgs {
   config: ProvisionConfig;
   setIsCheckingConfig: (b: boolean) => void;
   setConfigStatus: (
-    s: {
-      logging_service: { ok: boolean; details: string };
-      cdn_service: { ok: boolean; details: string };
-    } | null,
+    s: components["schemas"]["ProvisionCheckConfigResponse"] | null,
   ) => void;
 }
 
@@ -91,16 +90,18 @@ export async function runCheckConfig(args: CheckConfigArgs) {
     return;
   setIsCheckingConfig(true);
   try {
-    const { data } = await client.GET("/api/provision/check-config", {
-      params: {
-        query: {
-          token,
-          service_id: selectedService.id,
-          cdn_service_id: selectedCdnService.id,
-          bucket: config.fos_bucket_name,
+    const data = await unwrapClient(
+      client.GET("/api/provision/check-config", {
+        params: {
+          query: {
+            token,
+            service_id: selectedService.id,
+            cdn_service_id: selectedCdnService.id,
+            bucket: config.fos_bucket_name,
+          },
         },
-      },
-    });
+      }),
+    );
     if (data) setConfigStatus(data);
   } catch (e) {
     console.error("Failed to check config", e);
@@ -132,9 +133,11 @@ export async function runCheckFos(args: CheckFosArgs) {
   setFosStatus("checking");
   setFosError("");
   try {
-    const { data } = await client.POST("/api/provision/check-fos", {
-      body: { bucket, region, access_key, secret_key },
-    });
+    const data = await unwrapClient(
+      client.POST("/api/provision/check-fos", {
+        body: { bucket, region, access_key, secret_key },
+      }),
+    );
     if (data?.ok) {
       setFosStatus("success");
     } else {
@@ -161,9 +164,11 @@ export async function runCheckDomain(args: CheckDomainArgs) {
   if (!prefix || prefix.length < 3) return;
   setDomainStatus("checking");
   try {
-    const { data } = await client.GET("/api/provision/check-domain", {
-      params: { query: { prefix } },
-    });
+    const data = await unwrapClient(
+      client.GET("/api/provision/check-domain", {
+        params: { query: { prefix } },
+      }),
+    );
     if (data?.available) {
       setDomainStatus("available");
       setDomainMessage("Domain available!");
@@ -201,17 +206,19 @@ export async function runAnalyzeLake(args: AnalyzeLakeArgs) {
   } = args;
   setIsAnalyzing(true);
   try {
-    const { data } = await client.POST("/api/provision/lake-info", {
-      body: {
-        bucket: config.fos_bucket_name,
-        region: config.fos_region,
-        access_key: config.fos_access_key,
-        secret_key: config.fos_secret_key,
-        prefix: config.fos_prefix,
-        endpoint: config.fos_endpoint || undefined,
-        iceberg_metadata_location: icebergMetadataLocation || undefined,
-      },
-    });
+    const data = await unwrapClient(
+      client.POST("/api/provision/lake-info", {
+        body: {
+          bucket: config.fos_bucket_name,
+          region: config.fos_region,
+          access_key: config.fos_access_key,
+          secret_key: config.fos_secret_key,
+          prefix: config.fos_prefix,
+          endpoint: config.fos_endpoint || undefined,
+          iceberg_metadata_location: icebergMetadataLocation || undefined,
+        },
+      }),
+    );
     if (data?.ok) {
       setLakeInfo(data);
       if (data.range?.start && data.range?.end) {

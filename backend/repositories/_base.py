@@ -3458,10 +3458,10 @@ class QueryRunner:
                 f"    TIMESTAMPTZ '{ah_iso}' AS bucket_ts,"
                 f"    CAST(SUM(resp_bytes) AS DOUBLE) / {active_duration_secs} AS throughput_bps,"
                 f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_med_us,"
-                f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_baseline_us,"  # No min baseline for active hour
-                f"    0::BIGINT AS rtt_congestion_us,"
-                f"    0::DOUBLE AS avg_ploss,"  # Ploss requires packet info, assume 0 for live
-                f"    0::DOUBLE AS jitter_us,"
+                f"    {'CAST(approx_quantile(rtt_min, 0.5) AS DOUBLE)' if 'rtt_min' in set(self.get_schema_cols()) else 'CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE)'} AS rtt_baseline_us,"
+                f"    {'CAST(approx_quantile(tcp_rtt, 0.5) AS BIGINT) - CAST(' + metric_expressions.coalesce('approx_quantile(rtt_min, 0.5)', 'approx_quantile(tcp_rtt, 0.5)') + ' AS BIGINT)' if 'rtt_min' in set(self.get_schema_cols()) else '0::BIGINT'} AS rtt_congestion_us,"
+                f"    {'CAST(AVG(ploss) AS DOUBLE)' if 'ploss' in set(self.get_schema_cols()) else '0::DOUBLE'} AS avg_ploss,"
+                f"    {'CAST(approx_quantile(rtt_var, 0.5) AS DOUBLE)' if 'rtt_var' in set(self.get_schema_cols()) else '0::DOUBLE'} AS jitter_us,"
                 f"    CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS DOUBLE) * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,"
                 f"    CAST(COUNT(*) AS BIGINT) AS reqs"
                 f"   FROM {base_table} "
@@ -3575,6 +3575,7 @@ class QueryRunner:
         lat_grp = "lat" if has_lat else "NULL"
         lon_grp = "lon" if has_lat else "NULL"
         metro_grp = "metro" if has_metro else "NULL"
+        ploss_live_expr = "CAST(AVG(ploss) AS DOUBLE)" if "ploss" in cols else "0::DOUBLE"
 
         if et > active_hour_start:
             ah_iso = active_hour_start.isoformat()
@@ -3597,7 +3598,7 @@ class QueryRunner:
                 f"    {metro_col} AS metro,"
                 f"    TIMESTAMPTZ '{ah_iso}' AS bucket_ts,"
                 f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_med_us,"
-                f"    0::DOUBLE AS avg_ploss,"
+                f"    {ploss_live_expr} AS avg_ploss,"
                 f"    CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS DOUBLE) * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,"
                 f"    CAST(COUNT(*) AS BIGINT) AS reqs"
                 f"  FROM {base_table} "
@@ -3624,7 +3625,7 @@ class QueryRunner:
                 f"  UNION ALL "
                 f"  SELECT country, {city_col} AS city, {metro_col} AS metro,"
                 f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_med_us,"
-                f"    0::DOUBLE AS avg_ploss,"
+                f"    {ploss_live_expr} AS avg_ploss,"
                 f"    CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS DOUBLE) * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,"
                 f"    CAST(COUNT(*) AS BIGINT) AS reqs"
                 f"  FROM {base_table} "
@@ -5105,7 +5106,7 @@ class QueryRunner:
                 f"         CAST(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) AS BIGINT) AS cache_hits, "
                 f"         CAST(SUM(resp_bytes) AS BIGINT) AS bandwidth_bytes, "
                 f"         CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS p50_rtt_us, "
-                f"         CAST(approx_quantile(ttfb, 0.95) AS DOUBLE) AS p95_ttfb_ms "
+                f"         CAST(approx_quantile(ttfb, 0.95) * 1000.0 AS DOUBLE) AS p95_ttfb_ms "
                 f"  FROM {base_table} "
                 f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}' "
                 f"    AND pop IS NOT NULL AND pop != '' "

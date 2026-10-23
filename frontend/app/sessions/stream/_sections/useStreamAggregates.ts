@@ -90,10 +90,7 @@ export interface StreamAggregates {
   contentIds: { id: string; count: number }[]
 }
 
-const OBJECT_TYPE_LABELS: Record<string, string> = {
-  m: 'Manifest', a: 'Audio', v: 'Video', av: 'Muxed A/V',
-  i: 'Init Segment', c: 'Caption', tt: 'Timed Text', k: 'Crypto Key', o: 'Other',
-}
+import { OBJECT_TYPE_LABELS } from '@/app/streaming/_sections/streamingInfo'
 
 function computeAggregates(rows: Row[]): StreamAggregates {
   const sorted = [...rows].sort((a, b) => {

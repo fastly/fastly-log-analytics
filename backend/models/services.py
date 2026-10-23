@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -8,30 +8,45 @@ from backend.models._base import PassthroughModel, WireSafeModel
 from backend.models.common import BaseResponse
 
 
-class ServiceCronSync(BaseModel):
-    enabled: bool
-    polling_mode: Literal["regular", "adaptive"] = "adaptive"
+class CronSettingsPartial(BaseModel):
+    """Partial-update slice of a single cron block (sync / compact / ngwaf).
+
+    Distinct from ``ServiceCronSync`` etc. below which model the full
+    persisted config (``enabled`` required). Here every field is
+    optional — the handler only writes the keys the caller actually sent
+    so the matching cron block stays unchanged for fields the operator
+    didn't touch."""
+
+    enabled: bool | None = None
+    polling_mode: Literal["regular", "adaptive"] | None = None
     interval_mins: int | None = None
-    # Persisted sync configs use interval_seconds (the scheduler reads it, with
-    # interval_mins winning when both are present). Modelled here so this full
-    # view of the block can round-trip a real config without dropping it.
+    # The persisted sync config uses interval_seconds, and the scheduler reads
+    # it (interval_mins takes priority when both are set). Omitting it here made
+    # the settings endpoint silently DROP a caller-supplied interval_seconds and
+    # still answer "Successfully applied changes" — the value never reached the
+    # config (observed 2026-08-13). Pydantic ignores unknown fields, so an
+    # absent field on this partial is a silent no-op, not an error.
     interval_seconds: int | None = None
     commit_interval_mins: int | None = None
-    delete_after: bool | None = None
-    # When true, this service's raw request/RUM stream is shared with an
-    # out-of-band high-scale consumer: the high-scale archive deletion
-    # controller is the sole raw-deletion authority, and every legacy
-    # raw-deletion path (this delete_after included) stands down regardless
-    # of its own setting. See backend.config.resolve_raw_delete_after.
-    high_scale_shared_source: bool | None = None
     log_enabled: bool | None = None
     log_retention_days: int | None = None
     data_retention_days: int | None = None
     rum_retention_days: int | None = None
     cache_retention_days: int | None = None
     rollup_retention_months: int | None = None
+    # Snapshot-history window + expiry cadence (see run_cloud_maintenance and
+    # the scheduler's expire job). keep_snapshot_days drives metadata.json size
+    # and therefore per-commit cost; expire_interval_mins is how often it's
+    # enforced.
     keep_snapshot_days: int | None = None
     expire_interval_mins: int | None = None
+    delete_after: bool | None = None
+    high_scale_shared_source: bool | None = None
+
+
+class ServiceCronSync(CronSettingsPartial):
+    enabled: bool
+    polling_mode: Literal["regular", "adaptive"] = "adaptive"
 
 
 class ServiceCronCompact(BaseModel):
@@ -45,6 +60,16 @@ class ServiceCronNgwaf(BaseModel):
     interval_mins: int | None = None
     log_enabled: bool | None = None
     log_retention_days: int | None = None
+
+
+class RumConfigSection(WireSafeModel):
+    """Typed RUM configuration block on a persisted service config."""
+
+    enabled: bool | None = None
+    log_period: int | None = None
+    sync_interval_seconds: int | None = None
+    commit_interval_mins: int | None = None
+    delete_after: bool | None = None
 
 
 class ServiceConfig(BaseModel):
@@ -69,7 +94,7 @@ class ServiceConfig(BaseModel):
     ngwaf_workspace_id: str | None = None
     logging_enabled: bool | None = None
     rum_enabled: bool | None = None
-    rum: dict[str, Any] | None = None
+    rum: RumConfigSection | None = None
     rum_log_period: int | None = None
     analyst_path_a_supported: bool | None = None
     is_high_scale: bool | None = None
@@ -81,21 +106,48 @@ class ServicesListResponse(BaseResponse):
 
 class LogFieldsConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    groups: list[str]
+    groups: list[str] = Field(default_factory=list)
     field_overrides: dict[str, bool] = Field(default_factory=dict)
     field_limits: dict[str, int] | None = None
 
 
 class LogFieldsUpdateRequest(BaseModel):
-    log_fields: dict[str, Any]
+    log_fields: LogFieldsConfig
+
+
+class LogFormatHistoryEntry(WireSafeModel):
+    """One entry in ``log_format_history``."""
+
+    timestamp: str | None = None
+    changed_at: str | None = None
+    actor: str | None = None
+    changed_by: str | None = None
+    summary: str | None = None
+    preset: str | None = None
+    groups: list[str] | None = None
+    groups_before: list[str] | None = None
+    groups_after: list[str] | None = None
+    fields_added: list[str] | None = None
+    fields_removed: list[str] | None = None
+    field_overrides: dict[str, bool] | None = None
+    field_limits: dict[str, int] | None = None
+
+
+class LineBudgetWarning(WireSafeModel):
+    """Line-budget / WAF warning payload returned with log-fields responses."""
+
+    exceeded: bool | None = None
+    estimate: int | None = None
+    limit: int | None = None
+    message: str | None = None
 
 
 class LogFieldsResponse(BaseResponse):
     log_fields: LogFieldsConfig
     waf_warning: bool
-    history: list[dict[str, Any]]
+    history: list[LogFormatHistoryEntry]
     estimate: int
-    line_budget_warning: dict[str, Any] | None = None
+    line_budget_warning: LineBudgetWarning | None = None
 
 
 class CmcdSettingsResponse(BaseModel):
@@ -131,42 +183,6 @@ class AnalystInvite(BaseResponse):
     cdn_url: str | None = None
     cdn_service_id: str | None = None
     cdn_secret: str | None = None
-
-
-class CronSettingsPartial(BaseModel):
-    """Partial-update slice of a single cron block (sync / compact / ngwaf).
-
-    Distinct from ``ServiceCronSync`` etc. above which model the full
-    persisted config (``enabled`` required). Here every field is
-    optional — the handler only writes the keys the caller actually sent
-    so the matching cron block stays unchanged for fields the operator
-    didn't touch."""
-
-    enabled: bool | None = None
-    polling_mode: Literal["regular", "adaptive"] | None = None
-    interval_mins: int | None = None
-    # The persisted sync config uses interval_seconds, and the scheduler reads
-    # it (interval_mins takes priority when both are set). Omitting it here made
-    # the settings endpoint silently DROP a caller-supplied interval_seconds and
-    # still answer "Successfully applied changes" — the value never reached the
-    # config (observed 2026-08-13). Pydantic ignores unknown fields, so an
-    # absent field on this partial is a silent no-op, not an error.
-    interval_seconds: int | None = None
-    commit_interval_mins: int | None = None
-    log_enabled: bool | None = None
-    log_retention_days: int | None = None
-    data_retention_days: int | None = None
-    rum_retention_days: int | None = None
-    cache_retention_days: int | None = None
-    rollup_retention_months: int | None = None
-    # Snapshot-history window + expiry cadence (see run_cloud_maintenance and
-    # the scheduler's expire job). keep_snapshot_days drives metadata.json size
-    # and therefore per-commit cost; expire_interval_mins is how often it's
-    # enforced.
-    keep_snapshot_days: int | None = None
-    expire_interval_mins: int | None = None
-    delete_after: bool | None = None
-    high_scale_shared_source: bool | None = None
 
 
 class RumSettingsPartial(BaseModel):
@@ -295,7 +311,7 @@ class LogFieldsUpdateResponse(PassthroughModel):
     ok: bool | None = None
     message: str | None = None
     estimate: int | None = None
-    line_budget_warning: dict[str, Any] | None = None
+    line_budget_warning: LineBudgetWarning | None = None
 
 
 class CustomFieldsImportResponse(PassthroughModel):

@@ -999,7 +999,7 @@ def get_node_count_avg(service_id: str) -> float | None:
                FROM ingested_files
                WHERE source_name = ?
                  AND file_date IS NOT NULL
-               GROUP BY substr(file_name, instr(file_name, 'T') - 10, 19)
+               GROUP BY substr(file_name, strpos(file_name, 'T') - 10, 19)
                UNION ALL
                -- Slow arm: rows without a parseable basename. Typically
                -- zero rows in prod but kept so test fixtures + legacy
@@ -1008,8 +1008,8 @@ def get_node_count_avg(service_id: str) -> float | None:
                FROM ingested_files
                WHERE source_name = ?
                  AND file_date IS NULL
-                 AND instr(file_name, 'T') >= 11
-               GROUP BY substr(file_name, instr(file_name, 'T') - 10, 19)
+                 AND strpos(file_name, 'T') >= 11
+               GROUP BY substr(file_name, strpos(file_name, 'T') - 10, 19)
            ) AS combined""",
         (service_id, service_id),
     ).fetchone()

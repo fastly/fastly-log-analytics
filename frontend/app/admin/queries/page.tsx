@@ -37,7 +37,7 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { extractApiError } from '@/lib/api'
 
 import { useDocumentVisible } from './_helpers'
-import { useFilteredActive } from './_hooks/useFilteredActive'
+import { matchesQueryRowFilters, useFilteredActive } from './_hooks/useFilteredActive'
 import { useKeyboardShortcuts, type ShortcutBinding } from './_hooks/useKeyboardShortcuts'
 import { useQueryMonitorUrlState } from './_hooks/useQueryMonitorUrlState'
 import { ActiveTable } from './_sections/ActiveTable'
@@ -298,12 +298,18 @@ export default function QueryMonitorPage() {
     expandedRunIds,
   })
 
+  const filteredHistoricalRows = React.useMemo(() => {
+    const raw = historicalQuery.data?.rows ?? []
+    const q = search.trim().toLowerCase()
+    return raw.filter((r) => matchesQueryRowFilters(r, kindFilter, dbFilter, q))
+  }, [historicalQuery.data?.rows, search, kindFilter, dbFilter])
+
   const { copied: copiedQueries, copy: copyText } = useCopyToClipboard(1500)
 
   const handleCopyQueries = React.useCallback(async () => {
     const queries = slowHistoryMode === 'recent'
       ? slowQueries
-      : (historicalQuery.data?.rows ?? [])
+      : filteredHistoricalRows
 
     if (queries.length === 0) return
 
@@ -358,7 +364,7 @@ export default function QueryMonitorPage() {
     text += `==================================================\n`
 
     await copyText(text)
-  }, [slowHistoryMode, slowQueries, historicalQuery.data?.rows, slowThresholdMs, copyText])
+  }, [slowHistoryMode, slowQueries, filteredHistoricalRows, slowThresholdMs, copyText])
 
   const requestKill = React.useCallback(
     (row: ActiveRow) => {
@@ -642,7 +648,7 @@ export default function QueryMonitorPage() {
                     <Badge variant="outline">
                       {slowHistoryMode === 'recent'
                         ? slowQueries.length
-                        : (historicalQuery.data?.rows ?? []).length}
+                        : filteredHistoricalRows.length}
                     </Badge>
                     <span className="text-xs text-muted-foreground font-normal">
                       ≥ {slowThresholdMs < 1000 ? `${slowThresholdMs} ms` : `${slowThresholdMs / 1000}s`},
@@ -713,7 +719,7 @@ export default function QueryMonitorPage() {
                       disabled={
                         (slowHistoryMode === 'recent'
                           ? slowQueries
-                          : (historicalQuery.data?.rows ?? [])
+                          : filteredHistoricalRows
                         ).length === 0
                       }
                       onClick={handleCopyQueries}
@@ -750,7 +756,7 @@ export default function QueryMonitorPage() {
                       rows={
                         slowHistoryMode === 'recent'
                           ? slowQueries
-                          : (historicalQuery.data?.rows ?? [])
+                          : filteredHistoricalRows
                       }
                       onRowClick={(row) => setDetailRow(row)}
                       emptyMessage={

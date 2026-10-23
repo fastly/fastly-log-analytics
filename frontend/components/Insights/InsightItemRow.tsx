@@ -15,6 +15,8 @@ import type {
 } from './types'
 
 import { formatCount, formatCountMaybe } from '@/lib/format'
+import { buildInvestigateHref } from './shared'
+
 interface InsightItemRowProps {
   /** The owning card; its `id` fixes the type of `items[index].meta`. */
   insight: InsightCardData
@@ -29,14 +31,10 @@ export function InsightItemRow({ insight, index, onMapClick, onCacheCollapseClic
   const activeServiceId = useServiceStore(s => s.activeServiceId)
   const item = insight.items[index]
 
-  const investigateHref = React.useMemo(() => {
-    if (!item.investigate_url) return null
-    const url = new URL(item.investigate_url, 'http://localhost')
-    if (!url.searchParams.has('service') && activeServiceId) {
-      url.searchParams.set('service', activeServiceId)
-    }
-    return url.pathname + url.search
-  }, [item.investigate_url, activeServiceId])
+  const investigateHref = React.useMemo(
+    () => buildInvestigateHref(item.investigate_url, activeServiceId),
+    [item.investigate_url, activeServiceId],
+  )
 
   return (
     <div className="flex items-center justify-between text-xs p-2 rounded-md bg-muted/50 gap-2">

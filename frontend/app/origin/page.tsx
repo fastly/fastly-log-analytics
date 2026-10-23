@@ -6,7 +6,8 @@ import {
   ORIGIN_SSR_DEFAULTS,
   ORIGIN_SSR_SECTIONS,
 } from '@/lib/ssr/origin'
-import { firstParam, seedDehydratedState } from '@/lib/ssr/seed'
+import { seedDehydratedState } from '@/lib/ssr/seed'
+import { resolveServerServiceId } from '@/lib/ssr/service'
 import OriginClient from './_sections/OriginClient'
 
 // Per-request RSC shell for /origin. Pre-fetches the DEFAULT origin aggregates
@@ -69,10 +70,7 @@ export default async function OriginPage({
 }) {
   const params = await searchParams
   const bootstrap = await fetchBootstrapServerSide()
-  const serviceId =
-    firstParam(params.service) ??
-    (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ??
-    undefined
+  const serviceId = resolveServerServiceId(params, bootstrap)
 
   return (
     <Suspense fallback={<OriginLoading />}>

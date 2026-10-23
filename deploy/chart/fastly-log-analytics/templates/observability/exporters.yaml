@@ -26,9 +26,18 @@ spec:
         app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-redis-exporter
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: redis-exporter
           image: {{ .Values.observability.exporters.redis.image | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.observability.resources | nindent 12 }}
           env:
             - name: REDIS_ADDR
               value: {{ .Values.observability.exporters.redis.address | quote }}
@@ -67,9 +76,18 @@ spec:
         app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-postgres-exporter
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: postgres-exporter
           image: {{ .Values.observability.exporters.postgres.image | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.observability.resources | nindent 12 }}
           env:
             - name: DATA_SOURCE_NAME
               value: {{ .Values.observability.exporters.postgres.dataSourceName | quote }}
@@ -108,9 +126,18 @@ spec:
         app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-celery-exporter
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: celery-exporter
           image: {{ .Values.observability.exporters.celery.image | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.observability.resources | nindent 12 }}
           args:
             - "--broker-url={{ .Values.observability.exporters.celery.brokerUrl }}"
           ports:

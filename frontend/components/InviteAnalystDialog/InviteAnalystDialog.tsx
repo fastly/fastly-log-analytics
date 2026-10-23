@@ -25,6 +25,7 @@ import {
 } from 'lucide-react'
 import { Label } from '@/components/ui/label'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { cn } from '@/lib/utils'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 import {
@@ -157,9 +158,9 @@ export function InviteAnalystDialog({ service, open, onOpenChange }: InviteAnaly
     setError('')
     setStep('creating')
     try {
-      const { data } = await client.POST("/api/services/{service_id}/generate-viewer-key", {
+      const data = await unwrapClient(client.POST("/api/services/{service_id}/generate-viewer-key", {
         params: { path: { service_id: service.service_id } },
-      })
+      }))
       const invite = data as AnalystInvite
       recentInvites.set(service.service_id, { invite, issuedAt: Date.now() })
       setResult(invite)

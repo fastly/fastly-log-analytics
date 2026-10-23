@@ -4,6 +4,7 @@ import React from 'react'
 import { useSearchParams } from 'next/navigation'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useIsDataReady'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
 import { ReportShell } from '@/components/ReportShell'
@@ -108,11 +109,10 @@ export default function AlertsClient() {
     queryKey: ['loggingSettings', activeServiceId],
     queryFn: async ({ signal }) => {
       if (!activeServiceId) return null
-      const { data } = await client.GET("/api/services/{service_id}/logging-settings", {
+      return unwrapClient(client.GET("/api/services/{service_id}/logging-settings", {
         signal,
         params: { path: { service_id: activeServiceId } }
-      })
-      return data
+      }))
     },
     // Analysts never edit alerts and the redirect dance can't surface
     // logging settings to them anyway — skip the call entirely so the
@@ -134,14 +134,12 @@ export default function AlertsClient() {
     queryKey: ['alerts', activeServiceId],
     queryFn: async ({ signal }) => {
       if (activeServiceId) {
-        const { data } = await client.GET("/api/alerts/{service_id}", {
+        return unwrapClient(client.GET("/api/alerts/{service_id}", {
           signal,
           params: { path: { service_id: activeServiceId } }
-        })
-        return data
+        }))
       } else {
-        const { data } = await client.GET("/api/alerts/", { signal })
-        return data
+        return unwrapClient(client.GET("/api/alerts/", { signal }))
       }
     },
     placeholderData: (prev) => prev ?? queryClient.getQueryData(['alerts', null]),
@@ -233,9 +231,9 @@ export default function AlertsClient() {
     const timer = setTimeout(async () => {
       pendingTimersRef.current.delete(alertId)
       try {
-        await client.DELETE("/api/alerts/{alert_id}", {
+        await unwrapClient(client.DELETE("/api/alerts/{alert_id}", {
           params: { path: { alert_id: alertId } }
-        })
+        }))
         queryClient.invalidateQueries({ queryKey: ['alerts'] })
       } catch {
         // Restore the row on failure so the operator can retry; the global
@@ -283,9 +281,9 @@ export default function AlertsClient() {
     if (isAnalyst || !activeServiceId) return
     setIsEvaluating(true)
     try {
-      const { data } = await client.POST("/api/alerts/evaluate", {
+      const data = await unwrapClient(client.POST("/api/alerts/evaluate", {
         body: { service_id: activeServiceId }
-      })
+      }))
       const evaluated = data?.data?.evaluated ?? 0
       const triggered = data?.data?.triggered ?? 0
       showToast(`Evaluated ${evaluated} rule(s); ${triggered} triggered.`, 'success')

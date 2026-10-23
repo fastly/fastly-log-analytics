@@ -6,6 +6,7 @@ import { useQuery, useMutation } from '@tanstack/react-query'
 import { useShallow } from 'zustand/react/shallow'
 import type { ColumnDef, SortingState } from '@tanstack/react-table'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { useFilterStore } from '@/stores/filterStore'
 import { queryPageUrlParsers } from './_url-state'
 import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useIsDataReady'
@@ -222,8 +223,7 @@ function QueryPageInner() {
   const { data: schemaData } = useQuery({
     queryKey: queryKeys.admin.schema(activeServiceId),
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET('/api/schema', { signal })
-      return data
+      return unwrapClient(client.GET('/api/schema', { signal }))
     },
     enabled: !!activeServiceId,
     // Schema only changes when admin adds a custom field — never within
@@ -293,7 +293,7 @@ function QueryPageInner() {
   const { data: presets } = useQuery({
     queryKey: ['query', 'presets', activeServiceId],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET('/api/presets', { signal })
+      const data = await unwrapClient(client.GET('/api/presets', { signal }))
       return data ?? []
     },
     enabled: !!activeServiceId,

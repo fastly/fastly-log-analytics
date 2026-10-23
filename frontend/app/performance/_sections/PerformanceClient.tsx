@@ -2,14 +2,11 @@
 
 import { SlowestUrlsHelp, SlowestNetworksHelp, CacheTtlHelp, OriginVsEdgeHelp } from "../help-content";
 import React from 'react'
-import { useMounted } from '@/hooks/useMounted'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api'
 import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
-import { useFilterStore } from '@/stores/filterStore'
-import { useServiceStore } from '@/stores/serviceStore'
-import { quantizeAnchor } from '@/lib/time-window'
+import { useReportRangeAnchor } from '@/hooks/useReportRangeAnchor'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { DataTable } from '@/components/DataTable'
 import { Zap, Server, Shield, Clock, Network } from 'lucide-react'
@@ -338,28 +335,7 @@ export default function PerformanceClient({ nowServerStr }: { nowServerStr?: str
   const [urlVisibility, setUrlVisibility, onUrlVisChange] = useColumnVisibility()
   const [asnVisibility, setAsnVisibility, onAsnVisChange] = useColumnVisibility()
 
-  // Time-range wire inputs (lib/range-wire.ts; resolved in PerformanceBody). A
-  // quick-preset pill / the cold-load default → a server-reproducible token
-  // ("24h"), keeping the SSR seed key byte-matched. A custom absolute range
-  // (relativeRange null + isAutoRange false) → the explicit start/end bounds, so
-  // the latency tables/distributions reflect exactly the selected window.
-  const mounted = useMounted()
-
-  const relativeRange = useFilterStore((s) => s.relativeRange)
-  const isAutoRange = useFilterStore((s) => s.isAutoRange)
-  const storeEndTime = useFilterStore((s) => s.endTime)
-  // Anchor the keyed path to the SELECTED window's end, not to mount time: a
-  // preset clicked in a long-lived tab re-anchors at click time so the scan
-  // matches the hard-clamped x-axis (a mount-pinned anchor could leave the
-  // short 1h..12h presets fully disjoint from the display). Memoized on endTime
-  // so a re-render can't advance the key; cold-load endTime ≈ mount now, so the
-  // SSR seed (same 60s floor, quantizeAnchor ≡ backend quantize_anchor) still
-  // byte-matches within the quantum.
-  const anchor = React.useMemo(() => {
-    const baseVal = (!mounted && nowServerStr) ? nowServerStr : storeEndTime
-    const baseStr = baseVal || undefined
-    return quantizeAnchor(baseStr)
-  }, [storeEndTime, nowServerStr, mounted])
+  const { relativeRange, isAutoRange, anchor } = useReportRangeAnchor(nowServerStr)
 
   return (
     <ReportLayout

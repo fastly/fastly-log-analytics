@@ -22,6 +22,7 @@ import { SessionEventsDialog } from './SessionEventsDialog'
 import { SinceHoursPicker } from './SinceHoursPicker'
 import { useScoringQuery } from './useScoringQuery'
 import { client } from '@/lib/api'
+import { queryKeys } from '@/lib/query-keys'
 import { columnIdOf } from '@/components/DataTable/columnId'
 import type { components } from '@/types/api.generated'
 
@@ -90,7 +91,7 @@ export function TopFlaggedTable({
   const { labelBySid } = useScoringLabels(serviceId)
 
   const onFlagged = () => {
-    qc.invalidateQueries({ queryKey: ['scoring-labels', serviceId] })
+    qc.invalidateQueries({ queryKey: queryKeys.scoringLabels(serviceId) })
     qc.invalidateQueries({ queryKey: ['scoring-top-flagged', serviceId] })
   }
 

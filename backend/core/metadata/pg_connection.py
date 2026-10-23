@@ -42,6 +42,7 @@ test that runs against a real pool, which is how this shipped broken.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -562,6 +563,30 @@ class PgConnectionWrapper:
         # segfaults the owner mid-query.
         self._busy = threading.RLock()
 
+    def _get_cursor(self):
+        try:
+            return self._conn.cursor()
+        except psycopg.OperationalError:
+            pool = self._pool or get_pg_pool()
+            if pool is not None:
+                _return_to_pool_once(self._conn, self._returned, pool)
+                self._conn = pool.getconn()
+                self._returned = [False]
+                self._pool = pool
+                self._finalizer = weakref.finalize(self, _return_to_pool_once, self._conn, self._returned, pool)
+                return self._conn.cursor()
+            raise
+
+    @contextlib.contextmanager
+    def transaction(self):
+        tx_fn = getattr(self._conn, "transaction", None)
+        if callable(tx_fn):
+            with self._busy, tx_fn():
+                yield self
+        else:
+            with self._busy:
+                yield self
+
     def execute(self, sql: str, params: Any = None):
         with self._busy:
             return self._execute(sql, params)
@@ -571,15 +596,7 @@ class PgConnectionWrapper:
 
         from backend.utils.sqlite_profiler import _live_deregister, _live_register, _record
 
-        try:
-            cur = self._conn.cursor()
-        except psycopg.OperationalError:
-            pool = self._pool or get_pg_pool()
-            if pool is not None:
-                self._conn = pool.getconn()
-                cur = self._conn.cursor()
-            else:
-                raise
+        cur = self._get_cursor()
         rewritten_sql = _rewrite_sql(sql)
         rewritten_sql, id_col = _maybe_add_returning(rewritten_sql)
 
@@ -609,15 +626,7 @@ class PgConnectionWrapper:
 
         from backend.utils.sqlite_profiler import _live_deregister, _live_register, _record
 
-        try:
-            cur = self._conn.cursor()
-        except psycopg.OperationalError:
-            pool = self._pool or get_pg_pool()
-            if pool is not None:
-                self._conn = pool.getconn()
-                cur = self._conn.cursor()
-            else:
-                raise
+        cur = self._get_cursor()
         rewritten_sql = _rewrite_sql(sql)
         qid = _live_register("Postgres", rewritten_sql, self)
         t0 = time.perf_counter()

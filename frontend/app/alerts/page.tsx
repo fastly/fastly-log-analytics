@@ -3,6 +3,7 @@ import { HydrationBoundary } from '@tanstack/react-query'
 import { fetchAlertsServerSide } from '@/lib/ssr/alerts'
 import { fetchBootstrapServerSide } from '@/lib/ssr/bootstrap'
 import { firstParam, seedDehydratedState } from '@/lib/ssr/seed'
+import { resolveServerServiceId } from '@/lib/ssr/service'
 import AlertsClient from './_sections/AlertsClient'
 
 // Per-request RSC shell. We fetch the alerts list server-side and
@@ -30,15 +31,9 @@ export default async function AlertsPage({
   const params = await searchParams
   const urlServiceId = firstParam(params.service)
   const bootstrap = urlServiceId ? null : await fetchBootstrapServerSide()
-  const firstSvcId =
-    typeof bootstrap?.services?.[0]?.id === 'string'
-      ? bootstrap.services[0].id
-      : undefined
-  const serviceId =
-    urlServiceId ??
-    bootstrap?.active_service_id ??
-    firstSvcId ??
-    undefined
+  const serviceId = resolveServerServiceId(params, bootstrap, {
+    fallbackFirstService: true,
+  })
 
   const alertsRes = await fetchAlertsServerSide(serviceId)
 

@@ -2,6 +2,7 @@
 import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -36,12 +37,11 @@ function CredentialsDialogBody({ service, onClose, initialMode }: Props) {
 
   const credentialsMutation = useMutation({
     mutationFn: async ({ service_id, payload }: { service_id: string; payload: { api_token: string } | { access_key: string; secret_key: string } }) => {
-      const { data } = await client.PATCH("/api/services/{service_id}/credentials", {
+      return unwrapClient(client.PATCH("/api/services/{service_id}/credentials", {
         params: { path: { service_id } },
         // The body model defaults each field to ""; the generated type marks them all required.
         body: { api_token: '', access_key: '', secret_key: '', ...payload }
-      })
-      return data
+      }))
     },
     onSuccess: () => {
       onClose()

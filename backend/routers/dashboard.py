@@ -268,31 +268,7 @@ async def dashboard_bundle(
                 await task
                 raise
             timer.mark("bundle:top_bots", t1)
-        if isinstance(aggregates, dict):
-            aggregates = dict(aggregates)
-        if isinstance(top_bots, dict):
-            top_bots = dict(top_bots)
-        single_debug_queries: list = []
-        single_debug_calls: list = []
-        for sub in (aggregates, top_bots):
-            if isinstance(sub, dict):
-                single_debug_queries.extend(sub.pop("debug_queries", []) or [])
-                single_debug_queries.extend(sub.pop("_debug_queries", []) or [])
-                single_debug_calls.extend(sub.pop("debug_calls", []) or [])
-                single_debug_calls.extend(sub.pop("_debug_calls", []) or [])
-        return {
-            **cache_result({}, state="bypass", prewarmer=False),
-            "aggregates": aggregates,
-            "top_bots": top_bots,
-            "section_timings": section_timings,
-            "debug_queries": single_debug_queries,
-            "debug_calls": single_debug_calls,
-            # SQLite statements funnel through the request-scoped collector
-            # (not per-sub-response), so a single top-level read covers both
-            # branches. The backstop middleware can't inject this for us —
-            # its dispatch context predates start_call_tracking's.
-            "debug_sqlite": list(get_sqlite_queries()),
-        }
+        return _assemble_dashboard_bundle_response(aggregates, top_bots, section_timings)
 
     # Two-branch path (preserves the F015-hardened gather + second_cm
     # guard untouched). ``sections=None`` and ``sections=['core','bots']``
@@ -418,16 +394,15 @@ async def dashboard_bundle(
             await task_bots
             raise
         timer.mark("bundle:top_bots", t1)
-    # Lift `debug_queries` / `debug_calls` from each sub-response into
-    # the top-level BundleResponse so the frontend DebugPanel (which
-    # reads response.data._debug_queries — the serialization_alias)
-    # sees the queries from both endpoints aggregated. Without this,
-    # the panel shows 0 queries / 0.00ms even with DEBUG_RESPONSES on,
-    # because the telemetry sits one level deep under the sub-field.
-    # We POP rather than copy so the sub-responses end up with empty
-    # debug lists — Pydantic's BundleResponse will validate them and
-    # then BaseResponse._strip_debug_when_disabled redacts any
-    # remaining debug keys when DEBUG_RESPONSES is unset.
+    return _assemble_dashboard_bundle_response(aggregates, top_bots, section_timings)
+
+
+def _assemble_dashboard_bundle_response(
+    aggregates: Any,
+    top_bots: Any,
+    section_timings: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Lift `debug_queries` / `debug_calls` from each sub-response into the top-level BundleResponse."""
     if isinstance(aggregates, dict):
         aggregates = dict(aggregates)
     if isinstance(top_bots, dict):
@@ -447,9 +422,6 @@ async def dashboard_bundle(
         "section_timings": section_timings,
         "debug_queries": all_debug_queries,
         "debug_calls": all_debug_calls,
-        # See the single-branch return above — one top-level collector read
-        # covers both branches (asyncio.to_thread copies the request
-        # context, so both appended to the same list).
         "debug_sqlite": list(get_sqlite_queries()),
     }
 

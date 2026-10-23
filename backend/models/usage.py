@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from backend.models.admin import _BillingRatesMixin
 from backend.models.common import BaseResponse
 
 
-class _PrefillRatesBase(BaseResponse):
+class _PrefillRatesBase(_BillingRatesMixin, BaseResponse):
     """Shared base for /api/usage/prefill and /api/usage/prefill/rates.
 
     Holds the fields the cost-page stat cards need on first paint
@@ -24,10 +25,6 @@ class _PrefillRatesBase(BaseResponse):
     delete_after: bool = True
     log_retention_days: int = 90
     avg_nodes_per_flush: int | None = None
-    class_a_rate_per_1k: float | None = None
-    class_b_rate_per_10k: float | None = None
-    cdn_egress_rate_per_gb: float | None = None
-    storage_rate_per_gb_month: float | None = None
     min_billed_days: int | None = None
     billing_zone: str | None = "MBZ200"
 

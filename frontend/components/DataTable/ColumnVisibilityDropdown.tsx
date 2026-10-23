@@ -51,7 +51,7 @@ export function ColumnVisibilityDropdown<TData = unknown>(
             column.columnDef.meta?.label ??
             (typeof column.columnDef.header === 'string'
               ? column.columnDef.header
-              : column.id),
+              : column.id.replace(/_/g, ' ')),
           visible: column.getIsVisible(),
           onToggle: (visible: boolean) => column.toggleVisibility(visible),
         }))

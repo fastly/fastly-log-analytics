@@ -3,6 +3,7 @@
 import React, { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { useServiceStore } from '@/stores/serviceStore'
 import { ChevronRight, ChevronDown, Folder, Cloud, HardDrive, FileJson, Loader2, Maximize2, Minimize2, RefreshCw, Download } from 'lucide-react'
 import { useDateFormat } from '@/hooks/useDateFormat'
@@ -164,10 +165,9 @@ function Tree({ prefix, level, type, forceExpand }: TreeProps) {
     queryKey: queryKeys.admin.fileTree(type, activeServiceId, prefix),
     queryFn: async () => {
       const init = { params: { query: { prefix: prefix || undefined } } }
-      const { data } = type === 'iceberg'
-        ? await client.GET("/api/admin/iceberg-tree", init)
-        : await client.GET("/api/admin/raw-tree", init)
-      return data
+      return type === 'iceberg'
+        ? unwrapClient(client.GET("/api/admin/iceberg-tree", init))
+        : unwrapClient(client.GET("/api/admin/raw-tree", init))
     },
     enabled: !!activeServiceId,
   })

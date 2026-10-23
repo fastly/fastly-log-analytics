@@ -446,26 +446,7 @@ def _execute_request_facts_query(
     return HighScaleRequestFactResponse.with_telemetry(
         rows=rows,
         next_cursor=page.next_cursor,
-        metadata=QueryResponseMetadataResponse(
-            status=meta.status,
-            exact=meta.exact,
-            coverage=meta.coverage,
-            freshness_lag_seconds=meta.freshness_lag_seconds,
-            watermark=ServingWatermarkResponse(
-                service_id=meta.watermark.service_id,
-                domain=meta.watermark.domain,
-                owner_epoch=meta.watermark.owner_epoch,
-                coverage_start=meta.watermark.coverage_start,
-                coverage_end=meta.watermark.coverage_end,
-                last_accepted_cursor=meta.watermark.last_accepted_cursor,
-                last_archived_event_id=meta.watermark.last_archived_event_id,
-                last_visible_event_id=meta.watermark.last_visible_event_id,
-                exact=meta.watermark.exact,
-            ),
-            approximation_error=meta.approximation_error,
-            error=meta.error,
-            mode="clickhouse",
-        ),
+        metadata=_build_query_metadata_response(meta, mode="clickhouse"),
     )
 
 
@@ -553,6 +534,60 @@ def request_facts(
     )
 
 
+def _build_query_metadata_response(
+    metadata,
+    *,
+    mode: str | None = None,
+) -> QueryResponseMetadataResponse:
+    kwargs: dict = {
+        "status": metadata.status,
+        "exact": metadata.exact,
+        "coverage": metadata.coverage,
+        "freshness_lag_seconds": metadata.freshness_lag_seconds,
+        "watermark": ServingWatermarkResponse(
+            service_id=metadata.watermark.service_id,
+            domain=metadata.watermark.domain,
+            owner_epoch=metadata.watermark.owner_epoch,
+            coverage_start=metadata.watermark.coverage_start,
+            coverage_end=metadata.watermark.coverage_end,
+            last_accepted_cursor=metadata.watermark.last_accepted_cursor,
+            last_archived_event_id=metadata.watermark.last_archived_event_id,
+            last_visible_event_id=metadata.watermark.last_visible_event_id,
+            exact=metadata.watermark.exact,
+        ),
+        "approximation_error": metadata.approximation_error,
+        "error": metadata.error,
+    }
+    if mode is not None:
+        kwargs["mode"] = mode
+    return QueryResponseMetadataResponse(**kwargs)
+
+
+def _resolve_scoped_high_scale_service(
+    service_id: str,
+    ctx: RequestContext,
+    registry: HighScaleServiceRegistryProtocol,
+    *,
+    check_binding: bool = True,
+) -> HighScaleService:
+    if service_id != ctx.service_id:
+        raise HTTPException(status_code=403, detail=make_error("service_access_denied", "Service access denied"))
+    service = registry.resolve(ctx.service_id)
+    if service is None:
+        raise HTTPException(
+            status_code=404,
+            detail=make_error("high_scale_service_not_configured", "Service is not registered for high-scale queries"),
+        )
+    if check_binding and service.service_id != ctx.service_id:
+        raise HTTPException(
+            status_code=409,
+            detail=make_error(
+                "high_scale_service_mismatch", "High-scale service binding does not match the requested service"
+            ),
+        )
+    return service
+
+
 @router.post(
     "/services/{service_id}/rum-facts/{domain}",
     response_model=HighScaleRumFactResponse,
@@ -569,19 +604,7 @@ def rum_facts(
         raise HTTPException(status_code=403, detail=make_error("service_access_denied", "Service access denied"))
     if domain not in {"rum_vitals", "rum_errors"}:
         raise HTTPException(status_code=404, detail=make_error("not_found", "RUM domain not found"))
-    service = registry.resolve(ctx.service_id)
-    if service is None:
-        raise HTTPException(
-            status_code=404,
-            detail=make_error("high_scale_service_not_configured", "Service is not registered for high-scale queries"),
-        )
-    if service.service_id != ctx.service_id:
-        raise HTTPException(
-            status_code=409,
-            detail=make_error(
-                "high_scale_service_mismatch", "High-scale service binding does not match the requested service"
-            ),
-        )
+    service = _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=True)
 
     start_raw, end_raw = ctx.clamp(req.start_time, req.end_time)
     start = parse_iso_utc(start_raw)
@@ -613,29 +636,10 @@ def rum_facts(
             value = row.get("client_ip")
             if isinstance(value, str):
                 row["client_ip"] = mask_ip(value)
-    metadata = page.metadata
     return HighScaleRumFactResponse.with_telemetry(
         rows=rows,
         next_cursor=page.next_cursor,
-        metadata=QueryResponseMetadataResponse(
-            status=metadata.status,
-            exact=metadata.exact,
-            coverage=metadata.coverage,
-            freshness_lag_seconds=metadata.freshness_lag_seconds,
-            watermark=ServingWatermarkResponse(
-                service_id=metadata.watermark.service_id,
-                domain=metadata.watermark.domain,
-                owner_epoch=metadata.watermark.owner_epoch,
-                coverage_start=metadata.watermark.coverage_start,
-                coverage_end=metadata.watermark.coverage_end,
-                last_accepted_cursor=metadata.watermark.last_accepted_cursor,
-                last_archived_event_id=metadata.watermark.last_archived_event_id,
-                last_visible_event_id=metadata.watermark.last_visible_event_id,
-                exact=metadata.watermark.exact,
-            ),
-            approximation_error=metadata.approximation_error,
-            error=metadata.error,
-        ),
+        metadata=_build_query_metadata_response(page.metadata),
     )
 
 
@@ -650,14 +654,7 @@ def cmcd_facts(
     ctx: RequestContext = Depends(build_request_context),
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
 ):
-    if service_id != ctx.service_id:
-        raise HTTPException(status_code=403, detail=make_error("service_access_denied", "Service access denied"))
-    service = registry.resolve(ctx.service_id)
-    if service is None:
-        raise HTTPException(
-            status_code=404,
-            detail=make_error("high_scale_service_not_configured", "Service is not registered for high-scale queries"),
-        )
+    service = _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=False)
     start_raw, end_raw = ctx.clamp(req.start_time, req.end_time)
     start = parse_iso_utc(start_raw)
     end = parse_iso_utc(end_raw)
@@ -680,29 +677,10 @@ def cmcd_facts(
         limit=req.limit,
         cursor=req.cursor,
     )
-    metadata = page.metadata
     return HighScaleRequestFactResponse.with_telemetry(
         rows=_mask_client_ip_rows([dict(row) for row in page.rows], ctx),
         next_cursor=page.next_cursor,
-        metadata=QueryResponseMetadataResponse(
-            status=metadata.status,
-            exact=metadata.exact,
-            coverage=metadata.coverage,
-            freshness_lag_seconds=metadata.freshness_lag_seconds,
-            watermark=ServingWatermarkResponse(
-                service_id=metadata.watermark.service_id,
-                domain=metadata.watermark.domain,
-                owner_epoch=metadata.watermark.owner_epoch,
-                coverage_start=metadata.watermark.coverage_start,
-                coverage_end=metadata.watermark.coverage_end,
-                last_accepted_cursor=metadata.watermark.last_accepted_cursor,
-                last_archived_event_id=metadata.watermark.last_archived_event_id,
-                last_visible_event_id=metadata.watermark.last_visible_event_id,
-                exact=metadata.watermark.exact,
-            ),
-            approximation_error=metadata.approximation_error,
-            error=metadata.error,
-        ),
+        metadata=_build_query_metadata_response(page.metadata),
     )
 
 
@@ -718,21 +696,7 @@ def aggregates(
     ctx: RequestContext = Depends(build_request_context),
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
 ):
-    if service_id != ctx.service_id:
-        raise HTTPException(status_code=403, detail=make_error("service_access_denied", "Service access denied"))
-    service = registry.resolve(ctx.service_id)
-    if service is None:
-        raise HTTPException(
-            status_code=404,
-            detail=make_error("high_scale_service_not_configured", "Service is not registered for high-scale queries"),
-        )
-    if service.service_id != ctx.service_id:
-        raise HTTPException(
-            status_code=409,
-            detail=make_error(
-                "high_scale_service_mismatch", "High-scale service binding does not match the requested service"
-            ),
-        )
+    service = _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=True)
 
     start_raw, end_raw = ctx.clamp(req.start_time, req.end_time)
     start = parse_iso_utc(start_raw)
@@ -837,21 +801,7 @@ def submit_query(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
     jobs: HistoricalJobManager = Depends(get_historical_job_manager),
 ):
-    if service_id != ctx.service_id:
-        raise HTTPException(status_code=403, detail=make_error("service_access_denied", "Service access denied"))
-    service = registry.resolve(ctx.service_id)
-    if service is None:
-        raise HTTPException(
-            status_code=404,
-            detail=make_error("high_scale_service_not_configured", "Service is not registered for high-scale queries"),
-        )
-    if service.service_id != ctx.service_id:
-        raise HTTPException(
-            status_code=409,
-            detail=make_error(
-                "high_scale_service_mismatch", "High-scale service binding does not match the requested service"
-            ),
-        )
+    service = _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=True)
 
     start_raw, end_raw = ctx.clamp(req.start_time, req.end_time)
     start = parse_iso_utc(start_raw)
@@ -909,32 +859,13 @@ def submit_query(
             detail=make_error("high_scale_domain_not_configured", "Domain is not configured for this service"),
         ) from None
     rows = _mask_client_ip_rows([dict(row) for row in page.rows], ctx)
-    metadata = page.metadata
     return HighScaleQueryResponse.with_telemetry(
         service_id=ctx.service_id,
         domain=req.domain,
         plan=plan_response,
         rows=rows,
         next_cursor=page.next_cursor,
-        metadata=QueryResponseMetadataResponse(
-            status=metadata.status,
-            exact=metadata.exact,
-            coverage=metadata.coverage,
-            freshness_lag_seconds=metadata.freshness_lag_seconds,
-            watermark=ServingWatermarkResponse(
-                service_id=metadata.watermark.service_id,
-                domain=metadata.watermark.domain,
-                owner_epoch=metadata.watermark.owner_epoch,
-                coverage_start=metadata.watermark.coverage_start,
-                coverage_end=metadata.watermark.coverage_end,
-                last_accepted_cursor=metadata.watermark.last_accepted_cursor,
-                last_archived_event_id=metadata.watermark.last_archived_event_id,
-                last_visible_event_id=metadata.watermark.last_visible_event_id,
-                exact=metadata.watermark.exact,
-            ),
-            approximation_error=metadata.approximation_error,
-            error=metadata.error,
-        ),
+        metadata=_build_query_metadata_response(page.metadata),
         job_id=None,
     )
 
@@ -951,13 +882,7 @@ def query_job_status(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
     jobs: HistoricalJobManager = Depends(get_historical_job_manager),
 ):
-    if service_id != ctx.service_id:
-        raise HTTPException(status_code=403, detail=make_error("service_access_denied", "Service access denied"))
-    if registry.resolve(ctx.service_id) is None:
-        raise HTTPException(
-            status_code=404,
-            detail=make_error("high_scale_service_not_configured", "Service is not registered for high-scale queries"),
-        )
+    _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=False)
     job = jobs.get(job_id)
     if job is None or job.plan.service_id != ctx.service_id:
         raise HTTPException(status_code=404, detail=make_error("historical_job_not_found", "Historical job not found"))
@@ -989,13 +914,7 @@ def cancel_query_job(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
     jobs: HistoricalJobManager = Depends(get_historical_job_manager),
 ):
-    if service_id != ctx.service_id:
-        raise HTTPException(status_code=403, detail=make_error("service_access_denied", "Service access denied"))
-    if registry.resolve(ctx.service_id) is None:
-        raise HTTPException(
-            status_code=404,
-            detail=make_error("high_scale_service_not_configured", "Service is not registered for high-scale queries"),
-        )
+    _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=False)
     job = jobs.get(job_id)
     if job is None or job.plan.service_id != ctx.service_id:
         raise HTTPException(status_code=404, detail=make_error("historical_job_not_found", "Historical job not found"))

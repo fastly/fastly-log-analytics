@@ -6,6 +6,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { RefreshCw, ShieldCheck } from 'lucide-react'
 
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
+import { queryKeys } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -82,12 +84,8 @@ function SessionScoringPageContent() {
   // Fallback `/api/services` query when navigating directly to `/admin/session-scoring`
   // before the global ServiceInitializer has populated `activeServiceId`.
   const { data: servicesData, isLoading: servicesLoading } = useQuery({
-    queryKey: ['services'],
-    queryFn: async () => {
-      const { data, response } = await client.GET('/api/services')
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data
-    },
+    queryKey: queryKeys.services(),
+    queryFn: async () => unwrapClient(client.GET('/api/services')),
     enabled: !activeServiceId,
   })
 

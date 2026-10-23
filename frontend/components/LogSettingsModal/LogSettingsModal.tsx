@@ -3,6 +3,8 @@
 import React, { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
+import { queryKeys } from '@/lib/query-keys'
 import {
   Dialog,
   DialogContent,
@@ -62,24 +64,24 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
 
   const { data: lfResponse, isLoading: isLoadingFields, isError: isFieldsError, error: fieldsError } = useQuery({
     queryKey: ['services', service?.service_id, 'fields'],
-    queryFn: async () => {
-      const { data } = await client.GET('/api/services/{service_id}/log-fields', {
-        params: { path: { service_id: service!.service_id } },
-      })
-      return data
-    },
+    queryFn: async () =>
+      unwrapClient(
+        client.GET('/api/services/{service_id}/log-fields', {
+          params: { path: { service_id: service!.service_id } },
+        }),
+      ),
     enabled: !!service && open,
     retry: false,
   })
 
   const { data: loggingSettings, isLoading: isLoadingSettings, isError: isSettingsError, error: settingsError } = useQuery({
     queryKey: ['services', service?.service_id, 'logging-settings'],
-    queryFn: async () => {
-      const { data } = await client.GET('/api/services/{service_id}/logging-settings', {
-        params: { path: { service_id: service!.service_id } },
-      })
-      return data
-    },
+    queryFn: async () =>
+      unwrapClient(
+        client.GET('/api/services/{service_id}/logging-settings', {
+          params: { path: { service_id: service!.service_id } },
+        }),
+      ),
     enabled: !!service && open,
     retry: false,
   })
@@ -87,15 +89,15 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
   const { lines, status, isDone, error, start, stop, reset } = useSSE()
 
   const fieldsMutation = useMutation({
-    mutationFn: async (config: LogFieldsConfig) => {
-      const { data } = await client.POST('/api/services/{service_id}/log-fields', {
-        params: { path: { service_id: service!.service_id } },
-        body: { log_fields: config },
-      })
-      return data
-    },
+    mutationFn: async (config: LogFieldsConfig) =>
+      unwrapClient(
+        client.POST('/api/services/{service_id}/log-fields', {
+          params: { path: { service_id: service!.service_id } },
+          body: { log_fields: config },
+        }),
+      ),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['services'] })
+      queryClient.invalidateQueries({ queryKey: queryKeys.services() })
       // Trigger Fastly deployment with all settings.
       // Security: endpoint was previously a state-changing GET (CSRF
       // surface). Now POST — useSSE's `start(url, body)` overload sends a
@@ -121,7 +123,8 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
       if (lfResponse?.log_fields) {
         setConfig({
           groups: lfResponse.log_fields.groups || [],
-          field_overrides: lfResponse.log_fields.field_overrides || {}
+          field_overrides: lfResponse.log_fields.field_overrides || {},
+          field_limits: lfResponse.log_fields.field_limits || {},
         })
       }
       if (loggingSettings) {

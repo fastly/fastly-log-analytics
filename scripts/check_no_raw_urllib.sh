@@ -14,7 +14,10 @@
 # To (rarely) add a legitimate exception: add the file to ALLOWLIST and a short
 # inline comment at the call site explaining why the central client can't apply.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR/.."
+# shellcheck source=scripts/lib/ratchet_common.sh
+source "$SCRIPT_DIR/lib/ratchet_common.sh"
 
 # Files allowed to use raw urllib.request/urlopen, each for a documented reason:
 #   - core/fastly/client.py          the central client itself (the sanctioned urllib user)
@@ -40,28 +43,11 @@ PATTERN='urllib\.request|urllib\.error|\burlopen\('
 
 offenders=$(git grep -lE "$PATTERN" -- 'backend/**/*.py' ':(exclude)backend/**/test_*.py' 2>/dev/null || true)
 
-violations=""
-while IFS= read -r f; do
-  [ -z "$f" ] && continue
-  allowed=false
-  for a in "${ALLOWLIST[@]}"; do
-    if [ "$f" = "$a" ]; then
-      allowed=true
-      break
-    fi
-  done
-  if [ "$allowed" = false ]; then
-    violations+="$f"$'\n'
-  fi
-done <<< "$offenders"
-
-if [ -n "$violations" ]; then
-  echo "ERROR: raw urllib HTTP found in backend app module(s) not on the allowlist (B12):" >&2
-  echo "$violations" >&2
-  echo "Route Fastly calls through backend.core.fastly.client.fastly() and other" >&2
-  echo "external fetches through backend.utils.http.http_get_text(). If an" >&2
-  echo "exception is truly needed, add the file to ALLOWLIST in $0 with a reason." >&2
-  exit 1
-fi
-
-echo "OK: no raw urllib HTTP in backend app modules (outside the documented allowlist)."
+check_allowlist_offenders \
+  "$offenders" \
+  "ERROR: raw urllib HTTP found in backend app module(s) not on the allowlist (B12):" \
+  "Route Fastly calls through backend.core.fastly.client.fastly() and other
+external fetches through backend.utils.http.http_get_text(). If an
+exception is truly needed, add the file to ALLOWLIST in $0 with a reason." \
+  "OK: no raw urllib HTTP in backend app modules (outside the documented allowlist)." \
+  "${ALLOWLIST[@]}"

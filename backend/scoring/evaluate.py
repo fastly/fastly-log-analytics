@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Any, Final
 
 from backend.scoring.normalize import normalize
 from backend.scoring.scorer import score_layer2
@@ -114,17 +114,12 @@ def _compute_auc(scores: list[tuple[int, str]]) -> float:
     return wins / (n_good * n_bad)
 
 
-def evaluate(
-    matrix: dict,
+def _evaluate_sessions_with_extractor(
     labeled_sessions: Iterable[tuple[dict, str]],
+    score_extractor: Any,
     *,
     min_auc: float = DEFAULT_MIN_AUC,
 ) -> EvaluationResult:
-    """Score every labeled session against ``matrix`` and report AUC.
-
-    ``labeled_sessions`` is an iterable of (session_dict, label) where
-    label is ``"good"`` or ``"bad"``. Any other label string is rejected
-    upfront so a typo doesn't silently degrade AUC."""
     per_session: list[EvaluatedSession] = []
     scores_for_auc: list[tuple[int, str]] = []
     n_good = n_bad = 0
@@ -132,7 +127,10 @@ def evaluate(
     for session, label in labeled_sessions:
         if label not in ("good", "bad", "neutral"):
             raise ValueError(f"unexpected label {label!r}; want 'good', 'bad', or 'neutral'")
-        score, n_trans = _session_l2_score(session, matrix)
+        extracted = score_extractor(session)
+        if extracted is None:
+            continue
+        score, n_trans = extracted
         per_session.append(
             EvaluatedSession(
                 session_id=session.get("session_id", "?"),
@@ -163,6 +161,24 @@ def evaluate(
     )
 
 
+def evaluate(
+    matrix: dict,
+    labeled_sessions: Iterable[tuple[dict, str]],
+    *,
+    min_auc: float = DEFAULT_MIN_AUC,
+) -> EvaluationResult:
+    """Score every labeled session against ``matrix`` and report AUC.
+
+    ``labeled_sessions`` is an iterable of (session_dict, label) where
+    label is ``"good"`` or ``"bad"``. Any other label string is rejected
+    upfront so a typo doesn't silently degrade AUC."""
+    return _evaluate_sessions_with_extractor(
+        labeled_sessions,
+        lambda session: _session_l2_score(session, matrix),
+        min_auc=min_auc,
+    )
+
+
 def evaluate_from_persisted_scores(
     labeled_sessions: Iterable[tuple[dict, str]],
     *,
@@ -188,41 +204,18 @@ def evaluate_from_persisted_scores(
     Each session dict must carry a ``max_edge_score`` field (int 0-100).
     Sessions without one are dropped — there's nothing to evaluate.
     """
-    per_session: list[EvaluatedSession] = []
-    scores_for_auc: list[tuple[int, str]] = []
-    n_good = n_bad = 0
 
-    for session, label in labeled_sessions:
-        if label not in ("good", "bad", "neutral"):
-            raise ValueError(f"unexpected label {label!r}; want 'good', 'bad', or 'neutral'")
+    def _extract_persisted(session: dict) -> tuple[int, int] | None:
         max_score = session.get("max_edge_score")
         if max_score is None:
-            continue  # no persisted score — can't evaluate
+            return None
         n_events = len(session.get("events", []))
-        per_session.append(
-            EvaluatedSession(
-                session_id=session.get("session_id", "?"),
-                label=label,
-                l2_score=int(max_score),  # "l2_score" name kept for back-compat with EvaluatedSession dataclass
-                transition_count=max(0, n_events - 1),
-            )
-        )
-        if label == "neutral":
-            continue
-        scores_for_auc.append((int(max_score), label))
-        if label == "good":
-            n_good += 1
-        else:
-            n_bad += 1
+        return int(max_score), max(0, n_events - 1)
 
-    auc = _compute_auc(scores_for_auc)
-    return EvaluationResult(
-        auc=auc,
-        pass_threshold=min_auc,
-        passed=auc >= min_auc,
-        n_good=n_good,
-        n_bad=n_bad,
-        per_session=per_session,
+    return _evaluate_sessions_with_extractor(
+        labeled_sessions,
+        _extract_persisted,
+        min_auc=min_auc,
     )
 
 

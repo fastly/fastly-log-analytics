@@ -5,6 +5,7 @@ import { ChevronsUpDown, Trash2 } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import { useServiceStore } from '@/stores/serviceStore'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { queryKeys } from '@/lib/query-keys'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useBootstrapPending } from '@/hooks/useIsDataReady'
@@ -41,13 +42,12 @@ export function ViewSelector() {
   const bootstrapPending = useBootstrapPending()
 
   const { data: views } = useQuery({
-    queryKey: ['views', activeServiceId],
+    queryKey: queryKeys.views(activeServiceId),
     queryFn: async () => {
       if (!activeServiceId) return []
-      const { data } = await client.GET("/api/views/{service_id}", {
+      return unwrapClient(client.GET("/api/views/{service_id}", {
         params: { path: { service_id: activeServiceId } }
-      })
-      return data
+      }))
     },
     enabled: !!activeServiceId && !bootstrapPending,
   })
@@ -91,10 +91,10 @@ export function ViewSelector() {
     const timer = setTimeout(async () => {
       pendingTimersRef.current.delete(id)
       try {
-        await client.DELETE("/api/views/{view_id}", {
+        await unwrapClient(client.DELETE("/api/views/{view_id}", {
           params: { path: { view_id: id } }
-        })
-        queryClient.invalidateQueries({ queryKey: ['views', activeServiceId] })
+        }))
+        queryClient.invalidateQueries({ queryKey: queryKeys.views(activeServiceId) })
         // Bootstrap response also carries seeded views; invalidate so the
         // next bootstrap refetch reflects the deletion.
         queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })

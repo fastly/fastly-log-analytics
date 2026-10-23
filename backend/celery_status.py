@@ -167,19 +167,16 @@ def standard_ingest_summary() -> dict[str, int]:
             except Exception:
                 pass
             if ingested_files == 0:
-                for col in ("source_name", "service_id"):
-                    try:
-                        cur.execute(
-                            f"SELECT count(*) FROM ingested_files WHERE {col} IN ({placeholders})",
-                            tuple(sids),
-                        )
-                        rows = cur.fetchall()
-                        if rows and len(rows[0]) == 1 and isinstance(rows[0][0], (int, float)):
-                            ingested_files = int(rows[0][0])
-                            if ingested_files > 0:
-                                break
-                    except Exception:
-                        continue
+                try:
+                    cur.execute(
+                        f"SELECT count(*) FROM ingested_files WHERE source_name IN ({placeholders})",
+                        tuple(sids),
+                    )
+                    rows = cur.fetchall()
+                    if rows and len(rows[0]) == 1 and isinstance(rows[0][0], (int, float)):
+                        ingested_files = int(rows[0][0])
+                except Exception:
+                    pass
     except Exception as e:
         logger.debug("[celery_status] standard_ingest_summary failed: %s", e)
     return {

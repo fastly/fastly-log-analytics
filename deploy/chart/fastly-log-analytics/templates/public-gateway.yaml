@@ -49,6 +49,8 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
+      annotations:
+        checksum/config: {{ printf "%s:%s" (include "fastly-log-analytics.fullname" .) .Release.Name | sha256sum }}
       labels:
         app.kubernetes.io/name: public-gateway
         app.kubernetes.io/instance: {{ .Release.Name }}
@@ -73,6 +75,9 @@ spec:
             - name: http
               containerPort: 8080
           readinessProbe:
+            tcpSocket:
+              port: http
+          livenessProbe:
             tcpSocket:
               port: http
           resources:

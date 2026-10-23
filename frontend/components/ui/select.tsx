@@ -51,11 +51,13 @@ const Select = <Value extends string = string>({ children, ...props }: React.Com
   const [dynamicLabels, setDynamicLabels] = React.useState<Record<string, string>>({});
 
   const registerLabel = React.useCallback((value: string, label: string) => {
+    if (initialLabels[value] === label) return;
     setDynamicLabels(prev => prev[value] === label ? prev : { ...prev, [value]: label });
-  }, []);
+  }, [initialLabels]);
 
   const unregisterLabel = React.useCallback((value: string) => {
     setDynamicLabels(prev => {
+      if (!(value in prev)) return prev;
       const next = { ...prev };
       delete next[value];
       return next;
@@ -64,8 +66,13 @@ const Select = <Value extends string = string>({ children, ...props }: React.Com
 
   const labels = React.useMemo(() => ({ ...initialLabels, ...dynamicLabels }), [initialLabels, dynamicLabels]);
 
+  const contextValue = React.useMemo(
+    () => ({ labels, registerLabel, unregisterLabel }),
+    [labels, registerLabel, unregisterLabel],
+  );
+
   return (
-    <SelectContext.Provider value={{ labels, registerLabel, unregisterLabel }}>
+    <SelectContext.Provider value={contextValue}>
       <SelectPrimitive.Root {...props}>{children}</SelectPrimitive.Root>
     </SelectContext.Provider>
   );

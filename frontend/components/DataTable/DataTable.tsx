@@ -115,8 +115,9 @@ function DataTableImpl<TData, TValue>({
   getRowClassName,
   tableCaption
 }: DataTableProps<TData, TValue>) {
-  const { sorting, isSortingControlled, columnVisibility, setColumnVisibility, handleSortingChange } =
+  const { sorting, isSortingControlled, columnVisibility, setColumnVisibility, handleSortingChange, tableData } =
     useDataTableState({
+      data,
       controlledSorting,
       onSortingChange,
       initialSorting,
@@ -194,41 +195,6 @@ function DataTableImpl<TData, TValue>({
   })
 
   const tableColumns = React.useMemo(() => columns, [columns])
-  // Stabilise the data reference. Callers commonly pass ``query?.rows || []``,
-  // which is a BRAND-NEW array on every render while the query is
-  // loading/empty. TanStack's autoResetPageIndex treats each new data identity
-  // as a data change and fires setPagination → re-render → new array →
-  // infinite loop ("Maximum update depth exceeded"), freezing the page (e.g.
-  // the always-mounted Data Management tabs). Reuse the previous array whenever
-  // the contents are referentially identical so autoReset still fires on a REAL
-  // data change but not on an unstable-but-equal reference. Row arrays here are
-  // bounded, so the per-change shallow scan is cheap.
-  const prevDataRef = React.useRef(data)
-  const tableData = React.useMemo(() => {
-    const prev = prevDataRef.current
-    if (
-      Array.isArray(prev) &&
-      Array.isArray(data) &&
-      prev !== data &&
-      prev.length === data.length &&
-      prev.every((row, i) => row === data[i])
-    ) {
-      return prev
-    }
-    prevDataRef.current = data
-    return data
-  }, [data])
-
-  const prevInitialVisibilityJson = React.useRef(JSON.stringify(initialVisibility))
-  React.useEffect(() => {
-    const nextJson = JSON.stringify(initialVisibility)
-    if (nextJson !== prevInitialVisibilityJson.current) {
-      prevInitialVisibilityJson.current = nextJson
-      if (Object.keys(initialVisibility).length > 0) {
-        setColumnVisibility(initialVisibility)
-      }
-    }
-  }, [initialVisibility])
 
   const [columnSizing, setColumnSizing] = React.useState<Record<string, number>>({})
 

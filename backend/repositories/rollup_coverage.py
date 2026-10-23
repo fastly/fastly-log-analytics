@@ -605,6 +605,8 @@ def collect_hour_paths_with_floor(
     two does not change which URLs dominate a multi-day ranking. ``None`` on
     no files or insufficient coverage.
     """
+    if durable_serving_blocked(src):
+        return None
     bundled_root = _hour_bundled_root(src)
     if not os.path.isdir(bundled_root):
         return None

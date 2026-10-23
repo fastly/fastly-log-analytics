@@ -14,11 +14,7 @@
 
 import AxeBuilder from '@axe-core/playwright'
 import { expect, test, type Page } from '@playwright/test'
-
-type LayoutShiftEntry = PerformanceEntry & {
-  hadRecentInput?: boolean
-  value?: number
-}
+import { installClsObserver, readClsScore } from '../cls-observer'
 
 function bucket(minutesAgo: number): string {
   return new Date(Date.now() - minutesAgo * 60_000).toISOString()
@@ -117,20 +113,13 @@ test.describe('Streaming (CMCD) Page Contract (/streaming)', () => {
     await page.goto('/streaming')
     await expect(page.getByText('Total Sessions', { exact: true }).first()).toBeVisible({ timeout: 30_000 })
 
-    await page.addInitScript(() => {
-      ;(window as unknown as { __cls: number }).__cls = 0
-      new PerformanceObserver((list) => {
-        for (const entry of list.getEntries() as LayoutShiftEntry[]) {
-          if (!entry.hadRecentInput) (window as unknown as { __cls: number }).__cls += entry.value ?? 0
-        }
-      }).observe({ type: 'layout-shift', buffered: true })
-    })
+    await installClsObserver(page)
     await page.reload()
     await expect(page.getByText('Total Sessions', { exact: true }).first()).toBeVisible({ timeout: 30_000 })
     await expect(page.getByText('1,234').first()).toBeVisible({ timeout: 15_000 })
     await page.waitForTimeout(1_500)
 
-    const cls = await page.evaluate(() => (window as unknown as { __cls: number }).__cls)
+    const cls = await readClsScore(page)
     expect(cls).toBeLessThanOrEqual(0.05)
   })
 })

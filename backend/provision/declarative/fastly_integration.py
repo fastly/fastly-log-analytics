@@ -46,6 +46,51 @@ def fetch_active_version(service_id: str, token: str) -> int | None:
         return None
 
 
+def _unwrap_fastly_list(resp: object) -> list[dict]:
+    if isinstance(resp, dict) and "items" in resp:
+        return list(resp["items"])
+    if isinstance(resp, list):
+        return resp
+    return []
+
+
+def _delete_version_resource(
+    service_id: str,
+    version: int,
+    resource_path: str,
+    name: str,
+    token: str,
+) -> None:
+    encoded_name = urllib.parse.quote(name, safe="")
+    fastly(
+        "DELETE",
+        f"/service/{service_id}/version/{version}/{resource_path}/{encoded_name}",
+        token=token,
+        expect_empty=True,
+    )
+
+
+def _upsert_version_resource(
+    service_id: str,
+    version: int,
+    resource_path: str,
+    name: str,
+    body: dict,
+    token: str,
+) -> dict:
+    encoded_name = urllib.parse.quote(name, safe="")
+    item_url = f"/service/{service_id}/version/{version}/{resource_path}/{encoded_name}"
+    collection_url = f"/service/{service_id}/version/{version}/{resource_path}"
+    try:
+        fastly("GET", item_url, token=token)
+        exists = True
+    except RuntimeError:
+        exists = False
+    if exists:
+        return fastly("PUT", item_url, body, token=token)
+    return fastly("POST", collection_url, body, token=token)
+
+
 def fetch_snippets(service_id: str, version: int, token: str) -> list[VCLSnippet]:
     """Fetch all VCL snippets for a service version.
 
@@ -64,13 +109,7 @@ def fetch_snippets(service_id: str, version: int, token: str) -> list[VCLSnippet
             f"/service/{service_id}/version/{version}/snippet",
             token=token,
         )
-        items = resp
-        if isinstance(resp, dict) and "items" in resp:
-            items = resp["items"]
-        elif not isinstance(resp, list):
-            items = []
-
-        for item in items:
+        for item in _unwrap_fastly_list(resp):
             snippet = VCLSnippet(
                 name=item.get("name", ""),
                 priority=int(item.get("priority", 100)),
@@ -101,13 +140,7 @@ def fetch_logging_endpoints(service_id: str, version: int, token: str) -> list[L
             f"/service/{service_id}/version/{version}/logging/s3",
             token=token,
         )
-        items = resp
-        if isinstance(resp, dict) and "items" in resp:
-            items = resp["items"]
-        elif not isinstance(resp, list):
-            items = []
-
-        for item in items:
+        for item in _unwrap_fastly_list(resp):
             endpoint = LoggingEndpoint(
                 name=item.get("name", ""),
                 endpoint_type="s3",
@@ -142,13 +175,7 @@ def fetch_backends(service_id: str, version: int, token: str) -> list[Backend]:
             f"/service/{service_id}/version/{version}/backend",
             token=token,
         )
-        items = resp
-        if isinstance(resp, dict) and "items" in resp:
-            items = resp["items"]
-        elif not isinstance(resp, list):
-            items = []
-
-        for item in items:
+        for item in _unwrap_fastly_list(resp):
             backend = Backend(
                 name=item.get("name", ""),
                 address=item.get("address", ""),
@@ -188,13 +215,7 @@ def fetch_dictionaries(service_id: str, version: int, token: str) -> list[Servic
             f"/service/{service_id}/version/{version}/dictionary",
             token=token,
         )
-        items = resp
-        if isinstance(resp, dict) and "items" in resp:
-            items = resp["items"]
-        elif not isinstance(resp, list):
-            items = []
-
-        for item in items:
+        for item in _unwrap_fastly_list(resp):
             dict_name = item.get("name", "")
             dict_id = item.get("id", "")
             write_only = item.get("write_only", False)
@@ -207,13 +228,10 @@ def fetch_dictionaries(service_id: str, version: int, token: str) -> list[Servic
                         f"/service/{service_id}/dictionary/{dict_id}/items",
                         token=token,
                     )
-                    items_entries = items_resp
-                    if isinstance(items_resp, dict) and "items" in items_resp:
-                        items_entries = items_resp["items"]
-                    elif isinstance(items_resp, dict):
+                    if isinstance(items_resp, dict) and "items" not in items_resp:
                         items_entries = [items_resp]
-                    elif not isinstance(items_resp, list):
-                        items_entries = []
+                    else:
+                        items_entries = _unwrap_fastly_list(items_resp)
 
                     for entry in items_entries:
                         if isinstance(entry, dict):
@@ -283,13 +301,7 @@ def delete_snippet(service_id: str, version: int, snippet_name: str, token: str)
         snippet_name: Name of snippet to delete.
         token: API token.
     """
-    encoded_name = urllib.parse.quote(snippet_name, safe="")
-    fastly(
-        "DELETE",
-        f"/service/{service_id}/version/{version}/snippet/{encoded_name}",
-        token=token,
-        expect_empty=True,
-    )
+    _delete_version_resource(service_id, version, "snippet", snippet_name, token)
 
 
 def create_or_update_snippet(
@@ -306,46 +318,17 @@ def create_or_update_snippet(
         snippet: VCLSnippet to create/update.
         token: API token.
     """
-    # Strip "vcl_" prefix from subroutine name if present
     snippet_type = (
         snippet.subroutine.replace("vcl_", "") if snippet.subroutine.startswith("vcl_") else snippet.subroutine
     )
-
-    # Try to get existing snippet
-    encoded_name = urllib.parse.quote(snippet.name, safe="")
-    try:
-        fastly(
-            "GET",
-            f"/service/{service_id}/version/{version}/snippet/{encoded_name}",
-            token=token,
-        )
-        # Exists, update it
-        fastly(
-            "PUT",
-            f"/service/{service_id}/version/{version}/snippet/{encoded_name}",
-            {
-                "name": snippet.name,
-                "type": snippet_type,
-                "priority": snippet.priority,
-                "content": snippet.body,
-                "dynamic": 0,
-            },
-            token=token,
-        )
-    except RuntimeError:
-        # Doesn't exist, create it
-        fastly(
-            "POST",
-            f"/service/{service_id}/version/{version}/snippet",
-            {
-                "name": snippet.name,
-                "type": snippet_type,
-                "priority": snippet.priority,
-                "content": snippet.body,
-                "dynamic": 0,
-            },
-            token=token,
-        )
+    body = {
+        "name": snippet.name,
+        "type": snippet_type,
+        "priority": snippet.priority,
+        "content": snippet.body,
+        "dynamic": 0,
+    }
+    _upsert_version_resource(service_id, version, "snippet", snippet.name, body, token)
 
 
 def delete_logging_endpoint(service_id: str, version: int, endpoint_name: str, token: str) -> None:
@@ -357,13 +340,7 @@ def delete_logging_endpoint(service_id: str, version: int, endpoint_name: str, t
         endpoint_name: Name of endpoint to delete.
         token: API token.
     """
-    encoded_name = urllib.parse.quote(endpoint_name, safe="")
-    fastly(
-        "DELETE",
-        f"/service/{service_id}/version/{version}/logging/s3/{encoded_name}",
-        token=token,
-        expect_empty=True,
-    )
+    _delete_version_resource(service_id, version, "logging/s3", endpoint_name, token)
 
 
 def create_or_update_logging_endpoint(
@@ -388,8 +365,6 @@ def create_or_update_logging_endpoint(
         access_key: Optional S3 access key.
         secret_key: Optional S3 secret key.
     """
-    # Try to get existing endpoint
-    encoded_name = urllib.parse.quote(endpoint.name, safe="")
     body = {
         "name": endpoint.name,
         "path": endpoint.path,
@@ -403,7 +378,6 @@ def create_or_update_logging_endpoint(
     if endpoint.response_condition:
         body["response_condition"] = endpoint.response_condition
 
-    # Add S3-specific parameters if provided
     if bucket_name:
         body["bucket_name"] = bucket_name
     if domain:
@@ -413,27 +387,7 @@ def create_or_update_logging_endpoint(
     if secret_key:
         body["secret_key"] = secret_key
 
-    try:
-        fastly(
-            "GET",
-            f"/service/{service_id}/version/{version}/logging/s3/{encoded_name}",
-            token=token,
-        )
-        # Exists, update it
-        fastly(
-            "PUT",
-            f"/service/{service_id}/version/{version}/logging/s3/{encoded_name}",
-            body,
-            token=token,
-        )
-    except RuntimeError:
-        # Doesn't exist, create it
-        fastly(
-            "POST",
-            f"/service/{service_id}/version/{version}/logging/s3",
-            body,
-            token=token,
-        )
+    _upsert_version_resource(service_id, version, "logging/s3", endpoint.name, body, token)
 
 
 def delete_backend(service_id: str, version: int, backend_name: str, token: str) -> None:
@@ -445,13 +399,7 @@ def delete_backend(service_id: str, version: int, backend_name: str, token: str)
         backend_name: Name of backend to delete.
         token: API token.
     """
-    encoded_name = urllib.parse.quote(backend_name, safe="")
-    fastly(
-        "DELETE",
-        f"/service/{service_id}/version/{version}/backend/{encoded_name}",
-        token=token,
-        expect_empty=True,
-    )
+    _delete_version_resource(service_id, version, "backend", backend_name, token)
 
 
 def create_or_update_backend(service_id: str, version: int, backend: Backend, token: str) -> None:
@@ -483,29 +431,7 @@ def create_or_update_backend(service_id: str, version: int, backend: Backend, to
     else:
         body["shield"] = None
 
-    # Try to get existing backend
-    encoded_name = urllib.parse.quote(backend.name, safe="")
-    try:
-        fastly(
-            "GET",
-            f"/service/{service_id}/version/{version}/backend/{encoded_name}",
-            token=token,
-        )
-        # Exists, update it
-        fastly(
-            "PUT",
-            f"/service/{service_id}/version/{version}/backend/{encoded_name}",
-            body,
-            token=token,
-        )
-    except RuntimeError:
-        # Doesn't exist, create it
-        fastly(
-            "POST",
-            f"/service/{service_id}/version/{version}/backend",
-            body,
-            token=token,
-        )
+    _upsert_version_resource(service_id, version, "backend", backend.name, body, token)
 
 
 def delete_dictionary(service_id: str, version: int, dict_name: str, token: str) -> None:
@@ -517,13 +443,7 @@ def delete_dictionary(service_id: str, version: int, dict_name: str, token: str)
         dict_name: Name of dictionary to delete.
         token: API token.
     """
-    encoded_name = urllib.parse.quote(dict_name, safe="")
-    fastly(
-        "DELETE",
-        f"/service/{service_id}/version/{version}/dictionary/{encoded_name}",
-        token=token,
-        expect_empty=True,
-    )
+    _delete_version_resource(service_id, version, "dictionary", dict_name, token)
 
 
 def create_or_update_dictionary(
@@ -540,38 +460,17 @@ def create_or_update_dictionary(
         dictionary: ServiceDictionary to create/update.
         token: API token.
     """
-    encoded_name = urllib.parse.quote(dictionary.name, safe="")
-
-    try:
-        fastly(
-            "GET",
-            f"/service/{service_id}/version/{version}/dictionary/{encoded_name}",
-            token=token,
-        )
-        dict_exists = True
-    except RuntimeError:
-        dict_exists = False
-
-    if dict_exists:
-        resp = fastly(
-            "PUT",
-            f"/service/{service_id}/version/{version}/dictionary/{encoded_name}",
-            {
-                "name": dictionary.name,
-                "write_only": dictionary.write_only,
-            },
-            token=token,
-        )
-    else:
-        resp = fastly(
-            "POST",
-            f"/service/{service_id}/version/{version}/dictionary",
-            {
-                "name": dictionary.name,
-                "write_only": dictionary.write_only,
-            },
-            token=token,
-        )
+    resp = _upsert_version_resource(
+        service_id,
+        version,
+        "dictionary",
+        dictionary.name,
+        {
+            "name": dictionary.name,
+            "write_only": dictionary.write_only,
+        },
+        token,
+    )
 
     dict_id = resp.get("id", "")
     if not dict_id:

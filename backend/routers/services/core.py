@@ -694,7 +694,10 @@ def api_service_log_fields_set(request: Request, service_id: str, body: LogField
     _require_service_scope(request, service_id)
 
     cfg = load_service_config(service_id)
-    new_lf = body.log_fields
+    raw_lf = body.log_fields
+    new_lf: dict = (
+        raw_lf.model_dump(exclude_none=True) if hasattr(raw_lf, "model_dump") else (dict(raw_lf) if raw_lf else {})
+    )
     if not new_lf:
         raise HTTPException(status_code=400, detail={"error": "log_fields is required"})
     old_lf = cfg.get("log_fields", {})
@@ -1074,10 +1077,30 @@ def api_list_custom_fields(request: Request, service_id: str) -> CustomFieldsLis
     return CustomFieldsListResponse(fields=user_fields)  # type: ignore
 
 
+def _committed_duckdb_field_types(src: dict) -> dict[str, str]:
+    """Fallback schema lookup via the service's DuckDB/DuckLake schema when PyIceberg has no table."""
+    import os
+
+    from backend.core import duckdb as _db
+
+    db_path = _db.db_path_for_source(src)
+    if not os.path.exists(db_path):
+        return {}
+    con = _db.get_connection(source=src, read_only=True, max_wait=2.0, skip_view_update=True)
+    try:
+        return {
+            str(col["column"]): str(col["type"])
+            for col in _db.get_schema(con, src, stats=False)
+            if col.get("column") and col.get("type")
+        }
+    finally:
+        con.close()
+
+
 def _check_iceberg_type_lock(
     service_id: str, field_name: str, new_duckdb_type: str | None = None, new_value_type: str | None = None
 ) -> None:
-    """Ensure we don't mutate the core type of an existing field in the Iceberg table."""
+    """Ensure we don't mutate the core type of an existing field in the committed table."""
     from fastapi import HTTPException
 
     from backend.core import duckdb as _db
@@ -1085,7 +1108,7 @@ def _check_iceberg_type_lock(
     src = _db.get_source_for_service(service_id)
     if not src:
         return
-    # Only Iceberg-backed services have a committed schema to lock against;
+    # Only Iceberg/DuckLake-backed services have a committed schema to lock against;
     # explicitly-local services don't, so there is nothing to verify. Treat a
     # missing storage_mode as the default ("cloud") so the lock still applies.
     if src.get("storage_mode", "cloud") == "local":
@@ -1093,24 +1116,36 @@ def _check_iceberg_type_lock(
     try:
         from pyiceberg.exceptions import NoSuchTableError
 
-        from backend.core.iceberg import (  # type: ignore[attr-defined]
-            _DUCKDB_TO_ICEBERG,
-            _get_catalog,
-            _table_identifier,
-        )
+        from backend.core import iceberg as _iceberg
 
-        catalog = _get_catalog(src)
-        identifier = _table_identifier(src)
+        duckdb_to_iceberg = getattr(_iceberg, "_DUCKDB_TO_ICEBERG")
+        get_catalog = getattr(_iceberg, "_get_catalog")
+        table_identifier = getattr(_iceberg, "_table_identifier")
+
+        catalog = get_catalog(src)
+        identifier = table_identifier(src)
         try:
             table = catalog.load_table(identifier)
         except NoSuchTableError:
-            # No committed Iceberg table yet → the field is effectively brand
-            # new, nothing to lock. Safe to allow.
+            committed_types = _committed_duckdb_field_types(src)
+            existing_duckdb_type = committed_types.get(field_name)
+            if existing_duckdb_type and new_duckdb_type:
+                current_mapped = duckdb_to_iceberg.get(existing_duckdb_type.upper(), existing_duckdb_type.upper())
+                target_mapped = duckdb_to_iceberg.get(new_duckdb_type.upper(), new_duckdb_type.upper())
+                if current_mapped != target_mapped:
+                    raise HTTPException(
+                        status_code=422,
+                        detail={
+                            "errors": [
+                                f"Cannot change data type for '{field_name}' (currently {current_mapped}) after it has been created in the database. Please create a new field instead."
+                            ]
+                        },
+                    )
             return
         schema = table.schema()
         field = schema.find_field(field_name) if field_name in {f.name for f in schema.fields} else None
         if field and new_duckdb_type:
-            target_iceberg_type = _DUCKDB_TO_ICEBERG.get(new_duckdb_type)
+            target_iceberg_type = duckdb_to_iceberg.get(new_duckdb_type)
             if target_iceberg_type and field.field_type != target_iceberg_type:
                 raise HTTPException(
                     status_code=422,
@@ -1139,7 +1174,7 @@ def _check_iceberg_type_lock(
 
 
 def _locked_iceberg_field_names(src: dict | None, *, error_lead: str, error_tail: str) -> set[str]:
-    """Return the committed Iceberg-schema field names for ``src``.
+    """Return the committed Iceberg/DuckLake-schema field names for ``src``.
 
     Empty set for local services or when no table is committed yet. Fails
     CLOSED with a 503 (``{error_lead} ({ExcType}); {error_tail}``) on any
@@ -1154,17 +1189,17 @@ def _locked_iceberg_field_names(src: dict | None, *, error_lead: str, error_tail
     try:
         from pyiceberg.exceptions import NoSuchTableError
 
-        from backend.core.iceberg import (  # type: ignore[attr-defined]
-            _get_catalog,
-            _table_identifier,
-        )
+        from backend.core import iceberg as _iceberg
 
-        catalog = _get_catalog(src)
+        get_catalog = getattr(_iceberg, "_get_catalog")
+        table_identifier = getattr(_iceberg, "_table_identifier")
+
+        catalog = get_catalog(src)
         try:
-            table = catalog.load_table(_table_identifier(src))
+            table = catalog.load_table(table_identifier(src))
         except NoSuchTableError:
-            # No committed table yet → nothing committed to lock against.
-            return set()
+            # Fall back to DuckDB/DuckLake schema if a DB exists; otherwise empty set.
+            return set(_committed_duckdb_field_types(src).keys())
         return {f.name for f in table.schema().fields}
     except Exception as e:
         raise HTTPException(

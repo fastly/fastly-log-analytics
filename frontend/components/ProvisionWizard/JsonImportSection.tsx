@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { FileJson } from "lucide-react";
@@ -14,6 +14,15 @@ export function JsonImportSection({ onImport }: JsonImportSectionProps) {
   const [raw, setRaw] = useState("");
   const [parseError, setParseError] = useState("");
   const [imported, setImported] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+      }
+    };
+  }, []);
 
   const handleImport = () => {
     setParseError("");
@@ -25,7 +34,13 @@ export function JsonImportSection({ onImport }: JsonImportSectionProps) {
       setImported(true);
       setOpen(false);
       setRaw("");
-      setTimeout(() => setImported(false), 3000);
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+      }
+      timerRef.current = setTimeout(() => {
+        timerRef.current = null;
+        setImported(false);
+      }, 3000);
     } catch (e) {
       setParseError(e instanceof Error && e.message ? e.message : "Invalid JSON");
     }

@@ -1,15 +1,13 @@
 'use client'
 
 import React from 'react'
-import { useMounted } from '@/hooks/useMounted'
 import dynamic from 'next/dynamic'
 import { useTimezone } from '@/hooks/useTimezone'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
 import { useFieldLabel } from '@/hooks/useFieldLabel'
 import { useTimeLayout } from '@/lib/chart-helpers'
 import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
-import { useFilterStore } from '@/stores/filterStore'
-import { quantizeAnchor } from '@/lib/time-window'
+import { useReportRangeAnchor } from '@/hooks/useReportRangeAnchor'
 import { ReportLayout } from '@/components/ReportLayout'
 import { Skeleton } from '@/components/ui/skeleton'
 import { client, extractApiError } from '@/lib/api'
@@ -258,22 +256,7 @@ export default function SecurityClient({ nowServerStr }: { nowServerStr?: string
   // AND keeping the SSR seed key byte-matched. A custom absolute range
   // (relativeRange null + isAutoRange false) → the explicit start/end bounds, so
   // it scans exactly what it displays.
-  const mounted = useMounted()
-
-  const relativeRange = useFilterStore((s) => s.relativeRange)
-  const isAutoRange = useFilterStore((s) => s.isAutoRange)
-  const storeEndTime = useFilterStore((s) => s.endTime)
-  // Anchor the keyed path to the SELECTED window's end, not to mount time: a
-  // preset clicked in a long-lived tab re-anchors at click time so the scan
-  // matches the hard-clamped x-axis (a mount-pinned anchor could leave the
-  // short 1h..12h presets fully disjoint from the display). Memoized on endTime
-  // so a re-render can't advance the key; cold-load endTime ≈ mount now, so the
-  // SSR seed (same 60s floor, quantizeAnchor ≡ backend quantize_anchor) still
-  // byte-matches within the quantum.
-  const anchor = React.useMemo(() => {
-    const baseStr = (!mounted && nowServerStr) ? nowServerStr : storeEndTime
-    return quantizeAnchor(baseStr)
-  }, [storeEndTime, nowServerStr, mounted])
+  const { relativeRange, isAutoRange, anchor } = useReportRangeAnchor(nowServerStr)
 
   const [fingerprintVisibility, setFingerprintVisibility, onFingerprintVisChange] = useColumnVisibility()
   const [topIpVisibility, setTopIpVisibility, onTopIpVisChange] = useColumnVisibility()

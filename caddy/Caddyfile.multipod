@@ -1,9 +1,34 @@
 {
 	admin off
 	auto_https off
+	log {
+		format filter {
+			wrap json
+			fields {
+				request>headers>X-Admin-Gateway-Token delete
+				request>headers>X-Admin-Token delete
+			}
+		}
+	}
+}
+
+(redacted_log) {
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>headers>X-Admin-Gateway-Token delete
+				request>headers>X-Admin-Token delete
+			}
+		}
+		level INFO
+	}
 }
 
 :80 {
+    request_header -X-Admin-Gateway-Token
+    request_header -X-Admin-Token
     @api path /api/* /js/* /rum-beacon
     # Caddy forwards the REAL client IP (it appends the peer address to
     # X-Forwarded-For by default). Never stamp a synthetic XFF here: a
@@ -28,7 +53,7 @@
     }
 
     # Everything else → Next.js frontend.
-    reverse_proxy frontend:3000 {
-        flush_interval -1
-    }
+    reverse_proxy frontend:3000
+
+    import redacted_log
 }

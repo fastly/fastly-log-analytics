@@ -152,39 +152,41 @@ def recompute_wellknown_bots_rollup(
                 f") {parquet_zstd_target(tmp_path_sql)}"
             )
             try:
-                execute_with_stale_view_retry(con, source, lambda c, q=copy_sql: c.execute(q))
-            except Exception as e:  # noqa: BLE001 — DuckDB errors may arrive wrapped by the iceberg retry hop
-                logger.warning("[rollups] %s: bot-rollup COPY failed for hour=%s: %s", service_id, hour, e)
-                unlink_quiet(tmp_path)
-                continue
-
-            # Atomic publish under the per-service iceberg lock.
-            # Serializes against concurrent rebuilds (backfill +
-            # post-sync overlap). Sweep any pre-existing parquets
-            # for the hour FIRST so a reader scanning the dir can't
-            # see a stale-version row alongside the freshly-written
-            # one (the version check on read would catch it, but
-            # eliminating the window is cheaper).
-            with _get_service_lock(lock_key):
                 try:
-                    for fname in os.listdir(hour_dir):
-                        if fname.endswith(".parquet") and not fname.startswith(".tmp_"):
-                            unlink_quiet(os.path.join(hour_dir, fname))
-                except OSError:
-                    pass
-                final_path = os.path.join(hour_dir, f"compacted_{uuid.uuid4().hex[:12]}.parquet")
-                try:
-                    os.replace(tmp_path, final_path)
-                except OSError as e:
-                    logger.warning(
-                        "[rollups] %s: bot-rollup publish failed for hour=%s: %s",
-                        service_id,
-                        hour,
-                        e,
-                    )
-                    unlink_quiet(tmp_path)
+                    execute_with_stale_view_retry(con, source, lambda c, q=copy_sql: c.execute(q))
+                except Exception as e:  # noqa: BLE001 — DuckDB errors may arrive wrapped by the iceberg retry hop
+                    logger.warning("[rollups] %s: bot-rollup COPY failed for hour=%s: %s", service_id, hour, e)
                     continue
-            rebuilt += 1
+
+                # Atomic publish under the per-service iceberg lock.
+                # Serializes against concurrent rebuilds (backfill +
+                # post-sync overlap). Sweep any pre-existing parquets
+                # for the hour FIRST so a reader scanning the dir can't
+                # see a stale-version row alongside the freshly-written
+                # one (the version check on read would catch it, but
+                # eliminating the window is cheaper).
+                with _get_service_lock(lock_key):
+                    try:
+                        for fname in os.listdir(hour_dir):
+                            if fname.endswith(".parquet") and not fname.startswith(".tmp_"):
+                                unlink_quiet(os.path.join(hour_dir, fname))
+                    except OSError:
+                        pass
+                    final_path = os.path.join(hour_dir, f"compacted_{uuid.uuid4().hex[:12]}.parquet")
+                    try:
+                        os.replace(tmp_path, final_path)
+                    except OSError as e:
+                        logger.warning(
+                            "[rollups] %s: bot-rollup publish failed for hour=%s: %s",
+                            service_id,
+                            hour,
+                            e,
+                        )
+                        continue
+                rebuilt += 1
+            finally:
+                if os.path.exists(tmp_path):
+                    unlink_quiet(tmp_path)
     finally:
         if owns_con:
             con.close()

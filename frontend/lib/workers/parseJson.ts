@@ -10,19 +10,31 @@ export function parseJsonAsync<T>(jsonString: string): Promise<T> {
       }
       return;
     }
-    const worker = new Worker(new URL('./json-worker.ts', import.meta.url));
-    worker.onmessage = (event) => {
-      worker.terminate();
-      if (event.data.success) {
-        resolve(event.data.data);
-      } else {
-        reject(new Error(event.data.error));
+    try {
+      const worker = new Worker(new URL('./json-worker.ts', import.meta.url));
+      worker.onmessage = (event) => {
+        worker.terminate();
+        if (event.data.success) {
+          resolve(event.data.data);
+        } else {
+          reject(new Error(event.data.error));
+        }
+      };
+      worker.onerror = () => {
+        worker.terminate();
+        try {
+          resolve(JSON.parse(jsonString));
+        } catch (e) {
+          reject(e);
+        }
+      };
+      worker.postMessage(jsonString);
+    } catch {
+      try {
+        resolve(JSON.parse(jsonString));
+      } catch (e) {
+        reject(e);
       }
-    };
-    worker.onerror = (error) => {
-      worker.terminate();
-      reject(error);
-    };
-    worker.postMessage(jsonString);
+    }
   });
 }

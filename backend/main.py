@@ -411,7 +411,7 @@ def _migrate_config_on_startup() -> None:
 
     from backend.provision.declarative.config_migration import config_changed, migrate_config
 
-    config_dir = Path.home() / ".fastly-log-analytics" / "configs"
+    config_dir = Path(svcconfig.CONFIGS_DIR)
     if not config_dir.exists():
         return
 

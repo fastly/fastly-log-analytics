@@ -2,6 +2,8 @@
 import React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
+import { queryKeys } from '@/lib/query-keys'
 import { Label } from '@/components/ui/label'
 import {
   Tooltip,
@@ -84,10 +86,9 @@ export function SystemJobsStrip() {
 
   // Freshness via useAdminEventStream. Safety-net poll only.
   const { data: systemJobsData } = useQuery({
-    queryKey: ['system-jobs'],
+    queryKey: queryKeys.systemJobs(),
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/admin/system-jobs", { signal })
-      return data
+      return unwrapClient(client.GET("/api/admin/system-jobs", { signal }))
     },
     staleTime: 30_000,
     refetchInterval: 5 * 60_000,

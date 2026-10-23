@@ -2,7 +2,9 @@
 import React, { useState } from 'react'
 import { ELAPSED_RELATIVE_AGO_JUST_NOW, formatCount, formatElapsed } from '@/lib/format'
 import { useQuery } from '@tanstack/react-query'
-import { client, extractApiError } from '@/lib/api'
+import { adminFetch, client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
+import { downloadBlob } from '@/lib/download'
 import { useMounted } from '@/hooks/useMounted'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
@@ -94,7 +96,7 @@ export function BotSourcesPanel() {
   const { data: queryBotSourcesData, refetch: refetchBotSources } = useQuery({
     queryKey: ['bot-sources'],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/admin/bot-sources", { signal })
+      const data = await unwrapClient(client.GET("/api/admin/bot-sources", { signal }))
       return data as BotSourceList
     },
     staleTime: 60_000,
@@ -104,9 +106,9 @@ export function BotSourcesPanel() {
   async function handleRefreshBotSource(sourceId: string) {
     setRefreshingSource(sourceId)
     try {
-      await client.POST("/api/admin/bot-sources/{source_id}/refresh", {
+      await unwrapClient(client.POST("/api/admin/bot-sources/{source_id}/refresh", {
         params: { path: { source_id: sourceId } }
-      })
+      }))
       await refetchBotSources()
     } finally {
       setRefreshingSource(null)
@@ -236,7 +238,16 @@ export function BotSourcesPanel() {
           <span>Last enrichment: {fmtRelative(botSourcesData?.rdns.last_enrichment_at ?? null)}</span>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={() => window.open('/api/admin/rdns/export', '_blank')} title="Download rDNS Cache as CSV">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              void adminFetch('/api/admin/rdns/export').then(async (res) => {
+                if (res.ok) downloadBlob(await res.blob(), 'rdns_cache.csv')
+              })
+            }}
+            title="Download rDNS Cache as CSV"
+          >
             <Download className="h-3 w-3 mr-1.5" />
             Export CSV
           </Button>

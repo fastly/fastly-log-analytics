@@ -6,9 +6,11 @@ import { Users } from 'lucide-react'
 import dynamic from 'next/dynamic'
 
 import { client, extractApiError } from '@/lib/api'
+import { queryKeys } from '@/lib/query-keys'
 import { useIsDataReady } from '@/hooks/useIsDataReady'
 import { useScoringLabels } from '@/hooks/useScoringLabels'
 import { useActiveServiceCmcdEnabled } from '@/hooks/useActiveService'
+import { useServiceSwitchReset } from '@/hooks/useServiceSwitchReset'
 import { ReportLayout } from '@/components/ReportLayout'
 import { UpdatingBadge } from '@/components/UpdatingBadge'
 import type { components } from '@/types/api.generated'
@@ -80,7 +82,7 @@ function SessionsBody({
   useEffect(() => {
     return () => {
       queryClient.cancelQueries({ queryKey: ['sessions'] })
-      queryClient.cancelQueries({ queryKey: ['scoring-labels'] })
+      queryClient.cancelQueries({ queryKey: queryKeys.scoringLabelsAll() })
     }
   }, [queryClient])
 
@@ -102,7 +104,7 @@ function SessionsBody({
     enabled: !!activeServiceId,
   })
   const onFlagged = React.useCallback(() => {
-    qc.invalidateQueries({ queryKey: ['scoring-labels', activeServiceId] })
+    qc.invalidateQueries({ queryKey: queryKeys.scoringLabels(activeServiceId) })
   }, [qc, activeServiceId])
 
   const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
@@ -141,15 +143,10 @@ function SessionsBody({
   // unnecessarily after the switch. Cancelling on the old id (via a
   // ref of the previous value) is the only way to target them — the
   // current effect run already sees the new id.
-  const prevServiceRef = React.useRef<string | null>(activeServiceId)
-  React.useEffect(() => {
-    const prev = prevServiceRef.current
-    if (prev && prev !== activeServiceId) {
-      void qc.cancelQueries({ queryKey: ['sessions', 'list', prev] })
-      void qc.cancelQueries({ queryKey: ['scoring-labels', prev] })
-    }
-    prevServiceRef.current = activeServiceId
-  }, [activeServiceId, qc])
+  useServiceSwitchReset(activeServiceId, (prev) => {
+    void qc.cancelQueries({ queryKey: ['sessions', 'list', prev] })
+    void qc.cancelQueries({ queryKey: queryKeys.scoringLabels(prev) })
+  })
 
   if (rangeExceedsSevenDays) {
     return (

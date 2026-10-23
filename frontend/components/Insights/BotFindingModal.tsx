@@ -26,6 +26,7 @@ import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { formatBytes, formatCount } from '@/lib/format'
 import { useServiceStore } from '@/stores/serviceStore'
+import { InsightStatCard as StatCard, buildInvestigateHref } from './shared'
 import type { BotFindingModalData } from './types'
 
 interface BotFindingModalProps {
@@ -34,40 +35,14 @@ interface BotFindingModalProps {
   data: BotFindingModalData | null
 }
 
-interface StatCardProps {
-  icon: React.ReactNode
-  label: string
-  value: string
-  valueClass?: string
-  hint?: string
-}
-
-function StatCard({ icon, label, value, valueClass, hint }: StatCardProps) {
-  return (
-    <div className="p-3 rounded-lg bg-muted/40 border border-border flex flex-col justify-between">
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold flex items-center gap-1">
-        {icon} {label}
-      </div>
-      <div className={cn('mt-1.5 font-mono text-xl font-bold', valueClass ?? 'text-foreground')}>
-        {value}
-      </div>
-      {hint && <div className="text-[10px] text-muted-foreground mt-0.5">{hint}</div>}
-    </div>
-  )
-}
-
 export function BotFindingModal({ isOpen, onOpenChange, data }: BotFindingModalProps) {
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const investigateUrl = data?.item.investigate_url
 
-  const investigateHref = React.useMemo(() => {
-    if (!investigateUrl) return null
-    const url = new URL(investigateUrl, 'http://localhost')
-    if (!url.searchParams.has('service') && activeServiceId) {
-      url.searchParams.set('service', activeServiceId)
-    }
-    return url.pathname + url.search
-  }, [investigateUrl, activeServiceId])
+  const investigateHref = React.useMemo(
+    () => buildInvestigateHref(investigateUrl, activeServiceId),
+    [investigateUrl, activeServiceId],
+  )
 
   if (!data) return null
 

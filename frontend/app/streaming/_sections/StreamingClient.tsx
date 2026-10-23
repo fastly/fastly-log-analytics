@@ -4,9 +4,8 @@ import React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
-import { useMounted } from '@/hooks/useMounted'
+import { useReportRangeAnchor } from '@/hooks/useReportRangeAnchor'
 import { useFilterStore } from '@/stores/filterStore'
-import { quantizeAnchor } from '@/lib/time-window'
 import type { FiltersPayload } from '@/types/filters'
 import { resolveRangeWire } from '@/lib/range-wire'
 import { PlotlyChart } from '@/components/PlotlyChart'
@@ -640,15 +639,7 @@ function StreamingBody({
 }
 
 export default function StreamingClient({ nowServerStr }: { nowServerStr?: string }) {
-  const mounted = useMounted()
-  const relativeRange = useFilterStore((s) => s.relativeRange)
-  const isAutoRange = useFilterStore((s) => s.isAutoRange)
-  const storeEndTime = useFilterStore((s) => s.endTime)
-
-  const anchor = React.useMemo(() => {
-    const baseStr = (!mounted && nowServerStr) ? nowServerStr : storeEndTime
-    return quantizeAnchor(baseStr)
-  }, [storeEndTime, nowServerStr, mounted])
+  const { relativeRange, isAutoRange, anchor } = useReportRangeAnchor(nowServerStr)
 
   return (
     <ReportLayout

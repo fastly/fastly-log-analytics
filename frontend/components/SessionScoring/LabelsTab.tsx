@@ -23,6 +23,8 @@ import {
 } from '@/components/ui/select'
 import { useScoringLabels, type LabelRow, type LabelValue } from '@/hooks/useScoringLabels'
 import { client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
+import { queryKeys } from '@/lib/query-keys'
 import { showToast, showToastWithAction } from '@/lib/toast'
 
 import { SessionEventsDialog } from './SessionEventsDialog'
@@ -145,11 +147,13 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
   const saveEdit = React.useCallback(async (row: LabelRow, label: LabelValue, notes: string): Promise<boolean> => {
     setError('')
     try {
-      await client.PATCH('/api/services/{service_id}/scoring/labels/{label_id}', {
-        params: { path: { service_id: serviceId, label_id: row.id } },
-        body: { label, notes },
-      })
-      qc.invalidateQueries({ queryKey: ['scoring-labels', serviceId] })
+      await unwrapClient(
+        client.PATCH('/api/services/{service_id}/scoring/labels/{label_id}', {
+          params: { path: { service_id: serviceId, label_id: row.id } },
+          body: { label, notes },
+        }),
+      )
+      qc.invalidateQueries({ queryKey: queryKeys.scoringLabels(serviceId) })
       return true
     } catch (e) {
       setError(extractApiError(e) || 'Failed to update label')
@@ -174,10 +178,12 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
     const timer = setTimeout(async () => {
       pendingTimersRef.current.delete(id)
       try {
-        await client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}', {
-          params: { path: { service_id: serviceId, label_id: id } },
-        })
-        qc.invalidateQueries({ queryKey: ['scoring-labels', serviceId] })
+        await unwrapClient(
+          client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}', {
+            params: { path: { service_id: serviceId, label_id: id } },
+          }),
+        )
+        qc.invalidateQueries({ queryKey: queryKeys.scoringLabels(serviceId) })
       } catch (e) {
         setPendingDeleteIds((prev) => {
           const next = new Set(prev)

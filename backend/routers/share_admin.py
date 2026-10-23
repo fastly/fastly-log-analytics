@@ -270,7 +270,7 @@ def create_invite(payload: InvitePayload, request: Request):
             expires_at_utc=expires_at,
             ip_whitelist=payload.ip_whitelist,
             service_ids=payload.service_ids,
-            pii_policy=payload.pii_policy,
+            pii_policy=payload.pii_policy.model_dump() if payload.pii_policy is not None else None,
             query_window_hours=payload.query_window_hours,
             query_start_time=payload.query_start_time,
             query_end_time=payload.query_end_time,

@@ -3,6 +3,7 @@ import { HydrationBoundary } from '@tanstack/react-query'
 import { fetchBootstrapServerSide } from '@/lib/ssr/bootstrap'
 import { fetchCronRunsServerSide, fetchCronScheduleServerSide } from '@/lib/ssr/logs'
 import { firstParam, seedDehydratedState } from '@/lib/ssr/seed'
+import { resolveServerServiceId } from '@/lib/ssr/service'
 import LogsClient from './_sections/LogsClient'
 import { queryKeys } from '@/lib/query-keys'
 
@@ -26,10 +27,7 @@ export default async function LogsPage({
 }) {
   const params = await searchParams
   const bootstrap = await fetchBootstrapServerSide()
-  const serviceId =
-    firstParam(params.service) ??
-    (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ??
-    undefined
+  const serviceId = resolveServerServiceId(params, bootstrap)
   const tab = firstParam(params.tab)
 
   const [cronRunsData, cronScheduleData] = await Promise.all([

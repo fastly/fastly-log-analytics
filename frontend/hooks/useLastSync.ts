@@ -2,7 +2,7 @@
 
 import { useQuery } from '@tanstack/react-query'
 import { useServiceStore } from '@/stores/serviceStore'
-import { useIsAnalyst } from './useSyncStatus'
+import { useIsAnalyst } from '@/hooks/useIsAnalyst'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
 

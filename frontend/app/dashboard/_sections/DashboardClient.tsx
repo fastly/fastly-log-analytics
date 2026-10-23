@@ -1,17 +1,17 @@
 'use client'
 
 import React from 'react'
-import { useMounted } from '@/hooks/useMounted'
+import { useReportRangeAnchor } from '@/hooks/useReportRangeAnchor'
 import { useRouter } from 'next/navigation'
 import { useCardVisibility } from '@/hooks/useCardVisibility'
 import { useQuery } from '@tanstack/react-query'
 import { useDashboardBundle, type DashboardSection } from '@/hooks/useDashboardBundle'
 import { client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import type { ChartMetric } from '@/types/api'
 import { STALE_VIEW_RETRY_OPTIONS, throwIfStaleAggregates, isStaleDashboardViewError } from '@/lib/staleViewRetry'
 import { useFilterStore } from '@/stores/filterStore'
 import { useServiceStore } from '@/stores/serviceStore'
-import { quantizeAnchor } from '@/lib/time-window'
 import { useIsDataReady } from '@/hooks/useIsDataReady'
 import { DashboardHeader } from '@/components/Dashboard/DashboardHeader'
 import { Button } from '@/components/ui/button'
@@ -177,7 +177,7 @@ function DashboardBody({
   const { data: compareAggregates, error: compareError, refetch: refetchCompare } = useQuery({
     queryKey: ['dashboard', 'aggregates', 'compare', activeServiceId, compareStartTime, compareEndTime, filterPayload, metric, config.effectiveInterval],
     queryFn: async ({ signal }) => {
-      const { data } = await client.POST("/api/dashboard/aggregates", { signal,
+      const data = await unwrapClient(client.POST("/api/dashboard/aggregates", { signal,
         body: {
           start_time: compareStartTime!,
           end_time: compareEndTime!,
@@ -185,7 +185,7 @@ function DashboardBody({
           chart_metric: metric as ChartMetric,
           chart_interval: config.effectiveInterval
         }
-      })
+      }))
       return throwIfStaleAggregates(
         data,
         { startTime: compareStartTime, endTime: compareEndTime },
@@ -464,8 +464,6 @@ export default function DashboardClient({ nowServerStr }: { nowServerStr?: strin
   // all round-trip the user's current dashboard view. Hydration happens
   // in AppLayout.
 
-  const mounted = useMounted()
-
   const allCards = useDashboardCards()
   const allCardIds = React.useMemo(() => allCards.map((c) => c.id), [allCards])
   const inFormatCardIds = React.useMemo(
@@ -483,32 +481,7 @@ export default function DashboardClient({ nowServerStr }: { nowServerStr?: strin
     [allCards, visibleCards],
   )
 
-  // Time-range wire inputs (lib/range-wire.ts; resolved inside useDashboardBundle
-  // where startTime/endTime are available). A quick-preset pill
-  // (filterStore.relativeRange) or the cold-load/auto default → a server-
-  // reproducible token ("24h" default), which keeps the SSR seed key byte-matched
-  // AND makes the scan window match the hard-clamped chart x-axis. A custom
-  // absolute range (relativeRange null + isAutoRange false) → the explicit
-  // start/end bounds, so a custom range scans exactly what it displays rather
-  // than silently falling back to the 24h default.
-  const relativeRange = useFilterStore((s) => s.relativeRange)
-  const isAutoRange = useFilterStore((s) => s.isAutoRange)
-  const storeEndTime = useFilterStore((s) => s.endTime)
-  // Anchor the keyed path to the SELECTED window's end (floored to the 60s
-  // grid), not to mount time: every explicit range selection writes a fresh
-  // endTime, so a preset clicked in a long-lived tab re-anchors at click time
-  // and scans [click−N, click] — matching the hard-clamped x-axis — instead of
-  // a mount-pinned window that, for the short presets (1h..12h), could be fully
-  // disjoint from the display. Memoized on endTime so a cross-minute re-render
-  // still can't advance the key (no bundle refire); on cold load endTime is the
-  // store-init default (≈ mount now), so the SSR seed — which floors the SAME
-  // way (quantizeAnchor ≡ backend quantize_anchor) — still byte-matches within
-  // the quantum.
-  const anchor = React.useMemo(() => {
-    const baseVal = (!mounted && nowServerStr) ? nowServerStr : storeEndTime
-    const baseStr = baseVal || undefined
-    return quantizeAnchor(baseStr)
-  }, [storeEndTime, nowServerStr, mounted])
+  const { relativeRange, isAutoRange, anchor } = useReportRangeAnchor(nowServerStr)
 
   return (
     <ReportLayout

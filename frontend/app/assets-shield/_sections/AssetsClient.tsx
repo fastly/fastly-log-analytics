@@ -3,9 +3,9 @@
 import React from 'react'
 import Link from 'next/link'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
-import { useFilterStore } from '@/stores/filterStore'
-import { quantizeAnchor } from '@/lib/time-window'
+import { useReportRangeAnchor } from '@/hooks/useReportRangeAnchor'
 import { Layers, Database, HelpCircle, Archive, Zap, AlertTriangle, FileText, Loader2 } from 'lucide-react'
 import { ReportLayout } from '@/components/ReportLayout'
 import { HelpDialog } from '@/components/ui/help-dialog'
@@ -42,14 +42,13 @@ export function AssetsReportContent({
     filterPayload,
     range: { relativeRange, isAutoRange, startTime, endTime, anchor },
     queryFn: async ({ rangeBody, signal }) => {
-      const { data } = await client.POST('/api/assets/aggregates', {
+      return unwrapClient(client.POST('/api/assets/aggregates', {
         signal,
         body: {
           filters: filterPayload,
           ...rangeBody,
         },
-      })
-      return data
+      }))
     },
   })
 
@@ -583,13 +582,7 @@ export function AssetsReportContent({
 }
 
 export default function AssetsClient() {
-  const relativeRange = useFilterStore((s) => s.relativeRange)
-  const isAutoRange = useFilterStore((s) => s.isAutoRange)
-  const storeEndTime = useFilterStore((s) => s.endTime)
-
-  const anchor = React.useMemo(() => {
-    return quantizeAnchor(storeEndTime)
-  }, [storeEndTime])
+  const { relativeRange, isAutoRange, anchor } = useReportRangeAnchor()
 
   return (
     <ReportLayout

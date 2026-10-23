@@ -10,6 +10,7 @@ from backend.high_scale._projection_utils import (
     range_value as _range_value,
 )
 from backend.high_scale.registry import HighScaleService
+from backend.models.common import SectionTimingEntry
 from backend.models.network import (
     NetworkBundleRequest,
     NetworkBundleResponse,
@@ -910,7 +911,7 @@ def get_transport_metrics(
 
     return TransportMetrics(
         **cache_result({}, state="bypass", prewarmer=False),
-        section_timings=trace.timings(),
+        section_timings=[SectionTimingEntry.model_validate(t) for t in trace.timings()],
         has_transport_data=len(missing_fields) < len(_TRANSPORT_FIELDS),
         tcp_rtt_p50_ms=tcp_rtt_p50,
         tcp_rtt_p90_ms=tcp_rtt_p90,
@@ -979,10 +980,16 @@ def network_bundle(
         pop_health = pop_response.data if pop_response is not None else None
         transport_resp = f_transport.result() if f_transport else None
 
+    combined_timings = [
+        t
+        for r in (health_resp, quality_resp, pop_response, transport_resp)
+        if r is not None
+        for t in (getattr(r, "section_timings", None) or [])
+    ]
     return NetworkBundleResponse.with_telemetry(
         **cache_result({}, state="bypass", prewarmer=False),
         available=True,
-        section_timings=pop_response.section_timings if pop_response is not None else [],
+        section_timings=combined_timings,
         health=health_resp,
         quality=quality_resp,
         pop_health=pop_health,

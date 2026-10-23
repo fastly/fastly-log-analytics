@@ -366,7 +366,7 @@ function OverviewCard({
 function CeleryStatusCard() {
   const mounted = useMounted()
   const { data: queryData, isFetching, isLoading, isError } = useQuery({
-    queryKey: queryKeys.admin.overviewCeleryStatus(),
+    queryKey: queryKeys.admin.celeryStatus(),
     queryFn: async ({ signal }) => {
       return adminJson<'/api/admin/celery/status'>('/api/admin/celery/status', '/api/admin/celery/status', { signal })
     },

@@ -3,6 +3,7 @@
 import React, { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -44,18 +45,16 @@ export function PopLocationsModal({ open, onOpenChange }: PopLocationsModalProps
   const { data, isLoading } = useQuery({
     queryKey: ['pop-locations'],
     queryFn: async () => {
-      const { data } = await client.GET("/api/admin/pop-locations")
-      return data
+      return unwrapClient(client.GET("/api/admin/pop-locations"))
     },
     enabled: open,
   })
 
   const mutation = useMutation({
     mutationFn: async () => {
-      const { data } = await client.POST("/api/admin/pop-locations/refresh", {
+      return unwrapClient(client.POST("/api/admin/pop-locations/refresh", {
         body: { token: apiKey }
-      })
-      return data
+      }))
     },
     onSuccess: (result) => {
       queryClient.setQueryData(['pop-locations'], { pops: result?.pops || [] })

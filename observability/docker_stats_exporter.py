@@ -16,6 +16,7 @@ import json
 import socket
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 DOCKER_SOCK = "/var/run/docker.sock"
 POLL_INTERVAL_S = 5
@@ -26,12 +27,13 @@ _metrics_text = "# no scrape yet\n"
 
 
 class UnixSocketConnection(http.client.HTTPConnection):
-    def __init__(self, path: str) -> None:
-        super().__init__("localhost")
+    def __init__(self, path: str, timeout: float = 2.0) -> None:
+        super().__init__("localhost", timeout=timeout)
         self._sock_path = path
 
     def connect(self) -> None:
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
         self.sock.connect(self._sock_path)
 
 
@@ -94,13 +96,22 @@ def _collect_once() -> str:
     except (OSError, json.JSONDecodeError):
         return "\n".join(lines) + "\n"
 
-    for c in containers:
+    def _fetch_container_stats(c: dict) -> tuple[str, str, dict] | None:
         cid = c.get("Id", "")
         name = (c.get("Names") or ["/?"])[0].lstrip("/")
         try:
             stats = _docker_get(f"/containers/{cid}/stats?stream=false")
         except (OSError, json.JSONDecodeError):
+            return None
+        return cid, name, stats
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(_fetch_container_stats, containers))
+
+    for item in results:
+        if item is None:
             continue
+        cid, name, stats = item
 
         mem = stats.get("memory_stats", {})
         mem_usage = mem.get("usage", 0)

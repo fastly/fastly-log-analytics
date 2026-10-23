@@ -74,7 +74,7 @@ export function applySystemMetrics(qc: QueryClient, serviceId: string | null, da
     qc.setQueryData(queryKeys.admin.metadataStorage(), payload.metadata_storage)
   }
   if (payload.system_jobs != null) {
-    qc.setQueryData(['system-jobs'], payload.system_jobs)
+    qc.setQueryData(queryKeys.systemJobs(), payload.system_jobs)
   }
 }
 

@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { queryKeys } from '@/lib/query-keys'
 import {
   Dialog,
   DialogContent,
@@ -163,7 +164,7 @@ function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModa
   const handleOpenChange = (newOpen: boolean) => {
     if (status === 'streaming') return
     if (!newOpen && status === 'done') {
-      queryClient.invalidateQueries({ queryKey: ['services'] })
+      queryClient.invalidateQueries({ queryKey: queryKeys.services() })
     }
     onOpenChange(newOpen)
   }

@@ -10,6 +10,8 @@
  */
 
 import { expect, test } from '@playwright/test'
+import { revokeAnalystInvite, seedPasscodeAnalystInvite } from '../helpers/analyst-session'
+import { getFirstServiceId } from './helpers'
 
 type LayoutShiftEntry = PerformanceEntry & {
   hadRecentInput?: boolean
@@ -122,33 +124,20 @@ test.describe('Analyst Share Login Page Contract (/share-login)', () => {
   test('4. End-to-end Analyst Path B invite + claim token + passcode login + TOS gate + authenticated redirect', async ({
     page,
   }) => {
-    const bootRes = await page.request.get('/api/bootstrap')
-    expect(bootRes.ok()).toBeTruthy()
-    const bootJson = await bootRes.json()
-    const serviceId =
-      bootJson?.services?.[0]?.id ?? bootJson?.services?.[0]?.service_id ?? 'default'
-
-    const uniqueSuffix = Date.now()
-    const analystEmail = `e2e-analyst-${uniqueSuffix}@example.com`
-    const analystPasscode = 'ocean-breeze-cabin-42'
+    const serviceId = (await getFirstServiceId(page)) ?? 'default'
     let inviteId: string | null = null
 
     try {
       // 1. Create an Analyst Path B invite via POST /api/admin/share/invites
-      const createRes = await page.request.post('/api/admin/share/invites', {
-        data: {
-          name: 'E2E Share Analyst',
-          email: analystEmail,
-          passcode: analystPasscode,
-          duration_hours: 2,
-          service_ids: [serviceId],
-          auth_method: 'passcode',
-        },
+      const seeded = await seedPasscodeAnalystInvite(page.request, {
+        name: 'E2E Share Analyst',
+        passcode: 'ocean-breeze-cabin-42',
+        durationHours: 2,
+        serviceIds: [serviceId],
       })
-      expect(createRes.ok()).toBeTruthy()
-      const inviteData = await createRes.json()
-      inviteId = inviteData.id
-      expect(inviteId).toBeTruthy()
+      inviteId = seeded.inviteId
+      const analystEmail = seeded.email
+      const analystPasscode = seeded.passcode
 
       // 2. Mint a one-shot claim token via POST /api/admin/share/invites/{id}/claim-token
       const tokenRes = await page.request.post(`/api/admin/share/invites/${inviteId}/claim-token`)
@@ -190,37 +179,25 @@ test.describe('Analyst Share Login Page Contract (/share-login)', () => {
       const logoutRes = await page.request.post('/api/share/logout')
       expect(logoutRes.ok()).toBeTruthy()
     } finally {
-      if (inviteId) {
-        await page.request.delete(`/api/admin/share/invites/${inviteId}`).catch(() => {})
-      }
+      await revokeAnalystInvite(page.request, inviteId)
     }
   })
 
   test('5. Open-redirect protection on ?return= and ?next= query parameters', async ({ page }) => {
-    const bootRes = await page.request.get('/api/bootstrap')
-    const bootJson = await bootRes.json()
-    const serviceId =
-      bootJson?.services?.[0]?.id ?? bootJson?.services?.[0]?.service_id ?? 'default'
-
-    const uniqueSuffix = Date.now()
-    const analystEmail = `e2e-redirect-${uniqueSuffix}@example.com`
-    const analystPasscode = 'harbor-sunset-meadow-88'
+    const serviceId = (await getFirstServiceId(page)) ?? 'default'
     let inviteId: string | null = null
 
     try {
-      const createRes = await page.request.post('/api/admin/share/invites', {
-        data: {
-          name: 'E2E Redirect Guard',
-          email: analystEmail,
-          passcode: analystPasscode,
-          duration_hours: 1,
-          service_ids: [serviceId],
-          auth_method: 'passcode',
-        },
+      const seeded = await seedPasscodeAnalystInvite(page.request, {
+        name: 'E2E Redirect Guard',
+        email: `e2e-redirect-${Date.now()}@example.com`,
+        passcode: 'harbor-sunset-meadow-88',
+        durationHours: 1,
+        serviceIds: [serviceId],
       })
-      expect(createRes.ok()).toBeTruthy()
-      const inviteData = await createRes.json()
-      inviteId = inviteData.id
+      inviteId = seeded.inviteId
+      const analystEmail = seeded.email
+      const analystPasscode = seeded.passcode
 
       // Navigate with a hostile protocol-relative ?next=//evil.example/phish
       await page.goto('/share-login?next=%2F%2Fevil.example%2Fphish')
@@ -237,10 +214,7 @@ test.describe('Analyst Share Login Page Contract (/share-login)', () => {
       await page.waitForURL(/\/dashboard/, { timeout: 25_000 })
       expect(page.url()).not.toContain('evil.example')
     } finally {
-      await page.request.post('/api/share/logout').catch(() => {})
-      if (inviteId) {
-        await page.request.delete(`/api/admin/share/invites/${inviteId}`).catch(() => {})
-      }
+      await revokeAnalystInvite(page.request, inviteId, { logout: true })
     }
   })
 })

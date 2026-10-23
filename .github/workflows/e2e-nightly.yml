@@ -52,37 +52,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      - name: Setup E2E environment
+        uses: ./.github/actions/e2e-setup
         with:
-          enable-cache: true
-          python-version: "3.13"
-
-      - name: Install backend deps
-        run: uv sync
-
-      - name: Setup Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
-        with:
-          node-version: 24
-          cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend deps
-        run: cd frontend && npm ci
-
-      - name: Resolve Playwright version
-        id: playwright-version
-        run: echo "version=$(cd frontend && npx playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ matrix.browser }}-${{ steps.playwright-version.outputs.version }}
-
-      - name: Install Playwright browser (${{ matrix.browser }}) + system deps
-        run: cd frontend && npx playwright install --with-deps ${{ matrix.browser }}
+          browser: ${{ matrix.browser }}
 
       - name: Run Playwright Nightly (${{ matrix.browser }})
         env:

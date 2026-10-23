@@ -4,26 +4,26 @@ Detailed reference for every feature in the app. The [README](../README.md) has 
 
 ## Ingestion & Storage
 
-### Apache Iceberg data lake
-Logs are stored in a fully ACID-compliant Apache Iceberg table inside your Fastly Object Storage bucket. Multiple readers and writers can operate concurrently without locking each other out, and snapshots make point-in-time reads trivial.
+### DuckLake transactional data lake
+Logs are stored in a transactional DuckDB **DuckLake** table backed by PostgreSQL 16 (`DUCKLAKE_CATALOG`) and Fastly Object Storage (FOS). Multiple readers and writers can operate concurrently without locking each other out, and snapshots make point-in-time reads and retention cleanup trivial.
 
 ### Crash-safe ingestion
-Raw `.gz` log files are downloaded, parsed, buffered locally as Parquet, and atomically committed to the Iceberg catalog. An in-flight manifest (`ingest_in_flight` table) guards the window between buffer write and metadata commit so an interrupted process never corrupts the table or loses data. On restart, recovery either promotes the buffer to a permanent file or drops the in-flight row and re-ingests cleanly on the next tick.
+Raw `.gz` log files are downloaded, parsed, buffered locally as Parquet, and atomically committed to the DuckLake catalog. An in-flight manifest (`ingest_in_flight` / `ingest_ledger` in PostgreSQL) guards the window between buffer write and metadata commit so an interrupted process never corrupts the table or loses data. On restart, recovery either promotes the buffer to a permanent file or drops the in-flight row and re-ingests cleanly on the next tick.
 
 ### Schema evolution
-JSON log fields are mapped to typed Iceberg columns. New fields are added to the schema on the fly; missing fields are filled with NULLs. Invalid or corrupt log lines are isolated and surfaced in the ingestion history rather than failing the batch.
+JSON log fields are mapped to typed DuckLake columns. New fields are added to the schema on the fly; missing fields are filled with NULLs. Invalid or corrupt log lines are isolated and surfaced in the ingestion history rather than failing the batch.
 
-### Automated Iceberg compaction
-Small, frequently committed data files are periodically merged into larger files to keep query performance high and Iceberg metadata size in check. Old snapshots are expired on a weekly schedule.
+### Automated DuckLake compaction & optimization
+Small, frequently committed data files are periodically merged into larger files (`local_compact` and `optimize` via `ducklake_flush_inlined_data`, `ducklake_merge_adjacent_files`, and `ducklake_rewrite_data_files`) to keep query performance high and metadata size in check. Old snapshots are expired on an hourly schedule (`expire`).
 
-### Smart local caching
-When syncing the Iceberg table, data files are cached locally to give DuckDB instant query speeds. Missing files are transparently fetched from Fastly Object Storage at query time.
+### Smart local storage & cloud durability
+Queried Parquet data is stored on local NVMe/SSD disk (in `standard` mode) or served via ClickHouse and durable FOS Parquet (in `high_scale` mode) for instant analytical queries. Missing files are transparently fetched from Fastly Object Storage when needed.
 
 ### Log cleanup (optional)
-After successful Iceberg commits, the original `.gz` raw log files can be removed from the bucket automatically to keep storage costs down.
+After successful DuckLake commits, the original `.gz` raw log files can be removed from the bucket automatically to keep storage costs down.
 
 ### Multi-source support
-Every Fastly service / bucket / prefix combination gets its own configuration JSON, DuckDB engine file, and Iceberg table. Switch between services from the navigation bar to analyze logs from multiple Fastly services side by side.
+Every Fastly service / bucket / prefix combination gets its own configuration JSON, DuckDB engine file, and DuckLake table schema. Switch between services from the navigation bar to analyze logs from multiple Fastly services side by side.
 
 ## Provisioning
 
@@ -70,7 +70,7 @@ Threshold-based alerts that fire webhooks when a metric crosses an operator/thre
 ## Cost & Usage Visibility
 
 ### Usage & Cost page
-Live breakdown of storage usage (raw logs vs. Iceberg Parquet), a bar chart of Fastly Object Storage Class A / Class B operations, period totals with estimated cost, and an interactive cost estimator. The estimator pre-fills from your active service's traffic stats and the observed average log-line size from your ingested data.
+Live breakdown of storage usage (raw logs vs. DuckLake Parquet), a bar chart of Fastly Object Storage Class A / Class B operations, period totals with estimated cost, and an interactive cost estimator. The estimator pre-fills from your active service's traffic stats and the observed average log-line size from your ingested data.
 
 Requires a `FASTLY_API_KEY` with the [Billing permission](https://www.fastly.com/documentation/guides/account-info/user-and-account-management/about-user-roles-and-permissions/#account-management-roles).
 
@@ -87,13 +87,13 @@ The app is designed to minimize Fastly Object Storage operation costs:
 - **CDN-fronted reads.** With `cdn_url` configured, all Parquet data reads go through a Fastly Delivery service that fronts the FOS bucket. Edge caching means repeated queries cost **zero Class B operations** at the storage layer. The provisioning wizard generates the CDN VCL that handles AWS4 signing and shared-secret authentication automatically (see [CDN fronting](../README.md#cdn-fronting-optional-but-strongly-recommended) for hand-managed setups).
 - **Lazy listing.** The UI relies on local metadata for status updates; FOS `LIST` (Class A) only fires when polling for new raw logs. Ingestion uses S3 pagination markers (`StartAfter`) to scan only *new* files instead of iterating the bucket.
 - **Batch processing.** Bulk deletion and multi-file ingestion are batched to minimize API round-trips.
-- **Change-gated metadata writes.** `table_summary.json` is content-hashed before each PUT; identical-payload writes are skipped, eliminating a redundant FOS PUT per Iceberg commit in steady state.
-- **Dashboards never hit the cloud.** All analytics queries serve from the local DuckDB + Iceberg cache and per-service SQLite metadata. The only cloud reads are the cron-driven ingest cycle and the on-demand Fastly Stats reconciliation in the log-accounting panel (rate-limited to ≤1 call/minute per open admin tab).
+- **Change-gated metadata writes.** `table_summary.json` is content-hashed before each PUT; identical-payload writes are skipped, eliminating a redundant FOS PUT per DuckLake commit in steady state.
+- **Dashboards never hit the cloud.** All analytics queries serve from local DuckDB + DuckLake storage (or ClickHouse in high-scale mode) and PostgreSQL 16 operational metadata (`METADATA_DSN`). The only cloud reads are the cron-driven ingest cycle and the on-demand Fastly Stats reconciliation in the log-accounting panel (rate-limited to ≤1 call/minute per open admin tab).
 
 ## Collaboration
 
 ### Independent instance (durable JSON-config join)
-Admin generates a read-only invite from the **Invite Analyst** dialog. The dialog produces a JSON blob (bucket, region, read-only FOS credentials, CDN config, Iceberg metadata location). The analyst pastes the JSON into the **Join** flow of their own copy of the app. Their app connects to the admin's bucket, imports the saved admin state (log format history, saved views, custom field definitions), writes a `read_only` config, and starts syncing data. Best for long-lived collaboration — the credentials work until rotated.
+Admin generates a read-only invite from the **Invite Analyst** dialog. The dialog produces a JSON blob (bucket, region, read-only FOS credentials, CDN config). The analyst pastes the JSON into the **Join** flow of their own copy of the app. Their app connects to the admin's bucket, imports the saved admin state (log format history, saved views, custom field definitions), writes a `read_only` config, and starts syncing data. Best for long-lived collaboration — the credentials work until rotated (note: see [ADR-17](adr/17-analyst-path-a-ducklake.md) for current DuckLake limitations on Path A).
 
 ### Live shared instance (admin-as-server)
 Admin opens **Share Dashboard**, picks how analysts will reach the host, then mints per-analyst invites (name, email, scoped services, optional IP allowlist, optional expiry). Each invite authenticates with either a local passcode or — when an OIDC provider is configured — single sign-on (Google first; any OpenID Connect provider by discovery). OAuth logins converge on the same analyst session as passcode logins, so RBAC, IP masking, TOS gating, revocation, and audit apply unchanged; a per-provider `auto_provision` flag can additionally create invites just-in-time for verified logins from a trusted, org-restricted IdP. SSO is default-off and inert until a provider registry is configured. Invites are single-seat by default — a new login boots any existing session on the same invite. An optional per-invite **Allow shared logins** toggle lets several people be logged in under one invite at once (still bounded by the global session cap), at the cost of per-person audit attribution; it can be set at creation or edited later. Analysts log into the public URL, accept a TOS, and reach a read-only dashboard served from the admin's machine. No FOS credentials are issued; sessions exist only while sharing is active. Heartbeat polling surfaces a "Connection interrupted" overlay if the listener drops; admin can revoke a single invite or hit **Sever All Access** to evict everyone in one click. The invitations table shows who is actually using the shared dashboard at a glance — last login, an online-now presence dot, the invite's auth method, and a Shared badge for multi-seat invites — and all three admin tables (invitations, sessions, audit log) sort by any column.
@@ -122,7 +122,7 @@ Sync, commit, optimization, and snapshot expiration all run in the background vi
 `GET /api/health` is a cheap liveness check. `GET /api/health?deep=1` also verifies per-service ingest freshness and returns 503 when any service is degraded (last ingest older than the configured `stale_minutes`, adaptively widened per-service from that service's own ingest history to avoid false positives on low-traffic services, or last sync errored). Safe to wire into a load balancer.
 
 ### NGWAF integration
-If a Next-Gen WAF workspace is linked during provisioning, the app syncs verified-bot signal data from the Fastly NGWAF API into a shared local SQLite cache and enriches matching log rows for analysis.
+If a Next-Gen WAF workspace is linked during provisioning, the app syncs verified-bot signal data from the Fastly NGWAF API into PostgreSQL (`ngwaf_bots` table) and enriches matching log rows for analysis.
 
 ### Control Room
 Real-time operational dashboard at `/control-room` (admin-only). Nine tabs: Overview, Performance, Origin, Security, Network, Sessions, Cost, Insights, and Admin Health. Overview and Cost display live metrics from `rt.fastly.com` via SSE — requests/sec, error rate, cache hit ratio, bandwidth, and estimated cost. The Admin Health tab surfaces log-field audit results and ingest health. Correlator lets admins drill into any metric dimension against ingested logs. Remaining tabs and mutation endpoints (mitigations, rules, allowlist, cost-governor) are planned.
@@ -179,7 +179,7 @@ Real User Monitoring (RUM) captures fine-grained, client-side metrics and Core W
 
 ### Beacon Ingestion & Processing
 * **Server-Side Receiver (`/rum-beacon`):** A high-performance, secure backend receiver. It parses client-side JSON beacons (navigation timings, web vitals, errors, browser/device info) and maps them to PyArrow tables.
-* **Crash-Safe Buffer Ingest:** Faro event data is buffered to local Parquet files. Dedicated `rum_sync` and `rum_commit` cron jobs run on the APScheduler to commit RUM data atomically into the hour-partitioned Iceberg schema.
+* **Crash-Safe Buffer Ingest:** Faro event data is buffered to local Parquet files. Dedicated `rum_sync` and `rum_commit` cron jobs run on the APScheduler to commit RUM data atomically into the hour-partitioned DuckLake tables (`client_vitals` and `client_errors`).
 * **Analytics & Real-time Live Feed:** The RUM dashboard visualizes core performance metrics (LCP, FID, CLS, TTFB), error rates, device/OS distributions, and features an active, streaming SSE ticker feed (`/api/services/{id}/rum/live-events`) displaying navigation ticks as they occur.
 
 ## Assets Shield (Static Asset Delivery Analytics)

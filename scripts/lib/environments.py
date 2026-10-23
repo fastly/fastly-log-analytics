@@ -17,6 +17,7 @@ import os
 import stat
 import sys
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -187,3 +188,35 @@ def remediation_command(name: str) -> str:
             "svc/frontend-svc:3002:3000 svc/backend-svc:8002:8000",
         )
     raise KeyError(name)
+
+
+def parse_iso_utc(ts_str: str | None) -> datetime | None:
+    """Parse an ISO-8601 timestamp string into a timezone-aware UTC ``datetime``."""
+    if not ts_str or not isinstance(ts_str, str):
+        return None
+    try:
+        clean_ts = ts_str.strip().replace("Z", "+00:00")
+        if " " in clean_ts and "T" not in clean_ts:
+            parts = clean_ts.split(" ")
+            if len(parts) >= 2:
+                suffix = "" if ("+" in parts[1] or parts[1].endswith("Z")) else "+00:00"
+                clean_ts = f"{parts[0]}T{parts[1]}{suffix}"
+        dt = datetime.fromisoformat(clean_ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
+    except Exception:
+        return None
+
+
+def percentile(values: list[float], p: float) -> float:
+    """Return the linear-interpolated ``p``-th percentile (``p`` in ``0..100`` or ``0..1``)."""
+    if not values:
+        return 0.0
+    s = sorted(values)
+    frac = p / 100.0 if p > 1.0 else p
+    frac = max(0.0, min(1.0, frac))
+    k = (len(s) - 1) * frac
+    f = int(k)
+    c = min(f + 1, len(s) - 1)
+    return s[f] + (k - f) * (s[c] - s[f])

@@ -25,23 +25,7 @@ from fastapi.testclient import TestClient
 from backend.deps import get_source, require_admin
 from backend.main import app
 from backend.utils.remote_access import _is_blocked_path
-
-
-def _make_source(
-    service_id: str = "svc-admin-test",
-    access_level: str = "read_write",
-) -> dict:
-    return {
-        "name": service_id,
-        "service_id": service_id,
-        "display_name": "Admin Overview Test Service",
-        "bucket": "test-bucket",
-        "prefix": "fastly-logs",
-        "endpoint": "https://us-east.object.fastlystorage.app",
-        "access_key": "AKIAIOSFODNN7EXAMPLE",
-        "secret_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-        "access_level": access_level,
-    }
+from tests.helpers import make_source as _make_source
 
 
 @pytest.fixture

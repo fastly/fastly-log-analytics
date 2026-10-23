@@ -1,9 +1,9 @@
 import React from 'react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { http, HttpResponse } from 'msw'
 
+import { renderWithQueryClient } from '@/__tests__/helpers/renderWithQuery'
 import { server } from '@/__tests__/helpers/msw/server'
 import { useServiceStore } from '@/stores/serviceStore'
 import Loading from '@/app/admin/clickhouse/loading'
@@ -15,16 +15,6 @@ vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
   usePathname: () => '/admin/clickhouse',
 }))
-
-function renderWithQueryClient(ui: React.ReactElement) {
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      queries: { retry: false, gcTime: 0 },
-      mutations: { retry: false },
-    },
-  })
-  return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>)
-}
 
 describe('/admin/clickhouse page & ClickHouseAdminClient', () => {
   beforeEach(() => {

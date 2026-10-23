@@ -3,7 +3,8 @@ import { HydrationBoundary } from '@tanstack/react-query'
 
 import { fetchBootstrapServerSide } from '@/lib/ssr/bootstrap'
 import { fetchStreamingServerSide } from '@/lib/ssr/streaming'
-import { firstParam, seedDehydratedState } from '@/lib/ssr/seed'
+import { seedDehydratedState } from '@/lib/ssr/seed'
+import { resolveServerServiceId } from '@/lib/ssr/service'
 import StreamingLoading from './loading'
 import StreamingClient from './_sections/StreamingClient'
 
@@ -16,10 +17,7 @@ export default async function StreamingPage({
 }) {
   const params = await searchParams
   const bootstrap = await fetchBootstrapServerSide()
-  const serviceId =
-    firstParam(params.service) ??
-    (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ??
-    undefined
+  const serviceId = resolveServerServiceId(params, bootstrap)
 
   return (
     <Suspense fallback={<StreamingLoading />}>

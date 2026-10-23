@@ -1,8 +1,9 @@
 'use client'
 
 import * as React from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Check, Filter, Loader2, RotateCcw } from 'lucide-react'
+import { useScoringQuery } from './useScoringQuery'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -46,18 +47,14 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
   const [lintResult, setLintResult] = React.useState<LintResult | null>(null)
   const [lintPending, setLintPending] = React.useState(false)
 
-  const { data, isLoading, error } = useQuery({
-    queryKey: ['scoring-exclude-regex', serviceId],
-    queryFn: async () => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/exclude-regex',
-        { params: { path: { service_id: serviceId } } },
-      )
-      if (!response.ok || !data) throw new Error(`status ${response.status}`)
-      return data
-    },
-    staleTime: 60_000,
-  })
+  const { data, isLoading, error } = useScoringQuery(
+    ['scoring-exclude-regex', serviceId],
+    () =>
+      client.GET('/api/services/{service_id}/scoring/exclude-regex', {
+        params: { path: { service_id: serviceId } },
+      }),
+    { staleTime: 60_000 },
+  )
 
   // Initialise the draft from the stored value once the fetch completes.
   // ``enable_scoring`` populates cfg.scoring.exclude_url_regex with the

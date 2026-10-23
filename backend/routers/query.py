@@ -144,6 +144,26 @@ def query_endpoint(
     # tombstone-style swap (no cached SQL points at it).
     from backend.core.iceberg import execute_with_stale_view_retry
 
+    def _run_with_compaction_retry(con, src: dict, fn, *, table_name: str):
+        for attempt in (1, 2):
+            try:
+                return execute_with_stale_view_retry(con, src, fn, table_name=table_name)
+            except PermissionError as e:
+                # SQL validator gate — message is controlled ("operation X not
+                # permitted on table Y") so it's safe to echo for the admin.
+                raise HTTPException(status_code=403, detail=make_error("sql_not_permitted", _redact_paths(str(e))))
+            except Exception as e:
+                msg = str(e)
+                if attempt == 1 and "Cannot open file" in msg:
+                    continue  # compaction race — retry once
+                # _redact_paths keeps the SQL diagnostic text the admin needs
+                # while stripping the absolute file paths DuckDB interpolates
+                # into IO Error messages.
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error("query_failed", _redact_paths(msg)),
+                )
+
     # Resolve active source and connection based on dataset.
     # For RUM datasets, checkout isolated RUM connection and source.
     if req.dataset != "logs":
@@ -169,21 +189,7 @@ def query_endpoint(
                         dataset=req.dataset,
                     )
 
-                for attempt in (1, 2):
-                    try:
-                        return execute_with_stale_view_retry(con, rum_source, _run_rum, table_name=req.dataset)
-                    except PermissionError as e:
-                        raise HTTPException(
-                            status_code=403, detail=make_error("sql_not_permitted", _redact_paths(str(e)))
-                        )
-                    except Exception as e:
-                        msg = str(e)
-                        if attempt == 1 and "Cannot open file" in msg:
-                            continue  # compaction race — retry once
-                        raise HTTPException(
-                            status_code=400,
-                            detail=make_error("query_failed", _redact_paths(msg)),
-                        )
+                return _run_with_compaction_retry(con, rum_source, _run_rum, table_name=req.dataset)
         except HTTPException:
             raise
         except Exception as e:
@@ -207,24 +213,7 @@ def query_endpoint(
                 dataset="logs",
             )
 
-        for attempt in (1, 2):
-            try:
-                return execute_with_stale_view_retry(ctx.con, ctx.source, _run, table_name="logs")
-            except PermissionError as e:
-                # SQL validator gate — message is controlled ("operation X not
-                # permitted on table Y") so it's safe to echo for the admin.
-                raise HTTPException(status_code=403, detail=make_error("sql_not_permitted", _redact_paths(str(e))))
-            except Exception as e:
-                msg = str(e)
-                if attempt == 1 and "Cannot open file" in msg:
-                    continue  # compaction race — retry once
-                # _redact_paths keeps the SQL diagnostic text the admin needs
-                # while stripping the absolute file paths DuckDB interpolates
-                # into IO Error messages.
-                raise HTTPException(
-                    status_code=400,
-                    detail=make_error("query_failed", _redact_paths(msg)),
-                )
+        return _run_with_compaction_retry(ctx.con, ctx.source, _run, table_name="logs")
 
 
 _FALLBACK_SCHEMA_COLUMNS: list[dict[str, str]] = [
@@ -267,6 +256,9 @@ def query_schema_endpoint(
 
     if not schema:
         schema = list(_FALLBACK_SCHEMA_COLUMNS)
+
+    if mask_ips_for(ctx.analyst_session):
+        schema = [col for col in schema if col.get("column") != "cookie_session"]
 
     return {
         "source": name,

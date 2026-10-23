@@ -8,6 +8,7 @@ import { useTheme } from 'next-themes'
 import { DashboardMapData } from '@/types/api'
 import countryCodes from '@/lib/country-codes.json'
 import { countryFill } from '@/components/Map/colors'
+import { NORMALIZE_COUNTRY } from '@/components/Map/shared'
 import { useMapResize } from '@/components/Map/useMapResize'
 import { addCountryBaseLayer, createBaseMap, removeMapTabStops, updateCountryBaseLayerTheme } from '@/components/Map/baseLayers'
 import { formatCompactCount, resolveCountryName, formatCount } from '@/lib/format'
@@ -20,17 +21,6 @@ interface ChoroplethMapProps {
   data: DashboardMapData[]
   className?: string
   onCountryClick?: (country: string) => void
-}
-
-const NORMALIZE_COUNTRY: Record<string, string> = {
-  'United States': 'United States of America',
-  'Russia': 'Russia',
-  'South Korea': 'South Korea',
-  'Vietnam': 'Vietnam',
-  'Taiwan': 'Taiwan',
-  // Fastly usually returns plain names like 'United States',
-  // GeoJSON uses full names for some (e.g. 'United States of America').
-  // Note: 'United Kingdom' is already 'United Kingdom' in the topojson.
 }
 
 interface TooltipState {
@@ -174,6 +164,8 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
     dataMapRef.current = newDataMap
     nameToCodeRef.current = newNameToCode
 
+    let pendingStyleDataHandler: (() => void) | null = null
+
     const updateData = () => {
       if (!map.current?.getLayer('countries')) {
         // Layer not added yet — the init effect's 'load' handler adds
@@ -183,13 +175,18 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
         // first paint when data arrived before the map's 'load' event.
         // 'styledata' fires synchronously after addLayer() so this
         // path resolves with zero polling delay.
+        if (pendingStyleDataHandler) {
+          map.current?.off('styledata', pendingStyleDataHandler)
+        }
         const onStyleData = () => {
           if (map.current?.getLayer('countries')) {
             map.current.off('styledata', onStyleData)
+            pendingStyleDataHandler = null
             map.current.resize()
             updateData()
           }
         }
+        pendingStyleDataHandler = onStyleData
         map.current?.on('styledata', onStyleData)
         return
       }
@@ -221,6 +218,12 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
 
     updateData()
 
+    return () => {
+      if (pendingStyleDataHandler) {
+        map.current?.off('styledata', pendingStyleDataHandler)
+        pendingStyleDataHandler = null
+      }
+    }
   }, [data, theme])
 
   const maxCount = data.length > 0 ? Math.max(...data.map(d => d.count)) : 0

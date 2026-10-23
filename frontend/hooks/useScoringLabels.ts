@@ -4,6 +4,8 @@ import * as React from 'react'
 import { useQuery } from '@tanstack/react-query'
 
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
+import { queryKeys } from '@/lib/query-keys'
 import type { components } from '@/types/api'
 
 type LabelRowWire = components['schemas']['ScoringLabelRow']
@@ -45,15 +47,14 @@ interface Opts {
 export function useScoringLabels(serviceId: string, opts: Opts = {}): ScoringLabelsResult {
   const { enabled = true } = opts
   const q = useQuery({
-    queryKey: ['scoring-labels', serviceId],
+    queryKey: queryKeys.scoringLabels(serviceId),
     enabled: enabled && !!serviceId,
     queryFn: async () => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/labels',
-        { params: { path: { service_id: serviceId } } },
+      return unwrapClient(
+        client.GET('/api/services/{service_id}/scoring/labels', {
+          params: { path: { service_id: serviceId } },
+        }),
       )
-      if (!response.ok || !data) throw new Error(`status ${response.status}`)
-      return data
     },
     staleTime: 5 * 60_000,
   })

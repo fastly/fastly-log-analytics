@@ -21,8 +21,7 @@ dist/
 *.cron.lock
 /cache/*
 !/cache/.gitkeep
-.claude/*
-!.claude/commands/
+.claude/
 .agents/
 gemini.md
 SYSTEM.md
@@ -146,3 +145,5 @@ configs-hs/
 # Playwright output when e2e is run from the repo root
 /test-results/
 /artifacts/
+.tmp/
+.playwright-cli/

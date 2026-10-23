@@ -2,6 +2,8 @@
 
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
+import { queryKeys } from '@/lib/query-keys'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useFilterStore } from '@/stores/filterStore'
 import { useDebouncedFilterPayload } from '@/hooks/useFilterPayload'
@@ -22,19 +24,20 @@ export function useFieldValues({ field, search, limit = 50, enabled = true }: Us
   const filterPayload = useDebouncedFilterPayload()
 
   return useQuery({
-    queryKey: ['dashboard', 'field_values', activeServiceId, startTime, endTime, filterPayload, field, search],
+    queryKey: queryKeys.filtered('dashboard', 'field_values', activeServiceId, startTime, endTime, filterPayload, field, search),
     queryFn: async () => {
-      const { data } = await client.POST('/api/dashboard/field-values', {
-        body: {
-          start_time: startTime,
-          end_time: endTime,
-          filters: filterPayload,
-          field,
-          search,
-          limit,
-        },
-      })
-      return data
+      return await unwrapClient(
+        client.POST('/api/dashboard/field-values', {
+          body: {
+            start_time: startTime,
+            end_time: endTime,
+            filters: filterPayload,
+            field,
+            search,
+            limit,
+          },
+        }),
+      )
     },
     enabled: !!activeServiceId && enabled,
   })

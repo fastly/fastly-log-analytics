@@ -6,7 +6,7 @@ Day-2 operations for the session-scoring subsystem (v1.1.0). Aimed at the on-cal
 | :--- | :--- |
 | **Subsystem version** | v1.1.0 |
 | **Surface area** | `/admin/session-scoring` (UI) · `/api/services/{svc}/scoring/*` (API) |
-| **Storage** | `backend/metadata.db` (audit log) · Fastly Object Storage (`scoring_matrix_history/{version}.json` version history) · Fastly **KV Store** (`scoring_matrix`, key `matrix` — the live L2 matrix the edge scorer reads at runtime) · Compute ConfigStore (`scoring_config`: `enforce_threshold`, `l2_enforce_enabled`, `l2_enabled_at`) |
+| **Storage** | PostgreSQL metadata (`METADATA_DSN`, `scoring_audit` table) · Fastly Object Storage (`scoring_matrix_history/{version}.json` version history) · Fastly **KV Store** (`scoring_matrix`, key `matrix` — the live L2 matrix the edge scorer reads at runtime) · Compute ConfigStore (`scoring_config`: `enforce_threshold`, `l2_enforce_enabled`, `l2_enabled_at`) |
 | **Edge components** | 6 VCL snippets (recv / pass / fetch / deliver / miss / enforce) + scorer Wasm service |
 | **Audit scope** | Per-host; not mirrored via `state_sync` |
 
@@ -72,7 +72,7 @@ What gets torn down: VCL snippets removed, custom fields unregistered, scorer Wa
 
 What is **preserved per-host** (intentionally):
 
-- The `scoring_audit` table for this service in `metadata.db` — every prior mutation stays queryable.
+- The `scoring_audit` table for this service in PostgreSQL (`METADATA_DSN`) — every prior mutation stays queryable.
 - Matrix history under `scoring_matrix_history/` in the FOS bucket — re-enabling later can restore a prior version.
 
 If you need a hard wipe, delete the `scoring_audit` rows manually and remove the `scoring_matrix_history/{*}.json` objects from the bucket. Do this only when you're sure no compliance or forensics need them.
@@ -201,7 +201,7 @@ curl -sS "$HOST/api/services/$SVC/scoring/audit?limit=200" \
 
 **What's recorded.** Every mutation: enable, disable, threshold commit/clear, enforcement set/cleared, retrain, key rotation, matrix restore. Each row has the actor, timestamp, and a structured payload describing the before/after state.
 
-**Per-host scope.** The audit log lives in this host's `metadata.db` and is **not** mirrored via `state_sync`. If the same logical service is operated from multiple admin hosts (e.g. a primary and a hot-standby), each host has its own independent audit log. For a complete history, query each host and merge by timestamp.
+**Per-database scope.** The audit log lives in PostgreSQL (`METADATA_DSN`, `scoring_audit` table) and is **not** mirrored to FOS via `state_sync`. If the same logical service is operated from multiple independent deployments that do not share a `METADATA_DSN`, each deployment has its own independent audit log. For a complete history across separate databases, query each and merge by timestamp.
 
 ---
 

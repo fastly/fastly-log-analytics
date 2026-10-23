@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import statistics
 import sys
 import time
@@ -23,6 +22,10 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scripts.lib.environments import percentile  # noqa: E402
 
 try:
     import httpx
@@ -49,19 +52,6 @@ class EndpointBenchmarkResult:
     max_ms: float
     stddev_ms: float
     avg_bytes: int
-
-
-def percentile(data: list[float], p: float) -> float:
-    if not data:
-        return 0.0
-    k = (len(data) - 1) * (p / 100.0)
-    f = math.floor(k)
-    c = math.ceil(k)
-    if f == c:
-        return data[int(k)]
-    d0 = data[int(f)] * (c - k)
-    d1 = data[int(c)] * (k - f)
-    return d0 + d1
 
 
 def benchmark_endpoint(

@@ -10,6 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { RetentionSelect } from "@/components/ui/retention-select";
 import { Switch } from "@/components/ui/switch";
 import { SectionHeader } from "@/components/ui/section-header";
 import { LabelWithInfo } from "@/components/ui/label-with-info";
@@ -27,7 +28,6 @@ import type { WizardState } from "../useWizardState";
 import {
   PERIOD_LABELS,
   REGION_LABELS,
-  RETENTION_OPTIONS,
   SHIELD_LABELS,
 } from "@/lib/service-config-constants";
 import { RumVersionPicker } from "../RumVersionPicker";
@@ -540,23 +540,14 @@ export function StorageStep({ s }: { s: WizardState }) {
                     label="Request Log Retention"
                     info="Prunes high-volume CDN HTTP logs older than this threshold to minimize your Object Storage charges. RUM records are kept safe."
                   />
-                  <Select
+                  <RetentionSelect
                     value={String(config.log_retention_days)}
                     onValueChange={(v) =>
                       setConfig({ ...config, log_retention_days: Number(v) })
                     }
-                  >
-                    <SelectTrigger className="h-8 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {RETENTION_OPTIONS.map((o) => (
-                        <SelectItem key={o.value} value={o.value} className="text-xs">
-                          {o.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                    triggerClassName="h-8 text-xs"
+                    itemClassName="text-xs"
+                  />
                 </div>
               )}
 
@@ -566,23 +557,14 @@ export function StorageStep({ s }: { s: WizardState }) {
                     label="RUM Telemetry Retention"
                     info="Keeps client-side performance beacons (Web Vitals) for a longer period of time. Since RUM volume is very small, a larger retention window has negligible storage costs."
                   />
-                  <Select
+                  <RetentionSelect
                     value={String(config.rum_retention_days)}
                     onValueChange={(v) =>
                       setConfig({ ...config, rum_retention_days: Number(v) })
                     }
-                  >
-                    <SelectTrigger className="h-8 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {RETENTION_OPTIONS.map((o) => (
-                        <SelectItem key={o.value} value={o.value} className="text-xs">
-                          {o.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                    triggerClassName="h-8 text-xs"
+                    itemClassName="text-xs"
+                  />
                 </div>
               )}
             </div>
@@ -670,23 +652,14 @@ export function StorageStep({ s }: { s: WizardState }) {
                   label="Local Raw Log Cache"
                   info="How many days of raw logs to keep on the local NVMe disk. Older logs are automatically queried directly from S3 Object Storage."
                 />
-                <Select
+                <RetentionSelect
                   value={String(config.cache_retention_days)}
                   onValueChange={(v) =>
                     setConfig({ ...config, cache_retention_days: Number(v) })
                   }
-                >
-                  <SelectTrigger className="h-8 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {RETENTION_OPTIONS.map((o) => (
-                      <SelectItem key={o.value} value={o.value} className="text-xs">
-                        {o.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                  triggerClassName="h-8 text-xs"
+                  itemClassName="text-xs"
+                />
               </div>
 
               <div className="space-y-1.5">

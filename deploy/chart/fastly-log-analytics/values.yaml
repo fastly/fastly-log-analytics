@@ -194,10 +194,12 @@ config:
   # single uvicorn process past the liveness probe's timeout. Pin this to
   # (or just under) resources.requests.cpu so DuckDB can't oversubscribe.
   duckdbThreads: "2"
-  # DuckLake catalog DSN. Empty = the pod-local `.ducklake` file catalog,
-  # which is correct for deploymentMode: standard and rejected for
-  # deploymentMode: high_scale
-  # (which requires postgres:// or postgresql://).
+  # DuckLake catalog DSN (postgres:// or postgresql:// per ADR-22; file-backed
+  # catalogs and SQLite metadata stores were removed in ADR-22). Left empty in
+  # the default values file so `helm template` with no flags renders a
+  # self-contained manifest; production installs in both standard and
+  # high_scale modes must supply a Postgres DSN here and in secrets.metadataDsn
+  # (or secrets.existingSecret).
   ducklakeCatalog: ""
   ducklakeDataPath: ""
   hotS3Endpoint: ""

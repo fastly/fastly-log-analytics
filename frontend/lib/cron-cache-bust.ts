@@ -42,7 +42,7 @@ export function cronCacheBust(queryClient: QueryClient, _serviceId?: string | nu
 
   // Header badge + FilterBar bounds + sync-status badge.
   queryClient.invalidateQueries({ queryKey: queryKeys.lastSyncAll() })
-  queryClient.invalidateQueries({ queryKey: ['log-extents'] })
+  queryClient.invalidateQueries({ queryKey: queryKeys.logExtentsAll() })
   queryClient.invalidateQueries({ queryKey: queryKeys.syncStatusAll() })
 
   // Dashboard surfaces that consume the new log data. These are the
@@ -50,6 +50,7 @@ export function cronCacheBust(queryClient: QueryClient, _serviceId?: string | nu
   queryClient.invalidateQueries({ queryKey: ['dashboard', 'aggregates'] })
   queryClient.invalidateQueries({ queryKey: ['dashboard', 'top-bots'] })
   queryClient.invalidateQueries({ queryKey: ['dashboard', 'raw'] })
+  queryClient.invalidateQueries({ queryKey: ['dashboard', 'bundle'] })
 
   // Bootstrap carries seeded versions of several of the above; refresh
   // it so the next page navigation finds fresh seeds rather than stale

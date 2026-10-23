@@ -3,6 +3,7 @@ import { HydrationBoundary } from '@tanstack/react-query'
 import { fetchBootstrapServerSide } from '@/lib/ssr/bootstrap'
 import { fetchInsightsServerSide } from '@/lib/ssr/insights'
 import { firstParam, seedDehydratedState } from '@/lib/ssr/seed'
+import { resolveServerServiceId } from '@/lib/ssr/service'
 import InsightsClient from './_sections/InsightsClient'
 
 // Per-request RSC shell for /insights. Pre-fetches the DEFAULT insights
@@ -43,17 +44,19 @@ export default async function InsightsPage({
 }) {
   const params = await searchParams
   const bootstrap = await fetchBootstrapServerSide()
-  const serviceId =
-    firstParam(params.service) ??
-    bootstrap?.active_service_id ??
-    undefined
+  const serviceId = resolveServerServiceId(params, bootstrap)
   const logExtents = bootstrap?.log_extents
 
   const initialTab = firstParam(params.tab)
   const initialWindow = firstParam(params.window)
   const initialBaseline = firstParam(params.baseline)
 
-  const seed = await fetchInsightsServerSide(serviceId, logExtents)
+  const seed = await fetchInsightsServerSide(
+    serviceId,
+    logExtents,
+    initialWindow,
+    initialBaseline,
+  )
 
   // Seed under the EXACT client key. seedDehydratedState returns null when
   // seed is null, so a failed prefetch degrades to the client-fetch path.

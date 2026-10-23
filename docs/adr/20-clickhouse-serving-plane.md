@@ -60,7 +60,7 @@ therefore **not executed**, and ADR-18's serving constraints remain unchanged.
 Tasks 1–10 supply experiment evidence; Task 12 closes the experiment by taking
 the rejection branch. This is not an all-acceptance-gates-passed claim.
 Full measurements and limitations are in the
-[runbook](../runbooks/clickhouse-prototype.md#task-10-measured-docker-gate--failed).
+[runbook](../runbooks/high-scale-capacity-and-recovery.md).
 
 ## Original context and retained publication design
 
@@ -187,7 +187,7 @@ Tasks 4–6 verified the selected protocol against real Postgres and ClickHouse
 25.8.4.13. The bounded baseline exported 184,374 rows into 19 immutable Fastly
 Object Storage artifacts; a new generation rebuilt all rows with the DuckLake
 catalog configuration absent and matched the complete ordered canonical
-digest. See the [runbook](../runbooks/clickhouse-prototype.md) for interfaces,
+digest. See the [runbook](../runbooks/high-scale-capacity-and-recovery.md) for interfaces,
 bounds, retention ownership, commands and failure-test evidence. No ingest hook
 or automatic export job was added. This was Tasks 4–6's
 evidence; Tasks 7–10 subsequently added and measured the experimental

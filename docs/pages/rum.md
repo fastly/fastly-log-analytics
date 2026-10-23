@@ -158,7 +158,7 @@ selected real-data window.
 - [ ] **4. Time Range Extent:** Confirms 24h default or adaptive extent for services < 24h history.
 - [ ] **5. Unconfigured State:** Disabling RUM renders the onboarding helper gracefully.
 - [ ] **6. Role Verification:** Confirm Analyst Path B observes expected view without administrative buttons.
-- [ ] **7. Telemetry & Query Audit:** Verify all DuckDB and SQLite queries are recorded with zero duplicate queries.
+- [ ] **7. Telemetry & Query Audit:** Verify all DuckDB and PostgreSQL queries are recorded with zero duplicate queries.
 - [ ] **8. High-scale positive chart gate:** On a service with real visible RUM
   facts in the selected 30-day range, verify both trend charts have finite
   plotted points (not merely traces or a nonempty zero-filled axis), the

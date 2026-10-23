@@ -101,17 +101,7 @@ def test_compaction_stats_returns_local_compaction_snapshot(client):
 # ── PATCH /api/admin/metadata-retention ────────────────────────────────────
 
 
-def _fake_mutate(saved: dict, base: dict | None = None):
-    """``backend.config.mutate_config`` stand-in: applies ``fn`` to ``base`` and records the result."""
-
-    def _mutate(sid, fn, **kwargs):
-        cfg = dict(base if base is not None else {"name": "svc", "service_id": "svc"})
-        fn(cfg)
-        saved["sid"] = sid
-        saved["cfg"] = cfg
-        return cfg
-
-    return _mutate
+from tests.helpers import fake_mutate_config as _fake_mutate
 
 
 def test_metadata_retention_patch_writes_config_and_audit(client):

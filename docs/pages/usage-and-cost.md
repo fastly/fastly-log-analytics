@@ -45,7 +45,7 @@ Per H-1 security hardening, `/usage` and `/api/usage/*` expose financial cost ra
 
 | Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
-| **Usage Ledger** | Local SQLite `usage_log.db` (`usage_log` & `usage_log_hourly_summary`) + PostgreSQL metadata. | PostgreSQL 16 distributed usage ledger (`usage_log` & `usage_log_hourly_summary`). |
+| **Usage Ledger** | PostgreSQL 16 (`usage_log` & `usage_log_hourly_summary` via `METADATA_DSN`). | PostgreSQL 16 distributed usage ledger (`usage_log` & `usage_log_hourly_summary`). |
 | **Reconciliation Data** | Fastly `/stats/service` aggregated via `reconcile_fastly_stats`. | Fastly API stats matched with PostgreSQL metadata ledger. |
 | **Prefill & Billing Rates** | Instant read via `/api/usage/prefill/rates` and historical RUM/log calculation in `/api/usage/prefill`. | Instant PostgreSQL read via `/api/usage/prefill/rates`. |
 

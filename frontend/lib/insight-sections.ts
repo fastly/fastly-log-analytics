@@ -12,7 +12,7 @@ import { ShieldAlert, ServerCrash, Zap, Network, Globe, LayoutGrid, type LucideI
  *
  * Order is deliberate — triage flow: attack → broken → slow → shifting.
  */
-export interface InsightSection {
+interface InsightSection {
   /** Stable machine key. Matches the backend `category` enum value. */
   key: string
   label: string
@@ -20,7 +20,7 @@ export interface InsightSection {
   icon: LucideIcon
 }
 
-export const ALL_SECTION: InsightSection = {
+const ALL_SECTION: InsightSection = {
   key: 'all',
   label: 'All Categories',
   description: 'All automated insights and detected anomalies across every category.',

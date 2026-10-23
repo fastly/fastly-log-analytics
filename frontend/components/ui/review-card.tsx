@@ -43,7 +43,7 @@ export function ReviewItem({ label, value, children, className, variant = 'defau
       <div className={cn("flex items-center justify-between", className)}>
         <span>{label}</span>
         <div className="shrink-0">
-          {value || children}
+          {value ?? children}
         </div>
       </div>
     )
@@ -52,7 +52,7 @@ export function ReviewItem({ label, value, children, className, variant = 'defau
   return (
     <div className={cn("flex flex-col gap-1", className)}>
       <span className="text-muted-foreground">{label}</span>
-      <span className="font-medium truncate">{value || children}</span>
+      <span className="font-medium truncate">{value ?? children}</span>
     </div>
   )
 }

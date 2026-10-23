@@ -32,21 +32,8 @@ def clean_env(monkeypatch):
     monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
 
 
-def _source(tmp_path, service_id: str = "svc-expire-contract") -> dict:
-    cache_root = tmp_path / service_id
-    cache_root.mkdir(parents=True, exist_ok=True)
-    return {
-        "name": service_id,
-        "service_id": service_id,
-        "bucket": "test-fos-bucket",
-    }
-
-
-def _maintenance_config(monkeypatch, **cron_sync) -> None:
-    monkeypatch.setattr(
-        "backend.config.load_config",
-        lambda _service_id: {"provisioning": {"cron_sync": cron_sync}},
-    )
+from tests.cron.conftest import make_cron_source as _source
+from tests.cron.conftest import patch_maintenance_config as _maintenance_config
 
 
 def _snapshot_connection(*, count: int = 0, expire_error: Exception | None = None):

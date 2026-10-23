@@ -3,6 +3,7 @@ import React, { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRouter } from 'next/navigation'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { queryKeys } from '@/lib/query-keys'
 import { cronCacheBust } from '@/lib/cron-cache-bust'
 import { useMounted } from '@/hooks/useMounted'
@@ -77,17 +78,16 @@ export function ServicesTable() {
   )
 
   const { data: services, isLoading, isFetching, isError, error } = useQuery({
-    queryKey: ['services'],
+    queryKey: queryKeys.services(),
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/services", { signal })
-      return data
+      return unwrapClient(client.GET("/api/services", { signal }))
     },
   })
 
   const isRefreshing = isFetching && !isLoading
 
   const handleRefreshAll = React.useCallback(() => {
-    void queryClient.invalidateQueries({ queryKey: ['services'] })
+    void queryClient.invalidateQueries({ queryKey: queryKeys.services() })
     void queryClient.invalidateQueries({ queryKey: queryKeys.admin.overviewAll() })
     void queryClient.invalidateQueries({ queryKey: queryKeys.admin.healthSnapshot() })
     void queryClient.invalidateQueries({ queryKey: queryKeys.syncStatus(activeServiceId) })
@@ -201,7 +201,7 @@ export function ServicesTable() {
         open={!!teardownService}
         onOpenChange={(open) => !open && setTeardownService(null)}
         onComplete={() => {
-          queryClient.invalidateQueries({ queryKey: ['services'] })
+          queryClient.invalidateQueries({ queryKey: queryKeys.services() })
           queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })
           setTeardownService(null)
         }}
@@ -213,7 +213,7 @@ export function ServicesTable() {
         onOpenChange={(open) => !open && setDeleteDataService(null)}
         onComplete={() => {
           cronCacheBust(queryClient, deleteDataService?.service_id)
-          queryClient.invalidateQueries({ queryKey: ['services'] })
+          queryClient.invalidateQueries({ queryKey: queryKeys.services() })
           setDeleteDataService(null)
         }}
       />

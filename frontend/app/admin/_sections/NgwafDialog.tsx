@@ -2,6 +2,8 @@
 import React, { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
+import { queryKeys } from '@/lib/query-keys'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -93,10 +95,10 @@ function NgwafDialogBody({ service, onClose }: Props) {
                     setNgwafFetchError('')
                     setNgwafFetching(true)
                     try {
-                      const { data } = await client.GET("/api/provision/ngwaf-workspaces", {
+                      const data = await unwrapClient(client.GET("/api/provision/ngwaf-workspaces", {
                         params: { query: { service_id: service.service_id } },
                         headers: { Authorization: `Bearer ${ngwafApiToken}` }
-                      })
+                      }))
                       setNgwafWorkspaces((data?.workspaces || []).flatMap((w) => (w.id && w.name ? [{ id: w.id, name: w.name }] : [])))
                     } catch (e) {
                       setNgwafFetchError(extractApiError(e) || 'Could not load workspaces')
@@ -158,15 +160,15 @@ function NgwafDialogBody({ service, onClose }: Props) {
                     // entered above; backend accepts either the stored key
                     // (constant-time match) or a token with the 'global'
                     // scope on this service.
-                    await client.PATCH("/api/provision/services/{service_id}/ngwaf-workspace", {
+                    await unwrapClient(client.PATCH("/api/provision/services/{service_id}/ngwaf-workspace", {
                       params: {
                         path: { service_id: service.service_id },
                       },
                       headers: { Authorization: `Bearer ${ngwafApiToken}` },
                       body: { ngwaf_workspace_id: ngwafWorkspaceId.trim() || null },
-                    })
+                    }))
                     setNgwafSaved(true)
-                    queryClient.invalidateQueries({ queryKey: ['services'] })
+                    queryClient.invalidateQueries({ queryKey: queryKeys.services() })
                   } catch (e) {
                     setNgwafFetchError(extractApiError(e) || 'Failed to save')
                   } finally {

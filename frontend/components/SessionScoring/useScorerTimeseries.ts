@@ -1,9 +1,8 @@
 'use client'
 
-import { useQuery } from '@tanstack/react-query'
-
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
+import { useScoringQuery } from './useScoringQuery'
 
 // Derived from the generated OpenAPI schema now that
 // /scoring/latency-timeseries has a real response_model — no more
@@ -55,20 +54,14 @@ export function scorerHourlyLayout(perMinute: boolean, yTitle: string, showlegen
  * network request and a single cache entry.
  */
 export function useScorerTimeseries(serviceId: string, sinceHours: number) {
-  return useQuery({
-    queryKey: ['scoring-latency-timeseries', serviceId, sinceHours],
-    queryFn: async () => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/latency-timeseries',
-        {
-          params: {
-            path: { service_id: serviceId },
-            query: { since_hours: sinceHours },
-          },
+  return useScoringQuery(
+    ['scoring-latency-timeseries', serviceId, sinceHours],
+    () =>
+      client.GET('/api/services/{service_id}/scoring/latency-timeseries', {
+        params: {
+          path: { service_id: serviceId },
+          query: { since_hours: sinceHours },
         },
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as LatencyResponse
-    },
-  })
+      }),
+  )
 }

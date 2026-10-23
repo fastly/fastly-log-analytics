@@ -6,6 +6,7 @@ import { StatCard } from '@/components/ui/stat-card'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { formatCompactCount } from '@/lib/format'
 import { Activity, AlertTriangle, ArrowDownUp, Gauge, Network, Wifi } from 'lucide-react'
 import type { components } from '@/types/api'
@@ -30,7 +31,7 @@ export function TransportSection({
   const transportQuery = useServiceQuery(
     ['network', 'bundle', 'transport', activeServiceId, startTime, endTime, filterPayload],
     async ({ signal }) => {
-      const { data } = await client.POST('/api/network/bundle', {
+      const data = await unwrapClient(client.POST('/api/network/bundle', {
         signal,
         body: {
           start_time: startTime ?? undefined,
@@ -45,7 +46,7 @@ export function TransportSection({
           map_asn: 'all',
           region_country: 'US',
         },
-      })
+      }))
       return (data as { transport?: TransportMetrics } | undefined)?.transport ?? null
     },
     { enabled: Boolean(activeServiceId && startTime && endTime) }

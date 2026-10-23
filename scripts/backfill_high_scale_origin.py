@@ -3,17 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import json
-from dataclasses import asdict
+import sys
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from typing import cast
 
-from backend import config as app_config
-from backend.core.clickhouse_client import ClickHouseClient
-from backend.high_scale.aggregate_batch_adapter import AggregateBatchAdapter
-from backend.high_scale.postgres_control import PostgresControlPlane
-from backend.high_scale.publication import ClickHouseBatchAdapter, ClickHousePublication, PostgresBatchManifestStore
 from backend.high_scale.recovery import (
     purge_cmcd_projections,
     purge_origin_projections,
@@ -22,9 +14,18 @@ from backend.high_scale.recovery import (
     rebuild_origin_projections_from_fos,
     rebuild_rum_facts_from_fos,
 )
-from backend.high_scale.recovery_capacity import RecoveryCapacityMeasurement
-from backend.high_scale.registry import get_high_scale_service_registry
-from backend.high_scale.registry_bootstrap import register_high_scale_services_from_environment
+from scripts.backfill_high_scale import (
+    AggregateBatchAdapter,
+    ClickHouseBatchAdapter,
+    ClickHouseClient,
+    ClickHousePublication,
+    PostgresBatchManifestStore,
+    PostgresControlPlane,
+    app_config,
+    get_high_scale_service_registry,
+    register_high_scale_services_from_environment,
+    run_backfill_cli,
+)
 
 
 def _select(projection: str):
@@ -43,11 +44,7 @@ def _select(projection: str):
     return AggregateBatchAdapter, purge_origin_projections, rebuild_origin_projections_from_fos
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--service-id", required=True)
-    parser.add_argument("--days", type=int, default=30)
-    parser.add_argument("--rebuild-id")
+def _configure_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--projection",
         choices=("origin", "cmcd", "rum_vitals", "rum_errors"),
@@ -60,47 +57,23 @@ def main() -> int:
         help="delete this service's existing rows of the selected projection in the window first "
         "(required when rows already exist, otherwise every request is counted twice)",
     )
-    parser.add_argument(
-        "--capacity-json",
-        type=Path,
-        help="measured RecoveryCapacityMeasurement fields; exit 3 when the rebuild completes but the claim is invalid",
-    )
-    args = parser.parse_args()
-    if args.days <= 0:
-        parser.error("--days must be positive")
+
+
+def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.replace_existing and args.rebuild_id:
         parser.error("--replace-existing cannot resume a rebuild: the purge would delete rows the resumed id skips")
-    capacity = None
-    if args.capacity_json is not None:
-        try:
-            capacity = RecoveryCapacityMeasurement(**json.loads(args.capacity_json.read_text()))
-            capacity.validate()
-        except (OSError, TypeError, ValueError) as exc:
-            parser.error(f"--capacity-json is invalid: {exc}")
 
-    settings = app_config.load_clickhouse_config()
-    if settings is None:
-        raise RuntimeError("ClickHouse configuration is required")
-    client = ClickHouseClient(settings)
-    try:
-        registry = get_high_scale_service_registry()
-        register_high_scale_services_from_environment(registry, client=client)
-        service = registry.resolve(args.service_id)
-        if service is None or service.manifest_catalog is None or service.archive is None:
-            raise RuntimeError("service is not registered with its archive dependencies")
-        control = PostgresControlPlane()
-        adapter_type, purge, rebuild = _select(args.projection)
-        publication = ClickHousePublication(
-            PostgresBatchManifestStore(control),
-            adapter_type(cast(ClickHouseClient, service.client)),
-        )
+
+def main(argv: list[str] | None = None) -> int:
+    def _run(*, args, service, publication, capacity, module):
+        _, purge, rebuild = _select(args.projection)
         if args.replace_existing:
             purge(
                 service.client,
                 service_id=args.service_id,
                 since=datetime.now(UTC) - timedelta(days=args.days),
             )
-        report = rebuild(
+        return rebuild(
             service.manifest_catalog,
             service.archive,
             publication,
@@ -109,12 +82,29 @@ def main() -> int:
             rebuild_id=args.rebuild_id,
             capacity=capacity,
         )
-        print(json.dumps(asdict(report), sort_keys=True))
-        if not report.full_rebuild_complete:
-            return 1
-        return 3 if report.recovery_claim_valid is False else 0
-    finally:
-        client.close()
+
+    return run_backfill_cli(
+        _run,
+        configure_parser=_configure_parser,
+        validate_args=_validate_args,
+        select_adapter=lambda args, _mod: _select(args.projection)[0],
+        caller_module=sys.modules[__name__],
+        argv=argv,
+    )
+
+
+__all__ = [
+    "AggregateBatchAdapter",
+    "ClickHouseBatchAdapter",
+    "ClickHouseClient",
+    "ClickHousePublication",
+    "PostgresBatchManifestStore",
+    "PostgresControlPlane",
+    "app_config",
+    "get_high_scale_service_registry",
+    "main",
+    "register_high_scale_services_from_environment",
+]
 
 
 if __name__ == "__main__":

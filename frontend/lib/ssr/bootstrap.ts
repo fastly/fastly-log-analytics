@@ -41,7 +41,7 @@ function _fetchBootstrapUpstream(serviceId?: string | null): Promise<BootstrapRe
   // Returns null on ANY failure (no resp / non-2xx / malformed 2xx body) so
   // the root layout never throws a SyntaxError out of this server-component
   // path; the shared parseSsrJson reproduces that guard + warn contract.
-  const path = serviceId ? `/api/bootstrap?service_id=${serviceId}` : '/api/bootstrap'
+  const path = serviceId ? `/api/bootstrap?service_id=${encodeURIComponent(serviceId)}` : '/api/bootstrap'
   return ssrUpstreamGet({ path, logPrefix: 'ssr/bootstrap', injectAdminToken: true }).then((resp) =>
     parseSsrJson<BootstrapResponse>(resp, 'ssr/bootstrap'),
   )

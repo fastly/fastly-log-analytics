@@ -142,6 +142,7 @@ export const useFilterStore = create<FilterState>((set) => ({
     const now = new Date()
     set({
       filters: [],
+      edgeOnly: false,
       isAutoRange: true,
       relativeRange: null,
       compareMode: false,

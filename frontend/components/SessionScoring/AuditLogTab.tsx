@@ -1,8 +1,8 @@
 'use client'
 
 import * as React from 'react'
-import { useQuery } from '@tanstack/react-query'
 import { ScrollText, Info } from 'lucide-react'
+import { useScoringQuery } from './useScoringQuery'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { AuditLogHelp } from '@/components/SessionScoring/help-content'
@@ -92,23 +92,17 @@ const AUDIT_COLUMNS: ColumnDef<AuditRow>[] = [
 ]
 
 export function AuditLogTab({ serviceId }: AuditLogTabProps) {
-  const query = useQuery({
-    queryKey: ['scoring-audit', serviceId, AUDIT_LIMIT],
-    queryFn: async () => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/audit',
-        {
-          params: {
-            path: { service_id: serviceId },
-            query: { limit: AUDIT_LIMIT },
-          },
+  const query = useScoringQuery(
+    ['scoring-audit', serviceId, AUDIT_LIMIT],
+    () =>
+      client.GET('/api/services/{service_id}/scoring/audit', {
+        params: {
+          path: { service_id: serviceId },
+          query: { limit: AUDIT_LIMIT },
         },
-      )
-      if (!response.ok || !data) throw new Error(`status ${response.status}`)
-      return data
-    },
-    staleTime: 30_000,
-  })
+      }),
+    { staleTime: 30_000 },
+  )
 
   if (query.isError) {
     return (

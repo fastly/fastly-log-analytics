@@ -289,20 +289,17 @@ class ShareHeaderBadgeResponse(WireSafeModel):
     request: StreamMetrics | None = None
 
 
-class SyncStatus(LogExtentsMixin):
+class SyncStatus(ShareHeaderBadgeResponse, LogExtentsMixin):
     configured: bool = True
     busy: bool = False
     storage_mode: str | None = None
     access_level: str | None = None
-    local_rows: int | None = None
     latest_ingested_file_at: str | None = None
     latest_available_file_at: str | None = None
     duckdb_size_bytes: int | None = None
     duckdb_exists: bool | None = None
     active_run: dict[str, Any] | None = None
     ngwaf_workspace_id: str | None = None
-    rum: StreamMetrics | None = None
-    request: StreamMetrics | None = None
 
 
 class SyncStatusResponse(BaseResponse, SyncStatus):
@@ -495,7 +492,16 @@ class ResetLogsRequest(BaseModel):
 # ── /api/admin/usage-logging POST/PATCH body ───────────────────────────────
 
 
-class UsageLoggingUpdateBody(BaseModel):
+class _BillingRatesMixin(BaseModel):
+    class_a_rate_per_1k: float | None = None
+    class_b_rate_per_10k: float | None = None
+    cdn_egress_rate_per_gb: float | None = None
+    storage_rate_per_gb_month: float | None = None
+    min_billed_days: int | float | None = None
+    billing_zone: str | None = None
+
+
+class UsageLoggingUpdateBody(_BillingRatesMixin):
     """Body for ``PATCH /api/admin/usage-logging``.
 
     All fields are optional — only keys explicitly present in the request
@@ -505,12 +511,6 @@ class UsageLoggingUpdateBody(BaseModel):
 
     enabled: bool | None = None
     retention_days: float | None = None
-    class_a_rate_per_1k: float | None = None
-    class_b_rate_per_10k: float | None = None
-    cdn_egress_rate_per_gb: float | None = None
-    storage_rate_per_gb_month: float | None = None
-    min_billed_days: float | None = None
-    billing_zone: str | None = None
 
 
 # ── Wire-safe admin maintenance/config responses ───────────────────────────
@@ -523,7 +523,7 @@ class UsageLoggingUpdateBody(BaseModel):
 # Field lists derive from the producers, not from any frontend consumer.
 
 
-class UsageLoggingConfigResponse(PassthroughModel):
+class UsageLoggingConfigResponse(_BillingRatesMixin, PassthroughModel):
     """Merged global usage-logging config (``_USAGE_LOGGING_DEFAULTS`` +
     stored overrides). GET and PATCH both return this shape. The two
     day-count fields are ``int | float`` because the defaults are ints but
@@ -535,8 +535,6 @@ class UsageLoggingConfigResponse(PassthroughModel):
     class_b_rate_per_10k: int | float | None = None
     cdn_egress_rate_per_gb: int | float | None = None
     storage_rate_per_gb_month: int | float | None = None
-    min_billed_days: int | float | None = None
-    billing_zone: str | None = None
     track_duckdb_httpfs: bool | None = None
 
 
@@ -574,6 +572,8 @@ class SyncStartResponse(PassthroughModel):
 class BackfillBundleRollupsResponse(PassthroughModel):
     """Per-kind bundle counts from ``POST /admin/backfill-bundle-rollups``."""
 
+    time_series: int | None = None
+    sessions: int | None = None
     slow_urls: int | None = None
     origin_summary: int | None = None
     origin_summary_days: int | None = None
@@ -602,6 +602,12 @@ class BackfillBundleRollupsResponse(PassthroughModel):
     wellknown_bots: int | None = None
     overview: int | None = None
     overview_days: int | None = None
+    network_heatmap: int | None = None
+    network_heatmap_days: int | None = None
+    network_geo: int | None = None
+    network_geo_days: int | None = None
+    network_quality: int | None = None
+    pop_health: int | None = None
     rum: int | None = None
 
 

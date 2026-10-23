@@ -32,6 +32,9 @@ const _listeners = new Set<() => void>()
 let _interval: ReturnType<typeof setInterval> | null = null
 
 function _subscribe(cb: () => void): () => void {
+  if (_listeners.size === 0) {
+    _now = Date.now()
+  }
   _listeners.add(cb)
   if (_interval === null) {
     _interval = setInterval(() => {

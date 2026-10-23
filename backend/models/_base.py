@@ -13,6 +13,30 @@ class PassthroughModel(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
+    def __getitem__(self, key: str) -> Any:
+        if key in type(self).model_fields:
+            return getattr(self, key)
+        extra = self.__pydantic_extra__ or {}
+        if key in extra:
+            return extra[key]
+        raise KeyError(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __contains__(self, key: object) -> bool:
+        if not isinstance(key, str):
+            return False
+        extra = self.__pydantic_extra__ or {}
+        return (
+            key in self.model_fields_set
+            or key in extra
+            or (key in type(self).model_fields and getattr(self, key) is not None)
+        )
+
 
 class WireSafeModel(PassthroughModel):
     """``extra="allow"`` model whose serialization omits never-set fields.
@@ -34,6 +58,17 @@ class WireSafeModel(PassthroughModel):
                 if alias:
                     data.pop(alias, None)
         return data
+
+
+class SchemaColumn(WireSafeModel):
+    column: str | None = None
+    name: str = ""
+    type: str
+    min: str | None = None
+    max: str | None = None
+    approx_unique: int | None = None
+    null_percentage: float | None = None
+    count: int | None = None
 
 
 # One cell of a raw-log row: VARCHAR, the integer/float widths and BOOLEAN pass through; TIMESTAMP

@@ -6,8 +6,8 @@
     "node": ">=24"
   },
   "scripts": {
-    "dev": "node -e \"const fs=require('fs'); fs.mkdirSync('public', {recursive: true}); fs.copyFileSync('node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs', 'public/maplibre-gl-worker.mjs'); fs.copyFileSync('node_modules/maplibre-gl/dist/maplibre-gl-shared.mjs', 'public/maplibre-gl-shared.mjs');\" && npm run gen:types && next dev -H 127.0.0.1",
-    "build": "node -e \"const fs=require('fs'); fs.mkdirSync('public', {recursive: true}); fs.copyFileSync('node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs', 'public/maplibre-gl-worker.mjs'); fs.copyFileSync('node_modules/maplibre-gl/dist/maplibre-gl-shared.mjs', 'public/maplibre-gl-shared.mjs');\" && npm run gen:types && next build",
+    "dev": "npm run postinstall && npm run gen:types && next dev -H 127.0.0.1",
+    "build": "npm run postinstall && npm run gen:types && next build",
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",

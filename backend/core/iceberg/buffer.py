@@ -865,8 +865,10 @@ def run_cloud_maintenance(source: dict) -> dict:
     touching FOS — both the retention delete and expire_snapshots commit
     against the table, with the same reset-race risk.
     """
+    from backend.core.ducklake_admission import ducklake_write_admission
     from backend.core.iceberg.view import _get_service_lock
 
+    sid = source.get("service_id") or source.get("name", "default")
     lock = _get_service_lock(source.get("name", "default"))
     if not lock.acquire(timeout=_CLOUD_WRITE_LOCK_TIMEOUT_S):
         logger.warning(
@@ -875,7 +877,8 @@ def run_cloud_maintenance(source: dict) -> dict:
         )
         return {"error": "service busy (reset or another writer in progress)"}
     try:
-        return _run_cloud_maintenance_impl(source)
+        with ducklake_write_admission(sid):
+            return _run_cloud_maintenance_impl(source)
     finally:
         lock.release()
 

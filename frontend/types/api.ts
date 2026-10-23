@@ -13,6 +13,7 @@ export function toService(s: components['schemas']['BootstrapService']): Service
     rum_enabled: s.rum_enabled ?? undefined,
     analystPathASupported: s.analyst_path_a_supported ?? true,
     analystPathAReason: s.analyst_path_a_reason ?? null,
+    is_high_scale: s.is_high_scale ?? undefined,
   }
 }
 
@@ -70,9 +71,6 @@ export type WithRequired<T, K extends keyof StripIndex<T>> = Simplify<
   Omit<StripIndex<T>, K> & { [P in K]-?: NonNullable<StripIndex<T>[P]> }
 >
 
-/** Strip `null` from every value while keeping each key's optionality. */
-export type DropNull<T> = Simplify<{ [K in keyof StripIndex<T>]: NonNullable<StripIndex<T>[K]> }>
-
 /** Like WithRequired but keeps `null` in the value (key always present, value may be null). */
 export type WithRequiredNullable<T, K extends keyof StripIndex<T>> = Simplify<
   Omit<StripIndex<T>, K> & { [P in K]-?: Exclude<StripIndex<T>[P], undefined> }
@@ -92,8 +90,6 @@ export type { Service } from '@/stores/serviceStore'
 
 export type { components } from '@/types/api.generated'
 
-export type BootstrapService = components['schemas']['BootstrapService']
-
 export type ServiceConfig = components['schemas']['ServiceConfig']
 
 export type LogFieldsConfig = components['schemas']['LogFieldsConfig']
@@ -106,14 +102,8 @@ export type DashboardTableData = components['schemas']['FieldAggregate']
 
 export type DashboardMapData = components['schemas']['MapPoint']
 
-export type InsightsResponse = components['schemas']['InsightsResponse']
-
 /** One card, discriminated on `id`; `items[].meta` is the per-detection model for that id. */
-export type InsightCardData = InsightsResponse['insights'][number]
-
-export type InsightItem = InsightCardData['items'][number]
-
-export type InsightAvailabilityResponse = components['schemas']['InsightsAvailabilityResponse']
+export type InsightCardData = components['schemas']['InsightsResponse']['insights'][number]
 
 export type Session = components['schemas']['Session']
 

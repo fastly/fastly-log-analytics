@@ -4,7 +4,7 @@ import React from 'react'
 import Link from 'next/link'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
-import { Button, buttonVariants } from '@/components/ui/button'
+import { buttonVariants } from '@/components/ui/button'
 import {
   Select,
   SelectContent,
@@ -12,9 +12,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { RetentionSelect } from '@/components/ui/retention-select'
 import {
-  RETENTION_OPTIONS,
-  RETENTION_LABELS,
   COMMIT_INTERVAL_OPTIONS,
   SYNC_INTERVAL_OPTIONS,
 } from './constants'
@@ -69,16 +68,13 @@ export function AnalystSchedulePanel({
           <p className="text-[10px] text-muted-foreground leading-tight">
             Automatically deletes local data files older than this to save disk space.
           </p>
-          <Select value={cacheRetention} onValueChange={v => v && setCacheRetention(v)}>
-            <SelectTrigger id="cache-retention-analyst" className="h-9 text-sm">
-              <SelectValue>{(val) => RETENTION_LABELS[String(val)] || val}</SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              {RETENTION_OPTIONS.map(o => (
-                <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <RetentionSelect
+            id="cache-retention-analyst"
+            value={cacheRetention}
+            onValueChange={setCacheRetention}
+            triggerClassName="h-9 text-sm"
+            itemClassName=""
+          />
         </div>
       </div>
     </div>
@@ -209,16 +205,11 @@ export function LogSyncSection({
             <p className="text-[10px] text-muted-foreground leading-tight h-6">
               Delete CDN request log data from Iceberg older than this.
             </p>
-            <Select value={dataRetention} onValueChange={v => v && setDataRetention(v)}>
-              <SelectTrigger id="data-retention" className="h-7 text-[11px]">
-                <SelectValue>{(val) => RETENTION_LABELS[String(val)] || val}</SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                {RETENTION_OPTIONS.map(o => (
-                  <SelectItem key={o.value} value={o.value} className="text-[11px]">{o.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <RetentionSelect
+              id="data-retention"
+              value={dataRetention}
+              onValueChange={setDataRetention}
+            />
           </div>
 
           {rumEnabled && (
@@ -227,16 +218,11 @@ export function LogSyncSection({
               <p className="text-[10px] text-muted-foreground leading-tight h-6">
                 Delete RUM beacon telemetry from Iceberg older than this.
               </p>
-              <Select value={rumRetention} onValueChange={v => v && setRumRetention(v)}>
-                <SelectTrigger id="rum-retention" className="h-7 text-[11px]">
-                  <SelectValue>{(val) => RETENTION_LABELS[String(val)] || val}</SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {RETENTION_OPTIONS.map(o => (
-                    <SelectItem key={o.value} value={o.value} className="text-[11px]">{o.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <RetentionSelect
+                id="rum-retention"
+                value={rumRetention}
+                onValueChange={setRumRetention}
+              />
             </div>
           )}
 
@@ -245,16 +231,11 @@ export function LogSyncSection({
             <p className="text-[10px] text-muted-foreground leading-tight h-6">
               Delete local cache files older than this to save disk space.
             </p>
-            <Select value={cacheRetention} onValueChange={v => v && setCacheRetention(v)}>
-              <SelectTrigger id="cache-retention" className="h-7 text-[11px]">
-                <SelectValue>{(val) => RETENTION_LABELS[String(val)] || val}</SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                {RETENTION_OPTIONS.map(o => (
-                  <SelectItem key={o.value} value={o.value} className="text-[11px]">{o.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <RetentionSelect
+              id="cache-retention"
+              value={cacheRetention}
+              onValueChange={setCacheRetention}
+            />
           </div>
           <div className="grid gap-1.5">
             <Label htmlFor="rollup-retention" className="text-[11px] font-medium">Rollup Retention</Label>
@@ -319,16 +300,11 @@ export function LogSyncSection({
         {syncLogEnabled && (
           <div className="grid gap-1.5 max-w-[300px]">
             <Label htmlFor="sync-retention" className="text-[11px] font-medium">Keep cron logs for</Label>
-            <Select value={syncRetention} onValueChange={v => v && setSyncRetention(v)}>
-              <SelectTrigger id="sync-retention" className="h-7 text-[11px]">
-                <SelectValue>{(val) => RETENTION_LABELS[String(val)] || val}</SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                {RETENTION_OPTIONS.map(o => (
-                  <SelectItem key={o.value} value={o.value} className="text-[11px]">{o.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <RetentionSelect
+              id="sync-retention"
+              value={syncRetention}
+              onValueChange={setSyncRetention}
+            />
           </div>
         )}
 

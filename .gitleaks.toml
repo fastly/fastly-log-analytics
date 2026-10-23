@@ -46,7 +46,6 @@ paths = [
     '''^docs/''',
     '''^CHANGELOG\.md$''',
     '''^AGENTS\.md$''',
-    '''^vcl_reviews/.*\.txt$''',                              # VCL live review files (pulled compiled VCL log files)
 
     # Working-tree-only artifacts (all gitignored; matter only for
     # ad-hoc `--no-git` runs). We list the per-service config filename
@@ -58,10 +57,9 @@ paths = [
     # runs. Scope to the actual runtime artifact types rather than the whole
     # tree, so a stray plaintext secret accidentally dropped under data/ (a
     # NEW file type) is still scanned instead of blanket-allowlisted.
-    '''^data/system/share_key(\.pub)?$''',                    # SSH share keypair (the real secret material)
-    '''^data/.*\.(db|duckdb)(-wal|-shm)?$''',                 # SQLite/DuckDB runtime stores (binary blobs)
+    '''^data/.*\.duckdb(-wal|-shm)?$''',                      # DuckDB runtime stores (binary blobs)
     '''^data/.*\.tmp$''',                                     # transient store files
-    '''^data/(tunnel_state|system/usage_logging)\.json$''',  # runtime state blobs
+    '''^data/system/usage_logging\.json$''',                  # runtime state blobs
     '''.*/__pycache__/''',                                    # Python bytecode
     '''\.pyc$''',
 ]

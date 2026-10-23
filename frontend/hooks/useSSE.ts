@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { buildStreamRequest } from '@/lib/streamRequest'
+import { buildServiceHref } from '@/lib/navigation'
 import { runEventStream } from '@/hooks/useEventStream'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useAdminTokenStore } from '@/stores/adminTokenStore'
@@ -74,12 +75,8 @@ export function useSSE({ maxLines }: UseSSEOptions = {}) {
 
     const serviceId = useServiceStore.getState().activeServiceId
     let finalUrlPath = urlPath
-    if (serviceId) {
-      const separator = finalUrlPath.includes('?') ? '&' : '?'
-      const isPathParameterized = finalUrlPath.includes('/services/')
-      if (!finalUrlPath.includes('service=') && !isPathParameterized) {
-        finalUrlPath = `${finalUrlPath}${separator}service=${encodeURIComponent(serviceId)}`
-      }
+    if (serviceId && !finalUrlPath.includes('service=') && !finalUrlPath.includes('/services/')) {
+      finalUrlPath = buildServiceHref(finalUrlPath, serviceId)
     }
     if (mountedRef.current) {
       setLines([])

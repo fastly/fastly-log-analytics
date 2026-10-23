@@ -5,9 +5,9 @@
 // shared transport, inheriting its Caddy-marker trust gate + analyst clamp.
 
 import {
-  parseSsrJson,
+  fetchSsrRangePost,
   resolveDefaultSsrRangeKey,
-  ssrUpstreamGet,
+  type SsrRangeSeed,
 } from './upstream'
 
 // 'p99' is the literal sort_by default in the performance query key (the page
@@ -16,43 +16,12 @@ export const PERFORMANCE_SSR_DEFAULTS = {
   sortBy: 'p99' as const,
 } as const
 
-export interface PerformanceSsrSeed {
+export interface PerformanceSsrSeed extends SsrRangeSeed {
   /** /api/performance/aggregates response for all sections. */
   performanceData: unknown
-  /** Relative-range token (e.g. '24h') — must equal the client key element. */
-  rangeToken: string
-  /** Quantized anchor (ISO-Z, 60s grid) — must equal the client key element. */
-  anchor: string
 }
 
 export const resolvePerformanceDefaultKey = resolveDefaultSsrRangeKey
-
-async function fetchPerformanceData(
-  serviceId: string,
-  rangeToken: string,
-  anchor: string,
-): Promise<unknown> {
-  return parseSsrJson(
-    await ssrUpstreamGet({
-      path: '/api/performance/aggregates',
-      logPrefix: 'ssr/performance',
-      method: 'POST',
-      injectAdminToken: true,
-      // Mirror the client request body EXACTLY. range_token + anchor drive the
-      // scan window (the keyed path ignores start_time/end_time, so omitted).
-      body: {
-        filters: {},
-        sort_by: PERFORMANCE_SSR_DEFAULTS.sortBy,
-        // Omit sections to fetch all sections in a single request
-        sections: undefined,
-        range_token: rangeToken,
-        anchor,
-      },
-      extraHeaders: { 'x-service-id': serviceId },
-    }),
-    'ssr/performance',
-  )
-}
 
 /**
  * SSR-prefetch unified performance selection for the active service.
@@ -65,12 +34,16 @@ export async function fetchPerformanceServerSide(
   serviceId: string | undefined,
   now: Date = new Date(),
 ): Promise<PerformanceSsrSeed | null> {
-  const { rangeToken, anchor } = resolvePerformanceDefaultKey(now)
-
-  if (!serviceId) return null
-
-  const performanceData = await fetchPerformanceData(serviceId, rangeToken, anchor)
-
-  if (performanceData == null) return null
-  return { performanceData, rangeToken, anchor }
+  const seed = await fetchSsrRangePost({
+    serviceId,
+    path: '/api/performance/aggregates',
+    logPrefix: 'ssr/performance',
+    now,
+    body: {
+      sort_by: PERFORMANCE_SSR_DEFAULTS.sortBy,
+      sections: undefined,
+    },
+  })
+  if (!seed) return null
+  return { ...seed, performanceData: seed.data }
 }

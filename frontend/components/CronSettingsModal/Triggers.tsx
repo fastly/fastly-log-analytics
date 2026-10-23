@@ -10,10 +10,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { RetentionSelect } from '@/components/ui/retention-select'
 import { Shield } from 'lucide-react'
 import {
-  RETENTION_OPTIONS,
-  RETENTION_LABELS,
   NGWAF_INTERVAL_OPTIONS,
 } from './constants'
 
@@ -68,16 +67,11 @@ export function NgwafSection({
 
         <div className="grid gap-1.5 max-w-[200px]">
           <Label htmlFor="ngwaf-retention" className="text-[11px] font-medium">Keep cron logs for</Label>
-          <Select value={ngwafRetention} onValueChange={v => v && setNgwafRetention(v)}>
-            <SelectTrigger id="ngwaf-retention" className="h-7 text-[11px]">
-              <SelectValue>{(val) => RETENTION_LABELS[String(val)] || val}</SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              {RETENTION_OPTIONS.map(o => (
-                <SelectItem key={o.value} value={o.value} className="text-[11px]">{o.label}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <RetentionSelect
+            id="ngwaf-retention"
+            value={ngwafRetention}
+            onValueChange={setNgwafRetention}
+          />
         </div>
       </div>
     </div>
@@ -130,16 +124,11 @@ export function IcebergOptimizationSection({
 
         <div className="grid gap-1.5 max-w-[200px]">
           <Label htmlFor="compact-retention" className="text-[11px] font-medium">Keep cron logs for</Label>
-          <Select value={compactRetention} onValueChange={v => v && setCompactRetention(v)}>
-            <SelectTrigger id="compact-retention" className="h-7 text-[11px]">
-              <SelectValue>{(val) => RETENTION_LABELS[String(val)] || val}</SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              {RETENTION_OPTIONS.map(o => (
-                <SelectItem key={o.value} value={o.value} className="text-[11px]">{o.label}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <RetentionSelect
+            id="compact-retention"
+            value={compactRetention}
+            onValueChange={setCompactRetention}
+          />
         </div>
       </div>
     </div>

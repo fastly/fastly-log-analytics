@@ -21,6 +21,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 
 import { CreateInviteDialog } from './CreateInviteDialog'
 import { SortableHead, useTableSort, type SortAccessors } from './sortable'
@@ -147,18 +148,24 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
     setSavingServices(true)
     onError('')
     try {
-      await client.PATCH('/api/admin/share/invites/{invite_id}/services', {
-        params: { path: { invite_id: inviteId } },
-        body: { service_ids: editingServicesDraft },
-      })
-      await client.PATCH('/api/admin/share/invites/{invite_id}/pii', {
-        params: { path: { invite_id: inviteId } },
-        body: { mask_ips: editingMaskIps },
-      })
-      await client.PATCH('/api/admin/share/invites/{invite_id}/sharing', {
-        params: { path: { invite_id: inviteId } },
-        body: { allow_concurrent_sessions: editingAllowConcurrent },
-      })
+      await unwrapClient(
+        client.PATCH('/api/admin/share/invites/{invite_id}/services', {
+          params: { path: { invite_id: inviteId } },
+          body: { service_ids: editingServicesDraft },
+        }),
+      )
+      await unwrapClient(
+        client.PATCH('/api/admin/share/invites/{invite_id}/pii', {
+          params: { path: { invite_id: inviteId } },
+          body: { mask_ips: editingMaskIps },
+        }),
+      )
+      await unwrapClient(
+        client.PATCH('/api/admin/share/invites/{invite_id}/sharing', {
+          params: { path: { invite_id: inviteId } },
+          body: { allow_concurrent_sessions: editingAllowConcurrent },
+        }),
+      )
       setEditingServicesFor(null)
       await onRefresh()
     } catch (e) {
@@ -179,10 +186,12 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
     setSavingPasscode(true)
     setPasscodeError(null)
     try {
-      await client.PATCH('/api/admin/share/invites/{invite_id}/passcode', {
-        params: { path: { invite_id: inviteId } },
-        body: { passcode: passcodeDraft },
-      })
+      await unwrapClient(
+        client.PATCH('/api/admin/share/invites/{invite_id}/passcode', {
+          params: { path: { invite_id: inviteId } },
+          body: { passcode: passcodeDraft },
+        }),
+      )
       setEditingPasscodeFor(null)
       setPasscodeDraft('')
       setPasscodeSavedFor(inviteId)

@@ -49,6 +49,23 @@ const SLOW_QUERIES_MAX = 30
  * the head row keeping the ``×N`` badge and the sibling rows tagged with
  * ``_expandedChild`` for visual indent.
  */
+export function matchesQueryRowFilters(
+  r: Pick<CompletedRow, 'db_type' | 'sql_preview' | 'attribution'>,
+  kindFilter: AttributionKind | 'all',
+  dbFilter: DbFilter,
+  queryLower: string,
+): boolean {
+  if (kindFilter !== 'all' && r.attribution.kind !== kindFilter) return false
+  if (dbFilter !== 'all' && r.db_type !== dbFilter) return false
+  if (!queryLower) return true
+  return (
+    r.sql_preview.toLowerCase().includes(queryLower) ||
+    r.attribution.caller_qualname.toLowerCase().includes(queryLower) ||
+    r.attribution.caller_file.toLowerCase().includes(queryLower) ||
+    r.attribution.label.toLowerCase().includes(queryLower)
+  )
+}
+
 export function useFilteredActive({
   snapshot,
   search,
@@ -72,6 +89,7 @@ export function useFilteredActive({
   slowQueries: GroupedCompletedRow[]
 } {
   const nowMs = useNowMs()
+  const q = search.trim().toLowerCase()
   const justFinished = React.useMemo(() => {
     const all = snapshot?.completed ?? []
     const cutoff = nowMs / 1000 - JUST_FINISHED_WINDOW_S
@@ -82,10 +100,10 @@ export function useFilteredActive({
     const all = snapshot?.completed ?? []
     const filtered = all
       .filter((c) => c.duration_ms >= slowThresholdMs)
-      .filter((c) => dbFilter === 'all' || c.db_type === dbFilter)
+      .filter((c) => matchesQueryRowFilters(c, kindFilter, dbFilter, q))
     const grouped = groupCrons ? collapseCronRunsCompleted(filtered, expandedRunIds) : filtered
     return [...grouped].sort((a, b) => b.duration_ms - a.duration_ms).slice(0, SLOW_QUERIES_MAX)
-  }, [snapshot, slowThresholdMs, dbFilter, groupCrons, expandedRunIds])
+  }, [snapshot, slowThresholdMs, kindFilter, dbFilter, q, groupCrons, expandedRunIds])
 
   const filteredActive = React.useMemo(() => {
     const active: ActiveOrPromotedRow[] = (snapshot?.active ?? []).map((r) => ({ ...r }))
@@ -112,18 +130,9 @@ export function useFilteredActive({
       seen.add(r.query_id)
       combined.push(r)
     }
-    const q = search.trim().toLowerCase()
-    const filtered = combined.filter((r) => {
-      if (kindFilter !== 'all' && r.attribution.kind !== kindFilter) return false
-      if (dbFilter !== 'all' && r.db_type !== dbFilter) return false
-      if (!q) return true
-      return (
-        r.sql_preview.toLowerCase().includes(q) ||
-        r.attribution.caller_qualname.toLowerCase().includes(q) ||
-        r.attribution.caller_file.toLowerCase().includes(q) ||
-        r.attribution.label.toLowerCase().includes(q)
-      )
-    })
+    const filtered = combined.filter((r) =>
+      matchesQueryRowFilters(r, kindFilter, dbFilter, q),
+    )
     // Default order: live rows first (longest-running at top), then
     // promoted/just-finished, then cancelled. Sorting by duration alone
     // let a 5 s just-finished row outrank a 50 ms live row, which hid the
@@ -136,13 +145,13 @@ export function useFilteredActive({
       return b.duration_ms - a.duration_ms
     })
     return groupCrons ? collapseCronRunsActive(ordered, expandedRunIds) : ordered
-  }, [snapshot, justFinished, search, kindFilter, dbFilter, groupCrons, expandedRunIds])
+  }, [snapshot, justFinished, q, kindFilter, dbFilter, groupCrons, expandedRunIds])
 
   const completed = React.useMemo<GroupedCompletedRow[]>(() => {
     const raw = snapshot?.completed ?? []
-    const filtered = dbFilter === 'all' ? raw : raw.filter((c) => c.db_type === dbFilter)
+    const filtered = raw.filter((c) => matchesQueryRowFilters(c, kindFilter, dbFilter, q))
     return groupCrons ? collapseCronRunsCompleted(filtered, expandedRunIds) : filtered
-  }, [snapshot, dbFilter, groupCrons, expandedRunIds])
+  }, [snapshot, kindFilter, dbFilter, q, groupCrons, expandedRunIds])
 
   return { justFinished, filteredActive, completed, slowQueries }
 }

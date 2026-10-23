@@ -3,8 +3,8 @@ import json
 import os
 import sys
 
-# Add project to python path
-sys.path.append(".")
+# Add project root to python path regardless of current working directory
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from backend.core.duckdb import _get_fos_client, get_source_for_service
 

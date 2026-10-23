@@ -236,6 +236,19 @@ class ResponseCacheObservation(BaseModel):
         return {key: value for key, value in handler(self).items() if value is not None or key == "prewarmer"}
 
 
+class SectionTimingEntry(WireSafeModel):
+    """Per-phase wall-clock timing entry in ``BaseResponse.section_timings``."""
+
+    section: str | None = None
+    section_id: str | None = None
+    name: str | None = None
+    time_ms: float | None = None
+    duration_ms: float | None = None
+    sql_count: int | None = None
+    sql_ms: float | None = None
+    cache: str | None = None
+
+
 class BaseResponse(BaseModel):
     """Base response that automatically includes telemetry if present."""
 
@@ -256,7 +269,7 @@ class BaseResponse(BaseModel):
     # that don't instrument get a benign empty list. Safe to surface in
     # prod — phase names + millisecond timings are operational metadata,
     # not SQL/URLs.
-    section_timings: list[dict] = Field(default_factory=list, serialization_alias="_section_timings")
+    section_timings: list[SectionTimingEntry] = Field(default_factory=list, serialization_alias="_section_timings")
 
     @model_serializer(mode="wrap")
     def _strip_debug_when_disabled(self, handler):
@@ -281,7 +294,7 @@ class BaseResponse(BaseModel):
         return cls(**data, debug_queries=dq, debug_calls=dc, debug_sqlite=ds, debug_postgres=ds)
 
 
-class BootstrapService(PassthroughModel):
+class BootstrapService(WireSafeModel):
     service_id: str
     name: str | None = None
     access_level: str | None = None
@@ -290,6 +303,22 @@ class BootstrapService(PassthroughModel):
     rum_log_period: int | None = None
     analyst_path_a_supported: bool = True
     analyst_path_a_reason: str | None = None
+    is_high_scale: bool | None = None
+
+
+class BootstrapSettings(WireSafeModel):
+    """Typed settings envelope returned by ``GET /api/bootstrap``."""
+
+    initializing: bool | None = None
+    access_level: str | None = None
+    storage_mode: str | None = None
+    is_remote_analyst: bool | None = None
+    needs_login: bool | None = None
+    analyst_email: str | None = None
+    analyst_name: str | None = None
+    mask_ips: bool | None = None
+    admin_token: str | None = None
+    web_vitals_enabled: bool | None = None
 
 
 class BootstrapPopGeo(WireSafeModel):
@@ -324,6 +353,7 @@ class LastSyncInfo(WireSafeModel):
     duration_s: float | None = None
 
 
+from backend.models._base import SchemaColumn  # noqa: E402
 from backend.models.admin import (  # noqa: E402
     LogAccountingResponse,
     LogExtentsResponse,
@@ -334,7 +364,6 @@ from backend.models.admin_queries import (  # noqa: E402
     SlowQueriesCountResponse,
     SummaryResponse,
 )
-from backend.models.query import SchemaColumn  # noqa: E402
 from backend.models.services import CronRunsPageResponse  # noqa: E402
 from backend.models.session_scoring import ScoringLabelsResponse  # noqa: E402
 from backend.models.share_admin import ShareStatusBannerResponse  # noqa: E402
@@ -366,7 +395,7 @@ class BootstrapResponse(BaseResponse):
     # the frontend formats + renders it (see frontend/lib/pop.ts). Separate
     # from `pops` (lat/lon) so the world-map consumer is untouched.
     pop_geo: dict[str, BootstrapPopGeo] | None = None
-    settings: dict[str, str | bool | None] | None = None
+    settings: BootstrapSettings | None = None
     custom_dashboard_cards: list[CustomCard] = Field(default_factory=list)
     active_log_field_ids: list[str] = Field(default_factory=list)
     ngwaf_configured: bool = False

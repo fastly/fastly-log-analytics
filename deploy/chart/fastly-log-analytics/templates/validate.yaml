@@ -15,16 +15,20 @@ Template-time coherence gates for the deployment topology.
 {{- if and (eq .Values.config.sseBackplane "valkey") (not $hasBroker) -}}
 {{- fail "config.sseBackplane=valkey requires a broker URL: set secrets.celeryBrokerUrl or secrets.existingSecret." -}}
 {{- end -}}
+{{- if .Values.config.ducklakeCatalog -}}
+{{- if not (or (hasPrefix "postgres://" .Values.config.ducklakeCatalog) (hasPrefix "postgresql://" .Values.config.ducklakeCatalog)) -}}
+{{- fail (printf "config.ducklakeCatalog must be a Postgres DSN (postgres:// or postgresql://) per ADR-22; got %q." .Values.config.ducklakeCatalog) -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.secrets.metadataDsn -}}
+{{- if not (or (hasPrefix "postgres://" .Values.secrets.metadataDsn) (hasPrefix "postgresql://" .Values.secrets.metadataDsn)) -}}
+{{- fail (printf "secrets.metadataDsn must be a Postgres DSN (postgres:// or postgresql://) per ADR-22; got %q." .Values.secrets.metadataDsn) -}}
+{{- end -}}
+{{- end -}}
 {{- if eq $mode "high_scale" -}}
 {{- $catalog := required "config.deploymentMode=high_scale requires config.ducklakeCatalog to be a Postgres DSN (postgres:// or postgresql://)." .Values.config.ducklakeCatalog -}}
-{{- if not (or (hasPrefix "postgres://" $catalog) (hasPrefix "postgresql://" $catalog)) -}}
-{{- fail (printf "config.ducklakeCatalog must be a Postgres DSN (postgres:// or postgresql://) when config.deploymentMode=high_scale; got %q." $catalog) -}}
-{{- end -}}
 {{- if not .Values.secrets.existingSecret -}}
 {{- $dsn := required "config.deploymentMode=high_scale requires a shared Postgres metadata database; set secrets.metadataDsn or secrets.existingSecret." .Values.secrets.metadataDsn -}}
-{{- if not (or (hasPrefix "postgres://" $dsn) (hasPrefix "postgresql://" $dsn)) -}}
-{{- fail (printf "secrets.metadataDsn must be a Postgres DSN (postgres:// or postgresql://) when config.deploymentMode=high_scale; got %q." $dsn) -}}
-{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- if .Values.adminGateway.enabled }}

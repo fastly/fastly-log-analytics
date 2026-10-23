@@ -6,6 +6,7 @@ import { useFilterStore } from '@/stores/filterStore'
 import { useShallow } from 'zustand/react/shallow'
 import { useServiceStore } from '@/stores/serviceStore'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { queryKeys } from '@/lib/query-keys'
 import { useQueryClient } from '@tanstack/react-query'
 import { usePathname } from 'next/navigation'
@@ -65,7 +66,7 @@ export function SaveViewDialog() {
           relativeRange,
         },
       }
-      await client.POST("/api/views/", {
+      await unwrapClient(client.POST("/api/views/", {
         body: {
           service_id: activeServiceId,
           name,
@@ -74,8 +75,8 @@ export function SaveViewDialog() {
           end_time: endTime,
           page: pathname || "/dashboard"
         }
-      })
-      queryClient.invalidateQueries({ queryKey: ['views', activeServiceId] })
+      }))
+      queryClient.invalidateQueries({ queryKey: queryKeys.views(activeServiceId) })
       // Bootstrap response also carries seeded views; invalidate so the
       // next bootstrap refetch reflects the new view.
       queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })

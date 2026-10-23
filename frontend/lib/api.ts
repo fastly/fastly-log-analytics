@@ -8,55 +8,9 @@ import { useSessionRoleStore } from "@/stores/sessionRoleStore";
 import { showReadOnlyToast, showBusyToast, showToast } from "@/lib/toast";
 import { isUserActive } from "@/lib/userActivity";
 import { getPageLoadId, rotatePageLoadId } from "@/lib/pageLoadId";
+import { extractApiError, unwrapClient } from "@/lib/api-client";
 
-export { getPageLoadId, rotatePageLoadId };
-
-export function extractApiError(error: unknown): string {
-  if (!error) return 'Unknown error'
-  if (typeof error === 'string') return error
-  if (error instanceof Error && error.message) return error.message
-  const e = error as {
-    detail?: unknown;
-    message?: unknown;
-    error?: unknown;
-    errors?: unknown;
-  }
-  if (e.detail) {
-    if (typeof e.detail === 'string') return e.detail
-    if (Array.isArray(e.detail)) {
-      return (e.detail as Array<{ loc?: unknown[]; msg?: unknown }>).map((err) => {
-        const field = Array.isArray(err.loc) && err.loc.length > 0 ? String(err.loc[err.loc.length - 1]) : 'Field'
-        const msg = typeof err.msg === 'string' ? err.msg : 'Invalid value'
-        return `${field}: ${msg}`
-      }).join(', ')
-    }
-    if (typeof e.detail === 'object' && e.detail !== null) {
-      const detailObj = e.detail as {
-        errors?: unknown;
-        messages?: unknown;
-        message?: unknown;
-        error?: unknown;
-      }
-      if (Array.isArray(detailObj.errors)) {
-        return detailObj.errors.map(String).join(', ')
-      }
-      if (Array.isArray(detailObj.messages) && detailObj.messages.length > 0) {
-        return detailObj.messages.map(String).join(', ')
-      }
-      if (typeof detailObj.message === 'string' && detailObj.message) {
-        return detailObj.message
-      }
-      if (detailObj.error) {
-        return String(detailObj.error)
-      }
-    }
-    return JSON.stringify(e.detail)
-  }
-  if (typeof e.message === 'string' && e.message) return e.message
-  if (e.error) return String(e.error)
-  if (Array.isArray(e.errors)) return e.errors.map(String).join(', ')
-  try { return JSON.stringify(error) } catch { return 'Unknown error' }
-}
+export { getPageLoadId, rotatePageLoadId, extractApiError, unwrapClient };
 
 export function getApiBase() {
   if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
@@ -92,6 +46,41 @@ export const client = createClient<paths>({
 
 export { buildAdminHeaders } from "@/lib/adminHeaders";
 
+/**
+ * Shared client-context header stamper used by both `adminFetch` and the
+ * `openapi-fetch` request middleware so `X-Page-Load-ID`, `X-Admin-Token`,
+ * `x-service-id`, and `x-debug-responses` are injected in a single place.
+ */
+export function stampClientContextHeaders(headers: Headers): string | null {
+  const currentPageLoadId = getPageLoadId();
+  if (currentPageLoadId && !headers.has("X-Page-Load-ID")) {
+    headers.set("X-Page-Load-ID", currentPageLoadId);
+  }
+  try {
+    const token = useAdminTokenStore.getState().token;
+    if (token && !headers.has("X-Admin-Token")) {
+      headers.set("X-Admin-Token", token);
+    }
+  } catch { /* SSR pre-hydration — fall through without the header */ }
+  try {
+    const debug = useDebugStore.getState();
+    if ((debug.enabled || debug.apiCallsEnabled) && !headers.has("x-debug-responses")) {
+      headers.set("x-debug-responses", "1");
+    }
+  } catch { /* SSR pre-hydration — fall through without the header */ }
+  let sid: string | null = null;
+  try {
+    sid = useServiceStore.getState().activeServiceId;
+    if (!sid && typeof window !== "undefined") {
+      sid = new URLSearchParams(window.location.search).get("service");
+    }
+    if (sid && !headers.has("x-service-id")) {
+      headers.set("x-service-id", sid);
+    }
+  } catch { /* SSR pre-hydration — fall through without the header */ }
+  return sid;
+}
+
 // Plain ``fetch`` wrapper for the handful of callers that don't go
 // through the openapi-fetch client (typically because the response
 // type isn't in the OpenAPI spec or the caller wants raw Response).
@@ -107,41 +96,9 @@ export function adminFetch(
   input: string | URL | Request,
   init: RequestInit = {},
 ): Promise<Response> {
-  const headers = new Headers(init.headers ?? {})
-  const currentPageLoadId = getPageLoadId()
-  if (currentPageLoadId && !headers.has("X-Page-Load-ID")) {
-    headers.set("X-Page-Load-ID", currentPageLoadId)
-  }
-  try {
-    const token = useAdminTokenStore.getState().token
-    if (token && !headers.has("X-Admin-Token")) {
-      headers.set("X-Admin-Token", token)
-    }
-  } catch { /* SSR pre-hydration — fall through without the header */ }
-  // Service-scoped admin endpoints resolve the service from the x-service-id
-  // header (same as the openapi-fetch `client` middleware below). adminFetch
-  // historically only stamped the admin token, so service-scoped admin calls
-  // (log-accounting, slow-queries/count) silently resolved to the backend's
-  // DEFAULT service — which is why the ingest-gap card never changed when you
-  // switched services. Mirror the client middleware and stamp the active
-  // service. Global admin endpoints (live-query registry, host metrics) ignore
-  // it; path-scoped /api/services/{id}/* calls already carry the id.
-  try {
-    let sid = useServiceStore.getState().activeServiceId
-    if (!sid && typeof window !== "undefined") {
-      sid = new URLSearchParams(window.location.search).get("service");
-    }
-    if (sid && !headers.has("x-service-id")) {
-      headers.set("x-service-id", sid)
-    }
-  } catch { /* SSR pre-hydration — fall through without the header */ }
-  try {
-    const debug = useDebugStore.getState()
-    if ((debug.enabled || debug.apiCallsEnabled) && !headers.has("x-debug-responses")) {
-      headers.set("x-debug-responses", "1")
-    }
-  } catch { /* SSR pre-hydration — fall through without the header */ }
-  return fetch(input, { ...init, headers })
+  const headers = new Headers(init.headers ?? {});
+  stampClientContextHeaders(headers);
+  return fetch(input, { ...init, headers });
 }
 
 type JsonOf<P extends keyof paths, M extends "get" | "post" = "get"> = paths[P] extends {
@@ -314,35 +271,7 @@ function redirectToShareLoginIfSessionDead(): void {
 // Middleware to inject activeServiceId and handle errors
 client.use({
   async onRequest({ request }) {
-    const currentPageLoadId = getPageLoadId()
-    if (currentPageLoadId) {
-      request.headers.set("X-Page-Load-ID", currentPageLoadId)
-    }
-    // The ``_debug_queries`` / ``_debug_calls`` envelope is ~40 KB on
-    // /api/insights cold loads and ~5-15 KB on every other admin call.
-    // Opt in via this header only when the admin Debug Panel toggle is
-    // on, so the default admin payload stays slim. Backend strips the
-    // envelope when the header is absent.
-    try {
-      const debug = useDebugStore.getState();
-      if (debug.enabled || debug.apiCallsEnabled) {
-        request.headers.set("x-debug-responses", "1");
-      }
-    } catch { /* zustand may not be hydrated yet on SSR — leave header off */ }
-
-    // Phase Q: when the backend has ADMIN_SHARED_SECRET configured it
-    // ships the token down in /api/bootstrap's settings.admin_token and
-    // useBootstrap mirrors it into this store. We inject it here so every
-    // outbound admin request carries the second-factor header without
-    // each caller wiring it up. Analyst (Fastly-fronted) bootstraps
-    // return null, the store stays empty, and this no-ops on the analyst
-    // branch — so the Fastly path is unaffected.
-    try {
-      const adminToken = useAdminTokenStore.getState().token;
-      if (adminToken) {
-        request.headers.set("X-Admin-Token", adminToken);
-      }
-    } catch { /* SSR pre-hydration — interceptor will fire on the next request */ }
+    const activeServiceId = stampClientContextHeaders(request.headers);
 
     // Idle-timeout activity signal for the analyst session. "0" tells the
     // backend this request is NOT genuine user activity (no mouse/keyboard/
@@ -352,13 +281,7 @@ client.use({
     // touches a session). Set before the activeServiceId early-returns below.
     request.headers.set("X-User-Active", isUserActive() ? "1" : "0");
 
-    let { activeServiceId } = useServiceStore.getState();
-    if (!activeServiceId && typeof window !== "undefined") {
-      activeServiceId = new URLSearchParams(window.location.search).get("service");
-    }
-
     if (activeServiceId) {
-      request.headers.set("x-service-id", activeServiceId);
       return request;
     }
     // No active service at request time. Most paths will 400 — short-
@@ -464,12 +387,7 @@ client.use({
         (response.status === 403 && msg === 'read_only') ||
         isBusy503 ||
         response.status === 401 ||
-        (response.status === 403 &&
-          SESSION_DEAD_403_ERRORS.has(
-            (error as { detail?: { error?: string }; error?: string })?.detail?.error ??
-              (error as { error?: string })?.error ??
-              ''
-          ));
+        (response.status === 403 && typeof errorCode === "string" && SESSION_DEAD_403_ERRORS.has(errorCode));
       if (isMutation && !alreadyHandled) {
         showToast(msg || 'Request failed', 'error');
       }

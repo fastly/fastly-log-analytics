@@ -338,6 +338,7 @@ async function run() {
 
   const networkRecords: NetworkRecord[] = [];
   const consoleErrors: string[] = [];
+  const executionErrors: string[] = [];
   const piiViolations: Array<{ url: string; snippet: string }> = [];
 
   const page: Page = await context.newPage();
@@ -501,7 +502,10 @@ async function run() {
     }
 
   } catch (err: any) {
-    console.error(`Verification execution encountered an error: ${err.message}`);
+    const errMsg = err?.message || String(err);
+    executionErrors.push(errMsg);
+    consoleErrors.push(`EXECUTION_ERROR: ${errMsg}`);
+    console.error(`Verification execution encountered an error: ${errMsg}`);
   } finally {
     // Finalize HAR and close
     await context.close();
@@ -592,6 +596,11 @@ async function run() {
 
   if (failedRequests.some((r) => r.status >= 500)) {
     console.error(`FATAL: 5xx server errors encountered!`);
+    process.exit(1);
+  }
+
+  if (executionErrors.length > 0) {
+    console.error(`FATAL: Verification execution failed: ${executionErrors.join('; ')}`);
     process.exit(1);
   }
 }

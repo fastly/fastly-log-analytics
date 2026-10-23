@@ -80,7 +80,12 @@ export function FieldsStep({ s }: { s: WizardState }) {
                     onClick={() =>
                       setConfig((prev) => ({
                         ...prev,
-                        log_fields: { groups: [], field_overrides: {} },
+                        log_fields: {
+                          ...prev.log_fields,
+                          groups: [],
+                          field_overrides: {},
+                          field_limits: prev.log_fields.field_limits,
+                        },
                       }))
                     }
                   >

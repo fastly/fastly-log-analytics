@@ -12,6 +12,7 @@ from backend.models.common import (
     RangeKeyedRequest,
     ResponseCacheObservation,
     Seconds14400,
+    SectionTimingEntry,
 )
 
 
@@ -255,7 +256,7 @@ class TransportProtocolShare(BaseModel):
 
 
 class TransportMetrics(BaseModel):
-    section_timings: list[dict] | None = Field(
+    section_timings: list[SectionTimingEntry] | None = Field(
         default=None,
         serialization_alias="_section_timings",
         exclude_if=lambda value: value is None,
@@ -309,12 +310,7 @@ class NetworkQualityRequest(FilteredRequest):
     region_country: str = "US"
 
 
-class NetworkBundleRequest(RangeKeyedRequest):
-    metric: str = "health_score"
-    bucket_seconds: Seconds14400 = 300
-    top_n: Limit100 = 30
-    map_asn: str = "all"
-    sections: list[SectionName] | None = None
+class NetworkBundleRequest(NetworkHealthRequest):
     region_country: str = "US"
 
 

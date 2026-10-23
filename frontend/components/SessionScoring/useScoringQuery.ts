@@ -1,6 +1,6 @@
 'use client'
 
-import { useQuery, type UseQueryOptions, type UseQueryResult } from '@tanstack/react-query'
+import { useQuery, type QueryClient, type UseQueryOptions, type UseQueryResult } from '@tanstack/react-query'
 
 /**
  * Shared React Query wrapper for the service-scoped session-scoring GET
@@ -27,5 +27,15 @@ export function useScoringQuery<T>(
       return data
     },
     ...options,
+  })
+}
+
+export function invalidateServiceScoringQueries(queryClient: QueryClient, serviceId: string): void {
+  void queryClient.invalidateQueries({
+    predicate: (q) =>
+      Array.isArray(q.queryKey) &&
+      typeof q.queryKey[0] === 'string' &&
+      q.queryKey[0].startsWith('scoring-') &&
+      q.queryKey[1] === serviceId,
   })
 }

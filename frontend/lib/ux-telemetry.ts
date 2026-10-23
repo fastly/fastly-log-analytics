@@ -1,4 +1,5 @@
 import { getApiBase } from '@/lib/api'
+import type { Schema } from '@/types/api'
 
 // Fire-and-forget UX-event emitter — POSTs to /api/ux-events via
 // sendBeacon when available (so the request survives a page nav that
@@ -9,16 +10,7 @@ import { getApiBase } from '@/lib/api'
 // The companion of WebVitalsReporter's beacon pattern; sibling endpoint
 // shape is documented in backend/routers/ux_events.py.
 
-export interface UxEvent {
-  event: string
-  pathname?: string
-  /** Disambiguates multiple instances of the same component on a page
-   *  (e.g. multiple DataTables on /sessions). Pass the table caption /
-   *  title where available; the column-reorder lens uses it to slice
-   *  per-table reorder counts. */
-  component_id?: string
-  details?: Record<string, unknown>
-}
+export type UxEvent = Schema<'UxEventPayload'>
 
 export function reportUxEvent(evt: UxEvent): void {
   if (typeof window === 'undefined') return

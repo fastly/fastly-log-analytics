@@ -80,10 +80,14 @@ function earliestFromLogExtents(
 export async function fetchInsightsServerSide(
   serviceId: string | undefined,
   logExtents: LogExtentsLike | null | undefined,
+  initialWindow?: string | null,
+  initialBaseline?: string | null,
 ): Promise<InsightsSsrSeed | null> {
-  const { windowHours, baselineHours } = resolveInsightsDefault(
+  const defaults = resolveInsightsDefault(
     earliestFromLogExtents(logExtents),
   )
+  const windowHours = initialWindow || defaults.windowHours
+  const baselineHours = initialBaseline || defaults.baselineHours
 
   // Without a service id the backend 400s — return the tokens so the page can
   // still build the (unseeded) client key path, but no data to seed.

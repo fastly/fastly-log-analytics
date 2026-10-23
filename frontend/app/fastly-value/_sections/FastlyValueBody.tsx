@@ -13,6 +13,7 @@ import {
 } from 'lucide-react'
 import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { components } from '@/types/api.generated'
@@ -77,7 +78,7 @@ export default function FastlyValueBody({
     range: { relativeRange, isAutoRange, startTime, endTime, anchor },
     keyParts: ['1 day', activeTab],
     queryFn: async ({ rangeBody, signal }) => {
-      const { data } = await client.POST('/api/value/summary', {
+      return unwrapClient(client.POST('/api/value/summary', {
         signal,
         body: {
           filters: filterPayload,
@@ -85,8 +86,7 @@ export default function FastlyValueBody({
           sections,
           ...rangeBody,
         },
-      })
-      return data
+      }))
     },
     queryOptions: {
       enabled: activeTab !== 'assets',

@@ -1,7 +1,7 @@
 import React from 'react'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { renderWithQuery } from '@/__tests__/helpers/renderWithQuery'
 
 const { mockGet, mockDelete, mockPush } = vi.hoisted(() => ({
   mockGet: vi.fn(),
@@ -37,17 +37,6 @@ vi.mock('@/lib/api', async (importOriginal) => {
 
 import UsageLogClient from '@/app/admin/usage-log/_sections/UsageLogClient'
 import Loading from '@/app/admin/usage-log/loading'
-
-function renderWithQuery(ui: React.ReactElement) {
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      queries: {
-        retry: false,
-      },
-    },
-  })
-  return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>)
-}
 
 const SAMPLE_USAGE_LOG = {
   service_id: 'svc-alpha',

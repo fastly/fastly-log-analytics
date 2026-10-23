@@ -261,9 +261,7 @@ def _update_local_config(service_id: str, mutate: Callable[[dict], None]) -> Non
     try:
         mutate_config(service_id, mutate)
     except OSError as e:
-        import logging
-
-        logging.getLogger("backend.scheduler").info(f"Skipped updating read-only config cache: {e}")
+        logger.info("Skipped updating read-only config cache: %s", e)
 
 
 def reconcile_vcl_state(

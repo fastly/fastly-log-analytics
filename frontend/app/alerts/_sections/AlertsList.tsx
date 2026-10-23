@@ -3,6 +3,7 @@
 import React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { showToast } from '@/lib/toast'
 import { useServiceStore } from '@/stores/serviceStore'
 import { Button } from '@/components/ui/button'
@@ -81,10 +82,10 @@ export function AlertsList({
 
     setTogglingId(alert.id!)
     try {
-      await client.PATCH("/api/alerts/{alert_id}/enabled", {
+      await unwrapClient(client.PATCH("/api/alerts/{alert_id}/enabled", {
         params: { path: { alert_id: alert.id! } },
         body: { enabled: newEnabled }
-      })
+      }))
       queryClient.invalidateQueries({ queryKey: ['alerts'] })
     } catch (err) {
       console.error('Failed to toggle alert', err)

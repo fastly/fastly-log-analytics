@@ -16,19 +16,10 @@
  */
 import { expect, test } from '@playwright/test'
 import { E2E_BACKEND_PORT } from '../playwright.config'
+import { setCookieValues } from './helpers/analyst-session'
 
 const MOCK_IDP = `http://127.0.0.1:${E2E_BACKEND_PORT}/mock-idp`
 const E2E_EMAIL = 'e2e-analyst@example.com'
-
-function setCookieValues(headers: { name: string; value: string }[], cookieName: string): string | null {
-  for (const h of headers) {
-    if (h.name.toLowerCase() === 'set-cookie' && h.value.startsWith(`${cookieName}=`)) {
-      const val = h.value.split(';', 1)[0].slice(cookieName.length + 1)
-      if (val) return val
-    }
-  }
-  return null
-}
 
 test.describe('analyst OAuth login', () => {
   test('mock IdP discovery + auth-config expose the configured provider', async ({ request }) => {

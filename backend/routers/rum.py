@@ -108,22 +108,25 @@ async def receive_rum_beacon_fallback() -> Response:
     return Response(status_code=204)
 
 
-@asset_router.get("/js/rum.js")
-async def get_rum_tracker(request: Request, service_id: str | None = None):
-    # Resolve active service ID
+def _resolve_rum_js_service_id(request: Request, service_id: str | None) -> str | None:
+    """Resolve active service ID from query param, header, cookie, or default configured service."""
     sid = service_id
     if not sid:
         sid = request.headers.get("x-service-id")
     if not sid:
         sid = request.cookies.get("active_service_id")
 
-    # Check if this service ID is actually configured
     if sid and not svcconfig.load_config(sid):
         sid = None
 
     if not sid:
-        # Fallback to default/first configured service
         sid = svcconfig.get_active_service_id(fallback_to_first=True)
+    return sid
+
+
+@asset_router.get("/js/rum.js")
+async def get_rum_tracker(request: Request, service_id: str | None = None):
+    sid = _resolve_rum_js_service_id(request, service_id)
 
     if not sid:
         # No configured services found, return a silent dummy script
@@ -154,20 +157,7 @@ async def get_rum_tracker(request: Request, service_id: str | None = None):
 
 @asset_router.get("/js/faro-sdk.js")
 async def get_faro_sdk(request: Request, service_id: str | None = None):
-    # Resolve active service ID
-    sid = service_id
-    if not sid:
-        sid = request.headers.get("x-service-id")
-    if not sid:
-        sid = request.cookies.get("active_service_id")
-
-    # Check if this service ID is actually configured
-    if sid and not svcconfig.load_config(sid):
-        sid = None
-
-    if not sid:
-        # Fallback to default/first configured service
-        sid = svcconfig.get_active_service_id(fallback_to_first=True)
+    sid = _resolve_rum_js_service_id(request, service_id)
 
     version = DEFAULT_FARO_VERSION
     if sid:

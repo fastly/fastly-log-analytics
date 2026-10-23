@@ -15,6 +15,18 @@ export const queryKeys = {
 
   shareBanner: () => ['share-banner'] as const,
 
+  services: () => ['services'] as const,
+
+  systemJobs: () => ['system-jobs'] as const,
+
+  views: (serviceId: string | null | undefined) => ['views', serviceId] as const,
+
+  logExtents: (serviceId: string | null | undefined) => ['log-extents', serviceId] as const,
+  logExtentsAll: () => ['log-extents'] as const,
+
+  scoringLabels: (serviceId: string | null | undefined) => ['scoring-labels', serviceId] as const,
+  scoringLabelsAll: () => ['scoring-labels'] as const,
+
   rumStatus: (serviceId: string | null | undefined) => ['rum-status', serviceId] as const,
 
   syncStatus: (serviceId: string | null | undefined) => ['sync-status', serviceId] as const,

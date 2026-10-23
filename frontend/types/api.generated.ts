@@ -6694,9 +6694,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             _history?: components["schemas"]["HistoryObservation"] | null;
             /** Reader Coverage */
             _reader_coverage?: components["schemas"]["ReaderCoverage"][] | null;
@@ -6705,7 +6703,7 @@ export interface components {
                 [key: string]: components["schemas"]["FieldAggregate"];
             };
             /** Time Series */
-            time_series: components["schemas"]["backend__models__dashboard__TimeSeriesPoint"][];
+            time_series: components["schemas"]["TimeSeriesPoint"][];
             /** Map Data */
             map_data: components["schemas"]["MapPoint"][];
             /** Where Clause */
@@ -6836,9 +6834,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             data: components["schemas"]["AlertEvaluateData"];
         };
         /** AlertEvaluateResultItem */
@@ -6875,9 +6871,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Data */
             data: components["schemas"]["Alert"][];
             /** Evaluated At */
@@ -6933,9 +6927,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             data?: components["schemas"]["AlertPreviewData"] | null;
             /** Error */
             error?: string | null;
@@ -6961,9 +6953,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Data */
             data: components["schemas"]["AlertMutationData"] | {
                 [key: string]: unknown;
@@ -7029,9 +7019,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             data: components["schemas"]["AlertTestWebhookData"];
         };
         /** AnalystInvite */
@@ -7055,9 +7043,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Name */
             name: string;
             /** Service Id */
@@ -7221,9 +7207,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /**
              * Asset Type Breakdown
              * @default []
@@ -7343,6 +7327,10 @@ export interface components {
          * @description Per-kind bundle counts from ``POST /admin/backfill-bundle-rollups``.
          */
         BackfillBundleRollupsResponse: {
+            /** Time Series */
+            time_series?: number | null;
+            /** Sessions */
+            sessions?: number | null;
             /** Slow Urls */
             slow_urls?: number | null;
             /** Origin Summary */
@@ -7399,6 +7387,18 @@ export interface components {
             overview?: number | null;
             /** Overview Days */
             overview_days?: number | null;
+            /** Network Heatmap */
+            network_heatmap?: number | null;
+            /** Network Heatmap Days */
+            network_heatmap_days?: number | null;
+            /** Network Geo */
+            network_geo?: number | null;
+            /** Network Geo Days */
+            network_geo_days?: number | null;
+            /** Network Quality */
+            network_quality?: number | null;
+            /** Pop Health */
+            pop_health?: number | null;
             /** Rum */
             rum?: number | null;
         } & {
@@ -7506,9 +7506,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Active Service Id */
             active_service_id: string | null;
             /** Services */
@@ -7532,10 +7530,7 @@ export interface components {
             pop_geo?: {
                 [key: string]: components["schemas"]["BootstrapPopGeo"];
             } | null;
-            /** Settings */
-            settings?: {
-                [key: string]: string | boolean | null;
-            } | null;
+            settings?: components["schemas"]["BootstrapSettings"] | null;
             /** Custom Dashboard Cards */
             custom_dashboard_cards?: components["schemas"]["CustomCard"][];
             /** Active Log Field Ids */
@@ -7579,6 +7574,36 @@ export interface components {
             analyst_path_a_supported: boolean;
             /** Analyst Path A Reason */
             analyst_path_a_reason?: string | null;
+            /** Is High Scale */
+            is_high_scale?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * BootstrapSettings
+         * @description Typed settings envelope returned by ``GET /api/bootstrap``.
+         */
+        BootstrapSettings: {
+            /** Initializing */
+            initializing?: boolean | null;
+            /** Access Level */
+            access_level?: string | null;
+            /** Storage Mode */
+            storage_mode?: string | null;
+            /** Is Remote Analyst */
+            is_remote_analyst?: boolean | null;
+            /** Needs Login */
+            needs_login?: boolean | null;
+            /** Analyst Email */
+            analyst_email?: string | null;
+            /** Analyst Name */
+            analyst_name?: string | null;
+            /** Mask Ips */
+            mask_ips?: boolean | null;
+            /** Admin Token */
+            admin_token?: string | null;
+            /** Web Vitals Enabled */
+            web_vitals_enabled?: boolean | null;
         } & {
             [key: string]: unknown;
         };
@@ -7701,9 +7726,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Sources */
             sources: components["schemas"]["BotSourceMeta"][];
             rdns: components["schemas"]["RdnsStats"];
@@ -7792,9 +7815,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             aggregates?: components["schemas"]["AggregatesResponse"] | null;
             top_bots?: components["schemas"]["SecurityTopBotsResponse"] | null;
         };
@@ -7857,9 +7878,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /**
              * Url
              * @default
@@ -8093,12 +8112,12 @@ export interface components {
              * Offload Time Series
              * @default []
              */
-            offload_time_series: components["schemas"]["backend__models__value__TimeSeriesPoint"][];
+            offload_time_series: components["schemas"]["ValueTimeSeriesPoint"][];
             /**
              * Cache State Time Series
              * @default []
              */
-            cache_state_time_series: components["schemas"]["backend__models__value__TimeSeriesPoint"][];
+            cache_state_time_series: components["schemas"]["ValueTimeSeriesPoint"][];
         };
         /**
          * CancelResponse
@@ -8447,9 +8466,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             detail: components["schemas"]["ErrorDetail"];
         };
         /** ClickHouseReplayRequest */
@@ -8492,9 +8509,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Service Id */
             service_id: string;
             /** Dry Run */
@@ -8551,9 +8566,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Service Id */
             service_id: string;
             /** Enabled */
@@ -8598,9 +8611,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Available */
             available: boolean;
             /**
@@ -9398,7 +9409,7 @@ export interface components {
          * CronSettingsPartial
          * @description Partial-update slice of a single cron block (sync / compact / ngwaf).
          *
-         *     Distinct from ``ServiceCronSync`` etc. above which model the full
+         *     Distinct from ``ServiceCronSync`` etc. below which model the full
          *     persisted config (``enabled`` required). Here every field is
          *     optional — the handler only writes the keys the caller actually sent
          *     so the matching cron block stays unchanged for fields the operator
@@ -9457,9 +9468,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Live Bytes */
             live_bytes: number;
             /** Live Files */
@@ -9663,9 +9672,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             field: components["schemas"]["CustomField"];
             /**
              * Warnings
@@ -9768,9 +9775,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Fields */
             fields: components["schemas"]["CustomField"][];
         };
@@ -10039,9 +10044,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Values */
             values: components["schemas"]["FieldTopEntry"][];
             /** Field */
@@ -10394,9 +10397,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Service Id */
             service_id: string;
             /** Domain */
@@ -10444,9 +10445,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Export Id */
             export_id: string;
             /** Service Id */
@@ -10519,9 +10518,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Export Id */
             export_id: string;
             /** Service Id */
@@ -10559,9 +10556,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Job Id */
             job_id: string;
             /** Cancelled */
@@ -10588,9 +10583,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Job Id */
             job_id: string;
             /**
@@ -10679,9 +10672,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Service Id */
             service_id: string;
             /** Domain */
@@ -10747,9 +10738,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Rows */
             rows: {
                 [key: string]: unknown;
@@ -10787,9 +10776,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Service Id */
             service_id: string;
             /** Recommended Hot Days */
@@ -10836,9 +10823,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Rows */
             rows: {
                 [key: string]: unknown;
@@ -10976,7 +10961,7 @@ export interface components {
              * Io Time Series
              * @default []
              */
-            io_time_series: components["schemas"]["backend__models__value__TimeSeriesPoint"][];
+            io_time_series: components["schemas"]["ValueTimeSeriesPoint"][];
             /** Io Pct Of Traffic */
             io_pct_of_traffic?: number | null;
             /** Io Estimated Cost Usd */
@@ -10992,7 +10977,7 @@ export interface components {
              * Io Bandwidth Time Series
              * @default []
              */
-            io_bandwidth_time_series: components["schemas"]["backend__models__value__TimeSeriesPoint"][];
+            io_bandwidth_time_series: components["schemas"]["ValueTimeSeriesPoint"][];
             /**
              * Optimization Opportunities
              * @default []
@@ -11011,7 +10996,7 @@ export interface components {
              * Io Compression Time Series
              * @default []
              */
-            io_compression_time_series: components["schemas"]["backend__models__value__TimeSeriesPoint"][];
+            io_compression_time_series: components["schemas"]["ValueTimeSeriesPoint"][];
             /** Image Request Count */
             image_request_count?: number | null;
             /** Image Bandwidth Bytes */
@@ -11093,9 +11078,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
         };
         /** ImageOptimizationOpportunitiesInsightCard */
         ImageOptimizationOpportunitiesInsightCard: {
@@ -11354,9 +11337,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Files */
             files: components["schemas"]["IngestedFile"][];
         };
@@ -12797,9 +12778,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Insights */
             insights: (components["schemas"]["ErrorSpikesInsightCard"] | components["schemas"]["BotnetGroupingInsightCard"] | components["schemas"]["NewCountryTrafficInsightCard"] | components["schemas"]["CitySurgesInsightCard"] | components["schemas"]["CityErrorSpikesInsightCard"] | components["schemas"]["CityLatencyRegressionsInsightCard"] | components["schemas"]["NewCityTrafficInsightCard"] | components["schemas"]["UaMonocultureInsightCard"] | components["schemas"]["NewProbeUrlsInsightCard"] | components["schemas"]["WafSignalSpikesInsightCard"] | components["schemas"]["ProxySurgeInsightCard"] | components["schemas"]["AsnConcentrationInsightCard"] | components["schemas"]["AsnMetroPerformanceInsightCard"] | components["schemas"]["CacheCollapseInsightCard"] | components["schemas"]["CacheabilityRegressionInsightCard"] | components["schemas"]["LatencyRegressionInsightCard"] | components["schemas"]["ImpossibleDistanceInsightCard"] | components["schemas"]["TailLatencyInsightCard"] | components["schemas"]["CipherSpreadInsightCard"] | components["schemas"]["RequestSizeAnomalyInsightCard"] | components["schemas"]["ConnectionAbuseInsightCard"] | components["schemas"]["RegionLatencyInsightCard"] | components["schemas"]["CacheTtlMismatchInsightCard"] | components["schemas"]["ImageOptimizationOpportunitiesInsightCard"] | components["schemas"]["OriginLatencySpikeInsightCard"] | components["schemas"]["OriginErrorRateInsightCard"] | components["schemas"]["OriginRetriesInsightCard"] | components["schemas"]["OriginIpFailureInsightCard"] | components["schemas"]["ShieldPathDegradationInsightCard"] | components["schemas"]["RepeatedPatternsInsightCard"] | components["schemas"]["RepeatedPatternsFpInsightCard"] | components["schemas"]["LowAndSlowInsightCard"] | components["schemas"]["CredentialEnumerationInsightCard"] | components["schemas"]["NetworkAsnHealthInsightCard"] | components["schemas"]["ContentDiscoveryInsightCard"] | components["schemas"]["RefererMonocultureInsightCard"] | components["schemas"]["MethodDriftInsightCard"] | components["schemas"]["NewAsnTrafficInsightCard"] | components["schemas"]["AsnHostingShiftInsightCard"] | components["schemas"]["MetroDeliveryDegradationInsightCard"] | components["schemas"]["ConnectionTypeMixInsightCard"] | components["schemas"]["PopLatencyRegressionInsightCard"] | components["schemas"]["Http3FallbackInsightCard"] | components["schemas"]["CacheHitCliffInsightCard"] | components["schemas"]["PayloadCompressionRegressionInsightCard"] | components["schemas"]["SessionHarvestingInsightCard"] | components["schemas"]["TimeoutSplitInsightCard"] | components["schemas"]["CrawlerDisparityInsightCard"] | components["schemas"]["StaleBrowserVersionInsightCard"] | components["schemas"]["OrphanedDeepCrawlInsightCard"] | components["schemas"]["ResidentialFingerprintDispersionInsightCard"] | components["schemas"]["HighScale5xxInsightCard"])[];
             /** Window Start */
@@ -12857,10 +12836,7 @@ export interface components {
             ip_whitelist?: string | null;
             /** Service Ids */
             service_ids?: string[];
-            /** Pii Policy */
-            pii_policy?: {
-                [key: string]: unknown;
-            } | null;
+            pii_policy?: components["schemas"]["PiiPolicyPayload"] | null;
             /** Query Window Hours */
             query_window_hours?: number | null;
             /** Query Start Time */
@@ -12900,10 +12876,7 @@ export interface components {
             expires_at?: string | null;
             /** Ip Whitelist */
             ip_whitelist?: string | null;
-            /** Pii Policy */
-            pii_policy?: {
-                [key: string]: unknown;
-            } | null;
+            pii_policy?: components["schemas"]["PiiPolicyPayload"] | null;
             /** Query Window Hours */
             query_window_hours?: number | null;
             /** Query Start Time */
@@ -13035,6 +13008,22 @@ export interface components {
             [key: string]: unknown;
         };
         /**
+         * LineBudgetWarning
+         * @description Line-budget / WAF warning payload returned with log-fields responses.
+         */
+        LineBudgetWarning: {
+            /** Exceeded */
+            exceeded?: boolean | null;
+            /** Estimate */
+            estimate?: number | null;
+            /** Limit */
+            limit?: number | null;
+            /** Message */
+            message?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * LocalCompactNowResponse
          * @description ``compact_local_partitions`` result dict.
          */
@@ -13104,9 +13093,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /**
              * By
              * @enum {string}
@@ -13172,9 +13159,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /**
              * Configured
              * @default true
@@ -13319,7 +13304,7 @@ export interface components {
         /** LogFieldsConfig */
         LogFieldsConfig: {
             /** Groups */
-            groups: string[];
+            groups?: string[];
             /** Field Overrides */
             field_overrides?: {
                 [key: string]: boolean;
@@ -13350,29 +13335,19 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             log_fields: components["schemas"]["LogFieldsConfig"];
             /** Waf Warning */
             waf_warning: boolean;
             /** History */
-            history: {
-                [key: string]: unknown;
-            }[];
+            history: components["schemas"]["LogFormatHistoryEntry"][];
             /** Estimate */
             estimate: number;
-            /** Line Budget Warning */
-            line_budget_warning?: {
-                [key: string]: unknown;
-            } | null;
+            line_budget_warning?: components["schemas"]["LineBudgetWarning"] | null;
         };
         /** LogFieldsUpdateRequest */
         LogFieldsUpdateRequest: {
-            /** Log Fields */
-            log_fields: {
-                [key: string]: unknown;
-            };
+            log_fields: components["schemas"]["LogFieldsConfig"];
         };
         /**
          * LogFieldsUpdateResponse
@@ -13387,9 +13362,44 @@ export interface components {
             message?: string | null;
             /** Estimate */
             estimate?: number | null;
-            /** Line Budget Warning */
-            line_budget_warning?: {
-                [key: string]: unknown;
+            line_budget_warning?: components["schemas"]["LineBudgetWarning"] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * LogFormatHistoryEntry
+         * @description One entry in ``log_format_history``.
+         */
+        LogFormatHistoryEntry: {
+            /** Timestamp */
+            timestamp?: string | null;
+            /** Changed At */
+            changed_at?: string | null;
+            /** Actor */
+            actor?: string | null;
+            /** Changed By */
+            changed_by?: string | null;
+            /** Summary */
+            summary?: string | null;
+            /** Preset */
+            preset?: string | null;
+            /** Groups */
+            groups?: string[] | null;
+            /** Groups Before */
+            groups_before?: string[] | null;
+            /** Groups After */
+            groups_after?: string[] | null;
+            /** Fields Added */
+            fields_added?: string[] | null;
+            /** Fields Removed */
+            fields_removed?: string[] | null;
+            /** Field Overrides */
+            field_overrides?: {
+                [key: string]: boolean;
+            } | null;
+            /** Field Limits */
+            field_limits?: {
+                [key: string]: number;
             } | null;
         } & {
             [key: string]: unknown;
@@ -13415,9 +13425,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Ok */
             ok: boolean;
             /** Prefix */
@@ -13774,9 +13782,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /**
              * Available
              * @default true
@@ -13860,9 +13866,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /**
              * Has Data
              * @default true
@@ -14064,7 +14068,7 @@ export interface components {
              * Protocol Time Series
              * @default []
              */
-            protocol_time_series: components["schemas"]["backend__models__value__TimeSeriesPoint"][];
+            protocol_time_series: components["schemas"]["ValueTimeSeriesPoint"][];
         };
         /** NetworkMetroRow */
         NetworkMetroRow: {
@@ -14136,9 +14140,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Available */
             available: boolean;
             /**
@@ -14597,9 +14599,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /**
              * Has Data
              * @default false
@@ -14664,9 +14664,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /**
              * Has Data
              * @default false
@@ -14807,9 +14805,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /**
              * Has Data
              * @default false
@@ -14912,9 +14908,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /**
              * Has Data
              * @default false
@@ -15013,9 +15007,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /**
              * Has Data
              * @default false
@@ -15165,9 +15157,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /**
              * Has Data
              * @default false
@@ -15263,9 +15253,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /**
              * Has Data
              * @default false
@@ -15336,9 +15324,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /**
              * Has Data
              * @default false
@@ -15395,9 +15381,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /**
              * Has Data
              * @default false
@@ -15540,9 +15524,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /**
              * Has Data
              * @default false
@@ -15801,9 +15783,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /**
              * Top Urls
              * @default []
@@ -15870,7 +15850,7 @@ export interface components {
              * Latency Time Series
              * @default []
              */
-            latency_time_series: components["schemas"]["backend__models__value__TimeSeriesPoint"][];
+            latency_time_series: components["schemas"]["ValueTimeSeriesPoint"][];
         };
         /** PerformanceRequest */
         PerformanceRequest: {
@@ -15963,8 +15943,13 @@ export interface components {
          *     invite's PII policy (currently just ``mask_ips``) after creation.
          */
         PiiPolicyPayload: {
-            /** Mask Ips */
+            /**
+             * Mask Ips
+             * @default false
+             */
             mask_ips: boolean;
+        } & {
+            [key: string]: unknown;
         };
         /** PopHealthItem */
         PopHealthItem: {
@@ -16006,9 +15991,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Data */
             data: components["schemas"]["PopHealthItem"][];
         };
@@ -16085,9 +16068,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Pops */
             pops: components["schemas"]["PopLocation"][];
         };
@@ -16117,9 +16098,22 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
+            /** Class A Rate Per 1K */
+            class_a_rate_per_1k?: number | null;
+            /** Class B Rate Per 10K */
+            class_b_rate_per_10k?: number | null;
+            /** Cdn Egress Rate Per Gb */
+            cdn_egress_rate_per_gb?: number | null;
+            /** Storage Rate Per Gb Month */
+            storage_rate_per_gb_month?: number | null;
+            /** Min Billed Days */
+            min_billed_days?: number | null;
+            /**
+             * Billing Zone
+             * @default MBZ200
+             */
+            billing_zone: string | null;
             /** Avg Log File Size Kb */
             avg_log_file_size_kb?: number | null;
             /** Estimated Bytes Per Line */
@@ -16163,21 +16157,6 @@ export interface components {
             log_retention_days: number;
             /** Avg Nodes Per Flush */
             avg_nodes_per_flush?: number | null;
-            /** Class A Rate Per 1K */
-            class_a_rate_per_1k?: number | null;
-            /** Class B Rate Per 10K */
-            class_b_rate_per_10k?: number | null;
-            /** Cdn Egress Rate Per Gb */
-            cdn_egress_rate_per_gb?: number | null;
-            /** Storage Rate Per Gb Month */
-            storage_rate_per_gb_month?: number | null;
-            /** Min Billed Days */
-            min_billed_days?: number | null;
-            /**
-             * Billing Zone
-             * @default MBZ200
-             */
-            billing_zone: string | null;
         };
         /** PrefillResponse */
         PrefillResponse: {
@@ -16200,9 +16179,22 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
+            /** Class A Rate Per 1K */
+            class_a_rate_per_1k?: number | null;
+            /** Class B Rate Per 10K */
+            class_b_rate_per_10k?: number | null;
+            /** Cdn Egress Rate Per Gb */
+            cdn_egress_rate_per_gb?: number | null;
+            /** Storage Rate Per Gb Month */
+            storage_rate_per_gb_month?: number | null;
+            /** Min Billed Days */
+            min_billed_days?: number | null;
+            /**
+             * Billing Zone
+             * @default MBZ200
+             */
+            billing_zone: string | null;
             /** Avg Log File Size Kb */
             avg_log_file_size_kb?: number | null;
             /** Estimated Bytes Per Line */
@@ -16246,21 +16238,6 @@ export interface components {
             log_retention_days: number;
             /** Avg Nodes Per Flush */
             avg_nodes_per_flush?: number | null;
-            /** Class A Rate Per 1K */
-            class_a_rate_per_1k?: number | null;
-            /** Class B Rate Per 10K */
-            class_b_rate_per_10k?: number | null;
-            /** Cdn Egress Rate Per Gb */
-            cdn_egress_rate_per_gb?: number | null;
-            /** Storage Rate Per Gb Month */
-            storage_rate_per_gb_month?: number | null;
-            /** Min Billed Days */
-            min_billed_days?: number | null;
-            /**
-             * Billing Zone
-             * @default MBZ200
-             */
-            billing_zone: string | null;
             /** Requests Per Day */
             requests_per_day?: number | null;
             /** Edge Requests Per Day */
@@ -16842,9 +16819,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Items */
             items?: components["schemas"]["QuarantineEvidenceItem"][];
             /**
@@ -17015,9 +16990,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Source */
             source?: string | null;
             /**
@@ -17653,6 +17626,24 @@ export interface components {
             /** Estimated Cost Usd */
             estimated_cost_usd: number;
         };
+        /**
+         * RumConfigSection
+         * @description Typed RUM configuration block on a persisted service config.
+         */
+        RumConfigSection: {
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Log Period */
+            log_period?: number | null;
+            /** Sync Interval Seconds */
+            sync_interval_seconds?: number | null;
+            /** Commit Interval Mins */
+            commit_interval_mins?: number | null;
+            /** Delete After */
+            delete_after?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** RumCwvDistribution */
         RumCwvDistribution: {
             /** Good */
@@ -18087,34 +18078,12 @@ export interface components {
             [key: string]: unknown;
         };
         /**
-         * SchemaColumnRow
-         * @description One column of ``get_schema``: name/type always; the SUMMARIZE stats only on the sampled path.
-         */
-        SchemaColumnRow: {
-            /** Name */
-            name: string;
-            /** Type */
-            type: string;
-            /** Min */
-            min?: string | null;
-            /** Max */
-            max?: string | null;
-            /** Approx Unique */
-            approx_unique?: number | null;
-            /** Null Percentage */
-            null_percentage?: number | null;
-            /** Count */
-            count?: number | null;
-        } & {
-            [key: string]: unknown;
-        };
-        /**
          * SchemaResponse
          * @description ``GET /api/schema``: cached or live column list plus the safe table name.
          */
         SchemaResponse: {
             /** Schema */
-            schema: components["schemas"]["SchemaColumnRow"][];
+            schema: components["schemas"]["SchemaColumn"][];
             /** Table Name */
             table_name: string;
         } & {
@@ -18131,14 +18100,8 @@ export interface components {
             compliance_breakdown?: components["schemas"]["ScoringComplianceBreakdownResponse"] | null;
             latency_timeseries?: components["schemas"]["ScoringLatencyTimeseriesResponse"] | null;
             health?: components["schemas"]["ScoringHealthResponse"] | null;
-            /** Evaluation */
-            evaluation?: {
-                [key: string]: unknown;
-            } | null;
-            /** Evaluation Per Reason */
-            evaluation_per_reason?: {
-                [key: string]: unknown;
-            } | null;
+            evaluation?: components["schemas"]["ScoringEvaluationResponse"] | null;
+            evaluation_per_reason?: components["schemas"]["ScoringPerReasonResponse"] | null;
         } & {
             [key: string]: unknown;
         };
@@ -18263,19 +18226,14 @@ export interface components {
          * ScoringDashboardResponse
          * @description Composite of the per-endpoint producers — each sub-block is the
          *     byte-identical dict its standalone endpoint returns, so each nests the
-         *     same model that endpoint declares. ``status`` stays a free dict: it's
-         *     the secret-filtered cfg.scoring block, whose keys vary by provisioning
-         *     history.
+         *     same model that endpoint declares.
          */
         ScoringDashboardResponse: {
             /** Since Hours */
             since_hours?: number | null;
             /** Threshold */
             threshold?: number | null;
-            /** Status */
-            status?: {
-                [key: string]: unknown;
-            } | null;
+            status?: components["schemas"]["ScoringStatusResponse"] | null;
             evaluation?: components["schemas"]["ScoringEvaluationResponse"] | null;
             evaluation_per_reason?: components["schemas"]["ScoringPerReasonResponse"] | null;
             health?: components["schemas"]["ScoringHealthResponse"] | null;
@@ -18491,10 +18449,7 @@ export interface components {
             fail_open_breakdown: components["schemas"]["ScoringReasonCount"][];
             latency?: components["schemas"]["ScoringLatencySnapshot"] | null;
             matrix_staleness?: components["schemas"]["ScoringMatrixStaleness"] | null;
-            /** L2 Enforce */
-            l2_enforce?: {
-                [key: string]: unknown;
-            } | null;
+            l2_enforce?: components["schemas"]["ScoringL2EnforceState"] | null;
         } & {
             [key: string]: unknown;
         };
@@ -18530,8 +18485,7 @@ export interface components {
         /**
          * ScoringL2EnforceState
          * @description Shape from _build_l2_enforce_block / _l2_enforce_unavailable —
-         *     also nested as ``l2_enforce`` in ScoringHealthResponse (left ``dict``
-         *     there for wire-compat; this standalone GET carries the real schema).
+         *     also nested as ``l2_enforce`` in ScoringHealthResponse.
          */
         ScoringL2EnforceState: {
             /** Available */
@@ -19095,6 +19049,30 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /**
+         * SectionTimingEntry
+         * @description Per-phase wall-clock timing entry in ``BaseResponse.section_timings``.
+         */
+        SectionTimingEntry: {
+            /** Section */
+            section?: string | null;
+            /** Section Id */
+            section_id?: string | null;
+            /** Name */
+            name?: string | null;
+            /** Time Ms */
+            time_ms?: number | null;
+            /** Duration Ms */
+            duration_ms?: number | null;
+            /** Sql Count */
+            sql_count?: number | null;
+            /** Sql Ms */
+            sql_ms?: number | null;
+            /** Cache */
+            cache?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** SecurityAggregatesRequest */
         SecurityAggregatesRequest: {
             /** Start Time */
@@ -19141,9 +19119,37 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
+            /**
+             * Active Proxies Count
+             * @default 0
+             */
+            active_proxies_count: number;
+            /**
+             * Tunnel Requests Count
+             * @default 0
+             */
+            tunnel_requests_count: number;
+            /**
+             * Distance Mismatches Count
+             * @default 0
+             */
+            distance_mismatches_count: number;
+            /**
+             * Traffic Quality
+             * @default []
+             */
+            traffic_quality: components["schemas"]["TrafficQualityRow"][];
+            /**
+             * Suspicious Isps
+             * @default []
+             */
+            suspicious_isps: components["schemas"]["SuspiciousIspRow"][];
+            /**
+             * Active Clients
+             * @default []
+             */
+            active_clients: components["schemas"]["ActiveClientItem"][];
             /**
              * Tls Fingerprints
              * @default []
@@ -19221,36 +19227,6 @@ export interface components {
              * @default []
              */
             ngwaf_bots: components["schemas"]["SecurityBotRow"][];
-            /**
-             * Active Proxies Count
-             * @default 0
-             */
-            active_proxies_count: number;
-            /**
-             * Tunnel Requests Count
-             * @default 0
-             */
-            tunnel_requests_count: number;
-            /**
-             * Distance Mismatches Count
-             * @default 0
-             */
-            distance_mismatches_count: number;
-            /**
-             * Traffic Quality
-             * @default []
-             */
-            traffic_quality: components["schemas"]["TrafficQualityRow"][];
-            /**
-             * Suspicious Isps
-             * @default []
-             */
-            suspicious_isps: components["schemas"]["SuspiciousIspRow"][];
-            /**
-             * Active Clients
-             * @default []
-             */
-            active_clients: components["schemas"]["ActiveClientItem"][];
         };
         /**
          * SecurityBotRow
@@ -19294,7 +19270,7 @@ export interface components {
              * Threat Time Series
              * @default []
              */
-            threat_time_series: components["schemas"]["backend__models__value__TimeSeriesPoint"][];
+            threat_time_series: components["schemas"]["ValueTimeSeriesPoint"][];
             /**
              * Top Waf Signals
              * @default []
@@ -19322,9 +19298,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Reader Coverage */
             _reader_coverage?: components["schemas"]["ReaderCoverage"][] | null;
             /**
@@ -19369,10 +19343,7 @@ export interface components {
             logging_enabled?: boolean | null;
             /** Rum Enabled */
             rum_enabled?: boolean | null;
-            /** Rum */
-            rum?: {
-                [key: string]: unknown;
-            } | null;
+            rum?: components["schemas"]["RumConfigSection"] | null;
             /** Rum Log Period */
             rum_log_period?: number | null;
             /** Analyst Path A Supported */
@@ -19460,10 +19431,6 @@ export interface components {
             interval_seconds?: number | null;
             /** Commit Interval Mins */
             commit_interval_mins?: number | null;
-            /** Delete After */
-            delete_after?: boolean | null;
-            /** High Scale Shared Source */
-            high_scale_shared_source?: boolean | null;
             /** Log Enabled */
             log_enabled?: boolean | null;
             /** Log Retention Days */
@@ -19480,6 +19447,10 @@ export interface components {
             keep_snapshot_days?: number | null;
             /** Expire Interval Mins */
             expire_interval_mins?: number | null;
+            /** Delete After */
+            delete_after?: boolean | null;
+            /** High Scale Shared Source */
+            high_scale_shared_source?: boolean | null;
         };
         /**
          * ServiceScopePayload
@@ -19511,9 +19482,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Services */
             services: components["schemas"]["ServiceConfig"][];
         };
@@ -19615,9 +19584,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Columns */
             columns: string[];
             /** Data */
@@ -19733,9 +19700,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Sessions */
             sessions: components["schemas"]["Session"][];
             /**
@@ -20024,10 +19989,7 @@ export interface components {
             user_agent: string;
             /** Fingerprint Signature */
             fingerprint_signature: string;
-            /** Pii Policy */
-            pii_policy: {
-                [key: string]: unknown;
-            };
+            pii_policy: components["schemas"]["PiiPolicyPayload"];
             /** Query Window Hours */
             query_window_hours: number | null;
             /** Query Start Time */
@@ -20523,6 +20485,10 @@ export interface components {
             earliest_log_at?: string | null;
             /** Latest Log At */
             latest_log_at?: string | null;
+            /** Local Rows */
+            local_rows?: number | null;
+            rum?: components["schemas"]["StreamMetrics"] | null;
+            request?: components["schemas"]["StreamMetrics"] | null;
             /**
              * Configured
              * @default true
@@ -20537,8 +20503,6 @@ export interface components {
             storage_mode?: string | null;
             /** Access Level */
             access_level?: string | null;
-            /** Local Rows */
-            local_rows?: number | null;
             /** Latest Ingested File At */
             latest_ingested_file_at?: string | null;
             /** Latest Available File At */
@@ -20553,8 +20517,6 @@ export interface components {
             } | null;
             /** Ngwaf Workspace Id */
             ngwaf_workspace_id?: string | null;
-            rum?: components["schemas"]["StreamMetrics"] | null;
-            request?: components["schemas"]["StreamMetrics"] | null;
             /** Debug Queries */
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
@@ -20574,9 +20536,9 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
+        } & {
+            [key: string]: unknown;
         };
         /** SystemJobStatus */
         SystemJobStatus: {
@@ -20616,9 +20578,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Jobs */
             jobs: components["schemas"]["SystemJobStatus"][];
         };
@@ -20701,11 +20661,20 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Data */
             data: components["schemas"]["ThreatIntelItem"][];
+        };
+        /** TimeSeriesPoint */
+        TimeSeriesPoint: {
+            /** Time */
+            time: string;
+            /** Value */
+            value: number;
+            /** Category */
+            category?: string | null;
+            /** Baseline */
+            baseline?: number | null;
         };
         /** TimeoutSplitInsightCard */
         TimeoutSplitInsightCard: {
@@ -20869,9 +20838,7 @@ export interface components {
         /** TransportMetrics */
         TransportMetrics: {
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[] | null;
+            _section_timings?: components["schemas"]["SectionTimingEntry"][] | null;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /**
              * Has Transport Data
@@ -20971,9 +20938,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Nodes */
             nodes: components["schemas"]["TreeNode"][];
         };
@@ -21038,9 +21003,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Data */
             data: components["schemas"]["UsageBandwidthPoint"][];
             /** Total Bytes */
@@ -21084,9 +21047,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Data */
             data: components["schemas"]["UsageLogActivityPoint"][];
             /** Total Rows */
@@ -21213,9 +21174,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Service Id */
             service_id?: string | null;
             /** Entries */
@@ -21232,10 +21191,6 @@ export interface components {
          *     a PATCH body stores floats — smart-union keeps whichever arrives.
          */
         UsageLoggingConfigResponse: {
-            /** Enabled */
-            enabled?: boolean | null;
-            /** Retention Days */
-            retention_days?: number | null;
             /** Class A Rate Per 1K */
             class_a_rate_per_1k?: number | null;
             /** Class B Rate Per 10K */
@@ -21248,6 +21203,10 @@ export interface components {
             min_billed_days?: number | null;
             /** Billing Zone */
             billing_zone?: string | null;
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Retention Days */
+            retention_days?: number | null;
             /** Track Duckdb Httpfs */
             track_duckdb_httpfs?: boolean | null;
         } & {
@@ -21263,10 +21222,6 @@ export interface components {
          *     error envelope stays intact; the model just pins types for OpenAPI.
          */
         UsageLoggingUpdateBody: {
-            /** Enabled */
-            enabled?: boolean | null;
-            /** Retention Days */
-            retention_days?: number | null;
             /** Class A Rate Per 1K */
             class_a_rate_per_1k?: number | null;
             /** Class B Rate Per 10K */
@@ -21279,6 +21234,10 @@ export interface components {
             min_billed_days?: number | null;
             /** Billing Zone */
             billing_zone?: string | null;
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Retention Days */
+            retention_days?: number | null;
         };
         /** UsageOperationsPoint */
         UsageOperationsPoint: {
@@ -21310,9 +21269,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Data */
             data: components["schemas"]["UsageOperationsPoint"][];
             /** Total Class A */
@@ -21347,9 +21304,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             /** Data */
             data: components["schemas"]["RumBreakdownPoint"][];
             /** Total Beacons */
@@ -21442,9 +21397,7 @@ export interface components {
             _is_cached: boolean;
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
-            _section_timings?: {
-                [key: string]: unknown;
-            }[];
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
             overview?: components["schemas"]["OverviewMetrics"] | null;
             caching?: components["schemas"]["CachingMetrics"] | null;
             security?: components["schemas"]["SecurityMetrics"] | null;
@@ -21452,6 +21405,15 @@ export interface components {
             performance?: components["schemas"]["PerformanceMetrics"] | null;
             network?: components["schemas"]["NetworkMetrics"] | null;
             io?: components["schemas"]["IOMetrics"] | null;
+        };
+        /** ValueTimeSeriesPoint */
+        ValueTimeSeriesPoint: {
+            /** Time */
+            time: string;
+            /** Value */
+            value: number;
+            /** Category */
+            category?: string | null;
         };
         /**
          * VclHealthResponse
@@ -21670,26 +21632,6 @@ export interface components {
         _ToggleBody: {
             /** Enabled */
             enabled: boolean;
-        };
-        /** TimeSeriesPoint */
-        backend__models__dashboard__TimeSeriesPoint: {
-            /** Time */
-            time: string;
-            /** Value */
-            value: number;
-            /** Category */
-            category?: string | null;
-            /** Baseline */
-            baseline?: number | null;
-        };
-        /** TimeSeriesPoint */
-        backend__models__value__TimeSeriesPoint: {
-            /** Time */
-            time: string;
-            /** Value */
-            value: number;
-            /** Category */
-            category?: string | null;
         };
     };
     responses: never;

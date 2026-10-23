@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Textarea } from '@/components/ui/textarea'
 import { client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 
 import type { LabelValue } from '@/hooks/useScoringLabels'
 
@@ -74,18 +75,20 @@ export function FlagSessionPopover({
     setBusy(label)
     setError('')
     try {
-      await client.POST('/api/services/{service_id}/scoring/labels', {
-        params: { path: { service_id: serviceId } },
-        body: {
-          sid,
-          label,
-          notes,
-          flagged_by: 'admin',
-          sample_ip: sampleIp ?? '',
-          sample_ua: sampleUa ?? '',
-          sample_url: sampleUrl ?? '',
-        },
-      })
+      await unwrapClient(
+        client.POST('/api/services/{service_id}/scoring/labels', {
+          params: { path: { service_id: serviceId } },
+          body: {
+            sid,
+            label,
+            notes,
+            flagged_by: 'admin',
+            sample_ip: sampleIp ?? '',
+            sample_ua: sampleUa ?? '',
+            sample_url: sampleUrl ?? '',
+          },
+        }),
+      )
       setOpen(false)
       setNotes('')
       onFlagged?.()
@@ -101,9 +104,11 @@ export function FlagSessionPopover({
     setClearing(true)
     setError('')
     try {
-      await client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}', {
-        params: { path: { service_id: serviceId, label_id: currentLabelId } },
-      })
+      await unwrapClient(
+        client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}', {
+          params: { path: { service_id: serviceId, label_id: currentLabelId } },
+        }),
+      )
       setOpen(false)
       onFlagged?.()
     } catch (e) {

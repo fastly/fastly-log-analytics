@@ -3,6 +3,7 @@ import { HydrationBoundary } from '@tanstack/react-query'
 import { fetchBootstrapServerSide } from '@/lib/ssr/bootstrap'
 import { fetchUsageLogServerSide } from '@/lib/ssr/usage_log'
 import { firstParam, seedDehydratedState } from '@/lib/ssr/seed'
+import { resolveServerServiceId } from '@/lib/ssr/service'
 import { toQueryDate } from './_sections/shared'
 import UsageLogClient from './_sections/UsageLogClient'
 
@@ -37,15 +38,9 @@ export default async function UsageLogPage({
   const params = await searchParams
   const urlServiceId = firstParam(params.service)
   const bootstrap = urlServiceId ? null : await fetchBootstrapServerSide()
-  const firstSvcId =
-    typeof bootstrap?.services?.[0]?.id === 'string'
-      ? bootstrap.services[0].id
-      : undefined
-  const serviceId =
-    urlServiceId ??
-    bootstrap?.active_service_id ??
-    firstSvcId ??
-    undefined
+  const serviceId = resolveServerServiceId(params, bootstrap, {
+    fallbackFirstService: true,
+  })
   const nowMs = new Date().getTime()
 
   // Mirror the client's window math (floor-to-minute) so the SSR

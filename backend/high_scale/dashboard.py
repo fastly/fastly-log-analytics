@@ -644,10 +644,14 @@ def bundle(
         res_top_bots.debug_queries = []
         res_top_bots.debug_calls = []
 
+    combined_timings = [
+        t for r in (res_aggregates, res_top_bots) if r is not None for t in (getattr(r, "section_timings", None) or [])
+    ]
     return {
         **cache_result({}, state="bypass", prewarmer=False),
         "aggregates": res_aggregates,
         "top_bots": res_top_bots,
+        "section_timings": combined_timings,
         "debug_queries": get_queries(),
         "debug_calls": get_tracked_calls(),
         "debug_sqlite": list(get_sqlite_queries()),

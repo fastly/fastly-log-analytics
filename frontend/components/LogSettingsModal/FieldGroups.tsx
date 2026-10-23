@@ -359,7 +359,7 @@ export function StandardFieldsStep({
             variant="ghost"
             size="sm"
             className="h-8 text-xs font-semibold text-muted-foreground hover:text-foreground ml-auto"
-            onClick={() => setConfig({ groups: [], field_overrides: {} })}
+            onClick={() => setConfig({ ...config, groups: [], field_overrides: {}, field_limits: config.field_limits })}
           >
             Clear All
           </Button>

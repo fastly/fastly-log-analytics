@@ -214,6 +214,35 @@ class DiffResult:
         }
 
 
+def _diff_named_resources(
+    current_items: list[Any],
+    desired_items: list[Any],
+    label: str,
+) -> tuple[list[Any], list[Any], list[str]]:
+    current_by_name = {item.name: item for item in current_items}
+    desired_by_name = {item.name: item for item in desired_items}
+
+    to_add: list[Any] = []
+    to_update: list[Any] = []
+    to_remove: list[str] = []
+
+    for name, desired_item in desired_by_name.items():
+        if name not in current_by_name:
+            to_add.append(desired_item)
+        elif current_by_name[name] != desired_item:
+            to_update.append(desired_item)
+
+    for name in current_by_name:
+        if name not in desired_by_name:
+            to_remove.append(name)
+
+    overlap = {item.name for item in to_add} & {item.name for item in to_update}
+    if overlap:
+        raise RuntimeError(f"{label} in both to_add and to_update: {overlap}")
+
+    return to_add, to_update, to_remove
+
+
 def compute_diff(
     current_snippets: list[VCLSnippet],
     desired_snippets: list[VCLSnippet],
@@ -249,85 +278,17 @@ def compute_diff(
     current_dictionaries = current_dictionaries or []
     desired_dictionaries = desired_dictionaries or []
 
-    # Compute snippet diffs
-    current_by_name = {s.name: s for s in current_snippets}
-    desired_by_name = {s.name: s for s in desired_snippets}
-
-    for name, desired_snippet in desired_by_name.items():
-        if name not in current_by_name:
-            diff.snippets_to_add.append(desired_snippet)
-        elif current_by_name[name] != desired_snippet:
-            diff.snippets_to_update.append(desired_snippet)
-
-    for name in current_by_name:
-        if name not in desired_by_name:
-            diff.snippets_to_remove.append(name)
-
-    # Compute endpoint diffs
-    current_endpoints_by_name = {e.name: e for e in current_endpoints}
-    desired_endpoints_by_name = {e.name: e for e in desired_endpoints}
-
-    for name, desired_endpoint in desired_endpoints_by_name.items():
-        if name not in current_endpoints_by_name:
-            diff.endpoints_to_add.append(desired_endpoint)
-        elif current_endpoints_by_name[name] != desired_endpoint:
-            diff.endpoints_to_update.append(desired_endpoint)
-
-    for name in current_endpoints_by_name:
-        if name not in desired_endpoints_by_name:
-            diff.endpoints_to_remove.append(name)
-
-    # Compute backend diffs
-    current_backends_by_name = {b.name: b for b in current_backends}
-    desired_backends_by_name = {b.name: b for b in desired_backends}
-
-    for name, desired_backend in desired_backends_by_name.items():
-        if name not in current_backends_by_name:
-            diff.backends_to_add.append(desired_backend)
-        elif current_backends_by_name[name] != desired_backend:
-            diff.backends_to_update.append(desired_backend)
-
-    for name in current_backends_by_name:
-        if name not in desired_backends_by_name:
-            diff.backends_to_remove.append(name)
-
-    # Compute dictionary diffs
-    current_dicts_by_name = {d.name: d for d in current_dictionaries}
-    desired_dicts_by_name = {d.name: d for d in desired_dictionaries}
-
-    for name, desired_dict in desired_dicts_by_name.items():
-        if name not in current_dicts_by_name:
-            diff.dictionaries_to_add.append(desired_dict)
-        elif current_dicts_by_name[name] != desired_dict:
-            diff.dictionaries_to_update.append(desired_dict)
-
-    for name in current_dicts_by_name:
-        if name not in desired_dicts_by_name:
-            diff.dictionaries_to_remove.append(name)
-
-    # Assertions: no resource in both to_add and to_update
-    to_add_names = {s.name for s in diff.snippets_to_add}
-    to_update_names = {s.name for s in diff.snippets_to_update}
-    overlap = to_add_names & to_update_names
-    if overlap:
-        raise RuntimeError(f"Snippets in both to_add and to_update: {overlap}")
-
-    to_add_names = {e.name for e in diff.endpoints_to_add}
-    to_update_names = {e.name for e in diff.endpoints_to_update}
-    overlap = to_add_names & to_update_names
-    if overlap:
-        raise RuntimeError(f"Endpoints in both to_add and to_update: {overlap}")
-
-    to_add_names = {b.name for b in diff.backends_to_add}
-    to_update_names = {b.name for b in diff.backends_to_update}
-    overlap = to_add_names & to_update_names
-    if overlap:
-        raise RuntimeError(f"Backends in both to_add and to_update: {overlap}")
-
-    to_add_names = {d.name for d in diff.dictionaries_to_add}
-    to_update_names = {d.name for d in diff.dictionaries_to_update}
-    overlap = to_add_names & to_update_names
-    if overlap:
-        raise RuntimeError(f"Dictionaries in both to_add and to_update: {overlap}")
+    diff.snippets_to_add, diff.snippets_to_update, diff.snippets_to_remove = _diff_named_resources(
+        current_snippets, desired_snippets, "Snippets"
+    )
+    diff.endpoints_to_add, diff.endpoints_to_update, diff.endpoints_to_remove = _diff_named_resources(
+        current_endpoints, desired_endpoints, "Endpoints"
+    )
+    diff.backends_to_add, diff.backends_to_update, diff.backends_to_remove = _diff_named_resources(
+        current_backends, desired_backends, "Backends"
+    )
+    diff.dictionaries_to_add, diff.dictionaries_to_update, diff.dictionaries_to_remove = _diff_named_resources(
+        current_dictionaries, desired_dictionaries, "Dictionaries"
+    )
 
     return diff

@@ -70,7 +70,7 @@ export function useFilterUrlWriteback(): void {
             const start = new Date(now.getTime() - hours * 3600 * 1000).toISOString()
             store.setRelativeRange(activeRange, start, now.toISOString())
           }
-        } else if (store.isAutoRange) {
+        } else if (store.isAutoRange && (!store.startTime || !store.endTime)) {
           useFilterStore.setState({
             startTime: new Date(now.getTime() - 24 * 3600 * 1000).toISOString(),
             endTime: now.toISOString(),

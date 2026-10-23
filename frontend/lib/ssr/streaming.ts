@@ -5,7 +5,6 @@
 
 import {
   fetchSsrRangePost,
-  resolveDefaultSsrRangeKey,
   type SsrRangeSeed,
 } from './upstream'
 
@@ -15,8 +14,6 @@ export const STREAMING_SSR_DEFAULTS = {
 } as const
 
 export type StreamingSsrSeed = SsrRangeSeed
-
-export const resolveStreamingDefaultKey = resolveDefaultSsrRangeKey
 
 export async function fetchStreamingServerSide(
   serviceId: string | undefined,

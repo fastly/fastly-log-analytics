@@ -75,25 +75,17 @@ interface UseMapInitArgs {
   onMapError?: () => void
 }
 
-/**
- * Initializes the MapLibre instance, adds sources/layers, and wires hover
- * handlers for the city-scatter and dma-fill layers. Cleans up on unmount or
- * when `isDark` changes (so the map style can be rebuilt for the new theme).
- */
-/**
- * rAF-throttle a function so it fires at most once per animation frame.
- * MapLibre's per-layer `mousemove` event fires on every native mousemove
- * (~60-120 Hz on a trackpad), and each fire walks the feature index +
- * triggers a React `setTooltip` re-render. Coalescing to one call per
- * frame caps that at the display refresh rate without losing the latest
- * position — we keep the most recent args and discard intermediates.
- */
-import { rafThrottle } from '@/components/Map/ShieldingMap'
+import { rafThrottle } from '@/components/Map/shared'
 import { countryFill } from '@/components/Map/colors'
 import { addCountryBaseLayer, createBaseMap, updateCountryBaseLayerTheme, type MapFillColor } from '@/components/Map/baseLayers'
 import { observeMapResize } from '@/components/Map/useMapResize'
 import { CHART_COLORS } from '@/lib/chart-colors'
 
+/**
+ * Initializes the MapLibre instance, adds sources/layers, and wires hover
+ * handlers for the city-scatter and dma-fill layers. Cleans up on unmount or
+ * when `isDark` changes (so the map style can be rebuilt for the new theme).
+ */
 export function useMapInit({
   mapContainer,
   isDark,
@@ -279,16 +271,23 @@ export function useMapData({
     const mapBuckets = data.map_buckets
     const cityEntries = data.cities ?? []
 
+    let pendingStyleDataHandler: (() => void) | null = null
+
     const updateMap = () => {
       if (!map.current) return
 
       if (!map.current.getLayer('countries') || !map.current.getSource('heatmap')) {
+        if (pendingStyleDataHandler) {
+          map.current.off('styledata', pendingStyleDataHandler)
+        }
         const onStyleData = () => {
           if (map.current?.getLayer('countries') && map.current?.getSource('heatmap')) {
             map.current.off('styledata', onStyleData)
+            pendingStyleDataHandler = null
             updateMap()
           }
         }
+        pendingStyleDataHandler = onStyleData
         map.current.on('styledata', onStyleData)
         return
       }
@@ -385,5 +384,13 @@ export function useMapData({
     }
 
     updateMap()
+
+    const currentMap = map.current
+    return () => {
+      if (pendingStyleDataHandler) {
+        currentMap?.off('styledata', pendingStyleDataHandler)
+        pendingStyleDataHandler = null
+      }
+    }
   }, [bucketIdx, data, metric, isDark, dmaDataRef, map, setTooltip])
 }

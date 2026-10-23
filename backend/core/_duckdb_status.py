@@ -592,11 +592,11 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
     # ── 1. Non-DuckDB I/O (runs outside / before the exclusive WAL lock) ─────
     buf_bytes = None
     try:
-        import os as _os
+        from backend.utils.dir_size import _get_dir_size
 
         buf_dir = _cache_dir(source)
-        if _os.path.isdir(buf_dir):
-            buf_bytes = sum(_os.path.getsize(_os.path.join(r, f)) for r, _, files in _os.walk(buf_dir) for f in files)
+        if os.path.isdir(buf_dir):
+            buf_bytes = _get_dir_size(buf_dir)
     except Exception:
         logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
 

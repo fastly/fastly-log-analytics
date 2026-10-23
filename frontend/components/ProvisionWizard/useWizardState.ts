@@ -3,10 +3,13 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { client, extractApiError } from "@/lib/api";
+import { unwrapClient } from "@/lib/api-client";
+import { queryKeys } from "@/lib/query-keys";
 import { useServiceStore } from "@/stores/serviceStore";
 import { useTimezoneStore } from "@/stores/timezoneStore";
 import { useSSE } from "@/hooks/useSSE";
 import { showToast } from "@/lib/toast";
+import type { Schema } from "@/types/api";
 import {
   INITIAL_CONFIG,
   WIZARD_DRAFT_VERSION,
@@ -106,10 +109,8 @@ export function useWizardState(
   const [isFetchingTerraform, setIsFetchingTerraform] = useState(false);
   const [selectedCdnService, setSelectedCdnService] =
     useState<ProvisionService | null>(null);
-  const [configStatus, setConfigStatus] = useState<{
-    logging_service: { ok: boolean; details: string };
-    cdn_service: { ok: boolean; details: string };
-  } | null>(null);
+  const [configStatus, setConfigStatus] =
+    useState<Schema<"ProvisionCheckConfigResponse"> | null>(null);
   const [isCheckingConfig, setIsCheckingConfig] = useState(false);
 
   const [config, setConfig] = useState<ProvisionConfig>(INITIAL_CONFIG);
@@ -230,8 +231,7 @@ export function useWizardState(
   const { data: catalog, isLoading: isLoadingCatalog } = useQuery({
     queryKey: ["services", "catalog"],
     queryFn: async () => {
-      const { data } = await client.GET("/api/log-fields/catalog");
-      return data;
+      return await unwrapClient(client.GET("/api/log-fields/catalog"));
     },
     enabled: step === "fields",
   });
@@ -586,7 +586,7 @@ export function useWizardState(
       clearDraft();
       draftIdRef.current = null;
       draftCreatedAtRef.current = null;
-      queryClient.invalidateQueries({ queryKey: ['services'] })
+      queryClient.invalidateQueries({ queryKey: queryKeys.services() })
     }
   }, [status, isDone, queryClient]);
 

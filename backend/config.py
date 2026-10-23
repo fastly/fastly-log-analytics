@@ -230,7 +230,7 @@ def _seed_configs_if_needed():
                     shutil.copy2(f, dest)
                     logger.info("Seeded service config %s into %s", f.name, dest)
                 except Exception as e:
-                    logger.warning("Could not seed config %s: %e", f.name, e)
+                    logger.warning("Could not seed config %s: %s", f.name, e)
 
 
 def _ensure_dirs():
@@ -1042,8 +1042,19 @@ def is_usage_logging_enabled() -> bool:
 
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
 
+
+class _ConfigScalarCaches:
+    @staticmethod
+    def clear() -> None:
+        global _cdn_service_id_map
+        _cdn_service_id_map = None
+        _invalidate_service_ids_cache()
+
+
 _CacheRegistry.register("config._name_cache", _name_cache)
 _CacheRegistry.register("config._name_refresh_in_flight", _name_refresh_in_flight)
+_CacheRegistry.register("config._config_cache", _config_cache)
+_CacheRegistry.register("config._scalar_caches", _ConfigScalarCaches())
 
 # Cloud / Scalability Overrides (Phase 2+)
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "")

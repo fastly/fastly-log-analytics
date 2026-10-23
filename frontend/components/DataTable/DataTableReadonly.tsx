@@ -97,8 +97,9 @@ function DataTableReadonlyImpl<TData, TValue>({
   getRowClassName,
   tableCaption,
 }: DataTableReadonlyProps<TData, TValue>) {
-  const { sorting, isSortingControlled, columnVisibility, setColumnVisibility, handleSortingChange } =
+  const { sorting, isSortingControlled, columnVisibility, setColumnVisibility, handleSortingChange, tableData } =
     useDataTableState({
+      data,
       controlledSorting,
       onSortingChange,
       initialSorting,
@@ -115,28 +116,6 @@ function DataTableReadonlyImpl<TData, TValue>({
   })
 
   const tableColumns = React.useMemo(() => columns, [columns])
-
-  const prevDataRef = React.useRef(data)
-  const tableData = React.useMemo(() => {
-    const prev = prevDataRef.current
-    if (
-      Array.isArray(prev) &&
-      Array.isArray(data) &&
-      prev !== data &&
-      prev.length === data.length &&
-      prev.every((row, i) => row === data[i])
-    ) {
-      return prev
-    }
-    prevDataRef.current = data
-    return data
-  }, [data])
-
-  React.useEffect(() => {
-    if (Object.keys(initialVisibility).length > 0) {
-      setColumnVisibility(initialVisibility)
-    }
-  }, [initialVisibility])
 
   const [columnSizing, setColumnSizing] = React.useState<Record<string, number>>({})
 

@@ -1,8 +1,8 @@
 'use client'
 
 import * as React from 'react'
-import { useQuery } from '@tanstack/react-query'
 import { Info, LineChart } from 'lucide-react'
+import { useScoringQuery } from './useScoringQuery'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { CardErrorState } from '@/components/CardErrorState'
@@ -39,18 +39,14 @@ interface RocPrCurvesProps {
  * more sessions — sub-3 curves are spike-shaped noise.
  */
 export function RocPrCurves({ serviceId }: RocPrCurvesProps) {
-  const { data, isLoading, isError, error, refetch } = useQuery({
-    queryKey: ['scoring-curves', serviceId],
-    queryFn: async () => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/curves',
-        { params: { path: { service_id: serviceId } } },
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data
-    },
-    staleTime: 30_000,
-  })
+  const { data, isLoading, isError, error, refetch } = useScoringQuery(
+    ['scoring-curves', serviceId],
+    () =>
+      client.GET('/api/services/{service_id}/scoring/curves', {
+        params: { path: { service_id: serviceId } },
+      }),
+    { staleTime: 30_000 },
+  )
 
   return (
     <AnalyticsCard

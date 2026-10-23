@@ -2,6 +2,7 @@
 
 import type { QueryClient } from "@tanstack/react-query";
 import { adminFetch, client } from "@/lib/api";
+import { unwrapClient } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
 import { downloadBlob } from "@/lib/utils";
 import type { Service } from "@/stores/serviceStore";
@@ -40,26 +41,28 @@ export async function runFetchTerraformPreview(
   if (!selectedService) return;
   setIsFetchingTerraform(true);
   try {
-    const { data } = await client.POST("/api/provision/terraform/preview", {
-      body: {
-        token,
-        logging_service_id: selectedService.id,
-        service_name: selectedService.name,
-        endpoint_name: config.endpoint_name,
-        fos_region: config.fos_region,
-        fos_bucket_name: config.fos_bucket_name,
-        fos_prefix: config.fos_prefix,
-        sample_rate: String(config.sample_rate),
-        edge_only: config.edge_only,
-        custom_condition: config.custom_condition,
-        log_period: String(config.log_period),
-        rum_log_period: String(config.rum_log_period || 300),
-        cdn_service_name: config.cdn_service_name,
-        cdn_prefix: config.cdn_prefix,
-        cdn_shield: config.cdn_shield,
-        log_fields: config.log_fields,
-      },
-    });
+    const data = await unwrapClient(
+      client.POST("/api/provision/terraform/preview", {
+        body: {
+          token,
+          logging_service_id: selectedService.id,
+          service_name: selectedService.name,
+          endpoint_name: config.endpoint_name,
+          fos_region: config.fos_region,
+          fos_bucket_name: config.fos_bucket_name,
+          fos_prefix: config.fos_prefix,
+          sample_rate: String(config.sample_rate),
+          edge_only: config.edge_only,
+          custom_condition: config.custom_condition,
+          log_period: String(config.log_period),
+          rum_log_period: String(config.rum_log_period || 300),
+          cdn_service_name: config.cdn_service_name,
+          cdn_prefix: config.cdn_prefix,
+          cdn_shield: config.cdn_shield,
+          log_fields: config.log_fields,
+        },
+      }),
+    );
     if (data) {
       const files = data;
       setTerraformFiles(files);
@@ -350,39 +353,41 @@ export async function runAdminIngest(args: AdminIngestArgs) {
   setIsDeploying(true);
 
   try {
-    const { data } = await client.POST("/api/provision/ingest", {
-      body: {
-        token,
-        service_id: selectedService.id,
-        service_name: selectedService.name,
-        endpoint_name: config.endpoint_name,
-        fos_region: config.fos_region,
-        fos_bucket_name: config.fos_bucket_name,
-        fos_prefix: config.fos_prefix,
-        sample_rate: String(config.sample_rate),
-        edge_only: config.edge_only,
-        custom_condition: config.custom_condition,
-        log_period: String(config.log_period),
-        cdn_service_id: selectedCdnService?.id || config.cdn_service_name,
-        cdn_service_name: selectedCdnService?.name || config.cdn_service_name,
-        cdn_url:
-          config.cdn_url ||
-          (config.cdn_prefix
-            ? `https://${config.cdn_prefix}.global.ssl.fastly.net`
-            : ""),
-        cdn_shield: config.cdn_shield,
-        enable_cron_sync: config.enable_cron_sync,
-        delete_after: config.delete_after,
-        commit_interval_mins: config.commit_interval_mins,
-        enable_cron_compact: config.enable_cron_compact,
-        log_retention_days: config.log_retention_days,
-        rum_retention_days: config.rum_retention_days,
-        log_fields: config.log_fields,
-        rum_custom_condition: config.rum_custom_condition,
-        fos_access_key: config.fos_access_key,
-        fos_secret_key: config.fos_secret_key,
-      },
-    });
+    const data = await unwrapClient(
+      client.POST("/api/provision/ingest", {
+        body: {
+          token,
+          service_id: selectedService.id,
+          service_name: selectedService.name,
+          endpoint_name: config.endpoint_name,
+          fos_region: config.fos_region,
+          fos_bucket_name: config.fos_bucket_name,
+          fos_prefix: config.fos_prefix,
+          sample_rate: String(config.sample_rate),
+          edge_only: config.edge_only,
+          custom_condition: config.custom_condition,
+          log_period: String(config.log_period),
+          cdn_service_id: selectedCdnService?.id || config.cdn_service_name,
+          cdn_service_name: selectedCdnService?.name || config.cdn_service_name,
+          cdn_url:
+            config.cdn_url ||
+            (config.cdn_prefix
+              ? `https://${config.cdn_prefix}.global.ssl.fastly.net`
+              : ""),
+          cdn_shield: config.cdn_shield,
+          enable_cron_sync: config.enable_cron_sync,
+          delete_after: config.delete_after,
+          commit_interval_mins: config.commit_interval_mins,
+          enable_cron_compact: config.enable_cron_compact,
+          log_retention_days: config.log_retention_days,
+          rum_retention_days: config.rum_retention_days,
+          log_fields: config.log_fields,
+          rum_custom_condition: config.rum_custom_condition,
+          fos_access_key: config.fos_access_key,
+          fos_secret_key: config.fos_secret_key,
+        },
+      }),
+    );
 
     if (data?.ok) {
       setJoinedServiceId(selectedService.id);

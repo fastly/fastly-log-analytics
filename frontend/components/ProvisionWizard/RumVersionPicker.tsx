@@ -24,6 +24,9 @@ interface RumVersionPickerProps {
   serviceId: string;
   value: string | null;
   onChange: (version: string | null) => void;
+  availableVersions?: string[];
+  currentVersion?: string | null;
+  latestVersion?: string | null;
 }
 
 const INFO_TEXT =
@@ -39,7 +42,15 @@ const INFO_TEXT =
  * DEFAULT_FARO_VERSION, so this degraded path never leaves a service
  * without a bundle behind /js/faro-sdk.js (there is no CDN fallback).
  */
-export function RumVersionPicker({ serviceId, value, onChange }: RumVersionPickerProps) {
+export function RumVersionPicker({
+  serviceId,
+  value,
+  onChange,
+  availableVersions,
+  currentVersion,
+  latestVersion,
+}: RumVersionPickerProps) {
+  const hasPrefetched = availableVersions !== undefined;
   const { data, isLoading, isError, refetch, isFetching } = useQuery<RumVersionsResponse>({
     queryKey: ["rum-versions", serviceId],
     queryFn: async ({ signal }) => {
@@ -50,15 +61,15 @@ export function RumVersionPicker({ serviceId, value, onChange }: RumVersionPicke
       if (!response.ok) throw new Error(`status ${response.status}`);
       return data as RumVersionsResponse;
     },
-    enabled: !!serviceId,
+    enabled: !!serviceId && !hasPrefetched,
     retry: false,
     staleTime: Infinity,
   });
 
-  const available = data?.available ?? [];
-  const latest = data?.latest ?? null;
-  const current = data?.current ?? null;
-  const degraded = isError || (!isLoading && available.length === 0);
+  const available = availableVersions ?? data?.available ?? [];
+  const latest = latestVersion !== undefined ? latestVersion : (data?.latest ?? null);
+  const current = currentVersion !== undefined ? currentVersion : (data?.current ?? null);
+  const degraded = !hasPrefetched && (isError || (!isLoading && available.length === 0));
 
   // Seed the wizard's default once the catalog resolves: a fresh service
   // should come up pinned to the newest stable release rather than forcing
@@ -74,7 +85,7 @@ export function RumVersionPicker({ serviceId, value, onChange }: RumVersionPicke
     seedLatest();
   }, [latest]);
 
-  if (isLoading) {
+  if (!hasPrefetched && isLoading) {
     return (
       <div className="space-y-1.5">
         <div className="flex items-center justify-between">

@@ -11,6 +11,7 @@ import {
 } from '@/components/ui/dialog'
 import { useQuery } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { useServiceStore } from '@/stores/serviceStore'
 import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
 import { useDateFormat } from '@/hooks/useDateFormat'
@@ -23,6 +24,7 @@ import { statusBadgeClass } from '@/lib/status-style'
 import type { ColumnDef } from '@tanstack/react-table'
 import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
 import type { components } from '@/types/api.generated'
+import { InsightStatCard } from './shared'
 
 type CacheMiss = components['schemas']['CacheMissPoint']
 interface CacheCollapseModalProps {
@@ -46,18 +48,14 @@ export function CacheCollapseModal({
   const { data, isLoading, error } = useQuery({
     queryKey: ['insights', 'cache-collapse-detail', activeServiceId, url, windowHours, baselineHours],
     queryFn: async ({ signal }) => {
-      const res = await client.POST('/api/insights/cache-collapse-detail', {
+      return unwrapClient(client.POST('/api/insights/cache-collapse-detail', {
         signal,
         body: {
           url: url!,
           window_size_hrs: parseFloat(windowHours),
           baseline_hours: parseFloat(baselineHours),
         },
-      })
-      if (res.error) {
-        throw res.error
-      }
-      return res.data
+      }))
     },
     enabled: isOpen && !!url && !!activeServiceId,
     staleTime: 30000,
@@ -208,43 +206,33 @@ export function CacheCollapseModal({
           {!isLoading && !errorMsg && data && stats && (
             <>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <div className="p-3 rounded-lg bg-muted/40 border border-border flex flex-col justify-between">
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold flex items-center gap-1">
-                    <Clock className="h-3 w-3" /> Baseline Hit Ratio
-                  </div>
-                  <div className="mt-1.5 font-mono text-xl font-bold text-blue-500">
-                    {stats.baselineHitRate.toFixed(2)}%
-                  </div>
-                  <div className="text-[10px] text-muted-foreground mt-0.5">cacheable (HIT/(HIT+MISS))</div>
-                </div>
+                <InsightStatCard
+                  icon={<Clock className="h-3 w-3" />}
+                  label="Baseline Hit Ratio"
+                  value={`${stats.baselineHitRate.toFixed(2)}%`}
+                  valueClass="text-blue-500"
+                  hint="cacheable (HIT/(HIT+MISS))"
+                />
 
-                <div className="p-3 rounded-lg bg-muted/40 border border-border flex flex-col justify-between">
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold flex items-center gap-1">
-                    <ShieldAlert className="h-3 w-3 text-red-400" /> Recent Hit Ratio
-                  </div>
-                  <div className="mt-1.5 font-mono text-xl font-bold text-red-500">
-                    {stats.windowHitRate.toFixed(2)}%
-                  </div>
-                  <div className="text-[10px] text-muted-foreground mt-0.5">cacheable (HIT/(HIT+MISS))</div>
-                </div>
+                <InsightStatCard
+                  icon={<ShieldAlert className="h-3 w-3 text-red-400" />}
+                  label="Recent Hit Ratio"
+                  value={`${stats.windowHitRate.toFixed(2)}%`}
+                  valueClass="text-red-500"
+                  hint="cacheable (HIT/(HIT+MISS))"
+                />
 
-                <div className="p-3 rounded-lg bg-muted/40 border border-border flex flex-col justify-between">
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold flex items-center gap-1">
-                    <Activity className="h-3 w-3" /> Total Requests
-                  </div>
-                  <div className="mt-1.5 font-mono text-xl font-bold text-foreground">
-                    {formatCount(stats.totalRequests)}
-                  </div>
-                </div>
+                <InsightStatCard
+                  icon={<Activity className="h-3 w-3" />}
+                  label="Total Requests"
+                  value={formatCount(stats.totalRequests)}
+                />
 
-                <div className="p-3 rounded-lg bg-muted/40 border border-border flex flex-col justify-between">
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold flex items-center gap-1">
-                    <CheckCircle2 className="h-3 w-3 text-emerald-500" /> Total Cache Hits
-                  </div>
-                  <div className="mt-1.5 font-mono text-xl font-bold text-foreground">
-                    {formatCount(stats.realHits)}
-                  </div>
-                </div>
+                <InsightStatCard
+                  icon={<CheckCircle2 className="h-3 w-3 text-emerald-500" />}
+                  label="Total Cache Hits"
+                  value={formatCount(stats.realHits)}
+                />
               </div>
 
               {/* Recent-window cache disposition breakdown — tells apart a true

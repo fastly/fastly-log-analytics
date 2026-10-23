@@ -4,9 +4,9 @@
 
 // Builds and pushes the backend, frontend and admin-gateway images for the
 // Kubernetes deployment. The admin-gateway image (deploy/admin-gateway) is the
-// client-mTLS admin entrypoint. The worker, beat and metadata-schema-init pods
+// client-mTLS admin entrypoint. The worker and metadata-schema-init pods
 // reuse the backend image with a different `command` (see
-// docker-compose.multipod.yml and the chart's worker/beat deployments). Caddy
+// docker-compose.multipod.yml and the chart's worker deployment). Caddy
 // is the single-VM Compose reverse proxy, replaced by ingress on Kubernetes, so
 // it is not built here. Postgres, Valkey and observability images are upstream.
 //
@@ -104,7 +104,7 @@ fastlyPipeline(script: this) {
       error('FLA_BACKEND_IMAGE, FLA_FRONTEND_IMAGE and FLA_ADMIN_GATEWAY_IMAGE must be configured in Jenkins')
     }
     stage('Tag Release') {
-      def commitTag = env.GIT_COMMIT ? env.GIT_COMMIT.take(12) : env.GIT_COMMIT
+      def commitTag = env.GIT_COMMIT ? env.GIT_COMMIT.take(12) : (env.BUILD_NUMBER ?: 'latest')
       fastlyTagContainer(script: this,
         containerName: backendImage,
         containerVersion: commitTag,

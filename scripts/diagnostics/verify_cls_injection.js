@@ -131,6 +131,7 @@ async function runVerification() {
         await page.close();
         await context.close();
 
+        let scenarioBOk = false;
         if (clsBeacon) {
             console.log("  🎉 CLS Beacon Intercepted with Fix!");
             console.log(`     Raw URL: ${clsBeacon}`);
@@ -139,11 +140,16 @@ async function runVerification() {
             console.log(`     Parsed CLS Value: ${value}`);
             if (value && parseFloat(value) > 0.0) {
                 console.log(`     🚀 SUCCESS! CLS is now non-zero: ${value} (Visual stability score is working!)`);
+                scenarioBOk = true;
             } else {
-                console.log(`     ⚠️ CLS was captured but is still ${value}.`);
+                console.error(`     ⚠️ CLS was captured but is still ${value}.`);
             }
         } else {
-            console.log("  ❌ No CLS beacon was dispatched.");
+            console.error("  ❌ No CLS beacon was dispatched.");
+        }
+        if (!scenarioBOk) {
+            await browser.close();
+            process.exit(1);
         }
     }
 
@@ -151,4 +157,7 @@ async function runVerification() {
     console.log("\n===============================================================");
 }
 
-runVerification();
+runVerification().catch((err) => {
+    console.error("Fatal verification error:", err);
+    process.exit(1);
+});

@@ -24,7 +24,9 @@ from ._common import (
     NETWORK_QUALITY_COUNTRY_FILENAME,
     NETWORK_QUALITY_POP_FILENAME,
     NETWORK_QUALITY_REGION_FILENAME,
-    backfill_missing_bundles,
+    MultiBundleSpec,
+    backfill_multi_spec_bundles,
+    build_multi_spec_bundles,
     build_per_hour_bundles,
     parquet_zstd_target,
 )
@@ -72,88 +74,34 @@ def _pop_sql(ctx, table, start, end, tmp):
     return _build_sql("pop", False, table, start, end, tmp)
 
 
-_DIMS = (
-    ("quality_country", NETWORK_QUALITY_COUNTRY_FILENAME, ("country", "tcp_rtt"), _country_sql),
-    ("quality_asn", NETWORK_QUALITY_ASN_FILENAME, ("asn", "tcp_rtt"), _asn_sql),
-    ("quality_region", NETWORK_QUALITY_REGION_FILENAME, ("region", "country", "tcp_rtt"), _region_sql),
-    ("quality_pop", NETWORK_QUALITY_POP_FILENAME, ("pop", "tcp_rtt"), _pop_sql),
+_DIMS: tuple[MultiBundleSpec, ...] = (
+    ("country", NETWORK_QUALITY_COUNTRY_FILENAME, ("country", "tcp_rtt"), _country_sql),
+    ("asn", NETWORK_QUALITY_ASN_FILENAME, ("asn", "tcp_rtt"), _asn_sql),
+    ("region", NETWORK_QUALITY_REGION_FILENAME, ("region", "country", "tcp_rtt"), _region_sql),
+    ("pop", NETWORK_QUALITY_POP_FILENAME, ("pop", "tcp_rtt"), _pop_sql),
 )
 
 
-def _build_dim_bundles(
-    service_id: str,
-    source: dict,
-    hours: list[str],
-    *,
-    label: str,
-    filename: str,
-    req_cols: tuple[str, ...],
-    build_copy_sql,
-) -> int:
-    def eligibility(cols, table_ident, req_cols=req_cols):  # noqa: ARG001
-        for c in req_cols:
-            if c not in cols:
-                return None
-        return True
-
-    return build_per_hour_bundles(
+def build_network_quality_bundles(service_id: str, source: dict, hours: list[str]) -> int:
+    return build_multi_spec_bundles(
         service_id,
         source,
         hours,
-        bundle_filename=filename,
+        specs=_DIMS,
+        group_label="network_quality",
         tmp_prefix=".tmp_nq_",
-        label=label,
-        eligibility=eligibility,
-        build_copy_sql=build_copy_sql,
         logger=logger,
+        driver=build_per_hour_bundles,
     )
 
 
-def build_network_quality_bundles(service_id: str, source: dict, hours: list[str]) -> int:
-    written = 0
-    for label, filename, req_cols, build_copy_sql in _DIMS:
-        written += _build_dim_bundles(
-            service_id,
-            source,
-            hours,
-            label=label,
-            filename=filename,
-            req_cols=req_cols,
-            build_copy_sql=build_copy_sql,
-        )
-    return written
-
-
 def backfill_network_quality_bundles(service_id: str, source: dict) -> int:
-    written = 0
-    for label, filename, req_cols, build_copy_sql in _DIMS:
-
-        def _dim_builder(
-            sid: str,
-            src: dict,
-            hrs: list[str],
-            *,
-            _label: str = label,
-            _filename: str = filename,
-            _req_cols: tuple[str, ...] = req_cols,
-            _sql=build_copy_sql,
-        ) -> int:
-            return _build_dim_bundles(
-                sid,
-                src,
-                hrs,
-                label=_label,
-                filename=_filename,
-                req_cols=_req_cols,
-                build_copy_sql=_sql,
-            )
-
-        written += backfill_missing_bundles(
-            service_id,
-            source,
-            bundle_filename=filename,
-            label=label,
-            builder=_dim_builder,
-            logger=logger,
-        )
-    return written
+    return backfill_multi_spec_bundles(
+        service_id,
+        source,
+        specs=_DIMS,
+        group_label="network_quality",
+        tmp_prefix=".tmp_nq_",
+        logger=logger,
+        driver=build_per_hour_bundles,
+    )

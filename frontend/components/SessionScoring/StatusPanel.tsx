@@ -1,8 +1,9 @@
 'use client'
 
 import * as React from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Check, Copy, ExternalLink, Info, Power, PowerOff, RefreshCw, ShieldCheck, ShieldOff } from 'lucide-react'
+import { invalidateServiceScoringQueries, useScoringQuery } from './useScoringQuery'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -31,20 +32,16 @@ type ScoringEvaluation = components['schemas']['ScoringEvaluationResponse']
 
 export function StatusPanel({ serviceId }: StatusPanelProps) {
   const queryClient = useQueryClient()
-  const { data, isLoading, isFetching, error, refetch } = useQuery({
-    queryKey: ['scoring-status', serviceId],
-    queryFn: async () => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/status',
-        { params: { path: { service_id: serviceId } } },
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data
-    },
-    // No refetchInterval: polling 4 endpoints every 30-60s caused
-    // constant .duckdb-wal churn that ate ~1.5GB of mds_stores + VS Code
-    // extension-host RAM. Refresh happens after enable/disable via refetch().
-  })
+  // No refetchInterval: polling 4 endpoints every 30-60s caused
+  // constant .duckdb-wal churn that ate ~1.5GB of mds_stores + VS Code
+  // extension-host RAM. Refresh happens after enable/disable via refetch().
+  const { data, isLoading, isFetching, error, refetch } = useScoringQuery(
+    ['scoring-status', serviceId],
+    () =>
+      client.GET('/api/services/{service_id}/scoring/status', {
+        params: { path: { service_id: serviceId } },
+      }),
+  )
 
   const enabled = !!data?.enabled
   const pragmasMissing = !enabled && data?.preflight_pragmas_ready === false
@@ -69,32 +66,21 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
   // sinceHours-suffixed analytics keys (['scoring-health', id, hours], …) match.
   const refreshScoring = React.useCallback(() => {
     refetch()
-    queryClient.invalidateQueries({
-      predicate: (q) =>
-        Array.isArray(q.queryKey) &&
-        typeof q.queryKey[0] === 'string' &&
-        q.queryKey[0].startsWith('scoring-') &&
-        q.queryKey[1] === serviceId,
-    })
+    invalidateServiceScoringQueries(queryClient, serviceId)
   }, [queryClient, refetch, serviceId])
 
   // Matrix-quality (ROC-AUC) — only fire when scoring is actually on.
   // Cache invalidation handled server-side via _bust_analytics_cache on
   // label POST/PATCH/DELETE; client-side staleTime keeps the StatusPanel
   // from re-fetching on every focus change.
-  const { data: evalData } = useQuery({
-    queryKey: ['scoring-evaluation', serviceId],
-    queryFn: async () => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/evaluation',
-        { params: { path: { service_id: serviceId } } },
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data
-    },
-    enabled,
-    staleTime: 30_000,
-  })
+  const { data: evalData } = useScoringQuery(
+    ['scoring-evaluation', serviceId],
+    () =>
+      client.GET('/api/services/{service_id}/scoring/evaluation', {
+        params: { path: { service_id: serviceId } },
+      }),
+    { enabled, staleTime: 30_000 },
+  )
 
   return (
     <div data-testid="admin-session-scoring-status-card">

@@ -5,7 +5,8 @@ import {
   fetchPerformanceServerSide,
   PERFORMANCE_SSR_DEFAULTS,
 } from '@/lib/ssr/performance'
-import { firstParam, seedDehydratedState } from '@/lib/ssr/seed'
+import { seedDehydratedState } from '@/lib/ssr/seed'
+import { resolveServerServiceId } from '@/lib/ssr/service'
 import PerformanceClient from './_sections/PerformanceClient'
 
 // Per-request RSC shell for /performance. Pre-fetches the unified aggregates
@@ -45,10 +46,7 @@ export default async function PerformancePage({
 }) {
   const params = await searchParams
   const bootstrap = await fetchBootstrapServerSide()
-  const serviceId =
-    firstParam(params.service) ??
-    (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ??
-    undefined
+  const serviceId = resolveServerServiceId(params, bootstrap)
 
   return (
     <Suspense fallback={<PerformanceLoading />}>

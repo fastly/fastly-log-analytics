@@ -8,6 +8,7 @@ import { ChevronDown, ChevronUp, Database, HardDrive, Network, Trash2, Copy, Che
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge } from '@/components/ui/badge'
 import { client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
 import type { components } from '@/types/api.generated'
 import type { DebugCall as ApiDebugCall, DebugQuery as ApiDebugQuery } from '@/types/api'
@@ -102,7 +103,7 @@ export function DebugPanel() {
   const totalSqliteTime = sqliteEntries.reduce((acc, q) => acc + q.time_ms, 0)
 
   const clearSqlite = async () => {
-    await client.POST('/api/debug/clear-sqlite', {})
+    await unwrapClient(client.POST('/api/debug/clear-sqlite', {}))
     sqliteQuery.refetch()
   }
 

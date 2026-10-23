@@ -13,6 +13,7 @@
 
 import { expect, test } from '@playwright/test'
 import type { DebugQuery } from '../../types/api'
+import { getFirstServiceId as resolveActiveServiceId } from './helpers'
 
 type LayoutShiftEntry = PerformanceEntry & {
   hadRecentInput?: boolean
@@ -31,16 +32,6 @@ type RequestFactsDebugResponse = {
     watermark?: Record<string, unknown>
   }
   next_cursor?: string | null
-}
-
-async function resolveActiveServiceId(page: import('@playwright/test').Page): Promise<string | null> {
-  const res = await page.request.get('/api/bootstrap')
-  if (!res.ok()) return null
-  const data = (await res.json()) as {
-    active_service_id?: string | null
-    services?: Array<{ service_id?: string }>
-  }
-  return data.active_service_id ?? data.services?.[0]?.service_id ?? null
 }
 
 test.describe('High-Scale Request Facts Page Contract (/high-scale/request-facts)', () => {

@@ -1,4 +1,5 @@
-import { adminFetch, client, extractApiError, getApiBase } from '@/lib/api'
+import { adminFetch, client, getApiBase } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import type { components } from '@/types/api.generated'
 
 export type CustomField = components["schemas"]["CustomField"]
@@ -8,46 +9,51 @@ export type VclLintRequest = components["schemas"]["VclLintRequest"]
 
 export const customFieldsApi = {
   listCustomFields: async (service_id: string) => {
-    const { data, error } = await client.GET("/api/services/{service_id}/custom-fields", {
-      params: { path: { service_id } }
-    })
-    if (error) throw new Error(extractApiError(error) || "Failed to list custom fields")
-    return data
+    return await unwrapClient(
+      client.GET("/api/services/{service_id}/custom-fields", {
+        params: { path: { service_id } }
+      }),
+      "Failed to list custom fields",
+    )
   },
 
   createCustomField: async (service_id: string, field: Omit<CustomField, "created_at" | "updated_at">) => {
-    const { data, error } = await client.POST("/api/services/{service_id}/custom-fields", {
-      params: { path: { service_id } },
-      body: field
-    })
-    if (error) throw new Error(extractApiError(error) || "Failed to create custom field");
-    return data
+    return await unwrapClient(
+      client.POST("/api/services/{service_id}/custom-fields", {
+        params: { path: { service_id } },
+        body: field
+      }),
+      "Failed to create custom field",
+    )
   },
 
   updateCustomField: async (service_id: string, field_name: string, updates: CustomFieldUpdate) => {
-    const { data, error } = await client.PATCH("/api/services/{service_id}/custom-fields/{field_name}", {
-      params: { path: { service_id, field_name } },
-      body: updates
-    })
-    if (error) throw new Error(extractApiError(error) || "Failed to update custom field");
-    return data
+    return await unwrapClient(
+      client.PATCH("/api/services/{service_id}/custom-fields/{field_name}", {
+        params: { path: { service_id, field_name } },
+        body: updates
+      }),
+      "Failed to update custom field",
+    )
   },
 
   deleteCustomField: async (service_id: string, field_name: string) => {
-    const { data, error } = await client.DELETE("/api/services/{service_id}/custom-fields/{field_name}", {
-      params: { path: { service_id, field_name } }
-    })
-    if (error) throw new Error(extractApiError(error) || "Failed to delete custom field")
-    return data
+    return await unwrapClient(
+      client.DELETE("/api/services/{service_id}/custom-fields/{field_name}", {
+        params: { path: { service_id, field_name } }
+      }),
+      "Failed to delete custom field",
+    )
   },
 
   validateCustomVcl: async (service_id: string, body: VclLintRequest) => {
-    const { data, error } = await client.POST("/api/services/{service_id}/custom-fields/validate-vcl", {
-      params: { path: { service_id } },
-      body
-    })
-    if (error) throw new Error(extractApiError(error) || "Failed to validate VCL");
-    return data
+    return await unwrapClient(
+      client.POST("/api/services/{service_id}/custom-fields/validate-vcl", {
+        params: { path: { service_id } },
+        body
+      }),
+      "Failed to validate VCL",
+    )
   },
 
   exportCustomFields: async (service_id: string) => {
@@ -64,11 +70,12 @@ export const customFieldsApi = {
   },
 
   importCustomFields: async (service_id: string, fields: components["schemas"]["CustomFieldsImportBody"]["custom_fields"]) => {
-    const { data, error } = await client.POST("/api/services/{service_id}/custom-fields/import", {
-      params: { path: { service_id } },
-      body: { custom_fields: fields }
-    });
-    if (error) throw new Error(extractApiError(error) || "Failed to import custom fields");
-    return data;
+    return await unwrapClient(
+      client.POST("/api/services/{service_id}/custom-fields/import", {
+        params: { path: { service_id } },
+        body: { custom_fields: fields }
+      }),
+      "Failed to import custom fields",
+    )
   }
 }

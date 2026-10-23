@@ -6,6 +6,7 @@ import { useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { showToast } from '@/lib/toast'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useBootstrap } from '@/hooks/useBootstrap'
@@ -186,7 +187,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
           parsedCodes = statusCodesStr.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n))
         }
 
-        const { data } = await client.POST("/api/alerts/preview", {
+        const data = await unwrapClient(client.POST("/api/alerts/preview", {
           params: { query: { lookback_hours: lookbackHours } },
           body: {
             service_id: activeServiceId,
@@ -204,7 +205,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
             zscore_threshold: evalType === 'anomaly_zscore' ? (parseFloat(zscoreThreshold) || 3.0) : undefined,
             baseline_period_days: evalType === 'anomaly_zscore' ? (parseInt(baselinePeriodDays) || 7) : undefined,
           },
-        })
+        }))
         if (data) {
           setPreviewData(data.data ?? null)
         }
@@ -271,14 +272,14 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
       }
 
       if (initialAlert?.id) {
-        await client.PUT("/api/alerts/{alert_id}", {
+        await unwrapClient(client.PUT("/api/alerts/{alert_id}", {
           params: { path: { alert_id: initialAlert.id } },
           body: payload,
-        })
+        }))
       } else {
-        await client.POST("/api/alerts/", {
+        await unwrapClient(client.POST("/api/alerts/", {
           body: payload,
-        })
+        }))
       }
       queryClient.invalidateQueries({ queryKey: ['alerts'] })
       onSuccess()

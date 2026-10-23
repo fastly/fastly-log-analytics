@@ -66,7 +66,7 @@ The **Control Room** is the real-time operations console for Fastly Log Analytic
 
 ### Telemetry Attribution:
 - All queries and fetch requests carry `X-Page-Load-ID` (including `realtime-seed`, `realtime-stream`, `error-stream`, and `correlate`).
-- Profiler and telemetry calls record attribution in request telemetry and `usage_log.db`.
+- Profiler and telemetry calls record attribution in request telemetry and PostgreSQL's `usage_log` table.
 
 ---
 

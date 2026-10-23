@@ -3,6 +3,7 @@ import React, { useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRouter } from 'next/navigation'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { useDerivedState } from '@/hooks/useDerivedState'
 import { useMounted } from '@/hooks/useMounted'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -69,8 +70,8 @@ export const PricingSettings = () => {
 
   const { data: settings, isLoading } = useQuery({
     queryKey: ['usage-logging-settings'],
-    queryFn: async ({ signal }) => {
-      const { data } = await client.GET('/api/admin/usage-logging')
+    queryFn: async () => {
+      const data = await unwrapClient(client.GET('/api/admin/usage-logging'))
       return data ?? null
     },
   })
@@ -104,7 +105,7 @@ export const PricingSettings = () => {
   async function handleSave() {
     setSaving(true)
     try {
-      await client.PATCH('/api/admin/usage-logging', {
+      await unwrapClient(client.PATCH('/api/admin/usage-logging', {
         body: {
           class_a_rate_per_1k: parseFloat(rateA),
           class_b_rate_per_10k: parseFloat(rateB),
@@ -112,7 +113,7 @@ export const PricingSettings = () => {
           storage_rate_per_gb_month: parseFloat(rateStorage),
           min_billed_days: parseInt(minBilledDays),
         },
-      })
+      }))
       queryClient.invalidateQueries({ queryKey: ['usage-logging-settings'] })
       queryClient.invalidateQueries({ queryKey: ['usage'] })
       queryClient.invalidateQueries({ queryKey: ['usage-log'] })
@@ -194,9 +195,8 @@ export function GlobalSettings() {
 
   const { data: queryUsageLoggingSettings } = useQuery({
     queryKey: ['usage-logging-settings'],
-    queryFn: async ({ signal }) => {
-      const { data } = await client.GET('/api/admin/usage-logging')
-      return data
+    queryFn: async () => {
+      return unwrapClient(client.GET('/api/admin/usage-logging'))
     },
     staleTime: 60_000,
   })
@@ -209,7 +209,7 @@ export function GlobalSettings() {
     if (!Number.isFinite(days) || days < 1 || days === usageLogRetention) return
     queryClient.setQueryData(['usage-logging-settings'], (old: typeof usageLoggingSettings) => ({ ...old, retention_days: days }))
     try {
-      await client.PATCH('/api/admin/usage-logging', { body: { retention_days: days } })
+      await unwrapClient(client.PATCH('/api/admin/usage-logging', { body: { retention_days: days } }))
     } finally {
       queryClient.invalidateQueries({ queryKey: ['usage-logging-settings'] })
     }
@@ -219,7 +219,7 @@ export function GlobalSettings() {
     queryClient.setQueryData(['usage-logging-settings'], (old: typeof usageLoggingSettings) => ({ ...old, enabled }))
     setUsageLoggingLoading(true)
     try {
-      await client.PATCH('/api/admin/usage-logging', { body: { enabled } })
+      await unwrapClient(client.PATCH('/api/admin/usage-logging', { body: { enabled } }))
       queryClient.invalidateQueries({ queryKey: ['usage-logging-settings'] })
     } catch {
       queryClient.invalidateQueries({ queryKey: ['usage-logging-settings'] })

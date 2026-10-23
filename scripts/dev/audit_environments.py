@@ -48,6 +48,7 @@ from scripts.lib.environments import (  # noqa: E402
     ENVIRONMENT_SPECS,
     load_dotenv,
     load_persisted_deploy_env,
+    parse_iso_utc,
 )
 from scripts.lib.environments import service_id as _registry_service_id  # noqa: E402
 from scripts.lib.readiness import ProbeResult, probe  # noqa: E402
@@ -261,19 +262,10 @@ def http_post_json(
 
 
 def parse_timestamp_age(ts_str: str | None) -> float | None:
-    if not ts_str:
+    dt = parse_iso_utc(ts_str)
+    if dt is None:
         return None
-    try:
-        clean_ts = ts_str.replace("Z", "+00:00")
-        if " " in clean_ts and "T" not in clean_ts:
-            parts = clean_ts.split(" ")
-            clean_ts = f"{parts[0]}T{parts[1]}+00:00"
-        dt = datetime.fromisoformat(clean_ts)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
-        return max(0.0, (datetime.now(UTC) - dt).total_seconds())
-    except Exception:
-        return None
+    return max(0.0, (datetime.now(UTC) - dt).total_seconds())
 
 
 def format_duration(seconds: float | None) -> str:
@@ -499,7 +491,7 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
         # FOS probe
         fos = hs_data.get("fos")
         if fos and isinstance(fos, dict):
-            svc_fos = fos.get(env.service_id) or {}
+            svc_fos = fos.get(active_sid) or {}
             res.fos_reachable = svc_fos.get("reachable", False)
             res.fos_error = svc_fos.get("error")
             if not res.fos_reachable and res.fos_error:
@@ -507,7 +499,7 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
 
         # Compaction stats
         comp = hs_data.get("compaction") or {}
-        svc_comp = comp.get(env.service_id) or {}
+        svc_comp = comp.get(active_sid) or {}
         res.compaction_total_files = svc_comp.get("total_files") or 0
         res.compaction_daily_files = svc_comp.get("daily_files") or 0
         res.compaction_weekly_files = svc_comp.get("weekly_files") or 0

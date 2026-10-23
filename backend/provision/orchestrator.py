@@ -331,8 +331,8 @@ def save_state(state: dict):
     try:
         with open(_state_file_path(), "w") as f:
             json.dump(state, f, indent=2)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to save provisioning state: %s", e)
 
 
 def load_state() -> dict:
@@ -341,8 +341,8 @@ def load_state() -> dict:
         if os.path.exists(path):
             with open(path) as f:
                 return json.load(f)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to load provisioning state: %s", e)
     return {}
 
 

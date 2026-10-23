@@ -10,6 +10,7 @@ import { Input } from '@/components/ui/input'
 import { Trash2, Database, Pencil, Check, X, Lock } from 'lucide-react'
 import { useMounted } from '@/hooks/useMounted'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import type { Expect, WireParity } from '@/types/api'
 import type { components } from '@/types/api.generated'
 
@@ -95,7 +96,7 @@ export function MetadataStorageCard() {
   const { data, isLoading, isFetching, error } = useQuery<StorageResponse>({
     queryKey: queryKeys.admin.metadataStorage(),
     queryFn: async () => {
-      const { data } = await client.GET('/api/admin/metadata-storage')
+      const data = await unwrapClient(client.GET('/api/admin/metadata-storage'))
       // Narrow the all-optional wire type to the producer-guaranteed local
       // shape; the _StorageParity guard above keeps the assertion honest.
       return data as StorageResponse
@@ -134,8 +135,7 @@ export function MetadataStorageCard() {
         ingested_files_days: Math.max(0, parseInt(draft.ingested_files_days, 10) || 0),
         cron_runs_days: Math.max(0, parseInt(draft.cron_runs_days, 10) || 0),
       }
-      const { data } = await client.PATCH('/api/admin/metadata-retention', { body })
-      return data
+      return unwrapClient(client.PATCH('/api/admin/metadata-retention', { body }))
     },
     onSuccess: () => {
       setEditing(false)

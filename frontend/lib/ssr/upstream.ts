@@ -2,8 +2,6 @@ import { quantizeAnchor } from '@/lib/time-window'
 
 import { parseSsrJson, ssrUpstreamGet } from './_transport'
 
-export { parseSsrJson, ssrUpstreamGet }
-
 export interface SsrRangeSeed<T = unknown> {
   /** The upstream aggregates response body to seed into the cache. */
   data: T
@@ -19,7 +17,6 @@ export interface SsrRangeSeed<T = unknown> {
  */
 export function resolveDefaultSsrRangeKey(
   now: Date = new Date(),
-  _logExtents?: unknown,
 ): {
   rangeToken: string
   anchor: string
@@ -32,11 +29,10 @@ export async function fetchSsrRangePost(options: {
   path: string
   logPrefix: string
   now?: Date
-  logExtents?: unknown
   timeoutMs?: number
   body?: Record<string, unknown>
 }): Promise<SsrRangeSeed | null> {
-  const { rangeToken, anchor } = resolveDefaultSsrRangeKey(options.now, options.logExtents)
+  const { rangeToken, anchor } = resolveDefaultSsrRangeKey(options.now)
   if (!options.serviceId) return null
 
   const data = parseSsrJson(

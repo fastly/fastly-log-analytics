@@ -15,6 +15,8 @@ import { ScriptedTrafficData } from './types'
 
 import { formatCount } from '@/lib/format'
 import { formatDuration } from '@/lib/date'
+import { InsightStatCard as StatCard } from './shared'
+
 interface ScriptedTrafficModalProps {
   isOpen: boolean
   onOpenChange: (open: boolean) => void
@@ -26,28 +28,6 @@ function formatInterval(sec: number | null): string {
   if (sec == null) return '—'
   if (sec < 90) return `${formatCount(sec, { maximumFractionDigits: 1 })}s`
   return formatDuration(Math.max(0, sec))
-}
-
-interface StatCardProps {
-  icon: React.ReactNode
-  label: string
-  value: string
-  valueClass?: string
-  hint?: string
-}
-
-function StatCard({ icon, label, value, valueClass, hint }: StatCardProps) {
-  return (
-    <div className="p-3 rounded-lg bg-muted/40 border border-border flex flex-col justify-between">
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold flex items-center gap-1">
-        {icon} {label}
-      </div>
-      <div className={cn('mt-1.5 font-mono text-xl font-bold', valueClass ?? 'text-foreground')}>
-        {value}
-      </div>
-      {hint && <div className="text-[10px] text-muted-foreground mt-0.5">{hint}</div>}
-    </div>
-  )
 }
 
 export function ScriptedTrafficModal({ isOpen, onOpenChange, data }: ScriptedTrafficModalProps) {

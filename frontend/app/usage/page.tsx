@@ -5,6 +5,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useInViewOnce } from '@/hooks/useInViewOnce'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { useIsDataReady } from '@/hooks/useIsDataReady'
 import type { ChartInterval, ReportConfiguration } from '@/hooks/useReportConfig'
 import { StatCard } from '@/components/ui/stat-card'
@@ -125,10 +126,9 @@ function UsagePageContent({
         const { data: storage, isLoading: loadingStorage, isFetching: fetchingStorage, error: errorStorage } = useQuery({
     queryKey: ['usage', 'storage', activeServiceId, startTime, endTime],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/usage/current-storage", { signal,
+      return unwrapClient(client.GET("/api/usage/current-storage", { signal,
         params: { query: { start: startTime ?? undefined, end: endTime ?? undefined } }
-      })
-      return data
+      }))
     },
     enabled: isReady,
     staleTime: 60_000,
@@ -137,10 +137,9 @@ function UsagePageContent({
   const { data: ops, isLoading: loadingOps, isFetching: fetchingOps, error: errorOps } = useQuery({
     queryKey: ['usage', 'operations', activeServiceId, startTime, endTime, activityBy],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/usage/operations", { signal,
+      return unwrapClient(client.GET("/api/usage/operations", { signal,
         params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: activityBy } }
-      })
-      return data
+      }))
     },
     enabled: isReady,
     staleTime: 60_000,
@@ -149,10 +148,9 @@ function UsagePageContent({
   const { data: bw, isLoading: loadingBw, isFetching: fetchingBw, error: errorBw } = useQuery({
     queryKey: ['usage', 'bandwidth', activeServiceId, startTime, endTime, activityBy],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/usage/bandwidth", { signal,
+      return unwrapClient(client.GET("/api/usage/bandwidth", { signal,
         params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: activityBy } }
-      })
-      return data
+      }))
     },
     enabled: isReady,
     staleTime: 60_000,
@@ -161,10 +159,9 @@ function UsagePageContent({
   const { data: logActivity, isLoading: loadingActivity, isFetching: fetchingActivity, error: errorActivity } = useQuery({
     queryKey: ['usage', 'log-activity', activeServiceId, startTime, endTime, activityBy],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/usage/log-activity", { signal,
+      return unwrapClient(client.GET("/api/usage/log-activity", { signal,
         params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: activityBy } }
-      })
-      return data
+      }))
     },
     enabled: isReady,
     staleTime: 60_000,
@@ -173,10 +170,9 @@ function UsagePageContent({
   const { data: rumBreakdown, isLoading: loadingRumBreakdown, isFetching: fetchingRumBreakdown, error: errorRumBreakdown } = useQuery({
     queryKey: ['usage', 'rum-breakdown', activeServiceId, startTime, endTime],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/usage/rum-breakdown", { signal,
+      return unwrapClient(client.GET("/api/usage/rum-breakdown", { signal,
         params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: 'day' } }
-      })
-      return data
+      }))
     },
     enabled: isReady,
     staleTime: 60_000,
@@ -189,8 +185,7 @@ function UsagePageContent({
   const { data: prefillRates } = useQuery({
     queryKey: ['usage', 'prefill-rates', activeServiceId],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/usage/prefill/rates", { signal })
-      return data
+      return unwrapClient(client.GET("/api/usage/prefill/rates", { signal }))
     },
     enabled: isReady,
     // Rates only change on admin config edits; analyst can pay one round-trip
@@ -206,8 +201,7 @@ function UsagePageContent({
   const { data: prefillFull, isLoading: loadingPrefillFull } = useQuery({
     queryKey: ['usage', 'prefill-full', activeServiceId],
     queryFn: async ({ signal }) => {
-      const { data } = await client.GET("/api/usage/prefill", { signal })
-      return data
+      return unwrapClient(client.GET("/api/usage/prefill", { signal }))
     },
     enabled: isReady && estimatorVisible,
     staleTime: 5 * 60_000,

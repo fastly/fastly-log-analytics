@@ -30,6 +30,15 @@ export function RotateKeyButton({ serviceId, onRotated }: RotateKeyButtonProps) 
   const [status, setStatus] = React.useState<
     { kind: 'success' | 'error'; message: string } | null
   >(null)
+  const timerRef = React.useRef<number | null>(null)
+
+  React.useEffect(() => {
+    return () => {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current)
+      }
+    }
+  }, [])
 
   const mutation = useMutation({
     mutationFn: async (): Promise<RotateKeyResponse> => {
@@ -50,7 +59,13 @@ export function RotateKeyButton({ serviceId, onRotated }: RotateKeyButtonProps) 
       qc.invalidateQueries({ queryKey: ['scoring-status', serviceId] })
       qc.invalidateQueries({ queryKey: ['scoring-audit', serviceId] })
       onRotated?.()
-      window.setTimeout(() => setStatus(null), 4000)
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current)
+      }
+      timerRef.current = window.setTimeout(() => {
+        timerRef.current = null
+        setStatus(null)
+      }, 4000)
     },
     onError: (err: unknown) => {
       const message = err instanceof Error ? err.message : 'Failed to rotate key'

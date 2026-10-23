@@ -52,6 +52,28 @@ def get_source_by_name(service_id: str, name: str) -> dict | None:
 # ── usage_log ─────────────────────────────────────────────────────────────────
 
 
+def _upsert_hourly_summary(
+    con: pg_connection.PgConnectionWrapper,
+    summary_map: dict[tuple[str, str, str, str], list[int]],
+    now_iso: str,
+) -> None:
+    if not summary_map:
+        return
+    summary_rows = [
+        (sid, hr, oc, ot, counts[0], counts[1], now_iso) for (sid, hr, oc, ot), counts in summary_map.items()
+    ]
+    con.executemany(
+        "INSERT INTO usage_log_hourly_summary "
+        "(service_id, hour, operation_class, operation_type, count, bytes, last_updated) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (service_id, hour, operation_class, operation_type) "
+        "DO UPDATE SET count = usage_log_hourly_summary.count + EXCLUDED.count, "
+        "              bytes = usage_log_hourly_summary.bytes + EXCLUDED.bytes, "
+        "              last_updated = EXCLUDED.last_updated",
+        summary_rows,
+    )
+
+
 def log_usage_calls(service_id: str, calls: list[dict], process_context: str | None = None) -> None:
     if not calls:
         return
@@ -136,20 +158,7 @@ def log_usage_calls(service_id: str, calls: list[dict], process_context: str | N
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
-        if summary_map:
-            summary_rows = [
-                (sid, hr, oc, ot, counts[0], counts[1], now) for (sid, hr, oc, ot), counts in summary_map.items()
-            ]
-            con.executemany(
-                "INSERT INTO usage_log_hourly_summary "
-                "(service_id, hour, operation_class, operation_type, count, bytes, last_updated) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT (service_id, hour, operation_class, operation_type) "
-                "DO UPDATE SET count = usage_log_hourly_summary.count + EXCLUDED.count, "
-                "              bytes = usage_log_hourly_summary.bytes + EXCLUDED.bytes, "
-                "              last_updated = EXCLUDED.last_updated",
-                summary_rows,
-            )
+        _upsert_hourly_summary(con, summary_map, now)
         con.commit()
     except Exception as e:
         logger.error("[metadata_db] Failed to log usage calls: %s", e)
@@ -221,20 +230,7 @@ def log_synthetic_usage(service_id: str, calls: list[dict]) -> int:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             new_rows,
         )
-        if summary_map:
-            summary_rows = [
-                (sid, hr, oc, ot, counts[0], counts[1], now_iso) for (sid, hr, oc, ot), counts in summary_map.items()
-            ]
-            con.executemany(
-                "INSERT INTO usage_log_hourly_summary "
-                "(service_id, hour, operation_class, operation_type, count, bytes, last_updated) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT (service_id, hour, operation_class, operation_type) "
-                "DO UPDATE SET count = usage_log_hourly_summary.count + EXCLUDED.count, "
-                "              bytes = usage_log_hourly_summary.bytes + EXCLUDED.bytes, "
-                "              last_updated = EXCLUDED.last_updated",
-                summary_rows,
-            )
+        _upsert_hourly_summary(con, summary_map, now_iso)
         con.commit()
         return len(new_rows)
     except Exception as e:

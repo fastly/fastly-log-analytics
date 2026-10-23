@@ -18,10 +18,59 @@ Num = int | float
 InsightFilters = dict[str, str | int | float | None]
 
 
-class ErrorSpikesMeta(WireSafeModel):
+class _FiltersOnlyBaseMeta(WireSafeModel):
+    filters: InsightFilters
+
+
+class _RequestsFiltersBaseMeta(WireSafeModel):
+    requests: Num
+    filters: InsightFilters
+
+
+class _ErrorSpikeBaseMeta(WireSafeModel):
     requests: Num
     errors: Num
     filters: InsightFilters
+
+
+class _SpikeRatioBaseMeta(WireSafeModel):
+    spike_ratio: float
+    filters: InsightFilters
+
+
+class _RegressionRequestsBaseMeta(WireSafeModel):
+    regression_ratio: Num
+    requests: Num
+    filters: InsightFilters
+
+
+class _WindowBaselineRequestsBaseMeta(WireSafeModel):
+    window_requests: Num
+    baseline_requests: Num
+    filters: InsightFilters
+
+
+class _RegressionWindowRequestsBaseMeta(WireSafeModel):
+    regression_ratio: Num
+    window_requests: Num
+    filters: InsightFilters
+
+
+class _RepeatedPatternBaseMeta(WireSafeModel):
+    score: int
+    cv: float
+    modal_frac: float
+    mean_interval_s: float
+    stddev_s: float
+    mode_gap_s: int | None
+    n_gaps: int
+    n_events: int
+    span_s: int
+    rps: float
+
+
+class ErrorSpikesMeta(_ErrorSpikeBaseMeta):
+    pass
 
 
 class BotnetGroupingMeta(WireSafeModel):
@@ -30,34 +79,28 @@ class BotnetGroupingMeta(WireSafeModel):
     filters: InsightFilters
 
 
-class NewCountryTrafficMeta(WireSafeModel):
-    filters: InsightFilters
+class NewCountryTrafficMeta(_FiltersOnlyBaseMeta):
+    pass
 
 
-class CitySurgesMeta(WireSafeModel):
-    spike_ratio: float
-    filters: InsightFilters
+class CitySurgesMeta(_SpikeRatioBaseMeta):
+    pass
 
 
-class CityErrorSpikesMeta(WireSafeModel):
-    requests: Num
-    errors: Num
-    filters: InsightFilters
+class CityErrorSpikesMeta(_ErrorSpikeBaseMeta):
+    pass
 
 
-class CityLatencyRegressionsMeta(WireSafeModel):
-    regression_ratio: Num
-    requests: Num
-    filters: InsightFilters
+class CityLatencyRegressionsMeta(_RegressionRequestsBaseMeta):
+    pass
 
 
-class NewCityTrafficMeta(WireSafeModel):
-    filters: InsightFilters
+class NewCityTrafficMeta(_FiltersOnlyBaseMeta):
+    pass
 
 
-class UaMonocultureMeta(WireSafeModel):
-    requests: Num
-    filters: InsightFilters
+class UaMonocultureMeta(_RequestsFiltersBaseMeta):
+    pass
 
 
 class NewProbeUrlsMeta(WireSafeModel):
@@ -65,14 +108,12 @@ class NewProbeUrlsMeta(WireSafeModel):
     filters: InsightFilters
 
 
-class WafSignalSpikesMeta(WireSafeModel):
-    spike_ratio: float
-    filters: InsightFilters
+class WafSignalSpikesMeta(_SpikeRatioBaseMeta):
+    pass
 
 
-class ProxySurgeMeta(WireSafeModel):
-    requests: Num
-    filters: InsightFilters
+class ProxySurgeMeta(_RequestsFiltersBaseMeta):
+    pass
 
 
 class AsnConcentrationMeta(WireSafeModel):
@@ -81,28 +122,20 @@ class AsnConcentrationMeta(WireSafeModel):
     filters: InsightFilters
 
 
-class AsnMetroPerformanceMeta(WireSafeModel):
-    regression_ratio: Num
-    requests: Num
-    filters: InsightFilters
+class AsnMetroPerformanceMeta(_RegressionRequestsBaseMeta):
+    pass
 
 
-class CacheCollapseMeta(WireSafeModel):
-    window_requests: Num
-    baseline_requests: Num
-    filters: InsightFilters
+class CacheCollapseMeta(_WindowBaselineRequestsBaseMeta):
+    pass
 
 
-class CacheabilityRegressionMeta(WireSafeModel):
-    window_requests: Num
-    baseline_requests: Num
-    filters: InsightFilters
+class CacheabilityRegressionMeta(_WindowBaselineRequestsBaseMeta):
+    pass
 
 
-class LatencyRegressionMeta(WireSafeModel):
-    regression_ratio: Num
-    window_requests: Num
-    filters: InsightFilters
+class LatencyRegressionMeta(_RegressionWindowRequestsBaseMeta):
+    pass
 
 
 class ImpossibleDistanceMeta(WireSafeModel):
@@ -174,13 +207,12 @@ class ImageOptimizationOpportunitiesMeta(WireSafeModel):
     filters: InsightFilters
 
 
-class OriginLatencySpikeMeta(WireSafeModel):
-    requests: Num
-    filters: InsightFilters
+class OriginLatencySpikeMeta(_RequestsFiltersBaseMeta):
+    pass
 
 
-class OriginErrorRateMeta(WireSafeModel):
-    filters: InsightFilters
+class OriginErrorRateMeta(_FiltersOnlyBaseMeta):
+    pass
 
 
 class OriginRetriesMeta(WireSafeModel):
@@ -188,9 +220,8 @@ class OriginRetriesMeta(WireSafeModel):
     filters: InsightFilters
 
 
-class OriginIpFailureMeta(WireSafeModel):
-    requests: Num
-    filters: InsightFilters
+class OriginIpFailureMeta(_RequestsFiltersBaseMeta):
+    pass
 
 
 class ShieldPathDegradationMeta(WireSafeModel):
@@ -198,32 +229,12 @@ class ShieldPathDegradationMeta(WireSafeModel):
     requests: Num
 
 
-class RepeatedPatternsMeta(WireSafeModel):
-    score: int
-    cv: float
-    modal_frac: float
-    mean_interval_s: float
-    stddev_s: float
-    mode_gap_s: int | None
-    n_gaps: int
-    n_events: int
-    span_s: int
-    rps: float
+class RepeatedPatternsMeta(_RepeatedPatternBaseMeta):
     distinct_ua: int
     filters: InsightFilters
 
 
-class RepeatedPatternsFpMeta(WireSafeModel):
-    score: int
-    cv: float
-    modal_frac: float
-    mean_interval_s: float
-    stddev_s: float
-    mode_gap_s: int | None
-    n_gaps: int
-    n_events: int
-    span_s: int
-    rps: float
+class RepeatedPatternsFpMeta(_RepeatedPatternBaseMeta):
     distinct_ip: int
     filters: InsightFilters
 
@@ -264,9 +275,8 @@ class ContentDiscoveryMeta(WireSafeModel):
     filters: InsightFilters
 
 
-class RefererMonocultureMeta(WireSafeModel):
-    requests: Num
-    filters: InsightFilters
+class RefererMonocultureMeta(_RequestsFiltersBaseMeta):
+    pass
 
 
 class MethodDriftMeta(WireSafeModel):
@@ -275,10 +285,8 @@ class MethodDriftMeta(WireSafeModel):
     filters: InsightFilters
 
 
-class NewAsnTrafficMeta(WireSafeModel):
-    requests: Num
-    asn: int
-    filters: InsightFilters
+class NewAsnTrafficMeta(AsnConcentrationMeta):
+    pass
 
 
 class AsnHostingShiftMeta(WireSafeModel):
@@ -302,10 +310,8 @@ class ConnectionTypeMixMeta(WireSafeModel):
     filters: InsightFilters
 
 
-class PopLatencyRegressionMeta(WireSafeModel):
-    regression_ratio: Num
-    window_requests: Num
-    filters: InsightFilters
+class PopLatencyRegressionMeta(_RegressionWindowRequestsBaseMeta):
+    pass
 
 
 class Http3FallbackMeta(WireSafeModel):
@@ -321,10 +327,8 @@ class CacheHitCliffMeta(WireSafeModel):
     drop_pts: float
 
 
-class PayloadCompressionRegressionMeta(WireSafeModel):
-    window_requests: Num
-    baseline_requests: Num
-    filters: InsightFilters
+class PayloadCompressionRegressionMeta(_WindowBaselineRequestsBaseMeta):
+    pass
 
 
 class SessionHarvestingMeta(WireSafeModel):

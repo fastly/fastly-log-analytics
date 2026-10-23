@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { queryKeys } from '@/lib/query-keys'
 import { useAdminTokenStore } from '@/stores/adminTokenStore'
 import { useSessionRoleStore } from '@/stores/sessionRoleStore'
@@ -34,9 +35,13 @@ let _lastReconciledBootstrapState: {
 } | null = null
 
 export function useBootstrapSyncEffects(
-  query: { data: unknown; isStale: boolean },
-  activeServiceId: string | null,
+  query: { data: unknown; isStale?: boolean; dataUpdatedAt?: number },
+  activeServiceId?: string | null,
 ) {
+  const storeActiveServiceId = useServiceStore((state) => state.activeServiceId)
+  const resolvedActiveServiceId =
+    activeServiceId === undefined ? storeActiveServiceId : activeServiceId
+  const isRealQueryResult = typeof query.dataUpdatedAt === 'number'
   const data = query.data as
     | {
         services?: Parameters<typeof toService>[0][]
@@ -55,8 +60,13 @@ export function useBootstrapSyncEffects(
     | undefined
 
   useEffect(() => {
-    if (!data) return
-    if (_lastSyncedBootstrapData === data) return
+    if (!data || !isRealQueryResult) return
+    if (
+      _lastSyncedBootstrapData === data &&
+      useServiceStore.getState().isInitialized !== false
+    ) {
+      return
+    }
     _lastSyncedBootstrapData = data
     const { setServices, setInitialized } = useServiceStore.getState()
     setServices((data.services ?? []).map(toService))
@@ -126,39 +136,40 @@ export function useBootstrapSyncEffects(
     // dependent hooks gated on bootstrap status find data already in
     // their target cache. Moving it here would re-introduce the race
     // where dependent hooks re-render before useEffect runs.
-  }, [data])
+  }, [data, isRealQueryResult])
 
   // `isStale` gates the revert branch below. When true, query.data is a cached
   // snapshot that may predate the live service set (a refetch hasn't yet
   // replaced it — e.g. the 5-min staleTime window after a service was just
   // added). Reverting a just-selected activeServiceId against a stale snapshot
   // is the "Switch To a freshly-added service bounces back" bug.
-  const bootstrapIsStale = query.isStale
+  const bootstrapIsStale = Boolean(query.isStale)
 
   useEffect(() => {
-    if (!data) return
+    if (!data || !isRealQueryResult) return
     if (
       _lastReconciledBootstrapState &&
       _lastReconciledBootstrapState.data === data &&
       _lastReconciledBootstrapState.isStale === bootstrapIsStale &&
-      _lastReconciledBootstrapState.activeServiceId === activeServiceId
+      _lastReconciledBootstrapState.activeServiceId === resolvedActiveServiceId &&
+      useServiceStore.getState().isInitialized !== false
     ) {
       return
     }
     _lastReconciledBootstrapState = {
       data,
       isStale: bootstrapIsStale,
-      activeServiceId,
+      activeServiceId: resolvedActiveServiceId,
     }
     const services = (data.services ?? []).map(toService)
-    const currentServiceExists = services.some(s => s.id === activeServiceId)
+    const currentServiceExists = services.some(s => s.id === resolvedActiveServiceId)
 
-    if (!activeServiceId && services.length > 0) {
+    if (!resolvedActiveServiceId && services.length > 0) {
       const defaultId = data.active_service_id && services.some(s => s.id === data.active_service_id)
         ? data.active_service_id
         : services[0]?.id
       if (defaultId) useServiceStore.getState().setActiveServiceId(defaultId)
-    } else if (activeServiceId && !currentServiceExists) {
+    } else if (resolvedActiveServiceId && !currentServiceExists) {
       // HARDENING: only evict a selected service when the bootstrap snapshot is
       // fresh (just fetched, not a stale cached copy). A stale snapshot can be
       // missing a brand-new service the user just switched to — reverting off
@@ -173,9 +184,9 @@ export function useBootstrapSyncEffects(
           ? data.active_service_id
           : services[0]?.id
       ) : null
-      if (activeServiceId !== defaultId) useServiceStore.getState().setActiveServiceId(defaultId)
+      if (resolvedActiveServiceId !== defaultId) useServiceStore.getState().setActiveServiceId(defaultId)
     }
-  }, [data, bootstrapIsStale, activeServiceId])
+  }, [data, bootstrapIsStale, resolvedActiveServiceId, isRealQueryResult])
 }
 
 export function useBootstrap() {
@@ -183,7 +194,7 @@ export function useBootstrap() {
   const query = useQuery({
     queryKey: queryKeys.bootstrap(),
     queryFn: async () => {
-      const { data } = await client.GET("/api/bootstrap")
+      const data = await unwrapClient(client.GET("/api/bootstrap"))
       // Phase Q: capture the shared-secret admin token (null when
       // ADMIN_SHARED_SECRET is unset on the backend, or when bootstrap
       // is hit on the analyst branch) so the fetch interceptor in
@@ -226,7 +237,7 @@ export function useBootstrap() {
         const sid = data.active_service_id
         const seededViews = data.views
         if (Array.isArray(seededViews)) {
-          queryClient.setQueryData(['views', sid], seededViews)
+          queryClient.setQueryData(queryKeys.views(sid), seededViews)
         }
         const seededCatalog = data.log_fields_catalog
         if (seededCatalog) {
@@ -236,7 +247,7 @@ export function useBootstrap() {
         // Available to both admin and analyst.
         const seededLogExtents = data.log_extents
         if (seededLogExtents) {
-          queryClient.setQueryData(['log-extents', sid], seededLogExtents)
+          queryClient.setQueryData(queryKeys.logExtents(sid), seededLogExtents)
         }
         // Schema seed for /query — only fires when the cron-populated
         // status cache has a real schema list, so a cold-start bootstrap
@@ -265,7 +276,7 @@ export function useBootstrap() {
         // Skipping the standalone fetch on cold load.
         const seededScoringLabels = data.scoring_labels
         if (seededScoringLabels) {
-          queryClient.setQueryData(['scoring-labels', sid], seededScoringLabels)
+          queryClient.setQueryData(queryKeys.scoringLabels(sid), seededScoringLabels)
         }
       }
       // P1#5 (perf audit): share_status is no longer seeded from bootstrap
@@ -279,7 +290,7 @@ export function useBootstrap() {
       // so /admin's cold-load round-trip evaporates.
       const seededServices = data?.services
       if (Array.isArray(seededServices)) {
-        queryClient.setQueryData(['services'], { services: seededServices, _section_timings: [] })
+        queryClient.setQueryData(queryKeys.services(), { services: seededServices, _section_timings: [] })
       }
       return data
     },

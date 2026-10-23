@@ -79,7 +79,7 @@ import { PlotlyPrewarm } from '@/components/PlotlyChart/PlotlyPrewarm'
 import { MapPrewarm } from '@/components/Map/MapPrewarm'
 
 import { useUrlServiceSync } from '@/hooks/useUrlServiceSync'
-import { useBootstrap } from '@/hooks/useBootstrap'
+import { useBootstrap, useBootstrapSyncEffects } from '@/hooks/useBootstrap'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
 import { useEnforceMaskedFilters } from '@/hooks/useEnforceMaskedFilters'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -230,9 +230,11 @@ interface NavLinkProps {
   isActive: boolean
   disabled?: boolean
   collapsed?: boolean
+  onClick?: () => void
+  className?: string
 }
 
-function NavLink({ href, icon: Icon, name, isActive, disabled, collapsed, activeServiceId, router }: NavLinkProps & { activeServiceId?: string | null; router: ReturnType<typeof useRouter> }) {
+function NavLink({ href, icon: Icon, name, isActive, disabled, collapsed, onClick, className, activeServiceId, router }: NavLinkProps & { activeServiceId?: string | null; router: ReturnType<typeof useRouter> }) {
   const finalHref = activeServiceId
     ? `${href}?service=${activeServiceId}`
     : href
@@ -253,6 +255,7 @@ function NavLink({ href, icon: Icon, name, isActive, disabled, collapsed, active
     <Link
       href={finalHref}
       prefetch={false}
+      onClick={onClick}
       onMouseEnter={handlePointerHint}
       onTouchStart={handlePointerHint}
       aria-disabled={disabled || undefined}
@@ -266,7 +269,8 @@ function NavLink({ href, icon: Icon, name, isActive, disabled, collapsed, active
         disabled
           ? "text-muted-foreground opacity-50 cursor-not-allowed pointer-events-none"
           : "hover:bg-accent hover:text-accent-foreground",
-        !disabled && isActive ? "bg-primary text-primary-foreground shadow-sm" : !disabled ? "text-muted-foreground" : ""
+        !disabled && isActive ? "bg-primary text-primary-foreground shadow-sm" : !disabled ? "text-muted-foreground" : "",
+        className,
       )}
     >
       <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
@@ -301,7 +305,9 @@ export function AppLayout({
 }) {
   const pathname = usePathname()
   const router = useRouter()
-  const { data: bootstrapData, isSuccess, isLoading, isError, refetch: refetchBootstrap } = useBootstrap()
+  const bootstrapQuery = useBootstrap()
+  const { data: bootstrapData, isSuccess, isLoading, isError, refetch: refetchBootstrap } = bootstrapQuery
+  useBootstrapSyncEffects(bootstrapQuery)
   // Tracks whether the current /query page is in raw-SQL mode (?mode=raw).
   // Populated by <RawQueryModeProbe> inside the Suspense boundary below
   // so we don't have to call useSearchParams() directly here.
@@ -963,64 +969,34 @@ export function AppLayout({
             </div>
             <ScrollArea className="flex-1">
               <nav className="grid gap-1 p-2" aria-label="Primary">
-                {visibleNav.map((item) => {
-                  const Icon = item.icon
-                  const finalHref = navActiveServiceId
-                    ? `${item.href}?service=${navActiveServiceId}`
-                    : item.href
-                  const isActive = pathname === item.href
-                  const disabled = !hasServices
-                  return (
-                    <Link
-                      key={item.href}
-                      href={finalHref}
-                      prefetch={false}
-                      onClick={closeMobileNav}
-                      aria-disabled={disabled || undefined}
-                      aria-current={isActive ? 'page' : undefined}
-                      tabIndex={disabled ? -1 : undefined}
-                      className={cn(
-                        'flex items-center gap-3 rounded-md px-3 py-3 text-sm font-medium transition-colors min-h-11',
-                        disabled
-                          ? 'text-muted-foreground opacity-50 cursor-not-allowed pointer-events-none'
-                          : 'hover:bg-accent hover:text-accent-foreground',
-                        !disabled && isActive ? 'bg-primary text-primary-foreground shadow-sm' : !disabled ? 'text-muted-foreground' : '',
-                      )}
-                    >
-                      <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
-                      <span className="truncate">{item.name}</span>
-                    </Link>
-                  )
-                })}
+                {visibleNav.map((item) => (
+                  <NavLink
+                    key={item.href}
+                    {...item}
+                    isActive={pathname === item.href}
+                    disabled={!hasServices}
+                    activeServiceId={navActiveServiceId}
+                    router={router}
+                    onClick={closeMobileNav}
+                    className="py-3 min-h-11"
+                  />
+                ))}
               </nav>
             </ScrollArea>
             {visibleSystemNav.length > 0 && (
               <div className="border-t p-2 bg-muted/20 shrink-0">
                 <nav className="grid gap-1" aria-label="System">
-                  {visibleSystemNav.map((item) => {
-                    const Icon = item.icon
-                    const finalHref = navActiveServiceId
-                      ? `${item.href}?service=${navActiveServiceId}`
-                      : item.href
-                    const isActive = pathname === item.href
-                    return (
-                      <Link
-                        key={item.href}
-                        href={finalHref}
-                        prefetch={false}
-                        onClick={closeMobileNav}
-                        aria-current={isActive ? 'page' : undefined}
-                        className={cn(
-                          'flex items-center gap-3 rounded-md px-3 py-3 text-sm font-medium transition-colors min-h-11',
-                          'hover:bg-accent hover:text-accent-foreground',
-                          isActive ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground',
-                        )}
-                      >
-                        <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
-                        <span className="truncate">{item.name}</span>
-                      </Link>
-                    )
-                  })}
+                  {visibleSystemNav.map((item) => (
+                    <NavLink
+                      key={item.href}
+                      {...item}
+                      isActive={pathname === item.href}
+                      activeServiceId={navActiveServiceId}
+                      router={router}
+                      onClick={closeMobileNav}
+                      className="py-3 min-h-11"
+                    />
+                  ))}
                 </nav>
               </div>
             )}

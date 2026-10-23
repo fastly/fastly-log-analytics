@@ -3,6 +3,7 @@
 import React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { useServiceStore } from '@/stores/serviceStore'
 import {
   Card,
@@ -30,8 +31,7 @@ export function IcebergCalendar() {
   const { data: calendar, isLoading } = useQuery({
     queryKey: queryKeys.admin.icebergCalendar(activeServiceId),
     queryFn: async () => {
-      const { data } = await client.GET("/api/admin/iceberg-calendar")
-      return data
+      return unwrapClient(client.GET("/api/admin/iceberg-calendar"))
     },
     enabled: !!activeServiceId,
     staleTime: 60_000,

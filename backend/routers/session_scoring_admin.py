@@ -1601,8 +1601,6 @@ def scoring_threshold_put(
             scoring["operator_threshold"] = threshold
             scoring["operator_threshold_set_at"] = set_at
 
-    _apply_threshold(cfg)
-    scoring = cfg["scoring"]
     # Operator audit trail — every threshold change is attributable.
     from backend.core import metadata as metadata_db
 
@@ -1611,7 +1609,11 @@ def scoring_threshold_put(
         "threshold_committed" if threshold is not None else "threshold_cleared",
         details={"prior_threshold": prior_threshold, "new_threshold": threshold},
     )
-    svcconfig.mutate_config(service_id, _apply_threshold)
+    updated_cfg = svcconfig.mutate_config(service_id, _apply_threshold)
+    if not isinstance(updated_cfg, dict):
+        _apply_threshold(cfg)
+        updated_cfg = cfg
+    scoring = updated_cfg.get("scoring", {})
 
     _bust_analytics_cache(service_id)  # so /scoring/status reflects it next fetch
     return {

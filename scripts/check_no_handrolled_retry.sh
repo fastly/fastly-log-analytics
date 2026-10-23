@@ -12,7 +12,10 @@
 # (see AGENTS.md, "Shared helpers"). Counts may only go DOWN; a new file or a
 # higher count fails. When you migrate a loop, lower its count.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR/.."
+# shellcheck source=scripts/lib/ratchet_common.sh
+source "$SCRIPT_DIR/lib/ratchet_common.sh"
 
 BASELINE='
 backend/config.py 2
@@ -33,20 +36,9 @@ backend/utils/valkey_publisher.py 1
 
 counts=$(python3 -I scripts/check_no_handrolled_retry.py)
 
-fail=0
-while read -r count file; do
-  [ -z "${file:-}" ] && continue
-  allowed=$(printf '%s\n' "$BASELINE" | awk -v f="$file" '$1 == f { print $2 }')
-  allowed=${allowed:-0}
-  if [ "$count" -gt "$allowed" ]; then
-    echo "ERROR: $file has $count hand-rolled retry loop(s), baseline allows $allowed (B4)." >&2
-    echo "  Use backend/core/retry.py:retry_call instead of for/while + try/except + sleep." >&2
-    fail=1
-  fi
-done <<< "$counts"
-
-if [ "$fail" -ne 0 ]; then
-  exit 1
-fi
-
-echo "OK: hand-rolled retry loops in backend/ are within the ratchet baseline."
+check_ratchet_counts \
+  "$counts" \
+  "$BASELINE" \
+  "hand-rolled retry loop(s), baseline allows __ALLOWED__ (B4)." \
+  "Use backend/core/retry.py:retry_call instead of for/while + try/except + sleep." \
+  "OK: hand-rolled retry loops in backend/ are within the ratchet baseline."

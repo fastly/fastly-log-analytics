@@ -41,7 +41,7 @@ The **Security & Bot Intelligence** page delivers threat analytics across Fastly
 | Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Data Plane** | Reads DuckDB session view + `security_dims` / `security_proxies` / `verified_bots_ts` rollups. | Reads ClickHouse `request_facts` (every card honors the request filters and `sections` selector) and, for unfiltered NGWAF bot cards, the `ngwaf_bot` rows of `security_minute_dimensions`. A ClickHouse failure returns an error envelope, never an empty card. |
-| **Bot Enrichment** | Local SQLite `ngwaf_bot_cache.db` and `rdns_cache.db`. | NGWAF bot names are resolved at ingest from the Postgres `ngwaf_bots` cache and persisted on the fact row (`ngwaf_bot`, `ngwaf_bot_category`, `ngwaf_wellknown_bot`) plus the per-minute `ngwaf_bot` projection; well-known-bot verification uses the shared `rdns` cache. |
+| **Bot Enrichment** | PostgreSQL `ngwaf_bots` and `rdns` tables (`METADATA_DSN`). | NGWAF bot names are resolved at ingest from the Postgres `ngwaf_bots` cache and persisted on the fact row (`ngwaf_bot`, `ngwaf_bot_category`, `ngwaf_wellknown_bot`) plus the per-minute `ngwaf_bot` projection; well-known-bot verification uses the shared `rdns` cache. |
 | **Analyst masking** | `mask_ips` masks `active_clients[].ip` and `top_ips_header[].ip`. | Same fields masked by the same helper, on the aggregates and proxies-export paths. |
 
 ---
@@ -98,7 +98,7 @@ The **Security & Bot Intelligence** page delivers threat analytics across Fastly
 - [x] **4. Time Range Extent:** Confirms 24h default or adaptive extent for services < 24h history.
 - [x] **5. Bot Verification Filter:** Filter by "Verified Bots" vs "Spoofed Bots" and verify graph transitions.
 - [x] **6. Role Verification:** Confirm Analyst Path B observes masked IPs and cannot access admin triggers.
-- [x] **7. Telemetry & Query Audit:** Verify all DuckDB and SQLite queries are recorded with zero duplicate queries.
+- [x] **7. Telemetry & Query Audit:** Verify all DuckDB and PostgreSQL queries are recorded with zero duplicate queries.
 
 ---
 

@@ -40,17 +40,14 @@ def _require_read_write_source(source: dict) -> None:
         )
 
 
-@router.get("/admin/quarantine", response_model=QuarantineListResponse)
-def list_quarantine(
-    limit: int = Query(default=100, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
-    error_category: str | None = Query(default=None, min_length=1, max_length=64),
-    source_type: str | None = Query(default=None, min_length=1, max_length=32),
-    source: dict = Depends(get_source),
-    _admin: None = Depends(require_admin),
+def _fetch_quarantine_list_payload(
+    service_id: str,
+    *,
+    limit: int,
+    offset: int,
+    error_category: str | None,
+    source_type: str | None,
 ) -> dict:
-    _require_read_write_source(source)
-    service_id = _service_id_from_source(source)
     items = list_quarantine_evidence(
         service_id,
         limit=limit,
@@ -69,6 +66,26 @@ def list_quarantine(
         "items": [QuarantineEvidenceItem(**item) for item in items],
         "total": total,
     }
+
+
+@router.get("/admin/quarantine", response_model=QuarantineListResponse)
+def list_quarantine(
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    error_category: str | None = Query(default=None, min_length=1, max_length=64),
+    source_type: str | None = Query(default=None, min_length=1, max_length=32),
+    source: dict = Depends(get_source),
+    _admin: None = Depends(require_admin),
+) -> dict:
+    _require_read_write_source(source)
+    service_id = _service_id_from_source(source)
+    return _fetch_quarantine_list_payload(
+        service_id,
+        limit=limit,
+        offset=offset,
+        error_category=error_category,
+        source_type=source_type,
+    )
 
 
 @router.get("/admin/ledger/quarantine", response_model=QuarantineListResponse)
@@ -90,24 +107,13 @@ def list_ledger_quarantine(
             detail=make_error("service_not_found", f"Service {service_id} not found."),
         )
     _require_read_write_source(src)
-    items = list_quarantine_evidence(
+    return _fetch_quarantine_list_payload(
         service_id,
         limit=limit,
         offset=offset,
         error_category=error_category,
         source_type=source_type,
     )
-    for item in items:
-        item["quarantined_at"] = str(item["quarantined_at"])
-    total = count_quarantine_evidence(
-        service_id,
-        error_category=error_category,
-        source_type=source_type,
-    )
-    return {
-        "items": [QuarantineEvidenceItem(**item) for item in items],
-        "total": total,
-    }
 
 
 @router.get("/admin/quarantine/summary", response_model=QuarantineSummary)

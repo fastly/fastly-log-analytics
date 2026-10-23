@@ -26,7 +26,7 @@ import shutil
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from backend.utils.date_utils import parse_hour_key_strict
 
@@ -88,95 +88,74 @@ def _write_partial_hour_watermark(source: dict, hour: str, value: float) -> None
 TOTAL_FIELD = "__total__"
 
 
+def _read_partial_hour_parquet(
+    path: str,
+    con: duckdb.DuckDBPyConnection | None,
+    query_fn: Any,
+    default: Any,
+    *,
+    err_label: str = "read",
+) -> Any:
+    if not os.path.isfile(path):
+        return default
+    from backend.core.iceberg import is_stale_view_error
+
+    def _run_once() -> Any:
+        if con is not None:
+            return query_fn(con)
+        from backend.core.duckdb import get_memory_connection
+
+        tmp_con = get_memory_connection()
+        try:
+            return query_fn(tmp_con)
+        finally:
+            tmp_con.close()
+
+    try:
+        return _run_once()
+    except Exception as e:
+        if is_stale_view_error(e) or "Cannot open file" in str(e) or "No such file" in str(e):
+            time.sleep(0.01)
+            try:
+                return _run_once()
+            except Exception as e2:
+                logger.warning("[partial_hour] Retry %s failed on %s: %s", err_label, path, e2)
+                return default
+        logger.warning("[partial_hour] Failed %s on %s: %s", err_label, path, e)
+        if any(err in str(e).lower() for err in ("corrupt", "not a parquet file", "bad magic number", "footer")):
+            unlink_quiet(path)
+        return default
+
+
 def read_partial_hour_all_fields(
     source: dict, hour: str, con: duckdb.DuckDBPyConnection | None = None
 ) -> list[tuple[str, str, int]]:
     path = _all_fields_path(source, hour)
-    if not os.path.isfile(path):
-        return []
     sql = f"SELECT field, value, count FROM read_parquet('{path}') WHERE field != '{TOTAL_FIELD}'"
-    from backend.core.iceberg import is_stale_view_error
 
     def _query(c: duckdb.DuckDBPyConnection) -> list[tuple[str, str, int]]:
         rows = c.execute(sql).fetchall()
         return [(r[0], r[1], int(r[2])) for r in rows]
 
-    try:
-        if con is not None:
-            return _query(con)
-        from backend.core.duckdb import get_memory_connection
-
-        tmp_con = get_memory_connection()
-        try:
-            return _query(tmp_con)
-        finally:
-            tmp_con.close()
-    except Exception as e:
-        if is_stale_view_error(e) or "Cannot open file" in str(e) or "No such file" in str(e):
-            time.sleep(0.01)
-            try:
-                if con is not None:
-                    return _query(con)
-                tmp_con = get_memory_connection()
-                try:
-                    return _query(tmp_con)
-                finally:
-                    tmp_con.close()
-            except Exception as e2:
-                logger.warning("[partial_hour] Retry read failed on %s: %s", path, e2)
-                return []
-        logger.warning("[partial_hour] Failed reading %s: %s", path, e)
-        if any(err in str(e).lower() for err in ("corrupt", "not a parquet file", "bad magic number", "footer")):
-            unlink_quiet(path)
-        return []
+    return _read_partial_hour_parquet(path, con, _query, [], err_label="read")
 
 
 def read_partial_hour_total(source: dict, hour: str, con: duckdb.DuckDBPyConnection | None = None) -> int:
     """Return the whole-merge request count for ``hour`` (0 if no partial
     rollup exists yet, or if it somehow has no ``__total__`` row)."""
     path = _all_fields_path(source, hour)
-    if not os.path.isfile(path):
-        return 0
     # value = '' pins this to the ONE row merge_partial_hour's total_select
     # writes — defense in depth against a colliding custom field also named
     # TOTAL_FIELD writing OTHER (field, value) rows under the same field key
     # (the merge-time safe_fields filter already excludes that field, but
     # this keeps the read robust even if that guard is ever bypassed).
     sql = f"SELECT count FROM read_parquet('{path}') WHERE field = '{TOTAL_FIELD}' AND value = '' LIMIT 1"
-    from backend.core.iceberg import is_stale_view_error
 
     def _query(c: duckdb.DuckDBPyConnection) -> int:
         row = c.execute(sql).fetchone()
         return int(row[0]) if row else 0
 
-    try:
-        if con is not None:
-            return _query(con)
-        from backend.core.duckdb import get_memory_connection
-
-        tmp_con = get_memory_connection()
-        try:
-            return _query(tmp_con)
-        finally:
-            tmp_con.close()
-    except Exception as e:
-        if is_stale_view_error(e) or "Cannot open file" in str(e) or "No such file" in str(e):
-            time.sleep(0.01)
-            try:
-                if con is not None:
-                    return _query(con)
-                tmp_con = get_memory_connection()
-                try:
-                    return _query(tmp_con)
-                finally:
-                    tmp_con.close()
-            except Exception as e2:
-                logger.warning("[partial_hour] Retry total read failed on %s: %s", path, e2)
-                return 0
-        logger.warning("[partial_hour] Failed reading total from %s: %s", path, e)
-        if any(err in str(e).lower() for err in ("corrupt", "not a parquet file", "bad magic number", "footer")):
-            unlink_quiet(path)
-        return 0
+    return _read_partial_hour_parquet(path, con, _query, 0, err_label="total read")
 
 
 def _list_new_source_files(source: dict, hour: str, watermark: float) -> list[str]:

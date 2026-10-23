@@ -252,6 +252,16 @@ def main() -> int:
         tenancy_results.append(check_tenancy(t, timeout_s=args.timeout))
         rbac_results.append(check_rbac(t, timeout_s=args.timeout))
 
+    failed_count = sum(
+        1
+        for h, tn, rb in zip(health_results, tenancy_results, rbac_results)
+        if not h.backend_ok
+        or not tn.service_match
+        or not tn.rejection_ok
+        or not rb.unauth_analyst_blocked
+        or not rb.auth_config_ok
+    )
+
     if args.json:
         output_payload = [
             {
@@ -277,6 +287,7 @@ def main() -> int:
             for h, tn, rb in zip(health_results, tenancy_results, rbac_results)
         ]
         print(json.dumps(output_payload, indent=2))
+        return 1 if failed_count > 0 else 0
     else:
         print("\n" + "=" * 96)
         print("FLA Multi-Environment Health, Tenancy & RBAC Verification")
@@ -286,7 +297,6 @@ def main() -> int:
         )
         print("-" * 96)
 
-        failed_count = 0
         for h, tn, rb in zip(health_results, tenancy_results, rbac_results):
             h_str = "PASS (200)" if h.backend_ok else "FAIL"
             svc_str = f"{tn.resolved_service_id} (OK)" if tn.service_match else f"{tn.resolved_service_id} (FAIL)"
@@ -302,7 +312,6 @@ def main() -> int:
                 or not rb.unauth_analyst_blocked
                 or not rb.auth_config_ok
             ):
-                failed_count += 1
                 if h.error:
                     print(f"   [!] Health Error: {h.error}")
                 if tn.error:

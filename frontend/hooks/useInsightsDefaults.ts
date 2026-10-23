@@ -3,6 +3,8 @@
 import { useState, useMemo, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
+import { queryKeys } from '@/lib/query-keys'
 import { historyHoursFromExtents, pickInsightsDefault } from '@/lib/insights-defaults'
 
 interface InsightsDefaults {
@@ -34,10 +36,9 @@ export function useInsightsDefaults(
   activeServiceId: string | null | undefined,
 ): InsightsDefaults {
   const { data } = useQuery({
-    queryKey: ['log-extents', activeServiceId],
+    queryKey: queryKeys.logExtents(activeServiceId),
     queryFn: async () => {
-      const { data } = await client.GET('/api/log-extents')
-      return data
+      return await unwrapClient(client.GET('/api/log-extents'))
     },
     enabled: !!activeServiceId,
     staleTime: 60_000,

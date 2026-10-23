@@ -1,9 +1,11 @@
 import { useEffect } from 'react'
 import { parseAsString, useQueryStates } from 'nuqs'
 import { useFilterStore } from '@/stores/filterStore'
-import { useReportConfig } from './useReportConfig'
 import { useActiveService } from './useActiveService'
+import { useReportConfig } from './useReportConfig'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
+import { queryKeys } from '@/lib/query-keys'
 import { useQueryClient } from '@tanstack/react-query'
 import type { components } from '@/types/api.generated'
 import type { FilterPill } from '@/types/filters'
@@ -40,12 +42,8 @@ export function useViewMetricUrlSync(options?: { setMetric?: (m: string) => void
   const currentEdgeOnly = useFilterStore(s => s.edgeOnly)
   const currentCompareMode = useFilterStore(s => s.compareMode)
   const { activeServiceId } = useActiveService()
+  const { setMetric: fallbackSetMetric } = useReportConfig({ defaultMetric: 'requests', defaultInterval: '1 minute', defaultTrend: 'off' })
   const queryClient = useQueryClient()
-  const { setMetric: fallbackSetMetric } = useReportConfig({
-    defaultMetric: 'requests',
-    defaultInterval: '1 minute',
-    defaultTrend: 'off'
-  })
   const setMetric = options?.setMetric ?? fallbackSetMetric
 
   useEffect(() => {
@@ -56,12 +54,13 @@ export function useViewMetricUrlSync(options?: { setMetric?: (m: string) => void
       // ViewSelector's useQuery). Falls back to a direct GET only when
       // the cache is cold — keeps the legacy ?view=<id> deep-link path
       // working even before ViewSelector mounts.
-      let views = queryClient.getQueryData<components['schemas']['SavedViewRecord'][]>(['views', activeServiceId])
+      let views = queryClient.getQueryData<components['schemas']['SavedViewRecord'][]>(queryKeys.views(activeServiceId))
       if (!views) {
-        const { data } = await client.GET("/api/views/{service_id}", {
-          params: { path: { service_id: activeServiceId } }
-        })
-        views = data
+        views = await unwrapClient(
+          client.GET("/api/views/{service_id}", {
+            params: { path: { service_id: activeServiceId } }
+          }),
+        )
       }
       const view = views?.find((v) => v.id === id)
       if (view) {
@@ -70,7 +69,13 @@ export function useViewMetricUrlSync(options?: { setMetric?: (m: string) => void
         //   - Current: { filters: FilterPill[], _view_extras: {...} }
         //     where extras carries edgeOnly / compareMode / relativeRange.
         // Detect by Array.isArray and apply each branch's recovery.
-        const parsed = JSON.parse(view.filters_json)
+        let parsed: ReturnType<typeof JSON.parse>
+        try {
+          parsed = JSON.parse(view.filters_json)
+        } catch {
+          void setUrlParams({ view: null })
+          return
+        }
         const isLegacy = Array.isArray(parsed)
         const pills = isLegacy ? parsed : parsed?.filters
         const extras = isLegacy ? null : parsed?._view_extras
@@ -118,12 +123,12 @@ export function useViewMetricUrlSync(options?: { setMetric?: (m: string) => void
     }
 
     if (viewId) {
-      loadView(viewId)
+      void loadView(viewId).catch(() => {})
       return
     }
 
     if (urlMetric) {
-      setMetric(urlMetric)
+      setMetric?.(urlMetric)
       void setUrlParams({ metric: null })
     }
     // addFilter/setRange/setMetric/clearFilters are Zustand store methods —

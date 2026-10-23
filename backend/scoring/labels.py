@@ -184,8 +184,8 @@ def get_label(service_id: str, sid: str) -> dict | None:
 def get_label_by_id(service_id: str, label_id: str) -> dict | None:
     con = get_con(service_id)
     row = con.execute(
-        "SELECT * FROM scoring_labels WHERE id = ?",
-        (label_id,),
+        "SELECT * FROM scoring_labels WHERE id = ? AND service_id = ?",
+        (label_id, service_id),
     ).fetchone()
     return _row_to_dict(row) if row else None
 
@@ -214,8 +214,8 @@ def update_label(
         # updated_at (avoids cache-buster noise from no-change PATCHes).
         return get_label_by_id(service_id, label_id) or {}
     sets.append("updated_at = datetime('now')")
-    params.append(label_id)
-    con.execute(f"UPDATE scoring_labels SET {', '.join(sets)} WHERE id = ?", params)
+    params.extend([label_id, service_id])
+    con.execute(f"UPDATE scoring_labels SET {', '.join(sets)} WHERE id = ? AND service_id = ?", params)
     con.commit()
     _bust_cache(service_id)
     return get_label_by_id(service_id, label_id) or {}
@@ -225,7 +225,7 @@ def delete_label(service_id: str, label_id: str) -> dict:
     """Hard delete. Idempotent — deleting an already-deleted row returns
     success without raising."""
     con = get_con(service_id)
-    con.execute("DELETE FROM scoring_labels WHERE id = ?", (label_id,))
+    con.execute("DELETE FROM scoring_labels WHERE id = ? AND service_id = ?", (label_id, service_id))
     con.commit()
     _bust_cache(service_id)
     return {"status": "success", "id": label_id}

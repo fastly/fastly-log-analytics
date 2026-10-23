@@ -593,6 +593,9 @@ def _reset_module_caches():
     # above drains them. New module-level caches that ship with a
     # register() call are picked up automatically.
     yield
+    from backend.main import app
+
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture

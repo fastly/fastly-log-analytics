@@ -1,3 +1,5 @@
+import type { Page } from '@playwright/test'
+
 declare global {
   interface Window {
     __clsScore?: number
@@ -27,4 +29,18 @@ export function clsInitScript(): void {
   } catch {
     // layout-shift observer unsupported in this browser
   }
+}
+
+/**
+ * Install the cumulative layout-shift observer onto `page` via `addInitScript`.
+ */
+export async function installClsObserver(page: Page): Promise<void> {
+  await page.addInitScript(clsInitScript)
+}
+
+/**
+ * Read the accumulated unexpected layout-shift score from `window.__clsScore`.
+ */
+export async function readClsScore(page: Page): Promise<number> {
+  return page.evaluate(() => Number(window.__clsScore ?? 0))
 }

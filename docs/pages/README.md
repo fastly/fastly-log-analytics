@@ -191,8 +191,8 @@ Every page's underlying queries, aggregations, and data pipelines must function 
 ### 5. Telemetry & Query Audit Contract (Comprehensive Observability Across All Engines)
 Fastly Log Analytics features an integrated observability and telemetry architecture (`X-Page-Load-ID`, `RequestTelemetry`, multi-engine query profilers, and the interactive Debug Panel). As we test and audit every page, we must rigorously verify telemetry capture and audit the resulting queries:
 - **100% Instrumentation (Zero "Dark" Queries or Calls Across All Engines):**
-  - Every analytical query across **DuckDB** and **ClickHouse** (`query_registry.register("ClickHouse", ...)`), operational query across **SQLite** and **Postgres**, external Fastly/FOS API call, and logical execution section executed to render a page MUST be captured and attributed to that request's `X-Page-Load-ID` in `telemetry_queries`, `telemetry_sections`, and `usage_log`.
-  - The UI Debug Panel explicitly surfaces both DuckDB and ClickHouse queries under `"Data Queries (DuckDB / ClickHouse)"` alongside SQLite and HTTP calls.
+  - Every analytical query across **DuckDB** and **ClickHouse** (`query_registry.register("ClickHouse", ...)`), operational query across **PostgreSQL** (`METADATA_DSN`), external Fastly/FOS API call, and logical execution section executed to render a page MUST be captured and attributed to that request's `X-Page-Load-ID` in `telemetry_queries`, `telemetry_sections`, and `usage_log`.
+  - The UI Debug Panel explicitly surfaces both DuckDB and ClickHouse queries under `"Data Queries (DuckDB / ClickHouse)"` alongside PostgreSQL and HTTP calls.
   - No database query or network call may execute silently without instrumentation.
 - **Mandatory Query & Call Audit on Every Page Load:**
   - Automated tests and AI verification sessions must fetch `/api/debug/page-telemetry?service_id={id}&page_load_id={id}` (or inspect the Debug Panel) after every page load.
@@ -204,7 +204,7 @@ Fastly Log Analytics features an integrated observability and telemetry architec
 All page specifications, tests, and deployment verification procedures must account for our full operational tooling stack:
 - **Fastly VCL Linter & Dialect Simulator (`falco`):** Any VCL generated for log format strings, custom field expressions (`vcl_log_expression`), or edge snippets must pass `falco lint` and simulation tests before edge deployment.
 - **Distributed Ingestion & Scheduler (Celery, APScheduler, Valkey/Redis):** Asynchronous task distribution, high-scale ingest workers, crash-net recovery sweeps (`ledger_sweep`), and shared distributed state.
-- **Telemetry & Monitoring (OpenTelemetry, Prometheus, Grafana):** OTel tracing propagation, Prometheus scrape rules (`observability/clickhouse.rules.yml`, `observability/prometheus.yml`), and multi-pod dashboards (`observability/dashboards/fla-multipod.json`).
+- **Telemetry & Monitoring (OpenTelemetry, Prometheus, Grafana):** OTel tracing propagation, Prometheus scrape rules (`deploy/chart/fastly-log-analytics/files/observability/clickhouse.rules.yml`, `observability/prometheus.yml`), and multi-pod dashboards (`deploy/chart/fastly-log-analytics/files/observability/dashboards/fla-multipod.json`).
 - **End-to-End Testing & Verification (Playwright, Vitest, Pytest):** Dual-role Playwright E2E suites verifying Admin vs Analyst Path B access, network HAR performance capture, Core Web Vitals audits (LCP, INP, CLS), and unit tests (`pytest -n` with strict database test isolation).
 
 ### 5.7 Scheduled Jobs & Cron Testing Contract
@@ -213,7 +213,7 @@ In addition to user-facing page requests, Fastly Log Analytics relies on 25 back
 - **Cron Testing Mandate:** Any testing session or automated test suite verifying system health MUST verify:
   1. **Scheduler Registration:** All expected jobs for the deployment mode (`standard` vs `high_scale`) are registered in `APScheduler`.
   2. **Manual Triggerability:** Admin trigger endpoints (`POST /api/admin/sync/{id}`, `POST /api/admin/commit/{id}`, etc.) respond with HTTP 200 and complete successfully.
-  3. **Zero Dark Cron Work:** All database operations and FOS API calls made by background jobs must be attributed in `usage_log.db` and recorded in `cron_runs`.
+  3. **Zero Dark Cron Work:** All database operations and FOS API calls made by background jobs must be attributed in PostgreSQL's `usage_log` table and recorded in `cron_runs`.
   4. **Error Recovery & Dead-Letter:** Crash-recovery jobs (`ledger_sweep`, `gap_heal`) must be verified to reclaim orphaned tasks without data loss.
 
 

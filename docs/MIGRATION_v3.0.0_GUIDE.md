@@ -2,7 +2,7 @@
 
 ## Overview
 
-v3.0.0-beta1 replaces the commit-path storage engine (Apache Iceberg/pyiceberg → DuckDB's **DuckLake**), adds a distributed ingest data plane, and adds an optional Postgres metadata backend. The design is recorded in [ADR-14](adr/14-ducklake-replacement.md), [ADR-15](adr/15-multi-writer-topology.md) and [ADR-16](adr/16-ingest-ledger.md).
+v3.0.0-beta1 replaces the commit-path storage engine (Apache Iceberg/pyiceberg → DuckDB's **DuckLake**), adds a distributed ingest data plane, and standardizes operational metadata and the DuckLake catalog on **PostgreSQL 16** across all deployment modes (`METADATA_DSN` and `DUCKLAKE_CATALOG`). The design is recorded in [ADR-14](adr/14-ducklake-replacement.md), [ADR-15](adr/15-multi-writer-topology.md), [ADR-16](adr/16-ingest-ledger.md), and [ADR-22](adr/22-postgres-only-metadata.md).
 
 **For most operators the upgrade is: pull the new code, restart. The app migrates itself.** There is no export step, no downtime window, and no data copy.
 
@@ -14,8 +14,8 @@ Read [Before you upgrade](#before-you-upgrade) first — it is short, and one it
 
 | | You are here if | What you do |
 |---|---|---|
-| **Standard** (default) | You run one instance — the v2.x default. `DEPLOYMENT_MODE=standard`. | Pull, restart. Nothing else. |
-| **High-scale** (opt-in) | You want ingestion to fan out across many workers with ClickHouse. | Provision Postgres + valkey, set env vars, restart. |
+| **Standard** (default) | You run one instance — the v2.x default. `DEPLOYMENT_MODE=standard` (with PostgreSQL 16 included in the compose stack for `METADATA_DSN` and `DUCKLAKE_CATALOG`). | Pull, restart. Nothing else. |
+| **High-scale** (opt-in) | You want ingestion to fan out across many workers with ClickHouse. | Provision external Postgres + valkey + ClickHouse, set env vars, restart. |
 
 Single node remains the default and is fully supported. Scaled ingest is opt-in; you are not required to move to it, and **nothing about your v2.x deployment stops working if you don't**.
 
@@ -25,7 +25,7 @@ Single node remains the default and is fully supported. Scaled ingest is opt-in;
 
 ### 1. Take a backup
 
-Back up `data/` (per-service DuckDB files, metadata SQLite, config JSON) and your `configs/` directory. Adoption registers existing parquet **in place** and does not modify or delete your Iceberg data, so a rollback is possible — but take the backup anyway.
+Back up `data/` (per-service DuckDB files, legacy v2.x SQLite files, config JSON) and your `configs/` directory. Adoption registers existing parquet **in place** and does not modify or delete your Iceberg data, so a rollback is possible — but take the backup anyway.
 
 ### 2. Know what "adoption" will bring across
 
@@ -99,7 +99,7 @@ METADATA_DSN=postgresql://USER:PASS@HOST:5432/DBNAME
 CELERY_BROKER_URL=redis://HOST:6379/0
 ```
 
-All four are required. The backend and every worker **refuse to boot** without them rather than degrading silently — a file-based catalog cannot serve concurrent worker writers, and per-node SQLite metadata cannot serialize a cron lease across processes.
+All four are required for `high_scale` (and `DUCKLAKE_CATALOG` + `METADATA_DSN` are required across all modes per [ADR-22](adr/22-postgres-only-metadata.md)). The backend and every worker **refuse to boot** without them rather than degrading silently — file-based catalogs and SQLite metadata are retired in v3.
 
 The Postgres schema is created at startup, by the backend and by each worker, idempotently and safely when several pods boot at once. `scripts/setup_pg_schema.py` still exists and remains the explicit command for provisioning a database ahead of a deploy.
 
@@ -109,7 +109,7 @@ The Postgres schema is created at startup, by the backend and by each worker, id
 
 ### Kubernetes
 
-The Helm chart defaults to single-node and installs cleanly with no flags. Selecting celery mode without the DSNs fails at `helm template`/`helm install` time with a message naming the missing value. See the chart README for the full value set.
+The Helm chart defaults to `standard` mode. Per [ADR-22](adr/22-postgres-only-metadata.md), any configured `config.ducklakeCatalog` or `secrets.metadataDsn` must be a `postgresql://` DSN; selecting `high_scale` mode without the DSNs fails at `helm template`/`helm install` time with a message naming the missing value. See the chart README for the full value set.
 
 ---
 

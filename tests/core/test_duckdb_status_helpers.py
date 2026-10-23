@@ -346,10 +346,11 @@ def test_refresh_config_status_swallows_buffer_size_exception(monkeypatch):
         ),
         patch("backend.core.duckdb.get_schema", return_value=[]),
         patch("backend.core.duckdb.update_top_values"),
-        # os.path.isdir returns True so the walk path is taken; os.walk then
+        # os.path.isdir returns True so the walk path is taken; _get_dir_size then
         # raises and the except: pass at the call site must swallow it.
         patch("os.path.isdir", return_value=True),
         patch("os.walk", side_effect=_walk_explode),
+        patch("backend.utils.dir_size._get_dir_size", side_effect=_walk_explode),
     ):
         # Must NOT raise.
         refresh_config_status("svc")

@@ -11,6 +11,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { useServiceStore } from '@/stores/serviceStore';
 import { useIsAnalyst } from '@/hooks/useIsAnalyst';
 import { adminJsonResult } from '@/lib/api';
+import { queryKeys } from '@/lib/query-keys';
 import { cn } from '@/lib/utils';
 import type { components } from '@/types/api.generated';
 import { DisableRumDialog } from './DisableRumDialog';
@@ -37,7 +38,7 @@ export function RumStatusPanel() {
     isLoading: isServicesLoading,
     refetch: refetchServices,
   } = useQuery({
-    queryKey: ['services'],
+    queryKey: queryKeys.services(),
     queryFn: async () => {
       const res = await adminJsonResult('/api/services', '/api/services');
       return res.ok ? res.data : null;

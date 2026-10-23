@@ -168,7 +168,15 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
 
   const isValidName = /^[a-z][a-z0-9_]{0,47}$/.test(formData.name)
   const isLintingStale = formData.vcl_log_expression !== debouncedVcl || formData.collection_stage !== debouncedStage
-  const isSaveDisabled = saveMutation.isPending || isLinting || isLintingStale || !isValidName || !formData.label || !formData.vcl_log_expression || (lintResult && !lintResult.valid)
+  const isSaveDisabled =
+    saveMutation.isPending ||
+    isLinting ||
+    isLintingStale ||
+    !isValidName ||
+    !formData.label.trim() ||
+    !formData.vcl_log_expression.trim() ||
+    Boolean(lintFetchError) ||
+    Boolean(lintResult && !lintResult.valid)
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

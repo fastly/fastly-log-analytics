@@ -5,7 +5,8 @@ import {
   fetchSecurityServerSide,
   SECURITY_SSR_DEFAULTS,
 } from '@/lib/ssr/security'
-import { firstParam, seedDehydratedState } from '@/lib/ssr/seed'
+import { seedDehydratedState } from '@/lib/ssr/seed'
+import { resolveServerServiceId } from '@/lib/ssr/service'
 import SecurityClient from './_sections/SecurityClient'
 
 // Per-request RSC shell for /security. Pre-fetches the DEFAULT security
@@ -55,10 +56,7 @@ export default async function SecurityPage({
 }) {
   const params = await searchParams
   const bootstrap = await fetchBootstrapServerSide()
-  const serviceId =
-    firstParam(params.service) ??
-    (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ??
-    undefined
+  const serviceId = resolveServerServiceId(params, bootstrap)
 
   return (
     <Suspense fallback={<SecurityLoading />}>

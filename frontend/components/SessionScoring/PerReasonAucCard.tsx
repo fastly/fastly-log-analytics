@@ -1,8 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { ListChecks } from 'lucide-react'
+import { ListChecks, Info } from 'lucide-react'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { CardErrorState } from '@/components/CardErrorState'
@@ -10,10 +9,8 @@ import { PerReasonAucHelp } from '@/components/SessionScoring/help-content'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { client } from '@/lib/api'
-import { Info } from 'lucide-react'
 import type { components } from '@/types/api.generated'
-
-type PerReasonResponse = components['schemas']['ScoringPerReasonResponse']
+import { useScoringQuery } from './useScoringQuery'
 
 interface PerReasonAucCardProps {
   serviceId: string
@@ -30,18 +27,14 @@ interface PerReasonAucCardProps {
  * five empty buckets.
  */
 export function PerReasonAucCard({ serviceId }: PerReasonAucCardProps) {
-  const { data, isLoading, isError, error, refetch } = useQuery({
-    queryKey: ['scoring-evaluation-per-reason', serviceId],
-    queryFn: async () => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/evaluation/per-reason',
-        { params: { path: { service_id: serviceId } } },
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as PerReasonResponse
-    },
-    staleTime: 30_000,
-  })
+  const { data, isLoading, isError, error, refetch } = useScoringQuery(
+    ['scoring-evaluation-per-reason', serviceId],
+    () =>
+      client.GET('/api/services/{service_id}/scoring/evaluation/per-reason', {
+        params: { path: { service_id: serviceId } },
+      }),
+    { staleTime: 30_000 },
+  )
 
   return (
     <AnalyticsCard

@@ -25,6 +25,8 @@ import {
   Eye,
 } from 'lucide-react'
 import { formatBytes, formatCount } from '@/lib/format'
+import { adminFetch } from '@/lib/api'
+import { downloadBlob } from '@/lib/download'
 import type { ServiceConfig } from '@/types/api'
 
 
@@ -150,7 +152,12 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
                     className="h-4 w-4 p-0 ml-0.5 hover:bg-transparent text-muted-foreground hover:text-primary transition-colors"
                     onClick={(e) => {
                       e.stopPropagation()
-                      window.open(`/api/download-all?service_id=${row.original.service_id}&include=local`, '_blank')
+                      const sid = row.original.service_id
+                      void adminFetch(`/api/download-all?service_id=${encodeURIComponent(sid)}&include=local`).then(
+                        async (res) => {
+                          if (res.ok) downloadBlob(await res.blob(), `${sid}_local_cache.zip`)
+                        },
+                      )
                     }}
                     title="Download local cache as ZIP"
                   >

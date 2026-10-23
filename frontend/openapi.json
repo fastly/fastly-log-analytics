@@ -52839,8 +52839,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -52878,7 +52877,7 @@
           },
           "time_series": {
             "items": {
-              "$ref": "#/components/schemas/backend__models__dashboard__TimeSeriesPoint"
+              "$ref": "#/components/schemas/TimeSeriesPoint"
             },
             "type": "array",
             "title": "Time Series"
@@ -53271,8 +53270,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -53375,8 +53373,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -53540,8 +53537,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -53620,8 +53616,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -53786,8 +53781,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -53851,8 +53845,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -54348,8 +54341,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -54589,6 +54581,28 @@
       },
       "BackfillBundleRollupsResponse": {
         "properties": {
+          "time_series": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Series"
+          },
+          "sessions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sessions"
+          },
           "slow_urls": {
             "anyOf": [
               {
@@ -54897,6 +54911,72 @@
             ],
             "title": "Overview Days"
           },
+          "network_heatmap": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Network Heatmap"
+          },
+          "network_heatmap_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Network Heatmap Days"
+          },
+          "network_geo": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Network Geo"
+          },
+          "network_geo_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Network Geo Days"
+          },
+          "network_quality": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Network Quality"
+          },
+          "pop_health": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pop Health"
+          },
           "rum": {
             "anyOf": [
               {
@@ -55165,8 +55245,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -55283,26 +55362,12 @@
           "settings": {
             "anyOf": [
               {
-                "additionalProperties": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "boolean"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "type": "object"
+                "$ref": "#/components/schemas/BootstrapSettings"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Settings"
+            ]
           },
           "custom_dashboard_cards": {
             "items": {
@@ -55514,6 +55579,17 @@
               }
             ],
             "title": "Analyst Path A Reason"
+          },
+          "is_high_scale": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is High Scale"
           }
         },
         "additionalProperties": true,
@@ -55522,6 +55598,124 @@
           "service_id"
         ],
         "title": "BootstrapService"
+      },
+      "BootstrapSettings": {
+        "properties": {
+          "initializing": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Initializing"
+          },
+          "access_level": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Access Level"
+          },
+          "storage_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Storage Mode"
+          },
+          "is_remote_analyst": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Remote Analyst"
+          },
+          "needs_login": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Needs Login"
+          },
+          "analyst_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Analyst Email"
+          },
+          "analyst_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Analyst Name"
+          },
+          "mask_ips": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mask Ips"
+          },
+          "admin_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Admin Token"
+          },
+          "web_vitals_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Web Vitals Enabled"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "BootstrapSettings",
+        "description": "Typed settings envelope returned by ``GET /api/bootstrap``."
       },
       "BotEfficiencyRow": {
         "properties": {
@@ -55775,8 +55969,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -55985,8 +56178,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -56118,8 +56310,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -56790,7 +56981,7 @@
           },
           "offload_time_series": {
             "items": {
-              "$ref": "#/components/schemas/backend__models__value__TimeSeriesPoint"
+              "$ref": "#/components/schemas/ValueTimeSeriesPoint"
             },
             "type": "array",
             "title": "Offload Time Series",
@@ -56798,7 +56989,7 @@
           },
           "cache_state_time_series": {
             "items": {
-              "$ref": "#/components/schemas/backend__models__value__TimeSeriesPoint"
+              "$ref": "#/components/schemas/ValueTimeSeriesPoint"
             },
             "type": "array",
             "title": "Cache State Time Series",
@@ -57809,8 +58000,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -57930,8 +58120,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -58057,8 +58246,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -58206,8 +58394,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -60586,7 +60773,7 @@
         },
         "type": "object",
         "title": "CronSettingsPartial",
-        "description": "Partial-update slice of a single cron block (sync / compact / ngwaf).\n\nDistinct from ``ServiceCronSync`` etc. above which model the full\npersisted config (``enabled`` required). Here every field is\noptional \u2014 the handler only writes the keys the caller actually sent\nso the matching cron block stays unchanged for fields the operator\ndidn't touch."
+        "description": "Partial-update slice of a single cron block (sync / compact / ngwaf).\n\nDistinct from ``ServiceCronSync`` etc. below which model the full\npersisted config (``enabled`` required). Here every field is\noptional \u2014 the handler only writes the keys the caller actually sent\nso the matching cron block stays unchanged for fields the operator\ndidn't touch."
       },
       "CurrentStorageResponse": {
         "properties": {
@@ -60637,8 +60824,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -60980,8 +61166,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -61287,8 +61472,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -62051,8 +62235,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -62985,8 +63168,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -63119,8 +63301,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -63339,8 +63520,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -63445,8 +63625,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -63516,8 +63695,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -63754,8 +63932,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -63989,8 +64166,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -64075,8 +64251,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -64202,8 +64377,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -64701,7 +64875,7 @@
           },
           "io_time_series": {
             "items": {
-              "$ref": "#/components/schemas/backend__models__value__TimeSeriesPoint"
+              "$ref": "#/components/schemas/ValueTimeSeriesPoint"
             },
             "type": "array",
             "title": "Io Time Series",
@@ -64750,7 +64924,7 @@
           },
           "io_bandwidth_time_series": {
             "items": {
-              "$ref": "#/components/schemas/backend__models__value__TimeSeriesPoint"
+              "$ref": "#/components/schemas/ValueTimeSeriesPoint"
             },
             "type": "array",
             "title": "Io Bandwidth Time Series",
@@ -64796,7 +64970,7 @@
           },
           "io_compression_time_series": {
             "items": {
-              "$ref": "#/components/schemas/backend__models__value__TimeSeriesPoint"
+              "$ref": "#/components/schemas/ValueTimeSeriesPoint"
             },
             "type": "array",
             "title": "Io Compression Time Series",
@@ -65024,8 +65198,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -65840,8 +66013,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -70386,8 +70558,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -70739,14 +70910,12 @@
           "pii_policy": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/PiiPolicyPayload"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Pii Policy"
+            ]
           },
           "query_window_hours": {
             "anyOf": [
@@ -70875,14 +71044,12 @@
           "pii_policy": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/PiiPolicyPayload"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Pii Policy"
+            ]
           },
           "query_window_hours": {
             "anyOf": [
@@ -71333,6 +71500,58 @@
         ],
         "title": "LatencyRegressionMeta"
       },
+      "LineBudgetWarning": {
+        "properties": {
+          "exceeded": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exceeded"
+          },
+          "estimate": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimate"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "LineBudgetWarning",
+        "description": "Line-budget / WAF warning payload returned with log-fields responses."
+      },
       "LocalCompactNowResponse": {
         "properties": {
           "partitions_scanned": {
@@ -71574,8 +71793,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -71758,8 +71976,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -72303,9 +72520,6 @@
           }
         },
         "type": "object",
-        "required": [
-          "groups"
-        ],
         "title": "LogFieldsConfig"
       },
       "LogFieldsResponse": {
@@ -72357,8 +72571,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -72372,8 +72585,7 @@
           },
           "history": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/LogFormatHistoryEntry"
             },
             "type": "array",
             "title": "History"
@@ -72385,14 +72597,12 @@
           "line_budget_warning": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/LineBudgetWarning"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Line Budget Warning"
+            ]
           }
         },
         "type": "object",
@@ -72407,9 +72617,7 @@
       "LogFieldsUpdateRequest": {
         "properties": {
           "log_fields": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Log Fields"
+            "$ref": "#/components/schemas/LogFieldsConfig"
           }
         },
         "type": "object",
@@ -72456,20 +72664,190 @@
           "line_budget_warning": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/LineBudgetWarning"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Line Budget Warning"
+            ]
           }
         },
         "additionalProperties": true,
         "type": "object",
         "title": "LogFieldsUpdateResponse",
         "description": "POST /services/{id}/log-fields \u2014 no-change branch carries\n``message``; the applied branch carries ``estimate`` +\n``line_budget_warning`` (the ``waf_warning``-shaped dict, or null)."
+      },
+      "LogFormatHistoryEntry": {
+        "properties": {
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp"
+          },
+          "changed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changed At"
+          },
+          "actor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor"
+          },
+          "changed_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changed By"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "preset": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset"
+          },
+          "groups": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Groups"
+          },
+          "groups_before": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Groups Before"
+          },
+          "groups_after": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Groups After"
+          },
+          "fields_added": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fields Added"
+          },
+          "fields_removed": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fields Removed"
+          },
+          "field_overrides": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "boolean"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field Overrides"
+          },
+          "field_limits": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field Limits"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "LogFormatHistoryEntry",
+        "description": "One entry in ``log_format_history``."
       },
       "LoggingSettingsResponse": {
         "properties": {
@@ -72520,8 +72898,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -73503,8 +73880,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -73763,8 +74139,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -74358,7 +74733,7 @@
           },
           "protocol_time_series": {
             "items": {
-              "$ref": "#/components/schemas/backend__models__value__TimeSeriesPoint"
+              "$ref": "#/components/schemas/ValueTimeSeriesPoint"
             },
             "type": "array",
             "title": "Protocol Time Series",
@@ -74538,8 +74913,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -75729,8 +76103,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -75874,8 +76247,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -76243,8 +76615,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -76509,8 +76880,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -76726,8 +77096,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -77094,8 +77463,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -77309,8 +77677,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -77459,8 +77826,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -77578,8 +77944,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -78030,8 +78395,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -78841,8 +79205,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -79032,7 +79395,7 @@
           },
           "latency_time_series": {
             "items": {
-              "$ref": "#/components/schemas/backend__models__value__TimeSeriesPoint"
+              "$ref": "#/components/schemas/ValueTimeSeriesPoint"
             },
             "type": "array",
             "title": "Latency Time Series",
@@ -79305,13 +79668,12 @@
         "properties": {
           "mask_ips": {
             "type": "boolean",
-            "title": "Mask Ips"
+            "title": "Mask Ips",
+            "default": false
           }
         },
+        "additionalProperties": true,
         "type": "object",
-        "required": [
-          "mask_ips"
-        ],
         "title": "PiiPolicyPayload",
         "description": "Body for ``PATCH /api/share-admin/invites/{id}/pii`` \u2014 toggle the\ninvite's PII policy (currently just ``mask_ips``) after creation."
       },
@@ -79424,8 +79786,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -79664,8 +80025,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -79733,11 +80093,77 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
+          },
+          "class_a_rate_per_1k": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Class A Rate Per 1K"
+          },
+          "class_b_rate_per_10k": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Class B Rate Per 10K"
+          },
+          "cdn_egress_rate_per_gb": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cdn Egress Rate Per Gb"
+          },
+          "storage_rate_per_gb_month": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Storage Rate Per Gb Month"
+          },
+          "min_billed_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Billed Days"
+          },
+          "billing_zone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Billing Zone",
+            "default": "MBZ200"
           },
           "avg_log_file_size_kb": {
             "anyOf": [
@@ -79817,73 +80243,6 @@
               }
             ],
             "title": "Avg Nodes Per Flush"
-          },
-          "class_a_rate_per_1k": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Class A Rate Per 1K"
-          },
-          "class_b_rate_per_10k": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Class B Rate Per 10K"
-          },
-          "cdn_egress_rate_per_gb": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cdn Egress Rate Per Gb"
-          },
-          "storage_rate_per_gb_month": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Storage Rate Per Gb Month"
-          },
-          "min_billed_days": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Min Billed Days"
-          },
-          "billing_zone": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Billing Zone",
-            "default": "MBZ200"
           }
         },
         "type": "object",
@@ -79939,11 +80298,77 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
+          },
+          "class_a_rate_per_1k": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Class A Rate Per 1K"
+          },
+          "class_b_rate_per_10k": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Class B Rate Per 10K"
+          },
+          "cdn_egress_rate_per_gb": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cdn Egress Rate Per Gb"
+          },
+          "storage_rate_per_gb_month": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Storage Rate Per Gb Month"
+          },
+          "min_billed_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Billed Days"
+          },
+          "billing_zone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Billing Zone",
+            "default": "MBZ200"
           },
           "avg_log_file_size_kb": {
             "anyOf": [
@@ -80023,73 +80448,6 @@
               }
             ],
             "title": "Avg Nodes Per Flush"
-          },
-          "class_a_rate_per_1k": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Class A Rate Per 1K"
-          },
-          "class_b_rate_per_10k": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Class B Rate Per 10K"
-          },
-          "cdn_egress_rate_per_gb": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cdn Egress Rate Per Gb"
-          },
-          "storage_rate_per_gb_month": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Storage Rate Per Gb Month"
-          },
-          "min_billed_days": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Min Billed Days"
-          },
-          "billing_zone": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Billing Zone",
-            "default": "MBZ200"
           },
           "requests_per_day": {
             "anyOf": [
@@ -81672,8 +82030,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -82095,8 +82452,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -84080,6 +84436,69 @@
         ],
         "title": "RumBreakdownPoint"
       },
+      "RumConfigSection": {
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "log_period": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Period"
+          },
+          "sync_interval_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sync Interval Seconds"
+          },
+          "commit_interval_mins": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commit Interval Mins"
+          },
+          "delete_after": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delete After"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "RumConfigSection",
+        "description": "Typed RUM configuration block on a persisted service config."
+      },
       "RumCwvDistribution": {
         "properties": {
           "good": {
@@ -85275,86 +85694,11 @@
         ],
         "title": "SchemaColumn"
       },
-      "SchemaColumnRow": {
-        "properties": {
-          "name": {
-            "type": "string",
-            "title": "Name"
-          },
-          "type": {
-            "type": "string",
-            "title": "Type"
-          },
-          "min": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Min"
-          },
-          "max": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Max"
-          },
-          "approx_unique": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Approx Unique"
-          },
-          "null_percentage": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Null Percentage"
-          },
-          "count": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Count"
-          }
-        },
-        "additionalProperties": true,
-        "type": "object",
-        "required": [
-          "name",
-          "type"
-        ],
-        "title": "SchemaColumnRow",
-        "description": "One column of ``get_schema``: name/type always; the SUMMARIZE stats only on the sampled path."
-      },
       "SchemaResponse": {
         "properties": {
           "schema": {
             "items": {
-              "$ref": "#/components/schemas/SchemaColumnRow"
+              "$ref": "#/components/schemas/SchemaColumn"
             },
             "type": "array",
             "title": "Schema"
@@ -85428,26 +85772,22 @@
           "evaluation": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/ScoringEvaluationResponse"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Evaluation"
+            ]
           },
           "evaluation_per_reason": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/ScoringPerReasonResponse"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Evaluation Per Reason"
+            ]
           }
         },
         "additionalProperties": true,
@@ -85907,14 +86247,12 @@
           "status": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/ScoringStatusResponse"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Status"
+            ]
           },
           "evaluation": {
             "anyOf": [
@@ -86030,7 +86368,7 @@
         "additionalProperties": true,
         "type": "object",
         "title": "ScoringDashboardResponse",
-        "description": "Composite of the per-endpoint producers \u2014 each sub-block is the\nbyte-identical dict its standalone endpoint returns, so each nests the\nsame model that endpoint declares. ``status`` stays a free dict: it's\nthe secret-filtered cfg.scoring block, whose keys vary by provisioning\nhistory."
+        "description": "Composite of the per-endpoint producers \u2014 each sub-block is the\nbyte-identical dict its standalone endpoint returns, so each nests the\nsame model that endpoint declares."
       },
       "ScoringDistributionRow": {
         "properties": {
@@ -86747,14 +87085,12 @@
           "l2_enforce": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/ScoringL2EnforceState"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "L2 Enforce"
+            ]
           }
         },
         "additionalProperties": true,
@@ -86927,7 +87263,7 @@
           "readiness_days"
         ],
         "title": "ScoringL2EnforceState",
-        "description": "Shape from _build_l2_enforce_block / _l2_enforce_unavailable \u2014\nalso nested as ``l2_enforce`` in ScoringHealthResponse (left ``dict``\nthere for wire-compat; this standalone GET carries the real schema)."
+        "description": "Shape from _build_l2_enforce_block / _l2_enforce_unavailable \u2014\nalso nested as ``l2_enforce`` in ScoringHealthResponse."
       },
       "ScoringLabelCounts": {
         "properties": {
@@ -88732,6 +89068,102 @@
         ],
         "title": "ScoringTopFlaggedRow"
       },
+      "SectionTimingEntry": {
+        "properties": {
+          "section": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section"
+          },
+          "section_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "time_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Ms"
+          },
+          "duration_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Ms"
+          },
+          "sql_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sql Count"
+          },
+          "sql_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sql Ms"
+          },
+          "cache": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "SectionTimingEntry",
+        "description": "Per-phase wall-clock timing entry in ``BaseResponse.section_timings``."
+      },
       "SecurityAggregatesRequest": {
         "properties": {
           "start_time": {
@@ -88874,11 +89306,49 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
+          },
+          "active_proxies_count": {
+            "type": "integer",
+            "title": "Active Proxies Count",
+            "default": 0
+          },
+          "tunnel_requests_count": {
+            "type": "integer",
+            "title": "Tunnel Requests Count",
+            "default": 0
+          },
+          "distance_mismatches_count": {
+            "type": "integer",
+            "title": "Distance Mismatches Count",
+            "default": 0
+          },
+          "traffic_quality": {
+            "items": {
+              "$ref": "#/components/schemas/TrafficQualityRow"
+            },
+            "type": "array",
+            "title": "Traffic Quality",
+            "default": []
+          },
+          "suspicious_isps": {
+            "items": {
+              "$ref": "#/components/schemas/SuspiciousIspRow"
+            },
+            "type": "array",
+            "title": "Suspicious Isps",
+            "default": []
+          },
+          "active_clients": {
+            "items": {
+              "$ref": "#/components/schemas/ActiveClientItem"
+            },
+            "type": "array",
+            "title": "Active Clients",
+            "default": []
           },
           "tls_fingerprints": {
             "items": {
@@ -88995,45 +89465,6 @@
             },
             "type": "array",
             "title": "Ngwaf Bots",
-            "default": []
-          },
-          "active_proxies_count": {
-            "type": "integer",
-            "title": "Active Proxies Count",
-            "default": 0
-          },
-          "tunnel_requests_count": {
-            "type": "integer",
-            "title": "Tunnel Requests Count",
-            "default": 0
-          },
-          "distance_mismatches_count": {
-            "type": "integer",
-            "title": "Distance Mismatches Count",
-            "default": 0
-          },
-          "traffic_quality": {
-            "items": {
-              "$ref": "#/components/schemas/TrafficQualityRow"
-            },
-            "type": "array",
-            "title": "Traffic Quality",
-            "default": []
-          },
-          "suspicious_isps": {
-            "items": {
-              "$ref": "#/components/schemas/SuspiciousIspRow"
-            },
-            "type": "array",
-            "title": "Suspicious Isps",
-            "default": []
-          },
-          "active_clients": {
-            "items": {
-              "$ref": "#/components/schemas/ActiveClientItem"
-            },
-            "type": "array",
-            "title": "Active Clients",
             "default": []
           }
         },
@@ -89185,7 +89616,7 @@
           },
           "threat_time_series": {
             "items": {
-              "$ref": "#/components/schemas/backend__models__value__TimeSeriesPoint"
+              "$ref": "#/components/schemas/ValueTimeSeriesPoint"
             },
             "type": "array",
             "title": "Threat Time Series",
@@ -89252,8 +89683,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -89456,14 +89886,12 @@
           "rum": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/RumConfigSection"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Rum"
+            ]
           },
           "rum_log_period": {
             "anyOf": [
@@ -89708,28 +90136,6 @@
             ],
             "title": "Commit Interval Mins"
           },
-          "delete_after": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Delete After"
-          },
-          "high_scale_shared_source": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "High Scale Shared Source"
-          },
           "log_enabled": {
             "anyOf": [
               {
@@ -89817,6 +90223,28 @@
               }
             ],
             "title": "Expire Interval Mins"
+          },
+          "delete_after": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delete After"
+          },
+          "high_scale_shared_source": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "High Scale Shared Source"
           }
         },
         "type": "object",
@@ -89891,8 +90319,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -90309,8 +90736,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -90613,8 +91039,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -91379,9 +91804,7 @@
             "title": "Fingerprint Signature"
           },
           "pii_policy": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Pii Policy"
+            "$ref": "#/components/schemas/PiiPolicyPayload"
           },
           "query_window_hours": {
             "anyOf": [
@@ -92739,6 +93162,37 @@
             ],
             "title": "Latest Log At"
           },
+          "local_rows": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Rows"
+          },
+          "rum": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StreamMetrics"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StreamMetrics"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "configured": {
             "type": "boolean",
             "title": "Configured",
@@ -92770,17 +93224,6 @@
               }
             ],
             "title": "Access Level"
-          },
-          "local_rows": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Local Rows"
           },
           "latest_ingested_file_at": {
             "anyOf": [
@@ -92849,26 +93292,6 @@
             ],
             "title": "Ngwaf Workspace Id"
           },
-          "rum": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/StreamMetrics"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "request": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/StreamMetrics"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "_debug_queries": {
             "items": {
               "$ref": "#/components/schemas/DebugQuery"
@@ -92916,13 +93339,13 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
           }
         },
+        "additionalProperties": true,
         "type": "object",
         "title": "SyncStatusResponse"
       },
@@ -93048,8 +93471,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -93273,8 +93695,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -93292,6 +93713,46 @@
           "data"
         ],
         "title": "ThreatIntelListResponse"
+      },
+      "TimeSeriesPoint": {
+        "properties": {
+          "time": {
+            "type": "string",
+            "title": "Time"
+          },
+          "value": {
+            "type": "number",
+            "title": "Value"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "baseline": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline"
+          }
+        },
+        "type": "object",
+        "required": [
+          "time",
+          "value"
+        ],
+        "title": "TimeSeriesPoint"
       },
       "TimeoutSplitInsightCard": {
         "properties": {
@@ -93710,8 +94171,7 @@
             "anyOf": [
               {
                 "items": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/SectionTimingEntry"
                 },
                 "type": "array"
               },
@@ -94008,8 +94468,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -94195,8 +94654,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -94324,8 +94782,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -94619,8 +95076,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -94661,31 +95117,6 @@
       },
       "UsageLoggingConfigResponse": {
         "properties": {
-          "enabled": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Enabled"
-          },
-          "retention_days": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Retention Days"
-          },
           "class_a_rate_per_1k": {
             "anyOf": [
               {
@@ -94766,6 +95197,31 @@
               }
             ],
             "title": "Billing Zone"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "retention_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retention Days"
           },
           "track_duckdb_httpfs": {
             "anyOf": [
@@ -94786,28 +95242,6 @@
       },
       "UsageLoggingUpdateBody": {
         "properties": {
-          "enabled": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Enabled"
-          },
-          "retention_days": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Retention Days"
-          },
           "class_a_rate_per_1k": {
             "anyOf": [
               {
@@ -94855,6 +95289,9 @@
           "min_billed_days": {
             "anyOf": [
               {
+                "type": "integer"
+              },
+              {
                 "type": "number"
               },
               {
@@ -94873,6 +95310,28 @@
               }
             ],
             "title": "Billing Zone"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "retention_days": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retention Days"
           }
         },
         "type": "object",
@@ -94951,8 +95410,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -95048,8 +95506,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -95324,8 +95781,7 @@
           },
           "_section_timings": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/SectionTimingEntry"
             },
             "type": "array",
             "title": "Section Timings"
@@ -95403,6 +95859,35 @@
         },
         "type": "object",
         "title": "ValueSummaryResponse"
+      },
+      "ValueTimeSeriesPoint": {
+        "properties": {
+          "time": {
+            "type": "string",
+            "title": "Time"
+          },
+          "value": {
+            "type": "number",
+            "title": "Value"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          }
+        },
+        "type": "object",
+        "required": [
+          "time",
+          "value"
+        ],
+        "title": "ValueTimeSeriesPoint"
       },
       "VclHealthResponse": {
         "properties": {
@@ -95981,75 +96466,6 @@
           "enabled"
         ],
         "title": "_ToggleBody"
-      },
-      "backend__models__dashboard__TimeSeriesPoint": {
-        "properties": {
-          "time": {
-            "type": "string",
-            "title": "Time"
-          },
-          "value": {
-            "type": "number",
-            "title": "Value"
-          },
-          "category": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Category"
-          },
-          "baseline": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Baseline"
-          }
-        },
-        "type": "object",
-        "required": [
-          "time",
-          "value"
-        ],
-        "title": "TimeSeriesPoint"
-      },
-      "backend__models__value__TimeSeriesPoint": {
-        "properties": {
-          "time": {
-            "type": "string",
-            "title": "Time"
-          },
-          "value": {
-            "type": "number",
-            "title": "Value"
-          },
-          "category": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Category"
-          }
-        },
-        "type": "object",
-        "required": [
-          "time",
-          "value"
-        ],
-        "title": "TimeSeriesPoint"
       }
     }
   }

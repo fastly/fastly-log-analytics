@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { useMounted } from '@/hooks/useMounted'
 import { client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { useSearchParams } from 'next/navigation'
 
 import { useShareMutation } from './useShareMutation'
@@ -112,9 +113,11 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
     }
     setCapBusy(true)
     try {
-      await client.PATCH('/api/admin/share/settings', {
-        body: { max_concurrent_analyst_sessions: n },
-      })
+      await unwrapClient(
+        client.PATCH('/api/admin/share/settings', {
+          body: { max_concurrent_analyst_sessions: n },
+        }),
+      )
       await onRefresh()
       // Drop back to mirroring the (now-updated) server value.
       setCapDraft(null)

@@ -1,6 +1,6 @@
 import { formatDate, toUTCDate } from '@/lib/date'
 import { INTERVAL_SECONDS } from '@/lib/constants'
-import { makeTimeXAxis, TIME_HOVER_LAYOUT, densifyBarSeries, type BarSeriesPoint } from '@/lib/chart-helpers'
+import { densifyBarSeries, type BarSeriesPoint } from '@/lib/chart-helpers'
 import { CHART_COLORS } from '@/lib/chart-colors'
 import type { components } from '@/types/api.generated'
 import type { PlotlyTrace } from '@/types/plotly'

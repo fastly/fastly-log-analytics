@@ -31,13 +31,10 @@
          (request_aggregates, request_facts, rum_*_aggregates) in the low
          single-digit MB, while ClickHouse's own internal text_log/
          asynchronous_metric_log tables held millions of rows. Keep this
-         value in sync with docker-compose.clickhouse-prototype.yml's cpus/
-         mem_limit and with resource_limits.xml's background_pool_size/
-         max_concurrent_queries. This file loads after resource_limits.xml
-         (alphabetical config.d order) and will silently win on any
-         duplicate key. -->
-    <background_pool_size>4</background_pool_size>
-    <background_merges_mutations_concurrency_ratio>1</background_merges_mutations_concurrency_ratio>
+         Keep merge_tree sizing in sync with docker-compose.clickhouse-prototype.yml's
+         cpus/mem_limit and with resource_limits.xml's background_pool_size/
+         max_concurrent_queries (resource_limits.xml is the single owner of
+         background_pool_size and background_merges_mutations_concurrency_ratio). -->
 
     <merge_tree>
         <!-- Merge sizing for the 8G container, doubled from the prior 6G

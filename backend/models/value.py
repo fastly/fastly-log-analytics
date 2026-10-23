@@ -25,10 +25,13 @@ class ValueSummaryRequest(RangeKeyedRequest):
     chart_interval: str = "1 day"
 
 
-class TimeSeriesPoint(BaseModel):
+class ValueTimeSeriesPoint(BaseModel):
     time: str
     value: float
     category: str | None = None
+
+
+TimeSeriesPoint = ValueTimeSeriesPoint
 
 
 class OverviewMetrics(BaseModel):
@@ -50,8 +53,8 @@ class CachingMetrics(BaseModel):
     miss_requests: int | None = None
     pass_requests: int | None = None
     synth_requests: int | None = None
-    offload_time_series: list[TimeSeriesPoint] = []
-    cache_state_time_series: list[TimeSeriesPoint] = []
+    offload_time_series: list[ValueTimeSeriesPoint] = []
+    cache_state_time_series: list[ValueTimeSeriesPoint] = []
 
 
 class WafSignalRow(WireSafeModel):
@@ -83,7 +86,7 @@ class SecurityMetrics(BaseModel):
     waf_logged: int | None = None
     waf_passed: int | None = None
     total_requests: int | None = None
-    threat_time_series: list[TimeSeriesPoint] = []
+    threat_time_series: list[ValueTimeSeriesPoint] = []
     top_waf_signals: list[WafSignalRow] = []
 
 
@@ -100,7 +103,7 @@ class PerformanceMetrics(BaseModel):
     avg_miss_latency_ms: float | None = None
     p99_latency_ms: float | None = None
     total_requests: int | None = None
-    latency_time_series: list[TimeSeriesPoint] = []
+    latency_time_series: list[ValueTimeSeriesPoint] = []
 
 
 class NetworkMetrics(BaseModel):
@@ -109,7 +112,7 @@ class NetworkMetrics(BaseModel):
     ipv6_pct: float | None = None
     h2_pct: float | None = None
     total_requests: int | None = None
-    protocol_time_series: list[TimeSeriesPoint] = []
+    protocol_time_series: list[ValueTimeSeriesPoint] = []
 
 
 class IOFormatBreakdown(BaseModel):
@@ -123,17 +126,17 @@ class IOMetrics(BaseModel):
     io_bandwidth_bytes: int | None = None
     io_shield_bandwidth_bytes: int | None = None
     total_requests: int | None = None
-    io_time_series: list[TimeSeriesPoint] = []
+    io_time_series: list[ValueTimeSeriesPoint] = []
     io_pct_of_traffic: float | None = None
     io_estimated_cost_usd: float | None = None
     format_distribution: list[IOFormatBreakdown] = []
     modern_format_pct: float | None = None
-    io_bandwidth_time_series: list[TimeSeriesPoint] = []
+    io_bandwidth_time_series: list[ValueTimeSeriesPoint] = []
     optimization_opportunities: list[IOOpportunityRow] = []
     io_actual_bandwidth_saved_bytes: int | None = None
     io_actual_compression_ratio: float | None = None
     io_format_conversion_pairs: list[IOFormatConversionPair] = []
-    io_compression_time_series: list[TimeSeriesPoint] = []
+    io_compression_time_series: list[ValueTimeSeriesPoint] = []
     image_request_count: int | None = None
     image_bandwidth_bytes: int | None = None
     estimated_savings_bytes: int | None = None

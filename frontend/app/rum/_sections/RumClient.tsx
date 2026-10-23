@@ -15,7 +15,7 @@ import { formatDate } from '@/lib/date';
 import { Terminal, Activity, Monitor, ShieldAlert, Cpu, PieChart, TrendingUp, Eye } from 'lucide-react';
 import { adminJsonResult } from '@/lib/api';
 import { arrayOrEmpty, recordOrNull } from '@/lib/narrow';
-import type { WithRequired, components } from '@/types/api';
+import type { StripIndex, WithRequired, components } from '@/types/api';
 import { useIsAnalyst } from '@/hooks/useIsAnalyst';
 import type { FiltersPayload } from '@/types/filters';
 import type { RangeWireArgs } from '@/lib/range-wire';
@@ -75,14 +75,10 @@ interface RumRawLog {
   [key: string]: unknown;
 }
 
-type RumLiveEvent = {
-  time: string;
-  type: string;
-  path: string;
-  desc: string;
+type RumLiveEvent = Omit<StripIndex<components['schemas']['RumLiveEventItem']>, 'browser' | 'os' | 'raw_log'> & {
   // Legacy payloads carried ``{ name }`` objects here instead of plain strings.
-  browser: string | { name?: string };
-  os: string | { name?: string };
+  browser: components['schemas']['RumLiveEventItem']['browser'] | { name?: string };
+  os: components['schemas']['RumLiveEventItem']['os'] | { name?: string };
   raw_log?: RumRawLog;
 }
 
@@ -370,7 +366,10 @@ export function RumClient({
         '/api/services/{service_id}/rum/analytics',
         url,
       );
-      return res.ok ? recordOrNull(res.data) : null;
+      if (!res.ok) {
+        throw new Error(res.errorText || `RUM analytics failed (HTTP ${res.status})`);
+      }
+      return recordOrNull(res.data);
     },
     queryOptions: { enabled: !!serviceId && !!status?.enabled, refetchInterval: false },
   });
@@ -528,7 +527,7 @@ export function RumClient({
   );
 
   // Fetch live ticker
-  const { data: liveEvents } = useQuery({
+  const { data: liveEvents, isLoading: isLiveEventsLoading } = useQuery({
     queryKey: ['rum-live-events', serviceId, startTime, endTime, filterPayload],
     queryFn: async () => {
       if (!serviceId) return [];
@@ -545,7 +544,10 @@ export function RumClient({
         '/api/services/{service_id}/rum/live-events',
         url,
       );
-      return res.ok ? arrayOrEmpty(res.data) : [];
+      if (!res.ok) {
+        throw new Error(res.errorText || `RUM live events failed (HTTP ${res.status})`);
+      }
+      return arrayOrEmpty(res.data);
     },
     enabled: !!serviceId && !!status?.enabled,
     refetchInterval: false,
@@ -852,7 +854,7 @@ export function RumClient({
             columns={columns}
             data={liveEvents || []}
             searchKey="path"
-            isLoading={!liveEvents}
+            isLoading={isLiveEventsLoading}
             showPagination={false}
             emptyMessage="Waiting for real-time RUM user events..."
             onRowClick={(row) => setSelectedEvent(row)}

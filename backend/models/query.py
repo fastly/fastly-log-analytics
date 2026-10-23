@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from backend.models._base import JsonRows, WireSafeModel
+from backend.models._base import JsonRows, SchemaColumn, WireSafeModel
 from backend.models.common import BaseResponse
 
 QueryDataset = Literal["logs", "client_vitals", "client_errors"]
@@ -46,17 +46,6 @@ class PresetQuery(WireSafeModel):
     name: str
     description: str
     sql: str
-
-
-class SchemaColumn(WireSafeModel):
-    column: str | None = None
-    name: str = ""
-    type: str
-    min: str | None = None
-    max: str | None = None
-    approx_unique: int | None = None
-    null_percentage: float | None = None
-    count: int | None = None
 
 
 class QuerySchemaResponse(BaseResponse):

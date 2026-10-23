@@ -7,6 +7,7 @@ import { ColumnDef } from '@tanstack/react-table'
 import { AlertTriangle, Clock, ExternalLink, Film, Globe, Shield, Users } from 'lucide-react'
 
 import { client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { DataTable } from '@/components/DataTable'
 import { FlagSessionPopover } from '@/components/SessionScoring/FlagSessionPopover'
 import { Badge } from '@/components/ui/badge'
@@ -77,8 +78,7 @@ export function SessionDetail({
             start_time: selectedSession.session_start,
             end_time: selectedSession.session_end,
           }
-      const { data } = await client.POST("/api/sessions/detail", { signal, body })
-      return data
+      return unwrapClient(client.POST("/api/sessions/detail", { signal, body }))
     },
     enabled: !!activeServiceId && !!selectedSession
   })

@@ -205,6 +205,46 @@ class ScoringMatrixStaleness(PassthroughModel):
     threshold_pct: float | None = None
 
 
+class ScoringL2EnforceState(PassthroughModel):
+    """Shape from _build_l2_enforce_block / _l2_enforce_unavailable —
+    also nested as ``l2_enforce`` in ScoringHealthResponse."""
+
+    available: bool
+    enabled: bool
+    l2_enabled_at: int | None
+    days_since_optin: float | None
+    ramp_progress: float
+    fully_ramped: bool
+    warmup_days_remaining: float | None
+    scoring_enabled_at: int | None
+    deployment_age_days: float | None
+    ready: bool
+    ramp_days: float
+    readiness_days: float
+
+
+class ScoringPerReasonBucket(PassthroughModel):
+    reason: str | None = None
+    n_good: int | None = None
+    n_bad: int | None = None
+    min_per_class: int | None = None
+    has_min_samples: bool | None = None
+    # Present only when has_min_samples (evaluate_per_reason adds them
+    # conditionally); exclude_unset keeps the gated branch byte-stable.
+    auc: float | None = None
+    passed: bool | None = None
+    threshold: float | None = None
+
+
+class ScoringPerReasonResponse(PassthroughModel):
+    buckets: list[ScoringPerReasonBucket] = []
+    min_per_class: int | None = None
+    known_reasons: list[str] | None = None
+    has_min_samples_overall: bool | None = None
+    n_good: int | None = None
+    n_bad: int | None = None
+
+
 class ScoringHealthResponse(PassthroughModel):
     since_hours: int | None = None
     total_edge_rows: int | None = None
@@ -225,9 +265,8 @@ class ScoringHealthResponse(PassthroughModel):
     fail_open_breakdown: list[ScoringReasonCount] = []
     latency: ScoringLatencySnapshot | None = None
     matrix_staleness: ScoringMatrixStaleness | None = None
-    # Admin-only opt-in/readiness block (None for analysts). Left as a free
-    # dict — the consuming card is admin-only and intentionally untyped here.
-    l2_enforce: dict | None = None
+    # Admin-only opt-in/readiness block (None for analysts).
+    l2_enforce: ScoringL2EnforceState | None = None
 
 
 class ScoringEvaluationResponse(PassthroughModel):
@@ -296,11 +335,9 @@ class ScoringAnalyticsResponse(PassthroughModel):
     compliance_breakdown: ScoringComplianceBreakdownResponse | None = None
     latency_timeseries: ScoringLatencyTimeseriesResponse | None = None
     health: ScoringHealthResponse | None = None
-    # Admin-only (omitted entirely on the analyst path). Left as free dicts —
-    # the standalone /scoring/evaluation is typed via ScoringEvaluationResponse,
-    # but evaluation/per-reason is admin-only and intentionally untyped.
-    evaluation: dict | None = None
-    evaluation_per_reason: dict | None = None
+    # Admin-only (omitted entirely on the analyst path).
+    evaluation: ScoringEvaluationResponse | None = None
+    evaluation_per_reason: ScoringPerReasonResponse | None = None
 
 
 class ScoringLabelRow(WireSafeModel):
@@ -420,25 +457,6 @@ class ScoringEnforceThresholdPutResponse(PassthroughModel):
     message: str | None = None
 
 
-class ScoringL2EnforceState(PassthroughModel):
-    """Shape from _build_l2_enforce_block / _l2_enforce_unavailable —
-    also nested as ``l2_enforce`` in ScoringHealthResponse (left ``dict``
-    there for wire-compat; this standalone GET carries the real schema)."""
-
-    available: bool
-    enabled: bool
-    l2_enabled_at: int | None
-    days_since_optin: float | None
-    ramp_progress: float
-    fully_ramped: bool
-    warmup_days_remaining: float | None
-    scoring_enabled_at: int | None
-    deployment_age_days: float | None
-    ready: bool
-    ramp_days: float
-    readiness_days: float
-
-
 class ScoringL2EnforcePutResponse(PassthroughModel):
     ok: bool | None = None
     enabled: bool | None = None
@@ -541,51 +559,6 @@ class ScoringThresholdState(PassthroughModel):
     enforced: bool
 
 
-class ScoringPerReasonBucket(PassthroughModel):
-    reason: str | None = None
-    n_good: int | None = None
-    n_bad: int | None = None
-    min_per_class: int | None = None
-    has_min_samples: bool | None = None
-    # Present only when has_min_samples (evaluate_per_reason adds them
-    # conditionally); exclude_unset keeps the gated branch byte-stable.
-    auc: float | None = None
-    passed: bool | None = None
-    threshold: float | None = None
-
-
-class ScoringPerReasonResponse(PassthroughModel):
-    buckets: list[ScoringPerReasonBucket] = []
-    min_per_class: int | None = None
-    known_reasons: list[str] | None = None
-    has_min_samples_overall: bool | None = None
-    n_good: int | None = None
-    n_bad: int | None = None
-
-
-class ScoringDashboardResponse(PassthroughModel):
-    """Composite of the per-endpoint producers — each sub-block is the
-    byte-identical dict its standalone endpoint returns, so each nests the
-    same model that endpoint declares. ``status`` stays a free dict: it's
-    the secret-filtered cfg.scoring block, whose keys vary by provisioning
-    history."""
-
-    since_hours: int | None = None
-    threshold: int | None = None
-    status: dict | None = None
-    evaluation: ScoringEvaluationResponse | None = None
-    evaluation_per_reason: ScoringPerReasonResponse | None = None
-    health: ScoringHealthResponse | None = None
-    top_flagged: ScoringTopFlaggedResponse | None = None
-    score_distribution: ScoringScoreDistributionResponse | None = None
-    compliance_breakdown: ScoringComplianceBreakdownResponse | None = None
-    curves: ScoringCurvesResponse | None = None
-    threshold_preview: ScoringThresholdPreviewResponse | None = None
-    config_threshold: ScoringThresholdState | None = None
-    exclude_regex: ScoringExcludeRegexState | None = None
-    enforce_status_code: ScoringEnforceStatusCodeState | None = None
-
-
 class ScoringStatusResponse(PassthroughModel):
     """``GET /scoring/status``: the secret-filtered ``cfg.scoring`` block plus
     live-version and drift keys. Config-derived keys beyond these ride as extras."""
@@ -602,6 +575,27 @@ class ScoringStatusResponse(PassthroughModel):
     drift_detail: str | None = None
     drift_known: bool | None = None
     preflight_pragmas_ready: bool | None = None
+
+
+class ScoringDashboardResponse(PassthroughModel):
+    """Composite of the per-endpoint producers — each sub-block is the
+    byte-identical dict its standalone endpoint returns, so each nests the
+    same model that endpoint declares."""
+
+    since_hours: int | None = None
+    threshold: int | None = None
+    status: ScoringStatusResponse | None = None
+    evaluation: ScoringEvaluationResponse | None = None
+    evaluation_per_reason: ScoringPerReasonResponse | None = None
+    health: ScoringHealthResponse | None = None
+    top_flagged: ScoringTopFlaggedResponse | None = None
+    score_distribution: ScoringScoreDistributionResponse | None = None
+    compliance_breakdown: ScoringComplianceBreakdownResponse | None = None
+    curves: ScoringCurvesResponse | None = None
+    threshold_preview: ScoringThresholdPreviewResponse | None = None
+    config_threshold: ScoringThresholdState | None = None
+    exclude_regex: ScoringExcludeRegexState | None = None
+    enforce_status_code: ScoringEnforceStatusCodeState | None = None
 
 
 class ScoringConfigCompositeResponse(PassthroughModel):

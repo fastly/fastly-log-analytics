@@ -373,7 +373,7 @@ POP_HEALTH_LIVE = """
                 COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS errors,
                 ROUND(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) * 100.0 / COUNT(*), 2) AS error_rate,
                 approx_quantile(tcp_rtt, 0.5) AS p50_rtt_us,
-                approx_quantile(ttfb, 0.95) AS p95_ttfb_ms,
+                approx_quantile(ttfb, 0.95) * 1000.0 AS p95_ttfb_ms,
                 ROUND(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) * 100.0 / COUNT(*), 2) AS cache_hit_rate,
                 SUM(resp_bytes) AS bandwidth_bytes
             FROM {table_name}

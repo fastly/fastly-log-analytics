@@ -9,6 +9,7 @@ import { usePopGeoStore } from '@/stores/popGeoStore'
 import { formatPopGeo, type PopGeo } from '@/lib/pop'
 import { formatCompactCount, formatCount, resolveCountryName } from '@/lib/format'
 import { countryFill } from '@/components/Map/colors'
+import { NORMALIZE_COUNTRY } from '@/components/Map/shared'
 import { useMapResize } from '@/components/Map/useMapResize'
 import { addCountryBaseLayer, createBaseMap, removeMapTabStops, updateCountryBaseLayerTheme, type MapFillColor } from '@/components/Map/baseLayers'
 import { CHART_COLORS } from '@/lib/chart-colors'
@@ -31,14 +32,6 @@ function geoBbox(geometry: { coordinates: CoordTree[] }): [number, number, numbe
   }
   walk(geometry.coordinates)
   return [minX, minY, maxX, maxY]
-}
-
-const NORMALIZE_COUNTRY: Record<string, string> = {
-  'United States': 'United States of America',
-  'Russia': 'Russia',
-  'South Korea': 'South Korea',
-  'Vietnam': 'Vietnam',
-  'Taiwan': 'Taiwan',
 }
 
 interface PopTrafficMapProps {
@@ -226,6 +219,8 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
   useEffect(() => {
     if (!map.current) return
 
+    let pendingStyleDataHandler: (() => void) | null = null
+
     const updateLayers = () => {
       if (!map.current) return
 
@@ -240,12 +235,17 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
       }
 
       if (!map.current.getLayer('countries')) {
+        if (pendingStyleDataHandler) {
+          map.current.off('styledata', pendingStyleDataHandler)
+        }
         const onStyleData = () => {
           if (map.current?.getLayer('countries')) {
             map.current.off('styledata', onStyleData)
+            pendingStyleDataHandler = null
             updateLayers()
           }
         }
+        pendingStyleDataHandler = onStyleData
         map.current.on('styledata', onStyleData)
         return
       }
@@ -276,6 +276,13 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
     }
 
     updateLayers()
+
+    return () => {
+      if (pendingStyleDataHandler) {
+        map.current?.off('styledata', pendingStyleDataHandler)
+        pendingStyleDataHandler = null
+      }
+    }
   }, [popGeoJson, countryAgg, theme])
 
   useMapResize(map, mapContainer)
