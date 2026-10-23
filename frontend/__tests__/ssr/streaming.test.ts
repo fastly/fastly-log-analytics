@@ -86,7 +86,10 @@ describe('Streaming SSR fixture contract', () => {
       })
       const seedKey = ['cmcd', 'aggregates', 'svc-streaming-test', seed.rangeToken, seed.anchor, {}]
       const browserKey = ['cmcd', 'aggregates', 'svc-streaming-test', rangeKey, anchor, {}]
-      hydrate(queryClient, seedDehydratedState(seedKey, seed.data))
+      const dehydratedState = seedDehydratedState(seedKey, seed.data)
+      expect(dehydratedState).not.toBeNull()
+      if (!dehydratedState) throw new Error('Streaming SSR did not produce dehydrated state')
+      hydrate(queryClient, dehydratedState)
       expect(queryClient.getQueryData(browserKey)).toEqual(payload)
       expect(queryClient.getQueryState(browserKey)?.dataUpdatedAt).toBeGreaterThan(0)
     } finally {
