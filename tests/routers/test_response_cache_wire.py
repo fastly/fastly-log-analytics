@@ -1,16 +1,35 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from backend.repositories._base import _safe_table
+from backend.utils import bot_sources
 from tests.conftest import MOCK_SERVICE_ID
 from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
 
 
 @pytest.fixture
-def observation_request(in_memory_duckdb, test_service_source) -> dict:
+def observation_request(in_memory_duckdb, test_service_source, tmp_path, monkeypatch) -> dict:
+    source_dir = tmp_path / "bot-sources"
+    source_dir.mkdir()
+    (source_dir / "well-known-bots.json").write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": "googlebot",
+                        "name": "Googlebot",
+                        "pattern": {"accepted": ["Googlebot"]},
+                        "verification": {"domains": [], "cidrs": []},
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(bot_sources, "_CACHE_DIR", source_dir)
     logs = generate_mock_logs(test_service_source, num_logs=40, hours_ago=1)
     for log in logs:
         log.update(
@@ -69,6 +88,8 @@ def test_dashboard_bundle_components_keep_independent_observations(client, obser
     assert first.json()["_response_cache"]["state"] == "bypass"
     assert first.json()["aggregates"]["_response_cache"]["state"] == "miss"
     assert first.json()["top_bots"]["_response_cache"]["state"] == "miss"
+    assert first.json()["top_bots"]["bots"][0]["name"] == "Googlebot"
+    assert first.json()["top_bots"]["bots"][0]["request_count"] == 40
     second = client.post("/api/dashboard/bundle", json=observation_request, headers=headers)
     assert second.status_code == 200, second.text
     assert second.json()["aggregates"]["_response_cache"]["state"] == "hit"
