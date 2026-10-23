@@ -147,3 +147,4 @@ configs-hs/
 /artifacts/
 .tmp/
 .playwright-cli/
+/.streaming-test-artifacts
