@@ -1196,6 +1196,16 @@ def get_asn_names(service_id: str, asns: list) -> dict:
                 socket.setdefaulttimeout(2.0)
             try:
                 c = cymruwhois.Client()
+                orig_connect = getattr(c, "_connect", None)
+                if callable(orig_connect):
+
+                    def _safe_connect() -> None:
+                        orig_connect()
+                        reconf = getattr(getattr(c, "file", None), "reconfigure", None)
+                        if callable(reconf):
+                            reconf(encoding="utf-8", errors="replace")
+
+                    c._connect = _safe_connect
                 queries = [f"AS{asn}" for asn in need]
                 for result in c.lookupmany(queries):
                     if result and result.asn:
@@ -1209,8 +1219,8 @@ def get_asn_names(service_id: str, asns: list) -> dict:
             finally:
                 if prev_timeout is None:
                     socket.setdefaulttimeout(None)
-        except Exception:
-            logger.warning("ASN resolution failed", exc_info=True)
+        except Exception as exc:
+            logger.warning("ASN resolution failed: %s", type(exc).__name__)
 
         # Negatively cache any ASN in `need` that cymruwhois did not resolve
         # (including on WHOIS socket timeout/exception) so unallocated/synthetic
