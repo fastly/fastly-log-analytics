@@ -9,6 +9,7 @@ import { useServiceStore } from '@/stores/serviceStore'
 import Loading from '@/app/admin/clickhouse/loading'
 import ClickHouseAdminPage from '@/app/admin/clickhouse/page'
 import ClickHouseAdminClient from '@/app/admin/clickhouse/_sections/ClickHouseAdminClient'
+import { ClickHouseStatusNotice } from '@/app/admin/clickhouse/_sections/ClickHouseStatusNotice'
 
 vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams('service=svc-test'),
@@ -31,6 +32,34 @@ describe('/admin/clickhouse page & ClickHouseAdminClient', () => {
     expect(screen.getByTestId('admin-clickhouse-vitals-reservation')).toBeInTheDocument()
     expect(screen.getByTestId('admin-clickhouse-generation-reservation')).toBeInTheDocument()
     expect(screen.getByTestId('admin-clickhouse-replay-reservation')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-clickhouse-disabled-banner')).toHaveAttribute('aria-hidden', 'true')
+    expect(screen.getByTestId('admin-clickhouse-unavailable-banner')).toHaveAttribute('aria-hidden', 'true')
+  })
+
+  it('keeps notice reservations mounted while status changes and exposes only the applicable notice', () => {
+    const { rerender } = render(<ClickHouseStatusNotice />)
+    const disabled = screen.getByTestId('admin-clickhouse-disabled-banner')
+    const unavailable = screen.getByTestId('admin-clickhouse-unavailable-banner')
+    expect(disabled).toHaveAttribute('aria-hidden', 'true')
+    expect(unavailable).toHaveAttribute('aria-hidden', 'true')
+
+    rerender(<ClickHouseStatusNotice enabled={false} health="disabled" />)
+    expect(screen.getByTestId('admin-clickhouse-disabled-banner')).toBe(disabled)
+    expect(disabled).toHaveAttribute('aria-hidden', 'false')
+    expect(disabled).not.toHaveClass('invisible')
+    expect(unavailable).toHaveClass('invisible')
+
+    rerender(<ClickHouseStatusNotice enabled health="unavailable" />)
+    expect(screen.getByTestId('admin-clickhouse-unavailable-banner')).toBe(unavailable)
+    expect(unavailable).toHaveAttribute('aria-hidden', 'false')
+    expect(unavailable).not.toHaveClass('invisible')
+    expect(disabled).toHaveClass('invisible')
+
+    rerender(<ClickHouseStatusNotice enabled health="ok" />)
+    expect(disabled).toHaveAttribute('aria-hidden', 'true')
+    expect(unavailable).toHaveAttribute('aria-hidden', 'true')
+    expect(disabled).toHaveClass('invisible')
+    expect(unavailable).toHaveClass('invisible')
   })
 
   it('renders Standard mode disabled state with informational banner and disabled replay controls', async () => {
@@ -41,6 +70,7 @@ describe('/admin/clickhouse page & ClickHouseAdminClient', () => {
       expect(screen.getByTestId('admin-clickhouse-health-badge')).toHaveTextContent('disabled')
     })
     expect(screen.getByTestId('admin-clickhouse-disabled-banner')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-clickhouse-disabled-banner')).toHaveAttribute('aria-hidden', 'false')
     expect(screen.getByTestId('admin-clickhouse-vital-enabled')).toHaveTextContent('Standard (Disabled)')
     expect(screen.getByTestId('admin-clickhouse-replay-disabled-hint')).toBeInTheDocument()
     expect(screen.getByTestId('admin-clickhouse-replay-submit-btn')).toBeDisabled()
@@ -140,5 +170,6 @@ describe('/admin/clickhouse page & ClickHouseAdminClient', () => {
       expect(screen.getByTestId('admin-clickhouse-health-badge')).toHaveTextContent('unavailable')
     })
     expect(screen.getByTestId('admin-clickhouse-unavailable-banner')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-clickhouse-unavailable-banner')).toHaveAttribute('aria-hidden', 'false')
   })
 })

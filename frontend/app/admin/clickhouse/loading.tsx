@@ -1,7 +1,9 @@
 import { BackToAdminLink } from '@/components/BackToAdminLink'
 import { PageHeader } from '@/components/ui/page-header'
-import { Card, CardContent, CardHeader } from '@/components/ui/card'
+import { Activity } from 'lucide-react'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
+import { ClickHouseStatusNotice } from './_sections/ClickHouseStatusNotice'
 
 export function ClickHousePanelFallback() {
   return (
@@ -25,13 +27,17 @@ export function ClickHousePanelFallback() {
         data-testid="admin-clickhouse-vitals-reservation"
         className="min-h-[220px] [contain-intrinsic-size:auto_220px] [content-visibility:auto]"
       >
-        <CardHeader className="pb-2">
-          <Skeleton className="h-5 w-52" />
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Activity className="h-4 w-4 text-primary" />
+            Cluster &amp; Publication Vitals
+          </CardTitle>
+          <CardDescription>
+            ClickHouse serving schema readiness and PostgreSQL manifest publication counters.
+          </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <p className="text-xs text-muted-foreground">
-            Inspecting ClickHouse cluster and manifest publication telemetry...
-          </p>
+          <ClickHouseStatusNotice />
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <Skeleton className="h-20 w-full" />
             <Skeleton className="h-20 w-full" />
