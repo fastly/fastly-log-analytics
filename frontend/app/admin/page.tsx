@@ -8,6 +8,8 @@ import { OperationsOverview } from './_sections/OperationsOverview'
 import { QuarantineSection } from './_sections/QuarantineSection'
 import { AdminPrefetchLinks } from './AdminPrefetchLinks'
 
+export const dynamic = 'force-dynamic'
+
 export default function AdminPage() {
   const rawMode = (process.env.DEPLOYMENT_MODE || '').trim().toLowerCase()
   const isHighScale =

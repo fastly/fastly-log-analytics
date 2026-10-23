@@ -18,21 +18,32 @@
  *   5. Interactive manual refresh workflow (`admin-clickhouse-refresh-btn`) with `X-Page-Load-ID`
  *      telemetry attribution in High-Scale mode (or 404 route separation in Standard mode).
  */
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { clsInitScript, readClsScore } from '../cls-observer';
 import { resolveFirstServiceId, configureExternalAdminOrigin } from '../helpers';
 
 configureExternalAdminOrigin();
 
+async function isClickHouseEnabledForEnv(page: Page): Promise<boolean> {
+  const serviceId = await resolveFirstServiceId(page);
+  const statusRes = await page.request.get(
+    `/api/admin/clickhouse/status?service_id=${encodeURIComponent(serviceId)}`,
+  );
+  if (statusRes.status() !== 200) return false;
+  const statusJson = await statusRes.json();
+  return Boolean(statusJson.enabled);
+}
+
 test.describe('Page Spec: /admin/clickhouse (Admin ClickHouse Replay & Cluster Operations)', () => {
   test('1. Route accessibility, ServerFooter identity, and ClickHouse Admin layout mount', async ({
     page,
   }) => {
+    const enabled = await isClickHouseEnabledForEnv(page);
     const response = await page.goto('/admin/clickhouse', { waitUntil: 'domcontentloaded' });
     const status = response?.status() ?? 0;
     expect([200, 404]).toContain(status);
 
-    if (status === 404) {
+    if (!enabled || status === 404) {
       await expect(page.getByTestId('admin-clickhouse-root')).toHaveCount(0);
       return;
     }
@@ -51,13 +62,16 @@ test.describe('Page Spec: /admin/clickhouse (Admin ClickHouse Replay & Cluster O
   test('2. Pre-allocated zero-CLS reservation containers and warm-load budget (CLS <= 0.05, FCP < 1200ms)', async ({
     page,
   }) => {
+    const enabled = await isClickHouseEnabledForEnv(page);
     await page.addInitScript(clsInitScript);
 
     const response = await page.goto('/admin/clickhouse', { waitUntil: 'domcontentloaded' });
     const status = response?.status() ?? 0;
     expect([200, 404]).toContain(status);
 
-    if (status === 200) {
+    if (!enabled || status === 404) {
+      await expect(page.getByTestId('admin-clickhouse-root')).toHaveCount(0);
+    } else {
       const toolbar = page.getByTestId('admin-clickhouse-toolbar');
       const vitals = page.getByTestId('admin-clickhouse-vitals-reservation');
       const generation = page.getByTestId('admin-clickhouse-generation-reservation');
@@ -187,6 +201,7 @@ test.describe('Page Spec: /admin/clickhouse (Admin ClickHouse Replay & Cluster O
   test('5. Interactive manual refresh workflow with X-Page-Load-ID telemetry attribution', async ({
     page,
   }) => {
+    const enabled = await isClickHouseEnabledForEnv(page);
     const observedPageLoadIds: string[] = [];
     page.on('request', (req) => {
       if (req.url().includes('/api/admin/clickhouse/status')) {
@@ -198,7 +213,7 @@ test.describe('Page Spec: /admin/clickhouse (Admin ClickHouse Replay & Cluster O
     });
 
     const response = await page.goto('/admin/clickhouse', { waitUntil: 'domcontentloaded' });
-    if (response?.status() === 404) {
+    if (!enabled || response?.status() === 404) {
       await expect(page.getByTestId('admin-clickhouse-root')).toHaveCount(0);
       expect(observedPageLoadIds.length).toBe(0);
       return;

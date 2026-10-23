@@ -6,6 +6,8 @@ import { PageHeader } from '@/components/ui/page-header'
 import ClickHouseAdminClient from './_sections/ClickHouseAdminClient'
 import { ClickHousePanelFallback } from './loading'
 
+export const dynamic = 'force-dynamic'
+
 export const metadata: Metadata = {
   title: 'ClickHouse Replay & Cluster Operations',
 }

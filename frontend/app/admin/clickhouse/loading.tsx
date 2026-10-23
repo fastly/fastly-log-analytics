@@ -1,3 +1,4 @@
+import { notFound } from 'next/navigation'
 import { BackToAdminLink } from '@/components/BackToAdminLink'
 import { PageHeader } from '@/components/ui/page-header'
 import { Activity } from 'lucide-react'
@@ -93,6 +94,16 @@ export function ClickHousePanelFallback() {
  * produces zero layout shift (CLS <= 0.05).
  */
 export default function Loading() {
+  const rawMode = (process.env.DEPLOYMENT_MODE || '').trim().toLowerCase()
+  const isHighScale =
+    rawMode === 'standard'
+      ? false
+      : rawMode === 'high_scale' ||
+        ['1', 'true', 'yes', 'on'].includes((process.env.HIGH_SCALE_ENABLED || '').trim().toLowerCase())
+  if (!isHighScale) {
+    notFound()
+  }
+
   return (
     <div className="space-y-6" data-testid="admin-clickhouse-loading">
       <PageHeader
