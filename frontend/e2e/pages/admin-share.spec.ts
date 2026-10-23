@@ -186,12 +186,12 @@ test.describe('/admin/share — Admin Live Share Management Contract', () => {
     await tabSessions.click();
     await expect(tabSessions).toHaveAttribute('aria-selected', 'true');
     await expect(page.getByTestId('admin-share-sessions-panel')).toBeVisible({ timeout: 15_000 });
-    expect(page.url()).toContain('tab=sessions');
+    await expect(page).toHaveURL(/[?&]tab=sessions(?:&|$)/);
 
     await tabAudit.click();
     await expect(tabAudit).toHaveAttribute('aria-selected', 'true');
     await expect(page.getByTestId('admin-share-audit-panel')).toBeVisible({ timeout: 15_000 });
-    expect(page.url()).toContain('tab=audit');
+    await expect(page).toHaveURL(/[?&]tab=audit(?:&|$)/);
 
     await tabInvites.click();
     await expect(tabInvites).toHaveAttribute('aria-selected', 'true');

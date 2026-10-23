@@ -1,10 +1,9 @@
 /**
  * R-3c journey: analyst share-login.
  *
- * FILENAME IS LOAD-BEARING: the brute-force test below locks out the loopback
- * client IP for 5 minutes (per-IP limiter, shared by every spec in the run).
- * Playwright runs files alphabetically with one worker, so this file is named
- * `zz-` to run LAST; anything that signs in after it would get a 429.
+ * Lockout traffic uses a separate simulated loopback client through the
+ * isolated backend's trusted local proxy boundary. Locking the shared browser
+ * proxy IP would poison subsequent browser projects for five minutes.
  *
  * Two flows pinned here:
  *   1. Brute-force lockout — POST 30+ invalid passcodes from a single
@@ -20,16 +19,21 @@
  *      placeholder test to keep the file honest about scope.
  */
 import { expect, test } from '@playwright/test'
+import { randomInt } from 'node:crypto'
+import { E2E_BACKEND_PORT } from '../playwright.config'
 
 const SHARE_LOGIN_PATH = '/api/share/login'
 
 test.describe('analyst share-login', () => {
   test('brute-force lockout: 30 invalid passcodes return 429 + rate_limited shape', async ({ request }) => {
+    test.skip(!!process.env.PLAYWRIGHT_BASE_URL, 'Lockout fault injection is isolated-backend only')
+    const clientIp = `127.${randomInt(1, 255)}.${randomInt(1, 255)}.${randomInt(1, 255)}`
     let firstLockoutBody: { error?: string; retry_after_s?: number } | null = null
     const statusCounts = { '401': 0, '429': 0, other: 0 }
 
     for (let i = 0; i < 35; i++) {
-      const r = await request.post(SHARE_LOGIN_PATH, {
+      const r = await request.post(`http://127.0.0.1:${E2E_BACKEND_PORT}${SHARE_LOGIN_PATH}`, {
+        headers: { 'x-forwarded-for': clientIp },
         data: { email: 'attacker@example.com', passcode: `wrong-${i}` },
       })
       if (r.status() === 401) statusCounts['401']++
@@ -44,6 +48,8 @@ test.describe('analyst share-login', () => {
     }
 
     // At least one of the 35 attempts must have tripped the limiter.
+    expect(statusCounts['401']).toBe(5)
+    expect(statusCounts.other).toBe(0)
     expect(statusCounts['429']).toBeGreaterThan(0)
     expect(firstLockoutBody?.error).toBe('rate_limited')
     expect(typeof firstLockoutBody?.retry_after_s).toBe('number')
