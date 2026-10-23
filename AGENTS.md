@@ -1310,13 +1310,16 @@ including debug-opted-in errors, must not disclose artifact URLs or credentials.
 
 These apply to every change, regardless of scope.
 
-### Operational Protocol: Inquire, Clarify, and Document Before Execution (Never Guess)
+### Operational Protocol: Work Autonomously Within the Requested Scope
 
-Before beginning implementation, testing, or refactoring on any page, background job (cron), API, or architectural feature:
-1. **Read & Synthesize First:** Thoroughly read the specific page or cron specification (`docs/pages/{page}.md`, `docs/cron/jobs/{cron}.md`), supporting architecture documents (`docs/ARCHITECTURE.md`, `AGENTS.md`), deployment runbooks, and test suites.
-2. **Interactive Inquiry Mandate:** Ask the operator as many clarifying questions as necessary about requirements, ambiguous behaviors, traffic profiles, edge cases, role permissions, or architecture-specific expectations. **Never make unvalidated assumptions or guess intent** when details can be confirmed.
-3. **Document First, Then Execute:** Incorporate all answers, clarifications, and design decisions directly back into the authoritative documentation (`docs/pages/`, `docs/cron/`, etc.) before executing code changes or test suites.
-4. **End-to-End Verification Across All Dimensions:** Execute thorough testing across both deployment modes (`standard` vs `high_scale`) and all user roles (Admin vs Analyst Path B vs Analyst Path A), verifying 100% query and API call telemetry attribution.
+This project overrides the global requirement to keep asking questions until every detail is confirmed. Once the goal is clear, carry the task through research, planning, implementation, review, testing, and routine fixes without approval checkpoints between steps.
+
+1. **Read & Synthesize First:** Read the relevant page or cron specification (`docs/pages/{page}.md`, `docs/cron/jobs/{cron}.md`), architecture documents, deployment runbooks, and tests. Resolve questions from those sources before asking the operator.
+2. **Make Routine Decisions:** Choose the simplest approach consistent with existing patterns. Make reasonable, reversible assumptions and keep moving. Do not stop for plan approval, implementation approval, routine test runs, reviewer dispatch, or ordinary fixes to findings within scope. Skill workflows requiring those checkpoints yield to this rule.
+3. **Ask Only When Blocked:** Ask when missing information materially changes the requested outcome and cannot be resolved from the repo, or when an action needs explicit authorization. Do not expand the task to unrelated work.
+4. **Document Decisions:** Keep authoritative documentation current with material behavior and design decisions. Routine research and tests do not need a documentation or approval checkpoint.
+5. **Verify the Result:** Run relevant tests, lint, and formatting; verify affected deployment-mode and role behavior and telemetry attribution. Report actual blockers rather than waiting for approval to run ordinary checks.
+6. **Keep Explicit Boundaries:** Commit only your own changes and push feature/release branches with `git push origin HEAD` without asking. Never push main/master, force-push, create or merge PRs, publish, deploy, or perform destructive operational actions without fresh explicit approval. Autonomous development does not authorize deployments; the deployment procedure below applies only after approval.
 
 ### Canonical Multi-Tier Deployment Mandate (Never Deploy or Test by Hand)
 
