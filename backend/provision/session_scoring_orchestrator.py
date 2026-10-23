@@ -360,8 +360,8 @@ def _deploy_wasm_package(
     if not _SCORER_PACKAGE.exists():
         raise RuntimeError(
             f"prebuilt scorer package not found at {_SCORER_PACKAGE} — "
-            "run `make scorer-package` (or scripts/scoring/deploy_wasm.sh build) "
-            "off-VM and commit compute/scorer/pkg/session-scorer.tar.gz"
+            "the Docker image builds it from source (backend/Dockerfile scorer-builder stage), so "
+            "rebuild the image; outside Docker run `make scorer-package`"
         )
 
     # Smart-redeploy skip: if the committed build is unchanged since our last

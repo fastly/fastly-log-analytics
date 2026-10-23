@@ -29,7 +29,7 @@ dev:
 # without it the CLI blocks on a confirmation that aborts non-interactively.
 scorer-package:
 	cd compute/scorer && PATH="$$HOME/.cargo/bin:$$PATH" fastly compute build --auto-yes
-	@echo "Built compute/scorer/pkg/session-scorer.tar.gz — commit it."
+	@echo "Built compute/scorer/pkg/session-scorer.tar.gz (gitignored; Docker images build their own)."
 
 # Run the Rust scorer's native unit tests (normalize/cookie/matrix
 # cross-language parity, session-expiry boundaries, wire-format round-trips).

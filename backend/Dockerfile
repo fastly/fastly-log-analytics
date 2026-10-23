@@ -59,6 +59,46 @@ RUN set -eux; \
     rm /tmp/falco.tar.gz; \
     falco --version
 
+# --- Session scorer (Fastly Compute Wasm) ---
+# Built from source here so every image carries a package matching its own
+# commit; compute/scorer/pkg/ is gitignored and a hand-built tarball goes stale
+# or goes missing on any host that only does a git checkout. Local non-Docker
+# dev builds the same artifact with `make scorer-package`.
+# rust:1.90-slim-bookworm (matches compute/scorer/rust-toolchain.toml)
+FROM rust:1.90-slim-bookworm@sha256:64232e656c058f4468e8d024e990acff04f0fd5a5c0a88a574dc37773d7325c9 AS scorer-builder
+
+ARG TARGETARCH
+ARG FASTLY_CLI_VERSION=16.1.0
+ARG FASTLY_CLI_SHA256_AMD64=48e8b1dcf9fbe44c21fac06e32c3f9f670c1e9c611776199bfe61990e6dbe7ad
+ARG FASTLY_CLI_SHA256_ARM64=89f7f06e5f9fe5c2aa8e3f8dd45213caae4797bc41534ecdead04131d82baa0e
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates binaryen \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN set -eu; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) sha="$FASTLY_CLI_SHA256_AMD64" ;; \
+      arm64) sha="$FASTLY_CLI_SHA256_ARM64" ;; \
+      *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/fastly.tgz "https://github.com/fastly/cli/releases/download/v${FASTLY_CLI_VERSION}/fastly_v${FASTLY_CLI_VERSION}_linux-${TARGETARCH:-amd64}.tar.gz"; \
+    echo "${sha}  /tmp/fastly.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/fastly.tgz -C /usr/local/bin fastly; \
+    rm /tmp/fastly.tgz
+
+WORKDIR /src/compute/scorer
+COPY compute/scorer/rust-toolchain.toml compute/scorer/Cargo.toml compute/scorer/Cargo.lock compute/scorer/fastly.toml ./
+COPY compute/scorer/src ./src
+COPY compute/scorer/fixtures ./fixtures
+
+# Cache mounts keep the cargo registry and incremental target dir across
+# builds; the final tarball is copied out of the mount before it ends.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/compute/scorer/target \
+    fastly compute build --auto-yes \
+    && cp pkg/session-scorer.tar.gz /session-scorer.tar.gz
+
 # --- Production Stage ---
 # python:3.13-slim-bookworm
 FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS runner
@@ -126,7 +166,7 @@ COPY --from=builder --chown=app:app /root/.duckdb /home/app/.duckdb
 COPY --chown=app:app pyproject.toml README.md uv.lock ./
 COPY --chown=app:app scripts/generate_openapi.py scripts/clickhouse_replay.py scripts/
 COPY --chown=app:app compute/scorer/matrix.default.json ./compute/scorer/matrix.default.json
-COPY --chown=app:app compute/scorer/matrix.default.json compute/scorer/pk[g]/session-scorer.tar.g[z] ./compute/scorer/pkg/
+COPY --from=scorer-builder --chown=app:app /session-scorer.tar.gz ./compute/scorer/pkg/session-scorer.tar.gz
 
 # Copy backend application source
 COPY --chown=app:app backend/ ./backend/

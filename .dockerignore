@@ -38,6 +38,8 @@ frontend/vitest.config.*
 frontend/vitest.setup.ts
 frontend/playwright.config.*
 compute/scorer/target/
+compute/scorer/bin/
+compute/scorer/pkg/
 
 # Local docs / planning
 TESTING_PLAN*.md
