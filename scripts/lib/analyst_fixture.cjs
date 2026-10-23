@@ -30,8 +30,8 @@ function configuration(options) {
   return { adminOrigin, analystOrigin, tls };
 }
 
-async function api(context, origin, endpoint, { method = 'GET', data, statuses = [200], json = true } = {}) {
-  const response = await context.fetch(`${origin}${endpoint}`, { method, data, maxRedirects: 0, failOnStatusCode: false, timeout: 15000 });
+async function api(context, origin, endpoint, { method = 'GET', data, headers, statuses = [200], json = true } = {}) {
+  const response = await context.fetch(`${origin}${endpoint}`, { method, data, headers, maxRedirects: 0, failOnStatusCode: false, timeout: 15000 });
   try {
     requireThat(new URL(response.url()).origin === origin && statuses.includes(response.status()), 'unexpected_api_response');
     return json ? await response.json() : null;
@@ -228,7 +228,7 @@ async function withAnalystUsers(options, work) {
       stage = 'scope_verification';
       scopedBootstrap(await api(context.request, config.analystOrigin, '/api/bootstrap'), options.serviceId, options.maskIps);
       await api(context.request, config.analystOrigin, '/api/admin/share/status', { statuses: [403], json: false });
-      await api(context.request, config.analystOrigin, `/api/dashboard/aggregates?service_id=${encodeURIComponent(deniedService)}`, { method: 'POST', data: { filters: {}, sections: ['core'] }, statuses: [403], json: false });
+      await api(context.request, config.analystOrigin, `/api/dashboard/aggregates?service_id=${encodeURIComponent(deniedService)}`, { method: 'POST', headers: { Origin: config.analystOrigin }, data: { filters: {}, sections: ['core'] }, statuses: [403], json: false });
       requireThat(originViolations === 0, 'analyst_origin_violation');
       ready.push({ context, page, serviceId: options.serviceId, maskIps: options.maskIps, user: index, checkOrigin: () => requireThat(originViolations === 0, 'analyst_origin_violation') });
     }
@@ -240,7 +240,7 @@ async function withAnalystUsers(options, work) {
   } finally {
     for (const context of contexts) {
       try {
-        await api(context.request, config.analystOrigin, '/api/share/logout', { method: 'POST', json: false });
+        await api(context.request, config.analystOrigin, '/api/share/logout', { method: 'POST', headers: { Origin: config.analystOrigin }, json: false });
       } catch {
         cleanup.push('logout_failed');
       }

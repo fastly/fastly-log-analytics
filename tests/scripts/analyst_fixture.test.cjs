@@ -46,8 +46,14 @@ function fixture(t, overrides = {}) {
         if (!isAdmin && endpoint === '/api/share/auth-config') return response(url, 200, { passcode_enabled: state.passcodesEnabled !== false });
         if (!isAdmin && endpoint === '/api/bootstrap') return response(url, 200, { active_service_id: serviceId, services: [{ service_id: state.badScope ? 'service-other' : serviceId }], settings: { is_remote_analyst: !state.badBootstrap, access_level: 'read_only', mask_ips: state.badMask ? !context.invite.pii_policy.mask_ips : context.invite.pii_policy.mask_ips } });
         if (!isAdmin && endpoint === '/api/admin/share/status') return response(url, 403, {});
-        if (!isAdmin && endpoint === '/api/dashboard/aggregates') return response(url, 403, {});
+        if (!isAdmin && endpoint === '/api/dashboard/aggregates') {
+          assert.equal(options.headers?.Origin, analystOrigin);
+          return response(url, 403, {});
+        }
         if (!isAdmin && endpoint === '/api/share/logout') {
+          if (options.headers?.Origin !== analystOrigin) return response(url, 403, { error: 'origin_not_allowed' });
+          state.logoutOrigins ??= [];
+          state.logoutOrigins.push(options.headers.Origin);
           if (state.failLogout) throw new Error('private logout failure');
           return response(url, 200, { ok: true });
         }
@@ -99,6 +105,7 @@ for (const tosPending of [false, true]) test(`normal login${tosPending ? ' and T
   assert.equal(state.invites.length, 0);
   assert.equal(state.sessions.length, 0);
   assert.equal(state.mutations.length, 2);
+  assert.deepEqual(state.logoutOrigins, [analystOrigin]);
   assert.ok(state.adminOptions[0].clientCertificates.length === 1);
   assert.ok(state.analystOptions.every(row => row.ignoreHTTPSErrors === false && row.clientCertificates.length === 0 && row.serviceWorkers === 'block'));
   const journal = fs.readFileSync(options.journalPath, 'utf8');
