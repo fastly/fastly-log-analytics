@@ -1050,9 +1050,24 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
     try:
         con.execute(create_stmt)
     except Exception as e:
-        logger.error("[iceberg] Failed to create view %s: %s", view_name, e)
-        if durable_serving:
-            raise
+        if "write-write conflict" in str(e).lower():
+            try:
+                con.rollback()
+            except Exception:
+                logger.debug("_update_iceberg_view_locked: rollback failed (ignored)", exc_info=True)
+            try:
+                con.execute(create_stmt)
+            except Exception:
+                try:
+                    con.execute(f"CREATE OR REPLACE TEMP VIEW {view_name} AS {final_sql}")
+                except Exception as fallback_err:
+                    logger.error("[iceberg] Failed to create view %s: %s", view_name, fallback_err)
+                    if durable_serving:
+                        raise
+        else:
+            logger.error("[iceberg] Failed to create view %s: %s", view_name, e)
+            if durable_serving:
+                raise
 
     source_key = source.get("name", "default")
     cache_key = f"{source_key}::{target_table}" if target_table != "logs" else source_key
