@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import type { components } from '@/types/api.generated'
 
 import { useBootstrapPending } from '@/hooks/useIsDataReady'
@@ -38,15 +39,16 @@ export function useLastSync() {
     queryFn: async ({ signal }) => {
       // Single-row peek — the endpoint already supports task filter
       // + per_page, so this is a tiny query, not a full table dump.
-      const { data, error } = await client.GET('/api/cron-runs', {
-        signal,
-        // skip_total=true skips the COUNT(*) FROM cron_runs WHERE
-        // task=? precount inside the repo — useLastSync only reads
-        // entries[0] and never touches `total`, so the count was a
-        // 200-330 ms wasted scan per call on a busy service.
-        params: { query: { task: 'log_discovery', per_page: 1, page: 1, skip_total: true } },
-      })
-      if (error) throw error
+      const data = await unwrapClient(
+        client.GET('/api/cron-runs', {
+          signal,
+          // skip_total=true skips the COUNT(*) FROM cron_runs WHERE
+          // task=? precount inside the repo — useLastSync only reads
+          // entries[0] and never touches `total`, so the count was a
+          // 200-330 ms wasted scan per call on a busy service.
+          params: { query: { task: 'log_discovery', per_page: 1, page: 1, skip_total: true } },
+        }),
+      )
       const e = data?.entries?.[0]
       return {
         started_at: e?.started_at ?? null,

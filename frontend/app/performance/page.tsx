@@ -1,12 +1,11 @@
 import { HydrationBoundary } from '@tanstack/react-query'
 
-import { fetchBootstrapServerSide } from '@/lib/ssr/bootstrap'
 import {
   fetchPerformanceServerSide,
   PERFORMANCE_SSR_DEFAULTS,
 } from '@/lib/ssr/performance'
 import { seedDehydratedState } from '@/lib/ssr/seed'
-import { resolveServerServiceId } from '@/lib/ssr/service'
+import { resolvePageServiceId } from '@/lib/ssr/service'
 import PerformanceClient from './_sections/PerformanceClient'
 
 // Per-request RSC shell for /performance. Pre-fetches the unified aggregates
@@ -45,8 +44,7 @@ export default async function PerformancePage({
   searchParams: Promise<{ service?: string | string[] }>
 }) {
   const params = await searchParams
-  const bootstrap = await fetchBootstrapServerSide()
-  const serviceId = resolveServerServiceId(params, bootstrap)
+  const serviceId = await resolvePageServiceId(params)
 
   return (
     <Suspense fallback={<PerformanceLoading />}>

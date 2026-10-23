@@ -98,10 +98,8 @@ test.describe('SSR hydration smoke', () => {
           JSON.stringify({ state: { enabled: true, apiCallsEnabled: true }, version: 0 }),
         )
         // Hand-rolled localStorage-backed UI state (NOT zustand-persist):
-        // a non-default chart-visibility set (/charts) and a collapsed
-        // dashboard section. Reading these in a useState initializer diverged
-        // the first client render from the server's default render → #418.
-        localStorage.setItem('fastly_charts_card_visibility', JSON.stringify(['__e2e_only__']))
+        // a collapsed dashboard section. Reading this in a useState initializer
+        // diverged the first client render from the server's default render → #418.
         localStorage.setItem('dashboard_collapsed_sections', JSON.stringify(['request', 'cache']))
       }, SERVICE_ID)
 

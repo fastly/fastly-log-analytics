@@ -65,6 +65,31 @@ const okFor =
     HttpResponse.json(body as JsonBodyType)
 const noContent = () => () => new HttpResponse(null, { status: 204 })
 
+export const CMCD_FIXTURE = {
+  available: true,
+  has_data: true,
+  overview: {
+    active_sessions: 1234,
+    peak_viewers: 321,
+    avg_session_duration: 95,
+    rebuffer_rate: 4.2,
+    avg_bitrate: 3200,
+    avg_buffer_length: 14500,
+    median_throughput: 28000,
+  },
+  sessions_ts: [{ bucket: '2026-01-01T00:00:00Z', concurrent_sessions: 40, rebuffer_session_pct: 3.1, new_sessions: 12 }],
+  buffer_health_ts: [{ bucket: '2026-01-01T00:00:00Z', p50_buffer: 12000, p95_buffer: 26000, starvation_rate: 2.5 }],
+  bitrate_ts: [{ bucket: '2026-01-01T00:00:00Z', avg_bitrate: 3000, utilization_ratio: 0.5 }],
+  throughput_ts: [{ bucket: '2026-01-01T00:00:00Z', p50: 28000, p95: 45000, p99: 49000 }],
+  startup_ts: [{ bucket: '2026-01-01T00:00:00Z', startup_ratio: 8.5 }],
+  top_content: [{ content_id: 'movie-001', session_count: 77, rebuffer_rate: 5, avg_bitrate: 3100, avg_buffer_length: 13000 }],
+  rebuffer_by_country: [{ country: 'US', rebuffer_rate: 4, session_count: 600, median_throughput: 30000 }],
+  rebuffer_by_asn: [{ asn: 7922, label: 'AS7922 Comcast', rebuffer_rate: 6, session_count: 200, avg_bitrate: 2900, avg_buffer_length: 12000 }],
+  object_type_dist: [{ object_type: 'v', request_count: 900 }],
+  streaming_format_dist: [{ streaming_format: 'h', session_count: 700 }],
+  session_duration_dist: [{ duration_bucket: '1-5 min', session_count: 300 }],
+}
+
 /**
  * Default handlers used by ``server.listen()``. Override per-test with
  * ``server.use(http.get(...))`` rather than redefining the default set.

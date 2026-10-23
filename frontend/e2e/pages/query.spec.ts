@@ -14,11 +14,7 @@
 
 import { expect, test } from '@playwright/test'
 import type { DebugQuery } from '../../types/api'
-
-type LayoutShiftEntry = PerformanceEntry & {
-  hadRecentInput?: boolean
-  value?: number
-}
+import { installClsObserver, measureWarmPaintAndCls } from '../cls-observer'
 
 type QueryDebugResponse = {
   _debug_queries?: DebugQuery[]
@@ -155,35 +151,12 @@ test.describe('SQL Query Pad Page Contract (/query)', () => {
   test('7. Performance budget: FCP < 400ms and CLS <= 0.05 on warm load', async ({ page }) => {
     await page.goto('/query', { waitUntil: 'domcontentloaded' })
 
+    await installClsObserver(page)
     const start = Date.now()
     await page.reload({ waitUntil: 'domcontentloaded' })
     const totalTime = Date.now() - start
 
-    const metrics = await page.evaluate(() => {
-      return new Promise<{ fcp: number; cls: number }>((resolve) => {
-        let fcp = 0
-        let cls = 0
-        try {
-          const paintEntries = performance.getEntriesByName('first-contentful-paint')
-          if (paintEntries.length > 0) {
-            fcp = paintEntries[0].startTime
-          }
-
-          new PerformanceObserver((list) => {
-            for (const entry of list.getEntries()) {
-              const layoutShift = entry as LayoutShiftEntry
-              if (!layoutShift.hadRecentInput) {
-                cls += layoutShift.value ?? 0
-              }
-            }
-          }).observe({ type: 'layout-shift', buffered: true })
-
-          setTimeout(() => resolve({ fcp, cls }), 1000)
-        } catch {
-          resolve({ fcp: 0, cls: 0 })
-        }
-      })
-    })
+    const metrics = await measureWarmPaintAndCls(page, 1000)
 
     console.log(`[PERF /query] Reload: ${totalTime}ms | FCP: ${Math.round(metrics.fcp)}ms | CLS: ${metrics.cls.toFixed(3)}`)
     expect(totalTime).toBeLessThan(10_000)

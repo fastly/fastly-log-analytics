@@ -38,8 +38,7 @@ export function DiagnosticsPanel() {
     onSuccess: () => {
       // Invalidate both settings and bootstrap queries so the application re-syncs state
       queryClient.invalidateQueries({ queryKey: queryKeys.admin.debugSettings() })
-      queryClient.invalidateQueries({ queryKey: ['bootstrap'] })
-      queryClient.invalidateQueries()
+      queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })
     },
   })
 

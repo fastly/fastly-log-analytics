@@ -1467,12 +1467,16 @@ def retire_compacted_hour_bundles(
                 continue
 
             # Candidate constituent hours for this day
+            day_ip_spread_exists = os.path.isfile(os.path.join(bundled_root, f"day={day}", IP_SPREAD_BUNDLE_FILENAME))
+            target_filenames = (
+                (DAY_BUNDLE_FILENAME, IP_SPREAD_BUNDLE_FILENAME) if day_ip_spread_exists else (DAY_BUNDLE_FILENAME,)
+            )
             for hour_idx in range(24):
                 hour_str = f"{day}-{hour_idx:02d}"
                 hour_dir = os.path.join(hour_bundled_root, f"hour={hour_str}")
                 if not os.path.isdir(hour_dir):
                     continue
-                for target_filename in (DAY_BUNDLE_FILENAME, IP_SPREAD_BUNDLE_FILENAME):
+                for target_filename in target_filenames:
                     target_file = os.path.join(hour_dir, target_filename)
                     if os.path.isfile(target_file):
                         try:

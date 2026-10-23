@@ -3,6 +3,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { useServiceStore } from '@/stores/serviceStore'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
 import { useBootstrapPending } from '@/hooks/useIsDataReady'
 import type { components } from '@/types/api.generated'
@@ -56,12 +57,12 @@ export function useSyncStatus() {
   return useQuery({
     queryKey: queryKeys.syncStatus(activeServiceId),
     queryFn: async ({ signal }) => {
-      const { data, error } = await client.GET('/api/sync-status', {
-        signal,
-        params: { query: { skip_fos: true } },
-      })
-      if (error) throw error
-      return data as SyncStatus
+      return (await unwrapClient(
+        client.GET('/api/sync-status', {
+          signal,
+          params: { query: { skip_fos: true } },
+        }),
+      )) as SyncStatus
     },
     enabled: !!activeServiceId && !bootstrapPending && !isAnalyst && ready,
     staleTime: 60_000,

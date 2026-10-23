@@ -1,6 +1,7 @@
 'use client'
 
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { useServiceStore } from '@/stores/serviceStore'
 import { throwIfStaleAggregates, STALE_VIEW_RETRY_OPTIONS } from '@/lib/staleViewRetry'
 import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
@@ -95,23 +96,23 @@ export function useDashboardBundle({
     range: { relativeRange, isAutoRange, startTime, endTime, anchor },
     keyParts: [metric, interval, fields, sections],
     queryFn: async ({ rangeBody, signal }) => {
-      const { data, error } = await client.POST('/api/dashboard/bundle', {
-        signal,
-        body: {
-          // Token mode → {range_token, anchor} + display bounds (server
-          // resolves the window from the token and ignores the bounds; they
-          // only matter if the token isn't recognized — see lib/range-wire.ts).
-          // Custom mode → {start_time, end_time} only.
-          filters: filterPayload,
-          chart_metric: metric as ChartMetric,
-          chart_interval: interval,
-          fields: fields,
-          sections: sections,
-          ...rangeBody,
-        },
-      })
-      if (error) throw error
-      const body = data
+      const body = await unwrapClient(
+        client.POST('/api/dashboard/bundle', {
+          signal,
+          body: {
+            // Token mode → {range_token, anchor} + display bounds (server
+            // resolves the window from the token and ignores the bounds; they
+            // only matter if the token isn't recognized — see lib/range-wire.ts).
+            // Custom mode → {start_time, end_time} only.
+            filters: filterPayload,
+            chart_metric: metric as ChartMetric,
+            chart_interval: interval,
+            fields: fields,
+            sections: sections,
+            ...rangeBody,
+          },
+        }),
+      )
       if (body?.aggregates) {
         // Stale-view guard: throws if the response is the empty-schema
         // placeholder from a mid-commit window — STALE_VIEW_RETRY_OPTIONS retries

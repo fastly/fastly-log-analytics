@@ -49,7 +49,7 @@ _expand_sections = make_section_expander(SectionName)
 
 
 def _resolve_network_window(
-    req: NetworkHealthRequest | NetworkBundleRequest,
+    req: NetworkHealthRequest | NetworkQualityRequest | NetworkBundleRequest,
     ctx: RequestContext,
 ) -> tuple[str | None, str | None, str | None, str | None, str | None]:
     """Resolve and clamp the time window + cache-key tokens for network endpoints."""
@@ -175,7 +175,7 @@ def network_quality(
     req: NetworkQualityRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
-    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+    start_time, end_time, _, _, _ = _resolve_network_window(req, ctx)
 
     high_scale_service = ctx.high_scale
     if high_scale_service is not None:

@@ -15,17 +15,13 @@
  */
 
 import { expect, test } from '@playwright/test'
-import { adminGatewayContextOptions } from '../../../scripts/lib/admin_gateway_client.cjs'
 import { clsInitScript } from '../cls-observer'
+import { loginAsPasscodeAnalyst, revokeAnalystInvite } from '../helpers/analyst-session'
+import { configureExternalAdminOrigin, getFirstServiceId } from './helpers'
+
+configureExternalAdminOrigin()
 
 test.describe('Admin Task Queue & Ingest Ledger Page Contract (/admin/queue)', () => {
-  if (process.env.PLAYWRIGHT_BASE_URL) {
-    test.use({
-      baseURL: process.env.PLAYWRIGHT_BASE_URL,
-      ...adminGatewayContextOptions(process.env.PLAYWRIGHT_BASE_URL),
-    })
-  }
-
   test('1. Route accessibility, Admin RBAC contract & ServerFooter environment indicator', async ({
     page,
   }) => {
@@ -58,43 +54,17 @@ test.describe('Admin Task Queue & Ingest Ledger Page Contract (/admin/queue)', (
 
     // On the isolated E2E harness, also verify Analyst Path B receives 403 on /api/admin/celery/status and /api/admin/metric-history/batch
     if (!process.env.PLAYWRIGHT_BASE_URL) {
-      const bootRes = await page.request.get('/api/bootstrap')
-      const bootJson = await bootRes.json()
-      const serviceId =
-        bootJson?.services?.[0]?.id ?? bootJson?.services?.[0]?.service_id ?? 'svc-playwright-e2e'
-      const email = `e2e-queue-guard-${Date.now()}@example.com`
-      const passcode = 'harbor-cloud-forest-91'
+      const serviceId = (await getFirstServiceId(page)) ?? 'svc-playwright-e2e'
       let inviteId: string | null = null
       try {
-        await page.request.post('/api/admin/share/start', {
-          data: { public_endpoint: 'https://share-e2e.example.com', forward_port: 13004 },
+        const seeded = await loginAsPasscodeAnalyst(page.request, {
+          name: 'Queue Guard Analyst',
+          email: `e2e-queue-guard-${Date.now()}@example.com`,
+          passcode: 'harbor-cloud-forest-91',
+          durationHours: 1,
+          serviceIds: [serviceId],
         })
-        const invRes = await page.request.post('/api/admin/share/invites', {
-          data: {
-            name: 'Queue Guard Analyst',
-            email,
-            passcode,
-            duration_hours: 1,
-            service_ids: [serviceId],
-            auth_method: 'passcode',
-          },
-        })
-        expect(invRes.ok()).toBeTruthy()
-        inviteId = (await invRes.json()).id
-
-        const loginRes = await page.request.post('/api/share/login', {
-          data: { email, passcode },
-        })
-        expect(loginRes.ok()).toBeTruthy()
-
-        const tosRes = await page.request.get('/api/share/tos')
-        expect(tosRes.ok()).toBeTruthy()
-        const tosJson = await tosRes.json()
-
-        const ackRes = await page.request.post('/api/share/acknowledge', {
-          data: { version: tosJson.version },
-        })
-        expect(ackRes.ok()).toBeTruthy()
+        inviteId = seeded.inviteId
 
         const analystStatusRes = await page.request.get('/api/admin/celery/status', {
           headers: { 'x-remote-analyst': '1' },
@@ -110,11 +80,7 @@ test.describe('Admin Task Queue & Ingest Ledger Page Contract (/admin/queue)', (
         const analystHistoryBody = await analystHistoryRes.json()
         expect(analystHistoryBody.error).toBe('admin_only')
       } finally {
-        await page.request.post('/api/share/logout').catch(() => {})
-        if (inviteId) {
-          await page.request.delete(`/api/admin/share/invites/${inviteId}`).catch(() => {})
-        }
-        await page.request.post('/api/admin/share/stop').catch(() => {})
+        await revokeAnalystInvite(page.request, inviteId, { logout: true })
       }
     }
   })

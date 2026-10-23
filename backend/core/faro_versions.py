@@ -81,6 +81,7 @@ _SRI_ALGOS = ("sha512", "sha384", "sha256")
 # metadata AND the tarball bytes it describes — a ``dist.tarball`` URL
 # pointing anywhere else is refused before it is ever fetched.
 _TRUSTED_TARBALL_HOST = "registry.npmjs.org"
+_ABBREVIATED_PACKUMENT_HEADERS = {"Accept": "application/vnd.npm.install-v1+json"}
 
 
 def _version_sort_key(version: str) -> tuple[int, ...]:
@@ -126,7 +127,11 @@ async def fetch_available_faro_versions() -> list[str]:
         transport = httpx.AsyncHTTPTransport()
         async with httpx.AsyncClient(transport=transport) as client:
             with tracked_call("GET", REGISTRY_URL, service="NPM Registry"):
-                response = await client.get(REGISTRY_URL, timeout=_TIMEOUT)
+                response = await client.get(
+                    REGISTRY_URL,
+                    headers=_ABBREVIATED_PACKUMENT_HEADERS,
+                    timeout=_TIMEOUT,
+                )
             response.raise_for_status()
             data = response.json()
     except httpx.HTTPStatusError as exc:
@@ -173,6 +178,19 @@ def reset_versions_cache() -> None:
     _versions_cache = None
 
 
+class _VersionsCacheProxy:
+    """Adapter exposing ``.clear()`` so ``_versions_cache`` participates in ``CacheRegistry``."""
+
+    @staticmethod
+    def clear() -> None:
+        reset_versions_cache()
+
+
+from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+
+_CacheRegistry.register("faro_versions._versions_cache", _VersionsCacheProxy())
+
+
 async def get_faro_versions_cached() -> list[str]:
     """Return the Faro Web SDK version list for page-load use, cached.
 
@@ -216,7 +234,11 @@ async def _fetch_version_dist(client: httpx.AsyncClient, version: str) -> dict[s
         from backend.utils.telemetry import tracked_call
 
         with tracked_call("GET", REGISTRY_URL, service="NPM Registry"):
-            response = await client.get(REGISTRY_URL, timeout=_TIMEOUT)
+            response = await client.get(
+                REGISTRY_URL,
+                headers=_ABBREVIATED_PACKUMENT_HEADERS,
+                timeout=_TIMEOUT,
+            )
         response.raise_for_status()
         data = response.json()
     except httpx.HTTPStatusError as exc:
@@ -230,7 +252,11 @@ async def _fetch_version_dist(client: httpx.AsyncClient, version: str) -> dict[s
 
     versions_dict = data.get("versions") if isinstance(data, dict) else None
     version_meta = versions_dict.get(version) if isinstance(versions_dict, dict) else None
-    dist = version_meta.get("dist") if isinstance(version_meta, dict) else None
+    dist = (
+        version_meta.get("dist")
+        if isinstance(version_meta, dict)
+        else (data.get("dist") if isinstance(data, dict) else None)
+    )
     if not isinstance(dist, dict):
         raise ValueError(f"Failed to verify Faro bundle {version}: registry has no dist metadata for this version")
     return dist

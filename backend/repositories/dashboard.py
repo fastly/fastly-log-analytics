@@ -424,7 +424,6 @@ def _compute_dashboard_aggregates(
         "elapsed",
         "status",
         "cache",
-        "status",
         "resp_state",
         "req_header_bytes",
         "req_bytes",
@@ -1332,21 +1331,9 @@ def get_field_values(
         except Exception:
             logger.debug("get_field_values: step failed (ignored)", exc_info=True)
 
-    # Verify table exists
-    try:
-        exists = (
-            runner.execute(
-                f"SELECT {CANONICAL_METRICS['requests']} FROM information_schema.tables WHERE table_name = ?",
-                [table_name],
-            ).fetchone()[0]
-            > 0
-        )
-        if not exists:
-            return {"values": [], "field": field, **runner.telemetry()}
-    except Exception:
-        return {"values": [], "field": field, **runner.telemetry()}
-
     actual_cols = runner.get_schema_cols()
+    if not actual_cols:
+        return {"values": [], "field": field, **runner.telemetry()}
 
     # Exclude the field's own filter so picker shows all available values
     filters_excl = {k: v for k, v in filters.items() if k != field}

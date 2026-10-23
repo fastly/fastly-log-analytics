@@ -1,6 +1,7 @@
 'use client'
 
 import { useQuery, type QueryClient, type UseQueryOptions, type UseQueryResult } from '@tanstack/react-query'
+import { unwrapClient } from '@/lib/api-client'
 
 /**
  * Shared React Query wrapper for the service-scoped session-scoring GET
@@ -12,7 +13,7 @@ import { useQuery, type QueryClient, type UseQueryOptions, type UseQueryResult }
  * path, query params and result type all come from the generated OpenAPI
  * schema with no cast. Returns the full ``useQuery`` result unchanged.
  */
-type ScoringResult<T> = { data?: T; response: Response }
+type ScoringResult<T> = { data?: T; error?: unknown; response: Response }
 
 export function useScoringQuery<T>(
   queryKey: readonly unknown[],
@@ -21,11 +22,7 @@ export function useScoringQuery<T>(
 ): UseQueryResult<T, Error> {
   return useQuery<T, Error, T, readonly unknown[]>({
     queryKey,
-    queryFn: async () => {
-      const { data, response } = await request()
-      if (!response.ok || data === undefined) throw new Error(`status ${response.status}`)
-      return data
-    },
+    queryFn: async () => unwrapClient(request()),
     ...options,
   })
 }

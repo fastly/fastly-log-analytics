@@ -1293,6 +1293,7 @@ from backend.core.iceberg.buffer import (  # noqa: F401, E402
 from backend.core.iceberg.manifest import (  # noqa: F401, E402
     _align_to_schema,
     _arrow_to_duckdb,
+    _get_all_table_stats,
     _get_cached_or_scan_metadata,
     _get_scan_lock,
     _load_manifest_metadata_cache,
@@ -1302,7 +1303,9 @@ from backend.core.iceberg.manifest import (  # noqa: F401, E402
     _manifest_metadata_loaded_lock,
     _prune_empty_dirs,
     _save_manifest_metadata_cache,
+    ducklake_session,
     ducklake_table_exists,
+    get_all_table_stats,
     get_snapshot_calendar,
     get_table_info,
 )

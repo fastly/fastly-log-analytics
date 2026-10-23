@@ -33,11 +33,10 @@ import { StatusPanel } from '@/components/SessionScoring/StatusPanel'
 import { ThresholdSlider } from '@/components/SessionScoring/ThresholdSlider'
 import { L2EnforcementCard } from '@/components/SessionScoring/L2EnforcementCard'
 import { TopFlaggedTable } from '@/components/SessionScoring/TopFlaggedTable'
+import { invalidateServiceScoringQueries } from '@/components/SessionScoring/useScoringQuery'
 import { useServiceStore } from '@/stores/serviceStore'
 import {
-  scoringAnalyticsCompositeKey,
   scoringAnalyticsCompositeOptions,
-  scoringConfigCompositeKey,
   scoringConfigCompositeOptions,
 } from '@/lib/queries/scoring'
 import Loading from './loading'
@@ -188,16 +187,7 @@ function SessionScoringPageContent() {
     if (!effectiveServiceId) return
     analyticsSeededAt.current = 0
     configSeededAt.current = 0
-    qc.invalidateQueries({ queryKey: scoringAnalyticsCompositeKey(effectiveServiceId) })
-    qc.invalidateQueries({ queryKey: scoringConfigCompositeKey(effectiveServiceId) })
-    qc.invalidateQueries({
-      predicate: (q) =>
-        Array.isArray(q.queryKey) &&
-        typeof q.queryKey[0] === 'string' &&
-        ['scoring-curves', 'scoring-enforce-threshold', 'scoring-threshold-preview',
-         'scoring-labels', 'scoring-labels-counts', 'scoring-status'].includes(q.queryKey[0] as string) &&
-        q.queryKey[1] === effectiveServiceId,
-    })
+    invalidateServiceScoringQueries(qc, effectiveServiceId)
   }
 
   return (

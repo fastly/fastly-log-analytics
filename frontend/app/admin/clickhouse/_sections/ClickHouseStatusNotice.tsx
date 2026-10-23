@@ -20,12 +20,10 @@ export function ClickHouseStatusNotice({
       >
         <Info className="h-4 w-4 shrink-0 mt-0.5" />
         <div>
-          <p className="font-semibold">Standard Deployment Mode — ClickHouse Disabled</p>
+          <p className="font-semibold">ClickHouse Disabled</p>
           <p className="mt-0.5 text-muted-foreground">
-            This instance is running in Standard mode (<code>enabled: false</code>,{' '}
-            <code>health: &quot;disabled&quot;</code>). DuckDB + DuckLake serves all analytical queries directly
-            from local NVMe Parquet and FOS. ClickHouse cluster status and artifact replay are active only in
-            High-Scale deployments.
+            ClickHouse cluster connection is not currently enabled (<code>enabled: false</code>,{' '}
+            <code>health: &quot;disabled&quot;</code>).
           </p>
         </div>
       </div>

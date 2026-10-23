@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import StrEnum
+from functools import cached_property
 from typing import Any, Protocol
 from uuid import UUID, uuid5
 
@@ -140,7 +141,7 @@ class HighScaleBatch:
     generation: str
     rows: tuple[dict[str, Any], ...]
 
-    @property
+    @cached_property
     def digest(self) -> str:
         payload = "\n".join(
             json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False) for row in self.rows

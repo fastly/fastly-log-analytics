@@ -95,7 +95,10 @@ const stubClipboard = (writeText: () => Promise<void>) =>
   Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
 const hasCheck = (btn: HTMLElement) => btn.querySelector('svg.lucide-check') !== null
 
-afterEach(() => vi.useRealTimers())
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
 
 test('share-card copy flips the icon for the copied row only, then resets', async () => {
   vi.useFakeTimers()

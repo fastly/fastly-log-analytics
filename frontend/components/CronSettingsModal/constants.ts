@@ -1,13 +1,3 @@
-export const RETENTION_OPTIONS = [
-  { value: '1', label: '1 day' },
-  { value: '3', label: '3 days' },
-  { value: '7', label: '7 days' },
-  { value: '14', label: '14 days' },
-  { value: '30', label: '30 days' },
-  { value: '90', label: '90 days' },
-  { value: '0', label: 'Forever' },
-]
-
 export const COMMIT_INTERVAL_OPTIONS = [
   { value: '1',  label: 'Every 1 min  — most fresh, most snapshots' },
   { value: '2',  label: 'Every 2 min' },

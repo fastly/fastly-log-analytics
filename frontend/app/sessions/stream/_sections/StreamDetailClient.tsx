@@ -10,6 +10,7 @@ import {
 } from 'lucide-react'
 
 import { client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useIsDataReady'
 import { NoServiceSelected } from '@/components/NoServiceSelected'
 import { PageHeader } from '@/components/ui/page-header'
@@ -65,12 +66,12 @@ export function StreamDetailClient() {
   } = useQuery({
     queryKey: ['stream-detail', activeServiceId, token],
     queryFn: async ({ signal }) => {
-      const { data, error } = await client.POST('/api/sessions/detail', {
-        signal,
-        body: { session_token: token! },
-      })
-      if (error) throw error
-      return data
+      return unwrapClient(
+        client.POST('/api/sessions/detail', {
+          signal,
+          body: { session_token: token! },
+        }),
+      )
     },
     enabled: !!activeServiceId && !!token,
   })

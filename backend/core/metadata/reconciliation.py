@@ -160,42 +160,65 @@ def get_metadata_storage_stats(service_id: str, *, force: bool = False) -> dict:
     import contextlib
 
     out: dict[str, dict] = {}
+    # Resolve usage_log before opening the metadata readonly connection so we
+    # never check out two pooled readonly connections simultaneously.
+    usage_log_con = _open_usage_log(service_id)
+    if usage_log_con is None:
+        out[_USAGE_LOG_TABLE] = {"rows": 0, "bytes": 0}
+    else:
+        try:
+            rows = (
+                usage_log_con.execute(
+                    "SELECT sum(count) FROM usage_log_hourly_summary WHERE service_id = ?",
+                    (service_id,),
+                ).fetchone()[0]
+                or 0
+            )
+            row = usage_log_con.execute("SELECT pg_total_relation_size('usage_log')").fetchone()
+            bytes_: int | None = int(row[0]) if row and row[0] is not None else 0
+        except Exception:
+            rows, bytes_ = 0, None
+        finally:
+            usage_log_con.close()
+        out[_USAGE_LOG_TABLE] = {"rows": int(rows or 0), "bytes": bytes_}
+
+    non_usage_tables = [(sql_table, out_key) for sql_table, out_key in _STATS_TABLES if sql_table != _USAGE_LOG_TABLE]
     with contextlib.closing(get_con_readonly(service_id)) as con:
-        for sql_table, out_key in _STATS_TABLES:
-            if sql_table == _USAGE_LOG_TABLE:
-                # Lives in its own per-service file. Reported under the same
-                # key for UI continuity; a missing usage_log.db reads as 0/0.
-                usage_log_con = _open_usage_log(service_id)
-                if usage_log_con is None:
-                    out[out_key] = {"rows": 0, "bytes": 0}
+        batched_ok = False
+        try:
+            union_parts: list[str] = []
+            union_params: list[Any] = []
+            for sql_table, out_key in non_usage_tables:
+                count_sql, count_params = _stats_table_count_query(sql_table, service_id)
+                union_parts.append(
+                    f"SELECT ? AS out_key, ({count_sql}) AS rows, pg_total_relation_size('{sql_table}') AS bytes"
+                )
+                union_params.append(out_key)
+                union_params.extend(count_params)
+            batch_rows = con.execute(" UNION ALL ".join(union_parts), tuple(union_params)).fetchall()
+            if batch_rows and len(batch_rows) == len(non_usage_tables):
+                for br in batch_rows:
+                    out[str(br[0])] = {
+                        "rows": int(br[1] or 0),
+                        "bytes": int(br[2]) if br[2] is not None else 0,
+                    }
+                batched_ok = True
+        except Exception:
+            batched_ok = False
+
+        if not batched_ok:
+            for sql_table, out_key in non_usage_tables:
+                try:
+                    count_sql, count_params = _stats_table_count_query(sql_table, service_id)
+                    rows = con.execute(count_sql, count_params).fetchone()[0]
+                except Exception:
                     continue
                 try:
-                    rows = (
-                        usage_log_con.execute(
-                            "SELECT sum(count) FROM usage_log_hourly_summary WHERE service_id = ?",
-                            (service_id,),
-                        ).fetchone()[0]
-                        or 0
-                    )
-                    row = usage_log_con.execute("SELECT pg_total_relation_size('usage_log')").fetchone()
-                    bytes_: int | None = int(row[0]) if row and row[0] is not None else 0
+                    row = con.execute(f"SELECT pg_total_relation_size('{sql_table}')").fetchone()
+                    bytes_ = int(row[0]) if row and row[0] is not None else 0
                 except Exception:
-                    rows, bytes_ = 0, None
-                finally:
-                    usage_log_con.close()
+                    bytes_ = None
                 out[out_key] = {"rows": int(rows or 0), "bytes": bytes_}
-                continue
-            try:
-                count_sql, count_params = _stats_table_count_query(sql_table, service_id)
-                rows = con.execute(count_sql, count_params).fetchone()[0]
-            except Exception:
-                continue
-            try:
-                row = con.execute(f"SELECT pg_total_relation_size('{sql_table}')").fetchone()
-                bytes_ = int(row[0]) if row and row[0] is not None else 0
-            except Exception:
-                bytes_ = None
-            out[out_key] = {"rows": int(rows or 0), "bytes": bytes_}
 
     db_bytes: int | None
     try:

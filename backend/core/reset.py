@@ -273,13 +273,9 @@ def reset_service_logs(
             deleted_raw = yield from _purge_prefix(
                 fos, bucket, raw_prefix, _delete_objects_robust, label="request raw object(s) under raw/request/"
             )
-            rum_prefix = f"{prefix}/raw/rum/" if prefix else "raw/rum/"
-            deleted_rum = yield from _purge_prefix(
-                fos, bucket, rum_prefix, _delete_objects_robust, label="RUM raw object(s) under raw/rum/"
-            )
             yield {
                 "type": "status",
-                "message": f"Deleted {deleted_raw:,} request and {deleted_rum:,} RUM raw object(s).",
+                "message": f"Deleted {deleted_raw:,} request raw object(s).",
             }
 
         yield {"type": "status", "message": "Purging local quarantine evidence..."}
@@ -294,7 +290,7 @@ def reset_service_logs(
             ("client_vitals%", "client_errors%"),
         )
         con.execute(
-            "DELETE FROM local_compacted_files WHERE (service_id = ? OR service_id = '' OR service_id IS NULL) AND file_name NOT LIKE ? AND file_name NOT LIKE ?",
+            "DELETE FROM local_compacted_files WHERE service_id = ? AND file_name NOT LIKE ? AND file_name NOT LIKE ?",
             (service_id, "client_vitals%", "client_errors%"),
         )
         con.execute("DELETE FROM quarantined_files WHERE source_name = ?", (service_id,))
@@ -304,6 +300,8 @@ def reset_service_logs(
             (service_id, "%/raw/rum/%", "raw/rum/%", "rum/%"),
         )
         con.commit()
+        if con.execute("SELECT 1 FROM ingested_files WHERE source_name = ? LIMIT 1", (service_id,)).fetchone():
+            metadata_db.recompute_ingested_files_summary(con, service_id)
 
         if not preserve_usage_history:
             metadata_db.clear_usage_log(service_id)
@@ -332,21 +330,34 @@ def reset_service_logs(
             actor=actor,
         )
 
-        if os.getenv("HIGH_SCALE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        if svcconfig.is_high_scale_mode(source):
             try:
                 from backend.core.clickhouse_client import CLICKHOUSE_HIGH_SCALE_TABLES, get_clickhouse_client
 
                 yield {"type": "status", "message": "Purging ClickHouse high-scale tables..."}
                 client = get_clickhouse_client()
                 if client:
-                    for table in CLICKHOUSE_HIGH_SCALE_TABLES:
-                        client.execute(
-                            f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}} SETTINGS mutations_sync=2",
-                            {"service_id": service_id},
-                        )
+                    rum_ch_tables = {
+                        "rum_vitals_facts",
+                        "rum_error_facts",
+                        "rum_vitals_aggregates",
+                        "rum_error_aggregates",
+                    }
+                    req_tables = [t for t in CLICKHOUSE_HIGH_SCALE_TABLES if t not in rum_ch_tables]
+                    for table in req_tables:
+                        if table == "high_scale_batch_publications":
+                            client.execute(
+                                f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}} AND domain != 'rum' SETTINGS mutations_sync=2",
+                                {"service_id": service_id},
+                            )
+                        else:
+                            client.execute(
+                                f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}} SETTINGS mutations_sync=2",
+                                {"service_id": service_id},
+                            )
                     yield {
                         "type": "status",
-                        "message": f"Cleared data from {len(CLICKHOUSE_HIGH_SCALE_TABLES)} ClickHouse table(s).",
+                        "message": f"Cleared data from {len(req_tables)} ClickHouse table(s).",
                     }
             except Exception as e:
                 logger.error("Failed to purge ClickHouse tables: %s", e)
@@ -526,9 +537,14 @@ def reset_service_rum(
             yield {"type": "status", "message": f"Deleted {deleted:,} cloud object(s) for RUM {t_name}."}
 
         if delete_raw_logs:
-            # We don't have distinct raw RUM log prefixes; RUM is usually combined in raw or disjoint.
-            # If RUM-specific raw prefix existed, we'd delete it, but by default we preserve raw.
-            pass
+            rum_prefix = f"{prefix}/raw/rum/" if prefix else "raw/rum/"
+            deleted_rum = yield from _purge_prefix(
+                fos, bucket, rum_prefix, _delete_objects_robust, label="RUM raw object(s) under raw/rum/"
+            )
+            yield {
+                "type": "status",
+                "message": f"Deleted {deleted_rum:,} RUM raw object(s).",
+            }
 
         yield {"type": "status", "message": "Truncating local ingestion indexes for RUM..."}
         con = metadata_db.get_con(service_id)
@@ -545,7 +561,7 @@ def reset_service_rum(
             ("client_vitals%", "client_errors%"),
         )
         con.execute(
-            "DELETE FROM local_compacted_files WHERE (service_id = ? OR service_id = '' OR service_id IS NULL) AND (file_name LIKE 'client_vitals%' OR file_name LIKE 'client_errors%')",
+            "DELETE FROM local_compacted_files WHERE service_id = ? AND (file_name LIKE 'client_vitals%' OR file_name LIKE 'client_errors%')",
             (service_id,),
         )
         con.execute(
@@ -554,7 +570,16 @@ def reset_service_rum(
         )
         con.commit()
 
-        metadata_db.recompute_ingested_files_summary(con, service_id)
+        if con.execute("SELECT 1 FROM ingested_files WHERE source_name = ? LIMIT 1", (service_id,)).fetchone():
+            metadata_db.recompute_ingested_files_summary(con, service_id)
+        else:
+            con.execute("DELETE FROM ingested_files_summary WHERE source_name = ?", (service_id,))
+            con.commit()
+
+        svcconfig.update_status(
+            service_id,
+            {"rum_total_events": 0, "rum_vitals_count": 0, "rum_errors_count": 0},
+        )
 
         yield {"type": "status", "message": "Re-initializing RUM storage catalogs..."}
         clear_source_caches(rum_service_key)
@@ -582,6 +607,36 @@ def reset_service_rum(
             {"delete_raw_logs": delete_raw_logs},
             actor=actor,
         )
+
+        if svcconfig.is_high_scale_mode(source):
+            try:
+                from backend.core.clickhouse_client import get_clickhouse_client
+
+                yield {"type": "status", "message": "Purging ClickHouse high-scale RUM tables..."}
+                client = get_clickhouse_client()
+                if client:
+                    rum_ch_tables = (
+                        "rum_vitals_facts",
+                        "rum_error_facts",
+                        "rum_vitals_aggregates",
+                        "rum_error_aggregates",
+                    )
+                    for table in rum_ch_tables:
+                        client.execute(
+                            f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}} SETTINGS mutations_sync=2",
+                            {"service_id": service_id},
+                        )
+                    client.execute(
+                        "ALTER TABLE `high_scale_batch_publications` DELETE WHERE service_id={service_id:String} AND domain='rum' SETTINGS mutations_sync=2",
+                        {"service_id": service_id},
+                    )
+                    yield {
+                        "type": "status",
+                        "message": f"Cleared RUM data from {len(rum_ch_tables) + 1} ClickHouse table(s).",
+                    }
+            except Exception as e:
+                logger.error("Failed to purge ClickHouse RUM tables: %s", e)
+                yield {"type": "status", "message": f"Warning: Failed to purge ClickHouse RUM tables: {e}"}
 
         yield {
             "type": "done",

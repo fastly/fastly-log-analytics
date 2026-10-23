@@ -104,14 +104,7 @@ def _sample_cron_duration() -> int:
                 continue
             try:
                 con = get_con(service_id)
-                has_service_id = False
                 try:
-                    con.execute("SELECT service_id FROM cron_runs LIMIT 0")
-                    has_service_id = True
-                except Exception:
-                    pass
-
-                if has_service_id:
                     rows = con.execute(
                         """
                         SELECT task, duration_s
@@ -127,7 +120,9 @@ def _sample_cron_duration() -> int:
                         """,
                         (service_id, service_id),
                     ).fetchall()
-                else:
+                except Exception as probe_exc:
+                    if "service_id" not in str(probe_exc):
+                        raise
                     rows = con.execute(
                         """
                         SELECT task, duration_s
@@ -314,11 +309,17 @@ def _sample_ingest_ledger() -> int:
 
 
 def _sample_high_scale() -> int:
-    if os.getenv("HIGH_SCALE_ENABLED", "").lower() not in {"1", "true", "yes", "on"}:
+    from backend import config as svcconfig
+
+    if not svcconfig.is_high_scale_mode():
+        return 0
+    if (
+        os.getenv("HIGH_SCALE_ENABLED", "").lower() not in {"1", "true", "yes", "on"}
+        and svcconfig.DEPLOYMENT_MODE != "high_scale"
+    ):
         return 0
     count = 0
     try:
-        from backend import config as svcconfig
         from backend.high_scale.postgres_control import PostgresControlPlane
 
         control = PostgresControlPlane()
@@ -342,44 +343,50 @@ def _sample_high_scale() -> int:
             domains = configured_domains | {
                 row["domain"] for row in snapshot["source_objects"] + snapshot["source_age"] + snapshot["publications"]
             }
-            for domain in domains:
-                for status in source_statuses:
-                    if _safe_record(
-                        "high_scale_source_objects",
-                        0.0,
-                        service_id=service_id,
-                        domain=domain,
-                        status=status,
-                    ):
-                        count += 1
-                if _safe_record(
-                    "high_scale_oldest_active_age_seconds",
-                    0.0,
-                    service_id=service_id,
-                    domain=domain,
-                ):
-                    count += 1
-                if _safe_record(
-                    "high_scale_pending_manifests",
-                    0.0,
-                    service_id=service_id,
-                    domain=domain,
-                ):
-                    count += 1
-                if _safe_record(
-                    "high_scale_publication_lag_seconds",
-                    0.0,
-                    service_id=service_id,
-                    domain=domain,
-                ):
-                    count += 1
-                if _safe_record(
-                    "high_scale_rows_published_total",
-                    0.0,
-                    service_id=service_id,
-                    domain=domain,
-                ):
-                    count += 1
+            present_status = {(row["domain"], row["status"]) for row in snapshot["source_objects"]}
+            present_age = {row["domain"] for row in snapshot["source_age"]}
+            present_pub = {row["domain"] for row in snapshot["publications"]}
+            try:
+                from backend.core import operational_metrics
+
+                for domain in domains:
+                    for status in source_statuses:
+                        if (domain, status) not in present_status:
+                            operational_metrics.record(
+                                "high_scale_source_objects",
+                                0.0,
+                                service_id=service_id,
+                                domain=domain,
+                                status=status,
+                            )
+                    if domain not in present_age:
+                        operational_metrics.record(
+                            "high_scale_oldest_active_age_seconds",
+                            0.0,
+                            service_id=service_id,
+                            domain=domain,
+                        )
+                    if domain not in present_pub:
+                        operational_metrics.record(
+                            "high_scale_pending_manifests",
+                            0.0,
+                            service_id=service_id,
+                            domain=domain,
+                        )
+                        operational_metrics.record(
+                            "high_scale_publication_lag_seconds",
+                            0.0,
+                            service_id=service_id,
+                            domain=domain,
+                        )
+                        operational_metrics.record(
+                            "high_scale_rows_published_total",
+                            0.0,
+                            service_id=service_id,
+                            domain=domain,
+                        )
+            except Exception as e:
+                logger.debug("[metric_snapshot] high_scale zero-seed failed: %s", e)
             for row in snapshot["source_objects"]:
                 if _safe_record(
                     "high_scale_source_objects",

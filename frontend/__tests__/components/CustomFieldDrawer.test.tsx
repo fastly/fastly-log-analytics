@@ -21,11 +21,12 @@
  */
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { expect, test, vi } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import { axe } from 'vitest-axe'
 import { CustomFieldDrawer } from '@/components/CustomFields/CustomFieldDrawer'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClientProvider } from '@tanstack/react-query'
 import * as customFieldsApi from '@/lib/api/custom-fields'
+import { createTestQueryClient } from '../helpers/query'
 
 // monaco-editor breaks under jsdom; replace with a plain textarea.
 vi.mock('@monaco-editor/react', () => ({
@@ -56,7 +57,12 @@ window.HTMLElement.prototype.scrollIntoView = vi.fn()
 window.HTMLElement.prototype.hasPointerCapture = vi.fn()
 window.HTMLElement.prototype.releasePointerCapture = vi.fn()
 
-const queryClient = new QueryClient()
+const queryClient = createTestQueryClient()
+
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
 
 test('submits valid custom field and displays validation errors when invalid', async () => {
   // Radix Dialog's FocusScope schedules focus-management state updates on

@@ -1,5 +1,5 @@
 import React from 'react'
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 
@@ -11,18 +11,31 @@ import ClickHouseAdminPage from '@/app/admin/clickhouse/page'
 import ClickHouseAdminClient from '@/app/admin/clickhouse/_sections/ClickHouseAdminClient'
 import { ClickHouseStatusNotice } from '@/app/admin/clickhouse/_sections/ClickHouseStatusNotice'
 
+const notFoundMock = vi.fn(() => {
+  throw new Error('NEXT_HTTP_ERROR_FALLBACK;404')
+})
+
 vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams('service=svc-test'),
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
   usePathname: () => '/admin/clickhouse',
+  notFound: () => notFoundMock(),
 }))
 
 describe('/admin/clickhouse page & ClickHouseAdminClient', () => {
   beforeEach(() => {
+    notFoundMock.mockClear()
+    vi.unstubAllEnvs()
     useServiceStore.setState({
       activeServiceId: 'svc-test',
       services: [{ id: 'svc-test', name: 'Test Service' }],
     })
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.useRealTimers()
+    vi.restoreAllMocks()
   })
 
   it('renders route-level loading skeleton with pre-allocated zero-CLS reservation containers', () => {
@@ -62,7 +75,12 @@ describe('/admin/clickhouse page & ClickHouseAdminClient', () => {
     expect(unavailable).toHaveClass('invisible')
   })
 
-  it('renders Standard mode disabled state with informational banner and disabled replay controls', async () => {
+  it('triggers notFound() on /admin/clickhouse in Standard deployment mode and renders disabled client banner when mounted in High-Scale mode', async () => {
+    vi.stubEnv('DEPLOYMENT_MODE', 'standard')
+    expect(() => renderWithQueryClient(<ClickHouseAdminPage />)).toThrow('NEXT_HTTP_ERROR_FALLBACK;404')
+    expect(notFoundMock).toHaveBeenCalled()
+
+    vi.stubEnv('DEPLOYMENT_MODE', 'high_scale')
     renderWithQueryClient(<ClickHouseAdminPage />)
 
     expect(screen.getByTestId('admin-clickhouse-root')).toBeInTheDocument()
@@ -71,7 +89,7 @@ describe('/admin/clickhouse page & ClickHouseAdminClient', () => {
     })
     expect(screen.getByTestId('admin-clickhouse-disabled-banner')).toBeInTheDocument()
     expect(screen.getByTestId('admin-clickhouse-disabled-banner')).toHaveAttribute('aria-hidden', 'false')
-    expect(screen.getByTestId('admin-clickhouse-vital-enabled')).toHaveTextContent('Standard (Disabled)')
+    expect(screen.getByTestId('admin-clickhouse-vital-enabled')).toHaveTextContent('Disabled')
     expect(screen.getByTestId('admin-clickhouse-replay-disabled-hint')).toBeInTheDocument()
     expect(screen.getByTestId('admin-clickhouse-replay-submit-btn')).toBeDisabled()
   })

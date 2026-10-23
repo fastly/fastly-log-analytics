@@ -1,7 +1,7 @@
-import { QueryClient } from '@tanstack/react-query'
 import { describe, expect, it } from 'vitest'
 
 import { queryKeys } from '@/lib/query-keys'
+import { createTestQueryClient } from '../helpers/query'
 
 // The literal tuples the admin surface used before the factory existed. SSE
 // appliers, seeders and invalidators match on these shapes, so they must not
@@ -60,7 +60,7 @@ describe('queryKeys.admin shapes', () => {
   })
 
   it('prefix keys still match the longer keys they invalidate', () => {
-    const qc = new QueryClient()
+    const qc = createTestQueryClient()
     qc.setQueryData(k.cronLogs('s', 'all', 'all'), 1)
     qc.setQueryData(k.cronLogs('other', 'all', 'all'), 2)
     qc.setQueryData(k.icebergCalendar('s'), 3)
@@ -78,7 +78,7 @@ describe('queryKeys.admin shapes', () => {
   })
 
   it('overviewAll invalidates every overview key and nothing else', () => {
-    const qc = new QueryClient()
+    const qc = createTestQueryClient()
     qc.setQueryData(k.overviewQueriesSummary(), 1)
     qc.setQueryData(k.overviewLogAccounting('s'), 2)
     qc.setQueryData(k.overviewCeleryStatus(), 3)

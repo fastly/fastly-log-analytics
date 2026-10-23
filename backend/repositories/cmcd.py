@@ -10,6 +10,7 @@ import duckdb
 
 from backend.models.common import FiltersDict
 from backend.repositories._base import QueryRunner, SectionTimer, _safe_table
+from backend.repositories._sql import cmcd as _sql
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
@@ -17,6 +18,7 @@ from backend.repositories.utils.response_cache import (
     digest_cache_key,
     serialize_filters_for_key,
 )
+from backend.utils.date_utils import parse_iso_utc
 
 # CMCD fields that must exist in the schema for any section to return data.
 _CMCD_REQUIRED_COL = "cmcd_sid"
@@ -35,9 +37,10 @@ def _response_cache_key(
     bucket_seconds: int,
     top_n: int,
     sections: set[str] | None,
-    mask_ips: bool,
+    mask_ips: bool = False,
 ) -> str:
-    # Key field order is load-bearing (serialized as-is): s, e, f, bs, tn, sec, mi.
+    # Key field order is load-bearing (serialized as-is): s, e, f, bs, tn, sec.
+    # mask_ips is intentionally omitted because CMCD aggregates return no IP columns.
     sec_val = sorted(list(sections)) if sections is not None else None
     payload = {
         "s": bucket_time_to_minute(start_time),
@@ -46,7 +49,6 @@ def _response_cache_key(
         "bs": bucket_seconds,
         "tn": top_n,
         "sec": sec_val,
-        "mi": mask_ips,
     }
     return digest_cache_key(payload, src)
 
@@ -215,43 +217,17 @@ def _compute_cmcd_aggregates(
         # ── Overview ──────────────────────────────────────────────────────
         if _want("overview"):
             _t = _time.perf_counter()
-            sql = f"""
-                WITH base_metrics AS (
-                    SELECT
-                        COUNT(DISTINCT cmcd_sid) AS active_sessions,
-                        {_rebuffer_rate_expr(has_bs)},
-                        {"AVG(cmcd_br) FILTER (WHERE cmcd_ot = 'v')" if has_br and has_ot else "NULL"} AS avg_bitrate,
-                        {"AVG(cmcd_bl) FILTER (WHERE cmcd_ot = 'v')" if has_bl and has_ot else "NULL"} AS avg_buffer_length,
-                        {"APPROX_QUANTILE(cmcd_mtp, 0.5) FILTER (WHERE cmcd_ot = 'v')" if has_mtp and has_ot else "NULL"} AS median_throughput
-                    FROM {t} WHERE {w}
+            sql = _sql.OVERVIEW.format(
+                rebuffer_rate_expr=_rebuffer_rate_expr(has_bs),
+                avg_bitrate_expr="AVG(cmcd_br) FILTER (WHERE cmcd_ot = 'v')" if has_br and has_ot else "NULL",
+                avg_buffer_length_expr="AVG(cmcd_bl) FILTER (WHERE cmcd_ot = 'v')" if has_bl and has_ot else "NULL",
+                median_throughput_expr=(
+                    "APPROX_QUANTILE(cmcd_mtp, 0.5) FILTER (WHERE cmcd_ot = 'v')" if has_mtp and has_ot else "NULL"
                 ),
-                peak_metrics AS (
-                    SELECT MAX(cnt) AS peak_viewers FROM (
-                        SELECT COUNT(DISTINCT cmcd_sid) AS cnt
-                        FROM {t} WHERE {w}
-                        GROUP BY {_bucket_expr(bucket_ms)}
-                    )
-                ),
-                dur_metrics AS (
-                    SELECT ROUND(AVG(dur), 0) AS avg_dur FROM (
-                        SELECT EPOCH(MAX(timestamp)) - EPOCH(MIN(timestamp)) AS dur
-                        FROM {t} WHERE {w}
-                        GROUP BY cmcd_sid
-                        HAVING dur > 0
-                    )
-                )
-                SELECT
-                    b.active_sessions,
-                    b.rebuffer_rate,
-                    b.avg_bitrate,
-                    b.avg_buffer_length,
-                    b.median_throughput,
-                    p.peak_viewers,
-                    d.avg_dur
-                FROM base_metrics b
-                CROSS JOIN peak_metrics p
-                CROSS JOIN dur_metrics d
-            """
+                table=t,
+                where=w,
+                bucket_expr=_bucket_expr(bucket_ms),
+            )
             row = runner.execute(sql).fetchone()
             if row:
                 results["overview"] = {
@@ -323,7 +299,7 @@ def _compute_cmcd_aggregates(
                 )
                 col_map["startup_ts"] = ["startup_ratio"]
 
-            sql = f"SELECT {', '.join(select_parts)} FROM {t} WHERE {w} GROUP BY 1 ORDER BY 1"
+            sql = _sql.TIMESERIES_COMBINED.format(select_cols=", ".join(select_parts), table=t, where=w)
             rows = runner.execute(sql).fetchall()
             desc = [d[0] for d in runner.con.description]
             col_idx = {name: i for i, name in enumerate(desc)}
@@ -331,14 +307,7 @@ def _compute_cmcd_aggregates(
             if len(rows) > 0:
                 if want_ts["sessions_ts"]:
                     first_bucket = _bucket_expr(bucket_ms).replace("timestamp", "first_ts")
-                    new_sess_sql = f"""
-                        SELECT {first_bucket} AS bucket, COUNT(*) AS new_sessions
-                        FROM (
-                            SELECT cmcd_sid, MIN(timestamp) AS first_ts
-                            FROM {t} WHERE {w} GROUP BY cmcd_sid
-                        ) sub
-                        GROUP BY 1
-                    """
+                    new_sess_sql = _sql.NEW_SESSIONS.format(first_bucket=first_bucket, table=t, where=w)
                     new_sess_rows = runner.execute(new_sess_sql).fetchall()
                     new_sess_map = {str(r[0]): r[1] for r in new_sess_rows}
 
@@ -437,27 +406,14 @@ def _compute_cmcd_aggregates(
             br_agg = "AVG(cmcd_br) FILTER (WHERE cmcd_ot = 'v')" if has_br and has_ot else "NULL"
             bl_agg = "AVG(cmcd_bl) FILTER (WHERE cmcd_ot = 'v')" if has_bl and has_ot else "NULL"
             rebuffer_agg = "MAX(CASE WHEN cmcd_bs = true THEN 1 ELSE 0 END)" if has_bs else "0"
-            sql = f"""
-                WITH per_session AS (
-                    SELECT cmcd_cid, cmcd_sid,
-                        {rebuffer_agg} AS had_rebuffer,
-                        {br_agg} AS avg_br,
-                        {bl_agg} AS avg_bl
-                    FROM {t}
-                    WHERE {w} AND cmcd_cid IS NOT NULL AND cmcd_cid != ''
-                    GROUP BY 1, 2
-                )
-                SELECT
-                    cmcd_cid,
-                    COUNT(*) AS session_count,
-                    ROUND(SUM(had_rebuffer) * 100.0 / NULLIF(COUNT(*), 0), 2) AS rebuffer_rate,
-                    AVG(avg_br) AS avg_br,
-                    AVG(avg_bl) AS avg_bl
-                FROM per_session
-                GROUP BY 1
-                ORDER BY session_count DESC
-                LIMIT {top_n}
-            """
+            sql = _sql.TOP_CONTENT.format(
+                rebuffer_agg=rebuffer_agg,
+                br_agg=br_agg,
+                bl_agg=bl_agg,
+                table=t,
+                where=w,
+                top_n=top_n,
+            )
             rows = runner.execute(sql).fetchall()
             results["top_content"] = [
                 {
@@ -477,25 +433,12 @@ def _compute_cmcd_aggregates(
             # MEDIAN, not APPROX_QUANTILE: this aggregate runs once per (country, session) group, and
             # a t-digest per tiny group is ~9x slower (1.1 s vs 0.12 s on 3M rows / 72k groups).
             mtp_agg = "MEDIAN(cmcd_mtp) FILTER (WHERE cmcd_ot = 'v')" if has_mtp and has_ot else "NULL"
-            sql = f"""
-                WITH per_session AS (
-                    SELECT country, cmcd_sid,
-                        MAX(CASE WHEN cmcd_bs = true THEN 1 ELSE 0 END) AS had_rebuffer,
-                        {mtp_agg} AS median_mtp
-                    FROM {t}
-                    WHERE {w} AND country IS NOT NULL
-                    GROUP BY 1, 2
-                )
-                SELECT
-                    country,
-                    ROUND(SUM(had_rebuffer) * 100.0 / NULLIF(COUNT(*), 0), 2) AS rebuffer_rate,
-                    COUNT(*) AS session_count,
-                    AVG(median_mtp) AS median_mtp
-                FROM per_session
-                GROUP BY 1
-                ORDER BY session_count DESC
-                LIMIT {top_n}
-            """
+            sql = _sql.REBUFFER_BY_COUNTRY.format(
+                mtp_agg=mtp_agg,
+                table=t,
+                where=w,
+                top_n=top_n,
+            )
             rows = runner.execute(sql).fetchall()
             results["rebuffer_by_country"] = [
                 {
@@ -513,27 +456,13 @@ def _compute_cmcd_aggregates(
             _t = _time.perf_counter()
             br_agg = "AVG(cmcd_br) FILTER (WHERE cmcd_ot = 'v')" if has_br and has_ot else "NULL"
             bl_agg = "AVG(cmcd_bl) FILTER (WHERE cmcd_ot = 'v')" if has_bl and has_ot else "NULL"
-            sql = f"""
-                WITH per_session AS (
-                    SELECT asn, cmcd_sid,
-                        MAX(CASE WHEN cmcd_bs = true THEN 1 ELSE 0 END) AS had_rebuffer,
-                        {br_agg} AS avg_br,
-                        {bl_agg} AS avg_bl
-                    FROM {t}
-                    WHERE {w} AND asn IS NOT NULL
-                    GROUP BY 1, 2
-                )
-                SELECT
-                    asn,
-                    ROUND(SUM(had_rebuffer) * 100.0 / NULLIF(COUNT(*), 0), 2) AS rebuffer_rate,
-                    COUNT(*) AS session_count,
-                    AVG(avg_br) AS avg_br,
-                    AVG(avg_bl) AS avg_bl
-                FROM per_session
-                GROUP BY 1
-                ORDER BY session_count DESC
-                LIMIT {top_n}
-            """
+            sql = _sql.REBUFFER_BY_ASN.format(
+                br_agg=br_agg,
+                bl_agg=bl_agg,
+                table=t,
+                where=w,
+                top_n=top_n,
+            )
             rows = runner.execute(sql).fetchall()
             from backend.core import duckdb as _db
 
@@ -560,16 +489,7 @@ def _compute_cmcd_aggregates(
         if want_ot or want_sf:
             _t = _time.perf_counter()
             if want_ot and want_sf:
-                sql = f"""
-                    SELECT 'ot' AS kind, cmcd_ot AS val, COUNT(*) AS cnt
-                    FROM {t} WHERE {w} AND cmcd_ot IS NOT NULL AND cmcd_ot != ''
-                    GROUP BY 2
-                    UNION ALL
-                    SELECT 'sf' AS kind, cmcd_sf AS val, COUNT(DISTINCT cmcd_sid) AS cnt
-                    FROM {t} WHERE {w} AND cmcd_sf IS NOT NULL AND cmcd_sf != ''
-                    GROUP BY 2
-                    ORDER BY kind ASC, cnt DESC
-                """
+                sql = _sql.DIST_BOTH.format(table=t, where=w)
                 rows = runner.execute(sql).fetchall()
                 results["object_type_dist"] = [
                     {"object_type": r[1], "request_count": r[2]} for r in rows if r[0] == "ot"
@@ -578,19 +498,11 @@ def _compute_cmcd_aggregates(
                     {"streaming_format": r[1], "session_count": r[2]} for r in rows if r[0] == "sf"
                 ]
             elif want_ot:
-                sql = f"""
-                    SELECT cmcd_ot, COUNT(*) AS request_count
-                    FROM {t} WHERE {w} AND cmcd_ot IS NOT NULL AND cmcd_ot != ''
-                    GROUP BY 1 ORDER BY 2 DESC
-                """
+                sql = _sql.DIST_OT.format(table=t, where=w)
                 rows = runner.execute(sql).fetchall()
                 results["object_type_dist"] = [{"object_type": r[0], "request_count": r[1]} for r in rows]
             elif want_sf:
-                sql = f"""
-                    SELECT cmcd_sf, COUNT(DISTINCT cmcd_sid) AS session_count
-                    FROM {t} WHERE {w} AND cmcd_sf IS NOT NULL AND cmcd_sf != ''
-                    GROUP BY 1 ORDER BY 2 DESC
-                """
+                sql = _sql.DIST_SF.format(table=t, where=w)
                 rows = runner.execute(sql).fetchall()
                 results["streaming_format_dist"] = [{"streaming_format": r[0], "session_count": r[1]} for r in rows]
             timer.mark("distributions", _t)
@@ -598,37 +510,7 @@ def _compute_cmcd_aggregates(
         # ── Session Duration Distribution ─────────────────────────────────────
         if _want("session_duration_dist"):
             _t = _time.perf_counter()
-            sql = f"""
-                WITH session_spans AS (
-                    SELECT cmcd_sid,
-                        EPOCH(MAX(timestamp)) - EPOCH(MIN(timestamp)) AS dur
-                    FROM {t} WHERE {w}
-                    GROUP BY cmcd_sid
-                )
-                SELECT
-                    CASE
-                        WHEN dur < 30 THEN '<30s'
-                        WHEN dur < 120 THEN '30s–2m'
-                        WHEN dur < 300 THEN '2–5m'
-                        WHEN dur < 600 THEN '5–10m'
-                        WHEN dur < 1800 THEN '10–30m'
-                        WHEN dur < 3600 THEN '30m–1h'
-                        ELSE '>1h'
-                    END AS duration_bucket,
-                    CASE
-                        WHEN dur < 30 THEN 1
-                        WHEN dur < 120 THEN 2
-                        WHEN dur < 300 THEN 3
-                        WHEN dur < 600 THEN 4
-                        WHEN dur < 1800 THEN 5
-                        WHEN dur < 3600 THEN 6
-                        ELSE 7
-                    END AS sort_order,
-                    COUNT(*) AS session_count
-                FROM session_spans
-                GROUP BY 1, 2
-                ORDER BY 2
-            """
+            sql = _sql.SESSION_DURATION_DIST.format(table=t, where=w)
             rows = runner.execute(sql).fetchall()
             results["session_duration_dist"] = [{"duration_bucket": r[0], "session_count": r[2]} for r in rows]
             timer.mark("session_duration_dist", _t)
@@ -680,12 +562,9 @@ def _pad_timeseries(
     import datetime
     from datetime import UTC
 
-    import dateutil.parser
-
-    try:
-        st = dateutil.parser.isoparse(start_time)
-        et = dateutil.parser.isoparse(end_time)
-    except Exception:
+    st = parse_iso_utc(start_time)
+    et = parse_iso_utc(end_time)
+    if st is None or et is None:
         return sorted([{"bucket": k, **v} for k, v in db_rows_dict.items()], key=lambda x: x["bucket"])
 
     st_epoch = int(st.timestamp())

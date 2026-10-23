@@ -38,7 +38,10 @@ beforeEach(() => {
   mockPost.mockReset()
 })
 
-afterEach(() => vi.useRealTimers())
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
 
 test('Copy JSON flips to Copied after a successful write and resets', async () => {
   const writeText = vi.fn().mockResolvedValue(undefined)

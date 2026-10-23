@@ -16,7 +16,7 @@
 import { renderHook, waitFor } from '@testing-library/react'
 import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
 import { http, HttpResponse } from 'msw'
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { afterEach, describe, it, expect, beforeEach, vi } from 'vitest'
 
 import { server } from '@/__tests__/helpers/msw/server'
 
@@ -50,6 +50,11 @@ vi.mock('@/stores/serviceStore', () => {
 })
 
 const API_BASE = 'http://127.0.0.1:8000'
+
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
 
 /** Build a fresh QueryClient per test so the cache doesn't leak. */
 function wrapper() {

@@ -1,11 +1,12 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { expect, test, vi } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import { CustomFieldsManager } from '@/components/CustomFields/CustomFieldsManager'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClientProvider } from '@tanstack/react-query'
 import * as customFieldsApi from '@/lib/api/custom-fields'
 import type { components } from '@/types/api.generated'
 import React from 'react'
+import { createTestQueryClient } from '../helpers/query'
 
 vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
 
@@ -23,7 +24,12 @@ Object.defineProperty(window, 'matchMedia', {
   })),
 })
 
-const queryClient = new QueryClient()
+const queryClient = createTestQueryClient()
+
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
 
 test('renders custom fields and handles deletion', async () => {
   const user = userEvent.setup()

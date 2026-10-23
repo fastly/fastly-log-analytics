@@ -6,6 +6,7 @@ import { formatLocalDateTime } from '@/lib/date'
 import { formatCount } from '@/lib/format'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import type { ColumnDef } from '@tanstack/react-table'
 import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
 import { Badge } from '@/components/ui/badge'
@@ -181,9 +182,7 @@ export function QueueClient() {
   } = useQuery({
     queryKey: queryKeys.admin.celeryStatus(),
     queryFn: async ({ signal }) => {
-      const { data, response } = await client.GET('/api/admin/celery/status', { signal })
-      if (!response.ok || !data) throw new Error(`HTTP ${response.status}`)
-      return data
+      return unwrapClient(client.GET('/api/admin/celery/status', { signal }))
     },
     // We only poll if SSE isn't fully established as a fallback,
     // otherwise the stream pushes to this query key directly.
@@ -204,18 +203,18 @@ export function QueueClient() {
   } = useQuery({
     queryKey: queryKeys.admin.celeryLedger(ledgerFilter, null, 0),
     queryFn: async ({ signal }) => {
-      const { data: resData, response } = await client.GET('/api/admin/celery/ledger', {
-        params: {
-          query: {
-            status: ledgerFilter,
-            limit: 50,
-            offset: 0,
+      return unwrapClient(
+        client.GET('/api/admin/celery/ledger', {
+          params: {
+            query: {
+              status: ledgerFilter,
+              limit: 50,
+              offset: 0,
+            },
           },
-        },
-        signal,
-      })
-      if (!response.ok || !resData) throw new Error(`HTTP ${response.status}`)
-      return resData
+          signal,
+        }),
+      )
     },
     enabled: shouldInspectLedger,
   })
@@ -230,12 +229,12 @@ export function QueueClient() {
   } = useQuery({
     queryKey: queryKeys.admin.metricHistoryBatch('1h'),
     queryFn: async ({ signal }) => {
-      const { data, response } = await client.GET('/api/admin/metric-history/batch', {
-        params: { query: { since: '1h' } },
-        signal,
-      })
-      if (!response.ok || !data) throw new Error(`HTTP ${response.status}`)
-      return data as TrendBatch
+      return (await unwrapClient(
+        client.GET('/api/admin/metric-history/batch', {
+          params: { query: { since: '1h' } },
+          signal,
+        }),
+      )) as TrendBatch
     },
     refetchInterval: 60_000,
   })
@@ -271,12 +270,13 @@ export function QueueClient() {
       setActionBusyKey(busyId)
       setActionNotice(null)
       try {
-        const { data: res, response } = await client.POST('/api/admin/celery/ledger/retry', {
-          body: {
-            items: [{ service_id: entry.service_id, object_key: entry.object_key }],
-          },
-        })
-        if (!response.ok || !res) throw new Error(`HTTP ${response.status}`)
+        const res = await unwrapClient(
+          client.POST('/api/admin/celery/ledger/retry', {
+            body: {
+              items: [{ service_id: entry.service_id, object_key: entry.object_key }],
+            },
+          }),
+        )
         setActionNotice({
           kind: 'success',
           message: `Requeued ${res.affected ?? 1} file for ingest retry${res.dispatched ? ` (dispatched ${res.dispatched} to Celery)` : ''}.`,
@@ -300,12 +300,13 @@ export function QueueClient() {
       setActionBusyKey(busyId)
       setActionNotice(null)
       try {
-        const { data: res, response } = await client.POST('/api/admin/celery/ledger/purge', {
-          body: {
-            items: [{ service_id: entry.service_id, object_key: entry.object_key }],
-          },
-        })
-        if (!response.ok || !res) throw new Error(`HTTP ${response.status}`)
+        const res = await unwrapClient(
+          client.POST('/api/admin/celery/ledger/purge', {
+            body: {
+              items: [{ service_id: entry.service_id, object_key: entry.object_key }],
+            },
+          }),
+        )
         setActionNotice({
           kind: 'success',
           message: `Dismissed ${res.affected ?? 1} ledger entry.`,
@@ -329,10 +330,11 @@ export function QueueClient() {
     setActionBusyKey('bulk-retry')
     setActionNotice(null)
     try {
-      const { data: res, response } = await client.POST('/api/admin/celery/ledger/retry', {
-        body: { status: targetStatus },
-      })
-      if (!response.ok || !res) throw new Error(`HTTP ${response.status}`)
+      const res = await unwrapClient(
+        client.POST('/api/admin/celery/ledger/retry', {
+          body: { status: targetStatus },
+        }),
+      )
       setActionNotice({
         kind: 'success',
         message: `Requeued ${res.affected ?? 0} file(s) for retry${res.dispatched ? ` (dispatched ${res.dispatched} to Celery)` : ''}.`,
@@ -354,10 +356,11 @@ export function QueueClient() {
     setActionBusyKey('bulk-purge')
     setActionNotice(null)
     try {
-      const { data: res, response } = await client.POST('/api/admin/celery/ledger/purge', {
-        body: { status: targetStatus },
-      })
-      if (!response.ok || !res) throw new Error(`HTTP ${response.status}`)
+      const res = await unwrapClient(
+        client.POST('/api/admin/celery/ledger/purge', {
+          body: { status: targetStatus },
+        }),
+      )
       setActionNotice({
         kind: 'success',
         message: `Dismissed ${res.affected ?? 0} dead-letter/quarantined ledger entry(s).`,

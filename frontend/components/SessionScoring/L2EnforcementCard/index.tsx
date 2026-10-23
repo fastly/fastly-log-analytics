@@ -11,6 +11,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 
 import { useScoringQuery } from '../useScoringQuery'
 import { scoringAnalyticsCompositeKey, scoringConfigCompositeKey } from '@/lib/queries/scoring'
@@ -68,14 +69,13 @@ export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementC
   )
 
   const mutation = useMutation({
-    mutationFn: async (enabled: boolean) => {
-      const { data, response } = await client.PUT('/api/services/{service_id}/scoring/l2-enforce', {
-        params: { path: { service_id: serviceId }, query: { confirm: true } },
-        body: { enabled },
-      })
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data
-    },
+    mutationFn: async (enabled: boolean) =>
+      unwrapClient(
+        client.PUT('/api/services/{service_id}/scoring/l2-enforce', {
+          params: { path: { service_id: serviceId }, query: { confirm: true } },
+          body: { enabled },
+        }),
+      ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['scoring-l2-enforce', serviceId] })
       queryClient.invalidateQueries({ queryKey: scoringAnalyticsCompositeKey(serviceId) })
@@ -93,9 +93,11 @@ export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementC
     // backend detail ("Scoring not enabled or config store missing"), so match
     // both rather than leaking the raw string. A freshly-enabled service that
     // still shows this is just a pre-enable fetch the StatusPanel re-invalidates.
-    const friendly = /status 400|config store missing|scoring not enabled/i.test(raw)
-      ? 'Enable session scoring for this service to manage L2 enforcement.'
-      : raw
+    const friendly =
+      /status 400|http 400|config store missing|scoring not enabled/i.test(raw) ||
+      (error as { status?: number } | null)?.status === 400
+        ? 'Enable session scoring for this service to manage L2 enforcement.'
+        : raw
     return (
       <AnalyticsCard title="L2 enforcement" description={DESCRIPTION}>
         <CardErrorState

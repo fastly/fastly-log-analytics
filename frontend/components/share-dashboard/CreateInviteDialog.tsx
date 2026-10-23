@@ -88,8 +88,8 @@ function CreateInviteDialogInner({
     let cancelled = false
     ;(async () => {
       try {
-        const { data, response } = await client.GET('/api/admin/share/oauth-providers', {})
-        if (!cancelled && response.ok) setProviders(data?.providers ?? [])
+        const data = await unwrapClient(client.GET('/api/admin/share/oauth-providers', {}))
+        if (!cancelled) setProviders(data?.providers ?? [])
       } catch {
         /* leave empty — OAuth mode just stays disabled */
       }
@@ -101,8 +101,7 @@ function CreateInviteDialogInner({
 
   const handleWordphrase = async () => {
     try {
-      const { data, response } = await client.GET('/api/admin/share/wordphrase', {})
-      if (!response.ok) throw new Error(`status ${response.status}`)
+      const data = await unwrapClient(client.GET('/api/admin/share/wordphrase', {}))
       setPasscode(data?.passcode ?? '')
     } catch (e) {
       setError(extractApiError(e))

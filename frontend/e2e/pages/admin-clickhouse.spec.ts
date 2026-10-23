@@ -2,8 +2,8 @@
  * Page Specification E2E Suite: `/admin/clickhouse` (Admin ClickHouse Replay & Cluster Operations)
  *
  * Validates the contracts defined in `docs/pages/admin/clickhouse.md`:
- *   1. Route accessibility (`GET /admin/clickhouse` returns 200 for Admin), `ServerFooter`
- *      rendering, and ClickHouse Admin layout mounting.
+ *   1. Route accessibility (`GET /admin/clickhouse` returns 404 in Standard mode via `notFound()`,
+ *      or 200 in High-Scale mode with `ServerFooter` and `admin-clickhouse-root` mounted).
  *   2. Pre-allocated zero-CLS reservation containers (`admin-clickhouse-toolbar`,
  *      `admin-clickhouse-vitals-reservation`, `admin-clickhouse-generation-reservation`,
  *      `admin-clickhouse-replay-reservation`) and warm-load performance budget
@@ -13,13 +13,14 @@
  *      in High-Scale mode).
  *   4. Replay validation & dry-run contract (`POST /api/admin/clickhouse/replay` enforces
  *      `limit <= 100` with 422 on `limit: 101`, rejects missing reference with 422, and returns
- *      409 `clickhouse_disabled` in Standard mode or valid dry-run/404 response in High-Scale mode).
+ *      409 `clickhouse_disabled` in Standard mode or valid dry-run/404 `replay_not_found`
+ *      response in High-Scale mode).
  *   5. Interactive manual refresh workflow (`admin-clickhouse-refresh-btn`) with `X-Page-Load-ID`
- *      telemetry attribution.
+ *      telemetry attribution in High-Scale mode (or 404 route separation in Standard mode).
  */
 import { test, expect } from '@playwright/test';
 import { clsInitScript, readClsScore } from '../cls-observer';
-import { resolveFirstServiceId, configureExternalAdminOrigin } from './helpers';
+import { resolveFirstServiceId, configureExternalAdminOrigin } from '../helpers';
 
 configureExternalAdminOrigin();
 
@@ -28,7 +29,13 @@ test.describe('Page Spec: /admin/clickhouse (Admin ClickHouse Replay & Cluster O
     page,
   }) => {
     const response = await page.goto('/admin/clickhouse', { waitUntil: 'domcontentloaded' });
-    expect(response?.status()).toBe(200);
+    const status = response?.status() ?? 0;
+    expect([200, 404]).toContain(status);
+
+    if (status === 404) {
+      await expect(page.getByTestId('admin-clickhouse-root')).toHaveCount(0);
+      return;
+    }
 
     await expect(
       page.getByRole('heading', { name: 'ClickHouse Replay & Cluster Operations' }),
@@ -47,29 +54,32 @@ test.describe('Page Spec: /admin/clickhouse (Admin ClickHouse Replay & Cluster O
     await page.addInitScript(clsInitScript);
 
     const response = await page.goto('/admin/clickhouse', { waitUntil: 'domcontentloaded' });
-    expect(response?.status()).toBe(200);
+    const status = response?.status() ?? 0;
+    expect([200, 404]).toContain(status);
 
-    const toolbar = page.getByTestId('admin-clickhouse-toolbar');
-    const vitals = page.getByTestId('admin-clickhouse-vitals-reservation');
-    const generation = page.getByTestId('admin-clickhouse-generation-reservation');
-    const replay = page.getByTestId('admin-clickhouse-replay-reservation');
+    if (status === 200) {
+      const toolbar = page.getByTestId('admin-clickhouse-toolbar');
+      const vitals = page.getByTestId('admin-clickhouse-vitals-reservation');
+      const generation = page.getByTestId('admin-clickhouse-generation-reservation');
+      const replay = page.getByTestId('admin-clickhouse-replay-reservation');
 
-    await expect(toolbar).toBeVisible();
-    await expect(vitals).toBeVisible();
-    await expect(generation).toBeVisible();
-    await expect(replay).toBeVisible();
+      await expect(toolbar).toBeVisible();
+      await expect(vitals).toBeVisible();
+      await expect(generation).toBeVisible();
+      await expect(replay).toBeVisible();
 
-    // The route's Suspense skeleton and the loaded page share these test ids, so a single sample can
-    // land on the skeleton node as it detaches (boundingBox() === null). Poll until the swap settles.
-    const heightOf = (locator: typeof vitals) => async () => (await locator.boundingBox())?.height ?? 0;
-    await expect.poll(heightOf(vitals)).toBeGreaterThanOrEqual(200);
-    await expect.poll(heightOf(generation)).toBeGreaterThanOrEqual(180);
-    await expect.poll(heightOf(replay)).toBeGreaterThanOrEqual(260);
+      // The route's Suspense skeleton and the loaded page share these test ids, so a single sample can
+      // land on the skeleton node as it detaches (boundingBox() === null). Poll until the swap settles.
+      const heightOf = (locator: typeof vitals) => async () => (await locator.boundingBox())?.height ?? 0;
+      await expect.poll(heightOf(vitals)).toBeGreaterThanOrEqual(200);
+      await expect.poll(heightOf(generation)).toBeGreaterThanOrEqual(180);
+      await expect.poll(heightOf(replay)).toBeGreaterThanOrEqual(260);
 
-    // Wait for status badge to settle before sampling CLS & FCP
-    const healthBadge = page.getByTestId('admin-clickhouse-health-badge');
-    await expect(healthBadge).toHaveText(/^(ok|disabled|unavailable)$/);
-    await page.waitForTimeout(300);
+      // Wait for status badge to settle before sampling CLS & FCP
+      const healthBadge = page.getByTestId('admin-clickhouse-health-badge');
+      await expect(healthBadge).toHaveText(/^(ok|disabled|unavailable)$/);
+      await page.waitForTimeout(300);
+    }
 
     const clsScore = await readClsScore(page);
     const vitalsPerf = await page.evaluate(() => {
@@ -187,7 +197,13 @@ test.describe('Page Spec: /admin/clickhouse (Admin ClickHouse Replay & Cluster O
       }
     });
 
-    await page.goto('/admin/clickhouse', { waitUntil: 'domcontentloaded' });
+    const response = await page.goto('/admin/clickhouse', { waitUntil: 'domcontentloaded' });
+    if (response?.status() === 404) {
+      await expect(page.getByTestId('admin-clickhouse-root')).toHaveCount(0);
+      expect(observedPageLoadIds.length).toBe(0);
+      return;
+    }
+
     await expect(page.getByTestId('admin-clickhouse-health-badge')).toHaveText(
       /^(ok|disabled|unavailable)$/,
     );

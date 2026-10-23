@@ -15,7 +15,7 @@ import { SIDEBAR_COLLAPSED_COOKIE } from "@/lib/sidebar-cookie";
 import { ErrorBoundaryWithRouteReset } from "@/components/ErrorBoundary";
 import { ReloadLoopGuard } from "@/components/ReloadLoopGuard";
 import { WebVitalsReporter } from "@/components/WebVitalsReporter/WebVitalsReporter";
-import { queryKeys } from "@/lib/query-keys";
+import { queryKeys, seedBootstrapDependentCaches } from "@/lib/query-keys";
 import { fetchBootstrapServerSide } from "@/lib/ssr/bootstrap";
 import { shouldLoadRumScript } from "@/lib/rum-script";
 
@@ -93,56 +93,15 @@ export default async function RootLayout({
   if (bootstrap) {
     const client = new QueryClient();
     client.setQueryData(queryKeys.bootstrap(), bootstrap);
-    // Mirror the dependent-cache seeds from useBootstrap.queryFn so
-    // hooks gated on the bootstrap status flip find their slice in
-    // cache too. Key shapes live at frontend/hooks/useBootstrap.ts.
+    // Mirror the dependent-cache seeds from useBootstrap.queryFn via shared
+    // seedBootstrapDependentCaches so hooks gated on the bootstrap status flip
+    // find their slice in cache too.
+    seedBootstrapDependentCaches(client, bootstrap);
     sid = bootstrap.active_service_id ?? null;
-    if (sid) {
-      if (Array.isArray(bootstrap.views)) {
-        client.setQueryData(["views", sid], bootstrap.views);
-      }
-      if (bootstrap.log_fields_catalog) {
-        client.setQueryData(["log-fields-catalog", sid], bootstrap.log_fields_catalog);
-      }
-      client.setQueryData(queryKeys.syncStatus(sid), bootstrap.sync_status ?? null);
-      if (bootstrap.log_extents) {
-        client.setQueryData(["log-extents", sid], bootstrap.log_extents);
-      }
-      client.setQueryData(queryKeys.lastSync(sid), bootstrap.last_sync ?? null);
-      const schemaList = bootstrap.schema;
-      const tableName = bootstrap.table_name;
-      if (Array.isArray(schemaList) && schemaList.length > 0 && typeof tableName === "string") {
-        client.setQueryData(queryKeys.admin.schema(sid), { schema: schemaList, table_name: tableName });
-      }
-      if (bootstrap.cron_runs_first_page) {
-        client.setQueryData(queryKeys.admin.cronLogsRecent(sid), bootstrap.cron_runs_first_page);
-      }
-      if (bootstrap.scoring_labels) {
-        client.setQueryData(["scoring-labels", sid], bootstrap.scoring_labels);
-      }
-    }
     const services = bootstrap.services;
-    if (Array.isArray(services)) {
-      client.setQueryData(["services"], { services, _section_timings: [] });
-      if (sid) {
-        const activeSvc = services.find((s) => s.service_id === sid);
-        isRumEnabled = !!activeSvc?.rum_enabled;
-      }
-    }
-    // P1#5 (perf audit): the SSR share_status seed is removed. Bootstrap no
-    // longer carries share_status (build_share_status cost ~2.1s and sat on
-    // this admin SSR first-paint path). A direct load of /admin/share
-    // refetches GET /api/admin/share/status on mount (page.tsx's
-    // SHARE_STATUS_QUERY_KEY useQuery), so it self-populates with one
-    // round-trip — only the share page pays it, and only on direct load.
-    // The small global share_banner stays on the bootstrap response for the
-    // header.
-    const shareBanner = bootstrap.share_banner;
-    if (shareBanner && typeof shareBanner === "object") {
-      client.setQueryData(queryKeys.shareBanner(), {
-        sharing_active: !!shareBanner.sharing_active,
-        public_url: typeof shareBanner.public_url === "string" ? shareBanner.public_url : null,
-      });
+    if (Array.isArray(services) && sid) {
+      const activeSvc = services.find((s) => s.service_id === sid);
+      isRumEnabled = !!activeSvc?.rum_enabled;
     }
     dehydratedState = dehydrate(client);
   }

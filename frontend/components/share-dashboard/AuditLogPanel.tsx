@@ -22,6 +22,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 
 import { SortableHead, useTableSort, type SortAccessors } from './sortable'
 import { type AuditLog, type ShareStatus } from './utils'
@@ -96,10 +97,11 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
       onError('')
       try {
         const params: Record<string, string | number> = { limit: 200, email: initialEmailFilter }
-        const { data, response } = await client.GET('/api/admin/share/audit-logs', {
-          params: { query: params },
-        })
-        if (!response.ok) throw new Error(`status ${response.status}`)
+        const data = await unwrapClient(
+          client.GET('/api/admin/share/audit-logs', {
+            params: { query: params },
+          }),
+        )
         setFilteredLogs(data?.audit_logs || [])
       } catch (e) {
         onError(extractApiError(e))
@@ -121,10 +123,11 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
       if (filters.email) params.email = filters.email
       if (filters.since) params.since = filters.since
       if (filters.until) params.until = filters.until
-      const { data, response } = await client.GET('/api/admin/share/audit-logs', {
-        params: { query: params },
-      })
-      if (!response.ok) throw new Error(`status ${response.status}`)
+      const data = await unwrapClient(
+        client.GET('/api/admin/share/audit-logs', {
+          params: { query: params },
+        }),
+      )
       setFilteredLogs(data?.audit_logs || [])
     } catch (e) {
       onError(extractApiError(e))

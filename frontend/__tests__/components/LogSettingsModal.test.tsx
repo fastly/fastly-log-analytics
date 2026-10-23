@@ -1,13 +1,14 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { expect, test, vi } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import { axe } from 'vitest-axe'
 import { LogSettingsModal } from '@/components/LogSettingsModal/LogSettingsModal'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClientProvider } from '@tanstack/react-query'
 import * as apiLib from '@/lib/api'
 import type { ServiceConfig } from '@/types/api'
 import React from 'react'
 import { getOk } from '@/__tests__/helpers/api-result'
+import { createTestQueryClient } from '../helpers/query'
 
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
@@ -37,9 +38,14 @@ vi.mock('@/hooks/useSSE', () => ({
   })
 }))
 
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
+
 test('LogSettingsModal navigates through wizard steps', async () => {
   const user = userEvent.setup()
-  const queryClient = new QueryClient()
+  const queryClient = createTestQueryClient()
   const onOpenChange = vi.fn()
 
   vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: string) => {
@@ -112,7 +118,7 @@ test('LogSettingsModal navigates through wizard steps', async () => {
 
 test('LogSettingsModal shows custom fields in review step', async () => {
   const user = userEvent.setup()
-  const queryClient = new QueryClient()
+  const queryClient = createTestQueryClient()
   const onOpenChange = vi.fn()
 
   vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: string) => {
@@ -167,7 +173,7 @@ test('LogSettingsModal shows custom fields in review step', async () => {
 // contract break.
 test('LogSettingsModal Deploy POSTs body wrapped in { log_fields }', async () => {
   const user = userEvent.setup()
-  const queryClient = new QueryClient()
+  const queryClient = createTestQueryClient()
   const onOpenChange = vi.fn()
 
   vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: string) => {
@@ -239,7 +245,7 @@ test('LogSettingsModal has no axe-detectable a11y violations', async () => {
     realError(...args)
   })
 
-  const queryClient = new QueryClient()
+  const queryClient = createTestQueryClient()
 
   vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: string) => {
     if (url.includes('/api/log-fields/catalog')) {

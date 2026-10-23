@@ -1,7 +1,9 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
-import { queryKeys } from '@/lib/query-keys'
+import { queryKeys, seedBootstrapDependentCaches } from '@/lib/query-keys'
+
+export { seedBootstrapDependentCaches }
 import { useAdminTokenStore } from '@/stores/adminTokenStore'
 import { useSessionRoleStore } from '@/stores/sessionRoleStore'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -233,65 +235,7 @@ export function useBootstrap() {
       // dependent hook re-renders BEFORE useEffect runs, so its
       // `enabled` flips true and it queries an empty cache. Seeding
       // here closes that race.
-      if (data?.active_service_id) {
-        const sid = data.active_service_id
-        const seededViews = data.views
-        if (Array.isArray(seededViews)) {
-          queryClient.setQueryData(queryKeys.views(sid), seededViews)
-        }
-        const seededCatalog = data.log_fields_catalog
-        if (seededCatalog) {
-          queryClient.setQueryData(['log-fields-catalog', sid], seededCatalog)
-        }
-        queryClient.setQueryData(queryKeys.syncStatus(sid), data.sync_status ?? null)
-        // Available to both admin and analyst.
-        const seededLogExtents = data.log_extents
-        if (seededLogExtents) {
-          queryClient.setQueryData(queryKeys.logExtents(sid), seededLogExtents)
-        }
-        // Schema seed for /query — only fires when the cron-populated
-        // status cache has a real schema list, so a cold-start bootstrap
-        // (empty schema) still falls through to /api/schema's live
-        // get_schema fallback instead of caching an empty payload.
-        const seededSchemaList = data.schema
-        const seededTableName = data.table_name
-        if (Array.isArray(seededSchemaList) && seededSchemaList.length > 0 && typeof seededTableName === 'string') {
-          queryClient.setQueryData(queryKeys.admin.schema(sid), { schema: seededSchemaList, table_name: seededTableName })
-        }
-        // P1#5 (perf audit): cron_schedule is no longer seeded from
-        // bootstrap (its ~3s build sat on admin first-paint). The /logs
-        // cron tab refetches GET /api/cron-schedule on mount, so the tab
-        // self-populates with one round-trip. The tab-independent recent-
-        // runs delta below stays seeded (cheap, with_total=False).
-        const seededCronRunsFirstPage = data.cron_runs_first_page
-        if (seededCronRunsFirstPage) {
-          queryClient.setQueryData(queryKeys.admin.cronLogsRecent(sid), seededCronRunsFirstPage)
-        }
-        // Always seed ['last-sync', sid] so the cache entry exists before
-        // SyncStatusBadge's useLastSync() subscribes (prevents mid-render
-        // QueryCache.build → notify race).
-        queryClient.setQueryData(queryKeys.lastSync(sid), data.last_sync ?? null)
-        // /scoring/labels seed — TopFlaggedTable + admin Labels tab +
-        // dashboard Flag column all read from ['scoring-labels', sid].
-        // Skipping the standalone fetch on cold load.
-        const seededScoringLabels = data.scoring_labels
-        if (seededScoringLabels) {
-          queryClient.setQueryData(queryKeys.scoringLabels(sid), seededScoringLabels)
-        }
-      }
-      // P1#5 (perf audit): share_status is no longer seeded from bootstrap
-      // (build_share_status cost ~2.1s on admin first-paint). The
-      // /admin/share page refetches GET /api/admin/share/status on mount,
-      // so InvitationsPanel self-populates with one round-trip. The small
-      // global share_banner ({sharing_active, public_url}) is still carried
-      // on the bootstrap response and read directly for the header.
-      // /api/services returns {services, _section_timings} — bootstrap
-      // exposes the same enriched list. Seed ServicesTable's queryKey
-      // so /admin's cold-load round-trip evaporates.
-      const seededServices = data?.services
-      if (Array.isArray(seededServices)) {
-        queryClient.setQueryData(queryKeys.services(), { services: seededServices, _section_timings: [] })
-      }
+      seedBootstrapDependentCaches(queryClient, data)
       return data
     },
     // Bootstrap returns the services list + role flags + analyst session
@@ -309,7 +253,8 @@ export function useBootstrap() {
     // refetchOnMount / SSE invalidation / the manual Retry button still
     // recover a transient blip. See the 2026-06-23 bootstrap-storm outage.
     retry: (failureCount: number, error: unknown) => {
-      const status = (error as { response?: { status?: number } } | null)?.response?.status
+      const err = error as { status?: number; response?: { status?: number } } | null
+      const status = err?.status ?? err?.response?.status
       if (status !== undefined && status >= 400 && status < 500) return false
       return failureCount < 1
     },

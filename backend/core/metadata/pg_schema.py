@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS slow_queries (
 _SLOW_QUERIES_INDEX_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_slow_queries_service_started_dur ON slow_queries (service_id, started_at_utc, duration_ms)",
     "CREATE INDEX IF NOT EXISTS idx_slow_queries_service_duration ON slow_queries (service_id, duration_ms DESC, started_at_utc DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_slow_queries_started_at ON slow_queries (started_at_utc DESC)",
 )
 
 

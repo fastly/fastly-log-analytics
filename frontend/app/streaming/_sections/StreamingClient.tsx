@@ -3,14 +3,16 @@
 import React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { useReportRangeAnchor } from '@/hooks/useReportRangeAnchor'
+import { usePlotlyRangeZoom } from '@/hooks/usePlotlyRangeZoom'
 import { useFilterStore } from '@/stores/filterStore'
 import type { FiltersPayload } from '@/types/filters'
 import { resolveRangeWire } from '@/lib/range-wire'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
-import { parseFromInput, formatDuration, formatDate } from '@/lib/date'
+import { formatDuration, formatDate } from '@/lib/date'
 import { Play, Users, Wifi, BarChart3, Gauge, Globe, Film, AlertTriangle, TrendingUp, Clock, UserPlus } from 'lucide-react'
 import { ReportLayout } from '@/components/ReportLayout'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
@@ -18,7 +20,7 @@ import { StatCard } from '@/components/ui/stat-card'
 import { DataTable } from '@/components/DataTable'
 import { STREAMING_INFO, OBJECT_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from './streamingInfo'
 import { CHART_COLORS } from '@/lib/chart-colors'
-import type { PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/plotly'
+import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
 
 import { formatCountMaybe } from '@/lib/format'
 const SESSIONS_LAYOUT: PlotlyLayout = {
@@ -116,51 +118,28 @@ function StreamingBody({
     }
   }, [queryClient])
 
-  const handleChartRelayout = React.useCallback((event: PlotlyRelayoutEvent) => {
-    if (event['xaxis.autorange'] === true || event['xaxis.showspikes'] !== undefined) return
-    const nested = Array.isArray(event['xaxis.range']) ? event['xaxis.range'] : []
-    const bound = (flat: unknown, fallback: unknown): string | number | undefined => {
-      const v = flat ?? fallback
-      return typeof v === 'string' || typeof v === 'number' ? v : undefined
-    }
-    const x0 = bound(event['xaxis.range[0]'], nested[0])
-    const x1 = bound(event['xaxis.range[1]'], nested[1])
-    if (x0 === undefined || x1 === undefined) return
-    try {
-      const toLocalStr = (val: string | number) => {
-        if (typeof val === 'number') {
-          const d = new Date(val)
-          const pad = (n: number) => n.toString().padStart(2, '0')
-          return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-        }
-        return val.replace(' ', 'T')
-      }
-      const parsedStart = parseFromInput(toLocalStr(x0), timezone)
-      const parsedEnd = parseFromInput(toLocalStr(x1), timezone)
-      if (parsedStart && parsedEnd) setRange(parsedStart, parsedEnd)
-    } catch { /* ignore unparseable zoom events */ }
-  }, [setRange, timezone])
+  const handleChartRelayout = usePlotlyRangeZoom(timezone, setRange)
 
   const cmcdQuery = useServiceQuery(
     ['cmcd', 'aggregates', activeServiceId, rangeKey, anchor, filterPayload],
-    async ({ signal }) => {
-      const { data, error } = await client.POST('/api/cmcd/aggregates', {
-        signal,
-        body: {
-          filters: filterPayload,
-          bucket_seconds: 300,
-          top_n: 30,
-          ...rangeBody,
-        },
-      })
-      if (error) throw error
-      return data
-    },
+    ({ signal }) =>
+      unwrapClient(
+        client.POST('/api/cmcd/aggregates', {
+          signal,
+          body: {
+            filters: filterPayload,
+            bucket_seconds: 300,
+            top_n: 30,
+            ...rangeBody,
+          },
+        }),
+      ),
     { staleTime: 30_000, refetchInterval: 30_000 },
   )
 
   const data = cmcdQuery.data
   const overview = data?.overview
+  const hasStreamingData = Boolean(data?.available && data?.has_data)
 
   // ── Chart data ──────────────────────────────────────────────────────────
 
@@ -333,7 +312,88 @@ function StreamingBody({
     )
   }
 
-  // ── Content ─────────────────────────────────────────────────────────────
+  if (data && !hasStreamingData) {
+    return (
+      <>
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-4 mb-6">
+          <StatCard
+            title="Total Sessions"
+            value="—"
+            sub="in selected range"
+            icon={Play}
+            loading={cmcdQuery.isLoading}
+            helpTitle={STREAMING_INFO.active_sessions.title}
+            helpContent={STREAMING_INFO.active_sessions.body}
+          />
+          <StatCard
+            title="Peak Viewers"
+            value="—"
+            sub="max concurrent"
+            icon={TrendingUp}
+            loading={cmcdQuery.isLoading}
+            helpTitle={STREAMING_INFO.peak_viewers.title}
+            helpContent={STREAMING_INFO.peak_viewers.body}
+          />
+          <StatCard
+            title="Avg Duration"
+            value="—"
+            sub="per session"
+            icon={Clock}
+            loading={cmcdQuery.isLoading}
+            helpTitle={STREAMING_INFO.avg_session_duration.title}
+            helpContent={STREAMING_INFO.avg_session_duration.body}
+          />
+          <StatCard
+            title="Rebuffer Rate"
+            value="—"
+            sub="sessions with starvation"
+            icon={AlertTriangle}
+            loading={cmcdQuery.isLoading}
+            helpTitle={STREAMING_INFO.rebuffer_rate.title}
+            helpContent={STREAMING_INFO.rebuffer_rate.body}
+          />
+          <StatCard
+            title="Avg Bitrate"
+            value="—"
+            sub="video segments"
+            icon={Gauge}
+            loading={cmcdQuery.isLoading}
+            helpTitle={STREAMING_INFO.avg_bitrate.title}
+            helpContent={STREAMING_INFO.avg_bitrate.body}
+          />
+          <StatCard
+            title="Avg Buffer"
+            value="—"
+            sub="video segments"
+            icon={BarChart3}
+            loading={cmcdQuery.isLoading}
+            helpTitle={STREAMING_INFO.avg_buffer.title}
+            helpContent={STREAMING_INFO.avg_buffer.body}
+          />
+          <StatCard
+            title="Median Throughput"
+            value="—"
+            sub="measured throughput"
+            icon={Wifi}
+            loading={cmcdQuery.isLoading}
+            helpTitle={STREAMING_INFO.median_throughput.title}
+            helpContent={STREAMING_INFO.median_throughput.body}
+          />
+        </div>
+        <AnalyticsCard
+          title="Streaming Telemetry"
+          icon={<Play className="h-4 w-4" />}
+          isLoading={cmcdQuery.isLoading}
+          isFetching={cmcdQuery.isFetching}
+          error={cmcdQuery.error as AnalyticsCardError | null}
+          isEmpty
+          className="h-[320px]"
+        >
+          <div />
+        </AnalyticsCard>
+      </>
+    )
+  }
 
   return (
     <>

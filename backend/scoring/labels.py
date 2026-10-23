@@ -20,14 +20,20 @@ endpoints want.
 
 from __future__ import annotations
 
+import time
 import uuid
 from contextvars import ContextVar
 from typing import Literal
 
 from backend.core.metadata import get_con
+from backend.utils.cache_registry import CacheRegistry
 
 Label = Literal["good", "bad", "neutral"]
 ALLOWED_LABELS: frozenset[str] = frozenset({"good", "bad", "neutral"})
+
+_LABEL_COUNTS_TTL_S = 30.0
+_LABEL_COUNTS_CACHE: dict[str, tuple[float, dict[str, int]]] = {}
+CacheRegistry.register("scoring.labels._LABEL_COUNTS_CACHE", _LABEL_COUNTS_CACHE)
 
 # Per-request memoization for list_labels / counts_by_label. The same
 # /admin/session-scoring page composite fires these against the same
@@ -64,6 +70,7 @@ def _bust_cache(service_id: str) -> None:
     update / delete even when no request-scope cache is active. Walks
     keys to catch any list_labels(limit=…) variants, not just the
     default-limit entry."""
+    _LABEL_COUNTS_CACHE.pop(service_id, None)
     cache = _REQUEST_LABELS_CACHE.get()
     if cache is not None:
         to_drop = [k for k in cache if isinstance(k, tuple) and len(k) >= 2 and k[1] == service_id]
@@ -238,7 +245,15 @@ def counts_by_label(service_id: str) -> dict[str, int]:
     if cache is not None:
         cached = cache.get(("counts", service_id))
         if cached is not None:
-            return cached
+            return dict(cached)
+
+    now = time.monotonic()
+    ttl_entry = _LABEL_COUNTS_CACHE.get(service_id)
+    if ttl_entry is not None and (now - ttl_entry[0]) < _LABEL_COUNTS_TTL_S:
+        out_copy = dict(ttl_entry[1])
+        if cache is not None:
+            cache[("counts", service_id)] = out_copy
+        return dict(out_copy)
 
     con = get_con(service_id)
     rows = con.execute(
@@ -248,6 +263,7 @@ def counts_by_label(service_id: str) -> dict[str, int]:
     out = {"good": 0, "bad": 0, "neutral": 0}
     for r in rows:
         out[r["label"]] = int(r["n"])
+    _LABEL_COUNTS_CACHE[service_id] = (now, dict(out))
     if cache is not None:
         cache[("counts", service_id)] = out
     return out

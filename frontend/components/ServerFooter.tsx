@@ -48,9 +48,12 @@ export async function ServerFooter() {
     envName = 'production'
   }
 
+  const rawMode = (process.env.DEPLOYMENT_MODE || '').trim().toLowerCase()
   const isHighScale =
-    ['1', 'true', 'yes', 'on'].includes((process.env.HIGH_SCALE_ENABLED || '').trim().toLowerCase()) ||
-    ['high_scale', 'high-scale'].includes((process.env.DEPLOYMENT_MODE || '').trim().toLowerCase())
+    rawMode === 'standard'
+      ? false
+      : rawMode === 'high_scale' ||
+        ['1', 'true', 'yes', 'on'].includes((process.env.HIGH_SCALE_ENABLED || '').trim().toLowerCase())
   const architecture = isHighScale ? 'high-scale' : 'standard'
   const commitHash = process.env.COMMIT_HASH || 'unknown'
 

@@ -1,10 +1,11 @@
+import { Suspense } from 'react'
 import { HydrationBoundary } from '@tanstack/react-query'
 
-import { fetchBootstrapServerSide } from '@/lib/ssr/bootstrap'
 import { fetchAssetsServerSide } from '@/lib/ssr/assets'
 import { seedDehydratedState } from '@/lib/ssr/seed'
-import { resolveServerServiceId } from '@/lib/ssr/service'
+import { resolvePageServiceId } from '@/lib/ssr/service'
 import AssetsClient from './_sections/AssetsClient'
+import AssetsLoading from './loading'
 
 export const dynamic = 'force-dynamic'
 
@@ -14,9 +15,20 @@ export default async function AssetsShieldPage({
   searchParams: Promise<{ service?: string | string[] }>
 }) {
   const params = await searchParams
-  const bootstrap = await fetchBootstrapServerSide()
-  const serviceId = resolveServerServiceId(params, bootstrap)
+  const serviceId = await resolvePageServiceId(params)
 
+  return (
+    <Suspense fallback={<AssetsLoading />}>
+      <AssetsHydratedSection serviceId={serviceId} />
+    </Suspense>
+  )
+}
+
+async function AssetsHydratedSection({
+  serviceId,
+}: {
+  serviceId: string | undefined
+}) {
   const now = new Date()
   const seed = await fetchAssetsServerSide(serviceId, now)
 
@@ -36,7 +48,7 @@ export default async function AssetsShieldPage({
 
   return (
     <HydrationBoundary state={dehydratedState}>
-      <AssetsClient />
+      <AssetsClient nowServerStr={now.toISOString()} />
     </HydrationBoundary>
   )
 }

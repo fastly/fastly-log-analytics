@@ -53,15 +53,14 @@ class CronHeartbeat:
         from backend.core.metadata.base import get_con, release_thread_connection
 
         try:
-            while not self._stop.wait(self._interval_s):
+            while self._job_name and not self._stop.wait(self._interval_s):
                 try:
                     con = get_con(self._service_id)
-                    if self._job_name:
-                        con.execute(
-                            "UPDATE job_runs SET heartbeat_at = ? "
-                            "WHERE service_id = ? AND job_name = ? AND status = 'running'",
-                            (time.time(), self._service_id, self._job_name),
-                        )
+                    con.execute(
+                        "UPDATE job_runs SET heartbeat_at = ? "
+                        "WHERE service_id = ? AND job_name = ? AND status = 'running'",
+                        (time.time(), self._service_id, self._job_name),
+                    )
                     con.commit()
                 except Exception:
                     logger.debug("cron heartbeat refresh failed for %s", self._service_id, exc_info=True)

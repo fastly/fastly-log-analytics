@@ -157,8 +157,36 @@ class HighScaleWorkerCoordinator:
             expected_epoch=epoch,
             now=now,
         )
-        for source in objects:
-            self._discover(service_id, domain, source, current_owner, epoch)
+        discovered_by_key: dict[str, Any] = {}
+        batch_discover_fn = (
+            getattr(self._control, "discover_sources_batch", None) if self._control is not None else None
+        )
+        if (
+            self._control is not None
+            and objects
+            and callable(batch_discover_fn)
+            and getattr(type(self._control), "discover_sources_batch", None) is not None
+        ):
+            try:
+                batch_records = batch_discover_fn(
+                    service_id,
+                    domain,
+                    objects,
+                    expected_owner=current_owner,
+                    expected_owner_epoch=epoch,
+                )
+                for rec in batch_records or ():
+                    obj_key = getattr(rec, "object_key", None)
+                    if isinstance(obj_key, str):
+                        discovered_by_key[obj_key] = rec
+            except TypeError:
+                for source in objects:
+                    discovered_by_key[source.object_key] = self._discover(
+                        service_id, domain, source, current_owner, epoch
+                    )
+        else:
+            for source in objects:
+                discovered_by_key[source.object_key] = self._discover(service_id, domain, source, current_owner, epoch)
 
         next_cursor = page.next_cursor
         if next_cursor is None:
@@ -199,7 +227,13 @@ class HighScaleWorkerCoordinator:
 
         active_sources: list[SourceObjectDescriptor] = []
         for s in objects:
-            if self._already_terminal(service_id, s.object_key):
+            rec = discovered_by_key.get(s.object_key)
+            rec_status = getattr(rec, "status", None)
+            if isinstance(rec_status, str):
+                is_terminal = rec_status in _TERMINAL_SOURCE_STATES
+            else:
+                is_terminal = self._already_terminal(service_id, s.object_key)
+            if is_terminal:
                 duplicates += 1
             else:
                 active_sources.append(s)
@@ -481,9 +515,9 @@ class HighScaleWorkerCoordinator:
         source: SourceObjectDescriptor,
         expected_owner: str,
         epoch: int,
-    ) -> None:
+    ) -> Any:
         if self._control is not None:
-            self._control.discover_source(
+            return self._control.discover_source(
                 service_id,
                 domain,
                 source.object_key,
@@ -493,15 +527,14 @@ class HighScaleWorkerCoordinator:
                 expected_owner=expected_owner,
                 expected_owner_epoch=epoch,
             )
-        else:
-            self._ledger.discover(
-                service_id,
-                domain,
-                source.object_key,
-                source.checksum,
-                size_bytes=source.size_bytes,
-                version=source.version,
-            )
+        return self._ledger.discover(
+            service_id,
+            domain,
+            source.object_key,
+            source.checksum,
+            size_bytes=source.size_bytes,
+            version=source.version,
+        )
 
     def _advance_cursor(self, service_id: str, domain: str, cursor: str | None, owner: str, epoch: int) -> None:
         if cursor is None:
@@ -534,18 +567,23 @@ class HighScaleWorkerCoordinator:
             source = self._ledger.source(service_id, object_key)
         elif hasattr(self._ledger, "get_source"):
             source = self._ledger.get_source(service_id, object_key)
-        return getattr(source, "status", None) in {
-            "appended",
-            "archived",
-            "acknowledged",
-            "source_deleted",
-            "source_missing",
-        }
+        return getattr(source, "status", None) in _TERMINAL_SOURCE_STATES
 
     @staticmethod
     def _require_high_scale(owner: str, service_id: str) -> None:
         if owner != "high_scale":
             raise RuntimeError(f"high-scale worker is not the owner for {service_id}")
+
+
+_TERMINAL_SOURCE_STATES = frozenset(
+    {
+        "appended",
+        "archived",
+        "acknowledged",
+        "source_deleted",
+        "source_missing",
+    }
+)
 
 
 class HighScaleLeaseSweeper:

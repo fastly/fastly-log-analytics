@@ -19,16 +19,10 @@
  *      `X-Page-Load-ID` header propagation.
  */
 import { test, expect } from '@playwright/test';
-import { adminGatewayContextOptions } from '../../../scripts/lib/admin_gateway_client.cjs';
 import { clsInitScript } from '../cls-observer'
+import { configureExternalAdminOrigin } from './helpers';
 
-const externalOrigin = process.env.PLAYWRIGHT_BASE_URL || '';
-if (externalOrigin) {
-  test.use({
-    baseURL: externalOrigin,
-    ...adminGatewayContextOptions(externalOrigin),
-  });
-}
+configureExternalAdminOrigin();
 
 test.describe('/admin/rum — Admin RUM Ingestion & Configuration Contract', () => {
   test.setTimeout(90_000);

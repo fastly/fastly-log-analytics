@@ -7,7 +7,18 @@ from typing import Any
 
 from backend import config as svcconfig
 from backend.core import duckdb as _db
-from backend.utils.dir_size import walk_dir_stats as _walk_dir_stats
+from backend.utils.dir_size import (
+    _DIR_SIZE_CACHE as _shared_dir_size_cache,
+)
+from backend.utils.dir_size import (
+    _DIR_STATS_CACHE as _shared_dir_stats_cache,
+)
+from backend.utils.dir_size import (
+    _dir_size_lock as _shared_dir_size_lock,
+)
+from backend.utils.dir_size import (
+    walk_dir_stats as _walk_dir_stats,
+)
 
 # Cache dirs hold thousands of small parquet files; recursively stat'ing
 # them on every /api/bootstrap, /api/services, and admin tile render was a
@@ -32,8 +43,8 @@ from backend.utils.dir_size import walk_dir_stats as _walk_dir_stats
 # hydration described in HydrateAdminToken, surfacing as a spurious
 # "Couldn't load services" 401 on top of the raw slowness).
 _DIR_STATS_TTL_SEC = 300.0
-_dir_stats_cache: dict[str, tuple[float, int, int]] = {}
-_dir_stats_lock = threading.Lock()
+_dir_stats_cache: dict[str, tuple[float, int, int]] = _shared_dir_stats_cache
+_dir_stats_lock = _shared_dir_size_lock
 _dir_stats_refresh_in_flight: set[str] = set()
 
 
@@ -43,8 +54,11 @@ def _refresh_dir_stats_background(path: str) -> None:
     on the same path coalesce to a single background walk."""
     try:
         total_size, file_count = _walk_dir_stats(path)
+        ts = time.monotonic()
         with _dir_stats_lock:
-            _dir_stats_cache[path] = (time.monotonic(), total_size, file_count)
+            _dir_stats_cache[path] = (ts, total_size, file_count)
+            if _dir_stats_cache is _shared_dir_stats_cache:
+                _shared_dir_size_cache[path] = (ts, total_size)
     finally:
         with _dir_stats_lock:
             _dir_stats_refresh_in_flight.discard(path)

@@ -13,12 +13,8 @@
 
 import { expect, test } from '@playwright/test'
 import type { DebugQuery } from '../../types/api'
+import { installClsObserver, measureWarmPaintAndCls } from '../cls-observer'
 import { getFirstServiceId as resolveActiveServiceId } from './helpers'
-
-type LayoutShiftEntry = PerformanceEntry & {
-  hadRecentInput?: boolean
-  value?: number
-}
 
 type RequestFactsDebugResponse = {
   _debug_queries?: DebugQuery[]
@@ -139,42 +135,12 @@ test.describe('High-Scale Request Facts Page Contract (/high-scale/request-facts
   test('6. Performance budget: FCP < 400ms / LCP < 1500ms and CLS <= 0.05 on warm load', async ({ page }) => {
     await page.goto('/high-scale/request-facts', { waitUntil: 'domcontentloaded' })
 
+    await installClsObserver(page)
     const start = Date.now()
     await page.reload({ waitUntil: 'domcontentloaded' })
     const totalTime = Date.now() - start
 
-    const metrics = await page.evaluate(() => {
-      return new Promise<{ fcp: number; lcp: number; cls: number }>((resolve) => {
-        let fcp = 0
-        let lcp = 0
-        let cls = 0
-        try {
-          const paintEntries = performance.getEntriesByType('paint')
-          const fcpEntry = paintEntries.find((e) => e.name === 'first-contentful-paint')
-          if (fcpEntry) fcp = fcpEntry.startTime
-
-          new PerformanceObserver((list) => {
-            const entries = list.getEntries()
-            if (entries.length > 0) {
-              lcp = entries[entries.length - 1].startTime
-            }
-          }).observe({ type: 'largest-contentful-paint', buffered: true })
-
-          new PerformanceObserver((list) => {
-            for (const entry of list.getEntries()) {
-              const layoutShift = entry as LayoutShiftEntry
-              if (!layoutShift.hadRecentInput) {
-                cls += layoutShift.value ?? 0
-              }
-            }
-          }).observe({ type: 'layout-shift', buffered: true })
-
-          setTimeout(() => resolve({ fcp, lcp, cls }), 1000)
-        } catch {
-          resolve({ fcp: 0, lcp: 0, cls: 0 })
-        }
-      })
-    })
+    const metrics = await measureWarmPaintAndCls(page, 1000)
 
     console.log(
       `[PERF /high-scale/request-facts] Reload: ${totalTime}ms | FCP: ${Math.round(metrics.fcp)}ms | LCP: ${Math.round(metrics.lcp)}ms | CLS: ${metrics.cls.toFixed(3)}`

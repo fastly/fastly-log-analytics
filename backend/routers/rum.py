@@ -18,6 +18,7 @@ backend/provision/rum_orchestrator.py.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import logging
@@ -33,7 +34,7 @@ from backend.core.duckdb import rum_source_for
 from backend.core.faro_versions import fetch_available_faro_versions, get_faro_versions_cached
 from backend.core.iceberg import execute_with_stale_view_retry
 from backend.core.request_context import RequestContext, build_request_context
-from backend.deps import _ConnectionHolder, require_admin
+from backend.deps import _ConnectionHolder, get_service_id, require_admin, require_service_access
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.provision import (
     RumDisableRequest,
@@ -126,26 +127,16 @@ def _resolve_rum_js_service_id(request: Request, service_id: str | None) -> str 
 
 @asset_router.get("/js/rum.js")
 async def get_rum_tracker(request: Request, service_id: str | None = None):
-    sid = _resolve_rum_js_service_id(request, service_id)
+    def _build_tracker() -> tuple[str | None, str | None]:
+        sid = _resolve_rum_js_service_id(request, service_id)
+        if not sid:
+            return None, None
+        from backend.provision.rum_assets import generate_rum_tracker_js
 
-    if not sid:
-        # No configured services found, return a silent dummy script
-        return Response(
-            content="/* RUM tracker disabled (no active services) */",
-            media_type="application/javascript",
-            headers={"Cache-Control": "private, no-cache, must-revalidate"},
-        )
-
-    # Generate tracker JS
-    from backend.provision.rum_assets import generate_rum_tracker_js
+        return sid, generate_rum_tracker_js(sid)
 
     try:
-        js_code = generate_rum_tracker_js(sid)
-        return Response(
-            content=js_code,
-            media_type="application/javascript",
-            headers={"Cache-Control": "private, no-cache, must-revalidate"},
-        )
+        sid, js_code = await asyncio.to_thread(_build_tracker)
     except Exception as e:
         logger.error("Failed to generate dynamic RUM tracker JS: %s", e, exc_info=True)
         return Response(
@@ -153,6 +144,20 @@ async def get_rum_tracker(request: Request, service_id: str | None = None):
             media_type="application/javascript",
             headers={"Cache-Control": "private, no-cache, must-revalidate"},
         )
+
+    if not sid or js_code is None:
+        # No configured services found, return a silent dummy script
+        return Response(
+            content="/* RUM tracker disabled (no active services) */",
+            media_type="application/javascript",
+            headers={"Cache-Control": "private, no-cache, must-revalidate"},
+        )
+
+    return Response(
+        content=js_code,
+        media_type="application/javascript",
+        headers={"Cache-Control": "private, no-cache, must-revalidate"},
+    )
 
 
 @asset_router.get("/js/faro-sdk.js")
@@ -327,9 +332,28 @@ async def disable_rum_handler(
     return sse_response(stream())
 
 
-@router.get("/{service_id}/rum/status", response_model=RumStatusResponse, response_model_exclude_unset=True)
-async def rum_status(request: Request, service_id: str = Path(...)) -> dict[str, Any]:
-    """Get RUM enable/disable status and VCL drift detection."""
+def _require_rum_status_access(
+    request: Request,
+    service_id: str | None = Depends(get_service_id),
+) -> str | None:
+    analyst_session = getattr(getattr(request, "state", None), "analyst_session", None)
+    if analyst_session is None:
+        return service_id
+    raw_service_ids = getattr(analyst_session, "service_ids", None)
+    if raw_service_ids is None or isinstance(raw_service_ids, (list, tuple, set, frozenset)):
+        if hasattr(request, "path_params"):
+            return require_service_access(request, service_id)
+        allowed = set(raw_service_ids or [])
+        if service_id not in allowed:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": "service_not_authorized", "service": service_id},
+            )
+    return service_id
+
+
+def _rum_status_sync(request: Request, service_id: str) -> dict[str, Any]:
+    _require_rum_status_access(request, service_id)
     cfg = svcconfig.load_config(service_id) or {}
     rum_cfg = cfg.get("rum") or {}
 
@@ -367,6 +391,16 @@ async def rum_status(request: Request, service_id: str = Path(...)) -> dict[str,
         "capture_events": rum_cfg.get("capture_events", True),
         "custom_condition": rum_cfg.get("custom_condition", ""),
     }
+
+
+@router.get("/{service_id}/rum/status", response_model=RumStatusResponse, response_model_exclude_unset=True)
+async def rum_status(
+    request: Request,
+    service_id: str = Path(...),
+    _access: str | None = Depends(_require_rum_status_access),
+) -> dict[str, Any]:
+    """Get RUM enable/disable status and VCL drift detection."""
+    return await asyncio.to_thread(_rum_status_sync, request, service_id)
 
 
 @router.get(
@@ -576,37 +610,64 @@ def _inject_telemetry(res: dict) -> dict:
     return debug_envelope(res, gated=False)
 
 
-@router.get(
-    "/{service_id}/rum/beacon-health", response_model=RumBeaconHealthResponse, response_model_exclude_unset=True
-)
-async def rum_beacon_health(
-    request: Request,
-    ctx: RequestContext = Depends(build_request_context),
-) -> dict[str, Any]:
-    """Check if RUM beacons are arriving (validation endpoint for setup).
-    Queries DuckDB views using execute_with_stale_view_retry.
-    """
+def _parse_rum_filter_specs(filters: str | None) -> dict[str, Any]:
+    """Parse and validate RUM ``filters`` query parameter into ``FilterSpec`` objects."""
+    if not filters:
+        return {}
+    from backend.high_scale.rum import _FILTER_COLUMNS, parse_rum_filters
+    from backend.models.common import FilterSpec
+    from backend.repositories.utils.filters import filter_spec_attr, normalize_filter_key
+
+    try:
+        raw_dict = parse_rum_filters(filters)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail=make_error("rum_filters_unsupported", _RUM_FILTERS_MESSAGE)
+        ) from exc
+
+    parsed_filters: dict[str, Any] = {}
+    unsupported: list[str] = []
+    for raw_key, spec in raw_dict.items():
+        values = [
+            value
+            for value in (filter_spec_attr(spec, "values") or [])
+            if value is not None and not (isinstance(value, str) and value.strip() == "")
+        ]
+        column = normalize_filter_key(raw_key)
+        if values and column not in _FILTER_COLUMNS:
+            unsupported.append(raw_key)
+            continue
+        if isinstance(spec, dict):
+            parsed_filters[raw_key] = FilterSpec(mode=spec.get("mode", "include"), values=spec.get("values", []))
+        elif isinstance(spec, FilterSpec):
+            parsed_filters[raw_key] = spec
+    if unsupported:
+        raise HTTPException(status_code=400, detail=make_error("rum_filters_unsupported", _RUM_FILTERS_MESSAGE))
+    return parsed_filters
+
+
+def _rum_beacon_health_sync(ctx: RequestContext) -> dict[str, Any]:
     high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.rum import rum_beacon_health as hs_rum_health
 
-        return _inject_telemetry(hs_rum_health(high_scale_service))
+        try:
+            return hs_rum_health(high_scale_service, source=ctx.source)
+        except TypeError:
+            return hs_rum_health(high_scale_service)
 
     service_id = ctx.service_id
     cfg = svcconfig.load_config(service_id) or {}
-    rum_cfg = cfg.get("rum") or {}
 
     if not svcconfig.is_rum_enabled(cfg):
-        return _inject_telemetry(
-            {
-                "enabled": False,
-                "beacon_fire_rate": 0,
-                "recent_beacons": 0,
-                "last_beacon_time": None,
-                "setup_complete": False,
-                "message": "RUM not enabled for this service",
-            }
-        )
+        return {
+            "enabled": False,
+            "beacon_fire_rate": 0,
+            "recent_beacons": 0,
+            "last_beacon_time": None,
+            "setup_complete": False,
+            "message": "RUM not enabled for this service",
+        }
 
     try:
         rum_source = rum_source_for(ctx.source)
@@ -630,28 +691,37 @@ async def rum_beacon_health(
                     pass
 
         has_data = recent_count > 0 or last_dt is not None
-        return _inject_telemetry(
-            {
-                "enabled": True,
-                "beacon_fire_rate": recent_count,  # count per hour
-                "recent_beacons": recent_count,  # total in last hour
-                "last_beacon_time": last_beacon_time,
-                "setup_complete": has_data,
-                "message": "Script installed and firing" if has_data else "Waiting for beacons...",
-            }
-        )
+        return {
+            "enabled": True,
+            "beacon_fire_rate": recent_count,  # count per hour
+            "recent_beacons": recent_count,  # total in last hour
+            "last_beacon_time": last_beacon_time,
+            "setup_complete": has_data,
+            "message": "Script installed and firing" if has_data else "Waiting for beacons...",
+        }
     except Exception as e:
         logger.error(f"[rum] Setup check failed for {service_id}: {e}")
-        return _inject_telemetry(
-            {
-                "enabled": True,
-                "beacon_fire_rate": 0,
-                "recent_beacons": 0,
-                "last_beacon_time": None,
-                "setup_complete": False,
-                "message": f"Setup check failed: {e}",
-            }
-        )
+        return {
+            "enabled": True,
+            "beacon_fire_rate": 0,
+            "recent_beacons": 0,
+            "last_beacon_time": None,
+            "setup_complete": False,
+            "message": f"Setup check failed: {e}",
+        }
+
+
+@router.get(
+    "/{service_id}/rum/beacon-health", response_model=RumBeaconHealthResponse, response_model_exclude_unset=True
+)
+async def rum_beacon_health(
+    request: Request,
+    ctx: RequestContext = Depends(build_request_context),
+) -> dict[str, Any]:
+    """Check if RUM beacons are arriving (validation endpoint for setup).
+    Queries DuckDB views using execute_with_stale_view_retry.
+    """
+    return _inject_telemetry(await asyncio.to_thread(_rum_beacon_health_sync, ctx))
 
 
 @router.get("/{service_id}/rum/analytics", response_model=RumAnalyticsResponse, response_model_exclude_unset=True)
@@ -679,7 +749,10 @@ async def rum_analytics(
 
         start_time, end_time = ctx.resolve_window(window)
         try:
-            hs_result = hs_rum_analytics(high_scale_service, start_time, end_time, parse_rum_filters(filters))
+            parsed_hs_filters = parse_rum_filters(filters)
+            hs_result = await asyncio.to_thread(
+                hs_rum_analytics, high_scale_service, start_time, end_time, parsed_hs_filters
+            )
         except ValueError as exc:
             raise HTTPException(
                 status_code=400, detail=make_error("rum_filters_unsupported", _RUM_FILTERS_MESSAGE)
@@ -718,25 +791,20 @@ async def rum_analytics(
     parsed_until = parse_iso_utc(end_time) if end_time else None
     until: datetime.datetime = parsed_until if parsed_until is not None else datetime.datetime.now(datetime.UTC)
 
-    # Parse filters JSON string into FilterSpec map
-    parsed_filters = {}
-    if filters:
-        try:
-            import json
+    # Parse filters JSON string into FilterSpec map and validate against _FILTER_COLUMNS
+    parsed_filters = _parse_rum_filter_specs(filters)
 
-            from backend.models.common import FilterSpec
-
-            raw_dict = json.loads(filters)
-            for k, v in raw_dict.items():
-                if isinstance(v, dict):
-                    parsed_filters[k] = FilterSpec(mode=v.get("mode", "include"), values=v.get("values", []))
-        except Exception:
-            logger.debug("rum_analytics: step failed (ignored)", exc_info=True)
-
+    from backend.high_scale.rum import _FILTER_COLUMNS
     from backend.repositories.utils.filters import build_where_clause
 
     # Build parameterized where clause using start_time, end_time, and filters
-    params, where_sql = build_where_clause(start_time, end_time, parsed_filters)
+    params, where_sql = build_where_clause(
+        start_time,
+        end_time,
+        parsed_filters,
+        actual_cols=list(_FILTER_COLUMNS),
+        exclude_invalid_ips=False,
+    )
 
     rum_source = rum_source_for(ctx.source)
 
@@ -755,8 +823,11 @@ async def rum_analytics(
                 source=rum_source,
             )
 
-        with _ConnectionHolder(rum_source, read_only=True) as rum_con:
-            db_res = execute_with_stale_view_retry(rum_con, rum_source, _get_analytics)
+        def _run_analytics_query():
+            with _ConnectionHolder(rum_source, read_only=True) as rum_con:
+                return execute_with_stale_view_retry(rum_con, rum_source, _get_analytics)
+
+        db_res = await asyncio.to_thread(_run_analytics_query)
 
         if db_res.get("no_data", False):
             return _inject_telemetry(
@@ -979,18 +1050,22 @@ async def rum_live_events(
     end_time: str | None = None,
     filters: str | None = None,
     ctx: RequestContext = Depends(build_request_context),
+    range_token: Annotated[str | None, Query()] = None,
+    anchor: Annotated[str | None, Query()] = None,
 ) -> list[dict[str, Any]]:
     """Fetch recent live beacons stream to feed frontend ticker.
     Queries unified view records in DuckDB using execute_with_stale_view_retry.
     """
+    window = SimpleNamespace(range_token=range_token, anchor=anchor, start_time=start_time, end_time=end_time)
     high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.rum import parse_rum_filters
         from backend.high_scale.rum import rum_live_events as hs_rum_live
 
-        start_time, end_time = ctx.clamp(start_time, end_time)
+        start_time, end_time = ctx.resolve_window(window)
         try:
-            return hs_rum_live(high_scale_service, start_time, end_time, 50, parse_rum_filters(filters))
+            parsed_hs_filters = parse_rum_filters(filters)
+            return await asyncio.to_thread(hs_rum_live, high_scale_service, start_time, end_time, 50, parsed_hs_filters)
         except ValueError as exc:
             raise HTTPException(
                 status_code=400, detail=make_error("rum_filters_unsupported", _RUM_FILTERS_MESSAGE)
@@ -998,8 +1073,8 @@ async def rum_live_events(
 
     service_id = ctx.service_id
 
-    # 1. Clamp timebounds against analyst session limits
-    start_time, end_time = ctx.clamp(start_time, end_time)
+    # 1. Resolve (token or absolute) then clamp against analyst session limits
+    start_time, end_time = ctx.resolve_window(window)
 
     # 2. Establish fallback ranges
     if not start_time and not end_time:
@@ -1010,16 +1085,10 @@ async def rum_live_events(
         start_time = iso_z(start_dt)
         end_time = iso_z(end_dt)
 
-    # Parse JSON filters
-    parsed_filters = {}
-    if filters:
-        import json
+    # Parse and validate JSON filters
+    parsed_filters = _parse_rum_filter_specs(filters)
 
-        try:
-            parsed_filters = json.loads(filters)
-        except Exception:
-            logger.debug("rum_live_events: json.loads failed (ignored)", exc_info=True)
-
+    from backend.high_scale.rum import _FILTER_COLUMNS
     from backend.repositories.utils.filters import build_where_clause
 
     rum_source = rum_source_for(ctx.source)
@@ -1050,7 +1119,9 @@ async def rum_live_events(
         def _get_live_events(con):
             from backend.utils.date_utils import iso_z
 
-            actual_cols = rum_repo.get_client_vitals_columns(con)
+            actual_cols = [c for c in rum_repo.get_client_vitals_columns(con) if c in _FILTER_COLUMNS] or list(
+                _FILTER_COLUMNS
+            )
 
             # Try a narrow 2-hour recent window first with partition pruning when window > 2h
             s_dt = parse_iso_utc(start_time) if start_time else None
@@ -1081,8 +1152,11 @@ async def rum_live_events(
             )
             return rum_repo.fetch_rum_live_events(con, where_sql=where_sql, params=params, source=rum_source)
 
-        with _ConnectionHolder(rum_source, read_only=True) as rum_con:
-            rows = execute_with_stale_view_retry(rum_con, rum_source, _get_live_events)
+        def _run_live_events_query():
+            with _ConnectionHolder(rum_source, read_only=True) as rum_con:
+                return execute_with_stale_view_retry(rum_con, rum_source, _get_live_events)
+
+        rows = await asyncio.to_thread(_run_live_events_query)
 
         events = []
         for (

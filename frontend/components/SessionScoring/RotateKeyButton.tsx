@@ -7,6 +7,7 @@ import { KeyRound, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { client, extractApiError } from '@/lib/api'
+import { scoringConfigCompositeKey } from '@/lib/queries/scoring'
 import type { components } from '@/types/api.generated'
 
 interface RotateKeyButtonProps {
@@ -57,6 +58,7 @@ export function RotateKeyButton({ serviceId, onRotated }: RotateKeyButtonProps) 
       setStatus({ kind: 'success', message: 'Key rotated; previous slot updated' })
       setOpen(false)
       qc.invalidateQueries({ queryKey: ['scoring-status', serviceId] })
+      qc.invalidateQueries({ queryKey: scoringConfigCompositeKey(serviceId) })
       qc.invalidateQueries({ queryKey: ['scoring-audit', serviceId] })
       onRotated?.()
       if (timerRef.current !== null) {

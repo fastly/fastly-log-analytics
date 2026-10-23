@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import defaultdict
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -186,6 +187,52 @@ def get_ingest_columns_sql(log_fields_config: dict | None = None) -> str:
         + ", ".join(f"'{escape_sql_literal(fid)}': '{escape_sql_literal(dtype)}'" for fid, dtype in hints.items())
         + "}"
     )
+
+
+# Pre-built SQL CASE expressions that decode single-char field codes back to
+# human-readable values. Handles both new logs (encoded) and old logs (full
+# strings) transparently. Unknown values pass through via ELSE.
+_DECODE_EXPRS: dict[str, str] = {
+    "c_speed": fc.duckdb_decode_case("c_speed", fc.CONN_SPEED_ENCODE),
+    "p_type": fc.duckdb_decode_case("p_type", fc.PROXY_TYPE_ENCODE),
+    "p_desc": fc.duckdb_decode_case("p_desc", fc.PROXY_DESC_ENCODE),
+}
+
+
+def _build_column_select_exprs(
+    src: dict | None,
+    log_fields_config: dict | None = None,
+    *,
+    source_file_expr: str | None = None,
+) -> list[str]:
+    """Build the canonical column SELECT expression list for raw-JSON ingest.
+
+    Decodes single-char field codes (``c_speed``, ``p_type``, ``p_desc``) and
+    strips the leading ``{service_id}--`` prefix from ``backend`` across both
+    the standard sync path (``ingest``) and the Celery DuckLake convert paths
+    (``convert_object``, ``convert_batch_objects``).
+    """
+    catalog_field_ids = get_catalog_field_ids(log_fields_config)
+    svc_id = (src or {}).get("logging_service_id") or (src or {}).get("name", "")
+    if svc_id:
+        escaped = escape_sql_literal(svc_id)
+        backend_expr = f"regexp_replace(\"backend\", '^{escaped}--', '') AS \"backend\""
+    else:
+        backend_expr = '"backend"'
+
+    field_selects: list[str] = []
+    for fid in catalog_field_ids:
+        if fid in ("backend", "_source_file"):
+            continue
+        safe_fid = fid.replace('"', '""')
+        if fid in _DECODE_EXPRS:
+            field_selects.append(f'{_DECODE_EXPRS[fid]} AS "{safe_fid}"')
+        else:
+            field_selects.append(f'"{safe_fid}"')
+    if source_file_expr is not None:
+        field_selects.append(f"{source_file_expr} AS _source_file")
+    field_selects.append(backend_expr)
+    return field_selects
 
 
 _FASTLY_FNAME_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}[-:]\d{2}[-:]\d{2})")
@@ -706,20 +753,6 @@ def list_fos_files(
             if max_files and len(new_files) >= max_files:
                 break
 
-        # Fallback: if minute-prefix scan was attempted but found zero objects in total
-        # (e.g. non-v3 key layout or legacy test environment), fall back to standard lookback scan.
-        # But if the service has confirmed v3 layout, an idle tick (0 objects in the last 5 minutes)
-        # must NOT scan the full lookback.
-        if use_minute_prefixes and total_listed == 0 and not has_v3_files:
-            sak = _resolve_start_after_key()
-            fb_kwargs = {"Bucket": src["bucket"], "Prefix": raw_prefix}
-            if sak:
-                fb_kwargs["StartAfter"] = f"{prefix_path}/{sak}" if prefix_path else sak
-            for page in paginator.paginate(**fb_kwargs):
-                yield from _process_contents(page.get("Contents", []))
-                if max_files and len(new_files) >= max_files:
-                    break
-
         if max_files and len(new_files) > max_files:
             new_files = new_files[:max_files]
 
@@ -963,16 +996,6 @@ def ingest(
     log_fields_config = cfg.get("log_fields", {}) if cfg else None
 
     columns_sql = get_ingest_columns_sql(log_fields_config)
-    catalog_field_ids = get_catalog_field_ids(log_fields_config)
-
-    # Pre-built SQL CASE expressions that decode single-char field codes back to
-    # human-readable values. Handles both new logs (encoded) and old logs (full
-    # strings) transparently. Unknown values pass through via ELSE.
-    _DECODE_EXPRS: dict[str, str] = {
-        "c_speed": fc.duckdb_decode_case("c_speed", fc.CONN_SPEED_ENCODE),
-        "p_type": fc.duckdb_decode_case("p_type", fc.PROXY_TYPE_ENCODE),
-        "p_desc": fc.duckdb_decode_case("p_desc", fc.PROXY_DESC_ENCODE),
-    }
 
     try:
         from backend.core.duckdb import get_memory_connection
@@ -1147,34 +1170,9 @@ def ingest(
                 ).fetchall():
                     count_map[fpath] = rcount
 
-                # ── Transform: backend prefix strip ──
+                # ── Transform: backend prefix strip + single-char field decode ──
                 # Types are already correct from columns= above — no TRY_CAST needed.
-                svc_id = src.get("logging_service_id") or src.get("name", "")
-
-                filename_expr = '"filename"'
-
-                if svc_id:
-                    # Security: consistent escape helper across the
-                    # ingest path. Functionally identical to the inline
-                    # .replace but routes through escape_sql_literal so
-                    # any future hardening on the canonical helper
-                    # (e.g., extra char classes) flows here.
-                    escaped = escape_sql_literal(svc_id)
-                    backend_expr = f"regexp_replace(\"backend\", '^{escaped}--', '') AS \"backend\""
-                else:
-                    backend_expr = '"backend"'
-
-                field_selects = []
-                for fid in catalog_field_ids:
-                    if fid in ("backend", "_source_file"):
-                        continue
-                    safe_fid = fid.replace('"', '""')
-                    if fid in _DECODE_EXPRS:
-                        field_selects.append(f'{_DECODE_EXPRS[fid]} AS "{safe_fid}"')
-                    else:
-                        field_selects.append(f'"{safe_fid}"')
-                field_selects.append(f"{filename_expr} AS _source_file")
-                field_selects.append(backend_expr)
+                field_selects = _build_column_select_exprs(src, log_fields_config, source_file_expr='"filename"')
 
                 where_clauses = []
                 where_params = []
@@ -1736,24 +1734,24 @@ def _discover_prefix_common(
     con = get_con(service_id)
     cur = con.cursor()
     newly_discovered: list[str] = []
-    for f_path in new_files:
-        f_size = fos_result.get("file_sizes", {}).get(f_path, 0)
-        object_key = f_path[len(s3_prefix) :] if f_path.startswith(s3_prefix) else f_path
+    file_sizes = fos_result.get("file_sizes", {})
+    now_ts = time.time()
+    orig_task = originating_task if run_id is not None else None
+    for i in range(0, len(new_files), _LEDGER_KEY_SLICE):
+        chunk_files = new_files[i : i + _LEDGER_KEY_SLICE]
+        values_sql = ", ".join(["(?, ?, ?, 'discovered', ?, ?, ?)"] * len(chunk_files))
+        params: list[Any] = []
+        for f_path in chunk_files:
+            f_size = file_sizes.get(f_path, 0)
+            object_key = f_path[len(s3_prefix) :] if f_path.startswith(s3_prefix) else f_path
+            params.extend((service_id, object_key, f_size, now_ts, orig_task, run_id))
         cur.execute(
             "INSERT INTO ingest_ledger "
             "(service_id, object_key, size_bytes, status, discovered_at, originating_task, originating_run_id) "
-            "VALUES (?, ?, ?, 'discovered', ?, ?, ?) ON CONFLICT DO NOTHING",
-            (
-                service_id,
-                object_key,
-                f_size,
-                time.time(),
-                originating_task if run_id is not None else None,
-                run_id,
-            ),
+            f"VALUES {values_sql} ON CONFLICT DO NOTHING RETURNING object_key",
+            tuple(params),
         )
-        if cur.rowcount > 0:
-            newly_discovered.append(object_key)
+        newly_discovered.extend(r[0] for r in cur.fetchall())
     con.commit()
 
     batches = 0
@@ -1807,6 +1805,8 @@ def _ledger_record_failure(
     error: str,
     expected_generation: int | None = None,
     error_kind: str = "transient",
+    *,
+    commit: bool = True,
 ) -> str:
     """Record a convert failure: bump attempts, keep the error, and either
     requeue ('discovered') or give up ('quarantined') after LEDGER_MAX_ATTEMPTS.
@@ -1843,18 +1843,15 @@ def _ledger_record_failure(
     )
     if cur.rowcount == 0 and expected_generation is not None:
         return "stale"
-    con.commit()
-    result = con.execute(
-        "SELECT status, attempts FROM ingest_ledger WHERE service_id = ? AND object_key = ?",
-        (service_id, object_key),
-    ).fetchone()
-    status = result[0] if result else "unknown"
+    if commit:
+        con.commit()
+    status = "quarantined" if terminal else "discovered"
     if status == "quarantined":
         logger.error(
             "[ledger] %s: %s QUARANTINED after %s failed convert attempts: %s",
             service_id,
             object_key,
-            result[1],
+            next_attempts,
             error,
         )
     else:
@@ -1862,7 +1859,7 @@ def _ledger_record_failure(
             "[ledger] %s: convert failed for %s (attempt %s; retry at %.3f): %s",
             service_id,
             object_key,
-            result[1],
+            next_attempts,
             next_attempt_at or 0,
             error,
         )
@@ -1879,6 +1876,33 @@ def _ledger_mark_committed(con, service_id: str, object_key: str, expected_gener
     )
     con.commit()
     return "committed" if cur.rowcount else "stale"
+
+
+def _ledger_mark_committed_batch(
+    con, service_id: str, object_keys: list[str], claimed_generations: dict[str, int]
+) -> set[str]:
+    """Batched counterpart of ``_ledger_mark_committed`` grouped by lease generation."""
+    if not object_keys:
+        return set()
+    cur = con.cursor()
+    now = time.time()
+    by_gen: dict[int, list[str]] = defaultdict(list)
+    for k in object_keys:
+        by_gen[claimed_generations[k]].append(k)
+    committed_keys: set[str] = set()
+    for gen, keys in by_gen.items():
+        for i in range(0, len(keys), _LEDGER_KEY_SLICE):
+            key_slice = keys[i : i + _LEDGER_KEY_SLICE]
+            placeholders = ",".join("?" * len(key_slice))
+            cur.execute(
+                "UPDATE ingest_ledger SET status='committed', committed_at=? "
+                f"WHERE service_id=? AND status='claimed' AND lease_generation=? AND object_key IN ({placeholders}) "
+                "RETURNING object_key",
+                (now, service_id, gen, *key_slice),
+            )
+            committed_keys.update(r[0] for r in cur.fetchall())
+    con.commit()
+    return committed_keys
 
 
 def _is_permanent_s3_missing(fos: Any, bucket: str, object_key: str) -> bool:
@@ -2006,7 +2030,10 @@ def convert_object(service_id: str, object_key: str, worker_id: str) -> str:
             # invariant the sync path enforces before writing its buffer
             # (ingest.py's `_ingest_staging` reads, e.g. the one behind
             # `_fetched = ... WHERE timestamp IS NOT NULL`).
-            clean_read_expr = f"(SELECT * FROM {read_expr} WHERE timestamp IS NOT NULL)"
+            clean_read_expr = (
+                f"(SELECT {', '.join(_build_column_select_exprs(src, log_fields_config))} "
+                f"FROM {read_expr} WHERE timestamp IS NOT NULL)"
+            )
 
             table_exists = bool(
                 duckdb_con.execute(
@@ -2325,10 +2352,13 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
             # WHERE timestamp IS NOT NULL: ignore_errors=true does NOT drop a
             # malformed line, it inserts a row with every field NULL, and
             # that garbage would land straight in the queryable lake table.
+            clean_batch_expr = (
+                f"(SELECT {', '.join(_build_column_select_exprs(src, log_fields_config))}, filename "
+                f"FROM {read_expr} WHERE timestamp IS NOT NULL)"
+            )
             select_sql = (
                 "SELECT r.* EXCLUDE (filename), m.s3 AS _source_file "
-                f"FROM {read_expr} r JOIN temp.srcmap m ON m.local = r.filename "
-                "WHERE r.timestamp IS NOT NULL"
+                f"FROM {clean_batch_expr} r JOIN temp.srcmap m ON m.local = r.filename"
             )
 
             table_exists = bool(
@@ -2383,6 +2413,7 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
             # single-file helper. Best-effort: the valid rows are already
             # durably committed and must never be failed by a reporting
             # problem.
+            file_sizes_by_local = {local_file: os.path.getsize(local_file) for local_file, _s3_path, _k in files}
             for local_file, _s3_path, object_key in files:
                 outcome = _new_object_outcome()
                 outcome["valid_records"] = int(valid_by_local.get(local_file, 0))
@@ -2416,7 +2447,7 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
                 metadata_db.insert_ingested_files(
                     service_id,
                     [
-                        (object_key, valid_by_local.get(local_file, 0), os.path.getsize(local_file))
+                        (object_key, valid_by_local.get(local_file, 0), file_sizes_by_local[local_file])
                         for local_file, _s3_path, object_key in files
                     ],
                 )
@@ -2428,10 +2459,13 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
         # The transaction is shared, so its failure is the whole batch's:
         # every key still claimed becomes retryable rather than stranded.
         for object_key in active:
-            _ledger_record_failure(con_meta, service_id, object_key, str(e), claimed_generations[object_key])
+            _ledger_record_failure(
+                con_meta, service_id, object_key, str(e), claimed_generations[object_key], commit=False
+            )
             outcome = _new_object_outcome()
             _mark_object_failed(outcome)
             batch_outcomes[object_key] = outcome
+        con_meta.commit()
         _record_ledger_batch_outcomes(service_id, batch_outcomes)
         summary["failed"] += len(active)
         return summary
@@ -2445,9 +2479,9 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
                 logger.debug("convert_batch_objects: _ducklake_detach failed (ignored)", exc_info=True)
             duckdb_con.close()
 
+    committed_keys = _ledger_mark_committed_batch(con_meta, service_id, active, claimed_generations)
     for object_key in active:
-        outcome_status = _ledger_mark_committed(con_meta, service_id, object_key, claimed_generations[object_key])
-        if outcome_status == "committed":
+        if object_key in committed_keys:
             summary["committed"] += 1
             batch_outcomes[object_key] = outcomes[object_key]
         else:
@@ -3521,10 +3555,13 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
                 )
     except Exception as e:
         for object_key in active:
-            _ledger_record_failure(con_meta, service_id, object_key, str(e), claimed_generations[object_key])
+            _ledger_record_failure(
+                con_meta, service_id, object_key, str(e), claimed_generations[object_key], commit=False
+            )
             outcome = _new_object_outcome()
             _mark_object_failed(outcome)
             batch_outcomes[object_key] = outcome
+        con_meta.commit()
         _record_ledger_batch_outcomes(service_id, batch_outcomes)
         summary["failed"] += len(active)
         return summary
@@ -3538,9 +3575,9 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
                 logger.debug("convert_batch_rum_objects: _ducklake_detach failed (ignored)", exc_info=True)
             duckdb_con.close()
 
+    committed_keys = _ledger_mark_committed_batch(con_meta, service_id, active, claimed_generations)
     for object_key in active:
-        outcome_status = _ledger_mark_committed(con_meta, service_id, object_key, claimed_generations[object_key])
-        if outcome_status == "committed":
+        if object_key in committed_keys:
             summary["committed"] += 1
             batch_outcomes[object_key] = outcomes[object_key]
         else:
@@ -3740,17 +3777,19 @@ def finalize_committed_raw(service_id: str, batch_size: int = 10_000) -> dict:
     claimed_at = time.time()
     claimed: list[str] = []
     cur = con.cursor()
-    for key in eligible:
+    for i in range(0, len(eligible), _LEDGER_KEY_SLICE):
+        key_slice = eligible[i : i + _LEDGER_KEY_SLICE]
+        placeholders = ",".join("?" * len(key_slice))
         cur.execute(
             "UPDATE ingest_ledger SET raw_delete_claim_token=?, raw_delete_claimed_at=? "
-            "WHERE service_id=? AND object_key=? AND status='committed' "
+            f"WHERE service_id=? AND object_key IN ({placeholders}) AND status='committed' "
             "AND published_at IS NOT NULL AND raw_deleted_at IS NULL "
             "AND committed_at < ? "
-            "AND (raw_delete_claim_token IS NULL OR raw_delete_claimed_at < ?)",
-            (claim_token, claimed_at, service_id, key, cutoff, claim_expired),
+            "AND (raw_delete_claim_token IS NULL OR raw_delete_claimed_at < ?) "
+            "RETURNING object_key",
+            (claim_token, claimed_at, service_id, *key_slice, cutoff, claim_expired),
         )
-        if cur.rowcount:
-            claimed.append(key)
+        claimed.extend(r[0] for r in cur.fetchall())
     con.commit()
     eligible = claimed
     if not eligible:
@@ -3778,24 +3817,29 @@ def finalize_committed_raw(service_id: str, batch_size: int = 10_000) -> dict:
         failed_keys = {err.get("Key") for err in (resp.get("Errors") or [])}
         now = time.time()
         cur = con.cursor()
-        for key in chunk:
-            if key in failed_keys:
-                cur.execute(
-                    "UPDATE ingest_ledger SET raw_delete_claim_token=NULL, raw_delete_claimed_at=NULL "
-                    "WHERE service_id=? AND object_key=? AND raw_delete_claim_token=? AND raw_deleted_at IS NULL",
-                    (service_id, key, claim_token),
-                )
-                con.commit()
-                _record_raw_delete_failure(service_id, key)
-                continue
+        failed_list = [k for k in chunk if k in failed_keys]
+        succeeded_list = [k for k in chunk if k not in failed_keys]
+        for j in range(0, len(failed_list), _LEDGER_KEY_SLICE):
+            f_slice = failed_list[j : j + _LEDGER_KEY_SLICE]
+            placeholders = ",".join("?" * len(f_slice))
+            cur.execute(
+                "UPDATE ingest_ledger SET raw_delete_claim_token=NULL, raw_delete_claimed_at=NULL "
+                f"WHERE service_id=? AND object_key IN ({placeholders}) AND raw_delete_claim_token=? AND raw_deleted_at IS NULL",
+                (service_id, *f_slice, claim_token),
+            )
+        for j in range(0, len(succeeded_list), _LEDGER_KEY_SLICE):
+            s_slice = succeeded_list[j : j + _LEDGER_KEY_SLICE]
+            placeholders = ",".join("?" * len(s_slice))
             cur.execute(
                 "UPDATE ingest_ledger SET raw_deleted_at=?, "
                 "raw_delete_claim_token=NULL, raw_delete_claimed_at=NULL "
-                "WHERE service_id=? AND object_key=? AND raw_delete_claim_token=? AND raw_deleted_at IS NULL",
-                (now, service_id, key, claim_token),
+                f"WHERE service_id=? AND object_key IN ({placeholders}) AND raw_delete_claim_token=? AND raw_deleted_at IS NULL",
+                (now, service_id, *s_slice, claim_token),
             )
-            deleted += int(cur.rowcount > 0)
+            deleted += int(cur.rowcount or 0)
         con.commit()
+        for key in failed_list:
+            _record_raw_delete_failure(service_id, key)
         if failed_keys:
             logger.warning("[ledger] %s: %d raw delete(s) failed in batch", service_id, len(failed_keys))
     return {"deleted": deleted, "eligible": len(eligible), "delete_after": True}

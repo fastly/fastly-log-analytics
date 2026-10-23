@@ -143,7 +143,12 @@ def _query_buffer_stats(con, src) -> tuple[int, Any, Any]:
     return ((row[0] or 0), row[1], row[2])
 
 
-def _authoritative_direct_stats(con, src) -> tuple[int, Any, Any] | None:
+def _authoritative_direct_stats(
+    con,
+    src,
+    *,
+    buffer_stats: tuple[int, Any, Any] | None = None,
+) -> tuple[int, Any, Any] | None:
     """Count/min/max read STRAIGHT from the committed DuckLake table plus the
     live buffer parquet, bypassing a possibly-poisoned per-connection baked
     iceberg view.
@@ -171,6 +176,13 @@ def _authoritative_direct_stats(con, src) -> tuple[int, Any, Any] | None:
             if snap_id is not None:
                 with _ducklake_stats_cache_lock:
                     cached = _ducklake_stats_cache.get((src_name, lake_table))
+                if (cached is None or cached[0] != snap_id) and lake_table == "logs":
+                    with _db_main._data_stats_cache_lock:
+                        data_cached = _db_main._data_stats_cache.get(src_name)
+                    if data_cached is not None and data_cached[0] == ("ducklake", snap_id):
+                        cached = (snap_id, data_cached[1], data_cached[2], data_cached[3])
+                        with _ducklake_stats_cache_lock:
+                            _ducklake_stats_cache[(src_name, lake_table)] = cached
 
             if cached is not None and cached[0] == snap_id:
                 lake_count, lake_min, lake_max = cached[1], cached[2], cached[3]
@@ -184,6 +196,14 @@ def _authoritative_direct_stats(con, src) -> tuple[int, Any, Any] | None:
                 if snap_id is not None:
                     with _ducklake_stats_cache_lock:
                         _ducklake_stats_cache[(src_name, lake_table)] = (snap_id, lake_count, lake_min, lake_max)
+                    if lake_table == "logs":
+                        with _db_main._data_stats_cache_lock:
+                            _db_main._data_stats_cache[src_name] = (
+                                ("ducklake", snap_id),
+                                lake_count,
+                                lake_min,
+                                lake_max,
+                            )
 
             if lake_count > 0:
                 counts.append(lake_count)
@@ -194,7 +214,7 @@ def _authoritative_direct_stats(con, src) -> tuple[int, Any, Any] | None:
     except Exception as e:
         logger.debug("[sync-status] direct lake stats unavailable: %s", e)
     try:
-        b_cnt, b_min, b_max = _query_buffer_stats(con, src)
+        b_cnt, b_min, b_max = buffer_stats if buffer_stats is not None else _query_buffer_stats(con, src)
         if b_cnt > 0:
             counts.append(b_cnt)
         if b_min is not None:
@@ -221,7 +241,6 @@ def get_sync_status(
 
     force=True performs a fresh listing.
     """
-    global _fos_cache
     src = source or _db_main._DEFAULT_SOURCE
     configured = is_configured(src)
 
@@ -336,10 +355,24 @@ def get_sync_status(
 
         cache_key = src["name"]
         direct_stats = None
+        queried_buffer_stats: tuple[int, Any, Any] | None = None
         if data_fp is not None:
             try:
                 with _db_main._data_stats_cache_lock:
                     cached = _db_main._data_stats_cache.get(cache_key)
+                if (
+                    (cached is None or cached[0] != data_fp)
+                    and lake_table is not None
+                    and isinstance(data_fp, tuple)
+                    and len(data_fp) == 2
+                    and data_fp[0] == "ducklake"
+                ):
+                    with _ducklake_stats_cache_lock:
+                        dl_cached = _ducklake_stats_cache.get((cache_key, lake_table))
+                    if dl_cached is not None and dl_cached[0] == data_fp[1]:
+                        cached = (data_fp, dl_cached[1], dl_cached[2], dl_cached[3])
+                        with _db_main._data_stats_cache_lock:
+                            _db_main._data_stats_cache[cache_key] = cached
                 if cached is not None and cached[0] == data_fp:
                     d_count, d_min, d_max = cached[1], cached[2], cached[3]
                 else:
@@ -361,8 +394,17 @@ def get_sync_status(
                     d_max = d_row[2] if d_row else None
                     with _db_main._data_stats_cache_lock:
                         _db_main._data_stats_cache[cache_key] = (data_fp, d_count, d_min, d_max)
+                    if (
+                        lake_table is not None
+                        and isinstance(data_fp, tuple)
+                        and len(data_fp) == 2
+                        and data_fp[0] == "ducklake"
+                    ):
+                        with _ducklake_stats_cache_lock:
+                            _ducklake_stats_cache[(cache_key, lake_table)] = (data_fp[1], d_count, d_min, d_max)
 
                 b_count, b_min, b_max = _query_buffer_stats(con, src)
+                queried_buffer_stats = (b_count, b_min, b_max)
 
                 mins = [m for m in (d_min, b_min) if m is not None]
                 maxs = [m for m in (d_max, b_max) if m is not None]
@@ -423,7 +465,11 @@ def get_sync_status(
                 # source of truth, and the lake min/max are catalog-stat reads
                 # (no parquet-footer scan), so the split-stats fast path's
                 # perf win is preserved.
-                direct = direct_stats if direct_stats is not None else _authoritative_direct_stats(con, src)
+                direct = (
+                    direct_stats
+                    if direct_stats is not None
+                    else _authoritative_direct_stats(con, src, buffer_stats=queried_buffer_stats)
+                )
                 if direct is not None:
                     d_earliest, d_latest = direct[1], direct[2]
                     if d_latest is not None and (latest_log_at is None or d_latest > latest_log_at):
@@ -439,7 +485,11 @@ def get_sync_status(
                 # a skip_view_update status connection holding an empty view
                 # persists a stale latest_log_at forever (the GCE header flap
                 # that read Sept-22 while the lake was fresh — trap #33/#35).
-                direct = direct_stats if direct_stats is not None else _authoritative_direct_stats(con, src)
+                direct = (
+                    direct_stats
+                    if direct_stats is not None
+                    else _authoritative_direct_stats(con, src, buffer_stats=queried_buffer_stats)
+                )
                 if direct is not None:
                     local_rows = direct[0]
                     earliest_log_at = direct[1]
@@ -590,17 +640,20 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
 
     durable_serving = svcconfig.is_durable_serving_mode(source)
     # ── 1. Non-DuckDB I/O (runs outside / before the exclusive WAL lock) ─────
-    buf_bytes = None
-    try:
-        from backend.utils.dir_size import _get_dir_size
-
-        buf_dir = _cache_dir(source)
-        if os.path.isdir(buf_dir):
-            buf_bytes = _get_dir_size(buf_dir)
-    except Exception:
-        logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
-
     cached_status = src.get("status") or {}
+    buf_bytes = None
+    if not include_top_values and "buffer_size_bytes" in cached_status:
+        buf_bytes = cached_status.get("buffer_size_bytes")
+    else:
+        try:
+            from backend.utils.dir_size import _get_dir_size
+
+            buf_dir = _cache_dir(source)
+            if os.path.isdir(buf_dir):
+                buf_bytes = _get_dir_size(buf_dir)
+        except Exception:
+            logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
+
     iceberg_bytes = None
     iceberg_files = None
     if not include_top_values and "iceberg_bytes" in cached_status and "iceberg_files" in cached_status:
@@ -1070,7 +1123,7 @@ _schema_cache: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_SCHEM
 def _clear_schema_cache(source_name: str | None = None):
     """Clear the schema cache. If source_name is provided, only clear that source."""
     if source_name:
-        for k in _schema_cache.keys():
+        for k in list(_schema_cache.keys()):
             if k[0] == source_name:
                 _schema_cache.pop(k, None)
     else:
@@ -1191,34 +1244,37 @@ def get_asn_names(service_id: str, asns: list) -> dict:
 
             import cymruwhois  # type: ignore
 
-            prev_timeout = socket.getdefaulttimeout()
-            if prev_timeout is None:
-                socket.setdefaulttimeout(2.0)
-            try:
-                c = cymruwhois.Client()
-                orig_connect = getattr(c, "_connect", None)
-                if callable(orig_connect):
+            c = cymruwhois.Client()
+            orig_connect = getattr(c, "_connect", None)
+            if callable(orig_connect):
 
-                    def _safe_connect() -> None:
+                def _safe_connect() -> None:
+                    host = getattr(c, "host", None)
+                    port = getattr(c, "port", None)
+                    if isinstance(host, str) and isinstance(port, int):
+                        sock = socket.create_connection((host, port), timeout=2.0)
+                        c.socket = sock
+                        c.file = sock.makefile("r", encoding="utf-8", errors="replace")
+                    else:
                         orig_connect()
+                        sock_obj = getattr(c, "socket", None)
+                        if sock_obj is not None and hasattr(sock_obj, "settimeout"):
+                            sock_obj.settimeout(2.0)
                         reconf = getattr(getattr(c, "file", None), "reconfigure", None)
                         if callable(reconf):
                             reconf(encoding="utf-8", errors="replace")
 
-                    c._connect = _safe_connect
-                queries = [f"AS{asn}" for asn in need]
-                for result in c.lookupmany(queries):
-                    if result and result.asn:
-                        asn_int = int(result.asn)
-                        raw_owner = result.owner or f"AS{asn_int}"
-                        if " - " in raw_owner:
-                            name = raw_owner.split(" - ", 1)[1]
-                        else:
-                            name = raw_owner
-                        resolved[asn_int] = name
-            finally:
-                if prev_timeout is None:
-                    socket.setdefaulttimeout(None)
+                c._connect = _safe_connect
+            queries = [f"AS{asn}" for asn in need]
+            for result in c.lookupmany(queries):
+                if result and result.asn:
+                    asn_int = int(result.asn)
+                    raw_owner = result.owner or f"AS{asn_int}"
+                    if " - " in raw_owner:
+                        name = raw_owner.split(" - ", 1)[1]
+                    else:
+                        name = raw_owner
+                    resolved[asn_int] = name
         except Exception as exc:
             logger.warning("ASN resolution failed: %s", type(exc).__name__)
 

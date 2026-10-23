@@ -560,7 +560,8 @@ def _get_sessions_from_rollup(
                 FROM all_skinny
             ),
             top_sessions AS (
-                SELECT ip, ja4, sid, session_start, session_end, flagged
+                SELECT ip, ja4, sid, session_start, session_end, flagged,
+                       COUNT(*) OVER () AS total_sessions
                 FROM skinny_flagged
                 {where_sql}
                 ORDER BY {sort_col_sql} {sort_dir_sql}
@@ -586,14 +587,15 @@ def _get_sessions_from_rollup(
                        SUM(f.cmcd_count) AS cmcd_count,
                        CASE WHEN SUM(f.rtt_count) > 0 THEN SUM(f.rtt_sum) / SUM(f.rtt_count) / 1000.0 ELSE NULL END AS median_rtt_ms,
                        CAST(NULL AS BIGINT) AS unique_urls,
-                       t.flagged
+                       t.flagged,
+                       t.total_sessions
                 FROM top_sessions t
                 JOIN filtered f
                   ON f.ip = t.ip
                  AND f.ja4 IS NOT DISTINCT FROM t.ja4
                  AND f.first_ts >= t.session_start
                  AND f.last_ts <= t.session_end
-                GROUP BY t.ip, t.ja4, t.sid, t.session_start, t.session_end, t.flagged
+                GROUP BY t.ip, t.ja4, t.sid, t.session_start, t.session_end, t.flagged, t.total_sessions
             )
             SELECT * FROM agg
             ORDER BY {sort_col_sql} {sort_dir_sql}
@@ -645,8 +647,12 @@ def _get_sessions_from_rollup(
     section_timings.append({"section": "sessions_rollup_query", "time_ms": round((time.perf_counter() - _t) * 1000, 2)})
 
     sessions: list[dict] = []
+    total = 0
     for row in rows:
         d = dict(zip(col_names, row))
+        row_total = d.pop("total_sessions", None)
+        if row_total is not None and total == 0:
+            total = int(row_total)
         for k in ("session_start", "session_end"):
             if d.get(k) is not None:
                 d[k] = str(d[k])
@@ -655,7 +661,8 @@ def _get_sessions_from_rollup(
         d.pop("rtt_count", None)
         d["is_streaming"] = d.get("cmcd_count", 0) > 0
         sessions.append(d)
-    total = len(sessions)
+    if total < len(sessions):
+        total = len(sessions)
     asn_names = _build_asn_label_map(sessions, src)
 
     return {

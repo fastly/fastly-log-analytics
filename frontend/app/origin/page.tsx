@@ -1,13 +1,12 @@
 import { HydrationBoundary } from '@tanstack/react-query'
 
-import { fetchBootstrapServerSide } from '@/lib/ssr/bootstrap'
 import {
   fetchOriginServerSide,
   ORIGIN_SSR_DEFAULTS,
   ORIGIN_SSR_SECTIONS,
 } from '@/lib/ssr/origin'
 import { seedDehydratedState } from '@/lib/ssr/seed'
-import { resolveServerServiceId } from '@/lib/ssr/service'
+import { resolvePageServiceId } from '@/lib/ssr/service'
 import OriginClient from './_sections/OriginClient'
 
 // Per-request RSC shell for /origin. Pre-fetches the DEFAULT origin aggregates
@@ -69,8 +68,7 @@ export default async function OriginPage({
   searchParams: Promise<{ service?: string | string[] }>
 }) {
   const params = await searchParams
-  const bootstrap = await fetchBootstrapServerSide()
-  const serviceId = resolveServerServiceId(params, bootstrap)
+  const serviceId = await resolvePageServiceId(params)
 
   return (
     <Suspense fallback={<OriginLoading />}>

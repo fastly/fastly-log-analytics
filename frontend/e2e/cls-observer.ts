@@ -44,3 +44,41 @@ export async function installClsObserver(page: Page): Promise<void> {
 export async function readClsScore(page: Page): Promise<number> {
   return page.evaluate(() => Number(window.__clsScore ?? 0))
 }
+
+/**
+ * Wait `settleMs` after a warm reload and return `{ fcp, lcp, cls }` using the
+ * shared `clsInitScript` accumulator (`window.__clsScore`).
+ */
+export async function measureWarmPaintAndCls(
+  page: Page,
+  settleMs = 500,
+): Promise<{ fcp: number; lcp: number; cls: number }> {
+  return page.evaluate((waitMs) => {
+    return new Promise<{ fcp: number; lcp: number; cls: number }>((resolve) => {
+      let fcp = 0
+      let lcp = 0
+      try {
+        const paintEntries = performance.getEntriesByType('paint')
+        const fcpEntry = paintEntries.find((e) => e.name === 'first-contentful-paint')
+        if (fcpEntry) {
+          fcp = fcpEntry.startTime
+        }
+        new PerformanceObserver((list) => {
+          const entries = list.getEntries()
+          if (entries.length > 0) {
+            lcp = entries[entries.length - 1].startTime
+          }
+        }).observe({ type: 'largest-contentful-paint', buffered: true })
+      } catch {
+        // ignore if unsupported
+      }
+      setTimeout(() => {
+        resolve({
+          fcp,
+          lcp,
+          cls: Number(window.__clsScore ?? 0),
+        })
+      }, waitMs)
+    })
+  }, settleMs)
+}

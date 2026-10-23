@@ -215,7 +215,7 @@ async def prefill(source: dict = Depends(get_source)):
     timer = SectionTimer()
     section_timings = timer.entries
 
-    fast_result, prov = _compute_prefill_rates(source)
+    fast_result, prov = await asyncio.to_thread(_compute_prefill_rates, source)
     result: dict = {
         "requests_per_day": None,
         "edge_requests_per_day": None,

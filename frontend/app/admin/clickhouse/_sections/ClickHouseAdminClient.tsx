@@ -17,7 +17,8 @@ import {
   ShieldAlert,
 } from 'lucide-react'
 
-import { adminFetch, getApiBase } from '@/lib/api'
+import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { queryKeys } from '@/lib/query-keys'
 import { useServiceStore } from '@/stores/serviceStore'
 import type { components } from '@/types/api.generated'
@@ -40,25 +41,13 @@ async function fetchClickHouseStatus(
   serviceId: string,
   signal?: AbortSignal,
 ): Promise<ClickHouseStatusResponse> {
-  const response = await adminFetch(
-    `${getApiBase()}/api/admin/clickhouse/status?service_id=${encodeURIComponent(serviceId)}`,
-    { signal },
+  return unwrapClient(
+    client.GET('/api/admin/clickhouse/status', {
+      params: { query: { service_id: serviceId } },
+      signal,
+    }),
+    'Failed to load ClickHouse status',
   )
-  const payload = await response.json().catch(() => null)
-  // Both 200 (ok / disabled) and 503 (unavailable) return a valid ClickHouseStatusResponse payload
-  if (
-    (response.status === 200 || response.status === 503) &&
-    payload &&
-    typeof payload === 'object' &&
-    'health' in payload
-  ) {
-    return payload as ClickHouseStatusResponse
-  }
-  const detailMsg =
-    payload?.detail?.message ||
-    payload?.detail?.error ||
-    `Failed to load ClickHouse status (HTTP ${response.status})`
-  throw new Error(detailMsg)
 }
 
 function formatAgeSeconds(seconds: number | null | undefined): string {
@@ -102,23 +91,13 @@ export default function ClickHouseAdminClient({ initialServiceId }: ClickHouseAd
   })
 
   const replayMutation = useMutation({
-    mutationFn: async (payload: ClickHouseReplayRequest): Promise<ClickHouseReplayResponse> => {
-      const response = await adminFetch(`${getApiBase()}/api/admin/clickhouse/replay`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-      const body = await response.json().catch(() => null)
-      if (response.ok && body) {
-        return body as ClickHouseReplayResponse
-      }
-      const detail = body?.detail
-      const msg =
-        (detail && !Array.isArray(detail) ? detail.message || detail.error : null) ||
-        (Array.isArray(detail) ? detail.map((d: { msg?: string }) => d.msg).join('; ') : null) ||
-        `Replay failed (HTTP ${response.status})`
-      throw new Error(msg)
-    },
+    mutationFn: async (payload: ClickHouseReplayRequest): Promise<ClickHouseReplayResponse> =>
+      unwrapClient(
+        client.POST('/api/admin/clickhouse/replay', {
+          body: payload,
+        }),
+        'Replay failed',
+      ),
     onSuccess: (data) => {
       setReplayError(null)
       setReplayResult(data)
@@ -287,7 +266,7 @@ export default function ClickHouseAdminClient({ initialServiceId }: ClickHouseAd
             <div className="rounded-md border bg-muted/20 p-3">
               <div className="text-xs text-muted-foreground">Engine Mode</div>
               <div className="mt-1 text-lg font-semibold" data-testid="admin-clickhouse-vital-enabled">
-                {status ? (status.enabled ? 'High-Scale (Enabled)' : 'Standard (Disabled)') : '—'}
+                {status ? (status.enabled ? 'High-Scale (Enabled)' : 'Disabled') : '—'}
               </div>
               <div className="text-xs text-muted-foreground mt-0.5">
                 Schema Version: <span className="font-mono">{status?.schema_version ?? '—'}</span>
@@ -419,7 +398,7 @@ export default function ClickHouseAdminClient({ initialServiceId }: ClickHouseAd
             >
               {isEnabled
                 ? 'No active publication generation is currently registered for this service.'
-                : 'Active generation metadata is not applicable while ClickHouse is disabled in Standard mode.'}
+                : 'Active generation metadata is not applicable while ClickHouse is disabled.'}
             </div>
           )}
         </CardContent>

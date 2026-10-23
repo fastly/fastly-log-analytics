@@ -6,6 +6,7 @@ import { Users } from 'lucide-react'
 import dynamic from 'next/dynamic'
 
 import { client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { queryKeys } from '@/lib/query-keys'
 import { useIsDataReady } from '@/hooks/useIsDataReady'
 import { useScoringLabels } from '@/hooks/useScoringLabels'
@@ -110,24 +111,24 @@ function SessionsBody({
   const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
     queryKey: ['sessions', 'list', activeServiceId, startTime, endTime, filterPayload, flaggedOnly, streamingOnly, minReqs, min4xxPct],
     queryFn: async ({ signal }) => {
-      const { data, error } = await client.POST("/api/sessions", {
-        signal,
-        body: {
-          start_time: startTime,
-          end_time: endTime,
-          filters: filterPayload,
-          page: 1,
-          limit: 100,
-          sort_by: 'session_start',
-          sort_dir: 'desc',
-          flagged_only: flaggedOnly,
-          streaming_only: streamingOnly,
-          min_reqs_flag: minReqs !== '' ? minReqs : undefined,
-          min_4xx_pct_flag: min4xxPct !== '' ? min4xxPct : undefined,
-        }
-      })
-      if (error) throw error
-      return data as SessionsResponse | undefined
+      return (await unwrapClient(
+        client.POST("/api/sessions", {
+          signal,
+          body: {
+            start_time: startTime,
+            end_time: endTime,
+            filters: filterPayload,
+            page: 1,
+            limit: 100,
+            sort_by: 'session_start',
+            sort_dir: 'desc',
+            flagged_only: flaggedOnly,
+            streaming_only: streamingOnly,
+            min_reqs_flag: minReqs !== '' ? minReqs : undefined,
+            min_4xx_pct_flag: min4xxPct !== '' ? min4xxPct : undefined,
+          },
+        }),
+      )) as SessionsResponse | undefined
     },
     enabled: isReady && !rangeExceedsSevenDays
   })

@@ -14,11 +14,7 @@
 
 import { expect, test } from '@playwright/test'
 import type { DebugQuery } from '../../types/api'
-
-type LayoutShiftEntry = PerformanceEntry & {
-  hadRecentInput?: boolean
-  value?: number
-}
+import { installClsObserver, measureWarmPaintAndCls } from '../cls-observer'
 
 type SessionsDebugResponse = {
   _debug_queries?: DebugQuery[]
@@ -192,37 +188,12 @@ test.describe('User Sessions Explorer Page Contract (/sessions)', () => {
     // Prime cache on first visit
     await page.goto('/sessions', { waitUntil: 'domcontentloaded' })
 
+    await installClsObserver(page)
     const start = Date.now()
     await page.reload({ waitUntil: 'domcontentloaded' })
     const totalTime = Date.now() - start
 
-    const metrics = await page.evaluate(() => {
-      return new Promise<{ lcp: number; cls: number }>((resolve) => {
-        let lcp = 0
-        let cls = 0
-        try {
-          new PerformanceObserver((list) => {
-            const entries = list.getEntries()
-            if (entries.length > 0) {
-              lcp = entries[entries.length - 1].startTime
-            }
-          }).observe({ type: 'largest-contentful-paint', buffered: true })
-
-          new PerformanceObserver((list) => {
-            for (const entry of list.getEntries()) {
-              const layoutShift = entry as LayoutShiftEntry
-              if (!layoutShift.hadRecentInput) {
-                cls += layoutShift.value ?? 0
-              }
-            }
-          }).observe({ type: 'layout-shift', buffered: true })
-
-          setTimeout(() => resolve({ lcp, cls }), 1000)
-        } catch {
-          resolve({ lcp: 0, cls: 0 })
-        }
-      })
-    })
+    const metrics = await measureWarmPaintAndCls(page, 1000)
 
     console.log(`[PERF /sessions] Reload: ${totalTime}ms | LCP: ${Math.round(metrics.lcp)}ms | CLS: ${metrics.cls.toFixed(3)}`)
     expect(totalTime).toBeLessThan(10_000)

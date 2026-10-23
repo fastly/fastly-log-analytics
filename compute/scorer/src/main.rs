@@ -278,22 +278,15 @@ fn score_request(req: &Request) -> Response {
             // Leaving empty avoids re-running the full normalize() pass.
             category: "",
         });
-    // The skip-gram anchor is treated exactly like prev_route above: it is
-    // NOT taken from the unauthenticated X-Edge-Prev-Anchor header. A client
-    // could otherwise supply a SEEN high-probability anchor route; because the
-    // L2 transition prob is `direct_p.max(anchor_p * BETA)` (scorer.rs), a
-    // client-chosen anchor can only RAISE trans_prob and thus DEPRESS the L2
-    // sequence-anomaly score — the same evasion class closed for prev_route in
-    // audit F009. There is no trusted server-side source for the anchor today
-    // (it is not carried in the sealed cookie state), so it stays None and the
-    // skip-gram self-disables, matching the safe-by-default L2 fallback. The
-    // `prev_anchor_raw` binding survives only for the debug log so operators
-    // can see what the client tried to send.
-    let prev_anchor: Option<normalize::Route> = None;
+    // The skip-gram anchor is treated-like prev_route above: it is NOT taken
+    // from the unauthenticated X-Edge-Prev-Anchor header (audit F009). There is
+    // no trusted server-side source for the anchor today (it is not carried in
+    // the sealed cookie state), so `prev_anchor_route` is passed as `None`
+    // below and the skip-gram self-disables.
 
     // ── Score. ───────────────────────────────────────────────────────────────
     // Lazy matrix load: L2 only fires when there's a trusted previous-route
-    // signal (the sealed-cookie prev_route; prev_anchor is forced None above).
+    // signal (the sealed-cookie prev_route).
     // Cookie-missing requests — the large majority — never use the matrix, so
     // skip the ~1.8MB KV fetch entirely for them. The fetch (and its cold-start
     // cost) was pushing the scorer round-trip past the timeout budget and
@@ -301,7 +294,7 @@ fn score_request(req: &Request) -> Response {
     // still serving the matrix (cached per-instance) to L2-eligible requests.
     // Behaviour is unchanged: with prev_route None, L2 has no transition to
     // score regardless of whether the matrix is loaded.
-    let needs_matrix = prev_route.is_some() || prev_anchor.is_some();
+    let needs_matrix = prev_route.is_some();
     let matrix = if needs_matrix { matrix::load_matrix() } else { None };
     if needs_matrix && matrix.is_none() {
         // We needed the matrix but it's unlinked/empty/unparseable. L2
@@ -314,7 +307,7 @@ fn score_request(req: &Request) -> Response {
         cookie_compliance: compliance,
         current_route: &current_route,
         prev_route: prev_route.as_ref(),
-        prev_anchor_route: prev_anchor.as_ref(),
+        prev_anchor_route: None,
         matrix,
         l2_enforce_enabled,
         l2_days_since_optin,

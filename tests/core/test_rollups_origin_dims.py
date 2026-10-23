@@ -16,6 +16,7 @@ field='ost' out of the existing all_fields.parquet bundle and is exact.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
@@ -280,26 +281,26 @@ def test_readers_eligibility_gates(tmp_path):
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
     src = {"name": "svc-od-6"}
-    con = duckdb.connect(":memory:")
-    runner = QueryRunner(con, src)
+    with contextlib.closing(duckdb.connect(":memory:")) as con:
+        runner = QueryRunner(con, src)
 
-    readers = [
-        lambda s, e, hf: runner.try_origin_pop_latency_from_rollup(s, e, has_filters=hf, limit=30),
-        lambda s, e, hf: runner.try_origin_ip_health_from_rollup(s, e, has_filters=hf, limit=30),
-        lambda s, e, hf: runner.try_origin_path_breakdown_from_rollup(s, e, has_filters=hf),
-        lambda s, e, hf: runner.try_origin_status_from_rollup(s, e, has_filters=hf),
-    ]
+        readers = [
+            lambda s, e, hf: runner.try_origin_pop_latency_from_rollup(s, e, has_filters=hf, limit=30),
+            lambda s, e, hf: runner.try_origin_ip_health_from_rollup(s, e, has_filters=hf, limit=30),
+            lambda s, e, hf: runner.try_origin_path_breakdown_from_rollup(s, e, has_filters=hf),
+            lambda s, e, hf: runner.try_origin_status_from_rollup(s, e, has_filters=hf),
+        ]
 
-    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-        for call in readers:
-            # has_filters → None
-            assert call("2026-06-01T00:00:00Z", "2026-06-15T00:00:00Z", True) is None
-            # window < 48h → None
-            assert call("2026-06-01T00:00:00Z", "2026-06-02T12:00:00Z", False) is None
-            # empty bundle dir → None
-            assert call("2026-06-01T00:00:00Z", "2026-06-15T00:00:00Z", False) is None
-            # malformed timestamps → None
-            assert call("not-a-date", "2026-06-15T00:00:00Z", False) is None
+        with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+            for call in readers:
+                # has_filters → None
+                assert call("2026-06-01T00:00:00Z", "2026-06-15T00:00:00Z", True) is None
+                # window < 48h → None
+                assert call("2026-06-01T00:00:00Z", "2026-06-02T12:00:00Z", False) is None
+                # empty bundle dir → None
+                assert call("2026-06-01T00:00:00Z", "2026-06-15T00:00:00Z", False) is None
+                # malformed timestamps → None
+                assert call("not-a-date", "2026-06-15T00:00:00Z", False) is None
 
 
 # ── Reader: status_codes from existing all_fields.parquet ───────────────────
@@ -350,13 +351,13 @@ def test_try_origin_status_from_rollup_reads_all_fields(tmp_path):
             ],
         )
 
-    con = duckdb.connect(":memory:")
-    runner = QueryRunner(con, src)
-    st_iso = hours[0].isoformat().replace("+00:00", "Z")
-    et_iso = (hours[-1] + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    with contextlib.closing(duckdb.connect(":memory:")) as con:
+        runner = QueryRunner(con, src)
+        st_iso = hours[0].isoformat().replace("+00:00", "Z")
+        et_iso = (hours[-1] + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
 
-    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-        result = runner.try_origin_status_from_rollup(st_iso, et_iso, has_filters=False)
+        with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+            result = runner.try_origin_status_from_rollup(st_iso, et_iso, has_filters=False)
 
     assert result is not None, "status reader returned None — eligibility gate fired unexpectedly"
     assert result["has_data"] is True
@@ -463,25 +464,25 @@ def test_rollup_readers_match_live_temp_path(tmp_path):
             origin_dims.build_origin_dims_bundles("svc-od-8", src, [hour_token])
 
     # Live temp path: one temp table over ALL the same rows.
-    con = duckdb.connect(":memory:")
-    all_rows: list[dict] = []
-    for dt in hours:
-        all_rows.extend(_canonical_rows(dt))
-    _build_temp_table(con, "t_par", all_rows)
-    runner = QueryRunner(con, src)
-    actual_cols = {"pop", "oip", "ost", "edge"}
+    with contextlib.closing(duckdb.connect(":memory:")) as con:
+        all_rows: list[dict] = []
+        for dt in hours:
+            all_rows.extend(_canonical_rows(dt))
+        _build_temp_table(con, "t_par", all_rows)
+        runner = QueryRunner(con, src)
+        actual_cols = {"pop", "oip", "ost", "edge"}
 
-    live_pop = origin_repo._origin_pop_latency_from_temp(runner, "t_par", actual_cols, 30, has_filters=True)
-    live_ip = origin_repo._origin_ip_health_from_temp(runner, "t_par", actual_cols, 30, has_filters=True)
-    live_path = origin_repo._origin_path_breakdown_from_temp(runner, "t_par", actual_cols, has_filters=True)
+        live_pop = origin_repo._origin_pop_latency_from_temp(runner, "t_par", actual_cols, 30, has_filters=True)
+        live_ip = origin_repo._origin_ip_health_from_temp(runner, "t_par", actual_cols, 30, has_filters=True)
+        live_path = origin_repo._origin_path_breakdown_from_temp(runner, "t_par", actual_cols, has_filters=True)
 
-    # Rollup readers over the 50-hour window.
-    st_iso = hours[0].isoformat().replace("+00:00", "Z")
-    et_iso = (hours[-1] + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
-    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-        roll_pop = runner.try_origin_pop_latency_from_rollup(st_iso, et_iso, has_filters=False, limit=30)
-        roll_ip = runner.try_origin_ip_health_from_rollup(st_iso, et_iso, has_filters=False, limit=30)
-        roll_path = runner.try_origin_path_breakdown_from_rollup(st_iso, et_iso, has_filters=False)
+        # Rollup readers over the 50-hour window.
+        st_iso = hours[0].isoformat().replace("+00:00", "Z")
+        et_iso = (hours[-1] + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+        with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+            roll_pop = runner.try_origin_pop_latency_from_rollup(st_iso, et_iso, has_filters=False, limit=30)
+            roll_ip = runner.try_origin_ip_health_from_rollup(st_iso, et_iso, has_filters=False, limit=30)
+            roll_path = runner.try_origin_path_breakdown_from_rollup(st_iso, et_iso, has_filters=False)
 
     assert roll_pop is not None and roll_ip is not None and roll_path is not None
 

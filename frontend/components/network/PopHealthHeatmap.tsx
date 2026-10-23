@@ -3,6 +3,7 @@
 import React from 'react'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { formatBytes, formatCompactCount, formatCount } from '@/lib/format'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -58,18 +59,18 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
   const popHealthQuery = useServiceQuery<PopHealthItem[]>(
     ['network', 'pop-health', serviceId, startTime, endTime],
     async ({ signal }) => {
-      const { data, error } = await client.GET('/api/network/pop-health', {
-        signal,
-        params: {
-          query: {
-            start_time: startTime ?? undefined,
-            end_time: endTime ?? undefined,
+      const data = await unwrapClient(
+        client.GET('/api/network/pop-health', {
+          signal,
+          params: {
+            query: {
+              start_time: startTime ?? undefined,
+              end_time: endTime ?? undefined,
+            },
           },
-        },
-      })
-      if (error) {
-        throw new Error(typeof error === 'string' ? error : 'Failed to load PoP health data')
-      }
+        }),
+        'Failed to load PoP health data',
+      )
       return data?.data ?? []
     }
   )

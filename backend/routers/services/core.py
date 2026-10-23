@@ -275,7 +275,7 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
                         from backend.core import metadata as metadata_db
 
                         if service_id:
-                            row = metadata_db.get_cron_run_result(service_id, run_id)
+                            row = await asyncio.to_thread(metadata_db.get_cron_run_result, service_id, run_id)
                             if row:
                                 status = row["status"]
                                 # Normalize SQLite status values (success -> done, failed -> error) for SSE client compatibility
@@ -1088,11 +1088,13 @@ def _committed_duckdb_field_types(src: dict) -> dict[str, str]:
         return {}
     con = _db.get_connection(source=src, read_only=True, max_wait=2.0, skip_view_update=True)
     try:
-        return {
-            str(col["column"]): str(col["type"])
-            for col in _db.get_schema(con, src, stats=False)
-            if col.get("column") and col.get("type")
-        }
+        out: dict[str, str] = {}
+        for col in _db.get_schema(con, src, stats=False):
+            name = col.get("name") or col.get("column")
+            col_type = col.get("type")
+            if name and col_type:
+                out[str(name)] = str(col_type)
+        return out
     finally:
         con.close()
 

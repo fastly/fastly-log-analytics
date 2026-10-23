@@ -66,6 +66,8 @@ class DeletionController:
             return
         if not self._publication.is_replayable(manifest_id):
             raise ValueError("source deletion requires a replayable archive")
+        if len(self._verified_manifests) >= 4096:
+            self._verified_manifests.clear()
         self._verified_manifests.add(manifest_id)
 
     def delete_source(
@@ -99,11 +101,21 @@ class DeletionController:
             current_owner_epoch=current_owner_epoch,
         )
         self._store.delete(target_key)
-        self._ledger.mark_source_deleted(
-            service_id,
-            target_key,
-            manifest.manifest_id,
-        )
+        try:
+            self._ledger.mark_source_deleted(
+                service_id,
+                target_key,
+                manifest.manifest_id,
+                current_owner_epoch=current_owner_epoch,  # type: ignore[call-arg]
+            )
+        except TypeError:
+            self._ledger.mark_source_deleted(
+                service_id,
+                target_key,
+                manifest.manifest_id,
+            )
+        if not manifest.sources:
+            self._verified_manifests.discard(manifest.manifest_id)
 
     def delete_manifest_sources(
         self,
@@ -183,14 +195,25 @@ class DeletionController:
         deleted: list[str] = []
         for key in store_deleted:
             try:
-                self._ledger.mark_source_deleted(
-                    service_id,
-                    key,
-                    manifest.manifest_id,
-                )
+                try:
+                    self._ledger.mark_source_deleted(
+                        service_id,
+                        key,
+                        manifest.manifest_id,
+                        current_owner_epoch=current_owner_epoch,  # type: ignore[call-arg]
+                    )
+                except TypeError:
+                    self._ledger.mark_source_deleted(
+                        service_id,
+                        key,
+                        manifest.manifest_id,
+                    )
                 deleted.append(key)
             except Exception:
                 pass
+
+        if source_keys is None and len(deleted) >= len(target_keys):
+            self._verified_manifests.discard(manifest.manifest_id)
 
         return deleted
 
@@ -217,6 +240,7 @@ class PostgresDeletionLedger:
 
     def __init__(self, control: Any) -> None:
         self._control = control
+        self._promoted_manifests: set[str] = set()
 
     def get(self, service_id: str) -> Any:
         return self._control.owner(service_id)
@@ -224,19 +248,23 @@ class PostgresDeletionLedger:
     def authorize_source_delete(
         self, service_id: str, object_key: str, archive_manifest_id: str, *, current_owner_epoch: int
     ) -> Any:
-        try:
-            self._control.transition_archive_manifest(
-                archive_manifest_id,
-                expected_state=ArchiveState.MANIFEST_COMMITTED,
-                next_state=ArchiveState.DELETION_ELIGIBLE,
-                expected_owner_epoch=current_owner_epoch,
-            )
-        except ValueError:
-            # Already deletion_eligible (a prior sweep tick promoted it, or
-            # this is a retry), or a genuine owner-epoch mismatch — either
-            # way, the authorize_source_delete call below is the real fence
-            # and will raise if the manifest still isn't eligible.
-            pass
+        if archive_manifest_id not in self._promoted_manifests:
+            try:
+                self._control.transition_archive_manifest(
+                    archive_manifest_id,
+                    expected_state=ArchiveState.MANIFEST_COMMITTED,
+                    next_state=ArchiveState.DELETION_ELIGIBLE,
+                    expected_owner_epoch=current_owner_epoch,
+                )
+            except ValueError:
+                # Already deletion_eligible (a prior sweep tick promoted it, or
+                # this is a retry), or a genuine owner-epoch mismatch — either
+                # way, the authorize_source_delete call below is the real fence
+                # and will raise if the manifest still isn't eligible.
+                pass
+            if len(self._promoted_manifests) >= 4096:
+                self._promoted_manifests.clear()
+            self._promoted_manifests.add(archive_manifest_id)
         return self._control.authorize_source_delete(
             service_id,
             object_key,
@@ -244,13 +272,22 @@ class PostgresDeletionLedger:
             expected_owner_epoch=current_owner_epoch,
         )
 
-    def mark_source_deleted(self, service_id: str, object_key: str, archive_manifest_id: str) -> None:
-        owner = self._control.owner(service_id)
+    def mark_source_deleted(
+        self,
+        service_id: str,
+        object_key: str,
+        archive_manifest_id: str,
+        *,
+        current_owner_epoch: int | None = None,
+    ) -> None:
+        owner_epoch = (
+            current_owner_epoch if current_owner_epoch is not None else self._control.owner(service_id).owner_epoch
+        )
         self._control.mark_source_deleted(
             service_id,
             object_key,
             manifest_id=archive_manifest_id,
-            expected_owner_epoch=owner.owner_epoch,
+            expected_owner_epoch=owner_epoch,
         )
 
 

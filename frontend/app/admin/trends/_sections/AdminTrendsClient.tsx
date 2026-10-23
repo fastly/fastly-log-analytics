@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { BackToAdminLink } from '@/components/BackToAdminLink'
 import { PageHeader } from '@/components/ui/page-header'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { cn } from '@/lib/utils'
 import type { components } from '@/types/api.generated'
 import { queryKeys } from '@/lib/query-keys'
@@ -51,14 +52,12 @@ export default function AdminTrendsClient() {
   const { data: trends, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: queryKeys.admin.metricHistoryBatch(window),
     queryFn: async ({ signal }) => {
-      const { data, response } = await client.GET('/api/admin/metric-history/batch', {
-        params: { query: { since: window } },
-        signal,
-      })
-      if (!response.ok || !data) {
-        throw new Error(`HTTP ${response.status}`)
-      }
-      return data as TrendBatch
+      return (await unwrapClient(
+        client.GET('/api/admin/metric-history/batch', {
+          params: { query: { since: window } },
+          signal,
+        }),
+      )) as TrendBatch
     },
     // 60s sampler cadence — refetch matches that. Background-tab is off
     // so a backgrounded /admin/trends tab doesn't keep pulling.

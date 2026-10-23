@@ -241,11 +241,14 @@ async function verifyDataPage(browser, adminTlsOptions, spec) {
       } catch (chartErr) {
         console.log(`[${name} 24h] Attempt ${attempt}/4: no populated Plotly chart yet.`);
       }
-      bodyText = await page.evaluate(() => `${document.body.innerText}\n${document.body.textContent || ''}`);
+      const { bodyText: evaluatedBodyText, visibleText } = await page.evaluate(() => ({
+        bodyText: `${document.body.innerText}\n${document.body.textContent || ''}`,
+        visibleText: document.body.innerText,
+      }));
+      bodyText = evaluatedBodyText;
       const lower = bodyText.toLowerCase();
       hasMarker = markers.some(marker => lower.includes(marker.toLowerCase()));
       hasChart = await page.evaluate(hasPopulatedRumChart);
-      const visibleText = await page.evaluate(() => document.body.innerText);
       emptyPanels = EMPTY_STATE_MARKERS.reduce((sum, marker) => sum + visibleText.split(marker).length - 1, 0);
       if (hasMarker && hasChart && !visibleText.includes("Failed to load") && (!strictEmpty || emptyPanels === 0)) {
         break;

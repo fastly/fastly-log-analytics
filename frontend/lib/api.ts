@@ -317,6 +317,18 @@ client.use({
     throw err;
   },
   async onResponse({ request, response }) {
+    if (
+      response.status === 503 &&
+      String(request.url).includes("/api/admin/clickhouse/status")
+    ) {
+      const payload = await response.clone().json().catch(() => null);
+      if (payload && typeof payload === "object" && "health" in payload) {
+        return new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: response.headers,
+        });
+      }
+    }
     if (!response.ok) {
       const error = await response.json().catch(() => ({ message: "An unknown error occurred" }));
       const msg = extractApiError(error);

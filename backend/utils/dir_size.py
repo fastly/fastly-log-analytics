@@ -14,6 +14,7 @@ import time
 logger = logging.getLogger(__name__)
 
 _DIR_SIZE_CACHE: dict[str, tuple[float, int]] = {}
+_DIR_STATS_CACHE: dict[str, tuple[float, int, int]] = {}
 _DIR_SIZE_TTL_S = 120.0
 
 # Coalescing primitives (mirrors service_manager._get_dir_stats). The walk is
@@ -49,6 +50,10 @@ def _get_dir_size(path: str) -> int:
         cached = _DIR_SIZE_CACHE.get(path)
         if cached is not None and (now - cached[0]) < _DIR_SIZE_TTL_S:
             return cached[1]
+        stats_cached = _DIR_STATS_CACHE.get(path)
+        if stats_cached is not None and (now - stats_cached[0]) < _DIR_SIZE_TTL_S:
+            _DIR_SIZE_CACHE[path] = (stats_cached[0], stats_cached[1])
+            return stats_cached[1]
         if cached is not None:
             if path not in _dir_size_refresh_in_flight:
                 _dir_size_refresh_in_flight.add(path)
@@ -76,15 +81,21 @@ def _get_dir_size(path: str) -> int:
     # subsequent arrivals wait, then see the populated entry and return.
     with _dir_size_cold_locks_meta_lock:
         cold_lock = _dir_size_cold_locks.setdefault(path, threading.Lock())
-    with cold_lock:
-        with _dir_size_lock:
-            cached = _DIR_SIZE_CACHE.get(path)
-            if cached is not None:
-                return cached[1]
-        total = _scan_dir_size(path)
-        with _dir_size_lock:
-            _DIR_SIZE_CACHE[path] = (time.monotonic(), total)
-        return total
+    try:
+        with cold_lock:
+            with _dir_size_lock:
+                cached = _DIR_SIZE_CACHE.get(path)
+                if cached is not None:
+                    return cached[1]
+            total, file_count = walk_dir_stats(path)
+            ts = time.monotonic()
+            with _dir_size_lock:
+                _DIR_SIZE_CACHE[path] = (ts, total)
+                _DIR_STATS_CACHE[path] = (ts, total, file_count)
+            return total
+    finally:
+        with _dir_size_cold_locks_meta_lock:
+            _dir_size_cold_locks.pop(path, None)
 
 
 def _refresh_dir_size_background(path: str) -> None:
@@ -92,9 +103,11 @@ def _refresh_dir_size_background(path: str) -> None:
     Guarded by _dir_size_refresh_in_flight so concurrent expired reads on the
     same path coalesce to a single background walk."""
     try:
-        total = _scan_dir_size(path)
+        total, file_count = walk_dir_stats(path)
+        ts = time.monotonic()
         with _dir_size_lock:
-            _DIR_SIZE_CACHE[path] = (time.monotonic(), total)
+            _DIR_SIZE_CACHE[path] = (ts, total)
+            _DIR_STATS_CACHE[path] = (ts, total, file_count)
     finally:
         with _dir_size_lock:
             _dir_size_refresh_in_flight.discard(path)
@@ -138,3 +151,5 @@ def _scan_dir_size(path: str) -> int:
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("utils.dir_size._DIR_SIZE_CACHE", _DIR_SIZE_CACHE)
+_CacheRegistry.register("utils.dir_size._DIR_STATS_CACHE", _DIR_STATS_CACHE)
+_CacheRegistry.register("utils.dir_size._dir_size_cold_locks", _dir_size_cold_locks)

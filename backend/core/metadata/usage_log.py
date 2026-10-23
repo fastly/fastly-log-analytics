@@ -9,6 +9,7 @@ re-scanning the full table on every request.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -344,13 +345,20 @@ def reconcile_fastly_stats(
     )
 
     now_iso = iso_z_now()
-    for r in deletes_to_adjust:
-        hr = r["hour"]
-        op_class = r["operation_class"]
-        op_type = r["operation_type"]
-        cnt = int(r["c"] or 0)
-        bts = int(r["b"] or 0)
-        con.execute(
+    if deletes_to_adjust:
+        adjust_params = [
+            (
+                int(r["c"] or 0),
+                int(r["b"] or 0),
+                now_iso,
+                service_id,
+                r["hour"],
+                r["operation_class"],
+                r["operation_type"],
+            )
+            for r in deletes_to_adjust
+        ]
+        con.executemany(
             """
             UPDATE usage_log_hourly_summary
             SET count = count - ?,
@@ -361,7 +369,7 @@ def reconcile_fastly_stats(
               AND operation_class = ?
               AND operation_type = ?
             """,
-            (cnt, bts, now_iso, service_id, hr, op_class, op_type),
+            adjust_params,
         )
 
     written = 0
@@ -411,21 +419,7 @@ def reconcile_fastly_stats(
                 summary_map[key] = [0, 0]
             summary_map[key][0] += gap_count
 
-        summary_rows = [
-            (sid, hr, oc, ot, counts[0], counts[1], now_iso) for (sid, hr, oc, ot), counts in summary_map.items()
-        ]
-        con.executemany(
-            """
-            INSERT INTO usage_log_hourly_summary
-                (service_id, hour, operation_class, operation_type, count, bytes, last_updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (service_id, hour, operation_class, operation_type)
-            DO UPDATE SET count = usage_log_hourly_summary.count + EXCLUDED.count,
-                          bytes = usage_log_hourly_summary.bytes + EXCLUDED.bytes,
-                          last_updated = EXCLUDED.last_updated
-            """,
-            summary_rows,
-        )
+        _upsert_hourly_summary(con, summary_map, now_iso)
     con.commit()
     return written
 
@@ -433,6 +427,7 @@ def reconcile_fastly_stats(
 def purge_usage_log(service_id: str, retention_days: int) -> None:
     if retention_days <= 0:
         return
+    flush_telemetry_buffer(only_service=service_id)
     con = _ul(service_id)
     cutoff = iso_z(datetime.now(UTC) - timedelta(days=retention_days))
     con.execute("DELETE FROM usage_log WHERE service_id = ? AND timestamp < ?", (service_id, cutoff))
@@ -811,6 +806,75 @@ DEFAULT_METADATA_RETENTION = {
 }
 
 
+_TELEMETRY_FLUSH_INTERVAL_S = 2.0
+_TELEMETRY_FLUSH_BATCH_SIZE = 50
+_telemetry_lock = threading.Lock()
+_telemetry_query_buf: dict[str, list[tuple[str, str, str, str, str, float]]] = {}
+_telemetry_section_buf: dict[str, list[tuple[str, str, str, str, float]]] = {}
+_telemetry_flush_timer: threading.Timer | None = None
+_telemetry_flush_in_progress = False
+
+
+def _schedule_telemetry_flush() -> None:
+    global _telemetry_flush_timer
+    if _telemetry_flush_timer is not None:
+        return
+    _telemetry_flush_timer = threading.Timer(_TELEMETRY_FLUSH_INTERVAL_S, flush_telemetry_buffer)
+    _telemetry_flush_timer.daemon = True
+    _telemetry_flush_timer.start()
+
+
+def flush_telemetry_buffer(*, only_service: str | None = None) -> None:
+    """Flush buffered telemetry query and section rows in a single batch per service."""
+    global _telemetry_flush_timer, _telemetry_flush_in_progress
+    with _telemetry_lock:
+        if only_service is not None:
+            q_rows = _telemetry_query_buf.pop(only_service, None)
+            s_rows = _telemetry_section_buf.pop(only_service, None)
+            if not q_rows and not s_rows:
+                return
+            pending_q = {only_service: q_rows} if q_rows else {}
+            pending_s = {only_service: s_rows} if s_rows else {}
+        else:
+            _telemetry_flush_timer = None
+            if not _telemetry_query_buf and not _telemetry_section_buf:
+                _telemetry_flush_in_progress = False
+                return
+            pending_q = dict(_telemetry_query_buf)
+            pending_s = dict(_telemetry_section_buf)
+            _telemetry_query_buf.clear()
+            _telemetry_section_buf.clear()
+
+    services = set(pending_q.keys()) | set(pending_s.keys())
+    try:
+        for sid in services:
+            try:
+                con = _ul(sid)
+                q_batch = pending_q.get(sid)
+                if q_batch:
+                    con.executemany(
+                        "INSERT INTO telemetry_queries (timestamp, page_load_id, request_id, engine, sql_query, duration_ms) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        q_batch,
+                    )
+                s_batch = pending_s.get(sid)
+                if s_batch:
+                    con.executemany(
+                        "INSERT INTO telemetry_sections (timestamp, page_load_id, request_id, section_name, duration_ms) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        s_batch,
+                    )
+                con.commit()
+            except Exception:
+                logger.debug("flush_telemetry_buffer: commit failed for %s (ignored)", sid, exc_info=True)
+    finally:
+        if only_service is None:
+            with _telemetry_lock:
+                _telemetry_flush_in_progress = False
+                if _telemetry_query_buf or _telemetry_section_buf:
+                    _schedule_telemetry_flush()
+
+
 def log_telemetry_query(
     service_id: str,
     page_load_id: str,
@@ -819,14 +883,23 @@ def log_telemetry_query(
     sql: str,
     duration_ms: float,
 ) -> None:
-    con = _ul(service_id)
+    global _telemetry_flush_in_progress
     now = iso_z_now()
-    con.execute(
-        "INSERT INTO telemetry_queries (timestamp, page_load_id, request_id, engine, sql_query, duration_ms) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (now, page_load_id, request_id, engine, sql, duration_ms),
-    )
-    con.commit()
+    row = (now, page_load_id, request_id, engine, sql, duration_ms)
+    with _telemetry_lock:
+        _telemetry_query_buf.setdefault(service_id, []).append(row)
+        total = sum(len(v) for v in _telemetry_query_buf.values()) + sum(
+            len(v) for v in _telemetry_section_buf.values()
+        )
+        if total >= _TELEMETRY_FLUSH_BATCH_SIZE and not _telemetry_flush_in_progress:
+            _telemetry_flush_in_progress = True
+            needs_immediate = True
+        else:
+            needs_immediate = False
+            if not _telemetry_flush_in_progress:
+                _schedule_telemetry_flush()
+    if needs_immediate:
+        threading.Thread(target=flush_telemetry_buffer, daemon=True).start()
 
 
 def log_telemetry_section(
@@ -836,17 +909,27 @@ def log_telemetry_section(
     section_name: str,
     duration_ms: float,
 ) -> None:
-    con = _ul(service_id)
+    global _telemetry_flush_in_progress
     now = iso_z_now()
-    con.execute(
-        "INSERT INTO telemetry_sections (timestamp, page_load_id, request_id, section_name, duration_ms) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (now, page_load_id, request_id, section_name, duration_ms),
-    )
-    con.commit()
+    row = (now, page_load_id, request_id, section_name, duration_ms)
+    with _telemetry_lock:
+        _telemetry_section_buf.setdefault(service_id, []).append(row)
+        total = sum(len(v) for v in _telemetry_query_buf.values()) + sum(
+            len(v) for v in _telemetry_section_buf.values()
+        )
+        if total >= _TELEMETRY_FLUSH_BATCH_SIZE and not _telemetry_flush_in_progress:
+            _telemetry_flush_in_progress = True
+            needs_immediate = True
+        else:
+            needs_immediate = False
+            if not _telemetry_flush_in_progress:
+                _schedule_telemetry_flush()
+    if needs_immediate:
+        threading.Thread(target=flush_telemetry_buffer, daemon=True).start()
 
 
 def get_page_telemetry(service_id: str, page_load_id: str) -> dict:
+    flush_telemetry_buffer(only_service=service_id)
     con = _ul(service_id)
 
     # 1. Fetch queries

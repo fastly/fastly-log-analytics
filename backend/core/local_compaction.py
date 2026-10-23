@@ -39,6 +39,7 @@ Use this for hot-tier compaction every few minutes. Use the
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -248,6 +249,10 @@ def compact_local_partitions(
     service_key = source.get("name", "default")
     publish_lock = _get_service_lock(service_key)
 
+    # Accumulate every basename we delete across all three tiers so we
+    # can register them in one SQLite write at the end (vs N small writes).
+    removed_basenames: list[str] = []
+
     # ── Cleanup pass: remove orphaned .tmp_ files from previous crashed
     # runs. Safe because the publish step renames .tmp_<name> → <name>;
     # any leftover .tmp_ is by definition incomplete. The dashboard glob
@@ -256,7 +261,7 @@ def compact_local_partitions(
     if not dry_run:
         with publish_lock:
             result["stale_tmp_removed"] = _cleanup_stale_tmp(data_dir)
-            result["watermark_evicted"] = _enforce_disk_watermark(data_dir)
+            result["watermark_evicted"] = _enforce_disk_watermark(data_dir, removed_basenames=removed_basenames)
 
     # ── Active-hour guard: do NOT compact the current UTC hour (unless compact_active_hour is True). The sync
     # cron may be flushing buffer files into this partition mid-pass; our
@@ -268,10 +273,6 @@ def compact_local_partitions(
     result["active_hour_skipped"] = (
         os.path.isdir(os.path.join(data_dir, active_hour)) if not compact_active_hour else False
     )
-
-    # Accumulate every basename we delete across all three tiers so we
-    # can register them in one SQLite write at the end (vs N small writes).
-    removed_basenames: list[str] = []
 
     # ── Hourly tier: walk each partition dir, merge if multi-file.
     for entry in sorted(os.listdir(data_dir)):
@@ -314,8 +315,7 @@ def compact_local_partitions(
                 # write happens before that on an in-memory DuckDB connection and
                 # doesn't need the lock. Holding the lock during the COPY would
                 # block dashboard reads for ~1s per partition.
-                with publish_lock:
-                    r = _compact_single_partition(part_dir, bin_basenames, dry_run=dry_run)
+                r = _compact_single_partition(part_dir, bin_basenames, dry_run=dry_run, publish_lock=publish_lock)
                 if r.get("skipped_enospc"):
                     result["errors"].append(f"{part_dir}: ENOSPC pre-check failed (< 2x needed free disk)")
                     continue
@@ -337,8 +337,7 @@ def compact_local_partitions(
     # daily file. After this, the partition's hour dirs are removed.
     try:
         # Same RLock as the hourly path — file-system mutation phase only.
-        with publish_lock:
-            r = _compact_daily_tier(data_dir, dry_run=dry_run)
+        r = _compact_daily_tier(data_dir, dry_run=dry_run, publish_lock=publish_lock)
         result["daily_rollups"] = r["daily_rollups"]
         result["files_merged"] += r["files_merged"]
         result["files_removed"] += r["files_removed"]
@@ -355,8 +354,7 @@ def compact_local_partitions(
     # _WEEKLY_TIER_AGE_DAYS (default 30); for shorter retentions the
     # daily files age out before becoming weekly-eligible.
     try:
-        with publish_lock:
-            r = _compact_weekly_tier(data_dir, dry_run=dry_run)
+        r = _compact_weekly_tier(data_dir, dry_run=dry_run, publish_lock=publish_lock)
         result["weekly_rollups"] = r["weekly_rollups"]
         result["files_merged"] += r["files_merged"]
         result["files_removed"] += r["files_removed"]
@@ -396,7 +394,13 @@ def compact_local_partitions(
     return result
 
 
-def _enforce_disk_watermark(data_dir: str, threshold_pct: float = 0.85, target_pct: float = 0.70) -> int:
+def _enforce_disk_watermark(
+    data_dir: str,
+    threshold_pct: float = 0.85,
+    target_pct: float = 0.70,
+    *,
+    removed_basenames: list[str] | None = None,
+) -> int:
     """Check disk pressure and aggressively evict oldest local parquet if exceeded.
 
     Prevents high-volume services from exhausting the shared 64TB PVC by automatically
@@ -450,6 +454,8 @@ def _enforce_disk_watermark(data_dir: str, threshold_pct: float = 0.85, target_p
             os.remove(path)
             freed += size
             removed_count += 1
+            if removed_basenames is not None:
+                removed_basenames.append(os.path.basename(path))
         except OSError:
             pass
 
@@ -489,6 +495,7 @@ def _rollup_bins(
     result: dict[str, Any],
     *,
     dry_run: bool,
+    publish_lock: Any = None,
     log_migrate,
     log_migrate_fail,
     log_merge,
@@ -505,6 +512,7 @@ def _rollup_bins(
     weekly_rollups). The four log callables let each tier keep its exact log
     strings (emoji + wording) unchanged.
     """
+    lock_ctx = publish_lock if publish_lock is not None else contextlib.nullcontext()
     for bin_paths in bins:
         bytes_before = sum(os.path.getsize(p) for p in bin_paths)
         if dry_run:
@@ -535,7 +543,8 @@ def _rollup_bins(
             out_name = f"{name_prefix}{token}_{uuid.uuid4().hex[:8]}.parquet"
             out_path = os.path.join(out_root, out_name)
             try:
-                os.rename(old_path, out_path)
+                with lock_ctx:
+                    os.rename(old_path, out_path)
                 result["files_removed"] += 1
                 result.setdefault("removed_basenames", []).append(old_name)
                 result[rollup_key] += 1
@@ -578,16 +587,17 @@ def _rollup_bins(
 
                 # Atomic publish: rename tmp_path -> out_path FIRST so new compacted file is
                 # atomically present on disk before unlinking originals (Section 5 Step 4 & Section 7).
-                os.rename(tmp_path, out_path)
-                bytes_after = os.path.getsize(out_path)
+                with lock_ctx:
+                    os.rename(tmp_path, out_path)
+                    bytes_after = os.path.getsize(out_path)
 
-                for p in bin_paths:
-                    try:
-                        os.remove(p)
-                        result["files_removed"] += 1
-                        result.setdefault("removed_basenames", []).append(os.path.basename(p))
-                    except OSError as e:
-                        logger.warning("[local-compact] failed to remove %s: %s", p, e)
+                    for p in bin_paths:
+                        try:
+                            os.remove(p)
+                            result["files_removed"] += 1
+                            result.setdefault("removed_basenames", []).append(os.path.basename(p))
+                        except OSError as e:
+                            logger.warning("[local-compact] failed to remove %s: %s", p, e)
 
                 result[rollup_key] += 1
                 result["files_merged"] += len(bin_paths)
@@ -604,7 +614,7 @@ def _rollup_bins(
                 log_merge_fail(token, e)
 
 
-def _compact_daily_tier(data_dir: str, dry_run: bool = False) -> dict[str, Any]:
+def _compact_daily_tier(data_dir: str, dry_run: bool = False, *, publish_lock: Any = None) -> dict[str, Any]:
     """Group hour-partitions older than _DAILY_TIER_AGE_DAYS by day, merge
     each day's parquets into size-capped daily files under data/daily/, and
     remove the now-empty hour partition dirs.
@@ -668,6 +678,7 @@ def _compact_daily_tier(data_dir: str, dry_run: bool = False) -> dict[str, Any]:
             "daily_rollups",
             result,
             dry_run=dry_run,
+            publish_lock=publish_lock,
             log_migrate=lambda old, out: logger.info("🚚 [local-compact] migrated single-file bin %s to %s", old, out),
             log_migrate_fail=lambda old, e: logger.warning(
                 "[local-compact] failed to migrate single-file %s: %s", old, e
@@ -687,7 +698,7 @@ def _compact_daily_tier(data_dir: str, dry_run: bool = False) -> dict[str, Any]:
     return result
 
 
-def _compact_weekly_tier(data_dir: str, dry_run: bool = False) -> dict[str, Any]:
+def _compact_weekly_tier(data_dir: str, dry_run: bool = False, *, publish_lock: Any = None) -> dict[str, Any]:
     """Group daily files older than _WEEKLY_TIER_AGE_DAYS by ISO week, merge
     each week's parquets into size-capped weekly files under data/weekly/,
     and delete originals.
@@ -757,6 +768,7 @@ def _compact_weekly_tier(data_dir: str, dry_run: bool = False) -> dict[str, Any]
             "weekly_rollups",
             result,
             dry_run=dry_run,
+            publish_lock=publish_lock,
             log_migrate=lambda old, out: logger.info(
                 "🚚 [local-compact] migrated single-file weekly bin %s to %s", old, out
             ),
@@ -772,7 +784,9 @@ def _compact_weekly_tier(data_dir: str, dry_run: bool = False) -> dict[str, Any]
     return result
 
 
-def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool = False) -> dict[str, Any]:
+def _compact_single_partition(
+    part_dir: str, parquets: list[str], dry_run: bool = False, *, publish_lock: Any = None
+) -> dict[str, Any]:
     """Merge `parquets` (relative names) in `part_dir` into one new parquet.
 
     Uses DuckDB COPY to read+write since it's already in the dep tree and
@@ -849,26 +863,28 @@ def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool 
     # Atomic publish: rename tmp_path -> out_path FIRST so new compacted file is
     # atomically present on disk before unlinking originals (Section 5 Step 4 & Section 7).
     # Original source files remain untouched until atomic rename succeeds.
-    try:
-        os.rename(tmp_path, out_path)
-        bytes_after = os.path.getsize(out_path)
-    except Exception:
+    lock_ctx = publish_lock if publish_lock is not None else contextlib.nullcontext()
+    with lock_ctx:
         try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except OSError:
-            pass
-        raise
+            os.rename(tmp_path, out_path)
+            bytes_after = os.path.getsize(out_path)
+        except Exception:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
 
-    files_removed = 0
-    removed_basenames: list[str] = []
-    for p in paths:
-        try:
-            os.remove(p)
-            files_removed += 1
-            removed_basenames.append(os.path.basename(p))
-        except OSError as e:
-            logger.warning("[local-compact] failed to remove %s: %s", p, e)
+        files_removed = 0
+        removed_basenames: list[str] = []
+        for p in paths:
+            try:
+                os.remove(p)
+                files_removed += 1
+                removed_basenames.append(os.path.basename(p))
+            except OSError as e:
+                logger.warning("[local-compact] failed to remove %s: %s", p, e)
 
     return {
         "files_merged": len(parquets),

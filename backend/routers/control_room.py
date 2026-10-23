@@ -327,7 +327,7 @@ async def control_room_error_stream(
     """
     from backend.core import duckdb as _db
 
-    source = _db.get_source_for_service(service_id)
+    source = await asyncio.to_thread(_db.get_source_for_service, service_id)
     high_scale_service = registry.resolve(service_id)
 
     async def stream() -> AsyncIterator[dict]:
@@ -440,7 +440,8 @@ async def control_room_correlate(
     if high_scale_service is not None:
         start = datetime.now(UTC) - timedelta(minutes=window_minutes)
         aggregate_dimension = "client_ip" if col == "ip" else col
-        response = query_clickhouse_aggregate(
+        response = await asyncio.to_thread(
+            query_clickhouse_aggregate,
             high_scale_service.client,
             AggregateRequest(
                 service_id=service_id,
@@ -465,7 +466,7 @@ async def control_room_correlate(
             },
         }
 
-    source = _db.get_source_for_service(service_id)
+    source = await asyncio.to_thread(_db.get_source_for_service, service_id)
     if source is None:
         raise HTTPException(
             status_code=404,
@@ -573,6 +574,7 @@ def wizard_step(
 def control_room_tab(
     tab: str,
     service_id: ServiceId,
+    _access: str | None = Depends(require_service_access),
 ):
     """Return data for a control-room tab."""
     if tab not in TAB_STUBS:

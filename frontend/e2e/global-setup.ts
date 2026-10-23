@@ -13,7 +13,7 @@
  * during local iteration.
  */
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -183,9 +183,8 @@ async function globalSetup() {
   // the configs file before the backend boots and reads them.
   // node:fs.mkdirSync would be one way; the launcher creates the dir
   // first via mkdir(parents=True), so we mirror that here.
-  const fs = await import('node:fs')
-  fs.mkdirSync(configsDir, { recursive: true })
-  fs.mkdirSync(dataDir, { recursive: true })
+  mkdirSync(configsDir, { recursive: true })
+  mkdirSync(dataDir, { recursive: true })
   _seedDefaultServiceConfig(configsDir)
   _seedRealRtServiceConfig(configsDir)
   _seedSyntheticLogs(sandbox, configsDir, repoRoot)

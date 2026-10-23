@@ -28,6 +28,7 @@ export const queryKeys = {
   scoringLabelsAll: () => ['scoring-labels'] as const,
 
   rumStatus: (serviceId: string | null | undefined) => ['rum-status', serviceId] as const,
+  rumVersions: (serviceId: string | null | undefined) => ['rum-versions', serviceId] as const,
 
   syncStatus: (serviceId: string | null | undefined) => ['sync-status', serviceId] as const,
   /** Prefix key: matches every service's sync-status entry. */
@@ -122,4 +123,79 @@ export const queryKeys = {
     filters: FiltersPayload,
     ...extras: unknown[]
   ) => [domain, endpoint, serviceId, startTime, endTime, filters, ...extras] as const,
+}
+
+export interface BootstrapCacheSeedSource {
+  active_service_id?: string | null
+  views?: unknown
+  log_fields_catalog?: unknown
+  sync_status?: unknown
+  log_extents?: unknown
+  schema?: unknown
+  table_name?: unknown
+  cron_runs_first_page?: unknown
+  last_sync?: unknown
+  scoring_labels?: unknown
+  services?: unknown
+  share_banner?: {
+    sharing_active?: boolean | null
+    public_url?: string | null
+  } | null
+}
+
+/**
+ * Shared cache-seeding helper used by both SSR (`app/layout.tsx`) and client
+ * (`hooks/useBootstrap.ts`) so dependent query caches are populated identically
+ * through `queryKeys` helpers without drift.
+ */
+export function seedBootstrapDependentCaches(
+  queryClient: { setQueryData: (queryKey: readonly unknown[], updater: unknown) => unknown },
+  data: BootstrapCacheSeedSource | null | undefined,
+): void {
+  if (!data) return
+  if (data.active_service_id) {
+    const sid = data.active_service_id
+    if (Array.isArray(data.views)) {
+      queryClient.setQueryData(queryKeys.views(sid), data.views)
+    }
+    if (data.log_fields_catalog) {
+      queryClient.setQueryData(queryKeys.logFieldsCatalog(sid), data.log_fields_catalog)
+    }
+    queryClient.setQueryData(queryKeys.syncStatus(sid), data.sync_status ?? null)
+    if (data.log_extents) {
+      queryClient.setQueryData(queryKeys.logExtents(sid), data.log_extents)
+    }
+    const seededSchemaList = data.schema
+    const seededTableName = data.table_name
+    if (
+      Array.isArray(seededSchemaList) &&
+      seededSchemaList.length > 0 &&
+      typeof seededTableName === 'string'
+    ) {
+      queryClient.setQueryData(queryKeys.admin.schema(sid), {
+        schema: seededSchemaList,
+        table_name: seededTableName,
+      })
+    }
+    if (data.cron_runs_first_page) {
+      queryClient.setQueryData(queryKeys.admin.cronLogsRecent(sid), data.cron_runs_first_page)
+    }
+    queryClient.setQueryData(queryKeys.lastSync(sid), data.last_sync ?? null)
+    if (data.scoring_labels) {
+      queryClient.setQueryData(queryKeys.scoringLabels(sid), data.scoring_labels)
+    }
+  }
+  if (Array.isArray(data.services)) {
+    queryClient.setQueryData(queryKeys.services(), {
+      services: data.services,
+      _section_timings: [],
+    })
+  }
+  const shareBanner = data.share_banner
+  if (shareBanner && typeof shareBanner === 'object') {
+    queryClient.setQueryData(queryKeys.shareBanner(), {
+      sharing_active: !!shareBanner.sharing_active,
+      public_url: typeof shareBanner.public_url === 'string' ? shareBanner.public_url : null,
+    })
+  }
 }

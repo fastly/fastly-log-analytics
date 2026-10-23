@@ -21,11 +21,25 @@ FINGERPRINT_COVERAGE_BULK) over the SAME closed-hour data.
 
 from __future__ import annotations
 
+import contextlib
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import duckdb
 import pyarrow.parquet as pq
+import pytest
+
+from backend.repositories._sql.dashboard import CONN_REQUESTS_BUCKET
+from backend.repositories._sql.security import (
+    CONN_REUSE_DIST,
+    FINGERPRINT_COVERAGE_BULK,
+    REQ_HEADER_SIZE_DIST,
+    TOP_IPS_BY_MAX_HEADER,
+)
+from tests._helpers.dates import past_hour as _past_hour
+from tests._helpers.locks import noop_lock as _noop_lock
+
+pytestmark = pytest.mark.usefixtures("frozen_clock")
 
 
 def _seed_logs(con: duckdb.DuckDBPyConnection, table: str, rows: list[dict]) -> None:
@@ -454,38 +468,29 @@ def test_readers_eligibility_gates(tmp_path):
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
     src = {"name": "svc-sd-7"}
-    con = duckdb.connect(":memory:")
-    runner = QueryRunner(con, src)
+    with contextlib.closing(duckdb.connect(":memory:")) as con:
+        runner = QueryRunner(con, src)
 
-    readers = [
-        lambda s, e, hf: runner.try_security_req_size_from_rollup(s, e, has_filters=hf),
-        lambda s, e, hf: runner.try_security_conn_reuse_from_rollup(s, e, has_filters=hf),
-        lambda s, e, hf: runner.try_security_top_ips_from_rollup(s, e, has_filters=hf),
-        lambda s, e, hf: runner.try_security_coverage_from_rollup(s, e, has_filters=hf),
-    ]
+        readers = [
+            lambda s, e, hf: runner.try_security_req_size_from_rollup(s, e, has_filters=hf),
+            lambda s, e, hf: runner.try_security_conn_reuse_from_rollup(s, e, has_filters=hf),
+            lambda s, e, hf: runner.try_security_top_ips_from_rollup(s, e, has_filters=hf),
+            lambda s, e, hf: runner.try_security_coverage_from_rollup(s, e, has_filters=hf),
+        ]
 
-    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-        for call in readers:
-            # has_filters → None
-            assert call("2026-06-01T00:00:00Z", "2026-06-15T00:00:00Z", True) is None
-            # window < 48h → None
-            assert call("2026-06-01T00:00:00Z", "2026-06-02T12:00:00Z", False) is None
-            # empty bundle dir (no coverage) → None
-            assert call("2026-06-01T00:00:00Z", "2026-06-15T00:00:00Z", False) is None
-            # malformed timestamps → None
-            assert call("not-a-date", "2026-06-15T00:00:00Z", False) is None
+        with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+            for call in readers:
+                # has_filters → None
+                assert call("2026-06-01T00:00:00Z", "2026-06-15T00:00:00Z", True) is None
+                # window < 48h → None
+                assert call("2026-06-01T00:00:00Z", "2026-06-02T12:00:00Z", False) is None
+                # empty bundle dir (no coverage) → None
+                assert call("2026-06-01T00:00:00Z", "2026-06-15T00:00:00Z", False) is None
+                # malformed timestamps → None
+                assert call("not-a-date", "2026-06-15T00:00:00Z", False) is None
 
 
 # ── Parity: rollup reader output == live SQL output over the SAME data ───────
-
-# The live SQL templates (verbatim from backend/repositories/_sql/security.py).
-# Imported via the module so a future edit to the template flags this test.
-from backend.repositories._sql.security import (  # noqa: E402
-    CONN_REUSE_DIST,
-    FINGERPRINT_COVERAGE_BULK,
-    REQ_HEADER_SIZE_DIST,
-    TOP_IPS_BY_MAX_HEADER,
-)
 
 
 def test_rollup_readers_match_live_sql(tmp_path):
@@ -541,38 +546,38 @@ def test_rollup_readers_match_live_sql(tmp_path):
             security_dims.build_security_dims_bundles("svc-sd-8", src, [hour_token])
 
     # Live SQL over one temp table holding ALL 50 hours of the same rows.
-    con = duckdb.connect(":memory:")
-    all_rows: list[dict] = []
-    for dt in hours:
-        all_rows.extend(_canonical_rows(dt))
-    _seed_logs(con, "t_par", all_rows)
-    runner = QueryRunner(con, src)
+    with contextlib.closing(duckdb.connect(":memory:")) as con:
+        all_rows: list[dict] = []
+        for dt in hours:
+            all_rows.extend(_canonical_rows(dt))
+        _seed_logs(con, "t_par", all_rows)
+        runner = QueryRunner(con, src)
 
-    # ── req_size parity ──
-    live_req = con.execute(REQ_HEADER_SIZE_DIST.format(temp_table="t_par")).fetchall()
-    live_req_pairs = [(r[0], int(r[1])) for r in live_req]  # (bucket, count) in min_val order
+        # ── req_size parity ──
+        live_req = con.execute(REQ_HEADER_SIZE_DIST.format(temp_table="t_par")).fetchall()
+        live_req_pairs = [(r[0], int(r[1])) for r in live_req]  # (bucket, count) in min_val order
 
-    # ── conn_reuse parity ──
-    live_conn = con.execute(CONN_REUSE_DIST.format(temp_table="t_par")).fetchall()
-    live_conn_pairs = [(r[0], int(r[1])) for r in live_conn]
+        # ── conn_reuse parity ──
+        live_conn = con.execute(CONN_REUSE_DIST.format(temp_table="t_par")).fetchall()
+        live_conn_pairs = [(r[0], int(r[1])) for r in live_conn]
 
-    # ── topips parity ── (live LIMIT 10)
-    live_topips = con.execute(TOP_IPS_BY_MAX_HEADER.format(temp_table="t_par")).fetchall()
-    live_topips_pairs = [(r[0], int(r[1])) for r in live_topips]
+        # ── topips parity ── (live LIMIT 10)
+        live_topips = con.execute(TOP_IPS_BY_MAX_HEADER.format(temp_table="t_par")).fetchall()
+        live_topips_pairs = [(r[0], int(r[1])) for r in live_topips]
 
-    # ── coverage parity ── (one populated col over tls_ciphers_sha)
-    agg = "count(*) FILTER (WHERE tls_ciphers_sha IS NOT NULL AND tls_ciphers_sha != '') AS populated_0"
-    live_cov = con.execute(FINGERPRINT_COVERAGE_BULK.format(temp_table="t_par", agg_cols=agg)).fetchone()
-    live_total, live_pop = int(live_cov[0]), int(live_cov[1])
+        # ── coverage parity ── (one populated col over tls_ciphers_sha)
+        agg = "count(*) FILTER (WHERE tls_ciphers_sha IS NOT NULL AND tls_ciphers_sha != '') AS populated_0"
+        live_cov = con.execute(FINGERPRINT_COVERAGE_BULK.format(temp_table="t_par", agg_cols=agg)).fetchone()
+        live_total, live_pop = int(live_cov[0]), int(live_cov[1])
 
-    # Rollup readers over the 50-hour closed window.
-    st_iso = hours[0].isoformat().replace("+00:00", "Z")
-    et_iso = (hours[-1] + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
-    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-        roll_req = runner.try_security_req_size_from_rollup(st_iso, et_iso, has_filters=False)
-        roll_conn = runner.try_security_conn_reuse_from_rollup(st_iso, et_iso, has_filters=False)
-        roll_topips = runner.try_security_top_ips_from_rollup(st_iso, et_iso, has_filters=False)
-        roll_cov = runner.try_security_coverage_from_rollup(st_iso, et_iso, has_filters=False)
+        # Rollup readers over the 50-hour closed window.
+        st_iso = hours[0].isoformat().replace("+00:00", "Z")
+        et_iso = (hours[-1] + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+        with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+            roll_req = runner.try_security_req_size_from_rollup(st_iso, et_iso, has_filters=False)
+            roll_conn = runner.try_security_conn_reuse_from_rollup(st_iso, et_iso, has_filters=False)
+            roll_topips = runner.try_security_top_ips_from_rollup(st_iso, et_iso, has_filters=False)
+            roll_cov = runner.try_security_coverage_from_rollup(st_iso, et_iso, has_filters=False)
 
     assert roll_req is not None and roll_conn is not None and roll_topips is not None and roll_cov is not None
 
@@ -592,16 +597,6 @@ def test_rollup_readers_match_live_sql(tmp_path):
 
 
 # ── Dashboard conn_requests histogram reader (reuses the conn_reuse bundle) ──
-
-# The dashboard's live histogram SQL — imported via the module so a template
-# edit flags the parity test below.
-import pytest
-
-from backend.repositories._sql.dashboard import CONN_REQUESTS_BUCKET  # noqa: E402
-from tests._helpers.dates import past_hour as _past_hour
-from tests._helpers.locks import noop_lock as _noop_lock
-
-pytestmark = pytest.mark.usefixtures("frozen_clock")
 
 
 def test_conn_requests_hist_reader_parity_and_fold(tmp_path):
@@ -651,23 +646,23 @@ def test_conn_requests_hist_reader_parity_and_fold(tmp_path):
             security_dims.build_security_dims_bundles("svc-cr-1", src, [hour_token])
 
     # Live dashboard SQL over one table holding ALL hours of the same rows.
-    con = duckdb.connect(":memory:")
-    all_rows: list[dict] = []
-    for dt in hours:
-        all_rows.extend(_canonical_rows(dt))
-    _seed_logs(con, "t_par", all_rows)
-    live = con.execute(
-        CONN_REQUESTS_BUCKET.format(requests_metric="COUNT(*)", table_name="t_par", where_clause="1=1")
-    ).fetchall()
-    live_pairs = [(r[0], int(r[1])) for r in live]
+    with contextlib.closing(duckdb.connect(":memory:")) as con:
+        all_rows: list[dict] = []
+        for dt in hours:
+            all_rows.extend(_canonical_rows(dt))
+        _seed_logs(con, "t_par", all_rows)
+        live = con.execute(
+            CONN_REQUESTS_BUCKET.format(requests_metric="COUNT(*)", table_name="t_par", where_clause="1=1")
+        ).fetchall()
+        live_pairs = [(r[0], int(r[1])) for r in live]
 
-    runner = QueryRunner(con, src)
-    st_iso = hours[0].isoformat().replace("+00:00", "Z")
-    et_iso = (hours[-1] + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
-    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-        hist = runner.try_conn_requests_hist_from_rollup(
-            st_iso, et_iso, has_filters=False, actual_cols=["conn_requests"]
-        )
+        runner = QueryRunner(con, src)
+        st_iso = hours[0].isoformat().replace("+00:00", "Z")
+        et_iso = (hours[-1] + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+        with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+            hist = runner.try_conn_requests_hist_from_rollup(
+                st_iso, et_iso, has_filters=False, actual_cols=["conn_requests"]
+            )
 
     assert hist is not None
     assert [(r["value"], r["count"]) for r in hist["top"]] == live_pairs
@@ -685,15 +680,15 @@ def test_conn_requests_hist_reader_eligibility(tmp_path):
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
     src = {"name": "svc-cr-2"}
-    con = duckdb.connect(":memory:")
-    runner = QueryRunner(con, src)
+    with contextlib.closing(duckdb.connect(":memory:")) as con:
+        runner = QueryRunner(con, src)
 
-    call = lambda s, e, hf: runner.try_conn_requests_hist_from_rollup(s, e, has_filters=hf)  # noqa: E731
-    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-        assert call("2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z", True) is None
-        assert call("2026-06-01T00:00:00Z", "2026-06-01T01:30:00Z", False) is None
-        assert call("2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z", False) is None
-        assert call("not-a-date", "2026-06-02T00:00:00Z", False) is None
+        call = lambda s, e, hf: runner.try_conn_requests_hist_from_rollup(s, e, has_filters=hf)  # noqa: E731
+        with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+            assert call("2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z", True) is None
+            assert call("2026-06-01T00:00:00Z", "2026-06-01T01:30:00Z", False) is None
+            assert call("2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z", False) is None
+            assert call("not-a-date", "2026-06-02T00:00:00Z", False) is None
 
 
 def test_conn_requests_hist_reader_live_topup(tmp_path):
@@ -764,14 +759,14 @@ def test_conn_requests_hist_reader_live_topup(tmp_path):
     )
     pq.write_table(tbl, str(buffer_dir / "live.parquet"))
 
-    con = duckdb.connect(":memory:")
-    runner = QueryRunner(con, src)
-    st_iso = closed[0].isoformat().replace("+00:00", "Z")
-    et_iso = (active_dt + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
-    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-        hist = runner.try_conn_requests_hist_from_rollup(
-            st_iso, et_iso, has_filters=False, actual_cols=["conn_requests"]
-        )
+    with contextlib.closing(duckdb.connect(":memory:")) as con:
+        runner = QueryRunner(con, src)
+        st_iso = closed[0].isoformat().replace("+00:00", "Z")
+        et_iso = (active_dt + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
+        with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+            hist = runner.try_conn_requests_hist_from_rollup(
+                st_iso, et_iso, has_filters=False, actual_cols=["conn_requests"]
+            )
 
     assert hist is not None
     counts = {r["value"]: r["count"] for r in hist["top"]}

@@ -1455,15 +1455,6 @@ def finalize_cron_run_if_running(
         return False
 
 
-# Cache for FOS file listings to avoid redundant glob() calls during polling
-_fos_cache: dict[str, Any] = {
-    "gz_last_check": 0,
-    "parquet_count": 0,
-    "manifest_last_mod": None,
-    "gz_files": [],
-    "source_name": None,
-}
-
 # Cache for the data-side half of the get_sync_status COUNT/MIN/MAX query —
 # the second-largest cost in the sync cron path (~240 ms warm with ~1.7 k
 # small parquets, called every tick via refresh_config_status). Keyed by a

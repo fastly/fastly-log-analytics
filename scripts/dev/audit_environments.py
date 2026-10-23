@@ -27,6 +27,7 @@ import argparse
 import ipaddress
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -150,9 +151,16 @@ def auto_resolve_remote_admin_token() -> str | None:
 
     if resolve_cmd:
         try:
-            # Run the configured shell command
+            # Run the configured command via argv list without shell=True
             out = (
-                subprocess.check_output(resolve_cmd, shell=True, stderr=subprocess.DEVNULL, timeout=8).decode().strip()
+                subprocess.check_output(
+                    shlex.split(resolve_cmd),
+                    shell=False,
+                    stderr=subprocess.DEVNULL,
+                    timeout=8,
+                )
+                .decode()
+                .strip()
             )
             if "=" in out:
                 return out.split("=", 1)[1].strip()

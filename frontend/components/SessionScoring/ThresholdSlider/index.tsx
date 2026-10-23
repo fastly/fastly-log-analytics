@@ -11,6 +11,8 @@ import { useScoringQuery } from '../useScoringQuery'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
+import { scoringConfigCompositeKey } from '@/lib/queries/scoring'
 
 import { ThresholdMatrix, type BucketCounts } from './Matrix'
 import { ThresholdPreviewStats } from './Preview'
@@ -106,20 +108,21 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
   }
 
   const commitMutation = useMutation({
-    mutationFn: async (newThreshold: number | null) => {
-      const { data, response } = await client.PUT(
-        '/api/services/{service_id}/scoring/threshold',
-        {
-          params: { path: { service_id: serviceId } },
-          body: { threshold: newThreshold },
-        },
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data
-    },
+    mutationFn: async (newThreshold: number | null) =>
+      unwrapClient(
+        client.PUT(
+          '/api/services/{service_id}/scoring/threshold',
+          {
+            params: { path: { service_id: serviceId } },
+            body: { threshold: newThreshold },
+          },
+        ),
+      ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['scoring-threshold-committed', serviceId] })
       queryClient.invalidateQueries({ queryKey: ['scoring-status', serviceId] })
+      queryClient.invalidateQueries({ queryKey: scoringConfigCompositeKey(serviceId) })
+      queryClient.invalidateQueries({ queryKey: ['scoring-audit', serviceId] })
     },
   })
 
@@ -136,23 +139,24 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
   )
 
   const enforceMutation = useMutation({
-    mutationFn: async (newThreshold: number | null) => {
-      const { data, response } = await client.PUT(
-        '/api/services/{service_id}/scoring/enforce-threshold',
-        {
-          params: {
-            path: { service_id: serviceId },
-            query: { confirm: true },
+    mutationFn: async (newThreshold: number | null) =>
+      unwrapClient(
+        client.PUT(
+          '/api/services/{service_id}/scoring/enforce-threshold',
+          {
+            params: {
+              path: { service_id: serviceId },
+              query: { confirm: true },
+            },
+            body: { threshold: newThreshold },
           },
-          body: { threshold: newThreshold },
-        },
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data
-    },
+        ),
+      ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['scoring-enforce-threshold', serviceId] })
       queryClient.invalidateQueries({ queryKey: ['scoring-status', serviceId] })
+      queryClient.invalidateQueries({ queryKey: scoringConfigCompositeKey(serviceId) })
+      queryClient.invalidateQueries({ queryKey: ['scoring-audit', serviceId] })
     },
   })
 
@@ -170,22 +174,23 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
   )
 
   const statusCodeMutation = useMutation({
-    mutationFn: async (newCode: number | null) => {
-      const { data, response } = await client.PUT(
-        '/api/services/{service_id}/scoring/enforce-status-code',
-        {
-          params: {
-            path: { service_id: serviceId },
-            query: { confirm: true },
+    mutationFn: async (newCode: number | null) =>
+      unwrapClient(
+        client.PUT(
+          '/api/services/{service_id}/scoring/enforce-status-code',
+          {
+            params: {
+              path: { service_id: serviceId },
+              query: { confirm: true },
+            },
+            body: { status_code: newCode },
           },
-          body: { status_code: newCode },
-        },
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data
-    },
+        ),
+      ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['scoring-enforce-status-code', serviceId] })
+      queryClient.invalidateQueries({ queryKey: scoringConfigCompositeKey(serviceId) })
+      queryClient.invalidateQueries({ queryKey: ['scoring-audit', serviceId] })
     },
   })
 

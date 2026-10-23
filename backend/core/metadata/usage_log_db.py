@@ -166,6 +166,7 @@ _SCHEMA = [
         duration_ms REAL NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS idx_telemetry_queries_page ON telemetry_queries (page_load_id)",
+    "CREATE INDEX IF NOT EXISTS idx_telemetry_queries_ts ON telemetry_queries (timestamp)",
     """CREATE TABLE IF NOT EXISTS telemetry_sections (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TEXT NOT NULL,
@@ -175,4 +176,5 @@ _SCHEMA = [
         duration_ms REAL NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS idx_telemetry_sections_page ON telemetry_sections (page_load_id)",
+    "CREATE INDEX IF NOT EXISTS idx_telemetry_sections_ts ON telemetry_sections (timestamp)",
 ]

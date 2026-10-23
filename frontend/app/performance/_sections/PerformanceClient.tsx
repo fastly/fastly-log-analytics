@@ -3,6 +3,7 @@
 import { SlowestUrlsHelp, SlowestNetworksHelp, CacheTtlHelp, OriginVsEdgeHelp } from "../help-content";
 import React from 'react'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import type { components } from '@/types/api'
 import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
@@ -107,16 +108,17 @@ function PerformanceBody({
     range: { relativeRange, isAutoRange, startTime, endTime, anchor },
     keyParts: ['p99'],
     queryFn: async ({ rangeBody, signal }) => {
-      const { data, error } = await client.POST("/api/performance/aggregates", { signal,
-        body: {
-          filters: filterPayload,
-          sort_by: 'p99',
-          sections: undefined,
-          ...rangeBody,
-        }
-      })
-      if (error) throw error
-      return data
+      return unwrapClient(
+        client.POST("/api/performance/aggregates", {
+          signal,
+          body: {
+            filters: filterPayload,
+            sort_by: 'p99',
+            sections: undefined,
+            ...rangeBody,
+          },
+        }),
+      )
     }
   })
 

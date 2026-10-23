@@ -19,6 +19,7 @@ import { InvitationsPanel } from '@/components/share-dashboard/InvitationsPanel'
 import { SharingControlPanel } from '@/components/share-dashboard/SharingControlPanel'
 import type { ShareStatus } from '@/components/share-dashboard/utils'
 import { client, extractApiError } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { queryKeys } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 import Loading from './loading'
@@ -108,9 +109,7 @@ function ShareDashboardPageContent() {
   } = useQuery({
     queryKey: SHARE_STATUS_QUERY_KEY,
     queryFn: async ({ signal }) => {
-      const { data, response } = await client.GET('/api/admin/share/status', { signal })
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as ShareStatus
+      return (await unwrapClient(client.GET('/api/admin/share/status', { signal }))) as ShareStatus
     },
     // 30s staleTime so the hover-prefetch from the /admin PageHeader chip
     // is reused on click even when the user lingers on hover. Mutations
@@ -126,9 +125,7 @@ function ShareDashboardPageContent() {
   const { data: live } = useQuery({
     queryKey: SHARE_LIVE_QUERY_KEY,
     queryFn: async ({ signal }) => {
-      const { data, response } = await client.GET('/api/admin/share/live', { signal })
-      if (!response.ok) throw new Error(`live ${response.status}`)
-      return data as ShareLiveFields
+      return (await unwrapClient(client.GET('/api/admin/share/live', { signal }))) as ShareLiveFields
     },
     staleTime: 10_000,
     refetchInterval: 5 * 60_000,

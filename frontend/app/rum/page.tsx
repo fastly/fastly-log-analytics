@@ -1,9 +1,8 @@
 import { HydrationBoundary } from '@tanstack/react-query';
 
-import { fetchBootstrapServerSide } from '@/lib/ssr/bootstrap';
 import { fetchRumStatusServerSide } from '@/lib/ssr/rum';
 import { seedDehydratedState } from '@/lib/ssr/seed';
-import { resolveServerServiceId } from '@/lib/ssr/service';
+import { resolvePageServiceId } from '@/lib/ssr/service';
 import RumPageClient from './_sections/RumPageClient';
 import { queryKeys } from '@/lib/query-keys';
 
@@ -18,8 +17,7 @@ export default async function RumPage({
   searchParams: Promise<{ service?: string | string[] }>;
 }) {
   const params = await searchParams;
-  const bootstrap = await fetchBootstrapServerSide();
-  const serviceId = resolveServerServiceId(params, bootstrap);
+  const serviceId = await resolvePageServiceId(params);
 
   let dehydratedState = null;
   if (serviceId) {

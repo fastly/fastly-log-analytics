@@ -3,6 +3,7 @@
 import { useTimeseriesToTraces } from '@/hooks/useTimeseriesToTraces'
 import React from 'react'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import type { components } from '@/types/api'
 import type { PlotlyTrace } from '@/types/plotly'
 import type { RangeWireArgs } from '@/lib/range-wire'
@@ -104,35 +105,35 @@ function OriginReportContent({
     range: { relativeRange, isAutoRange, startTime, endTime, anchor },
     keyParts: [bucketMinutes, originMetric, originPercentile, ORIGIN_SECTIONS],
     queryFn: async ({ rangeBody, signal }) => {
-      const { data, error } = await client.POST('/api/origin/aggregates', { signal,
-        body: {
-          // Token mode → {range_token, anchor} (server resolves the window).
-          // Custom mode → {start_time, end_time} (backend falls back to these
-          // when range_token is absent).
-          filters: filterPayload,
-          bucket_minutes: bucketMinutes,
-          split_by_leg: false,
-          timeseries_metric: originMetric,
-          timeseries_percentile: originPercentile,
-          slow_urls_limit: 20,
-          // URLs with <50 reqs in the window almost never make the
-          // top-20 by p95 — a single outlier dominates and the row
-          // isn't statistically meaningful. Raising the HAVING from
-          // 10 to 50 cuts URL-cardinality 60-80 % (Zipfian) on the
-          // GROUP BY + APPROX_QUANTILE sorts; slow_urls section
-          // section on prod-tunnel-admin/7d drops ~1.3 s of the
-          // current ~2.2 s max.
-          slow_urls_min_requests: 50,
-          pop_latency_limit: 30,
-          ip_health_limit: 30,
-          sections: ORIGIN_SECTIONS,
-          ...rangeBody,
-        },
-      })
-      if (error) {
-        throw new Error(typeof error === 'string' ? error : 'Failed to load origin aggregates')
-      }
-      return data
+      return unwrapClient(
+        client.POST('/api/origin/aggregates', {
+          signal,
+          body: {
+            // Token mode → {range_token, anchor} (server resolves the window).
+            // Custom mode → {start_time, end_time} (backend falls back to these
+            // when range_token is absent).
+            filters: filterPayload,
+            bucket_minutes: bucketMinutes,
+            split_by_leg: false,
+            timeseries_metric: originMetric,
+            timeseries_percentile: originPercentile,
+            slow_urls_limit: 20,
+            // URLs with <50 reqs in the window almost never make the
+            // top-20 by p95 — a single outlier dominates and the row
+            // isn't statistically meaningful. Raising the HAVING from
+            // 10 to 50 cuts URL-cardinality 60-80 % (Zipfian) on the
+            // GROUP BY + APPROX_QUANTILE sorts; slow_urls section
+            // section on prod-tunnel-admin/7d drops ~1.3 s of the
+            // current ~2.2 s max.
+            slow_urls_min_requests: 50,
+            pop_latency_limit: 30,
+            ip_health_limit: 30,
+            sections: ORIGIN_SECTIONS,
+            ...rangeBody,
+          },
+        }),
+        'Failed to load origin aggregates',
+      )
     },
   })
 

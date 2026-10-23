@@ -7,7 +7,6 @@ from pydantic import AliasChoices, BaseModel, Field, model_serializer
 from backend.models._base import PassthroughModel, WireSafeModel
 from backend.models.common import (
     BaseResponse,
-    FilteredRequest,
     Limit100,
     RangeKeyedRequest,
     ResponseCacheObservation,
@@ -306,7 +305,7 @@ class NetworkHealthRequest(RangeKeyedRequest):
     sections: list[SectionName] | None = None
 
 
-class NetworkQualityRequest(FilteredRequest):
+class NetworkQualityRequest(RangeKeyedRequest):
     region_country: str = "US"
 
 

@@ -56,7 +56,7 @@
  * ShieldingMap Rules-of-Hooks crash described above).
  */
 import AxeBuilder from '@axe-core/playwright'
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 
 const CLEAN_ROUTES = [
   '/origin',
@@ -90,7 +90,7 @@ const CLEAN_ROUTES = [
 // real failure: a genuinely broken route throws on BOTH attempts and still
 // fails. Kept route-agnostic so every gated route gets the same cold-start
 // resilience in CI, not just /charts.
-async function gotoSettled(page: import('@playwright/test').Page, route: string) {
+async function gotoSettled(page: Page, route: string) {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       await page.goto(route)
@@ -104,7 +104,7 @@ async function gotoSettled(page: import('@playwright/test').Page, route: string)
   }
 }
 
-async function assertNoAxeViolations(page: import('@playwright/test').Page, route: string) {
+async function assertNoAxeViolations(page: Page, route: string) {
   await gotoSettled(page, route)
   await page.locator('main').first().waitFor({ state: 'visible', timeout: 30_000 })
   // Fixed settle for hydration + first data paint (see header note on

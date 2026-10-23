@@ -580,25 +580,26 @@ async def _application_lifespan(app: FastAPI):
 
     # Opt-in and fail explicitly; never claim a healthy ClickHouse dependency
     # or silently switch engines when this startup probe fails.
-    clickhouse = clickhouse_client.get_clickhouse_client()
-    if clickhouse is not None:
-        await asyncio.to_thread(clickhouse.health)
-        clickhouse_observer.start_clickhouse_observer()
-    registered_high_scale = register_high_scale_services_from_environment(
-        get_high_scale_service_registry(),
-        client=clickhouse,
-    )
-    if registered_high_scale:
-        logging.info("[fastapi] Registered %d high-scale service(s).", len(registered_high_scale))
+    if svcconfig.is_high_scale_mode():
+        clickhouse = clickhouse_client.get_clickhouse_client()
+        if clickhouse is not None:
+            await asyncio.to_thread(clickhouse.health)
+            clickhouse_observer.start_clickhouse_observer()
+        registered_high_scale = register_high_scale_services_from_environment(
+            get_high_scale_service_registry(),
+            client=clickhouse,
+        )
+        if registered_high_scale:
+            logging.info("[fastapi] Registered %d high-scale service(s).", len(registered_high_scale))
 
-        # Per-service least-privilege ClickHouse identities for analyst SQL (no-op without a console secret).
-        def _provision() -> tuple[str, ...]:
-            with console_access.provisioning_client(clickhouse) as admin:
-                return console_access.provision_configured_services(admin, registered_high_scale)
+            # Per-service least-privilege ClickHouse identities for analyst SQL (no-op without a console secret).
+            def _provision() -> tuple[str, ...]:
+                with console_access.provisioning_client(clickhouse) as admin:
+                    return console_access.provision_configured_services(admin, registered_high_scale)
 
-        provisioned = await asyncio.to_thread(_provision)
-        if provisioned:
-            logging.info("[fastapi] Provisioned analyst console access for %d service(s).", len(provisioned))
+            provisioned = await asyncio.to_thread(_provision)
+            if provisioned:
+                logging.info("[fastapi] Provisioned analyst console access for %d service(s).", len(provisioned))
 
     # Verify dependencies
     try:

@@ -13,11 +13,15 @@ import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { client, extractApiError } from '@/lib/api'
+import { scoringConfigCompositeKey } from '@/lib/queries/scoring'
 import { keyByOccurrence } from '@/lib/utils'
 
 interface ExcludeRegexCardProps {
   serviceId: string
 }
+
+const DESCRIPTION =
+  'Requests whose URL matches this regex are NOT sent to the scoring Compute service. The default skips common static-asset extensions; override to scope scoring to specific traffic patterns.'
 
 /**
  * Operator-facing control for "which URLs bypass the scoring Compute call".
@@ -106,6 +110,8 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['scoring-exclude-regex', serviceId] })
+      queryClient.invalidateQueries({ queryKey: scoringConfigCompositeKey(serviceId) })
+      queryClient.invalidateQueries({ queryKey: ['scoring-audit', serviceId] })
       setConfirmOpen(false)
     },
   })
@@ -180,7 +186,11 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
 
   if (isLoading) {
     return (
-      <AnalyticsCard title="URL exclusion regex" icon={<Filter className="h-4 w-4" />}>
+      <AnalyticsCard
+        title="URL exclusion regex"
+        icon={<Filter className="h-4 w-4" />}
+        description={DESCRIPTION}
+      >
         <Skeleton className="h-32 w-full" />
       </AnalyticsCard>
     )
@@ -188,7 +198,12 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
 
   if (!data) {
     return (
-      <AnalyticsCard title="URL exclusion regex" icon={<Filter className="h-4 w-4" />}>
+      <AnalyticsCard
+        title="URL exclusion regex"
+        icon={<Filter className="h-4 w-4" />}
+        description={DESCRIPTION}
+        error={error as (Error & { status?: number }) | null}
+      >
         <Alert variant="destructive">
           <AlertTriangle className="h-4 w-4" />
           <AlertDescription>Failed to load current exclusion regex.</AlertDescription>
@@ -201,7 +216,7 @@ export function ExcludeRegexCard({ serviceId }: ExcludeRegexCardProps) {
     <AnalyticsCard
       title="URL exclusion regex"
       icon={<Filter className="h-4 w-4" />}
-      description="Requests whose URL matches this regex are NOT sent to the scoring Compute service. The default skips common static-asset extensions; override to scope scoring to specific traffic patterns."
+      description={DESCRIPTION}
       error={error as (Error & { status?: number }) | null}
     >
       <div className="space-y-4">

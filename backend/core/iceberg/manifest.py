@@ -31,7 +31,9 @@ import logging
 import os
 import threading
 import time
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pyarrow as pa
 
@@ -360,10 +362,72 @@ def _get_cached_or_scan_metadata(source: dict, table) -> tuple[int, int, dict, s
 
 _ducklake_table_metadata_cache: dict[tuple[str, str], tuple[int | None, tuple[int, str | None, str | None, dict]]] = {}
 _ducklake_table_metadata_cache_lock = threading.Lock()
+_ducklake_session_local = threading.local()
 
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("iceberg._ducklake_table_metadata_cache", _ducklake_table_metadata_cache)
+
+
+@contextmanager
+def ducklake_session(source: dict):
+    """Share a single read-only DuckDB connection and DuckLake attachment across
+    multiple ``ducklake_table_exists`` / ``get_table_info`` / ``get_snapshot_calendar``
+    calls on the current thread. Connection creation and catalog attachment are
+    deferred until the first unmocked helper actually needs a connection.
+    """
+    prev = getattr(_ducklake_session_local, "current", None)
+    state: dict = {
+        "source": source,
+        "con": None,
+        "attached": False,
+        "existing_tables": set(),
+    }
+    _ducklake_session_local.current = state
+    try:
+        yield state
+    finally:
+        _ducklake_session_local.current = prev
+        con = state.get("con")
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                logger.debug("ducklake_session: con.close failed (ignored)", exc_info=True)
+
+
+def _acquire_ducklake_con(source: dict, con=None) -> tuple[Any, bool, bool, set[str] | None]:
+    """Return ``(con, attached, owns_con, existing_tables)`` for *source*.
+
+    Reuses an explicit *con* or an active :func:`ducklake_session` when present;
+    otherwise opens a fresh read-only connection that the caller must close.
+    """
+    from backend.core.duckdb import get_connection
+    from backend.core.iceberg._ducklake import _ducklake_attach
+
+    if con is not None:
+        attached = bool(_ducklake_attach(con, source, read_only=True))
+        return con, attached, False, None
+
+    session = getattr(_ducklake_session_local, "current", None)
+    if session is not None and session.get("source") is source:
+        s_con = session.get("con")
+        if s_con is None:
+            s_con = get_connection(source, read_only=True, skip_view_update=True)
+            session["con"] = s_con
+            session["attached"] = bool(_ducklake_attach(s_con, source, read_only=True))
+        return s_con, bool(session.get("attached")), False, session.get("existing_tables")
+
+    fresh_con = get_connection(source, read_only=True, skip_view_update=True)
+    try:
+        attached = bool(_ducklake_attach(fresh_con, source, read_only=True))
+    except Exception:
+        try:
+            fresh_con.close()
+        except Exception:
+            pass
+        raise
+    return fresh_con, attached, True, None
 
 
 def _lake_ident(lake_table: str) -> str:
@@ -438,7 +502,7 @@ def _get_cached_or_scan_ducklake_metadata(
     return result
 
 
-def ducklake_table_exists(source: dict, table_name: str = "logs") -> bool:
+def ducklake_table_exists(source: dict, table_name: str = "logs", *, con=None) -> bool:
     """Whether ``table_name``'s DuckLake table has been created for ``source``.
 
     Existence means a row in ``ducklake_table_info`` — the table exists in
@@ -450,24 +514,29 @@ def ducklake_table_exists(source: dict, table_name: str = "logs") -> bool:
     (bad credentials/config) rather than swallowing it, so callers can
     distinguish "not found" from "couldn't check".
     """
-    from backend.core.duckdb import get_connection
-    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
+    from backend.core.iceberg._ducklake import ducklake_table_name
 
-    con = get_connection(source, read_only=True, skip_view_update=True)
+    active_con, attached, owns_con, existing_tables = _acquire_ducklake_con(source, con)
     try:
-        if not _ducklake_attach(con, source, read_only=True):
+        if not attached:
             raise RuntimeError("failed to attach DuckLake catalog")
         lake_table = ducklake_table_name(source, table_name)
-        row = con.execute("SELECT 1 FROM ducklake_table_info('lake') WHERE table_name = ?", [lake_table]).fetchone()
-        return row is not None
+        row = active_con.execute(
+            "SELECT 1 FROM ducklake_table_info('lake') WHERE table_name = ?", [lake_table]
+        ).fetchone()
+        exists = row is not None
+        if exists and existing_tables is not None:
+            existing_tables.add(lake_table)
+        return exists
     finally:
-        try:
-            con.close()
-        except Exception:
-            logger.debug("ducklake_table_exists: con.close failed (ignored)", exc_info=True)
+        if owns_con and active_con is not None:
+            try:
+                active_con.close()
+            except Exception:
+                logger.debug("ducklake_table_exists: con.close failed (ignored)", exc_info=True)
 
 
-def get_table_info(source: dict, table=None, table_name: str = "logs") -> dict:
+def get_table_info(source: dict, table=None, table_name: str = "logs", *, con=None) -> dict:
     """Return snapshot count, data file count, total size, and latest snapshot time.
 
     DuckLake-native (v3 write-path cutover). ``table`` is accepted only for
@@ -475,10 +544,8 @@ def get_table_info(source: dict, table=None, table_name: str = "logs") -> dict:
     longer carries meaningful state, so it's ignored.
     """
     from backend import config as svcconfig
-    from backend.core.duckdb import get_connection
     from backend.core.iceberg._ducklake import (
         _default_data_path,
-        _ducklake_attach,
         ducklake_table_name,
     )
 
@@ -496,25 +563,28 @@ def get_table_info(source: dict, table=None, table_name: str = "logs") -> dict:
         "max_timestamp": None,
     }
 
-    con = None
+    active_con = None
+    owns_con = False
     try:
-        con = get_connection(source, read_only=True, skip_view_update=True)
-        if not _ducklake_attach(con, source, read_only=True):
+        active_con, attached, owns_con, existing_tables = _acquire_ducklake_con(source, con)
+        if not attached:
             raise RuntimeError("failed to attach DuckLake catalog")
 
         lake_table = ducklake_table_name(source, table_name)
-        info_row = con.execute(
+        info_row = active_con.execute(
             "SELECT table_id, file_count, file_size_bytes FROM ducklake_table_info('lake') WHERE table_name = ?",
             [lake_table],
         ).fetchone()
         if info_row is None:
             return {**zeroed, "error": f"DuckLake table not found: {lake_table}"}
+        if existing_tables is not None:
+            existing_tables.add(lake_table)
 
         table_id, file_count, file_size_bytes = info_row
         file_count = int(file_count or 0)
         file_size_bytes = int(file_size_bytes or 0)
 
-        snap_row = con.execute(
+        snap_row = active_con.execute(
             "SELECT count(*), max(snapshot_time) FROM ducklake_snapshots('lake') "
             "WHERE list_contains(flatten(map_values(changes)), ?)",
             [str(table_id)],
@@ -522,7 +592,7 @@ def get_table_info(source: dict, table=None, table_name: str = "logs") -> dict:
         snapshot_count = int(snap_row[0] or 0) if snap_row else 0
         latest_ts = snap_row[1].isoformat() if snap_row and snap_row[1] is not None else None
 
-        row_count, min_ts, max_ts, _calendar = _get_cached_or_scan_ducklake_metadata(con, source, lake_table)
+        row_count, min_ts, max_ts, _calendar = _get_cached_or_scan_ducklake_metadata(active_con, source, lake_table)
 
         # Small inserts land "inlined" in the catalog metadata rather than
         # as parquet files (see module-level comment above and
@@ -554,14 +624,14 @@ def get_table_info(source: dict, table=None, table_name: str = "logs") -> dict:
     except Exception as e:
         return {**zeroed, "error": str(e)}
     finally:
-        if con is not None:
+        if owns_con and active_con is not None:
             try:
-                con.close()
+                active_con.close()
             except Exception:
                 logger.debug("get_table_info: con.close failed (ignored)", exc_info=True)
 
 
-def get_snapshot_calendar(source: dict, table=None, table_name: str = "logs") -> dict:
+def get_snapshot_calendar(source: dict, table=None, table_name: str = "logs", *, con=None) -> dict:
     """Return per-date row counts scanned directly from the DuckLake table.
 
     DuckLake-native (v3 write-path cutover) — see ``get_table_info`` and the
@@ -571,30 +641,47 @@ def get_snapshot_calendar(source: dict, table=None, table_name: str = "logs") ->
     physical files yet (inlined). Accepted simplification — this no longer
     silently returns stale pyiceberg partition data.
     """
-    from backend.core.duckdb import get_connection
-    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
+    from backend.core.iceberg._ducklake import ducklake_table_name
 
-    con = None
+    active_con = None
+    owns_con = False
     try:
-        con = get_connection(source, read_only=True, skip_view_update=True)
-        if not _ducklake_attach(con, source, read_only=True):
+        active_con, attached, owns_con, existing_tables = _acquire_ducklake_con(source, con)
+        if not attached:
             return {}
 
         lake_table = ducklake_table_name(source, table_name)
-        exists = con.execute("SELECT 1 FROM ducklake_table_info('lake') WHERE table_name = ?", [lake_table]).fetchone()
-        if exists is None:
-            return {}
+        if existing_tables is None or lake_table not in existing_tables:
+            exists = active_con.execute(
+                "SELECT 1 FROM ducklake_table_info('lake') WHERE table_name = ?", [lake_table]
+            ).fetchone()
+            if exists is None:
+                return {}
+            if existing_tables is not None:
+                existing_tables.add(lake_table)
 
-        _row_count, _min_ts, _max_ts, calendar = _get_cached_or_scan_ducklake_metadata(con, source, lake_table)
+        _row_count, _min_ts, _max_ts, calendar = _get_cached_or_scan_ducklake_metadata(active_con, source, lake_table)
         return calendar
     except Exception:
         return {}
     finally:
-        if con is not None:
+        if owns_con and active_con is not None:
             try:
-                con.close()
+                active_con.close()
             except Exception:
                 logger.debug("get_snapshot_calendar: con.close failed (ignored)", exc_info=True)
+
+
+def _get_all_table_stats(
+    source: dict,
+    table_names: tuple[str, ...] = ("logs", "client_vitals", "client_errors"),
+) -> dict[str, dict]:
+    """Attach DuckLake once and inspect all requested tables in a single session."""
+    with ducklake_session(source):
+        return {tbl: get_table_info(source, table_name=tbl) for tbl in table_names}
+
+
+get_all_table_stats = _get_all_table_stats
 
 
 # ---------------------------------------------------------------------------

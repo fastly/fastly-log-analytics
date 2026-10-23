@@ -144,15 +144,42 @@ def merge_audit_for_service(service_id: str, rows: list[dict]) -> None:
     if not rows:
         return
     con = get_con(service_id)
+    src_names = list({r.get("source_name") for r in rows if r.get("source_name") is not None})
+    has_null_src = any(r.get("source_name") is None for r in rows)
+    if src_names and not has_null_src:
+        placeholders = ", ".join("?" for _ in src_names)
+        existing_rows = con.execute(
+            f"SELECT timestamp, source_name, event_type, actor FROM audit_logs WHERE source_name IN ({placeholders})",
+            src_names,
+        ).fetchall()
+    else:
+        existing_rows = con.execute(
+            "SELECT timestamp, source_name, event_type, actor FROM audit_logs",
+        ).fetchall()
+    seen: set[tuple] = {
+        (
+            str(er["timestamp"]) if er["timestamp"] is not None else None,
+            er["source_name"],
+            er["event_type"],
+            er["actor"],
+        )
+        for er in existing_rows
+    }
+    to_insert: list[tuple] = []
     for r in rows:
-        existing = con.execute(
-            "SELECT 1 FROM audit_logs WHERE source_name = ? AND timestamp = ? AND event_type = ? AND actor = ? LIMIT 1",
-            (r.get("source_name"), r.get("timestamp"), r.get("event_type"), r.get("actor")),
-        ).fetchone()
-        if existing:
+        ts = r.get("timestamp")
+        ts_str = str(ts) if ts is not None else None
+        src_name = r.get("source_name")
+        ev_type = r.get("event_type")
+        actor = r.get("actor")
+        key = (ts_str, src_name, ev_type, actor)
+        if key in seen:
             continue
-        con.execute(
+        seen.add(key)
+        to_insert.append((ts, src_name, ev_type, r.get("details"), actor))
+    if to_insert:
+        con.executemany(
             "INSERT INTO audit_logs (timestamp, source_name, event_type, details, actor) VALUES (?, ?, ?, ?, ?)",
-            (r.get("timestamp"), r.get("source_name"), r.get("event_type"), r.get("details"), r.get("actor")),
+            to_insert,
         )
     con.commit()

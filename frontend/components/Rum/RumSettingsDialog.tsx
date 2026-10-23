@@ -164,7 +164,7 @@ function RumSettingsDialogBody({
       completedRef.current = true
       onComplete?.()
       queryClient.invalidateQueries({ queryKey: queryKeys.rumStatus(serviceId) })
-      queryClient.invalidateQueries({ queryKey: ['rum-versions', serviceId] })
+      queryClient.invalidateQueries({ queryKey: queryKeys.rumVersions(serviceId) })
     }
     if (!isDone) {
       completedRef.current = false
@@ -185,16 +185,17 @@ function RumSettingsDialogBody({
 
     try {
       // 1. Save settings toggles synchronously first
+      const payload = {
+        capture_vitals: captureVitals,
+        capture_performance: capturePerformance,
+        capture_errors: captureErrors,
+        capture_events: captureEvents,
+        custom_condition: customCondition,
+      }
       const settingsRes = await adminFetch(`/api/services/${serviceId}/rum/settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          capture_vitals: captureVitals,
-          capture_performance: capturePerformance,
-          capture_errors: captureErrors,
-          capture_events: captureEvents,
-          custom_condition: customCondition,
-        }),
+        body: JSON.stringify(payload),
       })
 
       if (!settingsRes.ok) {

@@ -4,6 +4,7 @@ import React from 'react'
 import Link from 'next/link'
 import { useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import { scoringAnalyticsCompositeOptions, scoringConfigCompositeOptions } from '@/lib/queries/scoring'
 import { useMounted } from '@/hooks/useMounted'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -11,11 +12,13 @@ import { buttonVariants } from '@/components/ui/button'
 import { UserPlus, ShieldCheck, Activity, TrendingUp, Layers, Eye, Database } from 'lucide-react'
 import { queryKeys } from '@/lib/query-keys'
 
-export function AdminPrefetchLinks() {
+export function AdminPrefetchLinks({ isHighScale }: { isHighScale?: boolean } = {}) {
   const queryClient = useQueryClient()
   const mounted = useMounted()
   const storeServiceId = useServiceStore(s => s.activeServiceId)
+  const services = useServiceStore(s => s.services)
   const activeServiceId = mounted ? storeServiceId : null
+  const showClickHouse = isHighScale ?? services.some(s => Boolean(s.is_high_scale))
 
   return (
     <>
@@ -25,11 +28,8 @@ export function AdminPrefetchLinks() {
         onMouseEnter={() => {
           queryClient.prefetchQuery({
             queryKey: queryKeys.admin.shareStatus(),
-            queryFn: async ({ signal }) => {
-              const { data, response } = await client.GET('/api/admin/share/status', { signal })
-              if (!response.ok) throw new Error(`status ${response.status}`)
-              return data
-            },
+            queryFn: async ({ signal }) =>
+              unwrapClient(client.GET('/api/admin/share/status', { signal })),
           })
         }}
         data-testid="open-share-dialog"
@@ -62,14 +62,13 @@ export function AdminPrefetchLinks() {
         onMouseEnter={() => {
           queryClient.prefetchQuery({
             queryKey: queryKeys.admin.metricHistoryBatch('1h'),
-            queryFn: async ({ signal }) => {
-              const { data, response } = await client.GET('/api/admin/metric-history/batch', {
-                params: { query: { since: '1h' } },
-                signal,
-              })
-              if (!response.ok) throw new Error(`status ${response.status}`)
-              return data
-            },
+            queryFn: async ({ signal }) =>
+              unwrapClient(
+                client.GET('/api/admin/metric-history/batch', {
+                  params: { query: { since: '1h' } },
+                  signal,
+                }),
+              ),
           })
         }}
         className={buttonVariants({ variant: 'secondary', size: 'sm' })}
@@ -82,11 +81,8 @@ export function AdminPrefetchLinks() {
         onMouseEnter={() => {
           queryClient.prefetchQuery({
             queryKey: queryKeys.admin.celeryStatus(),
-            queryFn: async ({ signal }) => {
-              const { data, response } = await client.GET('/api/admin/celery/status', { signal })
-              if (!response.ok) throw new Error(`status ${response.status}`)
-              return data
-            },
+            queryFn: async ({ signal }) =>
+              unwrapClient(client.GET('/api/admin/celery/status', { signal })),
           })
         }}
         className={buttonVariants({ variant: 'secondary', size: 'sm' })}
@@ -100,27 +96,29 @@ export function AdminPrefetchLinks() {
       >
         <Eye className="h-4 w-4 mr-1" /> RUM
       </Link>
-      <Link
-        href={activeServiceId ? `/admin/clickhouse?service=${activeServiceId}` : '/admin/clickhouse'}
-        prefetch={false}
-        onMouseEnter={() => {
-          if (!activeServiceId) return
-          queryClient.prefetchQuery({
-            queryKey: queryKeys.admin.clickhouseStatus(activeServiceId),
-            queryFn: async ({ signal }) => {
-              const { data, response } = await client.GET('/api/admin/clickhouse/status', {
-                params: { query: { service_id: activeServiceId } },
-                signal,
-              })
-              if (!response.ok && response.status !== 503) throw new Error(`status ${response.status}`)
-              return data
-            },
-          })
-        }}
-        className={buttonVariants({ variant: 'secondary', size: 'sm' })}
-      >
-        <Database className="h-4 w-4 mr-1" /> ClickHouse
-      </Link>
+      {showClickHouse && (
+        <Link
+          href={activeServiceId ? `/admin/clickhouse?service=${activeServiceId}` : '/admin/clickhouse'}
+          prefetch={false}
+          onMouseEnter={() => {
+            if (!activeServiceId) return
+            queryClient.prefetchQuery({
+              queryKey: queryKeys.admin.clickhouseStatus(activeServiceId),
+              queryFn: async ({ signal }) => {
+                const { data, response } = await client.GET('/api/admin/clickhouse/status', {
+                  params: { query: { service_id: activeServiceId } },
+                  signal,
+                })
+                if (!response.ok && response.status !== 503) throw new Error(`status ${response.status}`)
+                return data
+              },
+            })
+          }}
+          className={buttonVariants({ variant: 'secondary', size: 'sm' })}
+        >
+          <Database className="h-4 w-4 mr-1" /> ClickHouse
+        </Link>
+      )}
     </>
   )
 }

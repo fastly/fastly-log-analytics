@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import tempfile
 from collections.abc import Sequence
@@ -442,6 +443,10 @@ class HighScaleIngestController:
         all_events: list[dict[str, Any]] = []
         total_accepted = 0
         total_quarantined = 0
+        counts_batch: list[tuple[str, int, int]] = []
+        has_batch_counts = (
+            self._control is not None and getattr(type(self._control), "record_source_counts_batch", None) is not None
+        )
 
         for descriptor, payload in sources_payloads:
             archive_source = ArchiveSourceObject(
@@ -462,13 +467,16 @@ class HighScaleIngestController:
             total_quarantined += decoded.quarantined_rows
 
             if self._control is not None:
-                self._control.record_source_counts(
-                    service_id,
-                    descriptor.object_key,
-                    accepted_rows=decoded.accepted_rows,
-                    malformed_rows=decoded.quarantined_rows,
-                    expected_owner_epoch=owner.owner_epoch,
-                )
+                if has_batch_counts:
+                    counts_batch.append((descriptor.object_key, decoded.accepted_rows, decoded.quarantined_rows))
+                else:
+                    self._control.record_source_counts(
+                        service_id,
+                        descriptor.object_key,
+                        accepted_rows=decoded.accepted_rows,
+                        malformed_rows=decoded.quarantined_rows,
+                        expected_owner_epoch=owner.owner_epoch,
+                    )
             else:
                 self._ledger.record_counts(
                     service_id,
@@ -491,6 +499,37 @@ class HighScaleIngestController:
 
             decoded_sources.append((descriptor, decoded, archive_rows))
             all_events.extend(decoded.events)
+
+        if self._control is not None and counts_batch:
+            batch_counts_fn = getattr(self._control, "record_source_counts_batch", None)
+            if (
+                callable(batch_counts_fn)
+                and getattr(type(self._control), "record_source_counts_batch", None) is not None
+            ):
+                try:
+                    batch_counts_fn(
+                        service_id,
+                        counts_batch,
+                        expected_owner_epoch=owner.owner_epoch,
+                    )
+                except TypeError:
+                    for object_key, accepted_rows, malformed_rows in counts_batch:
+                        self._control.record_source_counts(
+                            service_id,
+                            object_key,
+                            accepted_rows=accepted_rows,
+                            malformed_rows=malformed_rows,
+                            expected_owner_epoch=owner.owner_epoch,
+                        )
+            else:
+                for object_key, accepted_rows, malformed_rows in counts_batch:
+                    self._control.record_source_counts(
+                        service_id,
+                        object_key,
+                        accepted_rows=accepted_rows,
+                        malformed_rows=malformed_rows,
+                        expected_owner_epoch=owner.owner_epoch,
+                    )
 
         total_rows = total_accepted + total_quarantined
         if total_rows > 0 and (total_quarantined / total_rows) > HIGH_SCALE_MAX_DEAD_LETTER_RATIO:
@@ -776,7 +815,20 @@ class HighScaleIngestController:
     def _publish_control_manifest(self, manifest: ArchiveManifest, owner_epoch: int) -> None:
         if self._control is None:
             raise RuntimeError("self._control is unexpectedly None")
-        record = self._control.register_archive_manifest(manifest, owner_epoch=owner_epoch)
+        accepts_state = False
+        try:
+            accepts_state = "state" in inspect.signature(self._control.register_archive_manifest).parameters
+        except (TypeError, ValueError):
+            accepts_state = False
+        if accepts_state:
+            reg_fn: Any = self._control.register_archive_manifest
+            record = reg_fn(
+                manifest,
+                owner_epoch=owner_epoch,
+                state=ArchiveState.MANIFEST_COMMITTED,
+            )
+        else:
+            record = self._control.register_archive_manifest(manifest, owner_epoch=owner_epoch)
         states = (
             ArchiveState.ARTIFACT_UPLOADING,
             ArchiveState.ARTIFACT_VERIFIED,

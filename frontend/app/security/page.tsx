@@ -1,12 +1,11 @@
 import { HydrationBoundary } from '@tanstack/react-query'
 
-import { fetchBootstrapServerSide } from '@/lib/ssr/bootstrap'
 import {
   fetchSecurityServerSide,
   SECURITY_SSR_DEFAULTS,
 } from '@/lib/ssr/security'
 import { seedDehydratedState } from '@/lib/ssr/seed'
-import { resolveServerServiceId } from '@/lib/ssr/service'
+import { resolvePageServiceId } from '@/lib/ssr/service'
 import SecurityClient from './_sections/SecurityClient'
 
 // Per-request RSC shell for /security. Pre-fetches the DEFAULT security
@@ -55,8 +54,7 @@ export default async function SecurityPage({
   searchParams: Promise<{ service?: string | string[] }>
 }) {
   const params = await searchParams
-  const bootstrap = await fetchBootstrapServerSide()
-  const serviceId = resolveServerServiceId(params, bootstrap)
+  const serviceId = await resolvePageServiceId(params)
 
   return (
     <Suspense fallback={<SecurityLoading />}>

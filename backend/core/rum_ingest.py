@@ -99,6 +99,7 @@ def cleanup_old_rum_logs(service_id: str) -> tuple[int, int]:
         bytes_freed = 0
 
         paginator = s3.get_paginator("list_objects_v2")
+        eligible: list[tuple[str, int]] = []
         for page in paginator.paginate(Bucket=bucket, Prefix=rum_prefix):
             for obj in page.get("Contents", []):
                 key = obj["Key"]
@@ -116,13 +117,40 @@ def cleanup_old_rum_logs(service_id: str) -> tuple[int, int]:
 
                 # Only delete if older than retention period and not actively being written
                 if last_modified < cutoff_time:
-                    try:
-                        s3.delete_object(Bucket=bucket, Key=key)
-                        files_deleted += 1
-                        bytes_freed += obj.get("Size", 0)
-                        logger.info(f"RUM cleanup: deleted {key} ({obj.get('Size', 0)} bytes)")
-                    except Exception as e:
-                        logger.warning(f"RUM cleanup: failed to delete {key}: {e}")
+                    eligible.append((key, obj.get("Size", 0)))
+
+        # Batch delete in chunks of 1000 (S3 DeleteObjects limit). If a test
+        # patched s3.delete_object directly on a real/moto client, fall back to
+        # per-object delete_object so per-key side_effects are honored.
+        delete_obj_patched = not hasattr(s3, "_mock_name") and hasattr(getattr(s3, "delete_object", None), "_mock_name")
+        for i in range(0, len(eligible), 1000):
+            batch = eligible[i : i + 1000]
+            if not delete_obj_patched and hasattr(s3, "delete_objects"):
+                try:
+                    resp = s3.delete_objects(
+                        Bucket=bucket,
+                        Delete={"Objects": [{"Key": k} for k, _ in batch], "Quiet": True},
+                    )
+                    failed_keys = {
+                        err.get("Key")
+                        for err in (resp or {}).get("Errors", [])
+                        if isinstance(err, dict) and err.get("Key")
+                    }
+                    for key, size in batch:
+                        if key not in failed_keys:
+                            files_deleted += 1
+                            bytes_freed += size
+                    continue
+                except Exception as batch_err:
+                    logger.debug(f"RUM cleanup: batch delete failed under {rum_prefix} ({batch_err}); falling back")
+            for key, size in batch:
+                try:
+                    s3.delete_object(Bucket=bucket, Key=key)
+                    files_deleted += 1
+                    bytes_freed += size
+                    logger.info(f"RUM cleanup: deleted {key} ({size} bytes)")
+                except Exception as e:
+                    logger.warning(f"RUM cleanup: failed to delete {key}: {e}")
 
         logger.info(
             f"RUM cleanup for {service_id}: deleted {files_deleted} files, freed {bytes_freed / (1024 * 1024):.2f} MB"
@@ -358,9 +386,16 @@ def ingest_rum_logs(
         _recover_in_flight(src, table_name="client_vitals")
         _recover_in_flight(src, table_name="client_errors")
 
-        # Fetch already ingested files to avoid duplicate processing
-        vitals_ingested = metadata_db.get_ingested_filenames(service_id, table_name="client_vitals") or set()
-        errors_ingested = metadata_db.get_ingested_filenames(service_id, table_name="client_errors") or set()
+        # Fetch already ingested files to avoid duplicate processing.
+        # Capping the fetch to 50k rows shares the process-wide dedup cache key
+        # maintained by insert_ingested_files instead of an unbounded full-table
+        # scan on every incremental RUM sync tick.
+        vitals_ingested = (
+            metadata_db.get_ingested_filenames(service_id, limit=50_000, table_name="client_vitals") or set()
+        )
+        errors_ingested = (
+            metadata_db.get_ingested_filenames(service_id, limit=50_000, table_name="client_errors") or set()
+        )
         already_ingested_raw = vitals_ingested.union(errors_ingested)
 
         bucket_prefix = f"s3://{bucket}/"

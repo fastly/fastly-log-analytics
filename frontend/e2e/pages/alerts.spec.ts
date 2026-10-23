@@ -13,11 +13,8 @@
 
 import { expect, test } from '@playwright/test'
 import type { DebugQuery } from '../../types/api'
-
-type LayoutShiftEntry = PerformanceEntry & {
-  hadRecentInput?: boolean
-  value?: number
-}
+import { installClsObserver, measureWarmPaintAndCls } from '../cls-observer'
+import { getFirstServiceId } from './helpers'
 
 test.describe('Alerts & Notifications Page Contract (/alerts)', () => {
   test('1. Route accessibility & environment indicator', async ({ page }) => {
@@ -73,10 +70,7 @@ test.describe('Alerts & Notifications Page Contract (/alerts)', () => {
 
   test('4. Admin rule lifecycle: Create, Update, Toggle, Test Webhook, Evaluate & Delete', async ({ page }) => {
     // Resolve active service ID from /api/bootstrap so service-scoped alerts match UI
-    const bootRes = await page.request.get('/api/bootstrap')
-    expect(bootRes.ok()).toBeTruthy()
-    const bootJson = await bootRes.json()
-    const serviceId = bootJson?.services?.[0]?.id ?? bootJson?.services?.[0]?.service_id ?? 'default'
+    const serviceId = (await getFirstServiceId(page)) ?? 'default'
     const ruleId = `e2e-alert-${Date.now()}`
 
     try {
@@ -173,9 +167,7 @@ test.describe('Alerts & Notifications Page Contract (/alerts)', () => {
   })
 
   test('5. Role verification & SSRF protection checks', async ({ page }) => {
-    const bootRes = await page.request.get('/api/bootstrap')
-    const bootJson = await bootRes.json()
-    const serviceId = bootJson?.services?.[0]?.id ?? bootJson?.services?.[0]?.service_id ?? 'default'
+    const serviceId = (await getFirstServiceId(page)) ?? 'default'
 
     // Verify SSRF validation rejects loopback/private/metadata webhook targets with 400
     const ssrfRes = await page.request.post('/api/alerts/', {
@@ -207,36 +199,12 @@ test.describe('Alerts & Notifications Page Contract (/alerts)', () => {
   test('6. Performance budget: FCP < 400ms and CLS <= 0.05 on warm load', async ({ page }) => {
     await page.goto('/alerts', { waitUntil: 'domcontentloaded' })
 
+    await installClsObserver(page)
     const start = Date.now()
     await page.reload({ waitUntil: 'domcontentloaded' })
     const totalTime = Date.now() - start
 
-    const metrics = await page.evaluate(() => {
-      return new Promise<{ fcp: number; cls: number }>((resolve) => {
-        let fcp = 0
-        let cls = 0
-        try {
-          const paintEntries = performance.getEntriesByType('paint')
-          const fcpEntry = paintEntries.find((e) => e.name === 'first-contentful-paint')
-          if (fcpEntry) {
-            fcp = fcpEntry.startTime
-          }
-
-          new PerformanceObserver((list) => {
-            for (const entry of list.getEntries()) {
-              const layoutShift = entry as LayoutShiftEntry
-              if (!layoutShift.hadRecentInput) {
-                cls += layoutShift.value ?? 0
-              }
-            }
-          }).observe({ type: 'layout-shift', buffered: true })
-
-          setTimeout(() => resolve({ fcp, cls }), 800)
-        } catch {
-          resolve({ fcp: 0, cls: 0 })
-        }
-      })
-    })
+    const metrics = await measureWarmPaintAndCls(page, 800)
 
     console.log(`[PERF /alerts] Reload: ${totalTime}ms | FCP: ${Math.round(metrics.fcp)}ms | CLS: ${metrics.cls.toFixed(3)}`)
     expect(totalTime).toBeLessThan(10_000)
@@ -244,9 +212,7 @@ test.describe('Alerts & Notifications Page Contract (/alerts)', () => {
   })
 
   test('7. Telemetry instrumentation & query attribution audit', async ({ page }) => {
-    const bootRes = await page.request.get('/api/bootstrap')
-    const bootJson = await bootRes.json()
-    const serviceId = bootJson?.services?.[0]?.id ?? bootJson?.services?.[0]?.service_id ?? 'default'
+    const serviceId = (await getFirstServiceId(page)) ?? 'default'
 
     // 1. Verify GET /api/alerts/{service_id} returns valid response
     const listRes = await page.request.get(`/api/alerts/${serviceId}`, {

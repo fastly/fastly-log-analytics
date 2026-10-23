@@ -16,6 +16,8 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { client } from "@/lib/api";
+import { unwrapClient } from "@/lib/api-client";
+import { queryKeys } from "@/lib/query-keys";
 import type { components } from "@/types/api.generated";
 
 type RumVersionsResponse = components["schemas"]["RumVersionsResponse"];
@@ -52,15 +54,14 @@ export function RumVersionPicker({
 }: RumVersionPickerProps) {
   const hasPrefetched = availableVersions !== undefined;
   const { data, isLoading, isError, refetch, isFetching } = useQuery<RumVersionsResponse>({
-    queryKey: ["rum-versions", serviceId],
-    queryFn: async ({ signal }) => {
-      const { data, response } = await client.GET(
-        "/api/services/{service_id}/rum/versions",
-        { params: { path: { service_id: serviceId } }, signal },
-      );
-      if (!response.ok) throw new Error(`status ${response.status}`);
-      return data as RumVersionsResponse;
-    },
+    queryKey: queryKeys.rumVersions(serviceId),
+    queryFn: async ({ signal }) =>
+      unwrapClient(
+        client.GET(
+          "/api/services/{service_id}/rum/versions",
+          { params: { path: { service_id: serviceId } }, signal },
+        ),
+      ),
     enabled: !!serviceId && !hasPrefetched,
     retry: false,
     staleTime: Infinity,

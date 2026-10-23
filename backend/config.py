@@ -114,6 +114,8 @@ def load_clickhouse_config() -> ClickHouseConfig | None:
     CONNECT/POOL_TIMEOUT_S are 0.01..60; QUERY/INSERT_TIMEOUT_S 0.01..300;
     POOL_MAX_SIZE is 1..64. Environment changes require a process restart.
     """
+    if os.getenv("DEPLOYMENT_MODE", "").strip().lower() == "standard":
+        return None
     if not _clickhouse_bool("CLICKHOUSE_ENABLED", "false"):
         return None
     required = {}
@@ -1068,7 +1070,7 @@ HOT_S3_SECRET = os.getenv("HOT_S3_SECRET", "")
 def _default_sse_backplane() -> str:
     if explicit := os.getenv("SSE_BACKPLANE"):
         return explicit.strip()
-    return "valkey" if (DEPLOYMENT_MODE in {"high_scale", "high-scale"} or bool(CELERY_BROKER_URL)) else "local"
+    return "valkey" if (DEPLOYMENT_MODE == "high_scale" or bool(CELERY_BROKER_URL)) else "local"
 
 
 SSE_BACKPLANE = _default_sse_backplane()
@@ -1108,7 +1110,11 @@ def resolve_raw_delete_after(cfg: dict | None, requested: bool | None = None) ->
 def is_high_scale_mode(source: dict | None = None) -> bool:
     """Return whether the deployment uses the high-scale ClickHouse topology."""
     mode = (source or {}).get("deployment_mode") or DEPLOYMENT_MODE
-    return mode in {"high_scale", "high-scale"} or os.getenv("HIGH_SCALE_ENABLED", "0").strip().lower() in {
+    if mode == "high_scale":
+        return True
+    if mode == "standard":
+        return False
+    return os.getenv("HIGH_SCALE_ENABLED", "0").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -1129,13 +1135,13 @@ def is_durable_serving_mode(source: dict | None = None) -> bool:
 def validate_deployment_mode() -> None:
     """Fail fast on incoherent deployment configuration.
 
-    Allowed modes are 'standard' and 'high_scale' (or 'high-scale').
+    Allowed modes are 'standard' and 'high_scale'.
     DEPLOYMENT_MODE=high_throughput has been completely removed.
     Both modes require DUCKLAKE_CATALOG and METADATA_DSN to be Postgres DSNs per ADR-22.
     """
     if DEPLOYMENT_MODE == "high_throughput":
         raise RuntimeError("DEPLOYMENT_MODE=high_throughput has been removed; use 'standard' or 'high_scale'")
-    if DEPLOYMENT_MODE not in {"standard", "high_scale", "high-scale"}:
+    if DEPLOYMENT_MODE not in {"standard", "high_scale"}:
         raise RuntimeError(f"DEPLOYMENT_MODE must be either 'standard' or 'high_scale'; got {DEPLOYMENT_MODE!r}")
     if not DUCKLAKE_CATALOG.startswith(("postgres://", "postgresql://")):
         raise RuntimeError(

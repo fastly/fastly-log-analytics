@@ -1,10 +1,9 @@
 import { Suspense } from 'react'
 import { HydrationBoundary } from '@tanstack/react-query'
 
-import { fetchBootstrapServerSide } from '@/lib/ssr/bootstrap'
 import { fetchStreamingServerSide } from '@/lib/ssr/streaming'
 import { seedDehydratedState } from '@/lib/ssr/seed'
-import { resolveServerServiceId } from '@/lib/ssr/service'
+import { resolvePageServiceId } from '@/lib/ssr/service'
 import StreamingLoading from './loading'
 import StreamingClient from './_sections/StreamingClient'
 
@@ -16,8 +15,7 @@ export default async function StreamingPage({
   searchParams: Promise<{ service?: string | string[] }>
 }) {
   const params = await searchParams
-  const bootstrap = await fetchBootstrapServerSide()
-  const serviceId = resolveServerServiceId(params, bootstrap)
+  const serviceId = await resolvePageServiceId(params)
 
   return (
     <Suspense fallback={<StreamingLoading />}>
@@ -33,20 +31,22 @@ async function StreamingPageContent({
 }) {
   const now = new Date()
   const seed = await fetchStreamingServerSide(serviceId, now)
+  const seedData = seed?.data as { available?: boolean; has_data?: boolean } | null | undefined
 
-  const dehydratedState = seed
-    ? seedDehydratedState(
-        [
-          'cmcd',
-          'aggregates',
-          serviceId,
-          seed.rangeToken,
-          seed.anchor,
-          {},
-        ],
-        seed.data,
-      )
-    : null
+  const dehydratedState =
+    seed && seedData?.available && seedData?.has_data
+      ? seedDehydratedState(
+          [
+            'cmcd',
+            'aggregates',
+            serviceId,
+            seed.rangeToken,
+            seed.anchor,
+            {},
+          ],
+          seed.data,
+        )
+      : null
 
   return (
     <HydrationBoundary state={dehydratedState}>

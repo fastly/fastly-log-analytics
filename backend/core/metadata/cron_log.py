@@ -481,8 +481,9 @@ def record_ingest_batch_outcomes(
     service_id: str,
     outcomes_by_key: dict[str, dict[str, int]],
 ) -> int:
-    """Record ledger object outcomes for a batch of objects, coalescing SSE
-    ``cron_run_changed`` publications to at most one per originating cron run.
+    """Record ledger object outcomes for a batch of objects in a single
+    transaction, coalescing SSE ``cron_run_changed`` publications to at most
+    one per originating cron run.
 
     Without batch-level coalescing, a 50-file ``convert_batch_objects`` call
     emits 50 back-to-back ``cron_run_changed`` events ~25ms apart for the same
@@ -491,18 +492,111 @@ def record_ingest_batch_outcomes(
     """
     if not outcomes_by_key:
         return 0
-    updated_count = 0
-    pending_publishes: dict[tuple[int, str], str] = {}
+    normalized_by_key: dict[str, dict[str, int]] = {}
     for object_key, counters in outcomes_by_key.items():
-        updated, pub_info = _record_ingest_object_outcome_inner(service_id, object_key, counters)
-        if updated:
-            updated_count += 1
-        if pub_info is not None:
-            run_id, task, new_run_status = pub_info
-            pending_publishes[(run_id, task)] = new_run_status
-    for (run_id, task), new_run_status in pending_publishes.items():
-        _publish_cron_run_change(service_id, run_id, task, new_run_status)
-    return updated_count
+        if not object_key:
+            raise ValueError("object_key is required")
+        normalized_by_key[object_key] = _normalize_outcome_counters(counters)
+
+    con = get_con(service_id)
+    _begin_metadata_write(con)
+    pending_publishes: dict[tuple[int, str], str] = {}
+    try:
+        keys = list(normalized_by_key.keys())
+        placeholders = ",".join("?" for _ in keys)
+        ledger_rows = con.execute(
+            f"SELECT object_key, originating_task, originating_run_id, outcome_counters "
+            f"FROM ingest_ledger WHERE service_id = ? AND object_key IN ({placeholders}) "
+            f"ORDER BY object_key FOR UPDATE",
+            (service_id, *keys),
+        ).fetchall()
+        if not ledger_rows:
+            con.execute("ROLLBACK")
+            return 0
+
+        deltas_by_run: dict[int, tuple[str | None, dict[str, int]]] = {}
+        ledger_updates: list[tuple[str, str, str]] = []
+        for ledger_row in ledger_rows:
+            obj_key = ledger_row["object_key"]
+            new_counters = normalized_by_key[obj_key]
+            task = ledger_row["originating_task"]
+            run_id = ledger_row["originating_run_id"]
+            previous = _decode_outcome_counters(ledger_row["outcome_counters"])
+            if run_id is not None:
+                run_id_int = int(run_id)
+                existing_entry = deltas_by_run.get(run_id_int)
+                if existing_entry is None:
+                    deltas = {k: 0 for k in OUTCOME_COUNTER_KEYS}
+                    deltas_by_run[run_id_int] = (task, deltas)
+                else:
+                    if existing_entry[0] != task:
+                        raise RuntimeError(f"ledger origin task does not match cron run {run_id_int}")
+                    deltas = existing_entry[1]
+                for key in OUTCOME_COUNTER_KEYS:
+                    deltas[key] += new_counters[key] - previous[key]
+            ledger_updates.append((json.dumps(new_counters), service_id, obj_key))
+
+        for run_id_int in sorted(deltas_by_run):
+            task, deltas = deltas_by_run[run_id_int]
+            _lock_cron_run(con, service_id, run_id_int)
+            run_row = con.execute(
+                "SELECT task, status, outcome_counters FROM cron_runs WHERE id = ? AND service_id = ? FOR UPDATE",
+                (run_id_int, service_id),
+            ).fetchone()
+            if run_row is None:
+                raise RuntimeError(f"originating cron run {run_id_int} is missing for ledger object")
+            if task != run_row["task"]:
+                raise RuntimeError(f"ledger origin task does not match cron run {run_id_int}")
+            prev_run_status = str(run_row["status"]) if run_row["status"] is not None else None
+
+            totals = _decode_outcome_counters(run_row["outcome_counters"])
+            for key in OUTCOME_COUNTER_KEYS:
+                totals[key] += deltas[key]
+                if totals[key] < 0:
+                    raise RuntimeError(f"outcome counter {key!r} would become negative")
+            has_failure = any(
+                totals[key]
+                for key in (
+                    "malformed_records",
+                    "corrupt_containers",
+                    "quarantine_capture_failures",
+                    "source_delete_failures",
+                    "objects_partial",
+                    "objects_failed",
+                )
+            )
+            new_run_status = "error" if has_failure or run_row["status"] == "error" else run_row["status"]
+            con.execute(
+                "UPDATE cron_runs SET outcome_counters = ?, status = ?, "
+                "rows_ingested = ?, corrupt_rows = ?, "
+                "error_message = CASE WHEN ? = 'error' "
+                "THEN COALESCE(error_message, 'One or more ingestion objects had failures') "
+                "ELSE error_message END WHERE id = ? AND service_id = ?",
+                (
+                    json.dumps(totals),
+                    new_run_status,
+                    totals["valid_records"],
+                    totals["malformed_records"] + totals["corrupt_containers"],
+                    new_run_status,
+                    run_id_int,
+                    service_id,
+                ),
+            )
+            if task is not None and new_run_status is not None and new_run_status != prev_run_status:
+                pending_publishes[(run_id_int, task)] = new_run_status
+
+        con.executemany(
+            "UPDATE ingest_ledger SET outcome_counters = ? WHERE service_id = ? AND object_key = ?",
+            ledger_updates,
+        )
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+
+    for (run_id_int, task), new_run_status in pending_publishes.items():
+        _publish_cron_run_change(service_id, run_id_int, task, new_run_status)
+    return len(ledger_updates)
 
 
 def finalize_cron_run_if_running(
@@ -536,6 +630,8 @@ def finalize_cron_run_if_running(
     con = get_con(service_id)
 
     def _write() -> bool:
+        import time
+
         row = con.execute(
             "SELECT status FROM cron_runs WHERE id = ? AND service_id = ?", (run_id, service_id)
         ).fetchone()
@@ -547,6 +643,12 @@ def finalize_cron_run_if_running(
             "WHERE id = ? AND service_id = ? AND status = 'running'",
             (max(duration_s, 0.0), error_message, summary, run_id, service_id),
         )
+        if cur.rowcount:
+            con.execute(
+                "UPDATE job_runs SET status = 'error', finished_at = ? "
+                "WHERE service_id = ? AND job_name = ? AND status = 'running'",
+                (time.time(), service_id, task),
+            )
         con.commit()
         return bool(cur.rowcount)
 

@@ -10,13 +10,9 @@
  */
 
 import { expect, test } from '@playwright/test'
+import { installClsObserver, measureWarmPaintAndCls } from '../cls-observer'
 import { revokeAnalystInvite, seedPasscodeAnalystInvite } from '../helpers/analyst-session'
 import { getFirstServiceId } from './helpers'
-
-type LayoutShiftEntry = PerformanceEntry & {
-  hadRecentInput?: boolean
-  value?: number
-}
 
 test.describe('Analyst Share Login Page Contract (/share-login)', () => {
   test('1. Route accessibility, card layout mounting & footer environment indicator', async ({ page }) => {
@@ -44,36 +40,12 @@ test.describe('Analyst Share Login Page Contract (/share-login)', () => {
     expect(count).toBeGreaterThanOrEqual(2)
 
     // Warm reload performance & CLS measurement
+    await installClsObserver(page)
     const start = Date.now()
     await page.reload({ waitUntil: 'domcontentloaded' })
     const totalTime = Date.now() - start
 
-    const metrics = await page.evaluate(() => {
-      return new Promise<{ fcp: number; cls: number }>((resolve) => {
-        let fcp = 0
-        let cls = 0
-        try {
-          const paintEntries = performance.getEntriesByType('paint')
-          const fcpEntry = paintEntries.find((e) => e.name === 'first-contentful-paint')
-          if (fcpEntry) {
-            fcp = fcpEntry.startTime
-          }
-
-          new PerformanceObserver((list) => {
-            for (const entry of list.getEntries()) {
-              const layoutShift = entry as LayoutShiftEntry
-              if (!layoutShift.hadRecentInput) {
-                cls += layoutShift.value ?? 0
-              }
-            }
-          }).observe({ type: 'layout-shift', buffered: true })
-
-          setTimeout(() => resolve({ fcp, cls }), 800)
-        } catch {
-          resolve({ fcp: 0, cls: 0 })
-        }
-      })
-    })
+    const metrics = await measureWarmPaintAndCls(page, 800)
 
     console.log(
       `[PERF /share-login] Reload: ${totalTime}ms | FCP: ${Math.round(metrics.fcp)}ms | CLS: ${metrics.cls.toFixed(3)}`,

@@ -581,8 +581,8 @@ export function AssetsReportContent({
   )
 }
 
-export default function AssetsClient() {
-  const { relativeRange, isAutoRange, anchor } = useReportRangeAnchor()
+export default function AssetsClient({ nowServerStr }: { nowServerStr?: string }) {
+  const { relativeRange, isAutoRange, anchor } = useReportRangeAnchor(nowServerStr)
 
   return (
     <ReportLayout

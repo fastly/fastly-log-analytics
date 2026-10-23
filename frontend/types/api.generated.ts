@@ -14118,6 +14118,10 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
             /**
              * Region Country
              * @default US
@@ -29340,8 +29344,14 @@ export interface operations {
     };
     control_room_tab_api_services__service_id__control_room__tab__get: {
         parameters: {
-            query?: never;
-            header?: never;
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
             path: {
                 tab: string;
                 service_id: string;
@@ -29880,8 +29890,14 @@ export interface operations {
     };
     rum_status_api_services__service_id__rum_status_get: {
         parameters: {
-            query?: never;
-            header?: never;
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
             path: {
                 service_id: string;
             };
@@ -30523,6 +30539,8 @@ export interface operations {
                 start_time?: string | null;
                 end_time?: string | null;
                 filters?: string | null;
+                range_token?: string | null;
+                anchor?: string | null;
                 service?: string | null;
                 service_id?: string | null;
             };

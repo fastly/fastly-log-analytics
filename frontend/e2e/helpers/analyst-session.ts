@@ -75,3 +75,33 @@ export async function revokeAnalystInvite(
     await request.delete(`/api/admin/share/invites/${inviteId}`).catch(() => {})
   }
 }
+
+/**
+ * Ensure sharing is started, seed a passcode analyst invite, log in, and
+ * acknowledge TOS on `request`. Caller should clean up with
+ * `revokeAnalystInvite(request, inviteId, { logout: true })`.
+ */
+export async function loginAsPasscodeAnalyst(
+  request: APIRequestContext,
+  spec: PasscodeInviteSpec,
+): Promise<SeededPasscodeInvite> {
+  await request.post('/api/admin/share/start', {
+    data: { public_endpoint: 'https://share-e2e.example.com', forward_port: 13004 },
+  })
+  const seeded = await seedPasscodeAnalystInvite(request, spec)
+  const loginRes = await request.post('/api/share/login', {
+    data: { email: seeded.email, passcode: seeded.passcode },
+  })
+  expect(loginRes.ok()).toBeTruthy()
+
+  const tosRes = await request.get('/api/share/tos')
+  expect(tosRes.ok()).toBeTruthy()
+  const tosJson = (await tosRes.json()) as { version: string }
+
+  const ackRes = await request.post('/api/share/acknowledge', {
+    data: { version: tosJson.version },
+  })
+  expect(ackRes.ok()).toBeTruthy()
+
+  return seeded
+}

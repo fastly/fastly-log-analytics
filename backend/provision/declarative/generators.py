@@ -295,10 +295,6 @@ def _legacy_generate_consolidated_snippet(state: FeatureState, subroutine: str) 
     """Generate consolidated VCL for other subroutines using legacy multi-section append logic."""
     sections: list[str] = []
 
-    # Section 1: Variable declarations (if any feature needs them)
-    var_decls: list[str] = []
-    sections.append("\n".join(var_decls) if var_decls else "")
-
     # Section 6: Standard & Custom Field Captures (if logging enabled)
     if state.logging_enabled:
         from backend.provision.fastly_api import generate_capture_vcl
@@ -322,15 +318,6 @@ def _legacy_generate_consolidated_snippet(state: FeatureState, subroutine: str) 
         if capture_vcl.strip():
             sections.append(f"# Section 6: Log Field Capture ({subroutine})\n{capture_vcl}")
 
-    # Section 2: Security header & client IP scrubbing (always)
-    if subroutine == "vcl_recv":
-        sections.append(_generate_security_headers_vcl())
-
-    # Section 3: CMCD Extraction (if enabled)
-    if state.cmcd.enabled:
-        cmcd_body = _generate_cmcd_section_vcl(state, subroutine)
-        sections.append(cmcd_body)
-
     # Section 4: Session Scoring (if enabled)
     if state.scoring.enabled:
         scoring_body = _generate_scoring_section_vcl(state, subroutine)
@@ -344,21 +331,6 @@ def _legacy_generate_consolidated_snippet(state: FeatureState, subroutine: str) 
     # Join non-empty sections with blank lines
     consolidated = VclBuilder.join_sections(sections)
     return consolidated
-
-
-def _generate_security_headers_vcl() -> str:
-    """Section 2: Security header & client IP scrubbing (consolidated into Section 6)."""
-    return ""
-
-
-def _generate_cmcd_section_vcl(state: FeatureState, subroutine: str) -> str:
-    """Section 3: CMCD extraction (if enabled, runs in vcl_recv).
-
-    Under declarative consolidation, CMCD extraction is generated natively
-    inside generate_capture_vcl (Section 6) so that it is nested inside the
-    unforgeable edge-detect block. Returning empty here avoids duplicate code.
-    """
-    return ""
 
 
 def _generate_scoring_section_vcl(state: FeatureState, subroutine: str) -> str:

@@ -92,7 +92,7 @@ def get_service_display_label(service_id: str, cfg: dict | None = None) -> str:
         from backend import config as svcconfig
 
         cfg = svcconfig.load_config(service_id)
-    svc_name = cfg.get("name", service_id) if cfg else service_id
+    svc_name = (cfg.get("service_name") or cfg.get("name") or service_id) if cfg else service_id
     return f"{svc_name} ({service_id})" if svc_name and svc_name != service_id else service_id
 
 

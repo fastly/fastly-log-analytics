@@ -10,21 +10,13 @@
  */
 
 import { expect, test } from '@playwright/test'
-import { adminGatewayContextOptions } from '../../../scripts/lib/admin_gateway_client.cjs'
+import { installClsObserver, measureWarmPaintAndCls } from '../cls-observer'
+import { loginAsPasscodeAnalyst, revokeAnalystInvite } from '../helpers/analyst-session'
+import { configureExternalAdminOrigin, getFirstServiceId } from './helpers'
 
-type LayoutShiftEntry = PerformanceEntry & {
-  hadRecentInput?: boolean
-  value?: number
-}
+configureExternalAdminOrigin()
 
 test.describe('Admin Overview & Ingest Operations Page Contract (/admin)', () => {
-  if (process.env.PLAYWRIGHT_BASE_URL) {
-    test.use({
-      baseURL: process.env.PLAYWRIGHT_BASE_URL,
-      ...adminGatewayContextOptions(process.env.PLAYWRIGHT_BASE_URL),
-    })
-  }
-
   test('1. Route accessibility, Admin RBAC contract & ServerFooter environment indicator', async ({ page }) => {
     const res = await page.goto('/admin')
     expect(res?.status()).toBe(200)
@@ -46,43 +38,17 @@ test.describe('Admin Overview & Ingest Operations Page Contract (/admin)', () =>
 
     // On the isolated E2E harness, also verify Analyst Path B receives 403 on /api/admin/sync-status
     if (!process.env.PLAYWRIGHT_BASE_URL) {
-      const bootRes = await page.request.get('/api/bootstrap')
-      const bootJson = await bootRes.json()
-      const serviceId =
-        bootJson?.services?.[0]?.id ?? bootJson?.services?.[0]?.service_id ?? 'svc-playwright-e2e'
-      const email = `e2e-admin-guard-${Date.now()}@example.com`
-      const passcode = 'harbor-cloud-forest-91'
+      const serviceId = (await getFirstServiceId(page)) ?? 'svc-playwright-e2e'
       let inviteId: string | null = null
       try {
-        await page.request.post('/api/admin/share/start', {
-          data: { public_endpoint: 'https://share-e2e.example.com', forward_port: 13004 },
+        const seeded = await loginAsPasscodeAnalyst(page.request, {
+          name: 'Admin Guard Analyst',
+          email: `e2e-admin-guard-${Date.now()}@example.com`,
+          passcode: 'harbor-cloud-forest-91',
+          durationHours: 1,
+          serviceIds: [serviceId],
         })
-        const invRes = await page.request.post('/api/admin/share/invites', {
-          data: {
-            name: 'Admin Guard Analyst',
-            email,
-            passcode,
-            duration_hours: 1,
-            service_ids: [serviceId],
-            auth_method: 'passcode',
-          },
-        })
-        expect(invRes.ok()).toBeTruthy()
-        inviteId = (await invRes.json()).id
-
-        const loginRes = await page.request.post('/api/share/login', {
-          data: { email, passcode },
-        })
-        expect(loginRes.ok()).toBeTruthy()
-
-        const tosRes = await page.request.get('/api/share/tos')
-        expect(tosRes.ok()).toBeTruthy()
-        const tosJson = await tosRes.json()
-
-        const ackRes = await page.request.post('/api/share/acknowledge', {
-          data: { version: tosJson.version },
-        })
-        expect(ackRes.ok()).toBeTruthy()
+        inviteId = seeded.inviteId
 
         const analystSyncRes = await page.request.get('/api/admin/sync-status', {
           headers: { 'x-remote-analyst': '1' },
@@ -91,11 +57,7 @@ test.describe('Admin Overview & Ingest Operations Page Contract (/admin)', () =>
         const analystSyncBody = await analystSyncRes.json()
         expect(analystSyncBody.error).toBe('admin_only')
       } finally {
-        await page.request.post('/api/share/logout').catch(() => {})
-        if (inviteId) {
-          await page.request.delete(`/api/admin/share/invites/${inviteId}`).catch(() => {})
-        }
-        await page.request.post('/api/admin/share/stop').catch(() => {})
+        await revokeAnalystInvite(page.request, inviteId, { logout: true })
       }
     }
   })
@@ -114,37 +76,13 @@ test.describe('Admin Overview & Ingest Operations Page Contract (/admin)', () =>
     expect(count).toBeGreaterThanOrEqual(5)
 
     // Measure warm-load FCP and CLS
+    await installClsObserver(page)
     const start = Date.now()
     await page.reload({ waitUntil: 'domcontentloaded' })
     const totalTime = Date.now() - start
     await expect(page.locator('[data-testid="admin-overview-root"]:visible')).toBeVisible({ timeout: 15_000 })
 
-    const metrics = await page.evaluate(async () => {
-      return await new Promise<{ cls: number; fcp: number }>((resolve) => {
-        let clsValue = 0
-        const observer = new PerformanceObserver((list) => {
-          for (const entry of list.getEntries() as LayoutShiftEntry[]) {
-            if (!entry.hadRecentInput && typeof entry.value === 'number') {
-              clsValue += entry.value
-            }
-          }
-        })
-        try {
-          observer.observe({ type: 'layout-shift', buffered: true })
-        } catch {
-          // ignore if unsupported
-        }
-
-        const paintEntries = performance.getEntriesByType('paint')
-        const fcpEntry = paintEntries.find((e) => e.name === 'first-contentful-paint')
-        const fcpValue = fcpEntry ? fcpEntry.startTime : 0
-
-        setTimeout(() => {
-          observer.disconnect()
-          resolve({ cls: clsValue, fcp: fcpValue })
-        }, 500)
-      })
-    })
+    const metrics = await measureWarmPaintAndCls(page, 500)
 
     console.log(
       `[PERF /admin] Reload: ${totalTime}ms | FCP: ${Math.round(metrics.fcp)}ms | CLS: ${metrics.cls.toFixed(3)}`,

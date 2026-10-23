@@ -89,13 +89,13 @@ def _display_name(src: dict, fallback: str) -> str:
 
 def _display_label(src: dict, service_id: str) -> str:
     """``"{display_name} ({service_id})"`` when the friendly name differs from
-    the service id, otherwise just the service id. Every cron job that logs
-    a start/end line builds this same 2-line `_svc_name = _display_name(...);
-    _display = f"{_svc_name} ({sid})" if _svc_name != sid else sid` pair —
-    folded here so the format lives in one place.
+    the service id, otherwise just the service id. Delegates to
+    ``get_service_display_label`` in ``backend.cron.jobs._common`` so the
+    format lives in one place.
     """
-    name = _display_name(src, service_id)
-    return f"{name} ({service_id})" if name != service_id else service_id
+    from backend.cron.jobs._common import get_service_display_label
+
+    return get_service_display_label(service_id, src)
 
 
 # Per-service throttle for the heavy post-ingest refresh work — specifically

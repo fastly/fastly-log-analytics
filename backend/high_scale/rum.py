@@ -64,22 +64,60 @@ def _filter_clauses(filters: Mapping[str, Any] | None) -> tuple[list[str], dict[
 from backend.high_scale._common import format_iso_utc_or_empty as _iso
 
 
-def rum_beacon_health(service: HighScaleService) -> dict[str, Any]:
+def rum_beacon_health(
+    service: HighScaleService,
+    *,
+    source: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     from backend.high_scale._scope import visible_publication_fence_sql
+
+    if isinstance(source, dict) and (
+        (isinstance(source.get("rum"), dict) and source["rum"].get("enabled") is False)
+        or source.get("rum_enabled") is False
+    ):
+        return {
+            "enabled": False,
+            "has_data": False,
+            "beacons": 0,
+            "beacon_fire_rate": 0,
+            "recent_beacons": 0,
+            "last_beacon_time": None,
+            "setup_complete": False,
+            "message": "RUM is not enabled for this service.",
+        }
 
     try:
         res = service.client.execute(
-            f"SELECT sum(event_count) as c FROM rum_vitals_aggregates WHERE service_id = {{service_id:String}} AND dimension = 'metric_name' AND {visible_publication_fence_sql('rum_vitals_aggregate')}",
+            f"SELECT sum(event_count) as c, max(bucket_start) as last_ts FROM rum_vitals_aggregates WHERE service_id = {{service_id:String}} AND dimension = 'metric_name' AND {visible_publication_fence_sql('rum_vitals_aggregate')}",
             {"service_id": service.service_id},
         )
-        beacons = res[0].get("c", 0) if res and res[0].get("c") is not None else 0
+        row = res[0] if res else {}
+        beacons = int(row.get("c") or 0)
+        last_ts = row.get("last_ts") if beacons > 0 else None
     except Exception:
         res = service.client.execute(
-            f"SELECT count() as c FROM rum_vitals_facts WHERE service_id = {{service_id:String}} AND {visible_publication_fence_sql('rum_vitals')}",
+            f"SELECT count() as c, max(event_timestamp) as last_ts FROM rum_vitals_facts WHERE service_id = {{service_id:String}} AND {visible_publication_fence_sql('rum_vitals')}",
             {"service_id": service.service_id},
         )
-        beacons = res[0].get("c", 0) if res else 0
-    return {"has_data": beacons > 0, "beacons": beacons}
+        row = res[0] if res else {}
+        beacons = int(row.get("c") or 0)
+        last_ts = row.get("last_ts") if beacons > 0 else None
+    has_data = beacons > 0
+    last_beacon_time = (_iso(last_ts) or None) if last_ts is not None else None
+    return {
+        "enabled": True,
+        "has_data": has_data,
+        "beacons": beacons,
+        "beacon_fire_rate": beacons,
+        "recent_beacons": beacons,
+        "last_beacon_time": last_beacon_time,
+        "setup_complete": has_data,
+        "message": (
+            f"RUM is working! Received {beacons} beacon(s) in the last 15 minutes."
+            if has_data
+            else "No beacons received in the last 15 minutes. Ensure the RUM script is installed and your site is receiving traffic."
+        ),
+    }
 
 
 def rum_analytics(

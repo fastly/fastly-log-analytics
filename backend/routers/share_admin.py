@@ -9,6 +9,7 @@ list.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
@@ -538,10 +539,11 @@ async def backup_import(
         raise HTTPException(status_code=400, detail={"error": "invalid_mode"})
     blob = await file.read()
     try:
-        result = share_db.import_backup(blob, passphrase, mode=mode)
+        result = await asyncio.to_thread(share_db.import_backup, blob, passphrase, mode=mode)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": "import_failed", "message": str(exc)}) from exc
-    share_db.log_share_audit_event(
+    await asyncio.to_thread(
+        share_db.log_share_audit_event,
         event_type="BACKUP_IMPORTED",
         email=None,
         ip_address=client_ip(request, default="127.0.0.1"),

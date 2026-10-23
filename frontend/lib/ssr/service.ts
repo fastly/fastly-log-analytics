@@ -1,4 +1,5 @@
 import { firstParam } from './seed'
+import { fetchBootstrapServerSide } from './bootstrap'
 
 /**
  * Resolve the active service ID for an RSC page render:
@@ -26,4 +27,18 @@ export function resolveServerServiceId(
     if (typeof firstId === 'string') return firstId
   }
   return undefined
+}
+
+/**
+ * Resolve the active service ID for an RSC page render, short-circuiting
+ * `fetchBootstrapServerSide()` when `?service=` is already present in the URL.
+ */
+export async function resolvePageServiceId(
+  params: { service?: string | string[] },
+  options?: { fallbackFirstService?: boolean },
+): Promise<string | undefined> {
+  const urlServiceId = firstParam(params.service)
+  if (urlServiceId) return urlServiceId
+  const bootstrap = await fetchBootstrapServerSide()
+  return resolveServerServiceId(params, bootstrap, options)
 }

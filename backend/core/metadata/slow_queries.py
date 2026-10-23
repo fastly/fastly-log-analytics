@@ -50,6 +50,7 @@ _FLUSH_BATCH_SIZE = 50
 _buffer: dict[str, list[dict[str, Any]]] = {}
 _buffer_lock = threading.Lock()
 _flush_timer: threading.Timer | None = None
+_flush_in_progress = False
 
 
 def _normalise_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -123,7 +124,7 @@ def _flush_all(*, only_service: str | None = None) -> None:
     If *only_service* is given, flush just that service's buffer (used by
     read functions to ensure consistency). Otherwise flush everything.
     """
-    global _flush_timer
+    global _flush_timer, _flush_in_progress
     with _buffer_lock:
         if only_service is not None:
             rows = _buffer.pop(only_service, None)
@@ -133,19 +134,27 @@ def _flush_all(*, only_service: str | None = None) -> None:
         else:
             _flush_timer = None
             if not _buffer:
+                _flush_in_progress = False
                 return
             pending = dict(_buffer)
             _buffer.clear()
 
-    for service_id, rows in pending.items():
-        try:
-            con = get_con(service_id)
-            con.executemany(_INSERT_SQL, [_insert_params(_normalise_row(row)) for row in rows])
-            con.commit()
-        except Exception:
-            logger.debug("_flush_all: con.commit failed (ignored)", exc_info=True)
-        finally:
-            release_thread_connection()
+    try:
+        for service_id, rows in pending.items():
+            try:
+                con = get_con(service_id)
+                con.executemany(_INSERT_SQL, [_insert_params(_normalise_row(row)) for row in rows])
+                con.commit()
+            except Exception:
+                logger.debug("_flush_all: con.commit failed (ignored)", exc_info=True)
+            finally:
+                release_thread_connection()
+    finally:
+        if only_service is None:
+            with _buffer_lock:
+                _flush_in_progress = False
+                if _buffer:
+                    _schedule_flush()
 
 
 def insert_slow_query(service_id: str, row: dict[str, Any]) -> None:
@@ -162,15 +171,18 @@ def insert_slow_query(service_id: str, row: dict[str, Any]) -> None:
     a slow-query batch is itself now a slow query, an inline call risked
     a feedback loop (recording slow queries makes more of them slow).
     """
+    global _flush_in_progress
     params = _normalise_row(row)
     with _buffer_lock:
         _buffer.setdefault(service_id, []).append(params)
         total = sum(len(v) for v in _buffer.values())
-        if total >= _FLUSH_BATCH_SIZE:
+        if total >= _FLUSH_BATCH_SIZE and not _flush_in_progress:
+            _flush_in_progress = True
             needs_immediate = True
         else:
             needs_immediate = False
-            _schedule_flush()
+            if not _flush_in_progress:
+                _schedule_flush()
 
     if needs_immediate:
         threading.Thread(target=_flush_all, daemon=True).start()

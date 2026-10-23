@@ -13,6 +13,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   errSpy.mockRestore()
+  vi.restoreAllMocks()
   cleanup()
 })
 

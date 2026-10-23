@@ -348,6 +348,15 @@ class RequestTelemetry:
         if self._owns_root_span:
             self._root_span.end()
         self._root_span = None
+        try:
+            from backend.utils.telemetry import get_page_load_id
+
+            if get_page_load_id():
+                from backend.core.metadata import usage_log
+
+                usage_log.flush_telemetry_buffer()
+        except Exception:
+            logger.debug("end_request: flush_telemetry_buffer failed (ignored)", exc_info=True)
 
     # ── Section spans ─────────────────────────────────────────────────────
 

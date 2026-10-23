@@ -1,6 +1,7 @@
 import { queryOptions } from '@tanstack/react-query'
 
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 
 /**
  * Session-scoring composite queries. The admin hover-prefetch
@@ -17,28 +18,26 @@ export const scoringConfigCompositeKey = (serviceId: string | null | undefined) 
 export const scoringAnalyticsCompositeOptions = (serviceId: string | null | undefined, sinceHours: number) =>
   queryOptions({
     queryKey: [...scoringAnalyticsCompositeKey(serviceId), sinceHours] as const,
-    queryFn: async ({ signal }) => {
-      const { data, response } = await client.GET('/api/services/{service_id}/scoring/analytics', {
-        params: {
-          path: { service_id: serviceId ?? '' },
-          query: { since_hours: sinceHours },
-        },
-        signal,
-      })
-      if (!response.ok || !data) throw new Error(`status ${response.status}`)
-      return data
-    },
+    queryFn: async ({ signal }) =>
+      unwrapClient(
+        client.GET('/api/services/{service_id}/scoring/analytics', {
+          params: {
+            path: { service_id: serviceId ?? '' },
+            query: { since_hours: sinceHours },
+          },
+          signal,
+        }),
+      ),
   })
 
 export const scoringConfigCompositeOptions = (serviceId: string | null | undefined) =>
   queryOptions({
     queryKey: scoringConfigCompositeKey(serviceId),
-    queryFn: async ({ signal }) => {
-      const { data, response } = await client.GET('/api/services/{service_id}/scoring/config', {
-        params: { path: { service_id: serviceId ?? '' } },
-        signal,
-      })
-      if (!response.ok || !data) throw new Error(`status ${response.status}`)
-      return data
-    },
+    queryFn: async ({ signal }) =>
+      unwrapClient(
+        client.GET('/api/services/{service_id}/scoring/config', {
+          params: { path: { service_id: serviceId ?? '' } },
+          signal,
+        }),
+      ),
   })

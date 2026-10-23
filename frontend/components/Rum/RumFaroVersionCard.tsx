@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
 import { client } from '@/lib/api';
+import { unwrapClient } from '@/lib/api-client';
 import { useIsAnalyst } from '@/hooks/useIsAnalyst';
 import type { components } from '@/types/api.generated';
 import { RumSettingsDialog } from './RumSettingsDialog';
@@ -32,15 +33,14 @@ export function RumFaroVersionCard({ serviceId }: RumFaroVersionCardProps) {
 
   // Fetch versions
   const { data, isLoading: isVersionsLoading, isError, refetch, isFetching } = useQuery<RumVersionsResponse>({
-    queryKey: ['rum-versions', serviceId],
-    queryFn: async ({ signal }) => {
-      const { data, response } = await client.GET('/api/services/{service_id}/rum/versions', {
-        params: { path: { service_id: serviceId as string } },
-        signal,
-      });
-      if (!response.ok) throw new Error(`status ${response.status}`);
-      return data as RumVersionsResponse;
-    },
+    queryKey: queryKeys.rumVersions(serviceId),
+    queryFn: async ({ signal }) =>
+      unwrapClient(
+        client.GET('/api/services/{service_id}/rum/versions', {
+          params: { path: { service_id: serviceId as string } },
+          signal,
+        }),
+      ),
     enabled: !!serviceId && rumEnabled && !isAnalyst,
     retry: false,
   });
@@ -89,7 +89,7 @@ export function RumFaroVersionCard({ serviceId }: RumFaroVersionCardProps) {
   const updateAvailable = data?.update_available ?? false;
 
   const handleComplete = () => {
-    queryClient.invalidateQueries({ queryKey: ['rum-versions', serviceId] });
+    queryClient.invalidateQueries({ queryKey: queryKeys.rumVersions(serviceId) });
     queryClient.invalidateQueries({ queryKey: queryKeys.rumStatus(serviceId) });
   };
 
