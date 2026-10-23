@@ -71263,6 +71263,7 @@
         "title": "Ipv6AdoptionRow",
         "description": "Repository paths emit ``time``/``pct``; the high-scale path emits ``version``/``count``."
       },
+      "JsonValue": {},
       "LakeInfoRequest": {
         "properties": {
           "bucket": {
@@ -72517,6 +72518,16 @@
               }
             ],
             "title": "Field Limits"
+          },
+          "custom_fields": {
+            "items": {
+              "additionalProperties": {
+                "$ref": "#/components/schemas/JsonValue"
+              },
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Custom Fields"
           }
         },
         "type": "object",

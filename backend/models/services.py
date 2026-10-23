@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from backend.models._base import PassthroughModel, WireSafeModel
 from backend.models.common import BaseResponse
@@ -109,6 +109,7 @@ class LogFieldsConfig(BaseModel):
     groups: list[str] = Field(default_factory=list)
     field_overrides: dict[str, bool] = Field(default_factory=dict)
     field_limits: dict[str, int] | None = None
+    custom_fields: list[dict[str, JsonValue]] = Field(default_factory=list)
 
 
 class LogFieldsUpdateRequest(BaseModel):

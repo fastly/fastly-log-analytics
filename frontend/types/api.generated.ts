@@ -12922,6 +12922,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        JsonValue: unknown;
         /**
          * LakeInfoRequest
          * @description Body for ``POST /api/provision/lake-info`` — credentials + optional
@@ -13313,6 +13314,10 @@ export interface components {
             field_limits?: {
                 [key: string]: number;
             } | null;
+            /** Custom Fields */
+            custom_fields?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            }[];
         };
         /** LogFieldsResponse */
         LogFieldsResponse: {
