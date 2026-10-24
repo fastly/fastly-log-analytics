@@ -283,6 +283,9 @@ class BaseResponse(BaseModel):
     @classmethod
     def with_telemetry(cls, **data):
         """Helper to create a response with context-local telemetry."""
+        if not _debug_responses_enabled():
+            return cls(**data)
+
         from backend.utils.telemetry import get_queries, get_sqlite_queries, get_tracked_calls
 
         dq = data.pop("debug_queries", None) or get_queries()

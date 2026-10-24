@@ -182,6 +182,34 @@ def test_with_telemetry_pulls_sqlite_collector(monkeypatch):
         telemetry._SQLITE_QUERIES.set(None)
 
 
+def test_with_telemetry_skips_collectors_when_debug_responses_are_disabled(monkeypatch):
+    monkeypatch.setenv("DEBUG_RESPONSES", "0")
+    from backend.utils import telemetry
+
+    def unexpected_collector():
+        pytest.fail("Disabled diagnostics must not read telemetry collectors")
+
+    for name in ("get_queries", "get_sqlite_queries", "get_tracked_calls"):
+        monkeypatch.setattr(telemetry, name, unexpected_collector)
+
+    wire = BaseResponse.with_telemetry().model_dump(by_alias=True)
+
+    assert not any(
+        key in wire
+        for key in (
+            "_debug_queries",
+            "_debug_calls",
+            "_debug_sqlite",
+            "_debug_postgres",
+            "debug_queries",
+            "debug_calls",
+            "debug_sqlite",
+            "debug_postgres",
+        )
+    )
+    assert wire["_is_cached"] is False
+
+
 def test_debug_query_params_absent_from_wire_unless_set(monkeypatch):
     monkeypatch.setenv("DEBUG_RESPONSES", "1")
     producer_row = {"sql": "SELECT 1", "time_ms": 1.5, "engine": "DuckDB"}

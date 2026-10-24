@@ -357,7 +357,7 @@ def test_strip_envelope_removes_debug_keys():
     assert "_debug_queries" not in parsed
     assert "_debug_calls" not in parsed
     assert "_debug_sqlite" not in parsed
-    assert "_is_cached" not in parsed
+    assert parsed["_is_cached"] is True
     assert parsed["data"] == [1]
     assert out.headers["content-length"] == str(len(out.body))
 

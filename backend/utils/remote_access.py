@@ -759,12 +759,15 @@ async def _strip_analyst_envelope(
             request.state._analyst_envelope_complete = True
         analyst_query_enabled, analyst_api_enabled = analyst_debug_visibility(request)
         to_strip: list[str] = []
-        if not analyst_query_enabled:
-            to_strip.extend(_QUERY_DEBUG_KEYS)
-        if not analyst_api_enabled:
-            to_strip.extend(_API_DEBUG_KEYS)
-        if not (analyst_query_enabled or analyst_api_enabled):
-            to_strip.append("_is_cached")
+        from backend.models.common import _debug_responses_enabled
+
+        if not _debug_responses_enabled():
+            to_strip.extend((*_QUERY_DEBUG_KEYS, *_API_DEBUG_KEYS))
+        else:
+            if not analyst_query_enabled:
+                to_strip.extend(_QUERY_DEBUG_KEYS)
+            if not analyst_api_enabled:
+                to_strip.extend(_API_DEBUG_KEYS)
 
         for k in to_strip:
             if k in data:

@@ -589,11 +589,14 @@ def _inject_telemetry(res: dict) -> dict:
     Needed because Starlette's BaseHTTPMiddleware isolates ContextVars, so RUM
     endpoints (which bypass BaseResponse's internal .with_telemetry() call and
     instead return a raw dict) would otherwise return empty lists for telemetry.
-    The response middleware strips these fields when DEBUG_RESPONSES is off or
-    the request has not opted in; analyst visibility and masking still apply.
+    The response middleware strips these fields when the request has not opted
+    in; analyst visibility and masking still apply.
     """
+    from backend.models.common import _debug_responses_enabled
     from backend.utils.telemetry import debug_envelope
 
+    if not _debug_responses_enabled():
+        return res
     return debug_envelope(res, gated=False)
 
 

@@ -449,8 +449,8 @@ def debug_envelope(res: dict, *, gated: bool, is_cached: bool | None = False, in
     if is_cached is not None:
         out["_is_cached"] = is_cached
     if not _debug_responses_enabled():
-        out.pop("_debug_queries", None)
-        out.pop("_debug_calls", None)
+        for key in ("_debug_queries", "_debug_calls", "debug_queries", "debug_calls"):
+            out.pop(key, None)
     elif inject_calls:
         out["_debug_calls"] = get_tracked_calls()
     return out

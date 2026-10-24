@@ -29,8 +29,6 @@ Constraints:
   * Preserves opted-in telemetry when the body already has
     ``_debug_queries`` — never double-injects.
   * Gated on ``DEBUG_RESPONSES`` env (same flag as ``BaseResponse``).
-    When off, strips any pre-attached debug envelope from JSON objects,
-    regardless of request opt-in or ``DEBUG_RESPONSES_FORCE_INCLUDE``.
 
 Failure modes are silent + non-blocking: a body that won't parse as
 JSON, a contextvar read that raises, a re-serialisation that fails —
@@ -118,16 +116,13 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
             return response
 
         master_enabled = _debug_responses_enabled()
+
         is_remote = getattr(request.state, "is_remote", False)
         analyst_query_enabled = analyst_api_enabled = False
-        # RemoteAccess has already applied audience visibility and PII masking.
-        # Master-off must still strip any envelope those audience rules allowed.
         if is_remote and master_enabled:
             from backend.utils.remote_access import analyst_debug_visibility
 
             analyst_query_enabled, analyst_api_enabled = analyst_debug_visibility(request)
-            if not (analyst_query_enabled or analyst_api_enabled):
-                return response
         if _is_streaming_content_type(response):
             return response
         if not _is_json_response(response):
@@ -180,7 +175,8 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
             # phase names without secrets and is the next perf audit's
             # primary signal.
             stripped = False
-            for k in (*_DEBUG_ENVELOPE_KEYS, "_is_cached"):
+            keys_to_strip = (*_DEBUG_ENVELOPE_KEYS, "_is_cached") if master_enabled else _DEBUG_ENVELOPE_KEYS
+            for k in keys_to_strip:
                 if k in parsed:
                     parsed.pop(k)
                     stripped = True
@@ -212,7 +208,8 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
             if inject_api_calls:
                 parsed["_debug_calls"] = get_tracked_calls()
 
-            parsed.setdefault("_is_cached", False)
+            if not is_remote or inject_queries or inject_api_calls:
+                parsed.setdefault("_is_cached", False)
             new_body = json.dumps(parsed, default=str).encode("utf-8")
         except Exception as e:
             logger.warning("[telemetry-middleware] failed to inject telemetry: %s", e)

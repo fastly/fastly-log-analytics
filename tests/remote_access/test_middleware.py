@@ -2211,7 +2211,7 @@ _ROUTES = [
 
 
 def _envelope_keys(body: dict) -> list[str]:
-    return [k for k in body if k.startswith(_ENVELOPE_PREFIXES) or k == "_is_cached"]
+    return [k for k in body if k.startswith(_ENVELOPE_PREFIXES)]
 
 
 @pytest.mark.security_regression
@@ -2288,8 +2288,7 @@ def test_rum_pre_attached_envelope_respects_master_switch(
             expected.update(_debug_queries=queries, _debug_sqlite=queries)
         if api_visible:
             expected["_debug_calls"] = calls
-        if query_visible or api_visible:
-            expected["_is_cached"] = False
+        expected["_is_cached"] = False
 
     with TestClient(_rum_app(with_telemetry=True)) as client:
         if remote:
@@ -2433,8 +2432,19 @@ def _strip(payload: dict, *, query: str = "disabled", api: str = "disabled") -> 
 
 
 @pytest.mark.security_regression
-def test_strip_removes_every_debug_key_when_analyst_visibility_is_disabled():
-    assert _strip(_ENVELOPE) == {"ok": True}
+def test_strip_removes_debug_data_but_preserves_cache_marker_when_visibility_is_disabled(monkeypatch):
+    monkeypatch.setenv("DEBUG_RESPONSES", "0")
+    assert _strip(_ENVELOPE) == {"ok": True, "_is_cached": False}
+
+
+@pytest.mark.security_regression
+def test_scoring_cache_contract_preserves_marker_for_analyst_when_debug_is_disabled(monkeypatch):
+    monkeypatch.setenv("DEBUG_RESPONSES", "0")
+    from backend.routers.session_scoring import _finalize_cached
+
+    payload = _finalize_cached({"ok": True}, is_cached=True)
+
+    assert _strip(payload) == {"ok": True, "_is_cached": True}
 
 
 @pytest.mark.security_regression
