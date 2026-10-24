@@ -203,6 +203,8 @@ test('teardown CTA opens a confirm dialog and removes the service from /api/boot
 
   await page.goto('/admin')
 
+  await page.getByRole('button', { name: /refresh status/i }).click()
+
   const row = page
     .getByRole('row')
     .filter({ hasText: `PW Teardown Target ${sid}` })
