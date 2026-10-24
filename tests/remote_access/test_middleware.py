@@ -2056,12 +2056,15 @@ _HEADERS = {"X-Remote-Analyst": "1", "Host": "testserver"}
 _ENVELOPE_PREFIXES = ("_debug", "debug_")
 
 
-def _rum_app() -> FastAPI:
+def _rum_app(*, with_telemetry: bool = False) -> FastAPI:
     from backend.core.request_context import build_request_context
     from backend.routers import rum, share_auth
+    from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware
 
     app = FastAPI()
     app.add_middleware(RemoteAccessMiddleware)
+    if with_telemetry:
+        app.add_middleware(TelemetryResponseBodyMiddleware)
     app.include_router(share_auth.router)
     app.include_router(rum.router)
     app.dependency_overrides[build_request_context] = override_request_context(
@@ -2245,6 +2248,67 @@ def test_admin_rum_response_still_carries_the_envelope() -> None:
     assert {"_debug_queries", "_debug_calls"} <= set(body)
 
 
+@pytest.mark.parametrize("audience", ["admin", "both", "query", "api", "disabled"])
+@pytest.mark.parametrize(
+    ("master_enabled", "opt_in", "force_include"),
+    [
+        (False, False, False),
+        (False, True, False),
+        (False, False, True),
+        (True, False, False),
+        (True, True, False),
+        (True, False, True),
+    ],
+)
+def test_rum_pre_attached_envelope_respects_master_switch(
+    monkeypatch, audience: str, master_enabled: bool, opt_in: bool, force_include: bool
+) -> None:
+    from backend.utils import telemetry
+
+    monkeypatch.setenv("DEBUG_RESPONSES", "1" if master_enabled else "")
+    monkeypatch.setenv("DEBUG_RESPONSES_FORCE_INCLUDE", "1" if force_include else "")
+    queries = [{"sql": "SELECT 1", "time_ms": 0.1}]
+    calls = [{"method": "GET", "path": "/example"}]
+    monkeypatch.setattr(telemetry, "get_queries", lambda: queries)
+    monkeypatch.setattr(telemetry, "get_sqlite_queries", lambda: queries)
+    monkeypatch.setattr(telemetry, "get_tracked_calls", lambda: calls)
+    remote = audience != "admin"
+    query_visible = audience in ("admin", "both", "query")
+    api_visible = audience in ("admin", "both", "api")
+    expected = {
+        "enabled": False,
+        "beacon_fire_rate": 0,
+        "recent_beacons": 0,
+        "last_beacon_time": None,
+        "setup_complete": False,
+        "message": "RUM not enabled for this service",
+    }
+    if master_enabled and (opt_in or force_include):
+        if query_visible:
+            expected.update(_debug_queries=queries, _debug_sqlite=queries)
+        if api_visible:
+            expected["_debug_calls"] = calls
+        if query_visible or api_visible:
+            expected["_is_cached"] = False
+
+    with TestClient(_rum_app(with_telemetry=True)) as client:
+        if remote:
+            _start_share()
+            _login_analyst(client, _seed_invite(service_ids=[_SVC]))
+            share_db.set_setting("query_debug_visibility", "analysts" if query_visible else "disabled")
+            share_db.set_setting("api_call_debug_visibility", "analysts" if api_visible else "disabled")
+        headers = dict(_HEADERS) if remote else {}
+        if opt_in:
+            headers["x-debug-responses"] = "1"
+        with patch("backend.routers.rum.svcconfig.load_config", return_value={}):
+            response = client.get(f"/api/services/{_SVC}/rum/beacon-health", headers=headers)
+
+    assert response.status_code == 200, response.text
+    assert response.json() == expected
+    assert response.headers["content-type"] == "application/json"
+    assert int(response.headers["content-length"]) == len(response.content)
+
+
 @pytest.mark.security_regression
 def test_analyst_high_scale_query_response_has_no_debug_envelope() -> None:
     """``backend/high_scale/query.py`` returns BOTH ``debug_queries`` and ``_debug_queries`` (plus
@@ -2295,6 +2359,39 @@ def test_analyst_high_scale_query_response_has_no_debug_envelope() -> None:
         body = _post(c).json()
         assert "_debug_queries" in body
         assert "debug_calls" not in body and "_debug_calls" not in body
+
+
+@pytest.mark.security_regression
+def test_analyst_debug_aliases_are_stripped_when_master_switch_is_off(monkeypatch) -> None:
+    from backend.routers import share_auth
+    from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware
+
+    monkeypatch.setenv("DEBUG_RESPONSES", "0")
+    app = FastAPI()
+    app.add_middleware(RemoteAccessMiddleware)
+    app.add_middleware(TelemetryResponseBodyMiddleware)
+    app.include_router(share_auth.router)
+
+    @app.get(f"/api/services/{_SVC}/debug-aliases")
+    def debug_aliases():
+        return {
+            "value": "preserved",
+            "debug_queries": [{"sql": "SELECT secret FROM logs"}],
+            "debug_calls": [{"path": "/internal"}],
+        }
+
+    with TestClient(app) as client:
+        _start_share()
+        _login_analyst(client, _seed_invite(service_ids=[_SVC]))
+        share_db.set_setting("query_debug_visibility", "analysts")
+        share_db.set_setting("api_call_debug_visibility", "analysts")
+        response = client.get(
+            f"/api/services/{_SVC}/debug-aliases",
+            headers={**_HEADERS, "x-debug-responses": "1"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"value": "preserved"}
 
 
 # ── Merged from test_debug_envelope_sites.py ──

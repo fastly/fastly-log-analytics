@@ -26,11 +26,11 @@ Constraints:
   * Skips responses whose body isn't a JSON dict (lists, primitives,
     empty bodies, non-JSON content-types). Top-level lists can't host
     keys without breaking their contract.
-  * Skips when the body already has ``_debug_queries`` — never
-    double-injects.
+  * Preserves opted-in telemetry when the body already has
+    ``_debug_queries`` — never double-injects.
   * Gated on ``DEBUG_RESPONSES`` env (same flag as ``BaseResponse``).
-    When off, the middleware is a near no-op (still detects skip
-    conditions but never touches the body).
+    When off, strips any pre-attached debug envelope from JSON objects,
+    regardless of request opt-in or ``DEBUG_RESPONSES_FORCE_INCLUDE``.
 
 Failure modes are silent + non-blocking: a body that won't parse as
 JSON, a contextvar read that raises, a re-serialisation that fails —
@@ -97,8 +97,8 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
     See module docstring for the full contract. Three properties pinned
     by the test suite:
 
-      1. **No double-injection** — a response whose body already has
-         ``_debug_queries`` is returned unchanged (byte-identical).
+      1. **No double-injection** — an opted-in response whose body already
+         has ``_debug_queries`` is returned unchanged (byte-identical).
       2. **Plain-dict endpoints gain telemetry** — a route that returns
          ``{"foo": 1}`` becomes ``{"foo": 1, "_debug_queries": [...],
          "_debug_calls": [...], "_is_cached": false}``.
@@ -110,29 +110,19 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
 
-        # Bail early on the cheapest signals so the common case
-        # (non-JSON, streaming, gated off) pays close to zero overhead.
         try:
-            from backend.models.common import _debug_responses_enabled
+            from backend.models.common import _DEBUG_ENVELOPE_KEYS, _debug_responses_enabled
         except Exception:
             # Circular-import or test-harness setup glitch — never block
             # the request.
             return response
 
-        # 2026-06-10 audit (N-1): never attach telemetry to analyst
-        # responses, regardless of DEBUG_RESPONSES. The envelope leaks the
-        # Fastly KV store ID via _debug_calls and raw SQL via
-        # _debug_queries. Stripping in RemoteAccessMiddleware isn't enough
-        # because this middleware sits OUTSIDE it in the dispatch order
-        # and would re-inject. Honor the same is_remote flag the strip
-        # uses so admin (loopback) keeps the debug panel and analyst gets
-        # clean payloads.
-        if not _debug_responses_enabled():
-            return response
-
+        master_enabled = _debug_responses_enabled()
         is_remote = getattr(request.state, "is_remote", False)
         analyst_query_enabled = analyst_api_enabled = False
-        if is_remote:
+        # RemoteAccess has already applied audience visibility and PII masking.
+        # Master-off must still strip any envelope those audience rules allowed.
+        if is_remote and master_enabled:
             from backend.utils.remote_access import analyst_debug_visibility
 
             analyst_query_enabled, analyst_api_enabled = analyst_debug_visibility(request)
@@ -143,7 +133,9 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
         if not _is_json_response(response):
             return response
 
-        opt_in = request.headers.get("x-debug-responses") == "1" or _os.getenv("DEBUG_RESPONSES_FORCE_INCLUDE") == "1"
+        opt_in = master_enabled and (
+            request.headers.get("x-debug-responses") == "1" or _os.getenv("DEBUG_RESPONSES_FORCE_INCLUDE") == "1"
+        )
         if is_remote and opt_in and getattr(request.state, "_analyst_envelope_complete", False):
             return response
 
@@ -188,7 +180,7 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
             # phase names without secrets and is the next perf audit's
             # primary signal.
             stripped = False
-            for k in ("_debug_queries", "_debug_calls", "_debug_sqlite", "_debug_postgres", "_is_cached"):
+            for k in (*_DEBUG_ENVELOPE_KEYS, "_is_cached"):
                 if k in parsed:
                     parsed.pop(k)
                     stripped = True

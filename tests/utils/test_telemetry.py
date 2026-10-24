@@ -1236,6 +1236,76 @@ class TestTelemetryResponseMiddleware:
         assert "_debug_queries" not in body
         assert "_debug_calls" not in body
 
+    @pytest.mark.parametrize("master_enabled", [False, True])
+    def test_no_envelope_preserves_original_wire_bytes(self, monkeypatch, master_enabled: bool) -> None:
+        monkeypatch.setenv("DEBUG_RESPONSES", "1" if master_enabled else "")
+        monkeypatch.delenv("DEBUG_RESPONSES_FORCE_INCLUDE", raising=False)
+        app = FastAPI()
+        body = b'{ "value": 1.00, "_section_timings": [], "_response_cache": {"state": "hit"} }\n'
+
+        @app.get("/wire")
+        def wire() -> Response:
+            response = Response(body, status_code=202, media_type="application/json", headers={"X-Example": "kept"})
+            response.set_cookie("alpha", "A")
+            response.set_cookie("beta", "B")
+            return response
+
+        app.add_middleware(TelemetryResponseBodyMiddleware)
+        response = TestClient(app).get("/wire")
+
+        assert response.status_code == 202
+        assert response.content == body
+        assert response.headers["content-type"] == "application/json"
+        assert response.headers["x-example"] == "kept"
+        assert int(response.headers["content-length"]) == len(body)
+        assert len(response.headers.get_list("set-cookie")) == 2
+
+    def test_master_off_strips_pre_attached_envelope_without_collecting(self, monkeypatch) -> None:
+        from backend.utils import telemetry
+
+        monkeypatch.setenv("DEBUG_RESPONSES", "0")
+        monkeypatch.setenv("DEBUG_RESPONSES_FORCE_INCLUDE", "1")
+
+        def unexpected_collector() -> None:
+            pytest.fail("Master-off must not read telemetry collectors")
+
+        for name in ("get_queries", "get_sqlite_queries", "get_tracked_calls"):
+            monkeypatch.setattr(telemetry, name, unexpected_collector)
+        payload = {
+            "value": {"count": 7, "rows": [], "optional": None},
+            "_section_timings": [{"name": "query", "ms": 0.1}],
+            "_response_cache": {"state": "hit"},
+        }
+        app = FastAPI()
+
+        @app.get("/pre-attached")
+        def pre_attached() -> Response:
+            response = JSONResponse(
+                {
+                    **payload,
+                    "_debug_queries": [{"sql": "SELECT 1"}],
+                    "_debug_calls": [{"path": "/example"}],
+                    "_debug_sqlite": [{"sql": "SELECT 2"}],
+                    "_debug_postgres": [{"sql": "SELECT 3"}],
+                    "_is_cached": True,
+                },
+                status_code=202,
+                headers={"X-Example": "kept"},
+            )
+            response.set_cookie("alpha", "A")
+            response.set_cookie("beta", "B")
+            return response
+
+        app.add_middleware(TelemetryResponseBodyMiddleware)
+        response = TestClient(app).get("/pre-attached", headers={"x-debug-responses": "1"})
+
+        assert response.status_code == 202
+        assert response.json() == payload
+        assert response.headers["content-type"] == "application/json"
+        assert response.headers["x-example"] == "kept"
+        assert int(response.headers["content-length"]) == len(response.content)
+        assert len(response.headers.get_list("set-cookie")) == 2
+
     # ── gzip integration: pinned ordering ───────────────────────────────────
 
     def test_works_with_gzip_outer_middleware(self):
