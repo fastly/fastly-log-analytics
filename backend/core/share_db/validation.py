@@ -188,10 +188,15 @@ def mask_ip(ip: str) -> str:
     # double-masked from "1.2.3.xxx" to "[redacted]" (no leak, but uglier and
     # inconsistent with the analytics endpoints). The masked IPv6 form is a
     # valid address so it re-masks to itself already; only IPv4 needs the
-    # short-circuit. ".xxx" is not a valid IP tail so this can't excuse a real
-    # address.
+    # short-circuit. Validate the remaining octets before preserving the
+    # sentinel so malformed values cannot bypass the fail-closed path below.
     if ip.endswith(".xxx"):
-        return ip
+        try:
+            ipaddress.IPv4Address(ip[:-4] + ".0")
+        except ValueError:
+            pass
+        else:
+            return ip
     try:
         addr = ipaddress.ip_address(ip)
     except (ValueError, TypeError):

@@ -283,6 +283,18 @@ def test_mask_ip_is_idempotent_on_already_masked_v4():
     assert mask_ip("1.2.3.xxx") == "1.2.3.xxx"
 
 
+@pytest.mark.security_regression
+@pytest.mark.parametrize(
+    "value",
+    ["203.0.113.7, 198.51.100.xxx", "999.0.0.xxx"],
+)
+def test_mask_ip_redacts_malformed_values_with_xxx_suffix(value):
+    from backend.core.share_db.validation import apply_pii_policy, mask_ip
+
+    assert mask_ip(value) == "[redacted]"
+    assert apply_pii_policy({"client_ip": value}, {"mask_ips": True})["client_ip"] == "[redacted]"
+
+
 def test_mask_ip_values_masks_by_value_not_key():
     from backend.core.share_db.validation import mask_ip_values
 
