@@ -12,7 +12,7 @@ from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS, ma
 from backend.core.sql_ident import SAFE_IDENT_RE
 from backend.high_scale._projection_utils import range_value as _range_value
 from backend.high_scale.registry import HighScaleService
-from backend.models.dashboard import QueryRequest
+from backend.models.query import QueryRequest
 from backend.repositories._base import SectionTimer, _compact_sql_for_debug, _safe_table
 from backend.repositories.query import MAX_QUERY_ROWS
 from backend.utils.sql_validator import SQLValidationError, validate_user_sql

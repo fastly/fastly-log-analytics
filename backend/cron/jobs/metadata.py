@@ -41,14 +41,8 @@ _post_commit_metadata_sync_rerun: dict[str, bool] = {}
 _RETRYABLE_WEBHOOK_STATUS = (429, 500, 502, 503, 504)
 
 
-def _is_retryable_webhook_error(exc: BaseException) -> bool:
-    if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code in _RETRYABLE_WEBHOOK_STATUS
-    return isinstance(exc, httpx.TransportError)
-
-
 @tenacity.retry(
-    retry=tenacity.retry_if_exception(_is_retryable_webhook_error),
+    retry=tenacity.retry_if_exception_type((httpx.HTTPStatusError, httpx.TransportError)),
     stop=tenacity.stop_after_attempt(3),
     wait=tenacity.wait_exponential(multiplier=1, min=1, max=8),
     reraise=True,

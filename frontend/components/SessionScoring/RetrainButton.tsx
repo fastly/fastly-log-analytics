@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Brain, Check, Copy, Loader2 } from 'lucide-react'
+import { Brain, Loader2 } from 'lucide-react'
 
 import {
   Dialog,
@@ -14,11 +14,11 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
+import { CopyButton } from '@/components/ui/copy-button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { client, extractApiError } from '@/lib/api'
 import type { components } from '@/types/api.generated'
-import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
 import { formatCount } from '@/lib/format'
 import { invalidateServiceScoringQueries } from './useScoringQuery'
@@ -43,7 +43,6 @@ export function RetrainButton({ serviceId }: RetrainButtonProps) {
   const [open, setOpen] = React.useState(false)
   const [sinceDays, setSinceDays] = React.useState(7)
   const [result, setResult] = React.useState<RetrainResult | null>(null)
-  const { copied, copy } = useCopyToClipboard(2000)
 
   const mutation = useMutation({
     mutationFn: async (): Promise<RetrainResult> => {
@@ -184,19 +183,12 @@ export function RetrainButton({ serviceId }: RetrainButtonProps) {
                     <span className="text-[10px] font-mono text-muted-foreground">
                       deploy command
                     </span>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      aria-label={copied ? 'Copied deploy hint' : 'Copy deploy hint'}
+                    <CopyButton
+                      text={result.deploy_hint}
+                      ariaLabel="Copy deploy hint"
+                      copiedAriaLabel="Copied deploy hint"
                       className="h-6 w-6 hover:bg-muted-foreground/10"
-                      onClick={() => copy(result.deploy_hint!)}
-                    >
-                      {copied ? (
-                        <Check className="h-3 w-3 text-emerald-500" />
-                      ) : (
-                        <Copy className="h-3 w-3" />
-                      )}
-                    </Button>
+                    />
                   </div>
                   <pre className="p-2 text-[11px] font-mono leading-relaxed whitespace-pre-wrap break-all">
                     {result.deploy_hint}

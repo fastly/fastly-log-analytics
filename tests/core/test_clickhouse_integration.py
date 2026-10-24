@@ -17,7 +17,7 @@ from uuid import uuid4
 
 import duckdb
 
-from backend.core.clickhouse_client import CLICKHOUSE_FACT_COLUMNS, ClickHouseClient, get_clickhouse_client
+from backend.core.clickhouse_client import ClickHouseClient, get_clickhouse_client
 from backend.core.clickhouse_export import FosArtifacts
 from backend.core.clickhouse_manifest import Artifact, Dataset, PgManifest
 from backend.core.clickhouse_publication import (
@@ -30,7 +30,6 @@ from backend.core.clickhouse_publication import (
 )
 from backend.core.clickhouse_rows import build_batch_id, canonical_row, digest_rows
 from backend.core.clickhouse_schema import create_clickhouse_schema, target_identity
-from backend.repositories.clickhouse_dashboard import query_slice
 from tests.core.clickhouse_fos_fixture import TinyFos
 
 
@@ -244,38 +243,6 @@ class PublicationIntegration(unittest.TestCase):
         self.assertTrue(activate_generation(self.service, self.generation, store=self.store, client=self.client))
         self.assertTrue(self.ready().eligible)
         self.assertEqual(self.publish().status, "not_claimed")
-
-    def test_dashboard_final_aggregates_with_duplicate_insert_and_nulls(self):
-        rows = [
-            ("2026-09-01 00:00:00.000000", "US", "192.0.2.1", "/", 1),
-            ("2026-09-01 00:00:00.123456", "", "192.0.2.1", "/", None),
-            ("2026-09-01 00:00:00.123456", None, "192.0.2.1", "/", 2),
-            ("2026-09-02 00:00:00.000000", "GB", "192.0.2.1", "/", 6),
-            ("2026-09-02 00:00:00.000001", "after", "192.0.2.1", "/", 1),
-            ("2026-09-01 00:00:00.000000", "null-url", "192.0.2.1", None, 1),
-            ("2026-09-01 00:00:00.000000", "beacon", "192.0.2.1", "/rum-beacon?x=1", 1),
-            ("2026-09-01 00:00:00.000000", "empty-ip", "", "/", 1),
-            ("2026-09-01 00:00:00.000000", "null-ip", None, "/", 1),
-        ]
-        inserts = [
-            (self.service, self.artifact.batch_id, "placeholder", n, self.generation, *r) for n, r in enumerate(rows)
-        ]
-        # A single part contains both copies: no wait for a background merge,
-        # no global STOP MERGES that would interfere with the real corpus.
-        self.client.insert_rows("log_facts", list(CLICKHOUSE_FACT_COLUMNS), inserts + inserts)
-        for interval in ("1 second", "1 minute", "1 hour", "1 day"):
-            result = query_slice(
-                self.client,
-                self.service,
-                self.generation,
-                self.dataset.coverage_start,
-                self.dataset.coverage_end,
-                interval,
-            )
-            self.assertEqual(result["country"]["total"], 3)
-            self.assertEqual({r["value"]: r["count"] for r in result["country"]["top"]}, {"US": 1, "GB": 1})
-            self.assertEqual([p["value"] for p in result["time_series"]], [3.0, 1.0])
-            self.assertEqual(datetime.fromisoformat(result["time_series"][-1]["time"]), self.dataset.coverage_end)
 
     def test_partial_insert_retry_and_no_incomplete_visibility(self):
         with self.assertRaises(RuntimeError):

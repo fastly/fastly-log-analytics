@@ -137,61 +137,23 @@ def test_manual_trigger_endpoint_reentrancy():
 
 def test_manual_trigger_endpoint_standard_mode_rejected():
     """POST /api/admin/ledger/sweep/{service_id} on standard mode returns 400."""
-    standard_src = {**FAKE_SRC, "deployment_mode": "standard"}
-    app.dependency_overrides[get_source] = lambda: standard_src
-    app.dependency_overrides[get_service_id] = lambda: SERVICE_ID
-    try:
-        client = TestClient(app)
-        resp = client.post(
-            f"/api/admin/ledger/sweep/{SERVICE_ID}",
-            headers={"x-fastly-service-id": SERVICE_ID},
-        )
-        assert resp.status_code == 400
-        assert "high-scale" in resp.json()["detail"].lower()
-    finally:
-        app.dependency_overrides.pop(get_source, None)
-        app.dependency_overrides.pop(get_service_id, None)
+    from tests.cron.conftest import assert_manual_trigger_standard_mode_rejected
+
+    assert_manual_trigger_standard_mode_rejected(f"/api/admin/ledger/sweep/{SERVICE_ID}", SERVICE_ID, FAKE_SRC)
 
 
 def test_manual_trigger_endpoint_read_only_rejected():
     """POST /api/admin/ledger/sweep/{service_id} on read-only service returns 403."""
-    ro_src = {**FAKE_SRC, "access_level": "read_only"}
-    app.dependency_overrides[get_source] = lambda: ro_src
-    app.dependency_overrides[get_service_id] = lambda: SERVICE_ID
-    try:
-        client = TestClient(app)
-        resp = client.post(
-            f"/api/admin/ledger/sweep/{SERVICE_ID}",
-            headers={"x-fastly-service-id": SERVICE_ID},
-        )
-        assert resp.status_code == 403
-        assert "read-only" in resp.json()["detail"].lower()
-    finally:
-        app.dependency_overrides.pop(get_source, None)
-        app.dependency_overrides.pop(get_service_id, None)
+    from tests.cron.conftest import assert_manual_trigger_read_only_rejected
+
+    assert_manual_trigger_read_only_rejected(f"/api/admin/ledger/sweep/{SERVICE_ID}", SERVICE_ID, FAKE_SRC)
 
 
 def test_manual_trigger_endpoint_non_admin_rejected():
     """POST /api/admin/ledger/sweep/{service_id} by non-admin returns 403."""
-    from fastapi import HTTPException
+    from tests.cron.conftest import assert_manual_trigger_non_admin_rejected
 
-    def reject_analyst():
-        raise HTTPException(status_code=403, detail={"error": "admin_only"})
-
-    app.dependency_overrides[get_source] = lambda: FAKE_SRC
-    app.dependency_overrides[get_service_id] = lambda: SERVICE_ID
-    app.dependency_overrides[require_admin] = reject_analyst
-    try:
-        client = TestClient(app)
-        resp = client.post(
-            f"/api/admin/ledger/sweep/{SERVICE_ID}",
-            headers={"x-fastly-service-id": SERVICE_ID},
-        )
-        assert resp.status_code == 403
-    finally:
-        app.dependency_overrides.pop(get_source, None)
-        app.dependency_overrides.pop(get_service_id, None)
-        app.dependency_overrides.pop(require_admin, None)
+    assert_manual_trigger_non_admin_rejected(f"/api/admin/ledger/sweep/{SERVICE_ID}", SERVICE_ID, FAKE_SRC)
 
 
 # -----------------------------------------------------------------------------

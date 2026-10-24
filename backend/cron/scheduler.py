@@ -78,13 +78,6 @@ def _resolve_rum_sync_interval(rum_cfg: dict[str, Any], cfg: dict[str, Any], def
     return max(5, int(default_request_interval))
 
 
-def _display_name(src: dict, fallback: str) -> str:
-    """Return src['service_name'] or src['name'], falling back to ``fallback``.
-    Used by every cron-log site that wants the human-friendly name with
-    the service id as fallback when the friendly name isn't populated."""
-    return src.get("service_name") or src.get("name", fallback)
-
-
 def _display_label(src: dict, service_id: str) -> str:
     """``"{display_name} ({service_id})"`` when the friendly name differs from
     the service id, otherwise just the service id. Delegates to

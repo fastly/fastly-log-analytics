@@ -1,6 +1,6 @@
 'use client';
 
-import { Radio, BookOpen, Copy, Check } from 'lucide-react';
+import { Radio, BookOpen } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { ReportLayout } from '@/components/ReportLayout';
 import { RumClient } from './RumClient';
@@ -15,7 +15,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
+import { CopyButton } from '@/components/ui/copy-button';
 
 interface RumPageClientProps {
   initialServiceId?: string;
@@ -36,7 +36,6 @@ function ServiceSync({ serviceId, onSync }: ServiceSyncProps) {
 export default function RumPageClient({ initialServiceId }: RumPageClientProps) {
   const [showInstructions, setShowInstructions] = useState(false);
   const [activeServiceId, setActiveServiceId] = useState<string | null>(initialServiceId || null);
-  const { copied, copy } = useCopyToClipboard(2000);
   const isAnalyst = useIsAnalyst();
   const { relativeRange, isAutoRange, anchor } = useReportRangeAnchor();
 
@@ -102,19 +101,12 @@ export default function RumPageClient({ initialServiceId }: RumPageClientProps) 
                 <div className="bg-muted rounded-md overflow-hidden border">
                   <div className="flex items-center justify-between px-3 py-2 border-b bg-muted/50">
                     <span className="text-[10px] font-mono text-muted-foreground">installation code</span>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      aria-label={copied ? 'Copied script tag' : 'Copy script tag'}
+                    <CopyButton
+                      text={scriptTag}
+                      ariaLabel="Copy script tag"
+                      copiedAriaLabel="Copied script tag"
                       className="h-6 w-6 hover:bg-muted-foreground/10"
-                      onClick={() => copy(scriptTag)}
-                    >
-                      {copied ? (
-                        <Check className="h-3 w-3 text-emerald-500" />
-                      ) : (
-                        <Copy className="h-3 w-3" />
-                      )}
-                    </Button>
+                    />
                   </div>
                   <div className="p-3 font-mono text-xs overflow-x-auto">
                     <code>{scriptTag}</code>

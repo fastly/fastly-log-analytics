@@ -28,7 +28,7 @@ from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.cron.jobs import rum_ledger as rum_ledger_mod
 from backend.cron.jobs import rum_sync as rum_sync_mod
 from backend.cron.scheduler import Scheduler, _resolve_rum_sync_interval
-from backend.deps import get_service_id, get_source, require_admin
+from backend.deps import get_service_id, get_source
 from backend.main import app
 
 SERVICE_ID = "svc_test_rum_contract"
@@ -793,43 +793,16 @@ def test_manual_trigger_rum_sync_busy_503():
 
 def test_manual_trigger_rum_sync_read_only_rejected_403():
     """POST /api/admin/rum/sync/{service_id} on read-only service returns 403."""
-    ro_src = {**FAKE_SRC_STANDARD, "access_level": "read_only"}
-    app.dependency_overrides[get_source] = lambda: ro_src
-    app.dependency_overrides[get_service_id] = lambda: SERVICE_ID
-    try:
-        client = TestClient(app)
-        resp = client.post(
-            f"/api/admin/rum/sync/{SERVICE_ID}",
-            headers={"x-fastly-service-id": SERVICE_ID},
-        )
-        assert resp.status_code == 403
-        assert "read-only" in resp.json()["detail"].lower()
-    finally:
-        app.dependency_overrides.pop(get_source, None)
-        app.dependency_overrides.pop(get_service_id, None)
+    from tests.cron.conftest import assert_manual_trigger_read_only_rejected
+
+    assert_manual_trigger_read_only_rejected(f"/api/admin/rum/sync/{SERVICE_ID}", SERVICE_ID, FAKE_SRC_STANDARD)
 
 
 def test_manual_trigger_rum_sync_non_admin_rejected_403():
     """POST /api/admin/rum/sync/{service_id} by non-admin returns 403."""
-    from fastapi import HTTPException
+    from tests.cron.conftest import assert_manual_trigger_non_admin_rejected
 
-    def reject_analyst():
-        raise HTTPException(status_code=403, detail={"error": "admin_only"})
-
-    app.dependency_overrides[get_source] = lambda: FAKE_SRC_STANDARD
-    app.dependency_overrides[get_service_id] = lambda: SERVICE_ID
-    app.dependency_overrides[require_admin] = reject_analyst
-    try:
-        client = TestClient(app)
-        resp = client.post(
-            f"/api/admin/rum/sync/{SERVICE_ID}",
-            headers={"x-fastly-service-id": SERVICE_ID},
-        )
-        assert resp.status_code == 403
-    finally:
-        app.dependency_overrides.pop(get_source, None)
-        app.dependency_overrides.pop(get_service_id, None)
-        app.dependency_overrides.pop(require_admin, None)
+    assert_manual_trigger_non_admin_rejected(f"/api/admin/rum/sync/{SERVICE_ID}", SERVICE_ID, FAKE_SRC_STANDARD)
 
 
 def test_manual_trigger_rum_discovery_success():
@@ -861,37 +834,18 @@ def test_manual_trigger_rum_discovery_success():
 
 def test_manual_trigger_rum_discovery_standard_mode_rejected_400():
     """POST /api/admin/rum/discovery/{service_id} in standard mode returns 400."""
-    app.dependency_overrides[get_source] = lambda: FAKE_SRC_STANDARD
-    app.dependency_overrides[get_service_id] = lambda: SERVICE_ID
-    try:
-        client = TestClient(app)
-        resp = client.post(
-            f"/api/admin/rum/discovery/{SERVICE_ID}",
-            headers={"x-fastly-service-id": SERVICE_ID},
-        )
-        assert resp.status_code == 400
-        assert "high-scale" in resp.json()["detail"].lower()
-    finally:
-        app.dependency_overrides.pop(get_source, None)
-        app.dependency_overrides.pop(get_service_id, None)
+    from tests.cron.conftest import assert_manual_trigger_standard_mode_rejected
+
+    assert_manual_trigger_standard_mode_rejected(
+        f"/api/admin/rum/discovery/{SERVICE_ID}", SERVICE_ID, FAKE_SRC_STANDARD
+    )
 
 
 def test_manual_trigger_rum_discovery_read_only_rejected_403():
     """POST /api/admin/rum/discovery/{service_id} on read-only service returns 403."""
-    ro_src = {**FAKE_SRC_HIGH_SCALE, "access_level": "read_only"}
-    app.dependency_overrides[get_source] = lambda: ro_src
-    app.dependency_overrides[get_service_id] = lambda: SERVICE_ID
-    try:
-        client = TestClient(app)
-        resp = client.post(
-            f"/api/admin/rum/discovery/{SERVICE_ID}",
-            headers={"x-fastly-service-id": SERVICE_ID},
-        )
-        assert resp.status_code == 403
-        assert "read-only" in resp.json()["detail"].lower()
-    finally:
-        app.dependency_overrides.pop(get_source, None)
-        app.dependency_overrides.pop(get_service_id, None)
+    from tests.cron.conftest import assert_manual_trigger_read_only_rejected
+
+    assert_manual_trigger_read_only_rejected(f"/api/admin/rum/discovery/{SERVICE_ID}", SERVICE_ID, FAKE_SRC_HIGH_SCALE)
 
 
 def test_manual_trigger_rum_discovery_busy_503():
@@ -992,3 +946,94 @@ def test_rum_discovery_broker_unavailable_error(monkeypatch):
     assert kw.get("summary") == "RUM discovery failed"
     assert "Valkey broker connection refused" in (kw.get("error_message") or "")
     assert kw.get("run_id") == 100
+
+
+# =============================================================================
+# 13. Lease & Wrapper Lifecycle Tests (Folded from test_rum_ledger_lifecycle / test_rum_sync_lifecycle)
+# =============================================================================
+
+
+def test_discovery_lease_held_is_clean_skip(monkeypatch):
+    """When start_cron_run raises CronLeaseHeldError, _run_rum_discovery_cron skips cleanly."""
+    log_mock = MagicMock()
+    end_progress_mock = MagicMock()
+
+    monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_HIGH_SCALE)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "redis://x")
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
+    monkeypatch.setattr(
+        "backend.core.duckdb.start_cron_run",
+        MagicMock(side_effect=CronLeaseHeldError("held")),
+    )
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_mock)
+    monkeypatch.setattr("backend.cron_progress.end_progress", end_progress_mock)
+
+    rum_ledger_mod._run_rum_discovery_cron.__wrapped__(SERVICE_ID)
+
+    log_mock.assert_not_called()
+    end_progress_mock.assert_not_called()
+
+
+def test_rum_sync_reuses_externally_owned_run_id(monkeypatch, rum_sync_lease):
+    """When run_id is passed into _run_rum_sync, it does not re-acquire a lease."""
+    start_mock = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", start_mock)
+    monkeypatch.setattr("backend.cron.jobs.rum_sync._reconcile_faro_bundle", lambda sid, rid: True)
+    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.add_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+
+    seen: dict = {}
+
+    def fake_ingest(service_id, *args, **kwargs):
+        seen.update(kwargs)
+        yield ("done", 0)
+
+    monkeypatch.setattr("backend.cron.jobs.rum_sync.ingest_rum_logs", fake_ingest)
+
+    rum_sync_mod._run_rum_sync.__wrapped__(SERVICE_ID, run_id=99)
+
+    start_mock.assert_not_called()
+    assert seen["run_id"] == 99
+    assert seen["max_seconds"] == 240
+
+
+def test_rum_sync_skips_cleanly_when_lease_already_held(monkeypatch):
+    """When start_cron_run raises CronLeaseHeldError, _run_rum_sync exits cleanly."""
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_STANDARD)
+    monkeypatch.setattr(
+        "backend.core.duckdb.start_cron_run",
+        MagicMock(side_effect=CronLeaseHeldError("rum_sync is already running")),
+    )
+    log_mock = MagicMock()
+    ingest_mock = MagicMock()
+    start_progress_mock = MagicMock()
+    end_progress_mock = MagicMock()
+
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_mock)
+    monkeypatch.setattr("backend.cron.jobs.rum_sync.ingest_rum_logs", ingest_mock)
+    monkeypatch.setattr("backend.cron_progress.start_progress", start_progress_mock)
+    monkeypatch.setattr("backend.cron_progress.end_progress", end_progress_mock)
+
+    rum_sync_mod._run_rum_sync.__wrapped__(SERVICE_ID)
+
+    ingest_mock.assert_not_called()
+    log_mock.assert_not_called()
+    start_progress_mock.assert_not_called()
+    end_progress_mock.assert_not_called()
+
+
+def test_rum_sync_unknown_service_is_a_clean_skip(monkeypatch):
+    """When get_source_for_service returns None, _run_rum_sync exits without acquiring a lease."""
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: None)
+    start_mock = MagicMock()
+    ingest_mock = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", start_mock)
+    monkeypatch.setattr("backend.cron.jobs.rum_sync.ingest_rum_logs", ingest_mock)
+
+    rum_sync_mod._run_rum_sync.__wrapped__(SERVICE_ID)
+
+    ingest_mock.assert_not_called()
+    start_mock.assert_not_called()

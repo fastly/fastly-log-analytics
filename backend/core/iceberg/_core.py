@@ -32,11 +32,8 @@ import os
 import pyarrow as pa
 
 _C = "\x1b[36m"  # Cyan — iceberg operations
-_C2 = "\x1b[94m"  # Bright Blue — sync_data operations
 _R = "\x1b[0m"
 _ICE = f"🧊 {_C}[iceberg]{_R}"
-_ICE_PLAIN = f"{_C}[iceberg]{_R}"
-_SYNC = f"⬇️  {_C2}[sync_data]{_R}"
 
 logger = logging.getLogger(__name__)
 
@@ -236,10 +233,6 @@ def get_arrow_schema(log_fields_config: dict | None = None, table_name: str = "l
     return pa.schema(fields)
 
 
-def get_schema_field_names(log_fields_config: dict | None = None, table_name: str = "logs") -> set[str]:
-    return {f.name for f in get_arrow_schema(log_fields_config, table_name=table_name)}
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -334,11 +327,9 @@ from backend.core.iceberg.buffer import (  # noqa: F401, E402
 from backend.core.iceberg.manifest import (  # noqa: F401, E402
     _align_to_schema,
     _arrow_to_duckdb,
-    _get_all_table_stats,
     _prune_empty_dirs,
     ducklake_session,
     ducklake_table_exists,
-    get_all_table_stats,
     get_snapshot_calendar,
     get_table_info,
 )

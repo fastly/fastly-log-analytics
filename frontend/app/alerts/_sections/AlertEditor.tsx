@@ -9,7 +9,7 @@ import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 import { showToast } from '@/lib/toast'
 import { useServiceStore } from '@/stores/serviceStore'
-import { useBootstrap } from '@/hooks/useBootstrap'
+import { useDebounce } from '@/hooks/useDebounce'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
 import { Button } from '@/components/ui/button'
 import { Info, Loader2 } from 'lucide-react'
@@ -121,7 +121,6 @@ function LabelWithInfo({ htmlFor, children, tooltip }: { htmlFor?: string; child
 
 export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Alert | null, onSuccess: () => void }) {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
-  const { data: bootstrapData } = useBootstrap()
   // Defensive guard: AlertsPage already hides the dialog trigger for
   // analysts, but if the form mounts via any other path (deep-link,
   // older code path) the POST /api/alerts/preview call would silently
@@ -203,11 +202,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
       lookbackHours,
     ],
   )
-  const [debouncedPreviewParams, setDebouncedPreviewParams] = React.useState(previewParams)
-  React.useEffect(() => {
-    const timer = setTimeout(() => setDebouncedPreviewParams(previewParams), 500)
-    return () => clearTimeout(timer)
-  }, [previewParams])
+  const debouncedPreviewParams = useDebounce(previewParams, 500)
 
   const previewQuery = useQuery<AlertPreviewData | null>({
     queryKey: ['alert-preview', debouncedPreviewParams],

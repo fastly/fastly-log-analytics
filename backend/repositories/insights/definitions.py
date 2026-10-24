@@ -258,9 +258,6 @@ def new_probe_urls_processor(row: tuple, definition: InsightDefinition, context:
     }
 
 
-NEW_PROBES = SQL.NEW_PROBES
-NEW_PROBE_REGEX = SQL.NEW_PROBE_REGEX
-
 registry.register(
     InsightDefinition(
         id="new_probe_urls",

@@ -3,7 +3,7 @@ import { BackToAdminLink } from '@/components/BackToAdminLink'
 import { PageHeader } from '@/components/ui/page-header'
 import { Skeleton } from '@/components/ui/skeleton'
 
-export function SessionScoringFallback() {
+function SessionScoringFallback() {
   return (
     <div className="space-y-6" data-testid="admin-session-scoring-fallback">
       <div

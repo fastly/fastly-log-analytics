@@ -32,16 +32,14 @@ import { useFieldLabel } from '@/hooks/useFieldLabel'
 import type { LabelRow, LabelValue } from '@/hooks/useScoringLabels'
 import { buildSessionDashboardUrl, buildStreamDetailUrl } from '@/lib/session-urls'
 import { OBJECT_TYPE_LABELS, STREAM_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from '@/app/streaming/_sections/streamingInfo'
-import type { components } from '@/types/api.generated'
-import type { SessionDetailResponse, SessionsResponse } from '@/types/api'
+import type { Session, SessionDetailResponse, SessionsResponse } from '@/types/api'
 
 import { formatCount, formatCountMaybe } from '@/lib/format'
-type SessionRow = components['schemas']['Session']
 type SessionDetailRow = SessionDetailResponse['data'][number]
 
 interface SessionDetailProps {
-  selectedSession: SessionRow | null
-  setSelectedSession: (s: SessionRow | null) => void
+  selectedSession: Session | null
+  setSelectedSession: (s: Session | null) => void
   activeServiceId: string | null
   data: SessionsResponse | undefined
   labels: LabelRow[]

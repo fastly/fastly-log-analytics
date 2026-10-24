@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { cronCacheBust } from '@/lib/cron-cache-bust'
 import {
@@ -63,7 +63,6 @@ export interface SSEDialogFooterProps {
   stopDisabled?: boolean
   doneLabel?: string
   idleOrErrorLabel?: string
-  buttonClassName?: string
 }
 
 export function SSEDialogFooter({
@@ -73,17 +72,16 @@ export function SSEDialogFooter({
   stopDisabled = false,
   doneLabel = 'Close',
   idleOrErrorLabel = 'Cancel',
-  buttonClassName = 'h-10 px-6',
 }: SSEDialogFooterProps) {
   return (
     <>
       {status !== 'streaming' && (
-        <Button variant="outline" onClick={onClose} className={buttonClassName}>
+        <Button variant="outline" onClick={onClose} className="h-10 px-6">
           {status === 'done' ? doneLabel : idleOrErrorLabel}
         </Button>
       )}
       {status === 'streaming' && (
-        <Button variant="outline" onClick={onStop} disabled={stopDisabled} className={buttonClassName}>
+        <Button variant="outline" onClick={onStop} disabled={stopDisabled} className="h-10 px-6">
           Stop
         </Button>
       )}
@@ -163,25 +161,12 @@ interface SSEModalProps {
   body?: Record<string, unknown>
   /** Render a custom line; defaults to line.message or JSON stringify */
   renderLine?: (line: SSELine, index: number) => React.ReactNode
-  autoStart?: boolean
   onClose?: () => void
 }
 
-export function SSEModal({ trigger, title, description, endpoint, body, renderLine, autoStart = false, onClose }: SSEModalProps) {
+export function SSEModal({ trigger, title, description, endpoint, body, renderLine, onClose }: SSEModalProps) {
   const [open, setOpen] = useState(false)
-  const { lines, status, isDone, error, start, stop, reset } = useSSE()
-  const hasAutoStarted = useRef(false)
-
-  useEffect(() => {
-    if (open) {
-      if (autoStart && status === 'idle' && !hasAutoStarted.current) {
-        hasAutoStarted.current = true
-        start(endpoint, body)
-      }
-    } else {
-      hasAutoStarted.current = false
-    }
-  }, [open, autoStart, status, start, endpoint, body])
+  const { lines, status, error, start, stop, reset } = useSSE()
 
   const handleOpenChange = (newOpen: boolean) => {
     if (status === 'streaming') return // Prevent closing while streaming

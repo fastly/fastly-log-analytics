@@ -175,8 +175,7 @@ def test_provision_partial_failure_at_step_7_triggers_rollback(tmp_path, monkeyp
     only covers a failure BEFORE any Fastly-side state was created.
 
     Observed-behaviour note: the orchestrator wraps all 8 steps in one
-    try/except, so any post-step-7 raise (write_service_config or
-    install_capture_snippets bubbling up out of ensure_logging_endpoint)
+    try/except, so any post-step-7 raise (e.g. write_service_config)
     triggers the same rollback branch. We simulate at write_service_
     config because state has the freshly-set activated_logging_version
     by the time the raise fires — same teardown shape either way."""

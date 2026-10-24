@@ -22,8 +22,8 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { LabelWithInfo } from '@/components/ui/label-with-info'
-import { customFieldsApi, type CustomField, type VclLintRequest, type VclLintResult } from '@/lib/api/custom-fields'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { customFieldsApi, type CustomField, type VclLintResult } from '@/lib/api/custom-fields'
+import { useMutation } from '@tanstack/react-query'
 import { AlertTriangle, CheckCircle2, Loader2, Activity } from 'lucide-react'
 
 interface CustomFieldDrawerProps {

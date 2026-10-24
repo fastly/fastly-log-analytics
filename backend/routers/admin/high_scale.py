@@ -16,7 +16,7 @@ from backend.high_scale.disk_sampler import latest_disk_snapshot
 from backend.high_scale.retention import ServiceProfile, StorageProfile, recommend_retention
 from backend.models.admin_high_scale import HighScaleRetentionRecommendationResponse
 from backend.routers.admin._router import router
-from backend.utils.router_utils import make_error, require_service_id
+from backend.utils.router_utils import load_service_config_or_503, make_error, require_service_id
 
 logger = structlog.get_logger(__name__)
 
@@ -37,14 +37,7 @@ def api_high_scale_retention_recommendation(
     service_id = require_service_id(service_id)
     if not config.is_high_scale_mode():
         raise HTTPException(404, detail=make_error("high_scale_not_enabled", "High-scale mode is not enabled"))
-    try:
-        cfg = config.load_config(service_id)
-    except Exception:
-        raise HTTPException(
-            503, detail=make_error("service_unavailable", "Service configuration unavailable")
-        ) from None
-    if not cfg:
-        raise HTTPException(404, detail=make_error("service_not_found", "Service not found"))
+    cfg = load_service_config_or_503(service_id)
 
     volume_source: Literal["request", "sampled"] = "request"
     volume_bytes = total_bytes

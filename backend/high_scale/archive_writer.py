@@ -167,36 +167,6 @@ def write_batch_archive_checkpoint(
     return manifest
 
 
-def write_archive_checkpoint(
-    root: str | Path,
-    *,
-    service_id: str,
-    domain: str,
-    source: ArchiveSourceObject,
-    events: list[dict[str, Any]],
-    archive_epoch: int,
-    schema_version: str,
-    transform_version: str,
-    coverage_start: datetime,
-    coverage_end: datetime,
-    retention_seconds: int = 0,
-    deletion_grace_seconds: int = 900,
-) -> ArchiveManifest:
-    return write_batch_archive_checkpoint(
-        root,
-        service_id=service_id,
-        domain=domain,
-        source_batches=[(source, events)],
-        archive_epoch=archive_epoch,
-        schema_version=schema_version,
-        transform_version=transform_version,
-        coverage_start=coverage_start,
-        coverage_end=coverage_end,
-        retention_seconds=retention_seconds,
-        deletion_grace_seconds=deletion_grace_seconds,
-    )
-
-
 def _json_default(value: Any) -> str:
     if isinstance(value, datetime):
         return value.isoformat()

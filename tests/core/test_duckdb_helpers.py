@@ -58,7 +58,7 @@ def test_load_httpfs_installs_when_cached_extension_is_missing():
 
 
 def test_safe_iso_none_returns_none():
-    from backend.core.duckdb import _safe_iso
+    from backend.utils.date_utils import safe_iso as _safe_iso
 
     assert _safe_iso(None) is None
 
@@ -70,7 +70,7 @@ def test_safe_iso_naive_datetime_appends_z():
     drift by hours."""
     from datetime import datetime
 
-    from backend.core.duckdb import _safe_iso
+    from backend.utils.date_utils import safe_iso as _safe_iso
 
     dt = datetime(2026, 5, 18, 12, 30, 0)
     out = _safe_iso(dt)
@@ -83,7 +83,7 @@ def test_safe_iso_already_tz_aware_datetime_is_not_double_suffixed():
     "2026-05-18T12:30:00+00:00Z" which fromisoformat rejects."""
     from datetime import UTC, datetime
 
-    from backend.core.duckdb import _safe_iso
+    from backend.utils.date_utils import safe_iso as _safe_iso
 
     dt = datetime(2026, 5, 18, 12, 30, 0, tzinfo=UTC)
     out = _safe_iso(dt)
@@ -95,7 +95,7 @@ def test_safe_iso_falls_back_to_str_for_unknown_types():
     """Non-datetime objects → str(x). Pinned because DuckDB can
     return strings or other types from min()/max() — losing the
     fallback would crash with AttributeError."""
-    from backend.core.duckdb import _safe_iso
+    from backend.utils.date_utils import safe_iso as _safe_iso
 
     assert _safe_iso("already-a-string") == "already-a-string"
     assert _safe_iso(42) == "42"

@@ -63,34 +63,6 @@ CacheRegistry.register("high_scale._export_owners", _export_owners)
 _export_owners_lock = threading.Lock()
 
 
-def _resolve_export_service(
-    service_id: str,
-    ctx: RequestContext,
-    registry: HighScaleServiceRegistryProtocol,
-):
-    if service_id != ctx.service_id:
-        raise HTTPException(
-            status_code=409,
-            detail=make_error(
-                "high_scale_service_mismatch", "High-scale service binding does not match the requested service"
-            ),
-        )
-    service = registry.resolve(service_id)
-    if service is None:
-        raise HTTPException(
-            status_code=404,
-            detail=make_error("high_scale_service_not_configured", "Service is not registered for high-scale queries"),
-        )
-    if service.service_id != service_id:
-        raise HTTPException(
-            status_code=409,
-            detail=make_error(
-                "high_scale_service_mismatch", "High-scale service binding does not match the requested service"
-            ),
-        )
-    return service
-
-
 def _export_response(service_id: str, job: ExportJob, *, cancelled: bool | None = None):
     payload = {
         "export_id": job.job_id,
@@ -164,7 +136,7 @@ def request_export(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
     manager: ExportManager = Depends(get_export_manager),
 ):
-    service = _resolve_export_service(service_id, ctx, registry)
+    service = _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=True, mismatch_on_scope=True)
     start_raw, end_raw = ctx.clamp(req.start_time, req.end_time)
     start = parse_iso_utc(start_raw)
     end = parse_iso_utc(end_raw)
@@ -195,7 +167,7 @@ def export_status(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
     manager: ExportManager = Depends(get_export_manager),
 ):
-    _resolve_export_service(service_id, ctx, registry)
+    _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=True, mismatch_on_scope=True)
     with _export_owners_lock:
         owner = _export_owners.get(export_id)
     if owner != service_id:
@@ -222,7 +194,7 @@ def cancel_export(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
     manager: ExportManager = Depends(get_export_manager),
 ):
-    _resolve_export_service(service_id, ctx, registry)
+    _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=True, mismatch_on_scope=True)
     with _export_owners_lock:
         owner = _export_owners.get(export_id)
     if owner != service_id:
@@ -569,8 +541,17 @@ def _resolve_scoped_high_scale_service(
     registry: HighScaleServiceRegistryProtocol,
     *,
     check_binding: bool = True,
+    mismatch_on_scope: bool = False,
 ) -> HighScaleService:
     if service_id != ctx.service_id:
+        if mismatch_on_scope:
+            raise HTTPException(
+                status_code=409,
+                detail=make_error(
+                    "high_scale_service_mismatch",
+                    "High-scale service binding does not match the requested service",
+                ),
+            )
         raise HTTPException(status_code=403, detail=make_error("service_access_denied", "Service access denied"))
     service = registry.resolve(ctx.service_id)
     if service is None:

@@ -33,6 +33,7 @@ import {
 } from '@/components/ui/tooltip'
 import { ReportLayout } from '@/components/ReportLayout'
 import { WINDOW_OPTIONS, BASELINE_OPTIONS, historyHoursFromExtents } from '@/lib/insights-defaults'
+import { useDebounce } from '@/hooks/useDebounce'
 import { useInsightsDefaults } from '@/hooks/useInsightsDefaults'
 import { useDebouncedFilterPayload } from '@/hooks/useFilterPayload'
 import {
@@ -523,15 +524,8 @@ export default function InsightsClient({
   // both window AND baseline in succession) only fire one /api/insights
   // request instead of two. 400ms gives the user enough time to flip
   // both selects without firing the intermediate query.
-  const [appliedWindowHours, setAppliedWindowHours] = useState(windowHours)
-  const [appliedBaselineHours, setAppliedBaselineHours] = useState(baselineHours)
-  React.useEffect(() => {
-    const t = setTimeout(() => {
-      setAppliedWindowHours(windowHours)
-      setAppliedBaselineHours(baselineHours)
-    }, 400)
-    return () => clearTimeout(t)
-  }, [windowHours, baselineHours])
+  const appliedWindowHours = useDebounce(windowHours, 400)
+  const appliedBaselineHours = useDebounce(baselineHours, 400)
 
   const handleRescan = async () => {
     if (!activeServiceId || isRescanning) return

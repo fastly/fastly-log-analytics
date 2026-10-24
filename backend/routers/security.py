@@ -146,7 +146,8 @@ def export_proxies_csv(
     if high_scale_service is not None:
         from backend.high_scale.security import get_proxies_data as hs_proxies
 
-        res = hs_proxies(high_scale_service, None, resolved_start, resolved_end, mask_ips=mask_ips).model_dump()
+        res_raw = hs_proxies(high_scale_service, None, resolved_start, resolved_end, mask_ips=mask_ips)
+        res = res_raw.model_dump() if hasattr(res_raw, "model_dump") else res_raw
     else:
         # Query repository
         res = repo.get_security_proxies(

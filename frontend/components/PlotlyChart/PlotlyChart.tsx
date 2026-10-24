@@ -8,7 +8,6 @@ import { ChartA11yTable } from './ChartA11yTable'
 import { tracesToTable } from './tracesToTable'
 import type {
   PlotlyConfig,
-  PlotlyEvent,
   PlotlyFigure,
   PlotlyGraphDiv,
   PlotlyLayout,
@@ -62,7 +61,6 @@ interface PlotlyChartProps {
   className?: string
   height?: number | string
   onRelayout?: (event: PlotlyRelayoutEvent) => void
-  onSelected?: (event: PlotlyEvent) => void
   onUpdate?: (figure: PlotlyFigure, graphDiv: HTMLElement) => void
   /**
    * Optional caption for the screen-reader-only data table emitted
@@ -92,7 +90,6 @@ export const PlotlyChart = React.memo(function PlotlyChart({
   className,
   height = 300,
   onRelayout,
-  onSelected,
   onUpdate,
   a11yTitle = 'Chart data'
 }: PlotlyChartProps) {
@@ -100,11 +97,9 @@ export const PlotlyChart = React.memo(function PlotlyChart({
   const isDark = theme === 'dark'
   // Keep refs to the latest callbacks so the initialized handler is always current
   const onRelayoutRef = useRef(onRelayout)
-  const onSelectedRef = useRef(onSelected)
   useEffect(() => {
     onRelayoutRef.current = onRelayout
-    onSelectedRef.current = onSelected
-  }, [onRelayout, onSelected])
+  }, [onRelayout])
 
   // Store the graphDiv so we can re-attach listeners if needed
   const graphDivRef = useRef<PlotlyGraphDiv | null>(null)
@@ -119,12 +114,6 @@ export const PlotlyChart = React.memo(function PlotlyChart({
       onRelayoutRef.current?.(event)
     })
   }).current
-
-  // Stable callback for Plotly to prevent it from detaching the listener
-  // on render. `plotly_relayout` is wired imperatively in handleInitialized
-  // above to work around react-plotly.js dropping zoom events; no stable
-  // onRelayout prop is passed to <Plot> below.
-  const handleSelected = React.useCallback((e: PlotlyEvent) => onSelectedRef.current?.(e), [])
 
   // Container ref + narrow-viewport flag. Declared above defaultLayout
   // so the layout block can read `narrow` for the responsive legend
@@ -285,7 +274,6 @@ export const PlotlyChart = React.memo(function PlotlyChart({
           useResizeHandler
           onInitialized={handleInitialized}
           onUpdate={onUpdate}
-          onSelected={handleSelected}
         />
       ) : null}
       <ChartA11yTable shape={a11yShape} />

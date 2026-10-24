@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, Field
 
 from backend.models._base import WireSafeModel
 from backend.models.common import BaseResponse, RangeKeyedRequest
@@ -142,16 +142,13 @@ class SuspiciousIspRow(WireSafeModel):
     count: int
 
 
-class _SecurityProxiesFieldsMixin(BaseModel):
+class SecurityAggregatesResponse(BaseResponse):
     active_proxies_count: int = 0
     tunnel_requests_count: int = 0
     distance_mismatches_count: int = 0
     traffic_quality: list[TrafficQualityRow] = []
     suspicious_isps: list[SuspiciousIspRow] = []
     active_clients: list[ActiveClientItem] = []
-
-
-class SecurityAggregatesResponse(_SecurityProxiesFieldsMixin, BaseResponse):
     tls_fingerprints: list[TlsFingerprintRow] = []
     # Per-fingerprint-card coverage: {"tls_ciphers_sha": 0.99}. Drives the FE
     # "low coverage" hint so an analyst seeing a bare or trivial leaderboard
@@ -186,10 +183,6 @@ class SecurityTopBotsResponse(BaseResponse):
     )
     bots: list[SecurityBotRow] = []
     ngwaf_bots: list[SecurityBotRow] = []
-
-
-class SecurityProxiesResponse(_SecurityProxiesFieldsMixin, BaseResponse):
-    pass
 
 
 SecuritySectionName = Literal[

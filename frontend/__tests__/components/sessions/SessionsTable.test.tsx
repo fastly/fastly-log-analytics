@@ -57,7 +57,6 @@ function makeRow(overrides: Partial<SessionRow> = {}): SessionRow {
     ip: '10.0.0.1',
     country: 'US',
     asn: 7922,
-    asn_label: null,
     session_start: '2026-06-15T00:00:00Z',
     session_end: '2026-06-15T00:30:00Z',
     req_count: 100,

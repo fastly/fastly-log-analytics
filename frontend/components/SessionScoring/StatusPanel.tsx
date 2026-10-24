@@ -2,11 +2,12 @@
 
 import * as React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, Check, Copy, ExternalLink, Info, Power, PowerOff, RefreshCw, ShieldCheck, ShieldOff } from 'lucide-react'
+import { AlertTriangle, ExternalLink, Info, Power, PowerOff, RefreshCw, ShieldCheck, ShieldOff } from 'lucide-react'
 import { invalidateServiceScoringQueries, useScoringQuery } from './useScoringQuery'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { CopyButton } from '@/components/ui/copy-button'
 import {
   Dialog,
   DialogContent,
@@ -21,7 +22,6 @@ import { SSEModal } from '@/components/SSEModal'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
 import { formatLocalDateTime } from '@/lib/date'
-import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
 interface StatusPanelProps {
   serviceId: string
@@ -46,17 +46,12 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
   const enabled = !!data?.enabled
   const pragmasMissing = !enabled && data?.preflight_pragmas_ready === false
   const [pragmaModalOpen, setPragmaModalOpen] = React.useState(false)
-  const { copied: copiedPragmaMsg, copy: copyPragmaMsg } = useCopyToClipboard(2000)
 
   if (data?.preflight_pragmas_ready === true && pragmaModalOpen) {
     setPragmaModalOpen(false)
   }
 
   const accountTeamMessage = `Hi Fastly team — please enable the preflight request body preservation service pragmas on Fastly service ${serviceId} (preserving unsent request bodies across VCL restarts and omitting request bodies when backend requests are rewritten to GET or HEAD) so we can enable our Session Scoring Compute preflight pass.`
-
-  const handleCopyPragmaMessage = React.useCallback(async () => {
-    await copyPragmaMsg(accountTeamMessage)
-  }, [accountTeamMessage, copyPragmaMsg])
 
   // After an enable / disable / redeploy SSE stream closes, the scoring config
   // and analytics have all changed (or the stores were just created), so the
@@ -203,23 +198,16 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
                     </div>
                   </div>
                   <DialogFooter className="gap-2 sm:justify-between">
-                    <Button
-                      type="button"
+                    <CopyButton
+                      text={accountTeamMessage}
+                      label="Copy Message"
+                      copiedLabel="Copied"
                       variant="outline"
                       size="sm"
-                      onClick={handleCopyPragmaMessage}
+                      className=""
+                      iconClassName="h-3.5 w-3.5"
                       data-testid="admin-session-scoring-pragma-copy-btn"
-                    >
-                      {copiedPragmaMsg ? (
-                        <>
-                          <Check className="h-3.5 w-3.5 mr-1" /> Copied
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="h-3.5 w-3.5 mr-1" /> Copy Message
-                        </>
-                      )}
-                    </Button>
+                    />
                     <div className="flex items-center gap-2">
                       <Button
                         type="button"

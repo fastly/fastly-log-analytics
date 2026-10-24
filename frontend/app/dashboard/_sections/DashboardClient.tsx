@@ -11,14 +11,12 @@ import { unwrapClient } from '@/lib/api-client'
 import type { ChartMetric } from '@/types/api'
 import { STALE_VIEW_RETRY_OPTIONS, throwIfStaleAggregates, isStaleDashboardViewError } from '@/lib/staleViewRetry'
 import { useFilterStore } from '@/stores/filterStore'
-import { useServiceStore } from '@/stores/serviceStore'
 import { useIsDataReady } from '@/hooks/useIsDataReady'
 import { DashboardHeader } from '@/components/Dashboard/DashboardHeader'
 import { Button } from '@/components/ui/button'
 import { usePlotlyRangeZoom } from '@/hooks/usePlotlyRangeZoom'
 import { LayoutDashboard, ArrowRight } from 'lucide-react'
 import { ReportLayout } from '@/components/ReportLayout'
-import { buildServiceHref } from '@/lib/navigation'
 import { useShallow } from 'zustand/react/shallow'
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
 import { useDashboardCards } from '@/hooks/useDashboardCards'
@@ -367,7 +365,6 @@ function DashboardBody({
 
         <GeoMap
           isReady={isReady}
-          isLoadingAggs={isLoadingAggs}
           isFetchingAggs={isFetchingAggs}
           aggregates={aggregates}
           catalog={catalog}
@@ -379,7 +376,6 @@ function DashboardBody({
       <CardGrid
         visibleCardList={visibleCardList}
         isReady={isReady}
-        isLoadingAggs={isLoadingAggs}
         isFetchingAggs={isFetchingAggs}
         aggregates={aggregates}
         compareAggregates={compareAggregates}

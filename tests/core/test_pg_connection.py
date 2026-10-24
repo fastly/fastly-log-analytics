@@ -32,9 +32,8 @@ def test_placeholder_replace_no_placeholders():
 @pytest.mark.parametrize(
     "table,cols_hint",
     [
-        ("local_compacted_files", None),
-        ("committed_buffers", None),
         ("sources", None),
+        ("rdns", None),
     ],
 )
 def test_insert_or_ignore_known_tables_become_on_conflict_do_nothing(table, cols_hint):

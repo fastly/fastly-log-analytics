@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { Activity, ChevronRight, X } from 'lucide-react'
+import { Activity, ChevronRight } from 'lucide-react'
 import { useScoringQuery } from './useScoringQuery'
 
 import {

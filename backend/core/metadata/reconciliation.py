@@ -50,8 +50,6 @@ _STATS_TABLES = (
     ("views", "saved_views"),
     ("audit_logs", "audit_log"),
     ("ingest_in_flight", "in_flight_buffers"),
-    ("local_compacted_files", "locally_compacted_files"),
-    ("committed_buffers", "committed_buffers"),
     ("slow_queries", "slow_queries"),
     ("quarantined_files", "quarantined_files"),
 )
@@ -88,9 +86,7 @@ def _retention_timestamp_expr(ts_col: str) -> str:
 
 
 _STATS_SOURCE_NAME_TABLES = frozenset({"ingested_files", "audit_logs", "ingest_in_flight"})
-_STATS_SERVICE_ID_TABLES = frozenset(
-    {"cron_runs", "alerts", "views", "local_compacted_files", "slow_queries", "quarantined_files"}
-)
+_STATS_SERVICE_ID_TABLES = frozenset({"cron_runs", "alerts", "views", "slow_queries", "quarantined_files"})
 
 
 def _stats_table_count_query(sql_table: str, service_id: str) -> tuple[str, tuple[Any, ...]]:

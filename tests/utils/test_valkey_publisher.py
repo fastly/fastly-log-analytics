@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from backend.utils import valkey_publisher as vp
+from backend.utils.log_throttle import _last as _last_error_log
 from backend.utils.valkey_publisher import ValkeyPublisher
 
 
@@ -35,12 +36,12 @@ def _isolate_module_globals():
     saved_client = vp._sync_redis
     for k in vp.PUBLISH_STATS:
         vp.PUBLISH_STATS[k] = 0
-    vp._last_error_log.clear()
+    _last_error_log.clear()
     vp._sync_redis = None
     yield
     vp.PUBLISH_STATS.clear()
     vp.PUBLISH_STATS.update(saved_stats)
-    vp._last_error_log.clear()
+    _last_error_log.clear()
     vp._sync_redis = saved_client
 
 

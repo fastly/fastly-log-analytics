@@ -38,10 +38,6 @@ class SlidingWindowLimiter:
         self._locks: OrderedDict[str, float] = OrderedDict()
 
     @property
-    def WINDOW_S(self) -> int:
-        return int(self.window_s)
-
-    @property
     def MAX_TRACKED_IPS(self) -> int:
         return self.max_keys
 

@@ -24,7 +24,7 @@ import {
   panelDialogFooter,
 } from '@/lib/panel-dialog'
 import { CollapsibleGroup, StandardFieldsStep } from './FieldGroups'
-import { CustomFieldsStep } from './CustomFields'
+import { CustomFieldsManager } from '@/components/CustomFields/CustomFieldsManager'
 import { ReviewStep } from './Preview'
 import {
   estimateLogFieldBytesPerLine,
@@ -281,7 +281,9 @@ function LogSettingsModalBody({ service, open, onOpenChange }: LogSettingsModalP
                   )}
 
                   {step === 2 && (
-                    <CustomFieldsStep serviceId={service.service_id} />
+                    <div className="m-0 border-none p-0 outline-none">
+                      <CustomFieldsManager serviceId={service.service_id} />
+                    </div>
                   )}
 
                   {step === 3 && (

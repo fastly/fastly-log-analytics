@@ -1,7 +1,7 @@
 'use client'
 
 import type { PlotlyTrace } from '@/types/plotly'
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useMemo, useRef } from 'react'
 import { useInViewOnce } from '@/hooks/useInViewOnce'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
@@ -24,7 +24,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils';
-import { formatAbbreviatedCount, formatBytes, formatCount, formatCountMaybe, formatUSD } from '@/lib/format'
+import { formatAbbreviatedCount, formatBytes, formatCountMaybe, formatUSD } from '@/lib/format'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ReportLayout } from '@/components/ReportLayout'
 const FosOperationsHelp = ({ note }: { note?: string }) => (
@@ -72,14 +72,12 @@ function UsagePageContent({
   activeServiceId,
   config,
   setChartInterval,
-  intervalButtons,
 }: {
   startTime: string | null
   endTime: string | null
   activeServiceId: string | null
   config: ReportConfiguration
   setChartInterval: (interval: ChartInterval) => void
-  intervalButtons: React.ReactNode
 }) {
   const { theme } = useTheme()
   const isDark = theme === 'dark'

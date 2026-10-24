@@ -1,4 +1,4 @@
-from backend.models.security import SecurityAggregatesRequest, SecurityProxiesResponse
+from backend.models.security import SecurityAggregatesRequest, SecurityAggregatesResponse
 
 
 def test_security_proxies_response_validation():
@@ -27,7 +27,7 @@ def test_security_proxies_response_validation():
             }
         ],
     }
-    resp = SecurityProxiesResponse(**data)
+    resp = SecurityAggregatesResponse(**data)
     assert resp.active_proxies_count == 42
     assert len(resp.active_clients) == 1
     assert resp.active_clients[0].impossible_distance is True

@@ -15,10 +15,8 @@ from __future__ import annotations
 
 import os
 import shutil
-import socket
 import subprocess
 import tempfile
-import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -30,7 +28,15 @@ import yaml
 from backend.config import ClickHouseConfig
 from backend.core.clickhouse_client import ClickHouseClient, ClickHouseError
 from backend.high_scale import console_access as access
-from tests.high_scale.test_console_access_integration import _ddl
+from tests.high_scale.conftest import (
+    clickhouse_single_node_ddl as _ddl,
+)
+from tests.high_scale.conftest import (
+    free_loopback_port as _free_port,
+)
+from tests.high_scale.conftest import (
+    wait_for_clickhouse_ready,
+)
 
 pytestmark = [
     pytest.mark.security_regression,
@@ -52,12 +58,6 @@ def _render(*sets: str) -> list[dict]:
         args += ["--set", item]
     rendered = subprocess.run(args, check=True, capture_output=True, text=True).stdout
     return [doc for doc in yaml.safe_load_all(rendered) if doc]
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 def _statefulset_env(docs: list[dict]) -> dict[str, str]:
@@ -128,16 +128,7 @@ def server() -> Iterator[dict]:
     subprocess.run(["docker", "start", name], check=True, capture_output=True)
     base = f"http://127.0.0.1:{port}/"
     try:
-        deadline = time.time() + 90
-        while time.time() < deadline:
-            try:
-                if httpx.get(f"{base}ping", timeout=2).text.strip() == "Ok.":
-                    break
-            except httpx.HTTPError:
-                pass
-            time.sleep(1)
-        else:
-            raise RuntimeError("clickhouse-server did not become ready")
+        wait_for_clickhouse_ready(base)
 
         def app_sql(sql: str) -> None:
             response = httpx.post(base, params={"database": DB}, content=sql, auth=("fla_user", "apppw"), timeout=120)

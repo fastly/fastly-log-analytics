@@ -50,7 +50,13 @@ from backend.models.session_scoring import (
 )
 from backend.utils.auth import require_service_in_scope
 from backend.utils.remote_access import clamp_or_400, get_analyst_time_bounds
-from backend.utils.router_utils import make_error, not_found, resolve_fastly_token, stored_fastly_token
+from backend.utils.router_utils import (
+    load_service_config,
+    make_error,
+    not_found,
+    resolve_fastly_token,
+    stored_fastly_token,
+)
 from backend.utils.sse import sse_response, stream_iac_reconcile
 
 logger = logging.getLogger(__name__)
@@ -432,9 +438,6 @@ def _reconstruct_labeled_sessions(service_id: str, labels: list[dict]) -> list[t
     return result
 
 
-_resolve_token = resolve_fastly_token
-
-
 @router.post("/{service_id}/scoring/enable", dependencies=[Depends(require_admin)])
 def scoring_enable(
     service_id: str = Path(..., description="Logging service ID to enable scoring on"),
@@ -446,7 +449,7 @@ def scoring_enable(
     Compute service provisioning → Wasm deploy → VCL clone → backend +
     snippets + custom fields + format update → validate → activate."""
     token = body.token if body else ""
-    resolved_token = _resolve_token(service_id, token)
+    resolved_token = resolve_fastly_token(service_id, token)
     if not resolved_token:
         raise HTTPException(
             status_code=400,
@@ -539,7 +542,7 @@ def scoring_disable(
 ):
     """Disable session scoring. Reverse of enable_scoring."""
     token = body.token if body else ""
-    resolved_token = _resolve_token(service_id, token)
+    resolved_token = resolve_fastly_token(service_id, token)
     if not resolved_token:
         raise HTTPException(
             status_code=400,
@@ -671,11 +674,7 @@ def scoring_status(
 ) -> dict:
     """Return the scoring block from the service's config, or
     {"enabled": false} if scoring was never enabled."""
-    from backend import config as svcconfig
-
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": f"No config for service {service_id}"})
+    cfg = load_service_config(service_id)
     scoring = cfg.get("scoring")
     if not scoring or not scoring.get("enabled"):
         result: dict = {"enabled": False}

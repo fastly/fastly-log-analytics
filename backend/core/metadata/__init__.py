@@ -91,7 +91,6 @@ from backend.core.metadata.ingest_log import (
     get_ingested_files_status_summary,
     get_latest_ingest_ts,
     get_latest_reconciliation_ts,
-    get_locally_compacted_basenames,
     get_log_accounting_counts,
     get_log_activity,
     get_node_count_avg,
@@ -103,10 +102,8 @@ from backend.core.metadata.ingest_log import (
     list_in_flight,
     list_ingested_files,
     list_unbackfilled_fastly_edge_files,
-    purge_committed_buffer_rows,
     recompute_ingested_files_summary,
     record_in_flight,
-    register_locally_compacted,
 )
 
 # Quarantined-file tracking (corrupt/invalid ingest files copied to errors/).
@@ -237,13 +234,10 @@ __all__ = [
     "list_unbackfilled_fastly_edge_files",
     "get_latest_ingest_ts",
     "get_latest_reconciliation_ts",
-    "register_locally_compacted",
-    "get_locally_compacted_basenames",
     "insert_ingested_files",
     "record_in_flight",
     "clear_in_flight",
     "list_in_flight",
-    "purge_committed_buffer_rows",
     "get_log_activity",
     "get_node_count_avg",
     "get_rum_beacons_avg_per_day",

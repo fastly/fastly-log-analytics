@@ -84,7 +84,7 @@ def test_quota_request_limit_hit_does_not_record_bytes(clock):
 
 def test_quota_defaults_are_unchanged():
     lim = ra._StaticAssetLimiter()
-    assert (lim.REQ_LIMIT, lim.BYTE_LIMIT, lim.WINDOW_S, lim.MAX_TRACKED_IPS) == (600, 50 * 1024 * 1024, 60, 10_000)
+    assert (lim.REQ_LIMIT, lim.BYTE_LIMIT, lim.window_s, lim.MAX_TRACKED_IPS) == (600, 50 * 1024 * 1024, 60, 10_000)
     assert ra._static_limiter is not ra._analyst_api_limiter
 
 

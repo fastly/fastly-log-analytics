@@ -9,7 +9,6 @@ from backend.high_scale.registry import HighScaleService
 from backend.high_scale.security import security_aggregates as hs_security_aggregates
 from backend.models.security import (
     SecurityAggregatesResponse,
-    SecurityProxiesResponse,
     SecurityTopBotsResponse,
 )
 from backend.repositories._base import _safe_table
@@ -95,9 +94,8 @@ def test_repository_proxies_and_top_bots_wire_identical(in_memory_duckdb, test_s
             con=in_memory_duckdb, src=test_service_source, start_time=START, end_time=END, filters={}
         )
     assert_sections_wire_identical(
-        SecurityProxiesResponse, proxies, non_empty=("traffic_quality", "suspicious_isps", "active_clients")
+        SecurityAggregatesResponse, proxies, non_empty=("traffic_quality", "suspicious_isps", "active_clients")
     )
-    assert_sections_wire_identical(SecurityAggregatesResponse, proxies)
 
     bots = get_top_bots(con=in_memory_duckdb, src=test_service_source, start_time=START, end_time=END, filters={})
     assert_sections_wire_identical(SecurityTopBotsResponse, bots)

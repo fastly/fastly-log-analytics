@@ -4,8 +4,8 @@ import { FilterValueCell } from '@/components/FilterValueCell'
 
 import { formatCountMaybe } from '@/lib/format'
 
-const latencyHeader = (label: string) =>
-  function LatencyHeaderCell() {
+export const columnHeader = (label: string) =>
+  function ColumnHeaderCell() {
     return <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">{label}</span>
   }
 
@@ -31,7 +31,7 @@ export const makeLatencyColumns = <TRow extends LatencyRow>(
 ): ColumnDef<TRow>[] => [
   {
     accessorKey: labelField,
-    header: latencyHeader(labelName),
+    header: columnHeader(labelName),
     cell: (info) => {
       const val: unknown = info.row.original[filterField]
       const rawDisplay = info.getValue()
@@ -49,9 +49,9 @@ export const makeLatencyColumns = <TRow extends LatencyRow>(
       )
     }
   },
-  { accessorKey: 'requests', header: latencyHeader('Reqs'), cell: (info) => formatCountMaybe(numberValue(info.getValue())) ?? '0' },
-  { accessorKey: 'avg', header: latencyHeader('Avg (ms)'), cell: (info) => numberValue(info.getValue())?.toFixed(2) ?? '0.00' },
-  { accessorKey: 'p50', header: latencyHeader('P50'), cell: (info) => numberValue(info.getValue())?.toFixed(2) ?? '0.00' },
-  { accessorKey: 'p95', header: latencyHeader('P95'), cell: (info) => numberValue(info.getValue())?.toFixed(2) ?? '0.00' },
-  { accessorKey: 'p99', header: latencyHeader('P99'), cell: (info) => numberValue(info.getValue())?.toFixed(2) ?? '0.00' },
+  { accessorKey: 'requests', header: columnHeader('Reqs'), cell: (info) => formatCountMaybe(numberValue(info.getValue())) ?? '0' },
+  { accessorKey: 'avg', header: columnHeader('Avg (ms)'), cell: (info) => numberValue(info.getValue())?.toFixed(2) ?? '0.00' },
+  { accessorKey: 'p50', header: columnHeader('P50'), cell: (info) => numberValue(info.getValue())?.toFixed(2) ?? '0.00' },
+  { accessorKey: 'p95', header: columnHeader('P95'), cell: (info) => numberValue(info.getValue())?.toFixed(2) ?? '0.00' },
+  { accessorKey: 'p99', header: columnHeader('P99'), cell: (info) => numberValue(info.getValue())?.toFixed(2) ?? '0.00' },
 ]

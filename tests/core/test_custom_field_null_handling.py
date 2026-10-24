@@ -7,73 +7,7 @@ The sibling type-mismatch suite covers structurally-bad values.
 
 from __future__ import annotations
 
-import gzip
-import io
-import json
-import os
-import uuid
 from datetime import UTC, datetime, timedelta
-
-import pytest
-
-
-# Mirrors the harness in tests/core/test_custom_field_type_mismatch.py.
-# Duplicated rather than imported: pytest doesn't auto-collect fixtures
-# defined in sibling test modules.
-@pytest.fixture
-def custom_field_env(s3_mock, fos_source, monkeypatch, tmp_path):
-    # Per-test service_id: DuckLake tables persist in the shared per-worker
-    # Postgres catalog, and a reused table name resolves a data dir that was
-    # never created under this test's tmp root.
-    fos_source["service_id"] = f"nh{uuid.uuid4().hex[:10]}"
-    fos_source["duckdb_path"] = str(tmp_path / "e2e.duckdb")
-    cache_path = str(tmp_path / "cache")
-    os.makedirs(cache_path, exist_ok=True)
-    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: cache_path)
-    monkeypatch.setattr("backend.core.duckdb._configure_fos", lambda *a, **kw: None)
-
-    class _Shim:
-        def __init__(self, c):
-            self._c = c
-
-        def get_paginator(self, op, caller_hint=None):
-            return self._c.get_paginator(op)
-
-        def __getattr__(self, n):
-            return getattr(self._c, n)
-
-    monkeypatch.setattr("backend.core.ingest._get_fos_client", lambda _s: _Shim(s3_mock))
-
-    from backend.core import iceberg as ice
-
-    if hasattr(ice, "_view_cache"):
-        ice._view_cache.clear()
-
-    def _set_fields(custom_fields):
-        cfg = {
-            "service_id": fos_source["service_id"],
-            "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": custom_fields},
-        }
-        monkeypatch.setattr("backend.config.load_config", lambda _sid: cfg)
-
-    def _seed(key, rows):
-        body = io.BytesIO()
-        with gzip.GzipFile(fileobj=body, mode="wb") as gz:
-            gz.write(("\n".join(json.dumps(r) for r in rows) + "\n").encode())
-        s3_mock.put_object(Bucket=fos_source["bucket"], Key=key, Body=body.getvalue())
-
-    def _drain():
-        from backend.core import ingest as ing
-
-        return list(ing.ingest(source=fos_source))
-
-    return {
-        "fos_source": fos_source,
-        "cache": cache_path,
-        "set_custom_fields": _set_fields,
-        "seed_gz": _seed,
-        "drain_ingest": _drain,
-    }
 
 
 def _row(ts, idx, **extra):

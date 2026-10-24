@@ -9,7 +9,6 @@ from backend.high_scale.publication import (
     HighScaleBatch,
     InMemoryBatchManifestStore,
     InsertReceipt,
-    LostAcknowledgement,
     PartialInsert,
     PostgresBatchManifestStore,
     PublicationStatus,
@@ -39,7 +38,7 @@ class FakeClickHouse:
             raise PartialInsert(self.partial_rows)
         if self.fail_after_insert:
             self.fail_after_insert = False
-            raise LostAcknowledgement
+            raise RuntimeError("lost acknowledgement")
         return InsertReceipt(batch.batch_id, len(batch.rows), batch.digest)
 
 
@@ -50,7 +49,7 @@ def test_retry_after_lost_acknowledgement_publishes_once() -> None:
     publication = ClickHousePublication(store, client)
     batch = _batch()
 
-    with pytest.raises(LostAcknowledgement):
+    with pytest.raises(RuntimeError, match="lost acknowledgement"):
         publication.publish(batch)
 
     result = publication.publish(batch)

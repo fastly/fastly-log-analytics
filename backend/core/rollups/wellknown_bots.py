@@ -518,9 +518,6 @@ def _parse_iso_to_hour(iso: str) -> datetime | None:
         return None
     try:
         s = iso.rstrip("Z")
-        if "+" not in s and len(s) > 10 and s[-3] == ":":
-            # Hand-formatted offset like "+00:00" → already handled
-            pass
         dt = datetime.fromisoformat(s).replace(tzinfo=UTC)
     except ValueError:
         return None

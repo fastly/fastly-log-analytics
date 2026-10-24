@@ -28,6 +28,7 @@ import { SortableHead, useTableSort, type SortAccessors } from './sortable'
 import { useShareMutation } from './useShareMutation'
 import { type Invite, type ShareStatus } from './utils'
 import { formatDeterministicUTC } from '@/lib/date'
+import { useAutoFlash } from '@/hooks/useAutoFlash'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
 interface InvitationsPanelProps {
@@ -90,9 +91,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
   const [passcodeVisible, setPasscodeVisible] = React.useState(false)
   const [savingPasscode, setSavingPasscode] = React.useState(false)
   const [passcodeError, setPasscodeError] = React.useState<string | null>(null)
-  const [passcodeSavedFor, setPasscodeSavedFor] = React.useState<string | null>(null)
-  const passcodeSavedTimer = React.useRef<number | undefined>(undefined)
-  React.useEffect(() => () => window.clearTimeout(passcodeSavedTimer.current), [])
+  const { value: passcodeSavedFor, flash: flashPasscodeSaved } = useAutoFlash<string>(2000)
 
   const services = status?.services || []
   const invites = status?.invites || []
@@ -194,12 +193,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
       )
       setEditingPasscodeFor(null)
       setPasscodeDraft('')
-      setPasscodeSavedFor(inviteId)
-      window.clearTimeout(passcodeSavedTimer.current)
-      passcodeSavedTimer.current = window.setTimeout(
-        () => setPasscodeSavedFor((id) => (id === inviteId ? null : id)),
-        2000,
-      )
+      flashPasscodeSaved(inviteId)
       await onRefresh()
     } catch (e) {
       // Show validation errors inline (weak passcode etc.); don't push to the

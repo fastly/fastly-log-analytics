@@ -58,8 +58,6 @@ def test_lake_ident_rejects_trailing_newline():
     [
         lambda m: m._apply_target_file_size(None, "lake" + NL),
         lambda m: m.ducklake_current_snapshot_id(None, "lake" + NL),
-        lambda m: m._ducklake_add_data_files(None, ["s3://b/k"], "lake" + NL, "logs"),
-        lambda m: m._ducklake_add_data_files(None, ["s3://b/k"], "lake", "logs" + NL),
     ],
 )
 def test_ducklake_idents_reject_trailing_newline(call):

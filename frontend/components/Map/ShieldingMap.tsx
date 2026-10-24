@@ -46,8 +46,6 @@ interface TooltipInfo {
 
 import { rafThrottle } from '@/components/Map/shared'
 
-export { rafThrottle }
-
 // ── Geometry helpers ──────────────────────────────────────────────────────────
 
 export function greatCirclePoints(
@@ -274,8 +272,6 @@ export function buildDotFeatures(rows: readonly ShieldingRowInput[]): GeoJSON.Fe
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
-
-const EMPTY_FC: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] }
 
 export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, expandable, fillHeight }: ShieldingMapProps) {
   const mapContainer = useRef<HTMLDivElement>(null)

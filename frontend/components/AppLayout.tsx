@@ -7,7 +7,6 @@ import { usePathname, useSearchParams } from 'next/navigation'
 import { Dialog as DialogPrimitive } from '@base-ui/react/dialog'
 import {
   LayoutDashboard,
-  BarChart3,
   Network,
   Users,
   Settings,
@@ -29,7 +28,6 @@ import {
   TrendingUp,
   X,
   Eye,
-  Layers,
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'

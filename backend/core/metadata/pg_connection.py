@@ -331,8 +331,6 @@ _REPLACE_ON_CONFLICT_UPDATE = {
 }
 
 _IGNORE_TABLES = (
-    "local_compacted_files",
-    "committed_buffers",
     "sources",
     "invite_services",
     "rdns",
@@ -516,12 +514,10 @@ class PgConnectionWrapper:
     def __init__(
         self,
         conn: psycopg.Connection,
-        is_readonly: bool = False,
         return_to_pool_on_close: bool = False,
         pool=None,
     ):
         self._conn = conn
-        self._is_readonly = is_readonly
         self._return_to_pool_on_close = return_to_pool_on_close
         # Mutable, not per-connection: under Postgres one connection serves
         # every service on a thread (see get_pg_thread_connection), so this

@@ -29,14 +29,13 @@ from __future__ import annotations
 
 import math
 
-import duckdb
 import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from backend.models.common import FilterSpec
-from backend.repositories._base import _safe_table
 from backend.repositories.dashboard import get_aggregates
+from tests._helpers.duckdb_fixtures import make_seeded_logs_con
 
 _TABLE_NAME = "test_service"
 
@@ -44,70 +43,7 @@ _TABLE_NAME = "test_service"
 @pytest.fixture
 def seeded_con():
     """In-memory DuckDB seeded with a representative analytical table."""
-    con = duckdb.connect(":memory:")
-    table = _safe_table(_TABLE_NAME)
-    con.execute(
-        f"""
-        CREATE TABLE {table} (
-            "timestamp" TIMESTAMPTZ,
-            "dt" VARCHAR,
-            "timestamp_hour" VARCHAR,
-            "status" INTEGER,
-            "country" VARCHAR,
-            "url" VARCHAR,
-            "ip" VARCHAR,
-            "method" VARCHAR,
-            "ua" VARCHAR,
-            "pop" VARCHAR,
-            "asn" INTEGER,
-            "city" VARCHAR,
-            "region" VARCHAR,
-            "elapsed" INTEGER,
-            "cache" VARCHAR,
-            "ottfb" DOUBLE,
-            "ttfb" DOUBLE,
-            "waf_sig" VARCHAR,
-            "edge" BOOLEAN,
-            "lat" DOUBLE,
-            "lon" DOUBLE,
-            "resp_bytes" INTEGER
-        )
-        """
-    )
-    from datetime import UTC, datetime, timedelta
-
-    base = datetime.now(UTC) - timedelta(hours=1)
-    statuses = [200, 200, 200, 200, 404, 500, 200, 304, 301, 200]
-    pops = ["LAX", "JFK", "LHR", "LAX", "JFK", "LAX", "LHR", "JFK", "LAX", "LHR"]
-    for i in range(10):
-        ts = base + timedelta(minutes=i * 5)
-        con.execute(
-            f"""INSERT INTO {table} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [
-                ts,
-                ts.strftime("%Y-%m-%d"),
-                ts.strftime("%Y-%m-%d-%H"),
-                statuses[i],
-                "US",
-                f"/path-{i}",
-                f"10.0.0.{i}",
-                "GET",
-                "Mozilla/5.0",
-                pops[i],
-                15169 + i,
-                "San Francisco",
-                "CA",
-                50 + i * 10,
-                "HIT" if i % 2 == 0 else "MISS",
-                50000.0 + i,
-                0.05 + i * 0.01,
-                "",
-                True,
-                37.7749,
-                -122.4194,
-                500 + i * 100,
-            ],
-        )
+    con = make_seeded_logs_con(_TABLE_NAME, num_rows=10)
     yield con
     con.close()
 

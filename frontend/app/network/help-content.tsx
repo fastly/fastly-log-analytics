@@ -4,9 +4,10 @@ import { FilterValueCell } from "@/components/FilterValueCell";
 import { PopLabel } from "@/components/PopLabel";
 import { cn } from "@/lib/utils";
 import { formatCount } from "@/lib/format";
+import { columnHeader } from "@/lib/table-utils";
 import type { ColumnDef } from "@tanstack/react-table";
 import type { ShieldingRowInput } from "./shielding-rows";
-import { Activity, Shield, AlertTriangle, Search, ActivitySquare, AlertCircle, Globe, Zap, Network as NetworkIcon } from "lucide-react";
+import { Activity, AlertCircle, Globe, Zap, Network as NetworkIcon } from "lucide-react";
 export const GlobalHealthHelp = () => (
   <div className="space-y-4 text-sm text-muted-foreground">
     <p>A composite <strong>0–100 score</strong> aggregated across your top ASNs, weighted by request volume. 100 = perfect conditions, 0 = severe degradation.</p>
@@ -211,10 +212,6 @@ export function HealthBadge({ score }: { score: number | null }) {
   )
 }
 
-const shieldingHeader = (label: string) =>
-  function ShieldingHeader() {
-    return <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">{label}</span>
-  }
 // Cells read their own column through `getValue()` (typed `unknown` for a heterogeneous column set).
 const textValue = (v: unknown): string => (typeof v === 'string' ? v : '')
 const numberValue = (v: unknown): number | null => (typeof v === 'number' ? v : null)
@@ -223,7 +220,7 @@ const msCell = (value: unknown) => <span>{numberValue(value)?.toFixed(1)}ms</spa
 export const SHIELDING_COLUMNS: ColumnDef<ShieldingRowInput>[] = [
   {
     accessorKey: 'edge_pop',
-    id: 'edge_pop', meta: { label: 'Edge POP' }, header: shieldingHeader('Edge POP'),
+    id: 'edge_pop', meta: { label: 'Edge POP' }, header: columnHeader('Edge POP'),
     cell: (info) => (
       <FilterValueCell
         filters={[{ column: 'pop', value: textValue(info.getValue()) }]}
@@ -234,17 +231,17 @@ export const SHIELDING_COLUMNS: ColumnDef<ShieldingRowInput>[] = [
   },
   {
     accessorKey: 'shield_pop',
-    id: 'shield_pop', meta: { label: 'Shield POP' }, header: shieldingHeader('Shield POP'),
+    id: 'shield_pop', meta: { label: 'Shield POP' }, header: columnHeader('Shield POP'),
     cell: (info) => (
       <FilterValueCell
-        filters={[{ column: 'shield_pop', value: textValue(info.getValue()) }]}
+        filters={[{ column: 'shield_pop', value: textValue(info.getValue())} ]}
         display={<PopLabel code={textValue(info.getValue())} />}
         className="font-bold text-purple-500"
       />
     )
   },
   {
-    accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: shieldingHeader('Reqs'),
+    accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: columnHeader('Reqs'),
     cell: (info) => {
       // Mute the count on low-sample routes so the eye connects "few requests"
       // with the un-graded (grey) efficiency pill. (low-sample gating)
@@ -259,11 +256,11 @@ export const SHIELDING_COLUMNS: ColumnDef<ShieldingRowInput>[] = [
       )
     }
   },
-  { accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: shieldingHeader('P50 (E→S)'), cell: (info) => msCell(info.getValue()) },
-  { accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: shieldingHeader('P95 (E→S)'), cell: (info) => msCell(info.getValue()) },
-  { accessorKey: 'p99_ms', id: 'p99_ms', meta: { label: 'P99 Latency' }, header: shieldingHeader('P99 (E→S)'), cell: (info) => msCell(info.getValue()) },
+  { accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: columnHeader('P50 (E→S)'), cell: (info) => msCell(info.getValue()) },
+  { accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: columnHeader('P95 (E→S)'), cell: (info) => msCell(info.getValue()) },
+  { accessorKey: 'p99_ms', id: 'p99_ms', meta: { label: 'P99 Latency' }, header: columnHeader('P99 (E→S)'), cell: (info) => msCell(info.getValue()) },
   {
-    accessorKey: 'light_speed_rtt_ms', id: 'light_speed_rtt_ms', meta: { label: 'Light-Speed Floor' }, header: shieldingHeader('Light Floor'),
+    accessorKey: 'light_speed_rtt_ms', id: 'light_speed_rtt_ms', meta: { label: 'Light-Speed Floor' }, header: columnHeader('Light Floor'),
     cell: (info) => {
       const floor = numberValue(info.getValue())
       return floor != null
@@ -272,7 +269,7 @@ export const SHIELDING_COLUMNS: ColumnDef<ShieldingRowInput>[] = [
     }
   },
   {
-    accessorKey: 'efficiency_ratio', id: 'efficiency_ratio', meta: { label: 'Efficiency' }, header: shieldingHeader('Efficiency'),
+    accessorKey: 'efficiency_ratio', id: 'efficiency_ratio', meta: { label: 'Efficiency' }, header: columnHeader('Efficiency'),
     cell: (info) => {
       const ratio = numberValue(info.getValue())
       if (ratio == null) return <span className="text-muted-foreground">—</span>

@@ -186,7 +186,7 @@ def test_field_order_covers_ingest_storage_fields():
 
     # (3) End-to-end: the emitted Arrow schema (what the DuckDB `logs` view is
     # built from) actually contains every storage field.
-    schema_names = iceberg.get_schema_field_names()
+    schema_names = {f.name for f in iceberg.get_arrow_schema()}
     unmaterialized = storage_ids - schema_names
     assert not unmaterialized, f"Storage fields absent from the emitted Arrow/DuckDB schema: {sorted(unmaterialized)}"
 

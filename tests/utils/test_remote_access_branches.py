@@ -65,7 +65,6 @@ def _isolate(tmp_path, monkeypatch):
     shared pytest run).
     """
     monkeypatch.setenv("REMOTE_SHARE_DB_DIR", str(tmp_path / "system"))
-    share_db.reset_for_tests()
     tunnel.reset_for_tests()
     yield
     share_db.close_all_connections()

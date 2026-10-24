@@ -14,9 +14,12 @@
  * exercises browser-only `URL.createObjectURL` plumbing not present in
  * jsdom. The other 5 exports are covered.
  */
+import { API_BASE, FULL_CONFIG, serviceStoreMockFactory } from './test-helpers'
 import { without } from '@/__tests__/helpers/partial'
 import { http, HttpResponse } from 'msw'
 import { describe, it, expect, vi, afterEach } from 'vitest'
+
+vi.mock('@/stores/serviceStore', () => serviceStoreMockFactory())
 
 import {
   buildHandleModalClose,
@@ -25,47 +28,12 @@ import {
   runFetchTerraformPreview,
   runJoin,
 } from '@/components/ProvisionWizard/wizard-deploy'
-import { INITIAL_CONFIG } from '@/components/ProvisionWizard/types'
 import { server } from '@/__tests__/helpers/msw/server'
-
-const API_BASE = 'http://127.0.0.1:8000'
-
-vi.mock('@/stores/serviceStore', () => {
-  const state = { activeServiceId: 'svc-test' }
-  const useServiceStore: unknown = Object.assign(
-    (selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state),
-    { getState: () => state },
-  )
-  return { useServiceStore }
-})
 
 afterEach(() => {
   server.resetHandlers()
   vi.useRealTimers()
 })
-
-const FULL_CONFIG = {
-  ...INITIAL_CONFIG,
-  endpoint_name: 'My EP',
-  fos_region: 'us-east-1',
-  fos_bucket_name: 'my-bucket',
-  fos_prefix: 'logs/',
-  fos_access_key: 'AK',
-  fos_secret_key: 'SK',
-  sample_rate: 1,
-  edge_only: true,
-  custom_condition: '',
-  log_period: 60,
-  cdn_service_name: 'My CDN',
-  cdn_prefix: 'mycdn',
-  cdn_shield: 'iad-va-us',
-  cdn_url: '',
-  cdn_secret: '',
-  enable_cron_sync: true,
-  delete_after: false,
-  commit_interval_mins: 5,
-  enable_cron_compact: true,
-}
 
 describe('runFetchTerraformPreview', () => {
   function makeArgs(

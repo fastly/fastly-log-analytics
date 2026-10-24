@@ -13,22 +13,22 @@ import { setupNextHeadersMock, withTestHttpServer } from '../helpers/ssr'
 
 const { setHeaders } = setupNextHeadersMock()
 
-describe('resolveSecurityDefaultKey (key-match contract)', () => {
+describe('resolveDefaultSsrRangeKey (key-match contract)', () => {
   it('cold load → rangeToken "24h", anchor floored to the 60s grid', async () => {
-    const { resolveSecurityDefaultKey } = await import('@/lib/ssr/security')
+    const { resolveDefaultSsrRangeKey } = await import('@/lib/ssr/upstream')
     const { quantizeAnchor } = await import('@/lib/time-window')
 
     const now = new Date('2026-06-29T12:00:37.123Z')
-    const got = resolveSecurityDefaultKey(now)
+    const got = resolveDefaultSsrRangeKey(now)
     expect(got.rangeToken).toBe('24h')
     expect(got.anchor).toBe('2026-06-29T12:00:00Z')
     expect(got.anchor).toBe(quantizeAnchor(now.toISOString(), now))
   })
 
   it('two instants in the same 60s quantum resolve the identical anchor', async () => {
-    const { resolveSecurityDefaultKey } = await import('@/lib/ssr/security')
-    const a = resolveSecurityDefaultKey(new Date('2026-06-29T12:00:01Z'))
-    const b = resolveSecurityDefaultKey(new Date('2026-06-29T12:00:58Z'))
+    const { resolveDefaultSsrRangeKey } = await import('@/lib/ssr/upstream')
+    const a = resolveDefaultSsrRangeKey(new Date('2026-06-29T12:00:01Z'))
+    const b = resolveDefaultSsrRangeKey(new Date('2026-06-29T12:00:58Z'))
     expect(a.anchor).toBe(b.anchor)
     expect(a.anchor).toBe('2026-06-29T12:00:00Z')
   })
@@ -37,10 +37,11 @@ describe('resolveSecurityDefaultKey (key-match contract)', () => {
 describe('SSR-seed key ↔ client first-paint key byte-match', () => {
   it('the page.tsx seed key === the client useServiceQuery key', async () => {
     const { hashKey } = await import('@tanstack/react-query')
-    const { resolveSecurityDefaultKey, SECURITY_SSR_DEFAULTS } = await import('@/lib/ssr/security')
+    const { resolveDefaultSsrRangeKey } = await import('@/lib/ssr/upstream')
+    const { SECURITY_SSR_DEFAULTS } = await import('@/lib/ssr/security')
 
     const serviceId = 'svc-1'
-    const { rangeToken, anchor } = resolveSecurityDefaultKey(new Date('2026-06-29T12:00:30Z'))
+    const { rangeToken, anchor } = resolveDefaultSsrRangeKey(new Date('2026-06-29T12:00:30Z'))
 
     // ── SSR seed key (mirrors app/security/page.tsx) ──
     const seedKey = [

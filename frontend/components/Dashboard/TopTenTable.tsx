@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState } from 'react'
+import React from 'react'
 import { DashboardTableData } from '@/types/api'
 import { FieldSearchDialog } from './FieldSearchDialog'
 import { Copy, Check, EyeOff, TrendingUp, TrendingDown } from 'lucide-react'

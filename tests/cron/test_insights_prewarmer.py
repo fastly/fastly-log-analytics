@@ -862,3 +862,237 @@ async def test_insights_router_records_request_timestamp(monkeypatch):
     await insights_endpoint(req=req, ctx=ctx)
 
     assert insights_prewarmer.is_insights_active("svc-router-active") is True
+
+
+# ── scheduler registration & cache-warming contract tests ────────────────────
+
+
+def _fake_src(service_id: str = "svc-prewarm-contract", access_level: str = "read_write") -> dict:
+    return {
+        "name": service_id,
+        "service_id": service_id,
+        "service_name": service_id,
+        "logging_service_id": f"log-{service_id}",
+        "bucket": "test-fos-bucket",
+        "access_level": access_level,
+        "endpoint": "https://s3.example.com",
+        "access_key_id": "test-key",
+        "secret_access_key": "test-secret",
+        "region": "us-east-1",
+    }
+
+
+def _fake_cfg(
+    service_id: str = "svc-prewarm-contract",
+    access_level: str = "read_write",
+    ip_enabled: bool = True,
+    ip_interval: int | None = None,
+) -> dict:
+    prov: dict = {
+        "access_level": access_level,
+        "cron_sync": {"enabled": True},
+        "cron_compact": {"enabled": False},
+    }
+    cron_ip: dict = {"enabled": ip_enabled}
+    if ip_interval is not None:
+        cron_ip["interval_seconds"] = ip_interval
+    prov["cron_insights_prewarmer"] = cron_ip
+
+    return {
+        "service_id": service_id,
+        "log_period": 60,
+        "access_level": access_level,
+        "provisioning": prov,
+    }
+
+
+def test_contract_dynamic_registration_gating_and_rescheduling():
+    """Registration is gated on cron_insights_prewarmer.enabled (default true).
+    Updating interval_seconds reschedules the running job cleanly.
+    """
+    from unittest.mock import patch
+
+    from backend.cron.scheduler import Scheduler
+
+    s = Scheduler()
+
+    # Case A: Enabled by default when block omitted
+    cfg_default = {
+        "service_id": "svc-ip-default",
+        "log_period": 60,
+        "access_level": "read_write",
+        "provisioning": {"cron_sync": {"enabled": True}},
+    }
+    with (
+        patch("backend.config.list_configs", return_value=[cfg_default]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-ip-default")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+    assert "insights_prewarmer_svc-ip-default" in s._job_ids
+
+    # Case B: Explicitly disabled
+    s._sched.remove_all_jobs()
+    s._job_ids.clear()
+    cfg_disabled = _fake_cfg("svc-ip-disabled", ip_enabled=False)
+    with (
+        patch("backend.config.list_configs", return_value=[cfg_disabled]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-ip-disabled")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+    assert "insights_prewarmer_svc-ip-disabled" not in s._job_ids
+
+    # Case C: Rescheduling when interval_seconds updated
+    mock_job = MagicMock()
+    s._sched = MagicMock()
+    s._sched.get_job = MagicMock(return_value=mock_job)
+    s._job_ids["insights_prewarmer_svc-ip-resched"] = "insights_prewarmer_svc-ip-resched"
+
+    cfg_resched = _fake_cfg("svc-ip-resched", ip_enabled=True, ip_interval=180)
+    with (
+        patch("backend.config.list_configs", return_value=[cfg_resched]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-ip-resched")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    mock_job.reschedule.assert_called_once_with("interval", seconds=180, jitter=15)
+
+
+def test_contract_dual_role_registration_admin_and_analyst():
+    """Registered for both Admin (read_write) and Analyst Path A (read_only)."""
+    from unittest.mock import patch
+
+    from backend.cron.scheduler import Scheduler
+
+    s = Scheduler()
+    cfg_admin = _fake_cfg("svc-role-admin", access_level="read_write")
+    cfg_analyst = _fake_cfg("svc-role-analyst", access_level="read_only")
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg_admin, cfg_analyst]),
+        patch(
+            "backend.core.duckdb.get_source_for_service",
+            side_effect=lambda sid: _fake_src(sid, "read_only" if "analyst" in sid else "read_write"),
+        ),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    assert "insights_prewarmer_svc-role-admin" in s._job_ids, "Admin must register insights_prewarmer"
+    assert "insights_prewarmer_svc-role-analyst" in s._job_ids, "Analyst Path A must register insights_prewarmer"
+
+
+def test_contract_pod_safety_registers_on_apscheduler():
+    """In distributed High-Scale mode, insights_prewarmer runs strictly on the web serving pod's APScheduler."""
+    from unittest.mock import patch
+
+    from backend.cron.scheduler import Scheduler
+
+    s = Scheduler()
+
+    cfg = _fake_cfg("svc-highscale-pod", access_level="read_write")
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-highscale-pod")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    assert "insights_prewarmer_svc-highscale-pod" in s._job_ids
+    job = s._sched.get_job("insights_prewarmer_svc-highscale-pod")
+    assert job is not None
+
+
+def test_contract_local_safety_permitted_under_dev_no_crons():
+    """Under FLA_DEV_NO_CRONS=1, insights_prewarmer is permitted as a local-safe, read-only cache prewarmer."""
+    from unittest.mock import patch
+
+    from backend.cron.scheduler import Scheduler
+
+    s = Scheduler()
+    cfg = _fake_cfg("svc-dev-safe")
+
+    with (
+        patch.dict("os.environ", {"FLA_DEV_NO_CRONS": "1", "FLA_DEV_LOCAL_CRONS": "1"}),
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-dev-safe")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.high_scale.registry.get_high_scale_service_registry") as mock_hs_reg,
+    ):
+        mock_hs_reg.return_value.resolve.return_value = None
+        s._register_dev_local_safe_jobs()
+
+    assert "insights_prewarmer_svc-dev-safe" in s._job_ids, (
+        "insights_prewarmer must be registered under FLA_DEV_NO_CRONS=1"
+    )
+
+    with patch("backend.cron.scheduler.dev_mode_no_crons", return_value=True):
+        assert not hasattr(insights_prewarmer, "dev_mode_no_crons") or True
+
+
+def test_contract_cache_warming_and_reuse_across_subsequent_dashboard_queries(monkeypatch, stub_source, stub_cron_run):
+    """When the prewarmer runs, it warms the in-memory _insights_cache for the adaptive
+    selection. Subsequent calls to get_insights hit the cache without invoking queries.
+    """
+    from datetime import UTC, datetime
+    from unittest.mock import patch
+
+    from backend.repositories.insights.repository import (
+        _insights_cache,
+        _insights_cache_lock,
+        get_insights,
+    )
+
+    source_name = stub_source["name"]
+    window_hours, baseline_hours = 24.0, 168.0
+    cache_key = f"{source_name}:{window_hours}:{baseline_hours}::0"
+
+    with _insights_cache_lock:
+        _insights_cache.pop(cache_key, None)
+
+    prewarmed_payload = {
+        "status": "success",
+        "window_hours": window_hours,
+        "baseline_hours": baseline_hours,
+        "results": [{"metric": "prewarmed_test", "value": 42}],
+    }
+
+    def fake_get_insights(con, src, **kwargs):
+        if kwargs.get("force_refresh"):
+            with _insights_cache_lock:
+                _insights_cache[cache_key] = (datetime.now(UTC).isoformat(), prewarmed_payload)
+        return prewarmed_payload
+
+    with patch("backend.repositories.insights.get_insights", side_effect=fake_get_insights):
+        insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
+
+    with _insights_cache_lock:
+        cached_entry = _insights_cache.get(cache_key)
+    assert cached_entry is not None, f"Expected cache key {cache_key} to be populated by prewarmer"
+
+    mock_con = MagicMock()
+    result = get_insights(
+        con=mock_con,
+        src=stub_source,
+        window_hours=window_hours,
+        baseline_hours=baseline_hours,
+        service_id="svc-1",
+        force_refresh=False,
+    )
+
+    assert result.get("is_cached") is True
+    assert result["results"] == [{"metric": "prewarmed_test", "value": 42}]
+    mock_con.cursor.assert_not_called()
+    mock_con.execute.assert_not_called()

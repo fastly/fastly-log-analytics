@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 from backend.core.request_context import build_request_context
 from backend.main import app
-from backend.models.security import SecurityAggregatesResponse, SecurityProxiesResponse
+from backend.models.security import SecurityAggregatesResponse
 from backend.utils.remote_access import TimeBounds
 from tests.conftest import MOCK_SERVICE_ID, override_request_context
 
@@ -96,12 +96,12 @@ def test_threat_intel_is_clamped_to_the_analyst_window(client, monkeypatch, in_m
 def test_proxies_export_streams_masked_high_risk_clients(client, monkeypatch, in_memory_duckdb, test_service_source):
     _register_high_scale(monkeypatch, test_service_source)
     hs_proxies = MagicMock(
-        return_value=SecurityProxiesResponse(
-            active_clients=[
+        return_value={
+            "active_clients": [
                 {"ip": "198.51.100.xxx", "risk_level": "High", "impossible_distance": True},
                 {"ip": "198.51.101.xxx", "risk_level": "Medium"},
             ]
-        )
+        }
     )
     monkeypatch.setattr("backend.high_scale.security.get_proxies_data", hs_proxies)
     app.dependency_overrides[build_request_context] = _analyst_override(

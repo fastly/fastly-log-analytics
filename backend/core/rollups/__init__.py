@@ -31,14 +31,12 @@ symbol on the right-hand side of an existing
 
   Test-touched / cross-package internals:
     _is_safe_ident, _safe_table_for, _VIRTUAL_FIELD_BACKING
-    _rollups_root, _day_rollups_root, _hour_bundled_root, _day_bundled_root
-    _markers_path, _load_markers, _save_markers
+    _rollups_root, _hour_bundled_root, _day_bundled_root
     _build_copy_query, _build_virtual_field_copy_query
     _publish_field_partitions, _get_fields
     TOP_K, DAY_BUNDLE_FILENAME, DAY_BUNDLE_TOP_K,
     TIME_SERIES_BUNDLE_FILENAME, SESSIONS_BUNDLE_FILENAME
-    _wellknown_bots_root, _parse_iso_to_hour, _run_per_field_copy
-    _cleanup_per_field_after_bundle
+    _run_per_field_copy, _cleanup_per_field_after_bundle
 """
 
 from __future__ import annotations
@@ -78,7 +76,6 @@ from ._common import (
     _build_copy_query,
     _build_virtual_field_copy_query,
     _day_bundled_root,
-    _day_rollups_root,
     _get_fields,
     _hour_bundled_root,
     _is_safe_ident,
@@ -147,8 +144,6 @@ from .slow_urls import backfill_slow_urls_bundles, build_slow_urls_bundles
 from .time_series import build_time_series_bundles
 from .verified_bots_ts import backfill_verified_bots_ts_bundles, build_verified_bots_ts_bundles
 from .wellknown_bots import (
-    _parse_iso_to_hour,
-    _wellknown_bots_root,
     backfill_wellknown_bots_rollup,
     read_wellknown_bots_rollup,
     recompute_wellknown_bots_rollup,
@@ -259,7 +254,6 @@ __all__ = [
     "_safe_table_for",
     "_VIRTUAL_FIELD_BACKING",
     "_rollups_root",
-    "_day_rollups_root",
     "_hour_bundled_root",
     "_day_bundled_root",
     "rollups_present",
@@ -267,8 +261,6 @@ __all__ = [
     "_build_virtual_field_copy_query",
     "_publish_field_partitions",
     "_get_fields",
-    "_wellknown_bots_root",
-    "_parse_iso_to_hour",
     "_run_per_field_copy",
     "_cleanup_per_field_after_bundle",
 ]

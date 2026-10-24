@@ -11,10 +11,10 @@ import {
 } from '@/components/ui/dialog'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import { CopyButton } from '@/components/ui/copy-button'
 import { Badge } from '@/components/ui/badge'
 import {
   UserPlus,
-  Copy,
   Check,
   AlertTriangle,
   Loader2,
@@ -68,7 +68,6 @@ function getRecentInvite(serviceId: string): AnalystInvite | null {
 }
 
 function CopyField({ label, value, secret, multiline = false }: { label: string; value: string; secret?: boolean; multiline?: boolean }) {
-  const { copied, copy } = useCopyToClipboard(2000)
   const [revealed, setRevealed] = useState(false)
 
   const display = secret && !revealed ? '•'.repeat(Math.min(value.length, 24)) : value
@@ -93,16 +92,13 @@ function CopyField({ label, value, secret, multiline = false }: { label: string;
               {revealed ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
             </Button>
           )}
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label="Copy to clipboard"
-            className="h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground"
-            onClick={() => copy(value)}
+          <CopyButton
+            text={value}
+            ariaLabel="Copy to clipboard"
             title="Copy"
-          >
-            {copied ? <Check className="h-4 w-4 text-emerald-500" /> : <Copy className="h-4 w-4" />}
-          </Button>
+            className="h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground"
+            iconClassName="h-4 w-4"
+          />
         </div>
       </div>
     </div>

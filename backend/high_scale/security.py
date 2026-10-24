@@ -28,7 +28,6 @@ from backend.high_scale._projection_utils import range_value as _range_value
 from backend.high_scale.registry import HighScaleService
 from backend.models.security import (
     SecurityAggregatesResponse,
-    SecurityProxiesResponse,
     SecurityTopBotsResponse,
 )
 from backend.repositories.security import (
@@ -789,11 +788,11 @@ def get_proxies_data(
     end_time: str | None,
     *,
     mask_ips: bool = False,
-) -> SecurityProxiesResponse:
+) -> dict[str, Any]:
     scope = _scope(service, req, start_time, end_time)
     trace = HighScaleSections(service.service_id, "security")
     result = trace.run("proxies", lambda: _proxies(service, scope, mask_ips), source="fact")
-    return SecurityProxiesResponse.with_telemetry(**result, section_timings=trace.timings())
+    return {**result, "_section_timings": trace.timings()}
 
 
 def get_security_threat_intel(

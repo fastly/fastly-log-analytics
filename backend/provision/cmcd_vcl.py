@@ -23,7 +23,6 @@ Two transport modes:
 from __future__ import annotations
 
 CMCD_SNIPPET_NAME = "CMCD Extraction"
-CMCD_SNIPPET_PRIORITY = -50
 
 
 def _bool_v1(padded_source: str, key: str) -> str:

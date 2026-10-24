@@ -13,13 +13,13 @@ import { setupNextHeadersMock, withTestHttpServer } from '../helpers/ssr'
 
 const { setHeaders } = setupNextHeadersMock()
 
-describe('resolvePerformanceDefaultKey (key-match contract)', () => {
+describe('resolveDefaultSsrRangeKey (key-match contract)', () => {
   it('cold load → rangeToken "24h", anchor floored to the 60s grid', async () => {
-    const { resolvePerformanceDefaultKey } = await import('@/lib/ssr/performance')
+    const { resolveDefaultSsrRangeKey } = await import('@/lib/ssr/upstream')
     const { quantizeAnchor } = await import('@/lib/time-window')
 
     const now = new Date('2026-06-29T12:00:37.123Z')
-    const got = resolvePerformanceDefaultKey(now)
+    const got = resolveDefaultSsrRangeKey(now)
     expect(got.rangeToken).toBe('24h')
     expect(got.anchor).toBe('2026-06-29T12:00:00Z')
     expect(got.anchor).toBe(quantizeAnchor(now.toISOString(), now))
@@ -29,10 +29,11 @@ describe('resolvePerformanceDefaultKey (key-match contract)', () => {
 describe('SSR-seed key ↔ client first-paint key byte-match', () => {
   it('the page.tsx seed key === the client key', async () => {
     const { hashKey } = await import('@tanstack/react-query')
-    const { resolvePerformanceDefaultKey, PERFORMANCE_SSR_DEFAULTS } = await import('@/lib/ssr/performance')
+    const { resolveDefaultSsrRangeKey } = await import('@/lib/ssr/upstream')
+    const { PERFORMANCE_SSR_DEFAULTS } = await import('@/lib/ssr/performance')
 
     const serviceId = 'svc-1'
-    const { rangeToken, anchor } = resolvePerformanceDefaultKey(new Date('2026-06-29T12:00:30Z'))
+    const { rangeToken, anchor } = resolveDefaultSsrRangeKey(new Date('2026-06-29T12:00:30Z'))
 
     const seedKey = ['performance', 'aggregates', serviceId, rangeToken, anchor, {}, PERFORMANCE_SSR_DEFAULTS.sortBy]
     const clientKey = ['performance', 'aggregates', serviceId, rangeToken, anchor, {}, 'p99']

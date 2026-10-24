@@ -52,7 +52,6 @@ launcher = runpy.run_path({str(LAUNCHER)!r})
 launcher["_maybe_redirect_config_paths"]()
 from backend import config
 from backend.core.metadata import base, usage_log_db
-from backend.core.share_db import connection as share
 paths = {{
     "cwd": Path.cwd(),
     "configs": config.CONFIGS_DIR,
@@ -60,7 +59,6 @@ paths = {{
     "duckdb": config.duckdb_path("sandbox-service"),
     "metadata": base.db_path("sandbox-service"),
     "usage_db": usage_log_db.db_path("sandbox-service"),
-    "share": share.db_path(),
     "usage_config": config._USAGE_LOGGING_CONFIG_PATH,
     "buffer_cache": Path("cache"),
 }}
@@ -77,7 +75,6 @@ print(json.dumps({{key: str(Path(value).resolve()) for key, value in paths.items
         "duckdb": str(data / "services/sandbox-service.duckdb"),
         "metadata": str(data / "services/sandbox-service.metadata.db"),
         "usage_db": str(data / "services/sandbox-service.usage_log.db"),
-        "share": str(data / "system/remote_share.db"),
         "usage_config": str(data / "system/usage_logging.json"),
         "buffer_cache": str(sandbox / "cache"),
     }

@@ -7,7 +7,6 @@ from backend.core import field_registry as lf
 from backend.core.fastly.client import fastly
 from backend.core.fastly.rum_provisioning import generate_rum_recv_parts
 from backend.core.fastly.service import (
-    ensure_vcl_snippet,
     get_active_version,
     get_generated_vcl,
     list_s3_endpoints,
@@ -121,27 +120,6 @@ EDGE_DATA_MAPPING = {
     # raw cookie value is never logged or forwarded). See SESSION_COOKIE_ALLOWLIST.
     "cookie_session": _session_cookie_hash_vcl(),
 }
-
-
-# Capture-snippet install plan — the single source of truth shared by the live
-# provisioning path (``install_capture_snippets``) and the Terraform generator
-# (``backend.utils.terraform_gen``): which generated snippet lands in which
-# subroutine, at what priority, and whether it is always present.
-#   (content_key, snippet_name, subroutine, priority, required)
-#   * content_key — key in the dict returned by ``generate_capture_vcl``
-#   * priority    — lower runs first (Fastly default 100). "Reset Client IP"
-#     uses -100 so it runs ahead of operator VCL and the priority-1 capture.
-#   * required    — core phases are always generated; optional phases are
-#     guarded by ``content_key in snippets``.
-CAPTURE_SNIPPET_PLAN: tuple[tuple[str, str, str, int, bool], ...] = (
-    ("recv_reset", "Fastly Log Analytics Reset Client IP", "recv", -100, False),
-    ("recv", "Fastly Log Analytics Capture", "recv", 1, True),
-    ("miss", "Fastly Log Analytics Miss", "miss", 100, True),
-    ("pass", "Fastly Log Analytics Pass", "pass", 100, True),
-    ("fetch", "Fastly Log Analytics Origin Fetch", "fetch", 100, False),
-    ("deliver", "Fastly Log Analytics Origin Deliver", "deliver", 100, False),
-    ("error", "Fastly Log Analytics Origin Error", "error", 100, False),
-)
 
 
 def get_scrub_vcl_statements(log_fields_config: dict | None) -> list[str]:
@@ -734,55 +712,6 @@ def validate_log_format(log_fields_config: dict = None) -> list[str]:
         return []
 
     return _validate_log_format_regex(raw)
-
-
-def install_capture_snippets(
-    service_id: str,
-    version: int,
-    log_fields_config: dict | None,
-    token: str,
-    scoring_enabled: bool = False,
-) -> None:
-    # Delete legacy/historical snippet names to prevent collisions during compilation
-    legacy_snippet_names = [
-        "Fastly Log Analytics - vcl_recv",
-        "Fastly Log Analytics - vcl_miss",
-        "Fastly Log Analytics - vcl_pass",
-        "Fastly Log Analytics - vcl_fetch",
-        "Fastly Log Analytics - vcl_error",
-        "Fastly Log Analytics - vcl_deliver",
-    ]
-    try:
-        current_snippets = fastly("GET", f"/service/{service_id}/version/{version}/snippet", token=token)
-        for s in current_snippets:
-            s_name = s.get("name")
-            if s_name in legacy_snippet_names:
-                encoded_name = urllib.parse.quote(s_name, safe="")
-                try:
-                    fastly("DELETE", f"/service/{service_id}/version/{version}/snippet/{encoded_name}", token=token)
-                    info(f"Deleted legacy snippet: {s_name}")
-                except Exception as ex:
-                    warn(f"Failed to delete legacy snippet {s_name}: {ex}")
-    except Exception as e:
-        warn(f"Failed to fetch current snippets for legacy cleanup: {e}")
-
-    snippets = generate_capture_vcl(log_fields_config, scoring_enabled=scoring_enabled)
-    # CAPTURE_SNIPPET_PLAN is the single source of truth: required phases
-    # ("recv", "miss", "pass") are always generated; optional phases
-    # ("recv_reset", "fetch", "deliver", "error") only exist for certain
-    # configs and are guarded by `content_key in snippets`.
-    for content_key, snip_name, subroutine, priority, required in CAPTURE_SNIPPET_PLAN:
-        if not required and content_key not in snippets:
-            continue
-        ensure_vcl_snippet(
-            snip_name,
-            subroutine,
-            snippets[content_key],
-            priority,
-            service_id,
-            version,
-            token,
-        )
 
 
 def _validate_log_format_regex(raw: str) -> list[str]:

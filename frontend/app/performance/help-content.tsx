@@ -1,5 +1,5 @@
 import React from "react";
-import { Activity, Shield, Server, TrendingUp, Filter, BarChart3, Fingerprint, Network, Globe, Clock } from "lucide-react";
+import { Activity, Server, TrendingUp, Network, Clock } from "lucide-react";
 export const SlowestUrlsHelp = () => (
   <div className="space-y-4">
     <p>The top URLs ranked by a chosen latency metric, calculated across the selected time range.</p>

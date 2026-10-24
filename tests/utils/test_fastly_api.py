@@ -316,22 +316,6 @@ def test_generate_capture_vcl_includes_custom_edge_field_in_recv_snippet():
     assert "req.url" in out["recv"]
 
 
-def test_capture_snippet_plan_runs_reset_before_capture():
-    """The Reset Client IP snippet must install at a lower priority than the
-    capture snippet so it (and any operator override that follows) runs first.
-    Pinned because the whole anti-spoof + operator-override design depends on
-    reset(-100) < operator VCL < capture(1) ordering. Lower priority runs
-    first in Fastly."""
-    plan = {key: (name, sub, prio) for key, name, sub, prio, _req in fastly_api.CAPTURE_SNIPPET_PLAN}
-    reset_name, reset_sub, reset_prio = plan["recv_reset"]
-    _cap_name, cap_sub, cap_prio = plan["recv"]
-    assert reset_name == "Fastly Log Analytics Reset Client IP"
-    assert reset_sub == "recv"  # both target vcl_recv
-    assert cap_sub == "recv"
-    assert reset_prio == -100
-    assert reset_prio < cap_prio
-
-
 def test_generate_capture_vcl_emits_group_l_request_id_in_recv():
     """Group L adds the `randomstr(8)` request-id generator in recv
     so origin timing can correlate edge→shield→origin. Pinned

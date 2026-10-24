@@ -18,6 +18,7 @@ import React from 'react'
 import { act, render, screen } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
+import { maplibreMockFactory } from '@/__tests__/helpers/maplibre-mock'
 import type { TooltipInfo } from '@/components/Map/NetworkMap/OverlayLayer'
 import type { PlaybackControls as PlaybackControlsComponent } from '@/components/Map/NetworkMap/controls'
 
@@ -32,50 +33,7 @@ vi.mock('@/stores/timezoneStore', () => ({
   useTimezoneStore: () => ({ timezone: 'UTC' }),
 }))
 
-// maplibre-gl is a heavy module that touches WebGL / canvas; jsdom can't run
-// it. Stub the Map constructor so ``useRef<maplibregl.Map>`` keeps typing
-// happy and any reachable methods (the real ones are only invoked from
-// useMapInit/useMapData, both mocked below) are no-ops.
-vi.mock('maplibre-gl', () => {
-  class MockMap {
-    on() {}
-    off() {}
-    remove() {}
-    addSource() {}
-    addLayer() {}
-    removeLayer() {}
-    removeSource() {}
-    getSource() {}
-    getLayer() {}
-    setFeatureState() {}
-    setPaintProperty() {}
-    setLayoutProperty() {}
-    setFilter() {}
-    setStyle() {}
-    isStyleLoaded() {
-      return true
-    }
-    queryRenderedFeatures() {
-      return []
-    }
-    getCanvas() {
-      return { style: {} }
-    }
-    project() {
-      return { x: 0, y: 0 }
-    }
-    fitBounds() {}
-    setMaxBounds() {}
-    addControl() {}
-  }
-  return {
-    default: { Map: MockMap, NavigationControl: class {}, LngLatBounds: class {}, setWorkerUrl: () => {} },
-    Map: MockMap,
-    NavigationControl: class {},
-    LngLatBounds: class {},
-    setWorkerUrl: () => {},
-  }
-})
+vi.mock('maplibre-gl', () => maplibreMockFactory())
 
 // CSS side-effect import — vite throws if unmocked under vitest.
 vi.mock('maplibre-gl/dist/maplibre-gl.css', () => ({}))

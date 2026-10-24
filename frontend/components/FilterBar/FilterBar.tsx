@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { X, Plus, Bot } from 'lucide-react'
+import { X, Bot } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -11,8 +11,6 @@ import { useTimezoneStore } from '@/stores/timezoneStore'
 import { useServiceStore } from '@/stores/serviceStore'
 import { formatForInput, parseFromInput } from '@/lib/date'
 import { useIsFetching } from '@tanstack/react-query'
-import { client } from '@/lib/api'
-import { useDateFormat } from '@/hooks/useDateFormat'
 import { usePathname } from 'next/navigation'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
@@ -53,14 +51,12 @@ export const FilterBar = React.memo(function FilterBar() {
     endTime,
     filters,
     edgeOnly,
-    isAutoRange,
     relativeRange,
     setRange,
     setRelativeRange,
     removeFilter,
     toggleFilterMode,
     toggleEdgeOnly,
-    clearFilters,
     resetAll,
     resetRange,
     compareMode,
@@ -73,14 +69,12 @@ export const FilterBar = React.memo(function FilterBar() {
     endTime: state.endTime,
     filters: state.filters,
     edgeOnly: state.edgeOnly,
-    isAutoRange: state.isAutoRange,
     relativeRange: state.relativeRange,
     setRange: state.setRange,
     setRelativeRange: state.setRelativeRange,
     removeFilter: state.removeFilter,
     toggleFilterMode: state.toggleFilterMode,
     toggleEdgeOnly: state.toggleEdgeOnly,
-    clearFilters: state.clearFilters,
     resetAll: state.resetAll,
     resetRange: state.resetRange,
     compareMode: state.compareMode,

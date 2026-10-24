@@ -31,87 +31,9 @@ ingest time when a declared type doesn't match the value on the wire.
 
 from __future__ import annotations
 
-import gzip
-import io
-import json
-import os
-import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-
-
-@pytest.fixture
-def custom_field_env(s3_mock, fos_source, monkeypatch, tmp_path):
-    """Lightweight wrapper around the ingest harness used by test_e2e_pipeline.
-
-    Sets up moto S3 + a local DuckLake data path + cache, plus the
-    `_get_fos_client` monkeypatch for both the duckdb and ingest module
-    namespaces, plus a config loader stub that returns whatever custom
-    fields the test asks for. Returns helpers for seeding gzipped log
-    rows and draining the ingest generator.
-    """
-    # DuckLake tables persist in the shared per-worker Postgres catalog across
-    # tests, so each test needs its own service_id (table name) — a reused one
-    # resolves a table whose data dir was never created under this tmp root.
-    unique_id = f"tm{uuid.uuid4().hex[:10]}"
-    fos_source["service_id"] = unique_id
-    fos_source["name"] = unique_id
-    fos_source["duckdb_path"] = str(tmp_path / "e2e.duckdb")
-    cache_path = str(tmp_path / "cache")
-    os.makedirs(cache_path, exist_ok=True)
-
-    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: cache_path)
-    monkeypatch.setattr("backend.core.duckdb._configure_fos", lambda *a, **kw: None)
-
-    class _CallerHintShim:
-        def __init__(self, client):
-            self._client = client
-
-        def get_paginator(self, op, caller_hint=None):
-            return self._client.get_paginator(op)
-
-        def __getattr__(self, name):
-            return getattr(self._client, name)
-
-    shim = _CallerHintShim(s3_mock)
-    monkeypatch.setattr("backend.core.ingest._get_fos_client", lambda _src: shim)
-
-    # Reset view caches (autouse fixture does this too)
-    from backend.core import iceberg as ice
-
-    if hasattr(ice, "_view_cache"):
-        ice._view_cache.clear()
-
-    def _set_custom_fields(custom_fields: list[dict]):
-        cfg = {
-            "service_id": fos_source["service_id"],
-            "log_fields": {
-                "schema_version": 2,
-                "groups": ["A"],
-                "custom_fields": custom_fields,
-            },
-        }
-        monkeypatch.setattr("backend.config.load_config", lambda _sid: cfg)
-
-    def _seed_gz(key: str, rows: list[dict]) -> None:
-        body = io.BytesIO()
-        with gzip.GzipFile(fileobj=body, mode="wb") as gz:
-            gz.write(("\n".join(json.dumps(r) for r in rows) + "\n").encode())
-        s3_mock.put_object(Bucket=fos_source["bucket"], Key=key, Body=body.getvalue())
-
-    def _drain_ingest():
-        from backend.core import ingest as ing
-
-        return list(ing.ingest(source=fos_source))
-
-    return {
-        "fos_source": fos_source,
-        "cache": cache_path,
-        "set_custom_fields": _set_custom_fields,
-        "seed_gz": _seed_gz,
-        "drain_ingest": _drain_ingest,
-    }
 
 
 def _well_typed_row(ts: datetime, idx: int, custom_field_name: str, custom_value):

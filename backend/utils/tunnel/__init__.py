@@ -11,10 +11,6 @@ The SSH-to-localhost.run code path was removed in v2.0.
 
 from __future__ import annotations
 
-# Re-import the ``time`` module so existing tests that monkeypatch
-# ``tunnel.time.time`` for time-travel still work.
-import time  # noqa: F401  — re-exported for monkeypatch compat
-
 from .fingerprint import compute_fingerprint
 from .manager import (
     TunnelCapacityError,

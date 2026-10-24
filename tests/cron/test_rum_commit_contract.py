@@ -595,3 +595,28 @@ def test_rum_commit_aggregates_self_heal_on_stale_lake(monkeypatch):
     rum_commit_mod._run_rum_commit.__wrapped__(SERVICE_ID)
 
     assert recompute_calls["n"] == 2, "recompute must retry once after the stale-lake self-heal"
+
+
+def test_rum_commit_lease_held_is_clean_skip_with_no_row(monkeypatch):
+    """When start_cron_run raises CronLeaseHeldError, _run_rum_commit exits cleanly without side effects."""
+    from backend.core.metadata.cron_log import CronLeaseHeldError
+
+    log_mock = MagicMock()
+    commit_mock = MagicMock()
+    end_progress_mock = MagicMock()
+
+    monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC)
+    monkeypatch.setattr(
+        "backend.core.duckdb.start_cron_run",
+        MagicMock(side_effect=CronLeaseHeldError("held")),
+    )
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_mock)
+    monkeypatch.setattr("backend.core.iceberg.commit_buffer", commit_mock)
+    monkeypatch.setattr("backend.cron_progress.end_progress", end_progress_mock)
+
+    rum_commit_mod._run_rum_commit.__wrapped__(SERVICE_ID)
+
+    log_mock.assert_not_called()
+    commit_mock.assert_not_called()
+    end_progress_mock.assert_not_called()

@@ -80,18 +80,6 @@ def _is_ip_in_cidrs(ip: str, cidrs: list[str] | tuple[str, ...]) -> bool:
 # ── Init ──────────────────────────────────────────────────────────────────────
 
 
-_RDNS_DDL = """
-CREATE TABLE IF NOT EXISTS rdns (
-    ip              TEXT PRIMARY KEY,
-    hostname        TEXT,
-    status          TEXT,
-    fcrdns_verified INTEGER DEFAULT 0,
-    looked_up_at    TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_rdns_status_looked_up_at ON rdns (status, looked_up_at);
-"""
-
-
 def _write_con():
     from backend.core.metadata.pg_connection import get_pg_thread_connection
 

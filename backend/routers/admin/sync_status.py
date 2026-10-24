@@ -22,7 +22,8 @@ from backend.utils.sse_subscription import iter_with_disconnect_ping
 
 logger = logging.getLogger(__name__)
 
-from ._dir_size import _get_dir_size
+from backend.utils.dir_size import _get_dir_size
+
 from ._router import router
 
 # Dedicated router for the analyst-safe sync-status siblings (/api/log-extents

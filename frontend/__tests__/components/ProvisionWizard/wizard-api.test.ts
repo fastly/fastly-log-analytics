@@ -16,8 +16,11 @@
  * touched). Pure MSW pattern — same approach as
  * `__tests__/lib/api/custom-fields.test.ts`.
  */
+import { API_BASE, serviceStoreMockFactory } from './test-helpers'
 import { http, HttpResponse } from 'msw'
 import { describe, it, expect, vi, afterEach } from 'vitest'
+
+vi.mock('@/stores/serviceStore', () => serviceStoreMockFactory())
 
 import {
   buildValidateOnSuccess,
@@ -30,21 +33,6 @@ import {
 import { INITIAL_CONFIG } from '@/components/ProvisionWizard/types'
 import { useServiceStore } from '@/stores/serviceStore'
 import { server } from '@/__tests__/helpers/msw/server'
-
-const API_BASE = 'http://127.0.0.1:8000'
-
-// Match the pattern in __tests__/lib/api-error-paths.test.ts — the api
-// middleware reads useServiceStore.getState() on every typed-client
-// request. Inline the active-service id rather than referencing a const
-// (vi.mock is hoisted above module-level decls).
-vi.mock('@/stores/serviceStore', () => {
-  const state = { activeServiceId: 'svc-test' }
-  const useServiceStore: unknown = Object.assign(
-    (selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state),
-    { getState: () => state },
-  )
-  return { useServiceStore }
-})
 
 afterEach(() => {
   server.resetHandlers()

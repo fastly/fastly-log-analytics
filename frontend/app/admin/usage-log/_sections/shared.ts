@@ -8,8 +8,6 @@ export type UsageLogEntry = components['schemas']['UsageLogEntry'] & {
   service_id: string | null
 }
 
-export type UsageLogAggregate = components['schemas']['UsageLogAggregate']
-
 export const DATE_PRESETS = [
   { label: 'Last 1h', hours: 1 },
   { label: 'Last 24h', hours: 24 },

@@ -72,7 +72,7 @@ def iceberg_commit_endpoint(
     poll for completion. 200 (the prior status) misled clients that
     treated it as "done"."""
     from backend.cron.jobs.commit import _run_commit
-    from backend.routers.admin._helpers import run_admin_cron_trigger
+    from backend.utils.router_utils import run_admin_cron_trigger
 
     return run_admin_cron_trigger(
         source,
@@ -154,7 +154,7 @@ def reset_logs_endpoint(body: ResetLogsRequest, source: dict = Depends(get_sourc
     match the resolved service id.
     """
     from backend.core.reset import reset_service_logs
-    from backend.routers.admin._helpers import stream_sse_from_worker
+    from backend.utils.sse import stream_sse_from_worker
 
     service_id = source["name"]
 
@@ -192,7 +192,7 @@ def reset_rum_endpoint(body: ResetLogsRequest, source: dict = Depends(get_source
     while leaving logs data completely untouched.
     """
     from backend.core.reset import reset_service_rum
-    from backend.routers.admin._helpers import stream_sse_from_worker
+    from backend.utils.sse import stream_sse_from_worker
 
     service_id = source["name"]
 

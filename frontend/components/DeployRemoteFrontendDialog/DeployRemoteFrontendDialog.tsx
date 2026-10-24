@@ -12,13 +12,12 @@ import {
   Sparkles,
   ChevronRight,
   ChevronLeft,
-  Copy,
-  Check,
   ExternalLink
 } from 'lucide-react'
 
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import { CopyButton } from '@/components/ui/copy-button'
 import {
   Dialog,
   DialogContent,
@@ -30,7 +29,6 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
-import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 import { client, extractApiError } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { panelDialogContent, panelDialogHeaderSolid, panelDialogFooter } from '@/lib/panel-dialog'
@@ -63,9 +61,6 @@ export function DeployRemoteFrontendDialog() {
   const [tokenOverride, setTokenOverride] = React.useState('')
   const [deployError, setDeployError] = React.useState('')
   const [deployResult, setDeployResult] = React.useState<Schema<'SharingDeployResponse'> | null>(null)
-
-  // Clipboard hook for copying live link
-  const { copied, copy } = useCopyToClipboard()
 
   // Reset all form state when the dialog opens.
   const handleOpenChange = (next: boolean) => {
@@ -535,14 +530,11 @@ export function DeployRemoteFrontendDialog() {
                     https://{deployResult.domain_name}
                     <ExternalLink className="h-3.5 w-3.5 flex-shrink-0" />
                   </a>
-                  <Button
-                    variant="ghost"
-                    size="icon"
+                  <CopyButton
+                    text={`https://${deployResult.domain_name}`}
                     className="h-8 w-8 text-muted-foreground hover:text-foreground shrink-0"
-                    onClick={() => copy(`https://${deployResult.domain_name}`)}
-                  >
-                    {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
-                  </Button>
+                    iconClassName="h-4 w-4"
+                  />
                 </div>
               </div>
 

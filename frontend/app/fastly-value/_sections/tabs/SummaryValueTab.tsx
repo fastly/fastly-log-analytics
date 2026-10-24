@@ -9,7 +9,6 @@ import {
   ArrowDownToLine,
   Wifi,
   Lock,
-  Globe,
 } from 'lucide-react'
 import { StatCard } from '@/components/ui/stat-card'
 import { formatBytes, formatCompactCount, formatPctValue } from '@/lib/format'

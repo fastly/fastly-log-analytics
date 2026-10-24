@@ -425,3 +425,62 @@ def test_rollup_heal_error_handling(contract_service_source, monkeypatch):
     assert args[1] == "rollup_hour_heal"
     assert args[3] == "error"
     assert "DuckDB connection pool exhausted" in kwargs["error_message"]
+
+
+def test_rollup_heal_returns_when_source_missing(monkeypatch):
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: None)
+    _run_rollup_hour_heal.__wrapped__("missing-svc")
+
+
+def test_rollup_heal_skips_when_start_cron_run_raises(contract_service_source, monkeypatch):
+    from backend.core.metadata.cron_log import CronLeaseHeldError
+
+    src = contract_service_source
+    sid = src["service_id"]
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda s_id: src if s_id == sid else None)
+    monkeypatch.setattr(
+        "backend.core.duckdb.start_cron_run",
+        MagicMock(side_effect=CronLeaseHeldError("already running")),
+    )
+    heal_mock = MagicMock()
+    monkeypatch.setattr("backend.core.rollups.backfill_missing_hour_bundles", heal_mock)
+
+    _run_rollup_hour_heal.__wrapped__(sid)
+
+    heal_mock.assert_not_called()
+
+
+def test_rollup_heal_does_not_mark_ready_when_not_durable_mode(contract_service_source, monkeypatch):
+    src = contract_service_source
+    sid = src["service_id"]
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda s_id: src if s_id == sid else None)
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=201))
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
+    heal_mock = MagicMock(return_value={"missing": 1, "rebuilt_fields": 1, "bundled": 1})
+    monkeypatch.setattr("backend.core.rollups.backfill_missing_hour_bundles", heal_mock)
+    monkeypatch.setattr("backend.config.is_durable_serving_mode", lambda s: False)
+    mark_mock = MagicMock()
+    monkeypatch.setattr("backend.core.rollup_readiness.mark_rollup_coverage_ready", mark_mock)
+
+    _run_rollup_hour_heal.__wrapped__(sid)
+
+    mark_mock.assert_not_called()
+
+
+def test_rollup_heal_does_not_mark_ready_on_failure(contract_service_source, monkeypatch):
+    src = contract_service_source
+    sid = src["service_id"]
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda s_id: src if s_id == sid else None)
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=202))
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
+    monkeypatch.setattr(
+        "backend.core.rollups.backfill_missing_hour_bundles",
+        MagicMock(side_effect=RuntimeError("view refresh failed")),
+    )
+    monkeypatch.setattr("backend.config.is_durable_serving_mode", lambda s: True)
+    mark_mock = MagicMock()
+    monkeypatch.setattr("backend.core.rollup_readiness.mark_rollup_coverage_ready", mark_mock)
+
+    _run_rollup_hour_heal.__wrapped__(sid)
+
+    mark_mock.assert_not_called()

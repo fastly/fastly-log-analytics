@@ -1,7 +1,8 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback } from 'react'
 import { copyToClipboard } from '@/lib/clipboard'
+import { useAutoFlash } from '@/hooks/useAutoFlash'
 
 /**
  * Copy a string to the clipboard and surface a "just copied" flag that
@@ -15,20 +16,15 @@ import { copyToClipboard } from '@/lib/clipboard'
  * UI just shows the un-copied state.
  */
 export function useCopyToClipboard(resetMs: number = 1500) {
-  const [copied, setCopied] = useState(false)
-  const timer = useRef<number | undefined>(undefined)
-
-  useEffect(() => () => window.clearTimeout(timer.current), [])
+  const { active: copied, flash } = useAutoFlash(resetMs)
 
   const copy = useCallback(
     async (value: string) => {
       if (await copyToClipboard(value)) {
-        setCopied(true)
-        window.clearTimeout(timer.current)
-        timer.current = window.setTimeout(() => setCopied(false), resetMs)
+        flash()
       }
     },
-    [resetMs],
+    [flash],
   )
   return { copied, copy }
 }

@@ -118,12 +118,11 @@ def test_stats_tables_sql_names_all_exist_in_schema():
 
 
 def test_storage_stats_reports_reference_tables_under_ui_keys():
-    """The four formerly-dropped reference tables now surface under their
-    UI-facing keys. Each table exists on a fresh DB, so each key
-    must be present with rows >= 0 — not absent."""
+    """The reference tables surface under their UI-facing keys. Each table
+    exists on a fresh DB, so each key must be present with rows >= 0 — not absent."""
     sid = "svc-stats-refs"
     stats = reconciliation.get_metadata_storage_stats(sid)
-    for ui_key in ("saved_views", "audit_log", "in_flight_buffers", "locally_compacted_files"):
+    for ui_key in ("saved_views", "audit_log", "in_flight_buffers"):
         assert ui_key in stats["tables"], f"reference table dropped from stats: {ui_key}"
         assert stats["tables"][ui_key]["rows"] == 0
 

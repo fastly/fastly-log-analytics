@@ -17,9 +17,8 @@ import {
 } from '@/components/ui/select'
 import { useScoringLabels } from '@/hooks/useScoringLabels'
 
-import { FlagSessionPopover, type LabelValue } from './FlagSessionPopover'
+import { FlagSessionPopover } from './FlagSessionPopover'
 import { SessionEventsDialog } from './SessionEventsDialog'
-import { SinceHoursPicker } from './SinceHoursPicker'
 import { useScoringQuery } from './useScoringQuery'
 import { client } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
@@ -29,7 +28,6 @@ import type { components } from '@/types/api.generated'
 interface TopFlaggedTableProps {
   serviceId: string
   sinceHours?: number
-  onSinceHoursChange?: (hours: number) => void
 }
 
 type FlaggedRow = components['schemas']['ScoringTopFlaggedRow']
@@ -71,20 +69,15 @@ const DEFAULT_HIDDEN: Record<string, boolean> = {
 export function TopFlaggedTable({
   serviceId,
   sinceHours = 24,
-  onSinceHoursChange,
 }: TopFlaggedTableProps) {
   const qc = useQueryClient()
   const [complianceFilter, setComplianceFilter] = React.useState<string>('all')
   const [minScore, setMinScore] = React.useState<string>('0')
   const [visibility, setVisibility] = React.useState<Record<string, boolean>>(DEFAULT_HIDDEN)
-  // Uncontrolled time-window when the parent doesn't manage it.
-  const [localHours, setLocalHours] = React.useState(sinceHours)
-  const effectiveHours = onSinceHoursChange ? sinceHours : localHours
-  const setHours = onSinceHoursChange ?? setLocalHours
 
-  const flagged = useScoringQuery(['scoring-top-flagged', serviceId, effectiveHours], () =>
+  const flagged = useScoringQuery(['scoring-top-flagged', serviceId, sinceHours], () =>
     client.GET('/api/services/{service_id}/scoring/top-flagged', {
-      params: { path: { service_id: serviceId }, query: { since_hours: effectiveHours, limit: 200 } },
+      params: { path: { service_id: serviceId }, query: { since_hours: sinceHours, limit: 200 } },
     }),
   )
 
@@ -229,7 +222,7 @@ export function TopFlaggedTable({
 
   const columnIds = React.useMemo(() => columns.map(columnIdOf), [columns])
 
-  const since = effectiveHours >= 24 ? `${effectiveHours / 24}d` : `${effectiveHours}h`
+  const since = sinceHours >= 24 ? `${sinceHours / 24}d` : `${sinceHours}h`
 
   return (
     <AnalyticsCard
@@ -243,7 +236,6 @@ export function TopFlaggedTable({
       helpTitle="About Top Flagged Sessions"
       headerAction={
         <div className="flex items-center gap-2">
-          <SinceHoursPicker value={effectiveHours} onChange={setHours} compact />
           <Select value={complianceFilter} onValueChange={(v) => v && setComplianceFilter(v)}>
             <SelectTrigger className="h-7 text-xs w-32">
               <SelectValue placeholder="Cookie: any" />

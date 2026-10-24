@@ -1,5 +1,6 @@
 'use client'
 
+import { useDebounce } from '@/hooks/useDebounce'
 import { useDerivedState } from '@/hooks/useDerivedState'
 import * as React from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
@@ -57,11 +58,7 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
   // Local state for the slider — debounced into the React Query key so we
   // don't fire a new request on every drag pixel.
   const [thresholdRaw, setThresholdRaw] = React.useState(75)
-  const [threshold, setThreshold] = React.useState(75)
-  React.useEffect(() => {
-    const t = setTimeout(() => setThreshold(thresholdRaw), 150)
-    return () => clearTimeout(t)
-  }, [thresholdRaw])
+  const threshold = useDebounce(thresholdRaw, 150)
 
   // Controls the confirm dialog (commit / enforce / disable / change-status-code).
   // `value` is the threshold (0-100) for commit/enforce/disable, or the new
@@ -104,7 +101,6 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
   if (syncedServiceId !== serviceId && committed?.threshold != null) {
     setSyncedServiceId(serviceId)
     setThresholdRaw(committed.threshold)
-    setThreshold(committed.threshold)
   }
 
   const commitMutation = useMutation({

@@ -2,67 +2,12 @@ import React from 'react'
 import { render, screen, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, test, vi } from 'vitest'
+import { selectMockFactory } from '@/__tests__/helpers/ui-mocks'
 
 // ---------------------------------------------------------------------------
 // Mock @/components/ui/select. The real implementation uses base-ui which is
 // hard to drive from userEvent in jsdom (portals, native event sequencing).
-// PlaybackControls only cares that:
-//   - the `value` prop renders something the user can see
-//   - the `onValueChange` callback runs when an item is "picked"
-// So the shim renders every SelectItem as a <button data-select-value="..."/>
-// — tests then fire a click on the desired value to invoke onValueChange.
-vi.mock('@/components/ui/select', () => {
-  const SelectCtx = React.createContext<((v: string) => void) | null>(null)
-
-  const Select = ({
-    value,
-    onValueChange,
-    children,
-  }: {
-    value?: string
-    onValueChange?: (v: string) => void
-    children?: React.ReactNode
-  }) => (
-    <SelectCtx.Provider value={onValueChange ?? null}>
-      <div data-testid="mock-select" data-select-value={value ?? ''}>
-        {children}
-      </div>
-    </SelectCtx.Provider>
-  )
-
-  const SelectTrigger = ({ children }: { children?: React.ReactNode }) => (
-    <div data-testid="mock-select-trigger">{children}</div>
-  )
-
-  const SelectValue = ({ children }: { children?: React.ReactNode }) => (
-    <span data-testid="mock-select-value">{children}</span>
-  )
-
-  const SelectContent = ({ children }: { children?: React.ReactNode }) => (
-    <div data-testid="mock-select-content">{children}</div>
-  )
-
-  const SelectItem = ({
-    value,
-    children,
-  }: {
-    value: string
-    children?: React.ReactNode
-  }) => {
-    const onValueChange = React.useContext(SelectCtx)
-    return (
-      <button
-        type="button"
-        data-select-item-value={value}
-        onClick={() => onValueChange?.(value)}
-      >
-        {children}
-      </button>
-    )
-  }
-
-  return { Select, SelectTrigger, SelectValue, SelectContent, SelectItem }
-})
+vi.mock('@/components/ui/select', () => selectMockFactory())
 
 // ---------------------------------------------------------------------------
 // Mock @/components/ui/slider. Same rationale: the real slider is Radix and

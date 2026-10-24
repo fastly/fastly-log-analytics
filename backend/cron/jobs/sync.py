@@ -164,20 +164,6 @@ def schedule_post_ingest_rollups(service_id: str, src: dict[str, Any], hours: se
     worker.start()
 
 
-def wait_for_post_ingest_rollups(service_id: str, timeout: float) -> bool:
-    """Return True once no rollup worker is running for ``service_id``."""
-    deadline = time.monotonic() + timeout
-    while True:
-        with _rollup_lock:
-            worker = _rollup_workers.get(service_id)
-        if worker is None:
-            return True
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        worker.join(min(remaining, 0.05))
-
-
 @cron_task("cron.log_discovery", job_name="log_discovery")
 def _run_log_discovery_cron(
     service_id: str,

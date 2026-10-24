@@ -15,11 +15,9 @@ import {
 import { useDateFormat } from '@/hooks/useDateFormat'
 import type { LabelRow, LabelValue } from '@/hooks/useScoringLabels'
 import { cn } from '@/lib/utils'
-import type { components } from '@/types/api.generated'
-import type { SessionsResponse } from '@/types/api'
+import type { Session, SessionsResponse } from '@/types/api'
 
 import { formatCountMaybe } from '@/lib/format'
-type SessionRow = components['schemas']['Session']
 
 interface SessionsTableProps {
   data: SessionsResponse | undefined
@@ -30,7 +28,7 @@ interface SessionsTableProps {
   labelBySid: Map<string, LabelValue>
   idBySid: Map<string, string>
   onFlagged: () => void
-  onRowClick: (row: SessionRow) => void
+  onRowClick: (row: Session) => void
 }
 
 export function SessionsTable({
@@ -46,8 +44,8 @@ export function SessionsTable({
 }: SessionsTableProps) {
   const { full, relative, abbr } = useDateFormat()
 
-  const columns: ColumnDef<SessionRow>[] = React.useMemo(() => {
-    const cols: ColumnDef<SessionRow>[] = [
+  const columns: ColumnDef<Session>[] = React.useMemo(() => {
+    const cols: ColumnDef<Session>[] = [
       {
         accessorKey: 'ip',
         header: 'IP Address',

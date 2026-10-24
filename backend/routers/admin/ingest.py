@@ -6,8 +6,7 @@ from fastapi import Depends, HTTPException, Query
 
 from backend.deps import get_source, require_admin
 from backend.models.admin import SyncStartResponse
-from backend.routers.admin._helpers import run_admin_cron_trigger
-from backend.utils.router_utils import make_error
+from backend.utils.router_utils import load_service_config, make_error, run_admin_cron_trigger
 
 from ._router import router
 
@@ -166,34 +165,22 @@ def rum_ledger_sweep_service(
     _admin: None = Depends(require_admin),
     source: dict = Depends(get_source),
 ) -> SyncStartResponse:
-    if source.get("access_level") == "read_only":
-        raise HTTPException(
-            status_code=403, detail=make_error("admin_only", "Read-only services cannot run RUM ledger sweep.")
-        )
-
     from backend import config as svcconfig
-
-    if not svcconfig.is_high_scale_mode(source):
-        raise HTTPException(
-            status_code=400,
-            detail=make_error("high_scale_required", "RUM ledger sweep is only supported under high-scale mode."),
-        )
-
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(
-            status_code=400,
-            detail=make_error("service_not_found", "Service configuration not found."),
-        )
-
-    rum_enabled = svcconfig.is_rum_enabled(cfg)
-    if not rum_enabled:
-        raise HTTPException(
-            status_code=400,
-            detail=make_error("rum_not_enabled", "RUM is not enabled for this service."),
-        )
-
     from backend.cron.jobs.rum_ledger import _run_rum_ledger_sweep
+
+    def _precheck() -> None:
+        try:
+            cfg = load_service_config(service_id)
+        except HTTPException:
+            raise HTTPException(
+                status_code=400,
+                detail=make_error("service_not_found", "Service configuration not found."),
+            ) from None
+        if not svcconfig.is_rum_enabled(cfg):
+            raise HTTPException(
+                status_code=400,
+                detail=make_error("rum_not_enabled", "RUM is not enabled for this service."),
+            )
 
     return run_admin_cron_trigger(
         source,
@@ -202,6 +189,11 @@ def rum_ledger_sweep_service(
         success_msg="RUM ledger sweep started.",
         in_progress_msg="RUM ledger sweep already running.",
         readonly_detail=make_error("admin_only", "Read-only services cannot run RUM ledger sweep."),
+        require_high_scale=True,
+        high_scale_detail=make_error(
+            "high_scale_required", "RUM ledger sweep is only supported under high-scale mode."
+        ),
+        precheck=_precheck,
     )
 
 

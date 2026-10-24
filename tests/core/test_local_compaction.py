@@ -326,33 +326,6 @@ def test_weekly_tier_skips_single_day_weeks(patched_cache_dir, monkeypatch):
     assert not os.path.isdir(weekly_dir) or not os.listdir(weekly_dir)
 
 
-def test_compaction_registers_deleted_basenames(patched_cache_dir, monkeypatch):
-    """After merging + deleting originals, the deleted basenames must land
-    in the local_compacted_files registry so sync_data won't re-download
-    them. This is the fix for the compaction-vs-sync feedback loop."""
-    src = patched_cache_dir
-    cache_root = src["_test_cache_root"]
-    part = os.path.join(cache_root, "data", "timestamp_hour=2026-05-30-05")
-    os.makedirs(part)
-    for i in range(5):  # >3 → eligible
-        _write_parquet(os.path.join(part, f"original-{i}.parquet"), rows=10)
-
-    captured: list[tuple[str, list[str]]] = []
-
-    def fake_register(service_id: str, names: list[str]) -> None:
-        captured.append((service_id, list(names)))
-
-    monkeypatch.setattr("backend.core.metadata.register_locally_compacted", fake_register)
-
-    result = lc.compact_local_partitions(src)
-
-    assert result["partitions_compacted"] == 1
-    assert len(captured) == 1
-    service_id, names = captured[0]
-    assert service_id == src["service_id"]
-    assert sorted(names) == sorted(f"original-{i}.parquet" for i in range(5))
-
-
 def test_compaction_stats_snapshot(patched_cache_dir):
     """Stats helper returns counts useful for monitoring."""
     src = patched_cache_dir
@@ -453,8 +426,8 @@ def test_weekly_tier_bin_packing_splits_files(patched_cache_dir, monkeypatch):
 
 
 def test_daily_tier_migrates_single_file_bins_and_removes_dir(patched_cache_dir, monkeypatch):
-    """Daily compaction correctly migrates a single-file hourly partition to the daily folder,
-    removes the hourly partition dir, and registers its basename in the deleted registry."""
+    """Daily compaction correctly migrates a single-file hourly partition to the daily folder
+    and removes the hourly partition dir."""
     src = patched_cache_dir
     cache_root = src["_test_cache_root"]
     data_dir = os.path.join(cache_root, "data")
@@ -466,22 +439,12 @@ def test_daily_tier_migrates_single_file_bins_and_removes_dir(patched_cache_dir,
     os.makedirs(part)
     _write_parquet(os.path.join(part, "single_file.parquet"), rows=10)
 
-    captured: list[tuple[str, list[str]]] = []
-
-    def fake_register(service_id: str, names: list[str]) -> None:
-        captured.append((service_id, list(names)))
-
-    monkeypatch.setattr("backend.core.metadata.register_locally_compacted", fake_register)
-
-    result = lc.compact_local_partitions(src)
+    lc.compact_local_partitions(src)
 
     daily_dir = os.path.join(data_dir, "daily")
     daily_files = [f for f in os.listdir(daily_dir) if f.endswith(".parquet")]
     assert len(daily_files) == 1
     assert daily_files[0].startswith(f"daily_{day}_")
-
-    assert len(captured) == 1
-    assert captured[0][1] == ["single_file.parquet"]
 
     assert not os.path.isdir(part)
 

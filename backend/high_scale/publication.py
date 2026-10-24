@@ -123,10 +123,6 @@ class PublicationStatus(StrEnum):
     VISIBLE = "visible"
 
 
-class LostAcknowledgement(RuntimeError):
-    """The insert may have committed, but its acknowledgement was lost."""
-
-
 class PartialInsert(RuntimeError):
     def __init__(self, rows_inserted: int) -> None:
         super().__init__(f"partial ClickHouse insert: {rows_inserted} rows")

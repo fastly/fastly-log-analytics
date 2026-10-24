@@ -6,7 +6,6 @@
 
 import {
   fetchSsrRangePost,
-  resolveDefaultSsrRangeKey,
   type SsrRangeSeed,
 } from './upstream'
 
@@ -20,8 +19,6 @@ export interface PerformanceSsrSeed extends SsrRangeSeed {
   /** /api/performance/aggregates response for all sections. */
   performanceData: unknown
 }
-
-export const resolvePerformanceDefaultKey = resolveDefaultSsrRangeKey
 
 /**
  * SSR-prefetch unified performance selection for the active service.

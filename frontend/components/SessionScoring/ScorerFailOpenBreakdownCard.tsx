@@ -12,8 +12,6 @@ import { useScoringQuery } from './useScoringQuery'
 import { client } from '@/lib/api'
 
 import { formatCount } from '@/lib/format'
-// Generated from the /scoring/health response_model — single source of truth.
-type HealthResponse = components['schemas']['ScoringHealthResponse']
 type FailOpenBucket = NonNullable<components['schemas']['ScoringReasonCount']>
 
 interface ScorerFailOpenBreakdownCardProps {

@@ -33,7 +33,7 @@ from backend.high_scale.insight_queries import (
     repeated_patterns_fp,
 )
 from backend.high_scale.registry import HighScaleService
-from backend.models.dashboard import CacheCollapseDetailResponse, InsightsResponse
+from backend.models.insights import CacheCollapseDetailResponse, InsightsResponse
 from backend.repositories.insights import definitions as _definitions  # noqa: F401  (registers the detections)
 from backend.repositories.insights.registry import InsightDefinition, registry
 from backend.utils.bounded_cache import BoundedTTLCache

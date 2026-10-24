@@ -42,8 +42,7 @@ import { useKeyboardShortcuts, type ShortcutBinding } from './_hooks/useKeyboard
 import { useQueryMonitorUrlState } from './_hooks/useQueryMonitorUrlState'
 import { ActiveTable } from './_sections/ActiveTable'
 import { CompletedTable } from './_sections/CompletedTable'
-import { DbFilterChips } from './_sections/DbFilterChips'
-import { FilterChips } from './_sections/FilterChips'
+import { FilterChipRow } from './_sections/FilterChipRow'
 import { PollingIndicator } from './_sections/PollingIndicator'
 import { RowDetailDialog } from './_sections/RowDetailDialog'
 import { ShortcutsHelp } from './_sections/ShortcutsHelp'
@@ -51,8 +50,10 @@ import { SummaryStrip } from './_sections/SummaryStrip'
 import type {
   ActiveOrPromotedRow,
   ActiveRow,
+  AttributionKind,
   CancelResponse,
   CompletedRow,
+  DbFilter,
   MonitorConfig,
   SlowQueriesResult,
   SnapshotResponse,
@@ -62,6 +63,14 @@ import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 import { queryKeys } from '@/lib/query-keys'
 
 const DEFAULT_SLOW_THRESHOLD_MS = 500
+const DB_FILTER_OPTIONS: { value: DbFilter; label: string }[] = [
+  { value: 'all', label: 'All DBs' },
+  { value: 'DuckDB', label: 'DuckDB' },
+  { value: 'Postgres', label: 'Postgres' },
+]
+const KIND_FILTER_OPTIONS: { value: AttributionKind | 'all'; label: string }[] = (
+  ['all', 'analyst', 'admin', 'cron', 'system'] as const
+).map((o) => ({ value: o, label: o }))
 
 type DetailRow = ActiveOrPromotedRow | CompletedRow
 
@@ -582,8 +591,8 @@ export default function QueryMonitorPage() {
                         </>
                       )}
                     </Button>
-                    <DbFilterChips value={dbFilter} onChange={setDbFilter} />
-                    <FilterChips value={kindFilter} onChange={setKindFilter} />
+                    <FilterChipRow value={dbFilter} onChange={setDbFilter} options={DB_FILTER_OPTIONS} />
+                    <FilterChipRow value={kindFilter} onChange={setKindFilter} options={KIND_FILTER_OPTIONS} />
                     <Button
                       variant={groupCrons ? 'default' : 'outline'}
                       size="sm"

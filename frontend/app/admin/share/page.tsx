@@ -65,10 +65,10 @@ const AuditLogPanel = dynamic(
 // the page reads on mount. Resulting UX: by the time the operator
 // clicks Share Dashboard, the status payload is already in cache —
 // page paints real content immediately instead of skeleton-then-swap.
-export const SHARE_STATUS_QUERY_KEY = queryKeys.admin.shareStatus()
+const SHARE_STATUS_QUERY_KEY = queryKeys.admin.shareStatus()
 // Companion key for the lean /live poll — keeps its own cache slot so
 // the mount-time /status query isn't refetched on the 10-s tick.
-export const SHARE_LIVE_QUERY_KEY = queryKeys.admin.shareLive()
+const SHARE_LIVE_QUERY_KEY = queryKeys.admin.shareLive()
 
 type ShareLiveFields = Partial<
   Pick<

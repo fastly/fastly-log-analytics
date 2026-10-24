@@ -19,7 +19,6 @@ describe('CardGrid bot-card failure (UX-7)', () => {
       <CardGrid
         visibleCardList={[{ id: '_bot_name', label: 'Top Bots', inActiveFormat: false }]}
         isReady={true}
-        isLoadingAggs={false}
         isFetchingAggs={false}
         aggregates={{ data: {} }}
         compareAggregates={undefined}

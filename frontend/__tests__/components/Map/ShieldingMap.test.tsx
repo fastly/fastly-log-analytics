@@ -8,107 +8,30 @@
  */
 import { render, act, fireEvent, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
-import type { MapOptions } from 'maplibre-gl'
-import React from 'react'
 import {
-  ShieldingMap,
-  greatCirclePoints,
-  efficiencyColor,
-  lineWidth,
-  rafThrottle,
-  buildArcFeatures,
-  buildDotFeatures,
-} from '@/components/Map/ShieldingMap'
+  mapInstances,
+  maplibreMockFactory,
+  installMaplibreSideEffects,
+} from '@/__tests__/helpers/maplibre-mock'
+import React from 'react'
 
 vi.mock('next-themes', () => ({
   useTheme: vi.fn(() => ({ theme: 'light' })),
 }))
 
-type MockMapListener = (e: Record<string, unknown>) => void
-interface MockMapInstance {
-  sources: Record<string, unknown>
-  removed: boolean
-}
-const mapInstances: MockMapInstance[] = []
-vi.mock('maplibre-gl', () => {
-  class MockMap implements MockMapInstance {
-    container: HTMLElement | undefined
-    listeners: Record<string, MockMapListener[]> = {}
-    sources: Record<string, unknown> = {}
-    layers: unknown[] = []
-    removed = false
-    constructor(opts: Partial<MapOptions>) {
-      this.container = opts.container as HTMLElement | undefined
-      mapInstances.push(this)
-      queueMicrotask(() => this.emit('load'))
-    }
-    on(event: string, ...rest: unknown[]) {
-      const fn = (rest.length === 2 ? rest[1] : rest[0]) as MockMapListener
-      this.listeners[event] = this.listeners[event] || []
-      this.listeners[event].push(fn)
-    }
-    off() {}
-    addSource(id: string, src: Record<string, unknown>) {
-      this.sources[id] = { ...src, setData: vi.fn() }
-    }
-    addLayer(layer: unknown) {
-      this.layers.push(layer)
-    }
-    removeLayer() {}
-    removeSource() {}
-    getSource(id: string) {
-      return this.sources[id]
-    }
-    getLayer() {
-      return undefined
-    }
-    setFeatureState() {}
-    setPaintProperty() {}
-    setLayoutProperty() {}
-    setFilter() {}
-    setStyle() {}
-    isStyleLoaded() {
-      return true
-    }
-    queryRenderedFeatures() {
-      return []
-    }
-    getCanvas() {
-      return { style: {} }
-    }
-    remove() {
-      this.removed = true
-    }
-    project() {
-      return { x: 0, y: 0 }
-    }
-    fitBounds() {}
-    flyTo() {}
-    cameraForBounds() {
-      return { center: [0, 0], zoom: 2 }
-    }
-    setMaxBounds() {}
-    addControl() {}
-    emit(event: string, payload: Record<string, unknown> = {}) {
-      ;(this.listeners[event] || []).forEach((fn) => fn(payload))
-    }
-  }
-  return {
-    default: { Map: MockMap, LngLatBounds: class {}, NavigationControl: class {}, GlobeControl: class {}, setWorkerUrl: () => {} },
-    Map: MockMap,
-    LngLatBounds: class {},
-    NavigationControl: class {},
-    GlobeControl: class {},
-    setWorkerUrl: () => {},
-  }
-})
-
+vi.mock('maplibre-gl', () => maplibreMockFactory({ strictSources: true }))
 vi.mock('maplibre-gl/dist/maplibre-gl.css', () => ({}))
+installMaplibreSideEffects()
 
-beforeEach(() => {
-  stubResizeObserver()
-})
+import {
+  ShieldingMap,
+  greatCirclePoints,
+  efficiencyColor,
+  lineWidth,
+  buildArcFeatures,
+  buildDotFeatures,
+} from '@/components/Map/ShieldingMap'
+import { rafThrottle } from '@/components/Map/shared'
 
 // ── Helper unit tests ─────────────────────────────────────────────────────────
 

@@ -15,12 +15,10 @@ import queue
 import zipfile
 from typing import Any
 
-from backend.utils.router_utils import run_admin_cron_trigger  # noqa: F401
 from backend.utils.sse import (  # noqa: F401
     ClientDisconnected,
     _AbortableQueue,
     _stream_from_worker,
-    stream_sse_from_worker,
 )
 
 logger = logging.getLogger(__name__)

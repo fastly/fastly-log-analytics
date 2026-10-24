@@ -7,9 +7,8 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, test, vi, beforeEach } from 'vitest'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { createTestQueryClient } from '../helpers/query'
+import { selectMockFactory } from '../helpers/ui-mocks'
 import React from 'react'
-import { DiagnosticsPanel } from '@/app/admin/_sections/DiagnosticsPanel'
-import { useServiceStore } from '@/stores/serviceStore'
 
 vi.mock('@/hooks/useBootstrap', () => ({
   useBootstrap: () => ({ data: { debug_state: { debug_responses_enabled: true } } }),
@@ -17,60 +16,10 @@ vi.mock('@/hooks/useBootstrap', () => ({
 
 // Mock @/components/ui/select. The real implementation uses base-ui which is
 // hard to drive from userEvent in jsdom (portals, native event sequencing).
-vi.mock('@/components/ui/select', () => {
-  const SelectCtx = React.createContext<((v: string) => void) | null>(null)
+vi.mock('@/components/ui/select', () => selectMockFactory())
 
-  const Select = ({
-    value,
-    onValueChange,
-    children,
-  }: {
-    value?: string
-    onValueChange?: (v: string) => void
-    children?: React.ReactNode
-  }) => {
-    return (
-      <SelectCtx.Provider value={onValueChange ?? null}>
-        <div data-testid="mock-select" data-select-value={value ?? ''}>
-          {children}
-        </div>
-      </SelectCtx.Provider>
-    )
-  }
-
-  const SelectTrigger = ({ children }: { children?: React.ReactNode }) => (
-    <div data-testid="mock-select-trigger">{children}</div>
-  )
-
-  const SelectValue = ({ children }: { children?: React.ReactNode }) => (
-    <span data-testid="mock-select-value">{children}</span>
-  )
-
-  const SelectContent = ({ children }: { children?: React.ReactNode }) => (
-    <div data-testid="mock-select-content">{children}</div>
-  )
-
-  const SelectItem = ({
-    value,
-    children,
-  }: {
-    value: string
-    children?: React.ReactNode
-  }) => {
-    const onValueChange = React.useContext(SelectCtx)
-    return (
-      <button
-        type="button"
-        data-select-item-value={value}
-        onClick={() => onValueChange?.(value)}
-      >
-        {children}
-      </button>
-    )
-  }
-
-  return { Select, SelectTrigger, SelectValue, SelectContent, SelectItem }
-})
+import { DiagnosticsPanel } from '@/app/admin/_sections/DiagnosticsPanel'
+import { useServiceStore } from '@/stores/serviceStore'
 
 function makeClient() {
   return createTestQueryClient()

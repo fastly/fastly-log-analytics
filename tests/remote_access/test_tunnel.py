@@ -503,7 +503,7 @@ def test_rate_limit_snapshot_prunes_expired_lockouts(monkeypatch):
         mgr.record_login_failure("9.9.9.9", "c@example.com")
     # Time-travel past the lockout window.
     real_time = time.time
-    monkeypatch.setattr(tunnel.time, "time", lambda: real_time() + tunnel.LOGIN_LOCKOUT_S + 1)
+    monkeypatch.setattr(time, "time", lambda: real_time() + tunnel.LOGIN_LOCKOUT_S + 1)
     snap = mgr.get_rate_limit_snapshot()
     assert all(row["ip"] != "9.9.9.9" for row in snap["lockouts"])
 
@@ -599,17 +599,17 @@ def test_rate_limiter_lru_eviction(monkeypatch):
     rl.record_failure("2.2.2.2")
     rl.record_failure("3.3.3.3")
 
-    # Order of self._failures should be: "1.1.1.1", "2.2.2.2", "3.3.3.3"
-    assert list(rl._failures.keys()) == ["1.1.1.1", "2.2.2.2", "3.3.3.3"]
+    # Order of self._events should be: "1.1.1.1", "2.2.2.2", "3.3.3.3"
+    assert list(rl._events.keys()) == ["1.1.1.1", "2.2.2.2", "3.3.3.3"]
 
     # Touch "1.1.1.1" again (moves it to the end/MRU).
     rl.record_failure("1.1.1.1")
-    assert list(rl._failures.keys()) == ["2.2.2.2", "3.3.3.3", "1.1.1.1"]
+    assert list(rl._events.keys()) == ["2.2.2.2", "3.3.3.3", "1.1.1.1"]
 
     # Record failure for a 4th IP. "2.2.2.2" (oldest/LRU) should be evicted.
     rl.record_failure("4.4.4.4")
-    assert list(rl._failures.keys()) == ["3.3.3.3", "1.1.1.1", "4.4.4.4"]
-    assert "2.2.2.2" not in rl._failures
+    assert list(rl._events.keys()) == ["3.3.3.3", "1.1.1.1", "4.4.4.4"]
+    assert "2.2.2.2" not in rl._events
 
     # Trigger lockout for 3 different IPs.
     for _ in range(rate_limiter.LOGIN_FAILURE_THRESHOLD):
@@ -620,14 +620,14 @@ def test_rate_limiter_lru_eviction(monkeypatch):
         rl.record_failure("4.4.4.4")
 
     # Order of lockouts should be: "3.3.3.3", "1.1.1.1", "4.4.4.4"
-    assert list(rl._lockouts.keys()) == ["3.3.3.3", "1.1.1.1", "4.4.4.4"]
+    assert list(rl._locks.keys()) == ["3.3.3.3", "1.1.1.1", "4.4.4.4"]
 
     # Trigger a lockout for "5.5.5.5". "3.3.3.3" (oldest lockout) should be evicted.
     for _ in range(rate_limiter.LOGIN_FAILURE_THRESHOLD):
         rl.record_failure("5.5.5.5")
 
-    assert list(rl._lockouts.keys()) == ["1.1.1.1", "4.4.4.4", "5.5.5.5"]
-    assert "3.3.3.3" not in rl._lockouts
+    assert list(rl._locks.keys()) == ["1.1.1.1", "4.4.4.4", "5.5.5.5"]
+    assert "3.3.3.3" not in rl._locks
 
 
 # ── F014: mid-session permission revocation propagation ──────────────────

@@ -56,17 +56,6 @@ def _manifest_service_id(manifest: ArchiveManifest) -> str:
     return ""
 
 
-def _manifest_primary_object_key(manifest: ArchiveManifest) -> str:
-    source = getattr(manifest, "source", None)
-    if source is not None and getattr(source, "object_key", None):
-        return str(source.object_key)
-    sources = getattr(manifest, "sources", None) or ()
-    if sources:
-        first = sources[0]
-        return str(getattr(first, "object_key", None) or getattr(first, "key", ""))
-    return ""
-
-
 def replay_manifest(
     manifest: ArchiveManifest,
     archive: ArchivePublication,

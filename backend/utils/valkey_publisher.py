@@ -26,7 +26,6 @@ import os
 import threading
 from collections.abc import AsyncIterator
 
-from backend.utils.log_throttle import _last as _last_error_log  # noqa: F401
 from backend.utils.log_throttle import log_once_per
 
 logger = logging.getLogger(__name__)

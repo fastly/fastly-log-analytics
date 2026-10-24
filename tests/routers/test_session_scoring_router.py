@@ -1357,7 +1357,7 @@ def test_retrain_smoke(client, with_config, tmp_path, monkeypatch):
         patch("backend.scoring.labels.counts_by_label", return_value={"good": 0, "bad": 0, "neutral": 0}),
         patch("backend.provision.session_scoring_orchestrator._MATRIX_PATH", tmp_path / "matrix.json"),
         patch("backend.state_sync.publish_matrix_to_fos"),
-        patch("backend.routers.session_scoring_admin._resolve_token", return_value="tok"),
+        patch("backend.routers.session_scoring_admin.resolve_fastly_token", return_value="tok"),
         patch("backend.core.fastly.client.fastly_raw") as mock_raw,
     ):
         mock_get_con.return_value.close = lambda: None
@@ -1793,7 +1793,7 @@ def test_matrix_versions_restore_happy_path(client, with_config, monkeypatch, tm
         ) as mock_restore,
         patch("backend.provision.session_scoring_orchestrator._MATRIX_PATH", fake_shared_path),
         patch("backend.core.metadata.record_scoring_audit", side_effect=fake_audit),
-        patch("backend.routers.session_scoring_admin._resolve_token", return_value="tok"),
+        patch("backend.routers.session_scoring_admin.resolve_fastly_token", return_value="tok"),
         patch("backend.provision.session_scoring_orchestrator._write_matrix_to_kv") as mock_kv,
     ):
         r = client.post(f"/api/services/{LOG_SVC}/scoring/matrix-versions/2026-06-01-a/restore?confirm=true")
@@ -2033,7 +2033,7 @@ def test_audit_404_on_unknown_service(client, with_config):
     # with_config left empty → load_config returns None → 404 path.
     r = client.get("/api/services/no-such-service/scoring/audit")
     assert r.status_code == 404
-    assert "no config" in r.json()["detail"]["error"].lower()
+    assert "service not found" in r.json()["detail"]["error"].lower()
 
 
 # ── /scoring/enforce-threshold GET/PUT (live edge enforcement via ConfigStore) ─

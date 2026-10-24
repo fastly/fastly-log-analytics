@@ -37,9 +37,7 @@ from backend.core.share_db.audit import (
 )
 from backend.core.share_db.connection import (
     close_all_connections,
-    db_path,
     get_global_share_con,
-    reset_for_tests,
 )
 from backend.core.share_db.invites import (
     bind_invite_oauth_subject,
@@ -112,10 +110,8 @@ __all__ = [
     "iso_z",
     "iso_z_now",
     # Connection layer.
-    "db_path",
     "get_global_share_con",
     "close_all_connections",
-    "reset_for_tests",
     # Schema + migrations.
     "_SCHEMA",
     "LATEST_VERSION",

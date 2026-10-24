@@ -78,7 +78,7 @@ from backend.provision.session_scoring_setup import (
 # module first. The ignores are scoped per-line so any genuine error
 # (typo, removed export) still surfaces as a separate diagnostic.
 from backend.routers import session_scoring as _ss
-from backend.utils.router_utils import raise_internal
+from backend.utils.router_utils import load_service_config, query_errors, raise_internal, resolve_fastly_token
 
 router = _ss.router  # type: ignore[has-type]
 logger = _ss.logger  # type: ignore[has-type]
@@ -88,7 +88,6 @@ _load_matrix = _ss._load_matrix  # type: ignore[has-type]
 _fetch_session_events = _ss._fetch_session_events  # type: ignore[has-type]
 _scoring_time_window = _ss._scoring_time_window  # type: ignore[has-type]
 _reconstruct_labeled_sessions = _ss._reconstruct_labeled_sessions  # type: ignore[has-type]
-_resolve_token = _ss._resolve_token  # type: ignore[has-type]
 _finalize_cached = _ss._finalize_cached  # type: ignore[has-type]
 _SECRET_KEYS = _ss._SECRET_KEYS  # type: ignore[has-type]
 _MIN_LABELS_PER_CLASS = _ss._MIN_LABELS_PER_CLASS  # type: ignore[has-type]
@@ -266,7 +265,7 @@ def l2_enforce_readiness_block(service_id: str) -> dict:
     config_store_id = (cfg.get("scoring") or {}).get("scoring_config_store_id")
     if not config_store_id:
         return _l2_enforce_unavailable()
-    token = _resolve_token(service_id)
+    token = resolve_fastly_token(service_id)
     if not token:
         return _l2_enforce_unavailable()
     try:
@@ -390,7 +389,7 @@ def scoring_retrain(
     #     enable re-seeds KV. Takes effect as Compute instances recycle.
     kv_written = False
     matrix_store_id = (cfg.get("scoring") or {}).get("scoring_matrix_store_id", "")
-    resolved_token = _resolve_token(service_id)
+    resolved_token = resolve_fastly_token(service_id)
     if matrix_store_id and resolved_token:
         try:
             from backend.core.fastly.client import fastly_raw
@@ -517,7 +516,7 @@ def _require_scoring_config_store(service_id: str, token: str = "") -> tuple[dic
     if not config_store_id:
         raise HTTPException(status_code=400, detail={"error": "Scoring not enabled or config store missing"})
 
-    resolved_token = _resolve_token(service_id, token)
+    resolved_token = resolve_fastly_token(service_id, token)
     if not resolved_token:
         raise HTTPException(status_code=400, detail={"error": "Fastly API token required"})
 
@@ -887,7 +886,7 @@ def scoring_exclude_regex_put(
             status_code=400,
             detail={"error": "Session scoring is not enabled for this service"},
         )
-    resolved_token = _resolve_token(service_id, token)
+    resolved_token = resolve_fastly_token(service_id, token)
     if not resolved_token:
         raise HTTPException(status_code=400, detail={"error": "Fastly API token required"})
 
@@ -1112,7 +1111,7 @@ def scoring_enforce_status_code_put(
             detail={"error": "Session scoring is not enabled for this service"},
         )
 
-    resolved_token = _resolve_token(service_id, token)
+    resolved_token = resolve_fastly_token(service_id, token)
     if not resolved_token:
         raise HTTPException(status_code=400, detail={"error": "Fastly API token required"})
 
@@ -1234,7 +1233,7 @@ def scoring_matrix_versions_restore(
     # (the local copy was just deleted). Best-effort — needs a token + store.
     kv_written = False
     matrix_store_id = ((cfg or {}).get("scoring") or {}).get("scoring_matrix_store_id", "")
-    resolved_token = _resolve_token(service_id)
+    resolved_token = resolve_fastly_token(service_id)
     if matrix_store_id and resolved_token:
         try:
             from backend.provision.session_scoring_orchestrator import _write_matrix_to_kv
@@ -1278,6 +1277,7 @@ def scoring_matrix_versions_restore(
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
 )
+@query_errors(500, code="scoring_rotate_key_failed", logger_obj=logger)
 def scoring_rotate_key(
     service_id: ServiceId,
     token: str = Header(default=""),
@@ -1293,13 +1293,10 @@ def scoring_rotate_key(
     Returns rotation metadata — the new key itself is NOT returned in
     the response (only stored in the Fastly ConfigStore + audit log).
     """
-    from backend import config as svcconfig
     from backend.core import metadata as metadata_db
     from backend.provision.session_scoring_setup import rotate_aes_key
 
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": f"No config for service {service_id}"})
+    cfg = load_service_config(service_id)
 
     scoring = cfg.get("scoring") or {}
     if not scoring.get("enabled"):
@@ -1314,14 +1311,11 @@ def scoring_rotate_key(
             },
         )
 
-    resolved_token = _resolve_token(service_id, token)
+    resolved_token = resolve_fastly_token(service_id, token)
     if not resolved_token:
         raise HTTPException(status_code=400, detail={"error": "Fastly API token required"})
 
-    try:
-        result = rotate_aes_key(scoring_keys_store_id, token=resolved_token)
-    except Exception as e:
-        raise_internal(logger, e, code="scoring_rotate_key_failed")
+    result = rotate_aes_key(scoring_keys_store_id, token=resolved_token)
 
     # Record the rotation in the audit log (without the key value).
     metadata_db.record_scoring_audit(
@@ -1371,14 +1365,11 @@ def scoring_audit_list(
     ``since`` (optional ISO timestamp) filters to rows at or after that
     instant — handy for the admin UI to poll for new events without
     re-rendering the entire history."""
-    from backend import config as svcconfig
     from backend.core import metadata as metadata_db
 
     # 404 when the service itself isn't known — mirrors /scoring/status so
     # the UI gets a consistent shape across the audit + status pair.
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": f"No config for service {service_id}"})
+    load_service_config(service_id)
 
     rows = metadata_db.list_scoring_audit(service_id, limit=limit, since=since)
     return {"audit": rows, "limit": limit}
@@ -1435,9 +1426,7 @@ def scoring_threshold_put(
     if threshold is not None and not 0 <= threshold <= 100:
         raise HTTPException(status_code=400, detail={"error": "threshold must be 0-100"})
 
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": f"No config for service {service_id}"})
+    cfg = load_service_config(service_id)
     prior_threshold = cfg.get("scoring", {}).get("operator_threshold")
     set_at = _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
 

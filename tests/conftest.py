@@ -353,8 +353,6 @@ _PER_TEST_RESET_TABLES = (
     "usage_log_hourly_summary",
     "metric_snapshots",
     "slow_queries",
-    "committed_buffers",
-    "local_compacted_files",
     "ingest_in_flight",
     "ngwaf_bots",
     "ngwaf_sync_state",
@@ -436,13 +434,9 @@ def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
 
     # ``usage_log_db.db_path`` still derives from its own ``_DATA_DIR`` binding.
     from backend.core.metadata import usage_log_db as _usage_log_db
-
-    monkeypatch.setattr(_usage_log_db, "_DATA_DIR", str(sandbox_services))
-
-    # Sandbox share_db directory
     from backend.core.share_db import connection as _share_db_connection
 
-    monkeypatch.setattr(_share_db_connection, "_DATA_DIR", str(sandbox_system))
+    monkeypatch.setattr(_usage_log_db, "_DATA_DIR", str(sandbox_services))
 
     from backend.core import metric_snapshots as _metric_snapshots
 

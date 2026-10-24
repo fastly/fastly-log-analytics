@@ -27,7 +27,6 @@ import { durationColor, formatDurationMs, formatMemoryMb, kindBadgeVariant } fro
 import type {
   ActiveOrPromotedRow,
   ActiveRow,
-  CompletedRow,
   GroupedCompletedRow,
 } from '../_types'
 

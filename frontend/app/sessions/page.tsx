@@ -18,7 +18,7 @@ import type { components } from '@/types/api.generated'
 
 import { ScoringControls } from './_sections/ScoringControls'
 import { SessionsTable } from './_sections/SessionsTable'
-import type { BootstrapResponse, SessionsResponse } from '@/types/api'
+import type { BootstrapResponse, Session, SessionsResponse } from '@/types/api'
 
 function useActiveServiceCmcdEnabled(activeServiceId: string | null): boolean {
   const isInitialized = useServiceStore(s => s.isInitialized)
@@ -49,8 +49,6 @@ const SessionDetail = dynamic(
   { ssr: false },
 )
 
-type SessionRow = components['schemas']['Session']
-
 // Lifted out of the ReportLayout render-prop so the (large) hook list —
 // useIsDataReady, useMemo, useQueryClient, useScoringLabels, useCallback,
 // useQuery, useRef, useEffect — lives at the top of a STABLE component
@@ -68,8 +66,8 @@ interface SessionsBodyProps {
   endTime: string | null
   activeServiceId: string | null
   filterPayload: SessionsFilters
-  selectedSession: SessionRow | null
-  setSelectedSession: React.Dispatch<React.SetStateAction<SessionRow | null>>
+  selectedSession: Session | null
+  setSelectedSession: React.Dispatch<React.SetStateAction<Session | null>>
   flaggedOnly: boolean
   setFlaggedOnly: React.Dispatch<React.SetStateAction<boolean>>
   streamingOnly: boolean
@@ -253,7 +251,7 @@ function SessionsBody({
 
 
 export default function SessionsPage() {
-  const [selectedSession, setSelectedSession] = useState<SessionRow | null>(null)
+  const [selectedSession, setSelectedSession] = useState<Session | null>(null)
 
   // ── Filter state ─────────────────────────────────────────────────────────
   const [flaggedOnly, setFlaggedOnly] = useState(false)

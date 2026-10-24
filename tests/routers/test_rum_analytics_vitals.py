@@ -6,11 +6,9 @@ This test file has been fully modernized to use the DuckDB analytical tables
 
 from __future__ import annotations
 
-import datetime
 import json
 from unittest.mock import patch
 
-import duckdb
 import pytest
 import time_machine
 
@@ -24,157 +22,12 @@ def skip_view_update():
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from tests._helpers.rum import insert_rum_beacons as _insert
+from tests._helpers.rum import setup_temp_rum_db
+
+__all__ = ["setup_temp_rum_db"]
 
 client = TestClient(app)
-
-
-@pytest.fixture
-def setup_temp_rum_db(tmp_path, monkeypatch):
-    """Fixture that initializes a temporary isolated DuckDB database with the RUM schema."""
-    temp_db_path = tmp_path / "test.rum.duckdb"
-
-    # Initialize tables
-    con = duckdb.connect(str(temp_db_path))
-    con.execute("""
-        CREATE TABLE client_vitals (
-            timestamp TIMESTAMPTZ,
-            metric_name VARCHAR,
-            metric_value DOUBLE,
-            metric_rating VARCHAR,
-            pathname VARCHAR,
-            browser VARCHAR,
-            os VARCHAR,
-            device VARCHAR,
-            cid VARCHAR,
-            req_id VARCHAR
-        )
-    """)
-    con.execute("""
-        CREATE TABLE client_errors (
-            timestamp TIMESTAMPTZ,
-            error_message VARCHAR,
-            error_file VARCHAR,
-            error_line INTEGER,
-            error_col INTEGER,
-            pathname VARCHAR,
-            browser VARCHAR,
-            os VARCHAR,
-            device VARCHAR,
-            cid VARCHAR,
-            req_id VARCHAR
-        )
-    """)
-    con.close()
-
-    import uuid
-
-    unique_id = f"test_service_{uuid.uuid4().hex[:8]}"
-
-    # mock_source has test.duckdb so rum_source_for resolves it to test.rum.duckdb
-    mock_source = {
-        "name": unique_id,
-        "service_id": unique_id,
-        "duckdb_path": str(tmp_path / "test.duckdb"),
-        "access_level": "read_write",
-        "endpoint": "localhost",
-        "access_key_id": "mock",
-        "secret_access_key": "mock",
-        "region": "mock",
-    }
-
-    import backend.core.duckdb_pool as duckdb_pool
-
-    duckdb_pool.reset_pool_for_service("test_service")
-    duckdb_pool.reset_pool_for_service("test_service_rum")
-    monkeypatch.setattr("backend.core.request_context._resolve_source", lambda service_id, read_only=False: mock_source)
-
-    return temp_db_path
-
-
-def _insert(temp_rum_db_path, beacons: list[dict]) -> None:
-    from backend.core.rum_ingest import extract_metrics_from_faro_payload
-
-    con = duckdb.connect(str(temp_rum_db_path))
-    vitals_rows = []
-    errors_rows = []
-
-    for i, b in enumerate(beacons):
-        received_at = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=i + 5)
-        req_id = f"req_{i}_{id(b)}"
-
-        # Parse Faro payload
-        extracted = extract_metrics_from_faro_payload(b, {})
-
-        for item in extracted:
-            metric_name = item.get("metric_name")
-            if metric_name == "exception":
-                errors_rows.append(
-                    (
-                        received_at,
-                        item.get("error_message"),
-                        item.get("error_file"),
-                        item.get("error_line"),
-                        item.get("error_col"),
-                        item.get("pathname"),
-                        item.get("browser"),
-                        item.get("os"),
-                        item.get("device"),
-                        item.get("cid"),
-                        req_id,
-                    )
-                )
-            else:
-                val = item.get("metric_value")
-                # Convert pageLoadTime (usually string) to float if needed
-                if metric_name == "pageLoadTime" and val is not None:
-                    try:
-                        val = float(val)
-                    except Exception:
-                        pass
-
-                # Give proper metric rating
-                rating = item.get("metric_rating")
-                if not rating and val is not None:
-                    try:
-                        val_float = float(val)
-                        if metric_name == "lcp":
-                            rating = (
-                                "good" if val_float <= 2.5 else ("needs_improvement" if val_float <= 4.0 else "poor")
-                            )
-                        elif metric_name == "cls":
-                            rating = (
-                                "good" if val_float <= 0.1 else ("needs_improvement" if val_float <= 0.25 else "poor")
-                            )
-                        elif metric_name == "inp":
-                            rating = (
-                                "good" if val_float <= 200 else ("needs_improvement" if val_float <= 500 else "poor")
-                            )
-                        else:
-                            rating = "good"
-                    except Exception:
-                        rating = "good"
-
-                vitals_rows.append(
-                    (
-                        received_at,
-                        metric_name,
-                        val,
-                        rating,
-                        item.get("pathname"),
-                        item.get("browser"),
-                        item.get("os"),
-                        item.get("device"),
-                        item.get("cid"),
-                        req_id,
-                    )
-                )
-
-    if vitals_rows:
-        con.executemany("INSERT INTO client_vitals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", vitals_rows)
-    if errors_rows:
-        con.executemany("INSERT INTO client_errors VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", errors_rows)
-
-    con.close()
 
 
 def _faro_beacon(path: str, lcp: float, cls: float, inp: float, load_time: float) -> dict:

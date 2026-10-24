@@ -161,20 +161,7 @@ class FieldValuesResponse(BaseResponse):
 
 
 # ── Insights ──────────────────────────────────────────────────────────────────
-# Carved out to backend.models.insights; re-exported here for backward compatibility.
-from backend.models.insights import (  # noqa: F401
-    CacheBreakdown,
-    CacheCollapseDetailRequest,
-    CacheCollapseDetailResponse,
-    CacheCollapseTimelinePoint,
-    CacheMissPoint,
-    InsightAvailability,
-    InsightCard,
-    InsightItem,
-    InsightsAvailabilityResponse,
-    InsightsRequest,
-    InsightsResponse,
-)
+from backend.models.insights import InsightsResponse  # noqa: F401
 
 # ── Sessions ──────────────────────────────────────────────────────────────────
 
@@ -194,11 +181,6 @@ class Session(BaseModel):
     ja4: str | None = None
     country: str | None = None
     asn: int | None = None
-    # asn_label retained as an optional carry-through so old frontend builds
-    # that still read row.asn_label don't fall back to "AS<n>" mid-deploy.
-    # New backends leave it unset; the labelled string lives in the top-level
-    # ``asn_names`` map keyed by ``asn``.
-    asn_label: str | None = None
     session_start: str
     session_end: str
     req_count: int
@@ -260,15 +242,3 @@ class SessionDetailResponse(BaseResponse):
     columns: list[str]
     # Raw-log rows: every column is a scalar (custom fields are limited to the same types).
     data: list[dict[str, ScalarCell]]
-
-
-# ── Query (re-exported from backend.models.query for back-compat) ─────────────
-
-from backend.models.query import (  # noqa: E402, F401
-    PresetQuery,
-    QueryDataset,
-    QueryRequest,
-    QueryResponse,
-    QuerySchemaResponse,
-    SchemaColumn,
-)

@@ -79,27 +79,6 @@ _SLOW_QUERIES_INDEX_DDL = (
 )
 
 
-# committed_buffers is created by SQLite migration 004, not _SCHEMA, so the
-# Postgres path never had it — while pg_connection._IGNORE_TABLES already
-# rewrites its INSERT OR IGNORE, i.e. the dialect seam was built assuming the
-# table exists. Without this DDL, Postgres metadata mode loses the durable
-# buffer-commit checkpoint that exists to stop a crash between
-# table.append() and tombstone_buffer_files() re-appending the same rows
-# (~2x row duplication for the affected hour). CREATE IF NOT EXISTS — never
-# DROP.
-#
-# NOTE: no service_id column, mirroring SQLite. Migration 015 added
-# service_id to cron_runs and local_compacted_files ONLY, and
-# filter_uncommitted_buffers() queries this table with no service_id
-# predicate, so under one shared database this table is cross-tenant by
-# basename. Safe only because buffer basenames are uuid-derived. See ADR-18.
-_COMMITTED_BUFFERS_DDL = """
-CREATE TABLE IF NOT EXISTS committed_buffers (
-    buffer_filename TEXT PRIMARY KEY,
-    committed_at TEXT NOT NULL DEFAULT (to_char(current_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
-)
-"""
-
 _METRIC_SNAPSHOTS_DDL = """
 CREATE TABLE IF NOT EXISTS metric_snapshots (
     ts          TEXT NOT NULL,
@@ -267,7 +246,6 @@ def pg_schema_statements() -> list[str]:
     ]
     statements.append(_SLOW_QUERIES_DDL)
     statements.extend(_SLOW_QUERIES_INDEX_DDL)
-    statements.append(_COMMITTED_BUFFERS_DDL)
     statements.append(_METRIC_SNAPSHOTS_DDL)
     statements.extend(_METRIC_SNAPSHOTS_INDEX_DDL)
     statements.extend(_INGEST_LEDGER_ALTERS)

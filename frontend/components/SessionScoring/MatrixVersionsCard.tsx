@@ -2,16 +2,16 @@
 
 import * as React from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Copy, History, Info, RotateCcw } from 'lucide-react'
+import { History, Info, RotateCcw } from 'lucide-react'
 import { invalidateServiceScoringQueries, useScoringQuery } from './useScoringQuery'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { MatrixHistoryHelp } from '@/components/SessionScoring/help-content'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { CopyButton } from '@/components/ui/copy-button'
 import { Card, CardContent } from '@/components/ui/card'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
-import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 import type { ColumnDef } from '@tanstack/react-table'
 import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
 import { client, extractApiError } from '@/lib/api'
@@ -32,7 +32,6 @@ export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
   const qc = useQueryClient()
   const [pendingVersion, setPendingVersion] = React.useState<string | null>(null)
   const [restoreResult, setRestoreResult] = React.useState<RestoreResponse | null>(null)
-  const { copied, copy: copyText } = useCopyToClipboard(1500)
 
   const { data, isLoading, isFetching, isError, error } = useScoringQuery(
     ['scoring-matrix-versions', serviceId],
@@ -66,10 +65,6 @@ export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
       invalidateServiceScoringQueries(qc, serviceId)
     },
   })
-
-  const onCopyHint = () => {
-    if (restoreResult?.deploy_hint) copyText(restoreResult.deploy_hint)
-  }
 
   const currentVersion = data?.current_version ?? null
   const restorePending = restore.isPending
@@ -195,16 +190,14 @@ export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
               <span className="text-[10px] font-mono text-muted-foreground">
                 deploy hint
               </span>
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label={copied ? 'Copied deploy command' : 'Copy deploy command'}
+              <CopyButton
+                text={restoreResult.deploy_hint ?? ''}
+                ariaLabel="Copy deploy command"
+                copiedAriaLabel="Copied deploy command"
+                title="Copy to clipboard"
                 className="h-6 w-6 hover:bg-muted-foreground/10"
-                onClick={onCopyHint}
-                title={copied ? 'Copied!' : 'Copy to clipboard'}
-              >
-                <Copy className="h-3 w-3" />
-              </Button>
+                timeoutMs={1500}
+              />
             </div>
             <pre className="p-3 text-[11px] font-mono text-muted-foreground whitespace-pre-wrap leading-relaxed">
               {restoreResult.deploy_hint}

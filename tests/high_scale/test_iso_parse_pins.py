@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from backend.high_scale import aggregates, publication, raw_query, sessions
+from backend.high_scale import publication, raw_query, sessions
 
 
 @pytest.mark.parametrize("module", [sessions])
@@ -36,7 +36,7 @@ def test_publication_timestamp_assumes_utc_for_naive_and_wraps_errors() -> None:
 
 @pytest.mark.parametrize(
     "fn,key",
-    [(aggregates._event_timestamp, "timestamp"), (raw_query._row_timestamp, "timestamp")],
+    [(raw_query._row_timestamp, "timestamp")],
 )
 def test_astimezone_family_returns_utc_aware(fn, key) -> None:
     assert fn({key: "2026-01-02T03:04:05Z"}) == datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)

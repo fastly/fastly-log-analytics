@@ -25,14 +25,6 @@ class _LoginRateLimiter(SlidingWindowLimiter):
     def __init__(self) -> None:
         super().__init__(window_s=LOGIN_FAILURE_WINDOW_S, max_keys=MAX_TRACKED_IPS)
 
-    @property
-    def _failures(self):
-        return self._events
-
-    @property
-    def _lockouts(self):
-        return self._locks
-
     def snapshot(self) -> dict:  # type: ignore[override]
         """Best-effort snapshot of recent failure activity for the admin UI."""
         counts, locks = super().snapshot()

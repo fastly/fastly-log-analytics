@@ -26,37 +26,6 @@ def stub_source(monkeypatch) -> dict:
 
 
 @pytest.fixture
-def stub_cron_envelope(monkeypatch) -> dict[str, MagicMock]:
-    """Stub the standard cron envelope helpers so the body's
-    progress + cron_runs side effects can be inspected without real DB
-    writes."""
-    start = MagicMock(return_value=11)
-    log = MagicMock()
-    monkeypatch.setattr("backend.core.duckdb.start_cron_run", start)
-    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log)
-
-    start_progress = MagicMock()
-    end_progress = MagicMock()
-    cleanup = MagicMock()
-    log_event = MagicMock()
-    monkeypatch.setattr("backend.cron_progress.start_progress", start_progress)
-    monkeypatch.setattr("backend.cron_progress.end_progress", end_progress)
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", cleanup)
-    monkeypatch.setattr("backend.cron.scheduler._log_and_add_progress", log_event)
-    monkeypatch.setattr("backend.cron.scheduler._display_name", lambda src, sid: src.get("name", sid))
-    monkeypatch.setattr("backend.cron.scheduler._extract_log_text", lambda rid: "")
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *a, **kw: False)
-    monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", MagicMock())
-    return {
-        "start": start,
-        "log": log,
-        "start_progress": start_progress,
-        "end_progress": end_progress,
-        "log_event": log_event,
-    }
-
-
-@pytest.fixture
 def optimize_test_source(monkeypatch, tmp_path):
     service_id = "svc-optimize-contract"
     cache_root = tmp_path / "cache" / service_id

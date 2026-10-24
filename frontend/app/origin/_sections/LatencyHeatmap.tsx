@@ -8,6 +8,7 @@ import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCa
 import { ApproxBadge } from './ApproxBadge'
 import { cn } from '@/lib/utils';
 import { formatBytes, formatCount } from '@/lib/format'
+import { columnHeader } from '@/lib/table-utils'
 import { Server, MapPin, Globe } from 'lucide-react'
 import { useActiveLogFields } from '@/hooks/useActiveLogFields'
 import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
@@ -26,31 +27,27 @@ import type {
 // uppercase span, and requests/p50/p95 are byte-identical across the
 // url/pop/ip variants. Factor them out so the three column sets compose
 // from one definition each (rendered output is unchanged).
-const metricHeader = (label: string) =>
-  function MetricHeader() {
-    return <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">{label}</span>
-  }
 type LatencyRow = { p50_ms?: number | null; p95_ms?: number | null; requests: number }
 
 const msCell = (value: number | null | undefined) => <span>{value?.toFixed(1)}ms</span>
 
 const requestsCol = <TRow extends LatencyRow>(): ColumnDef<TRow> => ({
-  accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: metricHeader('Reqs'),
+  accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: columnHeader('Reqs'),
   cell: ({ row }) => formatCount(row.original.requests),
 })
 const p50Col = <TRow extends LatencyRow>(): ColumnDef<TRow> => ({
-  accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: metricHeader('P50'),
+  accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: columnHeader('P50'),
   cell: ({ row }) => msCell(row.original.p50_ms),
 })
 const p95Col = <TRow extends LatencyRow>(): ColumnDef<TRow> => ({
-  accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: metricHeader('P95'),
+  accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: columnHeader('P95'),
   cell: ({ row }) => msCell(row.original.p95_ms),
 })
 
 const URL_COLUMNS: ColumnDef<OriginSlowUrlRow>[] = [
   {
     accessorKey: 'url',
-    id: 'url', meta: { label: 'URL' }, header: metricHeader('URL'),
+    id: 'url', meta: { label: 'URL' }, header: columnHeader('URL'),
     cell: ({ row }) => (
       <FilterValueCell
         filters={[{ column: 'url', value: row.original.url }]}
@@ -63,7 +60,7 @@ const URL_COLUMNS: ColumnDef<OriginSlowUrlRow>[] = [
   p50Col(),
   p95Col(),
   {
-    accessorKey: 'p99_ms', id: 'p99_ms', meta: { label: 'P99 Latency' }, header: metricHeader('P99'),
+    accessorKey: 'p99_ms', id: 'p99_ms', meta: { label: 'P99 Latency' }, header: columnHeader('P99'),
     cell: ({ row }) => msCell(row.original.p99_ms),
   },
 ]
@@ -71,7 +68,7 @@ const URL_COLUMNS: ColumnDef<OriginSlowUrlRow>[] = [
 const POP_COLUMNS: ColumnDef<OriginPopLatencyRow>[] = [
   {
     accessorKey: 'pop',
-    id: 'pop', meta: { label: 'POP' }, header: metricHeader('POP'),
+    id: 'pop', meta: { label: 'POP' }, header: columnHeader('POP'),
     cell: ({ row }) => (
       <FilterValueCell
         filters={[{ column: 'pop', value: row.original.pop }]}
@@ -83,7 +80,7 @@ const POP_COLUMNS: ColumnDef<OriginPopLatencyRow>[] = [
   requestsCol(),
   p50Col(),
   {
-    accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: metricHeader('P95'),
+    accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: columnHeader('P95'),
     cell: ({ row }) => (
       <span className={cn(row.original.elevated ? "text-destructive font-bold" : "")}>
         {row.original.p95_ms?.toFixed(1)}ms
@@ -95,7 +92,7 @@ const POP_COLUMNS: ColumnDef<OriginPopLatencyRow>[] = [
 const IP_COLUMNS: ColumnDef<OriginIpHealthRow>[] = [
   {
     accessorKey: 'oip',
-    id: 'oip', meta: { label: 'Origin IP' }, header: metricHeader('Origin IP'),
+    id: 'oip', meta: { label: 'Origin IP' }, header: columnHeader('Origin IP'),
     cell: ({ row }) => (
       <FilterValueCell
         filters={[{ column: 'oip', value: row.original.oip }]}
@@ -107,7 +104,7 @@ const IP_COLUMNS: ColumnDef<OriginIpHealthRow>[] = [
   p50Col(),
   p95Col(),
   {
-    accessorKey: 'error_pct', id: 'error_pct', meta: { label: '5xx Errors %' }, header: metricHeader('5xx %'),
+    accessorKey: 'error_pct', id: 'error_pct', meta: { label: '5xx Errors %' }, header: columnHeader('5xx %'),
     cell: ({ row }) => (
       <span className={cn((row.original.error_pct ?? 0) > 1 ? "text-destructive font-bold" : "")}>
         {row.original.error_pct}%

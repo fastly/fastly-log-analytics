@@ -9,7 +9,7 @@ This file pins the **pure helpers + small wrappers** that the bigger
 code shares:
 
   - `_buffer_dir`, `_catalog_db_path` — per-source local paths
-  - `get_arrow_schema`, `get_schema_field_names` — schema conversion
+  - `get_arrow_schema` — schema conversion
   - `_write_metadata_pointer` — S3 pointer write + CDN purge
   - `clear_source_caches` — module-global cache reset
   - `_load_persistent_cache` / `_save_persistent_cache` — snapshot
@@ -290,7 +290,7 @@ def test_tombstone_logs_and_skips_on_marker_write_failure(tmp_path):
     assert paths[0] not in tombstoned
 
 
-# ── get_arrow_schema / get_schema_field_names ────────────────────────────
+# ── get_arrow_schema ─────────────────────────────────────────────────────
 
 
 def test_get_arrow_schema_returns_pyarrow_schema_with_standard_fields():
@@ -307,18 +307,6 @@ def test_get_arrow_schema_returns_pyarrow_schema_with_standard_fields():
     field_names = {f.name for f in schema}
     assert "timestamp" in field_names
     assert "status" in field_names
-
-
-def test_get_schema_field_names_returns_set_of_field_strings():
-    """`get_schema_field_names` returns a set (not a list) for fast
-    membership checks. Pinned because ingest checks
-    ``if "ip" in field_names`` on every row — O(1) set lookup
-    matters."""
-    from backend.core.iceberg import get_schema_field_names
-
-    names = get_schema_field_names(None)
-    assert isinstance(names, set)
-    assert len(names) > 0
 
 
 def test_get_arrow_schema_includes_enabled_custom_fields():

@@ -328,31 +328,31 @@ def _proxy_client() -> _Client:
 def test_proxies_report_real_counts_quality_isps_and_clients():
     with patch("backend.core.duckdb.get_asn_names", return_value={15169: "Example Net"}):
         res = hs.get_proxies_data(_service(_proxy_client()), _req(), START, END)
-    assert (res.active_proxies_count, res.tunnel_requests_count, res.distance_mismatches_count) == (3, 40, 2)
-    assert [(q.label, q.value) for q in res.traffic_quality] == [
+    assert (res["active_proxies_count"], res["tunnel_requests_count"], res["distance_mismatches_count"]) == (3, 40, 2)
+    assert [(q["label"], q["value"]) for q in res["traffic_quality"]] == [
         ("Direct Connection", 75.0),
         ("Active Tunnel / Proxy", 25.0),
     ]
-    assert [(i.isp, i.asn, i.count) for i in res.suspicious_isps] == [
+    assert [(i["isp"], i["asn"], i["count"]) for i in res["suspicious_isps"]] == [
         ("Example Net", 15169, 25),
         ("Unknown ISP", None, 1),
     ]
-    client = res.active_clients[0]
-    assert client.ip == "198.51.100.77"
-    assert client.asn_name == "Example Net"
-    assert client.impossible_distance is True
-    assert client.risk_level == "High"
-    assert client.city is None
-    assert client.country == "GB"
-    assert client.distance_km == 8800.4
+    client = res["active_clients"][0]
+    assert client["ip"] == "198.51.100.77"
+    assert client["asn_name"] == "Example Net"
+    assert client["impossible_distance"] is True
+    assert client["risk_level"] == "High"
+    assert client["city"] is None
+    assert client["country"] == "GB"
+    assert client["distance_km"] == 8800.4
 
 
 def test_proxies_mask_client_ips_for_analyst_sessions():
     with patch("backend.core.duckdb.get_asn_names", return_value={}):
         masked = hs.get_proxies_data(_service(_proxy_client()), _req(), START, END, mask_ips=True)
         clear = hs.get_proxies_data(_service(_proxy_client()), _req(), START, END, mask_ips=False)
-    assert masked.active_clients[0].ip == "198.51.100.xxx"
-    assert clear.active_clients[0].ip == "198.51.100.77"
+    assert masked["active_clients"][0]["ip"] == "198.51.100.xxx"
+    assert clear["active_clients"][0]["ip"] == "198.51.100.77"
 
 
 def test_top_ips_header_masks_ips_for_analyst_sessions():
@@ -371,9 +371,9 @@ def test_proxies_section_is_served_inside_aggregates_with_masking():
 def test_proxies_with_no_rows_report_zero_without_dividing_by_nothing():
     with patch("backend.core.duckdb.get_asn_names", return_value={}):
         res = hs.get_proxies_data(_service(_Client()), _req(), START, END)
-    assert res.active_proxies_count == 0
-    assert res.traffic_quality == []
-    assert res.active_clients == []
+    assert res["active_proxies_count"] == 0
+    assert res["traffic_quality"] == []
+    assert res["active_clients"] == []
 
 
 def test_active_clients_list_high_risk_first():

@@ -132,7 +132,6 @@ def _login_analyst_and_bootstrap(client, tmp_path, monkeypatch, *, pii_policy, n
 
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
     monkeypatch.setenv("REMOTE_SHARE_DB_DIR", str(tmp_path / "system"))
-    share_db.reset_for_tests()
     tunnel.reset_for_tests()
     config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID, "ngwaf_workspace_id": ngwaf_workspace_id})
 

@@ -6,13 +6,13 @@ import { KeyRound, Loader2 } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
+import { useAutoFlash } from '@/hooks/useAutoFlash'
 import { client, extractApiError } from '@/lib/api'
 import { scoringConfigCompositeKey } from '@/lib/queries/scoring'
 import type { components } from '@/types/api.generated'
 
 interface RotateKeyButtonProps {
   serviceId: string
-  onRotated?: () => void
 }
 
 type RotateKeyResponse = components['schemas']['ScoringRotateKeyResponse']
@@ -25,21 +25,15 @@ type RotateKeyResponse = components['schemas']['ScoringRotateKeyResponse']
  * cycle. Two rotations back-to-back will drop the original key entirely
  * and mark its cookies as 'tampered' at the edge.
  */
-export function RotateKeyButton({ serviceId, onRotated }: RotateKeyButtonProps) {
+export function RotateKeyButton({ serviceId }: RotateKeyButtonProps) {
   const qc = useQueryClient()
   const [open, setOpen] = React.useState(false)
-  const [status, setStatus] = React.useState<
-    { kind: 'success' | 'error'; message: string } | null
-  >(null)
-  const timerRef = React.useRef<number | null>(null)
-
-  React.useEffect(() => {
-    return () => {
-      if (timerRef.current !== null) {
-        window.clearTimeout(timerRef.current)
-      }
-    }
-  }, [])
+  const {
+    value: status,
+    flash: flashStatus,
+    set: setStatus,
+    clear: clearStatus,
+  } = useAutoFlash<{ kind: 'success' | 'error'; message: string }>(4000)
 
   const mutation = useMutation({
     mutationFn: async (): Promise<RotateKeyResponse> => {
@@ -55,19 +49,11 @@ export function RotateKeyButton({ serviceId, onRotated }: RotateKeyButtonProps) 
       return data
     },
     onSuccess: () => {
-      setStatus({ kind: 'success', message: 'Key rotated; previous slot updated' })
+      flashStatus({ kind: 'success', message: 'Key rotated; previous slot updated' })
       setOpen(false)
       qc.invalidateQueries({ queryKey: ['scoring-status', serviceId] })
       qc.invalidateQueries({ queryKey: scoringConfigCompositeKey(serviceId) })
       qc.invalidateQueries({ queryKey: ['scoring-audit', serviceId] })
-      onRotated?.()
-      if (timerRef.current !== null) {
-        window.clearTimeout(timerRef.current)
-      }
-      timerRef.current = window.setTimeout(() => {
-        timerRef.current = null
-        setStatus(null)
-      }, 4000)
     },
     onError: (err: unknown) => {
       const message = err instanceof Error ? err.message : 'Failed to rotate key'
@@ -81,7 +67,7 @@ export function RotateKeyButton({ serviceId, onRotated }: RotateKeyButtonProps) 
         variant="destructive"
         size="sm"
         onClick={() => {
-          setStatus(null)
+          clearStatus()
           setOpen(true)
         }}
         disabled={mutation.isPending}

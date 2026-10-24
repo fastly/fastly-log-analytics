@@ -27,13 +27,12 @@ from __future__ import annotations
 
 import math
 
-import duckdb
 import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from backend.models.common import FilterSpec
-from backend.repositories._base import _safe_table
+from tests._helpers.duckdb_fixtures import make_seeded_logs_con
 
 _TABLE_NAME = "test_service"
 _src = {"name": _TABLE_NAME, "service_id": "tsid"}
@@ -47,112 +46,7 @@ def seeded_con():
     """In-memory DuckDB with a representative schema + 30 rows of data
     that's varied enough to exercise the WHERE/GROUP BY paths in each
     repo without being so big it slows hypothesis down."""
-    con = duckdb.connect(":memory:")
-    table = _safe_table(_TABLE_NAME)
-    con.execute(
-        f"""
-        CREATE TABLE {table} (
-            "timestamp" TIMESTAMPTZ,
-            "dt" VARCHAR,
-            "timestamp_hour" VARCHAR,
-            "status" INTEGER,
-            "country" VARCHAR,
-            "url" VARCHAR,
-            "ip" VARCHAR,
-            "method" VARCHAR,
-            "ua" VARCHAR,
-            "pop" VARCHAR,
-            "asn" INTEGER,
-            "city" VARCHAR,
-            "region" VARCHAR,
-            "elapsed" INTEGER,
-            "cache" VARCHAR,
-            "ottfb" DOUBLE,
-            "ttfb" DOUBLE,
-            "waf_sig" VARCHAR,
-            "edge" BOOLEAN,
-            "lat" DOUBLE,
-            "lon" DOUBLE,
-            "resp_bytes" INTEGER,
-            "oip" VARCHAR,
-            "ost" INTEGER,
-            "tcp_rtt" INTEGER,
-            "transport" VARCHAR,
-            "ploss" DOUBLE,
-            "rtt_var" INTEGER,
-            "rtt_min" INTEGER,
-            "retrans" INTEGER,
-            "bw" INTEGER,
-            "c_speed" VARCHAR,
-            "c_type" VARCHAR,
-            "delivery_rate" INTEGER,
-            "metro" VARCHAR,
-            "p_type" VARCHAR,
-            "ja3" VARCHAR,
-            "ja4" VARCHAR,
-            "ttl" INTEGER,
-            "rid" VARCHAR,
-            "prid" VARCHAR,
-            "server_region" VARCHAR,
-            "ottlb" DOUBLE
-        )
-        """
-    )
-    from datetime import UTC, datetime, timedelta
-
-    base = datetime.now(UTC) - timedelta(hours=1)
-    statuses = [200, 200, 200, 200, 404, 500, 200, 304, 301, 200] * 3
-    pops = ["LAX", "JFK", "LHR"] * 10
-    for i in range(30):
-        ts = base + timedelta(minutes=i * 2)
-        con.execute(
-            f"INSERT INTO {table} VALUES " + "(" + ", ".join(["?"] * 43) + ")",
-            [
-                ts,
-                ts.strftime("%Y-%m-%d"),
-                ts.strftime("%Y-%m-%d-%H"),
-                statuses[i],
-                "US" if i % 3 == 0 else "GB",
-                f"/path-{i % 10}",
-                f"10.0.0.{i}",
-                "GET",
-                "Mozilla/5.0",
-                pops[i],
-                15169 + (i % 5),
-                "San Francisco",
-                "CA",
-                50 + i * 10,
-                "HIT" if i % 2 == 0 else "MISS",
-                50000.0 + i,
-                0.05 + i * 0.01,
-                "",
-                True,
-                37.7749,
-                -122.4194,
-                500 + i * 100,
-                "origin-1.example.com",
-                statuses[i],
-                10000 + i * 100,  # tcp_rtt
-                "h2",
-                0.0,
-                100,
-                50,
-                0,
-                100000,
-                "C",
-                "broadband",
-                100000,
-                "807",  # metro
-                "U",
-                "ja3_fp",
-                "ja4_fp",
-                300,
-                f"rid_{i}",
-                f"prid_{i % 10}",
-                "us-west",
-                0.05 + i * 0.01,
-            ],
-        )
+    con = make_seeded_logs_con(_TABLE_NAME, num_rows=30)
     yield con
     con.close()
 

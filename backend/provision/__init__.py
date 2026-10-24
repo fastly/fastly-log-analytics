@@ -1,25 +1,9 @@
 from backend.core.fastly.client import fastly
 from backend.core.fastly.utils import parse_period
 
-from .cli import (
-    handle_invite_analyst,
-    handle_list_fields,
-    handle_list_groups,
-    handle_teardown,
-    handle_update_cdn,
-    handle_update_logs,
-    wizard,
-)
 from .fastly_api import (
-    CAPTURE_SNIPPET_PLAN,
-    account_has_rate_limiting,
-    delete_cdn_service,
-    ensure_cdn_service,
     generate_capture_vcl,
     load_log_format,
-    redeploy_cdn_vcl,
-    remove_logging_endpoint,
-    service_has_scoring_pragmas,
     update_logging_endpoint,
     validate_log_format,
 )
@@ -27,7 +11,6 @@ from .fos_setup import ensure_fos_access_key, find_fos_key
 from .orchestrator import (
     _sync_crontab,
     analyst_path_a_supported,
-    cleanup_local_data,
     generate_analyst_invite,
     perform_teardown,
     provision,
@@ -40,24 +23,9 @@ from .orchestrator import (
 __all__ = [
     "fastly",
     "parse_period",
-    # cli
-    "handle_invite_analyst",
-    "handle_list_fields",
-    "handle_list_groups",
-    "handle_teardown",
-    "handle_update_cdn",
-    "handle_update_logs",
-    "wizard",
     # fastly_api
-    "CAPTURE_SNIPPET_PLAN",
-    "account_has_rate_limiting",
-    "delete_cdn_service",
-    "ensure_cdn_service",
     "generate_capture_vcl",
     "load_log_format",
-    "redeploy_cdn_vcl",
-    "remove_logging_endpoint",
-    "service_has_scoring_pragmas",
     "update_logging_endpoint",
     "validate_log_format",
     # fos_setup
@@ -66,7 +34,6 @@ __all__ = [
     # orchestrator
     "_sync_crontab",
     "analyst_path_a_supported",
-    "cleanup_local_data",
     "generate_analyst_invite",
     "perform_teardown",
     "provision",

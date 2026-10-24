@@ -30,12 +30,16 @@ import importlib as _importlib
 # pre-split surface where the model was transitively imported at module top).
 from backend.models.admin import SustainedLossAlert  # noqa: F401
 
+# Re-exports for the external import surface listed above. These run
+# AFTER the side-effect imports so the sub-modules are loaded and the
+# helper names are guaranteed to exist on the package.
+from backend.utils.dir_size import _DIR_SIZE_CACHE, _get_dir_size  # noqa: F401
+
 # Side-effect imports: each sub-module decorates the shared router.
 # ``_router`` defines `router`; helpers + dir_size provide module-level
 # state the endpoints rely on. Endpoint sub-modules then bind their
 # routes onto the shared router instance.
 from . import (  # noqa: F401
-    _dir_size,
     _helpers,
     _router,
     bot_sources,
@@ -58,11 +62,6 @@ from . import (  # noqa: F401
     sync_status,
     trees,
 )
-
-# Re-exports for the external import surface listed above. These run
-# AFTER the side-effect imports so the sub-modules are loaded and the
-# helper names are guaranteed to exist on the package.
-from ._dir_size import _DIR_SIZE_CACHE, _get_dir_size  # noqa: F401
 from ._helpers import (  # noqa: F401
     ClientDisconnected,
     _AbortableQueue,

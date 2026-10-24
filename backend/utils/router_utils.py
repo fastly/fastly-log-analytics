@@ -132,6 +132,7 @@ def run_admin_cron_trigger(
     invalidate_cache: bool = True,
     require_high_scale: bool = False,
     high_scale_detail: Any = None,
+    precheck: Callable[[], None] | None = None,
 ) -> SyncStartResponse:
     """Shared execution wrapper for manual admin cron trigger routes."""
     if source.get("access_level") == "read_only":
@@ -145,6 +146,9 @@ def run_admin_cron_trigger(
                 status_code=400,
                 detail=high_scale_detail or f"{task_name} is only supported under high-scale mode.",
             )
+
+    if precheck is not None:
+        precheck()
 
     if invalidate_cache:
         from backend.repositories.dashboard import invalidate_service
@@ -186,6 +190,23 @@ def load_service_config(service_id: str) -> dict:
         # the migrated callers used — frontend code keys on this exact
         # message via ``error.detail.error === "Service not found"``.
         raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    return cfg
+
+
+def load_service_config_or_503(service_id: str, *, writable: bool = False) -> dict:
+    """Load a service's config, raising 503 on read error, 404 if missing, or 403 if writable required."""
+    from backend import config as svcconfig
+
+    try:
+        cfg = svcconfig.load_config(service_id)
+    except Exception:
+        raise HTTPException(
+            503, detail=make_error("service_unavailable", "Service configuration unavailable")
+        ) from None
+    if not cfg:
+        raise HTTPException(404, detail=make_error("service_not_found", "Service not found"))
+    if writable and cfg.get("access_level", "read_write") != "read_write":
+        raise HTTPException(403, detail=make_error("read_write_required", "Read-write service required"))
     return cfg
 
 
@@ -454,7 +475,7 @@ def format_debug_request(
 # layering, and the only callers are routers anyway.
 
 
-def query_errors(status_code: int = 400):
+def query_errors(status_code: int = 400, *, code: str = "unhandled_error", logger_obj: Logger = logger):
     """Decorator that maps unhandled exceptions to the unified error envelope.
 
     Three branches:
@@ -468,7 +489,7 @@ def query_errors(status_code: int = 400):
       shape, different code.
     * Any other ``Exception`` → ``raise_internal``: logs the full
       traceback server-side (operator triage) and returns ``{"error":
-      "unhandled_error", "error_id": "..."}`` so upstream API bodies,
+      code, "error_id": "..."}`` so upstream API bodies,
       DuckDB internals, and stack-trace text never reach the client.
 
     Wearers of the decorator no longer need to think about which exception
@@ -503,7 +524,7 @@ def query_errors(status_code: int = 400):
                 except LookupError as e:
                     raise HTTPException(status_code=404, detail=make_error("not_found", redact_error_text(e)))
                 except Exception as e:
-                    raise_internal(logger, e, code="unhandled_error", status=status_code)
+                    raise_internal(logger_obj, e, code=code, status=status_code)
 
             return async_wrapper
 
@@ -518,7 +539,7 @@ def query_errors(status_code: int = 400):
             except LookupError as e:
                 raise HTTPException(status_code=404, detail=make_error("not_found", redact_error_text(e)))
             except Exception as e:
-                raise_internal(logger, e, code="unhandled_error", status=status_code)
+                raise_internal(logger_obj, e, code=code, status=status_code)
 
         return wrapper
 

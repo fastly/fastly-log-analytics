@@ -49,7 +49,6 @@ describe('CardGrid', () => {
       <CardGrid
         visibleCardList={[]}
         isReady={false}
-        isLoadingAggs={true}
         isFetchingAggs={false}
         aggregates={undefined}
         compareAggregates={undefined}
@@ -79,7 +78,6 @@ describe('CardGrid', () => {
       <CardGrid
         visibleCardList={visibleCardList}
         isReady={true}
-        isLoadingAggs={false}
         isFetchingAggs={false}
         aggregates={aggregates}
         compareAggregates={undefined}
@@ -106,7 +104,6 @@ describe('CardGrid', () => {
       <CardGrid
         visibleCardList={[{ id: 'ip', label: 'Client IP', inActiveFormat: false }]}
         isReady={true}
-        isLoadingAggs={false}
         isFetchingAggs={false}
         aggregates={aggregates}
         compareAggregates={undefined}
@@ -127,7 +124,6 @@ describe('CardGrid', () => {
       <CardGrid
         visibleCardList={[{ id: 'ip', label: 'Client IP', inActiveFormat: false }]}
         isReady={true}
-        isLoadingAggs={false}
         isFetchingAggs={false}
         aggregates={aggregates}
         compareAggregates={undefined}
@@ -149,7 +145,6 @@ describe('CardGrid', () => {
       <CardGrid
         visibleCardList={[{ id: 'custom_field_42', label: 'My Custom Field', inActiveFormat: false }]}
         isReady={true}
-        isLoadingAggs={false}
         isFetchingAggs={false}
         aggregates={{ data: { custom_field_42: { total: 1, top: [] } } }}
         compareAggregates={undefined}

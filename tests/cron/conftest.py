@@ -110,3 +110,122 @@ def cron_Recorder(monkeypatch: pytest.MonkeyPatch) -> CronRecorder:
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", rec.start_mock)
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", rec.log_mock)
     return rec
+
+
+@pytest.fixture
+def stub_cron_envelope(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
+    """Stub the standard cron envelope helpers so a cron job's progress and
+    ``cron_runs`` side effects can be inspected without real DB writes.
+    """
+    default_run_id = 33 if "test_commit" in request.node.nodeid else 11
+    start = MagicMock(return_value=default_run_id)
+    log = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", start)
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log)
+
+    start_progress = MagicMock()
+    end_progress = MagicMock()
+    cleanup = MagicMock()
+    log_event = MagicMock()
+    monkeypatch.setattr("backend.cron_progress.start_progress", start_progress)
+    monkeypatch.setattr("backend.cron_progress.end_progress", end_progress)
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", cleanup)
+    monkeypatch.setattr("backend.cron.scheduler._log_and_add_progress", log_event)
+    monkeypatch.setattr("backend.cron.scheduler._check_disk_space", lambda *a, **kw: (True, ""))
+    monkeypatch.setattr("backend.cron.scheduler._check_buffer_backlog", lambda *a, **kw: "")
+    monkeypatch.setattr("backend.cron.scheduler._extract_log_text", lambda rid: "")
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: "/tmp/cache")
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *a, **kw: False)
+    monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", MagicMock())
+    monkeypatch.setattr("backend.cron.jobs._common.refresh_view_and_warm_pool", MagicMock())
+    monkeypatch.setattr("backend.cron.jobs.metadata.dispatch_post_commit_metadata_sync", MagicMock())
+    return {
+        "start": start,
+        "log": log,
+        "start_progress": start_progress,
+        "end_progress": end_progress,
+        "log_event": log_event,
+    }
+
+
+def assert_manual_trigger_standard_mode_rejected(
+    endpoint_path: str,
+    service_id: str,
+    base_source: dict[str, Any],
+) -> Any:
+    """Assert that a High-Scale-only manual trigger endpoint returns 400 in standard mode."""
+    from starlette.testclient import TestClient
+
+    from backend.deps import get_service_id, get_source
+    from backend.main import app
+
+    standard_src = {**base_source, "deployment_mode": "standard"}
+    app.dependency_overrides[get_source] = lambda: standard_src
+    app.dependency_overrides[get_service_id] = lambda: service_id
+    try:
+        client = TestClient(app)
+        resp = client.post(endpoint_path, headers={"x-fastly-service-id": service_id})
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        msg = detail["message"] if isinstance(detail, dict) else str(detail)
+        assert "high-scale" in msg.lower()
+        return resp
+    finally:
+        app.dependency_overrides.pop(get_source, None)
+        app.dependency_overrides.pop(get_service_id, None)
+
+
+def assert_manual_trigger_read_only_rejected(
+    endpoint_path: str,
+    service_id: str,
+    base_source: dict[str, Any],
+) -> Any:
+    """Assert that a manual trigger endpoint returns 403 on a read-only service."""
+    from starlette.testclient import TestClient
+
+    from backend.deps import get_service_id, get_source
+    from backend.main import app
+
+    ro_src = {**base_source, "access_level": "read_only"}
+    app.dependency_overrides[get_source] = lambda: ro_src
+    app.dependency_overrides[get_service_id] = lambda: service_id
+    try:
+        client = TestClient(app)
+        resp = client.post(endpoint_path, headers={"x-fastly-service-id": service_id})
+        assert resp.status_code == 403
+        detail = resp.json()["detail"]
+        msg = detail["message"] if isinstance(detail, dict) else str(detail)
+        assert "read-only" in msg.lower()
+        return resp
+    finally:
+        app.dependency_overrides.pop(get_source, None)
+        app.dependency_overrides.pop(get_service_id, None)
+
+
+def assert_manual_trigger_non_admin_rejected(
+    endpoint_path: str,
+    service_id: str,
+    base_source: dict[str, Any],
+) -> Any:
+    """Assert that a manual trigger endpoint returns 403 when invoked by a non-admin."""
+    from fastapi import HTTPException
+    from starlette.testclient import TestClient
+
+    from backend.deps import get_service_id, get_source, require_admin
+    from backend.main import app
+
+    def reject_analyst() -> None:
+        raise HTTPException(status_code=403, detail={"error": "admin_only"})
+
+    app.dependency_overrides[get_source] = lambda: base_source
+    app.dependency_overrides[get_service_id] = lambda: service_id
+    app.dependency_overrides[require_admin] = reject_analyst
+    try:
+        client = TestClient(app)
+        resp = client.post(endpoint_path, headers={"x-fastly-service-id": service_id})
+        assert resp.status_code == 403
+        return resp
+    finally:
+        app.dependency_overrides.pop(get_source, None)
+        app.dependency_overrides.pop(get_service_id, None)
+        app.dependency_overrides.pop(require_admin, None)

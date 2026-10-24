@@ -359,18 +359,6 @@ def get_snapshot_calendar(source: dict, table=None, table_name: str = "logs", *,
                 logger.debug("get_snapshot_calendar: con.close failed (ignored)", exc_info=True)
 
 
-def _get_all_table_stats(
-    source: dict,
-    table_names: tuple[str, ...] = ("logs", "client_vitals", "client_errors"),
-) -> dict[str, dict]:
-    """Attach DuckLake once and inspect all requested tables in a single session."""
-    with ducklake_session(source):
-        return {tbl: get_table_info(source, table_name=tbl) for tbl in table_names}
-
-
-get_all_table_stats = _get_all_table_stats
-
-
 # ---------------------------------------------------------------------------
 # Internal helpers
 

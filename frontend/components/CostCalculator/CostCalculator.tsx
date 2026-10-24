@@ -12,10 +12,9 @@ import { Results } from './Results'
 interface CostCalculatorProps {
   prefillData?: PrefillResponse
   prefillNote?: string
-  overrideBytesPerLine?: number
 }
 
-export function CostCalculator({ prefillData, prefillNote, overrideBytesPerLine }: CostCalculatorProps) {
+export function CostCalculator({ prefillData, prefillNote }: CostCalculatorProps) {
   const [s, dispatch] = useReducer(reducer, DEFAULTS)
 
   useEffect(() => {
@@ -23,12 +22,6 @@ export function CostCalculator({ prefillData, prefillNote, overrideBytesPerLine 
       dispatch({ type: 'PREFILL', prefill: prefillData })
     }
   }, [prefillData])
-
-  useEffect(() => {
-    if (overrideBytesPerLine !== undefined && overrideBytesPerLine > 0) {
-      dispatch({ type: 'SET', key: 'bytesPerLine', value: overrideBytesPerLine })
-    }
-  }, [overrideBytesPerLine])
 
   const set = (key: keyof CalcState) => (value: number | boolean) => {
     dispatch({ type: 'SET', key, value })

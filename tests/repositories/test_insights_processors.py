@@ -258,11 +258,13 @@ def test_new_probes_list_is_regex_escaped():
     metacharacters that would otherwise match almost any URL."""
     import re
 
+    from backend.repositories._sql import insights as SQL
+
     # ``.env`` → ``\.env`` in the compiled regex
-    assert r"\.env" in defs.NEW_PROBE_REGEX
-    assert r"\.git" in defs.NEW_PROBE_REGEX
+    assert r"\.env" in SQL.NEW_PROBE_REGEX
+    assert r"\.git" in SQL.NEW_PROBE_REGEX
     # Sanity: the compiled regex compiles
-    re.compile(defs.NEW_PROBE_REGEX)
+    re.compile(SQL.NEW_PROBE_REGEX)
 
 
 def test_new_probes_regex_is_case_insensitive_via_duckdb_flag():
@@ -275,8 +277,10 @@ def test_new_probes_regex_is_case_insensitive_via_duckdb_flag():
     heuristic, producing one excess bound parameter and a
     ``Parameter argument/count mismatch`` error at execution. Pinned
     here so future refactors don't regress to ``(?i)``."""
+    from backend.repositories._sql import insights as SQL
+
     # Regex itself must NOT contain inline flags (would break param counting).
-    assert "(?i)" not in defs.NEW_PROBE_REGEX
+    assert "(?i)" not in SQL.NEW_PROBE_REGEX
     # SQL template must pass the 'i' flag as the third arg to regexp_matches.
     sql = next(d.sql_template for d in defs.registry.get_all() if d.id == "new_probe_urls")
     assert "regexp_matches" in sql

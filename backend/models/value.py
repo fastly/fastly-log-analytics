@@ -31,9 +31,6 @@ class ValueTimeSeriesPoint(BaseModel):
     category: str | None = None
 
 
-TimeSeriesPoint = ValueTimeSeriesPoint
-
-
 class OverviewMetrics(BaseModel):
     origin_offload_pct: float | None = None
     threats_blocked: int | None = None

@@ -54904,17 +54904,6 @@
             ],
             "title": "Network Heatmap"
           },
-          "network_heatmap_days": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Network Heatmap Days"
-          },
           "network_geo": {
             "anyOf": [
               {
@@ -54925,17 +54914,6 @@
               }
             ],
             "title": "Network Geo"
-          },
-          "network_geo_days": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Network Geo Days"
           },
           "network_quality": {
             "anyOf": [
@@ -55011,17 +54989,6 @@
             ],
             "title": "Rows Downloaded"
           },
-          "bytes_downloaded": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Bytes Downloaded"
-          },
           "files_removed": {
             "anyOf": [
               {
@@ -55032,17 +54999,6 @@
               }
             ],
             "title": "Files Removed"
-          },
-          "files_skipped": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Files Skipped"
           }
         },
         "additionalProperties": true,
@@ -66016,31 +65972,6 @@
               }
             ],
             "title": "Missing Fields"
-          },
-          "missing_groups": {
-            "anyOf": [
-              {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Missing Groups"
-          },
-          "enable_url": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Enable Url"
           },
           "required_fields": {
             "anyOf": [
@@ -89104,28 +89035,6 @@
             ],
             "title": "Duration Ms"
           },
-          "sql_count": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Sql Count"
-          },
-          "sql_ms": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Sql Ms"
-          },
           "cache": {
             "anyOf": [
               {
@@ -90456,17 +90365,6 @@
               }
             ],
             "title": "Asn"
-          },
-          "asn_label": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Asn Label"
           },
           "session_start": {
             "type": "string",

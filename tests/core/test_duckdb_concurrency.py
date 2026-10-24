@@ -33,23 +33,6 @@ from backend.core.duckdb import (
 )
 
 
-@pytest.fixture
-def retries(monkeypatch):
-    """Observe this thread's retries without suppressing background telemetry."""
-    owner = threading.current_thread()
-    record = duckdb_mod._record_lock_retry
-    count = 0
-
-    def tracked_record():
-        nonlocal count
-        record()
-        if threading.current_thread() is owner:
-            count += 1
-
-    monkeypatch.setattr(duckdb_mod, "_record_lock_retry", tracked_record)
-    return lambda: count
-
-
 def _src(db_path: str) -> dict:
     """Minimal source dict the connection setup will accept.
 
@@ -94,8 +77,8 @@ def _make_failing_connect(fail_count: int, real_connect, target_path: str):
     return _fake, state
 
 
-def test_succeeds_after_transient_lock_errors(tmp_path, monkeypatch, retries):
-    """Three lock failures, then success. Counter should be 3."""
+def test_succeeds_after_transient_lock_errors(tmp_path, monkeypatch):
+    """Three lock failures, then success."""
     db_path = str(tmp_path / "retry.duckdb")
     # Pre-create the file so the `if not os.path.exists` branch in get_connection doesn't run and confuse the call counts
     duckdb.connect(db_path).close()
@@ -107,12 +90,10 @@ def test_succeeds_after_transient_lock_errors(tmp_path, monkeypatch, retries):
     # Reproduce an earlier test's background work while these patches are live.
     def unrelated_work():
         duckdb.connect(str(tmp_path / "unrelated.duckdb")).close()
-        duckdb_mod._record_lock_retry()
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         executor.submit(unrelated_work).result()
     assert state["calls"] == 0
-    assert retries() == 0
 
     src = _src(db_path)
     con = get_connection(src, max_wait=5.0, read_only=False)
@@ -122,7 +103,6 @@ def test_succeeds_after_transient_lock_errors(tmp_path, monkeypatch, retries):
         con.close()
 
     assert state["calls"] == 4, "should have retried 3 times then succeeded on the 4th call"
-    assert retries() == 3, f"counter must increment once per retry; got {retries()}"
 
 
 def test_uses_exponential_backoff(tmp_path, monkeypatch):
@@ -173,17 +153,19 @@ def test_uses_exponential_backoff(tmp_path, monkeypatch):
         assert abs(got - want) < 1e-6, f"sleep #{i + 1}: expected {want}s, got {got}s. Full sequence: {sleeps}"
 
 
-def test_deadline_exceeded_raises_dbbusyerror(tmp_path, monkeypatch, retries):
+def test_deadline_exceeded_raises_dbbusyerror(tmp_path, monkeypatch):
     """When the deadline is reached, the caller sees DBBusyError — not a
     raw DuckDB exception. This is the contract dashboards rely on to
     translate to a clean 'system busy, retry' response."""
     db_path = str(tmp_path / "busy.duckdb")
 
     real_connect = duckdb.connect
+    calls = {"n": 0}
 
     def _always_locked(path, read_only=False):
         if path != db_path:
             return real_connect(path, read_only=read_only)
+        calls["n"] += 1
         raise duckdb.Error("Could not set lock on file: database is locked")
 
     monkeypatch.setattr(duckdb_mod.duckdb, "connect", _always_locked)
@@ -203,13 +185,10 @@ def test_deadline_exceeded_raises_dbbusyerror(tmp_path, monkeypatch, retries):
     assert "locked by another process" in str(excinfo.value)
     # __cause__ preserves the original DuckDB error for forensic debugging.
     assert excinfo.value.__cause__ is not None
-    # Multiple retries should have been recorded — the exact count varies
-    # by scheduler, but it must be > 0 (we hit the retry path before
-    # giving up).
-    assert retries() > 0
+    assert calls["n"] > 1
 
 
-def test_non_lock_error_is_not_retried(tmp_path, monkeypatch, retries):
+def test_non_lock_error_is_not_retried(tmp_path, monkeypatch):
     """Random errors must propagate immediately — retry would mask bugs."""
     db_path = str(tmp_path / "boom.duckdb")
     calls = {"n": 0}
@@ -228,13 +207,12 @@ def test_non_lock_error_is_not_retried(tmp_path, monkeypatch, retries):
         get_connection(src, max_wait=5.0, read_only=False)
 
     assert calls["n"] == 1, "non-lock errors must not be retried"
-    assert retries() == 0
 
 
 # ── Integration: real concurrent writer + readers ──────────────────────────
 
 
-def test_writer_then_reader_release_path(tmp_path, retries):
+def test_writer_then_reader_release_path(tmp_path):
     """Sanity: open a writer, close it, then a reader succeeds without
     retries. Ensures the retry path is contention-only — no false positives
     in the no-contention case."""
@@ -249,7 +227,6 @@ def test_writer_then_reader_release_path(tmp_path, retries):
     # Open and immediately close a writer.
     w = get_connection(src, read_only=False)
     w.close()
-    assert retries() == 0, "no contention; counter must not advance"
 
     # Reader should sail through.
     r = get_connection(src, read_only=True)
@@ -257,7 +234,3 @@ def test_writer_then_reader_release_path(tmp_path, retries):
         r.execute("SELECT count(*) FROM t").fetchone()
     finally:
         r.close()
-
-    assert retries() == 0, (
-        f"reader after closed writer hit the retry path ({retries()} retries); regression in lock detection?"
-    )

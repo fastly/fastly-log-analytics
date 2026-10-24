@@ -4,19 +4,14 @@ import React, { useMemo, useState } from 'react'
 import { Loader2 } from 'lucide-react'
 import { usePathname } from 'next/navigation'
 import { useServiceStore } from '@/stores/serviceStore'
-import { client } from '@/lib/api'
-import { useBootstrapPending } from '@/hooks/useIsDataReady'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
-import { useSyncStatus, type SyncStatus } from '@/hooks/useSyncStatus'
+import { useSyncStatus } from '@/hooks/useSyncStatus'
 import { useHeaderBadgeStream } from '@/hooks/useHeaderBadgeStream'
 import { useAdminEventStream, type AdminEventChannel } from '@/hooks/useAdminEventStream'
-import { useLastSync, type LastSyncInfo } from '@/hooks/useLastSync'
+import { useLastSync } from '@/hooks/useLastSync'
 import { useBootstrap } from '@/hooks/useBootstrap'
-import { useDateFormat } from '@/hooks/useDateFormat'
 import { LiveElapsed } from '@/components/LiveElapsed'
 import { TimeAgo } from '@/components/TimeAgo'
-import { Badge } from '@/components/ui/badge'
-import type { StreamMetrics } from '@/types/api'
 import { useSeededReady } from '@/hooks/useSeededReady'
 import { queryKeys } from '@/lib/query-keys'
 
@@ -46,7 +41,6 @@ export function SyncStatusBadge() {
 
 function SyncStatusBadgeInner() {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
-  const { full, abbr } = useDateFormat()
   const pathname = usePathname()
   const { data: status } = useSyncStatus()
   const { data: lastSync } = useLastSync()

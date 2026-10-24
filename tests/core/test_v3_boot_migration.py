@@ -73,7 +73,6 @@ def test_pg_schema_statements_are_postgres_dialect():
     # committed_buffers on Postgres before ADR-18.
     assert "cron_runs" in blob
     assert "slow_queries" in blob
-    assert "committed_buffers" in blob
     assert "ingest_ledger" in blob
     assert "metric_snapshots" in blob
     assert "high_scale_ownership" in blob

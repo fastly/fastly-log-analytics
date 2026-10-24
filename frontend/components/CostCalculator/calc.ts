@@ -1,6 +1,6 @@
 import type { components } from '@/types/api.generated'
 
-import { formatAbbreviatedCount, formatCount, formatUSD } from '@/lib/format'
+import { formatAbbreviatedCount, formatUSD } from '@/lib/format'
 export type PrefillResponse = components["schemas"]["PrefillResponse"]
 
 // ─── Billing Zones ────────────────────────────────────────────────────────────

@@ -212,7 +212,7 @@ def test_query_request_rejects_oversized_max_rows():
     """M1: the model caps max_rows at 10_000 (was unbounded → OOM lever)."""
     from pydantic import ValidationError
 
-    from backend.models.dashboard import QueryRequest
+    from backend.models.query import QueryRequest
 
     with pytest.raises(ValidationError):
         QueryRequest(sql="SELECT 1", max_rows=10_001)

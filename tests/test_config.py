@@ -1098,3 +1098,55 @@ def test_clickhouse_provisioner_is_none_when_clickhouse_is_disabled(clickhouse_e
     monkeypatch.setenv("CLICKHOUSE_PROVISION_USER", "fla_provisioner")
 
     assert svcconfig.load_clickhouse_provisioner_config() is None
+
+
+# ── Cleanup script identifies orphaned fields ────────────────────────────────
+
+
+def test_cleanup_script_identifies_orphaned_toplevel_endpoint_name():
+    """The cleanup script should identify and remove top-level endpoint_name."""
+    import importlib.util
+    from pathlib import Path as PathlibPath
+
+    script_path = PathlibPath(__file__).parent.parent / "scripts" / "cleanup_system_fields_from_configs.py"
+    spec = importlib.util.spec_from_file_location("cleanup_script", script_path)
+    cleanup_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cleanup_module)
+
+    assert cleanup_module.is_orphaned_toplevel_field("endpoint_name") is True
+    assert cleanup_module.is_orphaned_toplevel_field("last_reconciliation_at") is True
+    assert cleanup_module.is_orphaned_toplevel_field("name") is False
+    assert cleanup_module.is_orphaned_toplevel_field("service_id") is False
+
+
+def test_cleanup_script_removes_orphaned_fields_from_config():
+    """The cleanup script should remove orphaned fields from a config file."""
+    import importlib.util
+    from pathlib import Path as PathlibPath
+
+    script_path = PathlibPath(__file__).parent.parent / "scripts" / "cleanup_system_fields_from_configs.py"
+    spec = importlib.util.spec_from_file_location("cleanup_script", script_path)
+    cleanup_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cleanup_module)
+
+    cfg = {
+        "service_id": "test-svc",
+        "name": "Test Service",
+        "endpoint_name": "Legacy Name",
+        "last_reconciliation_at": "2026-08-07T12:00:00Z",
+        "provisioning": {"endpoint_name": "Current Name"},
+        "log_fields": {"custom_fields": []},
+    }
+
+    removed = []
+    for field_name in list(cfg.keys()):
+        if cleanup_module.is_orphaned_toplevel_field(field_name):
+            del cfg[field_name]
+            removed.append(field_name)
+
+    assert "endpoint_name" not in cfg
+    assert "last_reconciliation_at" not in cfg
+    assert set(removed) == {"endpoint_name", "last_reconciliation_at"}
+    assert cfg["service_id"] == "test-svc"
+    assert cfg["name"] == "Test Service"
+    assert cfg["provisioning"]["endpoint_name"] == "Current Name"

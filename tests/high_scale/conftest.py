@@ -564,3 +564,55 @@ def _validate_owner(owner: str) -> None:
 
 def _now_iso() -> str:
     return datetime.now(tz=UTC).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Shared ClickHouse Container Integration Helpers
+# ---------------------------------------------------------------------------
+
+_SQL_ROOT = Path("backend/high_scale/sql")
+
+
+def free_loopback_port() -> int:
+    """Bind an ephemeral loopback port and return the port number."""
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def clickhouse_single_node_ddl(sql_root: Path = _SQL_ROOT) -> list[str]:
+    """Load High-Scale ClickHouse schema SQL statements rewritten for single-node MergeTree."""
+    import re
+
+    statements: list[str] = []
+    for name in ("publication_schema.sql", "request_schema.sql", "rum_schema.sql"):
+        text = (sql_root / name).read_text()
+        text = re.sub(
+            r"ReplicatedReplacingMergeTree\(([^)]+)\)\s*\('[^']+',\s*'[^']+'\)",
+            r"ReplacingMergeTree(\1)",
+            text,
+        )
+        text = re.sub(r"ReplicatedMergeTree\([^;]*?\)", "MergeTree()", text)
+        text = re.sub(r"\nTTL [^;]*;", ";", text)
+        text = re.sub(r"--[^\n]*", "", text)
+        statements += [s.strip() for s in text.split(";") if s.strip()]
+    return statements
+
+
+def wait_for_clickhouse_ready(base_url: str, timeout_s: float = 90.0) -> None:
+    """Poll ClickHouse HTTP ``/ping`` until it responds ``Ok.`` or raise ``RuntimeError``."""
+    import time
+
+    import httpx
+
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            if httpx.get(f"{base_url}ping", timeout=2).text.strip() == "Ok.":
+                return
+        except httpx.HTTPError:
+            pass
+        time.sleep(1)
+    raise RuntimeError("clickhouse-server did not become ready")

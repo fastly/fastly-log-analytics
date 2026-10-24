@@ -16,7 +16,6 @@ type TopBots = components['schemas']['SecurityTopBotsResponse']
 export interface CardGridProps {
   visibleCardList: DashboardCard[]
   isReady: boolean
-  isLoadingAggs: boolean
   isFetchingAggs: boolean
   aggregates: DashboardAggregates | null | undefined
   compareAggregates: DashboardAggregates | null | undefined
@@ -34,7 +33,6 @@ export interface CardGridProps {
 export function CardGrid({
   visibleCardList,
   isReady,
-  isLoadingAggs,
   isFetchingAggs,
   aggregates,
   compareAggregates,

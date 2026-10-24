@@ -18,7 +18,6 @@ class SourceObjectMissingError(RuntimeError):
 
 
 MAX_SOURCE_PAGE_SIZE = 500
-DEFAULT_SOURCE_PAGE_SIZE = 100
 INITIAL_SOURCE_CURSOR = "__initial__"
 TERMINAL_SOURCE_CURSOR_PREFIX = "__terminal__:"
 

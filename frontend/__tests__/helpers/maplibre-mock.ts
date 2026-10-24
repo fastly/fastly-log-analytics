@@ -28,7 +28,7 @@
  */
 
 import type { MapOptions } from 'maplibre-gl'
-import { stubResizeObserver } from './browser-stubs'
+import { StubResizeObserver } from './browser-stubs'
 
 export type MockMapEventPayload = Record<string, unknown>
 export type MockMapListener = (e: MockMapEventPayload) => void
@@ -48,7 +48,7 @@ export interface MockMapInstance {
   addLayer: (layer: MockMapLayer) => void
   removeLayer: () => void
   removeSource: () => void
-  getSource: (id: string) => MockMapSourceHandle
+  getSource: (id: string) => MockMapSourceHandle | undefined
   getLayer: (id: string) => MockMapLayer | undefined
   setFeatureState: () => void
   setPaintProperty: (...args: unknown[]) => void
@@ -63,6 +63,8 @@ export interface MockMapInstance {
   removed: boolean
   project: () => { x: number; y: number }
   fitBounds: () => void
+  flyTo: () => void
+  cameraForBounds: () => { center: [number, number]; zoom: number }
   setMaxBounds: () => void
   addControl: () => void
   emit: (event: string, payload?: MockMapEventPayload) => void
@@ -86,7 +88,8 @@ export const mapInstances: MockMapInstance[] = []
  *
  * Every constructed map gets pushed into the shared `mapInstances` array.
  */
-export function maplibreMockFactory() {
+export function maplibreMockFactory(opts?: { strictSources?: boolean }) {
+  const strictSources = opts?.strictSources ?? false
   class MockMap implements MockMapInstance {
     container: string | HTMLElement | undefined
     listeners: Record<string, MockMapListener[]> = {}
@@ -111,24 +114,23 @@ export function maplibreMockFactory() {
     }
     off() {}
     addSource(id: string, src: MockMapSource) {
-      this.sources[id] = src
+      const handle: MockMapSourceHandle = {
+        ...src,
+        setData: (data: unknown) => {
+          handle.data = data
+        },
+      }
+      this.sources[id] = handle
     }
     addLayer(layer: MockMapLayer) {
       this.layers.push(layer)
     }
     removeLayer() {}
     removeSource() {}
-    getSource(id: string): MockMapSourceHandle {
-      const src = this.sources[id]
-      if (src) {
-        return {
-          ...src,
-          setData: (data: unknown) => {
-            src.data = data
-          }
-        }
-      }
-      return { setData: () => {} }
+    getSource(id: string): MockMapSourceHandle | undefined {
+      const src = this.sources[id] as MockMapSourceHandle | undefined
+      if (strictSources) return src
+      return src ?? { setData: () => {} }
     }
     getLayer(id: string) {
       return this.layers.find((l) => l.id === id)
@@ -157,6 +159,10 @@ export function maplibreMockFactory() {
       return { x: 0, y: 0 }
     }
     fitBounds() {}
+    flyTo() {}
+    cameraForBounds(): { center: [number, number]; zoom: number } {
+      return { center: [0, 0], zoom: 2 }
+    }
     setMaxBounds() {}
     addControl() {}
     emit(event: string, payload: MockMapEventPayload = {}) {
@@ -171,11 +177,13 @@ export function maplibreMockFactory() {
       Map: MockMap,
       LngLatBounds: class {},
       NavigationControl: class {},
+      GlobeControl: class {},
       setWorkerUrl: () => {},
     },
     Map: MockMap,
     LngLatBounds: class {},
     NavigationControl: class {},
+    GlobeControl: class {},
     setWorkerUrl: () => {},
   }
 }
@@ -186,5 +194,7 @@ export function maplibreMockFactory() {
  * multiple times — only patches when the global is absent.
  */
 export function installMaplibreSideEffects(): void {
-  if (!('ResizeObserver' in globalThis)) stubResizeObserver()
+  if (!('ResizeObserver' in globalThis)) {
+    globalThis.ResizeObserver = StubResizeObserver
+  }
 }

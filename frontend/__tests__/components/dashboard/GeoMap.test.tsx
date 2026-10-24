@@ -93,7 +93,6 @@ describe('GeoMap', () => {
     render(
       <GeoMap
         isReady={false}
-        isLoadingAggs={true}
         isFetchingAggs={false}
         aggregates={undefined}
         catalog={catalog}
@@ -110,7 +109,6 @@ describe('GeoMap', () => {
     render(
       <GeoMap
         isReady={true}
-        isLoadingAggs={false}
         isFetchingAggs={false}
         aggregates={{ map_data: [] }}
         catalog={catalog}
@@ -132,7 +130,6 @@ describe('GeoMap', () => {
     render(
       <GeoMap
         isReady={true}
-        isLoadingAggs={false}
         isFetchingAggs={false}
         aggregates={{ map_data: [] }}
         catalog={catalog}
@@ -154,7 +151,6 @@ describe('GeoMap', () => {
     render(
       <GeoMap
         isReady={true}
-        isLoadingAggs={false}
         isFetchingAggs={false}
         aggregates={{ map_data }}
         catalog={catalog}
@@ -172,7 +168,6 @@ describe('GeoMap', () => {
     render(
       <GeoMap
         isReady={true}
-        isLoadingAggs={false}
         isFetchingAggs={false}
         aggregates={{ map_data: [{ country: 'US', count: 1 }] }}
         catalog={catalog}
@@ -188,7 +183,6 @@ describe('GeoMap', () => {
     render(
       <GeoMap
         isReady={true}
-        isLoadingAggs={false}
         isFetchingAggs={false}
         aggregates={{ map_data: [] }}
         catalog={undefined}

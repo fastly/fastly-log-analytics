@@ -55,18 +55,6 @@ def _safe_table_name(*a, **kw):
     return _db_main._safe_table_name(*a, **kw)
 
 
-def _data_stats_fingerprint(*a, **kw):
-    return _db_main._data_stats_fingerprint(*a, **kw)
-
-
-def _execute_query_with_retry(*a, **kw):
-    return _db_main._execute_query_with_retry(*a, **kw)
-
-
-def _get_fos_client(*a, **kw):
-    return _db_main._get_fos_client(*a, **kw)
-
-
 def get_connection(*a, **kw):
     return _db_main.get_connection(*a, **kw)
 
@@ -75,23 +63,77 @@ def is_configured(*a, **kw):
     return _db_main.is_configured(*a, **kw)
 
 
-# Module-level constants the carved code reads with bare names.
-# ``STORAGE_MODE`` is set once at main-module load and never mutated, so
-# a static rebind here is fine. ``_DEFAULT_SOURCE`` CAN be re-bound by
-# ``reload_default_source`` — expose it via a property-like getter so
-# the bare-name reads inside this module's functions always see the
-# current main-module value (tests that swap it for fixture data work
-# unchanged).
-STORAGE_MODE = _db_main.STORAGE_MODE
-
-
+# ``_DEFAULT_SOURCE`` CAN be re-bound by ``reload_default_source`` — expose it
+# via a property-like getter so the bare-name reads inside this module's
+# functions always see the current main-module value (tests that swap it for
+# fixture data work unchanged).
 def __getattr__(name: str):
     if name == "_DEFAULT_SOURCE":
         return _db_main._DEFAULT_SOURCE
-    if name == "STORAGE_MODE":
-        # Re-read in case main-module rebound it after our top-level capture.
-        return _db_main.STORAGE_MODE
     raise AttributeError(name)
+
+
+# Cache for the data-side half of the get_sync_status COUNT/MIN/MAX query —
+# the second-largest cost in the sync cron path (~240 ms warm with ~1.7 k
+# small parquets, called every tick via refresh_config_status). Keyed by a
+# cheap data-dir mtime fingerprint; buffer-side stats are recomputed fresh
+# each call (~1 ms, <100 files) and merged. Process-local — workers don't
+# share — which is fine because the cost we avoid is per-process anyway.
+#
+# Why data-only: an earlier version of this fingerprint also covered the
+# buffer dir, but buffer writes land every tick (~1 s) on any busy service
+# and the cron only runs every ~10 s, so the fingerprint changed on virtually
+# every poll and the cache effectively never hit. The data dir only mutates
+# on commit/optimize (rare), so a data-only fingerprint hits ~every tick and
+# the split-out fresh buffer query keeps the merged count exactly accurate.
+_data_stats_cache: dict[str, tuple[tuple, int, Any, Any]] = {}
+_data_stats_cache_lock = threading.Lock()
+
+# Cache for update_top_values output. Same data-only fingerprint as the
+# get_sync_status split-stats cache: top values are dominated by committed
+# parquets (RESERVOIR samples 100 k rows from a view that scans every data
+# parquet's footer + sample), so when the data dir hasn't changed there is
+# nothing new to compute. Buffer churn is excluded deliberately — buffer
+# files contribute <0.1 % of a 100 k sample on any non-trivial service, and
+# filter-picker autocomplete already falls back to a live query when the
+# user types a string that isn't in the cached top-200 (get_field_values).
+# Process-local: refresh_config_status only runs in the APScheduler thread.
+_top_values_cache: dict[str, tuple] = {}
+_top_values_cache_lock = threading.Lock()
+
+
+def _data_stats_fingerprint(source: dict) -> tuple | None:
+    """Return a cheap fingerprint of the committed (data-side) view state.
+
+    Sums the mtime of every partition dir under ``cache/<bucket>/data/``
+    along with the count. New commits update partition dir mtimes (parquet
+    adds/removes); compaction/optimize also moves the mtimes. Cost is
+    ~0.5 ms for ~150 stat calls vs ~155 ms for the data-side COUNT/MIN/MAX
+    over the underlying parquets.
+
+    Buffer files are deliberately excluded — they churn every tick and would
+    bust the cache pointlessly. The buffer-side stats are merged in fresh by
+    the caller.
+
+    Returns None if the data dir is missing — callers should treat that as
+    "no cache" and fall back to the full view query.
+    """
+    cache_dir = _cache_dir(source)
+    data_dir = os.path.join(cache_dir, "data")
+    if not os.path.isdir(data_dir):
+        return None
+    data_sum = 0
+    data_count = 0
+    try:
+        for entry in os.scandir(data_dir):
+            try:
+                data_sum += entry.stat().st_mtime_ns
+                data_count += 1
+            except OSError:
+                pass
+    except OSError:
+        return None
+    return (data_sum, data_count)
 
 
 # In-memory cache for DuckLake committed table stats:

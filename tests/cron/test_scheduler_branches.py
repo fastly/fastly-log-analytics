@@ -42,21 +42,7 @@ def test_dev_mode_no_crons_false_when_unset(monkeypatch):
     assert sched.dev_mode_no_crons() is False
 
 
-# ── _display_name / _display_label ─────────────────────────────────────────
-
-
-def test_display_name_prefers_service_name():
-    src = {"service_name": "Friendly Name", "name": "svc"}
-    assert sched._display_name(src, "fallback") == "Friendly Name"
-
-
-def test_display_name_falls_back_to_name():
-    src = {"name": "svc-id"}
-    assert sched._display_name(src, "fallback") == "svc-id"
-
-
-def test_display_name_uses_explicit_fallback_when_both_missing():
-    assert sched._display_name({}, "fallback") == "fallback"
+# ── _display_label ─────────────────────────────────────────────────────────
 
 
 def test_display_label_collapses_when_name_matches_id():

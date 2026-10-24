@@ -397,8 +397,6 @@ class InsightAvailability(BaseModel):
     # SEPARATE subsystem from the runtime registry, so category is set in both.
     category: str | None = None
     missing_fields: list[str] | None = None
-    missing_groups: list[str] | None = None
-    enable_url: str | None = None
     required_fields: list[str] | None = None
     required_groups: list[str] | None = None
     available: bool

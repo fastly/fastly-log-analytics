@@ -12,13 +12,13 @@ import { setupNextHeadersMock, withTestHttpServer } from '../helpers/ssr'
 
 const { setHeaders } = setupNextHeadersMock()
 
-describe('resolveOriginDefaultKey (key-match contract)', () => {
+describe('resolveDefaultSsrRangeKey (key-match contract)', () => {
   it('cold load → rangeToken "24h", anchor floored to the 60s grid', async () => {
-    const { resolveOriginDefaultKey } = await import('@/lib/ssr/origin')
+    const { resolveDefaultSsrRangeKey } = await import('@/lib/ssr/upstream')
     const { quantizeAnchor } = await import('@/lib/time-window')
 
     const now = new Date('2026-06-29T12:00:37.123Z')
-    const got = resolveOriginDefaultKey(now)
+    const got = resolveDefaultSsrRangeKey(now)
     expect(got.rangeToken).toBe('24h')
     // 60s-floored, ISO-Z (no millis) — must equal what OriginClient's
     // quantizeAnchor pins for the same instant.
@@ -27,9 +27,9 @@ describe('resolveOriginDefaultKey (key-match contract)', () => {
   })
 
   it('two instants in the same 60s quantum resolve the identical anchor', async () => {
-    const { resolveOriginDefaultKey } = await import('@/lib/ssr/origin')
-    const a = resolveOriginDefaultKey(new Date('2026-06-29T12:00:01Z'))
-    const b = resolveOriginDefaultKey(new Date('2026-06-29T12:00:58Z'))
+    const { resolveDefaultSsrRangeKey } = await import('@/lib/ssr/upstream')
+    const a = resolveDefaultSsrRangeKey(new Date('2026-06-29T12:00:01Z'))
+    const b = resolveDefaultSsrRangeKey(new Date('2026-06-29T12:00:58Z'))
     expect(a.anchor).toBe(b.anchor)
     expect(a.anchor).toBe('2026-06-29T12:00:00Z')
   })
@@ -44,12 +44,13 @@ describe('SSR-seed key ↔ client first-paint key byte-match', () => {
   // SAME server-reproducible first-paint values documented in both files.
   it('the page.tsx seed key === the client useServiceQuery key', async () => {
     const { hashKey } = await import('@tanstack/react-query')
-    const { resolveOriginDefaultKey, ORIGIN_SSR_DEFAULTS, ORIGIN_SSR_SECTIONS } = await import(
+    const { resolveDefaultSsrRangeKey } = await import('@/lib/ssr/upstream')
+    const { ORIGIN_SSR_DEFAULTS, ORIGIN_SSR_SECTIONS } = await import(
       '@/lib/ssr/origin'
     )
 
     const serviceId = 'svc-1'
-    const { rangeToken, anchor } = resolveOriginDefaultKey(new Date('2026-06-29T12:00:30Z'))
+    const { rangeToken, anchor } = resolveDefaultSsrRangeKey(new Date('2026-06-29T12:00:30Z'))
 
     // ── SSR seed key (mirrors app/origin/page.tsx) ──
     const seedKey = [

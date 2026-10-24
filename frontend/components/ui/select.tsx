@@ -78,19 +78,6 @@ const Select = <Value extends string = string>({ children, ...props }: React.Com
   );
 }
 
-const SelectGroup = React.forwardRef<
-  HTMLDivElement,
-  SelectPrimitive.Group.Props
->(({ className, ...props }, ref) => (
-  <SelectPrimitive.Group
-    ref={ref}
-    data-slot="select-group"
-    className={cn("scroll-my-1 p-1", className)}
-    {...props}
-  />
-))
-SelectGroup.displayName = "SelectGroup"
-
 const SelectValue = React.forwardRef<
   HTMLSpanElement,
   SelectPrimitive.Value.Props
@@ -203,19 +190,6 @@ const SelectContent = React.forwardRef<
 )
 SelectContent.displayName = "SelectContent"
 
-const SelectLabel = React.forwardRef<
-  HTMLDivElement,
-  SelectPrimitive.GroupLabel.Props
->(({ className, ...props }, ref) => (
-  <SelectPrimitive.GroupLabel
-    ref={ref}
-    data-slot="select-label"
-    className={cn("px-1.5 py-1 text-xs text-muted-foreground", className)}
-    {...props}
-  />
-))
-SelectLabel.displayName = "SelectLabel"
-
 const SelectItem = React.forwardRef<
   HTMLDivElement,
   SelectPrimitive.Item.Props
@@ -310,11 +284,7 @@ SelectScrollDownButton.displayName = "SelectScrollDownButton"
 export {
   Select,
   SelectContent,
-  SelectGroup,
   SelectItem,
-  SelectLabel,
-  SelectScrollDownButton,
-  SelectScrollUpButton,
   SelectSeparator,
   SelectTrigger,
   SelectValue,

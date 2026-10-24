@@ -603,9 +603,7 @@ class BackfillBundleRollupsResponse(PassthroughModel):
     overview: int | None = None
     overview_days: int | None = None
     network_heatmap: int | None = None
-    network_heatmap_days: int | None = None
     network_geo: int | None = None
-    network_geo_days: int | None = None
     network_quality: int | None = None
     pop_health: int | None = None
     rum: int | None = None

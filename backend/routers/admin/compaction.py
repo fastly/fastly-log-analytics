@@ -624,7 +624,7 @@ def metadata_cleanup_now(
     from backend import config as svcconfig
     from backend.core.duckdb import log_cron_run, start_cron_run
     from backend.core.metadata import cleanup_metadata
-    from backend.routers.admin._helpers import stream_sse_from_worker
+    from backend.utils.sse import stream_sse_from_worker
 
     service_id = service_id or source.get("name") or source.get("service_id", "")
     cfg = svcconfig.load_config(service_id) or {}

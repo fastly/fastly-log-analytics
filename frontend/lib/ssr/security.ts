@@ -28,7 +28,6 @@
 
 import {
   fetchSsrRangePost,
-  resolveDefaultSsrRangeKey,
   type SsrRangeSeed,
 } from './upstream'
 
@@ -61,13 +60,6 @@ export const SECURITY_SSR_DEFAULTS = {
 } as const
 
 export type SecuritySsrSeed = SsrRangeSeed
-
-/**
- * Resolve the default (rangeToken, anchor) pair the client computes on first
- * paint. Exported so the unit test can pin the key-match without a network
- * round-trip. `now` injectable for deterministic tests.
- */
-export const resolveSecurityDefaultKey = resolveDefaultSsrRangeKey
 
 /**
  * SSR-prefetch the default security aggregates selection for the active service.

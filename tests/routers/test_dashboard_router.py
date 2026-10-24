@@ -23,8 +23,6 @@ def forbidden_clickhouse(monkeypatch):
     monkeypatch.setenv("CLICKHOUSE_ENABLED", "true")
     adapter = MagicMock(side_effect=AssertionError("archived evaluator reached from dashboard"))
     client = MagicMock(side_effect=AssertionError("ClickHouse client reached from dashboard"))
-    monkeypatch.setattr("backend.repositories.clickhouse_dashboard.get_aggregates", adapter)
-    monkeypatch.setattr("backend.repositories.clickhouse_dashboard.get_clickhouse_client", client)
     monkeypatch.setattr("backend.core.clickhouse_client.get_clickhouse_client", client)
     monkeypatch.setattr("backend.core.clickhouse_client.ClickHouseClient.execute", client)
     yield adapter, client

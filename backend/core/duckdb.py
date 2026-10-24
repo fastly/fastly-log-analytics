@@ -665,10 +665,6 @@ _LOCK_RETRY_MAX_DELAY = 0.5
 _LOCK_RETRY_MULTIPLIER = 2.0
 
 
-def _record_lock_retry() -> None:
-    pass
-
-
 # ── DuckDB instance-recycle support ──────────────────────────────────────────
 #
 # DuckDB's ``enable_object_cache`` caches parquet metadata keyed by filename and
@@ -939,9 +935,6 @@ def get_connection(
     db_path = db_path_for_source(src)
     connect_path = ":memory:" if durable_serving else db_path
 
-    # Per-source access level (from config) takes precedence over the global default
-    src_access_level = src.get("access_level") or ACCESS_LEVEL
-
     # Open a fresh connection per request — DuckDB cursors from a shared connection
     # serialize execution, which is slower than independent connections under load.
     # Lock retries use exponential backoff (TESTING_PLAN_3 item 13 contract):
@@ -1013,7 +1006,6 @@ def get_connection(
                     f"deployment_mode={context['deployment_mode']}, catalog_mode={context['catalog_mode']}). "
                     "Try again in a few seconds."
                 ) from e
-            _record_lock_retry()
             time.sleep(min(delay, remaining))
             delay = min(delay * _LOCK_RETRY_MULTIPLIER, _LOCK_RETRY_MAX_DELAY)
 
@@ -1291,69 +1283,6 @@ def finalize_cron_run_if_running(
         return False
 
 
-# Cache for the data-side half of the get_sync_status COUNT/MIN/MAX query —
-# the second-largest cost in the sync cron path (~240 ms warm with ~1.7 k
-# small parquets, called every tick via refresh_config_status). Keyed by a
-# cheap data-dir mtime fingerprint; buffer-side stats are recomputed fresh
-# each call (~1 ms, <100 files) and merged. Process-local — workers don't
-# share — which is fine because the cost we avoid is per-process anyway.
-#
-# Why data-only: an earlier version of this fingerprint also covered the
-# buffer dir, but buffer writes land every tick (~1 s) on any busy service
-# and the cron only runs every ~10 s, so the fingerprint changed on virtually
-# every poll and the cache effectively never hit. The data dir only mutates
-# on commit/optimize (rare), so a data-only fingerprint hits ~every tick and
-# the split-out fresh buffer query keeps the merged count exactly accurate.
-_data_stats_cache: dict[str, tuple[tuple, int, Any, Any]] = {}
-_data_stats_cache_lock = threading.Lock()
-
-# Cache for update_top_values output. Same data-only fingerprint as the
-# get_sync_status split-stats cache: top values are dominated by committed
-# parquets (RESERVOIR samples 100 k rows from a view that scans every data
-# parquet's footer + sample), so when the data dir hasn't changed there is
-# nothing new to compute. Buffer churn is excluded deliberately — buffer
-# files contribute <0.1 % of a 100 k sample on any non-trivial service, and
-# filter-picker autocomplete already falls back to a live query when the
-# user types a string that isn't in the cached top-200 (get_field_values).
-# Process-local: refresh_config_status only runs in the APScheduler thread.
-_top_values_cache: dict[str, tuple] = {}
-_top_values_cache_lock = threading.Lock()
-
-
-def _data_stats_fingerprint(source: dict) -> tuple | None:
-    """Return a cheap fingerprint of the committed (data-side) view state.
-
-    Sums the mtime of every partition dir under ``cache/<bucket>/data/``
-    along with the count. New commits update partition dir mtimes (parquet
-    adds/removes); compaction/optimize also moves the mtimes. Cost is
-    ~0.5 ms for ~150 stat calls vs ~155 ms for the data-side COUNT/MIN/MAX
-    over the underlying parquets.
-
-    Buffer files are deliberately excluded — they churn every tick and would
-    bust the cache pointlessly. The buffer-side stats are merged in fresh by
-    the caller.
-
-    Returns None if the data dir is missing — callers should treat that as
-    "no cache" and fall back to the full view query.
-    """
-    cache_dir = _cache_dir(source)
-    data_dir = os.path.join(cache_dir, "data")
-    if not os.path.isdir(data_dir):
-        return None
-    data_sum = 0
-    data_count = 0
-    try:
-        for entry in os.scandir(data_dir):
-            try:
-                data_sum += entry.stat().st_mtime_ns
-                data_count += 1
-            except OSError:
-                pass
-    except OSError:
-        return None
-    return (data_sum, data_count)
-
-
 # ── Sync-status / schema / ASN / usage-log helpers ────────────────────────
 #
 # Carved out to backend/core/_duckdb_status.py for the v2.0 file-size
@@ -1364,7 +1293,12 @@ from backend.core._duckdb_status import (  # noqa: E402, F401
     _SCHEMA_CACHE_TTL,
     ASN_CACHE_TTL_DAYS,
     _clear_schema_cache,
+    _data_stats_cache,
+    _data_stats_cache_lock,
+    _data_stats_fingerprint,
     _schema_cache,
+    _top_values_cache,
+    _top_values_cache_lock,
     backfill_fastly_edge_writes,
     clear_ducklake_stats_cache,
     enrich_asn_labels,
@@ -1382,26 +1316,11 @@ from backend.core._duckdb_status import (  # noqa: E402, F401
 )
 
 # A-3 (CacheRegistry): register module-level caches so the test
-# harness drains them via CacheRegistry.clear_all(). Schema cache
-# already exposes _clear_schema_cache() — wrap it so the registry's
-# .clear() contract is uniform.
+# harness drains them via CacheRegistry.clear_all().
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
-from backend.utils.date_utils import safe_iso as _safe_iso  # noqa: E402, F401
 
 _CacheRegistry.register("duckdb._fos_client_cache", _fos_client_cache)
 _CacheRegistry.register("duckdb._initialized_paths", _initialized_paths)
-
-
-class _SchemaCacheAdapter:
-    """Wraps the function-based clear so it fits the registry's
-    .clear() contract. The underlying dict isn't exported at module
-    scope, so we adapt rather than expose internals."""
-
-    def clear(self) -> None:
-        _clear_schema_cache()
-
-
-_CacheRegistry.register("duckdb._schema_cache", _SchemaCacheAdapter())
 
 
 class _DucklakeStatsCacheAdapter:

@@ -605,7 +605,7 @@ interface DatasetToggleProps {
   onDatasetChange: (next: ToggleDataset) => void
 }
 
-export function DatasetToggle({ dataset, onDatasetChange }: DatasetToggleProps) {
+function DatasetToggle({ dataset, onDatasetChange }: DatasetToggleProps) {
   return (
     <Tabs value={dataset} onValueChange={(v) => onDatasetChange(v as ToggleDataset)}>
       <TabsList className="grid w-full grid-cols-3 max-w-[480px]">

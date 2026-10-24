@@ -29,8 +29,6 @@ interface AnalyticsCardProps {
   /** Optional callback for the "Clear filter" link in the empty state. When
    *  omitted, the link is hidden (caller has no active filter to clear). */
   onClearFilter?: () => void
-  /** Optional href shown in the 403 state (e.g. mailto:admin or a docs link). */
-  noAccessHref?: string
   children: React.ReactNode
   className?: string
   contentClassName?: string
@@ -52,7 +50,6 @@ export function AnalyticsCard({
   isEmpty,
   error,
   onClearFilter,
-  noAccessHref,
   children,
   className,
   contentClassName,
@@ -152,14 +149,6 @@ export function AnalyticsCard({
                   <p className="text-xs text-muted-foreground">
                     This card requires permissions your account doesn&apos;t have.
                   </p>
-                  {noAccessHref ? (
-                    <a
-                      href={noAccessHref}
-                      className="text-xs text-primary hover:underline mt-1"
-                    >
-                      Contact an admin
-                    </a>
-                  ) : null}
                 </>
               ) : (
                 <>

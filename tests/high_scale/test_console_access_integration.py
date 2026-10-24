@@ -14,13 +14,10 @@ from __future__ import annotations
 import json
 import os
 import re
-import socket
 import subprocess
-import time
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -31,6 +28,15 @@ from backend.core.clickhouse_client import ClickHouseClient, ClickHouseError
 from backend.high_scale import console_access as access
 from backend.high_scale.query import query_endpoint
 from backend.models.query import QueryRequest
+from tests.high_scale.conftest import (
+    clickhouse_single_node_ddl as _ddl,
+)
+from tests.high_scale.conftest import (
+    free_loopback_port as _free_port,
+)
+from tests.high_scale.conftest import (
+    wait_for_clickhouse_ready,
+)
 
 pytestmark = [
     pytest.mark.security_regression,
@@ -42,31 +48,10 @@ pytestmark = [
 IMAGE = os.getenv("RUM_CLICKHOUSE_TEST_IMAGE", "clickhouse/clickhouse-server:25.8.4.13")
 DB = "fla_it"
 SECRET = b"integration-secret-" + b"x" * 32
-SQL_ROOT = Path("backend/high_scale/sql")
 NOW = datetime.now(UTC).replace(microsecond=0)
 BATCH_A = "11111111-1111-4111-8111-111111111111"
 BATCH_B = "22222222-2222-4222-8222-222222222222"
 BATCH_A_RUM = "33333333-3333-4333-8333-333333333333"
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-def _ddl() -> list[str]:
-    statements: list[str] = []
-    for name in ("publication_schema.sql", "request_schema.sql", "rum_schema.sql"):
-        text = (SQL_ROOT / name).read_text()
-        text = re.sub(
-            r"ReplicatedReplacingMergeTree\(([^)]+)\)\s*\('[^']+',\s*'[^']+'\)", r"ReplacingMergeTree(\1)", text
-        )
-        text = re.sub(r"ReplicatedMergeTree\([^;]*?\)", "MergeTree()", text)
-        text = re.sub(r"\nTTL [^;]*;", ";", text)
-        text = re.sub(r"--[^\n]*", "", text)
-        statements += [s.strip() for s in text.split(";") if s.strip()]
-    return statements
 
 
 class _Server:
@@ -137,16 +122,7 @@ def server() -> Iterator[_Server]:
     )  # fmt: skip
     srv = _Server(port)
     try:
-        deadline = time.time() + 90
-        while time.time() < deadline:
-            try:
-                if httpx.get(f"{srv.base}ping", timeout=2).text.strip() == "Ok.":
-                    break
-            except httpx.HTTPError:
-                pass
-            time.sleep(1)
-        else:
-            raise RuntimeError("clickhouse-server did not become ready")
+        wait_for_clickhouse_ready(srv.base)
         httpx.post(srv.base, content=f"CREATE DATABASE {DB}", auth=("admin", "adminpw")).raise_for_status()
         for statement in _ddl():
             srv.admin_sql(statement)

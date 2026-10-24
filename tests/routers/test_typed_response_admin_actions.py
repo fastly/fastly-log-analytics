@@ -185,9 +185,7 @@ def test_backfill_window_matches_producer(client):
     counters = {
         "files_downloaded": 2,
         "rows_downloaded": 10,
-        "bytes_downloaded": 2048,
         "files_removed": 0,
-        "files_skipped": 5,
     }
     with patch("backend.core.iceberg.sync_data", return_value=counters):
         resp = client.post("/api/admin/backfill-window?start_time=2026-10-01T00:00:00Z&end_time=2026-10-01T02:00:00Z")

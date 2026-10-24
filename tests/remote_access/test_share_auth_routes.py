@@ -605,7 +605,7 @@ def test_login_success_does_not_clear_login_failures(client, monkeypatch):
         headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
     )
     assert r.status_code == 200, r.text
-    assert rl._failures.get(ip), "failure counter must persist after a successful login"
+    assert rl._events.get(ip), "failure counter must persist after a successful login"
 
 
 def test_safe_audit_email_sanitizes_and_bounds():

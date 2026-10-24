@@ -366,18 +366,6 @@ def compact_local_partitions(
         logger.warning("[local-compact] %s", msg)
         result["errors"].append(msg)
 
-    # ── Register deletions so sync_data won't re-fetch them. Without this,
-    # every local_compact pass invalidates sync_data's fast path and forces
-    # a full re-download of every file we just deleted.
-    service_id = source.get("service_id") or source.get("name")
-    if removed_basenames and service_id and not dry_run:
-        try:
-            from backend.core import metadata as _meta
-
-            _meta.register_locally_compacted(service_id, removed_basenames)
-        except Exception as e:
-            logger.warning("[local-compact] failed to register compacted basenames: %s", e)
-
     result["duration_ms"] = int((time.time() - t0) * 1000)
     logger.info(
         "🧹 [local-compact] %s: hourly=%d/%d merged=%d removed=%d daily=%d weekly=%d tmp_cleaned=%d in %dms",

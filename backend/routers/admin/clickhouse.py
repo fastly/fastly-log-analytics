@@ -22,23 +22,9 @@ from backend.models.admin_clickhouse import (
 )
 from backend.models.errors import ErrorDetail
 from backend.routers.admin._router import router
-from backend.utils.router_utils import make_error, require_service_id
+from backend.utils.router_utils import load_service_config_or_503, make_error, require_service_id
 
 logger = structlog.get_logger(__name__)
-
-
-def _service(service_id: str, *, writable: bool = False) -> dict:
-    try:
-        cfg = config.load_config(service_id)
-    except Exception:
-        raise HTTPException(
-            503, detail=make_error("service_unavailable", "Service configuration unavailable")
-        ) from None
-    if not cfg:
-        raise HTTPException(404, detail=make_error("service_not_found", "Service not found"))
-    if writable and cfg.get("access_level", "read_write") != "read_write":
-        raise HTTPException(403, detail=make_error("read_write_required", "Read-write service required"))
-    return cfg
 
 
 @router.get(
@@ -49,7 +35,7 @@ def _service(service_id: str, *, writable: bool = False) -> dict:
 )
 def api_clickhouse_status(response: Response, service_id: str | None = Query(default=None, max_length=128)):
     service_id = require_service_id(service_id)
-    _service(service_id)
+    load_service_config_or_503(service_id)
     try:
         client = get_clickhouse_client()
         if client is None:
@@ -75,7 +61,7 @@ def api_clickhouse_status(response: Response, service_id: str | None = Query(def
     dependencies=[Depends(require_admin)],
 )
 def api_clickhouse_replay(req: ClickHouseReplayRequest):
-    cfg = _service(req.service_id, writable=True)
+    cfg = load_service_config_or_503(req.service_id, writable=True)
     if req.limit > 100:
         raise HTTPException(422, detail=make_error("invalid_replay_limit", "HTTP replay limit must be 1..100"))
     try:

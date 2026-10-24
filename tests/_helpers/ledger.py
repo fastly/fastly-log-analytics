@@ -147,7 +147,6 @@ class DuckLakeLedgerEnv:
 
     def __enter__(self):
         patches = [
-            patch("backend.config.SERVICES_DATA_DIR", self.tmp_path / "services"),
             patch("backend.config.load_config", return_value=self.cfg),
             patch("backend.core.duckdb.get_source_for_service", return_value=self.src),
             patch("backend.core.ingest._get_fos_client", return_value=self.fos),

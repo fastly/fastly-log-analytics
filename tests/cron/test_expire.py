@@ -44,7 +44,6 @@ def stub_cron_log(monkeypatch) -> dict[str, MagicMock]:
     log = MagicMock()
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", start)
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", log)
-    monkeypatch.setattr("backend.cron.scheduler._display_name", lambda src, sid: src.get("name", sid))
     return {"start": start, "log": log}
 
 

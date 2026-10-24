@@ -329,7 +329,7 @@ def test_convert_batch_quarantines_per_originating_file(tmp_path):
     assert item["original_key"] == dirty_key
     assert item["line_ordinal"] == 2
     assert item["error_category"] == "invalid_json"
-    evidence_path = tmp_path / "services" / service_id / "quarantine" / item["file_path"]
+    evidence_path = tmp_path / "data" / "services" / service_id / "quarantine" / item["file_path"]
     assert evidence_path.read_bytes() == b'{"timestamp": "2026-08-27T16:21:01Z", "url": "/trunc"\n'
     fos.put_object.assert_not_called()
 

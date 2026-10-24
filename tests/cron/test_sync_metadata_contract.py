@@ -735,3 +735,102 @@ def test_contract_rebuild_local_view_endpoint_busy_handling():
             assert "cron_busy" in str(err_data)
         finally:
             app.dependency_overrides.pop(get_source, None)
+
+
+# ── Additional unit tests folded from test_metadata.py ──────────────────────
+
+
+def test_post_commit_metadata_sync_worker_clears_state_after_failure(monkeypatch):
+    class DeferredThread:
+        def __init__(self, *, target, args, **kwargs):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(metadata.threading, "Thread", DeferredThread)
+    monkeypatch.setattr(
+        metadata,
+        "_run_post_commit_metadata_sync",
+        MagicMock(side_effect=RuntimeError("unexpected failure")),
+    )
+
+    metadata.dispatch_post_commit_metadata_sync("svc-1")
+    metadata._post_commit_metadata_sync_worker("svc-1")
+
+    assert metadata._post_commit_metadata_sync_rerun == {}
+
+
+def test_post_commit_metadata_sync_dispatch_clears_state_if_thread_start_fails(monkeypatch):
+    class FailedThread:
+        def __init__(self, *, target, args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread unavailable")
+
+    monkeypatch.setattr(metadata.threading, "Thread", FailedThread)
+
+    with pytest.raises(RuntimeError, match="thread unavailable"):
+        metadata.dispatch_post_commit_metadata_sync("svc-1")
+
+    assert metadata._post_commit_metadata_sync_rerun == {}
+
+
+def test_returns_when_config_missing(monkeypatch):
+    monkeypatch.setattr("backend.config.load_config", MagicMock(return_value=None))
+    get_src = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", get_src)
+    metadata._run_metadata_sync("ghost")
+    get_src.assert_not_called()
+
+
+def test_returns_when_source_missing(monkeypatch, base_context):
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: None)
+    metadata._run_metadata_sync("svc-meta-contract")
+    base_context["start_run"].assert_not_called()
+
+
+def test_skips_when_start_cron_run_raises(monkeypatch, base_context):
+    base_context["start_run"].side_effect = CronLeaseHeldError("already running")
+    init = MagicMock()
+    monkeypatch.setattr("backend.core.iceberg.init_iceberg_table", init)
+
+    metadata._run_metadata_sync("svc-meta-contract")
+
+    init.assert_not_called()
+    base_context["log_run"].assert_not_called()
+
+
+def test_happy_path_with_zero_new_files_still_succeeds(monkeypatch, base_context):
+    monkeypatch.setattr("backend.core.iceberg.init_iceberg_table", MagicMock())
+    monkeypatch.setattr(
+        "backend.core.iceberg.sync_data",
+        MagicMock(return_value={"files_downloaded": 0, "rows_downloaded": 0}),
+    )
+    monkeypatch.setattr("backend.core.iceberg.update_iceberg_view", MagicMock())
+    monkeypatch.setattr("backend.state_sync.import_admin_state", MagicMock())
+
+    metadata._run_metadata_sync("svc-meta-contract")
+
+    args, kwargs = base_context["log_run"].call_args
+    assert args[3] == "success"
+    assert kwargs["files_downloaded"] == 0
+    assert "new Iceberg data file" not in kwargs["summary"]
+
+
+def test_lifecycle_rows_have_no_log_output_and_one_terminal_row(monkeypatch, base_context):
+    monkeypatch.setattr(
+        "backend.core.iceberg.init_iceberg_table",
+        MagicMock(side_effect=ValueError("Table foo.bar not found in catalog")),
+    )
+
+    metadata._run_metadata_sync("svc-meta-contract")
+
+    base_context["log_run"].assert_called_once()
+    args, kwargs = base_context["log_run"].call_args
+    assert args[1] == "metadata_sync"
+    assert kwargs["run_id"] == 88
+    assert kwargs["log_output"] is None
+    base_context["end_prog"].assert_called_once_with(88)

@@ -14,6 +14,7 @@
  *   - the "not in the common list" fallback item only appears in manual mode
  */
 import { stubSystemTimeZone } from '@/__tests__/helpers/browser-stubs'
+import { selectMockFactory } from '@/__tests__/helpers/ui-mocks'
 import * as React from 'react'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -21,65 +22,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 // Mock @/components/ui/select — the real implementation uses base-ui which
 // is hard to drive from userEvent in jsdom (portals, native event
-// sequencing). Mirrors the shim in
-// __tests__/components/Map/NetworkMap/controls.test.tsx: every SelectItem
-// renders as a <button data-select-item-value="..."/>, SelectValue's
-// children render verbatim when provided, and clicking an item fires
-// onValueChange.
-vi.mock('@/components/ui/select', () => {
-  const SelectCtx = React.createContext<((v: string) => void) | null>(null)
-
-  const Select = ({
-    value,
-    onValueChange,
-    children,
-  }: {
-    value?: string
-    onValueChange?: (v: string) => void
-    children?: React.ReactNode
-  }) => (
-    <SelectCtx.Provider value={onValueChange ?? null}>
-      <div data-testid="mock-select" data-select-value={value ?? ''}>
-        {children}
-      </div>
-    </SelectCtx.Provider>
-  )
-
-  const SelectTrigger = ({ children }: { children?: React.ReactNode }) => (
-    <div data-testid="mock-select-trigger">{children}</div>
-  )
-
-  const SelectValue = ({ children }: { children?: React.ReactNode }) => (
-    <span data-testid="mock-select-value">{children}</span>
-  )
-
-  const SelectContent = ({ children }: { children?: React.ReactNode }) => (
-    <div data-testid="mock-select-content">{children}</div>
-  )
-
-  const SelectSeparator = () => <hr data-testid="mock-select-separator" />
-
-  const SelectItem = ({
-    value,
-    children,
-  }: {
-    value: string
-    children?: React.ReactNode
-  }) => {
-    const onValueChange = React.useContext(SelectCtx)
-    return (
-      <button
-        type="button"
-        data-select-item-value={value}
-        onClick={() => onValueChange?.(value)}
-      >
-        {children}
-      </button>
-    )
-  }
-
-  return { Select, SelectTrigger, SelectValue, SelectContent, SelectItem, SelectSeparator }
-})
+// sequencing).
+vi.mock('@/components/ui/select', () => selectMockFactory())
 
 import { TimezoneSwitcher } from '@/components/TimezoneSwitcher/TimezoneSwitcher'
 import { useTimezoneStore } from '@/stores/timezoneStore'

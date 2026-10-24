@@ -40,8 +40,6 @@ logger = logging.getLogger("backend.core.iceberg._core")
 # add the top-level ones here so the bare-name lookup works.
 import pyarrow.parquet as pq
 
-from backend.core import metadata as _meta_mod
-
 # Late-bind helpers from the main _core module (it's mid-load when this
 # file imports). __getattr__ catches any bare-name resolution that
 # falls through manifest.py's pattern.
@@ -200,7 +198,6 @@ def sweep_tombstoned_buffer_files(
     if not os.path.isdir(buf):
         return 0
     swept = 0
-    purged_basenames: list[str] = []
     recursive = table_name != "logs"
     pattern = (
         os.path.join(buf, "**", "*" + _TOMBSTONE_SUFFIX + "*")
@@ -231,22 +228,7 @@ def sweep_tombstoned_buffer_files(
             os.remove(marker)
         except Exception as e:
             logger.warning("%s Sweep failed to unlink tombstone %s: %s", _core_mod._ICE, marker, e)
-        purged_basenames.append(os.path.basename(parquet_path))
         swept += 1
-    # Drop the matching committed_buffers checkpoint rows once the
-    # parquet they referenced is gone from disk — keeps that table
-    # bounded over time. Done in one batched DELETE per sweep to avoid
-    # 1k tiny commits on a busy service.
-    if purged_basenames:
-        try:
-            service_id = source.get("service_id") or source.get("name", "")
-            _meta_mod.purge_committed_buffer_rows(service_id, purged_basenames)
-        except Exception as e:
-            logger.warning(
-                "%s Sweep failed to purge committed_buffers rows (will retry next tick): %s",
-                _core_mod._ICE,
-                e,
-            )
     return swept
 
 

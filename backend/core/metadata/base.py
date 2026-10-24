@@ -471,18 +471,6 @@ _SCHEMA = [
     # itself indexed instead of falling back to a TEMP B-TREE on large audit
     # tables.
     "CREATE INDEX IF NOT EXISTS idx_scoring_audit_ts ON scoring_audit(timestamp DESC)",
-    # Tracks Iceberg parquet basenames that local_compaction merged into a
-    # bigger local file and then deleted from disk. WITHOUT this table the
-    # sync_data fast-path check sees the deletions as "missing local files"
-    # → falls into the slow path → re-downloads the same files from FOS →
-    # local_compaction merges + deletes them again → infinite loop draining
-    # FOS bandwidth. With this table, sync_data treats basenames in the
-    # registry as "intentionally absent locally, do not re-fetch".
-    """CREATE TABLE IF NOT EXISTS local_compacted_files (
-        file_name TEXT PRIMARY KEY,
-        service_id TEXT,
-        compacted_at TEXT DEFAULT (datetime('now'))
-    )""",
     # service_id — not source_name — is the tenant discriminator, matching
     # every other table under a shared Postgres metadata database (ADR-15).
     # source_name is retained as informational only: readers used to filter

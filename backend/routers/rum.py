@@ -61,7 +61,13 @@ from backend.provision.rum_orchestrator_v2 import (
 from backend.repositories import rum as rum_repo
 from backend.utils.date_utils import iso_z, parse_iso_utc
 from backend.utils.error_redaction import correlation_id
-from backend.utils.router_utils import make_error, raise_internal, require_fastly_token, stored_fastly_token
+from backend.utils.router_utils import (
+    load_service_config,
+    make_error,
+    raise_internal,
+    require_fastly_token,
+    stored_fastly_token,
+)
 from backend.utils.sse import sse_response
 
 logger = logging.getLogger(__name__)
@@ -210,9 +216,7 @@ async def enable_rum_handler(
     body = body or RumEnableRequest()
     token = body.token
 
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": f"No config for service {service_id}"})
+    cfg = load_service_config(service_id)
 
     stored_token = stored_fastly_token(cfg)
     if not token:
@@ -508,9 +512,7 @@ def update_rum_settings(
     body: RumSettingsUpdateRequest = Body(...),
 ) -> dict[str, Any]:
     """Update RUM capture settings and re-deploy rum-tracker.js (admin-only)."""
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise HTTPException(status_code=404, detail={"error": f"No config found for service {service_id}"})
+    cfg = load_service_config(service_id)
 
     # Backup original configuration in case of deployment failure
     import copy

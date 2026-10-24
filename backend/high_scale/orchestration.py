@@ -448,6 +448,3 @@ _TERMINAL_SOURCE_STATES = frozenset(
         "source_missing",
     }
 )
-
-
-HighScaleWorker = HighScaleWorkerCoordinator

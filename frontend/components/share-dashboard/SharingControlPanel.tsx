@@ -25,7 +25,7 @@ type SharingMode = 'hostname' | 'ip'
 
 const IPV4_RE = /^(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?$/
 
-function buildEndpoint(mode: SharingMode, raw: string): string {
+function buildEndpoint(raw: string): string {
   const trimmed = raw.trim()
   if (!trimmed) return ''
   // If the user already typed a scheme, trust it; otherwise prepend https://.
@@ -69,7 +69,7 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
   const handleStart = () => {
     onError('')
     const raw = mode === 'hostname' ? hostnameValue : ipValue
-    const publicEndpoint = buildEndpoint(mode, raw)
+    const publicEndpoint = buildEndpoint(raw)
     if (!publicEndpoint) {
       onError(
         mode === 'hostname'

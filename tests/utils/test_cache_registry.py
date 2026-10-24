@@ -80,6 +80,6 @@ def test_iceberg_caches_are_registered_at_import():
         "network._response_cache",
         "duckdb._fos_client_cache",
         "duckdb._initialized_paths",
-        "duckdb._schema_cache",
+        "core._duckdb_status._schema_cache",
     ):
         assert required in names, f"missing registration: {required}"

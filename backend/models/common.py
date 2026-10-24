@@ -7,7 +7,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, AliasChoices, BaseModel, Field, field_validator, model_serializer
 
-from backend.models._base import PassthroughModel, WireSafeModel  # noqa: F401 (re-exported)
+from backend.models._base import WireSafeModel  # noqa: F401 (re-exported)
 from backend.models.log_fields_catalog import LogFieldsCatalogResponse
 from backend.models.query_observation import ClickHouseQueryObservation
 
@@ -244,8 +244,6 @@ class SectionTimingEntry(WireSafeModel):
     name: str | None = None
     time_ms: float | None = None
     duration_ms: float | None = None
-    sql_count: int | None = None
-    sql_ms: float | None = None
     cache: str | None = None
 
 

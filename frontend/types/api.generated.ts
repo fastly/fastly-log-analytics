@@ -7360,12 +7360,8 @@ export interface components {
             overview_days?: number | null;
             /** Network Heatmap */
             network_heatmap?: number | null;
-            /** Network Heatmap Days */
-            network_heatmap_days?: number | null;
             /** Network Geo */
             network_geo?: number | null;
-            /** Network Geo Days */
-            network_geo_days?: number | null;
             /** Network Quality */
             network_quality?: number | null;
             /** Pop Health */
@@ -7386,12 +7382,8 @@ export interface components {
             files_downloaded?: number | null;
             /** Rows Downloaded */
             rows_downloaded?: number | null;
-            /** Bytes Downloaded */
-            bytes_downloaded?: number | null;
             /** Files Removed */
             files_removed?: number | null;
-            /** Files Skipped */
-            files_skipped?: number | null;
         } & {
             [key: string]: unknown;
         };
@@ -11308,10 +11300,6 @@ export interface components {
             category?: string | null;
             /** Missing Fields */
             missing_fields?: string[] | null;
-            /** Missing Groups */
-            missing_groups?: string[] | null;
-            /** Enable Url */
-            enable_url?: string | null;
             /** Required Fields */
             required_fields?: string[] | null;
             /** Required Groups */
@@ -19028,10 +19016,6 @@ export interface components {
             time_ms?: number | null;
             /** Duration Ms */
             duration_ms?: number | null;
-            /** Sql Count */
-            sql_count?: number | null;
-            /** Sql Ms */
-            sql_ms?: number | null;
             /** Cache */
             cache?: string | null;
         } & {
@@ -19483,8 +19467,6 @@ export interface components {
             country?: string | null;
             /** Asn */
             asn?: number | null;
-            /** Asn Label */
-            asn_label?: string | null;
             /** Session Start */
             session_start: string;
             /** Session End */

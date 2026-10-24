@@ -4,7 +4,7 @@ import { BackToAdminLink } from '@/components/BackToAdminLink'
 import { PageHeader } from '@/components/ui/page-header'
 import { Skeleton } from '@/components/ui/skeleton'
 
-export function ShareDashboardFallback() {
+function ShareDashboardFallback() {
   return (
     <div className="space-y-6" data-testid="admin-share-fallback">
       <div

@@ -87,10 +87,6 @@ def _resolve_key() -> bytes:
     return _key
 
 
-def _aead() -> AESGCM:
-    return AESGCM(_resolve_key())
-
-
 def _b64url_encode(data: bytes) -> str:
     """Base64URL without padding — URL/JSON-safe, RFC 4648 §5."""
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")

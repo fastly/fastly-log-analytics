@@ -59,11 +59,6 @@ def _seed_metadata_rows():
         "INSERT INTO ingest_in_flight (buffer_filename, source_name, files_json) VALUES ('buf1', ?, '[]')",
         (MOCK_SERVICE_ID,),
     )
-    con.execute("INSERT INTO committed_buffers (buffer_filename) VALUES ('buf1')")
-    con.execute(
-        "INSERT INTO local_compacted_files (service_id, file_name) VALUES (?, 'a.gz')",
-        (MOCK_SERVICE_ID,),
-    )
     con.execute(
         "INSERT INTO quarantined_files (file_name, source_name, fos_key, error_key, meta_key) "
         "VALUES ('bad.gz', ?, 'raw/bad.gz', 'errors/bad.bad.jsonl', 'errors/bad.meta.json')",
@@ -145,8 +140,6 @@ def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_s
         "ingested_files",
         "ingested_files_summary",
         "ingest_in_flight",
-        "committed_buffers",
-        "local_compacted_files",
         "quarantined_files",
         "quarantine_evidence",
     ):
@@ -383,36 +376,3 @@ def test_rum_pause_is_a_no_op_when_rum_is_not_enabled():
     cfg: dict = {"rum": {}}
     assert _pause_rum_flags(cfg) is None
     assert cfg == {"rum": {}}
-
-
-def test_reset_service_logs_scopes_local_compacted_files_to_target_service_and_preserves_rum_buffers(
-    s3_mock, fos_source, fake_scheduler
-):
-    _save_config()
-    con = get_con(MOCK_SERVICE_ID)
-    con.execute(
-        "INSERT INTO local_compacted_files (service_id, file_name) VALUES (?, 'svc_a_req.parquet')",
-        (MOCK_SERVICE_ID,),
-    )
-    con.execute(
-        "INSERT INTO local_compacted_files (service_id, file_name) VALUES ('other-service', 'svc_b_req.parquet')"
-    )
-    con.execute(
-        "INSERT INTO local_compacted_files (service_id, file_name) VALUES (?, 'client_vitals_01.parquet')",
-        (MOCK_SERVICE_ID,),
-    )
-    con.execute("INSERT INTO committed_buffers (buffer_filename) VALUES ('buffer_req_01.parquet')")
-    con.execute("INSERT INTO committed_buffers (buffer_filename) VALUES ('client_vitals_buf_01.parquet')")
-    con.commit()
-
-    list(reset_mod.reset_service_logs(MOCK_SERVICE_ID, reload_scheduler=fake_scheduler))
-
-    remaining_compacted = {
-        (row[0], row[1]) for row in con.execute("SELECT service_id, file_name FROM local_compacted_files").fetchall()
-    }
-    assert remaining_compacted == {
-        ("other-service", "svc_b_req.parquet"),
-        (MOCK_SERVICE_ID, "client_vitals_01.parquet"),
-    }
-    remaining_buffers = {row[0] for row in con.execute("SELECT buffer_filename FROM committed_buffers").fetchall()}
-    assert remaining_buffers == {"client_vitals_buf_01.parquet"}

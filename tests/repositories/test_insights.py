@@ -149,7 +149,7 @@ def test_get_insights_cached_result_is_returned_on_second_call(in_memory_duckdb,
     is why the bug slipped through; we now round-trip through the model.
     """
     from backend.core.log_fields import LOG_FIELD_CATALOG
-    from backend.models.dashboard import InsightsResponse
+    from backend.models.insights import InsightsResponse
 
     table_name = _safe_table(test_service_source["name"])
     raw_fields = [f for f in LOG_FIELD_CATALOG if f.get("vcl") is not None]
@@ -1700,7 +1700,7 @@ def test_insights_request_bounds_window_fields():
     baseline_hours like 8_760_000 scanned ~1000 years of data)."""
     from pydantic import ValidationError
 
-    from backend.models.dashboard import InsightsRequest
+    from backend.models.insights import InsightsRequest
 
     with pytest.raises(ValidationError):
         InsightsRequest(window_size_hrs=169)

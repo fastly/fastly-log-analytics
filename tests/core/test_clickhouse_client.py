@@ -592,8 +592,11 @@ def test_app_lifecycle_initializes_probes_and_always_closes(monkeypatch, failure
                     raise RuntimeError("serving failure")
 
         if failure == "startup":
-            # The next uncaught operation after dependency init is the clock stamp.
-            monkeypatch.setattr(main, "datetime", MagicMock(now=MagicMock(side_effect=RuntimeError("startup failure"))))
+            monkeypatch.setattr(
+                main,
+                "register_high_scale_services_from_environment",
+                MagicMock(side_effect=RuntimeError("startup failure")),
+            )
         if failure:
             with pytest.raises((RuntimeError, ch.ClickHouseError)):
                 asyncio.run(run())

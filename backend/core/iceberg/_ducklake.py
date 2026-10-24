@@ -517,21 +517,3 @@ def ducklake_current_snapshot_id(con, alias: str = "lake") -> int | None:
     except Exception as e:
         logger.info("[ducklake] snapshot-id probe failed (lake not attached?): %s", e)
         return None
-
-
-def _ducklake_add_data_files(con, s3_paths: list[str], alias: str = "lake", table: str = "logs") -> None:
-    """Register existing parquet files into ``alias.table``.
-
-    NOT idempotent at the DuckLake level — re-adding a path duplicates its
-    rows (verified against ducklake d318a545). Callers must skip paths
-    already present in ``ducklake_list_files`` (see
-    ``_ducklake_migration.adopt_iceberg_to_ducklake``).
-    """
-    if not s3_paths:
-        return
-    require_safe_ident(alias, "invalid ducklake alias")
-    require_safe_ident(table, "invalid ducklake table name")
-    paths_str = ", ".join(f"'{escape_sql_literal(p)}'" for p in s3_paths)
-    con.execute(
-        f"CALL ducklake_add_data_files('{alias}', '{table}', [{paths_str}], allow_missing := true, ignore_extra_columns := true);"
-    )

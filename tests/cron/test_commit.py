@@ -36,38 +36,6 @@ def stub_source(monkeypatch) -> dict:
     return src
 
 
-@pytest.fixture
-def stub_cron_envelope(monkeypatch) -> dict[str, MagicMock]:
-    start = MagicMock(return_value=33)
-    log = MagicMock()
-    monkeypatch.setattr("backend.core.duckdb.start_cron_run", start)
-    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log)
-
-    start_progress = MagicMock()
-    end_progress = MagicMock()
-    cleanup = MagicMock()
-    log_event = MagicMock()
-    monkeypatch.setattr("backend.cron_progress.start_progress", start_progress)
-    monkeypatch.setattr("backend.cron_progress.end_progress", end_progress)
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", cleanup)
-    monkeypatch.setattr("backend.cron.scheduler._log_and_add_progress", log_event)
-    monkeypatch.setattr("backend.cron.scheduler._check_disk_space", lambda *a, **kw: (True, ""))
-    monkeypatch.setattr("backend.cron.scheduler._check_buffer_backlog", lambda *a, **kw: "")
-    monkeypatch.setattr("backend.cron.scheduler._extract_log_text", lambda rid: "")
-    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: "/tmp/cache")
-    monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", MagicMock())
-    monkeypatch.setattr("backend.cron.jobs._common.refresh_view_and_warm_pool", MagicMock())
-    # Post-commit metadata-sync dispatch resolves off backend.cron.jobs.metadata.
-    monkeypatch.setattr("backend.cron.jobs.metadata.dispatch_post_commit_metadata_sync", MagicMock())
-    return {
-        "start": start,
-        "log": log,
-        "start_progress": start_progress,
-        "end_progress": end_progress,
-        "log_event": log_event,
-    }
-
-
 def test_returns_when_config_missing(monkeypatch):
     monkeypatch.setattr("backend.config.load_config", MagicMock(return_value=None))
     get_src = MagicMock()

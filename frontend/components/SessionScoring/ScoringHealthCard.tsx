@@ -6,7 +6,6 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { CardErrorState } from '@/components/CardErrorState'
 import { ScoringHealthHelp } from '@/components/SessionScoring/help-content'
-import type { components } from '@/types/api.generated'
 
 import { useScoringQuery } from './useScoringQuery'
 import { client } from '@/lib/api'
@@ -16,12 +15,6 @@ interface ScoringHealthCardProps {
   serviceId: string
   sinceHours?: number
 }
-
-// Generated from the /scoring/health response_model — single source of truth.
-// Every field is nullable on the wire, so the render reads below coalesce with
-// `?? 0` (the values are non-null in practice; this just satisfies the types
-// and keeps runtime output identical).
-type HealthResponse = components['schemas']['ScoringHealthResponse']
 
 function Metric({
   icon: Icon,

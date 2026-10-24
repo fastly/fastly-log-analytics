@@ -33,6 +33,7 @@ from backend.utils.router_utils import (
     load_service_config,
     make_error,
     mutate_service_config,
+    query_errors,
     raise_internal,
     stored_fastly_token,
 )
@@ -79,20 +80,6 @@ def _trim_for_analyst(services: list[dict], allowed_ids: set[str]) -> list[dict]
     return out
 
 
-def _require_service_scope(request: Request, service_id: str) -> None:
-    """Defense-in-depth: reject a request when the analyst session attached
-    to ``request.state`` does not include ``service_id`` in its allowed
-    services. Admin sessions (``analyst_session is None``) pass through.
-
-    Mirrors the read gate already in place on ``api_services_list`` and the
-    write gate on ``api_service_update_credentials`` — this helper exists
-    so every per-service endpoint can call one place instead of
-    re-implementing the check. Thin wrapper over the shared
-    :func:`backend.utils.auth.require_service_in_scope`.
-    """
-    require_service_in_scope(request, service_id)
-
-
 @router.get("/services", response_model=ServicesListResponse)
 def api_services_list(request: Request, service_id: str | None = Depends(get_service_id)):
     from backend.services.service_manager import get_enriched_services
@@ -129,7 +116,7 @@ def get_service_lake_info(source: dict = Depends(get_source)):
 def api_service_cron_settings(request: Request, service_id: str, body: ServiceCronSettingsBody):
     from backend import config as svcconfig
 
-    _require_service_scope(request, service_id)
+    require_service_in_scope(request, service_id)
 
     # Capture once for the audit-log line below + the per-block iteration.
     # ``exclude_unset`` preserves the existing partial-update semantics
@@ -407,7 +394,7 @@ def api_service_update_credentials(request: Request, service_id: str, body: Serv
 
     from backend.core.duckdb import _get_fos_client
 
-    _require_service_scope(request, service_id)
+    require_service_in_scope(request, service_id)
 
     cfg = load_service_config(service_id)
     is_admin = cfg.get("access_level") == "read_write"
@@ -503,6 +490,7 @@ _logging_settings_cache: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seco
 
 
 @router.get("/services/{service_id}/logging-settings", response_model=LoggingSettingsResponse)
+@query_errors(500, code="logging_settings_save_failed", logger_obj=logger)
 def api_service_logging_settings(service_id: str):
     import re
     import time as _time
@@ -528,88 +516,83 @@ def api_service_logging_settings(service_id: str):
     cfg = load_service_config(service_id)
     token = stored_fastly_token(cfg)
     endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs")
-    try:
-        from backend.core.fastly.client import fastly
-        from backend.core.fastly.service import find_condition, get_active_version
+    from backend.core.fastly.client import fastly
+    from backend.core.fastly.service import find_condition, get_active_version
 
+    _t = _time.perf_counter()
+    active_ver = get_active_version(service_id, token)
+    timer.mark("get_active_version", _t)
+    if not active_ver:
+        raise HTTPException(status_code=400, detail={"error": "No active version found"})
+    encoded_name = urllib.parse.quote(endpoint_name, safe="")
+    _t = _time.perf_counter()
+    ep = fastly("GET", f"/service/{service_id}/version/{active_ver}/logging/s3/{encoded_name}", token=token)
+    timer.mark("get_logging_endpoint", _t)
+    sample_rate = 100
+    edge_only = False
+    custom_condition = ""
+    cond_name = ep.get("response_condition")
+    if cond_name:
         _t = _time.perf_counter()
-        active_ver = get_active_version(service_id, token)
-        timer.mark("get_active_version", _t)
-        if not active_ver:
-            raise HTTPException(status_code=400, detail={"error": "No active version found"})
-        encoded_name = urllib.parse.quote(endpoint_name, safe="")
-        _t = _time.perf_counter()
-        ep = fastly("GET", f"/service/{service_id}/version/{active_ver}/logging/s3/{encoded_name}", token=token)
-        timer.mark("get_logging_endpoint", _t)
-        sample_rate = 100
-        edge_only = False
-        custom_condition = ""
-        cond_name = ep.get("response_condition")
-        if cond_name:
-            _t = _time.perf_counter()
-            cond = find_condition(cond_name, service_id, active_ver, token)
-            timer.mark("find_condition", _t)
-            stmt = cond.get("statement", "") if cond else ""
-            m = re.search("randombool\\((\\d+),", stmt)
-            if m:
-                sample_rate = int(m.group(1))
-            if "req.restarts == 0" in stmt:
-                edge_only = True
-            mc = re.search(" && \\((?!req\\.restarts == 0)(.+)\\)$", stmt)
-            if mc:
-                custom_condition = mc.group(1)
-        prov = cfg.get("provisioning", {})
-        if not custom_condition:
-            custom_condition = prov.get("custom_condition", "")
-        full_path = ep.get("path", "")
-        prefix = ""
-        m = re.match("^/?(.*?)/raw/", full_path)
+        cond = find_condition(cond_name, service_id, active_ver, token)
+        timer.mark("find_condition", _t)
+        stmt = cond.get("statement", "") if cond else ""
+        m = re.search("randombool\\((\\d+),", stmt)
         if m:
-            prefix = m.group(1).strip("/")
-        format_match = True
-        try:
-            lf_config = cfg.get("log_fields")
-            from backend.provision import load_log_format
+            sample_rate = int(m.group(1))
+        if "req.restarts == 0" in stmt:
+            edge_only = True
+        mc = re.search(" && \\((?!req\\.restarts == 0)(.+)\\)$", stmt)
+        if mc:
+            custom_condition = mc.group(1)
+    prov = cfg.get("provisioning", {})
+    if not custom_condition:
+        custom_condition = prov.get("custom_condition", "")
+    full_path = ep.get("path", "")
+    prefix = ""
+    m = re.match("^/?(.*?)/raw/", full_path)
+    if m:
+        prefix = m.group(1).strip("/")
+    format_match = True
+    try:
+        lf_config = cfg.get("log_fields")
+        from backend.provision import load_log_format
 
-            target_format = load_log_format(lf_config)
-            current_format = (ep.get("format") or "").strip()
-            if current_format != target_format:
-                format_match = False
-        except Exception:
-            logger.debug("api_service_logging_settings: step failed (ignored)", exc_info=True)
+        target_format = load_log_format(lf_config)
+        current_format = (ep.get("format") or "").strip()
+        if current_format != target_format:
+            format_match = False
+    except Exception:
+        logger.debug("api_service_logging_settings: step failed (ignored)", exc_info=True)
 
-        # Cache only the business fields — telemetry (debug_queries,
-        # debug_calls, section_timings, is_cached) is regenerated per
-        # request so the Debug Panel keeps showing per-request data even
-        # on cache hits.
-        from backend.models.services import CmcdSettingsResponse
+    # Cache only the business fields — telemetry (debug_queries,
+    # debug_calls, section_timings, is_cached) is regenerated per
+    # request so the Debug Panel keeps showing per-request data even
+    # on cache hits.
+    from backend.models.services import CmcdSettingsResponse
 
-        cmcd_block = cfg.get("cmcd") or {}
-        cacheable = {
-            "prefix": prefix,
-            "period": ep.get("period", 60),
-            "sample_rate": sample_rate,
-            "edge_only": edge_only,
-            "custom_condition": custom_condition,
-            "format_match": format_match,
-            "version": active_ver,
-            "cmcd": CmcdSettingsResponse(
-                enabled=bool(cmcd_block.get("enabled")),
-                mode=cmcd_block.get("mode"),
-                version=cmcd_block.get("version"),
-            ),
-        }
-        _logging_settings_cache[service_id] = cacheable
+    cmcd_block = cfg.get("cmcd") or {}
+    cacheable = {
+        "prefix": prefix,
+        "period": ep.get("period", 60),
+        "sample_rate": sample_rate,
+        "edge_only": edge_only,
+        "custom_condition": custom_condition,
+        "format_match": format_match,
+        "version": active_ver,
+        "cmcd": CmcdSettingsResponse(
+            enabled=bool(cmcd_block.get("enabled")),
+            mode=cmcd_block.get("mode"),
+            version=cmcd_block.get("version"),
+        ),
+    }
+    _logging_settings_cache[service_id] = cacheable
 
-        return LoggingSettingsResponse.with_telemetry(
-            ok=True,
-            section_timings=section_timings,
-            **cacheable,
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise_internal(logger, e, code="logging_settings_save_failed")
+    return LoggingSettingsResponse.with_telemetry(
+        ok=True,
+        section_timings=section_timings,
+        **cacheable,
+    )
 
 
 from backend.models.services import LogFieldsResponse
@@ -683,7 +666,7 @@ def api_service_log_fields_set(request: Request, service_id: str, body: LogField
     from backend.core import field_registry as lf
     from backend.provision.system_fields import reconcile_system_custom_fields
 
-    _require_service_scope(request, service_id)
+    require_service_in_scope(request, service_id)
 
     cfg = load_service_config(service_id)
     raw_lf = body.log_fields
@@ -766,7 +749,7 @@ def api_service_update_logging_settings(
 ):
     from backend import config as svcconfig
 
-    _require_service_scope(request, service_id)
+    require_service_in_scope(request, service_id)
 
     cfg = load_service_config(service_id)
     prov = cfg.setdefault("provisioning", {})
@@ -1057,7 +1040,7 @@ from backend.models.custom_fields import (
 
 @router.get("/services/{service_id}/custom-fields", response_model=CustomFieldsListResponse)
 def api_list_custom_fields(request: Request, service_id: str) -> CustomFieldsListResponse:
-    _require_service_scope(request, service_id)
+    require_service_in_scope(request, service_id)
 
     cfg = load_service_config(service_id)
     from backend.core import field_registry as lf_module
@@ -1183,7 +1166,7 @@ def api_create_custom_field(request: Request, service_id: str, body: CustomField
     from backend import provision
     from backend.core import field_registry as lf_module
 
-    _require_service_scope(request, service_id)
+    require_service_in_scope(request, service_id)
 
     cfg = load_service_config(service_id)
     lf = lf_module.get_lf_config(cfg)
@@ -1229,7 +1212,7 @@ def api_update_custom_field(request: Request, service_id: str, field_name: str, 
     from backend.core import duckdb as _db
     from backend.core import field_registry as lf_module
 
-    _require_service_scope(request, service_id)
+    require_service_in_scope(request, service_id)
 
     # Prevent updating system-managed fields
     if _is_system_field(field_name):
@@ -1296,7 +1279,7 @@ def api_delete_custom_field(request: Request, service_id: str, field_name: str):
 
     from backend.core import field_registry as lf_module
 
-    _require_service_scope(request, service_id)
+    require_service_in_scope(request, service_id)
 
     # Prevent deleting system-managed fields
     if _is_system_field(field_name):
@@ -1324,7 +1307,7 @@ def api_validate_custom_vcl(request: Request, service_id: str, body: VclLintRequ
     from backend import provision
     from backend.core import field_registry as lf_module
 
-    _require_service_scope(request, service_id)
+    require_service_in_scope(request, service_id)
 
     cfg = load_service_config(service_id)
     lf = lf_module.get_lf_config(cfg)
@@ -1377,7 +1360,7 @@ def api_export_custom_fields(request: Request, service_id: str):
 
     from backend.core import field_registry as lf_module
 
-    _require_service_scope(request, service_id)
+    require_service_in_scope(request, service_id)
 
     cfg = load_service_config(service_id)
     lf = lf_module.get_lf_config(cfg)
@@ -1401,7 +1384,7 @@ def api_import_custom_fields(request: Request, service_id: str, body: CustomFiel
     from backend import provision
     from backend.core import field_registry as lf_module
 
-    _require_service_scope(request, service_id)
+    require_service_in_scope(request, service_id)
 
     cfg = load_service_config(service_id)
     # Pydantic guarantees ``custom_fields`` is a list (default []), so

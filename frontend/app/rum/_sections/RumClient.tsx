@@ -16,7 +16,6 @@ import { Terminal, Activity, Monitor, ShieldAlert, Cpu, PieChart, TrendingUp, Ey
 import { adminJsonResult } from '@/lib/api';
 import { arrayOrEmpty, recordOrNull } from '@/lib/narrow';
 import type { StripIndex, WithRequired, components } from '@/types/api';
-import { useIsAnalyst } from '@/hooks/useIsAnalyst';
 import type { FiltersPayload } from '@/types/filters';
 import type { RangeWireArgs } from '@/lib/range-wire';
 import {

@@ -123,49 +123,6 @@ async def test_proxy_strips_hop_by_hop_headers_before_forwarding(proxy_server):
     assert sent_headers.get("User-Agent") == "myclient/1.0"
 
 
-async def test_proxy_injects_sigv4_authorization_header_for_fos_request(proxy_server):
-    """The proxy reads X-Telemetry-Service-Id, loads FOS creds from config,
-    and signs the OUTBOUND request with SigV4. Clients hit the proxy
-    UNSIGNED — the proxy is the only signer."""
-    ctx, _ = _mock_upstream()
-    mock_cfg = {
-        "fos_access_key_id": "AKIATESTKEY",
-        "fos_secret_access_key": "test-secret",
-        "fos_region": "us-east-1",
-        # F6 allowlist: target must match cfg.fos_native_endpoint or
-        # cfg.cdn_host. This test exercises the FOS path; the test
-        # bucket stands in for the FOS native endpoint here.
-        "fos_native_endpoint": "bucket.s3.amazonaws.com",
-    }
-    captured = {}
-
-    def _capture(*args, **kwargs):
-        captured.update(kwargs)
-        return ctx
-
-    telemetry_proxy._bust_config_cache()
-    with patch("backend.config.load_config", return_value=mock_cfg):
-        with patch.object(telemetry_proxy._SESSION, "request", side_effect=_capture):
-            async with aiohttp.ClientSession() as s:
-                url = f"{proxy_server.proxy_endpoint()}/test.txt"
-                async with s.get(
-                    url,
-                    headers={
-                        "X-Fos-Target": "bucket.s3.amazonaws.com",
-                        "X-Telemetry-Service-Id": "test-svc",
-                    },
-                ) as resp:
-                    await resp.read()
-
-    sent = captured["headers"]
-    assert "Authorization" in sent
-    assert "Credential=AKIATESTKEY" in sent["Authorization"]
-    assert "SignedHeaders=" in sent["Authorization"]
-    assert "Signature=" in sent["Authorization"]
-    assert "X-Amz-Date" in sent
-    assert "X-Amz-Content-SHA256" in sent
-
-
 async def test_proxy_does_not_sign_cdn_routed_requests(proxy_server):
     """Requests routed to the service's cdn_url use ?key=... auth, NOT
     SigV4 — re-signing them would corrupt them."""
@@ -540,38 +497,6 @@ async def test_proxy_logs_warning_when_dashboard_context_hits_fos(proxy_server, 
     assert any("dashboard context hitting FOS" in r.message for r in caplog.records), (
         f"expected guardrail warning, got: {[r.message for r in caplog.records]}"
     )
-
-
-async def test_proxy_per_request_context_headers_land_in_usage_log(proxy_server):
-    """Pin the contextual-logging contract: X-Telemetry-Context becomes
-    `process_context` on the log row and X-Telemetry-Caller becomes
-    `caller`. The plumbing already works (Task 6 wired it) — this test
-    exists so the contract can't regress silently."""
-    ctx, _ = _mock_upstream()
-    captured = {"rows": [], "process_context": None}
-
-    def _capture(service_id, rows, process_context=None):
-        captured["rows"].extend(rows)
-        captured["process_context"] = process_context
-
-    with patch.object(telemetry_proxy._SESSION, "request", return_value=ctx):
-        with patch("backend.core.metadata.log_usage_calls", side_effect=_capture):
-            async with aiohttp.ClientSession() as s:
-                url = f"{proxy_server.proxy_endpoint()}/k"
-                async with s.get(
-                    url,
-                    headers={
-                        "X-Fos-Target": "bucket.s3.amazonaws.com",
-                        "X-Telemetry-Service-Id": "test-svc",
-                        "X-Telemetry-Caller": "duckdb.httpfs",
-                        "X-Telemetry-Context": "cron:sync:test-svc",
-                    },
-                ) as resp:
-                    await resp.read()
-            telemetry_proxy._flush_log_writes_for_tests()
-
-    assert captured["process_context"] == "cron:sync:test-svc"
-    assert captured["rows"][0]["caller"] == "duckdb.httpfs"
 
 
 async def test_proxy_synthesizes_fos_get_object_for_cdn_full_miss(proxy_server):
@@ -1304,3 +1229,625 @@ async def test_proxy_skips_gate_when_no_service_id(proxy_server):
                 assert resp.status == 200
 
     assert upstream_called, "upstream not called — gate fired despite no X-Telemetry-Service-Id"
+
+
+# ── Phase 2: boto3 routed through the proxy ─────────────────────────────────
+
+
+def _make_hooked_boto3_client(proxy_server, moto_s3_server, service_id: str):
+    """Build an UNSIGNED boto3 S3 client pointed at `proxy_server` with
+    `install_boto3_proxy_hook` registered against `moto_s3_server`, plus a
+    matching `mock_cfg`."""
+    _endpoint_url, host_port = moto_s3_server
+    source = {
+        "name": service_id,
+        "service_id": service_id,
+        "fos_native_endpoint": f"http://{host_port}",
+    }
+    mock_cfg = {
+        "fos_access_key_id": "testing",
+        "fos_secret_access_key": "testing",
+        "fos_region": "us-east-1",
+    }
+    client = boto3.client(
+        "s3",
+        endpoint_url=proxy_server.proxy_endpoint(),
+        region_name="us-east-1",
+        config=Config(signature_version=UNSIGNED, s3={"addressing_style": "path"}),
+    )
+    telemetry_proxy.install_boto3_proxy_hook(client, source)
+    return client, mock_cfg
+
+
+async def test_install_boto3_proxy_hook_routes_request_through_proxy(proxy_server, moto_s3_server):
+    """The hook is the single integration point between boto3 and the proxy.
+    If it doesn't inject X-Fos-Target / X-Telemetry-Service-Id correctly,
+    the proxy returns 400 (missing header) and no telemetry row is written."""
+    client, mock_cfg = _make_hooked_boto3_client(proxy_server, moto_s3_server, "phase2-test")
+    captured_rows: list[dict] = []
+    captured_service: list[str] = []
+
+    def _capture(service_id, rows, process_context=None):
+        captured_service.append(service_id)
+        captured_rows.extend(rows)
+
+    telemetry_proxy._bust_config_cache()
+    with (
+        patch("backend.config.load_config", return_value=mock_cfg),
+        patch("backend.core.metadata.log_usage_calls", side_effect=_capture),
+    ):
+        resp = client.head_bucket(Bucket="test-bucket")
+        assert resp["ResponseMetadata"]["HTTPStatusCode"] == 200
+        telemetry_proxy._flush_log_writes_for_tests()
+
+    assert len(captured_rows) == 1, f"expected 1 telemetry row, got {len(captured_rows)}"
+    assert captured_service == ["phase2-test"]
+    row = captured_rows[0]
+    assert row["method"] == "HEAD"
+    assert row["caller"] == "boto3.headbucket"
+
+
+async def test_install_boto3_proxy_hook_passes_process_context_per_request(proxy_server, moto_s3_server):
+    """Per-call ContextVar reads: context set between two requests on the same
+    client is reflected in the second request's telemetry row but not the first."""
+    from backend.utils import telemetry as tlm
+
+    client, mock_cfg = _make_hooked_boto3_client(proxy_server, moto_s3_server, "phase2-ctx")
+    contexts_seen: list[str | None] = []
+
+    def _capture(service_id, rows, process_context=None):
+        contexts_seen.append(process_context)
+
+    telemetry_proxy._bust_config_cache()
+    with (
+        patch("backend.config.load_config", return_value=mock_cfg),
+        patch("backend.core.metadata.log_usage_calls", side_effect=_capture),
+    ):
+        tlm._set_process_context_for_tests("cron:sync:phase2-ctx-A")
+        client.head_bucket(Bucket="test-bucket")
+        tlm._set_process_context_for_tests("cron:compact:phase2-ctx-B")
+        client.head_bucket(Bucket="test-bucket")
+        telemetry_proxy._flush_log_writes_for_tests()
+        tlm._set_process_context_for_tests(None)
+
+    assert contexts_seen == [
+        "cron:sync:phase2-ctx-A",
+        "cron:compact:phase2-ctx-B",
+    ], f"per-request context did not round-trip: {contexts_seen}"
+
+
+async def test_install_boto3_proxy_hook_falls_back_to_thread_name_when_context_unset(proxy_server, moto_s3_server):
+    """When no caller has ever called _set_process_context_for_tests (or it was reset),
+    the boto3 hook must still emit *some* context — the thread name."""
+    from backend.utils import telemetry as tlm
+
+    client, mock_cfg = _make_hooked_boto3_client(proxy_server, moto_s3_server, "phase2-fallback")
+    contexts_seen: list[str | None] = []
+
+    def _capture(service_id, rows, process_context=None):
+        contexts_seen.append(process_context)
+
+    tlm._PROCESS_CONTEXT.set(None)
+    with tlm._LATEST_PROCESS_CONTEXT_LOCK:
+        tlm._LATEST_PROCESS_CONTEXT = None
+
+    telemetry_proxy._bust_config_cache()
+    with (
+        patch("backend.config.load_config", return_value=mock_cfg),
+        patch("backend.core.metadata.log_usage_calls", side_effect=_capture),
+    ):
+        client.head_bucket(Bucket="test-bucket")
+        telemetry_proxy._flush_log_writes_for_tests()
+
+    assert len(contexts_seen) == 1
+    assert contexts_seen[0] is not None
+    assert contexts_seen[0].startswith("untagged:"), f"expected fallback 'untagged:<thread>', got {contexts_seen[0]!r}"
+
+
+class _FakeBoto3Client:
+    """Minimal stand-in for a boto3 client: captures the before-send handler
+    registered by install_boto3_proxy_hook so each test can invoke it
+    directly with a synthetic request + event_name."""
+
+    def __init__(self):
+        self._handler = None
+        self.meta = self
+
+    @property
+    def events(self):
+        return self
+
+    def register(self, _signal: str, handler):
+        self._handler = handler
+
+    def invoke(self, *, method: str, event_name: str, url: str = ""):
+        from types import SimpleNamespace
+
+        req = SimpleNamespace(method=method, headers={}, url=url)
+        assert self._handler is not None, "install_boto3_proxy_hook never ran"
+        self._handler(request=req, event_name=event_name)
+        return req.headers
+
+
+def _cdn_source():
+    return {
+        "name": "streamj",
+        "service_id": "streamj",
+        "fos_native_endpoint": "us-east.object.fastlystorage.app",
+        "cdn_url": "https://fos-streamj-logs.global.ssl.fastly.net",
+        "cdn_secret": "cdn-secret-abc",
+    }
+
+
+@pytest.mark.parametrize(
+    ("method", "event_name", "url", "expected_target", "expect_fastly_key"),
+    [
+        ("GET", "before-send.s3.GetObject", "", "fos-streamj-logs.global.ssl.fastly.net", True),
+        (
+            "GET",
+            "before-send.s3.GetObject",
+            "http://127.0.0.1:8000/bucket/raw/request/year=2026/file.gz",
+            "fos-streamj-logs.global.ssl.fastly.net",
+            True,
+        ),
+        ("HEAD", "before-send.s3.HeadObject", "", "fos-streamj-logs.global.ssl.fastly.net", True),
+        ("GET", "before-send.s3.ListObjectsV2", "", "us-east.object.fastlystorage.app", False),
+        ("PUT", "before-send.s3.PutObject", "", "us-east.object.fastlystorage.app", False),
+        ("POST", "before-send.s3.DeleteObjects", "", "us-east.object.fastlystorage.app", False),
+    ],
+)
+def test_install_boto3_proxy_hook_routing_by_operation(
+    method: str,
+    event_name: str,
+    url: str,
+    expected_target: str,
+    expect_fastly_key: bool,
+):
+    client = _FakeBoto3Client()
+    telemetry_proxy.install_boto3_proxy_hook(client, _cdn_source())
+    headers = client.invoke(method=method, event_name=event_name, url=url)
+    assert headers["X-Fos-Target"] == expected_target
+    if expect_fastly_key:
+        assert headers["x-fastly-key"] == "cdn-secret-abc"
+    else:
+        assert "x-fastly-key" not in headers
+
+
+def test_install_boto3_proxy_hook_ingest_download_uses_cdn():
+    client = _FakeBoto3Client()
+    telemetry_proxy.install_boto3_proxy_hook(client, _cdn_source())
+    token = telemetry_proxy._BOTO3_CALLER_HINT.set("ingest_download")
+    try:
+        headers = client.invoke(method="GET", event_name="before-send.s3.GetObject")
+        assert headers["X-Fos-Target"] == "fos-streamj-logs.global.ssl.fastly.net"
+        assert headers["x-fastly-key"] == "cdn-secret-abc"
+    finally:
+        telemetry_proxy._BOTO3_CALLER_HINT.reset(token)
+
+
+def test_install_boto3_proxy_hook_get_with_no_cdn_url_stays_native():
+    source = {
+        "name": "streamj-nocdn",
+        "service_id": "streamj-nocdn",
+        "fos_native_endpoint": "us-east.object.fastlystorage.app",
+    }
+    client = _FakeBoto3Client()
+    telemetry_proxy.install_boto3_proxy_hook(client, source)
+    headers = client.invoke(method="GET", event_name="before-send.s3.GetObject")
+    assert headers["X-Fos-Target"] == "us-east.object.fastlystorage.app"
+    assert "x-fastly-key" not in headers
+
+
+def test_sign_request_adds_content_md5_for_bulk_delete(monkeypatch):
+    monkeypatch.setattr(
+        telemetry_proxy,
+        "_load_config_cached",
+        lambda sid: {
+            "fos_access_key_id": "test-key",
+            "fos_secret_access_key": "test-secret",
+            "fos_region": "us-east-1",
+        },
+    )
+    headers = {}
+    body = b"<Delete><Object><Key>foo</Key></Object></Delete>"
+    signed = telemetry_proxy._sign_request(
+        "POST",
+        "https://us-east-1.object.fastlystorage.app/my-bucket?delete",
+        headers,
+        body,
+        "svc-test",
+    )
+    assert "Content-MD5" in signed or "content-md5" in signed
+    assert "Authorization" in signed
+
+
+# ── Phase 3a: DuckDB httpfs through the proxy ───────────────────────────────
+
+
+def test_configure_fos_creates_proxy_secret_no_cdn(proxy_server):
+    """``_configure_fos`` must create a SECRET named ``fos_proxy`` pointing
+    at the local proxy."""
+    import duckdb
+
+    from backend.core import duckdb as _ddb
+
+    source = {
+        "name": "phase3a-no-cdn",
+        "service_id": "phase3a-no-cdn",
+        "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
+        "endpoint": "us-east-1.object.fastlystorage.app",
+        "access_key_id": "AKIA-phase3a",
+        "secret_access_key": "secret-phase3a",
+        "region": "us-east-1",
+    }
+    con = duckdb.connect(":memory:")
+    try:
+        _ddb._configure_fos(con, source)
+
+        rows = con.execute("SELECT name, type, secret_string FROM duckdb_secrets() WHERE name='fos_proxy'").fetchall()
+        assert len(rows) == 1, f"expected 1 fos_proxy secret, got {len(rows)}: {rows}"
+        _name, stype, secret_string = rows[0]
+        assert stype.upper() == "S3"
+        proxy_host_port = proxy_server.proxy_endpoint().replace("http://", "")
+        assert proxy_host_port in secret_string, (
+            f"secret_string should reference proxy host:port {proxy_host_port}; got: {secret_string}"
+        )
+        for required in (
+            "X-Fos-Target=us-east-1.object.fastlystorage.app",
+            "X-Telemetry-Service-Id=phase3a-no-cdn",
+            "X-Telemetry-Caller=duckdb.httpfs",
+        ):
+            assert required in secret_string, (
+                f"missing required header in extra_http_headers: {required}\nsecret_string={secret_string}"
+            )
+        assert "x-fastly-key" not in secret_string.lower(), (
+            "no-CDN source must not inject x-fastly-key into the proxy SECRET"
+        )
+    finally:
+        con.close()
+
+
+def test_configure_fos_creates_proxy_secret_with_cdn(proxy_server):
+    """When source has cdn_url + cdn_secret, the proxy SECRET must target the
+    CDN host and carry x-fastly-key in EXTRA_HTTP_HEADERS."""
+    import duckdb
+
+    from backend.core import duckdb as _ddb
+
+    source = {
+        "name": "phase3a-cdn",
+        "service_id": "phase3a-cdn",
+        "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
+        "endpoint": "cdn.example.com",
+        "cdn_url": "https://cdn.example.com",
+        "cdn_secret": "fastly-secret-abc",
+        "access_key_id": "AKIA-phase3a",
+        "secret_access_key": "secret-phase3a",
+        "region": "us-east-1",
+    }
+    con = duckdb.connect(":memory:")
+    try:
+        _ddb._configure_fos(con, source)
+
+        rows = con.execute("SELECT secret_string FROM duckdb_secrets() WHERE name='fos_proxy'").fetchall()
+        assert len(rows) == 1
+        secret_string = rows[0][0]
+        assert "X-Fos-Target=cdn.example.com" in secret_string, (
+            f"CDN-configured source must target CDN host, not native FOS\nsecret_string={secret_string}"
+        )
+        assert "us-east-1.object.fastlystorage.app" not in secret_string, (
+            "native FOS endpoint must not leak into headers when CDN is configured"
+        )
+        assert "x-fastly-key=fastly-secret-abc" in secret_string, (
+            f"CDN-configured source must inject x-fastly-key\nsecret_string={secret_string}"
+        )
+    finally:
+        con.close()
+
+
+def test_configure_fos_uses_native_fos_when_edge_only_is_false(proxy_server):
+    """An explicitly disabled edge-only mode must keep DuckDB reads on native FOS."""
+    import duckdb
+
+    from backend.core import duckdb as _ddb
+
+    source = {
+        "name": "phase3a-native-reads",
+        "service_id": "phase3a-native-reads",
+        "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
+        "endpoint": "cdn.example.com",
+        "cdn_url": "https://cdn.example.com",
+        "cdn_secret": "fastly-secret-abc",
+        "provisioning": {"edge_only": False},
+        "access_key_id": "AKIA-phase3a",
+        "secret_access_key": "secret-phase3a",
+        "region": "us-east-1",
+    }
+    con = duckdb.connect(":memory:")
+    try:
+        _ddb._configure_fos(con, source)
+
+        secret_string = con.execute("SELECT secret_string FROM duckdb_secrets() WHERE name='fos_proxy'").fetchone()[0]
+        assert "X-Fos-Target=us-east-1.object.fastlystorage.app" in secret_string
+        assert "X-Fos-Target=cdn.example.com" not in secret_string
+        assert "x-fastly-key" not in secret_string.lower()
+    finally:
+        con.close()
+
+
+def test_configure_duckdb_s3_does_not_clobber_proxy_secret(proxy_server):
+    """iceberg.configure_duckdb_s3 runs immediately after _configure_fos in
+    get_connection. Pin that it leaves the fos_proxy SECRET alone."""
+    import duckdb
+
+    from backend.core import duckdb as _ddb
+    from backend.core import iceberg as _ic
+
+    source = {
+        "name": "phase3a-icestack",
+        "service_id": "phase3a-icestack",
+        "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
+        "endpoint": "us-east-1.object.fastlystorage.app",
+        "access_key_id": "AKIA-test",
+        "secret_access_key": "secret-test",
+        "region": "us-east-1",
+    }
+    con = duckdb.connect(":memory:")
+    try:
+        _ddb._configure_fos(con, source)
+        _ic.configure_duckdb_s3(con)
+
+        rows = con.execute("SELECT secret_string FROM duckdb_secrets() WHERE name='fos_proxy'").fetchall()
+        assert len(rows) == 1
+        proxy_host_port = proxy_server.proxy_endpoint().replace("http://", "")
+        assert proxy_host_port in rows[0][0], "configure_duckdb_s3 must NOT clobber the proxy SECRET"
+        ep = con.execute("SELECT current_setting('s3_endpoint')").fetchone()[0]
+        assert ep in ("", None), f"configure_duckdb_s3 must NOT SET s3_endpoint; got: {ep!r}"
+    finally:
+        con.close()
+
+
+def _write_parquet_to_moto(seed_client, bucket: str, key: str, rows: int = 8) -> bytes:
+    import io
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    table = pa.table({"x": list(range(rows))})
+    buf = io.BytesIO()
+    pq.write_table(table, buf)
+    body = buf.getvalue()
+    seed_client.put_object(Bucket=bucket, Key=key, Body=body)
+    return body
+
+
+async def test_duckdb_read_through_proxy_logs_telemetry(proxy_server, moto_s3_server, tmp_path):
+    """Acceptance-level integration: DuckDB issues a real read_parquet
+    against moto via the proxy, and the proxy logs at least one usage row
+    with caller='duckdb.httpfs' and the bucket/key referenced."""
+    from backend.core import duckdb as _ddb
+
+    endpoint_url, host_port = moto_s3_server
+    seed_client = boto3.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        region_name="us-east-1",
+        aws_access_key_id="testing",
+        aws_secret_access_key="testing",
+        config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+    )
+    _write_parquet_to_moto(seed_client, "test-bucket", "hello.parquet", rows=8)
+
+    source = {
+        "name": "phase3a-e2e",
+        "service_id": "phase3a-e2e",
+        "fos_native_endpoint": f"http://{host_port}",
+        "endpoint": f"http://{host_port}",
+        "access_key_id": "testing",
+        "secret_access_key": "testing",
+        "region": "us-east-1",
+        "duckdb_path": str(tmp_path / "phase3a_e2e.duckdb"),
+    }
+    mock_cfg = {
+        "fos_access_key_id": "testing",
+        "fos_secret_access_key": "testing",
+        "fos_region": "us-east-1",
+    }
+
+    captured_rows: list[dict] = []
+
+    def _capture(service_id, rows, process_context=None):
+        captured_rows.extend(rows)
+
+    telemetry_proxy._bust_config_cache()
+    with (
+        patch("backend.config.load_config", return_value=mock_cfg),
+        patch("backend.core.metadata.log_usage_calls", side_effect=_capture),
+    ):
+        con = _ddb.get_connection(source, skip_view_update=True)
+        try:
+            (count,) = con.execute("SELECT count(*) FROM read_parquet('s3://test-bucket/hello.parquet')").fetchone()
+            assert count == 8, f"expected 8 rows from parquet, got {count}"
+        finally:
+            con.close()
+        telemetry_proxy._flush_log_writes_for_tests()
+
+    assert len(captured_rows) >= 1, (
+        f"expected >=1 captured usage row from DuckDB->proxy round-trip, got {len(captured_rows)}"
+    )
+    duckdb_rows = [r for r in captured_rows if r.get("caller") == "duckdb.httpfs"]
+    assert len(duckdb_rows) >= 1, (
+        f"expected at least one row with caller='duckdb.httpfs'; got callers={[r.get('caller') for r in captured_rows]}"
+    )
+    keyed = [
+        r for r in duckdb_rows if "test-bucket" in (r.get("path") or "") and "hello.parquet" in (r.get("path") or "")
+    ]
+    assert len(keyed) >= 1, (
+        f"expected a usage row mentioning test-bucket/hello.parquet; got paths={[r.get('path') for r in duckdb_rows]}"
+    )
+
+
+def test_configure_fos_concurrent_no_write_write_conflict(proxy_server, tmp_path):
+    """Concurrent _configure_fos calls on the same DuckDB file must all
+    succeed without catalog write-write conflict."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    import duckdb
+
+    from backend.core import duckdb as _ddb
+
+    db_path = str(tmp_path / "concurrent_fos.duckdb")
+    source = {
+        "name": "phase3a-concurrent",
+        "service_id": "phase3a-concurrent",
+        "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
+        "endpoint": "us-east-1.object.fastlystorage.app",
+        "access_key_id": "AKIA-concurrent",
+        "secret_access_key": "secret-concurrent",
+        "region": "us-east-1",
+    }
+
+    errors: list[Exception] = []
+
+    def _worker(_i: int) -> None:
+        try:
+            con = duckdb.connect(db_path)
+            try:
+                _ddb._configure_fos(con, source)
+            finally:
+                con.close()
+        except Exception as e:
+            errors.append(e)
+
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        list(ex.map(_worker, range(32)))
+
+    assert not errors, (
+        "concurrent _configure_fos must not raise catalog write-write conflict; "
+        f"got {len(errors)} error(s); first: {errors[0]!r}"
+    )
+
+
+# ── Phase 4: always-on proxy pins ───────────────────────────────────────────
+
+
+def test_fastapi_lifespan_starts_proxy():
+    """The lifespan startup hook must call telemetry_proxy.start_proxy_server()
+    so the first request doesn't pay a cold-start cost."""
+    import asyncio as _asyncio
+
+    from backend import main as _main
+
+    called = {"n": 0}
+
+    def _fake_start():
+        called["n"] += 1
+
+    with patch("backend.utils.telemetry_proxy.start_proxy_server", side_effect=_fake_start):
+
+        async def _drive():
+            async with _main.lifespan(_main.app):
+                pass
+
+        _asyncio.run(_drive())
+
+    assert called["n"] >= 1, "lifespan must call start_proxy_server()"
+
+
+def test_get_fos_client_paginator_accepts_caller_hint():
+    """Production callers pass ``caller_hint`` to ``client.get_paginator(...)``."""
+    from backend.core import duckdb as _ddb
+
+    with _ddb._fos_client_lock:
+        _ddb._fos_client_cache.clear()
+
+    source = {
+        "name": "phase4-caller-hint",
+        "service_id": "phase4-caller-hint",
+        "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
+        "endpoint": "https://us-east-1.object.fastlystorage.app",
+        "access_key_id": "test",
+        "secret_access_key": "test",
+    }
+
+    client = _ddb._get_fos_client(source)
+    pag = client.get_paginator("list_objects_v2", caller_hint="ingest_scan")
+    assert pag is not None
+    assert hasattr(pag, "paginate")
+
+
+def test_get_fos_client_paginator_caller_hint_flows_to_proxy_header():
+    """When ``caller_hint`` is passed to the paginator and we iterate via
+    ``.paginate(...)``, every S3 request the proxy receives during that
+    iteration must carry ``X-Telemetry-Caller: <caller_hint>``."""
+    from backend.core import duckdb as _ddb
+
+    with _ddb._fos_client_lock:
+        _ddb._fos_client_cache.clear()
+
+    source = {
+        "name": "phase4-caller-hint-header",
+        "service_id": "phase4-caller-hint-header",
+        "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
+        "endpoint": "https://us-east-1.object.fastlystorage.app",
+    }
+    client = _ddb._get_fos_client(source)
+    pag = client.get_paginator("list_objects_v2", caller_hint="ingest_scan")
+
+    captured = []
+
+    class _FakeReq:
+        def __init__(self):
+            self.headers = {}
+
+    if hasattr(pag, "_set_caller_hint_context"):
+        token = pag._set_caller_hint_context()
+        try:
+            req = _FakeReq()
+            client.meta.events.emit("before-send.s3.ListObjectsV2", request=req)
+            captured.append(req.headers.get("X-Telemetry-Caller"))
+        finally:
+            pag._reset_caller_hint_context(token)
+    else:
+        from backend.utils.telemetry_proxy import _BOTO3_CALLER_HINT
+
+        token = _BOTO3_CALLER_HINT.set("ingest_scan")
+        try:
+            req = _FakeReq()
+            client.meta.events.emit("before-send.s3.ListObjectsV2", request=req)
+            captured.append(req.headers.get("X-Telemetry-Caller"))
+        finally:
+            _BOTO3_CALLER_HINT.reset(token)
+
+    assert captured == ["ingest_scan"], (
+        f"caller_hint must override default boto3.<op> in X-Telemetry-Caller; got {captured!r}"
+    )
+
+    req = _FakeReq()
+    client.meta.events.emit("before-send.s3.ListObjectsV2", request=req)
+    assert req.headers.get("X-Telemetry-Caller") == "boto3.listobjectsv2"
+
+
+def test_upstream_timeout_default_is_bounded():
+    """Default total upstream timeout must be <= 120s."""
+    total = telemetry_proxy._UPSTREAM_TIMEOUT.total
+    assert total is not None, "upstream timeout total must not be unbounded (None)"
+    assert 0 < total <= 120, f"default upstream timeout should be bounded (<= 120s), got {total}"
+
+
+def test_upstream_timeout_env_var_override():
+    """FOS_PROXY_UPSTREAM_TIMEOUT_S must override the default when set."""
+    import importlib
+    import os
+
+    original = os.environ.get("FOS_PROXY_UPSTREAM_TIMEOUT_S")
+    try:
+        os.environ["FOS_PROXY_UPSTREAM_TIMEOUT_S"] = "37"
+        importlib.reload(telemetry_proxy)
+        assert telemetry_proxy._UPSTREAM_TIMEOUT.total == 37.0
+    finally:
+        if original is None:
+            os.environ.pop("FOS_PROXY_UPSTREAM_TIMEOUT_S", None)
+        else:
+            os.environ["FOS_PROXY_UPSTREAM_TIMEOUT_S"] = original
+        importlib.reload(telemetry_proxy)

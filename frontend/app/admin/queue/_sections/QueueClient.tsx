@@ -963,8 +963,6 @@ export function QueueClient() {
                             const sizeLabel = formatBytes(item.size_bytes)
                             const rowBusyRetry =
                               actionBusyKey === `retry:${item.service_id}:${item.object_key}`
-                            const rowBusyPurge =
-                              actionBusyKey === `purge:${item.service_id}:${item.object_key}`
                             return (
                               <tr
                                 key={`${item.service_id}:${item.object_key}`}

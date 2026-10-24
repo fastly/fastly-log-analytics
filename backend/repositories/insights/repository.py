@@ -33,6 +33,7 @@ from backend.repositories._sql.insights import (
 )
 from backend.utils.telemetry import record_telemetry_query
 
+from . import definitions as _definitions  # noqa: F401  side-effect import: registers insight defs with the registry
 from .registry import registry
 
 logger = logging.getLogger(__name__)

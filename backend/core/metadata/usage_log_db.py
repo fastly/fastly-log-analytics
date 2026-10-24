@@ -8,9 +8,9 @@ below hands out the same pooled Postgres connections as
 
 What is still load-bearing here:
 
-- :func:`get_con` / :func:`open_readonly` / :func:`release_thread_connection` /
-  :func:`close_all_connections` — the import surface ``usage_log``, ``ingest_log``,
-  ``reconciliation`` and telemetry call (and tests monkeypatch).
+- :func:`get_con` / :func:`open_readonly` / :func:`close_all_connections` — the
+  import surface ``usage_log``, ``ingest_log``, ``reconciliation`` and telemetry
+  call (and tests monkeypatch).
 - :data:`_SCHEMA` — the table/index definitions. ``pg_schema.pg_schema_statements``
   translates them to Postgres DDL (and drops the SQLite triggers, whose rollup
   maintenance the Postgres write path does itself), so this list IS the source of
@@ -51,19 +51,9 @@ def open_readonly(service_id: str) -> pg_connection.PgConnectionWrapper:
     return wrapper
 
 
-def release_thread_connection() -> None:
-    """Release the thread connection back to the pool."""
-    pg_connection.release_pg_thread_connection()
-
-
 def close_all_connections() -> None:
     """Close all open Postgres connections in the pool."""
     pg_connection.close_all_pg_connections()
-
-
-def teardown(service_id: str) -> None:
-    """No-op under Postgres — rows are scoped by service_id."""
-    _validate_service_id_or_raise(service_id)
 
 
 # ── Schema ────────────────────────────────────────────────────────────────────

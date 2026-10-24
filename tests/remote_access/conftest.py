@@ -18,7 +18,6 @@ def isolate_share_db(tmp_path, monkeypatch):
     from backend.utils import tunnel
 
     monkeypatch.setenv("REMOTE_SHARE_DB_DIR", str(tmp_path / "system"))
-    share_db.reset_for_tests()
     tunnel.reset_for_tests()
     con = share_db.get_global_share_con()
     try:

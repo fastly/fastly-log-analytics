@@ -557,36 +557,6 @@ def get_latest_reconciliation_ts(service_id: str) -> str | None:
     return row["latest"] if row["latest"] else None
 
 
-def register_locally_compacted(service_id: str, file_names: list[str]) -> None:
-    """Record parquet basenames that local_compaction merged + deleted.
-
-    sync_data uses this to distinguish "intentionally absent locally"
-    (merged into a bigger local file) from "missing, needs re-fetch".
-    """
-    if not file_names:
-        return
-    con = get_con(service_id)
-    con.executemany(
-        "INSERT OR IGNORE INTO local_compacted_files (service_id, file_name) VALUES (?, ?)",
-        [(service_id, n) for n in file_names],
-    )
-    con.commit()
-
-
-def get_locally_compacted_basenames(service_id: str) -> set[str]:
-    """Return the set of parquet basenames that local_compaction has
-    intentionally removed (so sync_data should skip re-downloading them).
-    Cached at the call site if used in a hot loop.
-    """
-    con = get_con(service_id)
-    return {
-        row[0]
-        for row in con.execute(
-            "SELECT file_name FROM local_compacted_files WHERE service_id = ?", (service_id,)
-        ).fetchall()
-    }
-
-
 def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None]], table_name: str = "logs") -> None:
     """Bulk-insert/upsert (file_name, row_count, file_size_bytes) rows for a service.
 
@@ -782,22 +752,6 @@ def list_in_flight(service_id: str, table_name: str = "logs") -> list[tuple[str,
             tuples = []
         out.append((r["buffer_filename"], tuples))
     return out
-
-
-def purge_committed_buffer_rows(service_id: str, basenames: list[str]) -> int:
-    """Remove ``committed_buffers`` rows once the buffer parquets are
-    fully gone from disk (post tombstone-sweep). Bounds the table size
-    over time. Returns the number of rows deleted. Idempotent."""
-    if not basenames:
-        return 0
-    con = get_con(service_id)
-    placeholders = ", ".join("?" for _ in basenames)
-    cur = con.execute(
-        f"DELETE FROM committed_buffers WHERE buffer_filename IN ({placeholders})",
-        basenames,
-    )
-    con.commit()
-    return cur.rowcount
 
 
 def get_log_activity(service_id: str, start_iso: str, end_iso: str, by: str) -> dict:

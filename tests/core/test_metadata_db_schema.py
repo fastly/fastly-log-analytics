@@ -46,7 +46,6 @@ _EXPECTED_TABLES = {
     "views",
     "alerts",
     "scoring_labels",
-    "local_compacted_files",
 }
 
 _EXPECTED_INDEXES = {

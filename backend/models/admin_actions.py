@@ -56,14 +56,6 @@ class DuckdbRecycleResponse(WireSafeModel):
     freed_mb: float | None = None
 
 
-class DucklakeMigrateResponse(WireSafeModel):
-    """``POST /admin/ducklake/migrate`` (202)."""
-
-    ok: bool
-    message: str
-    service_id: str
-
-
 class NgwafSyncResponse(WireSafeModel):
     """``POST /admin/ngwaf/sync/{service_id}``."""
 
@@ -145,9 +137,7 @@ class BackfillWindowResponse(WireSafeModel):
     error: str | None = None
     files_downloaded: int | None = None
     rows_downloaded: int | None = None
-    bytes_downloaded: int | None = None
     files_removed: int | None = None
-    files_skipped: int | None = None
 
 
 class HealthServiceState(WireSafeModel):

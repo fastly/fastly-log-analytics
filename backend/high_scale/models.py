@@ -15,17 +15,6 @@ class RetentionRecommendation:
 
 
 @dataclass(frozen=True)
-class HighScaleQuotaProfile:
-    """Per-service bounds for interactive queries and exports."""
-
-    max_concurrent_queries: int
-    max_query_rows: int
-    max_exports_per_hour: int
-    max_export_rows_per_hour: int
-    max_export_bytes_per_hour: int
-
-
-@dataclass(frozen=True)
 class TopologyProfile:
     name: str
     clickhouse_replicas_per_shard: int
