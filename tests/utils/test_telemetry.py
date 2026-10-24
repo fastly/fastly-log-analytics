@@ -1260,7 +1260,7 @@ class TestTelemetryResponseMiddleware:
         assert int(response.headers["content-length"]) == len(body)
         assert len(response.headers.get_list("set-cookie")) == 2
 
-    def test_master_off_strips_pre_attached_envelope_without_collecting(self, monkeypatch) -> None:
+    def test_master_off_strips_pre_attached_debug_data_and_preserves_cache_marker(self, monkeypatch) -> None:
         from backend.utils import telemetry
 
         monkeypatch.setenv("DEBUG_RESPONSES", "0")
@@ -1275,6 +1275,11 @@ class TestTelemetryResponseMiddleware:
             "value": {"count": 7, "rows": [], "optional": None},
             "_section_timings": [{"name": "query", "ms": 0.1}],
             "_response_cache": {"state": "hit"},
+            "_debug_queries": [{"sql": "SELECT 1"}],
+            "_debug_calls": [{"path": "/example"}],
+            "_debug_sqlite": [{"sql": "SELECT 2"}],
+            "_debug_postgres": [{"sql": "SELECT 3"}],
+            "_is_cached": True,
         }
         app = FastAPI()
 
@@ -1283,11 +1288,10 @@ class TestTelemetryResponseMiddleware:
             response = JSONResponse(
                 {
                     **payload,
-                    "_debug_queries": [{"sql": "SELECT 1"}],
-                    "_debug_calls": [{"path": "/example"}],
-                    "_debug_sqlite": [{"sql": "SELECT 2"}],
-                    "_debug_postgres": [{"sql": "SELECT 3"}],
-                    "_is_cached": True,
+                    "debug_queries": [{"sql": "SELECT 4"}],
+                    "debug_calls": [{"path": "/bare"}],
+                    "debug_sqlite": [{"sql": "SELECT 5"}],
+                    "debug_postgres": [{"sql": "SELECT 6"}],
                 },
                 status_code=202,
                 headers={"X-Example": "kept"},
@@ -1300,7 +1304,12 @@ class TestTelemetryResponseMiddleware:
         response = TestClient(app).get("/pre-attached", headers={"x-debug-responses": "1"})
 
         assert response.status_code == 202
-        assert response.json() == payload
+        assert response.json() == {
+            "value": payload["value"],
+            "_section_timings": payload["_section_timings"],
+            "_response_cache": payload["_response_cache"],
+            "_is_cached": True,
+        }
         assert response.headers["content-type"] == "application/json"
         assert response.headers["x-example"] == "kept"
         assert int(response.headers["content-length"]) == len(response.content)
