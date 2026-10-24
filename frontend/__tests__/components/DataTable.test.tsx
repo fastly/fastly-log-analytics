@@ -23,9 +23,19 @@ import { axe } from 'vitest-axe'
 import React from 'react'
 import { DataTable } from '@/components/DataTable/DataTable'
 import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
+import { DateTimeCell } from '@/components/DataTable/DateTimeCell'
 import type { ColumnDef } from '@tanstack/react-table'
 
 vi.mock('@tanstack/react-virtual', async () => (await import('@/__tests__/helpers/virtual-mock')).reactVirtualModuleMock())
+vi.mock('@/hooks/useDateFormat', () => ({
+  useDateFormat: () => ({
+    full: (iso: string) => `full:${iso}`,
+    abbr: () => 'UTC',
+  }),
+}))
+vi.mock('@/components/TimeAgo', () => ({
+  TimeAgo: ({ timestamp }: { timestamp: string }) => `ago:${timestamp}`,
+}))
 
 beforeAll(() => {
   stubResizeObserver()
@@ -184,5 +194,25 @@ describe('showPagination={false}', () => {
     render(<DataTableReadonly columns={COLUMNS} data={MANY} hideToolbar />)
     expect(screen.queryByText('row-119')).toBeNull()
     expect(screen.getByText('row-49')).toBeTruthy()
+  })
+})
+
+describe('DateTimeCell', () => {
+  it('renders default em-dash fallback when iso is null', () => {
+    const { container } = render(<DateTimeCell iso={null} />)
+    const span = container.querySelector('span.text-muted-foreground\\/40')
+    expect(span).not.toBeNull()
+    expect(span?.textContent).toBe('—')
+  })
+
+  it('renders emptyFallback node when iso is null and fallback supplied', () => {
+    render(<DateTimeCell iso={undefined} emptyFallback={<span>N/A</span>} />)
+    expect(screen.getByText('N/A')).toBeInTheDocument()
+    expect(screen.queryByText('—')).toBeNull()
+  })
+
+  it('renders the live <TimeAgo> on the trigger when iso is provided', () => {
+    render(<DateTimeCell iso="2026-06-15T12:00:00Z" />)
+    expect(screen.getByText('ago:2026-06-15T12:00:00Z')).toBeInTheDocument()
   })
 })

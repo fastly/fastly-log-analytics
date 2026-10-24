@@ -762,3 +762,6 @@ def _reset_oauth_caches(request: pytest.FixtureRequest):
     oidc.set_test_transport(None)
     registry.reset_cache_for_tests()
     oidc.reset_caches_for_tests()
+
+
+from tests._helpers.config_fakes import with_config  # noqa: E402, F401

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from unittest.mock import patch
 
 import pytest
@@ -830,3 +832,191 @@ def test_bootstrap_header_badge_uses_live_sync_snapshot(client, tmp_path, monkey
 
 # Silence unused-import warnings
 _ = pytest
+
+
+# ── Merged from test_bootstrap_graceful_degradation.py ──
+
+
+def _seed_active_service(monkeypatch, tmp_path):
+    """A configured service so valid_active_id != None, which is the
+    precondition for the optional resolvers to run at all."""
+    from backend import config
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
+
+
+def _get(client):
+    return client.get("/api/bootstrap", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+
+
+def test_bootstrap_survives_share_banner_failure(client, tmp_path, monkeypatch):
+    """Tunnel manager in transient state → share_banner=None, no 500."""
+    _seed_active_service(monkeypatch, tmp_path)
+    with patch("backend.utils.tunnel.get_tunnel_manager", side_effect=RuntimeError("tunnel restart")):
+        response = _get(client)
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("share_banner") is None
+    assert data["active_service_id"] == MOCK_SERVICE_ID
+    assert "pops" in data
+
+
+def test_bootstrap_survives_ops_overview_queries_summary_failure(client, tmp_path, monkeypatch):
+    """query_registry.summary() raising → queries_summary sub-key omitted."""
+    _seed_active_service(monkeypatch, tmp_path)
+    from backend.core.query_registry import query_registry
+
+    with patch.object(query_registry, "summary", side_effect=RuntimeError("registry broke")):
+        response = _get(client)
+    assert response.status_code == 200
+    ov = response.json().get("ops_overview") or {}
+    assert "queries_summary" not in ov
+
+
+def test_bootstrap_survives_ops_overview_slow_query_count_failure(client, tmp_path, monkeypatch):
+    """count_slow_queries() raising → slow_queries_count omitted."""
+    _seed_active_service(monkeypatch, tmp_path)
+    with patch("backend.core.metadata.count_slow_queries", side_effect=RuntimeError("metadata.db down")):
+        response = _get(client)
+    assert response.status_code == 200
+    ov = response.json().get("ops_overview") or {}
+    assert "slow_queries_count" not in ov
+
+
+def test_bootstrap_survives_cron_runs_first_page_failure(client, tmp_path, monkeypatch):
+    """get_cron_runs raising → cron_runs_first_page=None."""
+    _seed_active_service(monkeypatch, tmp_path)
+    with patch("backend.core.metadata.cron_log.get_cron_runs", side_effect=RuntimeError("sqlite locked")):
+        response = _get(client)
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("cron_runs_first_page") is None
+    assert "services" in data
+
+
+def test_bootstrap_survives_last_sync_failure(client, tmp_path, monkeypatch):
+    """latest_cron_per_task raising → last_sync=None (header badge nicety)."""
+    _seed_active_service(monkeypatch, tmp_path)
+    with patch("backend.core.metadata.cron_log.latest_cron_per_task", side_effect=RuntimeError("corrupt")):
+        response = _get(client)
+    assert response.status_code == 200
+    assert response.json().get("last_sync") is None
+
+
+def test_bootstrap_survives_scoring_labels_failure(client, tmp_path, monkeypatch):
+    """labels.list_labels raising → scoring_labels=None (labels UI nicety)."""
+    _seed_active_service(monkeypatch, tmp_path)
+    with patch("backend.scoring.labels.list_labels", side_effect=RuntimeError("labels store down")):
+        response = _get(client)
+    assert response.status_code == 200
+    assert response.json().get("scoring_labels") is None
+
+
+def test_bootstrap_survives_simultaneous_optional_failures(client, tmp_path, monkeypatch):
+    """Worst case — every optional resolver dies. Bootstrap must still
+    return 200 with the core fields populated. Pins the per-block
+    try/except shield: losing any single block must not cascade."""
+    _seed_active_service(monkeypatch, tmp_path)
+    from backend.repositories import views as _views_repo
+
+    monkeypatch.setattr(_views_repo, "get_views", lambda _sid: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    with (
+        patch("backend.utils.tunnel.get_tunnel_manager", side_effect=RuntimeError("boom")),
+        patch("backend.core.metadata.cron_log.get_cron_runs", side_effect=RuntimeError("boom")),
+        patch("backend.core.metadata.cron_log.latest_cron_per_task", side_effect=RuntimeError("boom")),
+        patch("backend.scoring.labels.list_labels", side_effect=RuntimeError("boom")),
+    ):
+        response = _get(client)
+
+    assert response.status_code == 200, (
+        f"compound optional-resolver failure must not 500; got {response.status_code} body={response.text[:300]}"
+    )
+    data = response.json()
+    # Every optional field at its documented default
+    assert data.get("share_banner") is None
+    assert data.get("cron_runs_first_page") is None
+    assert data.get("last_sync") is None
+    assert data.get("scoring_labels") is None
+    assert data["views"] == []
+    # Core (non-optional) fields still populated
+    assert data["active_service_id"] == MOCK_SERVICE_ID
+    assert "services" in data
+    assert "pops" in data
+    assert "settings" in data
+
+
+# ── Merged from test_pricing_defaults.py ──
+
+
+from fastapi.testclient import TestClient
+
+from backend.deps import get_source
+from backend.main import app
+
+_MOCK_GLOBAL_CFG = {
+    "enabled": True,
+    "retention_days": 30,
+    "class_a_rate_per_1k": 0.006,  # Non-default
+    "class_b_rate_per_10k": 0.02,  # Non-default
+    "cdn_egress_rate_per_gb": 0.15,  # Non-default
+    "storage_rate_per_gb_month": 0.03,  # Non-default
+}
+
+_TEST_SOURCE = {"name": "test_service", "service_id": "svc1"}
+
+
+@patch("backend.config.load_usage_logging_config", return_value=_MOCK_GLOBAL_CFG)
+def test_prefill_uses_global_rates(mock_load):
+    """Verify that /api/usage/prefill returns the global rates, not hardcoded defaults."""
+    app.dependency_overrides[get_source] = lambda: _TEST_SOURCE
+    with TestClient(app) as c:
+        r = c.get("/api/usage/prefill")
+    app.dependency_overrides.pop(get_source, None)
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["class_a_rate_per_1k"] == 0.006
+    assert data["class_b_rate_per_10k"] == 0.02
+    assert data["cdn_egress_rate_per_gb"] == 0.15
+    assert data["storage_rate_per_gb_month"] == 0.03
+
+
+@patch("backend.config.load_usage_logging_config", return_value=_MOCK_GLOBAL_CFG)
+@patch("backend.core.metadata.get_usage_logs")
+def test_usage_log_uses_global_rates_for_cost(mock_get_logs, mock_load):
+    """Verify that aggregate cost calculations use the global rates."""
+    mock_get_logs.return_value = (
+        [],
+        0,
+        {
+            "total_class_a": 1000,
+            "total_class_b": 10000,
+            "total_cdn_downloads": 0,
+            "total_cdn_bytes": 1073741824,  # 1 GB
+            "total_fos_bytes": 0,
+            "class_a_breakdown": {},
+            "class_b_breakdown": {},
+        },
+    )
+
+    app.dependency_overrides[get_source] = lambda: _TEST_SOURCE
+    with TestClient(app) as c:
+        r = c.get(
+            "/api/admin/usage-log",
+            params={"start": "2024-01-01 00:00:00", "end": "2024-12-31 23:59:59"},
+        )
+    app.dependency_overrides.pop(get_source, None)
+
+    assert r.status_code == 200
+    agg = r.json()["aggregate"]
+
+    # Class A: 1000 ops @ $0.006/1k = 0.006
+    assert abs(agg["estimated_cost_class_a"] - 0.006) < 1e-10
+    # Class B: 10000 ops @ $0.02/10k = 0.02
+    assert abs(agg["estimated_cost_class_b"] - 0.02) < 1e-10
+    # CDN: 1GB @ $0.15/GB = 0.15
+    assert abs(agg["estimated_cost_cdn"] - 0.15) < 1e-10
+    # Total: 0.006 + 0.02 + 0.15 = 0.176
+    assert abs(agg["estimated_cost_total"] - 0.176) < 1e-10

@@ -2,15 +2,14 @@
  * StatusPanel contract for Session Scoring prerequisite pragmas.
  */
 import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
-import { stubGetAnimations, stubPointerCaptureAndScroll } from '@/__tests__/helpers/jsdom-shims'
+import { stubGetAnimations, stubPointerCaptureAndScroll } from '@/__tests__/helpers/browser-stubs'
 import * as React from 'react'
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { QueryClientProvider } from '@tanstack/react-query'
 import { http, HttpResponse } from 'msw'
 
-import { createTestQueryClient } from '../../helpers/query'
+import { renderWithQuery } from '../../helpers/query'
 import { server } from '@/__tests__/helpers/msw/server'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -26,15 +25,7 @@ const API_BASE = getApiBase()
 const SVC = 'svc-pragma-test'
 
 function renderPanel() {
-  const qc = createTestQueryClient()
-  return {
-    queryClient: qc,
-    ...render(
-      <QueryClientProvider client={qc}>
-        <StatusPanel serviceId={SVC} />
-      </QueryClientProvider>,
-    ),
-  }
+  return renderWithQuery(<StatusPanel serviceId={SVC} />)
 }
 
 beforeEach(() => {

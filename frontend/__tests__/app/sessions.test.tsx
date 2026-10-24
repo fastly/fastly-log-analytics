@@ -1,8 +1,7 @@
-import { render, screen } from '@testing-library/react'
+import { screen } from '@testing-library/react'
 import { expect, test, vi, beforeEach, afterEach } from 'vitest'
 import SessionsPage from '@/app/sessions/page'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/query'
 import React from 'react'
 import { spyOnConsoleError } from '../helpers/page-smoke'
 
@@ -55,11 +54,7 @@ afterEach(() => {
 })
 
 test('sessions page mounts and renders title', () => {
-  render(
-    <QueryClientProvider client={queryClient}>
-      <SessionsPage />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<SessionsPage />, { queryClient })
   expect(screen.getByText('User Sessions')).toBeInTheDocument()
   expect(errorSpy).not.toHaveBeenCalled()
 })

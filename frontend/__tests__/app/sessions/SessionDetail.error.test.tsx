@@ -1,7 +1,6 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import { expect, test, vi, beforeEach } from 'vitest'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../../helpers/query'
 import React from 'react'
 import { partial } from '../../helpers/partial'
 import type { components } from '@/types/api.generated'
@@ -40,18 +39,17 @@ beforeEach(() => queryClient.clear())
 // starvation flake, not a logic bug. Generous waitFor + test timeouts absorb the
 // load without masking a real regression (the alert still must appear).
 test('UX-5: shows an inline error + Retry (not a bare empty table) when the detail query 5xxs', async () => {
-  render(
-    <QueryClientProvider client={queryClient}>
-      <SessionDetail
-        selectedSession={selectedSession}
-        setSelectedSession={() => {}}
-        activeServiceId="test-svc"
-        data={undefined}
-        labels={[]}
-        labelBySid={new Map()}
-        onFlagged={() => {}}
-      />
-    </QueryClientProvider>,
+  renderWithQuery(
+    <SessionDetail
+      selectedSession={selectedSession}
+      setSelectedSession={() => {}}
+      activeServiceId="test-svc"
+      data={undefined}
+      labels={[]}
+      labelBySid={new Map()}
+      onFlagged={() => {}}
+    />,
+    { queryClient },
   )
   await waitFor(
     () => {

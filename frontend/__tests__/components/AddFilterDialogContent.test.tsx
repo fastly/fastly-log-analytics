@@ -7,7 +7,7 @@
  *   - Clicking a suggestion fills the value without submitting.
  */
 import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
-import { stubPointerCaptureAndScroll } from '@/__tests__/helpers/jsdom-shims'
+import { stubPointerCaptureAndScroll } from '@/__tests__/helpers/browser-stubs'
 import * as React from 'react'
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'

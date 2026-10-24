@@ -102,9 +102,6 @@ def test_two_targets_keep_distinct_identity_and_unrelated_target_legacy(configur
     )
     assert admin_tls.admin_origin("remote-standard") == second["origin"]
     assert admin_tls.admin_origin("local-std") is None
-    result = admin_tls.admin_tls_config("remote-std")
-    result["origin"] = "https://changed.example.com"
-    assert admin_tls.admin_origin("remote-standard") == second["origin"]
 
 
 def test_tls_context_keeps_verification_enabled(configured, monkeypatch):

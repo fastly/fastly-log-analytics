@@ -191,29 +191,6 @@ def test_request_lifecycle_in_test_mode():
     ctx.end_request(status_code=200)
     ctx.end_request()  # idempotent
 
-    assert ctx.section_timings() == []
-
-
-def test_section_records_timing_metadata():
-    """Even without an active SDK, the section helper appends a timing
-    row to the debug-panel shape so the renderer has data to show."""
-    ctx = request_telemetry.RequestTelemetry("GET", "/api/dashboard/aggregates")
-    ctx.start_request()
-    with ctx.section("dashboard.aggregates", expensive="true"):
-        pass
-    timings = ctx.section_timings()
-    assert len(timings) == 1
-    assert timings[0]["section"] == "dashboard.aggregates"
-    assert timings[0]["elapsed_ms"] >= 0
-    ctx.end_request()
-
-
-def test_record_call_does_not_raise_when_no_recording():
-    ctx = request_telemetry.RequestTelemetry("GET", "/api/x")
-    ctx.start_request()
-    ctx.record_call("GET", "/v1/services", time_ms=12.3, service="Fastly API", status=200)
-    ctx.end_request()
-
 
 def test_thread_wait_histogram_constructed_once():
     """The lazy property should construct the instrument on first call
@@ -221,34 +198,6 @@ def test_thread_wait_histogram_constructed_once():
     h1 = request_telemetry.thread_wait_histogram()
     h2 = request_telemetry.thread_wait_histogram()
     assert h1 is h2
-
-
-# ── With a real in-memory SDK exporter ────────────────────────────────────────
-
-
-def test_section_emits_real_span_when_sdk_enabled(monkeypatch):
-    """Install an in-memory exporter and assert the section context
-    manager produces a span with the expected name + attribute."""
-    # Use a private tracer provider for this test (avoid touching the
-    # module-level global SDK state which is wedge-prone in -n auto mode).
-    provider = TracerProvider()
-    exporter = InMemorySpanExporter()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-
-    with patch("backend.core.request_telemetry.get_tracer", return_value=provider.get_tracer("test")):
-        ctx = request_telemetry.RequestTelemetry("GET", "/api/test")
-        ctx.start_request()
-        with ctx.section("test.section", custom="x"):
-            pass
-        ctx.end_request(status_code=200)
-
-    spans = exporter.get_finished_spans()
-    names = [s.name for s in spans]
-    assert "section:test.section" in names
-    section_span = next(s for s in spans if s.name == "section:test.section")
-    assert section_span.attributes is not None
-    assert section_span.attributes.get("custom") == "x"
-    assert "app.section.elapsed_ms" in section_span.attributes
 
 
 def test_start_request_reuses_ambient_span_instead_of_opening_a_second_one():

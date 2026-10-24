@@ -94,21 +94,23 @@ export function SSEDialogFooter({
   )
 }
 
-export function makeSSECloseHandler({
+function makeSSECloseHandler({
   status,
   onOpenChange,
   onComplete,
+  reloadOnDone = true,
 }: {
   status: SSEStatus
   onOpenChange: (open: boolean) => void
   onComplete?: () => void
+  reloadOnDone?: boolean
 }) {
   return (isOpen: boolean) => {
     if (status === 'streaming') return
     onOpenChange(isOpen)
     if (!isOpen && status === 'done') {
       if (onComplete) onComplete()
-      window.location.reload()
+      if (reloadOnDone) window.location.reload()
     }
   }
 }
@@ -117,12 +119,16 @@ export function SSEActionDialogShell({
   open,
   onOpenChange,
   onComplete,
+  reloadOnDone = true,
   status,
   onStop,
+  stopDisabled = false,
   isExecuting,
   maxWidthClassName = 'sm:max-w-xl',
   titleClassName = 'text-destructive',
   title,
+  headerRight,
+  headerExtra,
   executionSection,
   confirmButton,
   doneLabel = 'Close',
@@ -132,24 +138,36 @@ export function SSEActionDialogShell({
   open: boolean
   onOpenChange: (open: boolean) => void
   onComplete?: () => void
+  reloadOnDone?: boolean
   status: SSEStatus
   onStop?: () => void
+  stopDisabled?: boolean
   isExecuting: boolean
   maxWidthClassName?: string
   titleClassName?: string
   title: React.ReactNode
+  headerRight?: React.ReactNode
+  headerExtra?: React.ReactNode
   executionSection: React.ReactNode
   confirmButton: React.ReactNode
   doneLabel?: string
   idleOrErrorLabel?: string
   children: React.ReactNode
 }) {
-  const handleClose = makeSSECloseHandler({ status, onOpenChange, onComplete })
+  const handleClose = makeSSECloseHandler({ status, onOpenChange, onComplete, reloadOnDone })
   return (
     <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent className={cn(maxWidthClassName, panelDialogContent)} showCloseButton={status !== 'streaming'}>
         <DialogHeader className={panelDialogHeaderSolid}>
-          <DialogTitle className={cn('flex items-center gap-2 text-xl font-bold', titleClassName)}>{title}</DialogTitle>
+          {headerRight ? (
+            <div className="flex items-center justify-between w-full">
+              <DialogTitle className={cn('flex items-center gap-2 text-xl font-bold', titleClassName)}>{title}</DialogTitle>
+              {headerRight}
+            </div>
+          ) : (
+            <DialogTitle className={cn('flex items-center gap-2 text-xl font-bold', titleClassName)}>{title}</DialogTitle>
+          )}
+          {headerExtra}
         </DialogHeader>
         <div className="flex-1 overflow-y-auto min-h-0">{isExecuting ? executionSection : children}</div>
         <DialogFooter className={panelDialogFooter}>
@@ -159,7 +177,14 @@ export function SSEActionDialogShell({
               {confirmButton}
             </>
           ) : (
-            <SSEDialogFooter status={status} onClose={() => handleClose(false)} onStop={onStop} doneLabel={doneLabel} idleOrErrorLabel={idleOrErrorLabel} />
+            <SSEDialogFooter
+              status={status}
+              onClose={() => handleClose(false)}
+              onStop={onStop}
+              stopDisabled={stopDisabled}
+              doneLabel={doneLabel}
+              idleOrErrorLabel={idleOrErrorLabel}
+            />
           )}
         </DialogFooter>
       </DialogContent>

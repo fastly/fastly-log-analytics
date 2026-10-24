@@ -6,10 +6,7 @@ and distributions used across the repo:
 * ``scripts/load_test/generate_synthetic_traffic.py`` imports the dimension
   pools plus :func:`generate_columns` / :func:`cols_to_arrow_table` to build
   bulk Arrow/Parquet/NDJSON batches.
-* ``tests/utils/mock_data.py`` imports :func:`generate_mock_records` for small
-  deterministic per-record fixtures.
-* ``scripts/load_test/generate_synthetic_rum_traffic.py`` and
-  ``scripts/dev/scale_harness.py`` build RUM (Faro) records/beacons through the
+* ``scripts/dev/scale_harness.py`` builds RUM (Faro) records/beacons through the
   ``generate_rum_*`` / ``build_rum_*`` helpers at the bottom of this module.
 
 Both the columnar generator (NumPy ``Generator``) and the per-record generator
@@ -476,99 +473,6 @@ def cols_to_arrow_table(cols: dict[str, Any], schema: pa.Schema) -> pa.Table:
                 arr = pa.nulls(n_rows, type=field.type)
             arrays.append(arr)
     return pa.Table.from_arrays(arrays, schema=schema)
-
-
-# ---------------------------------------------------------------------------
-# Per-Record Generator (stdlib random) — small deterministic test fixtures
-# ---------------------------------------------------------------------------
-
-
-def generate_mock_records(
-    config: dict,
-    num_logs: int = 100,
-    hours_ago: int = 1,
-    rng: random.Random | Any = random,
-) -> list[dict]:
-    """Generate synthetic per-record log entries based on the log_fields schema.
-
-    ``rng`` defaults to the stdlib ``random`` module so output is byte-identical
-    to the historical ``mock_data.generate_mock_logs`` behaviour; pass a seeded
-    ``random.Random`` for deterministic fixtures.
-    """
-    from backend.core.log_fields import resolve_enabled_fields
-
-    enabled_fields = resolve_enabled_fields(config.get("log_fields"))
-    logs = []
-
-    now = datetime.now(UTC)
-    start_time = now - timedelta(hours=hours_ago)
-
-    # Common IPs and User Agents for realistic aggregations
-    ips = ["192.168.1.1", "10.0.0.1", "203.0.113.5", "198.51.100.10"]
-    uas = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1.15",
-        "curl/7.68.0",
-        "python-requests/2.25.1",
-    ]
-    urls = ["/", "/api/data", "/images/logo.png", "/about", "/login"]
-
-    for _ in range(num_logs):
-        log_entry = {}
-
-        # Advance time slightly for each log to spread them out
-        log_time = start_time + timedelta(seconds=rng.randint(0, hours_ago * 3600))
-
-        # Always-on fields
-        if "timestamp" in enabled_fields:
-            log_entry["timestamp"] = log_time.strftime("%Y-%m-%dT%H:%M:%S%z")
-            # DuckDB expects a valid format, python's %z leaves off the colon, let's fix it
-            if log_entry["timestamp"].endswith("0000"):
-                log_entry["timestamp"] = log_entry["timestamp"][:-4] + "00:00"
-
-        if "ip" in enabled_fields:
-            log_entry["ip"] = rng.choice(ips)
-
-        if "status" in enabled_fields:
-            # 80% 200s, 10% 404s, 10% 500s
-            log_entry["status"] = rng.choices([200, 404, 500], weights=[0.8, 0.1, 0.1])[0]
-
-        if "elapsed" in enabled_fields:
-            log_entry["elapsed"] = rng.randint(1000, 500000)  # 1ms to 500ms
-
-        if "cache" in enabled_fields:
-            log_entry["cache"] = rng.choices(["HIT", "MISS", "PASS"], weights=[0.6, 0.3, 0.1])[0]
-
-        if "resp_bytes" in enabled_fields:
-            log_entry["resp_bytes"] = rng.randint(500, 50000)
-
-        # Group A
-        if "url" in enabled_fields:
-            log_entry["url"] = rng.choice(urls)
-        if "ua" in enabled_fields:
-            log_entry["ua"] = rng.choice(uas)
-        if "method" in enabled_fields:
-            log_entry["method"] = "GET"
-
-        # Group C (Infrastructure)
-        if "pop" in enabled_fields:
-            log_entry["pop"] = rng.choice(["JFK", "LHR", "SYD"])
-        if "ttfb" in enabled_fields:
-            # TTFB usually smaller than elapsed. Convert back to seconds for the log format
-            ttfb_ms = log_entry.get("elapsed", 20000) * 0.8
-            log_entry["ttfb"] = f"{ttfb_ms / 1000000:.6f}"
-
-        # Group D (Geo)
-        if "country" in enabled_fields:
-            log_entry["country"] = rng.choice(["US", "GB", "AU", "DE"])
-
-        # Group F (Network)
-        if "asn" in enabled_fields:
-            log_entry["asn"] = rng.choice([7922, 3320, 15169])
-
-        logs.append(log_entry)
-
-    return logs
 
 
 # ---------------------------------------------------------------------------

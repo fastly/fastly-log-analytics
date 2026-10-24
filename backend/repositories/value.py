@@ -315,7 +315,6 @@ def _try_overview_from_rollup(
     has_shield: bool,
     has_waf: bool,
     has_elapsed: bool,
-    timer: SectionTimer,
 ) -> dict[str, Any] | None:
     """Serve the overview+caching sections from pre-rolled hourly parquets.
 
@@ -771,7 +770,6 @@ def get_summary(
             has_shield=has_shield,
             has_waf=has_waf,
             has_elapsed=has_elapsed,
-            timer=timer,
         )
         if rollup_result is not None:
             result["used_rollups"] = True

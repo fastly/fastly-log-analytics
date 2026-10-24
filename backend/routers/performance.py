@@ -15,10 +15,6 @@ from backend.repositories import performance as repo
 from backend.utils.router_utils import make_section_expander, query_errors
 
 router = APIRouter(prefix="/api/performance", tags=["performance"], responses=DEFAULT_ERROR_RESPONSES)
-# Section selector — names mirror PerformanceAggregatesResponse fields one-to-one
-# so the FE can request a subset and the per-card React Query hooks each pull
-# only what they render.
-SectionName = PerformanceSectionName
 
 # top_urls + top_asns share a 2-pass CTE shape against the same per-request
 # temp table (commit 8fc53e1). They run sequentially on the same scan and the
@@ -32,7 +28,7 @@ _TOP_N_PAIR: frozenset[str] = frozenset({"top_urls", "top_asns"})
 # the other so the spool's cost is amortized across both rather than half-paid.
 _WATERFALL_SCATTER_PAIR: frozenset[str] = frozenset({"waterfall", "scatter"})
 
-_expand_sections = make_section_expander(SectionName, union_groups=(_TOP_N_PAIR, _WATERFALL_SCATTER_PAIR))
+_expand_sections = make_section_expander(PerformanceSectionName, union_groups=(_TOP_N_PAIR, _WATERFALL_SCATTER_PAIR))
 
 
 @router.post("/aggregates", response_model=PerformanceAggregatesResponse)

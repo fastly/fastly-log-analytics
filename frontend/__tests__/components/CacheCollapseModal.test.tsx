@@ -4,14 +4,13 @@
  * timestamp) and the cache/status badges.
  */
 import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
-import { stubPointerCaptureAndScroll } from '@/__tests__/helpers/jsdom-shims'
+import { stubPointerCaptureAndScroll } from '@/__tests__/helpers/browser-stubs'
 import * as React from 'react'
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
-import { QueryClientProvider } from '@tanstack/react-query'
+import { screen } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 
-import { createTestQueryClient } from '../helpers/query'
+import { renderWithQuery } from '../helpers/query'
 import { server } from '@/__tests__/helpers/msw/server'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -46,10 +45,8 @@ describe('CacheCollapseModal recent misses', () => {
         }),
       ),
     )
-    render(
-      <QueryClientProvider client={createTestQueryClient()}>
-        <CacheCollapseModal isOpen onOpenChange={() => {}} url="/hot" windowHours="1" baselineHours="24" />
-      </QueryClientProvider>,
+    renderWithQuery(
+      <CacheCollapseModal isOpen onOpenChange={() => {}} url="/hot" windowHours="1" baselineHours="24" />,
     )
     expect(await screen.findByText('SJC')).toBeTruthy()
     expect(screen.getByRole('columnheader', { name: /^Timestamp \(/ })).toBeTruthy()

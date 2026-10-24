@@ -380,7 +380,6 @@ def usage_current_storage(
 
     try:
         from backend import config as svcconfig
-        from backend.core.duckdb import get_connection
 
         # Config lookup is keyed on service_id; fall back to {} when the
         # config file is missing (e.g. mid-teardown, or when name != service_id
@@ -397,14 +396,9 @@ def usage_current_storage(
         query_days = MIN_BILLING_DAYS if delete_after else retention_days
         retention_start_str = (now - timedelta(days=query_days)).strftime("%Y-%m-%d %H:%M:%S")
 
-        # get_storage_stats reads from per-service SQLite metadata_db
-        # (file list + sizes), not the Iceberg view — RO + skip-view is safe
-        # and avoids contending with ingest's writer lock.
-        con = get_connection(source=src, max_wait=5, skip_view_update=True, read_only=True)
-        try:
-            stats = repo.get_storage_stats(con, src, retention_start_str, retention_end_str)
-        finally:
-            con.close()
+        # get_storage_stats reads from metadata_db (file list + sizes),
+        # not the DuckDB/DuckLake view — no DuckDB connection checkout needed.
+        stats = repo.get_storage_stats(None, src, retention_start_str, retention_end_str)
 
         total_files = stats["total_files"]
         total_bytes = stats["total_bytes"]

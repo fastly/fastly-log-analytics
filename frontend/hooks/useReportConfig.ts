@@ -5,8 +5,6 @@ import { useFilterStore } from '@/stores/filterStore'
 import { useShallow } from 'zustand/react/shallow'
 import { type ChartInterval, INTERVAL_SECONDS, INTERVALS } from '@/lib/constants'
 
-export type { ChartInterval }
-
 interface ReportConfigOptions {
   defaultMetric?: string
   defaultInterval?: ChartInterval

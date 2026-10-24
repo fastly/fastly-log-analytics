@@ -133,28 +133,6 @@ def test_parse_forward_roundtrip():
     )
 
 
-def test_ready_wait_returns_only_when_port_accepts_and_cleanup_reaps_group(kubectl):
-    port = free_port()
-    forward = pf.Forward("svc/backend-svc", port, 8000, namespace="ns")
-    with pf.port_forwards([forward], kubectl=kubectl.path, ready_timeout=15):
-        with socket.create_connection(("127.0.0.1", port), timeout=2):
-            pass
-        (call,) = kubectl.calls()
-        assert call["argv"] == [
-            "--namespace",
-            "ns",
-            "port-forward",
-            "--address",
-            "127.0.0.1",
-            "svc/backend-svc",
-            f"{port}:8000",
-        ]
-        assert alive(call["pid"]) and alive(call["child"])
-    assert wait_dead(call["pid"])
-    assert wait_dead(call["child"])
-    assert not pf.port_in_use(port)
-
-
 def test_port_in_use_is_refused_before_spawning(kubectl):
     with socket.socket() as blocker:
         blocker.bind(("127.0.0.1", 0))

@@ -1,7 +1,7 @@
 import React from 'react'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { renderWithQuery } from '@/__tests__/helpers/renderWithQuery'
+import { renderWithQuery } from '@/__tests__/helpers/query'
 
 const { mockGet } = vi.hoisted(() => ({
   mockGet: vi.fn(),

@@ -6,7 +6,6 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from backend import config as svcconfig
 from backend.core.request_context import RequestContext, build_request_context
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.network import (
@@ -16,9 +15,9 @@ from backend.models.network import (
     NetworkHealthResponse,
     NetworkQualityRequest,
     NetworkQualityResponse,
+    NetworkSectionName,
     PopHealthItem,
     PopHealthListResponse,
-    SectionName,
     TransportMetrics,
 )
 from backend.repositories import network as repo
@@ -32,7 +31,6 @@ from backend.utils.time_window import (
     invite_clamp_fingerprint,
     is_valid_range_token,
     quantize_anchor,
-    resolve_window,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,7 +43,7 @@ CORE_SECTIONS: frozenset[str] = frozenset(
 SHIELDING_SECTIONS: frozenset[str] = frozenset({"shielding_analysis"})
 
 # No coupling — every network section is independent.
-_expand_sections = make_section_expander(SectionName)
+_expand_sections = make_section_expander(NetworkSectionName)
 
 
 def _resolve_network_window(
@@ -53,10 +51,8 @@ def _resolve_network_window(
     ctx: RequestContext,
 ) -> tuple[str | None, str | None, str | None, str | None, str | None]:
     """Resolve and clamp the time window + cache-key tokens for network endpoints."""
+    start_time, end_time = ctx.resolve_window(req)
     if is_valid_range_token(req.range_token):
-        earliest_log_at = svcconfig.get_status(ctx.source["name"]).get("earliest_log_at")
-        resolved_start, resolved_end = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
-        start_time, end_time = ctx.clamp(resolved_start, resolved_end)
         return (
             start_time,
             end_time,
@@ -64,7 +60,6 @@ def _resolve_network_window(
             quantize_anchor(req.anchor),
             invite_clamp_fingerprint(ctx.analyst_session),
         )
-    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
     return start_time, end_time, None, None, None
 
 
@@ -84,7 +79,7 @@ def _execute_network_health_section(
 ) -> dict[str, Any]:
     if want_core:
         res = repo.get_health(
-            con_factory=lambda: ctx.con,
+            con_factory=ctx.con_factory(),
             src=ctx.source,
             start_time=start_time,
             end_time=end_time,
@@ -175,7 +170,7 @@ def network_quality(
     req: NetworkQualityRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
-    start_time, end_time, _, _, _ = _resolve_network_window(req, ctx)
+    start_time, end_time = ctx.resolve_window(req)
 
     high_scale_service = ctx.high_scale
     if high_scale_service is not None:
@@ -183,7 +178,7 @@ def network_quality(
 
         return hs_network_quality(high_scale_service, req, start_time, end_time)
     res = repo.get_quality(
-        con_factory=lambda: ctx.con,
+        con_factory=ctx.con_factory(),
         src=ctx.source,
         start_time=start_time,
         end_time=end_time,
@@ -328,7 +323,7 @@ def _network_bundle_impl(
         quality_resp = None
         if want_quality:
             q_res = repo.get_quality(
-                con_factory=lambda: ctx.con,
+                con_factory=ctx.con_factory(),
                 src=ctx.source,
                 start_time=start_time,
                 end_time=end_time,
@@ -362,7 +357,7 @@ def _network_bundle_impl(
         transport_resp = None
         if want_transport:
             t_res = repo.get_transport_metrics(
-                con_factory=lambda: ctx.con,
+                con_factory=ctx.con_factory(),
                 src=ctx.source,
                 start_time=start_time,
                 end_time=end_time,
@@ -405,7 +400,7 @@ def network_bundle_get(
     top_n: int = 30,
     map_asn: str = "all",
     region_country: str = "US",
-    sections: list[SectionName] | None = Query(default=None),
+    sections: list[NetworkSectionName] | None = Query(default=None),
     ctx: RequestContext = Depends(build_request_context),
 ):
     req = NetworkBundleRequest(

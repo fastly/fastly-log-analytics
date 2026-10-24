@@ -32,52 +32,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-_INDENT_UNIT = "  "
-
 
 class VclBuilder:
-    """Accumulate VCL lines, then render deterministically."""
-
-    def __init__(self, *, indent_unit: str = _INDENT_UNIT) -> None:
-        self._lines: list[str] = []
-        self._indent_unit = indent_unit
-
-    # ── line mode ────────────────────────────────────────────────────────
-    def raw(self, text: str) -> VclBuilder:
-        """Append a block verbatim (internal newlines preserved as-is)."""
-        self._lines.append(text)
-        return self
-
-    def line(self, text: str = "", *, indent: int = 0) -> VclBuilder:
-        """Append a single line, optionally indented ``indent`` levels."""
-        self._lines.append(f"{self._indent_unit * indent}{text}" if indent and text else text)
-        return self
-
-    def lines(self, items: Iterable[str], *, indent: int = 0) -> VclBuilder:
-        """Append each item as its own line (see :meth:`line`)."""
-        for item in items:
-            self.line(item, indent=indent)
-        return self
-
-    def blank(self) -> VclBuilder:
-        """Append a single empty line."""
-        self._lines.append("")
-        return self
-
-    def build(self) -> str:
-        """Render accumulated lines, ``"\\n"``-joined."""
-        return "\n".join(self._lines)
-
-    # ── static helpers ───────────────────────────────────────────────────
-    @staticmethod
-    def indent(text: str, levels: int = 1, *, unit: str = _INDENT_UNIT) -> str:
-        """Indent every line of ``text`` by ``levels`` units.
-
-        Blank lines are left empty (no trailing indent), matching how the
-        generators indent content lines while emitting bare ``""`` blanks.
-        """
-        prefix = unit * levels
-        return "\n".join(f"{prefix}{line}" if line else line for line in text.split("\n"))
+    """Line- and section-joining helpers for VCL generators."""
 
     @staticmethod
     def join_lines(items: Iterable[str]) -> str:

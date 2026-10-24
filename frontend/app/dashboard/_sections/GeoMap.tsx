@@ -27,7 +27,7 @@ const ChoroplethMap = dynamic(
   },
 )
 
-export interface GeoMapProps {
+interface GeoMapProps {
   isReady: boolean
   isFetchingAggs: boolean
   aggregates: DashboardAggregates | null | undefined

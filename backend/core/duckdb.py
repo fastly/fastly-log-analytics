@@ -34,8 +34,6 @@ INGEST_CHUNK_SIZE = int(os.getenv("INGEST_CHUNK_SIZE", "500"))
 # Per-service globals — reflect the currently active service.
 # These are updated by _load_service_globals() when the active service changes.
 DUCKDB_PATH = "logs.duckdb"  # overridden per-service
-STORAGE_MODE = "cloud"  # always cloud for new services
-ACCESS_LEVEL = "read_write"  # per-service from config
 
 # Status-display busy window. ``_duckdb_status`` shows a service as
 # "busy" while a cron row started inside this window is still running.
@@ -125,8 +123,6 @@ def _build_default_source() -> dict:
 _DEFAULT_SOURCE = _build_default_source()
 # Sync module-level globals with the first configured service on import
 DUCKDB_PATH = _DEFAULT_SOURCE.get("duckdb_path") or DUCKDB_PATH
-STORAGE_MODE = _DEFAULT_SOURCE.get("storage_mode") or STORAGE_MODE
-ACCESS_LEVEL = _DEFAULT_SOURCE.get("access_level") or ACCESS_LEVEL
 
 
 def get_source_for_service(service_id: str) -> dict | None:
@@ -147,10 +143,8 @@ def reload_default_source():
     Called after provisioning or teardown to pick up new/removed services
     without restarting the app.
     """
-    global STORAGE_MODE, ACCESS_LEVEL, DUCKDB_PATH
+    global DUCKDB_PATH
     _DEFAULT_SOURCE.update(_build_default_source())
-    STORAGE_MODE = _DEFAULT_SOURCE.get("storage_mode", "cloud")
-    ACCESS_LEVEL = _DEFAULT_SOURCE.get("access_level", "read_write")
     DUCKDB_PATH = _DEFAULT_SOURCE.get("duckdb_path", "logs.duckdb")
 
 

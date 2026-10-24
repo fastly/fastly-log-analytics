@@ -24,99 +24,28 @@ import os
 import re
 import shutil
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import duckdb
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
 from backend.core import rollup_readiness as rr
 from backend.repositories import rollup_coverage
 from backend.repositories._base import QueryRunner
 from backend.utils.date_utils import parse_iso_utc
+from tests._helpers.rollups import ALL_FIELDS, build_rollup_golden_layout
+from tests._helpers.rollups import RollupGoldenLayout as Layout
 from tests._helpers.sources import make_source
 
 GOLDEN_PATH = Path(__file__).parent / "golden" / "rollup_reader_coverage.json"
 _STAT_FNS = ("isfile", "isdir", "exists")
 _COLS = ["timestamp", "country", "city", "lat", "lon", "metro", "conn_requests", "waf_req_id", "ottfb", "ttfb", "ottlb"]
 
-ALL_FIELDS = "all_fields.parquet"
 TS = "time_series.parquet"
-
-
-# ── layout ──────────────────────────────────────────────────────────────────
-
-
-@dataclass
-class Layout:
-    """Writes bundle files for one (scenario, reader) combination."""
-
-    root: Path
-    anchor: datetime
-    fns: tuple[str, ...]
-    hour_root: Path = field(init=False)
-    day_root: Path = field(init=False)
-    field_root: Path = field(init=False)
-
-    def __post_init__(self) -> None:
-        rollups = self.root / "rollups"
-        self.hour_root = rollups / "hour_bundled"
-        self.day_root = rollups / "day_bundled"
-        self.field_root = rollups / "hour"
-
-    def hkey(self, k: int) -> str:
-        return (self.anchor + timedelta(hours=k)).strftime("%Y-%m-%d-%H")
-
-    def dkey(self, k: int) -> str:
-        return (self.anchor + timedelta(days=k)).strftime("%Y-%m-%d")
-
-    def mkroot(self) -> None:
-        self.hour_root.mkdir(parents=True, exist_ok=True)
-        self.day_root.mkdir(parents=True, exist_ok=True)
-        self.field_root.mkdir(parents=True, exist_ok=True)
-
-    def hour_files(self, ks: range | list[int], fns: tuple[str, ...] | None = None) -> None:
-        for k in ks:
-            d = self.hour_root / f"hour={self.hkey(k)}"
-            d.mkdir(parents=True, exist_ok=True)
-            for fn in fns or self.fns:
-                (d / fn).write_bytes(b"x")
-
-    def day_files(self, ks: range | list[int], variant: str = "std") -> None:
-        for k in ks:
-            day = self.dkey(k)
-            for fn in self.fns:
-                if variant == "std" or fn != ALL_FIELDS:
-                    d = self.day_root / f"day={day}"
-                    d.mkdir(parents=True, exist_ok=True)
-                    (d / fn).write_bytes(b"x")
-                elif variant == "nested_alt":
-                    d = self.day_root / f"day={day}"
-                    d.mkdir(parents=True, exist_ok=True)
-                    (d / f"day_bundle_{day}.parquet").write_bytes(b"x")
-                elif variant == "flat_alt":
-                    self.day_root.mkdir(parents=True, exist_ok=True)
-                    (self.day_root / f"day_bundle_{day}.parquet").write_bytes(b"x")
-
-    def marker(self, k: int) -> None:
-        (self.field_root / "field=requests" / f"hour={self.hkey(k)}").mkdir(parents=True, exist_ok=True)
-
-    def sentinel(self, k: int) -> None:
-        d = self.hour_root / f"hour={self.hkey(k)}"
-        d.mkdir(parents=True, exist_ok=True)
-        schema = pa.schema([("field", pa.string()), ("value", pa.string()), ("count", pa.int64())])
-        pq.write_table(pa.table({"field": [], "value": [], "count": []}, schema=schema), d / ALL_FIELDS)
-
-    def nonempty_allfields(self, k: int) -> None:
-        d = self.hour_root / f"hour={self.hkey(k)}"
-        d.mkdir(parents=True, exist_ok=True)
-        schema = pa.schema([("field", pa.string()), ("value", pa.string()), ("count", pa.int64())])
-        pq.write_table(pa.table({"field": ["country"], "value": ["US"], "count": [1]}, schema=schema), d / ALL_FIELDS)
 
 
 # ── scenarios ───────────────────────────────────────────────────────────────
@@ -687,8 +616,7 @@ class _Norm:
 def _run_reader(reader: Reader, sc: Scenario, tmp: Path, probe: _Probe, anchors: dict[str, datetime]) -> dict:
     anchor = anchors[sc.anchor]
     root = tmp / f"{reader.name.replace(':', '_').replace('[', '_').replace(']', '')}__{sc.name}"
-    lay = Layout(root, anchor, reader.fns)
-    sc.layout(lay)
+    lay = build_rollup_golden_layout(root, sc.layout, anchor=anchor, fns=reader.fns)
 
     def iso(off: float | None, raw: str | None) -> str | None:
         if raw is not None:

@@ -789,3 +789,318 @@ def test_credentials_in_user_ddl_never_reach_the_debug_query_telemetry(clients):
 
     assert "hunter2-super-secret" not in recorded
     assert "BY '[REDACTED]'" in recorded
+
+
+# ── Merged from test_clickhouse_metrics.py ──
+
+
+import pytest
+
+from backend.core import clickhouse_metrics as metrics
+from backend.core.clickhouse_client import ClickHouseClient, ClickHouseError
+
+
+@pytest.fixture
+def instruments(monkeypatch):
+    metrics._instrument.cache_clear()
+    meter = MagicMock()
+    found = {}
+
+    def create(name, **kwargs):
+        found[name] = (MagicMock(), kwargs)
+        return found[name][0]
+
+    meter.create_counter.side_effect = create
+    meter.create_histogram.side_effect = create
+    monkeypatch.setattr(metrics, "get_meter", lambda: meter)
+    yield found
+    metrics._instrument.cache_clear()
+
+
+def client(handler):
+    return ClickHouseClient(
+        config.ClickHouseConfig(
+            host="localhost", port=8123, database="analytics", user="default", password="", secure=False
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+
+def test_exact_lazy_query_instruments_and_statistics(instruments):
+    assert not instruments
+    con = client(lambda _: httpx.Response(200, json={"data": [], "statistics": {"bytes_read": 81}}))
+    try:
+        con.execute("SELECT {value:String}", {"value": "PRIVATE"})
+    finally:
+        con.close()
+    assert set(instruments) == {
+        "app.clickhouse_query_duration_ms",
+        "app.clickhouse_queries_total",
+        "app.clickhouse_bytes_read",
+        "app.clickhouse_admission_wait_ms",
+        "app.clickhouse_network_ms",
+        "app.clickhouse_decode_ms",
+    }
+    for name in ("admission_wait_ms", "network_ms", "decode_ms"):
+        phase, phase_options = instruments[f"app.clickhouse_{name}"]
+        assert phase_options["unit"] == "ms"
+        assert phase.record.call_args.args[0] >= 0
+        assert phase.record.call_args.args[1] == {"operation": "execute", "outcome": "success"}
+    histogram, options = instruments["app.clickhouse_query_duration_ms"]
+    assert options["unit"] == "ms"
+    assert histogram.record.call_args.args[0] >= 0
+    assert histogram.record.call_args.args[1] == {"outcome": "success"}
+    instruments["app.clickhouse_queries_total"][0].add.assert_called_once_with(1, {"outcome": "success"})
+    assert instruments["app.clickhouse_bytes_read"][1]["unit"] == "By"
+    instruments["app.clickhouse_bytes_read"][0].add.assert_called_once_with(81)
+    assert "PRIVATE" not in str(instruments)
+
+
+def test_acknowledged_physical_rows_include_retries_not_failed_inserts(instruments):
+    replies = iter([httpx.Response(200), httpx.Response(200), httpx.Response(503)])
+    con = client(lambda _: next(replies))
+    try:
+        for _ in range(2):
+            con.insert_rows("log_facts", ["country"], [("US",), ("US",)])
+        with pytest.raises(ClickHouseError):
+            con.insert_rows("log_facts", ["country"], [("US",)])
+    finally:
+        con.close()
+    counter = instruments["app.clickhouse_rows_inserted_total"][0]
+    assert [c.args for c in counter.add.call_args_list] == [(2,), (2,)]
+    hist, options = instruments["app.clickhouse_insert_duration_ms"]
+    assert options["unit"] == "ms"
+    assert [c.args[1] for c in hist.record.call_args_list] == [
+        {"outcome": "success"},
+        {"outcome": "success"},
+        {"outcome": "error"},
+    ]
+    assert "app.clickhouse_queries_total" not in instruments
+
+
+def test_admission_timeout_is_measured(instruments):
+    con = client(lambda _: pytest.fail("admission failed before HTTP"))
+    con._slots = MagicMock()
+    con._slots.acquire.return_value = False
+    try:
+        with pytest.raises(ClickHouseError, match="pool"):
+            con.execute("SELECT 1")
+    finally:
+        con.close()
+    instruments["app.clickhouse_queries_total"][0].add.assert_called_once_with(1, {"outcome": "timeout"})
+    assert instruments["app.clickhouse_query_duration_ms"][0].record.call_args.args[0] >= 0
+
+
+def test_metric_failure_does_not_mask_transport_error(monkeypatch):
+    monkeypatch.setattr(metrics, "_instrument", MagicMock(side_effect=RuntimeError("telemetry broken")))
+    con = client(lambda _: httpx.Response(503))
+    try:
+        with pytest.raises(ClickHouseError, match="server error"):
+            con.execute("SELECT 1")
+    finally:
+        con.close()
+
+
+# ── Merged from test_clickhouse_observer.py ──
+
+
+import pytest
+
+from backend.core import clickhouse_observer as observer
+
+
+@pytest.fixture
+def monitor(monkeypatch):
+    client, store, meter = MagicMock(), MagicMock(), MagicMock()
+    client.storage_health.return_value = {"up": 1, "disk_free": 40, "disk_total": 100}
+    store.publication_lag_seconds.return_value = 12.5
+    monkeypatch.setattr(observer, "get_meter", lambda: meter)
+    monkeypatch.setattr(observer, "PgManifest", lambda: store)
+    sampler = observer.ClickHouseObserver()
+    sampler.start(client)
+    yield sampler, client, store, meter
+    sampler.stop()
+
+
+def test_gauges_are_lazy_and_share_one_cheap_sample(monitor):
+    sampler, client, store, meter = monitor
+    client.storage_health.assert_not_called()
+    names = {call.args[0] for call in meter.create_observable_gauge.call_args_list}
+    assert names == {
+        "app.clickhouse_up",
+        "app.clickhouse_disk_free",
+        "app.clickhouse_disk_total",
+        "app.clickhouse_publication_lag_seconds",
+    }
+    assert sampler.observe("up")[0].value == 1
+    assert sampler.observe("disk_free")[0].value == 40
+    assert sampler.observe("disk_total")[0].value == 100
+    assert sampler.observe("lag")[0].value == 12.5
+    client.storage_health.assert_called_once_with()
+    store.publication_lag_seconds.assert_called_once_with()
+    assert all(not item.attributes for item in sampler.observe("lag"))
+
+
+def test_errors_are_unknown_except_health_zero_and_never_keep_old_values(monitor):
+    sampler, client, store, _ = monitor
+    assert sampler.observe("lag")[0].value > 0
+    client.storage_health.side_effect = RuntimeError("PRIVATE connection")
+    store.publication_lag_seconds.side_effect = RuntimeError("PRIVATE DSN")
+    sampler._sampled_at = 0
+    assert sampler.observe("up")[0].value == 0
+    assert sampler.observe("disk_free") == []
+    assert sampler.observe("disk_total") == []
+    assert sampler.observe("lag") == []
+    client.storage_health.side_effect = None
+    store.publication_lag_seconds.side_effect = None
+    store.publication_lag_seconds.return_value = 0
+    sampler._sampled_at = 0
+    assert sampler.observe("lag")[0].value == 0
+    assert sampler.observe("up")[0].value == 1
+
+
+def test_stop_disables_callbacks_and_closes_client_restart_reuses_gauges(monitor):
+    sampler, client, _, meter = monitor
+    sampler.stop()
+    sampler.stop()
+    assert sampler.observe("up") == []
+    client.close.assert_called_once_with()
+    sampler.start(client)
+    assert meter.create_observable_gauge.call_count == 4
+    assert sampler.observe("up")[0].value == 1
+
+
+def test_disabled_does_not_create_client_or_gauges(monkeypatch):
+    monkeypatch.setattr(observer.config, "load_clickhouse_config", lambda: None)
+    make = MagicMock(side_effect=AssertionError("opened disabled client"))
+    monkeypatch.setattr(observer, "ClickHouseClient", make)
+    observer.start_clickhouse_observer()
+    make.assert_not_called()
+
+
+# ── Merged from test_clickhouse_export.py ──
+
+from datetime import UTC, datetime, timedelta
+
+import duckdb
+import pytest
+
+from backend.core.clickhouse_export import FosArtifacts
+from backend.core.clickhouse_manifest import Dataset
+from backend.core.clickhouse_rows import canonical_row, digest_rows
+from scripts import clickhouse_replay
+from scripts.clickhouse_replay import parser, run
+from tests.core.clickhouse_fos_fixture import TinyFos
+
+
+def _rows_from_fixture(con) -> list[tuple]:
+    out = []
+    for idx, row in enumerate(con.execute("SELECT * FROM fixture").fetch_arrow_table().to_pylist()):
+        row["row_ordinal"] = idx
+        out.append(canonical_row(row))
+    return out
+
+
+@pytest.fixture
+def fixture():
+    source = {"service_id": "TestPrototype", "name": "TestPrototype", "bucket": "test-bucket", "prefix": "logs"}
+    fos = TinyFos()
+    objects = FosArtifacts(source, client=fos)
+    dataset = Dataset(
+        source["service_id"],
+        "test-dataset",
+        "test-catalog",
+        "logs_fixture",
+        1,
+        datetime(2026, 9, 1, tzinfo=UTC),
+        datetime(2026, 9, 2, tzinfo=UTC),
+        datetime.now(UTC) + timedelta(hours=1),
+        0,
+        digest_rows(()),
+    )
+    con = duckdb.connect()
+    con.execute(
+        "CREATE TABLE fixture AS SELECT 'source' AS source_identity, "
+        "'2026-09-01 00:00:00'::TIMESTAMP AS timestamp, NULL::VARCHAR AS country, "
+        "'192.0.2.1' AS ip, '/' AS url, 1::BIGINT AS conn_requests FROM range(5)"
+    )
+    yield dataset, objects, fos, con
+    con.close()
+
+
+def test_export_roundtrip_stable_ordinals_and_duplicates(fixture):
+    dataset, objects, fos, con = fixture
+    all_rows = _rows_from_fixture(con)
+    artifacts = [objects.put(dataset, tuple(all_rows[i : i + 2])) for i in range(0, len(all_rows), 2)]
+    rows = tuple(row for artifact in artifacts for row in objects.load(artifact).rows)
+    assert [row[1] for row in rows] == list(range(5))
+    assert digest_rows(rows) == digest_rows(tuple(all_rows))
+    assert len(artifacts) == 3
+    assert fos.puts == 3
+    assert all("/clickhouse-prototype/" in a.artifact_uri for a in artifacts)
+    assert rows[0][3] is None
+
+
+def test_corrupt_artifact_or_wrong_bucket_rejected(fixture):
+    dataset, objects, fos, con = fixture
+    all_rows = _rows_from_fixture(con)
+    artifact = objects.put(dataset, tuple(all_rows))
+    with pytest.raises(ValueError, match="bucket"):
+        objects.load(replace(artifact, artifact_uri=artifact.artifact_uri.replace("test-bucket", "other-bucket")))
+    key = next(iter(fos.objects))
+    payload, metadata = fos.objects[key]
+    fos.objects[key] = (b"x" + payload[1:], metadata)
+    with pytest.raises(ValueError, match="hash"):
+        objects.load(artifact)
+
+
+def test_head_mismatch_never_seals(fixture):
+    dataset, objects, fos, con = fixture
+    fos.head_object = lambda **kwargs: {"ContentLength": 0, "Metadata": {}}
+    all_rows = _rows_from_fixture(con)
+    with pytest.raises(ValueError, match="HEAD"):
+        objects.put(dataset, tuple(all_rows))
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        ["--export", "--start", "2026-09-01", "--end", "2026-09-02"],
+        ["--rebuild", "dataset"],
+        ["--resume", "generation"],
+    ],
+)
+def test_cli_dryrun_never_opens_storage(monkeypatch, mode):
+    no_storage = MagicMock(side_effect=AssertionError("must not open storage"))
+    for name in ("PgManifest", "FosArtifacts"):
+        monkeypatch.setattr(f"scripts.clickhouse_replay.{name}", no_storage)
+    args = parser().parse_args(["--service-id", "TestPrototype", *mode])
+    assert run(args)["dry_run"]
+    no_storage.assert_not_called()
+
+
+@pytest.mark.parametrize("extra", [["--limit", "0"], ["--max-rows", "1000001"], ["--ttl-hours", "nan"]])
+def test_cli_rejects_unbounded_arguments(extra):
+    args = parser().parse_args(
+        ["--service-id", "TestPrototype", "--export", "--start", "2026-09-01", "--end", "2026-09-02", *extra]
+    )
+    with pytest.raises(ValueError):
+        run(args)
+
+
+def test_cli_flushes_metrics_on_success_and_failure(monkeypatch):
+    events = []
+    monkeypatch.setattr("sys.argv", ["replay", "--service-id", "TestPrototype", "--rebuild", "fixture"])
+    monkeypatch.setattr(clickhouse_replay, "force_flush", lambda: events.append("flush"))
+    monkeypatch.setattr(clickhouse_replay, "close_clickhouse_client", lambda: events.append("close"))
+    monkeypatch.setattr(clickhouse_replay, "run", lambda args: {"dry_run": True})
+    assert clickhouse_replay.main() == 0
+    assert events == ["flush", "close"]
+    events.clear()
+
+    def fail(args):
+        raise ValueError("PRIVATE")
+
+    monkeypatch.setattr(clickhouse_replay, "run", fail)
+    assert clickhouse_replay.main() == 1
+    assert events == ["flush", "close"]

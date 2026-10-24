@@ -6,15 +6,14 @@
  * it on every keystroke).
  */
 import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
-import { stubPointerCaptureAndScroll } from '@/__tests__/helpers/jsdom-shims'
+import { stubPointerCaptureAndScroll } from '@/__tests__/helpers/browser-stubs'
 import * as React from 'react'
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { QueryClientProvider } from '@tanstack/react-query'
 import { http, HttpResponse } from 'msw'
 
-import { createTestQueryClient } from '../../helpers/query'
+import { renderWithQuery } from '../../helpers/query'
 import { server } from '@/__tests__/helpers/msw/server'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -32,9 +31,7 @@ beforeAll(() => {
 const API_BASE = getApiBase()
 const SVC = 'svc-tables'
 
-function renderWithClient(ui: React.ReactElement) {
-  return render(<QueryClientProvider client={createTestQueryClient()}>{ui}</QueryClientProvider>)
-}
+const renderWithClient = renderWithQuery
 
 beforeEach(() => {
   useServiceStore.setState({ activeServiceId: SVC, isInitialized: true })

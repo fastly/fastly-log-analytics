@@ -26,18 +26,15 @@ type ActiveCronJob = {
 
 export function CronScheduleBox({
   schedule: _schedule,
-  compact = false,
   activeJob = null,
   onOpenConsole
 }: {
   schedule: CronSchedule;
-  compact?: boolean;
   activeJob?: ActiveCronJob | null;
   onOpenConsole?: (jobId: number | string) => void
 }) {
   const { full, abbr } = useDateFormat()
   const schedule = _schedule
-  void compact
 
   if (schedule.disabled_reason === 'no_alerts_configured') {
     return (

@@ -22,12 +22,6 @@ from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import make_section_expander, query_errors
 
 router = APIRouter(prefix="/api/security", tags=["security"], responses=DEFAULT_ERROR_RESPONSES)
-# Section selector — names mirror SecurityAggregatesResponse fields one-to-one
-# so the FE can request a subset and the per-card React Query hooks each pull
-# only what they render. ngwaf_configured is a tiny bool derived from svc
-# config (no SQL), bundled into the verified_bots_ts/ngwaf_* gate so any bot
-# section request gets the badge.
-SectionName = SecuritySectionName
 
 # Fingerprint cards share a single full-temp coverage scan
 # (_build_security_response's FINGERPRINT_COVERAGE_BULK) — any one of them
@@ -46,7 +40,7 @@ _FINGERPRINT_CARDS: frozenset[str] = frozenset({"tls_fingerprints"})
 _NGWAF_BOT_PAIR: frozenset[str] = frozenset({"ngwaf_verified_bots", "ngwaf_verified_bots_ts"})
 
 _expand_sections = make_section_expander(
-    SectionName,
+    SecuritySectionName,
     union_groups=(_NGWAF_BOT_PAIR,),
     implies=((_FINGERPRINT_CARDS, "fingerprint_coverage"),),
 )

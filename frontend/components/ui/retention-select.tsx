@@ -10,12 +10,12 @@ import {
 } from '@/components/ui/select'
 import { RETENTION_OPTIONS } from '@/lib/service-config-constants'
 
-export interface RetentionOption {
+interface RetentionOption {
   readonly value: string
   readonly label: string
 }
 
-export interface RetentionSelectProps {
+interface RetentionSelectProps {
   id?: string
   value: string
   onValueChange: (value: string) => void

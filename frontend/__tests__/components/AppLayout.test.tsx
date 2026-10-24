@@ -13,8 +13,7 @@
  */
 import { render, screen, act } from '@testing-library/react'
 import { expect, test, vi, beforeEach } from 'vitest'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { renderWithQueryClient } from '../helpers/query'
 import { AppLayout } from '@/components/AppLayout'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useBootstrap } from '@/hooks/useBootstrap'
@@ -22,14 +21,6 @@ import { partial } from '../helpers/partial'
 import type { BootstrapResponse } from '@/types/api'
 import { usePathname, useRouter } from 'next/navigation'
 import React from 'react'
-
-// AppLayout now calls useQueryClient() to implement the navigation-cancel
-// pattern (cancel in-flight queries on route change). Tests need a real
-// QueryClientProvider in the tree or useQueryClient throws.
-function renderWithQueryClient(ui: React.ReactElement) {
-  const queryClient = createTestQueryClient()
-  return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>)
-}
 
 // Mock next/navigation
 // (navigationModuleMock also stubs useSearchParams, which AppLayout's

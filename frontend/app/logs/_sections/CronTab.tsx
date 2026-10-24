@@ -174,7 +174,6 @@ export function CronTab({
                                   key={item.task}
                                   schedule={item.schedule || { task: item.task }}
                                   activeJob={item.activeJob}
-                                  compact={item.task === 'expire_snapshots'}
                                   onOpenConsole={(jobId) => {
                                     setConsoleOpen(true)
                                     setSelectedConsoleJobId(jobId)
@@ -198,7 +197,6 @@ export function CronTab({
                                   key={item.task}
                                   schedule={item.schedule || { task: item.task }}
                                   activeJob={item.activeJob}
-                                  compact={item.task === 'expire_snapshots'}
                                   onOpenConsole={(jobId) => {
                                     setConsoleOpen(true)
                                     setSelectedConsoleJobId(jobId)

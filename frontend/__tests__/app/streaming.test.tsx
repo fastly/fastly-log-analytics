@@ -1,8 +1,7 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import { expect, test, vi, beforeEach, afterEach } from 'vitest'
 import StreamingClient from '@/app/streaming/_sections/StreamingClient'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/query'
 import React from 'react'
 import { spyOnConsoleError } from '../helpers/page-smoke'
 import { CMCD_FIXTURE } from '../helpers/msw/handlers'
@@ -50,11 +49,7 @@ afterEach(() => {
 })
 
 function renderPage() {
-  return render(
-    <QueryClientProvider client={queryClient}>
-      <StreamingClient />
-    </QueryClientProvider>,
-  )
+  return renderWithQuery(<StreamingClient />, { queryClient })
 }
 
 test('requests /api/cmcd/aggregates with the page window and renders the headline cards', async () => {

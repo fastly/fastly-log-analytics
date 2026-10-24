@@ -17,7 +17,7 @@ import {
   DropdownMenuShortcut,
 } from '@/components/ui/dropdown-menu'
 
-export interface FilterValueCellFilter {
+interface FilterValueCellFilter {
   column: string
   value: string
 }

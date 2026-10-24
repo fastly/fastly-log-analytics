@@ -5,7 +5,7 @@
  * and optional SSE-streamed upgrade on version change.
  */
 import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
-import { stubPointerCaptureAndScroll, stubGetAnimations } from '@/__tests__/helpers/jsdom-shims'
+import { stubPointerCaptureAndScroll, stubGetAnimations } from '@/__tests__/helpers/browser-stubs'
 import { createUseSSEMock } from '../../helpers/sse-mock'
 import * as React from 'react'
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'

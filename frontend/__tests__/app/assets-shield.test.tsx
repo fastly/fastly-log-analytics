@@ -1,8 +1,7 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { expect, test, vi, beforeEach, afterEach } from 'vitest'
 import AssetsClient, { AssetsReportContent } from '@/app/assets-shield/_sections/AssetsClient'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/query'
 import React from 'react'
 import { spyOnConsoleError } from '../helpers/page-smoke'
 
@@ -122,11 +121,7 @@ const MOCK_ASSETS_DATA = {
 test('assets-shield page mounts and renders title and layout shell', async () => {
   mockPost.mockResolvedValue({ data: MOCK_ASSETS_DATA })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <AssetsClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<AssetsClient />, { queryClient })
 
   expect(screen.getByText('Assets & Shield')).toBeInTheDocument()
   expect(errorSpy).not.toHaveBeenCalled()
@@ -135,11 +130,7 @@ test('assets-shield page mounts and renders title and layout shell', async () =>
 test('assets-shield renders zero-CLS layout reservations and contextual skeletons during loading', async () => {
   mockPost.mockReturnValue(new Promise(() => {})) // Never resolves to keep loading state
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <AssetsClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<AssetsClient />, { queryClient })
 
   // Verify zero-CLS card containers exist
   const overviewGrid = screen.getByTestId('assets-overview-grid')
@@ -165,11 +156,7 @@ test('assets-shield renders zero-CLS layout reservations and contextual skeleton
 test('assets-shield renders full data: breakdown, cache performance, compression, and hotspots', async () => {
   mockPost.mockResolvedValue({ data: MOCK_ASSETS_DATA })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <AssetsClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<AssetsClient />, { queryClient })
 
   expect(await screen.findByText('/static/bundle-huge.js')).toBeInTheDocument()
   expect(screen.getByText('/feed.json')).toBeInTheDocument()
@@ -190,11 +177,7 @@ test('assets-shield renders missing fields banner when optional fields are missi
     },
   })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <AssetsClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<AssetsClient />, { queryClient })
 
   const banner = await screen.findByTestId('missing-asset-fields-banner')
   expect(banner).toBeInTheDocument()
@@ -220,11 +203,7 @@ test('assets-shield renders empty state when asset breakdown has no data', async
     },
   })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <AssetsClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<AssetsClient />, { queryClient })
 
   await waitFor(() => {
     expect(screen.getByText('No Asset Metrics Yet')).toBeInTheDocument()
@@ -247,13 +226,9 @@ test('assets-shield refetches when only the custom range start changes', async (
     isAutoRange: false,
     anchor: '2026-08-19T13:00:00Z',
   }
-  const ui = (startTime: string) => (
-    <QueryClientProvider client={queryClient}>
-      <AssetsReportContent {...base} startTime={startTime} />
-    </QueryClientProvider>
-  )
+  const ui = (startTime: string) => <AssetsReportContent {...base} startTime={startTime} />
 
-  const { rerender } = render(ui('2026-08-19T12:00:00Z'))
+  const { rerender } = renderWithQuery(ui('2026-08-19T12:00:00Z'), { queryClient })
   await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1))
 
   rerender(ui('2026-08-19T11:00:00Z'))
@@ -276,18 +251,17 @@ test('assets-shield first paint hits the SSR-seeded cache entry (no refetch)', a
   seedClient.setQueryData(['assets', 'aggregates', 'test-service-id', rangeKey, anchor, {}], MOCK_ASSETS_DATA)
   mockPost.mockReturnValue(new Promise(() => {}))
 
-  render(
-    <QueryClientProvider client={seedClient}>
-      <AssetsReportContent
-        startTime="2026-08-19T12:00:00Z"
-        endTime="2026-08-19T13:00:00Z"
-        activeServiceId="test-service-id"
-        filterPayload={{}}
-        relativeRange={null}
-        isAutoRange={false}
-        anchor={anchor}
-      />
-    </QueryClientProvider>,
+  renderWithQuery(
+    <AssetsReportContent
+      startTime="2026-08-19T12:00:00Z"
+      endTime="2026-08-19T13:00:00Z"
+      activeServiceId="test-service-id"
+      filterPayload={{}}
+      relativeRange={null}
+      isAutoRange={false}
+      anchor={anchor}
+    />,
+    { queryClient: seedClient },
   )
 
   expect(await screen.findByText('/static/bundle-huge.js')).toBeInTheDocument()
@@ -297,11 +271,7 @@ test('assets-shield first paint hits the SSR-seeded cache entry (no refetch)', a
 test('assets-shield renders the uncompressed and low-TTL tables with encoded drill-down links', async () => {
   mockPost.mockResolvedValue({ data: MOCK_ASSETS_DATA })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <AssetsClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<AssetsClient />, { queryClient })
 
   const link = await screen.findByRole('link', { name: '/static/bundle-huge.js' })
   expect(link.getAttribute('href')).toContain('filter_url=%2Fstatic%2Fbundle-huge.js')

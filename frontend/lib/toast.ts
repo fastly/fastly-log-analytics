@@ -4,7 +4,7 @@
  * non-React code (e.g., openapi-fetch middleware).
  */
 
-export type ToastKind = 'info' | 'success' | 'error' | 'warn'
+type ToastKind = 'info' | 'success' | 'error' | 'warn'
 
 interface ToastOptions {
   durationMs?: number

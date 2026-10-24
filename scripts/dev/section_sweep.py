@@ -84,20 +84,6 @@ ENDPOINTS: tuple[tuple[str, str, Callable[[str], dict[str, Any]]], ...] = (
 )
 
 
-def classify_section(name: str) -> str:
-    section = summarize_sections([{"section": name}])["sections"][0]
-    return section["activity"] if section["activity"] != "unknown" else section["source"]
-
-
-def summarize_sections(timings: Iterable[dict[str, Any]]) -> dict[str, Any]:
-    component = describe_response({"_section_timings": list(timings)})["components"][0]
-    return {
-        "sections": component["sections"],
-        "temp_built": any(row["section"] == "temp_table_create" for row in component["sections"]),
-        "gaps": component["gaps"],
-    }
-
-
 def find_offenders(records: Iterable[dict[str, Any]], budget_ms: float = DEFAULT_BUDGET_MS) -> list[dict[str, Any]]:
     return rank_sections((sample for record in records for sample in record.get("samples", [])), budget_ms)
 

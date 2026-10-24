@@ -24,6 +24,7 @@ import pyarrow.parquet as pq
 from ._common import (
     _VIRTUAL_FIELD_BACKING,
     IP_SAMPLE_CAP,
+    IP_SPREAD_BUNDLE_FILENAME,
     _build_copy_query,
     _build_ip_spread_select_query,
     _build_virtual_field_copy_query,
@@ -229,7 +230,6 @@ def backfill_missing_hour_bundles(
     import duckdb as _ddb
 
     from backend.core.iceberg import update_iceberg_view
-    from backend.core.rollups._common import _hour_bundled_root
 
     bundled_root = _hour_bundled_root(source)
     existing: set[str] = set()
@@ -478,8 +478,6 @@ def backfill_missing_hour_ip_spread(
     count depends on which fields had data, which the count rollup
     already tracks (and which doesn't affect the bundle's existence).
     """
-    from backend.core.rollups._common import IP_SPREAD_BUNDLE_FILENAME, _hour_bundled_root
-
     bundled_root = _hour_bundled_root(source)
     if not os.path.isdir(bundled_root):
         # No bundle tree yet — backfill_missing_hour_bundles will create
@@ -553,14 +551,18 @@ def cleanup_old_rollups(
 
     deleted = 0
 
-    # 1. rollups/hour/field=*/hour=*
-    rollup_root = _rollups_root(source)
-    if os.path.isdir(rollup_root):
+    # 1 & 2. rollups/hour/field=*/hour=* and rollups/hour_ip_spread/field=*/hour=*
+    for root_dir, walk_label in (
+        (_rollups_root(source), "hour"),
+        (_ip_spread_root(source), "ip_spread"),
+    ):
+        if not os.path.isdir(root_dir):
+            continue
         try:
-            for field_entry in os.listdir(rollup_root):
+            for field_entry in os.listdir(root_dir):
                 if not field_entry.startswith("field="):
                     continue
-                field_dir = os.path.join(rollup_root, field_entry)
+                field_dir = os.path.join(root_dir, field_entry)
                 try:
                     for hour_entry in os.listdir(field_dir):
                         if not hour_entry.startswith("hour="):
@@ -577,32 +579,7 @@ def cleanup_old_rollups(
                 except OSError:
                     continue
         except OSError as e:
-            logger.warning("[rollups] cleanup walk failed for %s (hour): %s", service_id, e)
-
-    # 2. rollups/hour_ip_spread/field=*/hour=*
-    ip_spread_root = _ip_spread_root(source)
-    if os.path.isdir(ip_spread_root):
-        try:
-            for field_entry in os.listdir(ip_spread_root):
-                if not field_entry.startswith("field="):
-                    continue
-                field_dir = os.path.join(ip_spread_root, field_entry)
-                try:
-                    for hour_entry in os.listdir(field_dir):
-                        if not hour_entry.startswith("hour="):
-                            continue
-                        hour = hour_entry[len("hour=") :]
-                        if hour < hour_cutoff:
-                            hour_dir = os.path.join(field_dir, hour_entry)
-                            try:
-                                shutil.rmtree(hour_dir)
-                                deleted += 1
-                            except OSError as e:
-                                logger.warning("[rollups] could not delete %s: %s", hour_dir, e)
-                except OSError:
-                    continue
-        except OSError as e:
-            logger.warning("[rollups] cleanup walk failed for %s (ip_spread): %s", service_id, e)
+            logger.warning("[rollups] cleanup walk failed for %s (%s): %s", service_id, walk_label, e)
 
     # 3. rollups/day_bundled/day=*
     day_bundled_root = _day_bundled_root(source)
@@ -776,9 +753,6 @@ def _run_ip_spread_per_field(
     on one field logs + continues so the rest of the fields still
     publish on the same cron tick.
     """
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
     from backend.core.duckdb import _cache_dir
     from backend.core.iceberg import execute_with_stale_view_retry
     from backend.core.iceberg.view import _get_service_lock

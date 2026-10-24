@@ -34,12 +34,6 @@ class HighScaleConfig:
     persistent_storage: bool = True
     profile: str = "local"
 
-    @classmethod
-    def from_environment(cls) -> HighScaleConfig:
-        from backend.high_scale.config import from_environment
-
-        return from_environment()
-
     def topology_profile(self) -> TopologyProfile:
         return _resolve_topology_profile(self.profile)
 

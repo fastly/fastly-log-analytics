@@ -16,6 +16,7 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog'
 import { client, extractApiError } from '@/lib/api'
+import { useOpenGeneration } from '@/hooks/useDerivedState'
 import { cn } from '@/lib/utils'
 import { panelDialogContent, panelDialogHeaderSolid, panelDialogFooter } from '@/lib/panel-dialog'
 
@@ -25,12 +26,31 @@ interface TeardownRemoteFrontendDialogProps {
   onSuccess: () => void
 }
 
-export function TeardownRemoteFrontendDialog({
+export function TeardownRemoteFrontendDialog(props: TeardownRemoteFrontendDialogProps) {
+  const [open, setOpen] = React.useState(false)
+  const generation = useOpenGeneration(open)
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger
+        render={
+          <Button variant="destructive" className="gap-1.5 border-destructive/20 hover:bg-destructive/5">
+            <Globe className="h-4 w-4 text-destructive animate-pulse" />
+            Teardown Frontend
+          </Button>
+        }
+      />
+      <TeardownRemoteFrontendDialogBody key={generation} {...props} onClose={() => setOpen(false)} />
+    </Dialog>
+  )
+}
+
+function TeardownRemoteFrontendDialogBody({
   serviceId,
   domainName,
   onSuccess,
-}: TeardownRemoteFrontendDialogProps) {
-  const [open, setOpen] = React.useState(false)
+  onClose,
+}: TeardownRemoteFrontendDialogProps & { onClose: () => void }) {
   const [error, setError] = React.useState('')
   const [tokenOverride, setTokenOverride] = React.useState('')
 
@@ -51,7 +71,7 @@ export function TeardownRemoteFrontendDialog({
       setError('')
     },
     onSuccess: () => {
-      setOpen(false)
+      onClose()
       onSuccess()
     },
     onError: (err) => {
@@ -64,16 +84,6 @@ export function TeardownRemoteFrontendDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger
-        render={
-          <Button variant="destructive" className="gap-1.5 border-destructive/20 hover:bg-destructive/5">
-            <Globe className="h-4 w-4 text-destructive animate-pulse" />
-            Teardown Frontend
-          </Button>
-        }
-      />
-
       <DialogContent className={cn('sm:max-w-md', panelDialogContent)}>
         <DialogHeader className={panelDialogHeaderSolid}>
           <DialogTitle className="flex items-center gap-2 text-xl font-bold text-destructive">
@@ -124,7 +134,7 @@ export function TeardownRemoteFrontendDialog({
         <DialogFooter className={cn('gap-2 border-t pt-4', panelDialogFooter)}>
           <Button
             variant="outline"
-            onClick={() => setOpen(false)}
+            onClick={onClose}
             disabled={tearingDown}
             className="w-full sm:w-auto"
           >
@@ -141,6 +151,5 @@ export function TeardownRemoteFrontendDialog({
           </Button>
         </DialogFooter>
       </DialogContent>
-    </Dialog>
   )
 }

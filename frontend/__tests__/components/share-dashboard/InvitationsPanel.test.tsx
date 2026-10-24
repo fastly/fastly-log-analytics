@@ -5,7 +5,7 @@ import React from 'react'
 
 import { InvitationsPanel } from '@/components/share-dashboard/InvitationsPanel'
 import type { ShareStatus } from '@/components/share-dashboard/utils'
-import { stubMatchMedia } from '@/__tests__/helpers/jsdom-shims'
+import { stubMatchMedia } from '@/__tests__/helpers/browser-stubs'
 
 // Radix primitives (Popover/Checkbox) need these in jsdom.
 stubMatchMedia()

@@ -3,8 +3,7 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
-import { QueryClientProvider } from '@tanstack/react-query';
-import { createTestQueryClient } from '../helpers/query';
+import { renderWithQuery } from '../helpers/query';
 import { http, HttpResponse } from 'msw';
 import { server } from '@/__tests__/helpers/msw/server';
 import RumAdminPage from '@/app/admin/rum/page';
@@ -12,13 +11,6 @@ import Loading from '@/app/admin/rum/loading';
 import { useServiceStore } from '@/stores/serviceStore';
 
 const SVC = 'svc-admin-rum-test';
-
-function makeWrapper() {
-  const qc = createTestQueryClient();
-  return function Wrapper({ children }: { children: React.ReactNode }) {
-    return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
-  };
-}
 
 describe('Admin RUM Configuration Page (/admin/rum)', () => {
   beforeEach(() => {
@@ -52,7 +44,7 @@ describe('Admin RUM Configuration Page (/admin/rum)', () => {
       )
     );
 
-    render(<RumAdminPage />, { wrapper: makeWrapper() });
+    renderWithQuery(<RumAdminPage />);
 
     expect(screen.getByTestId('admin-rum-root')).toBeInTheDocument();
     expect(screen.getByTestId('admin-rum-status-reservation')).toBeInTheDocument();
@@ -91,7 +83,7 @@ describe('Admin RUM Configuration Page (/admin/rum)', () => {
       )
     );
 
-    render(<RumAdminPage />, { wrapper: makeWrapper() });
+    renderWithQuery(<RumAdminPage />);
 
     await waitFor(() => {
       expect(screen.getByTestId('admin-rum-status-line')).toHaveTextContent('✅ Enabled');
@@ -130,7 +122,7 @@ describe('Admin RUM Configuration Page (/admin/rum)', () => {
       )
     );
 
-    render(<RumAdminPage />, { wrapper: makeWrapper() });
+    renderWithQuery(<RumAdminPage />);
 
     await waitFor(() => {
       expect(screen.getByTestId('admin-rum-status-line')).toHaveTextContent('❌ Disabled');

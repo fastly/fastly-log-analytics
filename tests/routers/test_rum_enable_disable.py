@@ -9,36 +9,7 @@ from __future__ import annotations
 
 import json
 
-import pytest
-from fastapi.testclient import TestClient
-
-from backend.main import app
-from tests._helpers.config_fakes import mutate_via_save
-
 SVC = "TestRumEnableDisableSvc"
-
-
-@pytest.fixture
-def client():
-    return TestClient(app)
-
-
-@pytest.fixture
-def with_config(monkeypatch):
-    container: dict = {}
-
-    def fake_load(svc_id):
-        return container.get(svc_id)
-
-    saved: list[dict] = []
-
-    def fake_save(svc_id, cfg):
-        container[svc_id] = cfg
-        saved.append(dict(cfg))
-
-    monkeypatch.setattr("backend.config.load_config", fake_load)
-    monkeypatch.setattr("backend.config.mutate_config", mutate_via_save(fake_save))
-    return container
 
 
 def _events(response) -> list[dict]:

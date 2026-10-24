@@ -27,8 +27,6 @@ from backend.core.field_registry import (
     BY_CODE,
     BY_GROUP,
     REGISTRY,
-    Agg,
-    FilterOp,
     LogField,
 )
 from backend.core.log_fields import (
@@ -175,18 +173,6 @@ def test_hypothesis_every_code_lookup_succeeds(code: str) -> None:
     assert f.code == code
     # Derived properties never raise for any known field.
     _ = f.is_derived
-
-
-@given(op_value=st.sampled_from([op.value for op in FilterOp]))
-def test_hypothesis_filter_op_enum_roundtrips(op_value: str) -> None:
-    """Every FilterOp value round-trips through the enum constructor."""
-    assert FilterOp(op_value).value == op_value
-
-
-@given(agg_value=st.sampled_from([a.value for a in Agg]))
-def test_hypothesis_agg_enum_roundtrips(agg_value: str) -> None:
-    """Every Agg value round-trips through the enum constructor."""
-    assert Agg(agg_value).value == agg_value
 
 
 # ---------------------------------------------------------------------------

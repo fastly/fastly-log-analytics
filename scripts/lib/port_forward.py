@@ -27,7 +27,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import IO
 
@@ -231,18 +231,6 @@ class ForwardSet:
 
     def __exit__(self, *exc: object) -> None:
         self.stop()
-
-
-@contextlib.contextmanager
-def port_forwards(
-    forwards: Sequence[Forward],
-    *,
-    kubectl: str = "kubectl",
-    ready_timeout: float = DEFAULT_READY_TIMEOUT,
-    max_restarts: int = DEFAULT_MAX_RESTARTS,
-) -> Iterator[ForwardSet]:
-    with ForwardSet(forwards, kubectl=kubectl, ready_timeout=ready_timeout, max_restarts=max_restarts) as fwd_set:
-        yield fwd_set
 
 
 class _Terminated(BaseException):

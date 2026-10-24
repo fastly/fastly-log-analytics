@@ -15,9 +15,8 @@
  *      and status error banner (`admin-share-status-error`).
  */
 import { describe, expect, test, vi, beforeEach } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../../helpers/query'
+import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { renderWithQuery } from '../../helpers/query'
 import { http, HttpResponse } from 'msw'
 import React from 'react'
 import { withNuqsTestingAdapter, type OnUrlUpdateFunction } from 'nuqs/adapters/testing'
@@ -120,13 +119,9 @@ describe('admin/share page', () => {
       }),
     )
 
-    const client = createTestQueryClient()
-    render(
-      <QueryClientProvider client={client}>
-        <ShareDashboardPage />
-      </QueryClientProvider>,
-      { wrapper: withNuqsTestingAdapter({ searchParams: mockSearchParamsString }) },
-    )
+    renderWithQuery(<ShareDashboardPage />, {
+      wrapper: withNuqsTestingAdapter({ searchParams: mockSearchParamsString }),
+    })
 
     await waitFor(() => {
       expect(statusCalls).toBe(1)
@@ -171,13 +166,9 @@ describe('admin/share page', () => {
       }),
     )
 
-    const client = createTestQueryClient()
-    render(
-      <QueryClientProvider client={client}>
-        <ShareDashboardPage />
-      </QueryClientProvider>,
-      { wrapper: withNuqsTestingAdapter({ searchParams: mockSearchParamsString }) },
-    )
+    renderWithQuery(<ShareDashboardPage />, {
+      wrapper: withNuqsTestingAdapter({ searchParams: mockSearchParamsString }),
+    })
 
     await waitFor(() => {
       expect(statusCalls).toBe(1)
@@ -205,13 +196,9 @@ describe('admin/share page', () => {
       }),
     )
 
-    const client = createTestQueryClient()
-    render(
-      <QueryClientProvider client={client}>
-        <ShareDashboardPage />
-      </QueryClientProvider>,
-      { wrapper: withNuqsTestingAdapter({ searchParams: mockSearchParamsString }) },
-    )
+    renderWithQuery(<ShareDashboardPage />, {
+      wrapper: withNuqsTestingAdapter({ searchParams: mockSearchParamsString }),
+    })
 
     await waitFor(() => {
       expect(screen.getByTestId('admin-share-control-panel')).toBeTruthy()
@@ -231,13 +218,9 @@ describe('admin/share page', () => {
       }),
     )
 
-    const client = createTestQueryClient()
-    render(
-      <QueryClientProvider client={client}>
-        <ShareDashboardPage />
-      </QueryClientProvider>,
-      { wrapper: withNuqsTestingAdapter({ searchParams: mockSearchParamsString }) },
-    )
+    renderWithQuery(<ShareDashboardPage />, {
+      wrapper: withNuqsTestingAdapter({ searchParams: mockSearchParamsString }),
+    })
 
     await waitFor(() => {
       expect(screen.getByTestId('admin-share-status-error')).toBeTruthy()
@@ -253,19 +236,14 @@ describe('admin/share page', () => {
       http.get(`${API_BASE}/api/admin/share/live`, () => HttpResponse.json({})),
     )
 
-    render(
-      <QueryClientProvider client={createTestQueryClient()}>
-        <ShareDashboardPage />
-      </QueryClientProvider>,
-      {
-        wrapper: withNuqsTestingAdapter({
-          searchParams: mockSearchParamsString,
-          hasMemory: true,
-          onUrlUpdate,
-          resetUrlUpdateQueueOnMount: false,
-        }),
-      },
-    )
+    renderWithQuery(<ShareDashboardPage />, {
+      wrapper: withNuqsTestingAdapter({
+        searchParams: mockSearchParamsString,
+        hasMemory: true,
+        onUrlUpdate,
+        resetUrlUpdateQueueOnMount: false,
+      }),
+    })
 
     await waitFor(() => expect(screen.getByTestId('admin-share-control-panel')).toBeTruthy())
     expect(screen.getByTestId('admin-share-tab-invites').getAttribute('aria-selected')).toBe('true')

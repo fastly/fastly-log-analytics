@@ -113,3 +113,91 @@ def test_unavailable_when_the_service_has_no_cmcd_columns(con):
         filters={},
     )
     assert result["available"] is False
+
+
+# ── Merged from test_cmcd.py ──
+
+from unittest.mock import patch
+
+from tests.conftest import MOCK_SERVICE_ID
+
+
+def test_cmcd_aggregates_absolute_range(client, in_memory_duckdb, test_service_source):
+    """Verify CMCD aggregates endpoint works correctly with absolute date range."""
+    # We patch the repo call because it requires custom tables and complex schema,
+    # and we just want to verify the HTTP layer and router logic.
+    mock_ret = {
+        "available": True,
+        "has_data": True,
+        "overview": {"active_sessions": 10, "peak_viewers": 4},
+    }
+    with patch("backend.repositories.cmcd.get_cmcd_aggregates", return_value=mock_ret) as mock_get:
+        resp = client.post(
+            "/api/cmcd/aggregates",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            json={
+                "filters": {},
+                "start_time": "2026-08-19T12:00:00Z",
+                "end_time": "2026-08-19T13:00:00Z",
+                "sections": ["overview"],
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["available"] is True
+        assert data["overview"] == {"active_sessions": 10, "peak_viewers": 4}
+        mock_get.assert_called_once()
+
+
+def test_cmcd_aggregates_range_token(client, in_memory_duckdb, test_service_source, monkeypatch):
+    """Verify CMCD aggregates endpoint works correctly with range_token resolution."""
+    from backend import config as svcconfig
+
+    monkeypatch.setattr(svcconfig, "get_status", lambda sid: {"earliest_log_at": "2026-08-19T00:00:00Z"})
+
+    mock_ret = {
+        "available": True,
+        "has_data": False,
+    }
+    with patch("backend.repositories.cmcd.get_cmcd_aggregates", return_value=mock_ret) as mock_get:
+        resp = client.post(
+            "/api/cmcd/aggregates",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            json={
+                "filters": {},
+                "range_token": "last_24h",
+                "anchor": "2026-08-19T12:00:00Z",
+                "sections": ["bitrate_ts"],
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["available"] is True
+        assert data["has_data"] is False
+        mock_get.assert_called_once()
+
+
+def test_cmcd_aggregates_reports_setup_and_connection_time_before_the_repo_sections(
+    client, in_memory_duckdb, test_service_source
+):
+    """The repository's own timer starts after the connection is acquired, so the
+    router must add the time spent before it as leading `_section_timings` entries."""
+    mock_ret = {
+        "available": True,
+        "has_data": False,
+        "section_timings": [{"section": "temp_table_create", "time_ms": 1.5}],
+    }
+    with patch("backend.repositories.cmcd.get_cmcd_aggregates", return_value=mock_ret):
+        resp = client.post(
+            "/api/cmcd/aggregates",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            json={
+                "filters": {},
+                "start_time": "2026-08-19T12:00:00Z",
+                "end_time": "2026-08-19T13:00:00Z",
+                "sections": ["overview"],
+            },
+        )
+    assert resp.status_code == 200
+    names = [row["section"] for row in resp.json()["_section_timings"]]
+    assert names == ["request_setup", "connection_acquire", "temp_table_create"]

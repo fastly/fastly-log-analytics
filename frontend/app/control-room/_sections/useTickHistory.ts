@@ -116,7 +116,7 @@ export interface MetricsTick {
   aggregate_delay?: number
 }
 
-export interface TickEntry {
+interface TickEntry {
   timestamp: number
   data: MetricsData
 }

@@ -1,16 +1,15 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, expect, test, vi } from 'vitest'
 import { axe } from 'vitest-axe'
 import { LogSettingsModal } from '@/components/LogSettingsModal/LogSettingsModal'
-import { QueryClientProvider } from '@tanstack/react-query'
 import * as apiLib from '@/lib/api'
 import type { ServiceConfig } from '@/types/api'
 import React from 'react'
 import { getOk } from '@/__tests__/helpers/api-result'
-import { stubMatchMedia } from '@/__tests__/helpers/jsdom-shims'
+import { stubMatchMedia } from '@/__tests__/helpers/browser-stubs'
 import { createUseSSEMock } from '@/__tests__/helpers/sse-mock'
-import { createTestQueryClient } from '../helpers/query'
+import { renderWithQuery } from '../helpers/query'
 
 stubMatchMedia()
 window.HTMLElement.prototype.scrollIntoView = vi.fn()
@@ -25,7 +24,6 @@ afterEach(() => {
 
 test('LogSettingsModal navigates through wizard steps', async () => {
   const user = userEvent.setup()
-  const queryClient = createTestQueryClient()
   const onOpenChange = vi.fn()
 
   vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: string) => {
@@ -41,14 +39,12 @@ test('LogSettingsModal navigates through wizard steps', async () => {
     return getOk({})
   })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <LogSettingsModal
-        service={{ service_id: "test-svc", name: "Test Service" } as ServiceConfig}
-        open={true}
-        onOpenChange={onOpenChange}
-      />
-    </QueryClientProvider>
+  renderWithQuery(
+    <LogSettingsModal
+      service={{ service_id: "test-svc", name: "Test Service" } as ServiceConfig}
+      open={true}
+      onOpenChange={onOpenChange}
+    />
   )
 
   // Step 1: Wait for it to load and render "General Settings"
@@ -98,7 +94,6 @@ test('LogSettingsModal navigates through wizard steps', async () => {
 
 test('LogSettingsModal shows custom fields in review step', async () => {
   const user = userEvent.setup()
-  const queryClient = createTestQueryClient()
   const onOpenChange = vi.fn()
 
   vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: string) => {
@@ -115,14 +110,12 @@ test('LogSettingsModal shows custom fields in review step', async () => {
     return getOk({ log_fields: { groups: ['core'] } })
   })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <LogSettingsModal
-        service={{ service_id: "test-svc", name: "Test Service" } as ServiceConfig}
-        open={true}
-        onOpenChange={onOpenChange}
-      />
-    </QueryClientProvider>
+  renderWithQuery(
+    <LogSettingsModal
+      service={{ service_id: "test-svc", name: "Test Service" } as ServiceConfig}
+      open={true}
+      onOpenChange={onOpenChange}
+    />
   )
 
   // Navigate to Step 2
@@ -153,7 +146,6 @@ test('LogSettingsModal shows custom fields in review step', async () => {
 // contract break.
 test('LogSettingsModal Deploy POSTs body wrapped in { log_fields }', async () => {
   const user = userEvent.setup()
-  const queryClient = createTestQueryClient()
   const onOpenChange = vi.fn()
 
   vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: string) => {
@@ -172,14 +164,12 @@ test('LogSettingsModal Deploy POSTs body wrapped in { log_fields }', async () =>
   )
   vi.spyOn(apiLib.client, 'POST').mockImplementation(postSpy)
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <LogSettingsModal
-        service={{ service_id: 'test-svc', name: 'Test Service' } as ServiceConfig}
-        open={true}
-        onOpenChange={onOpenChange}
-      />
-    </QueryClientProvider>
+  renderWithQuery(
+    <LogSettingsModal
+      service={{ service_id: 'test-svc', name: 'Test Service' } as ServiceConfig}
+      open={true}
+      onOpenChange={onOpenChange}
+    />
   )
 
   // Walk wizard: Step 1 → 2 → 3 → Deploy. Pattern mirrors the existing
@@ -225,8 +215,6 @@ test('LogSettingsModal has no axe-detectable a11y violations', async () => {
     realError(...args)
   })
 
-  const queryClient = createTestQueryClient()
-
   vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: string) => {
     if (url.includes('/api/log-fields/catalog')) {
       return getOk({
@@ -238,14 +226,12 @@ test('LogSettingsModal has no axe-detectable a11y violations', async () => {
     return getOk({ log_fields: { groups: ['core'], field_overrides: {} } })
   })
 
-  const { container } = render(
-    <QueryClientProvider client={queryClient}>
-      <LogSettingsModal
-        service={{ service_id: 'test-svc', name: 'Test Service' } as ServiceConfig}
-        open={true}
-        onOpenChange={vi.fn()}
-      />
-    </QueryClientProvider>,
+  const { container } = renderWithQuery(
+    <LogSettingsModal
+      service={{ service_id: 'test-svc', name: 'Test Service' } as ServiceConfig}
+      open={true}
+      onOpenChange={vi.fn()}
+    />,
   )
 
   await waitFor(() => expect(screen.getByText('Log Period')).toBeDefined())

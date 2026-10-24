@@ -12,7 +12,7 @@ import IOValueTab from '@/app/fastly-value/_sections/tabs/IOValueTab'
 import type { components } from '@/types/api.generated'
 
 vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
-vi.mock('@/components/PlotlyChart', () => ({ PlotlyChart: () => <div data-testid="plotly" /> }))
+vi.mock('@/components/PlotlyChart', async () => (await import('../helpers/page-smoke')).plotlyChartModuleMock())
 vi.mock('@/components/FilterValueCell', () => ({
   FilterValueCell: ({ display }: { display: string }) => <span>{display}</span>,
 }))

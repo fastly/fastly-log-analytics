@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 
-import { renderWithQueryClient } from '@/__tests__/helpers/renderWithQuery'
+import { renderWithQueryClient } from '@/__tests__/helpers/query'
 import { server } from '@/__tests__/helpers/msw/server'
 import { useServiceStore } from '@/stores/serviceStore'
 import Loading from '@/app/admin/clickhouse/loading'

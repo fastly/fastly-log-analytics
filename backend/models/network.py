@@ -294,7 +294,6 @@ NetworkSectionName = Literal[
     "pop_health",
     "transport",
 ]
-SectionName = NetworkSectionName
 
 
 class NetworkHealthRequest(RangeKeyedRequest):
@@ -302,7 +301,7 @@ class NetworkHealthRequest(RangeKeyedRequest):
     bucket_seconds: Seconds14400 = 300
     top_n: Limit100 = 30
     map_asn: str = "all"
-    sections: list[SectionName] | None = None
+    sections: list[NetworkSectionName] | None = None
 
 
 class NetworkQualityRequest(RangeKeyedRequest):

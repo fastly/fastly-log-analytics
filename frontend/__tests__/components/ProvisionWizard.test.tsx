@@ -13,8 +13,7 @@ import {
   type WizardDraft,
 } from "@/components/ProvisionWizard/types";
 import { afterEach, beforeEach, vi, describe, it, expect } from "vitest";
-import { QueryClientProvider } from "@tanstack/react-query";
-import { createTestQueryClient } from "../helpers/query";
+import { createTestQueryClient, renderWithQuery } from "../helpers/query";
 import { createUseSSEMock } from "../helpers/sse-mock";
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
@@ -53,10 +52,6 @@ vi.mock("lucide-react", async () => {
 // ── Test Setup ───────────────────────────────────────────────────────────────
 
 const queryClient = createTestQueryClient();
-
-const wrapper = ({ children }: { children: React.ReactNode }) => (
-  <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-);
 
 function makeDraft(overrides: Partial<WizardDraft> = {}): WizardDraft {
   return {
@@ -107,8 +102,8 @@ describe("ResumeBanner", () => {
 
   it("hydrates the saved draft from localStorage when the wizard opens", () => {
     saveDraft(makeDraft({ currentStep: "fields" }));
-    render(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, {
-      wrapper,
+    renderWithQuery(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, {
+      queryClient,
     });
     expect(screen.getByText(/Resume previous wizard/i)).toBeInTheDocument();
   });

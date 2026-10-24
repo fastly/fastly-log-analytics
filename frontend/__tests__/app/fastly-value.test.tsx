@@ -1,8 +1,7 @@
-import { render, screen } from '@testing-library/react'
+import { screen } from '@testing-library/react'
 import { expect, test, vi, beforeEach, afterEach } from 'vitest'
 import FastlyValueClient from '@/app/fastly-value/_sections/FastlyValueClient'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/query'
 import React from 'react'
 import { spyOnConsoleError } from '../helpers/page-smoke'
 
@@ -50,11 +49,7 @@ afterEach(() => {
 })
 
 test('fastly-value page mounts and renders title and tab navigation', () => {
-  render(
-    <QueryClientProvider client={queryClient}>
-      <FastlyValueClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<FastlyValueClient />, { queryClient })
   expect(screen.getByText('Service Summary')).toBeInTheDocument()
   expect(screen.getByRole('tab', { name: /summary/i })).toBeInTheDocument()
   expect(screen.getByRole('tab', { name: /cdn & caching/i })).toBeInTheDocument()
@@ -70,11 +65,7 @@ test('fastly-value page mounts and renders title and tab navigation', () => {
 test('fastly-value summary query key keeps its pre-migration shape', async () => {
   const { resolveRangeWire } = await import('@/lib/range-wire')
   const { quantizeAnchor } = await import('@/lib/time-window')
-  render(
-    <QueryClientProvider client={queryClient}>
-      <FastlyValueClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<FastlyValueClient />, { queryClient })
   const anchor = quantizeAnchor('2026-01-01T01:00:00Z')
   const { rangeKey } = resolveRangeWire({
     relativeRange: null,

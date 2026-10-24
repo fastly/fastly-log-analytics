@@ -171,15 +171,3 @@ def _fetch_file_to_zip(
     except Exception:
         logger.error("Error fetching %s from FOS", key, exc_info=True)
         return False
-
-
-def _resolve_source(source_name: str) -> dict:
-    from backend import config as svcconfig
-    from backend.core.duckdb import _DEFAULT_SOURCE
-
-    if source_name == "default":
-        return _DEFAULT_SOURCE
-    cfg = svcconfig.load_config(source_name)
-    if cfg:
-        return {**_DEFAULT_SOURCE, **svcconfig.config_to_source(cfg)}
-    return _DEFAULT_SOURCE

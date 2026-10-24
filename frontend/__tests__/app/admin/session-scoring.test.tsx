@@ -12,9 +12,8 @@
  *   4. Direct navigation when `activeServiceId` is empty falls back to `/api/services`.
  */
 import { describe, expect, test, vi, beforeEach } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../../helpers/query'
+import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { renderWithQuery } from '../../helpers/query'
 import { http, HttpResponse } from 'msw'
 import React from 'react'
 
@@ -91,13 +90,7 @@ describe('admin/session-scoring page', () => {
       }),
     )
 
-    const client = createTestQueryClient()
-
-    render(
-      <QueryClientProvider client={client}>
-        <SessionScoringPage />
-      </QueryClientProvider>,
-    )
+    renderWithQuery(<SessionScoringPage />)
 
     await waitFor(() => {
       expect(analyticsHits, 'scoring/analytics composite must have been called').not.toEqual([])
@@ -149,12 +142,7 @@ describe('admin/session-scoring page', () => {
       }),
     )
 
-    const client = createTestQueryClient()
-    render(
-      <QueryClientProvider client={client}>
-        <SessionScoringPage />
-      </QueryClientProvider>,
-    )
+    renderWithQuery(<SessionScoringPage />)
 
     await waitFor(() => {
       expect(configCalls).toBe(1)
@@ -204,12 +192,7 @@ describe('admin/session-scoring page', () => {
       }),
     )
 
-    const client = createTestQueryClient()
-    render(
-      <QueryClientProvider client={client}>
-        <SessionScoringPage />
-      </QueryClientProvider>,
-    )
+    renderWithQuery(<SessionScoringPage />)
 
     await waitFor(() => {
       expect(configHits).toContain('svc-fallback')

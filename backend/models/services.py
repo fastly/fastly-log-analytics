@@ -260,9 +260,6 @@ class CronRunsResponse(WireSafeModel):
     entries: list[CronRunEntry] = []
 
 
-CronRunsPageResponse = CronRunsResponse
-
-
 # ── Wire-safe responses for the remaining services/core routes ─────────────
 #
 # Same contract as CronRunEntry above: ``extra="allow"`` + all-Optional +

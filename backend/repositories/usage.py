@@ -38,7 +38,7 @@ def get_edge_ratio(con: duckdb.DuckDBPyConnection, src: dict) -> tuple[float | N
 
 
 def get_storage_stats(
-    con: duckdb.DuckDBPyConnection,
+    con: duckdb.DuckDBPyConnection | None,
     src: dict,
     start_str: str,
     end_str: str,

@@ -28,13 +28,6 @@ from tests._helpers.config_fakes import mutate_via_save
 SVC = "svc-rum-status-projection"
 
 
-@pytest.fixture
-def with_config(monkeypatch):
-    container: dict = {}
-    monkeypatch.setattr("backend.config.load_config", lambda service_id: container.get(service_id))
-    return container
-
-
 def _request(analyst_session: object | None) -> SimpleNamespace:
     return SimpleNamespace(state=SimpleNamespace(analyst_session=analyst_session))
 

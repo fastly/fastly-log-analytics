@@ -21,6 +21,7 @@ import { client, extractApiError } from '@/lib/api'
 import type { components } from '@/types/api.generated'
 
 import { formatCount } from '@/lib/format'
+import { useOpenGeneration } from '@/hooks/useDerivedState'
 import { invalidateServiceScoringQueries } from './useScoringQuery'
 type RetrainResult = components['schemas']['ScoringRetrainResponse']
 
@@ -39,8 +40,26 @@ interface RetrainButtonProps {
  * dialog surfaces the deploy command for the operator to copy.
  */
 export function RetrainButton({ serviceId }: RetrainButtonProps) {
-  const queryClient = useQueryClient()
   const [open, setOpen] = React.useState(false)
+  const generation = useOpenGeneration(open)
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger
+        render={
+          <Button variant="outline" size="sm">
+            <Brain className="h-4 w-4 mr-1" />
+            Retrain matrix
+          </Button>
+        }
+      />
+      <RetrainDialogBody key={generation} serviceId={serviceId} onClose={() => setOpen(false)} />
+    </Dialog>
+  )
+}
+
+function RetrainDialogBody({ serviceId, onClose }: RetrainButtonProps & { onClose: () => void }) {
+  const queryClient = useQueryClient()
   const [sinceDays, setSinceDays] = React.useState(7)
   const [result, setResult] = React.useState<RetrainResult | null>(null)
 
@@ -68,24 +87,6 @@ export function RetrainButton({ serviceId }: RetrainButtonProps) {
   })
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(o) => {
-        setOpen(o)
-        if (!o) {
-          setResult(null)
-          mutation.reset()
-        }
-      }}
-    >
-      <DialogTrigger
-        render={
-          <Button variant="outline" size="sm">
-            <Brain className="h-4 w-4 mr-1" />
-            Retrain matrix
-          </Button>
-        }
-      />
       <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -202,7 +203,7 @@ export function RetrainButton({ serviceId }: RetrainButtonProps) {
         <DialogFooter>
           {!result && (
             <>
-              <Button variant="outline" onClick={() => setOpen(false)} disabled={mutation.isPending}>
+              <Button variant="outline" onClick={onClose} disabled={mutation.isPending}>
                 Cancel
               </Button>
               <Button onClick={() => mutation.mutate()} disabled={mutation.isPending}>
@@ -221,11 +222,10 @@ export function RetrainButton({ serviceId }: RetrainButtonProps) {
             </>
           )}
           {result && (
-            <Button onClick={() => setOpen(false)}>Close</Button>
+            <Button onClick={onClose}>Close</Button>
           )}
         </DialogFooter>
       </DialogContent>
-    </Dialog>
   )
 }
 

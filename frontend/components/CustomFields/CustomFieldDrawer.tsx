@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { useDebounce } from '@/hooks/useDebounce'
+import { useOpenGeneration } from '@/hooks/useDerivedState'
 import { oneOf } from '@/lib/narrow'
 import {
   Dialog,
@@ -56,9 +57,21 @@ const DEFAULT_FIELD: FormState = {
   filterable: true
 }
 
-export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave }: CustomFieldDrawerProps) {
+export function CustomFieldDrawer(props: CustomFieldDrawerProps) {
+  const generation = useOpenGeneration(props.open)
+  return <CustomFieldDrawerBody key={`${props.field?.name ?? '__new__'}|${generation}`} {...props} />
+}
+
+function CustomFieldDrawerBody({ serviceId, field, open, onOpenChange, onSave }: CustomFieldDrawerProps) {
   const isEditing = !!field
-  const [formData, setFormData] = useState<FormState>(DEFAULT_FIELD)
+  const [formData, setFormData] = useState<FormState>(() =>
+    field
+      ? {
+          ...field,
+          collection_stage: field.collection_stage || 'edge',
+        }
+      : { ...DEFAULT_FIELD },
+  )
   const [validationError, setValidationError] = useState<string | null>(null)
   const [lintResult, setLintResult] = useState<VclLintResult | null>(null)
   const [isLinting, setIsLinting] = useState(false)
@@ -126,29 +139,6 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
     onSuccess: () => onSave(),
     onError: (error: Error) => setValidationError(error.message || "Failed to save field")
   })
-
-  // Reset the form when the drawer opens or the edited field changes (adjusted during render
-  // against what was last seen). The mutation's own state is reset in the effect below — it is
-  // external to this component, so it cannot be derived.
-  const [seenDrawer, setSeenDrawer] = useState<{ open: boolean; field: typeof field }>({ open: false, field: null })
-  if (seenDrawer.open !== open || seenDrawer.field !== field) {
-    setSeenDrawer({ open, field })
-    if (open) {
-      setFormData(field ? {
-        ...field,
-        collection_stage: field.collection_stage || "edge"
-      } : { ...DEFAULT_FIELD })
-      setValidationError(null)
-      setLintResult(null)
-      setLintFetchError(null)
-    }
-  }
-
-  // The deps intentionally exclude `saveMutation` — TanStack Query's mutation object is
-  // recreated on every render, so listing it would re-fire this effect on every keystroke.
-  useEffect(() => {
-    if (open) saveMutation.reset()
-  }, [open, field])
 
   const handleChange = <K extends keyof FormState>(key: K, value: FormState[K]) => {
     setFormData(prev => {

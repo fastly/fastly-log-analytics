@@ -147,18 +147,6 @@ export interface WizardDraft {
   createdAt: string;
 }
 
-import {
-  REGION_LABELS,
-  SHIELD_LABELS,
-  SHIELD_MAP,
-} from "@/lib/service-config-constants";
-
-export {
-  REGION_LABELS,
-  SHIELD_LABELS,
-  SHIELD_MAP,
-};
-
 export function getStepsForMode(
   mode: WizardMode,
   config?: { logging_enabled?: boolean },

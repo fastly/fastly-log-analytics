@@ -1148,13 +1148,17 @@ def remove_logging_endpoint(
                 "if any of those are ours, teardown left VCL behind."
             )
 
+        from backend.provision.declarative.reconciler import (
+            MANAGED_BACKEND_NAMES,
+            MANAGED_DICTIONARY_NAMES,
+        )
+
         # Clean up any managed backends
         try:
             backends = fastly("GET", f"/service/{service_id}/version/{new_ver}/backend", token=token)
-            managed_backend_names = {"session_scorer", "fos_origin", "F_fos_origin", "F_F_fos_origin", "rum_collector"}
             for b in backends:
                 b_name = b.get("name")
-                if b_name in managed_backend_names:
+                if b_name in MANAGED_BACKEND_NAMES:
                     info(f"Removing managed backend '{b_name}' from draft…")
                     encoded_b = urllib.parse.quote(b_name, safe="")
                     fastly(
@@ -1170,10 +1174,9 @@ def remove_logging_endpoint(
         # Clean up any managed dictionaries
         try:
             dicts = fastly("GET", f"/service/{service_id}/version/{new_ver}/dictionary", token=token)
-            managed_dict_names = {"fos_credentials"}
             for d in dicts:
                 d_name = d.get("name")
-                if d_name in managed_dict_names:
+                if d_name in MANAGED_DICTIONARY_NAMES:
                     info(f"Removing managed dictionary '{d_name}' from draft…")
                     encoded_d = urllib.parse.quote(d_name, safe="")
                     fastly(
@@ -1330,53 +1333,12 @@ def update_logging_endpoint(cfg: dict, token: str):
     # Yield initial progress
     yield {"type": "progress", "current": 1, "total": total_steps}
 
-    import queue
-    import threading
-
-    events: queue.Queue = queue.Queue()
-
-    # Define status callback wrapper to yield status updates to caller
-    def status_callback(msg: str) -> None:
-        import sys
-
-        sys.stdout.write(f"  →  {msg}\n")
-        sys.stdout.flush()
-        events.put({"type": "status", "message": msg})
-
     from backend.provision.declarative.reconciler import reconcile_vcl_state
+    from backend.provision.utils import run_with_events
 
     yield {"type": "status", "message": f"🔍 Starting declarative reconciliation for service {service_id}..."}
     try:
-        result_container = []
-        error_container = []
-
-        def worker():
-            try:
-                res = reconcile_vcl_state(service_id, token, dry_run=False, status_cb=status_callback)
-                result_container.append(res)
-            except Exception as e:
-                error_container.append(e)
-            finally:
-                events.put(None)
-
-        t = threading.Thread(target=worker)
-        t.start()
-
-        while True:
-            try:
-                evt = events.get(timeout=0.1)
-                if evt is None:
-                    break
-                yield evt
-            except queue.Empty:
-                continue
-
-        t.join()
-
-        if error_container:
-            raise error_container[0]
-
-        result = result_container[0]
+        result = yield from run_with_events(reconcile_vcl_state, service_id, token, dry_run=False)
         if result.error:
             raise RuntimeError(result.error)
 

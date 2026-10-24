@@ -50,6 +50,43 @@ describe('fetchInsightsServerSide (insights SSR)', () => {
     expect(await fetchInsightsServerSide(undefined, null)).toBeNull()
   })
 
+  describe('Insights page hydration', () => {
+    it.each([undefined, 'svc-2'])('scopes first-render extents to the bootstrap service (override: %s)', async (service) => {
+      setHeaders({ host: 'localhost:3001' })
+      const extents = {
+        earliest_log_at: new Date(Date.now() - 36 * 3600_000).toISOString(),
+        latest_log_at: new Date().toISOString(),
+      }
+      await withTestHttpServer(
+        (req, res) => {
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify(req.url === '/api/bootstrap'
+            ? { active_service_id: 'svc-1', log_extents: extents }
+            : { insights: [] }))
+        },
+        async () => {
+          const { default: InsightsPage } = await import('@/app/insights/page')
+          const page = await InsightsPage({ searchParams: Promise.resolve({ service }) })
+          const queries = page.props.state.queries
+          expect(queries).toEqual(expect.arrayContaining([
+            expect.objectContaining({ queryKey: ['insights', service ?? 'svc-1', '4', '24'] }),
+          ]))
+          const extentsQuery = queries.find(
+            (query: { queryKey: readonly unknown[] }) => query.queryKey[0] === 'log-extents',
+          )
+          if (service) {
+            expect(extentsQuery).toBeUndefined()
+          } else {
+            expect(extentsQuery).toMatchObject({
+              queryKey: ['log-extents', 'svc-1'],
+              state: { data: extents },
+            })
+          }
+        },
+      )
+    })
+  })
+
   it('fail-closed: no Caddy marker + non-loopback Host → null, never forwarded', async () => {
     setHeaders({ host: 'fastly-log-analytics.global.ssl.fastly.net' })
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})

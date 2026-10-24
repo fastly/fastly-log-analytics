@@ -1,8 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/query'
 import { expect, test, vi, beforeEach } from 'vitest'
 import React from 'react'
 
@@ -34,11 +33,7 @@ test('Loading skeleton renders zero-CLS reservation containers and contextual me
 
 test('AdminPage wraps all child sections in zero-CLS contain-intrinsic-size reservations', () => {
   const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
-  const { container } = render(
-    <QueryClientProvider client={queryClient}>
-      <AdminPage />
-    </QueryClientProvider>,
-  )
+  const { container } = renderWithQuery(<AdminPage />, { queryClient })
   expect(screen.getByTestId('admin-overview-root')).toBeInTheDocument()
   expect(screen.getByTestId('admin-operations-reservation')).toBeInTheDocument()
   expect(screen.getByTestId('admin-services-reservation')).toBeInTheDocument()
@@ -92,11 +87,7 @@ test('OperationsOverview renders live query, ingest gap, slow query, and worker 
   )
 
   const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
-  render(
-    <QueryClientProvider client={queryClient}>
-      <OperationsOverview />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<OperationsOverview />, { queryClient })
 
   expect(screen.getByText('Live Queries')).toBeInTheDocument()
   expect(screen.getByText('Ingest Gap')).toBeInTheDocument()
@@ -130,11 +121,7 @@ test('ServicesTable renders loading status, services list, and manual Refresh St
 
   const user = userEvent.setup()
   const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
-  render(
-    <QueryClientProvider client={queryClient}>
-      <ServicesTable />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<ServicesTable />, { queryClient })
 
   await waitFor(() => {
     expect(screen.getByText('Production Edge CDN')).toBeInTheDocument()

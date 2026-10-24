@@ -37,11 +37,6 @@ import {
 } from '@/lib/log-field-config-ops'
 import type { ServiceConfig, LogFieldsConfig } from '@/types/api'
 
-// Re-export CollapsibleGroup so existing imports from this module keep working
-// (e.g. ProvisionWizard imports it from this path).
-export { CollapsibleGroup }
-
-
 interface LogSettingsModalProps {
   service: ServiceConfig | null
   open: boolean

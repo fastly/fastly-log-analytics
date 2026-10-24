@@ -92,3 +92,26 @@ def fetch_metric_snapshot_history(
     if task:
         parts.append(task)
     return batch.get("|".join(parts), [])
+
+
+import pytest
+
+
+@pytest.fixture
+def with_config(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Patch ``load_config``, ``mutate_config``, and ``get_active_service_id`` against an in-memory dict."""
+    container: dict[str, Any] = {}
+
+    def fake_load(svc_id: str) -> dict[str, Any] | None:
+        return container.get(svc_id)
+
+    def fake_save(svc_id: str, cfg: dict[str, Any]) -> None:
+        container[svc_id] = cfg
+
+    def fake_get_active(fallback_to_first: bool = True) -> str | None:
+        return next(iter(container), "TestRumAssetsSvc")
+
+    monkeypatch.setattr("backend.config.load_config", fake_load)
+    monkeypatch.setattr("backend.config.mutate_config", mutate_via_save(fake_save))
+    monkeypatch.setattr("backend.config.get_active_service_id", fake_get_active)
+    return container

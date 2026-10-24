@@ -1,11 +1,10 @@
-import { render, screen } from '@testing-library/react'
+import { screen } from '@testing-library/react'
 import { expect, test, vi, beforeEach, afterEach } from 'vitest'
 // app/origin/page.tsx is now an async RSC shell that SSR-prefetches and
 // dehydrates into <OriginClient />; RTL can't render an async component, so
 // the smoke test targets the client component that owns the title + sections.
 import OriginClient from '@/app/origin/_sections/OriginClient'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/query'
 import React from 'react'
 import { spyOnConsoleError } from '../helpers/page-smoke'
 
@@ -122,11 +121,7 @@ const MOCK_ORIGIN_DATA = {
 test('origin page mounts and renders title and all origin card titles with loaded data', async () => {
   mockPost.mockResolvedValue({ data: MOCK_ORIGIN_DATA })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <OriginClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<OriginClient />, { queryClient })
 
   expect(screen.getByText('Origin Performance')).toBeInTheDocument()
   expect(await screen.findByText('Origin TTFB (P50)')).toBeInTheDocument()
@@ -146,11 +141,7 @@ test('origin page displays contextual loading messages while query is pending', 
   // Never-resolving promise simulates active loading state
   mockPost.mockReturnValue(new Promise(() => {}))
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <OriginClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<OriginClient />, { queryClient })
 
   expect(screen.getByText('Loading Origin TTFB (P50)...')).toBeInTheDocument()
   expect(screen.getByText('Loading Origin TTFB (P95)...')).toBeInTheDocument()
@@ -172,11 +163,7 @@ test('origin page displays empty states when has_data is false', async () => {
     },
   })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <OriginClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<OriginClient />, { queryClient })
 
   expect(await screen.findByText('No Origin Metrics Yet')).toBeInTheDocument()
 })

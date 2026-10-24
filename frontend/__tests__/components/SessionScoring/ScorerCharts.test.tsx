@@ -13,16 +13,15 @@ import type { PlotlyTrace, PlotlyLayout } from '@/types/plotly'
 
 // Loosely-typed view of Plotly objects for assertions.
 type Loose = { [k: string]: any } // eslint-disable-line @typescript-eslint/no-explicit-any
-type Captured = { data: PlotlyTrace[]; layout: PlotlyLayout }
+type Captured = { data: PlotlyTrace[]; layout?: PlotlyLayout }
 let captured: Captured | null = null
 let timeseries: unknown = undefined
 
-vi.mock('@/components/PlotlyChart', () => ({
-  PlotlyChart: (props: Captured) => {
+vi.mock('@/components/PlotlyChart', async () =>
+  (await import('../../helpers/page-smoke')).plotlyChartModuleMock((props) => {
     captured = { data: props.data, layout: props.layout }
-    return <div data-testid="plotly" />
-  },
-}))
+  }),
+)
 
 vi.mock('@/components/SessionScoring/useScorerTimeseries', async (orig) => {
   const actual = await orig<typeof import('@/components/SessionScoring/useScorerTimeseries')>()

@@ -4,6 +4,7 @@ import { fetchBootstrapServerSide } from '@/lib/ssr/bootstrap'
 import { fetchInsightsServerSide } from '@/lib/ssr/insights'
 import { firstParam, seedDehydratedState } from '@/lib/ssr/seed'
 import { resolveServerServiceId } from '@/lib/ssr/service'
+import { queryKeys } from '@/lib/query-keys'
 import InsightsClient from './_sections/InsightsClient'
 
 // Per-request RSC shell for /insights. Pre-fetches the DEFAULT insights
@@ -66,9 +67,17 @@ export default async function InsightsPage({
         seed.data,
       )
     : null
+  const extentsState = serviceId && serviceId === bootstrap?.active_service_id && logExtents
+    ? seedDehydratedState(queryKeys.logExtents(serviceId), logExtents)
+    : null
 
   return (
-    <HydrationBoundary state={dehydratedState}>
+    <HydrationBoundary
+      state={{
+        mutations: [],
+        queries: [...(extentsState?.queries ?? []), ...(dehydratedState?.queries ?? [])],
+      }}
+    >
       <InsightsClient
         initialTab={initialTab}
         initialWindow={initialWindow}

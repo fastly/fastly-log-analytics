@@ -949,3 +949,188 @@ def test_ngwaf_sync_fetcher_exception_yields_error_event_and_logs():
     assert any(
         (kwargs.get("status") == "error" or (len(args) > 3 and args[3] == "error")) for args, kwargs in log_calls
     )
+
+
+# ── Merged from test_cron_interval_settings.py ──
+
+import json
+
+from backend.models.services import CronSettingsPartial
+
+
+def _post(body: dict, stored_cron_sync: dict) -> dict:
+    cfg = {
+        "service_id": "svc1",
+        "name": "Test Service",
+        "access_level": "read_write",
+        "log_period": 60,
+        "provisioning": {"cron_sync": dict(stored_cron_sync), "cron_compact": {"enabled": True}},
+    }
+    saved: dict = {}
+
+    with (
+        patch("backend.config.load_config", return_value=cfg),
+        patch("backend.config.mutate_config", side_effect=mutate_via_save(lambda sid, c: saved.update(c))),
+        patch("backend.provision._sync_crontab"),
+        patch("backend.core.metadata.record_audit"),
+    ):
+        resp = TestClient(app).post("/api/services/svc1/cron-settings", json=body)
+    assert resp.status_code == 200, resp.text
+    # SSE stream must have reached "done", not errored.
+    assert any('"done"' in line for line in resp.text.splitlines()), resp.text
+    return saved["provisioning"]["cron_sync"]
+
+
+def test_interval_seconds_is_modelled():
+    """It must survive request parsing — Pydantic drops unknown fields."""
+    assert "interval_seconds" in CronSettingsPartial.model_fields
+    parsed = CronSettingsPartial(**json.loads('{"interval_seconds": 90}'))
+    assert parsed.interval_seconds == 90
+
+
+def test_polling_mode_is_modelled_and_persisted():
+    parsed = CronSettingsPartial(**json.loads('{"polling_mode": "adaptive"}'))
+    assert parsed.polling_mode == "adaptive"
+
+    out = _post({"cron_sync": {"polling_mode": "adaptive"}}, {"enabled": True})
+
+    assert out["polling_mode"] == "adaptive"
+
+
+def test_polling_mode_rejects_unknown_values():
+    from pydantic import ValidationError
+
+    try:
+        CronSettingsPartial(**json.loads('{"polling_mode": "continuous"}'))
+    except ValidationError as exc:
+        assert "polling_mode" in str(exc)
+    else:
+        raise AssertionError("unsupported polling mode was accepted")
+
+
+def test_interval_seconds_is_persisted():
+    out = _post({"cron_sync": {"interval_seconds": 90}}, {"enabled": True, "interval_seconds": 30})
+    assert out["interval_seconds"] == 90
+
+
+def test_setting_interval_seconds_drops_stale_interval_mins():
+    """THE REGRESSION: a persisted interval_mins would otherwise keep winning."""
+    out = _post(
+        {"cron_sync": {"interval_seconds": 45}},
+        {"enabled": True, "interval_seconds": 30, "interval_mins": 2},
+    )
+    assert out["interval_seconds"] == 45
+    assert "interval_mins" not in out, "stale interval_mins still wins in the scheduler"
+
+
+def test_explicit_interval_mins_still_wins_when_both_sent():
+    """Sending both is unambiguous — respect mins, don't second-guess."""
+    out = _post(
+        {"cron_sync": {"interval_mins": 5, "interval_seconds": 45}},
+        {"enabled": True, "interval_seconds": 30},
+    )
+    assert out["interval_mins"] == 5
+    assert out["interval_seconds"] == 45
+
+
+def test_unrelated_keys_are_preserved():
+    """Partial update must not clobber persisted siblings."""
+    out = _post(
+        {"cron_sync": {"interval_seconds": 90}},
+        {"enabled": True, "interval_seconds": 30, "data_retention_days": 120, "delete_after": True},
+    )
+    assert out["data_retention_days"] == 120
+    assert out["delete_after"] is True
+    assert out["enabled"] is True
+
+
+def test_expiry_tuning_fields_round_trip():
+    out = _post(
+        {"cron_sync": {"keep_snapshot_days": 3, "expire_interval_mins": 30}},
+        {"enabled": True, "interval_seconds": 30},
+    )
+    assert out["keep_snapshot_days"] == 3
+    assert out["expire_interval_mins"] == 30
+
+
+# ── Merged from test_invite_analyst.py ──
+
+
+_FAKE_CFG = {
+    "service_id": "svc123",
+    "name": "Test Service",
+    "access_level": "read_write",
+    "fos_bucket": "test-bucket",
+    "fos_region": "us-east-1",
+    "fos_endpoint": "us-east-1.object.fastlystorage.app",
+    "fos_prefix": "",
+    "fos_access_key_id": "AKID",
+    "fos_secret_access_key": "SECRET",
+    "fastly_api_key": "stored-admin-token",
+}
+
+_FAKE_KEY = {"access_key": "ANALYST_KEY", "secret_key": "ANALYST_SECRET"}
+
+
+def test_generate_viewer_key_returns_raw_credentials():
+    """Viewer-key endpoint uses stored fastly_api_key and returns credentials."""
+    with (
+        patch("backend.config.load_config", return_value=_FAKE_CFG),
+        patch("backend.provision.orchestrator.fastly", return_value=_FAKE_KEY),
+        patch("backend.config.config_to_source", return_value={**_FAKE_CFG}),
+    ):
+        client = TestClient(app)
+        response = client.post("/api/services/svc123/generate-viewer-key")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["access_key_id"] == "ANALYST_KEY"
+    assert data["secret_key"] == "ANALYST_SECRET"
+    assert data["fos_bucket"] == "test-bucket"
+    # Encrypted invite fields must not be present
+    assert "invite_block" not in data
+    assert "invite_secret" not in data
+    assert "expires_at" not in data
+
+
+def test_generate_viewer_key_requires_stored_api_key():
+    """Missing fastly_api_key in config returns 400."""
+    cfg_no_token = {**_FAKE_CFG, "fastly_api_key": ""}
+    with patch("backend.config.load_config", return_value=cfg_no_token):
+        client = TestClient(app)
+        response = client.post("/api/services/svc123/generate-viewer-key")
+
+    assert response.status_code == 400
+
+
+def test_generate_viewer_key_rejects_celery_topology():
+    """Scalable DuckLake services must use Path B instead of FOS-only invites."""
+    with (
+        patch("backend.config.DEPLOYMENT_MODE", "high_scale"),
+        patch("backend.config.load_config", return_value=_FAKE_CFG),
+    ):
+        client = TestClient(app)
+        response = client.post("/api/services/svc123/generate-viewer-key")
+
+    assert response.status_code == 409
+    assert "Path B" in response.json()["detail"]["error"]
+
+
+def test_generate_viewer_key_requires_read_write_service():
+    """Analyst services (read_only) cannot generate viewer keys."""
+    ro_cfg = {**_FAKE_CFG, "access_level": "read_only"}
+    with patch("backend.config.load_config", return_value=ro_cfg):
+        client = TestClient(app)
+        response = client.post("/api/services/svc123/generate-viewer-key")
+
+    assert response.status_code == 403
+
+
+def test_decrypt_invite_endpoint_does_not_exist():
+    """/api/provision/decrypt-invite is not a valid endpoint."""
+    client = TestClient(app)
+    response = client.post(
+        "/api/provision/decrypt-invite",
+        json={"invite_block": "x", "secret_key": "y"},
+    )
+    assert response.status_code == 404 or response.status_code == 405

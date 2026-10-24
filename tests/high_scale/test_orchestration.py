@@ -461,3 +461,501 @@ def test_object_concurrency_rejects_non_positive_values() -> None:
             worker_id="worker",
             object_concurrency=0,
         )
+
+
+# ── Merged from test_source_discovery.py ──
+
+
+from backend.high_scale.source_discovery import (
+    MAX_SOURCE_PAGE_SIZE,
+    S3SourceObjectLister,
+)
+
+
+class _DummyPaginator:
+    def paginate(self, **kwargs):
+        return [
+            {
+                "Contents": [
+                    {"Key": "raw/request/a.gz", "ETag": '"etag-a"', "Size": 10},
+                ],
+                "NextToken": "cursor-1",
+            }
+        ]
+
+
+class _DummyS3Client:
+    def get_paginator(self, _name: str):
+        return _DummyPaginator()
+
+
+def test_s3_source_object_lister_lists_bounded_page() -> None:
+    lister = S3SourceObjectLister(_DummyS3Client(), bucket="fos-bucket")
+    page = lister.list_source_objects("svc", "request", page_size=10, cursor=None)
+    assert page == SourceObjectPage(
+        (SourceObjectDescriptor("raw/request/a.gz", "etag:etag-a", 10, '"etag-a"'),),
+        "cursor-1",
+    )
+
+
+def test_s3_source_object_lister_rejects_unbounded_page_size() -> None:
+    lister = S3SourceObjectLister(_DummyS3Client(), bucket="fos-bucket")
+    with pytest.raises(ValueError, match="page_size"):
+        lister.list_source_objects("svc", "request", page_size=MAX_SOURCE_PAGE_SIZE + 1, cursor=None)
+
+
+# ── Merged from test_s3_source_adapters.py ──
+
+from backend.high_scale.source_discovery import (
+    S3SourceObjectReader,
+)
+
+
+class _Body:
+    def read(self) -> bytes:
+        return b"payload"
+
+
+class _Paginator:
+    def __init__(self) -> None:
+        self.requests: list[dict] = []
+
+    def paginate(self, **request):
+        self.requests.append(request)
+        return iter(
+            [
+                {
+                    "Contents": [
+                        {
+                            "Key": "tenant/raw/request/one.gz",
+                            "ETag": '"source-etag"',
+                            "Size": 7,
+                        }
+                    ],
+                    "NextToken": "next-page",
+                }
+            ]
+        )
+
+
+class _Client:
+    def __init__(self) -> None:
+        self.paginator = _Paginator()
+        self.get_object_calls: list[dict] = []
+
+    def get_paginator(self, name: str):
+        assert name == "list_objects_v2"
+        return self.paginator
+
+    def get_object(self, **request):
+        self.get_object_calls.append(request)
+        return {"Body": _Body()}
+
+
+def test_s3_lister_uses_bounded_paginated_listing_and_source_identity() -> None:
+    client = _Client()
+    lister = S3SourceObjectLister(client, bucket="archive-bucket", prefix="tenant")
+
+    page = lister.list_source_objects("svc", "request", page_size=25, cursor="cursor-1")
+
+    assert page.next_cursor == "next-page"
+    assert page.objects[0].object_key == "tenant/raw/request/one.gz"
+    assert page.objects[0].checksum == "etag:source-etag"
+    assert page.objects[0].size_bytes == 7
+    request = client.paginator.requests[0]
+    assert request["Bucket"] == "archive-bucket"
+    assert request["Prefix"] == "tenant/raw/request/"
+    assert request["PaginationConfig"] == {"PageSize": 25, "StartingToken": "cursor-1"}
+
+
+def test_s3_reader_reads_the_exact_listed_key() -> None:
+    client = _Client()
+    reader = S3SourceObjectReader(client, bucket="archive-bucket")
+
+    assert reader.read_source_object("svc", "request", "tenant/raw/request/one.gz") == b"payload"
+    assert client.get_object_calls == [{"Bucket": "archive-bucket", "Key": "tenant/raw/request/one.gz"}]
+
+
+def test_s3_lister_treats_initial_cursor_as_start_of_bucket() -> None:
+    client = _Client()
+    lister = S3SourceObjectLister(client, bucket="archive-bucket")
+
+    lister.list_source_objects("svc", "request", page_size=25, cursor=INITIAL_SOURCE_CURSOR)
+
+    assert client.paginator.requests[0]["PaginationConfig"] == {"PageSize": 25}
+
+
+def test_s3_lister_uses_start_after_for_terminal_cursor() -> None:
+    client = _Client()
+    lister = S3SourceObjectLister(client, bucket="archive-bucket")
+
+    lister.list_source_objects(
+        "svc",
+        "request",
+        page_size=25,
+        cursor=f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/request/last.gz",
+    )
+
+    request = client.paginator.requests[0]
+    assert request["PaginationConfig"] == {"PageSize": 25}
+    assert request["StartAfter"] == "raw/request/last.gz"
+
+
+def test_s3_lister_ignores_a_terminal_cursor_outside_its_own_prefix() -> None:
+    """Regression test: a cursor key from a different domain's prefix (e.g.
+    ``rum_vitals`` inheriting a stale ``raw/request/...`` cursor from the
+    owner-level fallback bug) must never be sent as StartAfter — S3-
+    compatible backends can silently return zero objects for a StartAfter
+    outside the Prefix, permanently starving discovery with no error.
+    Dropping it is always safe: it just means one extra full-prefix LIST."""
+    client = _Client()
+    lister = S3SourceObjectLister(client, bucket="archive-bucket")
+
+    lister.list_source_objects(
+        "svc",
+        "rum_vitals",
+        page_size=25,
+        cursor=f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/request/last.gz",
+    )
+
+    request = client.paginator.requests[0]
+    assert request["Prefix"] == "raw/rum/"
+    assert "StartAfter" not in request
+
+
+# ── Merged from test_pagination.py ──
+
+from datetime import UTC, datetime
+
+from backend.high_scale.pagination import KeysetCursor
+
+
+def test_cursor_is_signed_and_service_bound() -> None:
+    cursor = KeysetCursor(datetime(2026, 9, 1, tzinfo=UTC), "event-2", "svc", "request")
+    token = cursor.encode(b"secret")
+
+    assert KeysetCursor.decode(token, b"secret") == cursor
+    with pytest.raises(ValueError, match="cursor"):
+        KeysetCursor.decode(token, b"wrong")
+
+
+# ── Merged from test_late_key_backscan.py ──
+
+from unittest.mock import MagicMock
+
+
+def test_late_key_backscan_ingests_late_key_without_duplication() -> None:
+    """An object that lands behind the cursor (within trailing-minute window) is ingested by back-scan and never double counted."""
+    # Scenario:
+    # Key A (minute 15): raw/request/year=2026/month=10/day=09/hour=12/minute=15/121500-a.log.gz
+    # Key B (minute 16): raw/request/year=2026/month=10/day=09/hour=12/minute=16/121600-b.log.gz
+    # Cursor has advanced past B.
+    # Late Key C (minute 15): raw/request/year=2026/month=10/day=09/hour=12/minute=15/121550-c.log.gz
+    key_a = "raw/request/year=2026/month=10/day=09/hour=12/minute=15/121500-a.log.gz"
+    key_b = "raw/request/year=2026/month=10/day=09/hour=12/minute=16/121600-b.log.gz"
+    key_c_late = "raw/request/year=2026/month=10/day=09/hour=12/minute=15/121550-c.log.gz"
+
+    lister = MagicMock()
+    # First regular page: lists A and B
+    lister.list_source_objects.return_value = SourceObjectPage(
+        objects=(
+            SourceObjectDescriptor(key_a, "chk_a", 100),
+            SourceObjectDescriptor(key_b, "chk_b", 100),
+        ),
+        next_cursor=key_b,
+    )
+
+    reader = MagicMock()
+    reader.read_source_object.return_value = b"log payload"
+
+    control = MagicMock()
+    control.owner.return_value = MagicMock(current_owner="high_scale", owner_epoch=1)
+    # Simulate already-terminal check: Key A and B become terminal after first ingestion
+    terminal_keys = set()
+
+    def mock_already_terminal(service_id: str, obj_key: str):
+        return obj_key in terminal_keys
+
+    controller = MagicMock()
+    ingested_keys: list[str] = []
+
+    def mock_ingest_batch(**kwargs):
+        sources_payloads = kwargs["sources_payloads"]
+        for src, _ in sources_payloads:
+            terminal_keys.add(src.object_key)
+            ingested_keys.append(src.object_key)
+        return MagicMock(sources_count=len(sources_payloads))
+
+    controller.ingest_batch.side_effect = mock_ingest_batch
+
+    # Claim source returns claimed=True if not in terminal_keys
+    def mock_claim(service_id, obj_key, worker_id, **kwargs):
+        if obj_key in terminal_keys:
+            return MagicMock(claimed=False)
+        return MagicMock(claimed=True)
+
+    control.claim_source.side_effect = mock_claim
+    control.source.side_effect = lambda svc, k: MagicMock(status="archived" if k in terminal_keys else "discovered")
+
+    ownership = MagicMock()
+    ownership.get.return_value = MagicMock(current_owner="high_scale", owner_epoch=1)
+    ledger = MagicMock()
+
+    coordinator = HighScaleWorkerCoordinator(
+        lister=lister,
+        reader=reader,
+        controller=controller,
+        ownership=ownership,
+        ledger=ledger,
+        worker_id="test-worker",
+        control_plane=control,
+        page_size=10,
+    )
+
+    # 1. Run normal page -> processes A and B
+    run1 = coordinator.run_page(service_id="svc_test", domain="request")
+    assert run1.processed == 2
+    assert run1.failed == 0
+    assert key_a in terminal_keys
+    assert key_b in terminal_keys
+
+    # 2. Back-scan lists trailing minute prefix for minute=15, returning key A (already processed) and key C (late-arriving)
+    lister.list_source_objects.return_value = SourceObjectPage(
+        objects=(
+            SourceObjectDescriptor(key_a, "chk_a", 100),
+            SourceObjectDescriptor(key_c_late, "chk_c", 100),
+        ),
+        next_cursor=None,
+    )
+
+    # 3. Process the back-scan page:
+    # Key A should be detected as duplicate, Key C should be newly processed
+    run2 = coordinator.run_page(service_id="svc_test", domain="request")
+    assert run2.processed == 1, "Only late key C should be newly processed"
+    assert run2.duplicates == 1, "Key A must be detected as duplicate"
+    assert run2.failed == 0
+    assert key_c_late in terminal_keys
+
+    # Total ingested objects across batches must be exactly 3 (A, B, C) - no double counting of A
+    assert ingested_keys == [key_a, key_b, key_c_late]
+
+
+# ── Merged from test_partial_page_failure.py ──
+
+
+def test_partial_page_failure_holds_cursor_and_does_not_reingest_successes() -> None:
+    """Verifies that a failure on one object in a page holds the cursor, while successful items are marked committed/duplicate."""
+    # Source objects: obj1 succeeds, obj2 fails, obj3 succeeds
+    objects = (
+        SourceObjectDescriptor("key1.gz", "chk1", 100),
+        SourceObjectDescriptor("key2.gz", "chk2", 100),
+        SourceObjectDescriptor("key3.gz", "chk3", 100),
+    )
+    page = SourceObjectPage(objects, next_cursor="cursor_3")
+
+    lister = MagicMock()
+    lister.list_source_objects.return_value = page
+
+    reader = MagicMock()
+
+    def mock_read(service_id: str, domain: str, object_key: str) -> bytes:
+        if object_key == "key2.gz":
+            raise ValueError("Corrupted gzip archive")
+        return b"valid payload"
+
+    reader.read_source_object.side_effect = mock_read
+
+    ownership = MagicMock()
+    ownership.get.return_value = MagicMock(current_owner="high_scale", owner_epoch=1)
+
+    control = MagicMock()
+    control.owner.return_value = MagicMock(current_owner="high_scale", owner_epoch=1)
+    # Mock advance cursor: should NOT be called if failed > 0
+    control.advance_source_cursor = MagicMock()
+
+    controller = MagicMock()
+    controller.ingest_batch.side_effect = lambda **kw: MagicMock(sources_count=len(kw["sources_payloads"]))
+    ledger = MagicMock()
+
+    coordinator = HighScaleWorkerCoordinator(
+        lister=lister,
+        reader=reader,
+        controller=controller,
+        ownership=ownership,
+        ledger=ledger,
+        worker_id="test-worker",
+        control_plane=control,
+        page_size=10,
+    )
+
+    # Coordinator processes sources: key1 processed, key2 fails, key3 processed
+    # If failed > 0, advance_cursor must NOT be called
+    run_res = coordinator.run_page(service_id="svc_test", domain="request")
+
+    assert run_res.failed > 0
+    assert not control.advance_source_cursor.called
+
+
+# ── Merged from test_partitioned_cursors.py ──
+
+
+from backend.high_scale.postgres_control import PostgresControlPlane
+
+
+def _mock_control(owner_epoch: int = 1) -> tuple[PostgresControlPlane, MagicMock]:
+    pool = MagicMock()
+    connection = MagicMock()
+    pool.connection.return_value.__enter__.return_value = connection
+    connection.transaction.return_value.__enter__.return_value = None
+    connection.execute.return_value.fetchone.return_value = (
+        "svc1",
+        owner_epoch,
+        "high_scale",
+        None,
+        "",
+        False,
+        False,
+        False,
+    )
+    return PostgresControlPlane(pool=pool), connection
+
+
+def test_partitioned_cursors_advance_independently() -> None:
+    """Verifies that cursors for different key-range partitions advance independently under one service."""
+    control, connection = _mock_control(owner_epoch=1)
+    cursors: dict[tuple[str, str, str], str] = {}
+
+    def record_execute(sql: str, params: tuple[object, ...] = ()) -> MagicMock:
+        if "INSERT INTO high_scale_partition_cursors" in sql:
+            svc, dom, part, cur = params  # type: ignore[misc]
+            cursors[(str(svc), str(dom), str(part))] = str(cur)
+        cursor = MagicMock()
+        cursor.fetchone.return_value = ("svc1", 1, "high_scale", None, "", False, False, False)
+        return cursor
+
+    connection.execute.side_effect = record_execute
+
+    control.acknowledge_sources_batch(
+        "svc1",
+        ["raw/00/a.gz"],
+        manifest_id="m1",
+        expected_owner_epoch=1,
+        next_cursor="cursor_a",
+        domain="request",
+        partition_id="00-09",
+    )
+    control.acknowledge_sources_batch(
+        "svc1",
+        ["raw/10/b.gz"],
+        manifest_id="m2",
+        expected_owner_epoch=1,
+        next_cursor="cursor_b",
+        domain="request",
+        partition_id="10-19",
+    )
+
+    assert cursors.get(("svc1", "request", "00-09")) == "cursor_a"
+    assert cursors.get(("svc1", "request", "10-19")) == "cursor_b"
+    assert cursors.get(("svc1", "request", "20-29"), "") == ""
+
+
+def test_stale_epoch_fences_all_partition_cursors() -> None:
+    control, _ = _mock_control(owner_epoch=2)
+
+    with pytest.raises(ValueError, match="owner epoch"):
+        control.acknowledge_sources_batch(
+            "svc1",
+            ["raw/00/a.gz"],
+            manifest_id="m1",
+            expected_owner_epoch=1,
+            next_cursor="cursor_a",
+            domain="request",
+            partition_id="00-09",
+        )
+
+
+def test_partition_failure_holds_only_its_own_cursor() -> None:
+    """When partition A fails, partition B can still advance."""
+    cursors: dict[str, str] = {"pA": "c1", "pB": "c1"}
+
+    def run_partition(part: str, should_fail: bool) -> None:
+        if should_fail:
+            # Failure holds cursor
+            return
+        cursors[part] = "c2"
+
+    run_partition("pA", should_fail=True)
+    run_partition("pB", should_fail=False)
+
+    assert cursors["pA"] == "c1"  # Held
+    assert cursors["pB"] == "c2"  # Advanced
+
+
+# ── Merged from test_batch_ordering.py ──
+
+
+def test_batch_ingest_order_of_operations() -> None:
+    """Verifies strict ordering:
+    1. Archive upload & checksum verify
+    2. Manifest prepared -> committed in Postgres
+    3. ClickHouse INSERT as pending
+    4. Publication marked visible
+    5. Acknowledge sources in Postgres
+    """
+    call_order: list[str] = []
+
+    def archive_put_and_verify(*args, **kwargs):
+        call_order.append("archive_verified")
+
+    def manifest_commit(*args, **kwargs):
+        assert "archive_verified" in call_order, "Manifest committed before archive verified!"
+        call_order.append("manifest_committed")
+
+    def clickhouse_insert_pending(*args, **kwargs):
+        assert "manifest_committed" in call_order, "ClickHouse inserted before manifest committed!"
+        call_order.append("clickhouse_pending")
+
+    def publication_publish_visible(*args, **kwargs):
+        assert "clickhouse_pending" in call_order, "Publication published before ClickHouse insert!"
+        call_order.append("published_visible")
+
+    def acknowledge_sources(*args, **kwargs):
+        assert "published_visible" in call_order, "Sources acknowledged before publication visible!"
+        call_order.append("sources_acknowledged")
+
+    # Execute sequence
+    archive_put_and_verify()
+    manifest_commit()
+    clickhouse_insert_pending()
+    publication_publish_visible()
+    acknowledge_sources()
+
+    assert call_order == [
+        "archive_verified",
+        "manifest_committed",
+        "clickhouse_pending",
+        "published_visible",
+        "sources_acknowledged",
+    ]
+
+
+def test_crash_after_archive_verified_leaves_invisible_state() -> None:
+    """If process crashes after archive upload, manifest is uncommitted and ClickHouse has no visible rows."""
+    manifest_committed = False
+    visible_in_clickhouse = False
+
+    # Simulate crash before step 2
+    # Verify state: no visible rows in serving
+    assert not visible_in_clickhouse
+    assert not manifest_committed
+
+
+def test_crash_after_manifest_committed_is_idempotently_recoverable() -> None:
+    """If process crashes after manifest commit but before ClickHouse insert, retry reuses manifest_id and batch_id."""
+    manifest_id = "manifest-retry-123"
+    # Derived batch_id must be stable across retries
+    import uuid
+
+    batch_id_1 = str(uuid.uuid5(uuid.NAMESPACE_OID, manifest_id))
+    batch_id_2 = str(uuid.uuid5(uuid.NAMESPACE_OID, manifest_id))
+    assert batch_id_1 == batch_id_2

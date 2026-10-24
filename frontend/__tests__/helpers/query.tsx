@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { render, type RenderOptions, type RenderResult } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { QueryClientConfig } from '@tanstack/react-query'
 import { NuqsTestingAdapter } from 'nuqs/adapters/testing'
@@ -36,3 +37,50 @@ export function makeQueryWrapper(qc: QueryClient) {
     )
   }
 }
+
+interface RenderWithQueryOptions extends RenderOptions {
+  queryClient?: QueryClient
+  queryOptions?: QueryClientConfig['defaultOptions']
+  withNuqs?: boolean
+}
+
+/**
+ * Shared helper that renders `ui` inside a test `QueryClientProvider` with
+ * `queries.retry = false` and `mutations.retry = false` by default.
+ */
+export function renderWithQuery(
+  ui: React.ReactElement,
+  options?: RenderWithQueryOptions
+): RenderResult & { queryClient: QueryClient } {
+  const {
+    queryClient: providedClient,
+    queryOptions,
+    withNuqs = false,
+    wrapper: InnerWrapper,
+    ...renderOptions
+  } = options ?? {}
+  const queryClient =
+    providedClient ??
+    createTestQueryClient({
+      mutations: { retry: false, ...queryOptions?.mutations },
+      ...queryOptions,
+      queries: { retry: false, gcTime: 0, ...queryOptions?.queries },
+    })
+  const Wrapper = ({ children }: { children: React.ReactNode }) => {
+    const content = InnerWrapper ? <InnerWrapper>{children}</InnerWrapper> : children
+    if (withNuqs) {
+      return (
+        <NuqsTestingAdapter searchParams={window.location.search}>
+          <QueryClientProvider client={queryClient}>{content}</QueryClientProvider>
+        </NuqsTestingAdapter>
+      )
+    }
+    return <QueryClientProvider client={queryClient}>{content}</QueryClientProvider>
+  }
+  return {
+    queryClient,
+    ...render(ui, { wrapper: Wrapper, ...renderOptions }),
+  }
+}
+
+export const renderWithQueryClient = renderWithQuery

@@ -448,9 +448,9 @@ def test_rollup_readers_match_live_temp_path(tmp_path):
         runner = QueryRunner(con, src)
         actual_cols = {"pop", "oip", "ost", "edge"}
 
-        live_pop = origin_repo._origin_pop_latency_from_temp(runner, "t_par", actual_cols, 30, has_filters=True)
-        live_ip = origin_repo._origin_ip_health_from_temp(runner, "t_par", actual_cols, 30, has_filters=True)
-        live_path = origin_repo._origin_path_breakdown_from_temp(runner, "t_par", actual_cols, has_filters=True)
+        live_pop = origin_repo._origin_pop_latency_from_temp(runner, "t_par", actual_cols, 30)
+        live_ip = origin_repo._origin_ip_health_from_temp(runner, "t_par", actual_cols, 30)
+        live_path = origin_repo._origin_path_breakdown_from_temp(runner, "t_par", actual_cols)
 
         # Rollup readers over the 50-hour window.
         st_iso = hours[0].isoformat().replace("+00:00", "Z")

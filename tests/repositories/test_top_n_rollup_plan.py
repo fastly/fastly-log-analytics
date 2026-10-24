@@ -187,3 +187,107 @@ class TestHealWhereClause:
     def test_unbounded_window_uses_hour_edges(self) -> None:
         got = heal_where_clause(["2026-03-14-06"], None, None)
         assert got.startswith("timestamp >= '2026-03-14T06:00:00+00:00' AND timestamp < '2026-03-14T07:00:00+00:00'")
+
+
+# ── Merged from test_partial_hour_reader_integration.py ──
+
+from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
+
+from backend.core import rollup_readiness as rr
+
+
+def test_partial_hour_adjusted_live_start_narrows_and_returns_total():
+    from backend.repositories._base import QueryRunner
+
+    active_hour_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    active_hour = active_hour_dt.strftime("%Y-%m-%d-%H")
+    watermark_dt = active_hour_dt + timedelta(minutes=20)
+    window_end = datetime(2027, 1, 1, tzinfo=UTC)
+
+    with (
+        patch(
+            "backend.core.rollups.partial_hour.read_partial_hour_watermark",
+            return_value=watermark_dt.timestamp(),
+        ),
+        patch(
+            "backend.core.rollups.partial_hour.read_partial_hour_all_fields",
+            return_value=[("country", "US", 42)],
+        ),
+        patch(
+            "backend.core.rollups.partial_hour.read_partial_hour_total",
+            return_value=42,
+        ),
+    ):
+        runner = QueryRunner.__new__(QueryRunner)
+        runner.src = {"service_id": "svc-a", "name": "svc-a"}
+        runner.con = None
+        live_start, partial_rows, partial_total = runner._partial_hour_adjusted_live_start(
+            active_hour_dt, active_hour, window_end
+        )
+        # The watermark (hour_start + 20min) is later than the naive window
+        # start passed in (hour_start), so it should win via max(). No skew
+        # margin is applied (see I2 investigation in the method's docstring
+        # — subtracting one is unsafe for this writer).
+        assert live_start == watermark_dt
+        assert partial_rows == [("country", "US", 42)]
+        # C1: the total comes from the writer's __total__ row, NOT from
+        # summing partial_rows across every field.
+        assert partial_total == 42
+
+
+def test_partial_hour_adjusted_live_start_skips_when_window_starts_mid_hour():
+    """I1: a caller whose window starts AFTER the active hour's own start
+    can't safely use the partial rollup (it always covers the WHOLE
+    [hour_start, watermark) span) — the seam must fall back to an
+    unmodified live scan instead of over-counting."""
+    from backend.repositories._base import QueryRunner
+
+    active_hour_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    active_hour = active_hour_dt.strftime("%Y-%m-%d-%H")
+    mid_hour_start = active_hour_dt + timedelta(minutes=15)
+    window_end = datetime(2027, 1, 1, tzinfo=UTC)
+
+    with patch(
+        "backend.core.rollups.partial_hour.read_partial_hour_watermark",
+        return_value=(active_hour_dt + timedelta(minutes=20)).timestamp(),
+    ):
+        runner = QueryRunner.__new__(QueryRunner)
+        runner.src = {"service_id": "svc-a", "name": "svc-a"}
+        runner.con = None
+        live_start, partial_rows, partial_total = runner._partial_hour_adjusted_live_start(
+            mid_hour_start, active_hour, window_end
+        )
+
+    assert live_start == mid_hour_start
+    assert partial_rows == []
+    assert partial_total == 0
+
+
+def test_collect_hourly_bundle_paths_trusts_durable_once_ready(tmp_path):
+    rr.reset_rollup_coverage_ready()
+    src = {"service_id": "svc-durable", "name": "svc-durable", "deployment_mode": "high_scale"}
+
+    with (
+        patch("backend.config.is_durable_serving_mode", return_value=True),
+        patch("backend.repositories.rollup_coverage.cached_listdir", return_value=[]) as mock_listdir,
+    ):
+        assert rollup_coverage.collect_hourly_bundle_paths(src, None, None, str(tmp_path), "x.parquet") is None
+        mock_listdir.assert_not_called()
+
+    rr.mark_rollup_coverage_ready("svc-durable")
+
+    with (
+        patch("backend.config.is_durable_serving_mode", return_value=True),
+        patch("backend.repositories.rollup_coverage.cached_listdir", return_value=[]) as mock_listdir,
+    ):
+        rollup_coverage.collect_hourly_bundle_paths(
+            src,
+            datetime(2026, 9, 6, 12, tzinfo=UTC),
+            datetime(2026, 9, 6, 13, tzinfo=UTC),
+            str(tmp_path),
+            "x.parquet",
+        )
+        mock_listdir.assert_called()
+
+    rr.reset_rollup_coverage_ready("svc-durable")

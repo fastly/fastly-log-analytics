@@ -7,7 +7,7 @@ import type { Simplify, WithRequired, components } from '@/types/api'
 
 type RumStatusWire = WithRequired<components['schemas']['RumStatusResponse'], 'enabled'>
 
-export type RumStatus = Simplify<RumStatusWire & { unauthorized?: boolean }>
+type RumStatus = Simplify<RumStatusWire & { unauthorized?: boolean }>
 
 interface UseRumStatusOptions {
   enabled?: boolean

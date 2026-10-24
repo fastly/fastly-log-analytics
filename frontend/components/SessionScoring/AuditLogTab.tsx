@@ -5,9 +5,9 @@ import { ScrollText, Info } from 'lucide-react'
 import { useScoringQuery } from './useScoringQuery'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
+import { CardErrorState } from '@/components/CardErrorState'
 import { AuditLogHelp } from '@/components/SessionScoring/help-content'
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
 import type { ColumnDef } from '@tanstack/react-table'
 import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
 import { client } from '@/lib/api'
@@ -112,18 +112,13 @@ export function AuditLogTab({ serviceId }: AuditLogTabProps) {
         helpContent={<AuditLogHelp />}
         helpTitle="About Scoring Audit Log"
       >
-        <div className="flex flex-col items-start gap-3">
-          <div className="flex items-center gap-2 text-destructive">
-            <Info className="h-4 w-4" />
-            <span className="text-sm font-medium">Failed to load audit log</span>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            {query.error?.message || 'Unknown error'}
-          </p>
-          <Button size="sm" variant="outline" onClick={() => query.refetch()}>
-            Retry
-          </Button>
-        </div>
+        <CardErrorState
+          icon={<Info className="h-4 w-4" />}
+          title="Failed to load audit log"
+          message={query.error?.message || 'Unknown error'}
+          onRetry={() => query.refetch()}
+          variant="stacked"
+        />
       </AnalyticsCard>
     )
   }

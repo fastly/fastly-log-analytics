@@ -28,7 +28,8 @@ import {
 import { cn } from "@/lib/utils";
 import type { WizardState } from "../useWizardState";
 import { JsonImportSection } from "../JsonImportSection";
-import { ANALYST_PATH_A_UNSUPPORTED_REASON, REGION_LABELS } from "../types";
+import { REGION_LABELS } from "@/lib/service-config-constants";
+import { ANALYST_PATH_A_UNSUPPORTED_REASON } from "../types";
 
 // Lightweight per-field validators that fire on blur so wizard users see
 // errors as they tab through, not only when the validate-mutation rejects

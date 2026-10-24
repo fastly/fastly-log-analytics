@@ -14,12 +14,12 @@
  * the dedup semantics + the enabled-gated lifecycle (poll start/stop +
  * data-clear-on-disable) so a regression fails CI loudly.
  */
-import { render, screen, act, waitFor } from '@testing-library/react'
+import { screen, act, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
-import { QueryClient, QueryClientProvider, type QueryCacheNotifyEvent } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { QueryClient, type QueryCacheNotifyEvent } from '@tanstack/react-query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/query'
 import React from 'react'
 import { DebugPanel } from '@/components/DebugPanel'
 import { useDebugStore } from '@/stores/debugStore'
@@ -36,11 +36,7 @@ function makeClient() {
 }
 
 function renderWith(qc: QueryClient) {
-  return render(
-    <QueryClientProvider client={qc}>
-      <DebugPanel />
-    </QueryClientProvider>,
-  )
+  return renderWithQuery(<DebugPanel />, { queryClient: qc })
 }
 
 beforeEach(() => {
@@ -162,11 +158,12 @@ describe('DebugPanel — dedup + lifecycle', () => {
       })
       return null
     }
-    render(
-      <QueryClientProvider client={qc}>
+    renderWithQuery(
+      <>
         <Seeder />
         <DebugPanel />
-      </QueryClientProvider>,
+      </>,
+      { queryClient: qc },
     )
 
     // Extraction happens without any /api/debug/recent-sqlite traffic.
@@ -226,11 +223,12 @@ describe('DebugPanel — dedup + lifecycle', () => {
       })
       return null
     }
-    render(
-      <QueryClientProvider client={qc}>
+    renderWithQuery(
+      <>
         <Seeder />
         <DebugPanel />
-      </QueryClientProvider>,
+      </>,
+      { queryClient: qc },
     )
 
     await waitFor(() => {

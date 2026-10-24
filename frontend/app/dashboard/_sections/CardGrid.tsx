@@ -13,7 +13,7 @@ import type { DashboardAggregates } from './types'
 
 type TopBots = components['schemas']['SecurityTopBotsResponse']
 
-export interface CardGridProps {
+interface CardGridProps {
   visibleCardList: DashboardCard[]
   isReady: boolean
   isFetchingAggs: boolean

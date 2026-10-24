@@ -6,11 +6,11 @@ import { History, Info, RotateCcw } from 'lucide-react'
 import { invalidateServiceScoringQueries, useScoringQuery } from './useScoringQuery'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
+import { CardErrorState } from '@/components/CardErrorState'
 import { MatrixHistoryHelp } from '@/components/SessionScoring/help-content'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { CopyButton } from '@/components/ui/copy-button'
-import { Card, CardContent } from '@/components/ui/card'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import type { ColumnDef } from '@tanstack/react-table'
 import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
@@ -134,17 +134,11 @@ export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
 
   if (isError) {
     return (
-      <Card className="border-destructive/20 bg-destructive/5">
-        <CardContent className="pt-6">
-          <div className="flex items-center gap-2 text-destructive">
-            <Info className="h-4 w-4" />
-            <span className="text-sm font-medium">Failed to load matrix versions</span>
-          </div>
-          <p className="text-xs text-muted-foreground mt-1">
-            {(error as Error)?.message || 'Unknown error'}
-          </p>
-        </CardContent>
-      </Card>
+      <CardErrorState
+        icon={<Info className="h-4 w-4" />}
+        title="Failed to load matrix versions"
+        message={(error as Error)?.message || 'Unknown error'}
+      />
     )
   }
 

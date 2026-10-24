@@ -12,31 +12,10 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi.testclient import TestClient
 
-from backend.main import app
 from backend.provision.rum_orchestrator_v2 import upgrade_faro_version
 
 SVC = "TestRumVersionsUpgradeSvc"
-
-
-@pytest.fixture
-def client():
-    """Plain TestClient(app) — mirrors test_session_scoring_router.py's
-    rationale: these tests mock ``backend.config.load_config`` directly and
-    don't need the conftest DB-override plumbing."""
-    return TestClient(app)
-
-
-@pytest.fixture
-def with_config(monkeypatch):
-    container: dict = {}
-
-    def fake_load(svc_id):
-        return container.get(svc_id)
-
-    monkeypatch.setattr("backend.config.load_config", fake_load)
-    return container
 
 
 @pytest.fixture(autouse=True)

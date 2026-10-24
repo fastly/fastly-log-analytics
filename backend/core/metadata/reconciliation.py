@@ -312,16 +312,20 @@ def cleanup_metadata(
     # framing so the modal can render a determinate bar.
     total_steps = len(_CLEANUP_TABLES) + 2
 
+    def _snapshot_counts() -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for table, _, _ in _CLEANUP_TABLES:
+            try:
+                t_where, t_params = _tenant_where_clause(table, service_id)
+                counts[table] = int(
+                    con.execute(f"SELECT count(*) FROM {table} WHERE {t_where}", t_params).fetchone()[0] or 0
+                )
+            except Exception:
+                counts[table] = 0
+        return counts
+
     _emit({"type": "status", "message": "Reading current row counts…"})
-    before: dict[str, int] = {}
-    for table, _, _ in _CLEANUP_TABLES:
-        try:
-            t_where, t_params = _tenant_where_clause(table, service_id)
-            before[table] = int(
-                con.execute(f"SELECT count(*) FROM {table} WHERE {t_where}", t_params).fetchone()[0] or 0
-            )
-        except Exception:
-            before[table] = 0
+    before = _snapshot_counts()
 
     deleted: dict[str, int] = {}
     for idx, (table, key, ts_col) in enumerate(_CLEANUP_TABLES, start=1):
@@ -435,15 +439,7 @@ def cleanup_metadata(
         }
     )
 
-    after: dict[str, int] = {}
-    for table, _, _ in _CLEANUP_TABLES:
-        try:
-            t_where, t_params = _tenant_where_clause(table, service_id)
-            after[table] = int(
-                con.execute(f"SELECT count(*) FROM {table} WHERE {t_where}", t_params).fetchone()[0] or 0
-            )
-        except Exception:
-            after[table] = 0
+    after = _snapshot_counts()
     _emit(
         {
             "type": "progress",

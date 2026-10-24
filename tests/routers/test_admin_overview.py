@@ -233,3 +233,251 @@ def test_analyst_path_b_rejected_with_403_on_admin_overview_routes():
     with pytest.raises(HTTPException) as exc:
         require_admin(fake_req)  # type: ignore[arg-type]
     assert exc.value.status_code == 403
+
+
+# ── Merged from test_admin_iceberg.py ──
+
+import json
+
+from backend.core.metadata.cron_log import CronLeaseHeldError
+
+
+def test_iceberg_info_endpoint(client, override_source):
+
+    fake_info = {
+        "table_name": "logs",
+        "table_location": "s3://bucket/prefix/iceberg",
+        "snapshots": 5,
+        "data_files": 12,
+        "size_bytes": 1024,
+        "latest_snapshot_at": "2026-08-19T00:00:00Z",
+        "buffer_files": 1,
+        "buffer_size_bytes": 512,
+    }
+    with patch("backend.core.iceberg.get_table_info", return_value=fake_info) as mock_get:
+        response = client.get("/api/admin/iceberg-info?table_name=logs")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["size_bytes"] == 1024
+        assert data["table_name"] == "logs"
+        mock_get.assert_called_once_with(override_source, table_name="logs")
+
+
+def test_iceberg_calendar_endpoint(client, override_source):
+    fake_calendar = {
+        "2026-08-19": {"data_files": 5, "size_bytes": 1024},
+    }
+    with patch("backend.core.iceberg.get_snapshot_calendar", return_value=fake_calendar) as mock_get:
+        response = client.get("/api/admin/iceberg-calendar?table_name=logs")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["2026-08-19"] == {"data_files": 5, "size_bytes": 1024}
+        mock_get.assert_called_once_with(override_source, table_name="logs")
+
+
+def test_iceberg_commit_endpoint(client, override_source):
+    with patch("backend.utils.router_utils.start_or_resume_cron", return_value={"ok": True}) as mock_start:
+        response = client.post("/api/admin/commit-iceberg")
+        assert response.status_code == 202
+        mock_start.assert_called_once()
+
+
+def test_rebuild_local_view_endpoint_success(client, override_source):
+    with (
+        patch("backend.core.iceberg.clear_source_caches") as mock_clear,
+        patch("backend.core.duckdb.start_cron_run", return_value="run-123") as mock_start_cron,
+        patch("backend.cron_progress.start_progress") as mock_prog,
+        patch("threading.Thread") as mock_thread,
+    ):
+        response = client.post("/api/admin/rebuild-local-view")
+        assert response.status_code == 202
+        assert response.json()["run_id"] == "run-123"
+        mock_clear.assert_called_once_with("service123")
+        mock_start_cron.assert_called_once_with(override_source, "metadata_sync")
+        mock_prog.assert_called_once_with("run-123", service_id="service123", task="metadata_sync")
+        mock_thread.assert_called_once()
+
+
+def test_rebuild_local_view_endpoint_busy(client, override_source):
+    with (
+        patch("backend.core.iceberg.clear_source_caches"),
+        patch("backend.core.duckdb._cache_dir", return_value="/tmp"),
+        patch("os.path.exists", return_value=False),
+        patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("busy")),
+    ):
+        response = client.post("/api/admin/rebuild-local-view")
+        assert response.status_code == 503
+
+
+def test_reset_logs_endpoint_read_only(client, override_source):
+    override_source["access_level"] = "read_only"
+    response = client.post(
+        "/api/admin/reset-logs",
+        json={"confirm": "service123", "delete_raw_logs": False, "preserve_usage_history": True},
+    )
+    assert response.status_code == 403
+
+
+def test_reset_logs_endpoint_confirm_mismatch(client, override_source):
+    response = client.post(
+        "/api/admin/reset-logs",
+        json={"confirm": "wrong", "delete_raw_logs": False, "preserve_usage_history": True},
+    )
+    assert response.status_code == 400
+
+
+def test_reset_logs_endpoint_success(client, override_source):
+    def fake_reset(*args, **kwargs):
+        yield {"type": "status", "message": "starting"}
+        yield {"type": "done", "message": "done"}
+
+    with patch("backend.core.reset.reset_service_logs", side_effect=fake_reset):
+        response = client.post(
+            "/api/admin/reset-logs",
+            json={"confirm": "service123", "delete_raw_logs": False, "preserve_usage_history": True},
+        )
+        assert response.status_code == 200
+        assert "text/event-stream" in response.headers["content-type"]
+        events = []
+        for line in response.iter_lines():
+            if line.startswith("data:"):
+                events.append(json.loads(line[5:]))
+        assert len(events) == 2
+        assert events[0]["type"] == "status"
+        assert events[1]["type"] == "done"
+
+
+def test_reset_rum_endpoint_read_only(client, override_source):
+    override_source["access_level"] = "read_only"
+    response = client.post(
+        "/api/admin/reset-rum",
+        json={"confirm": "service123", "delete_raw_logs": False},
+    )
+    assert response.status_code == 403
+
+
+def test_reset_rum_endpoint_confirm_mismatch(client, override_source):
+    response = client.post(
+        "/api/admin/reset-rum",
+        json={"confirm": "wrong", "delete_raw_logs": False},
+    )
+    assert response.status_code == 400
+
+
+def test_reset_rum_endpoint_success(client, override_source):
+    def fake_reset(*args, **kwargs):
+        yield {"type": "status", "message": "starting"}
+
+    with patch("backend.core.reset.reset_service_rum", side_effect=fake_reset):
+        response = client.post(
+            "/api/admin/reset-rum",
+            json={"confirm": "service123", "delete_raw_logs": False},
+        )
+        assert response.status_code == 200
+        assert "text/event-stream" in response.headers["content-type"]
+        events = []
+        for line in response.iter_lines():
+            if line.startswith("data:"):
+                events.append(json.loads(line[5:]))
+        assert len(events) == 1
+        assert events[0]["type"] == "status"
+
+
+# ── Merged from test_admin_metric_history.py ──
+
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from fastapi import FastAPI, Request
+
+from backend.core import metric_snapshots
+from backend.routers.admin import router as admin_router
+from backend.utils.date_utils import iso_z
+
+
+def test_metric_history_batch_groups_by_scope_key():
+    t1 = iso_z(datetime.now(UTC) - timedelta(minutes=10))
+    t2 = iso_z(datetime.now(UTC) - timedelta(minutes=5))
+    metric_snapshots.record_snapshot("cpu_load_1m", 0.7, ts=t1)
+    metric_snapshots.record_snapshot("cpu_load_1m", 0.9, ts=t2)
+    metric_snapshots.record_snapshot("pool_wait_p95_ms", 5.0, service_id="svc-a", ts=t2)
+    metric_snapshots.record_snapshot("cron_duration_ms", 800.0, service_id="svc-a", task="sync", ts=t2)
+
+    with TestClient(app) as client:
+        r = client.get("/api/admin/metric-history/batch?since=1h")
+
+    assert r.status_code == 200
+    series = r.json()["series"]
+    assert "cpu_load_1m" in series
+    assert "pool_wait_p95_ms|svc-a" in series
+    assert "cron_duration_ms|svc-a|sync" in series
+    # Points within a series are ordered chronologically ascending
+    cpu_points = series["cpu_load_1m"]
+    assert len(cpu_points) >= 2
+    assert cpu_points[-2]["value"] == pytest.approx(0.7)
+    assert cpu_points[-1]["value"] == pytest.approx(0.9)
+    assert cpu_points[-2]["ts"] < cpu_points[-1]["ts"]
+
+
+@pytest.mark.parametrize(
+    ("window", "expected_points"),
+    [
+        ("30m", 1),
+        ("1h", 2),
+        ("6h", 3),
+        ("24h", 4),
+        ("7d", 5),
+    ],
+)
+def test_metric_history_batch_windows(window: str, expected_points: int):
+    metric_name = f"test_window_metric_{window}"
+    now = datetime.now(UTC)
+    metric_snapshots.record_snapshot(metric_name, 10.0, ts=iso_z(now - timedelta(minutes=10)))
+    metric_snapshots.record_snapshot(metric_name, 20.0, ts=iso_z(now - timedelta(minutes=45)))
+    metric_snapshots.record_snapshot(metric_name, 30.0, ts=iso_z(now - timedelta(hours=3)))
+    metric_snapshots.record_snapshot(metric_name, 40.0, ts=iso_z(now - timedelta(hours=12)))
+    metric_snapshots.record_snapshot(metric_name, 50.0, ts=iso_z(now - timedelta(days=3)))
+
+    with TestClient(app) as client:
+        r = client.get(f"/api/admin/metric-history/batch?since={window}")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert "series" in body
+    pts = body["series"].get(metric_name, [])
+    assert len(pts) == expected_points
+
+
+@pytest.mark.parametrize("bad_window", ["invalid", "0h", "-5h", "1w", "abc", ""])
+def test_metric_history_batch_rejects_invalid_window(bad_window: str):
+    with TestClient(app) as client:
+        r = client.get(f"/api/admin/metric-history/batch?since={bad_window}")
+
+    assert r.status_code == 400
+    assert "Invalid lookback window" in r.json()["detail"]["error"]
+
+
+def test_metric_history_batch_rejects_analyst_path_b():
+    # 1. Middleware path gate blocks /api/admin/metric-history/batch
+    assert _is_blocked_path("/api/admin/metric-history/batch") is True
+
+    # 2. Route-level Depends(require_admin) also rejects Analyst Path B sessions with 403 admin_only
+    analyst_app = FastAPI()
+
+    @analyst_app.middleware("http")
+    async def _stamp_analyst(request: Request, call_next):
+        request.state.analyst_session = SimpleNamespace(
+            session_id="sess-analyst-1",
+            service_ids=["svc-a"],
+            email="analyst@example.com",
+        )
+        return await call_next(request)
+
+    analyst_app.include_router(admin_router)
+
+    with TestClient(analyst_app) as client:
+        r = client.get("/api/admin/metric-history/batch?since=1h")
+
+    assert r.status_code == 403
+    detail = r.json().get("detail", r.json())
+    assert detail["error"] == "admin_only"

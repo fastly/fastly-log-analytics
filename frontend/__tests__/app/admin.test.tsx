@@ -12,11 +12,10 @@
  * ``'use client'`` ``ServicesTable`` component delivers that
  * contract without depending on the RSC boundary.
  */
-import { render, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/query'
 import { expect, test, vi, beforeEach } from 'vitest'
 import React from 'react'
 
@@ -57,11 +56,7 @@ test('ServicesTable renders services flowed through MSW + openapi-fetch', async 
   // Per-test QueryClient avoids cross-test cache leakage and lets us
   // disable retries cleanly.
   const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
-  render(
-    <QueryClientProvider client={queryClient}>
-      <ServicesTable />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<ServicesTable />, { queryClient })
 
   await waitFor(
     () => {
@@ -91,11 +86,7 @@ test('the row Manage menu offers Delete Data (left of/above Teardown) and opens 
 
   const user = userEvent.setup()
   const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
-  render(
-    <QueryClientProvider client={queryClient}>
-      <ServicesTable />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<ServicesTable />, { queryClient })
 
   await waitFor(() => expect(screen.getByText('Test Service')).toBeInTheDocument())
 

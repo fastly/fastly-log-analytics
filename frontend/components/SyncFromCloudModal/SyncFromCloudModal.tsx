@@ -23,6 +23,7 @@ import {
 } from '@/lib/panel-dialog'
 import { useTimezoneStore } from '@/stores/timezoneStore'
 import { useServiceStore } from '@/stores/serviceStore'
+import { useOpenGeneration } from '@/hooks/useDerivedState'
 
 interface SyncFromCloudModalProps {
   open: boolean
@@ -32,7 +33,12 @@ interface SyncFromCloudModalProps {
 
 type LakeInfo = components['schemas']['ProvisionLakeInfoResponse']
 
-export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFromCloudModalProps) {
+export function SyncFromCloudModal(props: SyncFromCloudModalProps) {
+  const generation = useOpenGeneration(props.open)
+  return <SyncFromCloudModalBody key={generation} {...props} />
+}
+
+function SyncFromCloudModalBody({ open, onOpenChange, onStartSync }: SyncFromCloudModalProps) {
   const { timezone } = useTimezoneStore()
   const activeServiceId = useServiceStore(s => s.activeServiceId)
 
@@ -85,16 +91,6 @@ export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFrom
   )
   const setImportRange = (update: (prev: { start: string; end: string }) => { start: string; end: string }) =>
     setRangeDraft(update(importRange))
-
-  // Closing the modal drops the import choices (adjusted during render, keyed on `open`).
-  const [wasOpen, setWasOpen] = useState(open)
-  if (open !== wasOpen) {
-    setWasOpen(open)
-    if (!open) {
-      setImportMode("all")
-      setRangeDraft(null)
-    }
-  }
 
   const estimatedImportSize = React.useMemo(() => {
     if (!lakeInfo?.calendar) return 0;

@@ -19,15 +19,14 @@
  * inject an invalid name to exercise the API-error path, so that one
  * step uses fireEvent.change as a documented escape hatch.
  */
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
+import { screen, fireEvent, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, expect, test, vi } from 'vitest'
 import { axe } from 'vitest-axe'
 import { CustomFieldDrawer } from '@/components/CustomFields/CustomFieldDrawer'
-import { QueryClientProvider } from '@tanstack/react-query'
 import * as customFieldsApi from '@/lib/api/custom-fields'
-import { createTestQueryClient } from '../helpers/query'
-import { stubMatchMedia, stubPointerCaptureAndScroll } from '../helpers/jsdom-shims'
+import { renderWithQuery } from '../helpers/query'
+import { stubMatchMedia, stubPointerCaptureAndScroll } from '../helpers/browser-stubs'
 
 // monaco-editor breaks under jsdom; replace with a plain textarea.
 vi.mock('@monaco-editor/react', () => ({
@@ -43,8 +42,6 @@ vi.mock('@monaco-editor/react', () => ({
 // jsdom shims required by the Drawer's underlying primitives.
 stubMatchMedia()
 stubPointerCaptureAndScroll()
-
-const queryClient = createTestQueryClient()
 
 afterEach(() => {
   vi.useRealTimers()
@@ -91,16 +88,14 @@ test('submits valid custom field and displays validation errors when invalid', a
     new Error('Field name must be lowercase alphanumeric + underscore'),
   )
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <CustomFieldDrawer
-        serviceId="test-svc"
-        open={true}
-        onOpenChange={onOpenChange}
-        onSave={onSave}
-        field={null}
-      />
-    </QueryClientProvider>,
+  renderWithQuery(
+    <CustomFieldDrawer
+      serviceId="test-svc"
+      open={true}
+      onOpenChange={onOpenChange}
+      onSave={onSave}
+      field={null}
+    />,
   )
 
   await waitFor(() => expect(screen.getByText('Basic Information')).toBeDefined())
@@ -190,16 +185,14 @@ test('CustomFieldDrawer has no axe-detectable a11y violations', async () => {
     format_length_limit: 8000,
   })
 
-  const { container } = render(
-    <QueryClientProvider client={queryClient}>
-      <CustomFieldDrawer
-        serviceId="test-svc"
-        open={true}
-        onOpenChange={vi.fn()}
-        onSave={vi.fn()}
-        field={null}
-      />
-    </QueryClientProvider>,
+  const { container } = renderWithQuery(
+    <CustomFieldDrawer
+      serviceId="test-svc"
+      open={true}
+      onOpenChange={vi.fn()}
+      onSave={vi.fn()}
+      field={null}
+    />,
   )
   // Field Name input is the most stable anchor — present as soon as the
   // drawer's basic-info section renders.

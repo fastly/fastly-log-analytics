@@ -344,3 +344,52 @@ def test_falco_required_when_missing_binary_env_set(monkeypatch):
     assert result.ok is True  # lint_vcl itself is fail-open on missing binary
     # It is the CALLER's responsibility (as in test_vcl_semantics.py's
     # FALCO_REQUIRED guard) to turn "skipped" into a hard failure in CI.
+
+
+# ── Merged from test_rum_custom_condition.py ──
+
+import pytest
+
+from backend.core.fastly.rum_provisioning import validate_rum_custom_condition
+
+
+@pytest.mark.parametrize("cond", ["", "   ", None])
+def test_empty_condition_is_allowed(cond):
+    assert validate_rum_custom_condition(cond) is None
+
+
+@pytest.mark.parametrize(
+    "cond",
+    [
+        'req.url.path !~ "^/api/"',  # the exact value the affected service ran
+        'req.url.path ~ "^/api/"',  # the kill-switch inverse
+        'req.url ~ "^/api/"',
+        'client.ip != "203.0.113.5" && req.url.path !~ "^/api/"',
+    ],
+)
+def test_path_predicates_are_rejected(cond):
+    err = validate_rum_custom_condition(cond)
+    assert err is not None
+    assert "req.url" in err
+    # The message must tell the operator where page filtering actually belongs,
+    # otherwise they'll just try another unworkable variant.
+    assert "tracker" in err
+
+
+def test_single_quotes_rejected():
+    """VCL string literals are double-quoted; the old placeholder used singles."""
+    err = validate_rum_custom_condition("client.ip != '192.168.1.1'")
+    assert err is not None
+    assert "double quotes" in err
+
+
+@pytest.mark.parametrize(
+    "cond",
+    [
+        'req.http.User-Agent !~ "(bot|crawler)"',
+        'client.geo.country_code != "US"',
+        'req.http.Host == "example.com"',
+    ],
+)
+def test_workable_conditions_pass(cond):
+    assert validate_rum_custom_condition(cond) is None

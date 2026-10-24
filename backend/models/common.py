@@ -361,9 +361,9 @@ from backend.models.admin_queries import (  # noqa: E402
     SlowQueriesCountResponse,
     SummaryResponse,
 )
-from backend.models.services import CronRunsPageResponse  # noqa: E402
-from backend.models.session_scoring import ScoringLabelsResponse  # noqa: E402
-from backend.models.share_admin import ShareStatusBannerResponse  # noqa: E402
+from backend.models.services import CronRunsResponse  # noqa: E402
+from backend.models.session_scoring import ScoringLabelsListResponse  # noqa: E402
+from backend.models.share_admin import ShareBannerResponse  # noqa: E402
 from backend.models.views import SavedView  # noqa: E402
 
 
@@ -415,7 +415,7 @@ class BootstrapResponse(BaseResponse):
     # in so the global share banner has its initial state on first
     # render and skips the first /api/admin/share/banner poll.
     # ADMIN ONLY — analysts don't manage sharing.
-    share_banner: ShareStatusBannerResponse | None = None
+    share_banner: ShareBannerResponse | None = None
     # Analyst-safe sibling of sync_status, projected down to the two
     # fields the global SyncStatusBadge renders (latest_log_at,
     # local_rows). Available to BOTH admin AND analyst sessions so the
@@ -446,7 +446,7 @@ class BootstrapResponse(BaseResponse):
     # expensive payloads dominates the bootstrap hot path. The cron
     # schedule itself is a lazy-load on the cron tab (P1#5).
     # ADMIN ONLY — analysts don't reach /logs.
-    cron_runs_first_page: CronRunsPageResponse | None = None
+    cron_runs_first_page: CronRunsResponse | None = None
     # Seed for useLastSync (the "Last Sync: Xs ago" header badge).
     # Shape: ``{started_at, status, duration_s}`` of the latest non-running
     # sync cron run, derived from ``latest_cron_per_task("sync")``. Without
@@ -460,7 +460,7 @@ class BootstrapResponse(BaseResponse):
     # GET /api/services/{sid}/scoring/labels (p95 311 ms admin / 702 ms
     # analyst). Shape mirrors the endpoint: ``{labels: [...], counts: {...}}``.
     # ADMIN ONLY.
-    scoring_labels: ScoringLabelsResponse | None = None
+    scoring_labels: ScoringLabelsListResponse | None = None
     # section_timings is inherited from BaseResponse.
 
 

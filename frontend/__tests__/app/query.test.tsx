@@ -1,9 +1,8 @@
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, test, vi, beforeEach } from 'vitest'
 import QueryPage from '@/app/query/page'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/query'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useFilterStore } from '@/stores/filterStore'
 import {
@@ -58,7 +57,8 @@ const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
 // nuqs needs an adapter; seed it from the jsdom URL so tests that
 // history.replaceState() a deep link before rendering keep working.
 const renderWithNuqs = (ui: React.ReactElement, onUrlUpdate?: OnUrlUpdateFunction) =>
-  render(ui, {
+  renderWithQuery(ui, {
+    queryClient,
     wrapper: withNuqsTestingAdapter({ searchParams: window.location.search, hasMemory: true, onUrlUpdate }),
   })
 
@@ -96,11 +96,7 @@ test('renders query page and executes a query', async () => {
     }
   })
 
-  renderWithNuqs(
-    <QueryClientProvider client={queryClient}>
-      <QueryPage />
-    </QueryClientProvider>
-  )
+  renderWithNuqs(<QueryPage />)
 
   // Verify header
   expect(screen.getByText('Query Explorer')).toBeInTheDocument()
@@ -151,11 +147,7 @@ test('/query keeps ?filters= in the URL after a filter mutation', async () => {
   expect(useFilterStore.getState().filters.map(f => [f.column, f.value, f.mode]))
     .toEqual([['status', '200', 'include']])
 
-  renderWithNuqs(
-    <QueryClientProvider client={queryClient}>
-      <QueryPage />
-    </QueryClientProvider>,
-  )
+  renderWithNuqs(<QueryPage />)
 
   // useFilterUrlWriteback's effect should re-emit the current store state
   // (one include filter on status=200) back into the URL.
@@ -187,11 +179,7 @@ test('renders engine initializing skeleton when service is not yet initialized',
   useServiceStore.setState({ activeServiceId: null, isInitialized: false })
   mockGet.mockImplementation(() => new Promise<ApiStub>(() => {}))
 
-  renderWithNuqs(
-    <QueryClientProvider client={queryClient}>
-      <QueryPage />
-    </QueryClientProvider>,
-  )
+  renderWithNuqs(<QueryPage />)
 
   expect(screen.getByTestId('query-engine-initializing')).toBeInTheDocument()
   expect(screen.getByText(/Initializing DuckDB analytical engine/i)).toBeInTheDocument()
@@ -213,11 +201,7 @@ test('enforces zero-CLS layout reservations and renders schema sidebar in Raw SQ
     return { data: { fields: [] } }
   })
 
-  renderWithNuqs(
-    <QueryClientProvider client={queryClient}>
-      <QueryPage />
-    </QueryClientProvider>,
-  )
+  renderWithNuqs(<QueryPage />)
 
   const pageRoot = screen.getByTestId('query-page-root')
   expect(pageRoot.className).toContain('contain-intrinsic-size')
@@ -245,11 +229,7 @@ test('displays user-friendly error alert when mutating SQL is rejected by AST va
     }),
   })
 
-  renderWithNuqs(
-    <QueryClientProvider client={queryClient}>
-      <QueryPage />
-    </QueryClientProvider>,
-  )
+  renderWithNuqs(<QueryPage />)
 
   await user.click(screen.getByRole('tab', { name: /edit raw sql/i }))
   const editor = screen.getByTestId('mock-editor')
@@ -277,11 +257,7 @@ test('renders CSV export button and virtualized results table after query execut
     },
   })
 
-  renderWithNuqs(
-    <QueryClientProvider client={queryClient}>
-      <QueryPage />
-    </QueryClientProvider>,
-  )
+  renderWithNuqs(<QueryPage />)
 
   await user.click(screen.getByRole('button', { name: /run query/i }))
 
@@ -296,11 +272,7 @@ test('hydrates Raw SQL mode when ?q= URL parameter is provided', async () => {
   mockGet.mockResolvedValue({ data: { fields: [], schema: [] } })
   window.history.replaceState({}, '', '/query?q=' + encodeURIComponent('SELECT count(*) FROM logs'))
 
-  renderWithNuqs(
-    <QueryClientProvider client={queryClient}>
-      <QueryPage />
-    </QueryClientProvider>,
-  )
+  renderWithNuqs(<QueryPage />)
 
   const editor = await screen.findByTestId('mock-editor')
   expect((editor as HTMLTextAreaElement).value).toBe('SELECT count(*) FROM logs')
@@ -310,11 +282,7 @@ test('deep link ?mode=raw opens the Raw SQL editor', async () => {
   mockGet.mockResolvedValue({ data: { fields: [], schema: [] } })
   window.history.replaceState({}, '', '/query?mode=raw')
 
-  renderWithNuqs(
-    <QueryClientProvider client={queryClient}>
-      <QueryPage />
-    </QueryClientProvider>,
-  )
+  renderWithNuqs(<QueryPage />)
 
   expect(await screen.findByTestId('mock-editor')).toBeInTheDocument()
   expect(screen.getByRole('tab', { name: /edit raw sql/i })).toHaveAttribute('aria-selected', 'true')
@@ -324,11 +292,7 @@ test('an unrecognised ?mode= value stays in structured mode', async () => {
   mockGet.mockResolvedValue({ data: { fields: [], schema: [] } })
   window.history.replaceState({}, '', '/query?mode=bogus')
 
-  renderWithNuqs(
-    <QueryClientProvider client={queryClient}>
-      <QueryPage />
-    </QueryClientProvider>,
-  )
+  renderWithNuqs(<QueryPage />)
 
   expect(await screen.findByRole('tab', { name: /edit raw sql/i })).toHaveAttribute('aria-selected', 'false')
   expect(screen.queryByTestId('mock-editor')).not.toBeInTheDocument()
@@ -340,12 +304,7 @@ test('switching modes writes and clears ?mode=raw while preserving other params'
   window.history.replaceState({}, '', '/query?start_time=2026-01-01T00:00:00Z&end_time=2026-01-01T01:00:00Z')
   const onUrlUpdate = vi.fn<OnUrlUpdateFunction>()
 
-  renderWithNuqs(
-    <QueryClientProvider client={queryClient}>
-      <QueryPage />
-    </QueryClientProvider>,
-    onUrlUpdate,
-  )
+  renderWithNuqs(<QueryPage />, onUrlUpdate)
 
   await user.click(await screen.findByRole('tab', { name: /edit raw sql/i }))
   await waitFor(() => {
@@ -372,11 +331,7 @@ test('dashboard "See Raw Logs" deep link (?start_time&end_time&filters) hydrates
     `/query?start_time=2026-02-01T00:00:00Z&end_time=2026-02-01T06:00:00Z&filters=${encodeURIComponent(JSON.stringify(filters))}`,
   )
 
-  renderWithNuqs(
-    <QueryClientProvider client={queryClient}>
-      <QueryPage />
-    </QueryClientProvider>,
-  )
+  renderWithNuqs(<QueryPage />)
 
   await screen.findByText('Query Explorer')
   const state = useFilterStore.getState()

@@ -3,14 +3,7 @@
 import React from 'react'
 import { cn } from '@/lib/utils'
 import { Input } from '@/components/ui/input'
-import { Button } from '@/components/ui/button'
-import { Info } from 'lucide-react'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@/components/ui/tooltip'
+import { LabelWithInfo } from '@/components/ui/label-with-info'
 
 function hasAccessibleName(el: React.ReactElement): boolean {
   const p = el.props as { 'aria-label'?: unknown; 'aria-labelledby'?: unknown }
@@ -30,32 +23,12 @@ export function Row({ label, children, muted, tooltip }: { label: string; childr
       : children
   return (
     <div className={cn('flex items-center justify-between py-1.5 border-b border-border/40 last:border-0 gap-4', muted && 'opacity-60')}>
-      <div className='flex items-center gap-1.5 text-sm text-muted-foreground flex-1 leading-tight'>
-        <span>{label}</span>
-        {tooltip && (
-          <TooltipProvider>
-            <Tooltip>
-              {/* A-8 (a11y, WCAG 2.1.1): Button (not span) so keyboard
-                  users can tab to the info icon and reveal the tooltip. */}
-              <TooltipTrigger
-                render={
-                  <Button
-                    variant="ghost"
-                    size="icon-xs"
-                    aria-label={`More info: ${label}`}
-                    className="hover:text-foreground transition-colors shrink-0"
-                  />
-                }
-              >
-                <Info className="h-3.5 w-3.5" />
-              </TooltipTrigger>
-              <TooltipContent side="top" className="max-w-[250px] text-xs">
-                {tooltip}
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        )}
-      </div>
+      <LabelWithInfo
+        label={label}
+        info={tooltip}
+        className="gap-1.5 text-sm text-muted-foreground flex-1 leading-tight"
+        labelClassName="text-sm font-normal leading-tight"
+      />
       <div className='flex-shrink-0'>{labelledChild}</div>
     </div>
   )

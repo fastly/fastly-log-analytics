@@ -10,8 +10,6 @@ import json
 import logging
 import os
 import re
-import shutil
-import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -156,72 +154,6 @@ def acquire_vcl_lock(service_id: str, timeout_sec: int = 300) -> FileLock:
                         lock_path.unlink(missing_ok=True)
                 raise
     raise LockAcquisitionTimeout(service_id, time.time() - start)
-
-
-# ============================================================================
-# VCL Linting & Safety Checks (Gotcha 3)
-# ============================================================================
-
-
-def lint_log_format(log_format_vcl: str, log_fields: list[str]) -> list[str]:
-    """Lint VCL log format with graceful falco fallback.
-
-    Tier 1: Use falco if available (comprehensive).
-    Tier 2: Offline checks (duplicate vars, undefined fields, syntax).
-
-    Args:
-        log_format_vcl: VCL expression to lint.
-        log_fields: List of defined log field names.
-
-    Returns:
-        List of lint errors. Empty if valid.
-    """
-    errors = []
-
-    # Tier 1: Try to use falco
-    if shutil.which("falco") is not None:
-        result = subprocess.run(
-            ["falco", "lint", "-"],
-            input=log_format_vcl,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode != 0:
-            errors.extend(result.stdout.split("\n"))
-    else:
-        # Falco unavailable, fall back to offline checks
-        errors.extend(_offline_vcl_checks(log_format_vcl, log_fields))
-
-    return [e for e in errors if e.strip()]
-
-
-def _offline_vcl_checks(vcl: str, fields: list[str]) -> list[str]:
-    """Offline VCL safety checks (no falco required)."""
-    errors = []
-
-    # Check 1: No duplicate variable declarations
-    var_decl_pattern = r"^\s*declare\s+local\s+var\.(\w+)"
-    declared_vars = re.findall(var_decl_pattern, vcl, re.MULTILINE)
-    duplicates = [v for v in set(declared_vars) if declared_vars.count(v) > 1]
-    if duplicates:
-        errors.append(f"Duplicate variable declarations: {duplicates}")
-
-    # Check 2: All log fields referenced in format are defined
-    referenced = set(re.findall(r"\{([a-z_]+)\}", vcl))
-    undefined = referenced - set(fields)
-    if undefined:
-        errors.append(f"Undefined log fields in format: {undefined}")
-
-    # Check 3: VCL syntax: balanced braces
-    if vcl.count("{") != vcl.count("}"):
-        errors.append("Unbalanced braces in VCL")
-
-    # Check 4: No forbidden keywords
-    if re.search(r"\bgoto\b", vcl):
-        errors.append("Fastly VCL does not support 'goto' statements")
-
-    return errors
 
 
 # ============================================================================
@@ -512,9 +444,6 @@ def reconcile_vcl_state(
                         status_cb(
                             f"✓ Configuration compiled and validated successfully in draft version {draft_version} (activation bypassed)."
                         )
-
-                # Async: upload state to FOS (fire-and-forget)
-                _upload_state_to_fos(service_id, desired_state)
 
                 result.changes_applied = diff.summary()
 
@@ -1415,19 +1344,6 @@ def _validate_draft(service_id: str, token: str, draft_version: int) -> str:
 def _activate_draft(service_id: str, token: str, draft_version: int) -> None:
     """Activate the draft version on Fastly."""
     fastly_integration.activate_version(service_id, draft_version, token)
-
-
-def _upload_state_to_fos(service_id: str, state: FeatureState) -> None:
-    """Upload state manifest to FOS (async, fire-and-forget).
-
-    This is a non-critical operation. If it fails, log a warning but don't raise.
-    """
-    try:
-        # TODO: Implement FOS upload
-        # s3://fos-bucket/internal/reconciliation/{service_id}/state_manifest.json
-        pass
-    except Exception:
-        pass
 
 
 RUM_SURROGATE_KEY = "rum-js"

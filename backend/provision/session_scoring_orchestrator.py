@@ -27,6 +27,7 @@ import hashlib
 import json
 import logging
 import urllib.parse
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -1097,6 +1098,60 @@ def _clone_swap_snippet(
     return new_ver
 
 
+def _update_live_scoring_snippet(
+    logging_service_id: str,
+    token: str,
+    *,
+    fn_name: str,
+    setting_label: str,
+    scoring_key: str,
+    scoring_value: Any,
+    snippet_name: str,
+    vcl_type: str,
+    body: str,
+    priority: int,
+    info_label: str,
+    comment_fn: Callable[[str], str],
+    ok_suffix: str,
+) -> int:
+    def _mutate(target: dict) -> None:
+        scoring = target.get("scoring") or {}
+        if not scoring.get("enabled"):
+            raise RuntimeError(
+                f"Session scoring is not enabled for {logging_service_id}; "
+                f"run enable_scoring first before customising the {setting_label}."
+            )
+        scoring[scoring_key] = scoring_value
+        target["scoring"] = scoring
+
+    if svcconfig.mutate_config(logging_service_id, _mutate) is None:
+        raise RuntimeError(f"No config found for logging service {logging_service_id}")
+
+    active_ver = get_active_version(logging_service_id, token)
+    if active_ver is None:
+        raise RuntimeError(f"Logging service {logging_service_id} has no active version")
+    info(f"Cloning version {active_ver} to update {info_label}")
+    ts = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    try:
+        new_ver = _clone_swap_snippet(
+            logging_service_id,
+            token,
+            active_ver=active_ver,
+            comment=comment_fn(ts),
+            snippet_name=snippet_name,
+            vcl_type=vcl_type,
+            body=body,
+            priority=priority,
+        )
+        ok(f"Logging service version {new_ver} active ({ok_suffix})")
+        return new_ver
+    except Exception as exc:
+        fail(f"{fn_name} failed: {exc}")
+        rollback_to_version(logging_service_id, token, active_ver, call=fastly)
+        raise
+
+
 def update_recv_exclusion_regex(
     logging_service_id: str,
     token: str,
@@ -1126,62 +1181,32 @@ def update_recv_exclusion_regex(
     re-activates the prior version so the service is never left in an
     inconsistent state.
     """
-    # Persist the override first — that way even if the Fastly activation
-    # below fails, a future enable_scoring run picks up the new value.
-    # None is the canonical "use default" representation so the JSON cfg
-    # file doesn't end up with an empty-string sentinel.
-    cleaned = (new_regex or "").strip()
-
-    def _set_regex(target: dict) -> None:
-        scoring = target.get("scoring") or {}
-        if not scoring.get("enabled"):
-            raise RuntimeError(
-                f"Session scoring is not enabled for {logging_service_id}; "
-                "run enable_scoring first before customising the recv exclusion regex."
-            )
-        scoring["exclude_url_regex"] = cleaned or None
-        target["scoring"] = scoring
-
-    if svcconfig.mutate_config(logging_service_id, _set_regex) is None:
-        raise RuntimeError(f"No config found for logging service {logging_service_id}")
-
-    # Generate the recv snippet body with the new regex.
     from backend.provision.session_scoring_vcl import (
         DEFAULT_ASSET_EXT_REGEX,
         recv_snippet,
         resolve_exclude_url_regex,
     )
 
+    cleaned = (new_regex or "").strip()
     effective_regex = resolve_exclude_url_regex(cleaned or None)
     is_default = effective_regex == DEFAULT_ASSET_EXT_REGEX
     new_recv_body = recv_snippet(logging_service_id, exclude_url_regex=cleaned or None)
 
-    # Clone → swap → activate.
-    active_ver = get_active_version(logging_service_id, token)
-    if active_ver is None:
-        raise RuntimeError(f"Logging service {logging_service_id} has no active version")
-    info(f"Cloning version {active_ver} to update recv-snippet exclusion regex")
-    ts = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-    try:
-        new_ver = _clone_swap_snippet(
-            logging_service_id,
-            token,
-            active_ver=active_ver,
-            comment=f"Update scoring recv exclusion regex {ts}",
-            snippet_name=SCORING_RECV_NAME,
-            vcl_type="recv",
-            body=new_recv_body,
-            priority=SCORING_SNIPPET_PRIORITY,
-        )
-        ok(f"Logging service version {new_ver} active (recv exclusion regex updated)")
-    except Exception as exc:
-        fail(f"update_recv_exclusion_regex failed: {exc}")
-        # Re-activate the prior version so the service isn't left on the
-        # half-updated draft. Best-effort — if this fails too, the draft
-        # is left for the operator to clean up manually.
-        rollback_to_version(logging_service_id, token, active_ver, call=fastly)
-        raise
+    new_ver = _update_live_scoring_snippet(
+        logging_service_id,
+        token,
+        fn_name="update_recv_exclusion_regex",
+        setting_label="recv exclusion regex",
+        scoring_key="exclude_url_regex",
+        scoring_value=cleaned or None,
+        snippet_name=SCORING_RECV_NAME,
+        vcl_type="recv",
+        body=new_recv_body,
+        priority=SCORING_SNIPPET_PRIORITY,
+        info_label="recv-snippet exclusion regex",
+        comment_fn=lambda ts: f"Update scoring recv exclusion regex {ts}",
+        ok_suffix="recv exclusion regex updated",
+    )
 
     return {
         "effective_regex": effective_regex,
@@ -1217,9 +1242,6 @@ def update_enforce_status_code(
     re-activates the prior version so the service is never left in an
     inconsistent state.
     """
-    # Persist the override first so a future enable_scoring re-bake also
-    # picks it up even if the activation below fails. None is the canonical
-    # "use default" representation (mirrors exclude_url_regex shape).
     from backend.provision.session_scoring_vcl import (
         DEFAULT_ENFORCE_STATUS_CODE,
         enforce_snippet,
@@ -1228,47 +1250,23 @@ def update_enforce_status_code(
 
     effective_code = resolve_enforce_status_code(new_status_code)
     is_default = effective_code == DEFAULT_ENFORCE_STATUS_CODE
-
-    def _set_status_code(target: dict) -> None:
-        scoring = target.get("scoring") or {}
-        if not scoring.get("enabled"):
-            raise RuntimeError(
-                f"Session scoring is not enabled for {logging_service_id}; "
-                "run enable_scoring first before customising the enforce status code."
-            )
-        scoring["enforce_status_code"] = None if is_default else effective_code
-        target["scoring"] = scoring
-
-    if svcconfig.mutate_config(logging_service_id, _set_status_code) is None:
-        raise RuntimeError(f"No config found for logging service {logging_service_id}")
-
     new_enforce_body = enforce_snippet(effective_code)
 
-    # Clone → swap → activate.
-    active_ver = get_active_version(logging_service_id, token)
-    if active_ver is None:
-        raise RuntimeError(f"Logging service {logging_service_id} has no active version")
-    info(f"Cloning version {active_ver} to update enforce-snippet status code → {effective_code}")
-    ts = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-    try:
-        new_ver = _clone_swap_snippet(
-            logging_service_id,
-            token,
-            active_ver=active_ver,
-            comment=f"Update scoring enforce status code → {effective_code} ({ts})",
-            snippet_name=SCORING_ENFORCE_NAME,
-            vcl_type="recv",
-            body=new_enforce_body,
-            priority=SCORING_SNIPPET_PRIORITY + 1,
-        )
-        ok(f"Logging service version {new_ver} active (enforce status code → {effective_code})")
-    except Exception as exc:
-        fail(f"update_enforce_status_code failed: {exc}")
-        # Re-activate the prior version so the service isn't left on the
-        # half-updated draft. Best-effort.
-        rollback_to_version(logging_service_id, token, active_ver, call=fastly)
-        raise
+    new_ver = _update_live_scoring_snippet(
+        logging_service_id,
+        token,
+        fn_name="update_enforce_status_code",
+        setting_label="enforce status code",
+        scoring_key="enforce_status_code",
+        scoring_value=None if is_default else effective_code,
+        snippet_name=SCORING_ENFORCE_NAME,
+        vcl_type="recv",
+        body=new_enforce_body,
+        priority=SCORING_SNIPPET_PRIORITY + 1,
+        info_label=f"enforce-snippet status code → {effective_code}",
+        comment_fn=lambda ts: f"Update scoring enforce status code → {effective_code} ({ts})",
+        ok_suffix=f"enforce status code → {effective_code}",
+    )
 
     return {
         "effective_status_code": effective_code,

@@ -914,3 +914,224 @@ def test_sync_jobs_skips_rollup_heal_for_read_only_service():
 
     assert "rollup_compact_svc-2" not in s._job_ids
     assert "rollup_heal_svc-2" not in s._job_ids
+
+
+# ── Merged from test_scheduler_apscheduler_stress.py ──
+
+import concurrent.futures
+import logging
+import threading
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+
+def test_apscheduler_max_instances_1_waits_for_cleanup(monkeypatch, caplog):
+    """The scheduler never overlaps a resource-owning cron invocation."""
+    apscheduler = pytest.importorskip("apscheduler.schedulers.background")
+    from backend.cron import decorators as sched_mod
+
+    monkeypatch.setattr(sched_mod, "_CRON_HARD_CAP_S", 0.1)
+
+    tick_log: list[float] = []
+    active = 0
+    max_active = 0
+    state_lock = threading.Lock()
+
+    @sched_mod.cron_task("apscheduler-stress")
+    def _cron_body(service_id: str) -> None:
+        nonlocal active, max_active
+        tick_log.append(time.monotonic())
+        with state_lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.35 if len(tick_log) == 1 else 0.02)
+        with state_lock:
+            active -= 1
+
+    sched = apscheduler.BackgroundScheduler(timezone="UTC")
+    sched.add_job(
+        _cron_body,
+        "interval",
+        seconds=0.4,
+        args=["svc-stress"],
+        id="cron-apscheduler-stress",
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(UTC) + timedelta(milliseconds=50),
+    )
+
+    caplog.set_level(logging.ERROR, logger="backend.scheduler")
+    sched.start()
+
+    try:
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline and len(tick_log) < 2:
+            time.sleep(0.05)
+    finally:
+        sched.shutdown(wait=False)
+
+    assert len(tick_log) >= 2, (
+        f"APScheduler stalled at {len(tick_log)} tick(s): {[r.getMessage() for r in caplog.records]}"
+    )
+    assert max_active == 1
+
+    assert any("exceeded" in rec.getMessage() and "watchdog threshold" in rec.getMessage() for rec in caplog.records), (
+        f"expected watchdog ERROR log; got {[r.getMessage() for r in caplog.records]}"
+    )
+
+
+def test_usage_log_phase_30s_timeout_pattern_does_not_block_caller():
+    """Pins the per-phase pattern in _run_log_discovery_cron (backend/cron/jobs/sync.py).
+
+    The phase is wrapped in its own single-worker ThreadPoolExecutor with
+    a 30s timeout. On timeout we MUST call ``shutdown(wait=False)`` — if
+    that's ever changed to ``wait=True`` the caller blocks on the leaked
+    thread and we're right back in the wedge.
+
+    This test reproduces the exact shape (executor + submit +
+    result(timeout=...) + shutdown(wait=False)) and verifies the caller
+    returns within timeout + small jitter.
+    """
+
+    def _hangs():
+        time.sleep(10)
+        return "should-never-return"
+
+    PHASE_TIMEOUT_S = 0.3
+
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="usage-log-stress")
+    shutdown_wait = True
+
+    start = time.monotonic()
+    try:
+        fut = ex.submit(_hangs)
+        try:
+            fut.result(timeout=PHASE_TIMEOUT_S)
+            pytest.fail("expected TimeoutError — hangs() sleeps 10s but timeout is 0.3s")
+        except concurrent.futures.TimeoutError:
+            shutdown_wait = False
+    finally:
+        ex.shutdown(wait=shutdown_wait)
+    elapsed = time.monotonic() - start
+
+    # The full block must return well inside the timeout + small overhead.
+    # If shutdown_wait=True ever creeps back in, this elapsed jumps to ~10s.
+    assert elapsed < PHASE_TIMEOUT_S + 1.0, (
+        f"phase pattern took {elapsed:.2f}s — caller is blocking on the leaked "
+        f"thread, defeating the per-phase timeout. Check that shutdown_wait "
+        f"is set to False on TimeoutError."
+    )
+
+
+def test_metadata_db_init_lock_has_finite_timeout():
+    """Verify that Postgres connection pool acquires with a finite timeout."""
+    import inspect
+
+    from backend.core.metadata import pg_connection
+
+    src = inspect.getsource(pg_connection.get_pg_pool)
+    assert "timeout=" in src, "get_pg_pool must configure a finite connection timeout"
+
+
+# ── Merged from test_scheduler_watchdog.py ──
+
+
+def test_cron_task_waits_for_cleanup_after_watchdog_threshold(monkeypatch, caplog):
+    """An overlong body is reported but its resource-owning thread is joined."""
+    from backend.cron import decorators as sched_mod
+
+    monkeypatch.setattr(sched_mod, "_CRON_HARD_CAP_S", 0.05)
+
+    @sched_mod.cron_task("hang-test")
+    def _hangs_forever(service_id: str) -> None:
+        time.sleep(0.15)
+
+    caplog.set_level(logging.ERROR, logger="backend.scheduler")
+
+    start = time.monotonic()
+    result = _hangs_forever("svc-watchdog")
+    elapsed = time.monotonic() - start
+
+    assert result is None
+    assert elapsed >= 0.15, "the resource-owning worker must finish before release"
+    assert any(
+        "exceeded" in rec.getMessage()
+        and "watchdog threshold" in rec.getMessage()
+        and "svc-watchdog" in rec.getMessage()
+        for rec in caplog.records
+        if rec.levelno >= logging.ERROR
+    ), f"expected ERROR log naming the service; got {[r.getMessage() for r in caplog.records]}"
+
+
+def test_cron_task_propagates_normal_return(monkeypatch):
+    """Fast inner function returns a sentinel; wrapper returns the same value.
+
+    Pins that the watchdog is transparent on the happy path — refactoring
+    it must not silently swallow the return value or wrap it in a Future.
+    """
+    from backend.cron import decorators as sched_mod
+
+    monkeypatch.setattr(sched_mod, "_CRON_HARD_CAP_S", 60)
+
+    sentinel = object()
+
+    @sched_mod.cron_task("happy-path")
+    def _quick(service_id: str):
+        return sentinel
+
+    start = time.monotonic()
+    result = _quick("svc-happy")
+    elapsed = time.monotonic() - start
+
+    assert result is sentinel
+    assert elapsed < 5, f"happy path took {elapsed:.2f}s — should be near-instant"
+
+
+def test_cron_task_preserves_telemetry_context(monkeypatch):
+    """The wrapper's process_context_scope must apply inside the worker thread.
+
+    Pins that wrapping in ThreadPoolExecutor didn't break telemetry attribution.
+    The 2026-05-21 incident left this contract intact and we don't want a
+    silent regression where every cron's usage rows land with NULL context.
+    """
+    from backend.cron import decorators as sched_mod
+    from backend.utils.telemetry import get_process_context
+
+    captured = {}
+
+    @sched_mod.cron_task("ctx-test")
+    def _check_ctx(service_id: str) -> None:
+        captured["ctx"] = get_process_context()
+
+    _check_ctx("svc-ctx")
+
+    assert captured.get("ctx") == "ctx-test", (
+        f"expected process_context='ctx-test' inside cron body; got {captured.get('ctx')!r}. "
+        "If None, the process_context_scope is being applied in the wrong thread."
+    )
+
+
+def test_cron_task_heartbeat_thread_releases_its_connection(monkeypatch):
+    """Live incident (2026-09-03): the per-invocation heartbeat thread
+    (a fresh ``threading.Thread``, never reused across ticks — unlike the
+    bounded watchdog executor) called ``get_con()`` but never gave the
+    connection back. Under Postgres that permanently pins one slot of the
+    bounded METADATA_PG_POOL_MAX pool per cron tick across the WHOLE
+    scheduler, and every metadata-touching request/cron eventually starts
+    raising PoolTimeout once the pool is exhausted. The heartbeat thread
+    must release its connection on exit, whether or not it ever actually
+    used one (job_name=None skips the UPDATE, but the finally must still
+    run and be a safe no-op)."""
+    from backend.cron import decorators as sched_mod
+
+    monkeypatch.setattr(sched_mod, "_CRON_HARD_CAP_S", 60)
+
+    @sched_mod.cron_task("release-test", job_name="release_test_job")
+    def _quick(service_id: str):
+        return None
+
+    with patch("backend.core.metadata.base.release_thread_connection") as mock_release:
+        _quick("svc-release")
+
+    mock_release.assert_called_once_with()

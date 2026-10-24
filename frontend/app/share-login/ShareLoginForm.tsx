@@ -74,11 +74,10 @@ export function ShareLoginForm() {
   const { ref: emailFieldRef, ...emailField } = register('email')
   const [reveal, setReveal] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
-  // Seed the banner from ?oauth_error via the fixed allowlist (never the raw
-  // param). A passcode-login error later overwrites this.
-  const [error, setError] = React.useState<string | null>(() =>
+  const [oauthError] = React.useState<string | null>(() =>
     oauthErrorCode ? (OAUTH_ERROR_COPY[oauthErrorCode] ?? OAUTH_ERROR_DEFAULT) : null,
   )
+  const [loginError, setError] = React.useState<string | null>()
   const [retryAfter, setRetryAfter] = React.useState<number | null>(null)
   const [redirecting, setRedirecting] = React.useState<string | null>(null)
   const emailInputRef = React.useRef<HTMLInputElement>(null)
@@ -122,12 +121,13 @@ export function ShareLoginForm() {
     },
   })
   const claimedInvite = claimQuery.data?.data ?? null
+  const error = loginError !== undefined
+    ? loginError
+    : claimQuery.data?.expired
+      ? 'This invitation link has expired or is no longer valid.'
+      : oauthError
 
   React.useEffect(() => {
-    if (claimQuery.data?.expired) {
-      setError('This invitation link has expired or is no longer valid.')
-      return
-    }
     const claimedEmail = claimQuery.data?.data?.email
     if (claimedEmail) {
       setValue('email', getValues('email') || claimedEmail)

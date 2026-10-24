@@ -2,7 +2,7 @@ import { TIME_HOVER_LAYOUT, makeTimeXAxis } from '@/lib/chart-helpers'
 import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
 import type { DashboardAggregates, DashboardCatalog } from './types'
 
-export interface BuildChartLayoutParams {
+interface BuildChartLayoutParams {
   trafficData: PlotlyTrace[]
   aggregates: Pick<DashboardAggregates, 'metric'> | null | undefined
   metric: string

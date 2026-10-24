@@ -2,8 +2,7 @@ import React from 'react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { withNuqsTestingAdapter } from 'nuqs/adapters/testing'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { renderWithQuery } from '../helpers/query'
 import QueryMonitorPage from '@/app/admin/queries/page'
 import Loading from '@/app/admin/queries/loading'
 
@@ -49,14 +48,7 @@ describe('Admin Live Query Monitor (/admin/queries)', () => {
       return new Promise(() => {})
     })
 
-    const queryClient = createTestQueryClient()
-
-    render(
-      <QueryClientProvider client={queryClient}>
-        <QueryMonitorPage />
-      </QueryClientProvider>,
-      { wrapper: withNuqsTestingAdapter() },
-    )
+    renderWithQuery(<QueryMonitorPage />, { wrapper: withNuqsTestingAdapter() })
 
     expect(screen.getByTestId('admin-queries-root')).toBeDefined()
     expect(screen.getByText('Live Query Monitor')).toBeDefined()
@@ -157,14 +149,7 @@ describe('Admin Live Query Monitor (/admin/queries)', () => {
       return {}
     })
 
-    const queryClient = createTestQueryClient()
-
-    render(
-      <QueryClientProvider client={queryClient}>
-        <QueryMonitorPage />
-      </QueryClientProvider>,
-      { wrapper: withNuqsTestingAdapter() },
-    )
+    renderWithQuery(<QueryMonitorPage />, { wrapper: withNuqsTestingAdapter() })
 
     // Wait for populated summary strip to reflect active DuckDB query
     const statusLive = await screen.findByText('1 active query')
@@ -192,16 +177,11 @@ describe('Admin Live Query Monitor (/admin/queries)', () => {
       route === '/api/admin/app-config/query-monitor' ? { enabled: true } : new Promise(() => {}),
     )
 
-    render(
-      <QueryClientProvider client={createTestQueryClient()}>
-        <QueryMonitorPage />
-      </QueryClientProvider>,
-      {
-        wrapper: withNuqsTestingAdapter({
-          searchParams: '?q=COMPACT&kind=cron&view=live&slow=250&db=DuckDB&nogroup=1',
-        }),
-      },
-    )
+    renderWithQuery(<QueryMonitorPage />, {
+      wrapper: withNuqsTestingAdapter({
+        searchParams: '?q=COMPACT&kind=cron&view=live&slow=250&db=DuckDB&nogroup=1',
+      }),
+    })
 
     expect(await screen.findByDisplayValue('COMPACT')).toBeDefined()
     expect(screen.getByRole('tab', { name: /live only/i }).getAttribute('aria-selected')).toBe('true')

@@ -18,7 +18,7 @@ function bool(v: unknown): boolean {
   return false
 }
 
-export interface StreamSummary {
+interface StreamSummary {
   durationSeconds: number | null
   avgBitrate: number | null
   topBitrate: number | null
@@ -39,24 +39,24 @@ export interface TimelinePoint {
   isStartup: boolean
 }
 
-export interface BitrateTier {
+interface BitrateTier {
   bitrate: number
   count: number
   pct: number
 }
 
-export interface BitrateShifts {
+interface BitrateShifts {
   upshifts: number
   downshifts: number
 }
 
-export interface BufferBucket {
+interface BufferBucket {
   label: string
   count: number
   pct: number
 }
 
-export interface StarvationEvent {
+interface StarvationEvent {
   timestamp: string
   bitrate: number | null
   buffer: number | null
@@ -64,20 +64,20 @@ export interface StarvationEvent {
   url: string | null
 }
 
-export interface ObjectTypeDist {
+interface ObjectTypeDist {
   type: string
   label: string
   count: number
   pct: number
 }
 
-export interface NetworkPoint {
+interface NetworkPoint {
   timestamp: string
   throughput: number | null
   rtt: number | null
 }
 
-export interface StreamAggregates {
+interface StreamAggregates {
   summary: StreamSummary
   timeline: TimelinePoint[]
   bitrateTiers: BitrateTier[]

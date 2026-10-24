@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import datetime
 import json
@@ -898,3 +900,401 @@ def test_rum_long_window_merges_live_active_hour_tail_without_double_counting(se
         assert data_long["error_count"] == 1
         assert any(p["path"] == "/live-5s-ago" for p in data_long["worst_pages"])
         assert any(e["message"] == "Error: live_5s_boom" and e["count"] == 1 for e in data_long["errors"])
+
+
+# ── Merged from test_rum_assets.py ──
+
+import pytest
+
+SVC = "TestRumAssetsSvc"
+
+
+def test_get_rum_tracker_js(with_config, monkeypatch):
+    # Set up config
+    with_config[SVC] = {"service_id": SVC, "rum": {"faro_version": "2.9.0"}}
+
+    # Mock generate_rum_tracker_js
+    fake_js = "console.log('rum tracker code');"
+    monkeypatch.setattr("backend.provision.rum_assets.generate_rum_tracker_js", lambda sid: f"{fake_js} /* {sid} */")
+
+    # 1. No headers/cookies -> defaults to active service
+    r = client.get("/js/rum.js")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/javascript")
+    assert f"{fake_js} /* {SVC} */" in r.text
+
+    # 2. Service ID in query param
+    r = client.get("/js/rum.js?service_id=CustomSvc")
+    # CustomSvc not loaded in with_config, so it should fall back to first active
+    assert r.status_code == 200
+    assert f"{fake_js} /* {SVC} */" in r.text
+
+    # With CustomSvc in config
+    with_config["CustomSvc"] = {"service_id": "CustomSvc"}
+    r = client.get("/js/rum.js?service_id=CustomSvc")
+    assert r.status_code == 200
+    assert f"{fake_js} /* CustomSvc */" in r.text
+
+
+def test_get_faro_sdk_js(with_config, monkeypatch):
+    with_config[SVC] = {"service_id": SVC, "rum": {"faro_version": "2.9.0"}}
+
+    async def mock_fetch(version):
+        return f"console.log('faro bundle version {version}');".encode()
+
+    monkeypatch.setattr("backend.core.faro_versions.fetch_faro_bundle", mock_fetch)
+
+    r = client.get("/js/faro-sdk.js")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/javascript")
+    assert "console.log('faro bundle version 2.9.0');" in r.text
+
+
+@pytest.mark.security_regression
+def test_get_rum_tracker_js_error_does_not_leak_exception_text(with_config, monkeypatch):
+    with_config[SVC] = {"service_id": SVC}
+    secret = '*/ </script> alert("x"); \n /etc/secret-path "quoted" \'single\''
+
+    def boom(sid):
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr("backend.provision.rum_assets.generate_rum_tracker_js", boom)
+    r = client.get("/js/rum.js")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/javascript")
+    assert "secret-path" not in r.text
+    assert "</script>" not in r.text
+    assert "alert" not in r.text
+    assert "RuntimeError" not in r.text
+    assert "\n" not in r.text.strip()
+    assert r.text.count("*/") == 1
+
+
+# ── Merged from test_rum_beacon_health_real_data.py ──
+
+
+import pytest
+from fastapi.testclient import TestClient
+
+from backend.main import app
+
+
+@pytest.fixture
+def _mock_rum_enabled_config(monkeypatch):
+    monkeypatch.setenv("DUCKDB_CONNECTION_POOL", "0")
+    monkeypatch.setattr(
+        "backend.config.load_config",
+        lambda sid: {
+            "service_id": sid,
+            "rum": {"enabled": True},
+            "rum_enabled": True,
+        },
+    )
+
+
+def test_enabled_with_recent_beacons_reports_fire_rate_and_setup_complete(setup_temp_rum_db, _mock_rum_enabled_config):
+    service_id = "test_beacon_health_recent"
+    recent = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=5)
+
+    _insert_beacons(
+        setup_temp_rum_db,
+        [{"pathname": "/", "load_time": 1.5, "received_at": recent.isoformat(), "cid": "cid1", "req_id": "req1"}],
+    )
+
+    r = client.get(f"/api/services/{service_id}/rum/beacon-health")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["enabled"] is True
+    assert data["recent_beacons"] == 1
+    assert data["beacon_fire_rate"] == 1
+    assert data["setup_complete"] is True
+    assert data["message"] == "Script installed and firing"
+    assert data["last_beacon_time"] is not None
+
+
+def test_enabled_with_no_recent_beacons_reports_waiting(setup_temp_rum_db, _mock_rum_enabled_config):
+    service_id = "test_beacon_health_none_recent"
+    stale = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=3)
+
+    _insert_beacons(
+        setup_temp_rum_db,
+        [{"pathname": "/", "load_time": 1.5, "received_at": stale.isoformat(), "cid": "cid1", "req_id": "req1"}],
+    )
+
+    r = client.get(f"/api/services/{service_id}/rum/beacon-health")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["enabled"] is True
+    assert data["recent_beacons"] == 0
+    assert data["setup_complete"] is True
+    assert data["message"] == "Script installed and firing"
+    assert data["last_beacon_time"] is not None
+
+
+def test_enabled_with_absolutely_no_beacons_reports_waiting(setup_temp_rum_db, _mock_rum_enabled_config):
+    _ = setup_temp_rum_db
+    service_id = "test_beacon_health_empty"
+    # Database is completely empty
+
+    r = client.get(f"/api/services/{service_id}/rum/beacon-health")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["enabled"] is True
+    assert data["recent_beacons"] == 0
+    assert data["setup_complete"] is False
+    assert data["message"] == "Waiting for beacons..."
+    assert data["last_beacon_time"] is None
+
+
+def test_db_failure_is_caught_and_reported_in_message(setup_temp_rum_db, _mock_rum_enabled_config, monkeypatch):
+    _ = setup_temp_rum_db
+    service_id = "test_beacon_health_db_failure"
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("db is locked")
+
+    monkeypatch.setattr("backend.routers.rum.execute_with_stale_view_retry", _raise)
+
+    r = client.get(f"/api/services/{service_id}/rum/beacon-health")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["enabled"] is True
+    assert data["setup_complete"] is False
+    assert "Setup check failed" in data["message"]
+    assert "db is locked" in data["message"]
+
+
+# ── Merged from test_rum_golden.py ──
+
+import os
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from backend.main import app
+
+GOLDEN_DIR = Path(__file__).parent / "golden"
+_GOLDEN_SERVICE_ID = "svc-rum-golden"
+WINDOW = "start_time=2026-08-05T00:00:00Z&end_time=2026-08-05T23:59:59Z"
+
+
+@pytest.fixture
+def rum_db(request):
+    return request.getfixturevalue("setup_temp_rum_db")
+
+
+def _beacons() -> list[dict]:
+    out: list[dict] = []
+    specs = [
+        ("10:05:00", "/home", "Chrome", "macOS", "Desktop", 1.2, 2100.0, 0.05, 150.0, False),
+        ("10:20:00", "/home", "Firefox", "Windows", "Desktop", 2.4, 3400.0, 0.15, 320.0, False),
+        ("10:40:00", "/cart", "Chrome", "Android", "Mobile", 3.1, 4800.0, 0.3, 650.0, True),
+        ("11:10:00", "/cart", "Safari", "macOS", "Desktop", 0.9, 1800.0, 0.02, 90.0, True),
+        ("11:50:00", "/search", "Chrome", "Windows", "Desktop", 1.7, 2600.0, 0.11, 210.0, False),
+        ("13:30:00", "/home", "Chrome", "macOS", "Desktop", 1.1, 2000.0, 0.04, 120.0, False),
+    ]
+    for i, (hms, path, browser, os_, device, load, lcp, cls, inp, err) in enumerate(specs):
+        b = {
+            "received_at": f"2026-08-05T{hms}+00:00",
+            "pathname": path,
+            "meta": {"browser": browser, "os": os_, "device": device},
+            "load_time": load,
+            "lcp": lcp,
+            "cls": cls,
+            "inp": inp,
+            "cid": f"cid_{i}",
+            "req_id": f"req_{i}",
+        }
+        if err:
+            n = 2 if i == 2 else 1
+            b["exceptions"] = [{"value": f"Boom {i}", "filename": "app.js"}] * n
+        out.append(b)
+    return out
+
+
+def _check(name: str, body) -> None:
+    if isinstance(body, dict):
+        body = {k: v for k, v in body.items() if not k.startswith("_debug")}
+    path = GOLDEN_DIR / f"rum_{name}.json"
+    rendered = json.dumps(body, indent=2, sort_keys=True) + "\n"
+    if os.getenv("UPDATE_GOLDEN") == "1":
+        path.write_text(rendered)
+    assert path.exists(), f"missing golden {path.name}; run with UPDATE_GOLDEN=1"
+    assert json.loads(path.read_text()) == json.loads(rendered)
+
+
+def _get_golden(url: str):
+    r = client.get(url)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_golden_empty(rum_db) -> None:
+    _check("analytics_empty", _get_golden(f"/api/services/{_GOLDEN_SERVICE_ID}/rum/analytics?{WINDOW}"))
+
+
+def test_golden_raw_long_window(rum_db) -> None:
+    _insert_beacons(rum_db, _beacons())
+    _check("analytics_raw_long", _get_golden(f"/api/services/{_GOLDEN_SERVICE_ID}/rum/analytics?{WINDOW}"))
+
+
+def test_golden_raw_short_window(rum_db) -> None:
+    _insert_beacons(rum_db, _beacons())
+    url = f"/api/services/{_GOLDEN_SERVICE_ID}/rum/analytics?start_time=2026-08-05T10:00:00Z&end_time=2026-08-05T11:30:00Z"
+    _check("analytics_raw_short", _get_golden(url))
+
+
+def test_golden_filtered(rum_db) -> None:
+    _insert_beacons(rum_db, _beacons())
+    flt = json.dumps({"browser": {"mode": "include", "values": ["Chrome"]}})
+    params = {"start_time": "2026-08-05T00:00:00Z", "end_time": "2026-08-05T23:59:59Z", "filters": flt}
+    resp = client.get(f"/api/services/{_GOLDEN_SERVICE_ID}/rum/analytics", params=params)
+    assert resp.status_code == 200, resp.text
+    _check("analytics_filtered", resp.json())
+
+
+def test_golden_rollup(rum_db) -> None:
+    import backend.core.duckdb_pool as duckdb_pool
+    from backend.core.rollups.rum import recompute_rum_aggregates
+
+    _insert_beacons(rum_db, _beacons())
+    duckdb_pool.shutdown_all()
+    con = duckdb.connect(str(rum_db), read_only=False)
+    try:
+        recompute_rum_aggregates(con, _GOLDEN_SERVICE_ID)
+        assert con.execute("SELECT COUNT(*) FROM rum_vitals_aggregates").fetchone()[0] > 0
+    finally:
+        con.close()
+    _check("analytics_rollup", _get_golden(f"/api/services/{_GOLDEN_SERVICE_ID}/rum/analytics?{WINDOW}"))
+
+
+def test_golden_live_events(rum_db) -> None:
+    # One metric (or one error) per timestamp: live-events orders by timestamp only, so
+    # same-timestamp rows would make the golden order nondeterministic.
+    beacons = []
+    for i, b in enumerate(_beacons()):
+        base = {k: b[k] for k in ("pathname", "meta", "cid", "req_id")}
+        beacons.append({**base, "received_at": b["received_at"], "lcp": b["lcp"]})
+        if i % 2:
+            beacons.append(
+                {**base, "received_at": b["received_at"].replace(":00+", ":30+"), "exceptions": [{"value": f"Err {i}"}]}
+            )
+    _insert_beacons(rum_db, beacons)
+    _check("live_events", {"events": _get_golden(f"/api/services/{_GOLDEN_SERVICE_ID}/rum/live-events?{WINDOW}")})
+
+
+def test_golden_beacon_health_disabled(rum_db) -> None:
+    _check("beacon_health_disabled", _get_golden(f"/api/services/{_GOLDEN_SERVICE_ID}/rum/beacon-health"))
+
+
+# ── Merged from test_rum_range_token.py ──
+
+import typing
+
+import pytest
+from fastapi.testclient import TestClient
+
+from backend.core.request_context import RequestContext
+from backend.main import app
+from backend.utils.date_utils import parse_iso_utc
+from backend.utils.remote_access import TimeBounds
+from backend.utils.time_window import resolve_window
+
+_TOKEN_SERVICE_ID = "svc-rum-token"
+ANCHOR = "2026-08-05T12:00:30Z"
+EMPTY = {"no_data": True, "vitals_rows": []}
+
+
+@pytest.fixture
+def captured(setup_temp_rum_db):
+    calls: list[dict] = []
+
+    def fake(con, **kw):
+        calls.append(kw)
+        return EMPTY
+
+    with patch("backend.routers.rum.rum_repo.fetch_rum_analytics", fake):
+        yield calls
+
+
+def _get_token(**params):
+    r = client.get(f"/api/services/{_TOKEN_SERVICE_ID}/rum/analytics", params=params)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_token_resolves_same_window_as_dashboard_helper(captured) -> None:
+    _get_token(range_token="24h", anchor=ANCHOR)
+    exp_start, exp_end = resolve_window("24h", ANCHOR)
+    assert (captured[0]["start_time"], captured[0]["end_time"]) == (exp_start, exp_end)
+    assert exp_end == "2026-08-05T12:00:00Z"
+
+
+def test_token_ignores_supplied_absolute_bounds(captured) -> None:
+    _get_token(range_token="1h", anchor=ANCHOR, start_time="2000-01-01T00:00:00Z", end_time="2000-01-02T00:00:00Z")
+    assert (captured[0]["start_time"], captured[0]["end_time"]) == resolve_window("1h", ANCHOR)
+
+
+def test_absent_token_uses_supplied_bounds_unchanged(captured) -> None:
+    _get_token(start_time="2026-08-05T00:00:00Z", end_time="2026-08-05T23:59:59Z", anchor=ANCHOR)
+    assert (captured[0]["start_time"], captured[0]["end_time"]) == ("2026-08-05T00:00:00Z", "2026-08-05T23:59:59Z")
+
+
+def test_invalid_token_falls_back_to_supplied_bounds(captured) -> None:
+    _get_token(range_token="bogus", anchor=ANCHOR, start_time="2026-08-05T00:00:00Z", end_time="2026-08-05T01:00:00Z")
+    assert (captured[0]["start_time"], captured[0]["end_time"]) == ("2026-08-05T00:00:00Z", "2026-08-05T01:00:00Z")
+
+
+def _ctx(source: dict, session: object | None, bounds: TimeBounds) -> RequestContext:
+    from tests.conftest import make_test_request_context
+
+    return make_test_request_context(
+        service_id=_TOKEN_SERVICE_ID,
+        source=source,
+        session=session,
+        read_only=True,
+        time_bounds=bounds,
+    )
+
+
+@pytest.mark.security_regression
+def test_analyst_token_window_is_clamped_to_invite(setup_temp_rum_db, captured) -> None:
+    """A 30d token must never widen an analyst past their 1h invite window."""
+    session = SimpleNamespace(query_window_hours=1, query_start_time=None, query_end_time=None)
+    req = SimpleNamespace(state=SimpleNamespace(analyst_session=session))
+    bounds = get_analyst_time_bounds(typing.cast(typing.Any, req))
+    source = {
+        "name": "test_service",
+        "service_id": "test_service",
+        "duckdb_path": str(setup_temp_rum_db).replace(".rum.duckdb", ".duckdb"),
+        "access_level": "read_write",
+        "endpoint": "localhost",
+        "access_key_id": "mock",
+        "secret_access_key": "mock",
+        "region": "mock",
+    }
+
+    def run(ctx: RequestContext, request: object) -> None:
+        asyncio.run(
+            rum_router.rum_analytics(
+                request=typing.cast(typing.Any, request),
+                start_time=None,
+                end_time=None,
+                filters=None,
+                ctx=ctx,
+                range_token="30d",
+                anchor=None,
+            )
+        )
+
+    run(_ctx(source, session, bounds), req)
+    run(_ctx(source, None, TimeBounds(None, None)), SimpleNamespace(state=SimpleNamespace(analyst_session=None)))
+
+    def span_h(c: dict) -> float:
+        s, e = parse_iso_utc(c["start_time"]), parse_iso_utc(c["end_time"])
+        assert s is not None and e is not None
+        return (e - s).total_seconds() / 3600
+
+    assert span_h(captured[0]) <= 1.01, "analyst token window not clamped to invite"
+    assert span_h(captured[1]) > 24 * 29, "admin negative control should get the full 30d window"

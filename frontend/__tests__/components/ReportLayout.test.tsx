@@ -9,9 +9,8 @@
  *
  * @vitest-environment jsdom
  */
-import { render, screen } from '@testing-library/react'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { screen } from '@testing-library/react'
+import { renderWithQuery } from '../helpers/query'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { Server } from 'lucide-react'
 import React from 'react'
@@ -51,35 +50,25 @@ vi.mock('@/components/ChartIntervalButtons', () => ({
   ChartIntervalButtons: () => <div data-testid="interval-buttons" />,
 }))
 
-function wrapper() {
-  const qc = createTestQueryClient({ queries: { gcTime: 0, staleTime: 0 } })
-  function TestWrapper({ children }: { children: React.ReactNode }) {
-    return React.createElement(QueryClientProvider, { client: qc }, children)
-  }
-  return TestWrapper
-}
-
 describe('ReportLayout', () => {
   beforeEach(() => {
     vi.clearAllMocks()
   })
 
   it('provides the resolved time range, service, filter payload + bucket to the render-prop', () => {
-    const Wrapper = wrapper()
-    render(
-      <Wrapper>
-        <ReportLayout title="Security" description="" icon={Server}>
-          {({ startTime, endTime, activeServiceId, filterPayload, bucketSeconds }) => (
-            <div>
-              <div data-testid="start">{startTime}</div>
-              <div data-testid="end">{endTime}</div>
-              <div data-testid="service">{activeServiceId}</div>
-              <div data-testid="filter">{JSON.stringify(filterPayload)}</div>
-              <div data-testid="bucket">{String(bucketSeconds)}</div>
-            </div>
-          )}
-        </ReportLayout>
-      </Wrapper>,
+    renderWithQuery(
+      <ReportLayout title="Security" description="" icon={Server}>
+        {({ startTime, endTime, activeServiceId, filterPayload, bucketSeconds }) => (
+          <div>
+            <div data-testid="start">{startTime}</div>
+            <div data-testid="end">{endTime}</div>
+            <div data-testid="service">{activeServiceId}</div>
+            <div data-testid="filter">{JSON.stringify(filterPayload)}</div>
+            <div data-testid="bucket">{String(bucketSeconds)}</div>
+          </div>
+        )}
+      </ReportLayout>,
+      { queryOptions: { queries: { gcTime: 0, staleTime: 0 } } },
     )
 
     expect(screen.getByTestId('start').textContent).toBe('2026-01-01T00:00:00Z')
@@ -90,18 +79,16 @@ describe('ReportLayout', () => {
   })
 
   it('does not own a query — no data/isLoading leak into the render-prop', () => {
-    const Wrapper = wrapper()
-    render(
-      <Wrapper>
-        <ReportLayout title="Charts" description="" icon={Server}>
-          {(ctx) => (
-            <div>
-              <div data-testid="has-data-key">{String('data' in ctx)}</div>
-              <div data-testid="has-loading-key">{String('isLoading' in ctx)}</div>
-            </div>
-          )}
-        </ReportLayout>
-      </Wrapper>,
+    renderWithQuery(
+      <ReportLayout title="Charts" description="" icon={Server}>
+        {(ctx) => (
+          <div>
+            <div data-testid="has-data-key">{String('data' in ctx)}</div>
+            <div data-testid="has-loading-key">{String('isLoading' in ctx)}</div>
+          </div>
+        )}
+      </ReportLayout>,
+      { queryOptions: { queries: { gcTime: 0, staleTime: 0 } } },
     )
 
     expect(screen.getByTestId('has-data-key').textContent).toBe('false')
@@ -109,13 +96,11 @@ describe('ReportLayout', () => {
   })
 
   it('renders the interval buttons in the render-prop arg', () => {
-    const Wrapper = wrapper()
-    render(
-      <Wrapper>
-        <ReportLayout title="Logs" description="" icon={Server}>
-          {({ intervalButtons }) => <div>{intervalButtons}</div>}
-        </ReportLayout>
-      </Wrapper>,
+    renderWithQuery(
+      <ReportLayout title="Logs" description="" icon={Server}>
+        {({ intervalButtons }) => <div>{intervalButtons}</div>}
+      </ReportLayout>,
+      { queryOptions: { queries: { gcTime: 0, staleTime: 0 } } },
     )
     expect(screen.getByTestId('interval-buttons')).toBeInTheDocument()
   })

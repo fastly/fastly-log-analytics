@@ -30,9 +30,9 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { ClickHouseStatusNotice } from './ClickHouseStatusNotice'
 
-export type ClickHouseStatusResponse = components['schemas']['ClickHouseStatusResponse']
-export type ClickHouseReplayRequest = components['schemas']['ClickHouseReplayRequest']
-export type ClickHouseReplayResponse = components['schemas']['ClickHouseReplayResponse']
+type ClickHouseStatusResponse = components['schemas']['ClickHouseStatusResponse']
+type ClickHouseReplayRequest = components['schemas']['ClickHouseReplayRequest']
+type ClickHouseReplayResponse = components['schemas']['ClickHouseReplayResponse']
 
 interface ClickHouseAdminClientProps {
   initialServiceId?: string

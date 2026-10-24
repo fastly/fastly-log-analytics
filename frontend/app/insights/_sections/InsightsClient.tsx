@@ -8,7 +8,7 @@ import { unwrapClient } from '@/lib/api-client'
 import { queryKeys } from '@/lib/query-keys'
 import type { FiltersPayload } from '@/types/filters'
 import { cn } from '@/lib/utils'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useEffectiveServiceId } from '@/hooks/useIsDataReady'
 import { useSessionRoleStore } from '@/stores/sessionRoleStore'
 import { InsightCard, SEVERITY_BADGE_CLASS } from '@/components/Insights/InsightCard'
 import { InsightCardSkeleton } from '@/components/Insights/InsightCardSkeleton'
@@ -463,7 +463,7 @@ export default function InsightsClient({
   // Window/baseline default adapt to how much history the active service has
   // (e.g. ~2h of data → "this hour vs the previous hour" instead of the 7-day
   // baseline that would just say "not enough data"). An explicit pick wins.
-  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  const activeServiceId = useEffectiveServiceId()
   const isRemoteAnalyst = useSessionRoleStore((s) => s.isRemoteAnalyst)
   const defaults = useInsightsDefaults(activeServiceId)
   const filterPayload = useDebouncedFilterPayload(true)

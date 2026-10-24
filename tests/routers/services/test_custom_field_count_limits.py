@@ -53,7 +53,9 @@ from backend.provision import fastly_api
 
 
 @pytest.fixture(autouse=True)
-def force_8000_safe_max(monkeypatch):
+def force_8000_safe_max(monkeypatch, request):
+    if request.node.name.startswith("test_validate_vcl"):
+        return
     monkeypatch.setattr(fastly_api, "FASTLY_LOG_FORMAT_SAFE_MAX", 8000)
 
 
@@ -270,3 +272,203 @@ def test_drop_a_field_at_the_size_limit_then_re_add_succeeds(tmp_path, monkeypat
     assert removed_name not in names
     assert "cf999" in names
     assert len(names) == count
+
+
+# ── Merged from test_audit_router.py ──
+
+from backend.core import metadata as metadata_db
+from tests.conftest import MOCK_SERVICE_ID
+
+
+def _seed_audit(source_name: str, n: int = 3, event_type: str = "service_renamed") -> None:
+    for i in range(n):
+        metadata_db.record_audit(source_name, event_type=event_type, details={"i": i})
+
+
+def test_audit_logs_returns_seeded_entries(client, test_service_source):
+    _seed_audit(test_service_source["name"], n=3, event_type="service_renamed")
+
+    r = client.get("/api/audit-logs", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 3
+    assert len(body["entries"]) == 3
+    assert all(e["event_type"] == "service_renamed" for e in body["entries"])
+
+
+def test_audit_logs_filters_by_event_type(client, test_service_source):
+    _seed_audit(test_service_source["name"], n=2, event_type="service_renamed")
+    _seed_audit(test_service_source["name"], n=4, event_type="time_range_cleared")
+
+    r = client.get(
+        "/api/audit-logs",
+        params={"event_type": "time_range_cleared"},
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 4
+    assert all(e["event_type"] == "time_range_cleared" for e in body["entries"])
+
+
+def test_audit_logs_pagination(client, test_service_source):
+    _seed_audit(test_service_source["name"], n=10)
+
+    r = client.get(
+        "/api/audit-logs",
+        params={"page": 2, "per_page": 3},
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 10
+    assert body["page"] == 2
+    assert body["per_page"] == 3
+    assert len(body["entries"]) == 3
+
+
+def test_audit_logs_per_page_validation(client):
+    """per_page > 1000 must be rejected by FastAPI Query validation."""
+    r = client.get(
+        "/api/audit-logs",
+        params={"per_page": 5000},
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+    )
+    assert r.status_code == 422
+
+
+def test_audit_logs_page_must_be_positive(client):
+    r = client.get(
+        "/api/audit-logs",
+        params={"page": 0},
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+    )
+    assert r.status_code == 422
+
+
+def test_audit_logs_default_dir_is_descending(client, test_service_source):
+    """Most-recent-first is the default — verify the entries come back DESC by ts."""
+    _seed_audit(test_service_source["name"], n=5)
+
+    r = client.get("/api/audit-logs", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert r.status_code == 200
+    entries = r.json()["entries"]
+    timestamps = [e["timestamp"] for e in entries]
+    assert timestamps == sorted(timestamps, reverse=True), "default sort dir must be DESC"
+
+
+# ── Merged from test_custom_field_vcl_lint.py ──
+
+
+_CFG = {
+    "service_id": "svc-lint",
+    "name": "Lint Test",
+    "log_fields": {
+        "preset": "standard",
+        "groups": ["A"],
+        "schema_version": 2,
+        "custom_fields": [],
+    },
+}
+
+
+def _client():
+    return TestClient(app)
+
+
+def test_validate_vcl_404_for_missing_service():
+    with patch("backend.config.load_config", return_value=None):
+        r = _client().post(
+            "/api/services/missing/custom-fields/validate-vcl",
+            json={"vcl_log_expression": "req.http.Host", "collection_stage": "edge"},
+        )
+    assert r.status_code == 404
+
+
+def test_validate_vcl_valid_expression_returns_valid_true():
+    """A simple, well-formed expression must produce the contract the
+    drawer relies on: ``valid=True``, empty ``errors``, a numeric
+    ``format_length``, and a ``format_length_limit``."""
+    with patch("backend.config.load_config", return_value=dict(_CFG)):
+        r = _client().post(
+            "/api/services/svc-lint/custom-fields/validate-vcl",
+            json={
+                "vcl_log_expression": "req.http.Host",
+                "collection_stage": "edge",
+            },
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["valid"] is True
+    assert body["errors"] == []
+    assert isinstance(body["warnings"], list)
+    assert isinstance(body["format_length"], int)
+    assert body["format_length"] > 0
+    assert body["format_length_limit"] == 12000
+
+
+def test_validate_vcl_invalid_expression_returns_errors():
+    """An obviously broken expression (unbalanced braces) must produce
+    ``valid: False`` with at least one entry in ``errors``."""
+    with patch("backend.config.load_config", return_value=dict(_CFG)):
+        r = _client().post(
+            "/api/services/svc-lint/custom-fields/validate-vcl",
+            json={
+                # Unbalanced + references no real VCL identifier — both
+                # the AST validator and the format-length validator
+                # should reject this.
+                "vcl_log_expression": "req.http.{{ not closed",
+                "collection_stage": "edge",
+            },
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["valid"] is False
+    assert len(body["errors"]) >= 1, f"expected at least one error, got: {body}"
+
+
+def test_validate_vcl_response_shape_matches_drawer_contract():
+    """The drawer reads ``valid``, ``errors``, ``warnings``,
+    ``format_length_limit``. Any rename breaks the UI silently because the
+    component reads the fields untyped (``data as any``)."""
+    with patch("backend.config.load_config", return_value=dict(_CFG)):
+        r = _client().post(
+            "/api/services/svc-lint/custom-fields/validate-vcl",
+            json={"vcl_log_expression": "req.http.Host", "collection_stage": "edge"},
+        )
+    keys = set(r.json().keys())
+    required = {"valid", "errors", "warnings", "format_length_limit"}
+    missing = required - keys
+    assert not missing, f"drawer-contract response keys missing: {missing}"
+
+
+def test_validate_vcl_collection_stage_origin_accepted():
+    """``origin`` stage is a different code path (custom field is
+    promoted via beresp headers). The endpoint must accept it."""
+    with patch("backend.config.load_config", return_value=dict(_CFG)):
+        r = _client().post(
+            "/api/services/svc-lint/custom-fields/validate-vcl",
+            json={
+                "vcl_log_expression": "beresp.http.x-something",
+                "collection_stage": "origin",
+            },
+        )
+    assert r.status_code == 200
+    assert "valid" in r.json()
+
+
+def test_validate_vcl_rejects_unknown_collection_stage():
+    """Pydantic enforces the ``Literal['edge', 'origin']`` — a typo
+    becomes a 422, not a silent passthrough."""
+    with patch("backend.config.load_config", return_value=dict(_CFG)):
+        r = _client().post(
+            "/api/services/svc-lint/custom-fields/validate-vcl",
+            json={
+                "vcl_log_expression": "req.http.Host",
+                "collection_stage": "midway",  # not a real stage
+            },
+        )
+    assert r.status_code == 422

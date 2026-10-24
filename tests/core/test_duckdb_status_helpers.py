@@ -1686,3 +1686,164 @@ def test_get_sync_status_ducklake_snapshot_cached_split_stats(in_memory_duckdb, 
 _ = MagicMock
 _ = pytest
 _ = os
+
+
+# ── Merged from test_reconcile_fastly_stats_gate.py ──
+
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+
+@pytest.fixture
+def fresh_service():
+    """Empty usage_log + ingested_files for a unique service id."""
+    from backend.core import metadata as metadata_db
+
+    service_id = "recon-svc-1"
+    # Touch ingested_files so the DB is initialised cleanly.
+    metadata_db.insert_ingested_files(
+        service_id,
+        [("s3://bkt/raw/2026-05-22/12/2026-05-22T12:00:00.000-x.log.gz", 1, 1)],
+    )
+    yield service_id
+
+
+def _seed_reconciliation_row(service_id: str, ts_iso: str) -> None:
+    # usage_log lives in its own per-service SQLite (v2.0 cutover);
+    # ``get_latest_reconciliation_ts`` reads from there too.
+    from backend.core.metadata import usage_log_db as _usage_log_db
+
+    con = _usage_log_db.get_con(service_id)
+    con.execute(
+        """
+        INSERT INTO usage_log
+        (timestamp, service_id, operation_class, operation_type, url, status,
+         duration_ms, function_name, process_context, count)
+        VALUES (?, ?, 'A', 'RECONCILE_A', 'fastly://stats/aggregate/test', 'OK',
+                0.0, 'fastly.reconciliation', 'fastly:reconciliation', 1)
+        """,
+        (ts_iso, service_id),
+    )
+    con.commit()
+
+
+@patch("backend.config.is_usage_logging_enabled", return_value=True)
+@patch("backend.config.get_fastly_api_key", return_value="fake-key")
+def test_reconcile_skipped_when_recent_reconciliation_exists(_key, _enabled, fresh_service):
+    """A reconciliation row written 30 minutes ago should short-circuit the call
+    before any HTTP request to Fastly is made."""
+    from backend.core import duckdb as _db
+
+    recent = (datetime.now(UTC) - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _seed_reconciliation_row(fresh_service, recent)
+
+    src = {"name": fresh_service, "logging_service_id": "logsvc"}
+    with patch("urllib.request.urlopen") as urlopen:
+        result = _db.reconcile_fastly_stats(src)
+        assert result == 0
+        assert not urlopen.called
+
+
+@patch("backend.config.is_usage_logging_enabled", return_value=True)
+@patch("backend.config.get_fastly_api_key", return_value="fake-key")
+def test_reconcile_runs_when_last_reconciliation_is_old(_key, _enabled, fresh_service):
+    """A reconciliation row written >1h ago should NOT block the next call —
+    we proceed to the Fastly API."""
+    from backend.core import duckdb as _db
+
+    old = (datetime.now(UTC) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _seed_reconciliation_row(fresh_service, old)
+
+    src = {"name": fresh_service, "logging_service_id": "logsvc"}
+    with patch("urllib.request.urlopen") as urlopen:
+        # urlopen raises so we don't have to mock the full response shape — we
+        # only care that the gate let us past.
+        urlopen.side_effect = RuntimeError("called!")
+        _db.reconcile_fastly_stats(src)
+        assert urlopen.called
+
+
+@patch("backend.config.is_usage_logging_enabled", return_value=True)
+@patch("backend.config.get_fastly_api_key", return_value="fake-key")
+def test_reconcile_runs_when_no_prior_reconciliation(_key, _enabled, fresh_service):
+    """First-ever reconcile call (no prior 'fastly.reconciliation' rows) must
+    proceed past the gate."""
+    from backend.core import duckdb as _db
+
+    src = {"name": fresh_service, "logging_service_id": "logsvc"}
+    with patch("urllib.request.urlopen") as urlopen:
+        urlopen.side_effect = RuntimeError("called!")
+        _db.reconcile_fastly_stats(src)
+        assert urlopen.called
+
+
+# ── Merged from test_rum_status_freshness.py ──
+
+
+import duckdb
+
+
+def _make_rum_con() -> duckdb.DuckDBPyConnection:
+    con = duckdb.connect(":memory:")
+    # Aggregate tables EXIST (mirrors a service that has rolled up before)
+    # but are left EMPTY to simulate rollup lag behind freshly-landed raw.
+    con.execute("""
+        CREATE TABLE rum_vitals_aggregates (
+            service_id VARCHAR, bucket_start TIMESTAMPTZ, dimension VARCHAR,
+            value VARCHAR, event_count BIGINT, value_sum DOUBLE,
+            good_count BIGINT, ni_count BIGINT, poor_count BIGINT,
+            p50_value DOUBLE, p75_value DOUBLE, p99_value DOUBLE
+        )
+    """)
+    con.execute("""
+        CREATE TABLE rum_error_aggregates (
+            service_id VARCHAR, bucket_start TIMESTAMPTZ, dimension VARCHAR,
+            value VARCHAR, error_count BIGINT
+        )
+    """)
+    con.execute("CREATE TABLE client_vitals (req_id VARCHAR, cid VARCHAR, timestamp TIMESTAMPTZ)")
+    con.execute("CREATE TABLE client_errors (req_id VARCHAR, cid VARCHAR, timestamp TIMESTAMPTZ)")
+    return con
+
+
+def test_empty_aggregates_still_report_raw_freshness():
+    """Aggregates exist but are empty; raw client_vitals has fresh rows.
+
+    Expect a non-zero count and the raw MAX(timestamp), NOT ``None``.
+    """
+    from backend.core.rollups.rum import rum_count_and_latest
+
+    con = _make_rum_con()
+    recent = datetime.now(UTC) - timedelta(seconds=30)
+    con.execute(
+        "INSERT INTO client_vitals VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)",
+        ["r1", "c1", recent, "r2", "c2", recent, "r3", "c3", recent],
+    )
+
+    count, latest = rum_count_and_latest(con)
+
+    assert count == 3, f"expected 3 raw beacons, got {count}"
+    assert latest is not None, "latest_log_at must come from raw MAX(timestamp), not be gated on empty aggregates"
+    # Normalize to compare the instant regardless of tz representation.
+    assert abs((latest.replace(tzinfo=UTC) if latest.tzinfo is None else latest) - recent) < timedelta(seconds=1)
+
+
+def test_populated_aggregates_fast_path_returns_count_and_raw_latest():
+    """When aggregates have rows, use them for the count but keep raw freshness."""
+    from backend.core.rollups.rum import rum_count_and_latest
+
+    con = _make_rum_con()
+    bucket = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    con.execute(
+        "INSERT INTO rum_vitals_aggregates (service_id, bucket_start, dimension, value, event_count) VALUES (?, ?, 'total', 'pageviews', 10)",
+        ["svc", bucket],
+    )
+    recent = datetime.now(UTC) - timedelta(seconds=15)
+    con.execute("INSERT INTO client_vitals VALUES (?, ?, ?)", ["r1", "c1", recent])
+
+    count, latest = rum_count_and_latest(con)
+
+    assert count == 10, f"aggregate fast-path count expected 10, got {count}"
+    assert latest is not None
+    assert abs((latest.replace(tzinfo=UTC) if latest.tzinfo is None else latest) - recent) < timedelta(seconds=1)

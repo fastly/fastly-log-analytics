@@ -16,7 +16,7 @@ cron/jobs/sync.py, and tests/* import these by name):
   ``LOG_ACCOUNTING_MIN_RUN``          — shared with scheduler heal trigger
 - ``SustainedLossAlert``              — re-exported from models.admin
 - ``_QueueFile``, ``_stream_from_worker``,
-  ``_fetch_file_to_zip``, ``_resolve_source``,
+  ``_fetch_file_to_zip``,
   ``_get_dir_size``, ``ClientDisconnected`` — internal helpers exercised
   directly by tests/routers/test_admin_mutation_endpoints.py
 """
@@ -67,7 +67,6 @@ from ._helpers import (  # noqa: F401
     _AbortableQueue,
     _fetch_file_to_zip,
     _QueueFile,
-    _resolve_source,
     _stream_from_worker,
 )
 from ._router import router  # noqa: F401
@@ -98,7 +97,6 @@ __all__ = [
     "_AbortableQueue",
     "_stream_from_worker",
     "_fetch_file_to_zip",
-    "_resolve_source",
     "_DIR_SIZE_CACHE",
     "_get_dir_size",
     "_scan_dir_size",

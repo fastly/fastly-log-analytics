@@ -1,11 +1,10 @@
-import { render, screen } from '@testing-library/react'
+import { screen } from '@testing-library/react'
 import { expect, test, vi, beforeEach, afterEach } from 'vitest'
 // app/performance/page.tsx is now an async RSC shell that SSR-prefetches and
 // dehydrates into <PerformanceClient />; RTL can't render an async component, so
 // the smoke test targets the client component that owns the title + sections.
 import PerformanceClient from '@/app/performance/_sections/PerformanceClient'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/query'
 import React from 'react'
 import { spyOnConsoleError } from '../helpers/page-smoke'
 
@@ -84,11 +83,7 @@ test('performance page mounts and renders title and all 5 card titles with loade
     },
   })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <PerformanceClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<PerformanceClient />, { queryClient })
 
   expect(screen.getByText('Performance')).toBeInTheDocument()
   expect(await screen.findByText('End-to-End Latency Waterfall (Average)')).toBeInTheDocument()
@@ -104,11 +99,7 @@ test('performance page displays contextual loading messages while query is pendi
   // Never-resolving promise simulates active loading state
   mockPost.mockReturnValue(new Promise(() => {}))
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <PerformanceClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<PerformanceClient />, { queryClient })
 
   expect(screen.getByText('Calculating latency percentiles...')).toBeInTheDocument()
   expect(screen.getByText('Profiling endpoint latency...')).toBeInTheDocument()
@@ -129,11 +120,7 @@ test('performance page displays empty states and approximate badge appropriately
     },
   })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <PerformanceClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<PerformanceClient />, { queryClient })
 
   // Empty state across cards
   const emptyBadges = await screen.findAllByText('No data for this filter')
@@ -176,12 +163,11 @@ test('UX-2: /performance survives a dirty scatter row with cache=null', async ()
     return { data: { available: true, ttl_dist: [] } }
   })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <Boundary>
-        <PerformanceClient />
-      </Boundary>
-    </QueryClientProvider>,
+  renderWithQuery(
+    <Boundary>
+      <PerformanceClient />
+    </Boundary>,
+    { queryClient },
   )
   await screen.findByText('End-to-End Latency Waterfall (Average)')
   expect(screen.queryByTestId('route-crashed')).toBeNull()

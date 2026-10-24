@@ -6,7 +6,7 @@ import { ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react'
 import { TableHead } from '@/components/ui/table'
 import { cn } from '@/lib/utils'
 
-export type SortDir = 'asc' | 'desc'
+type SortDir = 'asc' | 'desc'
 
 /** A cell value we know how to order: numbers, strings, or "missing". */
 type SortValue = string | number | null | undefined
@@ -14,7 +14,7 @@ type SortValue = string | number | null | undefined
 /** Map of sortKey → accessor returning the comparable value for a row. */
 export type SortAccessors<T> = Record<string, (row: T) => SortValue>
 
-export interface TableSort<T> {
+interface TableSort<T> {
   sorted: T[]
   sortKey: string
   sortDir: SortDir

@@ -274,3 +274,292 @@ def test_real_observation_is_persisted_before_sse_publication(durable_metrics, m
     assert len(published) == 2
     assert published[-1]["total_rows"] == 0
     assert published[-1]["latest_log_at"] is None
+
+
+# ── Merged from test_operational_metrics.py ──
+
+from backend.core import operational_metrics
+
+
+class _FakeGauge:
+    def __init__(self, callbacks):
+        self.callbacks = callbacks
+
+
+class _FakeMeter:
+    def __init__(self):
+        self.gauges = {}
+
+    def create_observable_gauge(self, *, name, callbacks, description, unit):
+        gauge = _FakeGauge(callbacks)
+        self.gauges[name] = (gauge, description, unit)
+        return gauge
+
+
+def test_record_exposes_latest_labeled_observation(monkeypatch):
+    meter = _FakeMeter()
+    operational_metrics.reset_for_tests()
+    monkeypatch.setattr(operational_metrics, "get_meter", lambda: meter)
+
+    operational_metrics.record("celery_queue_depth", 7, queue="q.ingest")
+
+    gauge, description, unit = meter.gauges["fla_celery_queue_depth"]
+    observations = gauge.callbacks[0](None)
+    assert [(item.value, item.attributes) for item in observations] == [(7.0, {"queue": "q.ingest"})]
+    assert description == "Celery broker queue depth"
+    assert unit == "{messages}"
+
+
+def test_record_keeps_distinct_label_sets(monkeypatch):
+    meter = _FakeMeter()
+    operational_metrics.reset_for_tests()
+    monkeypatch.setattr(operational_metrics, "get_meter", lambda: meter)
+
+    operational_metrics.record("ingest_ledger_rows", 3, status="discovered")
+    operational_metrics.record("ingest_ledger_rows", 2, status="claimed")
+
+    gauge, _, _ = meter.gauges["fla_ingest_ledger_rows"]
+    observations = gauge.callbacks[0](None)
+    assert {(item.value, item.attributes["status"]) for item in observations} == {
+        (3.0, "discovered"),
+        (2.0, "claimed"),
+    }
+
+
+def test_high_scale_metrics_are_exported_with_domain_labels(monkeypatch):
+    meter = _FakeMeter()
+    operational_metrics.reset_for_tests()
+    monkeypatch.setattr(operational_metrics, "get_meter", lambda: meter)
+
+    operational_metrics.record(
+        "high_scale_publication_lag_seconds",
+        12.5,
+        service_id="svc",
+        domain="request",
+    )
+
+    gauge, description, unit = meter.gauges["fla_high_scale_publication_lag_seconds"]
+    observation = gauge.callbacks[0](None)[0]
+    assert observation.value == 12.5
+    assert observation.attributes == {"domain": "request", "service_id": "svc"}
+    assert description == "Age of the oldest pending high-scale publication"
+    assert unit == "s"
+
+
+# ── Merged from test_telemetry_schema.py ──
+
+from fastapi.testclient import TestClient
+
+from backend.core.metadata import usage_log, usage_log_db
+from backend.main import app
+from backend.utils.telemetry import get_page_load_id
+
+
+def test_telemetry_schema_and_helpers(monkeypatch, tmp_path):
+    # Setup temporary directory for metadata DB
+    monkeypatch.setattr(usage_log_db, "_DATA_DIR", str(tmp_path))
+
+    # Initialize connection which runs schemas
+    con = usage_log_db.get_con("test_service")
+
+    # Verify tables exist
+    tables = [
+        r[0]
+        for r in con.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()"
+        ).fetchall()
+    ]
+    assert "telemetry_queries" in tables
+    assert "telemetry_sections" in tables
+
+    # Test logging queries
+    usage_log.log_telemetry_query(
+        service_id="test_service",
+        page_load_id="page-123",
+        request_id="req-456",
+        engine="duckdb",
+        sql="SELECT 1",
+        duration_ms=45.2,
+    )
+
+    # Test logging sections
+    usage_log.log_telemetry_section(
+        service_id="test_service",
+        page_load_id="page-123",
+        request_id="req-456",
+        section_name="dashboard.aggregates",
+        duration_ms=12.5,
+    )
+
+    # Test retrieval
+    telemetry = usage_log.get_page_telemetry("test_service", "page-123")
+    assert len(telemetry["queries"]) == 1
+    assert telemetry["queries"][0]["sql_query"] == "SELECT 1"
+    assert telemetry["queries"][0]["engine"] == "duckdb"
+    assert telemetry["queries"][0]["duration_ms"] == 45.2
+
+    assert len(telemetry["sections"]) == 1
+    assert telemetry["sections"][0]["section_name"] == "dashboard.aggregates"
+    assert telemetry["sections"][0]["duration_ms"] == 12.5
+
+
+def test_page_load_id_propagation_middleware():
+    client = TestClient(app)
+    response = client.get("/api/health", headers={"X-Page-Load-ID": "test-page-999"})
+    assert response.status_code == 200
+    assert get_page_load_id() is None
+
+
+# ── Merged from test_memory_guard.py ──
+
+import signal
+
+import pytest
+
+from backend.core import memory_guard
+
+
+@pytest.fixture(autouse=True)
+def _no_real_kill(monkeypatch):
+    """Hard safety net: never let a real signal escape this module under test."""
+    calls = []
+    monkeypatch.setattr(memory_guard.os, "kill", lambda pid, sig: calls.append((pid, sig)))
+    return calls
+
+
+def _set_rss(monkeypatch, value):
+    """Patch the lazily-imported current_rss_bytes to return ``value`` bytes."""
+    monkeypatch.setattr("backend.core.duckdb.current_rss_bytes", lambda: value)
+
+
+def test_disabled_by_default(monkeypatch, _no_real_kill):
+    monkeypatch.delenv("BACKEND_GRACEFUL_RESTART_RSS_MB", raising=False)
+    _set_rss(monkeypatch, 50_000 * 1024 * 1024)  # huge, but guard is off
+    assert memory_guard.maybe_graceful_restart() is False
+    assert _no_real_kill == []
+
+
+def test_below_threshold_does_not_restart(monkeypatch, _no_real_kill):
+    monkeypatch.setenv("BACKEND_GRACEFUL_RESTART_RSS_MB", "9000")
+    _set_rss(monkeypatch, 5000 * 1024 * 1024)  # 5GB < 9GB
+    assert memory_guard.maybe_graceful_restart() is False
+    assert _no_real_kill == []
+
+
+def test_at_or_above_threshold_sends_sigterm(monkeypatch, _no_real_kill):
+    monkeypatch.setenv("BACKEND_GRACEFUL_RESTART_RSS_MB", "9000")
+    _set_rss(monkeypatch, 9500 * 1024 * 1024)  # 9.5GB >= 9GB
+    assert memory_guard.maybe_graceful_restart() is True
+    assert len(_no_real_kill) == 1
+    pid, sig = _no_real_kill[0]
+    assert sig == signal.SIGTERM
+    assert pid > 0
+
+
+def test_unreadable_rss_does_not_restart(monkeypatch, _no_real_kill):
+    monkeypatch.setenv("BACKEND_GRACEFUL_RESTART_RSS_MB", "9000")
+    _set_rss(monkeypatch, None)  # /proc unreadable (e.g. off-Linux)
+    assert memory_guard.maybe_graceful_restart() is False
+    assert _no_real_kill == []
+
+
+def test_threshold_parse_bytes(monkeypatch):
+    monkeypatch.setenv("BACKEND_GRACEFUL_RESTART_RSS_MB", "9000")
+    assert memory_guard.graceful_restart_rss_threshold_bytes() == 9000 * 1024 * 1024
+    monkeypatch.setenv("BACKEND_GRACEFUL_RESTART_RSS_MB", "garbage")
+    assert memory_guard.graceful_restart_rss_threshold_bytes() == 0
+    monkeypatch.delenv("BACKEND_GRACEFUL_RESTART_RSS_MB", raising=False)
+    assert memory_guard.graceful_restart_rss_threshold_bytes() == 0
+
+
+# ── Merged from test_web_vitals_store.py ──
+
+import json
+
+import pytest
+
+from backend.core import web_vitals_store
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", "On"])
+def test_collection_enabled_truthy_values(monkeypatch, value):
+    monkeypatch.setenv("WEB_VITALS_COLLECT", value)
+    assert web_vitals_store.collection_enabled() is True
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", ""])
+def test_collection_enabled_falsey_values(monkeypatch, value):
+    monkeypatch.setenv("WEB_VITALS_COLLECT", value)
+    assert web_vitals_store.collection_enabled() is False
+
+
+def test_collection_disabled_when_unset(monkeypatch):
+    monkeypatch.delenv("WEB_VITALS_COLLECT", raising=False)
+    assert web_vitals_store.collection_enabled() is False
+
+
+def test_append_sample_writes_one_json_line_each(monkeypatch, tmp_path):
+    sink = tmp_path / "nested" / "web_vitals.jsonl"  # parent dir is created lazily
+    monkeypatch.setattr(web_vitals_store, "LOG_PATH", sink)
+
+    web_vitals_store.append_sample({"name": "LCP", "value": 1200.0, "rating": "good"})
+    web_vitals_store.append_sample({"name": "CLS", "value": 0.05, "rating": "good"})
+
+    lines = sink.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["name"] == "LCP"
+    assert json.loads(lines[1])["name"] == "CLS"
+
+
+def test_append_sample_never_raises_on_io_error(monkeypatch, tmp_path):
+    # Point LOG_PATH at a path whose parent is a file, so mkdir/open fails;
+    # the helper must swallow the error rather than break the request.
+    blocker = tmp_path / "afile"
+    blocker.write_text("x")
+    monkeypatch.setattr(web_vitals_store, "LOG_PATH", blocker / "child" / "wv.jsonl")
+    web_vitals_store.append_sample({"name": "LCP", "value": 1.0, "rating": "good"})  # no exception
+
+
+def test_max_bytes_defaults_to_200mb(monkeypatch):
+    monkeypatch.delenv("WEB_VITALS_MAX_MB", raising=False)
+    assert web_vitals_store._max_bytes() == 200 * 1024 * 1024
+
+
+def test_max_bytes_invalid_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("WEB_VITALS_MAX_MB", "not-a-number")
+    assert web_vitals_store._max_bytes() == 200 * 1024 * 1024
+
+
+def test_max_bytes_zero_disables_cap(monkeypatch):
+    monkeypatch.setenv("WEB_VITALS_MAX_MB", "0")
+    assert web_vitals_store._max_bytes() == 0
+
+
+def test_rotation_creates_single_backup_at_cap(monkeypatch, tmp_path):
+    """Once the active file reaches the cap it's rotated to a single .1
+    backup and a fresh file continues — recent data is retained, disk is
+    bounded at ~2x the cap."""
+    monkeypatch.setattr(web_vitals_store, "LOG_PATH", tmp_path / "wv.jsonl")
+    # ~52-byte cap: smaller than one sample line, so each write past the
+    # first rotates. Exercises the rotation path deterministically.
+    monkeypatch.setenv("WEB_VITALS_MAX_MB", "0.00005")
+    for i in range(4):
+        web_vitals_store.append_sample({"name": "LCP", "value": i, "rating": "good"})
+
+    active = tmp_path / "wv.jsonl"
+    backup = web_vitals_store.rotated_path()
+    assert active.exists()
+    assert backup.exists()  # rotation happened
+    # Only ONE backup is kept, and the active file holds the most recent
+    # write(s) — not all four.
+    assert len(active.read_text(encoding="utf-8").strip().splitlines()) < 4
+    assert not (tmp_path / "wv.jsonl.2").exists()
+
+
+def test_cap_zero_disables_rotation(monkeypatch, tmp_path):
+    monkeypatch.setattr(web_vitals_store, "LOG_PATH", tmp_path / "wv.jsonl")
+    monkeypatch.setenv("WEB_VITALS_MAX_MB", "0")
+    for i in range(5):
+        web_vitals_store.append_sample({"name": "LCP", "value": i, "rating": "good"})
+    assert not web_vitals_store.rotated_path().exists()
+    assert len((tmp_path / "wv.jsonl").read_text(encoding="utf-8").strip().splitlines()) == 5

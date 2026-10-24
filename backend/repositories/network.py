@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import UTC
 from typing import Any
 
@@ -19,15 +20,12 @@ from backend.repositories._base import QueryRunner, SectionTimer, _safe_table
 from backend.repositories._sql import network as SQL
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
+    ResponseMemo,
     bucket_time_to_minute,
-    cache_get,
-    cache_put,
-    cache_result,
     digest_cache_key,
     serialize_filters_for_key,
 )
 from backend.repositories.utils.single_flight import coalesce
-from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.geo import format_city_label
 
 
@@ -46,7 +44,8 @@ class _TempTableUnavailable(Exception):
 # the data" beats "redo the cloud read" — 30 s is well below ingest cadence.
 _RESPONSE_CACHE_TTL = 30.0
 _RESPONSE_CACHE_MAXSIZE = 128
-_response_cache: BoundedTTLCache = BoundedTTLCache(maxsize=_RESPONSE_CACHE_MAXSIZE, ttl_seconds=_RESPONSE_CACHE_TTL)
+_memo = ResponseMemo(ttl=_RESPONSE_CACHE_TTL, maxsize=_RESPONSE_CACHE_MAXSIZE, prewarmer=False)
+_response_cache = _memo.cache
 
 
 def _response_cache_key(
@@ -199,11 +198,8 @@ def _rtt_congestion_expr() -> str:
     return "APPROX_QUANTILE(CAST(COALESCE(tcp_rtt, 0) AS BIGINT) - CAST(COALESCE(rtt_min, 0) AS BIGINT), 0.5)"
 
 
-import typing
-
-
 def get_health(
-    con_factory: typing.Callable[[], duckdb.DuckDBPyConnection],
+    con_factory: Callable[[], duckdb.DuckDBPyConnection],
     src: dict,
     start_time: str | None,
     end_time: str | None,
@@ -283,16 +279,11 @@ def get_health(
         invite_clamp_fingerprint=invite_clamp_fingerprint,
     )
     if not force_refresh:
-        cached = cache_get(_response_cache, cache_key, prewarmer=False)
+        cached = _memo.get(cache_key)
         if cached is not None:
             return {**cached, "telemetry": {}}
 
-    observation = cache_result(
-        {},
-        state="bypass" if force_refresh else "miss",
-        ttl_seconds=None if force_refresh else _response_cache.ttl,
-        prewarmer=False,
-    )
+    observation = _memo.result({}, state="bypass" if force_refresh else "miss")
     table_name = _safe_table(src["name"])
 
     _runner: QueryRunner | None = None
@@ -1089,7 +1080,7 @@ def get_health(
         if _has_signal(payload):
             # network additionally strips section_timings (per-request paint
             # telemetry) from the stored copy.
-            cache_put(_response_cache, cache_key, payload, strip=("section_timings",))
+            _memo.put(cache_key, payload, strip=("section_timings",))
         return {**payload, **observation}
 
     finally:
@@ -1102,7 +1093,7 @@ def get_health(
 
 
 def get_quality(
-    con_factory: typing.Callable[[], duckdb.DuckDBPyConnection],
+    con_factory: Callable[[], duckdb.DuckDBPyConnection],
     src: dict,
     start_time: str | None,
     end_time: str | None,

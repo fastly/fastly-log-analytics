@@ -394,16 +394,6 @@ def _generate_rum_section_vcl(state: FeatureState, subroutine: str) -> str:
         shield_pop = SHIELD_MAP.get(state.fos_region, "iad-va-us")
     asset_fetch_dict = generate_rum_asset_fetch_vcl(shield_pop, state.faro_version)
 
-    # Map subroutine names to snippet names from the generator
-    # Phase 1: recv + deliver
-    # Phase 3: asset-fetch + sigv4 signing + error handler
-    snippet_map = {
-        "vcl_recv": "RUM - Recv",
-        "vcl_deliver": "RUM - Set cookies",
-        "vcl_miss": "RUM - Asset fetch SigV4 signing",
-        "vcl_error": "RUM - Recv",  # placeholder, will be overridden below
-    }
-
     sections = []
 
     # Handle vcl_recv: include asset-fetch logic and RUM-Recv beacon logic

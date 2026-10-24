@@ -672,52 +672,6 @@ def test_stream_from_worker_propagates_context_to_thread():
     assert captured["value"] == "from_request"
 
 
-# ── _resolve_source (private helper) ──────────────────────────────────────
-
-
-def test_resolve_source_returns_default_for_default_name():
-    """``source_name == "default"`` returns the legacy default source
-    dict (storage_mode=local). Pinned because old single-service
-    installs still query as ``source=default``."""
-    from backend.routers.admin import _resolve_source
-
-    out = _resolve_source("default")
-    # The legacy default source has at minimum `name` and `storage_mode`
-    assert "name" in out
-
-
-def test_resolve_source_merges_loaded_config_into_default(tmp_path, monkeypatch):
-    """A known service name → merge its config_to_source onto the
-    default base. Pinned because admin endpoints fall through to the
-    default's region/endpoint when the service config omits them."""
-    from backend import config
-    from backend.routers.admin import _resolve_source
-
-    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
-    config.save_config(
-        "svc-known",
-        {"service_id": "svc-known", "fos_bucket": "b", "fos_region": "us-west-2"},
-    )
-
-    out = _resolve_source("svc-known")
-    # The loaded config's bucket beats the default
-    assert out.get("bucket") == "b" or out.get("fos_bucket") == "b"
-
-
-def test_resolve_source_returns_default_for_unknown_name(tmp_path, monkeypatch):
-    """Unknown service name → fall back to the default source (not
-    a 404). Pinned because admin endpoints prefer "render default
-    data" over "fail loudly" — the user might be on the wrong
-    service-id but the page should still load."""
-    from backend import config
-    from backend.routers.admin import _resolve_source
-
-    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
-
-    out = _resolve_source("ghost-service")
-    assert "name" in out  # The default source has a name
-
-
 # ── _get_dir_size (recursive disk-walk helper) ────────────────────────────
 
 

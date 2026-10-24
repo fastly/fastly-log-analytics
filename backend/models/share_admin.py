@@ -128,9 +128,6 @@ class ShareBannerResponse(WireSafeModel):
     public_url: str | None = None
 
 
-ShareStatusBannerResponse = ShareBannerResponse
-
-
 class InviteRecord(PassthroughModel):
     """One remote-invite row (``SELECT *`` + derived fields). The stored
     passcode hash rides through ``extra`` untouched — intentionally NOT

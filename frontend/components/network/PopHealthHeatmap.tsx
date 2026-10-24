@@ -28,7 +28,7 @@ const POP_HEALTH_THRESHOLDS = {
   criticalTtfbMs: 800,
 } as const
 
-export type PopHealthItem = components['schemas']['PopHealthItem']
+type PopHealthItem = components['schemas']['PopHealthItem']
 
 function classifyPopHealth(pop: PopHealthItem): 'critical' | 'degraded' | 'healthy' {
   if (

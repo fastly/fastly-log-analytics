@@ -1,9 +1,7 @@
 import json
 import logging
 import os
-import queue
 import shutil
-import threading
 import time
 
 logger = logging.getLogger(__name__)
@@ -30,7 +28,7 @@ from backend.provision.fos_setup import (
     ensure_fos_access_key,
     ensure_fos_bucket,
 )
-from backend.provision.utils import ok, step, warn
+from backend.provision.utils import ok, run_with_events, step, warn
 
 
 def _sync_crontab():
@@ -274,38 +272,6 @@ def write_service_config(state: dict):
             _apply(first_cfg)
             svcconfig.save_config(service_id, first_cfg)
     ok(f"Service config written → configs/{service_id}.json")
-
-
-def run_with_events(func, *args, raise_on_error: bool = True, **kwargs):
-    q: queue.Queue[str | None] = queue.Queue()
-    kwargs["status_cb"] = q.put
-    res = []
-    err = []
-
-    def worker():
-        try:
-            res.append(func(*args, **kwargs))
-        except Exception as e:
-            err.append(e)
-        finally:
-            q.put(None)
-
-    t = threading.Thread(target=worker)
-    t.start()
-
-    while True:
-        msg = q.get()
-        if msg is None:
-            break
-        yield {"type": "status", "message": msg}
-
-    t.join()
-    if err:
-        if raise_on_error:
-            raise err[0]
-        yield {"type": "error", "message": str(err[0])}
-        return None
-    return res[0]
 
 
 class _PreflightError(Exception):
@@ -870,48 +836,42 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
 
     yield {"type": "progress", "current": 4, "total": total_steps}
     step(4, total_steps, "Deleting FOS bucket" if opts.get("remove_bucket") else "Skipping FOS bucket deletion")
-    if opts.get("remove_bucket") and state.get("fos_bucket_name"):
+    remove_bucket = bool(opts.get("remove_bucket"))
+    remove_cloud_files = not remove_bucket and bool(opts.get("remove_cloud_files"))
+    if (remove_bucket or remove_cloud_files) and state.get("fos_bucket_name"):
         try:
             temp_desc = f"fos-log-analysis-temp-teardown-{state.get('logging_service_id', 'unknown')}"
             temp_key = yield from run_with_events(
                 ensure_fos_access_key, temp_desc, {}, token, permission="read-write-admin"
             )
             try:
-                yield from run_with_events(
-                    delete_fos_bucket,
-                    state["fos_bucket_name"],
-                    state["fos_region"],
-                    temp_key["access_key"],
-                    temp_key["secret_key"],
-                    service_id=state.get("logging_service_id"),
-                )
-            finally:
-                yield from run_with_events(delete_fos_access_key, temp_key["id"], token)
-        except Exception:
-            pass
-    elif opts.get("remove_cloud_files") and state.get("fos_bucket_name"):
-        try:
-            temp_desc = f"fos-log-analysis-temp-teardown-{state.get('logging_service_id', 'unknown')}"
-            temp_key = yield from run_with_events(
-                ensure_fos_access_key, temp_desc, {}, token, permission="read-write-admin"
-            )
-            try:
-                from backend.provision.fos_setup import delete_fos_prefix
+                if remove_bucket:
+                    yield from run_with_events(
+                        delete_fos_bucket,
+                        state["fos_bucket_name"],
+                        state["fos_region"],
+                        temp_key["access_key"],
+                        temp_key["secret_key"],
+                        service_id=state.get("logging_service_id"),
+                    )
+                else:
+                    from backend.provision.fos_setup import delete_fos_prefix
 
-                prefix = state.get("fos_prefix", "")
-                yield from run_with_events(
-                    delete_fos_prefix,
-                    state["fos_bucket_name"],
-                    state["fos_region"],
-                    temp_key["access_key"],
-                    temp_key["secret_key"],
-                    prefix,
-                    service_id=state.get("logging_service_id"),
-                )
+                    prefix = state.get("fos_prefix", "")
+                    yield from run_with_events(
+                        delete_fos_prefix,
+                        state["fos_bucket_name"],
+                        state["fos_region"],
+                        temp_key["access_key"],
+                        temp_key["secret_key"],
+                        prefix,
+                        service_id=state.get("logging_service_id"),
+                    )
             finally:
                 yield from run_with_events(delete_fos_access_key, temp_key["id"], token)
         except Exception as exc:
-            yield {"type": "status", "message": f"Warning: failed to delete cloud files: {exc}"}
+            if remove_cloud_files:
+                yield {"type": "status", "message": f"Warning: failed to delete cloud files: {exc}"}
 
     yield {"type": "progress", "current": 5, "total": total_steps}
     step(5, total_steps, "Deleting CDN service" if opts.get("remove_cdn") else "Skipping CDN service deletion")

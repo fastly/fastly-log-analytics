@@ -44,7 +44,7 @@ import { AlertsList, ALERTS_AVAILABLE_COLUMNS } from './AlertsList'
 import { CreateAlertForm } from './AlertEditor'
 
 type Alert = components["schemas"]["Alert"]
-export type AlertStatusFilter = 'all' | 'alerting' | 'ok' | 'muted'
+type AlertStatusFilter = 'all' | 'alerting' | 'ok' | 'muted'
 
 const VALID_STATUS_FILTERS = new Set<AlertStatusFilter>(['all', 'alerting', 'ok', 'muted'])
 

@@ -191,12 +191,7 @@ async def dashboard_bundle(
     # cancellation so the holder records the connection for the finally to
     # release.
     t_prewarm = time.perf_counter()
-    _prewarm = asyncio.create_task(asyncio.to_thread(lambda: ctx.con))
-    try:
-        await asyncio.shield(_prewarm)
-    except asyncio.CancelledError:
-        await _prewarm
-        raise
+    await ctx.prewarm_con()
     timer.mark("bundle:primary_checkout", t_prewarm)
 
     sections = _expand_sections(req.sections)
@@ -245,27 +240,25 @@ async def dashboard_bundle(
     aggregates: Any = None
     top_bots: Any = None
 
+    async def _shielded_to_thread(fn: Any, *args: Any) -> Any:
+        task = asyncio.create_task(asyncio.to_thread(fn, *args))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+
     # Single-branch fast path — when the selector excluded the other
     # branch, skip the 2nd-conn checkout + asyncio.gather hardness
     # entirely. The remaining branch runs synchronously on ctx.con.
     if not (want_aggregates and want_bots):
         if want_aggregates:
             t0 = time.perf_counter()
-            task = asyncio.create_task(asyncio.to_thread(_run_aggregates, ctx.con))
-            try:
-                aggregates = await asyncio.shield(task)
-            except asyncio.CancelledError:
-                await task
-                raise
+            aggregates = await _shielded_to_thread(_run_aggregates, ctx.con)
             timer.mark("bundle:aggregates", t0)
         if want_bots:
             t1 = time.perf_counter()
-            task = asyncio.create_task(asyncio.to_thread(_run_top_bots, ctx.con))
-            try:
-                top_bots = await asyncio.shield(task)
-            except asyncio.CancelledError:
-                await task
-                raise
+            top_bots = await _shielded_to_thread(_run_top_bots, ctx.con)
             timer.mark("bundle:top_bots", t1)
         return _assemble_dashboard_bundle_response(aggregates, top_bots, section_timings)
 
@@ -378,20 +371,10 @@ async def dashboard_bundle(
                     logger.debug("dashboard_bundle: cm_to_exit.__exit__ failed (ignored)", exc_info=True)
     else:
         t0 = time.perf_counter()
-        task_agg = asyncio.create_task(asyncio.to_thread(_run_aggregates, ctx.con))
-        try:
-            aggregates = await asyncio.shield(task_agg)
-        except asyncio.CancelledError:
-            await task_agg
-            raise
+        aggregates = await _shielded_to_thread(_run_aggregates, ctx.con)
         timer.mark("bundle:aggregates", t0)
         t1 = time.perf_counter()
-        task_bots = asyncio.create_task(asyncio.to_thread(_run_top_bots, ctx.con))
-        try:
-            top_bots = await asyncio.shield(task_bots)
-        except asyncio.CancelledError:
-            await task_bots
-            raise
+        top_bots = await _shielded_to_thread(_run_top_bots, ctx.con)
         timer.mark("bundle:top_bots", t1)
     return _assemble_dashboard_bundle_response(aggregates, top_bots, section_timings)
 
@@ -508,9 +491,8 @@ def dashboard_field_values(
 
         return hs_dashboard.field_values(ctx.high_scale, req, start_time, end_time)
     _is_real_repo = getattr(repo.get_field_values, "__module__", "") == "backend.repositories.dashboard"
-    _has_eager_con = ctx._con_override is not None or (ctx._holder is not None and ctx._holder.con is not None)
     return repo.get_field_values(
-        con=ctx.con if (_has_eager_con or not _is_real_repo) else (lambda: ctx.con),
+        con=ctx.con_or_factory(force_eager=not _is_real_repo),
         src=ctx.source,
         field=req.field,
         search=req.search,

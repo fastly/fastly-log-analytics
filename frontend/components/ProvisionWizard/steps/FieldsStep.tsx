@@ -2,7 +2,7 @@
 
 import React from "react";
 import { Button } from "@/components/ui/button";
-import { CollapsibleGroup } from "@/components/LogSettingsModal/LogSettingsModal";
+import { CollapsibleGroup } from "@/components/LogSettingsModal/FieldGroups";
 import { CmcdConfigSection } from "@/components/CmcdConfigSection";
 import { FileJson, Loader2, Shield } from "lucide-react";
 import { cn } from "@/lib/utils";

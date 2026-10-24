@@ -1,11 +1,10 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import { expect, test, vi, beforeEach, afterEach } from 'vitest'
 // app/security/page.tsx is now an async RSC shell that SSR-prefetches and
 // dehydrates into <SecurityClient />; RTL can't render an async component, so
 // the smoke test targets the client component that owns the title + sections.
 import SecurityClient from '@/app/security/_sections/SecurityClient'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/query'
 import React from 'react'
 
 // R-6 (testing_suite_audit_2026-06-14.md). Render-smoke only: prove the
@@ -59,11 +58,7 @@ afterEach(() => {
 })
 
 test('security page mounts and renders title and tab navigation', async () => {
-  render(
-    <QueryClientProvider client={queryClient}>
-      <SecurityClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<SecurityClient />, { queryClient })
 
   expect(screen.getByText('Security')).toBeInTheDocument()
   expect(screen.getByRole('tab', { name: /waf activity/i })).toBeInTheDocument()
@@ -82,76 +77,75 @@ test('BotsSection renders Bot & Crawler Value vs. Cost table with bandwidth and 
     typeof import('@/app/security/_sections/BotsSection')
   >('@/app/security/_sections/BotsSection')
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <ActualBotsSection
-        data={{
-          _is_cached: false,
-          tls_fingerprints: [],
-          fingerprint_coverage: {},
-          req_size_dist: [],
-          top_ips_header: [],
-          ipv6_adoption: [],
-          proxy_dist: [],
-          conn_reuse_dist: [],
-          verified_bots_ts: [],
-          ngwaf_configured: false,
-          ngwaf_verified_bots: [],
-          ngwaf_verified_bots_ts: [],
-          wellknown_bots: [],
-          bot_efficiency: [
-            {
-              bot_name: 'Anthropic Crawler Search',
-              category: 'AI Crawler',
-              request_count: 1500,
-              resp_bytes: 52_428_800,
-              bandwidth_pct: 32.5,
-              referrals: 0,
-              requests_per_referral: 1500,
-              bytes_per_referral: 52_428_800,
-            },
-            {
-              bot_name: 'Google Crawler',
-              category: 'Search Engine Crawler',
-              request_count: 800,
-              resp_bytes: 10_485_760,
-              bandwidth_pct: 6.5,
-              referrals: 400,
-              requests_per_referral: 2.0,
-              bytes_per_referral: 26_214.4,
-            },
-          ],
-          bots: [],
-          ngwaf_bots: [],
-          active_proxies_count: 0,
-          tunnel_requests_count: 0,
-          distance_mismatches_count: 0,
-          traffic_quality: [],
-          suspicious_isps: [],
-          active_clients: [],
-        }}
-        bucketSeconds={3600}
-        isLoading={false}
-        isFetching={false}
-        error={null}
-        intervalButtons={null}
-        timezone="UTC"
-        commonTimeLayout={{}}
-        getFieldLabel={(id: string) => id}
-        ngwafBotVisibility={{}}
-        setNgwafBotVisibility={vi.fn()}
-        onNgwafBotVisChange={vi.fn()}
-        botVisibility={{}}
-        setBotVisibility={vi.fn()}
-        onBotVisChange={vi.fn()}
-        botEfficiencyVisibility={{}}
-        setBotEfficiencyVisibility={vi.fn()}
-        onBotEfficiencyVisChange={vi.fn()}
-        fingerprintVisibility={{}}
-        setFingerprintVisibility={vi.fn()}
-        onFingerprintVisChange={vi.fn()}
-      />
-    </QueryClientProvider>,
+  renderWithQuery(
+    <ActualBotsSection
+      data={{
+        _is_cached: false,
+        tls_fingerprints: [],
+        fingerprint_coverage: {},
+        req_size_dist: [],
+        top_ips_header: [],
+        ipv6_adoption: [],
+        proxy_dist: [],
+        conn_reuse_dist: [],
+        verified_bots_ts: [],
+        ngwaf_configured: false,
+        ngwaf_verified_bots: [],
+        ngwaf_verified_bots_ts: [],
+        wellknown_bots: [],
+        bot_efficiency: [
+          {
+            bot_name: 'Anthropic Crawler Search',
+            category: 'AI Crawler',
+            request_count: 1500,
+            resp_bytes: 52_428_800,
+            bandwidth_pct: 32.5,
+            referrals: 0,
+            requests_per_referral: 1500,
+            bytes_per_referral: 52_428_800,
+          },
+          {
+            bot_name: 'Google Crawler',
+            category: 'Search Engine Crawler',
+            request_count: 800,
+            resp_bytes: 10_485_760,
+            bandwidth_pct: 6.5,
+            referrals: 400,
+            requests_per_referral: 2.0,
+            bytes_per_referral: 26_214.4,
+          },
+        ],
+        bots: [],
+        ngwaf_bots: [],
+        active_proxies_count: 0,
+        tunnel_requests_count: 0,
+        distance_mismatches_count: 0,
+        traffic_quality: [],
+        suspicious_isps: [],
+        active_clients: [],
+      }}
+      bucketSeconds={3600}
+      isLoading={false}
+      isFetching={false}
+      error={null}
+      intervalButtons={null}
+      timezone="UTC"
+      commonTimeLayout={{}}
+      getFieldLabel={(id: string) => id}
+      ngwafBotVisibility={{}}
+      setNgwafBotVisibility={vi.fn()}
+      onNgwafBotVisChange={vi.fn()}
+      botVisibility={{}}
+      setBotVisibility={vi.fn()}
+      onBotVisChange={vi.fn()}
+      botEfficiencyVisibility={{}}
+      setBotEfficiencyVisibility={vi.fn()}
+      onBotEfficiencyVisChange={vi.fn()}
+      fingerprintVisibility={{}}
+      setFingerprintVisibility={vi.fn()}
+      onFingerprintVisChange={vi.fn()}
+    />,
+    { queryClient },
   )
 
   expect(

@@ -30,7 +30,7 @@ import { downloadBlob } from '@/lib/download'
 import type { ServiceConfig } from '@/types/api'
 
 
-export interface ServiceColumnDeps {
+interface ServiceColumnDeps {
   activeServiceId: string | null
   // Switch the active service AND navigate to its dashboard. Encapsulated so
   // both the store write and the bootstrap-cache refresh happen together (see

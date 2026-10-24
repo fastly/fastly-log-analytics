@@ -11,36 +11,6 @@ from scripts.dev import section_sweep as sweep
 from scripts.lib.section_measurements import describe_response
 
 
-def test_classify_section_buckets() -> None:
-    assert sweep.classify_section("proxies_rollup") == "rollup"
-    assert sweep.classify_section("req_size_dist_rollup") == "rollup"
-    assert sweep.classify_section("security:temp_skipped") == "skipped"
-    assert sweep.classify_section("connection_acquire") == "queue"
-    assert sweep.classify_section("get_schema_cols") == "overhead"
-    assert sweep.classify_section("temp_table_create") == "unknown"
-    assert sweep.classify_section("wellknown_bots_query") == "unknown"
-    assert sweep.classify_section("summary_cache_hit") == "cache"
-
-
-def test_summarize_sections_sources_and_temp_flag() -> None:
-    summary = sweep.summarize_sections(
-        [
-            {"section": "connection_acquire", "time_ms": 120.0},
-            {"section": "bot_efficiency_rollup", "time_ms": 9.0},
-            {"section": "temp_table_create", "time_ms": 458.6},
-            {"section": "wellknown_bots_query", "time_ms": 217.0, "source": "live"},
-            {"section": "security:temp_skipped", "time_ms": 0.0},
-            {"not": "a timing"},
-        ]
-    )
-    assert summary["sections"][0]["activity"] == "queue"
-    assert summary["sections"][1]["source"] == "rollup"
-    assert summary["sections"][3]["source"] == "live"
-    assert "totals_ms" not in summary
-    assert summary["temp_built"] is True
-    assert sweep.summarize_sections([])["temp_built"] is False
-
-
 def _rec(endpoint: str, window: str, sections: list[dict]) -> dict:
     sample = {
         "sample_id": endpoint,

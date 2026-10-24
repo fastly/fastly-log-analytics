@@ -37,7 +37,6 @@ def _response_cache_key(
     bucket_seconds: int,
     top_n: int,
     sections: set[str] | None,
-    mask_ips: bool = False,
 ) -> str:
     # Key field order is load-bearing (serialized as-is): s, e, f, bs, tn, sec.
     # mask_ips is intentionally omitted because CMCD aggregates return no IP columns.
@@ -63,7 +62,6 @@ def get_cmcd_aggregates(
     top_n: int = 30,
     sections: set[str] | None = None,
     mask_ips: bool = False,
-    **kwargs,
 ) -> dict[str, Any]:
     """Return CMCD streaming analytics aggregates.
 
@@ -79,7 +77,6 @@ def get_cmcd_aggregates(
         bucket_seconds=bucket_seconds,
         top_n=top_n,
         sections=sections,
-        mask_ips=mask_ips,
     )
     if start_time is not None and end_time is not None:
         cached_fast = _memo.get(cache_key)
@@ -100,7 +97,6 @@ def get_cmcd_aggregates(
             bucket_seconds=bucket_seconds,
             top_n=top_n,
             sections=sections,
-            mask_ips=mask_ips,
             cache_key=cache_key,
         )
 
@@ -121,7 +117,6 @@ def _compute_cmcd_aggregates(
     bucket_seconds: int,
     top_n: int,
     sections: set[str] | None,
-    mask_ips: bool,
     cache_key: str,
 ) -> dict[str, Any]:
     timer = SectionTimer()

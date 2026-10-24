@@ -10,22 +10,12 @@ import json
 from unittest.mock import patch
 
 import pytest
-from fastapi.testclient import TestClient
 
 from backend.main import app
 from backend.repositories.session_scoring import _SCORING_COLUMN_TYPES
 from tests._helpers.config_fakes import mutate_via_save
 
 LOG_SVC = "TestScoringRouterSvc"
-
-
-@pytest.fixture
-def client():
-    """Plain TestClient(app) — deliberately shadows conftest's ``client``
-    fixture (which installs DuckDB/source dependency overrides) because
-    these tests mock ``backend.config.load_config`` directly and don't
-    need the in-memory DB plumbing."""
-    return TestClient(app)
 
 
 @pytest.fixture(autouse=True)
@@ -48,19 +38,6 @@ def _clear_analytics_cache_between_tests(monkeypatch):
     _ss._inflight.clear()
     _ss._scoring_svc_version_cache.clear()
     _ss._scoring_pragma_cache.clear()
-
-
-@pytest.fixture
-def with_config(monkeypatch):
-    """Return a writable container so individual tests can stash a fake
-    service config that backend.config.load_config picks up."""
-    container: dict = {}
-
-    def fake_load(svc_id):
-        return container.get(svc_id)
-
-    monkeypatch.setattr("backend.config.load_config", fake_load)
-    return container
 
 
 # ── /scoring/status ──────────────────────────────────────────────────────────

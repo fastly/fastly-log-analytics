@@ -338,6 +338,112 @@ def get_summary(
     return _store_response_cache(cache_key, payload, runner)
 
 
+def _run_timeseries_query(
+    runner: QueryRunner,
+    table: str,
+    where: str,
+    params: list,
+    lat_expr: str,
+    unit_conv: str,
+    *,
+    actual_cols: set[str] | list[str],
+    bucket_minutes: float,
+    split_by_leg: bool,
+    percentile: str,
+) -> dict:
+    pct_val = {"p50": 0.5, "p95": 0.95, "p99": 0.99}.get(percentile, 0.95)
+    agg_expr = f"MEDIAN({lat_expr})" if percentile == "p50" else f"APPROX_QUANTILE({lat_expr}, {pct_val})"
+    interval = (
+        f"INTERVAL '{max(1, int(bucket_minutes * 60))}' seconds"
+        if bucket_minutes < 1
+        else f"INTERVAL '{int(bucket_minutes)}' minutes"
+    )
+    has_edge_col = split_by_leg and "edge" in actual_cols
+    edge_col = ', "edge"' if has_edge_col else ""
+
+    rows = runner.execute(
+        SQL.TIMESERIES_BUCKETED.format(
+            interval=interval,
+            agg_expr=agg_expr,
+            unit_conv=unit_conv,
+            edge_col=edge_col,
+            table=table,
+            where=where,
+            lat_expr=lat_expr,
+            edge_group=edge_col,
+        ),
+        params,
+    ).fetchall()
+
+    series = [
+        {
+            "time": safe_iso(r[0]),
+            "miss_count": r[1],
+            "value": r[2],
+            **({"edge": r[3]} if has_edge_col else {}),
+        }
+        for r in rows
+    ]
+    return {"has_data": len(series) > 0, "series": series}
+
+
+def _shape_slow_url_rows(rows: list[tuple]) -> dict:
+    return {
+        "has_data": len(rows) > 0,
+        "rows": [{"url": r[0], "requests": r[1], "p50_ms": r[2], "p95_ms": r[3], "p99_ms": r[4]} for r in rows],
+    }
+
+
+def _shape_status_code_rows(rows: list[tuple]) -> dict:
+    if not rows:
+        return {"has_data": False, "rows": []}
+    return {
+        "has_data": True,
+        "rows": [{"status": r[0], "count": r[1], "pct": r[2]} for r in rows],
+    }
+
+
+def _shape_path_breakdown_rows(rows: list[tuple]) -> dict:
+    if not rows:
+        return {"has_data": False, "shielding_detected": False, "rows": []}
+    return {
+        "has_data": True,
+        "shielding_detected": any(r[0] is False for r in rows),
+        "rows": [{"edge": r[0], "requests": r[1], "p50_ms": r[2], "p95_ms": r[3]} for r in rows],
+    }
+
+
+def _shape_pop_latency_rows(rows: list[tuple]) -> dict:
+    if not rows:
+        return {"has_data": False, "requires_group_c": False, "rows": []}
+    valid_p95s = sorted(r[3] for r in rows if r[3] is not None)
+    median_p95 = valid_p95s[len(valid_p95s) // 2] if valid_p95s else 0
+    return {
+        "has_data": True,
+        "requires_group_c": False,
+        "median_p95_ms": median_p95,
+        "rows": [
+            {
+                "pop": r[0],
+                "requests": r[1],
+                "p50_ms": r[2],
+                "p95_ms": r[3],
+                "elevated": r[3] is not None and median_p95 is not None and r[3] > median_p95 * 2,
+            }
+            for r in rows
+        ],
+    }
+
+
+def _shape_ip_health_rows(rows: list[tuple]) -> dict:
+    if not rows:
+        return {"has_data": False, "rows": []}
+    return {
+        "has_data": True,
+        "rows": [{"oip": r[0], "requests": r[1], "p50_ms": r[2], "p95_ms": r[3], "error_pct": r[4]} for r in rows],
+    }
+
+
 def get_timeseries(
     con: duckdb.DuckDBPyConnection,
     src: dict,
@@ -392,46 +498,18 @@ def get_timeseries(
     else:
         lat_expr = f'"{metric_col}"'
 
-    pct_val = {"p50": 0.5, "p95": 0.95, "p99": 0.99}.get(percentile, 0.95)
-    if percentile == "p50":
-        agg_expr = f"MEDIAN({lat_expr})"
-    else:
-        agg_expr = f"APPROX_QUANTILE({lat_expr}, {pct_val})"
-
-    # Bucket interval - handle sub-minute intervals for '1 second' resolution
-    if bucket_minutes < 1:
-        interval = f"INTERVAL '{max(1, int(bucket_minutes * 60))}' seconds"
-    else:
-        interval = f"INTERVAL '{int(bucket_minutes)}' minutes"
-
-    edge_col = ', "edge"' if (split_by_leg and "edge" in actual_cols) else ""
-    edge_group = ', "edge"' if (split_by_leg and "edge" in actual_cols) else ""
-
-    rows = runner.execute(
-        SQL.TIMESERIES_BUCKETED.format(
-            interval=interval,
-            agg_expr=agg_expr,
-            unit_conv=unit_conv,
-            edge_col=edge_col,
-            table=table_name,
-            where=where,
-            lat_expr=lat_expr,
-            edge_group=edge_group,
-        ),
+    payload = _run_timeseries_query(
+        runner,
+        table_name,
+        where,
         params,
-    ).fetchall()
-
-    has_edge_col = split_by_leg and "edge" in actual_cols
-    series = [
-        {
-            "time": safe_iso(r[0]),
-            "miss_count": r[1],
-            "value": r[2],
-            **({"edge": r[3]} if has_edge_col else {}),
-        }
-        for r in rows
-    ]
-    payload = {"has_data": len(series) > 0, "series": series}
+        lat_expr,
+        unit_conv,
+        actual_cols=actual_cols,
+        bucket_minutes=bucket_minutes,
+        split_by_leg=split_by_leg,
+        percentile=percentile,
+    )
     return _store_response_cache(cache_key, payload, runner)
 
 
@@ -465,11 +543,7 @@ def get_slow_urls(
         params + [min_requests, limit],
     ).fetchall()
 
-    payload = {
-        "has_data": len(rows) > 0,
-        "rows": [{"url": r[0], "requests": r[1], "p50_ms": r[2], "p95_ms": r[3], "p99_ms": r[4]} for r in rows],
-    }
-    return _store_response_cache(cache_key, payload, runner)
+    return _store_response_cache(cache_key, _shape_slow_url_rows(rows), runner)
 
 
 def get_status_codes(
@@ -496,15 +570,7 @@ def get_status_codes(
         params,
     ).fetchall()
 
-    if not rows:
-        payload = {"has_data": False, "rows": []}
-        return _store_response_cache(cache_key, payload, runner)
-
-    payload = {
-        "has_data": True,
-        "rows": [{"status": r[0], "count": r[1], "pct": r[2]} for r in rows],
-    }
-    return _store_response_cache(cache_key, payload, runner)
+    return _store_response_cache(cache_key, _shape_status_code_rows(rows), runner)
 
 
 def get_path_breakdown(
@@ -533,20 +599,7 @@ def get_path_breakdown(
         params,
     ).fetchall()
 
-    if not rows:
-        payload = {"has_data": False, "shielding_detected": False, "rows": []}
-        return _store_response_cache(cache_key, payload, runner)
-
-    # Shielding is in play iff at least one row group has edge=false (shield-leg log).
-    # Folds the prior separate "SELECT 1 LIMIT 1" probe into the main aggregate.
-    shielding_detected = any(r[0] is False for r in rows)
-
-    payload = {
-        "has_data": True,
-        "shielding_detected": shielding_detected,
-        "rows": [{"edge": r[0], "requests": r[1], "p50_ms": r[2], "p95_ms": r[3]} for r in rows],
-    }
-    return _store_response_cache(cache_key, payload, runner)
+    return _store_response_cache(cache_key, _shape_path_breakdown_rows(rows), runner)
 
 
 def get_pop_latency(
@@ -576,28 +629,7 @@ def get_pop_latency(
         params + [limit],
     ).fetchall()
 
-    if not rows:
-        payload = {"has_data": False, "requires_group_c": False, "rows": []}
-        return _store_response_cache(cache_key, payload, runner)
-
-    valid_p95s = sorted(r[3] for r in rows if r[3] is not None)
-    median_p95 = valid_p95s[len(valid_p95s) // 2] if valid_p95s else 0
-    payload = {
-        "has_data": True,
-        "requires_group_c": False,
-        "median_p95_ms": median_p95,
-        "rows": [
-            {
-                "pop": r[0],
-                "requests": r[1],
-                "p50_ms": r[2],
-                "p95_ms": r[3],
-                "elevated": r[3] is not None and median_p95 is not None and r[3] > median_p95 * 2,
-            }
-            for r in rows
-        ],
-    }
-    return _store_response_cache(cache_key, payload, runner)
+    return _store_response_cache(cache_key, _shape_pop_latency_rows(rows), runner)
 
 
 def get_ip_health(
@@ -627,15 +659,7 @@ def get_ip_health(
         params + [limit],
     ).fetchall()
 
-    if not rows:
-        payload = {"has_data": False, "rows": []}
-        return _store_response_cache(cache_key, payload, runner)
-
-    payload = {
-        "has_data": True,
-        "rows": [{"oip": r[0], "requests": r[1], "p50_ms": r[2], "p95_ms": r[3], "error_pct": r[4]} for r in rows],
-    }
-    return _store_response_cache(cache_key, payload, runner)
+    return _store_response_cache(cache_key, _shape_ip_health_rows(rows), runner)
 
 
 _DIM_CANDIDATES: dict[str, list[str]] = {
@@ -847,10 +871,6 @@ def _origin_summary_from_temp(
     runner: QueryRunner,
     temp_table: str,
     actual_cols: set[str] | list[str],
-    *,
-    start_time: str | None = None,
-    end_time: str | None = None,
-    has_filters: bool = True,
 ) -> dict:
     """get_summary against the per-request TEMP TABLE.
 
@@ -861,12 +881,6 @@ def _origin_summary_from_temp(
     :func:`_shape_summary` helper (the TEMP-specific templates
     ``TEMP_SUMMARY_ROLLUP`` / ``TEMP_SUMMARY_BY_EDGE`` were folded into
     ``SUMMARY_GROUPING_SETS`` per the b10 audit finding).
-
-    PURE temp-path: the rollup-first attempt was hoisted into
-    :func:`get_aggregates`'s pre-temp phase (Part B skip-temp guard), so
-    this helper now only runs when the section MISSED the rollup and the
-    temp was built. ``start_time`` / ``end_time`` / ``has_filters`` are
-    retained for signature stability but no longer consulted here.
     """
     return _shape_summary(runner, temp_table, "1=1", [], "lat_us", actual_cols)
 
@@ -879,21 +893,7 @@ def _origin_timeseries_from_temp(
     split_by_leg: bool,
     metric: str,
     percentile: str,
-    *,
-    start_time: str | None = None,
-    end_time: str | None = None,
-    has_filters: bool = True,
-    table_name: str | None = None,
-    where_clause: str | None = None,
-    params: list | None = None,
 ) -> dict:
-    # PURE temp-path: the origin_latency_ts rollup-first attempt was hoisted
-    # into get_aggregates's pre-temp phase (Part B skip-temp guard). This helper
-    # now only runs for the MISSED case (filtered / <48h / split_by_leg /
-    # sub-minute bucket / partial coverage) against the materialized temp table.
-    # The ``table_name`` / ``where_clause`` / ``params`` / ``start_time`` /
-    # ``end_time`` / ``has_filters`` kwargs are retained for signature stability
-    # but no longer consulted here.
     actual_cols_set = set(actual_cols)
     metric_col = "ottfb" if metric == "ttfb" else "ottlb"
     unit_conv = "/ 1000.0"
@@ -910,41 +910,18 @@ def _origin_timeseries_from_temp(
     else:
         lat_expr = f'"{metric_col}"'
 
-    pct_val = {"p50": 0.5, "p95": 0.95, "p99": 0.99}.get(percentile, 0.95)
-    agg_expr = f"MEDIAN({lat_expr})" if percentile == "p50" else f"APPROX_QUANTILE({lat_expr}, {pct_val})"
-
-    if bucket_minutes < 1:
-        interval = f"INTERVAL '{max(1, int(bucket_minutes * 60))}' seconds"
-    else:
-        interval = f"INTERVAL '{int(bucket_minutes)}' minutes"
-
-    edge_col = ', "edge"' if (split_by_leg and "edge" in actual_cols_set) else ""
-    edge_group = ', "edge"' if (split_by_leg and "edge" in actual_cols_set) else ""
-
-    rows = runner.execute(
-        SQL.TIMESERIES_BUCKETED.format(
-            interval=interval,
-            agg_expr=agg_expr,
-            unit_conv=unit_conv,
-            edge_col=edge_col,
-            table=temp_table,
-            where="1=1",
-            lat_expr=lat_expr,
-            edge_group=edge_group,
-        )
-    ).fetchall()
-
-    has_edge_col = split_by_leg and "edge" in actual_cols_set
-    series = [
-        {
-            "time": safe_iso(r[0]),
-            "miss_count": r[1],
-            "value": r[2],
-            **({"edge": r[3]} if has_edge_col else {}),
-        }
-        for r in rows
-    ]
-    return {"has_data": len(series) > 0, "series": series}
+    return _run_timeseries_query(
+        runner,
+        temp_table,
+        "1=1",
+        [],
+        lat_expr,
+        unit_conv,
+        actual_cols=actual_cols_set,
+        bucket_minutes=bucket_minutes,
+        split_by_leg=split_by_leg,
+        percentile=percentile,
+    )
 
 
 def _origin_slow_urls_from_temp(
@@ -953,83 +930,39 @@ def _origin_slow_urls_from_temp(
     actual_cols: set[str] | list[str],
     min_requests: int,
     limit: int,
-    *,
-    start_time: str | None = None,
-    end_time: str | None = None,
-    has_filters: bool = True,
 ) -> dict:
-    actual_cols_set = set(actual_cols)
-    if "url" not in actual_cols_set:
+    if "url" not in set(actual_cols):
         return {"has_data": False, "rows": []}
 
-    # PURE temp-path: the slow_urls rollup-first attempt was hoisted into
-    # get_aggregates's pre-temp phase (Part B skip-temp guard). This helper now
-    # only runs for the MISSED case. ``start_time`` / ``end_time`` /
-    # ``has_filters`` are retained for signature stability but unused here.
-    #
-    # Use the pre-computed lat_us column so percentile sorts can leverage
-    # column-store layout instead of paying COALESCE per row.
     rows = runner.execute(
         SQL.SLOW_URLS.format(lat_val="lat_us", table=temp_table, where="1=1"),
         [min_requests, limit],
     ).fetchall()
-    return {
-        "has_data": len(rows) > 0,
-        "rows": [{"url": r[0], "requests": r[1], "p50_ms": r[2], "p95_ms": r[3], "p99_ms": r[4]} for r in rows],
-    }
+    return _shape_slow_url_rows(rows)
 
 
 def _origin_status_codes_from_temp(
     runner: QueryRunner,
     temp_table: str,
     actual_cols: set[str] | list[str],
-    *,
-    start_time: str | None = None,
-    end_time: str | None = None,
-    has_filters: bool = True,
 ) -> dict:
     if "ost" not in set(actual_cols):
         return {"has_data": False, "rows": []}
 
-    # PURE temp-path: the status_codes rollup-first attempt was hoisted into
-    # get_aggregates's pre-temp phase (Part B skip-temp guard). This helper now
-    # only runs for the MISSED case. ``start_time`` / ``end_time`` /
-    # ``has_filters`` are retained for signature stability but unused here.
     rows = runner.execute(SQL.STATUS_CODES.format(table=temp_table, where="1=1")).fetchall()
-    if not rows:
-        return {"has_data": False, "rows": []}
-    return {
-        "has_data": True,
-        "rows": [{"status": r[0], "count": r[1], "pct": r[2]} for r in rows],
-    }
+    return _shape_status_code_rows(rows)
 
 
 def _origin_path_breakdown_from_temp(
     runner: QueryRunner,
     temp_table: str,
     actual_cols: set[str] | list[str],
-    *,
-    start_time: str | None = None,
-    end_time: str | None = None,
-    has_filters: bool = True,
 ) -> dict:
-    actual_cols_set = set(actual_cols)
-    if "edge" not in actual_cols_set:
+    if "edge" not in set(actual_cols):
         return {"has_data": False, "shielding_detected": False, "rows": []}
 
-    # PURE temp-path: the origin_path rollup-first attempt was hoisted into
-    # get_aggregates's pre-temp phase (Part B skip-temp guard). This helper now
-    # only runs for the MISSED case. ``start_time`` / ``end_time`` /
-    # ``has_filters`` are retained for signature stability but unused here.
     rows = runner.execute(SQL.PATH_BREAKDOWN.format(lat_val="lat_us", table=temp_table, where="1=1")).fetchall()
-    if not rows:
-        return {"has_data": False, "shielding_detected": False, "rows": []}
-    shielding_detected = any(r[0] is False for r in rows)
-    return {
-        "has_data": True,
-        "shielding_detected": shielding_detected,
-        "rows": [{"edge": r[0], "requests": r[1], "p50_ms": r[2], "p95_ms": r[3]} for r in rows],
-    }
+    return _shape_path_breakdown_rows(rows)
 
 
 def _origin_pop_latency_from_temp(
@@ -1037,42 +970,15 @@ def _origin_pop_latency_from_temp(
     temp_table: str,
     actual_cols: set[str] | list[str],
     limit: int,
-    *,
-    start_time: str | None = None,
-    end_time: str | None = None,
-    has_filters: bool = True,
 ) -> dict:
-    actual_cols_set = set(actual_cols)
-    if "pop" not in actual_cols_set:
+    if "pop" not in set(actual_cols):
         return {"has_data": False, "requires_group_c": True, "rows": []}
 
-    # PURE temp-path: the origin_pop rollup-first attempt was hoisted into
-    # get_aggregates's pre-temp phase (Part B skip-temp guard). This helper now
-    # only runs for the MISSED case. ``start_time`` / ``end_time`` /
-    # ``has_filters`` are retained for signature stability but unused here.
     rows = runner.execute(
         SQL.POP_LATENCY.format(lat_val="lat_us", table=temp_table, where="1=1"),
         [limit],
     ).fetchall()
-    if not rows:
-        return {"has_data": False, "requires_group_c": False, "rows": []}
-    valid_p95s = sorted(r[3] for r in rows if r[3] is not None)
-    median_p95 = valid_p95s[len(valid_p95s) // 2] if valid_p95s else 0
-    return {
-        "has_data": True,
-        "requires_group_c": False,
-        "median_p95_ms": median_p95,
-        "rows": [
-            {
-                "pop": r[0],
-                "requests": r[1],
-                "p50_ms": r[2],
-                "p95_ms": r[3],
-                "elevated": r[3] is not None and median_p95 is not None and r[3] > median_p95 * 2,
-            }
-            for r in rows
-        ],
-    }
+    return _shape_pop_latency_rows(rows)
 
 
 def _origin_ip_health_from_temp(
@@ -1080,29 +986,16 @@ def _origin_ip_health_from_temp(
     temp_table: str,
     actual_cols: set[str] | list[str],
     limit: int,
-    *,
-    start_time: str | None = None,
-    end_time: str | None = None,
-    has_filters: bool = True,
 ) -> dict:
     actual_cols_set = set(actual_cols)
     if "oip" not in actual_cols_set or "ost" not in actual_cols_set:
         return {"has_data": False, "rows": []}
 
-    # PURE temp-path: the origin_ip rollup-first attempt was hoisted into
-    # get_aggregates's pre-temp phase (Part B skip-temp guard). This helper now
-    # only runs for the MISSED case. ``start_time`` / ``end_time`` /
-    # ``has_filters`` are retained for signature stability but unused here.
     rows = runner.execute(
         SQL.IP_HEALTH.format(lat_val="lat_us", table=temp_table, where="1=1"),
         [limit],
     ).fetchall()
-    if not rows:
-        return {"has_data": False, "rows": []}
-    return {
-        "has_data": True,
-        "rows": [{"oip": r[0], "requests": r[1], "p50_ms": r[2], "p95_ms": r[3], "error_pct": r[4]} for r in rows],
-    }
+    return _shape_ip_health_rows(rows)
 
 
 async def get_aggregates(
@@ -1327,14 +1220,7 @@ async def get_aggregates(
         if not _run("summary"):
             return {}
         _ts = _time.perf_counter()
-        result = _origin_summary_from_temp(
-            r,
-            temp_table,
-            actual_set,
-            start_time=start_time,
-            end_time=end_time,
-            has_filters=has_filters,
-        )
+        result = _origin_summary_from_temp(r, temp_table, actual_set)
         timer.mark("summary", _ts)
         return {"summary": result}
 
@@ -1348,9 +1234,6 @@ async def get_aggregates(
             actual_set,
             slow_urls_min_requests,
             slow_urls_limit,
-            start_time=start_time,
-            end_time=end_time,
-            has_filters=has_filters,
         )
         timer.mark("slow_urls", _ts)
         return {"slow_urls": result}
@@ -1367,40 +1250,15 @@ async def get_aggregates(
                 split_by_leg,
                 timeseries_metric,
                 timeseries_percentile,
-                start_time=start_time,
-                end_time=end_time,
-                has_filters=has_filters,
-                # The rollup reader's active-hour live merge reads the BASE
-                # view, not the temp. Pass the base table + the (time-only,
-                # since unfiltered) inlined where_clause + params (empty under
-                # inline_params=True). Mirrors dashboard.py's
-                # try_time_series_from_rollup call shape.
-                table_name=table_name,
-                where_clause=where_clause,
-                params=params,
             )
             timer.mark("timeseries", _ts)
         if _run("status_codes"):
             _ts = _time.perf_counter()
-            out["status_codes"] = _origin_status_codes_from_temp(
-                r,
-                temp_table,
-                actual_set,
-                start_time=start_time,
-                end_time=end_time,
-                has_filters=has_filters,
-            )
+            out["status_codes"] = _origin_status_codes_from_temp(r, temp_table, actual_set)
             timer.mark("status_codes", _ts)
         if _run("path_breakdown"):
             _ts = _time.perf_counter()
-            out["path_breakdown"] = _origin_path_breakdown_from_temp(
-                r,
-                temp_table,
-                actual_set,
-                start_time=start_time,
-                end_time=end_time,
-                has_filters=has_filters,
-            )
+            out["path_breakdown"] = _origin_path_breakdown_from_temp(r, temp_table, actual_set)
             timer.mark("path_breakdown", _ts)
         return out
 
@@ -1413,9 +1271,6 @@ async def get_aggregates(
                 temp_table,
                 actual_set,
                 pop_latency_limit,
-                start_time=start_time,
-                end_time=end_time,
-                has_filters=has_filters,
             )
             timer.mark("pop_latency", _ts)
         if _run("ip_health"):
@@ -1425,24 +1280,15 @@ async def get_aggregates(
                 temp_table,
                 actual_set,
                 ip_health_limit,
-                start_time=start_time,
-                end_time=end_time,
-                has_filters=has_filters,
             )
             timer.mark("ip_health", _ts)
         return out
 
-    # Per-branch occupancy — a branch runs (and acquires an extra conn) only
-    # when it owns at least one MISSED requested section. Rollup-hit sections
-    # are already merged, so they neither run a helper nor cost a pool checkout.
-    # Branch 1 (primary runner) always uses ``runner`` so we never need an extra
-    # conn for the summary branch. The remaining three are gated wholesale so a
-    # single missed-card request only pays for one pool checkout instead of
-    # three.
+    # Per-branch occupancy — a branch runs only when it owns at least one
+    # MISSED requested section. Rollup-hit sections are already merged.
     branch_slow_active = _run("slow_urls")
     branch_ts_active = bool(_run("timeseries") or _run("status_codes") or _run("path_breakdown"))
     branch_pop_active = bool(_run("pop_latency") or _run("ip_health"))
-    extras_needed = sum(int(b) for b in (branch_slow_active, branch_ts_active, branch_pop_active))
 
     try:
         # Since all branch queries read from the temporary table (which is connection-scoped

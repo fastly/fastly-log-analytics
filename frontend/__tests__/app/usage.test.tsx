@@ -1,8 +1,7 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import { expect, test, vi, beforeEach, afterEach } from 'vitest'
 import UsagePage from '@/app/usage/page'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/query'
 import React from 'react'
 import { spyOnConsoleError } from '../helpers/page-smoke'
 
@@ -65,11 +64,7 @@ afterEach(() => {
 })
 
 test('usage page mounts and renders title', () => {
-  render(
-    <QueryClientProvider client={queryClient}>
-      <UsagePage />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<UsagePage />, { queryClient })
   expect(screen.getByText('System Usage')).toBeInTheDocument()
   expect(errorSpy).not.toHaveBeenCalled()
 })
@@ -80,11 +75,7 @@ test('UX-6: storage card shows an error (not "0.00 GB-hrs") and the cost is flag
     return undefined
   })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <UsagePage />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<UsagePage />, { queryClient })
   await waitFor(() => {
     expect(screen.getByText('Failed to load storage usage.')).toBeInTheDocument()
   })

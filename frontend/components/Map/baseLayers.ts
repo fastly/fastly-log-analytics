@@ -133,7 +133,7 @@ export function updateCountryBaseLayerTheme(map: MapLibreMap, isDark: boolean): 
   map.setPaintProperty(COUNTRIES_LAYER_ID, 'fill-outline-color', countryOutline(isDark))
 }
 
-export interface BaseMapOptions {
+interface BaseMapOptions {
   renderWorldCopies: boolean
   zoom: number
   /** A plain wheel scrolls the page; zoom needs Cmd/Ctrl + wheel. */

@@ -6,7 +6,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useAutoFlash } from "@/hooks/useAutoFlash";
 import { FileJson } from "lucide-react";
 
-export interface JsonImportSectionProps {
+interface JsonImportSectionProps {
   onImport: (parsed: Record<string, string>) => void;
 }
 

@@ -24,7 +24,8 @@ import {
 import { formatBytes } from '@/lib/format'
 import { formatRelative } from '@/lib/date'
 import { useDateFormat } from '@/hooks/useDateFormat'
-import { Button } from '@/components/ui/button'
+import { LabelWithInfo } from '@/components/ui/label-with-info'
+import { CardErrorState } from '@/components/CardErrorState'
 import {
   Tooltip,
   TooltipContent,
@@ -56,15 +57,11 @@ export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
 
   if (error) {
     return (
-      <Card className="border-destructive/20 bg-destructive/5">
-        <CardContent className="pt-6">
-          <div className="flex items-center gap-2 text-destructive">
-            <Info className="h-4 w-4" />
-            <span className="text-sm font-medium">Failed to load DuckLake table info</span>
-          </div>
-          <p className="text-xs text-muted-foreground mt-1">{error?.message || 'Unknown error'}</p>
-        </CardContent>
-      </Card>
+      <CardErrorState
+        icon={<Info className="h-4 w-4" />}
+        title="Failed to load DuckLake table info"
+        message={error?.message || 'Unknown error'}
+      />
     )
   }
 
@@ -102,28 +99,12 @@ export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
           <Card key={stat.label} className="shadow-none border-muted/60">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
               <CardTitle className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
-                {stat.label}
-                <TooltipProvider>
-                  <Tooltip>
-                    {/* A-8 (a11y, WCAG 2.1.1): Button (not span) so keyboard
-                        users can tab to the info icon. */}
-                    <TooltipTrigger
-                      render={
-                        <Button
-                          variant="ghost"
-                          size="icon-xs"
-                          aria-label={`More info: ${stat.label}`}
-                          className="flex items-center opacity-40 hover:opacity-100"
-                        />
-                      }
-                    >
-                      <Info className="h-3 w-3 " />
-                    </TooltipTrigger>
-                    <TooltipContent className="text-[10px] max-w-[150px]">
-                      {stat.tooltip}
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
+                <LabelWithInfo
+                  label={stat.label}
+                  info={stat.tooltip}
+                  className="gap-1.5"
+                  labelClassName="text-[10px] font-bold uppercase tracking-wider text-muted-foreground"
+                />
               </CardTitle>
               <stat.icon className="h-3.5 w-3.5 text-muted-foreground/60" />
             </CardHeader>

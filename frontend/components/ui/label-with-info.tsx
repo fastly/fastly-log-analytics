@@ -14,7 +14,7 @@ import {
 
 interface LabelWithInfoProps {
   label: string
-  info: React.ReactNode
+  info?: React.ReactNode
   className?: string
   labelClassName?: string
   htmlFor?: string
@@ -26,30 +26,32 @@ export function LabelWithInfo({ label, info, className, labelClassName, htmlFor 
       <Label htmlFor={htmlFor} className={cn("text-xs font-semibold", labelClassName)}>
         {label}
       </Label>
-      {/* A-9 (a11y, WCAG 1.4.13): inherit the accessible 400/300
-          defaults from tooltip.tsx — info-icon tooltips carry the
-          explanatory text users may need time to read and reach. */}
-      <TooltipProvider>
-        <Tooltip>
-          {/* A-8 (a11y, WCAG 2.1.1): Button (not span) so keyboard users can
-              tab to the info icon and trigger the tooltip on focus. */}
-          <TooltipTrigger
-            render={
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                aria-label={`More info: ${label}`}
-                className="flex items-center text-muted-foreground hover:text-foreground"
-              />
-            }
-          >
-            <Info className="h-3.5 w-3.5 " />
-          </TooltipTrigger>
-          <TooltipContent side="right" className="max-w-xs text-xs">
-            <p>{info}</p>
-          </TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
+      {info && (
+        /* A-9 (a11y, WCAG 1.4.13): inherit the accessible 400/300
+            defaults from tooltip.tsx — info-icon tooltips carry the
+            explanatory text users may need time to read and reach. */
+        <TooltipProvider>
+          <Tooltip>
+            {/* A-8 (a11y, WCAG 2.1.1): Button (not span) so keyboard users can
+                tab to the info icon and trigger the tooltip on focus. */}
+            <TooltipTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label={`More info: ${label}`}
+                  className="flex items-center text-muted-foreground hover:text-foreground"
+                />
+              }
+            >
+              <Info className="h-3.5 w-3.5 " />
+            </TooltipTrigger>
+            <TooltipContent side="right" className="max-w-xs text-xs">
+              <p>{info}</p>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      )}
     </div>
   )
 }

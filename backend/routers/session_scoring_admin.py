@@ -58,14 +58,11 @@ from backend.models.session_scoring import (
     ScoringThresholdState,
 )
 from backend.provision.session_scoring_setup import (
-    L2_ENABLED_AT_KEY as _L2_ENABLED_AT_KEY,
-)
-from backend.provision.session_scoring_setup import (
-    L2_ENFORCE_ENABLED_KEY as _L2_ENFORCE_ENABLED_KEY,
-)
-from backend.provision.session_scoring_setup import (
     SCORING_ENABLED_AT_KEY as _SCORING_ENABLED_AT_KEY,
 )
+
+_L2_ENABLED_AT_KEY = "l2_enabled_at"
+_L2_ENFORCE_ENABLED_KEY = "l2_enforce_enabled"
 
 # Pull the shared router + helpers from the main session_scoring module.
 # Importing the module (not the names) avoids a circular-import trap:
@@ -557,8 +554,6 @@ def scoring_enforce_threshold_get(
     request's score >= threshold, it emits X-Edge-Score-Enforce: 1,
     which the SCORING_ENFORCE_NAME VCL snippet turns into a 429.
     """
-    from backend.core.fastly.client import fastly
-
     _cfg, config_store_id, resolved_token = _require_scoring_config_store(service_id, token)
 
     cache_key = (service_id, config_store_id)
@@ -567,20 +562,10 @@ def scoring_enforce_threshold_get(
         return {**cached, "_is_cached": True}
 
     try:
-        item = fastly(
-            "GET",
-            f"/resources/stores/config/{config_store_id}/item/{_ENFORCE_THRESHOLD_KEY}",
-            token=resolved_token,
-        )
-        raw = (item or {}).get("item_value", "")
-        threshold: int | None = int(raw) if raw and raw.isdigit() else None
+        raw = _l2_get_item(config_store_id, _ENFORCE_THRESHOLD_KEY, resolved_token)
     except RuntimeError as exc:
-        # 404 from ConfigStore = key not present = enforcement not set.
-        # Mirrors the pattern in session_scoring_orchestrator.py:307-311.
-        if "404" in str(exc):
-            threshold = None
-        else:
-            raise_internal(logger, exc, code="enforce_threshold_read_failed", status=502)
+        raise_internal(logger, exc, code="enforce_threshold_read_failed", status=502)
+    threshold: int | None = int(raw) if raw and raw.isdigit() else None
 
     result = {
         "threshold": threshold,

@@ -1045,53 +1045,256 @@ def test_clickhouse_provisioner_is_none_when_clickhouse_is_disabled(clickhouse_e
     assert svcconfig.load_clickhouse_provisioner_config() is None
 
 
-# ── Cleanup script identifies orphaned fields ────────────────────────────────
+# ── Merged from test_endpoint_routing.py ──
 
 
-def test_cleanup_script_identifies_orphaned_toplevel_endpoint_name():
-    """The cleanup script should identify and remove top-level endpoint_name."""
-    import importlib.util
-    from pathlib import Path as PathlibPath
-
-    script_path = PathlibPath(__file__).parent.parent / "scripts" / "cleanup_system_fields_from_configs.py"
-    spec = importlib.util.spec_from_file_location("cleanup_script", script_path)
-    cleanup_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(cleanup_module)
-
-    assert cleanup_module.is_orphaned_toplevel_field("endpoint_name") is True
-    assert cleanup_module.is_orphaned_toplevel_field("last_reconciliation_at") is True
-    assert cleanup_module.is_orphaned_toplevel_field("name") is False
-    assert cleanup_module.is_orphaned_toplevel_field("service_id") is False
-
-
-def test_cleanup_script_removes_orphaned_fields_from_config():
-    """The cleanup script should remove orphaned fields from a config file."""
-    import importlib.util
-    from pathlib import Path as PathlibPath
-
-    script_path = PathlibPath(__file__).parent.parent / "scripts" / "cleanup_system_fields_from_configs.py"
-    spec = importlib.util.spec_from_file_location("cleanup_script", script_path)
-    cleanup_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(cleanup_module)
-
-    cfg = {
-        "service_id": "test-svc",
+def _routing_cfg(with_cdn: bool) -> dict:
+    base = {
+        "service_id": "svc1",
         "name": "Test Service",
-        "endpoint_name": "Legacy Name",
-        "last_reconciliation_at": "2026-08-07T12:00:00Z",
-        "provisioning": {"endpoint_name": "Current Name"},
-        "log_fields": {"custom_fields": []},
+        "fos_region": "us-east-1",
+        "fos_endpoint": "us-east-1.object.fastlystorage.app",
+        "fos_access_key_id": "k",
+        "fos_secret_access_key": "s",
+        "fos_bucket": "test-bucket",
+        "fos_prefix": "",
     }
+    if with_cdn:
+        base["cdn_url"] = "https://cdn.example.com"
+        base["cdn_secret"] = "abc123"
+        base["cdn_service_id"] = "cdn-svc"
+    return base
 
-    removed = []
-    for field_name in list(cfg.keys()):
-        if cleanup_module.is_orphaned_toplevel_field(field_name):
-            del cfg[field_name]
-            removed.append(field_name)
 
-    assert "endpoint_name" not in cfg
-    assert "last_reconciliation_at" not in cfg
-    assert set(removed) == {"endpoint_name", "last_reconciliation_at"}
-    assert cfg["service_id"] == "test-svc"
-    assert cfg["name"] == "Test Service"
-    assert cfg["provisioning"]["endpoint_name"] == "Current Name"
+class TestConfigToSource:
+    def test_native_endpoint_always_present(self):
+        src = svcconfig.config_to_source(_routing_cfg(with_cdn=False))
+        assert src["fos_native_endpoint"] == "us-east-1.object.fastlystorage.app"
+        assert src["endpoint"] == "us-east-1.object.fastlystorage.app"
+
+    def test_cdn_routed_endpoint_keeps_native_separate(self):
+        """When a CDN is configured, source['endpoint'] points at the CDN
+        (used by DuckDB httpfs for cached parquet GETs) but
+        source['fos_native_endpoint'] remains the native FOS host so boto3
+        and PyIceberg can do lists/writes/deletes."""
+        src = svcconfig.config_to_source(_routing_cfg(with_cdn=True))
+        assert src["endpoint"] == "cdn.example.com"
+        assert src["fos_native_endpoint"] == "us-east-1.object.fastlystorage.app"
+        assert src["fos_native_endpoint"] != src["endpoint"]
+
+
+# ── Merged from test_config_rum_enabled.py ──
+
+import pytest
+
+from backend.config import is_rum_enabled
+
+
+@pytest.mark.parametrize(
+    "cfg,expected",
+    [
+        (None, False),
+        ({}, False),
+        ({"rum_enabled": True}, True),
+        ({"rum_enabled": False}, False),
+        ({"rum": {"enabled": True}}, True),
+        ({"rum": {"enabled": False}}, False),
+        ({"rum": {"enabled": False}, "rum_enabled": True}, False),
+        ({"rum": {"enabled": True}, "rum_enabled": False}, True),
+        ({"rum": {"enabled": None}, "rum_enabled": True}, True),
+        ({"rum": {}, "rum_enabled": True}, True),
+        ({"rum": "garbage", "rum_enabled": True}, True),
+        ({"rum": None, "rum_enabled": True}, True),
+        ({"rum": {"enabled": 1}}, True),
+        ({"rum": {"enabled": 0}, "rum_enabled": True}, False),
+    ],
+)
+def test_is_rum_enabled_semantics(cfg, expected):
+    assert is_rum_enabled(cfg) is expected
+
+
+def test_rum_status_route_agrees_with_the_scheduler_when_fields_disagree(client, monkeypatch):
+    from backend import config as svcconfig
+    from tests.conftest import MOCK_SERVICE_ID
+
+    disagreeing = {"service_id": MOCK_SERVICE_ID, "rum": {"enabled": False}, "rum_enabled": True}
+    monkeypatch.setattr(svcconfig, "load_config", lambda sid: dict(disagreeing))
+    resp = client.get(f"/api/services/{MOCK_SERVICE_ID}/rum/status")
+    assert resp.status_code == 200
+    assert resp.json()["enabled"] is is_rum_enabled(disagreeing) is False
+
+
+_CASES = [
+    ({"rum": {"enabled": False}, "rum_enabled": True}, False),
+    ({"rum": {"enabled": True}, "rum_enabled": False}, True),
+    ({"rum_enabled": True}, True),
+    ({"rum": {"enabled": True}}, True),
+    ({"rum": {"enabled": None}, "rum_enabled": True}, True),
+    ({}, False),
+]
+
+
+@pytest.mark.parametrize("extra,expected", _CASES)
+def test_feature_state_from_config_uses_the_shared_resolution(extra, expected):
+    from backend.provision.declarative.state import FeatureState
+
+    state = FeatureState.from_config({"service_id": "svc", "log_period": 60, **extra})
+    assert state.rum_enabled is expected is is_rum_enabled(extra)
+
+
+@pytest.mark.parametrize("extra,expected", _CASES)
+def test_terraform_generation_uses_the_shared_resolution(extra, expected, monkeypatch):
+    from backend.provision.declarative.state import FeatureState
+    from backend.utils import terraform_gen
+
+    seen: list[dict] = []
+    real = FeatureState.from_config
+
+    def spy(cfg):
+        seen.append(cfg)
+        return real(cfg)
+
+    monkeypatch.setattr(terraform_gen.FeatureState, "from_config", staticmethod(spy))
+    terraform_gen.generate_terraform({"logging_service_id": "svc", "log_period": 60, **extra}, "AK", "SK")
+    assert seen[0]["rum_enabled"] is expected
+
+
+@pytest.mark.parametrize(
+    ("final_cfg", "expected"),
+    [
+        ({"rum": {"enabled": False}, "rum_enabled": True}, False),
+        ({"rum": {"enabled": True}, "rum_enabled": False}, True),
+        ({"rum_enabled": True}, True),
+    ],
+)
+def test_rum_enable_done_event_reports_the_shared_resolution(final_cfg, expected, client, monkeypatch):
+    import json
+
+    from backend import config as svcconfig
+    from tests.conftest import MOCK_SERVICE_ID
+
+    state = {"cfg": {"service_id": MOCK_SERVICE_ID, "fastly_api_key": "TOKEN"}}
+    monkeypatch.setattr(svcconfig, "load_config", lambda sid: dict(state["cfg"]))
+
+    def fake_run_with_events(func, *args, **kwargs):
+        yield {"type": "status", "message": "enabling RUM"}
+        state["cfg"] = {"service_id": MOCK_SERVICE_ID, "fastly_api_key": "TOKEN", **final_cfg}
+
+    monkeypatch.setattr("backend.routers.rum.run_with_events", fake_run_with_events)
+    monkeypatch.setattr("backend.cron.scheduler.get_scheduler", lambda: type("S", (), {"reload": lambda self: None})())
+
+    resp = client.post(f"/api/services/{MOCK_SERVICE_ID}/rum/enable", json={"activate": True})
+    assert resp.status_code == 200
+    events = [json.loads(line[len("data: ") :]) for line in resp.text.splitlines() if line.startswith("data: ")]
+    done = next(e for e in events if e["type"] == "done")
+    assert done["rum"]["enabled"] is expected
+
+
+# ── Merged from test_validate_ingest_mode.py ──
+
+import pytest
+
+_PG = "postgresql://fla:pw@pg:5432/ducklake"
+
+
+@pytest.fixture
+def high_scale_env(monkeypatch):
+    """A fully coherent high_scale configuration."""
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_scale")
+    monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", _PG)
+    monkeypatch.setenv("METADATA_DSN", _PG)
+    return monkeypatch
+
+
+def test_sync_mode_requires_postgres_dsns_but_no_broker(monkeypatch):
+    """Standard mode requires Postgres DSNs, but does not require CELERY_BROKER_URL."""
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "standard")
+    monkeypatch.setattr(svcconfig, "CELERY_BROKER_URL", "")
+    monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", _PG)
+    monkeypatch.setenv("METADATA_DSN", _PG)
+
+    assert svcconfig.validate_deployment_mode() is None
+
+
+def test_coherent_high_scale_config_passes(high_scale_env):
+    assert svcconfig.validate_deployment_mode() is None
+
+
+def test_high_throughput_is_rejected(monkeypatch):
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_throughput")
+    with pytest.raises(
+        RuntimeError, match="DEPLOYMENT_MODE=high_throughput has been removed; use 'standard' or 'high_scale'"
+    ):
+        svcconfig.validate_deployment_mode()
+
+
+@pytest.mark.parametrize(
+    "catalog",
+    ["", "/app/data/services/svc.ducklake", "svc.ducklake"],
+    ids=["unset", "absolute-file", "relative-file"],
+)
+def test_high_scale_rejects_non_postgres_ducklake_catalog(high_scale_env, catalog):
+    high_scale_env.setattr(svcconfig, "DUCKLAKE_CATALOG", catalog)
+
+    with pytest.raises(RuntimeError, match="requires DUCKLAKE_CATALOG to be a Postgres DSN"):
+        svcconfig.validate_deployment_mode()
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [None, "", "/app/data/services/svc.metadata.db", "sqlite:///app/data/svc.metadata.db"],
+    ids=["unset", "empty", "sqlite-path", "sqlite-url"],
+)
+def test_high_scale_rejects_non_postgres_metadata_dsn(high_scale_env, dsn):
+    if dsn is None:
+        high_scale_env.delenv("METADATA_DSN", raising=False)
+    else:
+        high_scale_env.setenv("METADATA_DSN", dsn)
+
+    with pytest.raises(RuntimeError, match="requires METADATA_DSN to be a Postgres DSN"):
+        svcconfig.validate_deployment_mode()
+
+
+@pytest.mark.parametrize("scheme", ["postgres", "postgresql"])
+def test_both_postgres_url_schemes_accepted(high_scale_env, scheme):
+    """libpq accepts both spellings; the gate must not reject the short one
+    and send an operator hunting a phantom misconfiguration."""
+    dsn = f"{scheme}://fla:pw@pg:5432/db"
+    high_scale_env.setattr(svcconfig, "DUCKLAKE_CATALOG", dsn)
+    high_scale_env.setenv("METADATA_DSN", dsn)
+
+    assert svcconfig.validate_deployment_mode() is None
+
+
+def test_metadata_dsn_error_names_the_shared_state_at_risk(high_scale_env):
+    """The message must explain WHY, matching the DuckLake error's style —
+    an operator seeing it should not need to read the source to know what
+    breaks."""
+    high_scale_env.delenv("METADATA_DSN", raising=False)
+
+    with pytest.raises(RuntimeError) as exc:
+        svcconfig.validate_deployment_mode()
+
+    msg = str(exc.value)
+    assert "job_runs" in msg
+    assert "ingest ledger" in msg
+    assert "pod-local" in msg
+
+
+def test_unknown_deployment_mode_is_rejected(monkeypatch):
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "unknown")
+
+    with pytest.raises(RuntimeError, match="DEPLOYMENT_MODE"):
+        svcconfig.validate_deployment_mode()
+
+
+@pytest.mark.parametrize("mode", ["standard", "high_scale"])
+def test_config_to_source_emits_deployment_mode(monkeypatch, tmp_path, mode):
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", mode)
+    monkeypatch.setattr(svcconfig, "duckdb_path", lambda _service_id: str(tmp_path / "service.duckdb"))
+
+    source = svcconfig.config_to_source({"service_id": "svc", "raw_layout_version": 3})
+
+    assert source["deployment_mode"] == mode
+    assert "ingest_mode" not in source
+    assert "serving_mode" not in source

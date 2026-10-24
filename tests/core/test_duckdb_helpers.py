@@ -406,7 +406,7 @@ def test_build_default_source_uses_first_configured_service():
 
 def test_reload_default_source_updates_module_globals():
     """`reload_default_source` mutates _DEFAULT_SOURCE in place +
-    updates STORAGE_MODE/ACCESS_LEVEL/DUCKDB_PATH module-globals.
+    updates DUCKDB_PATH module-global.
     Pinned because all other modules import these at startup and
     keep their reference — mutate-in-place is the only way to
     propagate."""
@@ -435,15 +435,11 @@ def test_reload_default_source_updates_module_globals():
             db_mod.reload_default_source()
 
         assert db_mod._DEFAULT_SOURCE["bucket"] == "new-bucket"
-        assert db_mod.STORAGE_MODE == "local"
-        assert db_mod.ACCESS_LEVEL == "read_only"
         assert db_mod.DUCKDB_PATH == "/tmp/new.duckdb"
     finally:
         # Restore module globals so we don't leak state into other tests
         db_mod._DEFAULT_SOURCE.clear()
         db_mod._DEFAULT_SOURCE.update(original_default)
-        db_mod.STORAGE_MODE = original_default.get("storage_mode", "cloud")
-        db_mod.ACCESS_LEVEL = original_default.get("access_level", "read_write")
         db_mod.DUCKDB_PATH = original_default.get("duckdb_path", "logs.duckdb")
 
 

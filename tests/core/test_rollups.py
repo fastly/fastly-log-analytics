@@ -822,3 +822,217 @@ def test_recompute_copy_failure_skips_hour_without_raising(tmp_path):
     bad_dir = cache_root / "rollups" / "wellknown_bots" / f"hour={h_bad}"
     if bad_dir.exists():
         assert not list(bad_dir.glob("compacted_*.parquet"))
+
+
+# ── Merged from test_commit_crash_recovery.py ──
+
+
+# ── Rollup atomic publish: a crash mid-rename leaves no trusted half-bundle ──
+
+
+def _seed_ts_table(con, table, hour_dt):
+    con.execute(
+        f"CREATE TABLE {table} (timestamp TIMESTAMPTZ, status INTEGER, cache VARCHAR, resp_bytes BIGINT, ttfb DOUBLE)"
+    )
+    for k in range(5):
+        con.execute(f"INSERT INTO {table} VALUES (?, 200, 'HIT', 100, 0.05)", [hour_dt + timedelta(minutes=k)])
+
+
+def test_rollup_copy_failure_leaves_no_partial_bundle(tmp_path, monkeypatch):
+    """If the COPY that writes the tmp parquet fails, the writer must remove
+    the tmp and publish NOTHING — never a half-written ``time_series.parquet``
+    that the reader would then trust as a complete hour."""
+    from contextlib import contextmanager
+    from unittest.mock import patch
+
+    from backend.core.rollups import time_series
+
+    @contextmanager
+    def _noop(_k):
+        yield
+
+    src = {"name": "atomic-svc", "service_id": "atomic-id", "_cache_dir_override": str(tmp_path)}
+    hour_dt = (datetime.now(UTC) - timedelta(hours=3)).replace(minute=0, second=0, microsecond=0)
+    hour = hour_dt.strftime("%Y-%m-%d-%H")
+    con = duckdb.connect(":memory:")
+    _seed_ts_table(con, "logs", hour_dt)
+
+    class _CopyFailingCon:
+        """Proxy whose ``execute`` raises on the COPY (tmp-parquet write) but
+        delegates everything else — DuckDB connection objects don't allow
+        attribute reassignment, hence the proxy. ``close()`` is a no-op so the
+        writer's ``finally: con.close()`` doesn't orphan our table."""
+
+        def __init__(self, real):
+            self._real = real
+
+        def execute(self, sql, *a, **kw):
+            if sql.strip().upper().startswith("COPY"):
+                raise duckdb.IOException("crash: disk full writing tmp parquet")
+            return self._real.execute(sql, *a, **kw)
+
+        def close(self):
+            pass
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    proxy = _CopyFailingCon(con)
+
+    with (
+        patch("backend.core.rollups._common._safe_table_for", return_value="logs"),
+        patch("backend.core.duckdb.get_connection", return_value=proxy),
+        patch("backend.core.iceberg.view._get_service_lock", _noop),
+        patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
+    ):
+        n = time_series.build_time_series_bundles("atomic-id", src, [hour])
+
+    bundle_dir = tmp_path / "rollups" / "hour_bundled" / f"hour={hour}"
+    assert n == 0, "writer reported a publish despite the COPY failing"
+    # No published bundle, and no orphan .tmp left behind.
+    assert not (bundle_dir / "time_series.parquet").exists(), "half-written bundle published after COPY failure"
+    if bundle_dir.exists():
+        leftover = [p for p in os.listdir(bundle_dir) if p.startswith(".tmp")]
+        assert leftover == [], f"orphan tmp parquet left after COPY failure: {leftover}"
+
+
+def test_reader_ignores_stray_tmp_bundle(tmp_path):
+    """A crash between tmp-write and os.replace can leave a ``.tmp_ts_*.parquet``
+    in the bundle dir. The reader keys on the exact ``time_series.parquet``
+    name, so a stray tmp must be invisible — never read as data."""
+    from backend.core.rollups import TIME_SERIES_BUNDLE_FILENAME, _hour_bundled_root
+    from backend.repositories.rollup_coverage import collect_hourly_bundle_paths
+
+    src = {"name": "stray-svc", "service_id": "stray-id", "_cache_dir_override": str(tmp_path)}
+    hour_dt = (datetime.now(UTC) - timedelta(hours=3)).replace(minute=0, second=0, microsecond=0)
+    hour = hour_dt.strftime("%Y-%m-%d-%H")
+    bundled_root = _hour_bundled_root(src)
+    hour_dir = os.path.join(bundled_root, f"hour={hour}")
+    os.makedirs(hour_dir, exist_ok=True)
+
+    # A valid bundle + a stray half-written tmp sibling.
+    con = duckdb.connect()
+    try:
+        con.execute(
+            f"COPY (SELECT TIMESTAMPTZ '{hour_dt.isoformat()}' AS bucket, 5 AS requests, 0 AS status_4xx, "
+            f"0 AS status_5xx, 0 AS hits, 0 AS cache_total, 0 AS resp_bytes_sum, 0.0 AS ttfb_sum, 0 AS ttfb_count) "
+            f"TO '{os.path.join(hour_dir, TIME_SERIES_BUNDLE_FILENAME)}' (FORMAT PARQUET)"
+        )
+    finally:
+        con.close()
+    # Garbage tmp file (not even valid parquet) — must be ignored.
+    with open(os.path.join(hour_dir, ".tmp_ts_deadbeef.parquet"), "wb") as f:
+        f.write(b"not a parquet file")
+
+    result = collect_hourly_bundle_paths(
+        src, hour_dt, hour_dt + timedelta(hours=1), bundled_root, TIME_SERIES_BUNDLE_FILENAME
+    )
+    assert result is not None
+    paths, _crosses = result
+    assert len(paths) == 1, f"reader picked up a stray/tmp file: {paths}"
+    assert paths[0].endswith(TIME_SERIES_BUNDLE_FILENAME)
+
+
+# ── Merged from test_step7_rollup_coverage.py ──
+
+
+from backend.repositories import dashboard, network, security
+from backend.repositories._base import _safe_table
+from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
+
+
+def test_unfiltered_dashboard_queries_hit_rollups_and_skip_raw_scans(in_memory_duckdb, monkeypatch):
+    """
+    Verify that when unfiltered requests are made to all default dashboard views
+    AND rollups exist, NO raw scans (temp tables) are created.
+    """
+    src = {"name": "test_service", "service_id": "test-service-id"}
+    table_name = _safe_table(src["name"])
+    logs = generate_mock_logs(src, num_logs=50)
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+
+    real_isdir = os.path.isdir
+
+    def fake_isdir(path: str) -> bool:
+        if path.endswith(os.path.join("rollups", "hour")):
+            return True
+        return real_isdir(path)
+
+    monkeypatch.setattr(dashboard.os.path, "isdir", fake_isdir)
+
+    from backend.repositories._base import QueryRunner
+
+    monkeypatch.setattr(
+        QueryRunner, "execute_top_n_rollups", lambda self, cols, *a, **k: ([(c, "val", 10) for c in cols], cols)
+    )
+    monkeypatch.setattr(
+        QueryRunner, "try_time_series_from_rollup", lambda *a, **k: [{"time": "2026-01-01T00:00:00Z", "value": 1.0}]
+    )
+    monkeypatch.setattr(QueryRunner, "try_conn_requests_hist_from_rollup", lambda *a, **k: [])
+    monkeypatch.setattr(QueryRunner, "try_security_coverage_from_rollup", lambda *a, **k: (100, 10))
+    monkeypatch.setattr(QueryRunner, "try_count_from_rollup", lambda *a, **k: [])
+    monkeypatch.setattr(QueryRunner, "try_security_top_ips_from_rollup", lambda *a, **k: [])
+    monkeypatch.setattr(QueryRunner, "try_security_req_size_from_rollup", lambda *a, **k: [(500, 10)])
+    monkeypatch.setattr(QueryRunner, "try_security_conn_reuse_from_rollup", lambda *a, **k: [(50, 10)])
+    monkeypatch.setattr(
+        QueryRunner, "try_verified_bots_ts_from_rollup", lambda *a, **k: [("2026-01-01T00:00:00Z", "Googlebot", 10)]
+    )
+    monkeypatch.setattr(
+        QueryRunner, "try_ngwaf_top_bots_from_rollup", lambda *a, **k: [("BadBot", "1.2.3.4", "AS", 5, 5)]
+    )
+    monkeypatch.setattr(QueryRunner, "try_network_heatmap_from_rollup", lambda *a, **k: [])
+    monkeypatch.setattr(QueryRunner, "try_network_geo_from_rollup", lambda *a, **k: ([], []))
+    monkeypatch.setattr(QueryRunner, "try_network_speed_from_rollup", lambda *a, **k: [])
+    monkeypatch.setattr(QueryRunner, "try_network_rtt_from_rollup", lambda *a, **k: [])
+    monkeypatch.setattr(QueryRunner, "try_origin_latency_ts_from_rollup", lambda *a, **k: [])
+    monkeypatch.setattr(QueryRunner, "try_origin_status_from_rollup", lambda *a, **k: [])
+    monkeypatch.setattr(QueryRunner, "try_origin_path_breakdown_from_rollup", lambda *a, **k: [])
+    monkeypatch.setattr(QueryRunner, "try_origin_pop_latency_from_rollup", lambda *a, **k: [])
+    monkeypatch.setattr(QueryRunner, "try_slow_urls_from_rollup", lambda *a, **k: [])
+    monkeypatch.setattr(QueryRunner, "try_origin_summary_from_rollup", lambda *a, **k: {"has_data": True})
+    monkeypatch.setattr(QueryRunner, "try_origin_ip_health_from_rollup", lambda *a, **k: [])
+    monkeypatch.setattr(QueryRunner, "try_perf_latency_from_rollup", lambda *a, **k: [])
+    monkeypatch.setattr(QueryRunner, "try_perf_ttl_dist_from_rollup", lambda *a, **k: [])
+
+    monkeypatch.setattr("backend.repositories.security._has_rollup_coverage", lambda *a, **k: True)
+    monkeypatch.setattr("backend.repositories.security._ipv6_per_hour_from_rollups", lambda *a, **k: {"count": 10})
+    monkeypatch.setattr("backend.repositories.security._proxy_dist_from_rollups", lambda *a, **k: [])
+    monkeypatch.setattr("backend.repositories.security._window_eligible_for_rollup", lambda *a, **k: True)
+    monkeypatch.setattr("backend.core.rollups.read_wellknown_bots_rollup", lambda *a, **k: [])
+    monkeypatch.setattr(
+        QueryRunner, "execute_ip_spread_rollups", lambda self, cols, *a, **k: ({(c, "val"): 10 for c in cols}, {})
+    )
+
+    res_dash = dashboard.get_aggregates(
+        con=in_memory_duckdb,
+        src=src,
+        start_time="2026-01-01T00:00:00Z",
+        end_time="2026-01-02T00:00:00Z",
+        filters={},
+        chart_interval="1 hour",
+        chart_metric="requests",
+    )
+    timings_dash = [t["section"] for t in res_dash.get("section_timings", [])]
+    assert "temp_table_create" not in timings_dash, f"Dashboard raw scan! {timings_dash}"
+
+    res_sec = security.get_security_aggregates(
+        con=in_memory_duckdb,
+        src=src,
+        start_time="2026-01-01T00:00:00Z",
+        end_time="2026-01-02T00:00:00Z",
+        filters={},
+        bucket_seconds=3600,
+    )
+    timings_sec = [t["section"] for t in res_sec.get("section_timings", [])]
+    assert "temp_table_create" in timings_sec, "Security verified_bots_ts requires temp table"
+
+    res_net_health = network.get_health(
+        con_factory=lambda: in_memory_duckdb,
+        src=src,
+        start_time="2026-01-01T00:00:00Z",
+        end_time="2026-01-02T00:00:00Z",
+        filters={},
+        bucket_seconds=3600,
+    )
+    timings_net_health = [t["section"] for t in res_net_health.get("section_timings", [])]
+    assert "temp_table_create" not in timings_net_health, f"Network health raw scan! {timings_net_health}"

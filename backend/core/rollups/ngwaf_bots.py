@@ -170,6 +170,20 @@ def _purge_stale_ngwaf_bots_parquets(source: dict) -> int:
     return purged
 
 
+def _ngwaf_bots_eligibility(cols: set[str], *, require_timestamp: bool = False) -> dict[str, str] | None:
+    if "waf_req_id" not in cols or (require_timestamp and "timestamp" not in cols):
+        return None
+    from backend import config as svcconfig
+
+    db_path = svcconfig.ngwaf_sqlite_cache_override()
+    if db_path and not os.path.exists(db_path):
+        return None
+    values_sql = _read_ngwaf_bots_as_values_sql(db_path)
+    if values_sql is None:
+        return None
+    return {"ngwaf_values_sql": values_sql}
+
+
 def build_ngwaf_bots_bundles(service_id: str, source: dict, hours: list[str]) -> int:
     """Write a per-hour ngwaf_bots rollup for each closed hour.
 
@@ -182,17 +196,7 @@ def build_ngwaf_bots_bundles(service_id: str, source: dict, hours: list[str]) ->
     """
 
     def eligibility(cols, table_ident):
-        if "waf_req_id" not in cols:
-            return None
-        from backend import config as svcconfig
-
-        db_path = svcconfig.ngwaf_sqlite_cache_override()
-        if db_path and not os.path.exists(db_path):
-            return None
-        values_sql = _read_ngwaf_bots_as_values_sql(db_path)
-        if values_sql is None:
-            return None
-        return {"ngwaf_values_sql": values_sql}
+        return _ngwaf_bots_eligibility(cols)
 
     def build_copy_sql(ctx, table_ident, start_iso, end_iso, tmp_path):
         return (
@@ -252,17 +256,7 @@ def build_ngwaf_bots_ts_bundles(service_id: str, source: dict, hours: list[str])
     """
 
     def eligibility(cols, table_ident):
-        if "waf_req_id" not in cols or "timestamp" not in cols:
-            return None
-        from backend import config as svcconfig
-
-        db_path = svcconfig.ngwaf_sqlite_cache_override()
-        if db_path and not os.path.exists(db_path):
-            return None
-        values_sql = _read_ngwaf_bots_as_values_sql(db_path)
-        if values_sql is None:
-            return None
-        return {"ngwaf_values_sql": values_sql}
+        return _ngwaf_bots_eligibility(cols, require_timestamp=True)
 
     def build_copy_sql(ctx, table_ident, start_iso, end_iso, tmp_path):
         return (

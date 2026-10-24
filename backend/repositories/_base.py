@@ -2448,12 +2448,8 @@ class QueryRunner:
             f"ORDER BY p95_us_w DESC "
             f"LIMIT ?"
         )
-        try:
-            rows = self.execute(sql, [min_requests, limit]).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[slow_urls_rollup] read failed, falling back to raw: %s", e)
+        rows = self._exec_rollup(sql, [min_requests, limit], tag="slow_urls_rollup")
+        if rows is None:
             return None
 
         out_rows = []
@@ -2509,6 +2505,73 @@ class QueryRunner:
             observation=observation,
         )
 
+    def _rollup_paths_sql(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        bundle_filename: str,
+        *,
+        has_filters: bool,
+        require_top_asns: list[int] | None = None,
+        min_hours: int | None = None,
+        skip_partial_start: bool = True,
+        allow_empty_with_done: bool = False,
+    ) -> str | None:
+        """Check rollup window eligibility, collect bundle paths, and return
+        the quoted ``read_parquet([...])`` path list string (or ``None``)."""
+        win = self._eligible_rollup_window(
+            start_time,
+            end_time,
+            has_filters=has_filters,
+            require_top_asns=require_top_asns,
+            min_hours=min_hours,
+        )
+        if win is None:
+            return None
+        st, et = win
+        rollup_paths = self._collect_rollup_paths(
+            st,
+            et,
+            bundle_filename,
+            skip_partial_start=skip_partial_start,
+            allow_empty_with_done=allow_empty_with_done,
+        )
+        if rollup_paths is None:
+            return None
+        return quote_path_list(rollup_paths)
+
+    def _exec_rollup(
+        self,
+        sql: str,
+        params: list[Any] | None = None,
+        *,
+        tag: str,
+    ) -> list[Any] | None:
+        """Execute a rollup query and return ``fetchall()``, or ``None`` on DuckDB error."""
+        try:
+            return self.execute(sql, params).fetchall() if params is not None else self.execute(sql).fetchall()
+        except duckdb.InterruptException:
+            raise
+        except duckdb.Error as e:
+            _logger.debug("[%s] read failed, falling back to raw: %s", tag, e)
+            return None
+
+    def _exec_rollup_one(
+        self,
+        sql: str,
+        params: list[Any] | None = None,
+        *,
+        tag: str,
+    ) -> Any | None:
+        """Execute a single-row rollup query and return ``fetchone()``, or ``None`` on DuckDB error."""
+        try:
+            return self.execute(sql, params).fetchone() if params is not None else self.execute(sql).fetchone()
+        except duckdb.InterruptException:
+            raise
+        except duckdb.Error as e:
+            _logger.debug("[%s] read failed, falling back to raw: %s", tag, e)
+            return None
+
     def try_origin_summary_from_rollup(
         self,
         start_time: str | None,
@@ -2540,16 +2603,11 @@ class QueryRunner:
         """
         from backend.core.rollups._common import ORIGIN_SUMMARY_BUNDLE_FILENAME
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
-        if win is None:
+        paths_sql = self._rollup_paths_sql(
+            start_time, end_time, ORIGIN_SUMMARY_BUNDLE_FILENAME, has_filters=has_filters
+        )
+        if paths_sql is None:
             return None
-        st, et = win
-
-        rollup_paths = self._collect_rollup_paths(st, et, ORIGIN_SUMMARY_BUNDLE_FILENAME)
-        if rollup_paths is None:
-            return None
-
-        paths_sql = quote_path_list(rollup_paths)
         sql = (
             f"SELECT "
             f"  CAST(SUM(requests) AS BIGINT)                                AS requests, "
@@ -2567,14 +2625,7 @@ class QueryRunner:
             f"  SUM(obytes_p50 * obytes_count) / NULLIF(SUM(obytes_count), 0)  AS obytes_p50 "
             f"FROM read_parquet([{paths_sql}])"
         )
-        try:
-            row = self.execute(sql).fetchone()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[origin_summary_rollup] read failed, falling back to raw: %s", e)
-            return None
-
+        row = self._exec_rollup_one(sql, tag="origin_summary_rollup")
         if row is None or row[0] is None or row[0] == 0:
             # No data in the rolled-up window — let raw serve so the
             # caller's has_data=False return shape matches what would
@@ -2646,16 +2697,9 @@ class QueryRunner:
         """
         from backend.core.rollups._common import ORIGIN_POP_BUNDLE_FILENAME
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
-        if win is None:
+        paths_sql = self._rollup_paths_sql(start_time, end_time, ORIGIN_POP_BUNDLE_FILENAME, has_filters=has_filters)
+        if paths_sql is None:
             return None
-        st, et = win
-
-        rollup_paths = self._collect_rollup_paths(st, et, ORIGIN_POP_BUNDLE_FILENAME)
-        if rollup_paths is None:
-            return None
-
-        paths_sql = quote_path_list(rollup_paths)
         sql = (
             f"SELECT pop, "
             f"       CAST(SUM(requests) AS BIGINT) AS requests, "
@@ -2666,14 +2710,7 @@ class QueryRunner:
             f"ORDER BY p95_us_w DESC "
             f"LIMIT ?"
         )
-        try:
-            rows = self.execute(sql, [limit]).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[origin_pop_rollup] read failed, falling back: %s", e)
-            return None
-
+        rows = self._exec_rollup(sql, [limit], tag="origin_pop_rollup")
         if not rows:
             return None
 
@@ -2730,18 +2767,9 @@ class QueryRunner:
         """
         from backend.core.rollups._common import ORIGIN_IP_BUNDLE_FILENAME
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
-        if win is None:
+        paths_sql = self._rollup_paths_sql(start_time, end_time, ORIGIN_IP_BUNDLE_FILENAME, has_filters=has_filters)
+        if paths_sql is None:
             return None
-        st, et = win
-
-        rollup_paths = self._collect_rollup_paths(st, et, ORIGIN_IP_BUNDLE_FILENAME)
-        if rollup_paths is None:
-            return None
-
-        # error_pct mirrors IP_HEALTH's ROUND(... , 1); HAVING + ORDER + LIMIT
-        # re-applied at the window grain (the live HAVING is COUNT >= 10).
-        paths_sql = quote_path_list(rollup_paths)
         sql = (
             f"SELECT oip, "
             f"       CAST(SUM(requests) AS BIGINT) AS requests, "
@@ -2754,14 +2782,7 @@ class QueryRunner:
             f"ORDER BY error_pct DESC "
             f"LIMIT ?"
         )
-        try:
-            rows = self.execute(sql, [limit]).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[origin_ip_rollup] read failed, falling back: %s", e)
-            return None
-
+        rows = self._exec_rollup(sql, [limit], tag="origin_ip_rollup")
         if not rows:
             return None
 
@@ -2800,16 +2821,9 @@ class QueryRunner:
         """
         from backend.core.rollups._common import ORIGIN_PATH_BUNDLE_FILENAME
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
-        if win is None:
+        paths_sql = self._rollup_paths_sql(start_time, end_time, ORIGIN_PATH_BUNDLE_FILENAME, has_filters=has_filters)
+        if paths_sql is None:
             return None
-        st, et = win
-
-        rollup_paths = self._collect_rollup_paths(st, et, ORIGIN_PATH_BUNDLE_FILENAME)
-        if rollup_paths is None:
-            return None
-
-        paths_sql = quote_path_list(rollup_paths)
         sql = (
             f"SELECT edge, "
             f"       CAST(SUM(requests) AS BIGINT) AS requests, "
@@ -2818,14 +2832,7 @@ class QueryRunner:
             f"FROM read_parquet([{paths_sql}]) "
             f"GROUP BY edge"
         )
-        try:
-            rows = self.execute(sql).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[origin_path_rollup] read failed, falling back: %s", e)
-            return None
-
+        rows = self._exec_rollup(sql, tag="origin_path_rollup")
         if not rows:
             return None
 
@@ -2875,18 +2882,9 @@ class QueryRunner:
         """
         from backend.core.rollups._common import DAY_BUNDLE_FILENAME
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
-        if win is None:
+        paths_sql = self._rollup_paths_sql(start_time, end_time, DAY_BUNDLE_FILENAME, has_filters=has_filters)
+        if paths_sql is None:
             return None
-        st, et = win
-
-        # all_fields.parquet is the shared per-field bundle (schema:
-        # field, hour, value, count). Day-prefer / hour-fallback walk.
-        rollup_paths = self._collect_rollup_paths(st, et, DAY_BUNDLE_FILENAME)
-        if rollup_paths is None:
-            return None
-
-        paths_sql = quote_path_list(rollup_paths)
         sql = (
             f"SELECT status, "
             f"       CAST(SUM(count) AS BIGINT) AS count, "
@@ -2904,14 +2902,7 @@ class QueryRunner:
             f"GROUP BY status "
             f"ORDER BY count DESC"
         )
-        try:
-            rows = self.execute(sql).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[origin_status_rollup] read failed, falling back: %s", e)
-            return None
-
+        rows = self._exec_rollup(sql, tag="origin_status_rollup")
         if not rows:
             return None
 
@@ -3074,12 +3065,8 @@ class QueryRunner:
             f"ORDER BY out_bucket"
         )
 
-        try:
-            rows = self.execute(final_sql, params if crosses_active else []).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[origin_latency_ts_rollup] read failed, falling back to raw: %s", e)
+        rows = self._exec_rollup(final_sql, params if crosses_active else [], tag="origin_latency_ts_rollup")
+        if rows is None:
             return None
 
         series: list[dict] = []
@@ -3131,14 +3118,10 @@ class QueryRunner:
             return None
         st, et = win
 
-        def _run_dim(
-            filename: str, group_col: str, filter_sql: str = "", filter_params: list = None
-        ) -> list[dict] | None:
+        def _run_dim(filename: str, filter_sql: str = "", filter_params: list = None) -> list[dict] | None:
             rollup_paths = self._collect_rollup_paths(st, et, filename)
             if not rollup_paths:
                 return None
-            from backend.core.rollups._common import quote_path_list
-
             paths_sql = quote_path_list(rollup_paths)
 
             sql = (
@@ -3159,19 +3142,19 @@ class QueryRunner:
             ]
 
         try:
-            by_country = _run_dim(NETWORK_QUALITY_COUNTRY_FILENAME, "country")
+            by_country = _run_dim(NETWORK_QUALITY_COUNTRY_FILENAME)
             if by_country is None:
                 return None
 
-            by_asn = _run_dim(NETWORK_QUALITY_ASN_FILENAME, "asn")
+            by_asn = _run_dim(NETWORK_QUALITY_ASN_FILENAME)
             if by_asn is None:
                 return None
 
-            by_pop = _run_dim(NETWORK_QUALITY_POP_FILENAME, "pop")
+            by_pop = _run_dim(NETWORK_QUALITY_POP_FILENAME)
             if by_pop is None:
                 return None
 
-            by_region = _run_dim(NETWORK_QUALITY_REGION_FILENAME, "region", "AND country = ?", [region_country])
+            by_region = _run_dim(NETWORK_QUALITY_REGION_FILENAME, "AND country = ?", [region_country])
             if by_region is None:
                 return None
 
@@ -3217,24 +3200,19 @@ class QueryRunner:
         """
         from backend.core.rollups._common import NETWORK_RTT_BUNDLE_FILENAME
 
-        win = self._eligible_rollup_window(
-            start_time, end_time, has_filters=has_filters, require_top_asns=top_asns, min_hours=24
+        paths_sql = self._rollup_paths_sql(
+            start_time,
+            end_time,
+            NETWORK_RTT_BUNDLE_FILENAME,
+            has_filters=has_filters,
+            require_top_asns=top_asns,
+            min_hours=24,
         )
-        if win is None:
-            return None
-        st, et = win
-
-        # Same day-prefer / hour-fallback walk as the other percentile
-        # rollups. Network_rtt has no day-level compaction yet, but the
-        # shared walk keeps the structure so adding one later is just a
-        # writer drop-in.
-        rollup_paths = self._collect_rollup_paths(st, et, NETWORK_RTT_BUNDLE_FILENAME)
-        if rollup_paths is None:
+        if paths_sql is None:
             return None
 
         # Parameterise the top-N ASN list; never interpolate ints into SQL.
         asn_placeholders = ", ".join(["?"] * len(top_asns))
-        paths_sql = quote_path_list(rollup_paths)
         sql = (
             f"SELECT asn, "
             f"  SUM(p95_us * rtt_count) / NULLIF(SUM(rtt_count), 0) AS p95_us, "
@@ -3243,12 +3221,8 @@ class QueryRunner:
             f"WHERE asn IN ({asn_placeholders}) "
             f"GROUP BY asn"
         )
-        try:
-            rows = self.execute(sql, top_asns).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[network_rtt_rollup] read failed, falling back: %s", e)
+        rows = self._exec_rollup(sql, top_asns, tag="network_rtt_rollup")
+        if rows is None:
             return None
 
         out: dict[int, dict[str, float | None]] = {}
@@ -3329,12 +3303,8 @@ class QueryRunner:
                 f"GROUP BY asn, c_speed "
                 f"ORDER BY asn, cnt DESC"
             )
-        try:
-            rows = self.execute(sql, top_asns).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[network_speed_rollup] read failed, falling back: %s", e)
+        rows = self._exec_rollup(sql, top_asns, tag="network_speed_rollup")
+        if rows is None:
             return None
         return [(int(r[0]), str(r[1]), int(r[2])) for r in rows]
 
@@ -3465,14 +3435,7 @@ class QueryRunner:
                 f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
                 f" ORDER BY reqs DESC"
             )
-        try:
-            rows = self.execute(sql).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[network_heatmap_rollup] read failed, falling back: %s", e)
-            return None
-
+        rows = self._exec_rollup(sql, tag="network_heatmap_rollup")
         if not rows:
             return None
         return list(rows)
@@ -3750,12 +3713,8 @@ class QueryRunner:
             f"  GROUP BY 1, 2"
             f") GROUP BY bucket, bot_type ORDER BY bucket, bot_type"
         )
-        try:
-            rows = self.execute(sql).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[verified_bots_ts_rollup] read failed, falling back: %s", e)
+        rows = self._exec_rollup(sql, tag="verified_bots_ts_rollup")
+        if rows is None:
             return None
         return [(r[0], str(r[1]), int(r[2])) for r in rows]
 
@@ -3794,16 +3753,9 @@ class QueryRunner:
         filename = PERF_TOP_URLS_BUNDLE_FILENAME if dimension == "url" else PERF_TOP_ASNS_BUNDLE_FILENAME
         # Whitelist → safe to interpolate; default p99 mirrors the live sort.
         sort_col = {"avg": "avg_us", "p50": "p50_us_w", "p95": "p95_us_w", "p99": "p99_us_w"}.get(sort_by, "p99_us_w")
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
-        if win is None:
+        paths_sql = self._rollup_paths_sql(start_time, end_time, filename, has_filters=has_filters)
+        if paths_sql is None:
             return None
-        st, et = win
-
-        rollup_paths = self._collect_rollup_paths(st, et, filename)
-        if rollup_paths is None:
-            return None
-
-        paths_sql = quote_path_list(rollup_paths)
         sql = (
             f"SELECT value, "
             f"       CAST(SUM(requests) AS BIGINT) AS requests, "
@@ -3817,12 +3769,8 @@ class QueryRunner:
             f"ORDER BY {sort_col} DESC "
             f"LIMIT ?"
         )
-        try:
-            rows = self.execute(sql, [min_requests, limit]).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[perf_latency_rollup] read failed, falling back: %s", e)
+        rows = self._exec_rollup(sql, [min_requests, limit], tag="perf_latency_rollup")
+        if rows is None:
             return None
 
         def _ms(v: Any) -> float | None:
@@ -3850,29 +3798,16 @@ class QueryRunner:
         bundle_filename: str,
         log_tag: str,
     ) -> list[dict] | None:
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
-        if win is None:
+        paths_sql = self._rollup_paths_sql(start_time, end_time, bundle_filename, has_filters=has_filters)
+        if paths_sql is None:
             return None
-        st, et = win
-
-        rollup_paths = self._collect_rollup_paths(st, et, bundle_filename)
-        if rollup_paths is None:
-            return None
-
-        paths_sql = quote_path_list(rollup_paths)
         sql = (
             f"SELECT bucket, CAST(SUM(count) AS BIGINT) AS c, MIN(min_val) AS mv "
             f"FROM read_parquet([{paths_sql}]) "
             f"GROUP BY bucket "
             f"ORDER BY mv"
         )
-        try:
-            rows = self.execute(sql).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[%s] read failed, falling back: %s", log_tag, e)
-            return None
+        rows = self._exec_rollup(sql, tag=log_tag)
         if not rows:
             return None
         return [{"bucket": r[0], "count": int(r[1] or 0)} for r in rows]
@@ -4309,12 +4244,8 @@ class QueryRunner:
             f"FROM read_parquet([{paths_sql}]) "
             f"GROUP BY bot_name, wellknown_bot_name, category"
         )
-        try:
-            rows = self.execute(sql).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[ngwaf_verified_bots_rollup] read failed, falling back: %s", e)
+        rows = self._exec_rollup(sql, tag="ngwaf_verified_bots_rollup")
+        if rows is None:
             return None
 
         counts: dict[tuple[str | None, str | None, str | None], int] = {}
@@ -4411,12 +4342,8 @@ class QueryRunner:
             f"WHERE bucket_ts >= TIMESTAMPTZ '{st_iso}' AND bucket_ts < TIMESTAMPTZ '{et_iso}' "
             f"GROUP BY 1, 2"
         )
-        try:
-            rows = self.execute(sql).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[ngwaf_verified_bots_ts_rollup] read failed, falling back: %s", e)
+        rows = self._exec_rollup(sql, tag="ngwaf_verified_bots_ts_rollup")
+        if rows is None:
             return None
 
         counts: dict[tuple[Any, str], int] = {}
@@ -4475,16 +4402,11 @@ class QueryRunner:
         """
         from backend.core.rollups._common import SECURITY_TOPIPS_BUNDLE_FILENAME
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
-        if win is None:
+        paths_sql = self._rollup_paths_sql(
+            start_time, end_time, SECURITY_TOPIPS_BUNDLE_FILENAME, has_filters=has_filters
+        )
+        if paths_sql is None:
             return None
-        st, et = win
-
-        rollup_paths = self._collect_rollup_paths(st, et, SECURITY_TOPIPS_BUNDLE_FILENAME)
-        if rollup_paths is None:
-            return None
-
-        paths_sql = quote_path_list(rollup_paths)
         sql = (
             f"SELECT ip, CAST(MAX(max_header) AS BIGINT) AS mh "
             f"FROM read_parquet([{paths_sql}]) "
@@ -4492,13 +4414,7 @@ class QueryRunner:
             f"ORDER BY mh DESC "
             f"LIMIT 10"
         )
-        try:
-            rows = self.execute(sql).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[security_top_ips_rollup] read failed, falling back: %s", e)
-            return None
+        rows = self._exec_rollup(sql, tag="security_top_ips_rollup")
         if not rows:
             return None
         return [{"ip": r[0], "max_header": int(r[1] or 0)} for r in rows]
@@ -4523,24 +4439,11 @@ class QueryRunner:
         """
         from backend.core.rollups._common import SECURITY_COV_BUNDLE_FILENAME
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
-        if win is None:
+        paths_sql = self._rollup_paths_sql(start_time, end_time, SECURITY_COV_BUNDLE_FILENAME, has_filters=has_filters)
+        if paths_sql is None:
             return None
-        st, et = win
-
-        rollup_paths = self._collect_rollup_paths(st, et, SECURITY_COV_BUNDLE_FILENAME)
-        if rollup_paths is None:
-            return None
-
-        paths_sql = quote_path_list(rollup_paths)
         sql = f"SELECT SUM(total_rows), SUM(tls_populated) FROM read_parquet([{paths_sql}])"
-        try:
-            row = self.execute(sql).fetchone()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[security_coverage_rollup] read failed, falling back: %s", e)
-            return None
+        row = self._exec_rollup_one(sql, tag="security_coverage_rollup")
         if row is None or row[0] is None or int(row[0]) == 0:
             return None
         return int(row[0]), int(row[1] or 0)
@@ -4743,32 +4646,27 @@ class QueryRunner:
         """
         from backend.core.rollups._common import SECURITY_BOT_EFF_BUNDLE_FILENAME, SECURITY_BOT_EFF_UA_TOP_K
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
-        if win is None:
-            return None
-        st, et = win
-
-        rollup_paths = self._collect_rollup_paths(st, et, SECURITY_BOT_EFF_BUNDLE_FILENAME, allow_empty_with_done=True)
-        if not rollup_paths:
+        paths_sql = self._rollup_paths_sql(
+            start_time,
+            end_time,
+            SECURITY_BOT_EFF_BUNDLE_FILENAME,
+            has_filters=has_filters,
+            allow_empty_with_done=True,
+        )
+        if paths_sql is None:
             return None
 
         sql = (
             f"WITH g AS ("
             f"  SELECT kind, key, CAST(SUM(cnt) AS BIGINT) AS cnt, CAST(SUM(resp_bytes) AS BIGINT) AS resp_bytes "
-            f"  FROM read_parquet([{quote_path_list(rollup_paths)}]) GROUP BY kind, key"
+            f"  FROM read_parquet([{paths_sql}]) GROUP BY kind, key"
             f"), r AS ("
             f"  SELECT *, ROW_NUMBER() OVER (PARTITION BY kind ORDER BY resp_bytes DESC, cnt DESC) AS rn FROM g"
             f") "
             f"SELECT kind, key, cnt, resp_bytes FROM r WHERE kind != 'ua' OR rn <= {SECURITY_BOT_EFF_UA_TOP_K}"
         )
-        try:
-            rows = self.execute(sql).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[security_bot_efficiency_rollup] read failed, falling back: %s", e)
-            return None
-        if not any(r[0] == "site" for r in rows):
+        rows = self._exec_rollup(sql, tag="security_bot_efficiency_rollup")
+        if not rows or not any(r[0] == "site" for r in rows):
             return None
         return [(str(r[0]), str(r[1] or ""), int(r[2] or 0), int(r[3] or 0)) for r in rows]
 
@@ -4798,28 +4696,17 @@ class QueryRunner:
         """
         from backend.core.rollups._common import PERF_TTL_DIST_BUNDLE_FILENAME
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
-        if win is None:
+        paths_sql = self._rollup_paths_sql(start_time, end_time, PERF_TTL_DIST_BUNDLE_FILENAME, has_filters=has_filters)
+        if paths_sql is None:
             return None
-        st, et = win
-
-        rollup_paths = self._collect_rollup_paths(st, et, PERF_TTL_DIST_BUNDLE_FILENAME)
-        if rollup_paths is None:
-            return None
-
-        paths_sql = quote_path_list(rollup_paths)
         sql = (
             f"SELECT bucket, CAST(SUM(count) AS BIGINT) AS count "
             f"FROM read_parquet([{paths_sql}]) "
             f"GROUP BY bucket "
             f"ORDER BY MIN(min_ttl)"
         )
-        try:
-            rows = self.execute(sql).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[perf_ttl_dist_rollup] read failed, falling back: %s", e)
+        rows = self._exec_rollup(sql, tag="perf_ttl_dist_rollup")
+        if rows is None:
             return None
         return [{"bucket": r[0], "count": int(r[1])} for r in rows]
 

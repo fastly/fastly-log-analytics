@@ -1,9 +1,9 @@
 'use client'
 
 import React from 'react'
-import { formatBytes } from '@/lib/format'
+import { formatBytes, formatUSD } from '@/lib/format'
 import { ResultRow } from './parts'
-import { fmtN, fmtUSD } from './calc'
+import { fmtN } from './calc'
 import type { CalcState, CalcResults } from './calc'
 
 interface ResultsProps {
@@ -19,33 +19,33 @@ export function Results({ s, r }: ResultsProps) {
         <ResultRow
           label='Class A Operations (writes, lists)'
           detail={`${fmtN(Math.round(r.classAPerMonth))} ops @ $${s.rateA}/1k`}
-          cost={fmtUSD(r.costA)}
+          cost={formatUSD(r.costA)}
         />
         <ResultRow
           label='Class B Operations (reads)'
           detail={`${fmtN(Math.round(r.classBPerMonth))} ops @ $${s.rateB}/1k`}
-          cost={fmtUSD(r.costB)}
+          cost={formatUSD(r.costB)}
         />
         <ResultRow
           label='Storage (GB-months billed)'
           detail={r.storageTiers.map(t => `${t.label}: ${Math.max(0.001, t.gbMonths).toFixed(3)} GB-mo${t.flagged ? '*' : ''}`).join(' · ')}
-          cost={fmtUSD(r.costStorage)}
+          cost={formatUSD(r.costStorage)}
         />
         <ResultRow
           label='CDN Egress'
           detail={`${r.cdnEgressGB.toFixed(3)} GB`}
-          cost={fmtUSD(r.costEgress)}
+          cost={formatUSD(r.costEgress)}
         />
         {s.rumBeaconsDay > 0 && (
           <ResultRow
             label='Real User Monitoring (RUM) Cost Portion'
             detail={`${fmtN(Math.round(r.rumBeaconsMonth))} beacons · ${Math.max(0.001, r.rumParquetGBMonths).toFixed(3)} GB RUM storage (included in Class A & Storage above)`}
-            cost={fmtUSD(r.costRum)}
+            cost={formatUSD(r.costRum)}
           />
         )}
         <ResultRow
           label='Total Estimated Monthly Cost'
-          cost={fmtUSD(r.totalCost)}
+          cost={formatUSD(r.totalCost)}
           highlight
         />
       </div>

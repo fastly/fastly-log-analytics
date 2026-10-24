@@ -96,3 +96,64 @@ class TestLintDocument:
         assert res.ok is True
         assert res.skipped is True
         assert "falco" in res.skipped_reason.lower()
+
+
+# ── Merged from test_path_safety.py ──
+
+import os
+
+from backend.utils.path_safety import path_within_dir
+
+
+def test_path_within_dir_basic(tmp_path):
+    base_dir = str(tmp_path)
+
+    # 1. Path inside base directory
+    candidate = str(tmp_path / "subdir" / "file.txt")
+    assert path_within_dir(base_dir, candidate) is True
+
+    # 2. Path equals base directory
+    assert path_within_dir(base_dir, base_dir) is True
+
+    # 3. Path outside base directory via relative traversal
+    candidate_escape = str(tmp_path / ".." / "other_dir")
+    assert path_within_dir(base_dir, candidate_escape) is False
+
+
+def test_path_within_dir_value_error_fallback(monkeypatch):
+    # Mock os.path.commonpath to raise ValueError to test the exception block coverage
+    def mock_commonpath(paths):
+        raise ValueError("Simulated drive mismatch or empty paths")
+
+    monkeypatch.setattr(os.path, "commonpath", mock_commonpath)
+    assert path_within_dir("/tmp/base", "/tmp/base/candidate") is False
+
+
+# ── Merged from test_sql_literal_escaping_sites.py ──
+
+import pytest
+
+from backend.core.rollups._common import quote_path_list
+from backend.utils.sql_validator import escape_sql_literal
+
+
+def test_quote_path_list_doubles_embedded_quotes() -> None:
+    assert quote_path_list(["/a/o'brien.parquet", "/b.parquet"]) == "'/a/o''brien.parquet', '/b.parquet'"
+
+
+def test_escape_sql_literal_rejects_non_str() -> None:
+    with pytest.raises(TypeError):
+        escape_sql_literal(5)  # type: ignore[arg-type]
+
+
+def test_no_hand_rolled_quote_doubling_left_in_backend() -> None:
+    import pathlib
+
+    needle = 'replace("\'", "\'\'")'
+    root = pathlib.Path(__file__).resolve().parents[2] / "backend"
+    offenders = [
+        str(p.relative_to(root))
+        for p in root.rglob("*.py")
+        if needle in p.read_text(encoding="utf-8") and p.name != "sql_validator.py"
+    ]
+    assert offenders == []

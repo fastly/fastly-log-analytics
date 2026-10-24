@@ -449,3 +449,418 @@ def test_remove_endpoint_failed_rollback_is_logged_not_masked(caplog):
         with pytest.raises(RuntimeError, match="Validation failed"):
             _remove_endpoint(fake)
     assert any("rollback activation of version 10 failed" in r.getMessage() for r in caplog.records)
+
+
+# ── Merged from test_cdn_service_config_writes.py ──
+
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from backend import config as svcconfig
+
+_MERGE_SID = "logsvc1"
+
+
+@pytest.fixture
+def reconcile():
+    with (
+        patch("backend.provision.declarative.reconciler.reconcile_cdn_service_state") as mock_reconcile,
+        patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=True),
+    ):
+        mock_reconcile.return_value = SimpleNamespace(activated_version=3)
+        yield mock_reconcile
+
+
+def test_ensure_cdn_service_creates_config_when_absent(reconcile):
+    assert svcconfig.load_config(_MERGE_SID) is None
+
+    reconcile.side_effect = lambda **kw: svcconfig.mutate_config(
+        _MERGE_SID, lambda c: c.setdefault("fos_proxy", {}).update(service_id="cdn123")
+    )
+    out = fastly_api.ensure_cdn_service({"service_id": _MERGE_SID, "fos_bucket": "b"}, "AK", "SK", "tok")
+
+    saved = json.loads(svcconfig.config_path(_MERGE_SID).read_text())
+    assert saved["fos_bucket"] == "b"
+    assert saved["fos_access_key_id"] == "AK"
+    assert saved["fos_secret_access_key"] == "SK"
+    assert saved["rum"]["cid_salt"]
+    assert out["id"] == "cdn123"
+
+
+def test_ensure_cdn_service_merges_into_existing_config_and_keeps_cid_salt(reconcile):
+    svcconfig.save_config(_MERGE_SID, {"service_id": _MERGE_SID, "keep_me": 1, "rum": {"enabled": True}})
+    salt = svcconfig.load_config(_MERGE_SID)["rum"]["cid_salt"]
+
+    # the orchestrator's in-memory cfg replaces the rum block wholesale, without the salt
+    fastly_api.ensure_cdn_service(
+        {"service_id": _MERGE_SID, "fos_bucket": "b", "rum": {"enabled": False}}, "AK", "SK", "tok"
+    )
+
+    saved = json.loads(svcconfig.config_path(_MERGE_SID).read_text())
+    assert saved["keep_me"] == 1
+    assert saved["fos_bucket"] == "b"
+    assert saved["fos_access_key_id"] == "AK"
+    assert saved["rum"]["enabled"] is False
+    assert saved["rum"]["cid_salt"] == salt
+
+
+def test_redeploy_cdn_vcl_sets_rate_limiting_without_touching_other_keys():
+    svcconfig.save_config(
+        _MERGE_SID,
+        {"service_id": _MERGE_SID, "cdn_service_id": "cdn9", "fos_proxy": {"service_id": "cdn9"}, "other": [1, 2]},
+    )
+    with patch("backend.provision.declarative.reconciler.reconcile_cdn_service_state") as mock_reconcile:
+        mock_reconcile.return_value = SimpleNamespace(activated_version=4)
+        assert fastly_api.redeploy_cdn_vcl("cdn9", "tok", rate_limiting=False) == 4
+
+    saved = json.loads(svcconfig.config_path(_MERGE_SID).read_text())
+    assert saved["fos_proxy"] == {"service_id": "cdn9", "rate_limiting_enabled": False}
+    assert saved["other"] == [1, 2]
+
+
+def test_redeploy_cdn_vcl_creates_missing_fos_proxy_block():
+    svcconfig.save_config(_MERGE_SID, {"service_id": _MERGE_SID, "cdn_service_id": "cdn9"})
+    with patch("backend.provision.declarative.reconciler.reconcile_cdn_service_state") as mock_reconcile:
+        mock_reconcile.return_value = SimpleNamespace(activated_version=5)
+        fastly_api.redeploy_cdn_vcl("cdn9", "tok", rate_limiting=True)
+
+    assert svcconfig.load_config(_MERGE_SID)["fos_proxy"] == {"rate_limiting_enabled": True}
+
+
+# ── Merged from test_update_logging_endpoint_config_merge.py ──
+
+
+import pytest
+
+from backend.provision.declarative.reconciler import ReconciliationResult
+from tests._helpers.config_fakes import config_lock_held as _lock_held
+from tests._helpers.config_fakes import read_persisted_config as _persisted
+
+_MERGE_SID = "logsvc1"
+
+
+def _drain(gen):
+    return list(gen)
+
+
+@pytest.fixture
+def stored():
+    svcconfig.save_config(_MERGE_SID, {"service_id": _MERGE_SID, "keep_me": 1, "provisioning": {"keep_prov": "x"}})
+    return svcconfig.load_config(_MERGE_SID)
+
+
+@pytest.fixture
+def fastly_stubs():
+    with (
+        patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=None) as rl,
+        patch(
+            "backend.provision.declarative.reconciler.reconcile_vcl_state",
+            return_value=ReconciliationResult(service_id=_MERGE_SID, activated_version=11, changes_applied=["fmt"]),
+        ) as reconcile,
+    ):
+        yield rl, reconcile
+
+
+def test_persists_requested_fields_and_keeps_everything_else(stored, fastly_stubs):
+
+    salt = stored["rum"]["cid_salt"]
+
+    events = _drain(
+        fastly_api.update_logging_endpoint(
+            {
+                "logging_service_id": _MERGE_SID,
+                "provisioning": {"endpoint_name": "EP"},
+                "sample_rate": 50,
+                "edge_only": True,
+                "log_period": 120,
+                "fos_path": "/raw/%H/",
+            },
+            "tok",
+        )
+    )
+
+    saved = _persisted()
+    assert saved["provisioning"] == {"keep_prov": "x", "sample_rate": 50, "edge_only": True, "endpoint_name": "EP"}
+    assert saved["log_period"] == 120
+    assert saved["fos_path"] == "/raw/%H/"
+    assert saved["keep_me"] == 1
+    assert saved["rum"]["cid_salt"] == salt
+    assert events[-1]["type"] == "done"
+
+
+def test_rate_limit_probe_result_lands_without_clobbering_a_concurrent_writer(stored, fastly_stubs):
+    rl, _ = fastly_stubs
+
+    def probe(_token, _sid):
+        assert not _lock_held(), "config lock held across a Fastly call"
+        svcconfig.mutate_config(_MERGE_SID, lambda c: c.update(concurrent_key="kept"))
+        return True
+
+    rl.side_effect = probe
+
+    _drain(fastly_api.update_logging_endpoint({"logging_service_id": _MERGE_SID, "log_period": 60}, "tok"))
+
+    saved = _persisted()
+    assert saved["concurrent_key"] == "kept"
+    assert saved["provisioning"]["rate_limiting"] is True
+    assert saved["keep_me"] == 1
+
+
+def test_config_lock_is_not_held_while_reconciling(stored, fastly_stubs):
+    _, reconcile = fastly_stubs
+    seen: list[bool] = []
+
+    def spy(*_a, **_kw):
+        seen.append(_lock_held())
+        return ReconciliationResult(service_id=_MERGE_SID, activated_version=11, changes_applied=["fmt"])
+
+    reconcile.side_effect = spy
+
+    _drain(fastly_api.update_logging_endpoint({"logging_service_id": _MERGE_SID, "log_period": 60}, "tok"))
+
+    assert seen == [False]
+
+
+def test_missing_config_raises_before_any_fastly_call(fastly_stubs):
+    rl, reconcile = fastly_stubs
+
+    with pytest.raises(RuntimeError, match="not found|empty"):
+        _drain(fastly_api.update_logging_endpoint({"logging_service_id": _MERGE_SID, "log_period": 60}, "tok"))
+
+    rl.assert_not_called()
+    reconcile.assert_not_called()
+    assert not svcconfig.config_path(_MERGE_SID).exists()
+
+
+# ── Merged from test_write_service_config_merge.py ──
+
+from backend.provision import orchestrator
+
+_MERGE_SID = "logsvc1"
+
+
+def _state(**overrides) -> dict:
+    base = {
+        "logging_service_id": _MERGE_SID,
+        "service_name": "Test Service",
+        "fos_region": "us-east-1",
+        "fos_bucket_name": "test-bucket",
+        "fos_access_key_id": "AKIA",
+        "fos_secret_access_key": "secret",
+        "cdn_url": "https://test.example",
+        "cdn_secret": "cdn-secret",
+        "cdn_service_id": "cdn-1",
+        "admin_token": "tok",
+        "log_period": 60,
+        "log_fields": {"groups": ["A"]},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_first_write_creates_the_config_with_a_cid_salt():
+
+    assert svcconfig.load_config(_MERGE_SID) is None
+
+    orchestrator.write_service_config(_state())
+
+    saved = _persisted()
+    assert saved["service_id"] == _MERGE_SID
+    assert saved["name"] == "Test Service"
+    assert saved["fos_bucket"] == "test-bucket"
+    assert saved["fastly_api_key"] == "tok"
+    assert saved["provisioning"]["cron_sync"]["interval_seconds"] == 60
+    assert saved["created_at"]
+    assert saved["rum"]["cid_salt"]
+
+
+def test_rewrite_keeps_code_managed_blocks_and_the_cid_salt():
+    svcconfig.save_config(
+        _MERGE_SID,
+        {
+            "service_id": _MERGE_SID,
+            "scoring": {"enabled": True, "scoring_service_id": "S"},
+            "cmcd": {"enabled": True},
+            "ngwaf_workspace_id": "ws",
+            "rum": {"faro_version": "1.2.3"},
+            "log_fields": {"groups": ["A"], "custom_fields": [{"name": "mine", "duckdb_type": "VARCHAR"}]},
+        },
+    )
+    salt = svcconfig.load_config(_MERGE_SID)["rum"]["cid_salt"]
+    created_at = svcconfig.load_config(_MERGE_SID)["created_at"]
+
+    orchestrator.write_service_config(_state())
+
+    saved = _persisted()
+    assert saved["scoring"] == {"enabled": True, "scoring_service_id": "S"}
+    assert saved["cmcd"] == {"enabled": True}
+    assert saved["ngwaf_workspace_id"] == "ws"
+    assert saved["rum"]["faro_version"] == "1.2.3"
+    assert saved["rum"]["cid_salt"] == salt
+    assert saved["created_at"] == created_at
+    assert [cf["name"] for cf in saved["log_fields"]["custom_fields"]] == ["mine"]
+
+
+def test_rewrite_does_not_replace_the_cid_salt_with_one_from_the_request_body():
+    svcconfig.save_config(_MERGE_SID, {"service_id": _MERGE_SID})
+    salt = svcconfig.load_config(_MERGE_SID)["rum"]["cid_salt"]
+
+    orchestrator.write_service_config(_state(rum={"enabled": True, "cid_salt": "attacker-chosen"}))
+
+    saved = _persisted()
+    assert saved["rum"]["cid_salt"] == salt
+    assert saved["rum"]["enabled"] is True
+
+
+def test_rewrite_keeps_stored_keys_the_wizard_does_not_own():
+    svcconfig.save_config(
+        _MERGE_SID,
+        {
+            "service_id": _MERGE_SID,
+            "fos_proxy": {"service_id": "cdn-proxy"},
+            "status": {"state": "ok"},
+            "last_activated_version": 7,
+            "rum_vcl_sha": "sha",
+        },
+    )
+
+    orchestrator.write_service_config(_state())
+
+    saved = _persisted()
+    assert saved["fos_proxy"] == {"service_id": "cdn-proxy"}
+    assert saved["status"] == {"state": "ok"}
+    assert saved["last_activated_version"] == 7
+    assert saved["rum_vcl_sha"] == "sha"
+    assert saved["fos_bucket"] == "test-bucket"
+
+
+# ── Merged from test_system_fields.py ──
+
+from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES
+from backend.provision.session_scoring_orchestrator import _SCORING_FIELD_NAMES
+from backend.provision.system_fields import (
+    reconcile_cfg_system_custom_fields,
+    reconcile_system_custom_fields,
+    system_feature_flags,
+)
+
+_USER_FIELD = {"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True}
+
+
+def _names(fields: list[dict]) -> set[str]:
+    return {cf["name"] for cf in fields}
+
+
+# ── system_feature_flags ─────────────────────────────────────────────────────
+
+
+def test_flags_read_both_features():
+    assert system_feature_flags({}) == (False, False)
+    assert system_feature_flags({"cmcd": {"enabled": True}}) == (False, True)
+    assert system_feature_flags({"scoring": {"enabled": True}}) == (True, False)
+    assert system_feature_flags({"scoring": {"enabled": True}, "cmcd": {"enabled": True}}) == (True, True)
+
+
+def test_flags_tolerate_null_blocks():
+    """A config that carries ``cmcd: null`` must not raise."""
+    assert system_feature_flags({"cmcd": None, "scoring": None}) == (False, False)
+
+
+# ── reconcile_system_custom_fields ───────────────────────────────────────────
+
+
+def test_cmcd_fields_reinjected_when_enabled():
+    """THE REGRESSION: a non-empty list that omits cmcd_* must regain them."""
+    out = reconcile_system_custom_fields([_USER_FIELD], scoring_enabled=False, cmcd_enabled=True)
+    names = _names(out)
+    for name in _CMCD_FIELD_NAMES:
+        assert name in names, f"CMCD field {name!r} was not re-injected"
+    assert "my_custom" in names, "user custom_field was wrongly stripped"
+
+
+def test_cmcd_fields_stripped_when_disabled():
+    """Disable must converge too — stale cmcd_* entries are removed."""
+    stale = [_USER_FIELD, {"name": "cmcd_sid", "duckdb_type": "VARCHAR"}]
+    out = reconcile_system_custom_fields(stale, scoring_enabled=False, cmcd_enabled=False)
+    assert _names(out) == {"my_custom"}
+
+
+def test_stale_cmcd_entries_replaced_by_canonical():
+    """A remote/partial cmcd_* entry is replaced, not duplicated."""
+    stale = [{"name": "cmcd_sid", "duckdb_type": "WRONG", "enabled": False}]
+    out = reconcile_system_custom_fields(stale, scoring_enabled=False, cmcd_enabled=True)
+    sids = [cf for cf in out if cf["name"] == "cmcd_sid"]
+    assert len(sids) == 1, "cmcd_sid duplicated instead of replaced"
+    assert sids[0]["duckdb_type"] == "VARCHAR"
+    assert sids[0]["enabled"] is True
+
+
+def test_both_features_coexist():
+    out = reconcile_system_custom_fields([_USER_FIELD], scoring_enabled=True, cmcd_enabled=True)
+    names = _names(out)
+    assert _CMCD_FIELD_NAMES <= names
+    assert _SCORING_FIELD_NAMES <= names
+    assert "my_custom" in names
+
+
+def test_scoring_enabled_does_not_drag_in_cmcd():
+    """The two features are independent — scoring on, CMCD off."""
+    out = reconcile_system_custom_fields([_USER_FIELD], scoring_enabled=True, cmcd_enabled=False)
+    names = _names(out)
+    assert _SCORING_FIELD_NAMES <= names
+    assert not (_CMCD_FIELD_NAMES & names)
+
+
+def test_none_input_is_safe():
+    out = reconcile_system_custom_fields(None, scoring_enabled=False, cmcd_enabled=True)
+    assert _CMCD_FIELD_NAMES <= _names(out)
+
+
+def test_returned_entries_are_copies():
+    """Callers mutating the result must not corrupt the module-level canon."""
+    first = reconcile_system_custom_fields(None, scoring_enabled=False, cmcd_enabled=True)
+    first[0]["label"] = "MUTATED"
+    second = reconcile_system_custom_fields(None, scoring_enabled=False, cmcd_enabled=True)
+    assert second[0]["label"] != "MUTATED"
+
+
+def test_idempotent():
+    once = reconcile_system_custom_fields([_USER_FIELD], scoring_enabled=True, cmcd_enabled=True)
+    twice = reconcile_system_custom_fields(once, scoring_enabled=True, cmcd_enabled=True)
+    assert _names(once) == _names(twice)
+    assert len(once) == len(twice), "repeat reconcile duplicated entries"
+
+
+# ── reconcile_cfg_system_custom_fields ───────────────────────────────────────
+
+
+def test_cfg_level_reconcile_mutates_in_place():
+    cfg = {
+        "cmcd": {"enabled": True},
+        "log_fields": {"schema_version": 2, "custom_fields": [_USER_FIELD]},
+    }
+    reconcile_cfg_system_custom_fields(cfg)
+    names = _names(cfg["log_fields"]["custom_fields"])
+    assert _CMCD_FIELD_NAMES <= names
+    assert "my_custom" in names
+
+
+def test_cfg_level_reconcile_creates_missing_log_fields():
+    """A config with no log_fields block still gets the v2 default shape."""
+    cfg = {"cmcd": {"enabled": True}}
+    reconcile_cfg_system_custom_fields(cfg)
+    assert cfg["log_fields"]["schema_version"] == 2
+    assert _CMCD_FIELD_NAMES <= _names(cfg["log_fields"]["custom_fields"])
+
+
+def test_cfg_level_reconcile_strips_when_feature_off():
+    cfg = {
+        "log_fields": {
+            "schema_version": 2,
+            "custom_fields": [_USER_FIELD, {"name": "cmcd_br", "duckdb_type": "INTEGER"}],
+        }
+    }
+    reconcile_cfg_system_custom_fields(cfg)
+    assert _names(cfg["log_fields"]["custom_fields"]) == {"my_custom"}

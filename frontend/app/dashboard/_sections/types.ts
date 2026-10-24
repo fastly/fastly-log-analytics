@@ -52,5 +52,3 @@ export interface DashboardBodyProps {
   isAutoRange: boolean
   anchor: string
 }
-
-export type { ReportConfiguration }

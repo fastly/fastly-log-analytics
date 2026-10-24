@@ -82,17 +82,6 @@ DEBUG_LOG_DEFAULT = "0"
 # into enforcement, but it never turns L2 on automatically. The actual L2
 # enforcement gate is the operator's explicit opt-in (see L2_ENFORCE_ENABLED_KEY).
 SCORING_ENABLED_AT_KEY = "scoring_enabled_at"
-# Layer-2 enforcement opt-in (scoring_config). ``l2_enforce_enabled`` is the
-# explicit operator switch the Rust scorer reads to decide whether L2 joins the
-# *enforced* combined score ("1" = on); ``l2_enabled_at`` is the UNIX-epoch
-# anchor the backend stamps on the off→on transition so the scorer can fade L2
-# in over a few days from the moment of consent (NOT from deployment age). Both
-# are written by the ``/scoring/l2-enforce`` admin endpoint, not at provision
-# time — a freshly-provisioned service has neither key, so L2 stays observe-only
-# until an operator explicitly opts in. The 7-day ``scoring_enabled_at`` deploy
-# age above is now only an advisory readiness gauge surfaced in the admin UI.
-L2_ENFORCE_ENABLED_KEY = "l2_enforce_enabled"
-L2_ENABLED_AT_KEY = "l2_enabled_at"
 CURRENT_KEY_HEX = "current_key_hex"
 PREVIOUS_KEY_HEX = "previous_key_hex"  # blank until first rotation
 # Shared secret VCL → Compute. The customer's VCL service embeds this

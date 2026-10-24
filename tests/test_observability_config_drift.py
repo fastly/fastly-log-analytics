@@ -128,3 +128,93 @@ def test_chart_observability_copies_are_byte_identical() -> None:
             f"{rel} drifted from the canonical observability/{rel}. Re-copy it: "
             f"cp observability/{rel} deploy/chart/fastly-log-analytics/files/observability/{rel}"
         )
+
+
+# ── Merged from test_docker_stats_exporter.py ──
+
+from observability.docker_stats_exporter import _block_io_bytes
+
+
+def test_block_io_bytes_sums_read_and_write_operations():
+    stats = {
+        "blkio_stats": {
+            "io_service_bytes_recursive": [
+                {"op": "Read", "value": 1024},
+                {"op": "Write", "value": 2048},
+                {"op": "Read", "value": 512},
+                {"op": "Sync", "value": 99},
+            ]
+        }
+    }
+
+    assert _block_io_bytes(stats) == (1536, 2048)
+
+
+def test_block_io_bytes_handles_missing_or_invalid_values():
+    assert _block_io_bytes({}) == (0, 0)
+    assert _block_io_bytes(
+        {"blkio_stats": {"io_service_bytes_recursive": [{"op": "Read"}, {"op": "Write", "value": "bad"}]}}
+    ) == (0, 0)
+
+
+# ── Merged from test_elevation_dashboard.py ──
+
+import json
+from pathlib import Path
+
+import pytest
+
+
+def _dashboard() -> dict:
+    dashboard_path = Path("local-docs/fla-multipod-elevation.json")
+    if not dashboard_path.exists():
+        pytest.skip("Elevation dashboard export is intentionally local-only")
+    return json.loads(dashboard_path.read_text())
+
+
+def test_elevation_dashboard_includes_high_scale_operational_panels() -> None:
+    dashboard = _dashboard()
+    panels = dashboard["panels"]
+    panel_text = json.dumps(panels)
+
+    expected_metrics = (
+        "fla_high_scale_source_objects",
+        "fla_high_scale_oldest_active_age_seconds",
+        "fla_high_scale_publication_lag_seconds",
+        "fla_high_scale_pending_manifests",
+        "fla_high_scale_rows_published_total",
+    )
+
+    assert len({panel["id"] for panel in panels}) == len(panels)
+    for metric in expected_metrics:
+        assert metric in panel_text
+
+
+def test_elevation_dashboard_keeps_variable_based_promql() -> None:
+    dashboard = _dashboard()
+    panel_text = json.dumps(dashboard["panels"])
+
+    assert "$site" in panel_text
+    assert "$namespace" in panel_text
+
+
+# ── Merged from test_clickhouse_compose.py ──
+
+
+def test_prometheus_preserves_requested_bytes_series_via_recording_alias():
+    prometheus = yaml.safe_load(Path("observability/prometheus.yml").read_text())
+    assert "/etc/prometheus/clickhouse.rules.yml" in prometheus["rule_files"]
+    overlay = yaml.safe_load(Path("docker-compose.observability.yml").read_text())
+    assert (
+        "./deploy/chart/fastly-log-analytics/files/observability/clickhouse.rules.yml:/etc/prometheus/clickhouse.rules.yml:ro"
+        in overlay["services"]["prometheus"]["volumes"]
+    )
+    rules = yaml.safe_load(
+        Path("deploy/chart/fastly-log-analytics/files/observability/clickhouse.rules.yml").read_text()
+    )
+    assert rules["groups"][0]["rules"] == [
+        {
+            "record": "app_clickhouse_bytes_read_bytes_total",
+            "expr": "app_clickhouse_bytes_read_total",
+        }
+    ]

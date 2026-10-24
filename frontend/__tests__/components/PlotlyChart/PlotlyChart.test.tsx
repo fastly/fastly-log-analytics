@@ -14,6 +14,7 @@ import React from 'react'
 
 import { PlotlyChart } from '@/components/PlotlyChart/PlotlyChart'
 import type { PlotlyConfig, PlotlyGraphDiv, PlotlyLayout, PlotlyRelayoutEvent } from '@/types/plotly'
+import { stubResizeObserver } from '../../helpers/browser-stubs'
 
 // Capture every Plot render so each test can pull its most recent props.
 type PlotStubProps = {
@@ -58,18 +59,12 @@ class MockIntersectionObserver {
   thresholds = []
 }
 
-class MockResizeObserver {
-  observe() {}
-  disconnect() {}
-  unobserve() {}
-}
-
 beforeEach(() => {
   plotCalls.length = 0
   lastIOCallback = null
   lastIOOptions = null
   vi.stubGlobal('IntersectionObserver', MockIntersectionObserver)
-  vi.stubGlobal('ResizeObserver', MockResizeObserver)
+  stubResizeObserver()
 })
 
 describe('PlotlyChart', () => {

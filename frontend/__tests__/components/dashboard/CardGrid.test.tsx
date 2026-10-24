@@ -158,4 +158,27 @@ describe('CardGrid', () => {
     expect(screen.getByText('Custom')).toBeInTheDocument()
     expect(screen.getByTestId('card-custom_field_42')).toBeInTheDocument()
   })
+
+  it('renders CardErrorState + Retry for a bot card when top-bots errors (not a forever spinner)', () => {
+    const onRetryTopBots = vi.fn()
+    render(
+      <CardGrid
+        visibleCardList={[{ id: '_bot_name', label: 'Top Bots', inActiveFormat: false }]}
+        isReady={true}
+        isFetchingAggs={false}
+        aggregates={{ data: {} }}
+        compareAggregates={undefined}
+        compareMode={false}
+        topBotsData={undefined}
+        topBotsError={new Error('top-bots boom')}
+        onRetryTopBots={onRetryTopBots}
+        collapsedSections={new Set()}
+        toggleSectionCollapsed={() => {}}
+        onRowClick={() => {}}
+      />,
+    )
+    expect(screen.getByText('Failed to load bot data.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
+    expect(screen.queryByText('Loading...')).toBeNull()
+  })
 })

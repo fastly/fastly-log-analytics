@@ -1,8 +1,7 @@
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { screen, waitFor, fireEvent } from '@testing-library/react'
 import { expect, test, vi, beforeEach } from 'vitest'
 import InsightsClient from '@/app/insights/_sections/InsightsClient'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/query'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useSessionRoleStore } from '@/stores/sessionRoleStore'
 import type { ReactNode } from 'react'
@@ -72,11 +71,7 @@ test('renders insights page and displays insight cards', async () => {
     },
   })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <InsightsClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<InsightsClient />, { queryClient })
 
   expect(screen.getByText('Anomaly Detection')).toBeInTheDocument()
 
@@ -102,11 +97,7 @@ test('adapts the default window/baseline to a service with ~2h of history', asyn
     data: { insights: [], computed_at: new Date().toISOString() },
   })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <InsightsClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<InsightsClient />, { queryClient })
 
   // ~2h history → window 1h / baseline 1h reaches the /api/insights request
   // (instead of the static 7-day baseline that would just say "not enough data").
@@ -120,6 +111,30 @@ test('adapts the default window/baseline to a service with ~2h of history', asyn
     },
     { timeout: 3000 },
   )
+})
+
+test('uses the SSR service and adaptive seed before the service store hydrates', async () => {
+  useServiceStore.setState({ activeServiceId: null, isInitialized: false })
+  queryClient.setQueryData(['bootstrap'], { active_service_id: 'test-svc' })
+  queryClient.setQueryData(['log-extents', 'test-svc'], {
+    earliest_log_at: new Date(Date.now() - 36 * 3600_000).toISOString(),
+    latest_log_at: new Date().toISOString(),
+  })
+  queryClient.setQueryData(['insights', 'test-svc', '4', '24'], {
+    insights: [{
+      id: 'seeded-insight',
+      title: 'Seeded anomaly',
+      category: 'edge',
+      severity: 'warning',
+    }],
+    computed_at: new Date().toISOString(),
+  })
+  apiGet.mockResolvedValue({ data: { unavailable: [] } })
+
+  renderWithQuery(<InsightsClient />, { queryClient })
+
+  expect(screen.getByText('Seeded anomaly')).toBeInTheDocument()
+  expect(apiPost).not.toHaveBeenCalled()
 })
 
 test('renders all 6 category tabs and enforces zero-CLS layout reservation classes', async () => {
@@ -139,11 +154,7 @@ test('renders all 6 category tabs and enforces zero-CLS layout reservation class
     },
   })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <InsightsClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<InsightsClient />, { queryClient })
 
   // Verify all 6 tabs are rendered
   await waitFor(() => {
@@ -176,11 +187,7 @@ test('displays unavailable insights alert with link to service-config', async ()
     data: { insights: [], computed_at: new Date().toISOString() },
   })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <InsightsClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<InsightsClient />, { queryClient })
 
   await waitFor(() => {
     expect(screen.getByText(/2 insights are unavailable/i)).toBeInTheDocument()
@@ -198,11 +205,7 @@ test('renders Re-scan button for Admin and handles force_refresh', async () => {
     data: { insights: [], computed_at: new Date().toISOString() },
   })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <InsightsClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<InsightsClient />, { queryClient })
 
   await waitFor(() => {
     expect(screen.getByRole('button', { name: /re-scan/i })).toBeInTheDocument()
@@ -224,11 +227,7 @@ test('hides Re-scan button for Remote Analyst', async () => {
     data: { insights: [], computed_at: new Date().toISOString() },
   })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <InsightsClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<InsightsClient />, { queryClient })
 
   await waitFor(() => {
     expect(screen.getByText('Anomaly Detection')).toBeInTheDocument()
@@ -246,11 +245,7 @@ test('displays clean pass state when a category has no anomalies', async () => {
     },
   })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <InsightsClient initialTab="security" />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<InsightsClient initialTab="security" />, { queryClient })
 
   await waitFor(() => {
     expect(screen.getByTestId('insights-empty-pass')).toBeInTheDocument()

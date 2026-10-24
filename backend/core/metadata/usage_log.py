@@ -552,20 +552,16 @@ def _query_usage_log_aggregate_rollup(
     return rows
 
 
-def get_usage_logs(
+def _build_usage_log_where(
     service_id: str,
     start: str,
     end: str,
-    *,
-    usage_type: str = "",
-    process_context: str = "",
-    operation_type: str = "",
-    page: int = 1,
-    page_size: int = 100,
-) -> tuple[list[dict], int, dict]:
-    """Paginated usage log query with aggregates. Used by the Usage Log page."""
+    usage_type: str,
+    process_context: str,
+    operation_type: str,
+) -> tuple[str, list[Any]]:
     conditions = ["service_id = ?", "timestamp >= ?", "timestamp <= ?"]
-    params: list = [service_id, start, end]
+    params: list[Any] = [service_id, start, end]
 
     pred, pred_params = _usage_class_predicate(usage_type)
     if pred:
@@ -579,7 +575,22 @@ def get_usage_logs(
         conditions.append("operation_type LIKE ?")
         params.append(f"%{operation_type}%")
 
-    where = " AND ".join(conditions)
+    return " AND ".join(conditions), params
+
+
+def get_usage_logs(
+    service_id: str,
+    start: str,
+    end: str,
+    *,
+    usage_type: str = "",
+    process_context: str = "",
+    operation_type: str = "",
+    page: int = 1,
+    page_size: int = 100,
+) -> tuple[list[dict], int, dict]:
+    """Paginated usage log query with aggregates. Used by the Usage Log page."""
+    where, params = _build_usage_log_where(service_id, start, end, usage_type, process_context, operation_type)
 
     # Open a short-lived RO connection so a slow paginated SELECT can't
     # queue behind the cron writer's WAL commit.
@@ -708,22 +719,7 @@ def iter_usage_logs_chunks(
     dicts; callers iterate them and stream out without materialising
     the whole result.
     """
-    conditions = ["service_id = ?", "timestamp >= ?", "timestamp <= ?"]
-    params: list = [service_id, start, end]
-
-    pred, pred_params = _usage_class_predicate(usage_type)
-    if pred:
-        conditions.append(pred)
-        params.extend(pred_params)
-
-    if process_context:
-        conditions.append("process_context LIKE ?")
-        params.append(f"%{process_context}%")
-    if operation_type:
-        conditions.append("operation_type LIKE ?")
-        params.append(f"%{operation_type}%")
-
-    where = " AND ".join(conditions)
+    where, params = _build_usage_log_where(service_id, start, end, usage_type, process_context, operation_type)
 
     try:
         con = _usage_log_db.open_readonly(service_id)
@@ -858,10 +854,29 @@ def flush_telemetry_buffer(*, only_service: str | None = None) -> None:
                 logger.debug("flush_telemetry_buffer: commit failed for %s (ignored)", sid, exc_info=True)
     finally:
         if only_service is None:
+            pg_connection.release_pg_thread_connection()
             with _telemetry_lock:
                 _telemetry_flush_in_progress = False
                 if _telemetry_query_buf or _telemetry_section_buf:
                     _schedule_telemetry_flush()
+
+
+def _enqueue_telemetry_row(target_buf: dict[str, list[Any]], service_id: str, row: tuple[Any, ...]) -> None:
+    global _telemetry_flush_in_progress
+    with _telemetry_lock:
+        target_buf.setdefault(service_id, []).append(row)
+        total = sum(len(v) for v in _telemetry_query_buf.values()) + sum(
+            len(v) for v in _telemetry_section_buf.values()
+        )
+        if total >= _TELEMETRY_FLUSH_BATCH_SIZE and not _telemetry_flush_in_progress:
+            _telemetry_flush_in_progress = True
+            needs_immediate = True
+        else:
+            needs_immediate = False
+            if not _telemetry_flush_in_progress:
+                _schedule_telemetry_flush()
+    if needs_immediate:
+        threading.Thread(target=flush_telemetry_buffer, daemon=True).start()
 
 
 def log_telemetry_query(
@@ -872,23 +887,11 @@ def log_telemetry_query(
     sql: str,
     duration_ms: float,
 ) -> None:
-    global _telemetry_flush_in_progress
-    now = iso_z_now()
-    row = (now, page_load_id, request_id, engine, sql, duration_ms)
-    with _telemetry_lock:
-        _telemetry_query_buf.setdefault(service_id, []).append(row)
-        total = sum(len(v) for v in _telemetry_query_buf.values()) + sum(
-            len(v) for v in _telemetry_section_buf.values()
-        )
-        if total >= _TELEMETRY_FLUSH_BATCH_SIZE and not _telemetry_flush_in_progress:
-            _telemetry_flush_in_progress = True
-            needs_immediate = True
-        else:
-            needs_immediate = False
-            if not _telemetry_flush_in_progress:
-                _schedule_telemetry_flush()
-    if needs_immediate:
-        threading.Thread(target=flush_telemetry_buffer, daemon=True).start()
+    _enqueue_telemetry_row(
+        _telemetry_query_buf,
+        service_id,
+        (iso_z_now(), page_load_id, request_id, engine, sql, duration_ms),
+    )
 
 
 def log_telemetry_section(
@@ -898,23 +901,11 @@ def log_telemetry_section(
     section_name: str,
     duration_ms: float,
 ) -> None:
-    global _telemetry_flush_in_progress
-    now = iso_z_now()
-    row = (now, page_load_id, request_id, section_name, duration_ms)
-    with _telemetry_lock:
-        _telemetry_section_buf.setdefault(service_id, []).append(row)
-        total = sum(len(v) for v in _telemetry_query_buf.values()) + sum(
-            len(v) for v in _telemetry_section_buf.values()
-        )
-        if total >= _TELEMETRY_FLUSH_BATCH_SIZE and not _telemetry_flush_in_progress:
-            _telemetry_flush_in_progress = True
-            needs_immediate = True
-        else:
-            needs_immediate = False
-            if not _telemetry_flush_in_progress:
-                _schedule_telemetry_flush()
-    if needs_immediate:
-        threading.Thread(target=flush_telemetry_buffer, daemon=True).start()
+    _enqueue_telemetry_row(
+        _telemetry_section_buf,
+        service_id,
+        (iso_z_now(), page_load_id, request_id, section_name, duration_ms),
+    )
 
 
 def get_page_telemetry(service_id: str, page_load_id: str) -> dict:

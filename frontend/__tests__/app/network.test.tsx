@@ -1,8 +1,7 @@
-import { render, screen } from '@testing-library/react'
+import { screen } from '@testing-library/react'
 import { expect, test, vi, beforeEach, afterEach } from 'vitest'
 import NetworkPage from '@/app/network/page'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/query'
 import type { ReactNode } from 'react'
 import { spyOnConsoleError } from '../helpers/page-smoke'
 
@@ -78,11 +77,7 @@ test('network page mounts and renders unavailable state when fields not active',
   mockPost.mockResolvedValue({ data: { available: false, reason: 'Network fields not enabled' } })
   mockGet.mockResolvedValue({ data: { data: [] } })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <NetworkPage />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<NetworkPage />, { queryClient })
   expect(screen.getByText('Network & ASN Health')).toBeInTheDocument()
   expect(await screen.findByText('Network Metrics Unavailable')).toBeInTheDocument()
   expect(screen.getByText('Network fields not enabled')).toBeInTheDocument()
@@ -181,11 +176,7 @@ test('network page renders full dashboard with transport metrics and leaderboard
     },
   })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <NetworkPage />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<NetworkPage />, { queryClient })
 
   // Verify shell and summary cards
   expect(screen.getByText('Network & ASN Health')).toBeInTheDocument()
@@ -246,11 +237,7 @@ test('transport section displays missing fields banner when optional fields not 
   })
   mockGet.mockResolvedValue({ data: { data: [] } })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <NetworkPage />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<NetworkPage />, { queryClient })
 
   expect(await screen.findByTestId('missing-transport-fields-banner')).toBeInTheDocument()
   expect(screen.getByText('tcp_rtt, retrans, ploss')).toBeInTheDocument()
@@ -263,11 +250,7 @@ test('network health queries keep the range-wire key shape and request body afte
   const { resolveRangeWire } = await import('@/lib/range-wire')
   const { quantizeAnchor } = await import('@/lib/time-window')
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <NetworkPage />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<NetworkPage />, { queryClient })
   await screen.findByText('Network Metrics Unavailable')
 
   const anchor = quantizeAnchor('2026-01-01T01:00:00Z')
@@ -301,11 +284,7 @@ test('UX-4: Network Quality section stays mounted with an error surface on a /ne
     return { data: { available: true } }
   })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <NetworkPage />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<NetworkPage />, { queryClient })
   expect(await screen.findByText('Network Quality')).toBeInTheDocument()
   expect((await screen.findAllByRole('alert')).length).toBeGreaterThan(0)
 })

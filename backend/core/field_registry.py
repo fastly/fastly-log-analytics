@@ -62,29 +62,6 @@ class DuckType(StrEnum):
     DOUBLE = "DOUBLE"
 
 
-class Agg(StrEnum):
-    COUNT = "count"
-    COUNT_DISTINCT = "count_distinct"
-    SUM = "sum"
-    AVG = "avg"
-    MIN = "min"
-    MAX = "max"
-    GROUP_BY = "group_by"
-
-
-class FilterOp(StrEnum):
-    EQ = "eq"
-    NEQ = "neq"
-    GT = "gt"
-    GTE = "gte"
-    LT = "lt"
-    LTE = "lte"
-    CONTAINS = "contains"
-    STARTS_WITH = "starts_with"
-    IN = "in"
-    NOT_IN = "not_in"
-
-
 class Group(StrEnum):
     """Field grouping. Values match the legacy `group` column.
 
@@ -117,24 +94,6 @@ class Group(StrEnum):
         if raw is None:
             return cls.CORE
         return cls(raw)
-
-
-# ---------------------------------------------------------------------------
-# Type-driven derivation: aggregations + filter ops + security hook detection
-# ---------------------------------------------------------------------------
-
-_NUMERIC: frozenset[DuckType] = frozenset(
-    {
-        DuckType.UTINYINT,
-        DuckType.USMALLINT,
-        DuckType.UINTEGER,
-        DuckType.UBIGINT,
-        DuckType.BIGINT,
-        DuckType.INTEGER,
-        DuckType.FLOAT,
-        DuckType.DOUBLE,
-    }
-)
 
 
 # ---------------------------------------------------------------------------
@@ -400,11 +359,9 @@ from backend.core.log_fields import (  # noqa: E402
 )
 
 __all__ = (
-    "Agg",
     "BY_CODE",
     "BY_GROUP",
     "DuckType",
-    "FilterOp",
     "GROUP_INFO",
     "Group",
     "INSIGHT_DEFINITIONS",

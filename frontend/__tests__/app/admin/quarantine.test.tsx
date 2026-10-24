@@ -1,11 +1,10 @@
-import { QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { QuarantineSection } from '@/app/admin/_sections/QuarantineSection'
 import { useServiceStore } from '@/stores/serviceStore'
-import { createTestQueryClient } from '../../helpers/query'
+import { renderWithQuery } from '../../helpers/query'
 
 const { adminFetchMock } = vi.hoisted(() => ({ adminFetchMock: vi.fn() }))
 
@@ -41,12 +40,7 @@ function jsonResponse(body: unknown): Response {
 }
 
 function renderSection() {
-  const queryClient = createTestQueryClient({ queries: { retry: false } })
-  return render(
-    <QueryClientProvider client={queryClient}>
-      <QuarantineSection />
-    </QueryClientProvider>,
-  )
+  return renderWithQuery(<QuarantineSection />)
 }
 
 describe('QuarantineSection', () => {

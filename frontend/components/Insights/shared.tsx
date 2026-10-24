@@ -3,7 +3,7 @@
 import React from 'react'
 import { cn } from '@/lib/utils'
 
-export interface InsightStatCardProps {
+interface InsightStatCardProps {
   icon: React.ReactNode
   label: string
   value: string

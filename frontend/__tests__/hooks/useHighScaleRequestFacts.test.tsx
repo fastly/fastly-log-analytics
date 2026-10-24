@@ -1,9 +1,7 @@
 /**
  * @vitest-environment jsdom
  */
-import React from 'react'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -45,14 +43,6 @@ const pageTwo = {
   _is_cached: false,
 }
 
-function wrapper({ children }: { children: React.ReactNode }) {
-  return (
-    <QueryClientProvider client={createTestQueryClient()}>
-      {children}
-    </QueryClientProvider>
-  )
-}
-
 beforeEach(() => {
   vi.spyOn(client, 'POST').mockReset()
 })
@@ -74,7 +64,7 @@ describe('useHighScaleRequestFacts', () => {
         endTime: '2026-09-11T01:00:00Z',
         pageSize: 1,
       }),
-      { wrapper },
+      { wrapper: makeQueryWrapper(createTestQueryClient()) },
     )
 
     await waitFor(() => expect(result.current.data?.rows[0]?.event_id).toBe('event-1'))

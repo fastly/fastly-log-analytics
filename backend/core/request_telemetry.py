@@ -40,7 +40,6 @@ import threading
 
 logger = logging.getLogger(__name__)
 import time
-from contextlib import contextmanager
 from typing import Any
 from uuid import uuid4
 
@@ -276,7 +275,6 @@ class RequestTelemetry:
         "_root_span",
         "_root_ctx_token",
         "_owns_root_span",
-        "_section_timings",
         "_t_start",
         "is_cached",
     )
@@ -287,7 +285,6 @@ class RequestTelemetry:
         self._root_span: Span | None = None
         self._root_ctx_token: Any = None
         self._owns_root_span: bool = False
-        self._section_timings: list[dict[str, Any]] = []
         self._t_start: float = 0.0
         self.is_cached: bool = False
 
@@ -355,101 +352,3 @@ class RequestTelemetry:
                 usage_log.flush_telemetry_buffer()
         except Exception:
             logger.debug("end_request: flush_telemetry_buffer failed (ignored)", exc_info=True)
-
-    # ── Section spans ─────────────────────────────────────────────────────
-
-    @contextmanager
-    def section(self, name: str, **attrs: Any):
-        """Open a child span for a logical section of the request.
-
-        Example:
-            with ctx.telemetry.section("dashboard.aggregates"):
-                ...
-        """
-        tracer = get_tracer()
-        t0 = time.monotonic()
-        with tracer.start_as_current_span(f"section:{name}") as span:
-            for k, v in attrs.items():
-                span.set_attribute(k, v)
-            try:
-                yield span
-            finally:
-                elapsed_ms = round((time.monotonic() - t0) * 1000, 2)
-                span.set_attribute("app.section.elapsed_ms", elapsed_ms)
-                self._section_timings.append({"section": name, "elapsed_ms": elapsed_ms})
-
-                try:
-                    from backend.utils.telemetry import _RECORDING_TELEMETRY, get_page_load_id
-
-                    plid = get_page_load_id()
-                    if plid:
-                        token = _RECORDING_TELEMETRY.set(True)
-                        try:
-                            from backend import config as svcconfig
-
-                            sid = svcconfig.get_active_service_id()
-                            if sid:
-                                from backend.core.metadata import usage_log
-
-                                usage_log.log_telemetry_section(
-                                    service_id=sid,
-                                    page_load_id=plid,
-                                    request_id="unknown",
-                                    section_name=name,
-                                    duration_ms=elapsed_ms,
-                                )
-                        finally:
-                            _RECORDING_TELEMETRY.reset(token)
-                except Exception as e:
-                    logger.debug("Failed to record section to SQLite telemetry: %s", e)
-
-    # ── Call / query attribution (mirrors backend.utils.telemetry API) ────
-
-    def record_call(
-        self,
-        method: str,
-        path: str,
-        time_ms: float,
-        status: int | str | None = None,
-        service: str = "Fastly API",
-        details: str | None = None,
-        caller: str | None = None,
-        bytes_count: int | None = None,
-    ) -> None:
-        """Emit a span event for an external call. Mirrored to the legacy
-        ContextVar API in backend.utils.telemetry until Phase 10."""
-        span = self._current_span()
-        if span is None:
-            return
-        attrs: dict[str, Any] = {
-            "app.call.method": method,
-            "app.call.path": path,
-            "app.call.time_ms": float(time_ms),
-            "app.call.service": service,
-        }
-        if status is not None:
-            attrs["app.call.status"] = str(status)
-        if details:
-            attrs["app.call.details"] = details
-        if caller:
-            attrs["app.call.caller"] = caller
-        if bytes_count is not None:
-            attrs["app.call.bytes"] = int(bytes_count)
-        span.add_event(name="external_call", attributes=attrs)
-
-    # ── Debug-panel render shape ──────────────────────────────────────────
-
-    def section_timings(self) -> list[dict[str, Any]]:
-        return list(self._section_timings)
-
-    # ── Internals ─────────────────────────────────────────────────────────
-
-    def _current_span(self) -> Span | None:
-        """The span events should attach to. Prefer the active span (from a
-        nested section), fall back to the root span."""
-        active = trace.get_current_span()
-        # NonRecordingSpan is the default when no provider is active (test
-        # mode); skip recording in that case.
-        if active and active.is_recording():
-            return active
-        return self._root_span if self._root_span and self._root_span.is_recording() else None

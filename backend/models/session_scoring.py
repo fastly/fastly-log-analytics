@@ -375,9 +375,6 @@ class ScoringLabelsListResponse(WireSafeModel):
     counts: ScoringLabelCounts
 
 
-ScoringLabelsResponse = ScoringLabelsListResponse
-
-
 # ── Response models for the admin endpoints (session_scoring_admin.py) ───────
 #
 # Same wire-safety contract as the analyst-safe reads above: every model

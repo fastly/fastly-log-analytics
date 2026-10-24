@@ -10,7 +10,7 @@ import type { Schema } from '@/types/api'
 // The companion of WebVitalsReporter's beacon pattern; sibling endpoint
 // shape is documented in backend/routers/ux_events.py.
 
-export type UxEvent = Schema<'UxEventPayload'>
+type UxEvent = Schema<'UxEventPayload'>
 
 export function reportUxEvent(evt: UxEvent): void {
   if (typeof window === 'undefined') return

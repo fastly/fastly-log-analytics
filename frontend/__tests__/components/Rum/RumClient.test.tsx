@@ -23,7 +23,7 @@ import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import RumPageClient from '@/app/rum/_sections/RumPageClient'
 
-vi.mock('@/components/PlotlyChart', () => ({ PlotlyChart: () => <div data-testid="plotly-chart" /> }))
+vi.mock('@/components/PlotlyChart', async () => (await import('../../helpers/page-smoke')).plotlyChartModuleMock())
 vi.mock('@/components/charts/TimeSeriesChart', () => ({ TimeSeriesChart: () => <div data-testid="timeseries-chart" /> }))
 
 vi.mock('@tanstack/react-virtual', async () => (await import('../../helpers/virtual-mock')).reactVirtualModuleMock())

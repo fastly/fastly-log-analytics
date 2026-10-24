@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 import { cn } from '@/lib/utils'
 
-export interface CopyButtonProps {
+interface CopyButtonProps {
   text: string
   label?: string
   copiedLabel?: string

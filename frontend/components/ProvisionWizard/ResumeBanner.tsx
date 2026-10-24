@@ -19,7 +19,7 @@ function stepLabelFor(draft: WizardDraft): string {
   return found?.label ?? draft.currentStep;
 }
 
-export interface ResumeBannerProps {
+interface ResumeBannerProps {
   draft: WizardDraft;
   onResume: () => void;
   onStartFresh: () => void;

@@ -2,11 +2,10 @@
  * Tests for the DiagnosticsPanel component, verifying that it loads debug visibility
  * settings from the backend and triggers appropriate PATCH mutations on change.
  */
-import { render, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, test, vi, beforeEach } from 'vitest'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/query'
 import { selectMockFactory } from '../helpers/ui-mocks'
 import React from 'react'
 
@@ -33,11 +32,7 @@ describe('DiagnosticsPanel — debug settings API triggers', () => {
 
   test('renders with initial settings from the backend', async () => {
     const qc = makeClient()
-    render(
-      <QueryClientProvider client={qc}>
-        <DiagnosticsPanel />
-      </QueryClientProvider>,
-    )
+    renderWithQuery(<DiagnosticsPanel />, { queryClient: qc })
 
     // Wait for settings to load
     await screen.findByText('Query debugging panel')
@@ -54,11 +49,7 @@ describe('DiagnosticsPanel — debug settings API triggers', () => {
     const qc = makeClient()
     const invalidateSpy = vi.spyOn(qc, 'invalidateQueries')
 
-    render(
-      <QueryClientProvider client={qc}>
-        <DiagnosticsPanel />
-      </QueryClientProvider>,
-    )
+    renderWithQuery(<DiagnosticsPanel />, { queryClient: qc })
 
     // Wait for initial render
     await screen.findByText('Query debugging panel')
@@ -84,11 +75,7 @@ describe('DiagnosticsPanel — debug settings API triggers', () => {
     const qc = makeClient()
     const invalidateSpy = vi.spyOn(qc, 'invalidateQueries')
 
-    render(
-      <QueryClientProvider client={qc}>
-        <DiagnosticsPanel />
-      </QueryClientProvider>,
-    )
+    renderWithQuery(<DiagnosticsPanel />, { queryClient: qc })
 
     // Wait for initial render
     await screen.findByText('Query debugging panel')

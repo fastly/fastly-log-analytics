@@ -19,6 +19,11 @@ from backend.utils.sql_validator import escape_sql_literal
 from ._common import (
     DAY_BUNDLE_FILENAME,
     DAY_BUNDLE_TOP_K,
+    IP_SPREAD_BUNDLE_FILENAME,
+    NETWORK_QUALITY_ASN_FILENAME,
+    NETWORK_QUALITY_COUNTRY_FILENAME,
+    NETWORK_QUALITY_POP_FILENAME,
+    NETWORK_QUALITY_REGION_FILENAME,
     NETWORK_RTT_BUNDLE_FILENAME,
     NETWORK_SPEED_BUNDLE_FILENAME,
     NGWAF_BOTS_BUNDLE_FILENAME,
@@ -63,6 +68,7 @@ from ._common import (
     unlink_quiet,
     wavg,
 )
+from .ngwaf_bots import _purge_stale_ngwaf_bots_parquets
 
 logger = logging.getLogger(__name__)
 
@@ -569,755 +575,385 @@ def compact_closed_days_to_daily(
 # ── origin_summary closed-day compaction ────────────────────────────────────
 
 
-def compact_origin_summary_closed_days_to_daily(
-    service_id: str,
-    source: dict,
-    lookback_days: int | None = None,
-) -> int:
-    """Consolidate closed-day per-hour origin_summary parquets into per-day files.
+def _make_day_compactor(
+    jobs: list[tuple[str, str, Callable[[str, str], str]]],
+    *,
+    pre_hook: Callable[[dict], object] | None = None,
+) -> Callable[..., int]:
+    """Build a ``compact_*_closed_days_to_daily`` function bound to ``jobs``."""
 
-    For each closed UTC day where:
-      - All present hours under ``hour_bundled/hour=YYYY-MM-DD-HH/origin_summary.parquet``
-        belong to a day that is strictly before today (the active day is
-        still being written and would change underneath us).
-      - The per-day file is missing OR any constituent hour parquet has
-        a newer mtime than the per-day file.
-
-    ...read every hour file for the day, weighted-average percentile
-    columns + SUM count columns, write a single
-    ``day_bundled/day=YYYY-MM-DD/origin_summary.parquet`` with the
-    same schema as the hour file.
-
-    Same atomic-tmp + rename + per-service iceberg lock as
-    :func:`compact_closed_days_to_daily`. Same in-memory DuckDB to
-    sidestep the per-service .duckdb RW lock contention surfaced in the
-    2026-06-06 prod incident — origin_summary inputs are parquet on
-    disk, no per-service catalog state needed.
-
-    Mathematically equivalent to reading 24 per-hour rows directly,
-    because the reader's request-weighted-average SQL is associative
-    when weights are carried (``lat_us_count``, ``ottlb_count``,
-    ``cdn_ovh_count``, ``ost_total_count``, ``obytes_count``). Counts
-    are exact SUMs.
-
-    The hour files are NOT deleted — the reader prefers day-bundled
-    when present and silently falls back to per-hour otherwise, so
-    leaving the hour files keeps mid-read deletions impossible and
-    makes the compaction freely idempotent.
-
-    Returns the number of (closed-day) origin_summary files rebuilt.
-    """
-
-    # Mirrors try_origin_summary_from_rollup's reader SQL exactly: SUMs for
-    # counts (associative), request-weighted average for percentile columns
-    # using the per-hour count as the weight. Reading the resulting day file
-    # with the same weighted-average SQL across day rows is mathematically
-    # identical to reading all 24 hour files directly.
-    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT "
-            f"    CAST(SUM(requests) AS BIGINT) AS requests, "
-            f"    CAST(SUM(total_misses) AS BIGINT) AS total_misses, "
-            f"    CAST(SUM(total_passes) AS BIGINT) AS total_passes, "
-            f"    CAST(SUM(lat_us_count) AS BIGINT) AS lat_us_count, "
-            f"    CAST({wavg('ottfb_p50_us', 'lat_us_count')} AS DOUBLE) AS ottfb_p50_us, "
-            f"    CAST({wavg('ottfb_p75_us', 'lat_us_count')} AS DOUBLE) AS ottfb_p75_us, "
-            f"    CAST({wavg('ottfb_p95_us', 'lat_us_count')} AS DOUBLE) AS ottfb_p95_us, "
-            f"    CAST({wavg('ottfb_p99_us', 'lat_us_count')} AS DOUBLE) AS ottfb_p99_us, "
-            f"    CAST(SUM(ottlb_count) AS BIGINT) AS ottlb_count, "
-            f"    CAST({wavg('ottlb_p50_us', 'ottlb_count')} AS DOUBLE) AS ottlb_p50_us, "
-            f"    CAST({wavg('ottlb_p95_us', 'ottlb_count')} AS DOUBLE) AS ottlb_p95_us, "
-            f"    CAST(SUM(cdn_ovh_count) AS BIGINT) AS cdn_ovh_count, "
-            f"    CAST({wavg('cdn_ovh_p50_us', 'cdn_ovh_count')} AS DOUBLE) AS cdn_ovh_p50_us, "
-            f"    CAST(SUM(ost_5xx_count) AS BIGINT) AS ost_5xx_count, "
-            f"    CAST(SUM(ost_total_count) AS BIGINT) AS ost_total_count, "
-            f"    CAST(SUM(obytes_count) AS BIGINT) AS obytes_count, "
-            f"    CAST({wavg('obytes_p50', 'obytes_count')} AS DOUBLE) AS obytes_p50 "
-            f"  FROM read_parquet([{paths_sql}])"
-            f") {parquet_zstd_target(tmp_file)}"
+    def _compact(
+        service_id: str,
+        source: dict,
+        lookback_days: int | None = None,
+    ) -> int:
+        if pre_hook is not None:
+            pre_hook(source)
+        return compact_closed_days(
+            service_id,
+            source,
+            jobs=jobs,
+            lookback_days=lookback_days,
+            logger=logger,
         )
 
-    return compact_closed_days(
-        service_id,
-        source,
-        jobs=[(ORIGIN_SUMMARY_BUNDLE_FILENAME, ".tmp_os_", _copy_sql)],
-        lookback_days=lookback_days,
-        logger=logger,
+    return _compact
+
+
+def _origin_summary_copy_sql(paths_sql: str, tmp_file: str) -> str:
+    return (
+        f"COPY ("
+        f"  SELECT "
+        f"    CAST(SUM(requests) AS BIGINT) AS requests, "
+        f"    CAST(SUM(total_misses) AS BIGINT) AS total_misses, "
+        f"    CAST(SUM(total_passes) AS BIGINT) AS total_passes, "
+        f"    CAST(SUM(lat_us_count) AS BIGINT) AS lat_us_count, "
+        f"    CAST({wavg('ottfb_p50_us', 'lat_us_count')} AS DOUBLE) AS ottfb_p50_us, "
+        f"    CAST({wavg('ottfb_p75_us', 'lat_us_count')} AS DOUBLE) AS ottfb_p75_us, "
+        f"    CAST({wavg('ottfb_p95_us', 'lat_us_count')} AS DOUBLE) AS ottfb_p95_us, "
+        f"    CAST({wavg('ottfb_p99_us', 'lat_us_count')} AS DOUBLE) AS ottfb_p99_us, "
+        f"    CAST(SUM(ottlb_count) AS BIGINT) AS ottlb_count, "
+        f"    CAST({wavg('ottlb_p50_us', 'ottlb_count')} AS DOUBLE) AS ottlb_p50_us, "
+        f"    CAST({wavg('ottlb_p95_us', 'ottlb_count')} AS DOUBLE) AS ottlb_p95_us, "
+        f"    CAST(SUM(cdn_ovh_count) AS BIGINT) AS cdn_ovh_count, "
+        f"    CAST({wavg('cdn_ovh_p50_us', 'cdn_ovh_count')} AS DOUBLE) AS cdn_ovh_p50_us, "
+        f"    CAST(SUM(ost_5xx_count) AS BIGINT) AS ost_5xx_count, "
+        f"    CAST(SUM(ost_total_count) AS BIGINT) AS ost_total_count, "
+        f"    CAST(SUM(obytes_count) AS BIGINT) AS obytes_count, "
+        f"    CAST({wavg('obytes_p50', 'obytes_count')} AS DOUBLE) AS obytes_p50 "
+        f"  FROM read_parquet([{paths_sql}])"
+        f") {parquet_zstd_target(tmp_file)}"
     )
 
 
-# ── network_rtt closed-day compaction ───────────────────────────────────
+compact_origin_summary_closed_days_to_daily = _make_day_compactor(
+    [(ORIGIN_SUMMARY_BUNDLE_FILENAME, ".tmp_os_", _origin_summary_copy_sql)]
+)
 
 
-def compact_network_rtt_closed_days_to_daily(
-    service_id: str,
-    source: dict,
-    lookback_days: int | None = None,
-) -> int:
-    """Consolidate closed-day per-hour network_rtt parquets into per-day
-    files at ``day_bundled/day=YYYY-MM-DD/network_rtt.parquet``.
-
-    Mirrors :func:`compact_origin_summary_closed_days_to_daily` exactly,
-    only swapping the filename + aggregation columns. Per-day row keeps
-    the same schema as per-hour (asn, requests, rtt_count, p95_us,
-    p99_us) so the reader treats both interchangeably — the math is
-    associative because percentiles are request-weighted-averaged via
-    the rtt_count column carried alongside.
-
-    Top-K cap per day is the SAME as per hour (100). The day file is
-    the GROUP BY asn of all per-hour rows; no extra ranking step
-    needed because every ASN that hit top-100 in any hour is already
-    in scope. Returns the number of (closed-day) files rebuilt.
-    """
-
-    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT asn, "
-            f"    CAST(SUM(requests) AS BIGINT) AS requests, "
-            f"    CAST(SUM(rtt_count) AS BIGINT) AS rtt_count, "
-            f"    CAST({wavg('p95_us', 'rtt_count')} AS DOUBLE) AS p95_us, "
-            f"    CAST({wavg('p99_us', 'rtt_count')} AS DOUBLE) AS p99_us "
-            f"  FROM read_parquet([{paths_sql}]) "
-            f"  GROUP BY asn"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
-
-    return compact_closed_days(
-        service_id,
-        source,
-        jobs=[(NETWORK_RTT_BUNDLE_FILENAME, ".tmp_nr_", _copy_sql)],
-        lookback_days=lookback_days,
-        logger=logger,
+def _network_rtt_copy_sql(paths_sql: str, tmp_file: str) -> str:
+    return (
+        f"COPY ("
+        f"  SELECT asn, "
+        f"    CAST(SUM(requests) AS BIGINT) AS requests, "
+        f"    CAST(SUM(rtt_count) AS BIGINT) AS rtt_count, "
+        f"    CAST({wavg('p95_us', 'rtt_count')} AS DOUBLE) AS p95_us, "
+        f"    CAST({wavg('p99_us', 'rtt_count')} AS DOUBLE) AS p99_us "
+        f"  FROM read_parquet([{paths_sql}]) "
+        f"  GROUP BY asn"
+        f") {parquet_zstd_target(tmp_file)}"
     )
 
 
-# ── network_speed closed-day compaction ─────────────────────────────────
+compact_network_rtt_closed_days_to_daily = _make_day_compactor(
+    [(NETWORK_RTT_BUNDLE_FILENAME, ".tmp_nr_", _network_rtt_copy_sql)]
+)
+
+compact_network_speed_closed_days_to_daily = _make_day_compactor(
+    [(NETWORK_SPEED_BUNDLE_FILENAME, ".tmp_ns_", _sum_count_copy_sql("asn, c_speed"))]
+)
+
+compact_ngwaf_bots_closed_days_to_daily = _make_day_compactor(
+    [(NGWAF_BOTS_BUNDLE_FILENAME, ".tmp_nb_", _sum_count_copy_sql("bot_name, wellknown_bot_name, category"))],
+    pre_hook=_purge_stale_ngwaf_bots_parquets,
+)
+
+compact_ngwaf_bots_ts_closed_days_to_daily = _make_day_compactor(
+    [(NGWAF_BOTS_TS_BUNDLE_FILENAME, ".tmp_nbts_", _sum_count_copy_sql("bucket_ts, bot_name"))]
+)
+
+compact_verified_bots_ts_closed_days_to_daily = _make_day_compactor(
+    [(VERIFIED_BOTS_TS_BUNDLE_FILENAME, ".tmp_vbts_", _sum_count_copy_sql("bucket_ts, bot_type"))]
+)
 
 
-def compact_network_speed_closed_days_to_daily(
-    service_id: str,
-    source: dict,
-    lookback_days: int | None = None,
-) -> int:
-    """Consolidate closed-day per-hour network_speed parquets into
-    per-day files at ``day_bundled/day=YYYY-MM-DD/network_speed.parquet``.
-
-    Same shape as :func:`compact_network_rtt_closed_days_to_daily` but
-    the aggregation is a pure GROUP BY (asn, c_speed) + SUM(count) —
-    no weighted-average step because the math is exact for integer
-    counts.
-    """
-    return compact_closed_days(
-        service_id,
-        source,
-        jobs=[(NETWORK_SPEED_BUNDLE_FILENAME, ".tmp_ns_", _sum_count_copy_sql("asn, c_speed"))],
-        lookback_days=lookback_days,
-        logger=logger,
+def _origin_latency_ts_copy_sql(paths_sql: str, tmp_file: str) -> str:
+    return (
+        f"COPY ("
+        f"  SELECT bucket_ts, "
+        f"    CAST(SUM(ttfb_count) AS BIGINT) AS ttfb_count, "
+        f"    {wavg('ttfb_p50_us', 'ttfb_count')} AS ttfb_p50_us, "
+        f"    {wavg('ttfb_p95_us', 'ttfb_count')} AS ttfb_p95_us, "
+        f"    {wavg('ttfb_p99_us', 'ttfb_count')} AS ttfb_p99_us, "
+        f"    CAST(SUM(ttlb_count) AS BIGINT) AS ttlb_count, "
+        f"    {wavg('ttlb_p50_us', 'ttlb_count')} AS ttlb_p50_us, "
+        f"    {wavg('ttlb_p95_us', 'ttlb_count')} AS ttlb_p95_us, "
+        f"    {wavg('ttlb_p99_us', 'ttlb_count')} AS ttlb_p99_us "
+        f"  FROM read_parquet([{paths_sql}]) "
+        f"  GROUP BY bucket_ts"
+        f") {parquet_zstd_target(tmp_file)}"
     )
 
 
-def compact_ngwaf_bots_closed_days_to_daily(
-    service_id: str,
-    source: dict,
-    lookback_days: int | None = None,
-) -> int:
-    """Consolidate closed-day per-hour ngwaf_bots parquets into per-day
-    files at ``day_bundled/day=YYYY-MM-DD/ngwaf_bots.parquet``.
+compact_origin_latency_ts_closed_days_to_daily = _make_day_compactor(
+    [(ORIGIN_LATENCY_TS_BUNDLE_FILENAME, ".tmp_olts_", _origin_latency_ts_copy_sql)]
+)
 
-    Same shape as :func:`compact_network_speed_closed_days_to_daily`:
-    pure GROUP BY (bot_name, wellknown_bot_name, category) + SUM(count) —
-    exact for integer counts, no re-cap needed (bot cardinality is tens per day).
-    Purges pre-wellknown_bot_name 3-column hour/day files first (Trap #24).
-    """
-    from .ngwaf_bots import _purge_stale_ngwaf_bots_parquets
 
-    _purge_stale_ngwaf_bots_parquets(source)
-    return compact_closed_days(
-        service_id,
-        source,
-        jobs=[
-            (
-                NGWAF_BOTS_BUNDLE_FILENAME,
-                ".tmp_nb_",
-                _sum_count_copy_sql("bot_name, wellknown_bot_name, category"),
-            )
-        ],
-        lookback_days=lookback_days,
-        logger=logger,
+def _perf_latency_copy_sql(paths_sql: str, tmp_file: str) -> str:
+    return (
+        f"COPY ("
+        f"  SELECT value, requests, elapsed_count, elapsed_sum, p50_us, p95_us, p99_us FROM ("
+        f"    SELECT value, "
+        f"      CAST(SUM(requests) AS BIGINT) AS requests, "
+        f"      CAST(SUM(elapsed_count) AS BIGINT) AS elapsed_count, "
+        f"      CAST(SUM(elapsed_sum) AS DOUBLE) AS elapsed_sum, "
+        f"      CAST({wavg('p50_us', 'requests')} AS DOUBLE) AS p50_us, "
+        f"      CAST({wavg('p95_us', 'requests')} AS DOUBLE) AS p95_us, "
+        f"      CAST({wavg('p99_us', 'requests')} AS DOUBLE) AS p99_us, "
+        f"      ROW_NUMBER() OVER ("
+        f"        ORDER BY {wavg('p99_us', 'requests')} DESC"
+        f"      ) AS rn "
+        f"    FROM read_parquet([{paths_sql}]) "
+        f"    GROUP BY value"
+        f"  ) WHERE rn <= {PERF_LATENCY_BUNDLE_TOP_K}"
+        f") {parquet_zstd_target(tmp_file)}"
     )
 
 
-def compact_ngwaf_bots_ts_closed_days_to_daily(
-    service_id: str,
-    source: dict,
-    lookback_days: int | None = None,
-) -> int:
-    """Consolidate closed-day per-hour ngwaf_bots_ts parquets into per-day
-    files at ``day_bundled/day=YYYY-MM-DD/ngwaf_bots_ts.parquet``.
+compact_perf_latency_closed_days_to_daily = _make_day_compactor(
+    [
+        (PERF_TOP_URLS_BUNDLE_FILENAME, ".tmp_pl_", _perf_latency_copy_sql),
+        (PERF_TOP_ASNS_BUNDLE_FILENAME, ".tmp_pl_", _perf_latency_copy_sql),
+    ]
+)
 
-    Preserves minute granularity (``bucket_ts``) so the reader can re-bucket
-    across any window — same shape as :func:`compact_verified_bots_ts_closed_days_to_daily`.
-    """
-    return compact_closed_days(
-        service_id,
-        source,
-        jobs=[(NGWAF_BOTS_TS_BUNDLE_FILENAME, ".tmp_nbts_", _sum_count_copy_sql("bucket_ts, bot_name"))],
-        lookback_days=lookback_days,
-        logger=logger,
+
+def _origin_pop_copy_sql(paths_sql: str, tmp_file: str) -> str:
+    return (
+        f"COPY ("
+        f"  SELECT pop, requests, lat_us_count, lat_us_sum, p50_us, p95_us FROM ("
+        f"    SELECT pop, "
+        f"      CAST(SUM(requests) AS BIGINT) AS requests, "
+        f"      CAST(SUM(lat_us_count) AS BIGINT) AS lat_us_count, "
+        f"      CAST(SUM(lat_us_sum) AS DOUBLE) AS lat_us_sum, "
+        f"      CAST({wavg('p50_us', 'requests')} AS DOUBLE) AS p50_us, "
+        f"      CAST({wavg('p95_us', 'requests')} AS DOUBLE) AS p95_us, "
+        f"      ROW_NUMBER() OVER (ORDER BY SUM(requests) DESC) AS rn "
+        f"    FROM read_parquet([{paths_sql}]) "
+        f"    GROUP BY pop"
+        f"  ) WHERE rn <= {ORIGIN_DIMS_BUNDLE_TOP_K}"
+        f") {parquet_zstd_target(tmp_file)}"
     )
 
 
-# ── verified_bots_ts closed-day compaction ──────────────────────────────
-
-
-def compact_verified_bots_ts_closed_days_to_daily(
-    service_id: str,
-    source: dict,
-    lookback_days: int | None = None,
-) -> int:
-    """Consolidate closed-day per-hour verified_bots_ts parquets into
-    per-day files at ``day_bundled/day=YYYY-MM-DD/verified_bots_ts.parquet``.
-
-    Unlike :func:`compact_network_speed_closed_days_to_daily` (which
-    collapses the time dimension for a leaderboard panel) this PRESERVES
-    minute granularity — verified_bots_ts is a time series, so the reader
-    must still be able to re-bucket across the window. The aggregation is
-    ``GROUP BY (bucket_ts, bot_type) SUM(count)``, a no-op merge (each
-    minute lives in exactly one source hour file) that's harmless and
-    idempotent.
-
-    Same ``:memory:`` DuckDB + mtime-gated + active-day-skip posture as
-    the other rollup day-compactors (per the 2026-06-06 incident lesson).
-    """
-    return compact_closed_days(
-        service_id,
-        source,
-        jobs=[(VERIFIED_BOTS_TS_BUNDLE_FILENAME, ".tmp_vbts_", _sum_count_copy_sql("bucket_ts, bot_type"))],
-        lookback_days=lookback_days,
-        logger=logger,
+def _origin_ip_copy_sql(paths_sql: str, tmp_file: str) -> str:
+    return (
+        f"COPY ("
+        f"  SELECT oip, requests, lat_us_count, lat_us_sum, p50_us, p95_us, "
+        f"         ost_5xx_count, ost_total_count FROM ("
+        f"    SELECT oip, "
+        f"      CAST(SUM(requests) AS BIGINT) AS requests, "
+        f"      CAST(SUM(lat_us_count) AS BIGINT) AS lat_us_count, "
+        f"      CAST(SUM(lat_us_sum) AS DOUBLE) AS lat_us_sum, "
+        f"      CAST({wavg('p50_us', 'requests')} AS DOUBLE) AS p50_us, "
+        f"      CAST({wavg('p95_us', 'requests')} AS DOUBLE) AS p95_us, "
+        f"      CAST(SUM(ost_5xx_count) AS BIGINT) AS ost_5xx_count, "
+        f"      CAST(SUM(ost_total_count) AS BIGINT) AS ost_total_count, "
+        f"      ROW_NUMBER() OVER (ORDER BY SUM(requests) DESC) AS rn "
+        f"    FROM read_parquet([{paths_sql}]) "
+        f"    GROUP BY oip"
+        f"  ) WHERE rn <= {ORIGIN_DIMS_BUNDLE_TOP_K}"
+        f") {parquet_zstd_target(tmp_file)}"
     )
 
 
-# ── origin_latency_ts closed-day compaction ─────────────────────────────
-
-
-def compact_origin_latency_ts_closed_days_to_daily(
-    service_id: str,
-    source: dict,
-    lookback_days: int | None = None,
-) -> int:
-    """Consolidate closed-day per-hour origin_latency_ts parquets into per-day
-    files at ``day_bundled/day=YYYY-MM-DD/origin_latency_ts.parquet``.
-
-    Like :func:`compact_verified_bots_ts_closed_days_to_daily` this PRESERVES
-    the minute (``bucket_ts``) dimension — origin_latency_ts is a time series,
-    so the reader must still be able to re-bucket across the window. Minutes
-    are DISJOINT across the 24 source hour files (each minute lives in exactly
-    one hour), so the day file is the union of the 24 hour files: do NOT
-    collapse to one row and do NOT apply any top-K cap.
-
-    The ``GROUP BY bucket_ts`` is therefore a no-op merge — ``SUM(count)`` and
-    the request-weighted percentile (``SUM(p*_us * count)/SUM(count)``) both
-    reduce to identity for the single source row per bucket, but the
-    request-weighted form is written for uniformity with the reader's
-    cross-file weighting (and harmlessly composes if two hour files ever share
-    a minute).
-
-    Same ``:memory:`` DuckDB + mtime-gated + active-day-skip posture as the
-    other rollup day-compactors. Returns the number of (closed-day) files
-    rebuilt.
-    """
-
-    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT bucket_ts, "
-            f"    CAST(SUM(ttfb_count) AS BIGINT) AS ttfb_count, "
-            f"    {wavg('ttfb_p50_us', 'ttfb_count')} AS ttfb_p50_us, "
-            f"    {wavg('ttfb_p95_us', 'ttfb_count')} AS ttfb_p95_us, "
-            f"    {wavg('ttfb_p99_us', 'ttfb_count')} AS ttfb_p99_us, "
-            f"    CAST(SUM(ttlb_count) AS BIGINT) AS ttlb_count, "
-            f"    {wavg('ttlb_p50_us', 'ttlb_count')} AS ttlb_p50_us, "
-            f"    {wavg('ttlb_p95_us', 'ttlb_count')} AS ttlb_p95_us, "
-            f"    {wavg('ttlb_p99_us', 'ttlb_count')} AS ttlb_p99_us "
-            f"  FROM read_parquet([{paths_sql}]) "
-            f"  GROUP BY bucket_ts"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
-
-    return compact_closed_days(
-        service_id,
-        source,
-        jobs=[(ORIGIN_LATENCY_TS_BUNDLE_FILENAME, ".tmp_olts_", _copy_sql)],
-        lookback_days=lookback_days,
-        logger=logger,
+def _origin_path_copy_sql(paths_sql: str, tmp_file: str) -> str:
+    return (
+        f"COPY ("
+        f"  SELECT edge, "
+        f"    CAST(SUM(requests) AS BIGINT) AS requests, "
+        f"    CAST(SUM(lat_us_count) AS BIGINT) AS lat_us_count, "
+        f"    CAST(SUM(lat_us_sum) AS DOUBLE) AS lat_us_sum, "
+        f"    CAST({wavg('p50_us', 'requests')} AS DOUBLE) AS p50_us, "
+        f"    CAST({wavg('p95_us', 'requests')} AS DOUBLE) AS p95_us "
+        f"  FROM read_parquet([{paths_sql}]) "
+        f"  GROUP BY edge"
+        f") {parquet_zstd_target(tmp_file)}"
     )
 
 
-# ── perf_latency closed-day compaction ──────────────────────────────────
+compact_origin_dims_closed_days_to_daily = _make_day_compactor(
+    [
+        (ORIGIN_POP_BUNDLE_FILENAME, ".tmp_od_", _origin_pop_copy_sql),
+        (ORIGIN_IP_BUNDLE_FILENAME, ".tmp_od_", _origin_ip_copy_sql),
+        (ORIGIN_PATH_BUNDLE_FILENAME, ".tmp_od_", _origin_path_copy_sql),
+    ]
+)
 
 
-def compact_perf_latency_closed_days_to_daily(
-    service_id: str,
-    source: dict,
-    lookback_days: int | None = None,
-) -> int:
-    """Consolidate closed-day per-hour perf_top_urls / perf_top_asns parquets
-    into per-day files at ``day_bundled/day=YYYY-MM-DD/<name>.parquet``.
-
-    Mirrors :func:`compact_network_rtt_closed_days_to_daily` (request-weighted
-    percentile merge) for BOTH perf dimensions, but re-caps the day file to the
-    top-K by p99 because URL cardinality is high (the union of 24 hours'
-    top-100 can be large). The weighted-avg composes exactly with the reader's
-    cross-file weighting. Returns the number of (closed-day) files rebuilt.
-    """
-
-    # Identical aggregation for both dimensions — each per-hour row keys on a
-    # ``value`` column (url or asn); the request-weighted-average composes with
-    # the reader's cross-file weighting, then re-cap to top-K by p99.
-    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT value, requests, elapsed_count, elapsed_sum, p50_us, p95_us, p99_us FROM ("
-            f"    SELECT value, "
-            f"      CAST(SUM(requests) AS BIGINT) AS requests, "
-            f"      CAST(SUM(elapsed_count) AS BIGINT) AS elapsed_count, "
-            f"      CAST(SUM(elapsed_sum) AS DOUBLE) AS elapsed_sum, "
-            f"      CAST({wavg('p50_us', 'requests')} AS DOUBLE) AS p50_us, "
-            f"      CAST({wavg('p95_us', 'requests')} AS DOUBLE) AS p95_us, "
-            f"      CAST({wavg('p99_us', 'requests')} AS DOUBLE) AS p99_us, "
-            f"      ROW_NUMBER() OVER ("
-            f"        ORDER BY {wavg('p99_us', 'requests')} DESC"
-            f"      ) AS rn "
-            f"    FROM read_parquet([{paths_sql}]) "
-            f"    GROUP BY value"
-            f"  ) WHERE rn <= {PERF_LATENCY_BUNDLE_TOP_K}"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
-
-    return compact_closed_days(
-        service_id,
-        source,
-        jobs=[
-            (PERF_TOP_URLS_BUNDLE_FILENAME, ".tmp_pl_", _copy_sql),
-            (PERF_TOP_ASNS_BUNDLE_FILENAME, ".tmp_pl_", _copy_sql),
-        ],
-        lookback_days=lookback_days,
-        logger=logger,
+def _security_topips_copy_sql(paths_sql: str, tmp_file: str) -> str:
+    return (
+        f"COPY ("
+        f"  SELECT ip, max_header FROM ("
+        f"    SELECT ip, CAST(MAX(max_header) AS BIGINT) AS max_header "
+        f"    FROM read_parquet([{paths_sql}]) "
+        f"    GROUP BY ip "
+        f"    ORDER BY max_header DESC "
+        f"    LIMIT {SECURITY_TOPIPS_BUNDLE_TOP_K}"
+        f"  )"
+        f") {parquet_zstd_target(tmp_file)}"
     )
 
 
-# ── origin_dims (pop / oip / edge) closed-day compaction ────────────────────
-
-
-def compact_origin_dims_closed_days_to_daily(
-    service_id: str,
-    source: dict,
-    lookback_days: int | None = None,
-) -> int:
-    """Consolidate closed-day per-hour origin_pop / origin_ip / origin_path
-    parquets into per-day files at ``day_bundled/day=YYYY-MM-DD/<name>.parquet``.
-
-    Mirrors :func:`compact_perf_latency_closed_days_to_daily` (request-weighted
-    percentile merge) for all three origin-dimension bundles. The per-day file
-    request-weights the percentiles (``SUM(p*_us * requests) / SUM(requests)``)
-    and SUMs the counts; pop/oip re-cap the top-K at day grain (the union of 24
-    hours' top-100 can exceed 100 distinct keys), and oip additionally SUMs the
-    exact ``ost_5xx_count`` + ``ost_total_count`` so the reader's error_pct
-    stays exact. edge has no top-K (only 2 keys). The weighted-avg composes
-    exactly with the reader's cross-file weighting.
-
-    Same ``:memory:`` DuckDB + mtime-gated + active-day-skip posture as the
-    other rollup day-compactors. Returns the number of (closed-day) files
-    rebuilt across all three jobs.
-    """
-
-    # pop: per-day GROUP BY pop, request-weighted percentiles, re-cap top-K by
-    # requests (pop cardinality is small but the cap keeps the shape uniform).
-    def _pop_copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT pop, requests, lat_us_count, lat_us_sum, p50_us, p95_us FROM ("
-            f"    SELECT pop, "
-            f"      CAST(SUM(requests) AS BIGINT) AS requests, "
-            f"      CAST(SUM(lat_us_count) AS BIGINT) AS lat_us_count, "
-            f"      CAST(SUM(lat_us_sum) AS DOUBLE) AS lat_us_sum, "
-            f"      CAST({wavg('p50_us', 'requests')} AS DOUBLE) AS p50_us, "
-            f"      CAST({wavg('p95_us', 'requests')} AS DOUBLE) AS p95_us, "
-            f"      ROW_NUMBER() OVER (ORDER BY SUM(requests) DESC) AS rn "
-            f"    FROM read_parquet([{paths_sql}]) "
-            f"    GROUP BY pop"
-            f"  ) WHERE rn <= {ORIGIN_DIMS_BUNDLE_TOP_K}"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
-
-    # oip: per-day GROUP BY oip, request-weighted percentiles, SUM the exact
-    # 5xx/total counts, re-cap top-K by requests.
-    def _ip_copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT oip, requests, lat_us_count, lat_us_sum, p50_us, p95_us, "
-            f"         ost_5xx_count, ost_total_count FROM ("
-            f"    SELECT oip, "
-            f"      CAST(SUM(requests) AS BIGINT) AS requests, "
-            f"      CAST(SUM(lat_us_count) AS BIGINT) AS lat_us_count, "
-            f"      CAST(SUM(lat_us_sum) AS DOUBLE) AS lat_us_sum, "
-            f"      CAST({wavg('p50_us', 'requests')} AS DOUBLE) AS p50_us, "
-            f"      CAST({wavg('p95_us', 'requests')} AS DOUBLE) AS p95_us, "
-            f"      CAST(SUM(ost_5xx_count) AS BIGINT) AS ost_5xx_count, "
-            f"      CAST(SUM(ost_total_count) AS BIGINT) AS ost_total_count, "
-            f"      ROW_NUMBER() OVER (ORDER BY SUM(requests) DESC) AS rn "
-            f"    FROM read_parquet([{paths_sql}]) "
-            f"    GROUP BY oip"
-            f"  ) WHERE rn <= {ORIGIN_DIMS_BUNDLE_TOP_K}"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
-
-    # edge: per-day GROUP BY edge, request-weighted percentiles. NO top-K (2
-    # rows per day at most).
-    def _path_copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT edge, "
-            f"    CAST(SUM(requests) AS BIGINT) AS requests, "
-            f"    CAST(SUM(lat_us_count) AS BIGINT) AS lat_us_count, "
-            f"    CAST(SUM(lat_us_sum) AS DOUBLE) AS lat_us_sum, "
-            f"    CAST({wavg('p50_us', 'requests')} AS DOUBLE) AS p50_us, "
-            f"    CAST({wavg('p95_us', 'requests')} AS DOUBLE) AS p95_us "
-            f"  FROM read_parquet([{paths_sql}]) "
-            f"  GROUP BY edge"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
-
-    return compact_closed_days(
-        service_id,
-        source,
-        jobs=[
-            (ORIGIN_POP_BUNDLE_FILENAME, ".tmp_od_", _pop_copy_sql),
-            (ORIGIN_IP_BUNDLE_FILENAME, ".tmp_od_", _ip_copy_sql),
-            (ORIGIN_PATH_BUNDLE_FILENAME, ".tmp_od_", _path_copy_sql),
-        ],
-        lookback_days=lookback_days,
-        logger=logger,
+def _security_cov_copy_sql(paths_sql: str, tmp_file: str) -> str:
+    return (
+        f"COPY ("
+        f"  SELECT "
+        f"    CAST(SUM(total_rows) AS BIGINT) AS total_rows, "
+        f"    CAST(SUM(tls_populated) AS BIGINT) AS tls_populated "
+        f"  FROM read_parquet([{paths_sql}])"
+        f") {parquet_zstd_target(tmp_file)}"
     )
 
 
-# ── security_dims (req_size / conn_reuse / topips / cov) closed-day compaction ─
+compact_security_dims_closed_days_to_daily = _make_day_compactor(
+    [
+        (SECURITY_REQ_SIZE_BUNDLE_FILENAME, ".tmp_sd_", _bucket_min_copy_sql("min_val")),
+        (SECURITY_CONN_REUSE_BUNDLE_FILENAME, ".tmp_sd_", _bucket_min_copy_sql("min_val")),
+        (SECURITY_TOPIPS_BUNDLE_FILENAME, ".tmp_sd_", _security_topips_copy_sql),
+        (SECURITY_COV_BUNDLE_FILENAME, ".tmp_sd_", _security_cov_copy_sql),
+    ]
+)
 
 
-def compact_security_dims_closed_days_to_daily(
-    service_id: str,
-    source: dict,
-    lookback_days: int | None = None,
-) -> int:
-    """Consolidate closed-day per-hour security_req_size / security_conn_reuse /
-    security_topips / security_cov parquets into per-day files at
-    ``day_bundled/day=YYYY-MM-DD/<name>.parquet``.
-
-    All four merges are EXACT (no request-weighted percentile step):
-
-      - req_size / conn_reuse: ``GROUP BY bucket`` with ``SUM(count)`` and
-        ``MIN(min_val)`` (min-of-mins keeps the cross-hour bucket ordering the
-        reader's ``ORDER BY MIN(min_val)`` relies on).
-      - topips: ``GROUP BY ip`` with ``MAX(max_header)`` (MAX-of-MAX — NOT SUM;
-        the origin precedent in ``_pop_copy_sql`` orders by ``SUM(requests)``,
-        which is the WRONG merge for a per-ip MAX leaderboard), re-capped to the
-        same top-500 per-day so the cross-day reader still re-ranks correctly.
-      - cov: collapse to ONE row per day with ``SUM(total_rows)`` +
-        ``SUM(tls_populated)``.
-
-    Same ``:memory:`` DuckDB + mtime-gated + active-day-skip posture as the
-    other rollup day-compactors (per the 2026-06-06 incident lesson — parquet
-    inputs only, no per-service catalog state). Returns the number of
-    (closed-day) files rebuilt across all four jobs.
-    """
-
-    # req_size / conn_reuse: GROUP BY bucket, SUM(count), MIN(min_val).
-    _bucket_copy_sql = _bucket_min_copy_sql("min_val")
-
-    # topips: GROUP BY ip, MAX(max_header) (MAX-of-MAX), re-cap top-K by max.
-    def _topips_copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT ip, max_header FROM ("
-            f"    SELECT ip, CAST(MAX(max_header) AS BIGINT) AS max_header "
-            f"    FROM read_parquet([{paths_sql}]) "
-            f"    GROUP BY ip "
-            f"    ORDER BY max_header DESC "
-            f"    LIMIT {SECURITY_TOPIPS_BUNDLE_TOP_K}"
-            f"  )"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
-
-    # cov: collapse to one row per day — SUM both counts.
-    def _cov_copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT "
-            f"    CAST(SUM(total_rows) AS BIGINT) AS total_rows, "
-            f"    CAST(SUM(tls_populated) AS BIGINT) AS tls_populated "
-            f"  FROM read_parquet([{paths_sql}])"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
-
-    return compact_closed_days(
-        service_id,
-        source,
-        jobs=[
-            (SECURITY_REQ_SIZE_BUNDLE_FILENAME, ".tmp_sd_", _bucket_copy_sql),
-            (SECURITY_CONN_REUSE_BUNDLE_FILENAME, ".tmp_sd_", _bucket_copy_sql),
-            (SECURITY_TOPIPS_BUNDLE_FILENAME, ".tmp_sd_", _topips_copy_sql),
-            (SECURITY_COV_BUNDLE_FILENAME, ".tmp_sd_", _cov_copy_sql),
-        ],
-        lookback_days=lookback_days,
-        logger=logger,
+def _security_flagged_copy_sql(paths_sql: str, tmp_file: str) -> str:
+    return (
+        f"COPY ("
+        f"  SELECT ip, asn, pop, rtt_min, tcp_rtt, lat, lon, country, city, CAST(SUM(cnt) AS BIGINT) AS cnt "
+        f"  FROM read_parquet([{paths_sql}]) GROUP BY ALL"
+        f") {parquet_zstd_target(tmp_file)}"
     )
 
 
-# ── security_proxies (proxy_quality / proxy_flagged / bot_eff) closed-day compaction ─
-
-
-def compact_security_proxies_closed_days_to_daily(
-    service_id: str,
-    source: dict,
-    lookback_days: int | None = None,
-) -> int:
-    """Consolidate closed-day per-hour security_proxy_quality /
-    security_proxy_flagged / security_bot_eff parquets into per-day files at
-    ``day_bundled/day=YYYY-MM-DD/<name>.parquet``.
-
-      - proxy_quality: ``GROUP BY type`` with ``SUM(count)`` (exact).
-      - proxy_flagged: ``GROUP BY`` the client tuple with ``SUM(cnt)`` (exact; the
-        reader counts distinct IPs over these rows, so the tuple must survive).
-      - bot_eff: ``GROUP BY kind, key`` with ``SUM(cnt)`` / ``SUM(resp_bytes)``;
-        the per-UA rows are re-capped to the same top-K by bytes. The ``ref``
-        count stays a SUM of per-hour distinct IPs (approximate, see
-        :mod:`.security_proxies`).
-
-    Same ``:memory:`` DuckDB + mtime-gated + active-day-skip posture as the other
-    rollup day-compactors. Returns the number of day files rebuilt.
-    """
-    _quality_copy_sql = _sum_count_copy_sql("type")
-
-    def _flagged_copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT ip, asn, pop, rtt_min, tcp_rtt, lat, lon, country, city, CAST(SUM(cnt) AS BIGINT) AS cnt "
-            f"  FROM read_parquet([{paths_sql}]) GROUP BY ALL"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
-
-    def _bot_eff_copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  WITH merged AS ("
-            f"    SELECT kind, key, CAST(SUM(cnt) AS BIGINT) AS cnt, CAST(SUM(resp_bytes) AS BIGINT) AS resp_bytes "
-            f"    FROM read_parquet([{paths_sql}]) GROUP BY kind, key"
-            f"  ), "
-            f"  ranked AS ("
-            f"    SELECT *, ROW_NUMBER() OVER (PARTITION BY kind ORDER BY resp_bytes DESC, cnt DESC) AS rn FROM merged"
-            f"  ) "
-            f"  SELECT kind, key, cnt, resp_bytes FROM ranked "
-            f"  WHERE kind != 'ua' OR rn <= {SECURITY_BOT_EFF_UA_TOP_K}"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
-
-    return compact_closed_days(
-        service_id,
-        source,
-        jobs=[
-            (SECURITY_PROXY_QUALITY_BUNDLE_FILENAME, ".tmp_sp_", _quality_copy_sql),
-            (SECURITY_PROXY_FLAGGED_BUNDLE_FILENAME, ".tmp_sp_", _flagged_copy_sql),
-            (SECURITY_BOT_EFF_BUNDLE_FILENAME, ".tmp_sp_", _bot_eff_copy_sql),
-        ],
-        lookback_days=lookback_days,
-        logger=logger,
+def _security_bot_eff_copy_sql(paths_sql: str, tmp_file: str) -> str:
+    return (
+        f"COPY ("
+        f"  WITH merged AS ("
+        f"    SELECT kind, key, CAST(SUM(cnt) AS BIGINT) AS cnt, CAST(SUM(resp_bytes) AS BIGINT) AS resp_bytes "
+        f"    FROM read_parquet([{paths_sql}]) GROUP BY kind, key"
+        f"  ), "
+        f"  ranked AS ("
+        f"    SELECT *, ROW_NUMBER() OVER (PARTITION BY kind ORDER BY resp_bytes DESC, cnt DESC) AS rn FROM merged"
+        f"  ) "
+        f"  SELECT kind, key, cnt, resp_bytes FROM ranked "
+        f"  WHERE kind != 'ua' OR rn <= {SECURITY_BOT_EFF_UA_TOP_K}"
+        f") {parquet_zstd_target(tmp_file)}"
     )
 
 
-# ── perf_dims (ttl_dist) closed-day compaction ───────────────────────────────
+compact_security_proxies_closed_days_to_daily = _make_day_compactor(
+    [
+        (SECURITY_PROXY_QUALITY_BUNDLE_FILENAME, ".tmp_sp_", _sum_count_copy_sql("type")),
+        (SECURITY_PROXY_FLAGGED_BUNDLE_FILENAME, ".tmp_sp_", _security_flagged_copy_sql),
+        (SECURITY_BOT_EFF_BUNDLE_FILENAME, ".tmp_sp_", _security_bot_eff_copy_sql),
+    ]
+)
+
+compact_perf_dims_closed_days_to_daily = _make_day_compactor(
+    [(PERF_TTL_DIST_BUNDLE_FILENAME, ".tmp_pd_", _bucket_min_copy_sql("min_ttl"))]
+)
 
 
-def compact_perf_dims_closed_days_to_daily(
-    service_id: str,
-    source: dict,
-    lookback_days: int | None = None,
-) -> int:
-    """Consolidate closed-day per-hour perf_ttl_dist parquets into per-day files
-    at ``day_bundled/day=YYYY-MM-DD/perf_ttl_dist.parquet``.
-
-    The merge is EXACT (no request-weighted percentile step): ``GROUP BY bucket``
-    with ``SUM(count)`` and ``MIN(min_ttl)`` (min-of-mins keeps the cross-hour
-    bucket ordering the reader's ``ORDER BY MIN(min_ttl)`` relies on) — the same
-    posture as security_dims' req_size/conn_reuse merge.
-
-    Same ``:memory:`` DuckDB + mtime-gated + active-day-skip posture as the other
-    rollup day-compactors (per the 2026-06-06 incident lesson — parquet inputs
-    only, no per-service catalog state). Returns the number of (closed-day) files
-    rebuilt.
-    """
-    return compact_closed_days(
-        service_id,
-        source,
-        jobs=[(PERF_TTL_DIST_BUNDLE_FILENAME, ".tmp_pd_", _bucket_min_copy_sql("min_ttl"))],
-        lookback_days=lookback_days,
-        logger=logger,
+def _overview_copy_sql(paths_sql: str, tmp_file: str) -> str:
+    return (
+        f"COPY ("
+        f"  SELECT hour_start, "
+        f"    CAST(SUM(requests) AS BIGINT) AS requests, "
+        f"    CAST(SUM(hit_requests) AS BIGINT) AS hit_requests, "
+        f"    CAST(SUM(miss_requests) AS BIGINT) AS miss_requests, "
+        f"    CAST(SUM(pass_requests) AS BIGINT) AS pass_requests, "
+        f"    CAST(SUM(synth_requests) AS BIGINT) AS synth_requests, "
+        f"    CAST(SUM(origin_requests) AS BIGINT) AS origin_requests, "
+        f"    CAST(SUM(bandwidth_saved_bytes) AS BIGINT) AS bandwidth_saved_bytes, "
+        f"    CAST(SUM(total_bandwidth_bytes) AS BIGINT) AS total_bandwidth_bytes, "
+        f"    CAST(SUM(shield_hit_requests) AS BIGINT) AS shield_hit_requests, "
+        f"    CAST(SUM(shield_total_requests) AS BIGINT) AS shield_total_requests, "
+        f"    CAST(SUM(threats_blocked) AS BIGINT) AS threats_blocked, "
+        f"    CAST(SUM(hit_elapsed_sum) AS DOUBLE) AS hit_elapsed_sum, "
+        f"    CAST(SUM(hit_elapsed_count) AS BIGINT) AS hit_elapsed_count, "
+        f"    CAST(SUM(miss_elapsed_sum) AS DOUBLE) AS miss_elapsed_sum, "
+        f"    CAST(SUM(miss_elapsed_count) AS BIGINT) AS miss_elapsed_count "
+        f"  FROM read_parquet([{paths_sql}]) "
+        f"  GROUP BY hour_start"
+        f") {parquet_zstd_target(tmp_file)}"
     )
 
 
-def compact_overview_closed_days_to_daily(
-    service_id: str,
-    source: dict,
-    lookback_days: int | None = None,
-) -> int:
-    """Consolidate closed-day per-hour overview parquets into per-day files
-    at ``day_bundled/day=YYYY-MM-DD/overview.parquet``.
+compact_overview_closed_days_to_daily = _make_day_compactor(
+    [(OVERVIEW_BUNDLE_FILENAME, ".tmp_ov_", _overview_copy_sql)]
+)
 
-    Preserves ``hour_start`` granularity (24 rows per day file) so the
-    reader can still re-bucket to sub-day chart intervals. All metric
-    columns are SUM-aggregatable — the ``GROUP BY hour_start`` is a no-op
-    merge (each hour lives in exactly one source file).
-    """
 
-    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT hour_start, "
-            f"    CAST(SUM(requests) AS BIGINT) AS requests, "
-            f"    CAST(SUM(hit_requests) AS BIGINT) AS hit_requests, "
-            f"    CAST(SUM(miss_requests) AS BIGINT) AS miss_requests, "
-            f"    CAST(SUM(pass_requests) AS BIGINT) AS pass_requests, "
-            f"    CAST(SUM(synth_requests) AS BIGINT) AS synth_requests, "
-            f"    CAST(SUM(origin_requests) AS BIGINT) AS origin_requests, "
-            f"    CAST(SUM(bandwidth_saved_bytes) AS BIGINT) AS bandwidth_saved_bytes, "
-            f"    CAST(SUM(total_bandwidth_bytes) AS BIGINT) AS total_bandwidth_bytes, "
-            f"    CAST(SUM(shield_hit_requests) AS BIGINT) AS shield_hit_requests, "
-            f"    CAST(SUM(shield_total_requests) AS BIGINT) AS shield_total_requests, "
-            f"    CAST(SUM(threats_blocked) AS BIGINT) AS threats_blocked, "
-            f"    CAST(SUM(hit_elapsed_sum) AS DOUBLE) AS hit_elapsed_sum, "
-            f"    CAST(SUM(hit_elapsed_count) AS BIGINT) AS hit_elapsed_count, "
-            f"    CAST(SUM(miss_elapsed_sum) AS DOUBLE) AS miss_elapsed_sum, "
-            f"    CAST(SUM(miss_elapsed_count) AS BIGINT) AS miss_elapsed_count "
-            f"  FROM read_parquet([{paths_sql}]) "
-            f"  GROUP BY hour_start"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
-
-    return compact_closed_days(
-        service_id,
-        source,
-        jobs=[(OVERVIEW_BUNDLE_FILENAME, ".tmp_ov_", _copy_sql)],
-        lookback_days=lookback_days,
-        logger=logger,
+def _time_series_copy_sql(paths_sql: str, tmp_file: str) -> str:
+    return (
+        f"COPY ("
+        f"  SELECT "
+        f"    bucket, "
+        f"    CAST(SUM(requests) AS BIGINT) AS requests, "
+        f"    CAST(SUM(status_4xx) AS BIGINT) AS status_4xx, "
+        f"    CAST(SUM(status_5xx) AS BIGINT) AS status_5xx, "
+        f"    CAST(SUM(hits) AS BIGINT) AS hits, "
+        f"    CAST(SUM(cache_total) AS BIGINT) AS cache_total, "
+        f"    CAST(SUM(resp_bytes_sum) AS BIGINT) AS resp_bytes_sum, "
+        f"    CAST(SUM(ttfb_sum) AS DOUBLE) AS ttfb_sum, "
+        f"    CAST(SUM(ttfb_count) AS BIGINT) AS ttfb_count "
+        f"  FROM read_parquet([{paths_sql}]) "
+        f"  GROUP BY bucket "
+        f"  ORDER BY bucket"
+        f") {parquet_zstd_target(tmp_file)}"
     )
 
 
-def compact_time_series_closed_days_to_daily(
-    service_id: str,
-    source: dict,
-    lookback_days: int | None = None,
-) -> int:
-    """Consolidate closed-day per-hour time_series parquets into per-day files."""
+compact_time_series_closed_days_to_daily = _make_day_compactor(
+    [(TIME_SERIES_BUNDLE_FILENAME, ".tmp_ts_day_", _time_series_copy_sql)]
+)
 
-    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT "
-            f"    bucket, "
-            f"    CAST(SUM(requests) AS BIGINT) AS requests, "
-            f"    CAST(SUM(status_4xx) AS BIGINT) AS status_4xx, "
-            f"    CAST(SUM(status_5xx) AS BIGINT) AS status_5xx, "
-            f"    CAST(SUM(hits) AS BIGINT) AS hits, "
-            f"    CAST(SUM(cache_total) AS BIGINT) AS cache_total, "
-            f"    CAST(SUM(resp_bytes_sum) AS BIGINT) AS resp_bytes_sum, "
-            f"    CAST(SUM(ttfb_sum) AS DOUBLE) AS ttfb_sum, "
-            f"    CAST(SUM(ttfb_count) AS BIGINT) AS ttfb_count "
-            f"  FROM read_parquet([{paths_sql}]) "
-            f"  GROUP BY bucket "
-            f"  ORDER BY bucket"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
 
-    return compact_closed_days(
-        service_id,
-        source,
-        jobs=[(TIME_SERIES_BUNDLE_FILENAME, ".tmp_ts_day_", _copy_sql)],
-        lookback_days=lookback_days,
-        logger=logger,
+def _pop_health_copy_sql(paths_sql: str, tmp_file: str) -> str:
+    return (
+        f"COPY ("
+        f"  SELECT "
+        f"      CAST(pop AS VARCHAR) AS pop, "
+        f"      CAST(SUM(requests) AS BIGINT) AS requests, "
+        f"      CAST(SUM(errors) AS BIGINT) AS errors, "
+        f"      CAST(SUM(cache_hits) AS BIGINT) AS cache_hits, "
+        f"      CAST(SUM(bandwidth_bytes) AS BIGINT) AS bandwidth_bytes, "
+        f"      CAST({wavg('p50_rtt_us', 'requests')} AS DOUBLE) AS p50_rtt_us, "
+        f"      CAST({wavg('p95_ttfb_ms', 'requests')} AS DOUBLE) AS p95_ttfb_ms "
+        f"  FROM read_parquet([{paths_sql}]) "
+        f"  GROUP BY pop"
+        f") {parquet_zstd_target(tmp_file)}"
     )
 
 
-def compact_pop_health_closed_days_to_daily(
-    service_id: str,
-    source: dict,
-    lookback_days: int | None = None,
-) -> int:
-    """Consolidate closed-day per-hour pop_health parquets into per-day files."""
+compact_pop_health_closed_days_to_daily = _make_day_compactor(
+    [(POP_HEALTH_BUNDLE_FILENAME, ".tmp_ph_", _pop_health_copy_sql)]
+)
 
-    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT "
-            f"      CAST(pop AS VARCHAR) AS pop, "
-            f"      CAST(SUM(requests) AS BIGINT) AS requests, "
-            f"      CAST(SUM(errors) AS BIGINT) AS errors, "
-            f"      CAST(SUM(cache_hits) AS BIGINT) AS cache_hits, "
-            f"      CAST(SUM(bandwidth_bytes) AS BIGINT) AS bandwidth_bytes, "
-            f"      CAST({wavg('p50_rtt_us', 'requests')} AS DOUBLE) AS p50_rtt_us, "
-            f"      CAST({wavg('p95_ttfb_ms', 'requests')} AS DOUBLE) AS p95_ttfb_ms "
-            f"  FROM read_parquet([{paths_sql}]) "
-            f"  GROUP BY pop"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
 
-    return compact_closed_days(
-        service_id,
-        source,
-        jobs=[(POP_HEALTH_BUNDLE_FILENAME, ".tmp_ph_", _copy_sql)],
-        lookback_days=lookback_days,
-        logger=logger,
+def _network_quality_copy_sql(include_country: bool) -> Callable[[str, str], str]:
+    country_select = ", country" if include_country else ""
+    return lambda paths_sql, tmp_file: (
+        f"COPY ("
+        f"  SELECT dim_val {country_select}, "
+        f"    CAST(SUM(requests) AS BIGINT) AS requests, "
+        f"    CAST({wavg('p50_us', 'requests')} AS DOUBLE) AS p50_us "
+        f"  FROM read_parquet([{paths_sql}]) "
+        f"  GROUP BY dim_val {country_select} "
+        f"  ORDER BY requests DESC LIMIT 100"
+        f") {parquet_zstd_target(tmp_file)}"
     )
 
 
-def compact_network_quality_closed_days_to_daily(
-    service_id: str,
-    source: dict,
-    lookback_days: int | None = None,
-) -> int:
-    from ._common import (
-        NETWORK_QUALITY_ASN_FILENAME,
-        NETWORK_QUALITY_COUNTRY_FILENAME,
-        NETWORK_QUALITY_POP_FILENAME,
-        NETWORK_QUALITY_REGION_FILENAME,
-    )
-
-    def _build_sql(dim_col: str, include_country: bool) -> Callable[[str, str], str]:
-        country_select = ", country" if include_country else ""
-        return lambda paths_sql, tmp_file: (
-            f"COPY ("
-            f"  SELECT dim_val {country_select}, "
-            f"    CAST(SUM(requests) AS BIGINT) AS requests, "
-            f"    CAST({wavg('p50_us', 'requests')} AS DOUBLE) AS p50_us "
-            f"  FROM read_parquet([{paths_sql}]) "
-            f"  GROUP BY dim_val {country_select} "
-            f"  ORDER BY requests DESC LIMIT 100"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
-
-    return compact_closed_days(
-        service_id,
-        source,
-        jobs=[
-            (NETWORK_QUALITY_COUNTRY_FILENAME, ".tmp_nq_", _build_sql("country", False)),
-            (NETWORK_QUALITY_ASN_FILENAME, ".tmp_nq_", _build_sql("asn", False)),
-            (NETWORK_QUALITY_REGION_FILENAME, ".tmp_nq_", _build_sql("region", True)),
-            (NETWORK_QUALITY_POP_FILENAME, ".tmp_nq_", _build_sql("pop", False)),
-        ],
-        lookback_days=lookback_days,
-        logger=logger,
-    )
+compact_network_quality_closed_days_to_daily = _make_day_compactor(
+    [
+        (NETWORK_QUALITY_COUNTRY_FILENAME, ".tmp_nq_", _network_quality_copy_sql(False)),
+        (NETWORK_QUALITY_ASN_FILENAME, ".tmp_nq_", _network_quality_copy_sql(False)),
+        (NETWORK_QUALITY_REGION_FILENAME, ".tmp_nq_", _network_quality_copy_sql(True)),
+        (NETWORK_QUALITY_POP_FILENAME, ".tmp_nq_", _network_quality_copy_sql(False)),
+    ]
+)
 
 
 def retire_compacted_hour_bundles(
@@ -1337,13 +973,6 @@ def retire_compacted_hour_bundles(
     """
     from backend.core.duckdb import get_memory_connection
     from backend.core.iceberg.view import _get_service_lock
-
-    from ._common import (
-        DAY_BUNDLE_FILENAME,
-        IP_SPREAD_BUNDLE_FILENAME,
-        _day_bundled_root,
-        _hour_bundled_root,
-    )
 
     bundled_root = _day_bundled_root(source)
     hour_bundled_root = _hour_bundled_root(source)

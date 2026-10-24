@@ -14,8 +14,6 @@ type MapCity = components['schemas']['NetworkMapCity']
 
 const A2_TO_A3: Record<string, string> = countryMapData
 
-export { formatBucket } from '@/lib/date'
-
 /** One city's value for a metric id (``health_score``, ``rtt_med_us`` …); ``null`` when absent. */
 function cityMetric(c: MapCity, metric: string): number | null {
   const v = (c as Record<string, unknown>)[metric]

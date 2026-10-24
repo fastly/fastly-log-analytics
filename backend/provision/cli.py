@@ -347,13 +347,8 @@ def handle_invite_analyst(args):
         sys.exit(1)
 
 
-def handle_update_logs(args):
-    banner("Fastly Log Analysis — Update Logs")
+def _resolve_cli_service_and_token(args, *, require_token: bool = True) -> tuple[str, dict, str]:
     from backend import config as svcconfig
-    from backend.provision.system_fields import (
-        reconcile_system_custom_fields,
-        system_feature_flags,
-    )
 
     service_id = args.service_id or (svcconfig.list_service_ids()[0] if svcconfig.list_service_ids() else None)
     if not service_id:
@@ -363,6 +358,22 @@ def handle_update_logs(args):
     if not cfg:
         fail(f"Config for {service_id} not found.")
         sys.exit(1)
+    if not require_token:
+        return service_id, cfg, ""
+    token = args.token or cfg.get("fastly_api_key") or ask("Fastly API token")
+    if not token:
+        sys.exit(1)
+    return service_id, cfg, token
+
+
+def handle_update_logs(args):
+    banner("Fastly Log Analysis — Update Logs")
+    from backend.provision.system_fields import (
+        reconcile_system_custom_fields,
+        system_feature_flags,
+    )
+
+    service_id, cfg, _ = _resolve_cli_service_and_token(args, require_token=False)
 
     from backend.core import field_registry as lf
 
@@ -429,18 +440,7 @@ def handle_update_cdn(args):
     banner("Fastly Log Analysis — Update CDN Service")
     from backend import config as svcconfig
 
-    service_id = args.service_id or (svcconfig.list_service_ids()[0] if svcconfig.list_service_ids() else None)
-    if not service_id:
-        fail("No services configured.")
-        sys.exit(1)
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        fail(f"Config for {service_id} not found.")
-        sys.exit(1)
-
-    token = args.token or cfg.get("fastly_api_key") or ask("Fastly API token")
-    if not token:
-        sys.exit(1)
+    service_id, cfg, token = _resolve_cli_service_and_token(args)
 
     prov_cfg = cfg.get("provisioning", {})
     cdn_service_id = prov_cfg.get("cdn_service_id") or cfg.get("cdn_service_id")
@@ -491,20 +491,7 @@ def handle_enable_scoring(args):
     emits its own per-stage console lines (the two-phase Compute/Logging
     progress), so the CLI only adds the final summary."""
     banner("Fastly Log Analysis — Enable Session Scoring")
-    from backend import config as svcconfig
-
-    service_id = args.service_id or (svcconfig.list_service_ids()[0] if svcconfig.list_service_ids() else None)
-    if not service_id:
-        fail("No services configured.")
-        sys.exit(1)
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        fail(f"Config for {service_id} not found.")
-        sys.exit(1)
-
-    token = args.token or cfg.get("fastly_api_key") or ask("Fastly API token")
-    if not token:
-        sys.exit(1)
+    service_id, _cfg, token = _resolve_cli_service_and_token(args)
 
     from backend.provision.session_scoring_orchestrator import enable_scoring
 
@@ -526,20 +513,7 @@ def handle_disable_scoring(args):
     them, then tears down the scorer Compute service + ConfigStores. Prompts
     for confirmation unless ``--yes`` is passed."""
     banner("Fastly Log Analysis — Disable Session Scoring")
-    from backend import config as svcconfig
-
-    service_id = args.service_id or (svcconfig.list_service_ids()[0] if svcconfig.list_service_ids() else None)
-    if not service_id:
-        fail("No services configured.")
-        sys.exit(1)
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        fail(f"Config for {service_id} not found.")
-        sys.exit(1)
-
-    token = args.token or cfg.get("fastly_api_key") or ask("Fastly API token")
-    if not token:
-        sys.exit(1)
+    service_id, _cfg, token = _resolve_cli_service_and_token(args)
 
     if not getattr(args, "yes", False):
         blank()

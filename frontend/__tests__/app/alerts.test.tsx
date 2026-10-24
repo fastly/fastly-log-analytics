@@ -1,33 +1,38 @@
-/**
- * MSW migration (TESTING_PLAN_3 item 9). This test used to
- * ``vi.mock('@/lib/api')`` and hand-stub `client.GET`. That bypassed
- * the openapi-fetch middleware (header injection, error-throwing
- * onResponse) so an error in either layer would slip through tests.
- *
- * Now we let the real openapi-fetch client run and intercept at the
- * fetch boundary with MSW. The store mocks remain — they are state,
- * not network.
- */
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
-import { expect, test, vi, beforeEach } from 'vitest'
+import { createTestQueryClient, renderWithQuery } from '../helpers/query'
+import { describe, expect, test, vi, beforeEach } from 'vitest'
 import React from 'react'
+import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
 
-// The route's page.tsx is now an async RSC that pre-fetches alerts
-// server-side and dehydrates the cache for the client island. The unit
-// test exercises the client island directly so it stays compatible with
-// vitest's synchronous render.
 import AlertsClient from '@/app/alerts/_sections/AlertsClient'
+import { AlertPreview } from '@/app/alerts/_sections/AlertPreview'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useFilterStore } from '@/stores/filterStore'
+import { useTimezoneStore } from '@/stores/timezoneStore'
 import { server } from '@/__tests__/helpers/msw/server'
 
-// Mock the heavy plotly child — irrelevant to the assertion here.
-vi.mock('@/components/PlotlyChart', async () => (await import('../helpers/page-smoke')).plotlyChartModuleMock())
+const plotlyChartCalls: Array<{ data: PlotlyTrace[]; layout: PlotlyLayout | undefined }> = []
+
+vi.mock('@/components/PlotlyChart', async () =>
+  (await import('../helpers/page-smoke')).plotlyChartModuleMock((props) => {
+    plotlyChartCalls.push({ data: props.data, layout: props.layout })
+  }),
+)
 
 vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
+
+vi.mock('@/hooks/useLogFieldsCatalog', () => ({
+  useLogFieldsCatalog: vi.fn(() => ({
+    data: {
+      fields: [
+        { id: 'requests', unit: '', precision: 0 },
+        { id: 'origin_latency_ms', unit: 'ms', precision: 1 },
+      ],
+    },
+  })),
+}))
 
 const mockReplace = vi.fn()
 const mockPush = vi.fn()
@@ -118,8 +123,10 @@ function installBaseHandlers(alerts: readonly unknown[] = [], role: 'admin' | 'a
 }
 
 beforeEach(() => {
+  plotlyChartCalls.length = 0
   vi.clearAllMocks()
   mockSearchParams = new URLSearchParams()
+  useTimezoneStore.setState({ timezone: 'UTC' })
   useServiceStore.setState({
     activeServiceId: 'test-svc',
     isInitialized: true,
@@ -136,11 +143,7 @@ beforeEach(() => {
 test('renders alerts page empty state and zero-CLS containers', async () => {
   installBaseHandlers([])
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <AlertsClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<AlertsClient />, { queryClient })
 
   expect(await screen.findByText('Alerts')).toBeInTheDocument()
   expect(await screen.findByTestId('alerts-empty-state')).toHaveTextContent('No alert rules configured')
@@ -152,11 +155,7 @@ test('renders alerts page empty state and zero-CLS containers', async () => {
 test('renders configured rules, KPI summary cards, and status filter tabs', async () => {
   installBaseHandlers(SAMPLE_ALERTS)
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <AlertsClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<AlertsClient />, { queryClient })
 
   expect(await screen.findByText('High 5xx Spike')).toBeInTheDocument()
   expect(screen.getByText('Origin TTFB Budget')).toBeInTheDocument()
@@ -166,7 +165,6 @@ test('renders configured rules, KPI summary cards, and status filter tabs', asyn
   expect(screen.getByTestId('alerts-count-ok')).toHaveTextContent('1')
   expect(screen.getByTestId('alerts-count-muted')).toHaveTextContent('1')
 
-  // Verify status filter buttons exist and filter rows when clicked
   const mutedFilterBtn = screen.getByTestId('alerts-filter-muted')
   fireEvent.click(mutedFilterBtn)
 
@@ -203,11 +201,7 @@ test('dispatches PATCH on mute/enable switch toggle and POST on test notificatio
     }),
   )
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <AlertsClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<AlertsClient />, { queryClient })
 
   expect(await screen.findByText('High 5xx Spike')).toBeInTheDocument()
 
@@ -239,11 +233,7 @@ test('enforces read-only gating for Analyst Path B role', async () => {
     evaluated_at: new Date().toISOString(),
   })
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <AlertsClient />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<AlertsClient />, { queryClient })
 
   expect(await screen.findByText('High 5xx Spike')).toBeInTheDocument()
 
@@ -254,5 +244,145 @@ test('enforces read-only gating for Analyst Path B role', async () => {
     expect(screen.queryByTestId('delete-alert-alert-firing')).not.toBeInTheDocument()
     expect(screen.queryByTestId('test-alert-alert-firing')).not.toBeInTheDocument()
     expect(screen.getByTestId('analyst-alert-enabled-alert-firing')).toHaveTextContent('On')
+  })
+})
+
+const basePreviewProps = {
+  previewData: null,
+  isPreviewLoading: false,
+  lookbackHours: 6,
+  setLookbackHours: vi.fn(),
+  metric: 'requests',
+  evalType: 'absolute',
+  threshold: '',
+}
+
+describe('AlertPreview', () => {
+  test('renders the empty placeholder when previewData has no points', () => {
+    render(<AlertPreview {...basePreviewProps} previewData={{ times: [], values: [], type: 'absolute' }} />)
+    expect(screen.getByText('No data available for preview.')).toBeInTheDocument()
+    expect(plotlyChartCalls).toHaveLength(0)
+  })
+
+  test('shows the loading spinner when isPreviewLoading is true', () => {
+    const { container } = render(
+      <AlertPreview {...basePreviewProps} isPreviewLoading={true} previewData={null} />,
+    )
+    const spinner = container.querySelector('svg.animate-spin')
+    expect(spinner).not.toBeNull()
+  })
+
+  test('highlights the active lookback button (default variant -> bg-primary)', async () => {
+    const setLookbackHours = vi.fn()
+    render(
+      <AlertPreview
+        {...basePreviewProps}
+        lookbackHours={12}
+        setLookbackHours={setLookbackHours}
+        previewData={{ times: [], values: [], type: 'absolute' }}
+      />,
+    )
+
+    const active = screen.getByRole('button', { name: '12h' })
+    const inactive = screen.getByRole('button', { name: '1h' })
+
+    expect(active.className).toContain('bg-primary')
+    expect(inactive.className).not.toContain('bg-primary')
+
+    await userEvent.click(inactive)
+    expect(setLookbackHours).toHaveBeenCalledWith(1)
+  })
+
+  test('passes the current xy trace to PlotlyChart (timestamps converted to the selected tz)', () => {
+    const previewData = {
+      times: ['2026-06-15T00:00:00Z', '2026-06-15T01:00:00Z'],
+      values: [10, 20],
+      type: 'absolute' as const,
+    }
+    render(<AlertPreview {...basePreviewProps} previewData={previewData} threshold="" />)
+
+    expect(plotlyChartCalls.length).toBeGreaterThan(0)
+    const lastCall = plotlyChartCalls[plotlyChartCalls.length - 1]
+    const current = lastCall.data[0]
+    expect(current.name).toBe('Current')
+    expect(current.x).toEqual(['2026-06-15 00:00:00', '2026-06-15 01:00:00'])
+    expect(current.y).toEqual(previewData.values)
+    expect(current.type).toBe('bar')
+  })
+
+  test('omits the threshold overlay when threshold does not parse to a number', () => {
+    const previewData = {
+      times: ['2026-06-15T00:00:00Z', '2026-06-15T01:00:00Z'],
+      values: [10, 20],
+      type: 'absolute' as const,
+    }
+    render(
+      <AlertPreview
+        {...basePreviewProps}
+        previewData={previewData}
+        threshold=""
+      />,
+    )
+
+    const lastCall = plotlyChartCalls[plotlyChartCalls.length - 1]
+    const thresholdTrace = lastCall.data.find((t) => t?.name === 'Threshold')
+    expect(thresholdTrace).toBeUndefined()
+  })
+
+  test('emits a horizontal threshold trace when previewData.type=absolute and threshold parses', () => {
+    const previewData = {
+      times: ['2026-06-15T00:00:00Z', '2026-06-15T01:00:00Z'],
+      values: [10, 20],
+      type: 'absolute' as const,
+    }
+    render(<AlertPreview {...basePreviewProps} previewData={previewData} threshold="42" />)
+
+    const lastCall = plotlyChartCalls[plotlyChartCalls.length - 1]
+    const thresholdTrace = lastCall.data.find((t) => t?.name === 'Threshold')
+    expect(thresholdTrace).toBeDefined()
+    expect(thresholdTrace?.x).toEqual(['2026-06-15 00:00:00', '2026-06-15 01:00:00'])
+    expect(thresholdTrace?.y).toEqual([42, 42])
+    expect(thresholdTrace?.line?.dash).toBe('dash')
+  })
+
+  test('locks the x-axis (fixedrange) so the preview has no zoom/pan affordance', () => {
+    const previewData = {
+      times: ['2026-06-15T00:00:00Z', '2026-06-15T01:00:00Z'],
+      values: [10, 20],
+      type: 'absolute' as const,
+    }
+    render(<AlertPreview {...basePreviewProps} previewData={previewData} threshold="" />)
+
+    const lastCall = plotlyChartCalls[plotlyChartCalls.length - 1]
+    expect(lastCall.layout?.xaxis?.fixedrange).toBe(true)
+  })
+
+  test('emits both baseline and calculated-threshold traces for relative_increase evalType', () => {
+    const previewData = {
+      times: ['2026-06-15T00:00:00Z', '2026-06-15T01:00:00Z'],
+      values: [110, 220],
+      hist_values: [100, 200],
+      type: 'relative' as const,
+    }
+    render(
+      <AlertPreview
+        {...basePreviewProps}
+        previewData={previewData}
+        evalType="relative_increase"
+        threshold="10"
+      />,
+    )
+
+    const lastCall = plotlyChartCalls[plotlyChartCalls.length - 1]
+    const baseline = lastCall.data.find((t) => t?.name === 'Baseline')
+    const threshold = lastCall.data.find((t) => t?.name === 'Threshold')
+
+    expect(baseline).toBeDefined()
+    expect(baseline?.y).toEqual(previewData.hist_values)
+
+    expect(threshold).toBeDefined()
+    expect(threshold?.y).toHaveLength(2)
+    expect(threshold?.y?.[0]).toBeCloseTo(110, 5)
+    expect(threshold?.y?.[1]).toBeCloseTo(220, 5)
   })
 })

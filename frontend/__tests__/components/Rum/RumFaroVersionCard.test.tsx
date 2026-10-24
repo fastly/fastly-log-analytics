@@ -13,7 +13,7 @@
  *     query so the card reflects the new pin without a manual reload
  */
 import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
-import { stubPointerCaptureAndScroll, stubGetAnimations } from '@/__tests__/helpers/jsdom-shims'
+import { stubPointerCaptureAndScroll, stubGetAnimations } from '@/__tests__/helpers/browser-stubs'
 import * as React from 'react'
 import { describe, it, expect, afterEach, beforeEach, beforeAll, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'

@@ -12,12 +12,11 @@
  */
 import * as React from "react";
 import { describe, it, expect, afterEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { QueryClientProvider } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
 
-import { createTestQueryClient } from "../../helpers/query";
+import { renderWithQuery } from "../../helpers/query";
 import { server } from '@/__tests__/helpers/msw/server';
 import { getApiBase } from "@/lib/api";
 import { RumVersionPicker } from "@/components/ProvisionWizard/RumVersionPicker";
@@ -29,11 +28,8 @@ function renderPicker(
   onChange: (v: string | null) => void,
   value: string | null = null,
 ) {
-  const qc = createTestQueryClient();
-  return render(
-    <QueryClientProvider client={qc}>
-      <RumVersionPicker serviceId={SVC} value={value} onChange={onChange} />
-    </QueryClientProvider>,
+  return renderWithQuery(
+    <RumVersionPicker serviceId={SVC} value={value} onChange={onChange} />,
   );
 }
 

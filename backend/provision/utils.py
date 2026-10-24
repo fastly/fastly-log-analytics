@@ -24,7 +24,9 @@ on non-TTY) — the Console instances are configured with
 ``force_terminal=None`` so rich's own detection wins.
 """
 
+import queue
 import sys
+import threading
 
 from rich.console import Console
 
@@ -142,3 +144,35 @@ def ask_int(question, default, min_val=None, max_val=None):
             return val
         except ValueError:
             warn("Please enter a valid integer.")
+
+
+def run_with_events(func, *args, raise_on_error: bool = True, **kwargs):
+    q: queue.Queue[str | None] = queue.Queue()
+    kwargs["status_cb"] = q.put
+    res = []
+    err = []
+
+    def worker():
+        try:
+            res.append(func(*args, **kwargs))
+        except Exception as e:
+            err.append(e)
+        finally:
+            q.put(None)
+
+    t = threading.Thread(target=worker)
+    t.start()
+
+    while True:
+        msg = q.get()
+        if msg is None:
+            break
+        yield {"type": "status", "message": msg}
+
+    t.join()
+    if err:
+        if raise_on_error:
+            raise err[0]
+        yield {"type": "error", "message": str(err[0])}
+        return None
+    return res[0]

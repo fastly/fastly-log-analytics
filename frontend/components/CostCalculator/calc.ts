@@ -53,7 +53,7 @@ export interface CalcState {
   billingZone: BillingZone
 }
 
-export type CalcAction =
+type CalcAction =
   | { type: 'SET'; key: keyof CalcState; value: number | boolean | BillingZone }
   | { type: 'SET_ZONE'; zone: BillingZone }
   | { type: 'PREFILL'; prefill: PrefillResponse }
@@ -331,5 +331,3 @@ export function calculate(s: CalcState): CalcResults {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 export const fmtN = (n: number): string => formatAbbreviatedCount(n, 2)
-
-export { formatUSD as fmtUSD }

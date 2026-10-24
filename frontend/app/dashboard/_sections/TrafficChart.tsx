@@ -15,9 +15,10 @@ import { cn } from '@/lib/utils'
 import { TRENDS } from '@/lib/constants'
 import { useActiveLogFields } from '@/hooks/useActiveLogFields'
 import type { PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/plotly'
-import type { DashboardAggregates, DashboardCatalog, ReportConfiguration } from './types'
+import type { ReportConfiguration } from '@/hooks/useReportConfig'
+import type { DashboardAggregates, DashboardCatalog } from './types'
 
-export interface TrafficChartProps {
+interface TrafficChartProps {
   catalog: DashboardCatalog | undefined
   metric: string
   setMetric: (m: string) => void

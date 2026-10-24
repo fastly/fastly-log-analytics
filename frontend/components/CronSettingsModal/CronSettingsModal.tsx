@@ -4,23 +4,10 @@ import React, { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useOpenGeneration } from '@/hooks/useDerivedState'
 import { queryKeys } from '@/lib/query-keys'
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Loader2, Clock } from 'lucide-react'
 import { useSSE } from '@/hooks/useSSE'
-import { SSEDialogFooter, SSEExecutionSection } from '@/components/SSEModal'
-import { cn } from '@/lib/utils'
-import {
-  panelDialogContent,
-  panelDialogFooter,
-  panelDialogHeaderMuted,
-} from '@/lib/panel-dialog'
+import { SSEActionDialogShell, SSEExecutionSection } from '@/components/SSEModal'
 import { AnalystSchedulePanel, LogSyncSection } from './Schedule'
 import { NgwafSection, IcebergOptimizationSection } from './Triggers'
 import type { ServiceConfig } from '@/types/api'
@@ -157,18 +144,10 @@ function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModa
     start(`/api/services/${service.service_id}/cron-settings`, body)
   }
 
-  const handleOpenChange = (newOpen: boolean) => {
-    if (status === 'streaming') return
-    if (!newOpen && status === 'done') {
-      queryClient.invalidateQueries({ queryKey: queryKeys.services() })
-    }
-    onOpenChange(newOpen)
-  }
-
   if (!service) return null
 
   const isPending = status === 'streaming'
-  const isSuccess = status === 'done' || status === 'error' || status === 'streaming'
+  const isExecuting = status === 'done' || status === 'error' || status === 'streaming'
 
   const syncIntervalNum = parseInt(syncIntervalMins)
 
@@ -182,120 +161,116 @@ function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModa
         : `every ${adminSyncSeconds} seconds`)
 
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className={cn("sm:max-w-4xl", panelDialogContent)} showCloseButton={status !== 'streaming'}>
-        <DialogHeader className={panelDialogHeaderMuted}>
-          <div className="flex items-center justify-between">
-            <DialogTitle className="flex items-center gap-2">
-              <Clock className="h-5 w-5 text-primary" />
-              Cron Settings
-            </DialogTitle>
-          </div>
-          <div className="text-sm text-muted-foreground mt-1">
-            Service: <span className="font-medium text-foreground">{service.name}</span>
-          </div>
-        </DialogHeader>
-
-        <div className="flex-1 overflow-y-auto min-h-0">
-          {isSuccess ? (
-            <SSEExecutionSection
-              title="Updating Cron Settings"
-              subtitle="Applying new background sync configuration..."
-              lines={lines}
-              status={status}
-              error={error}
-              heightClassName="h-[300px]"
-              progressLabel="Step"
-              doneMessage="Settings applied! You may now close this window."
-            />
-          ) : isAnalyst ? (
-            <AnalystSchedulePanel
-              syncEnabled={syncEnabled}
-              setSyncEnabled={setSyncEnabled}
-              syncIntervalMins={syncIntervalMins}
-              setSyncIntervalMins={setSyncIntervalMins}
-              cacheRetention={cacheRetention}
-              setCacheRetention={setCacheRetention}
-            />
-          ) : (
-            <div className="space-y-8 p-6 text-sm">
-              <LogSyncSection
-                syncEnabled={syncEnabled}
-                setSyncEnabled={setSyncEnabled}
-                pollingMode={pollingMode}
-                setPollingMode={setPollingMode}
-                deleteAfter={deleteAfter}
-                setDeleteAfter={setDeleteAfter}
-                dataRetention={dataRetention}
-                setDataRetention={setDataRetention}
-                cacheRetention={cacheRetention}
-                setCacheRetention={setCacheRetention}
-                rollupRetention={rollupRetention}
-                setRollupRetention={setRollupRetention}
-                commitInterval={commitInterval}
-                setCommitInterval={setCommitInterval}
-                syncLogEnabled={syncLogEnabled}
-                setSyncLogEnabled={setSyncLogEnabled}
-                syncRetention={syncRetention}
-                setSyncRetention={setSyncRetention}
-                syncFreqLabel={syncFreqLabel}
-                isAnalyst={isAnalyst}
-                syncIntervalNum={syncIntervalNum}
-                adminSyncSeconds={adminSyncSeconds}
-                rumRetention={rumRetention}
-                setRumRetention={setRumRetention}
-                rumEnabled={service.rum_enabled ?? false}
-                rumSyncEnabled={rumSyncEnabled}
-                setRumSyncEnabled={setRumSyncEnabled}
-                rumLogPeriod={rumLogPeriod}
-                setRumLogPeriod={setRumLogPeriod}
-                rumDeleteAfter={rumDeleteAfter}
-                setRumDeleteAfter={setRumDeleteAfter}
-                serviceId={service.service_id}
-              />
-
-              {service.ngwaf_workspace_id && (
-                <NgwafSection
-                  ngwafInterval={ngwafInterval}
-                  setNgwafInterval={setNgwafInterval}
-                  ngwafLogEnabled={ngwafLogEnabled}
-                  setNgwafLogEnabled={setNgwafLogEnabled}
-                  ngwafRetention={ngwafRetention}
-                  setNgwafRetention={setNgwafRetention}
-                />
-              )}
-
-              <IcebergOptimizationSection
-                compactEnabled={compactEnabled}
-                setCompactEnabled={setCompactEnabled}
-                compactLogEnabled={compactLogEnabled}
-                setCompactLogEnabled={setCompactLogEnabled}
-                compactRetention={compactRetention}
-                setCompactRetention={setCompactRetention}
-              />
-            </div>
-          )}
+    <SSEActionDialogShell
+      open={open}
+      onOpenChange={onOpenChange}
+      onComplete={() => {
+        queryClient.invalidateQueries({ queryKey: queryKeys.services() })
+      }}
+      reloadOnDone={false}
+      status={status}
+      onStop={stop}
+      isExecuting={isExecuting}
+      maxWidthClassName="sm:max-w-4xl"
+      titleClassName="text-foreground"
+      title={
+        <>
+          <Clock className="h-5 w-5 text-primary" />
+          Cron Settings
+        </>
+      }
+      headerExtra={
+        <div className="text-sm text-muted-foreground mt-1">
+          Service: <span className="font-medium text-foreground">{service.name}</span>
         </div>
+      }
+      executionSection={
+        <SSEExecutionSection
+          title="Updating Cron Settings"
+          subtitle="Applying new background sync configuration..."
+          lines={lines}
+          status={status}
+          error={error}
+          heightClassName="h-[300px]"
+          progressLabel="Step"
+          doneMessage="Settings applied! You may now close this window."
+        />
+      }
+      confirmButton={
+        <Button onClick={handleSave} disabled={isPending} className="h-10 px-6 font-bold">
+          {isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+          Save Changes
+        </Button>
+      }
+      idleOrErrorLabel="Close"
+    >
+      {isAnalyst ? (
+        <AnalystSchedulePanel
+          syncEnabled={syncEnabled}
+          setSyncEnabled={setSyncEnabled}
+          syncIntervalMins={syncIntervalMins}
+          setSyncIntervalMins={setSyncIntervalMins}
+          cacheRetention={cacheRetention}
+          setCacheRetention={setCacheRetention}
+        />
+      ) : (
+        <div className="space-y-8 p-6 text-sm">
+          <LogSyncSection
+            syncEnabled={syncEnabled}
+            setSyncEnabled={setSyncEnabled}
+            pollingMode={pollingMode}
+            setPollingMode={setPollingMode}
+            deleteAfter={deleteAfter}
+            setDeleteAfter={setDeleteAfter}
+            dataRetention={dataRetention}
+            setDataRetention={setDataRetention}
+            cacheRetention={cacheRetention}
+            setCacheRetention={setCacheRetention}
+            rollupRetention={rollupRetention}
+            setRollupRetention={setRollupRetention}
+            commitInterval={commitInterval}
+            setCommitInterval={setCommitInterval}
+            syncLogEnabled={syncLogEnabled}
+            setSyncLogEnabled={setSyncLogEnabled}
+            syncRetention={syncRetention}
+            setSyncRetention={setSyncRetention}
+            syncFreqLabel={syncFreqLabel}
+            isAnalyst={isAnalyst}
+            syncIntervalNum={syncIntervalNum}
+            adminSyncSeconds={adminSyncSeconds}
+            rumRetention={rumRetention}
+            setRumRetention={setRumRetention}
+            rumEnabled={service.rum_enabled ?? false}
+            rumSyncEnabled={rumSyncEnabled}
+            setRumSyncEnabled={setRumSyncEnabled}
+            rumLogPeriod={rumLogPeriod}
+            setRumLogPeriod={setRumLogPeriod}
+            rumDeleteAfter={rumDeleteAfter}
+            setRumDeleteAfter={setRumDeleteAfter}
+            serviceId={service.service_id}
+          />
 
-        <DialogFooter className={panelDialogFooter}>
-          {!isSuccess ? (
-            <>
-              <Button variant="outline" onClick={() => onOpenChange(false)} className="h-10 px-6">Cancel</Button>
-              <Button onClick={handleSave} disabled={isPending} className="h-10 px-6 font-bold">
-                {isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                Save Changes
-              </Button>
-            </>
-          ) : (
-            <SSEDialogFooter
-              status={status}
-              onClose={() => onOpenChange(false)}
-              onStop={stop}
-              idleOrErrorLabel="Close"
+          {service.ngwaf_workspace_id && (
+            <NgwafSection
+              ngwafInterval={ngwafInterval}
+              setNgwafInterval={setNgwafInterval}
+              ngwafLogEnabled={ngwafLogEnabled}
+              setNgwafLogEnabled={setNgwafLogEnabled}
+              ngwafRetention={ngwafRetention}
+              setNgwafRetention={setNgwafRetention}
             />
           )}
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+
+          <IcebergOptimizationSection
+            compactEnabled={compactEnabled}
+            setCompactEnabled={setCompactEnabled}
+            compactLogEnabled={compactLogEnabled}
+            setCompactLogEnabled={setCompactLogEnabled}
+            compactRetention={compactRetention}
+            setCompactRetention={setCompactRetention}
+          />
+        </div>
+      )}
+    </SSEActionDialogShell>
   )
 }

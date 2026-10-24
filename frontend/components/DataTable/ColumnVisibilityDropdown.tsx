@@ -19,7 +19,7 @@ interface BaseColumnVisibilityDropdownProps {
   compact?: boolean
 }
 
-export type ColumnVisibilityDropdownProps<TData = unknown> = BaseColumnVisibilityDropdownProps &
+type ColumnVisibilityDropdownProps<TData = unknown> = BaseColumnVisibilityDropdownProps &
   (
     | {
         columns: { id: string; label: string }[]

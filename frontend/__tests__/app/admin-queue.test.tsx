@@ -1,8 +1,7 @@
 import React from 'react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { renderWithQuery } from '../helpers/query'
 import AdminQueuePage from '@/app/admin/queue/page'
 import Loading from '@/app/admin/queue/loading'
 
@@ -23,11 +22,6 @@ vi.mock('@/hooks/useAdminEventStream', () => ({
 vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
 
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/admin/queue'))
-
-function renderWithQuery(ui: React.ReactElement) {
-  const qc = createTestQueryClient()
-  return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>)
-}
 
 describe('AdminQueuePage (/admin/queue)', () => {
   beforeEach(() => {

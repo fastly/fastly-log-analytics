@@ -1,27 +1,27 @@
-import { render, screen } from '@testing-library/react'
-import { expect, test, vi, beforeEach, afterEach } from 'vitest'
-// The route's page.tsx is now an async RSC that pre-fetches the cron
-// runs server-side and dehydrates the cache for the client island.
-// The unit test exercises the client island directly so it stays
-// compatible with vitest's synchronous render.
+import { screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { describe, expect, it, test, vi, beforeEach, afterEach } from 'vitest'
 import LogsClient from '@/app/logs/_sections/LogsClient'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { QuickActionsBar } from '@/app/logs/_sections/QuickActionsBar'
+import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES, CRON_GROUPS } from '@/app/logs/_sections/CronExplanations'
+import { renderWithQuery } from '../helpers/query'
 import React from 'react'
 import { spyOnConsoleError } from '../helpers/page-smoke'
 
-// R-6 (testing_suite_audit_2026-06-14.md). Logs is a tabs-driven
-// admin page (not a ReportLayout consumer), so the smoke test mocks
-// the state hook + the heavy tab/section components and asserts on
-// the PageHeader title only.
+const { showToastMock, postMock } = vi.hoisted(() => ({
+  showToastMock: vi.fn(),
+  postMock: vi.fn(),
+}))
+
+vi.mock('@/lib/toast', () => ({ showToast: showToastMock }))
+vi.mock('@/lib/cron-cache-bust', () => ({ cronCacheBust: vi.fn() }))
 
 vi.mock('@/stores/serviceStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())
-
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/logs'))
 
 vi.mock('@/lib/api', () => ({
-  client: { GET: vi.fn(), POST: vi.fn().mockResolvedValue({ data: {} }), use: vi.fn() },
-  extractApiError: vi.fn((e) => String(e)),
+  client: { GET: vi.fn(), POST: postMock, use: vi.fn() },
+  extractApiError: (e: unknown) => (e instanceof Error ? e.message : String(e)),
   getApiBase: vi.fn(() => 'http://test'),
 }))
 
@@ -31,10 +31,10 @@ vi.mock('@/app/logs/_state', () => ({
     activeTab: 'cron',
     handleTabChange: vi.fn(),
     isAnalyst: false,
-    status: { idle: true },
+    status: { idle: true, access_level: 'read_write' },
     catalogMaps: {},
-    recentCrons: [],
-    cronLogs: [],
+    recentCrons: {},
+    cronLogs: {},
     auditLogs: [],
     ingestedFiles: [],
     orderedSchedules: [],
@@ -82,7 +82,6 @@ vi.mock('@/app/logs/_state', () => ({
 vi.mock('@/app/logs/_sections/CronColumns', () => ({ useCronColumns: () => [] }))
 vi.mock('@/app/logs/_sections/AuditColumns', () => ({ useAuditColumns: () => [] }))
 vi.mock('@/app/logs/_sections/FloatingOperationsDock', () => ({ FloatingOperationsDock: () => null }))
-vi.mock('@/app/logs/_sections/QuickActionsBar', () => ({ QuickActionsBar: () => null }))
 vi.mock('@/app/logs/_sections/CronTab', () => ({ CronTab: () => <div data-testid="cron-tab" /> }))
 vi.mock('@/app/logs/_sections/ServiceHistoryTab', () => ({ ServiceHistoryTab: () => null }))
 vi.mock('@/app/logs/_sections/IngestionTab', () => ({ IngestionTab: () => null }))
@@ -98,12 +97,12 @@ vi.mock('@/components/SyncFromCloudModal/SyncFromCloudModal', () => ({
 }))
 vi.mock('@/components/NoServiceSelected', () => ({ NoServiceSelected: () => null }))
 
-const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
-
 let errorSpy: ReturnType<typeof spyOnConsoleError>
 
 beforeEach(() => {
-  queryClient.clear()
+  showToastMock.mockClear()
+  postMock.mockReset()
+  postMock.mockResolvedValue({ data: {} })
   errorSpy = spyOnConsoleError()
 })
 
@@ -112,11 +111,62 @@ afterEach(() => {
 })
 
 test('logs page mounts and renders title in cron mode', () => {
-  render(
-    <QueryClientProvider client={queryClient}>
-      <LogsClient initialTab="cron" />
-    </QueryClientProvider>,
-  )
+  renderWithQuery(<LogsClient initialTab="cron" />)
   expect(screen.getByText('Data Management')).toBeInTheDocument()
   expect(errorSpy).not.toHaveBeenCalled()
+})
+
+function renderBar() {
+  const start = vi.fn()
+  const props: React.ComponentProps<typeof QuickActionsBar> = {
+    isAnalyst: false,
+    status: { access_level: 'read_write' },
+    activeServiceId: 'svc',
+    recentCrons: {},
+    cronLogs: {},
+    setSseTitle: vi.fn(),
+    setSseDescription: vi.fn(),
+    setIsSSEModalOpen: vi.fn(),
+    setIsSyncModalOpen: vi.fn(),
+    reset: vi.fn(),
+    start,
+    setDisplayedJobs: vi.fn(),
+    setSelectedConsoleJobId: vi.fn(),
+    setConsoleOpen: vi.fn(),
+  }
+  renderWithQuery(<QuickActionsBar {...props} />)
+  return start
+}
+
+describe('QuickActionsBar quick-action failures (UX-9)', () => {
+  test('toasts and does not open an SSE stream when Import Logs POST 5xxs', async () => {
+    postMock.mockRejectedValue(new Error('ingest boom'))
+    const start = renderBar()
+    await userEvent.click(screen.getByRole('button', { name: /import logs/i }))
+    await waitFor(() => expect(showToastMock).toHaveBeenCalledWith('ingest boom'))
+    expect(start).not.toHaveBeenCalled()
+  })
+
+  test('toasts and does not open /cron-runs/undefined/stream when the 200 body has no run_id', async () => {
+    postMock.mockResolvedValue({ data: {} })
+    const start = renderBar()
+    await userEvent.click(screen.getByRole('button', { name: /import logs/i }))
+    await waitFor(() => expect(showToastMock).toHaveBeenCalledWith('No run id returned'))
+    expect(start).not.toHaveBeenCalled()
+  })
+})
+
+describe('partial_hour_merge cron registry entry', () => {
+  it('has a label', () => {
+    expect(CRON_DISPLAY_NAMES.partial_hour_merge).toBeTruthy()
+  })
+
+  it('has a description', () => {
+    expect(CRON_EXPLANATIONS.partial_hour_merge).toBeTruthy()
+  })
+
+  it('is grouped alongside the other rollup jobs', () => {
+    const rollupGroup = CRON_GROUPS.find((g) => g.tasks.includes('rollup_hour_heal'))
+    expect(rollupGroup?.tasks).toContain('partial_hour_merge')
+  })
 })

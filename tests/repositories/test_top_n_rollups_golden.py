@@ -24,7 +24,7 @@ import json
 import os
 import shutil
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -37,6 +37,8 @@ import time_machine
 from backend.core import rollup_readiness as rr
 from backend.repositories import _base, rollup_coverage
 from backend.repositories._base import QueryRunner
+from tests._helpers.rollups import RollupGoldenLayout as Layout
+from tests._helpers.rollups import build_rollup_golden_layout
 from tests._helpers.sources import make_source
 from tests.repositories.test_rollup_reader_coverage_golden import _compact, _digest, _Norm, _Probe
 
@@ -65,70 +67,6 @@ ROLLED_ROWS = [
 LIVE_ROWS = [("country", "US", 5), ("country", "ES", 3), ("city", "NYC", 2), ("status", "200", 4)]
 HEAL_ROWS = [("country", "ES", 40), ("city", "MAD", 3), ("status", "503", 2)]
 PARTIAL_ROWS = [("country", "US", 7), ("status", "301", 1)]
-
-
-# ── layout ──────────────────────────────────────────────────────────────────
-
-
-@dataclass
-class Layout:
-    root: Path
-    hour: Path = field(init=False)
-    day: Path = field(init=False)
-    hour_b: Path = field(init=False)
-    day_b: Path = field(init=False)
-
-    def __post_init__(self) -> None:
-        r = self.root / "rollups"
-        self.hour, self.day = r / "hour", r / "day"
-        self.hour_b, self.day_b = r / "hour_bundled", r / "day_bundled"
-
-    @staticmethod
-    def hk(k: int) -> str:
-        return (H + timedelta(hours=k)).strftime("%Y-%m-%d-%H")
-
-    @staticmethod
-    def dk(k: int) -> str:
-        return (H.replace(hour=0) + timedelta(days=k)).strftime("%Y-%m-%d")
-
-    @staticmethod
-    def _touch(p: Path) -> None:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(b"x")
-
-    def field_hours(self, fields: list[str], ks: range | list[int], fname: str = "part-0.parquet") -> None:
-        for f in fields:
-            for k in ks:
-                self._touch(self.hour / f"field={f}" / f"hour={self.hk(k)}" / fname)
-
-    def field_hour_dirs(self, fields: list[str], ks: list[int]) -> None:
-        for f in fields:
-            for k in ks:
-                (self.hour / f"field={f}" / f"hour={self.hk(k)}").mkdir(parents=True, exist_ok=True)
-
-    def field_days(self, fields: list[str], ks: list[int], fname: str = "part-0.parquet") -> None:
-        for f in fields:
-            for k in ks:
-                self._touch(self.day / f"field={f}" / f"day={self.dk(k)}" / fname)
-
-    def empty_day_dirs(self, fields: list[str], ks: list[int]) -> None:
-        for f in fields:
-            for k in ks:
-                (self.day / f"field={f}" / f"day={self.dk(k)}").mkdir(parents=True, exist_ok=True)
-
-    def bundled_hours(self, ks: range | list[int]) -> None:
-        for k in ks:
-            self._touch(self.hour_b / f"hour={self.hk(k)}" / "all_fields.parquet")
-
-    def bundled_days(self, ks: list[int], variant: str = "std") -> None:
-        for k in ks:
-            day = self.dk(k)
-            if variant == "std":
-                self._touch(self.day_b / f"day={day}" / "all_fields.parquet")
-            elif variant == "nested_alt":
-                self._touch(self.day_b / f"day={day}" / f"day_bundle_{day}.parquet")
-            elif variant == "flat_alt":
-                self._touch(self.day_b / f"day_bundle_{day}.parquet")
 
 
 # ── cases ───────────────────────────────────────────────────────────────────
@@ -383,8 +321,7 @@ def _iso(off: float | None) -> str | None:
 
 def _run(case: Case, tmp: Path, probe: _Probe) -> tuple[dict, dict[str, str]]:
     root = tmp / case.name
-    lay = Layout(root)
-    case.layout(lay)
+    build_rollup_golden_layout(root, case.layout, anchor=H)
     root.mkdir(parents=True, exist_ok=True)
 
     st = case.st_raw if case.st_raw is not None else _iso(case.st)

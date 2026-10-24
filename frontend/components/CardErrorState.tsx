@@ -10,7 +10,7 @@ export function CardErrorState({
   icon?: React.ReactNode
   title: string
   message: string
-  onRetry: () => void
+  onRetry?: () => void
   // 'default' lays the rows out in block flow (mt-1/mt-3 margins); 'stacked'
   // uses a flex column with gap-3 + items-start. Same content, two spacings —
   // ScoreDistChart needs the stacked look the rest of the cards don't.
@@ -30,9 +30,11 @@ export function CardErrorState({
         <span className="text-sm font-medium">{title}</span>
       </div>
       <p className={isStacked ? 'text-xs text-muted-foreground' : 'text-xs text-muted-foreground mt-1'}>{message}</p>
-      <Button size="sm" variant="outline" className={isStacked ? undefined : 'mt-3'} onClick={onRetry}>
-        Retry
-      </Button>
+      {onRetry && (
+        <Button size="sm" variant="outline" className={isStacked ? undefined : 'mt-3'} onClick={onRetry}>
+          Retry
+        </Button>
+      )}
     </div>
   )
 }

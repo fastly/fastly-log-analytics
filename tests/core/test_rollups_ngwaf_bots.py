@@ -387,7 +387,6 @@ def test_ngwaf_verified_bots_and_ts_parity_with_live_sql_and_temp_skip(tmp_path)
         resp = _build_security_response(
             runner,
             src,
-            con,
             ["timestamp", "waf_req_id"],
             "logs_parity",
             "",

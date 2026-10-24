@@ -14,9 +14,8 @@
  * the timeline to render.
  */
 import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
-import { render, screen, cleanup, waitFor, act } from '@testing-library/react'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { createTestQueryClient } from '../../helpers/query'
+import { screen, cleanup, waitFor, act } from '@testing-library/react'
+import { renderWithQuery } from '../../helpers/query'
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest'
 import React from 'react'
 
@@ -107,27 +106,24 @@ function makeListResponse(
   }
 }
 
-function withProviders(ui: React.ReactNode) {
-  const qc = createTestQueryClient({ queries: { gcTime: 0, staleTime: 0 } })
-  return <QueryClientProvider client={qc}>{ui}</QueryClientProvider>
+function renderSessionDetail(ui: React.ReactElement) {
+  return renderWithQuery(ui, { queryOptions: { queries: { gcTime: 0, staleTime: 0 } } })
 }
 
 // --- tests --------------------------------------------------------------
 
 describe('SessionDetail', () => {
   it('does not render the dialog when selectedSession is null', () => {
-    render(
-      withProviders(
-        <SessionDetail
-          selectedSession={null}
-          setSelectedSession={vi.fn()}
-          activeServiceId="svc-1"
-          data={makeListResponse()}
-          labels={[]}
-          labelBySid={new Map()}
-          onFlagged={vi.fn()}
-        />,
-      ),
+    renderSessionDetail(
+      <SessionDetail
+        selectedSession={null}
+        setSelectedSession={vi.fn()}
+        activeServiceId="svc-1"
+        data={makeListResponse()}
+        labels={[]}
+        labelBySid={new Map()}
+        onFlagged={vi.fn()}
+      />,
     )
     // The dialog title is only rendered when open=true.
     expect(screen.queryByText(/^Session:/)).toBeNull()
@@ -136,18 +132,16 @@ describe('SessionDetail', () => {
 
   it('renders the session header + metadata when a session is selected', () => {
     postMock.mockResolvedValue({ data: { columns: [], data: [], _is_cached: false } })
-    render(
-      withProviders(
-        <SessionDetail
-          selectedSession={makeSession({ ip: '10.0.0.42', country: 'CA' })}
-          setSelectedSession={vi.fn()}
-          activeServiceId="svc-1"
-          data={makeListResponse()}
-          labels={[]}
-          labelBySid={new Map()}
-          onFlagged={vi.fn()}
-        />,
-      ),
+    renderSessionDetail(
+      <SessionDetail
+        selectedSession={makeSession({ ip: '10.0.0.42', country: 'CA' })}
+        setSelectedSession={vi.fn()}
+        activeServiceId="svc-1"
+        data={makeListResponse()}
+        labels={[]}
+        labelBySid={new Map()}
+        onFlagged={vi.fn()}
+      />,
     )
     expect(screen.getByText(/Session:/)).toBeInTheDocument()
     expect(screen.getByText('10.0.0.42')).toBeInTheDocument()
@@ -165,18 +159,16 @@ describe('SessionDetail', () => {
       session_start: '2026-06-15T00:00:00Z',
       session_end: '2026-06-15T01:00:00Z',
     })
-    render(
-      withProviders(
-        <SessionDetail
-          selectedSession={session}
-          setSelectedSession={vi.fn()}
-          activeServiceId="svc-1"
-          data={makeListResponse()}
-          labels={[]}
-          labelBySid={new Map()}
-          onFlagged={vi.fn()}
-        />,
-      ),
+    renderSessionDetail(
+      <SessionDetail
+        selectedSession={session}
+        setSelectedSession={vi.fn()}
+        activeServiceId="svc-1"
+        data={makeListResponse()}
+        labels={[]}
+        labelBySid={new Map()}
+        onFlagged={vi.fn()}
+      />,
     )
     await waitFor(() => expect(postMock).toHaveBeenCalled())
     const [path, opts] = postMock.mock.calls[0]
@@ -191,18 +183,16 @@ describe('SessionDetail', () => {
 
   it('skips the fetch when activeServiceId is null (useQuery enabled=false)', async () => {
     postMock.mockResolvedValue({ data: { columns: [], data: [], _is_cached: false } })
-    render(
-      withProviders(
-        <SessionDetail
-          selectedSession={makeSession()}
-          setSelectedSession={vi.fn()}
-          activeServiceId={null}
-          data={makeListResponse()}
-          labels={[]}
-          labelBySid={new Map()}
-          onFlagged={vi.fn()}
-        />,
-      ),
+    renderSessionDetail(
+      <SessionDetail
+        selectedSession={makeSession()}
+        setSelectedSession={vi.fn()}
+        activeServiceId={null}
+        data={makeListResponse()}
+        labels={[]}
+        labelBySid={new Map()}
+        onFlagged={vi.fn()}
+      />,
     )
     // Give react-query a tick — should still NOT have called POST.
     // Wrap the settle window in act() so the dialog's deferred Radix
@@ -225,18 +215,16 @@ describe('SessionDetail', () => {
         ],
       },
     })
-    render(
-      withProviders(
-        <SessionDetail
-          selectedSession={makeSession()}
-          setSelectedSession={vi.fn()}
-          activeServiceId="svc-1"
-          data={makeListResponse()}
-          labels={[]}
-          labelBySid={new Map()}
-          onFlagged={vi.fn()}
-        />,
-      ),
+    renderSessionDetail(
+      <SessionDetail
+        selectedSession={makeSession()}
+        setSelectedSession={vi.fn()}
+        activeServiceId="svc-1"
+        data={makeListResponse()}
+        labels={[]}
+        labelBySid={new Map()}
+        onFlagged={vi.fn()}
+      />,
     )
     expect(screen.getByText(/Request Timeline/i)).toBeInTheDocument()
     await waitFor(() => expect(screen.getAllByText(/example\.com/).length).toBeGreaterThan(0))
@@ -249,51 +237,45 @@ describe('SessionDetail', () => {
 
   it('shows the Edge-only switch only when data.has_edge=true', () => {
     postMock.mockResolvedValue({ data: { columns: [], data: [], _is_cached: false } })
-    const { rerender } = render(
-      withProviders(
-        <SessionDetail
-          selectedSession={makeSession()}
-          setSelectedSession={vi.fn()}
-          activeServiceId="svc-1"
-          data={makeListResponse({ has_edge: false })}
-          labels={[]}
-          labelBySid={new Map()}
-          onFlagged={vi.fn()}
-        />,
-      ),
+    const { rerender } = renderSessionDetail(
+      <SessionDetail
+        selectedSession={makeSession()}
+        setSelectedSession={vi.fn()}
+        activeServiceId="svc-1"
+        data={makeListResponse({ has_edge: false })}
+        labels={[]}
+        labelBySid={new Map()}
+        onFlagged={vi.fn()}
+      />,
     )
     expect(screen.queryByText(/Edge only/i)).toBeNull()
 
     rerender(
-      withProviders(
-        <SessionDetail
-          selectedSession={makeSession()}
-          setSelectedSession={vi.fn()}
-          activeServiceId="svc-1"
-          data={makeListResponse({ has_edge: true })}
-          labels={[]}
-          labelBySid={new Map()}
-          onFlagged={vi.fn()}
-        />,
-      ),
+      <SessionDetail
+        selectedSession={makeSession()}
+        setSelectedSession={vi.fn()}
+        activeServiceId="svc-1"
+        data={makeListResponse({ has_edge: true })}
+        labels={[]}
+        labelBySid={new Map()}
+        onFlagged={vi.fn()}
+      />,
     )
     expect(screen.getByText(/Edge only/i)).toBeInTheDocument()
   })
 
   it('renders the FlagSessionPopover in the header when edge_sid is present', () => {
     postMock.mockResolvedValue({ data: { columns: [], data: [], _is_cached: false } })
-    render(
-      withProviders(
-        <SessionDetail
-          selectedSession={makeSession({ edge_sid: 'sid-abc' })}
-          setSelectedSession={vi.fn()}
-          activeServiceId="svc-1"
-          data={makeListResponse()}
-          labels={[]}
-          labelBySid={new Map()}
-          onFlagged={vi.fn()}
-        />,
-      ),
+    renderSessionDetail(
+      <SessionDetail
+        selectedSession={makeSession({ edge_sid: 'sid-abc' })}
+        setSelectedSession={vi.fn()}
+        activeServiceId="svc-1"
+        data={makeListResponse()}
+        labels={[]}
+        labelBySid={new Map()}
+        onFlagged={vi.fn()}
+      />,
     )
     expect(screen.getByTestId('flag-popover')).toBeInTheDocument()
   })

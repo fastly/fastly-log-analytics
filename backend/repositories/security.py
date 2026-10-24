@@ -902,7 +902,6 @@ def get_security_aggregates(
         res = _build_security_response(
             runner,
             src,
-            con,
             actual_cols,
             table_name,
             where_clause,
@@ -927,7 +926,6 @@ def get_security_aggregates(
 def _build_security_response(
     runner: QueryRunner,
     src: dict,
-    con: duckdb.DuckDBPyConnection | Callable[[], duckdb.DuckDBPyConnection],
     actual_cols: list[str],
     table_name: str,
     where_clause: str,

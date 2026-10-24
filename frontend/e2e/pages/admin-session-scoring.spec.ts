@@ -9,7 +9,7 @@
  *      `admin-session-scoring-overview-reservation`) and warm-load performance budget
  *      (`CLS <= 0.05`, `FCP < 1200ms`).
  *   3. Backend data contracts: `/api/services/{service_id}/scoring/config`,
- *      `/api/services/{service_id}/scoring/analytics`, `/api/services/{service_id}/session-scoring/status`,
+ *      `/api/services/{service_id}/scoring/analytics`, `/api/services/{service_id}/scoring/status`,
  *      and `/api/services`.
  *   4. Session Scoring status panel (`Enabled` / `Disabled` badge, Enable or Redeploy/Disable
  *      buttons) and tabs (`Overview`, `Labels`, `Matrix history`, `Audit`) rendering cleanly
@@ -89,7 +89,7 @@ test.describe('/admin/session-scoring — Admin Session Scoring Configuration Co
     }
   });
 
-  test('3. Backend data contracts: /api/services/{service_id}/scoring/config, /session-scoring/status, and /api/services', async ({
+  test('3. Backend data contracts: /api/services/{service_id}/scoring/config, /scoring/status, and /api/services', async ({
     page,
     request,
   }) => {
@@ -147,12 +147,12 @@ test.describe('/admin/session-scoring — Admin Session Scoring Configuration Co
     }
 
     if (resolvedServiceId) {
-      const aliasRes = await request.get(
-        `/api/services/${encodeURIComponent(resolvedServiceId)}/session-scoring/status`
+      const statusRes = await request.get(
+        `/api/services/${encodeURIComponent(resolvedServiceId)}/scoring/status`
       );
-      expect(aliasRes.status()).toBe(200);
-      const aliasJson = (await aliasRes.json()) as Record<string, unknown>;
-      expect(typeof aliasJson['enabled']).toBe('boolean');
+      expect(statusRes.status()).toBe(200);
+      const statusJson = (await statusRes.json()) as Record<string, unknown>;
+      expect(typeof statusJson['enabled']).toBe('boolean');
     }
   });
 

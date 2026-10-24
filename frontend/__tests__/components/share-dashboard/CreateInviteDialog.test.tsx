@@ -7,7 +7,7 @@ import { server } from '@/__tests__/helpers/msw/server'
 import { useServiceStore } from '@/stores/serviceStore'
 import { CreateInviteDialog } from '@/components/share-dashboard/CreateInviteDialog'
 import type { ShareStatus } from '@/components/share-dashboard/utils'
-import { stubMatchMedia } from '@/__tests__/helpers/jsdom-shims'
+import { stubMatchMedia } from '@/__tests__/helpers/browser-stubs'
 
 // Radix primitives (Dialog/Select/Checkbox) need these in jsdom.
 stubMatchMedia()

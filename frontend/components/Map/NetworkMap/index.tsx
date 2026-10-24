@@ -7,9 +7,10 @@ import * as maplibregl from 'maplibre-gl'
 maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs')
 import { useTheme } from 'next-themes'
 import { useTimezoneStore } from '@/stores/timezoneStore'
+import { formatBucket } from '@/lib/date'
 import { PlaybackControls } from './controls'
 import { MapTooltip, type CityTooltipData, type TooltipInfo } from './OverlayLayer'
-import { formatBucket, useMapInit, useMapData, type NetworkMapData } from './MapLayer'
+import { useMapInit, useMapData, type NetworkMapData } from './MapLayer'
 
 interface NetworkMapProps {
   data: NetworkMapData | null | undefined

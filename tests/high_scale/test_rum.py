@@ -1,5 +1,7 @@
 """Regression coverage for the native RUM chart producer."""
 
+from __future__ import annotations
+
 from datetime import UTC, datetime
 from typing import Any
 
@@ -167,3 +169,176 @@ def test_errors_only_and_null_metric_rows_remain_honest() -> None:
     assert result["vitals"]["lcp"]["p75"] is None
     assert result["trends"]["lcp"] == result["trends"]["cls"] == [None, None, None]
     assert result["trends"]["error_rate"] == [None, 100.0, None]
+
+
+# ── Merged from test_rum_fields.py ──
+
+import pytest
+
+from backend.high_scale._rum_fields import rum_environment, rum_error_position
+
+
+def test_flat_beacon_keys_are_extracted_verbatim() -> None:
+    env = rum_environment(
+        {
+            "browser": "Firefox",
+            "os": "Linux",
+            "device": "Desktop",
+            "country": "DE",
+            "city": "Berlin",
+            "region": "BE",
+            "pop": "FRA",
+            "tls": "1.3",
+            "ttfb": 0.042,
+        }
+    )
+
+    assert env == {
+        "country": "DE",
+        "browser": "Firefox",
+        "os": "Linux",
+        "device": "Desktop",
+        "city": "Berlin",
+        "region": "BE",
+        "pop": "FRA",
+        "tls": "1.3",
+        "ttfb": 0.042,
+    }
+
+
+def test_edge_log_aliases_are_accepted_for_geography_and_connection_fields() -> None:
+    env = rum_environment(
+        {
+            "geo_country_code": "FR",
+            "geo_city": "Paris",
+            "geo_region": "IDF",
+            "server_pop": "CDG",
+            "tls_version": "1.2",
+            "time_to_first_byte": "88",
+        }
+    )
+
+    assert env["country"] == "FR" and env["city"] == "Paris" and env["region"] == "IDF"
+    assert env["pop"] == "CDG" and env["tls"] == "1.2" and env["ttfb"] == 88.0
+
+
+def test_missing_values_stay_empty_and_are_never_defaulted_to_a_browser() -> None:
+    env = rum_environment({"browser": "  ", "os": None, "ttfb": "not-a-number"})
+
+    assert env["browser"] == "" and env["os"] == "" and env["device"] == ""
+    assert env["country"] == "" and env["pop"] == "" and env["tls"] == ""
+    assert env["ttfb"] is None
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), True, ""])
+def test_non_finite_or_non_numeric_ttfb_is_dropped(bad) -> None:
+    assert rum_environment({"ttfb": bad})["ttfb"] is None
+
+
+def test_numeric_strings_in_text_fields_are_kept_as_text() -> None:
+    assert rum_environment({"tls": 1.3, "region": 13})["tls"] == "1.3"
+    assert rum_environment({"region": 13})["region"] == "13"
+
+
+def test_error_position_reads_the_rum_prefixed_or_plain_keys() -> None:
+    assert rum_error_position({"rum_error_line": "42", "rum_error_col": 7}) == (42, 7)
+    assert rum_error_position({"error_line": 5, "error_col": "9"}) == (5, 9)
+
+
+@pytest.mark.parametrize("row", [{}, {"rum_error_line": "abc"}, {"rum_error_line": -3, "rum_error_col": None}])
+def test_unknown_or_invalid_error_positions_are_zero(row) -> None:
+    assert rum_error_position(row) == (0, 0)
+
+
+# ── Merged from test_rum_router_filters.py ──
+
+import json
+from unittest.mock import PropertyMock, patch
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from backend.high_scale.rum import parse_rum_filters
+from tests.conftest import override_request_context
+
+_SVC = "svcA"
+_FILTERS = {"browser": {"mode": "include", "values": ["Chrome"]}}
+
+
+@pytest.fixture
+def client():
+    from backend.core.request_context import build_request_context
+    from backend.routers import rum
+
+    app = FastAPI()
+    app.include_router(rum.router)
+    app.dependency_overrides[build_request_context] = override_request_context(
+        source={"name": _SVC, "service_id": _SVC}
+    )
+    with TestClient(app) as c:
+        yield c
+
+
+class _Service:
+    service_id = _SVC
+    client: Any = None
+
+
+@pytest.fixture
+def high_scale():
+    with patch("backend.core.request_context.RequestContext.high_scale", new_callable=PropertyMock) as hs:
+        hs.return_value = _Service()
+        yield hs
+
+
+def test_parse_rum_filters_accepts_objects_and_rejects_everything_else() -> None:
+    assert parse_rum_filters(None) == {} and parse_rum_filters("") == {}
+    assert parse_rum_filters(json.dumps(_FILTERS)) == _FILTERS
+    with pytest.raises(ValueError, match="valid JSON"):
+        parse_rum_filters("{not json")
+    with pytest.raises(ValueError, match="JSON object"):
+        parse_rum_filters("[1, 2]")
+
+
+def test_analytics_route_passes_the_parsed_filters_through(client, high_scale) -> None:
+    seen: list[Any] = []
+
+    def fake(service, start, end, filters=None):
+        seen.append(filters)
+        return {"is_mock": False, "no_data": True}
+
+    with patch("backend.high_scale.rum.rum_analytics", fake):
+        client.get(f"/api/services/{_SVC}/rum/analytics", params={"filters": json.dumps(_FILTERS)})
+
+    assert seen == [_FILTERS]
+
+
+def test_live_events_route_passes_the_parsed_filters_through(client, high_scale) -> None:
+    seen: list[Any] = []
+
+    def fake(service, start, end, limit, filters=None):
+        seen.append(filters)
+        return []
+
+    with patch("backend.high_scale.rum.rum_live_events", fake):
+        response = client.get(f"/api/services/{_SVC}/rum/live-events", params={"filters": json.dumps(_FILTERS)})
+
+    assert response.status_code == 200 and seen == [_FILTERS]
+
+
+@pytest.mark.parametrize("path", ["rum/analytics", "rum/live-events"])
+@pytest.mark.parametrize("filters", ['{"metric_name": {"mode": "include", "values": ["LCP"]}}', "{broken"])
+def test_unsupported_or_malformed_filters_are_a_client_error_not_a_server_error(
+    client, high_scale, path, filters
+) -> None:
+    class _Client:
+        def execute(self, sql, params=None):
+            raise AssertionError("no query may run for a rejected filter")
+
+    _Service.client = _Client()
+
+    response = client.get(f"/api/services/{_SVC}/{path}", params={"filters": filters})
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "rum_filters_unsupported"

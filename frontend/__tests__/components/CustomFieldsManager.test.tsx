@@ -1,19 +1,16 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, expect, test, vi } from 'vitest'
 import { CustomFieldsManager } from '@/components/CustomFields/CustomFieldsManager'
-import { QueryClientProvider } from '@tanstack/react-query'
 import * as customFieldsApi from '@/lib/api/custom-fields'
 import type { components } from '@/types/api.generated'
 import React from 'react'
-import { createTestQueryClient } from '../helpers/query'
-import { stubMatchMedia } from '../helpers/jsdom-shims'
+import { renderWithQuery } from '../helpers/query'
+import { stubMatchMedia } from '../helpers/browser-stubs'
 
 vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
 
 stubMatchMedia()
-
-const queryClient = createTestQueryClient()
 
 afterEach(() => {
   vi.useRealTimers()
@@ -46,11 +43,7 @@ test('renders custom fields and handles deletion', async () => {
 
   const deleteSpy = vi.spyOn(customFieldsApi.customFieldsApi, 'deleteCustomField').mockResolvedValue({} as components['schemas']['CustomFieldResponse'])
 
-  render(
-    <QueryClientProvider client={queryClient}>
-      <CustomFieldsManager serviceId="test-svc" />
-    </QueryClientProvider>
-  )
+  renderWithQuery(<CustomFieldsManager serviceId="test-svc" />)
 
   // Wait for the field to load
   await waitFor(() => expect(screen.getByText('Test Field One')).toBeDefined())

@@ -27,7 +27,6 @@ from env vars or config, never hard-coded infra.
 |---|---|
 | `backup_service_configs.sh` | Off-VM backup of service configs to object storage (DR; ADR-13). Writes a freshness marker the admin health card reads. |
 | `analyze_web_vitals.py` | Report over the RUM Web Vitals JSONL sink (`--out`, `--purge`). |
-| `usage_compare.py` | Sanity check: local usage accounting vs Fastly `/stats` API (flags classifier drift / mid-flight backfill). |
 
 ## Session scoring (`scoring/`)
 

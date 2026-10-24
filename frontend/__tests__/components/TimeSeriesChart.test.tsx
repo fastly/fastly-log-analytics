@@ -17,10 +17,10 @@ import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
 import type { PlotlyChart } from '@/components/PlotlyChart/PlotlyChart'
 
 type PlotlyChartProps = ComponentProps<typeof PlotlyChart>
-const plotlyMock = vi.fn<(props: PlotlyChartProps) => React.ReactElement>(() => <div data-testid="plotly-chart" />)
-vi.mock('@/components/PlotlyChart/PlotlyChart', () => ({
-  PlotlyChart: (props: PlotlyChartProps) => plotlyMock(props),
-}))
+const plotlyMock = vi.fn<(props: PlotlyChartProps) => void>()
+vi.mock('@/components/PlotlyChart/PlotlyChart', async () =>
+  (await import('../helpers/page-smoke')).plotlyChartModuleMock((props) => plotlyMock(props)),
+)
 
 vi.mock('@/lib/chart-helpers', () => ({
   TIME_HOVER_LAYOUT: { hovermode: 'x unified' },

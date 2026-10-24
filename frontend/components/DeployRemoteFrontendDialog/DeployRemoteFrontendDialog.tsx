@@ -32,14 +32,33 @@ import { Switch } from '@/components/ui/switch'
 import { client, extractApiError } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { panelDialogContent, panelDialogHeaderSolid, panelDialogFooter } from '@/lib/panel-dialog'
+import { useOpenGeneration } from '@/hooks/useDerivedState'
 import type { Schema } from '@/types/api'
 import { useSearchParams } from 'next/navigation'
 
 export function DeployRemoteFrontendDialog() {
+  const [open, setOpen] = React.useState(false)
+  const generation = useOpenGeneration(open)
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger
+        render={
+          <Button variant="outline" className="gap-1.5 border-primary/20 hover:bg-primary/5">
+            <Globe className="h-4 w-4 text-primary" />
+            Deploy Remote Frontend
+          </Button>
+        }
+      />
+      <DeployRemoteFrontendDialogBody key={generation} onClose={() => setOpen(false)} />
+    </Dialog>
+  )
+}
+
+function DeployRemoteFrontendDialogBody({ onClose }: { onClose: () => void }) {
   const searchParams = useSearchParams()
   const serviceId = searchParams?.get('service')
 
-  const [open, setOpen] = React.useState(false)
   const [step, setStep] = React.useState<1 | 2 | 3 | 'success'>(1)
 
   // Step 1: Domain Selection State
@@ -61,27 +80,6 @@ export function DeployRemoteFrontendDialog() {
   const [tokenOverride, setTokenOverride] = React.useState('')
   const [deployError, setDeployError] = React.useState('')
   const [deployResult, setDeployResult] = React.useState<Schema<'SharingDeployResponse'> | null>(null)
-
-  // Reset all form state when the dialog opens.
-  const handleOpenChange = (next: boolean) => {
-    if (next) {
-      const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:'
-      setStep(1)
-      setPrefix('')
-      setIsCustom(false)
-      setDomainCheckResult(null)
-      setOriginHost(window.location.hostname)
-      setOriginPort(isHttps ? 443 : 80)
-      setUseSsl(isHttps)
-      setOverrideHost('')
-      setTokenOverride('')
-      setServiceName('')
-      setIsServiceNameEdited(false)
-      setDeployError('')
-      setDeployResult(null)
-    }
-    setOpen(next)
-  }
 
   // Computed Domain based on step 1 selections
   const computedDomain = React.useMemo(() => {
@@ -182,16 +180,6 @@ export function DeployRemoteFrontendDialog() {
   const canDeploy = !deploying && !!serviceName && canGoToStep3 && canGoToStep2
 
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogTrigger
-        render={
-          <Button variant="outline" className="gap-1.5 border-primary/20 hover:bg-primary/5">
-            <Globe className="h-4 w-4 text-primary" />
-            Deploy Remote Frontend
-          </Button>
-        }
-      />
-
       <DialogContent className={cn('sm:max-w-lg', panelDialogContent)}>
         <DialogHeader className={panelDialogHeaderSolid}>
           <DialogTitle className="flex items-center gap-2 text-xl font-bold">
@@ -564,7 +552,7 @@ export function DeployRemoteFrontendDialog() {
         <DialogFooter className={panelDialogFooter}>
           {step === 1 && (
             <div className="flex justify-between w-full items-center">
-              <Button variant="outline" onClick={() => setOpen(false)}>
+              <Button variant="outline" onClick={onClose}>
                 Close
               </Button>
               <Button disabled={!canGoToStep2} onClick={() => setStep(2)} className="gap-1.5">
@@ -605,13 +593,12 @@ export function DeployRemoteFrontendDialog() {
 
           {step === 'success' && (
             <div className="flex justify-end w-full">
-              <Button variant="outline" onClick={() => setOpen(false)}>
+              <Button variant="outline" onClick={onClose}>
                 Done
               </Button>
             </div>
           )}
         </DialogFooter>
       </DialogContent>
-    </Dialog>
   )
 }

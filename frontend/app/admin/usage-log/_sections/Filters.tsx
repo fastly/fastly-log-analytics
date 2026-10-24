@@ -13,7 +13,7 @@ import {
 } from '@/components/ui/select'
 import { DATE_PRESETS } from './shared'
 
-export interface UsageLogFiltersProps {
+interface UsageLogFiltersProps {
   preset: number
   setPreset: (n: number) => void
   usageType: string

@@ -111,12 +111,6 @@ def admin_origin(environment: str) -> str | None:
     return config["origin"] if config else None
 
 
-def admin_tls_config(environment: str) -> dict[str, str] | None:
-    """Copy of configured origin/cert/key/ca for an environment or alias."""
-    config = _settings().get(ALIASES.get(environment, environment))
-    return dict(config) if config else None
-
-
 def is_admin_url(url: str) -> bool:
     """Whether this exact origin has a configured client identity."""
     origin = _origin(url)

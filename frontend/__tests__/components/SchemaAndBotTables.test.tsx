@@ -9,10 +9,9 @@ import * as React from 'react'
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { QueryClientProvider } from '@tanstack/react-query'
 import { http, HttpResponse } from 'msw'
 
-import { createTestQueryClient } from '../helpers/query'
+import { renderWithQuery } from '../helpers/query'
 import { server } from '@/__tests__/helpers/msw/server'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -77,11 +76,7 @@ describe('BotSourcesPanel', () => {
       }),
     )
     const user = userEvent.setup()
-    render(
-      <QueryClientProvider client={createTestQueryClient()}>
-        <BotSourcesPanel />
-      </QueryClientProvider>,
-    )
+    renderWithQuery(<BotSourcesPanel />)
     expect(await screen.findByText('Alpha Bots')).toBeTruthy()
     expect(screen.getByText('not cached')).toBeTruthy()
     expect(screen.getByText('1,500')).toBeTruthy()
@@ -109,11 +104,7 @@ describe('BotSourcesPanel', () => {
       }),
     )
     const user = userEvent.setup()
-    render(
-      <QueryClientProvider client={createTestQueryClient()}>
-        <BotSourcesPanel />
-      </QueryClientProvider>,
-    )
+    renderWithQuery(<BotSourcesPanel />)
     await waitFor(() => expect(listCalls).toBe(1))
     await user.click(await screen.findByRole('button', { name: /Enrich Now/ }))
     await waitFor(() => expect(enrichCalls).toBe(1))
@@ -128,11 +119,7 @@ describe('BotSourcesPanel', () => {
       ),
     )
     const user = userEvent.setup()
-    render(
-      <QueryClientProvider client={createTestQueryClient()}>
-        <BotSourcesPanel />
-      </QueryClientProvider>,
-    )
+    renderWithQuery(<BotSourcesPanel />)
     await user.click(await screen.findByRole('button', { name: /Enrich Now/ }))
     expect(await screen.findByRole('alert')).toBeTruthy()
   })
