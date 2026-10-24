@@ -13,9 +13,11 @@ import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from importlib import import_module
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from backend.core.duckdb import _safe_table_name, get_connection
 from backend.core.iceberg import buffer as buffer_mod
@@ -24,6 +26,8 @@ from backend.core.iceberg import view as view_mod
 from backend.core.iceberg._ducklake import ducklake_table_name
 from backend.core.iceberg.buffer import _commit_buffer_impl, buffer_files
 from backend.core.iceberg.manifest import ducklake_table_exists, get_snapshot_calendar, get_table_info
+from backend.core.rollups import _common as rollup_common
+from backend.core.rollups.time_series import build_time_series_bundles
 from tests._helpers.sources import make_source
 
 _make_source = partial(make_source, kind="lake", buffer_dir=True)
@@ -165,6 +169,85 @@ class TestCommitTombstoneContract:
 
         assert result["rows_committed"] == 1
         assert _lake_count(src) == 2
+
+
+def test_rollup_count_preserves_rows_when_buffer_commits_mid_recompute(tmp_path, monkeypatch):
+    src = _make_source(tmp_path, f"dl{uuid.uuid4().hex[:8]}")
+    ts = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+    _write_buffer(src, "batch_a.parquet", ts=ts, source_file="s3://b/raw/a.gz", n=3)
+    assert _commit_buffer_impl(src)["rows_committed"] == 3
+    _write_buffer(src, "batch_b.parquet", ts=ts, source_file="s3://b/raw/b.gz", n=2)
+    original = buffer_mod._ducklake_write_connection
+    written = []
+
+    @contextmanager
+    def publish_during_commit(source):
+        with original(source) as con:
+            yield con
+            written.append(build_time_series_bundles(source["name"], source, ["2026-08-30-12"]))
+
+    monkeypatch.setattr(buffer_mod, "_ducklake_write_connection", publish_during_commit)
+    with rollup_common.shared_rollup_session(src) as session:
+        con, _ = session.acquire(
+            rollup_common._safe_table_for(src),
+            logger=rollup_common.logger,
+            log_label="rollup commit consistency",
+        )
+        assert con.execute(f"SELECT COUNT(*) FROM {_safe_table_name(src['name'])}").fetchone()[0] == 5
+        assert _commit_buffer_impl(src)["rows_committed"] == 2
+
+    assert written == [1]
+    bundle = os.path.join(rollup_common._hour_bundled_root(src), "hour=2026-08-30-12", "time_series.parquet")
+    assert sum(pq.read_table(bundle).column("requests").to_pylist()) == 5
+
+    _write_buffer(src, "batch_c.parquet", ts=ts, source_file="s3://b/raw/c.gz", n=1)
+    fresh = get_connection(src)
+    try:
+        assert fresh.execute(f"SELECT COUNT(*) FROM {_safe_table_name(src['name'])}").fetchone()[0] == 6
+    finally:
+        fresh.close()
+
+
+def test_view_cache_refreshes_if_a_commit_follows_snapshot_selection(tmp_path, monkeypatch):
+    src = _make_source(tmp_path, f"dl{uuid.uuid4().hex[:8]}")
+    ts = datetime(2026, 8, 30, tzinfo=UTC)
+    _write_buffer(src, "batch_a.parquet", ts=ts, source_file="s3://b/raw/a.gz", n=3)
+    assert _commit_buffer_impl(src)["rows_committed"] == 3
+    _write_buffer(src, "batch_b.parquet", ts=ts, source_file="s3://b/raw/b.gz", n=2)
+    original = view_mod._finalize_view_sql
+
+    def finalize_after_commit(*args, **kwargs):
+        monkeypatch.setattr(view_mod, "_finalize_view_sql", original)
+        assert _commit_buffer_impl(src)["rows_committed"] == 2
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(view_mod, "_finalize_view_sql", finalize_after_commit)
+    con = get_connection(src)
+    try:
+        assert con.execute(f"SELECT COUNT(*) FROM {_safe_table_name(src['name'])}").fetchone()[0] == 5
+    finally:
+        con.close()
+
+    fresh = get_connection(src)
+    try:
+        assert fresh.execute(f"SELECT COUNT(*) FROM {_safe_table_name(src['name'])}").fetchone()[0] == 5
+    finally:
+        fresh.close()
+
+
+def test_committed_view_refuses_an_unverifiable_snapshot(tmp_path, monkeypatch):
+    src = _make_source(tmp_path, f"dl{uuid.uuid4().hex[:8]}")
+    _write_buffer(src, "batch_a.parquet", ts=datetime(2026, 8, 30, tzinfo=UTC), source_file="s3://b/raw/a.gz")
+    assert _commit_buffer_impl(src)["rows_committed"] == 1
+    con = get_connection(src)
+    monkeypatch.setattr(
+        import_module("backend.core.iceberg._ducklake"), "ducklake_current_snapshot_id", lambda con: None
+    )
+    try:
+        with pytest.raises(RuntimeError, match="Cannot verify the DuckLake snapshot"):
+            view_mod._update_iceberg_view_locked(con, src)
+    finally:
+        con.close()
 
 
 class TestTenantIsolation:

@@ -692,7 +692,7 @@ def _persistent_view_exists(con, source: dict, target_table: str = "logs") -> bo
 
 
 def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", force: bool = False) -> None:
-    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
+    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_current_snapshot_id, ducklake_table_name
 
     t_start = time.time()
     view_name = _view_target_name(source, target_table)
@@ -745,15 +745,18 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
     # lake.logs — under a shared catalog that would mix tenants).
     lake_table = ducklake_table_name(source, target_table)
     committed_parts: list[str] = []
-    try:
-        res = con.execute(
-            "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1",
-            [lake_table],
-        ).fetchone()
-        if res:
-            committed_parts.append(f'SELECT * FROM lake."{lake_table}"')
-    except Exception as e:
-        logger.warning("[iceberg] %s: lake table probe failed for %s: %s", source.get("name"), lake_table, e)
+    token = _ducklake_view_token(con)
+    res = con.execute(
+        "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1",
+        [lake_table],
+    ).fetchone()
+    if res:
+        snapshot_id = ducklake_current_snapshot_id(con)
+        if snapshot_id is None:
+            raise RuntimeError("Cannot verify the DuckLake snapshot for the committed view")
+        token = f"ducklake:{snapshot_id}"
+        # Buffer paths are fixed at bind time; the committed side must not advance past them.
+        committed_parts.append(f'SELECT * FROM lake."{lake_table}" AT (VERSION => {snapshot_id})')
 
     parts = list(committed_parts)
     if buf_files:
@@ -802,7 +805,6 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
 
     source_key = source.get("name", "default")
     cache_key = f"{source_key}::{target_table}" if target_table != "logs" else source_key
-    token = _ducklake_view_token(con)
     variant_fp = _source_variant_fp(source)
     schema_fp = tuple(sorted(dynamic_schema_field_names))
     _view_cache[cache_key] = (
