@@ -21,10 +21,18 @@ from backend.repositories._sql import insights as _insights_sql
 from backend.repositories._sql.insights import (
     COALESCED_ASN_AGGREGATES,
     COALESCED_CITY_AGGREGATES,
+    COALESCED_DIM_AGGREGATES,
+    COALESCED_FP_AGGREGATES,
+    COALESCED_GEO_LATENCY_AGGREGATES,
+    COALESCED_IP_EXTENDED_AGGREGATES,
     COALESCED_IP_SECURITY_AGGREGATES,
-    COALESCED_SCALAR_AGGREGATES,
+    COALESCED_SCALAR_EXTENDED_AGGREGATES,
     COALESCED_URL_AGGREGATES,
+    COALESCED_URL_EXTENDED_AGGREGATES,
     REPEATED_BOT_UA_REGEX,
+)
+from backend.repositories._sql.insights import (
+    COALESCED_SCALAR_AGGREGATES as COALESCED_SCALAR_AGGREGATES,
 )
 from backend.utils.telemetry import record_telemetry_query
 
@@ -196,68 +204,80 @@ def _coalesced_url_aggregates(
     table_name: str,
     window_start_s: str,
     *,
+    actual_cols: Collection[str] | None = None,
     shadow_cursor: duckdb.DuckDBPyConnection | None = None,
     debug_lock: threading.Lock | None = None,
 ) -> dict[str, list[tuple]]:
-    """Coalesce 5 URL-keyed insights (error_spikes, cache_collapse,
-    cacheability_regression, latency_regression, tail_latency) into ONE
-    pass over ``table_name``.
+    """Coalesce URL-keyed insights into ONE pass over ``table_name``.
 
-    Each of those insights previously ran its own GROUP BY url
-    scan with the same WHERE clause and same baseline/window split
-    ((timestamp < window_start) → baseline, (>=) → window). Coalescing
-    them mirrors the O2 city-aggregates pattern that demonstrably saved
-    ~520 ms on prod by replacing 4 city scans with 1.
-
-    Why not all url-keyed insights: ``origin_latency_spike`` is grouped by
-    URL too but its SQL has a different shape — it uses overall_stats
-    CTEs to normalize against the entire population's percentile, so
-    its per-url aggregates need a second pass. Leaving it on its own
-    SQL template avoids cross-contaminating the simpler shared CTE.
-
-    cache_collapse and cacheability_regression are siblings that split the
-    cache story: cache_collapse tracks the hit ratio of *cacheable* traffic
-    (HIT/(HIT+MISS), PASS excluded), cacheability_regression tracks a surge
-    in *uncacheable* traffic (PASS/total). They share the HIT/MISS/PASS
-    counters in COALESCED_URL_AGGREGATES.
-
-    Returns ``{insight_id: rows}`` where each rows list matches the
-    insight's existing processor row-schema. On any exception the
-    caller falls back to the legacy per-insight scans transparently.
-
-    - error_spikes:             [url, w_rate, b_rate, w_errors, w_total, b_total]
-    - cache_collapse:           [url, w_rate, b_rate, w_cacheable, b_cacheable]
-    - cacheability_regression:  [url, w_pass_rate, b_pass_rate, w_total, b_total]
-    - latency_regression:       [url, w_p95, b_p95, w_total, b_total]
-    - tail_latency:             [url, p99_ms, p50_ms, ratio, total]
+    When ``actual_cols`` is None, computes the 5 core URL insights
+    (error_spikes, cache_collapse, cacheability_regression,
+    latency_regression, tail_latency) via COALESCED_URL_AGGREGATES.
+    When ``actual_cols`` is provided, uses COALESCED_URL_EXTENDED_AGGREGATES
+    to also compute new_probe_urls, payload_compression_regression,
+    image_optimization_opportunities, cache_ttl_mismatch, and origin_retries
+    in the same single scan.
     """
-    sql = COALESCED_URL_AGGREGATES.format(table_name=table_name)
+    use_extended = actual_cols is not None
+    if actual_cols is not None:
+        sql = COALESCED_URL_EXTENDED_AGGREGATES.format(
+            table_name=table_name,
+            resp_bytes_sel='t."resp_bytes"' if "resp_bytes" in actual_cols else "NULL::BIGINT",
+            uncompressed_sel=(
+                "(NOT regexp_matches(lower(COALESCE(t.\"resp_header_content_encoding\", '')), 'gzip|br|zstd|deflate'))"
+                if "resp_header_content_encoding" in actual_cols
+                else "FALSE"
+            ),
+            is_mobile_sel=(
+                "CASE WHEN t.\"ua\" ILIKE '%Mobi%' OR t.\"ua\" ILIKE '%Android%' OR t.\"ua\" ILIKE '%iPhone%' THEN 1 ELSE 0 END"
+                if "ua" in actual_cols
+                else "0"
+            ),
+            ttl_sel='t."ttl"' if "ttl" in actual_cols else "NULL::DOUBLE",
+            hits_sel='t."hits"' if "hits" in actual_cols else "NULL::DOUBLE",
+            age_sel='t."age"' if "age" in actual_cols else "NULL::DOUBLE",
+            oretries_sel='t."oretries"' if "oretries" in actual_cols else "NULL::BIGINT",
+        )
+    else:
+        sql = COALESCED_URL_AGGREGATES.format(table_name=table_name)
     if shadow_cursor is not None and debug_lock is not None:
         result_cursor = _execute_on_cursor(runner, debug_lock, shadow_cursor, sql, [window_start_s, window_start_s])
     else:
         result_cursor = runner.execute(sql, [window_start_s, window_start_s])
 
-    # Bounded top-K via min-heap on score: each insight only ever holds
-    # at most _TOP_K entries in memory regardless of how many unique
-    # URLs match the threshold. Pre-refactor these were unbounded lists
-    # that grew linearly with cardinality — an attacker generating
-    # millions of unique URLs (e.g. random query-string) that hit any
-    # of the per-insight gates could OOM the worker before the trailing
-    # sort+slice ran. The counter tie-breaker preserves insertion order
-    # for items with identical scores (matches the prior implicit-stable
-    # sort behaviour).
     _TOP_K = 15
     error_spikes_heap: list[tuple] = []
     cache_collapse_heap: list[tuple] = []
     cacheability_regression_heap: list[tuple] = []
     latency_regression_heap: list[tuple] = []
     tail_latency_heap: list[tuple] = []
+    new_probe_urls_heap: list[tuple] = []
+    payload_comp_heap: list[tuple] = []
+    image_opt_heap: list[tuple] = []
+    cache_ttl_heap: list[tuple] = []
+    origin_retries_heap: list[tuple] = []
 
-    def _push_top_k(heap: list[tuple], score: float, counter: int, item: tuple) -> None:
-        if len(heap) < _TOP_K:
+    def _push_top_k(heap: list[tuple], score: float, counter: int, item: tuple, k: int = _TOP_K) -> None:
+        if len(heap) < k:
             heapq.heappush(heap, (score, counter, item))
         else:
             heapq.heappushpop(heap, (score, counter, item))
+
+    has_pcr = bool(
+        use_extended
+        and actual_cols is not None
+        and "resp_header_content_encoding" in actual_cols
+        and "resp_bytes" in actual_cols
+    )
+    has_img = bool(use_extended and actual_cols is not None and "resp_bytes" in actual_cols and "ua" in actual_cols)
+    has_ttl = bool(
+        use_extended
+        and actual_cols is not None
+        and "ttl" in actual_cols
+        and "hits" in actual_cols
+        and "age" in actual_cols
+    )
+    has_oret = bool(use_extended and actual_cols is not None and "oretries" in actual_cols)
 
     counter = 0
 
@@ -266,34 +286,71 @@ def _coalesced_url_aggregates(
         if not rows:
             break
         for r in rows:
-            (
-                url,
-                w_total,
-                b_total,
-                w_5xx,
-                b_5xx,
-                w_hits,
-                b_hits,
-                w_miss,
-                b_miss,
-                w_pass,
-                b_pass,
-                w_lat_total,
-                b_lat_total,
-                w_p95,
-                b_p95,
-                w_p99,
-                w_p50,
-            ) = r
+            if use_extended:
+                (
+                    url,
+                    w_total,
+                    b_total,
+                    w_5xx,
+                    b_5xx,
+                    w_hits,
+                    b_hits,
+                    w_miss,
+                    b_miss,
+                    w_pass,
+                    b_pass,
+                    w_lat_total,
+                    b_lat_total,
+                    w_p95,
+                    b_p95,
+                    w_p99,
+                    w_p50,
+                    is_probe,
+                    w_4xx,
+                    is_comp,
+                    pcr_w_uncomp,
+                    pcr_w_total,
+                    pcr_b_uncomp,
+                    pcr_b_total,
+                    is_img,
+                    img_w_cnt,
+                    img_w_bytes,
+                    img_w_avg_bytes,
+                    img_w_mobile,
+                    ttl_w_cnt,
+                    ttl_w_avg_ttl,
+                    ttl_w_avg_hits,
+                    ttl_w_avg_age,
+                    oret_w_cnt,
+                    oret_w_avg,
+                    oret_w_max,
+                ) = r
+            else:
+                (
+                    url,
+                    w_total,
+                    b_total,
+                    w_5xx,
+                    b_5xx,
+                    w_hits,
+                    b_hits,
+                    w_miss,
+                    b_miss,
+                    w_pass,
+                    b_pass,
+                    w_lat_total,
+                    b_lat_total,
+                    w_p95,
+                    b_p95,
+                    w_p99,
+                    w_p50,
+                ) = r
 
             w_total_i = w_total or 0
             b_total_i = b_total or 0
             counter += 1
 
             # ── error_spikes ──────────────────────────────────────────────────
-            # Legacy HAVING: w_total >= 3 AND w_rate >= 0.05
-            #                AND (b_total < 10 OR w_rate >= b_rate * 2 + 0.05)
-            # ORDER BY (w_rate - COALESCE(b_rate, 0)) DESC LIMIT 15
             if w_total_i >= 3:
                 w_rate_e = (w_5xx or 0) / w_total_i if w_total_i else 0.0
                 b_rate_e = ((b_5xx or 0) / b_total_i) if b_total_i else None
@@ -303,12 +360,6 @@ def _coalesced_url_aggregates(
                     _push_top_k(error_spikes_heap, score, counter, item)
 
             # ── cache_collapse ────────────────────────────────────────────────
-            # Hit ratio = HIT / (HIT + MISS) — the conventional Fastly cache hit
-            # ratio. PASS is uncacheable and excluded from both numerator and
-            # denominator, so a PASS surge no longer trips this insight (it is
-            # surfaced by cacheability_regression below). Gate on the *cacheable*
-            # sample size (HIT+MISS), not total requests. Mirror this exactly in
-            # the standalone CACHE_COLLAPSE template (parity test depends on it).
             w_cacheable = (w_hits or 0) + (w_miss or 0)
             b_cacheable = (b_hits or 0) + (b_miss or 0)
             if w_cacheable >= 5 and b_cacheable >= 20:
@@ -320,9 +371,6 @@ def _coalesced_url_aggregates(
                     _push_top_k(cache_collapse_heap, score, counter, item_cc)
 
             # ── cacheability_regression ───────────────────────────────────────
-            # pass_rate = PASS / ALL requests. Fires when a previously-cacheable
-            # URL flips to mostly PASS (origin made it uncacheable). Mirror the
-            # standalone CACHEABILITY_REGRESSION template.
             if w_total_i >= 10 and b_total_i >= 50:
                 w_pass_rate = (w_pass or 0) / w_total_i if w_total_i else 0.0
                 b_pass_rate = (b_pass or 0) / b_total_i if b_total_i else 0.0
@@ -332,13 +380,6 @@ def _coalesced_url_aggregates(
                     _push_top_k(cacheability_regression_heap, score, counter, item_cr)
 
             # ── latency_regression ────────────────────────────────────────────
-            # Legacy HAVING: w_total >= 5 AND b_total >= 20 AND w_p95 >= b_p95 * 2.0
-            #                AND w_p95 - b_p95 >= 200
-            # ORDER BY (w_p95 / NULLIF(b_p95, 0)) DESC LIMIT 15
-            #
-            # Note: legacy uses w_total/b_total (TOTAL counts) for the >=5/>=20
-            # gate, NOT w_lat_total/b_lat_total — preserve that or this insight
-            # would surface MORE urls than the legacy implementation.
             if (
                 w_total_i >= 5
                 and b_total_i >= 20
@@ -352,26 +393,80 @@ def _coalesced_url_aggregates(
                 _push_top_k(latency_regression_heap, score, counter, item_lr)
 
             # ── tail_latency (window-only) ────────────────────────────────────
-            # Legacy WHERE timestamp >= window_start; HAVING COUNT(*) >= 20 AND
-            # ratio > 5. ORDER BY ratio DESC LIMIT 15.
-            # ratio = p99 / NULLIF(p50, 0)
             if w_lat_total is not None and w_lat_total >= 20 and w_p99 is not None and w_p50 is not None and w_p50 > 0:
                 ratio = round(w_p99 / w_p50, 1)
                 if ratio > 5:
                     item_tl: tuple = (url, w_p99, w_p50, ratio, w_lat_total)
                     _push_top_k(tail_latency_heap, ratio or 0.0, counter, item_tl)
 
+            if use_extended:
+                # ── new_probe_urls ────────────────────────────────────────────
+                if is_probe and w_total_i > 0 and b_total_i == 0:
+                    w_error_pct = (w_4xx or 0) * 100.0 / w_total_i
+                    item_npu: tuple = (url, w_total_i, b_total_i, w_error_pct)
+                    _push_top_k(new_probe_urls_heap, float(w_total_i), counter, item_npu, k=25)
+
+                # ── payload_compression_regression ────────────────────────────
+                if has_pcr and is_comp and (pcr_w_total or 0) >= 10 and (pcr_b_total or 0) >= 50:
+                    w_rate_p = (pcr_w_uncomp or 0) / pcr_w_total
+                    b_rate_p = (pcr_b_uncomp or 0) / pcr_b_total
+                    if b_rate_p <= 0.20 and w_rate_p >= 0.50 and w_rate_p >= b_rate_p + 0.30:
+                        item_pcr: tuple = (url, w_rate_p, b_rate_p, pcr_w_total, pcr_b_total)
+                        _push_top_k(payload_comp_heap, w_rate_p - b_rate_p, counter, item_pcr, k=15)
+
+                # ── image_optimization_opportunities ──────────────────────────
+                if has_img and is_img and (img_w_bytes or 0) > 524288:
+                    avg_kb = round((img_w_avg_bytes or 0.0) / 1024.0, 1)
+                    mobile_ratio = ((img_w_mobile or 0) * 1.0 / img_w_cnt) if img_w_cnt else 0.0
+                    item_img: tuple = (url, img_w_cnt, img_w_bytes, avg_kb, mobile_ratio)
+                    _push_top_k(image_opt_heap, float(img_w_bytes), counter, item_img, k=15)
+
+                # ── cache_ttl_mismatch ────────────────────────────────────────
+                if (
+                    has_ttl
+                    and (ttl_w_cnt or 0) >= 10
+                    and ttl_w_avg_hits is not None
+                    and ttl_w_avg_hits < 2
+                    and ttl_w_avg_ttl is not None
+                    and ttl_w_avg_ttl > 60
+                ):
+                    item_ttl: tuple = (
+                        url,
+                        round(ttl_w_avg_ttl, 0),
+                        round(ttl_w_avg_hits, 1),
+                        round(ttl_w_avg_age or 0.0, 0),
+                        ttl_w_cnt,
+                    )
+                    _push_top_k(cache_ttl_heap, float(ttl_w_avg_ttl), counter, item_ttl, k=20)
+
+                # ── origin_retries ────────────────────────────────────────────
+                if has_oret and (oret_w_cnt or 0) >= 5 and oret_w_avg is not None:
+                    avg_ret = round(oret_w_avg, 2)
+                    item_oret: tuple = (url, oret_w_cnt, avg_ret, oret_w_max)
+                    _push_top_k(origin_retries_heap, float(avg_ret), counter, item_oret, k=10)
+
     def _heap_to_sorted_items(heap: list[tuple]) -> list[tuple]:
         # heap is (score, counter, item); return items sorted by score desc.
         return [entry[2] for entry in sorted(heap, key=lambda e: e[0], reverse=True)]
 
-    return {
+    res: dict[str, list[tuple]] = {
         "error_spikes": _heap_to_sorted_items(error_spikes_heap),
         "cache_collapse": _heap_to_sorted_items(cache_collapse_heap),
         "cacheability_regression": _heap_to_sorted_items(cacheability_regression_heap),
         "latency_regression": _heap_to_sorted_items(latency_regression_heap),
         "tail_latency": _heap_to_sorted_items(tail_latency_heap),
     }
+    if use_extended:
+        res["new_probe_urls"] = _heap_to_sorted_items(new_probe_urls_heap)
+        if has_pcr:
+            res["payload_compression_regression"] = _heap_to_sorted_items(payload_comp_heap)
+        if has_img:
+            res["image_optimization_opportunities"] = _heap_to_sorted_items(image_opt_heap)
+        if has_ttl:
+            res["cache_ttl_mismatch"] = _heap_to_sorted_items(cache_ttl_heap)
+        if has_oret:
+            res["origin_retries"] = _heap_to_sorted_items(origin_retries_heap)
+    return res
 
 
 def _coalesced_ip_security_aggregates(
@@ -381,52 +476,58 @@ def _coalesced_ip_security_aggregates(
     window_hours: float,
     baseline_hours: float,
     *,
+    actual_cols: Collection[str] | None = None,
     shadow_cursor: duckdb.DuckDBPyConnection | None = None,
     debug_lock: threading.Lock | None = None,
 ) -> dict[str, list[tuple]]:
-    """Coalesce the 3 IP-keyed security scans (low_and_slow,
-    credential_enumeration, content_discovery) into ONE ``GROUP BY ip`` pass
+    """Coalesce the IP-keyed security scans into ONE ``GROUP BY ip`` pass
     over ``table_name``.
 
-    Each of those insights previously ran its own ``GROUP BY ip`` scan of the
-    temp. §9.7 of the design plan requires folding same-key insights into a
-    shared pre-agg (mirrors ``_coalesced_url_aggregates``) so cold-path latency
-    doesn't grow linearly with the number of IP scans. ``COALESCED_IP_SECURITY_
-    AGGREGATES`` computes conditional aggregates for all three keyed on ``ip``;
-    this demuxes them into each insight's existing processor row-schema, applies
-    each insight's HAVING/ORDER/LIMIT in Python, and (via the caller's
-    try/except) falls back to the standalone scans on any exception.
-
-    Returns ``{insight_id: rows}`` where each rows list matches the insight's
-    existing processor row-schema:
-
-    - low_and_slow:            [ip, hits, distinct_paths, span_s, rps]
-    - credential_enumeration:  [ip, w_denied, w_attempts, w_paths, b_denied]
-    - content_discovery:       [ip, w_404, w_total, distinct_404, b_404]
+    When ``actual_cols`` is None, computes low_and_slow, credential_enumeration,
+    and content_discovery via COALESCED_IP_SECURITY_AGGREGATES.
+    When ``actual_cols`` is provided, uses COALESCED_IP_EXTENDED_AGGREGATES
+    to also compute orphaned_deep_crawl, session_harvesting, and exact
+    candidate bounds for request_size_anomaly and connection_abuse.
     """
-    sql = COALESCED_IP_SECURITY_AGGREGATES.format(table_name=table_name)
+    use_extended = actual_cols is not None
+    if actual_cols is not None:
+        sql = COALESCED_IP_EXTENDED_AGGREGATES.format(
+            table_name=table_name,
+            no_referer_sel=(
+                '(t."referer" IS NULL OR t."referer" = \'\' OR t."referer" = \'-\')'
+                if "referer" in actual_cols
+                else "FALSE"
+            ),
+            cs_sel='t."cookie_session"' if "cookie_session" in actual_cols else "NULL::VARCHAR",
+            req_header_bytes_sel='t."req_header_bytes"' if "req_header_bytes" in actual_cols else "NULL::BIGINT",
+            conn_requests_sel='t."conn_requests"' if "conn_requests" in actual_cols else "NULL::BIGINT",
+        )
+    else:
+        sql = COALESCED_IP_SECURITY_AGGREGATES.format(table_name=table_name)
     if shadow_cursor is not None and debug_lock is not None:
         result_cursor = _execute_on_cursor(runner, debug_lock, shadow_cursor, sql, [window_start_s, window_start_s])
     else:
         result_cursor = runner.execute(sql, [window_start_s, window_start_s])
 
-    # Bounded top-K via min-heap on a per-insight sort key — each insight holds
-    # at most _TOP_K entries regardless of IP cardinality, so an attacker
-    # spraying millions of distinct IPs (each tripping the outer HAVING with a
-    # single probe/auth/404 request) can't OOM the worker. The counter
-    # tie-breaker preserves insertion order for equal keys (stable-sort parity
-    # with the standalone ORDER BY). Sort keys are tuples so multi-column ORDER
-    # BYs (low_and_slow's distinct DESC, span DESC) compare lexicographically.
     _TOP_K = 15
     low_and_slow_heap: list[tuple] = []
     credential_enumeration_heap: list[tuple] = []
     content_discovery_heap: list[tuple] = []
+    orphaned_deep_crawl_heap: list[tuple] = []
+    session_harvesting_heap: list[tuple] = []
 
     def _push_top_k(heap: list[tuple], sortkey: tuple, counter: int, item: tuple) -> None:
         if len(heap) < _TOP_K:
             heapq.heappush(heap, (sortkey, counter, item))
         else:
             heapq.heappushpop(heap, (sortkey, counter, item))
+
+    has_odc = bool(use_extended and actual_cols is not None and "referer" in actual_cols)
+    has_sh = bool(use_extended and actual_cols is not None and "cookie_session" in actual_cols)
+    has_rsa = bool(use_extended and actual_cols is not None and "req_header_bytes" in actual_cols)
+    has_ca = bool(use_extended and actual_cols is not None and "conn_requests" in actual_cols)
+    rsa_candidates = 0
+    ca_candidates = 0
 
     baseline_scale = max(baseline_hours, 1.0)
     counter = 0
@@ -436,43 +537,64 @@ def _coalesced_ip_security_aggregates(
         if not rows:
             break
         for r in rows:
-            (
-                ip,
-                ls_hits,
-                ls_distinct,
-                ls_min_sec,
-                ls_max_sec,
-                ce_w_denied,
-                ce_w_attempts,
-                ce_w_paths,
-                ce_b_denied,
-                cd_w_404,
-                cd_w_total,
-                cd_distinct_404,
-                cd_b_404,
-            ) = r
+            if use_extended:
+                (
+                    ip,
+                    ls_hits,
+                    ls_distinct,
+                    ls_min_sec,
+                    ls_max_sec,
+                    ce_w_denied,
+                    ce_w_attempts,
+                    ce_w_paths,
+                    ce_b_denied,
+                    cd_w_404,
+                    cd_w_total,
+                    cd_distinct_404,
+                    cd_b_404,
+                    odc_w_reqs,
+                    odc_w_urls,
+                    odc_b_reqs,
+                    sh_w_sessions,
+                    sh_w_reqs,
+                    sh_b_sessions,
+                    rsa_w_cnt,
+                    rsa_w_max,
+                    rsa_b_min,
+                    _rsa_b_max,
+                    ca_w_cnt,
+                    ca_w_max,
+                    ca_b_min,
+                    _ca_b_max,
+                ) = r
+            else:
+                (
+                    ip,
+                    ls_hits,
+                    ls_distinct,
+                    ls_min_sec,
+                    ls_max_sec,
+                    ce_w_denied,
+                    ce_w_attempts,
+                    ce_w_paths,
+                    ce_b_denied,
+                    cd_w_404,
+                    cd_w_total,
+                    cd_distinct_404,
+                    cd_b_404,
+                ) = r
             counter += 1
 
             # ── low_and_slow ──────────────────────────────────────────────────
-            # Standalone HAVING: hits >= 5 AND distinct >= 3 AND span >= 600 AND
-            # hits/span < 0.2. ORDER BY distinct DESC, span DESC LIMIT 15.
             ls_hits_i = ls_hits or 0
             ls_distinct_i = ls_distinct or 0
             span_s = (ls_max_sec - ls_min_sec) if (ls_min_sec is not None and ls_max_sec is not None) else 0
-            if (
-                ls_hits_i >= 5
-                and ls_distinct_i >= 3
-                and span_s >= 600
-                and (ls_hits_i / span_s) < 0.2  # span_s >= 600 here, never zero
-            ):
+            if ls_hits_i >= 5 and ls_distinct_i >= 3 and span_s >= 600 and (ls_hits_i / span_s) < 0.2:
                 rps = round(ls_hits_i / span_s, 5)
                 item_ls: tuple = (ip, ls_hits_i, ls_distinct_i, span_s, rps)
                 _push_top_k(low_and_slow_heap, (ls_distinct_i, span_s), counter, item_ls)
 
             # ── credential_enumeration ────────────────────────────────────────
-            # Standalone HAVING: w_denied >= 20 AND w_denied/w_attempts >= 0.5 AND
-            # w_denied > b_denied/baseline_hours*window_hours*3 + 5.
-            # ORDER BY w_denied DESC LIMIT 15.
             ce_w_denied_i = ce_w_denied or 0
             if ce_w_denied_i >= 20:
                 ce_ratio = (ce_w_denied_i / ce_w_attempts) if ce_w_attempts else 0.0
@@ -482,8 +604,6 @@ def _coalesced_ip_security_aggregates(
                     _push_top_k(credential_enumeration_heap, (ce_w_denied_i,), counter, item_ce)
 
             # ── content_discovery ─────────────────────────────────────────────
-            # Standalone HAVING: w_404 >= 20 AND w_404/w_total >= 0.7 AND
-            # distinct_404 >= 15. ORDER BY w_404 DESC LIMIT 15.
             cd_w_404_i = cd_w_404 or 0
             cd_distinct_404_i = cd_distinct_404 or 0
             if cd_w_404_i >= 20 and cd_distinct_404_i >= 15:
@@ -492,15 +612,56 @@ def _coalesced_ip_security_aggregates(
                     item_cd: tuple = (ip, cd_w_404_i, cd_w_total, cd_distinct_404_i, cd_b_404)
                     _push_top_k(content_discovery_heap, (cd_w_404_i,), counter, item_cd)
 
+            if use_extended:
+                # ── orphaned_deep_crawl ───────────────────────────────────────
+                if has_odc and (odc_w_reqs or 0) >= 50 and (odc_w_urls or 0) >= 10:
+                    b_reqs_i = odc_b_reqs or 0
+                    reqs_per_url = odc_w_reqs * 1.0 / max(odc_w_urls, 1.0)
+                    surge_ratio = odc_w_reqs * 1.0 / max(b_reqs_i / baseline_scale * window_hours, 1.0)
+                    item_odc: tuple = (ip, odc_w_reqs, odc_w_urls, b_reqs_i, reqs_per_url, surge_ratio)
+                    _push_top_k(orphaned_deep_crawl_heap, (odc_w_reqs,), counter, item_odc)
+
+                # ── session_harvesting ────────────────────────────────────────
+                if has_sh and (sh_w_sessions or 0) >= 20:
+                    b_sess_i = sh_b_sessions or 0
+                    if sh_w_sessions > b_sess_i * 2 + 10:
+                        item_sh: tuple = (ip, sh_w_sessions, sh_w_reqs, b_sess_i)
+                        _push_top_k(session_harvesting_heap, (sh_w_sessions,), counter, item_sh)
+
+                # ── request_size_anomaly exact lower-bound check ──────────────
+                # Since min(B) <= P95(B), max_w > P95(B)*3 requires max_w > min(B)*3.
+                if has_rsa and (rsa_w_cnt or 0) >= 3 and rsa_b_min is not None and (rsa_w_max or 0) > rsa_b_min * 3:
+                    rsa_candidates += 1
+
+                # ── connection_abuse exact lower-bound check ──────────────────
+                if (
+                    has_ca
+                    and (ca_w_cnt or 0) >= 5
+                    and (ca_w_max or 0) >= 50
+                    and ca_b_min is not None
+                    and (ca_w_max or 0) > ca_b_min * 3
+                ):
+                    ca_candidates += 1
+
     def _heap_to_sorted_items(heap: list[tuple]) -> list[tuple]:
         # heap is (sortkey, counter, item); return items sorted by sortkey desc.
         return [entry[2] for entry in sorted(heap, key=lambda e: e[0], reverse=True)]
 
-    return {
+    res: dict[str, list[tuple]] = {
         "low_and_slow": _heap_to_sorted_items(low_and_slow_heap),
         "credential_enumeration": _heap_to_sorted_items(credential_enumeration_heap),
         "content_discovery": _heap_to_sorted_items(content_discovery_heap),
     }
+    if use_extended:
+        if has_odc:
+            res["orphaned_deep_crawl"] = _heap_to_sorted_items(orphaned_deep_crawl_heap)
+        if has_sh:
+            res["session_harvesting"] = _heap_to_sorted_items(session_harvesting_heap)
+        if has_rsa and rsa_candidates == 0:
+            res["request_size_anomaly"] = []
+        if has_ca and ca_candidates == 0:
+            res["connection_abuse"] = []
+    return res
 
 
 def _coalesced_asn_aggregates(
@@ -640,17 +801,23 @@ def _coalesced_scalar_aggregates(
     shadow_cursor: duckdb.DuckDBPyConnection | None = None,
     debug_lock: threading.Lock | None = None,
 ) -> dict[str, list[tuple]]:
-    """Coalesce the 2 ungrouped service-wide scalar insights (http3_fallback,
-    cache_hit_cliff) into ONE pass over ``table_name``.
+    """Coalesce the ungrouped service-wide scalar insights (http3_fallback,
+    cache_hit_cliff, timeout_split, and origin_latency_spike overall gate)
+    into ONE pass over ``table_name``.
     """
     has_transport = "transport" in actual_cols
     has_cache = "cache" in actual_cols
-    if not (has_transport or has_cache):
+    has_oconnect = "oconnect_ms" in actual_cols
+    has_ottfb = "ottfb" in actual_cols
+    has_ts = has_oconnect and has_ottfb
+    if not (has_transport or has_cache or has_ts or has_ottfb):
         return {}
-    sql = COALESCED_SCALAR_AGGREGATES.format(
+    sql = COALESCED_SCALAR_EXTENDED_AGGREGATES.format(
         table_name=table_name,
         transport_sel='"transport"' if has_transport else "NULL::VARCHAR",
         cache_sel='"cache"' if has_cache else "NULL::VARCHAR",
+        oconnect_ms_sel='"oconnect_ms"' if has_oconnect else "NULL::DOUBLE",
+        ottfb_sel='"ottfb"' if has_ottfb else "NULL::DOUBLE",
     )
     if shadow_cursor is not None and debug_lock is not None:
         row = _execute_on_cursor(runner, debug_lock, shadow_cursor, sql, [window_start_s, window_start_s]).fetchone()
@@ -663,9 +830,40 @@ def _coalesced_scalar_aggregates(
             res["http3_fallback"] = []
         if has_cache:
             res["cache_hit_cliff"] = []
+        if has_ts:
+            res["timeout_split"] = []
+        if has_ottfb:
+            res["origin_latency_spike"] = []
         return res
 
-    w_quic, w_tr_total, b_quic, b_tr_total, w_hits, w_cacheable, b_hits, b_cacheable = (int(v or 0) for v in row)
+    (
+        w_quic,
+        w_tr_total,
+        b_quic,
+        b_tr_total,
+        w_hits,
+        w_cacheable,
+        b_hits,
+        b_cacheable,
+        ts_w_conn,
+        ts_b_conn,
+        ts_w_read,
+        ts_b_read,
+        ts_w_total,
+        ts_b_total,
+        ols_w_p95,
+        ols_b_p95,
+    ) = row
+    w_quic = int(w_quic or 0)
+    w_tr_total = int(w_tr_total or 0)
+    b_quic = int(b_quic or 0)
+    b_tr_total = int(b_tr_total or 0)
+    w_hits = int(w_hits or 0)
+    w_cacheable = int(w_cacheable or 0)
+    b_hits = int(b_hits or 0)
+    b_cacheable = int(b_cacheable or 0)
+    ts_w_total = int(ts_w_total or 0)
+    ts_b_total = int(ts_b_total or 0)
 
     if has_transport:
         if (
@@ -689,6 +887,466 @@ def _coalesced_scalar_aggregates(
         else:
             res["cache_hit_cliff"] = []
 
+    if has_ts:
+        if (
+            ts_w_total >= 50
+            and ts_b_total >= 100
+            and (
+                (ts_w_conn is not None and ts_b_conn is not None and ts_w_conn > ts_b_conn * 2 and ts_w_conn >= 50)
+                or (ts_w_read is not None and ts_b_read is not None and ts_w_read > ts_b_read * 2 and ts_w_read >= 100)
+            )
+        ):
+            res["timeout_split"] = [(ts_w_conn, ts_b_conn, ts_w_read, ts_b_read, ts_w_total, ts_b_total)]
+        else:
+            res["timeout_split"] = []
+
+    if has_ottfb:
+        # Gate origin_latency_spike: only run the per-URL query when overall w_p95 > b_p95 * 2
+        if ols_w_p95 is None or ols_b_p95 is None or not (ols_w_p95 > ols_b_p95 * 2):
+            res["origin_latency_spike"] = []
+
+    return res
+
+
+def _coalesced_fp_aggregates(
+    runner: QueryRunner,
+    table_name: str,
+    window_start_s: str,
+    window_hours: float,
+    baseline_hours: float,
+    actual_cols: Collection[str],
+    *,
+    shadow_cursor: duckdb.DuckDBPyConnection | None = None,
+    debug_lock: threading.Lock | None = None,
+) -> dict[str, list[tuple]]:
+    """Coalesce fingerprint & cipher spread insights (botnet_grouping,
+    residential_fingerprint_dispersion, cipher_spread) into ONE pass using
+    GROUPING SETS ((fp), (cipher)).
+    """
+    has_ip = "ip" in actual_cols
+    has_fp = has_ip and ("ja4" in actual_cols or "ja3" in actual_cols)
+    has_rfd = has_ip and "ja4" in actual_cols and "asn" in actual_cols and "p_type" in actual_cols
+    has_cipher = has_ip and "tls_ciphers_sha" in actual_cols
+    if not (has_fp or has_rfd or has_cipher):
+        return {}
+    fp_col = '"ja4"' if "ja4" in actual_cols else ('"ja3"' if "ja3" in actual_cols else "NULL::VARCHAR")
+    sql = COALESCED_FP_AGGREGATES.format(
+        table_name=table_name,
+        fp_sel=fp_col if (has_fp or has_rfd) else "NULL::VARCHAR",
+        cipher_sel='"tls_ciphers_sha"' if has_cipher else "NULL::VARCHAR",
+        ip_sel='"ip"',
+        asn_sel='"asn"' if "asn" in actual_cols else "NULL::BIGINT",
+        is_non_hosting_sel='("p_type" IS NULL OR "p_type" != \'hosting\')' if "p_type" in actual_cols else "true",
+    )
+    if shadow_cursor is not None and debug_lock is not None:
+        raw_rows = _execute_on_cursor(
+            runner, debug_lock, shadow_cursor, sql, [window_start_s, window_start_s]
+        ).fetchall()
+    else:
+        raw_rows = runner.execute(sql, [window_start_s, window_start_s]).fetchall()
+
+    baseline_scale = max(float(baseline_hours), 1.0)
+    win_h = float(window_hours)
+
+    botnet: list[tuple] = []
+    rfd: list[tuple] = []
+    cipher_list: list[tuple] = []
+
+    for (
+        gid,
+        fp,
+        cipher,
+        bg_w_ips,
+        bg_w_reqs,
+        bg_b_ips,
+        rfd_w_ips,
+        rfd_w_asns,
+        rfd_w_reqs,
+        rfd_b_ips,
+        rfd_b_asns,
+        cs_w_ips,
+        cs_w_reqs,
+        cs_b_ips,
+    ) in raw_rows:
+        gid_i = int(gid or 0)
+        if gid_i == 1 and fp is not None and fp != "":
+            if has_fp:
+                w_ips = int(bg_w_ips or 0)
+                w_reqs = int(bg_w_reqs or 0)
+                b_ips = int(bg_b_ips or 0)
+                scaled_b = b_ips / baseline_scale * win_h
+                if w_ips >= 5 and w_ips > scaled_b * 3:
+                    ip_ratio = w_ips * 1.0 / max(scaled_b, 1.0)
+                    botnet.append((fp, w_ips, w_reqs, b_ips, ip_ratio))
+            if has_rfd:
+                rw_ips = int(rfd_w_ips or 0)
+                rw_asns = int(rfd_w_asns or 0)
+                rw_reqs = int(rfd_w_reqs or 0)
+                rb_ips = int(rfd_b_ips or 0)
+                rb_asns = int(rfd_b_asns or 0)
+                if rw_ips >= 30 and rw_asns >= 5:
+                    asn_exp = rw_asns * 1.0 / max(rb_asns, 1.0)
+                    rfd.append((fp, rw_ips, rw_asns, rw_reqs, rb_ips, asn_exp))
+        elif gid_i == 2 and has_cipher and cipher is not None and cipher != "":
+            cw_ips = int(cs_w_ips or 0)
+            cw_reqs = int(cs_w_reqs or 0)
+            cb_ips = int(cs_b_ips or 0)
+            scaled_cb = cb_ips / baseline_scale * win_h
+            if cw_ips >= 5 and cw_ips > scaled_cb * 3:
+                c_ratio = cw_ips * 1.0 / max(scaled_cb, 1.0)
+                cipher_list.append((c_ratio, (cipher, cw_ips, cw_reqs, cb_ips)))
+
+    botnet.sort(key=lambda r: r[4], reverse=True)
+    rfd.sort(key=lambda r: r[5], reverse=True)
+    cipher_list.sort(key=lambda pair: pair[0], reverse=True)
+
+    res: dict[str, list[tuple]] = {}
+    if has_fp:
+        res["botnet_grouping"] = botnet[:10]
+    if has_rfd:
+        res["residential_fingerprint_dispersion"] = rfd[:10]
+    if has_cipher:
+        res["cipher_spread"] = [item for _, item in cipher_list[:10]]
+    return res
+
+
+def _coalesced_dim_aggregates(
+    runner: QueryRunner,
+    table_name: str,
+    window_start_s: str,
+    actual_cols: Collection[str],
+    *,
+    shadow_cursor: duckdb.DuckDBPyConnection | None = None,
+    debug_lock: threading.Lock | None = None,
+) -> dict[str, list[tuple]]:
+    """Coalesce 8 low-cardinality dimension insights (new_country_traffic,
+    proxy_surge, method_drift, connection_type_mix, origin_error_rate,
+    origin_ip_failure, referer_monoculture, ua_monoculture) into ONE pass
+    using GROUPING SETS.
+    """
+    has_country = "country" in actual_cols
+    has_ptype = "p_type" in actual_cols
+    has_method = "method" in actual_cols
+    has_ctype = "c_type" in actual_cols and "c_speed" in actual_cols
+    has_ost = "ost" in actual_cols
+    has_oip = "oip" in actual_cols and has_ost
+    has_referer = "referer" in actual_cols
+    has_ua = "ua" in actual_cols
+    if not (has_country or has_ptype or has_method or has_ctype or has_ost or has_oip or has_referer or has_ua):
+        return {}
+
+    sql = COALESCED_DIM_AGGREGATES.format(
+        table_name=table_name,
+        country_sel='"country"' if has_country else "NULL::VARCHAR",
+        p_type_sel='"p_type"' if has_ptype else "NULL::VARCHAR",
+        method_sel='"method"' if has_method else "NULL::VARCHAR",
+        c_type_sel='"c_type"' if has_ctype else "NULL::VARCHAR",
+        c_speed_sel='"c_speed"' if has_ctype else "NULL::VARCHAR",
+        ost_sel='"ost"' if has_ost else "NULL::INTEGER",
+        oip_sel='"oip"' if has_oip else "NULL::VARCHAR",
+        referer_sel='"referer"' if has_referer else "NULL::VARCHAR",
+        ua_sel='"ua"' if has_ua else "NULL::VARCHAR",
+    )
+    if shadow_cursor is not None and debug_lock is not None:
+        raw_rows = _execute_on_cursor(
+            runner, debug_lock, shadow_cursor, sql, [window_start_s, window_start_s]
+        ).fetchall()
+    else:
+        raw_rows = runner.execute(sql, [window_start_s, window_start_s]).fetchall()
+
+    # GROUPING_ID(country, p_type, method, c_type, c_speed, ost, oip, referer, ua)
+    # Bit positions (8..0):
+    # (country)          -> 0b0_1111_1111 = 255
+    # (p_type)           -> 0b1_0111_1111 = 383
+    # (method)           -> 0b1_1011_1111 = 447
+    # (c_type, c_speed)  -> 0b1_1100_1111 = 463
+    # (ost)              -> 0b1_1111_0111 = 503
+    # (oip)              -> 0b1_1111_1011 = 507
+    # (referer)          -> 0b1_1111_1101 = 509
+    # (ua)               -> 0b1_1111_1110 = 510
+    country_rows: list[tuple] = []
+    ptype_rows: list[tuple] = []
+    method_rows: list[tuple] = []
+    ctype_rows: list[tuple] = []
+    ost_rows: list[tuple] = []
+    oip_rows: list[tuple] = []
+    referer_rows: list[tuple] = []
+    ua_rows: list[tuple] = []
+
+    for (
+        gid,
+        country,
+        p_type,
+        method,
+        c_type,
+        c_speed,
+        ost,
+        oip,
+        referer,
+        ua,
+        w_cnt,
+        b_cnt,
+        w_ost_nn,
+        b_ost_nn,
+        w_ost_5xx,
+        b_ost_5xx,
+    ) in raw_rows:
+        gid_i = int(gid or 0)
+        wc = int(w_cnt or 0)
+        bc = int(b_cnt or 0)
+        if gid_i == 255:
+            country_rows.append((country, wc, bc))
+        elif gid_i == 383:
+            ptype_rows.append((p_type, wc, bc))
+        elif gid_i == 447:
+            method_rows.append((method, wc, bc))
+        elif gid_i == 463:
+            ctype_rows.append((c_type, c_speed, wc, bc))
+        elif gid_i == 503:
+            ost_rows.append(
+                (ost, wc, bc, int(w_ost_nn or 0), int(b_ost_nn or 0), int(w_ost_5xx or 0), int(b_ost_5xx or 0))
+            )
+        elif gid_i == 507:
+            oip_rows.append((oip, int(w_ost_nn or 0), int(w_ost_5xx or 0)))
+        elif gid_i == 509:
+            referer_rows.append((referer, wc, bc))
+        elif gid_i == 510:
+            ua_rows.append((ua, wc, bc))
+
+    res: dict[str, list[tuple]] = {}
+
+    if has_country:
+        nc = [(c, wc, bc) for c, wc, bc in country_rows if c is not None and wc >= 3 and bc == 0]
+        nc.sort(key=lambda r: r[1], reverse=True)
+        res["new_country_traffic"] = nc[:20]
+
+    if has_ptype:
+        # PROXY_SURGE filters WHERE p_type IS NOT NULL
+        pt_nn = [(pt, wc, bc) for pt, wc, bc in ptype_rows if pt is not None]
+        w_total_all = sum(wc for _, wc, _ in pt_nn)
+        b_total_all = sum(bc for _, _, bc in pt_nn)
+        pt_nonempty = [(pt, wc, bc) for pt, wc, bc in pt_nn if pt != ""]
+        w_proxy_total = sum(wc for _, wc, _ in pt_nonempty)
+        b_proxy_total = sum(bc for _, _, bc in pt_nonempty)
+        if (
+            w_total_all > 0
+            and b_total_all > 0
+            and (w_proxy_total * 100.0 / w_total_all) >= 5.0
+            and (w_proxy_total * 100.0 / w_total_all) >= (b_proxy_total * 100.0 / b_total_all) * 2 + 5
+        ):
+            res["proxy_surge"] = [(pt, wc, bc, w_total_all, b_total_all) for pt, wc, bc in pt_nonempty]
+        else:
+            res["proxy_surge"] = []
+
+    if has_method:
+        m_w_total = sum(wc for _, wc, _ in method_rows)
+        m_b_total = sum(bc for _, _, bc in method_rows)
+        md: list[tuple] = []
+        if m_w_total > 0:
+            for m, wc, bc in method_rows:
+                if m is not None and m != "" and str(m).upper() not in ("GET", "HEAD", "OPTIONS"):
+                    if wc >= 20 and (wc * 1.0 / m_w_total) >= 0.10:
+                        if m_b_total == 0 or (wc * 1.0 / m_w_total) >= (bc * 1.0 / m_b_total) * 2 + 0.05:
+                            md.append((m, wc, bc, m_w_total, m_b_total))
+        md.sort(key=lambda r: r[1], reverse=True)
+        res["method_drift"] = md[:10]
+
+    if has_ctype:
+        ct_valid = [(ct, cs, wc, bc) for ct, cs, wc, bc in ctype_rows if ct is not None and ct != ""]
+        ct_w_total = sum(wc for _, _, wc, _ in ct_valid)
+        ct_b_total = sum(bc for _, _, _, bc in ct_valid)
+        ct_out: list[tuple] = []
+        if ct_w_total > 0:
+            for ct, cs, wc, bc in ct_valid:
+                if wc >= 20 and (wc * 1.0 / ct_w_total) >= 0.15:
+                    if ct_b_total == 0 or (wc * 1.0 / ct_w_total) >= (bc * 1.0 / ct_b_total) * 2 + 0.05:
+                        ct_out.append((ct, cs, wc, bc, ct_w_total, ct_b_total))
+        ct_out.sort(key=lambda r: r[2], reverse=True)
+        res["connection_type_mix"] = ct_out[:15]
+
+    if has_ost:
+        ost_valid = [r for r in ost_rows if r[0] is not None]
+        o_w_total = sum(r[3] for r in ost_valid)
+        o_b_total = sum(r[4] for r in ost_valid)
+        o_w_5xx = sum(r[5] for r in ost_valid)
+        o_b_5xx = sum(r[6] for r in ost_valid)
+        if (
+            o_w_total > 0
+            and o_b_total > 0
+            and (o_w_5xx * 100.0 / o_w_total) >= 1.0
+            and (o_w_5xx * 100.0 / o_w_total) > (o_b_5xx * 100.0 / o_b_total) * 2
+        ):
+            res["origin_error_rate"] = [
+                (r[0], r[1], o_w_total, o_b_total, o_w_5xx, o_b_5xx) for r in ost_valid if int(r[0]) >= 500 and r[1] > 0
+            ]
+        else:
+            res["origin_error_rate"] = []
+
+    if has_oip:
+        oip_stats: list[tuple[str, int, float]] = []
+        for oip_val, reqs, errs_5xx in oip_rows:
+            if oip_val is not None and oip_val != "" and reqs >= 10:
+                err_pct = round(errs_5xx * 100.0 / reqs, 1)
+                oip_stats.append((oip_val, reqs, err_pct))
+        if oip_stats:
+            rates = sorted(r[2] for r in oip_stats)
+            n = len(rates)
+            pos = 0.5 * (n - 1)
+            lo = int(pos)
+            hi = min(lo + 1, n - 1)
+            frac = pos - lo
+            median_rate = rates[lo] + frac * (rates[hi] - rates[lo])
+            oip_out = [
+                (oip_val, reqs, err_pct, median_rate)
+                for oip_val, reqs, err_pct in oip_stats
+                if err_pct > median_rate * 3 and err_pct > 5
+            ]
+            oip_out.sort(key=lambda r: r[2], reverse=True)
+            res["origin_ip_failure"] = oip_out
+        else:
+            res["origin_ip_failure"] = []
+
+    if has_referer:
+        ref_w_total = sum(wc for _, wc, _ in referer_rows)
+        ref_b_total = sum(bc for _, _, bc in referer_rows)
+        ref_out: list[tuple] = []
+        if ref_w_total > 0:
+            for ref, wc, bc in referer_rows:
+                if ref is not None and ref != "":
+                    if (wc * 1.0 / ref_w_total) >= 0.20:
+                        if ref_b_total == 0 or (wc * 1.0 / ref_w_total) >= (bc * 1.0 / ref_b_total) * 3 + 0.10:
+                            ref_out.append((ref, wc, bc, ref_b_total, ref_w_total))
+        ref_out.sort(key=lambda r: r[1], reverse=True)
+        res["referer_monoculture"] = ref_out[:10]
+
+    if has_ua:
+        ua_w_total = sum(wc for _, wc, _ in ua_rows)
+        ua_b_total = sum(bc for _, _, bc in ua_rows)
+        ua_out: list[tuple] = []
+        if ua_w_total > 0:
+            for ua_val, wc, bc in ua_rows:
+                if (wc * 1.0 / ua_w_total) >= 0.25:
+                    if ua_b_total == 0 or (wc * 1.0 / ua_w_total) >= (bc * 1.0 / ua_b_total) * 3 + 0.10:
+                        ua_out.append((ua_val, wc, bc, ua_b_total, ua_w_total))
+        ua_out.sort(key=lambda r: r[1], reverse=True)
+        res["ua_monoculture"] = ua_out[:10]
+
+    return res
+
+
+def _coalesced_geo_latency_aggregates(
+    runner: QueryRunner,
+    table_name: str,
+    window_start_s: str,
+    actual_cols: Collection[str],
+    *,
+    shadow_cursor: duckdb.DuckDBPyConnection | None = None,
+    debug_lock: threading.Lock | None = None,
+) -> dict[str, list[tuple]]:
+    """Coalesce pop_latency_regression, region_latency, and
+    metro_delivery_degradation into ONE pass using GROUPING SETS
+    ((pop), (server_region), (metro)).
+    """
+    has_elapsed = "elapsed" in actual_cols
+    has_pop = "pop" in actual_cols and has_elapsed
+    has_sreg = "server_region" in actual_cols and has_elapsed
+    has_metro_dr = "metro" in actual_cols and "delivery_rate" in actual_cols
+    if not (has_pop or has_sreg or has_metro_dr):
+        return {}
+    has_ottfb = "ottfb" in actual_cols
+    sql = COALESCED_GEO_LATENCY_AGGREGATES.format(
+        table_name=table_name,
+        pop_sel='"pop"' if has_pop else "NULL::VARCHAR",
+        server_region_sel='"server_region"' if has_sreg else "NULL::VARCHAR",
+        metro_sel='"metro"' if has_metro_dr else "NULL::INTEGER",
+        elapsed_sel='"elapsed"' if has_elapsed else "NULL::DOUBLE",
+        ottfb_sel='"ottfb"' if has_ottfb else "NULL::DOUBLE",
+        delivery_rate_sel='"delivery_rate"' if has_metro_dr else "NULL::DOUBLE",
+    )
+    if shadow_cursor is not None and debug_lock is not None:
+        raw_rows = _execute_on_cursor(
+            runner, debug_lock, shadow_cursor, sql, [window_start_s, window_start_s]
+        ).fetchall()
+    else:
+        raw_rows = runner.execute(sql, [window_start_s, window_start_s]).fetchall()
+
+    # GROUPING_ID(pop, server_region, metro)
+    # (pop)           -> 0b011 = 3
+    # (server_region) -> 0b101 = 5
+    # (metro)         -> 0b110 = 6
+    pop_out: list[tuple[float, tuple]] = []
+    sreg_out: list[tuple[float, tuple]] = []
+    metro_out: list[tuple[float, tuple]] = []
+
+    for (
+        gid,
+        pop,
+        server_region,
+        metro,
+        w_p95,
+        b_p95,
+        w_lat_total,
+        b_lat_total,
+        w_ottfb_cnt,
+        w_ottfb_p95,
+        w_med_dr,
+        b_med_dr,
+        w_dr_total,
+        b_dr_total,
+    ) in raw_rows:
+        gid_i = int(gid or 0)
+        if gid_i == 3 and has_pop and pop is not None and pop != "":
+            wt = int(w_lat_total or 0)
+            bt = int(b_lat_total or 0)
+            if (
+                wt >= 20
+                and bt >= 50
+                and w_p95 is not None
+                and b_p95 is not None
+                and w_p95 >= b_p95 * 1.5
+                and (w_p95 - b_p95) >= 100
+            ):
+                ratio = (w_p95 / b_p95) if b_p95 else float("inf")
+                pop_out.append((ratio, (pop, w_p95, b_p95, wt, bt)))
+        elif gid_i == 5 and has_sreg and server_region is not None and server_region != "":
+            wt = int(w_lat_total or 0)
+            bt = int(b_lat_total or 0)
+            if (
+                wt >= 20
+                and bt >= 50
+                and w_p95 is not None
+                and b_p95 is not None
+                and w_p95 >= b_p95 * 1.5
+                and (w_p95 - b_p95) >= 100
+            ):
+                ottfb_val = w_ottfb_p95 if (has_ottfb and int(w_ottfb_cnt or 0) >= 20) else None
+                ratio = (w_p95 / b_p95) if b_p95 else float("inf")
+                sreg_out.append((ratio, (server_region, w_p95, b_p95, wt, bt, ottfb_val)))
+        elif gid_i == 6 and has_metro_dr and metro is not None:
+            wdt = int(w_dr_total or 0)
+            bdt = int(b_dr_total or 0)
+            if (
+                wdt >= 20
+                and bdt >= 50
+                and w_med_dr is not None
+                and b_med_dr is not None
+                and w_med_dr > 0
+                and b_med_dr > 0
+                and w_med_dr <= b_med_dr * 0.5
+            ):
+                metro_out.append((b_med_dr - w_med_dr, (metro, w_med_dr, b_med_dr, wdt, bdt)))
+
+    pop_out.sort(key=lambda pair: pair[0], reverse=True)
+    sreg_out.sort(key=lambda pair: pair[0], reverse=True)
+    metro_out.sort(key=lambda pair: pair[0], reverse=True)
+
+    res: dict[str, list[tuple]] = {}
+    if has_pop:
+        res["pop_latency_regression"] = [item for _, item in pop_out[:15]]
+    if has_sreg:
+        res["region_latency"] = [item for _, item in sreg_out[:15]]
+    if has_metro_dr:
+        res["metro_delivery_degradation"] = [item for _, item in metro_out[:15]]
     return res
 
 
@@ -1179,7 +1837,12 @@ def get_insights(
             try:
                 cur = runner.con.cursor()
                 return _coalesced_url_aggregates(
-                    runner, table_name, window_start_s, shadow_cursor=cur, debug_lock=_debug_lock
+                    runner,
+                    table_name,
+                    window_start_s,
+                    actual_cols=actual_cols,
+                    shadow_cursor=cur,
+                    debug_lock=_debug_lock,
                 )
             except Exception as e:
                 import logging
@@ -1202,6 +1865,7 @@ def get_insights(
                     window_start_s,
                     window_hours,
                     baseline_hours,
+                    actual_cols=actual_cols,
                     shadow_cursor=cur,
                     debug_lock=_debug_lock,
                 )
@@ -1233,7 +1897,15 @@ def get_insights(
                 return {}
 
         def _task_scalar() -> dict[str, list[tuple]]:
-            if not ("timestamp" in actual_cols and ("transport" in actual_cols or "cache" in actual_cols)):
+            if not (
+                "timestamp" in actual_cols
+                and (
+                    "transport" in actual_cols
+                    or "cache" in actual_cols
+                    or "oconnect_ms" in actual_cols
+                    or "ottfb" in actual_cols
+                )
+            ):
                 return {}
             try:
                 cur = runner.con.cursor()
@@ -1253,18 +1925,85 @@ def get_insights(
                 )
                 return {}
 
-        max_coalesce_workers = max(1, min(max_workers, 5))
+        def _task_fp() -> dict[str, list[tuple]]:
+            if not ("timestamp" in actual_cols and "ip" in actual_cols):
+                return {}
+            try:
+                cur = runner.con.cursor()
+                return _coalesced_fp_aggregates(
+                    runner,
+                    table_name,
+                    window_start_s,
+                    window_hours,
+                    baseline_hours,
+                    actual_cols,
+                    shadow_cursor=cur,
+                    debug_lock=_debug_lock,
+                )
+            except Exception as e:
+                import logging
+
+                logging.getLogger(__name__).warning("[insights] coalesced FP aggregates failed, falling back: %s", e)
+                return {}
+
+        def _task_dim() -> dict[str, list[tuple]]:
+            if "timestamp" not in actual_cols:
+                return {}
+            try:
+                cur = runner.con.cursor()
+                return _coalesced_dim_aggregates(
+                    runner,
+                    table_name,
+                    window_start_s,
+                    actual_cols,
+                    shadow_cursor=cur,
+                    debug_lock=_debug_lock,
+                )
+            except Exception as e:
+                import logging
+
+                logging.getLogger(__name__).warning("[insights] coalesced dim aggregates failed, falling back: %s", e)
+                return {}
+
+        def _task_geo_lat() -> dict[str, list[tuple]]:
+            if "timestamp" not in actual_cols:
+                return {}
+            try:
+                cur = runner.con.cursor()
+                return _coalesced_geo_latency_aggregates(
+                    runner,
+                    table_name,
+                    window_start_s,
+                    actual_cols,
+                    shadow_cursor=cur,
+                    debug_lock=_debug_lock,
+                )
+            except Exception as e:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "[insights] coalesced geo-latency aggregates failed, falling back: %s", e
+                )
+                return {}
+
+        max_coalesce_workers = max(1, min(max_workers, 4))
         with ThreadPoolExecutor(
             max_workers=max_coalesce_workers, thread_name_prefix="insights-coalesce"
         ) as _coalesce_pool:
             _fut_city = _coalesce_pool.submit(contextvars.copy_context().run, _task_city)
             _fut_url = _coalesce_pool.submit(contextvars.copy_context().run, _task_url)
             _fut_ip = _coalesce_pool.submit(contextvars.copy_context().run, _task_ip)
+            _fut_fp = _coalesce_pool.submit(contextvars.copy_context().run, _task_fp)
+            _fut_dim = _coalesce_pool.submit(contextvars.copy_context().run, _task_dim)
+            _fut_geo_lat = _coalesce_pool.submit(contextvars.copy_context().run, _task_geo_lat)
             _fut_asn = _coalesce_pool.submit(contextvars.copy_context().run, _task_asn)
             _fut_scalar = _coalesce_pool.submit(contextvars.copy_context().run, _task_scalar)
             city_precomputed = _fut_city.result()
             url_precomputed = _fut_url.result()
             ip_security_precomputed = _fut_ip.result()
+            fp_precomputed = _fut_fp.result()
+            dim_precomputed = _fut_dim.result()
+            geo_lat_precomputed = _fut_geo_lat.result()
             asn_precomputed = _fut_asn.result()
             scalar_precomputed = _fut_scalar.result()
 
@@ -1312,6 +2051,12 @@ def get_insights(
                         rows = url_precomputed[d.id]
                     elif is_default_template and d.id in ip_security_precomputed:
                         rows = ip_security_precomputed[d.id]
+                    elif is_default_template and d.id in fp_precomputed:
+                        rows = fp_precomputed[d.id]
+                    elif is_default_template and d.id in dim_precomputed:
+                        rows = dim_precomputed[d.id]
+                    elif is_default_template and d.id in geo_lat_precomputed:
+                        rows = geo_lat_precomputed[d.id]
                     elif is_default_template and d.id in asn_precomputed:
                         rows = asn_precomputed[d.id]
                     elif is_default_template and d.id in scalar_precomputed:
@@ -1443,14 +2188,11 @@ def get_insights(
                 }
 
         # ThreadPoolExecutor dispatch — DuckDB releases the GIL during
-        # query execution, so the per-insight scans (~15-20 SQL-firing
-        # definitions after city_precomputed/url_precomputed bypass the
-        # other 5-10) overlap on the same database. ``max_workers=4``
-        # bounds memory pressure on the shared scratch :memory: tables
-        # and leaves headroom for the main-thread Python work that runs
-        # around the SQL.
+        # query execution, so the remaining per-insight scans overlap on
+        # the same database. Capping pool_workers at 3 avoids oversubscribing
+        # DuckDB's shared thread pool across too many simultaneous heavy scans.
         if tasks:
-            pool_workers = max(1, min(max_workers, len(tasks)))
+            pool_workers = max(1, min(max_workers, 3, len(tasks)))
             ctx_tasks = [(contextvars.copy_context(), t) for t in tasks]
             with ThreadPoolExecutor(max_workers=pool_workers, thread_name_prefix="insights") as pool:
                 for res in pool.map(lambda pair: pair[0].run(_safe_run, pair[1]), ctx_tasks):

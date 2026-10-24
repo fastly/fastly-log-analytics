@@ -468,15 +468,25 @@ REQUEST_SIZE_ANOMALY = """
                 (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
             FROM {table_name} WHERE req_header_bytes > 0
         ),
-        stats AS (
+        win_ips AS (
             SELECT "ip",
-                MAX(req_header_bytes) FILTER (WHERE is_w) AS max_bytes,
-                AVG(req_header_bytes) FILTER (WHERE is_w) AS avg_bytes,
-                COUNT(*) FILTER (WHERE is_w) AS w_total,
-                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY req_header_bytes) FILTER (WHERE is_b) AS b_p95
+                MAX(req_header_bytes) AS max_bytes,
+                AVG(req_header_bytes) AS avg_bytes,
+                COUNT(*) AS w_total
             FROM base
+            WHERE is_w
             GROUP BY "ip"
-            HAVING COUNT(*) FILTER (WHERE is_w) >= 3 AND COUNT(*) FILTER (WHERE is_b) > 0
+            HAVING COUNT(*) >= 3
+        ),
+        stats AS (
+            SELECT w."ip",
+                w.max_bytes,
+                w.avg_bytes,
+                w.w_total,
+                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY b.req_header_bytes) AS b_p95
+            FROM win_ips w
+            JOIN base b ON w."ip" = b."ip" AND b.is_b
+            GROUP BY w."ip", w.max_bytes, w.avg_bytes, w.w_total
         )
         SELECT "ip", max_bytes, avg_bytes, w_total, b_p95 FROM stats
         WHERE w_total >= 3 AND max_bytes > b_p95 * 3
@@ -492,17 +502,25 @@ CONNECTION_ABUSE = """
                 (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
             FROM {table_name} WHERE conn_requests > 0
         ),
-        stats AS (
+        win_ips AS (
             SELECT "ip",
-                MAX(conn_requests) FILTER (WHERE is_w) AS max_reqs,
-                AVG(conn_requests) FILTER (WHERE is_w) AS avg_reqs,
-                COUNT(*) FILTER (WHERE is_w) AS w_total,
-                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY conn_requests) FILTER (WHERE is_b) AS b_p95
+                MAX(conn_requests) AS max_reqs,
+                AVG(conn_requests) AS avg_reqs,
+                COUNT(*) AS w_total
             FROM base
+            WHERE is_w
             GROUP BY "ip"
-            HAVING COUNT(*) FILTER (WHERE is_w) >= 5
-               AND MAX(conn_requests) FILTER (WHERE is_w) >= 50
-               AND COUNT(*) FILTER (WHERE is_b) > 0
+            HAVING COUNT(*) >= 5 AND MAX(conn_requests) >= 50
+        ),
+        stats AS (
+            SELECT w."ip",
+                w.max_reqs,
+                w.avg_reqs,
+                w.w_total,
+                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY b.conn_requests) AS b_p95
+            FROM win_ips w
+            JOIN base b ON w."ip" = b."ip" AND b.is_b
+            GROUP BY w."ip", w.max_reqs, w.avg_reqs, w.w_total
         )
         SELECT "ip", max_reqs, avg_reqs, w_total, b_p95 FROM stats
         WHERE w_total >= 5 AND max_reqs > b_p95 * 3 AND max_reqs >= 50
@@ -734,17 +752,22 @@ def _build_repeated_patterns_sql(
     div_alias: str,
 ) -> str:
     return f"""
-    WITH bot_uas AS (
-        SELECT ua_val
-        FROM (SELECT DISTINCT CAST({{ua_col}} AS VARCHAR) AS ua_val FROM {{table_name}} WHERE {{ua_col}} IS NOT NULL)
-        WHERE regexp_matches(ua_val, '{{bot_ua_regex}}', 'i')
-    ),
-    kept AS MATERIALIZED (
-        SELECT {key_select} AS {key_col}, epoch("timestamp")::BIGINT AS sec, {div_select} AS {div_col}
+    WITH win_rows AS (
+        SELECT {key_select} AS {key_col}, epoch("timestamp")::BIGINT AS sec, {div_select} AS {div_col}, {{ua_col}} AS ua_val
         FROM {{table_name}}
         WHERE "timestamp" >= CAST(? AS TIMESTAMPTZ)
           AND {key_where}
-          AND ({{ua_col}} IS NULL OR {{ua_col}} NOT IN (SELECT ua_val FROM bot_uas))
+    ),
+    bot_uas AS (
+        SELECT ua_str
+        FROM (SELECT DISTINCT CAST(ua_val AS VARCHAR) AS ua_str FROM win_rows WHERE ua_val IS NOT NULL)
+        WHERE regexp_matches(ua_str, '{{bot_ua_regex}}', 'i')
+    ),
+    kept AS (
+        SELECT w.{key_col}, w.sec, w.{div_col}
+        FROM win_rows w
+        LEFT JOIN bot_uas b ON CAST(w.ua_val AS VARCHAR) = b.ua_str
+        WHERE b.ua_str IS NULL
     ),
     meta AS (
         SELECT {key_col}, COUNT(DISTINCT {div_col}) AS {div_alias}, COUNT(*) AS n_events,
@@ -1104,22 +1127,25 @@ CONNECTION_TYPE_MIX = """
             FROM {table_name}
             WHERE "c_type" IS NOT NULL AND "c_type" != ''
         ),
-        totals AS (
-            SELECT
-                COUNT(*) FILTER (WHERE is_w) AS w_total,
-                COUNT(*) FILTER (WHERE is_b) AS b_total
-            FROM base
+        grouped AS (
+            SELECT c_type, c_speed,
+                COUNT(*) FILTER (WHERE is_w) AS w_cnt,
+                COUNT(*) FILTER (WHERE is_b) AS b_cnt
+            FROM base GROUP BY c_type, c_speed
+        ),
+        with_totals AS (
+            SELECT c_type, c_speed, w_cnt, b_cnt,
+                SUM(w_cnt) OVER () AS w_total,
+                SUM(b_cnt) OVER () AS b_total
+            FROM grouped
         )
-        SELECT g.c_type, g.c_speed,
-            COUNT(*) FILTER (WHERE g.is_w) AS w_cnt,
-            COUNT(*) FILTER (WHERE g.is_b) AS b_cnt,
-            t.w_total, t.b_total
-        FROM base g, totals t GROUP BY g.c_type, g.c_speed, t.w_total, t.b_total
-        HAVING w_cnt >= 20 AND t.w_total > 0
-            AND w_cnt * 1.0 / t.w_total >= 0.15
-            AND (t.b_total = 0
-                 OR w_cnt * 1.0 / t.w_total
-                    >= b_cnt * 1.0 / NULLIF(t.b_total, 0) * 2 + 0.05)
+        SELECT c_type, c_speed, w_cnt, b_cnt, w_total, b_total
+        FROM with_totals
+        WHERE w_cnt >= 20 AND w_total > 0
+            AND w_cnt * 1.0 / w_total >= 0.15
+            AND (b_total = 0
+                 OR w_cnt * 1.0 / w_total
+                    >= b_cnt * 1.0 / NULLIF(b_total, 0) * 2 + 0.05)
         ORDER BY w_cnt DESC LIMIT 15
     """
 
@@ -1324,7 +1350,7 @@ TIMEOUT_SPLIT = """
 # repository.py for the row-schema docstring).
 
 COALESCED_CITY_AGGREGATES = """
-    WITH raw_base AS NOT MATERIALIZED (
+    WITH base AS (
         SELECT
             "city",
             {region_sel} AS region,
@@ -1335,18 +1361,6 @@ COALESCED_CITY_AGGREGATES = """
             (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
         FROM {table_name}
         WHERE "city" IS NOT NULL AND "city" != ''
-    ),
-    win_cities AS (
-        SELECT "city"
-        FROM raw_base
-        WHERE is_w
-        GROUP BY "city"
-        HAVING COUNT(*) >= 5
-    ),
-    base AS (
-        SELECT r.*
-        FROM raw_base r
-        JOIN win_cities wc ON r."city" = wc."city"
     )
     SELECT
         {label_expr} AS label, "city", region, country,
@@ -1366,13 +1380,11 @@ COALESCED_CITY_AGGREGATES = """
     """
 
 # ── Coalesced URL aggregates ─────────────────────────────────────────────────
-# ONE pass over the temp table that computes the superset for the 4 URL-keyed
-# insights (error_spikes, cache_collapse, latency_regression, tail_latency).
-# origin_latency_spike is the 5th URL-keyed insight but has a different shape
-# (normalized against the whole-population p95) — kept on its own template.
+# ONE pass over the temp table that computes the superset for the URL-keyed
+# insights.
 
 COALESCED_URL_AGGREGATES = """
-    WITH raw_base AS NOT MATERIALIZED (
+    WITH base AS (
         SELECT
             "url",
             status,
@@ -1382,18 +1394,6 @@ COALESCED_URL_AGGREGATES = """
             (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
         FROM {table_name}
         WHERE "url" IS NOT NULL
-    ),
-    win_urls AS (
-        SELECT "url"
-        FROM raw_base
-        WHERE is_w
-        GROUP BY "url"
-        HAVING COUNT(*) >= 3
-    ),
-    base AS (
-        SELECT r.*
-        FROM raw_base r
-        JOIN win_urls wu ON r."url" = wu."url"
     )
     SELECT
         "url",
@@ -1429,6 +1429,96 @@ COALESCED_URL_AGGREGATES = """
     FROM base
     GROUP BY "url"
     HAVING COUNT(*) FILTER (WHERE is_w) >= 3
+    """
+
+COALESCED_URL_EXTENDED_AGGREGATES = f"""
+    WITH url_flags AS (
+        SELECT "url", is_probe, is_comp, is_img
+        FROM (
+            SELECT
+                "url",
+                regexp_matches("url", '{NEW_PROBE_REGEX}', 'i') AS is_probe,
+                regexp_matches("url", '{COMPRESSIBLE_REGEX}', 'i') AS is_comp,
+                (("url" ILIKE '%.jpg%' OR "url" ILIKE '%.jpeg%' OR "url" ILIKE '%.png%' OR "url" ILIKE '%.gif%')
+                 AND "url" NOT ILIKE '%auto=webp%' AND "url" NOT ILIKE '%format=auto%'
+                 AND "url" NOT ILIKE '%format=webp%' AND "url" NOT ILIKE '%format=avif%') AS is_img
+            FROM (SELECT DISTINCT "url" FROM {{table_name}} WHERE "url" IS NOT NULL)
+        )
+        WHERE is_probe OR is_comp OR is_img
+    ),
+    base AS (
+        SELECT
+            t."url" AS url,
+            t.status,
+            t.cache,
+            t.elapsed,
+            {{resp_bytes_sel}} AS resp_bytes,
+            {{uncompressed_sel}} AS uncompressed,
+            {{is_mobile_sel}} AS is_mobile,
+            {{ttl_sel}} AS ttl,
+            {{hits_sel}} AS hits,
+            {{age_sel}} AS age,
+            {{oretries_sel}} AS oretries,
+            COALESCE(u.is_probe, FALSE) AS is_probe,
+            COALESCE(u.is_comp, FALSE) AS is_comp,
+            COALESCE(u.is_img, FALSE) AS is_img,
+            (t.timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+            (t.timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+        FROM {{table_name}} t
+        LEFT JOIN url_flags u ON t."url" = u."url"
+        WHERE t."url" IS NOT NULL
+    )
+    SELECT
+        url,
+        COUNT(*) FILTER (WHERE is_w) AS w_total,
+        COUNT(*) FILTER (WHERE is_b) AS b_total,
+        SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_5xx,
+        SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_5xx,
+        SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_hits,
+        SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_hits,
+        SUM(CASE WHEN starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_miss,
+        SUM(CASE WHEN starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_miss,
+        SUM(CASE WHEN starts_with(cache, 'PASS') THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_pass,
+        SUM(CASE WHEN starts_with(cache, 'PASS') THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_pass,
+        COUNT(*) FILTER (WHERE is_w AND elapsed IS NOT NULL) AS w_lat_total,
+        COUNT(*) FILTER (WHERE is_b AND elapsed IS NOT NULL) AS b_lat_total,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed)
+            FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0 AS w_p95,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed)
+            FILTER (WHERE is_b AND elapsed IS NOT NULL) / 1000.0 AS b_p95,
+        ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY elapsed)
+              FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0, 0) AS w_p99,
+        ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY elapsed)
+              FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0, 0) AS w_p50,
+        -- new_probe_urls
+        BOOL_OR(is_probe) AS is_probe,
+        SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_4xx,
+        -- payload_compression_regression
+        BOOL_OR(is_comp) AS is_comp,
+        COUNT(*) FILTER (WHERE is_w AND is_comp AND status = 200 AND resp_bytes >= 1024 AND uncompressed) AS pcr_w_uncomp,
+        COUNT(*) FILTER (WHERE is_w AND is_comp AND status = 200 AND resp_bytes >= 1024) AS pcr_w_total,
+        COUNT(*) FILTER (WHERE is_b AND is_comp AND status = 200 AND resp_bytes >= 1024 AND uncompressed) AS pcr_b_uncomp,
+        COUNT(*) FILTER (WHERE is_b AND is_comp AND status = 200 AND resp_bytes >= 1024) AS pcr_b_total,
+        -- image_optimization_opportunities
+        BOOL_OR(is_img) AS is_img,
+        COUNT(*) FILTER (WHERE is_w AND is_img AND status = 200) AS img_w_cnt,
+        SUM(resp_bytes) FILTER (WHERE is_w AND is_img AND status = 200) AS img_w_bytes,
+        AVG(resp_bytes) FILTER (WHERE is_w AND is_img AND status = 200) AS img_w_avg_bytes,
+        SUM(is_mobile) FILTER (WHERE is_w AND is_img AND status = 200) AS img_w_mobile,
+        -- cache_ttl_mismatch
+        COUNT(*) FILTER (WHERE is_w AND ttl IS NOT NULL AND ttl > 0 AND hits IS NOT NULL AND age IS NOT NULL) AS ttl_w_cnt,
+        AVG(ttl) FILTER (WHERE is_w AND ttl IS NOT NULL AND ttl > 0 AND hits IS NOT NULL AND age IS NOT NULL) AS ttl_w_avg_ttl,
+        AVG(hits) FILTER (WHERE is_w AND ttl IS NOT NULL AND ttl > 0 AND hits IS NOT NULL AND age IS NOT NULL) AS ttl_w_avg_hits,
+        AVG(age) FILTER (WHERE is_w AND ttl IS NOT NULL AND ttl > 0 AND hits IS NOT NULL AND age IS NOT NULL) AS ttl_w_avg_age,
+        -- origin_retries
+        COUNT(*) FILTER (WHERE is_w AND oretries > 0) AS oret_w_cnt,
+        AVG(oretries) FILTER (WHERE is_w AND oretries > 0) AS oret_w_avg,
+        MAX(oretries) FILTER (WHERE is_w AND oretries > 0) AS oret_w_max
+    FROM base
+    GROUP BY url
+    HAVING COUNT(*) FILTER (WHERE is_w) >= 3
+        OR (BOOL_OR(is_probe) AND COUNT(*) FILTER (WHERE is_w) > 0 AND COUNT(*) FILTER (WHERE is_b) = 0)
+        OR (BOOL_OR(is_img) AND SUM(resp_bytes) FILTER (WHERE is_w AND is_img AND status = 200) > 524288)
     """
 
 
@@ -1510,6 +1600,84 @@ COALESCED_IP_SECURITY_AGGREGATES = f"""
         OR (COUNT(*) FILTER (WHERE is_w AND status = 404) > 0)
     """
 
+COALESCED_IP_EXTENDED_AGGREGATES = f"""
+    WITH url_flags AS (
+        SELECT "url", is_sensitive, is_auth, is_deep
+        FROM (
+            SELECT
+                "url",
+                regexp_matches("url", '{NEW_PROBE_REGEX}', 'i') AS is_sensitive,
+                regexp_matches("url", '{AUTH_PATHS_REGEX}', 'i') AS is_auth,
+                ("url" LIKE '/%/%/%' AND "url" NOT LIKE '%.%') AS is_deep
+            FROM (SELECT DISTINCT "url" FROM {{table_name}} WHERE "url" IS NOT NULL)
+        )
+        WHERE is_sensitive OR is_auth OR is_deep
+    ),
+    base AS (
+        SELECT
+            t."ip" AS ip,
+            t."url" AS url,
+            t.status,
+            epoch(t."timestamp")::BIGINT AS sec,
+            {{no_referer_sel}} AS no_referer,
+            {{cs_sel}} AS cs,
+            {{req_header_bytes_sel}} AS req_header_bytes,
+            {{conn_requests_sel}} AS conn_requests,
+            COALESCE(u.is_sensitive, FALSE) AS is_sensitive,
+            COALESCE(u.is_auth, FALSE) AS is_auth,
+            COALESCE(u.is_deep, FALSE) AS is_deep,
+            (t.timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+            (t.timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+        FROM {{table_name}} t
+        LEFT JOIN url_flags u ON t."url" = u."url"
+        WHERE t."ip" IS NOT NULL AND t."ip" <> ''
+    )
+    SELECT
+        ip,
+        -- low_and_slow: probe paths over the WHOLE span (no window split)
+        COUNT(*) FILTER (WHERE url IS NOT NULL AND is_sensitive) AS ls_hits,
+        COUNT(DISTINCT url) FILTER (WHERE url IS NOT NULL AND is_sensitive) AS ls_distinct,
+        MIN(sec) FILTER (WHERE url IS NOT NULL AND is_sensitive) AS ls_min_sec,
+        MAX(sec) FILTER (WHERE url IS NOT NULL AND is_sensitive) AS ls_max_sec,
+        -- credential_enumeration: auth paths, window/baseline 401/403
+        COUNT(*) FILTER (WHERE url IS NOT NULL AND is_auth AND is_w AND status IN (401, 403)) AS ce_w_denied,
+        COUNT(*) FILTER (WHERE url IS NOT NULL AND is_auth AND is_w) AS ce_w_attempts,
+        COUNT(DISTINCT url) FILTER (WHERE url IS NOT NULL AND is_auth AND is_w) AS ce_w_paths,
+        COUNT(*) FILTER (WHERE url IS NOT NULL AND is_auth AND is_b AND status IN (401, 403)) AS ce_b_denied,
+        -- content_discovery: all URLs, window/baseline 404s
+        COUNT(*) FILTER (WHERE url IS NOT NULL AND is_w AND status = 404) AS cd_w_404,
+        COUNT(*) FILTER (WHERE url IS NOT NULL AND is_w) AS cd_w_total,
+        COUNT(DISTINCT url) FILTER (WHERE url IS NOT NULL AND is_w AND status = 404) AS cd_distinct_404,
+        COUNT(*) FILTER (WHERE url IS NOT NULL AND is_b AND status = 404) AS cd_b_404,
+        -- orphaned_deep_crawl
+        COUNT(*) FILTER (WHERE url IS NOT NULL AND is_deep AND no_referer AND is_w) AS odc_w_reqs,
+        COUNT(DISTINCT url) FILTER (WHERE url IS NOT NULL AND is_deep AND no_referer AND is_w) AS odc_w_urls,
+        COUNT(*) FILTER (WHERE url IS NOT NULL AND is_deep AND no_referer AND is_b) AS odc_b_reqs,
+        -- session_harvesting
+        COUNT(DISTINCT cs) FILTER (WHERE is_w AND cs IS NOT NULL AND cs <> '') AS sh_w_sessions,
+        COUNT(*) FILTER (WHERE is_w AND cs IS NOT NULL AND cs <> '') AS sh_w_reqs,
+        COUNT(DISTINCT cs) FILTER (WHERE is_b AND cs IS NOT NULL AND cs <> '') AS sh_b_sessions,
+        -- request_size_anomaly pre-check (min(B) <= P95(B), so if w_max <= b_min * 3 we know w_max <= b_p95 * 3)
+        COUNT(*) FILTER (WHERE is_w AND req_header_bytes > 0) AS rsa_w_cnt,
+        MAX(req_header_bytes) FILTER (WHERE is_w AND req_header_bytes > 0) AS rsa_w_max,
+        MIN(req_header_bytes) FILTER (WHERE is_b AND req_header_bytes > 0) AS rsa_b_min,
+        MAX(req_header_bytes) FILTER (WHERE is_b AND req_header_bytes > 0) AS rsa_b_max,
+        -- connection_abuse pre-check (same exact min(B) <= P95(B) bound)
+        COUNT(*) FILTER (WHERE is_w AND conn_requests > 0) AS ca_w_cnt,
+        MAX(conn_requests) FILTER (WHERE is_w AND conn_requests > 0) AS ca_w_max,
+        MIN(conn_requests) FILTER (WHERE is_b AND conn_requests > 0) AS ca_b_min,
+        MAX(conn_requests) FILTER (WHERE is_b AND conn_requests > 0) AS ca_b_max
+    FROM base
+    GROUP BY ip
+    HAVING (COUNT(*) FILTER (WHERE url IS NOT NULL AND is_sensitive) >= 5)
+        OR (COUNT(*) FILTER (WHERE url IS NOT NULL AND is_auth AND is_w AND status IN (401, 403)) >= 20)
+        OR (COUNT(*) FILTER (WHERE url IS NOT NULL AND is_w AND status = 404) >= 20)
+        OR (COUNT(*) FILTER (WHERE url IS NOT NULL AND is_deep AND no_referer AND is_w) >= 50)
+        OR (COUNT(DISTINCT cs) FILTER (WHERE is_w AND cs IS NOT NULL AND cs <> '') >= 20)
+        OR (COUNT(*) FILTER (WHERE is_w AND req_header_bytes > 0) >= 3 AND MIN(req_header_bytes) FILTER (WHERE is_b AND req_header_bytes > 0) IS NOT NULL AND MAX(req_header_bytes) FILTER (WHERE is_w AND req_header_bytes > 0) > MIN(req_header_bytes) FILTER (WHERE is_b AND req_header_bytes > 0) * 3)
+        OR (COUNT(*) FILTER (WHERE is_w AND conn_requests > 0) >= 5 AND MAX(conn_requests) FILTER (WHERE is_w AND conn_requests > 0) >= 50 AND MIN(conn_requests) FILTER (WHERE is_b AND conn_requests > 0) IS NOT NULL AND MAX(conn_requests) FILTER (WHERE is_w AND conn_requests > 0) > MIN(conn_requests) FILTER (WHERE is_b AND conn_requests > 0) * 3)
+    """
+
 
 # ── Coalesced ASN aggregates ──────────────────────────────────────────────────
 # ONE ``GROUP BY asn`` pass over the temp table computing the superset for the
@@ -1570,6 +1738,143 @@ COALESCED_SCALAR_AGGREGATES = """
         COALESCE(SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_b), 0) AS b_hits,
         COALESCE(SUM(CASE WHEN starts_with(cache, 'HIT') OR starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_b), 0) AS b_cacheable
     FROM base
+    """
+
+COALESCED_SCALAR_EXTENDED_AGGREGATES = """
+    WITH base AS (
+        SELECT
+            {transport_sel} AS transport,
+            {cache_sel} AS cache,
+            {oconnect_ms_sel} AS oconnect_ms,
+            {ottfb_sel} AS ottfb,
+            (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+            (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+        FROM {table_name}
+    )
+    SELECT
+        COUNT(*) FILTER (WHERE is_w AND transport IS NOT NULL AND transport != '' AND lower(transport) = 'quic') AS w_quic,
+        COUNT(*) FILTER (WHERE is_w AND transport IS NOT NULL AND transport != '') AS w_tr_total,
+        COUNT(*) FILTER (WHERE is_b AND transport IS NOT NULL AND transport != '' AND lower(transport) = 'quic') AS b_quic,
+        COUNT(*) FILTER (WHERE is_b AND transport IS NOT NULL AND transport != '') AS b_tr_total,
+        COALESCE(SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_w), 0) AS w_hits,
+        COALESCE(SUM(CASE WHEN starts_with(cache, 'HIT') OR starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_w), 0) AS w_cacheable,
+        COALESCE(SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_b), 0) AS b_hits,
+        COALESCE(SUM(CASE WHEN starts_with(cache, 'HIT') OR starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_b), 0) AS b_cacheable,
+        -- timeout_split
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY oconnect_ms) FILTER (WHERE is_w AND oconnect_ms IS NOT NULL AND ottfb IS NOT NULL) AS ts_w_conn,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY oconnect_ms) FILTER (WHERE is_b AND oconnect_ms IS NOT NULL AND ottfb IS NOT NULL) AS ts_b_conn,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY GREATEST(ottfb / 1000.0 - oconnect_ms, 0)) FILTER (WHERE is_w AND oconnect_ms IS NOT NULL AND ottfb IS NOT NULL) AS ts_w_read,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY GREATEST(ottfb / 1000.0 - oconnect_ms, 0)) FILTER (WHERE is_b AND oconnect_ms IS NOT NULL AND ottfb IS NOT NULL) AS ts_b_read,
+        COUNT(*) FILTER (WHERE is_w AND oconnect_ms IS NOT NULL AND ottfb IS NOT NULL) AS ts_w_total,
+        COUNT(*) FILTER (WHERE is_b AND oconnect_ms IS NOT NULL AND ottfb IS NOT NULL) AS ts_b_total,
+        -- origin_latency_spike overall gate
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY ottfb) FILTER (WHERE is_w AND ottfb IS NOT NULL) / 1000.0 AS ols_w_p95,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY ottfb) FILTER (WHERE is_b AND ottfb IS NOT NULL) / 1000.0 AS ols_b_p95
+    FROM base
+    """
+
+COALESCED_FP_AGGREGATES = """
+    WITH base AS (
+        SELECT
+            {fp_sel} AS fp,
+            {cipher_sel} AS cipher,
+            {ip_sel} AS ip,
+            {asn_sel} AS asn,
+            {is_non_hosting_sel} AS is_non_hosting,
+            (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+            (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+        FROM {table_name}
+    )
+    SELECT
+        GROUPING_ID(fp, cipher) AS gid,
+        fp,
+        cipher,
+        -- botnet_grouping (gid = 1, grouped by fp)
+        COUNT(DISTINCT ip) FILTER (WHERE is_w AND fp IS NOT NULL AND fp != '') AS bg_w_ips,
+        COUNT(*) FILTER (WHERE is_w AND fp IS NOT NULL AND fp != '') AS bg_w_reqs,
+        COUNT(DISTINCT ip) FILTER (WHERE is_b AND fp IS NOT NULL AND fp != '') AS bg_b_ips,
+        -- residential_fingerprint_dispersion (gid = 1, grouped by fp, non-hosting)
+        COUNT(DISTINCT ip) FILTER (WHERE is_w AND fp IS NOT NULL AND fp != '' AND is_non_hosting) AS rfd_w_ips,
+        COUNT(DISTINCT asn) FILTER (WHERE is_w AND fp IS NOT NULL AND fp != '' AND is_non_hosting) AS rfd_w_asns,
+        COUNT(*) FILTER (WHERE is_w AND fp IS NOT NULL AND fp != '' AND is_non_hosting) AS rfd_w_reqs,
+        COUNT(DISTINCT ip) FILTER (WHERE is_b AND fp IS NOT NULL AND fp != '' AND is_non_hosting) AS rfd_b_ips,
+        COUNT(DISTINCT asn) FILTER (WHERE is_b AND fp IS NOT NULL AND fp != '' AND is_non_hosting) AS rfd_b_asns,
+        -- cipher_spread (gid = 2, grouped by cipher)
+        COUNT(DISTINCT ip) FILTER (WHERE is_w AND cipher IS NOT NULL AND cipher != '') AS cs_w_ips,
+        COUNT(*) FILTER (WHERE is_w AND cipher IS NOT NULL AND cipher != '') AS cs_w_reqs,
+        COUNT(DISTINCT ip) FILTER (WHERE is_b AND cipher IS NOT NULL AND cipher != '') AS cs_b_ips
+    FROM base
+    GROUP BY GROUPING SETS ((fp), (cipher))
+    """
+
+COALESCED_DIM_AGGREGATES = """
+    WITH base AS (
+        SELECT
+            {country_sel} AS country,
+            {p_type_sel} AS p_type,
+            {method_sel} AS method,
+            {c_type_sel} AS c_type,
+            {c_speed_sel} AS c_speed,
+            {ost_sel} AS ost,
+            {oip_sel} AS oip,
+            {referer_sel} AS referer,
+            {ua_sel} AS ua,
+            (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+            (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+        FROM {table_name}
+    )
+    SELECT
+        GROUPING_ID(country, p_type, method, c_type, c_speed, ost, oip, referer, ua) AS gid,
+        country, p_type, method, c_type, c_speed, ost, oip, referer, ua,
+        COUNT(*) FILTER (WHERE is_w) AS w_cnt,
+        COUNT(*) FILTER (WHERE is_b) AS b_cnt,
+        COUNT(*) FILTER (WHERE is_w AND ost IS NOT NULL) AS w_ost_nn,
+        COUNT(*) FILTER (WHERE is_b AND ost IS NOT NULL) AS b_ost_nn,
+        COUNT(*) FILTER (WHERE is_w AND ost >= 500) AS w_ost_5xx,
+        COUNT(*) FILTER (WHERE is_b AND ost >= 500) AS b_ost_5xx
+    FROM base
+    GROUP BY GROUPING SETS (
+        (country),
+        (p_type),
+        (method),
+        (c_type, c_speed),
+        (ost),
+        (oip),
+        (referer),
+        (ua)
+    )
+    """
+
+COALESCED_GEO_LATENCY_AGGREGATES = """
+    WITH base AS (
+        SELECT
+            {pop_sel} AS pop,
+            {server_region_sel} AS server_region,
+            {metro_sel} AS metro,
+            {elapsed_sel} AS elapsed,
+            {ottfb_sel} AS ottfb,
+            {delivery_rate_sel} AS delivery_rate,
+            (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+            (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+        FROM {table_name}
+    )
+    SELECT
+        GROUPING_ID(pop, server_region, metro) AS gid,
+        pop,
+        server_region,
+        metro,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed) FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0 AS w_p95,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed) FILTER (WHERE is_b AND elapsed IS NOT NULL) / 1000.0 AS b_p95,
+        COUNT(*) FILTER (WHERE is_w AND elapsed IS NOT NULL) AS w_lat_total,
+        COUNT(*) FILTER (WHERE is_b AND elapsed IS NOT NULL) AS b_lat_total,
+        COUNT(*) FILTER (WHERE is_w AND elapsed IS NOT NULL AND ottfb IS NOT NULL) AS w_ottfb_cnt,
+        ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY ottfb) FILTER (WHERE is_w AND elapsed IS NOT NULL AND ottfb IS NOT NULL) / 1000.0, 0) AS w_ottfb_p95,
+        PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY delivery_rate) FILTER (WHERE is_w AND delivery_rate > 0) AS w_med_dr,
+        PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY delivery_rate) FILTER (WHERE is_b AND delivery_rate > 0) AS b_med_dr,
+        COUNT(*) FILTER (WHERE is_w AND delivery_rate > 0) AS w_dr_total,
+        COUNT(*) FILTER (WHERE is_b AND delivery_rate > 0) AS b_dr_total
+    FROM base
+    GROUP BY GROUPING SETS ((pop), (server_region), (metro))
     """
 
 
@@ -1740,7 +2045,7 @@ CRAWLER_DISPARITY = """
 STALE_BROWSER_VERSION = r"""
         WITH distinct_uas AS (
             SELECT ua, lower(ua) AS l_ua
-            FROM (SELECT DISTINCT ua FROM {table_name} WHERE ua IS NOT NULL)
+            FROM (SELECT DISTINCT ua FROM {table_name} WHERE ua IS NOT NULL AND contains(lower(ua), 'chrome'))
         ),
         stale_uas AS (
             SELECT
@@ -1922,7 +2227,13 @@ __all__ = [
     # repository.py templates
     "COALESCED_CITY_AGGREGATES",
     "COALESCED_URL_AGGREGATES",
+    "COALESCED_URL_EXTENDED_AGGREGATES",
     "COALESCED_IP_SECURITY_AGGREGATES",
+    "COALESCED_IP_EXTENDED_AGGREGATES",
     "COALESCED_ASN_AGGREGATES",
     "COALESCED_SCALAR_AGGREGATES",
+    "COALESCED_SCALAR_EXTENDED_AGGREGATES",
+    "COALESCED_FP_AGGREGATES",
+    "COALESCED_DIM_AGGREGATES",
+    "COALESCED_GEO_LATENCY_AGGREGATES",
 ]
