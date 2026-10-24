@@ -1879,10 +1879,10 @@ from datetime import UTC, datetime
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from backend.core.iceberg.rum_schema import CLIENT_VITALS_ARROW_SCHEMA
 
 from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
 from backend.core.iceberg.buffer import _commit_buffer_impl
-from backend.core.iceberg.rum_schema import CLIENT_VITALS_ARROW_SCHEMA
 from backend.core.local_compaction import compact_local_partitions
 from backend.cron.jobs import rum_commit as rum_commit_mod
 

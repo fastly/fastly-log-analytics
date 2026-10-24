@@ -31,6 +31,7 @@ import {
 } from '@/components/ui/select'
 import { ColumnDef } from '@tanstack/react-table'
 import { LogAccountingPanel } from './UsageChart'
+import { toQueryDate } from '../_date'
 
 type UsageLogResponse = components['schemas']['UsageLogResponse']
 
@@ -44,10 +45,6 @@ export const DATE_PRESETS = [
   { label: 'Last 7d', hours: 168 },
   { label: 'Last 30d', hours: 720 },
 ]
-
-export function toQueryDate(d: Date): string {
-  return d.toISOString().slice(0, 19) + 'Z'
-}
 
 export function fmtCost(n: number): string {
   if (n === 0) return '$0.000000'

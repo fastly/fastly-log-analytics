@@ -338,8 +338,9 @@ class _FakeRequest:
 
 async def _drive_sse_with_payload(monkeypatch, payload: dict) -> dict:
     """Helper: start SSE stream, publish a payload, return the first frame."""
-    import backend.routers.control_room as cr_mod
     from backend.core.realtime.publisher import RealtimeMetricsPublisher
+
+    import backend.routers.control_room as cr_mod
 
     test_publisher = RealtimeMetricsPublisher()
     test_publisher.bind_loop(asyncio.get_running_loop())
@@ -575,8 +576,9 @@ def test_realtime_seed_with_cached_ticks(admin_client, monkeypatch):
 
 def test_realtime_seed_with_fetch_fallback(admin_client, monkeypatch):
     """If the publisher cache is empty, fall back to fetching from RT API."""
-    import backend.routers.control_room as cr_mod
     from backend.core.realtime.publisher import publisher as rt_publisher
+
+    import backend.routers.control_room as cr_mod
 
     monkeypatch.setattr(rt_publisher, "get_recent_ticks", lambda sid, count: [])
 
