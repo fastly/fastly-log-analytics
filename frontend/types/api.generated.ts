@@ -7458,7 +7458,7 @@ export interface components {
         };
         /**
          * BootstrapDebugState
-         * @description Debug-visibility settings folded into bootstrap (admin only).
+         * @description Diagnostics capability and audience settings for authenticated clients.
          */
         BootstrapDebugState: {
             /** Debug Responses Enabled */

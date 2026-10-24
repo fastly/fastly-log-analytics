@@ -34,7 +34,6 @@ from backend.models.dashboard import (
 )
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
-    bucket_time_to_minute,
     cache_result,
     client_cache_token,
     digest_cache_key,
@@ -511,6 +510,8 @@ def _cache_agg_resp(cache_key: str | None, resp: AggregatesResponse) -> Aggregat
 
 def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: str | None, end_time: str | None):
     norm_interval = _normalize_chart_interval(req.chart_interval)
+    start = _range_value(start_time)
+    end = _range_value(end_time)
     cache_key: str | None = None
     if _HS_DASHBOARD_CACHE_TTL > 0 and start_time is not None and end_time is not None:
         raw_filters = (
@@ -521,8 +522,8 @@ def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: st
                 "ep": "hs_dashboard_aggregates",
                 "svc": service.service_id,
                 "cid": client_cache_token(service.client),
-                "s": bucket_time_to_minute(start_time),
-                "e": bucket_time_to_minute(end_time),
+                "s": start.isoformat() if start is not None else None,
+                "e": end.isoformat() if end is not None else None,
                 "f": serialize_filters_for_key(raw_filters),
                 "ci": norm_interval,
                 "cm": req.chart_metric,
@@ -538,7 +539,12 @@ def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: st
         if cached is not None:
             return AggregatesResponse.with_telemetry(**cached)
 
-    if req.filters or norm_interval == "1 second":
+    partial_minutes = (
+        start is not None
+        and end is not None
+        and any(bound.second != 0 or bound.microsecond != 0 for bound in (start, end))
+    )
+    if req.filters or norm_interval == "1 second" or partial_minutes:
         resp = _filtered_aggregates(service, req, start_time, end_time)
         return _cache_agg_resp(cache_key, resp)
 

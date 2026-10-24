@@ -55329,7 +55329,7 @@
           "api_call_debug_visibility"
         ],
         "title": "BootstrapDebugState",
-        "description": "Debug-visibility settings folded into bootstrap (admin only)."
+        "description": "Diagnostics capability and audience settings for authenticated clients."
       },
       "BootstrapPopGeo": {
         "properties": {

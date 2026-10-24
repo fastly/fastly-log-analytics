@@ -30,14 +30,17 @@ from backend.config import ClickHouseConfig
 from backend.core.clickhouse_client import ClickHouseClient
 from backend.high_scale import cmcd as hs_cmcd
 from backend.high_scale import sessions as hs_sessions
+from backend.high_scale.archive_models import ServingWatermark
 from backend.high_scale.cmcd import cmcd_aggregates
+from backend.high_scale.dashboard import aggregates as dashboard_aggregates
 from backend.high_scale.insights import cache_collapse_detail_endpoint, insights_endpoint
 from backend.high_scale.origin import aggregates as origin_aggregates
 from backend.high_scale.origin_projection import build_origin_projection_rows
 from backend.high_scale.projections import project_cmcd
+from backend.high_scale.registry import HighScaleService
 from backend.high_scale.sessions import sessions_endpoint
 from backend.models.cmcd import CmcdRequest
-from backend.models.dashboard import SessionsRequest
+from backend.models.dashboard import AggregatesRequest, SessionsRequest
 from backend.models.insights import CacheCollapseDetailRequest, InsightsRequest
 from backend.repositories.insights.registry import registry
 
@@ -167,6 +170,51 @@ def service(fixture: _Fixture) -> Iterator[SimpleNamespace]:
     client = _make_client(fixture.seed)
     yield SimpleNamespace(service_id=SERVICE, client=client)
     client.close()
+
+
+def test_unfiltered_dashboard_counts_exact_subminute_event_window(fixture: _Fixture) -> None:
+    start = datetime(2026, 1, 1, 0, 0, 17, 125000, tzinfo=UTC)
+    end = start + timedelta(minutes=1)
+    rows = [
+        fixture.request(start - timedelta(milliseconds=1), "/outside"),
+        fixture.request(start, "/kept"),
+        fixture.request(start + timedelta(seconds=1), "/kept"),
+        fixture.request(end - timedelta(milliseconds=1), "/kept"),
+        fixture.request(end, "/outside"),
+        fixture.request(end + timedelta(seconds=1), "/outside"),
+        {**fixture.request(start, "/other"), "service_id": "other-svc"},
+    ]
+    fixture.insert("request_facts", "request", rows)
+    client = _make_client(fixture.seed)
+    try:
+        service = HighScaleService(
+            service_id=SERVICE,
+            client=client,
+            cursor_secret=b"fixture",
+            request_watermark=ServingWatermark(
+                service_id=SERVICE,
+                domain="request",
+                owner_epoch=1,
+                coverage_start=start,
+                coverage_end=end,
+                last_accepted_cursor=None,
+                last_archived_event_id=None,
+                last_visible_event_id=None,
+                exact=True,
+            ),
+        )
+        response = dashboard_aggregates(
+            service,
+            AggregatesRequest(fields=["url"], include_time_series=False, include_map_data=False),
+            start.isoformat(),
+            end.isoformat(),
+        )
+    finally:
+        client.close()
+
+    assert response.total_rows == 3
+    assert response.data["url"].total == 3
+    assert [(row.value, row.count) for row in response.data["url"].top] == [("/kept", 3)]
 
 
 def _spread(start: datetime, end: datetime, count: int) -> list[datetime]:

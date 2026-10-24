@@ -330,7 +330,7 @@ class BootstrapPopGeo(WireSafeModel):
 
 
 class BootstrapDebugState(WireSafeModel):
-    """Debug-visibility settings folded into bootstrap (admin only)."""
+    """Diagnostics capability and audience settings for authenticated clients."""
 
     debug_responses_enabled: bool
     query_debug_visibility: str
@@ -430,13 +430,9 @@ class BootstrapResponse(BaseResponse):
     # not-yet-populated poll continues from useFilterBar for new
     # services where extents land later.
     log_extents: LogExtentsResponse | None = None
-    # Whether the backend will populate ``_debug_queries`` /
-    # ``_debug_calls`` envelopes on responses (gated by the
-    # ``DEBUG_RESPONSES`` env var). Folded in so the admin
-    # DiagnosticsPanel can dim the "Query debugging" / "API call"
-    # toggles on first paint instead of paying a separate
-    # /api/debug/state round-trip. ADMIN ONLY — analysts never see
-    # the diagnostics panel and the toggles aren't user-facing.
+    # Admin DiagnosticsPanel reads backend capability; both roles use the
+    # audience settings to honor operator-enabled diagnostics. The response
+    # middleware independently enforces analyst visibility.
     debug_state: BootstrapDebugState | None = None
     # Seed for the OperationsOverview admin cards:
     # ``{queries_summary, log_accounting, slow_queries_count}``.

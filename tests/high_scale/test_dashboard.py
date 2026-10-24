@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -382,6 +382,35 @@ def _recording_service() -> tuple[HighScaleService, _RecordingClient]:
 
 
 _WINDOW = ("2026-09-15T00:00:00Z", "2026-09-16T00:00:00Z")
+
+
+@pytest.mark.parametrize(
+    ("start_time", "end_time"),
+    [
+        ("2026-09-15T00:00:17Z", "2026-09-16T00:00:00Z"),
+        ("2026-09-15T00:00:00Z", "2026-09-16T00:00:17Z"),
+        ("2026-09-15T00:00:00.001Z", "2026-09-16T00:00:00Z"),
+        ("2026-09-15T00:00:00Z", "2026-09-16T00:00:00.001Z"),
+    ],
+)
+def test_unfiltered_subminute_windows_use_scoped_facts(start_time: str, end_time: str) -> None:
+    service, client = _recording_service()
+
+    response = aggregates(service, AggregatesRequest(fields=["url", "country"]), start_time, end_time)
+
+    start = datetime.fromisoformat(start_time)
+    end = datetime.fromisoformat(end_time)
+    end_upper = end + timedelta(minutes=1) if end.second == 0 and end.microsecond == 0 else end
+    assert client.calls
+    for sql, params in client.calls:
+        assert "FROM request_facts" in sql
+        assert "event_timestamp >= {start:DateTime64(3)}" in sql
+        assert "event_timestamp < {end_upper:DateTime64(3)}" in sql
+        assert "high_scale_batch_publications FINAL" in sql
+        assert params["service_id"] == "svc"
+        assert params["start"] == start
+        assert params["end_upper"] == end_upper
+    assert all(row["source"] == "fact" for row in response.section_timings if row["activity"] != "overhead")
 
 
 def test_filtered_aggregates_use_the_shared_filter_translation_and_visibility_fence():
