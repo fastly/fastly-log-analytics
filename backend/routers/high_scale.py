@@ -15,6 +15,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.core import metadata
+from backend.core.high_scale_sections import HighScaleSections
 from backend.core.request_context import RequestContext, build_request_context
 from backend.core.share_db.validation import mask_ip
 from backend.deps import require_admin
@@ -595,20 +596,26 @@ def cmcd_facts(
             status_code=404,
             detail=make_error("high_scale_domain_not_configured", "CMCD is not configured for this service"),
         ) from None
-    page = query_cmcd_facts(
-        service.client,
-        service_id=ctx.service_id,
-        start=start,
-        end=end,
-        cursor_secret=service.cursor_secret,
-        watermark=watermark,
-        limit=req.limit,
-        cursor=req.cursor,
+    trace = HighScaleSections(ctx.service_id, "cmcd")
+    page = trace.run(
+        "facts",
+        lambda: query_cmcd_facts(
+            service.client,
+            service_id=ctx.service_id,
+            start=start,
+            end=end,
+            cursor_secret=service.cursor_secret,
+            watermark=watermark,
+            limit=req.limit,
+            cursor=req.cursor,
+        ),
+        source="projected_fact",
     )
     return HighScaleRequestFactResponse.with_telemetry(
         rows=_mask_client_ip_rows([dict(row) for row in page.rows], ctx),
         next_cursor=page.next_cursor,
         metadata=_build_query_metadata_response(page.metadata),
+        section_timings=trace.timings(),
     )
 
 

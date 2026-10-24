@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+from backend.core.high_scale_sections import current_clickhouse_scope
 from backend.core.request_context import build_request_context
 from backend.high_scale.archive_models import ServingWatermark
 from backend.high_scale.exports import ExportManager, get_export_manager
@@ -12,8 +13,10 @@ from backend.utils.remote_access import TimeBounds
 class _QueryClient:
     def __init__(self, rows):
         self.rows = rows
+        self.scopes = []
 
     def execute(self, sql, params=None):
+        self.scopes.append(current_clickhouse_scope())
         return self.rows
 
 
@@ -280,14 +283,23 @@ def test_rum_facts_rejects_unconfigured_domain(client, test_service_source):
 def test_cmcd_facts_queries_configured_domain(client, test_service_source):
     from backend.high_scale.registry import get_high_scale_service_registry
 
-    app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(_service())
+    service = _service()
+    app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(service)
     response = client.post(
         f"/api/high-scale/services/{test_service_source['service_id']}/cmcd-facts",
         json={"start_time": "2026-09-11T20:00:00Z", "end_time": "2026-09-11T21:00:00Z"},
     )
 
     assert response.status_code == 200, response.text
-    assert response.json()["metadata"]["watermark"]["domain"] == "cmcd"
+    body = response.json()
+    assert body["metadata"]["watermark"]["domain"] == "cmcd"
+    timing = body["_section_timings"][0]
+    scope = service.client.scopes[0]
+    assert timing["section"] == "cmcd.facts"
+    assert timing["source"] == scope["source"] == "projected_fact"
+    assert timing["section_id"] == scope["section_id"]
+    assert timing["timing_kind"] == "client_section_wall"
+    assert timing["server_cpu_ms"] is None
 
 
 class _AggregateQueryClient:
