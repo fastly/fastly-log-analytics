@@ -7,8 +7,7 @@ import {
   usToMs,
   type LatencyRow,
 } from '@/components/SessionScoring/useScorerTimeseries'
-import { denseBarTrace, lineTrace, withSecondaryAxis } from '@/lib/chart-builders'
-import { CHART_COLORS } from '@/lib/chart-colors'
+import { CHART_COLORS, denseBarTrace, lineTrace, withSecondaryAxis } from '@/lib/chart-builders'
 
 interface ScorerLatencyChartProps {
   serviceId: string

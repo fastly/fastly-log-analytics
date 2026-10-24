@@ -95,7 +95,7 @@ def ledger_sweep_service(
     _admin: None = Depends(require_admin),
     source: dict = Depends(get_source),
 ) -> SyncStartResponse:
-    from backend.cron.jobs.ledger import _run_ledger_sweep
+    from backend.cron.jobs.rum_ledger import _run_ledger_sweep
 
     return run_admin_cron_trigger(
         source,

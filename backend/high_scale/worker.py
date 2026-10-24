@@ -18,13 +18,13 @@ from backend.core.clickhouse_client import ClickHouseClient
 from backend.core.duckdb import _get_fos_client, get_source_for_service
 from backend.high_scale.aggregate_batch_adapter import AggregateBatchAdapter
 from backend.high_scale.archive_publication import ArchivePublication, S3ObjectStore
-from backend.high_scale.config import from_environment
 from backend.high_scale.deletion import (
     DeletionController,
     HighScaleDeletionSweeper,
     PostgresDeletionLedger,
 )
 from backend.high_scale.ingest_controller import HighScaleIngestController
+from backend.high_scale.models import from_environment
 from backend.high_scale.orchestration import HighScaleWorkerCoordinator, PageRun
 from backend.high_scale.postgres_control import PostgresControlPlane
 from backend.high_scale.publication import ClickHouseBatchAdapter, ClickHousePublication, PostgresBatchManifestStore
@@ -407,27 +407,7 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
     )
 
 
-class _MultiServiceWorkerLoop(HighScaleWorkerLoop):
-    def __init__(
-        self,
-        *,
-        coordinators: tuple[tuple[str, HighScaleWorkerCoordinator], ...],
-        domains: tuple[str, ...],
-        interval_seconds: float,
-        deletion_sweepers: tuple[tuple[str, HighScaleDeletionSweeper | None], ...] = (),
-        deletion_sweep_limit: int = 100,
-        pages_per_tick: int | None = None,
-        service_weights: Mapping[str, int] | None = None,
-    ) -> None:
-        super().__init__(
-            coordinators=coordinators,
-            domains=domains,
-            interval_seconds=interval_seconds,
-            deletion_sweepers=deletion_sweepers,
-            deletion_sweep_limit=deletion_sweep_limit,
-            pages_per_tick=pages_per_tick,
-            service_weights=service_weights,
-        )
+_MultiServiceWorkerLoop = HighScaleWorkerLoop
 
 
 def _csv_env(name: str) -> tuple[str, ...]:
@@ -435,19 +415,13 @@ def _csv_env(name: str) -> tuple[str, ...]:
 
 
 def main() -> None:
-    import os
-
     if os.environ.get("OTEL_EXPORTER") == "prometheus":
         try:
-            import logging
-
             from prometheus_client import start_http_server
 
             logging.info("Starting Prometheus metrics server on port 8000")
             start_http_server(8000)
         except Exception as e:
-            import logging
-
             logging.warning(f"Failed to start prometheus_client: {e}")
 
     parser = ArgumentParser(description="Run the bounded high-scale source worker")

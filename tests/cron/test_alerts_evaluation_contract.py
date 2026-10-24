@@ -1,18 +1,4 @@
-"""Contract test suite for Cron 12: alerts_evaluation_{service_id}.
-
-Verifies all requirements and checklist items from docs/cron/jobs/alerts-evaluation.md:
-1. FLA_DEV_NO_CRONS=1 / dev_mode_no_crons() skips execution and scheduler registration.
-2. Dynamic registration gating on _service_has_alerts(service_id) and cron_alerts.enabled.
-3. Politeness gating (should_defer_cron) defers when active interactive queries are running.
-4. Early exit when no enabled alerts exist, logging 'skipped' without opening DuckDB.
-5. DuckDB metrics evaluation over lookback windows and query timing instrumentation (track_query category="alerts").
-6. Stale log detection (>30 min) bails out without triggering alerts.
-7. Resilience against per-alert evaluation failure (individual errors do not halt the loop).
-8. Two-phase execution: writing last-triggered timestamps and exporting admin state BEFORE dispatching webhooks.
-9. Notification dispatch resilience across legacy webhook, Slack mrkdwn, PagerDuty Events API v2, and generic HTTP.
-10. Execution status contract: 'warning' on triggered alerts or webhook failures, 'success' otherwise, 'error' on unhandled exceptions.
-11. Telemetry attribution, cron_progress SSE event emission, and duration finalization in guaranteed finally block.
-"""
+"""Consolidated tests for test_alerts_evaluation_contract."""
 
 from __future__ import annotations
 
@@ -813,3 +799,78 @@ def test_error_row_has_zero_counters_run_id_and_no_log_output():
     assert kwargs["run_id"] == 108
     assert kwargs["log_output"] is None
     end_progress.assert_called_once_with(108)
+
+
+# ── Merged from test_webhook_senders.py ──────────────────────────────────────────────
+
+import httpx
+import pytest
+import tenacity
+
+from backend.cron.jobs import metadata
+
+
+def _response(status: int) -> httpx.Response:
+    return httpx.Response(status, request=httpx.Request("POST", "https://hook.example/x"))
+
+
+class TestWebhookSenders:
+    @pytest.fixture(autouse=True)
+    def _no_backoff(self, monkeypatch):
+        monkeypatch.setattr(tenacity.nap.time, "sleep", lambda _s: None)
+
+    def test_old_names_still_exist_and_share_the_json_sender(self):
+        assert metadata._post_alert_webhook is metadata._post_json
+        assert metadata._post_slack_notification is metadata._post_json
+        assert callable(metadata._post_pagerduty_notification)
+
+    def test_retries_transient_5xx_then_succeeds(self, monkeypatch):
+        seen = []
+        codes = iter([503, 502, 200])
+
+        def fake_post(url, json=None, timeout=None):
+            seen.append((url, json, timeout))
+            return _response(next(codes))
+
+        monkeypatch.setattr(httpx, "post", fake_post)
+        metadata._post_alert_webhook("https://hook.example/x", {"a": 1})
+        assert len(seen) == 3
+        assert seen[0] == ("https://hook.example/x", {"a": 1}, 5)
+
+    def test_does_not_retry_a_4xx(self, monkeypatch):
+        calls = []
+
+        def fake_post(url, json=None, timeout=None):
+            calls.append(url)
+            return _response(400)
+
+        monkeypatch.setattr(httpx, "post", fake_post)
+        metadata._post_slack_notification("https://hook.example/x", {"text": "hi"})
+        assert len(calls) == 1
+
+    def test_gives_up_after_three_attempts_and_reraises(self, monkeypatch):
+        calls = []
+
+        def fake_post(url, json=None, timeout=None):
+            calls.append(url)
+            return _response(503)
+
+        monkeypatch.setattr(httpx, "post", fake_post)
+        with pytest.raises(httpx.HTTPStatusError):
+            metadata._post_slack_notification("https://hook.example/x", {})
+        assert len(calls) == 3
+
+    def test_pagerduty_builds_payload_and_is_not_double_retried(self, monkeypatch):
+        bodies = []
+
+        def fake_post(url, json=None, timeout=None):
+            bodies.append(json)
+            return _response(503)
+
+        monkeypatch.setattr(httpx, "post", fake_post)
+        with pytest.raises(httpx.HTTPStatusError):
+            metadata._post_pagerduty_notification("https://pd.example/e", "HighErr", "error_rate", "> 5%", "svc")
+        assert len(bodies) == 3
+        assert bodies[0]["event_action"] == "trigger"
+        assert bodies[0]["payload"]["summary"] == "Alert HighErr triggered on svc: error_rate > 5%"
+        assert bodies[0]["payload"]["component"] == "error_rate"

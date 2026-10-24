@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterator
-from concurrent.futures import Executor, Future
+from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
 from typing import Any, Literal, TypeVar
@@ -121,6 +121,33 @@ class HighScaleSections:
                 _logger.info("high_scale.section", **entry)
             except Exception:
                 logging.getLogger(__name__).debug("section logging failed", exc_info=True)
+
+    def run_parallel(
+        self,
+        tasks: Sequence[tuple[str, Callable[[], _Result]]],
+        *,
+        source: _Source | Callable[[str], _Source] = "unknown",
+        activity: Literal["compute", "overhead"] | Callable[[str], Literal["compute", "overhead"]] = "compute",
+        max_workers: int | None = None,
+        thread_name_prefix: str = "",
+    ) -> dict[str, _Result]:
+        if not tasks:
+            return {}
+
+        def _src(key: str) -> _Source:
+            return source(key) if callable(source) else source
+
+        def _act(key: str) -> Literal["compute", "overhead"]:
+            return activity(key) if callable(activity) else activity
+
+        if len(tasks) == 1:
+            key, fn = tasks[0]
+            return {key: self.run(key, fn, source=_src(key), activity=_act(key))}
+
+        workers = min(max_workers, len(tasks)) if max_workers is not None else len(tasks)
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=thread_name_prefix) as pool:
+            futures = [(key, self.submit(pool, key, fn, source=_src(key), activity=_act(key))) for key, fn in tasks]
+            return {key: fut.result() for key, fut in futures}
 
     def timings(self) -> list[dict[str, Any]]:
         with self._lock:

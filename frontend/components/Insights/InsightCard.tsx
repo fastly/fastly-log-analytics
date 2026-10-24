@@ -9,17 +9,107 @@ import {
   CardHeader,
   CardTitle
 } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import { Badge } from '@/components/ui/badge'
 import { InsightCardData } from '@/types/api'
 import { cn, keyByOccurrence } from '@/lib/utils'
-import { AlertTriangle, Info, CheckCircle, AlertCircle, HelpCircle } from 'lucide-react'
+import { AlertTriangle, Info, CheckCircle, AlertCircle, HelpCircle, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { InsightDataModal } from './InsightDataModal'
 import { InsightItemRow } from './InsightItemRow'
-import { BotFindingModalData, ImpossibleDistanceData, ScriptedTrafficData } from './types'
+import { BotFindingModalData, ImpossibleDistanceData, ScriptedTrafficData } from './shared'
 import { CacheCollapseModal } from './CacheCollapseModal'
 import { ScriptedTrafficModal } from './ScriptedTrafficModal'
 import { BotFindingModal } from './BotFindingModal'
+
+interface InsightCardSkeletonProps {
+  title: string
+  description?: string
+  loadingMessage?: string
+}
+
+export function InsightCardSkeleton({
+  title,
+  description,
+  loadingMessage = 'Analyzing log patterns…',
+}: InsightCardSkeletonProps) {
+  return (
+    <Card className="h-full flex flex-col min-h-[220px] [contain-intrinsic-size:220px] [content-visibility:auto] opacity-90">
+      <CardHeader className="pb-2">
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <Loader2 className="h-5 w-5 shrink-0 text-muted-foreground animate-spin" />
+            <CardTitle className="text-base leading-tight">{title}</CardTitle>
+          </div>
+        </div>
+        {description && (
+          <CardDescription className="text-xs mt-1">{description}</CardDescription>
+        )}
+      </CardHeader>
+
+      <CardContent className="flex-1 flex flex-col items-center justify-center pt-0 pb-6 text-xs text-muted-foreground gap-1.5">
+        <span>{loadingMessage}</span>
+      </CardContent>
+    </Card>
+  )
+}
+
+interface InsightDataModalProps {
+  insight: InsightCardData
+  isOpen: boolean
+  onOpenChange: (open: boolean) => void
+  onMapClick?: (data: ImpossibleDistanceData) => void
+  onCacheCollapseClick?: (url: string) => void
+  onScriptedTrafficClick?: (data: ScriptedTrafficData) => void
+  onBotFindingClick?: (data: BotFindingModalData) => void
+}
+
+export function InsightDataModal({
+  insight,
+  isOpen,
+  onOpenChange,
+  onMapClick,
+  onCacheCollapseClick,
+  onScriptedTrafficClick,
+  onBotFindingClick,
+}: InsightDataModalProps) {
+  if (!insight.items || insight.items.length === 0) return null
+
+  return (
+    <Dialog open={isOpen} onOpenChange={onOpenChange}>
+      <DialogContent data-testid="data-modal-open" className="max-w-2xl max-h-[85vh] flex flex-col">
+        <DialogHeader>
+          <DialogTitle>All Data: {insight.title}</DialogTitle>
+          <DialogDescription className="sr-only">
+            Full list of records backing the “{insight.title}” insight.
+          </DialogDescription>
+        </DialogHeader>
+
+        <ScrollArea className="flex-1 -mx-6 px-6">
+          <div className="space-y-1.5 py-4">
+            {keyByOccurrence(insight.items, (it) => it.label).map(({ key }, index) => (
+              <InsightItemRow
+                key={key}
+                insight={insight}
+                index={index}
+                onMapClick={onMapClick}
+                onCacheCollapseClick={onCacheCollapseClick}
+                onScriptedTrafficClick={onScriptedTrafficClick}
+                onBotFindingClick={onBotFindingClick}
+              />
+            ))}
+          </div>
+        </ScrollArea>
+      </DialogContent>
+    </Dialog>
+  )
+}
 
 // Lazy-load the help modal: its index statically imports ~28KB of
 // per-insight help copy (InsightHelpModal/sections/*) that otherwise ships

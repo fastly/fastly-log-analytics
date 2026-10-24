@@ -104,6 +104,33 @@ ERROR_SPIKES = """
 
 # ── 2. Botnet Grouping ────────────────────────────────────────────────────────
 
+
+def _build_ip_spread_sql(col: str, *, include_ratio: bool = False) -> str:
+    ratio_expr = "w_ips * 1.0 / GREATEST(COALESCE(b_ips, 0) / GREATEST({baseline_hours}, 1.0) * {window_hours}, 1)"
+    extra_sel = f",\n            {ratio_expr} AS ip_ratio" if include_ratio else ""
+    order_by = "ip_ratio" if include_ratio else f"({ratio_expr})"
+    return f"""
+        WITH base AS (
+            SELECT "{col}", "ip",
+                (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+                (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+            FROM {{table_name}} WHERE "{col}" IS NOT NULL AND "{col}" != ''
+        ),
+        agg AS (
+            SELECT "{col}",
+                COUNT(DISTINCT "ip") FILTER (WHERE is_w) AS w_ips,
+                COUNT(*) FILTER (WHERE is_w) AS w_reqs,
+                COUNT(DISTINCT "ip") FILTER (WHERE is_b) AS b_ips
+            FROM base GROUP BY "{col}"
+            HAVING COUNT(DISTINCT "ip") FILTER (WHERE is_w) >= 5
+        )
+        SELECT "{col}", w_ips, w_reqs, COALESCE(b_ips, 0) AS b_ips{extra_sel}
+        FROM agg
+        WHERE w_ips > COALESCE(b_ips, 0) / GREATEST({{baseline_hours}}, 1.0) * {{window_hours}} * 3
+        ORDER BY {order_by} DESC LIMIT 10
+    """
+
+
 BOTNET_GROUPING = """
         WITH base AS (
             SELECT "{fp_col}", "ip",
@@ -132,16 +159,19 @@ BOTNET_GROUPING = """
 
 # ── 4. New Country Traffic ────────────────────────────────────────────────────
 
-NEW_COUNTRY_TRAFFIC = """
-        SELECT "country",
+
+def _build_new_dim_traffic_sql(col: str, min_w_cnt: int) -> str:
+    return f"""
+        SELECT "{col}",
             COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
             COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt
-        FROM {table_name}
-        WHERE "country" IS NOT NULL
-        GROUP BY "country"
-        HAVING w_cnt >= 3 AND b_cnt = 0
+        FROM {{table_name}} WHERE "{col}" IS NOT NULL GROUP BY "{col}"
+        HAVING w_cnt >= {min_w_cnt} AND b_cnt = 0
         ORDER BY w_cnt DESC LIMIT 20
     """
+
+
+NEW_COUNTRY_TRAFFIC = _build_new_dim_traffic_sql("country", 3)
 
 # ── 5. City Traffic Surges ────────────────────────────────────────────────────
 
@@ -386,22 +416,30 @@ CACHEABILITY_REGRESSION = """
 
 # ── 16. Latency Regression ────────────────────────────────────────────────────
 
-LATENCY_REGRESSION = """
+
+def _build_p95_latency_regression_sql(
+    col: str, min_w: int, min_b: int, ratio_mult: str, diff_floor: int, extra_where: str = ""
+) -> str:
+    where_extra = f"{extra_where} AND " if extra_where else ""
+    return f"""
         WITH base AS (
-            SELECT "url", elapsed,
+            SELECT "{col}", elapsed,
                 (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
                 (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
-            FROM {table_name} WHERE elapsed IS NOT NULL
+            FROM {{table_name}} WHERE {where_extra}elapsed IS NOT NULL
         )
-        SELECT "url",
+        SELECT "{col}",
             PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed) FILTER (WHERE is_w) / 1000.0 AS w_p95,
             PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed) FILTER (WHERE is_b) / 1000.0 AS b_p95,
             COUNT(*) FILTER (WHERE is_w) AS w_total,
             COUNT(*) FILTER (WHERE is_b) AS b_total
-        FROM base GROUP BY "url"
-        HAVING w_total >= 5 AND b_total >= 20 AND w_p95 >= b_p95 * 2.0 AND w_p95 - b_p95 >= 200
+        FROM base GROUP BY "{col}"
+        HAVING w_total >= {min_w} AND b_total >= {min_b} AND w_p95 >= b_p95 * {ratio_mult} AND w_p95 - b_p95 >= {diff_floor}
         ORDER BY (w_p95 / NULLIF(b_p95, 0)) DESC LIMIT 15
     """
+
+
+LATENCY_REGRESSION = _build_p95_latency_regression_sql("url", 5, 20, "2.0", 200)
 
 # ── 17. Impossible Distance / Spoofing ────────────────────────────────────────
 
@@ -434,98 +472,47 @@ TAIL_LATENCY = """
 
 # ── 19. Cipher Fingerprint Clustering ─────────────────────────────────────────
 
-CIPHER_SPREAD = """
+CIPHER_SPREAD = _build_ip_spread_sql("tls_ciphers_sha")
+
+# ── 20. Request Size Anomaly & 21. Connection Reuse Anomaly ───────────────────
+
+
+def _build_ip_max_vs_p95_sql(
+    col: str, alias_suffix: str, min_w: int, extra_having: str = "", extra_where: str = ""
+) -> str:
+    max_alias = f"max_{alias_suffix}"
+    avg_alias = f"avg_{alias_suffix}"
+    return f"""
         WITH base AS (
-            SELECT "tls_ciphers_sha", "ip",
+            SELECT "ip", {col},
                 (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
                 (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
-            FROM {table_name} WHERE "tls_ciphers_sha" IS NOT NULL AND "tls_ciphers_sha" != ''
-        ),
-        agg AS (
-            SELECT "tls_ciphers_sha",
-                COUNT(DISTINCT "ip") FILTER (WHERE is_w) AS w_ips,
-                COUNT(*) FILTER (WHERE is_w) AS w_reqs,
-                COUNT(DISTINCT "ip") FILTER (WHERE is_b) AS b_ips
-            FROM base
-            GROUP BY "tls_ciphers_sha"
-            HAVING COUNT(DISTINCT "ip") FILTER (WHERE is_w) >= 5
-        )
-        SELECT "tls_ciphers_sha",
-            w_ips,
-            w_reqs,
-            COALESCE(b_ips, 0) AS b_ips
-        FROM agg
-        WHERE w_ips > COALESCE(b_ips, 0) / GREATEST({baseline_hours}, 1.0) * {window_hours} * 3
-        ORDER BY (w_ips * 1.0 / GREATEST(COALESCE(b_ips, 0) / GREATEST({baseline_hours}, 1.0) * {window_hours}, 1)) DESC LIMIT 10
-    """
-
-# ── 20. Request Size Anomaly ──────────────────────────────────────────────────
-
-REQUEST_SIZE_ANOMALY = """
-        WITH base AS (
-            SELECT "ip", req_header_bytes,
-                (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
-                (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
-            FROM {table_name} WHERE req_header_bytes > 0
+            FROM {{table_name}} WHERE {col} > 0
         ),
         win_ips AS (
             SELECT "ip",
-                MAX(req_header_bytes) AS max_bytes,
-                AVG(req_header_bytes) AS avg_bytes,
+                MAX({col}) AS {max_alias},
+                AVG({col}) AS {avg_alias},
                 COUNT(*) AS w_total
-            FROM base
-            WHERE is_w
-            GROUP BY "ip"
-            HAVING COUNT(*) >= 3
+            FROM base WHERE is_w GROUP BY "ip"
+            HAVING COUNT(*) >= {min_w}{extra_having}
         ),
         stats AS (
-            SELECT w."ip",
-                w.max_bytes,
-                w.avg_bytes,
-                w.w_total,
-                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY b.req_header_bytes) AS b_p95
-            FROM win_ips w
-            JOIN base b ON w."ip" = b."ip" AND b.is_b
-            GROUP BY w."ip", w.max_bytes, w.avg_bytes, w.w_total
+            SELECT w."ip", w.{max_alias}, w.{avg_alias}, w.w_total,
+                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY b.{col}) AS b_p95
+            FROM win_ips w JOIN base b ON w."ip" = b."ip" AND b.is_b
+            GROUP BY w."ip", w.{max_alias}, w.{avg_alias}, w.w_total
         )
-        SELECT "ip", max_bytes, avg_bytes, w_total, b_p95 FROM stats
-        WHERE w_total >= 3 AND max_bytes > b_p95 * 3
-        ORDER BY max_bytes DESC LIMIT 15
+        SELECT "ip", {max_alias}, {avg_alias}, w_total, b_p95 FROM stats
+        WHERE w_total >= {min_w} AND {max_alias} > b_p95 * 3{extra_where}
+        ORDER BY {max_alias} DESC LIMIT 15
     """
 
-# ── 21. Connection Reuse Anomaly ──────────────────────────────────────────────
 
-CONNECTION_ABUSE = """
-        WITH base AS (
-            SELECT "ip", conn_requests,
-                (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
-                (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
-            FROM {table_name} WHERE conn_requests > 0
-        ),
-        win_ips AS (
-            SELECT "ip",
-                MAX(conn_requests) AS max_reqs,
-                AVG(conn_requests) AS avg_reqs,
-                COUNT(*) AS w_total
-            FROM base
-            WHERE is_w
-            GROUP BY "ip"
-            HAVING COUNT(*) >= 5 AND MAX(conn_requests) >= 50
-        ),
-        stats AS (
-            SELECT w."ip",
-                w.max_reqs,
-                w.avg_reqs,
-                w.w_total,
-                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY b.conn_requests) AS b_p95
-            FROM win_ips w
-            JOIN base b ON w."ip" = b."ip" AND b.is_b
-            GROUP BY w."ip", w.max_reqs, w.avg_reqs, w.w_total
-        )
-        SELECT "ip", max_reqs, avg_reqs, w_total, b_p95 FROM stats
-        WHERE w_total >= 5 AND max_reqs > b_p95 * 3 AND max_reqs >= 50
-        ORDER BY max_reqs DESC LIMIT 15
-    """
+REQUEST_SIZE_ANOMALY = _build_ip_max_vs_p95_sql("req_header_bytes", "bytes", 3)
+CONNECTION_ABUSE = _build_ip_max_vs_p95_sql(
+    "conn_requests", "reqs", 5, " AND MAX(conn_requests) >= 50", " AND max_reqs >= 50"
+)
 
 # ── 22. Regional Latency Degradation ──────────────────────────────────────────
 
@@ -1062,14 +1049,7 @@ METHOD_DRIFT = """
 # meaningful traffic — mirrors new_country_traffic / new_city_traffic. ASN-keyed
 # → network section; row[0] is the ASN so asn_names hydration resolves the ISP
 # label. Row: [asn, w_cnt, b_cnt]. 2 ``?`` (all window start).
-NEW_ASN_TRAFFIC = """
-        SELECT "asn",
-            COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
-            COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt
-        FROM {table_name} WHERE "asn" IS NOT NULL GROUP BY "asn"
-        HAVING w_cnt >= 20 AND b_cnt = 0
-        ORDER BY w_cnt DESC LIMIT 20
-    """
+NEW_ASN_TRAFFIC = _build_new_dim_traffic_sql("asn", 20)
 
 # ── 37b. ASN Hosting Shift (asn_hosting_shift) ──────────────────────────────────
 # Track B: per-ASN ratio of p_type='hosting' traffic shifting from consumer to
@@ -1153,23 +1133,9 @@ CONNECTION_TYPE_MIX = """
 # Track B: per-Fastly-PoP P95 edge latency (elapsed µs → ms) regression vs
 # baseline — finer than region/city, isolates a single datacenter's serving
 # slowdown. Row: [pop, w_p95, b_p95, w_total, b_total]. 2 ``?`` (window start).
-POP_LATENCY_REGRESSION = """
-        WITH base AS (
-            SELECT "pop" AS pop, elapsed,
-                (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
-                (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
-            FROM {table_name}
-            WHERE "pop" IS NOT NULL AND "pop" != '' AND elapsed IS NOT NULL
-        )
-        SELECT pop,
-            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed) FILTER (WHERE is_w) / 1000.0 AS w_p95,
-            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed) FILTER (WHERE is_b) / 1000.0 AS b_p95,
-            COUNT(*) FILTER (WHERE is_w) AS w_total,
-            COUNT(*) FILTER (WHERE is_b) AS b_total
-        FROM base GROUP BY pop
-        HAVING w_total >= 20 AND b_total >= 50 AND w_p95 >= b_p95 * 1.5 AND w_p95 - b_p95 >= 100
-        ORDER BY (w_p95 / NULLIF(b_p95, 0)) DESC LIMIT 15
-    """
+POP_LATENCY_REGRESSION = _build_p95_latency_regression_sql(
+    "pop", 20, 50, "1.5", 100, '"pop" IS NOT NULL AND "pop" != \'\''
+)
 
 # ── 41. HTTP/3 → TCP Fallback Spike (http3_fallback) ──────────────────────────
 # Track B: a service-wide drop in QUIC (HTTP/3) share vs a QUIC-healthy baseline

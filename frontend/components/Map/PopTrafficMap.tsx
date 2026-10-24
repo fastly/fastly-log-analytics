@@ -8,11 +8,9 @@ import { useTheme } from 'next-themes'
 import { usePopGeoStore } from '@/stores/popGeoStore'
 import { formatPopGeo, type PopGeo } from '@/lib/pop'
 import { formatCompactCount, formatCount, resolveCountryName } from '@/lib/format'
-import { countryFill } from '@/components/Map/colors'
-import { NORMALIZE_COUNTRY } from '@/components/Map/shared'
-import { useMapResize } from '@/components/Map/useMapResize'
+import { countryFill, NORMALIZE_COUNTRY, useMapResize } from '@/components/Map/shared'
 import { addCountryBaseLayer, createBaseMap, removeMapTabStops, updateCountryBaseLayerTheme, type MapFillColor } from '@/components/Map/baseLayers'
-import { CHART_COLORS } from '@/lib/chart-colors'
+import { CHART_COLORS } from '@/lib/chart-builders'
 
 type CoordTree = number | CoordTree[]
 

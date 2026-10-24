@@ -25,7 +25,7 @@ import { Loader2 } from 'lucide-react'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { PageHeader } from '@/components/ui/page-header'
 import { Skeleton } from '@/components/ui/skeleton'
-import { SkeletonGrid } from '@/components/ui/skeleton-grid'
+import { SkeletonGrid } from '@/components/ui/skeleton'
 
 /**
  * When a route's loading.tsx passes its (static, build-time-known) title,

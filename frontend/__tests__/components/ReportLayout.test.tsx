@@ -1,107 +1,179 @@
 /**
- * C-3: ReportLayout wires ReportShell through the shared
- * time/service/filter/interval hooks and exposes a render-prop callback to
- * the page body. It no longer owns a query (the `apiCall` opt-out was removed
- * so there is ONE query architecture — pages run their data fetch through
- * `useAnalyticsReportQuery`). Pin the contract: the render-prop receives
- * `startTime`, `endTime`, `activeServiceId`, `filterPayload`, `bucketSeconds`,
- * `config`, `intervalButtons` etc. — and does NOT expose `data`/`isLoading`.
+ * Consolidated tests for ReportShell, ChartIntervalButtons, NoServiceSelected, and UpdatingBadge.
  *
  * @vitest-environment jsdom
  */
-import { screen } from '@testing-library/react'
-import { renderWithQuery } from '../helpers/query'
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { render, screen, cleanup } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { Server } from 'lucide-react'
 import React from 'react'
-import { ReportLayout } from '@/components/ReportLayout'
+import { ReportShell } from '@/components/ReportShell'
+import { ChartIntervalButtons } from '@/components/ChartIntervalButtons'
+import { NoServiceSelected } from '@/components/NoServiceSelected'
+import { UpdatingBadge } from '@/components/UpdatingBadge'
+import { INTERVALS } from '@/lib/constants'
 
-vi.mock('@/hooks/useTimeRange', () => ({
-  useTimeRange: () => ({ startTime: '2026-01-01T00:00:00Z', endTime: '2026-01-01T01:00:00Z' }),
-}))
+let mockActiveServiceId: string | null = 'svc-1'
+let mockIsDataReady = true
+let mockBootstrapResolved = true
+
 vi.mock('@/hooks/useIsDataReady', () => ({
-  useEffectiveServiceId: () => 'svc-1',
-}))
-vi.mock('@/hooks/useTimezone', () => ({ useTimezone: () => 'UTC' }))
-vi.mock('@/hooks/useFilterPayload', () => ({
-  useFilterPayload: () => ({ filters: [] }),
-  useDebouncedFilterPayload: () => ({ filters: [] }),
-}))
-vi.mock('@/hooks/useViewMetricUrlSync', () => ({ useViewMetricUrlSync: vi.fn() }))
-vi.mock('@/hooks/useReportConfig', () => ({
-  useReportConfig: () => ({
-    config: { effectiveInterval: '1 hour', validIntervals: ['1 hour'] },
-    setChartInterval: vi.fn(),
-    trend: 'flat',
-    setTrend: vi.fn(),
-  }),
+  useEffectiveServiceId: () => mockActiveServiceId,
+  useIsDataReady: () => mockIsDataReady,
+  useBootstrapResolved: () => mockBootstrapResolved,
 }))
 
-vi.mock('@/components/ReportShell', () => ({
-  ReportShell: ({ children, title }: { children?: React.ReactNode; title?: React.ReactNode }) => (
-    <div>
-      <h1>{title}</h1>
-      {children}
-    </div>
-  ),
+vi.mock('@/components/skeletons/PageSkeleton', () => ({
+  DashboardSkeleton: () => <div data-testid="skeleton" />,
 }))
 
-vi.mock('@/components/ChartIntervalButtons', () => ({
-  ChartIntervalButtons: () => <div data-testid="interval-buttons" />,
-}))
+afterEach(() => cleanup())
 
-describe('ReportLayout', () => {
+describe('ReportShell', () => {
   beforeEach(() => {
-    vi.clearAllMocks()
+    mockActiveServiceId = 'svc-1'
+    mockIsDataReady = true
+    mockBootstrapResolved = true
   })
 
-  it('provides the resolved time range, service, filter payload + bucket to the render-prop', () => {
-    renderWithQuery(
-      <ReportLayout title="Security" description="" icon={Server}>
-        {({ startTime, endTime, activeServiceId, filterPayload, bucketSeconds }) => (
-          <div>
-            <div data-testid="start">{startTime}</div>
-            <div data-testid="end">{endTime}</div>
-            <div data-testid="service">{activeServiceId}</div>
-            <div data-testid="filter">{JSON.stringify(filterPayload)}</div>
-            <div data-testid="bucket">{String(bucketSeconds)}</div>
-          </div>
-        )}
-      </ReportLayout>,
-      { queryOptions: { queries: { gcTime: 0, staleTime: 0 } } },
+  it('renders title + children once the service is selected and data is ready', () => {
+    render(
+      <ReportShell title="My Report" description="A descriptive line" icon={Server}>
+        <div data-testid="content">body</div>
+      </ReportShell>,
     )
-
-    expect(screen.getByTestId('start').textContent).toBe('2026-01-01T00:00:00Z')
-    expect(screen.getByTestId('end').textContent).toBe('2026-01-01T01:00:00Z')
-    expect(screen.getByTestId('service').textContent).toBe('svc-1')
-    expect(screen.getByTestId('filter').textContent).toBe(JSON.stringify({ filters: [] }))
-    expect(screen.getByTestId('bucket').textContent).toBe('3600')
+    expect(screen.getByText('My Report')).toBeInTheDocument()
+    expect(screen.getByTestId('content')).toBeInTheDocument()
   })
 
-  it('does not own a query — no data/isLoading leak into the render-prop', () => {
-    renderWithQuery(
-      <ReportLayout title="Charts" description="" icon={Server}>
-        {(ctx) => (
-          <div>
-            <div data-testid="has-data-key">{String('data' in ctx)}</div>
-            <div data-testid="has-loading-key">{String('isLoading' in ctx)}</div>
-          </div>
-        )}
-      </ReportLayout>,
-      { queryOptions: { queries: { gcTime: 0, staleTime: 0 } } },
+  it('falls back to NoServiceSelected when no active service id is set (requireService default)', () => {
+    mockActiveServiceId = null
+    render(
+      <ReportShell title="Security" icon={Server}>
+        <div data-testid="content">body</div>
+      </ReportShell>,
     )
-
-    expect(screen.getByTestId('has-data-key').textContent).toBe('false')
-    expect(screen.getByTestId('has-loading-key').textContent).toBe('false')
+    expect(screen.getByRole('heading', { name: 'No Service Selected' })).toBeInTheDocument()
+    expect(screen.getByText(/select a service/i)).toBeInTheDocument()
+    expect(screen.queryByTestId('content')).not.toBeInTheDocument()
   })
 
-  it('renders the interval buttons in the render-prop arg', () => {
-    renderWithQuery(
-      <ReportLayout title="Logs" description="" icon={Server}>
-        {({ intervalButtons }) => <div>{intervalButtons}</div>}
-      </ReportLayout>,
-      { queryOptions: { queries: { gcTime: 0, staleTime: 0 } } },
+  it('shows the dashboard skeleton when isDataReady is false and honours isReadyOverride', () => {
+    mockIsDataReady = false
+    const { unmount } = render(
+      <ReportShell title="Logs" icon={Server}>
+        <div data-testid="content">body</div>
+      </ReportShell>,
     )
-    expect(screen.getByTestId('interval-buttons')).toBeInTheDocument()
+    expect(screen.getByTestId('skeleton')).toBeInTheDocument()
+    expect(screen.queryByTestId('content')).not.toBeInTheDocument()
+    unmount()
+
+    render(
+      <ReportShell title="Logs" icon={Server} isReadyOverride>
+        <div data-testid="content">body</div>
+      </ReportShell>,
+    )
+    expect(screen.getByTestId('content')).toBeInTheDocument()
+    expect(screen.queryByTestId('skeleton')).not.toBeInTheDocument()
+  })
+
+  it('flash defense: bootstrap unresolved AND no active service → skeleton, not NoServiceSelected', () => {
+    mockActiveServiceId = null
+    mockBootstrapResolved = false
+    mockIsDataReady = false
+    render(
+      <ReportShell title="Dashboard" icon={Server}>
+        <div data-testid="content">body</div>
+      </ReportShell>,
+    )
+    expect(screen.queryByRole('heading', { name: 'No Service Selected' })).not.toBeInTheDocument()
+    expect(screen.getByTestId('skeleton')).toBeInTheDocument()
+  })
+
+  it('requireService=false bypasses the NoServiceSelected gate', () => {
+    mockActiveServiceId = null
+    render(
+      <ReportShell title="Insights" icon={Server} requireService={false}>
+        <div data-testid="content">body</div>
+      </ReportShell>,
+    )
+    expect(screen.queryByRole('heading', { name: 'No Service Selected' })).not.toBeInTheDocument()
+    expect(screen.getByTestId('content')).toBeInTheDocument()
+  })
+})
+
+const ALL_VALID = new Set(INTERVALS.map((i) => i.value))
+
+describe('ChartIntervalButtons', () => {
+  it('renders one button per INTERVALS entry and marks effective interval with aria-pressed=true', () => {
+    render(
+      <ChartIntervalButtons
+        effectiveInterval="1 hour"
+        validIntervals={ALL_VALID}
+        onIntervalChange={() => {}}
+      />,
+    )
+    for (const i of INTERVALS) {
+      expect(screen.getByRole('button', { name: `Chart bucket size: ${i.label}` })).toBeInTheDocument()
+    }
+    expect(screen.getByRole('button', { name: 'Chart bucket size: 1h' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: 'Chart bucket size: 1m' })).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('fires onIntervalChange for valid buttons and disables invalid ones', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const { unmount } = render(
+      <ChartIntervalButtons
+        effectiveInterval="1 minute"
+        validIntervals={ALL_VALID}
+        onIntervalChange={onChange}
+      />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Chart bucket size: 1h' }))
+    expect(onChange).toHaveBeenCalledWith('1 hour')
+    unmount()
+
+    const onChangeDisabled = vi.fn()
+    render(
+      <ChartIntervalButtons
+        effectiveInterval="1 minute"
+        validIntervals={new Set(['1 minute'])}
+        onIntervalChange={onChangeDisabled}
+      />,
+    )
+    const hourBtn = screen.getByRole('button', { name: 'Chart bucket size: 1h' })
+    expect(hourBtn).toBeDisabled()
+    await user.click(hourBtn)
+    expect(onChangeDisabled).not.toHaveBeenCalled()
+  })
+})
+
+describe('NoServiceSelected', () => {
+  it('renders the provided message, default/explicit title, and lucide icon', () => {
+    const { container, unmount } = render(
+      <NoServiceSelected icon={Server} message="Pick one from the picker above" />,
+    )
+    expect(screen.getByRole('heading', { name: 'No Service Selected' })).toBeInTheDocument()
+    expect(screen.getByText('Pick one from the picker above')).toBeInTheDocument()
+    const svg = container.querySelector('svg')
+    expect(svg?.classList.contains('text-muted-foreground')).toBe(true)
+    unmount()
+
+    render(<NoServiceSelected icon={Server} message="msg" title="Nothing here yet" />)
+    expect(screen.getByRole('heading', { name: 'Nothing here yet' })).toBeInTheDocument()
+  })
+})
+
+describe('UpdatingBadge', () => {
+  it('renders the "Updating" label text and pulses the decorative dot only', () => {
+    const { container } = render(<UpdatingBadge />)
+    expect(screen.getByText(/updating/i)).toBeInTheDocument()
+    expect(container.children).toHaveLength(1)
+    const root = container.firstChild as HTMLElement
+    expect(root.className).not.toMatch(/animate-pulse/)
+    expect(root.querySelector('span')!.className).toMatch(/animate-pulse/)
   })
 })

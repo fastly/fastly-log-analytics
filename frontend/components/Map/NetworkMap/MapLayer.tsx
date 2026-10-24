@@ -73,11 +73,9 @@ interface UseMapInitArgs {
   onMapError?: () => void
 }
 
-import { rafThrottle } from '@/components/Map/shared'
-import { countryFill } from '@/components/Map/colors'
+import { rafThrottle, countryFill, observeMapResize } from '@/components/Map/shared'
 import { addCountryBaseLayer, createBaseMap, updateCountryBaseLayerTheme, type MapFillColor } from '@/components/Map/baseLayers'
-import { observeMapResize } from '@/components/Map/useMapResize'
-import { CHART_COLORS } from '@/lib/chart-colors'
+import { CHART_COLORS } from '@/lib/chart-builders'
 
 /**
  * Initializes the MapLibre instance, adds sources/layers, and wires hover

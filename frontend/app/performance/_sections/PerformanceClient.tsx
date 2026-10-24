@@ -15,8 +15,8 @@ import { ReportLayout } from '@/components/ReportLayout'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ColumnVisibilityDropdown } from '@/components/DataTable'
 import { makeLatencyColumns } from '@/lib/table-utils'
-import { useFieldLabel } from '@/hooks/useFieldLabel';
-import { CHART_COLORS } from '@/lib/chart-colors'
+import { useFieldLabel } from '@/hooks/useLogFieldsCatalog';
+import { CHART_COLORS } from '@/lib/chart-builders'
 import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
 import type { FiltersPayload } from '@/types/filters'
 type PerformanceUrlRow = components['schemas']['PerformanceUrlRow']

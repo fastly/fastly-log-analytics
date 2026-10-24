@@ -142,60 +142,57 @@ def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
         run.record(status, summary=summary, error_message=error_message, files_downloaded=discovered)
 
 
-@cron_task("ledger_rum_sweep", job_name="ledger_rum_sweep")
-def _run_rum_ledger_sweep(service_id: str, run_id: int | None = None) -> None:
-    """Celery-mode crash net for the RUM ledger pipeline — RUM counterpart
-    of ``backend.cron.jobs.sync._run_ledger_sweep``. Registered by the
-    scheduler only when high-scale mode and RUM is enabled for this
-    service."""
+def _run_ledger_sweep_impl(
+    service_id: str,
+    run_id: int | None,
+    *,
+    job_name: str,
+    sweep_fn,
+    label: str,
+    require_rum: bool = False,
+    finalize_running_backstop: bool = False,
+    include_warning_error_message: bool = False,
+) -> None:
     from backend.cron.scheduler import dev_mode_no_crons
 
     if dev_mode_no_crons():
-        logger.warning("[scheduler] %s: FLA_DEV_NO_CRONS=1 — RUM ledger sweep refused.", service_id)
+        logger.warning("[scheduler] %s: FLA_DEV_NO_CRONS=1 — %s refused.", service_id, label)
         return
 
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
-    from backend.core.ingest import sweep_rum_ledger_once
 
-    src = get_source_for_service(service_id)
-    if src is None or not svcconfig.is_high_scale_mode(src):
-        return
-    if src.get("access_level") == "read_only":
-        return
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         return
-
-    rum_cfg = cfg.get("rum")
-    rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
-    rum_enabled = svcconfig.is_rum_enabled(cfg)
-    if not rum_enabled:
+    if require_rum and not svcconfig.is_rum_enabled(cfg):
+        return
+    src = get_source_for_service(service_id)
+    if src is None or not svcconfig.is_high_scale_mode(src) or src.get("access_level") == "read_only":
         return
 
+    row_prefix = "RUM " if require_rum else ""
     with cron_run(
         service_id,
-        "ledger_rum_sweep",
+        job_name,
         source=src,
         run_id=run_id,
-        error_summary="RUM ledger sweep failed",
+        error_summary=f"{label[0].upper()}{label[1:]} failed",
         finalize_duration=True,
-        finalize_running_backstop=True,
+        finalize_running_backstop=finalize_running_backstop,
         include_log_output=False,
     ) as run:
         if not run.ok:
             return
-        run.log_progress({"type": "status", "message": f"Starting RUM ledger sweep for {service_id}..."})
+        run.log_progress({"type": "status", "message": f"Starting {label} for {service_id}..."})
 
-        summary = sweep_rum_ledger_once(service_id, run_id=run.run_id)
-        run_status = "success"
+        summary = sweep_fn(service_id, run_id=run.run_id)
         warnings = []
         if not summary.get("broker_ok", True):
             warnings.append("Celery broker/queue depth probe failed")
         if summary.get("dead_letter", 0) > 0:
-            warnings.append(f"{summary['dead_letter']} dead-letter/quarantined RUM row(s)")
-        if warnings:
-            run_status = "warning"
+            warnings.append(f"{summary['dead_letter']} dead-letter/quarantined {row_prefix}row(s)")
+        run_status = "warning" if warnings else "success"
 
         summary_msg = (
             f"reclaimed={summary.get('reclaimed', 0)} redispatched={summary.get('redispatched', 0)} "
@@ -204,10 +201,43 @@ def _run_rum_ledger_sweep(service_id: str, run_id: int | None = None) -> None:
         if warnings:
             summary_msg += f" ({'; '.join(warnings)})"
 
-        run.record(
-            run_status,
-            summary=summary_msg,
-            error_message="; ".join(warnings) if warnings else None,
-            files_downloaded=summary.get("discovered", 0),
-        )
+        record_kwargs: dict = {
+            "summary": summary_msg,
+            "files_downloaded": summary.get("discovered", 0),
+        }
+        if include_warning_error_message:
+            record_kwargs["error_message"] = "; ".join(warnings) if warnings else None
+        run.record(run_status, **record_kwargs)
         run.log_progress({"type": "done", "message": summary_msg})
+
+
+@cron_task("ledger_sweep", job_name="ledger_sweep")
+def _run_ledger_sweep(service_id: str, run_id: int | None = None) -> None:
+    """Celery-mode crash net: reclaim stale ledger claims, re-dispatch stuck
+    rows, and diff a lookback FOS LIST against the ledger."""
+    from backend.core.ingest import sweep_ledger_once
+
+    _run_ledger_sweep_impl(
+        service_id,
+        run_id,
+        job_name="ledger_sweep",
+        sweep_fn=sweep_ledger_once,
+        label="ledger sweep",
+    )
+
+
+@cron_task("ledger_rum_sweep", job_name="ledger_rum_sweep")
+def _run_rum_ledger_sweep(service_id: str, run_id: int | None = None) -> None:
+    """Celery-mode crash net for the RUM ledger pipeline."""
+    from backend.core.ingest import sweep_rum_ledger_once
+
+    _run_ledger_sweep_impl(
+        service_id,
+        run_id,
+        job_name="ledger_rum_sweep",
+        sweep_fn=sweep_rum_ledger_once,
+        label="RUM ledger sweep",
+        require_rum=True,
+        finalize_running_backstop=True,
+        include_warning_error_message=True,
+    )

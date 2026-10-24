@@ -6,15 +6,42 @@ import hashlib
 import logging
 import xml.etree.ElementTree as ET
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
+
+from botocore.auth import S3SigV4Auth
+from botocore.awsrequest import AWSRequest
+from botocore.credentials import Credentials
 
 from backend import config as svcconfig
 from backend.core.faro_versions import fetch_faro_bundle
 from backend.core.fastly.utils import region_endpoint
-from backend.utils.fos_signing import sign_fos_request
 from backend.utils.http import make_client
 
 logger = logging.getLogger(__name__)
+
+
+def sign_fos_request(
+    method: str,
+    url: str,
+    headers: dict | None,
+    body: bytes,
+    access_key_id: str,
+    secret_access_key: str,
+    region: str = "us-east-1",
+) -> dict[str, str]:
+    """Sign a FOS request using AWS SigV4."""
+    if headers is None:
+        headers = {}
+
+    if "Host" not in headers and "host" not in headers:
+        headers["Host"] = urlparse(url).netloc
+
+    credentials = Credentials(access_key_id, secret_access_key)
+    aws_req = AWSRequest(method=method, url=url, headers=headers, data=body)
+    S3SigV4Auth(credentials, "s3", region).add_auth(aws_req)
+    headers.update(dict(aws_req.headers))
+    return headers
+
 
 # Faro bundles are stored per-version so a mid-upgrade failure never leaves
 # the currently-served bundle half-overwritten; cleanup sweeps this prefix.

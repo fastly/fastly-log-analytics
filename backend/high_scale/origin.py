@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+import math
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from backend.core.high_scale_sections import HighScaleSections
-from backend.high_scale import origin_facts
+from backend.high_scale._common import _TIMESERIES_METRICS, visible_fact_clauses
 from backend.high_scale._filters import (
     build_clickhouse_filters,
 )
 from backend.high_scale._filters import (
     build_published_projection_where as _where,
 )
-from backend.high_scale._sketch import RELATIVE_ERROR
+from backend.high_scale._projection_utils import RELATIVE_ERROR
+from backend.high_scale._projection_utils import range_value as _range_value
 from backend.high_scale.registry import HighScaleService
 from backend.utils.date_utils import safe_iso
 
@@ -33,6 +36,54 @@ _APPROX_NOTE = (
     f"(relative error at most {RELATIVE_ERROR:.0%}). Request counts and error rates are exact."
 )
 _APPROX = {"_approx": True, "_approx_note": _APPROX_NOTE}
+_NOT_APPROX = {"_approx": False}
+
+_BASE_COLUMNS = (
+    "event_timestamp, url, "
+    "coalesce(toFloat64OrNull(custom_fields['ottfb']), toFloat64OrNull(custom_fields['ttfb']) * 1000000.0) "
+    "AS latency_us, "
+    "toInt32OrNull(custom_fields['ost']) AS status, "
+    "upper(custom_fields['cache']) AS cache_u, "
+    "toFloat64OrNull(custom_fields['ottlb']) AS ottlb_us, "
+    "toFloat64OrNull(custom_fields['elapsed']) AS elapsed_us, "
+    "toInt64OrNull(custom_fields['obytes']) AS obytes, "
+    "custom_fields['pop'] AS pop, "
+    "multiIf(lower(custom_fields['edge']) IN ('true', '1'), 'true', "
+    "lower(custom_fields['edge']) IN ('false', '0'), 'false', '') AS edge_s, "
+    "custom_fields['oip'] AS oip"
+)
+_ORDER_BY_P95 = "ifNotFinite(latency_q[2], -1.0) DESC"
+_LATENCY_DIMENSIONS = {
+    "edge": ("edge_s", "latency_us IS NOT NULL AND edge_s != ''", 0),
+    "pop": ("pop", "latency_us IS NOT NULL AND pop != ''", 0),
+    "oip": ("oip", "status IS NOT NULL AND oip != ''", 10),
+}
+
+
+@dataclass(frozen=True)
+class FactsScope:
+    base: str
+    params: dict[str, Any]
+
+
+def _facts_scope(
+    service: HighScaleService,
+    start_time: str | None,
+    end_time: str | None,
+    filter_sql: str,
+    filter_params: Mapping[str, Any],
+) -> FactsScope:
+    clauses = [*visible_fact_clauses("request"), filter_sql]
+    params: dict[str, Any] = {"service_id": service.service_id, **filter_params}
+    start = _range_value(start_time)
+    end = _range_value(end_time)
+    if start is not None:
+        clauses.append("event_timestamp >= {start:DateTime64(3)}")
+        params["start"] = start
+    if end is not None:
+        clauses.append("event_timestamp <= {end:DateTime64(3)}")
+        params["end"] = end
+    return FactsScope(f"(SELECT {_BASE_COLUMNS} FROM request_facts WHERE {' AND '.join(clauses)})", params)
 
 
 def _sketch_select(alias: str, column: str, quantiles: tuple[float, ...]) -> str:
@@ -44,12 +95,25 @@ def _sketch_select(alias: str, column: str, quantiles: tuple[float, ...]) -> str
     )
 
 
-def _quantile(row: dict[str, Any], alias: str, index: int) -> float | None:
+def _quantile(row: Mapping[str, Any], alias: str, index: int, count_key: str | None = None) -> float | None:
     """The ``index``-th requested quantile in milliseconds-ready microseconds; None with no observations."""
-    if int(row.get(f"{alias}_n") or 0) == 0:
+    if int(row.get(count_key or f"{alias}_n") or 0) == 0:
         return None
-    values = row.get(f"{alias}_q") or []
+    values = row.get(alias if count_key else f"{alias}_q") or []
     return _float_or_none(values[index]) if index < len(values) else None
+
+
+def _resolve_timeseries_metric(req: Any) -> tuple[str, str, float]:
+    if req.split_by_leg:
+        raise ValueError("high-scale Origin timeseries does not support split_by_leg")
+    if req.bucket_minutes < 1:
+        raise ValueError("high-scale Origin timeseries requires bucket_minutes of at least 1")
+    metric = _TIMESERIES_METRICS.get((req.timeseries_metric, req.timeseries_percentile))
+    if metric is None:
+        raise ValueError("high-scale Origin timeseries does not support the requested metric and percentile")
+    fact_col, level = metric
+    proj_col = "latency" if fact_col == "latency_us" else "ttlb"
+    return fact_col, proj_col, level
 
 
 def _summary(service: HighScaleService, start_time: str | None, end_time: str | None) -> dict[str, Any]:
@@ -110,23 +174,9 @@ def _timeseries(
     start_time: str | None,
     end_time: str | None,
 ) -> dict[str, Any]:
-    if req.split_by_leg:
-        raise ValueError("high-scale Origin timeseries does not support split_by_leg")
-    if req.bucket_minutes < 1:
-        raise ValueError("high-scale Origin timeseries requires bucket_minutes of at least 1")
+    _, metric_column, level = _resolve_timeseries_metric(req)
     where, params = _where(service.service_id, "origin_summary", start_time, end_time)
     params["bucket_minutes"] = int(req.bucket_minutes)
-    metric = {
-        ("ttfb", "p50"): ("latency", 0.5),
-        ("ttfb", "p95"): ("latency", 0.95),
-        ("ttfb", "p99"): ("latency", 0.99),
-        ("ttlb", "p50"): ("ttlb", 0.5),
-        ("ttlb", "p95"): ("ttlb", 0.95),
-        ("ttlb", "p99"): ("ttlb", 0.99),
-    }.get((req.timeseries_metric, req.timeseries_percentile))
-    if metric is None:
-        raise ValueError("high-scale Origin timeseries does not support the requested metric and percentile")
-    metric_column, level = metric
     rows = service.client.execute(
         "/* origin:timeseries */ SELECT "
         "toStartOfInterval(bucket_start, toIntervalMinute({bucket_minutes:UInt32})) AS time, "
@@ -148,6 +198,156 @@ def _timeseries(
         ],
         **_APPROX,
     }
+
+
+def _facts_summary(service: HighScaleService, facts: FactsScope) -> dict[str, Any]:
+    rows = service.client.execute(
+        "/* origin:facts_summary */ SELECT "
+        "countIf(latency_us IS NOT NULL) AS requests, "
+        "countIf(latency_us IS NOT NULL AND cache_u LIKE 'MISS%') AS misses, "
+        "countIf(latency_us IS NOT NULL AND cache_u LIKE 'PASS%') AS passes, "
+        "countIf(latency_us IS NOT NULL AND status BETWEEN 500 AND 599) AS origin_5xx, "
+        "countIf(latency_us IS NOT NULL AND status IS NOT NULL) AS status_count, "
+        "quantilesExact(0.5, 0.75, 0.95, 0.99)(latency_us) AS latency_q, "
+        "countIf(latency_us IS NOT NULL AND ottlb_us IS NOT NULL) AS ttlb_n, "
+        "quantilesExactIf(0.5, 0.95)(ottlb_us, latency_us IS NOT NULL AND ottlb_us IS NOT NULL) AS ttlb_q, "
+        "countIf(latency_us IS NOT NULL AND ottlb_us IS NOT NULL AND elapsed_us IS NOT NULL) AS overhead_n, "
+        "quantileExactIf(0.5)(elapsed_us - ottlb_us, "
+        "latency_us IS NOT NULL AND ottlb_us IS NOT NULL AND elapsed_us IS NOT NULL) AS overhead_q, "
+        "countIf(latency_us IS NOT NULL AND obytes >= 0) AS bytes_n, "
+        "quantileExactIf(0.5)(toFloat64(obytes), latency_us IS NOT NULL AND obytes >= 0) AS bytes_q "
+        f"FROM {facts.base}",
+        facts.params,
+    )
+    row = rows[0] if rows else {}
+    requests = int(row.get("requests") or 0)
+    if requests == 0:
+        return {
+            "has_data": False,
+            "total_misses": None,
+            "total_passes": None,
+            "ottfb_p50_ms": None,
+            "ottfb_p75_ms": None,
+            "ottfb_p95_ms": None,
+            "ottfb_p99_ms": None,
+            "ottlb_p50_ms": None,
+            "ottlb_p95_ms": None,
+            "cdn_overhead_p50_ms": None,
+            "origin_error_rate": None,
+            "obytes_p50": None,
+            **_NOT_APPROX,
+        }
+    status_count = int(row.get("status_count") or 0)
+    overhead_n = int(row.get("overhead_n") or 0)
+    bytes_n = int(row.get("bytes_n") or 0)
+    return {
+        "has_data": True,
+        "total_misses": int(row.get("misses") or 0),
+        "total_passes": int(row.get("passes") or 0),
+        "ottfb_p50_ms": _milliseconds(_quantile(row, "latency_q", 0, "requests")),
+        "ottfb_p75_ms": _milliseconds(_quantile(row, "latency_q", 1, "requests")),
+        "ottfb_p95_ms": _milliseconds(_quantile(row, "latency_q", 2, "requests")),
+        "ottfb_p99_ms": _milliseconds(_quantile(row, "latency_q", 3, "requests")),
+        "ottlb_p50_ms": _milliseconds(_quantile(row, "ttlb_q", 0, "ttlb_n")),
+        "ottlb_p95_ms": _milliseconds(_quantile(row, "ttlb_q", 1, "ttlb_n")),
+        "cdn_overhead_p50_ms": _milliseconds(float(row["overhead_q"])) if overhead_n else None,
+        "origin_error_rate": int(row.get("origin_5xx") or 0) / status_count if status_count else None,
+        "obytes_p50": float(row["bytes_q"]) if bytes_n else None,
+        **_NOT_APPROX,
+    }
+
+
+def _facts_timeseries(service: HighScaleService, facts: FactsScope, req: Any) -> dict[str, Any]:
+    column, _, level = _resolve_timeseries_metric(req)
+    rows = service.client.execute(
+        "/* origin:facts_timeseries */ SELECT "
+        "toStartOfInterval(event_timestamp, toIntervalMinute({bucket_minutes:UInt32})) AS time, "
+        "countIf(cache_u LIKE 'MISS%') AS miss_count, "
+        f"countIf({column} IS NOT NULL) AS value_n, "
+        f"quantileExact({level})({column}) AS value "
+        f"FROM {facts.base} WHERE latency_us IS NOT NULL GROUP BY time ORDER BY time",
+        {**facts.params, "bucket_minutes": int(req.bucket_minutes)},
+    )
+    return {
+        "has_data": bool(rows),
+        "series": [
+            {
+                "time": safe_iso(row["time"]),
+                "miss_count": int(row.get("miss_count") or 0),
+                "value": _milliseconds(row["value"]) if int(row.get("value_n") or 0) else None,
+            }
+            for row in rows
+        ],
+        **_NOT_APPROX,
+    }
+
+
+def _facts_slow_urls(service: HighScaleService, facts: FactsScope, req: Any) -> dict[str, Any]:
+    rows = service.client.execute(
+        "/* origin:facts_slow_urls */ SELECT url AS value, count() AS requests, "
+        "quantilesExact(0.5, 0.95, 0.99)(latency_us) AS latency_q "
+        f"FROM {facts.base} WHERE latency_us IS NOT NULL AND url != '' GROUP BY url "
+        f"HAVING requests >= {{min_requests:UInt64}} ORDER BY {_ORDER_BY_P95} LIMIT {{limit:UInt32}}",
+        {**facts.params, "min_requests": int(req.slow_urls_min_requests), "limit": int(req.slow_urls_limit)},
+    )
+    return {
+        "has_data": bool(rows),
+        "rows": [
+            {
+                "url": row["value"],
+                "requests": int(row["requests"]),
+                "p50_ms": _milliseconds(_quantile(row, "latency_q", 0, "requests")),
+                "p95_ms": _milliseconds(_quantile(row, "latency_q", 1, "requests")),
+                "p99_ms": _milliseconds(_quantile(row, "latency_q", 2, "requests")),
+            }
+            for row in rows
+        ],
+        **_NOT_APPROX,
+    }
+
+
+def _facts_status_codes(service: HighScaleService, facts: FactsScope) -> dict[str, Any]:
+    rows = service.client.execute(
+        "/* origin:facts_status_codes */ SELECT "
+        "toInt32(multiIf(status BETWEEN 100 AND 599, status, -1)) AS value, count() AS requests "
+        f"FROM {facts.base} WHERE status IS NOT NULL GROUP BY value ORDER BY requests DESC",
+        facts.params,
+    )
+    total = sum(int(row["requests"]) for row in rows)
+    return {
+        "has_data": bool(rows),
+        "rows": [
+            {"status": int(row["value"]), "count": int(row["requests"]), "pct": int(row["requests"]) * 100.0 / total}
+            for row in rows
+            if total > 0
+        ],
+        **_NOT_APPROX,
+    }
+
+
+def _facts_latency_dimension(
+    service: HighScaleService,
+    facts: FactsScope,
+    *,
+    marker: str,
+    dimension: str,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    column, predicate, minimum = _LATENCY_DIMENSIONS[dimension]
+    params = dict(facts.params)
+    suffix = f" HAVING requests >= {minimum}" if minimum else ""
+    suffix += f" ORDER BY {_ORDER_BY_P95}"
+    if limit is not None:
+        params["limit"] = int(limit)
+        suffix += " LIMIT {limit:UInt32}"
+    return service.client.execute(
+        f"/* origin:facts_{marker} */ SELECT {column} AS value, count() AS requests, "
+        "countIf(status BETWEEN 500 AND 599) AS origin_5xx, "
+        "countIf(latency_us IS NOT NULL) AS latency_n, "
+        "quantilesExact(0.5, 0.95)(latency_us) AS latency_q "
+        f"FROM {facts.base} WHERE {predicate} GROUP BY {column}{suffix}",
+        params,
+    )
 
 
 def _dimension_rows(
@@ -272,7 +472,7 @@ def _latency_dimension(
 
 def _milliseconds(value: object) -> float | None:
     parsed = _float_or_none(value)
-    return parsed / 1000.0 if parsed is not None else None
+    return parsed / 1000.0 if parsed is not None and math.isfinite(parsed) else None
 
 
 def _float_or_none(value: object) -> float | None:
@@ -288,14 +488,12 @@ def aggregates(
     sections: set[str] | None,
 ) -> dict[str, Any]:
     filter_sql, filter_params = build_clickhouse_filters(req.filters)
-    facts = (
-        origin_facts.scope(service, start_time, end_time, filter_sql, filter_params) if filter_sql != "1=1" else None
-    )
-    approx = _APPROX if facts is None else {"_approx": False}
+    facts = _facts_scope(service, start_time, end_time, filter_sql, filter_params) if filter_sql != "1=1" else None
+    approx = _APPROX if facts is None else _NOT_APPROX
 
     def latency_rows(marker: str, dimension: str, limit: int | None = None, having: str | None = None):
         if facts is not None:
-            return origin_facts.latency_dimension(service, facts, marker=marker, dimension=dimension, limit=limit)
+            return _facts_latency_dimension(service, facts, marker=marker, dimension=dimension, limit=limit)
         return _latency_dimension(
             service,
             marker=marker,
@@ -375,9 +573,7 @@ def aggregates(
         tasks.append(
             (
                 "summary",
-                lambda: (
-                    _summary(service, start_time, end_time) if facts is None else origin_facts.summary(service, facts)
-                ),
+                lambda: _summary(service, start_time, end_time) if facts is None else _facts_summary(service, facts),
             )
         )
     if "timeseries" in sections:
@@ -387,7 +583,7 @@ def aggregates(
                 lambda: (
                     _timeseries(service, req, start_time, end_time)
                     if facts is None
-                    else origin_facts.timeseries(service, facts, req)
+                    else _facts_timeseries(service, facts, req)
                 ),
             )
         )
@@ -398,7 +594,7 @@ def aggregates(
                 lambda: (
                     _slow_urls(service, req, start_time, end_time)
                     if facts is None
-                    else origin_facts.slow_urls(service, facts, req)
+                    else _facts_slow_urls(service, facts, req)
                 ),
             )
         )
@@ -409,7 +605,7 @@ def aggregates(
                 lambda: (
                     _status_codes(service, start_time, end_time)
                     if facts is None
-                    else origin_facts.status_codes(service, facts)
+                    else _facts_status_codes(service, facts)
                 ),
             )
         )
@@ -421,21 +617,7 @@ def aggregates(
         tasks.append(("ip_health", _build_ip_health))
 
     trace = HighScaleSections(service.service_id, "origin")
-    result: dict[str, Any] = {}
-    if len(tasks) <= 1:
-        for key, fn in tasks:
-            result[key] = trace.run(key, fn, source="projection" if facts is None else "fact")
-    else:
-        with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
-            futures = [
-                (
-                    key,
-                    trace.submit(pool, key, fn, source="projection" if facts is None else "fact"),
-                )
-                for key, fn in tasks
-            ]
-            for key, fut in futures:
-                result[key] = fut.result()
+    result = trace.run_parallel(tasks, source="projection" if facts is None else "fact")
 
     summary = result.get("summary", _EMPTY["summary"])
     return {"has_data": bool(summary.get("has_data")), **result, "section_timings": trace.timings()}

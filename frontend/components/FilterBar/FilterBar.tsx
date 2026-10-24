@@ -26,7 +26,7 @@ import { ViewSelector } from './ViewSelector'
 
 import { useShallow } from 'zustand/react/shallow'
 import { useMounted } from '@/hooks/useMounted'
-import { useServiceSwitchReset } from '@/hooks/useServiceSwitchReset'
+import { useServiceSwitchReset } from '@/hooks/useUrlServiceSync'
 
 // First-element of every React Query key whose results depend on the
 // global start/end time range. Used by the active-pill loading dot's

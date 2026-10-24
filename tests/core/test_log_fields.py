@@ -1,7 +1,66 @@
-from backend.core.log_fields import PRESETS, generate_log_format
+"""Pin the runtime log-line size budget against Fastly's 16 KiB Deliver cap.
+
+Background
+----------
+Fastly silently truncates emitted log lines past 16 KiB on Deliver services
+(64 KiB on Compute). No error surfaces to the customer — corrupt JSON shows
+up in DuckDB hours later. The template-size gate at
+``provision.fastly_api.FASTLY_LOG_FORMAT_SAFE_MAX`` only protects the static
+template string; it cannot see per-request value sizes.
+
+``check_log_line_budget`` exists to give the customer a config-time signal
+before that truncation starts costing data. It compares
+``estimate_log_line_bytes`` (an average) against a safe-max set at ~60% of
+the cap to leave headroom for URL- / UA-heavy requests that routinely
+inflate real lines 2-3x past the average.
+
+What this file pins
+-------------------
+1. A small config produces no warning.
+2. A config that lands between safe_max and deliver_max returns
+   ``LOG_LINE_APPROACHING_LIMIT`` (severity "warn").
+3. A config that exceeds the deliver_max returns ``LOG_LINE_TOO_LARGE``
+   (severity "error").
+4. Warning payload shape (frontend reads these specific keys).
+5. The two router endpoints that consume the estimate also surface the
+   warning, so the dashboard can render it.
+
+Why these specific cases: the warn band is the genuinely useful one (the
+error band only triggers for pathological configs), so this file leans
+on the warn-band assertions to lock in the actionable behavior.
+"""
+
+from __future__ import annotations
+
+import pathlib
+from unittest.mock import patch
+
+import pytest
+from fastapi.testclient import TestClient
+from hypothesis import given
+from hypothesis import strategies as st
+
+from backend import config
+from backend.core import field_registry as fr
+from backend.core import log_fields as lf
+from backend.core import sql_ident
+from backend.core.field_registry import (
+    BY_CODE,
+    BY_GROUP,
+    REGISTRY,
+    LogField,
+)
+from backend.core.log_fields import (
+    _BUILTIN_FIELD_NAMES,
+    LOG_FIELD_CATALOG,
+    PRESETS,
+    generate_log_format,
+)
+from backend.main import app
 from backend.provision import generate_capture_vcl
 
 
+# ── Merged from tests/core/test_log_fields.py ──
 def test_generate_log_format():
     """Verify that VCL log format strings are generated correctly."""
     # Test minimal preset
@@ -35,9 +94,6 @@ def test_field_overrides():
     assert '"url":' in fmt
     assert '"country":' in fmt
     assert '"pop":' not in fmt  # Pop is Group C, shouldn't be included
-
-
-# ── default_off (opt-in) fields ────────────────────────────────────────────
 
 
 def test_default_off_field_registry_non_empty():
@@ -231,9 +287,6 @@ def test_cmcd_string_fields_do_not_starve_scoring_budget():
     assert cmcd_sid_match, "cmcd_sid should appear in the format"
     cmcd_sid_limit = int(cmcd_sid_match.group(1))
     assert cmcd_sid_limit < 2000, f"cmcd_sid should use bytes_estimate-derived limit, not 2000 (got {cmcd_sid_limit})"
-
-
-# ── validate_custom_field: 14-rule validation gauntlet ─────────────────────
 
 
 def _valid_field(**overrides) -> dict:
@@ -466,3 +519,474 @@ def test_client_ip_falls_back_to_socket_ip_when_capture_did_not_run():
         'if(req.http.x-fos-edge-data:ip != "", req.http.x-fos-edge-data:ip, '
         'if(req.http.Fastly-Client-IP != "", req.http.Fastly-Client-IP, client.ip))' in fmt
     )
+
+
+# ── Merged from tests/core/test_log_line_budget.py ──
+def _make_custom_fields(count: int, bytes_each: int) -> list[dict]:
+    """Build saved-shape custom field records with a target bytes_estimate.
+
+    Used to drive estimate_log_line_bytes into the warn or error band
+    without depending on which built-in groups happen to be enabled.
+    """
+    return [
+        {
+            "name": f"cf{i:03d}",
+            "label": f"cf{i:03d}",
+            "description": "",
+            "vcl_log_expression": "req.http.Host",
+            "collection_stage": "edge",
+            "duckdb_type": "VARCHAR",
+            "value_type": "string",
+            "bytes_estimate": bytes_each,
+            "nullable": True,
+            "enabled": True,
+            "show_in_dashboard": False,
+            "show_in_logs": True,
+            "filterable": True,
+        }
+        for i in range(count)
+    ]
+
+
+def test_constants_pin_the_fastly_caps():
+    """If anyone moves the constants we want a loud failure here.
+
+    16 KiB is the Fastly Deliver cap straight from
+    https://docs.fastly.com/products/network-services-resource-limits and
+    must not drift. The safe-max is a tunable headroom (~60%); the test
+    pins the ratio band rather than the exact integer so a deliberate
+    tweak (e.g., to 55% or 65%) doesn't require touching this assertion.
+    """
+    assert lf.FASTLY_LOG_LINE_DELIVER_MAX == 16 * 1024
+    # Safe max must leave material headroom for value-size variance but
+    # not so much that even fat configs never warn.
+    assert 0.40 < lf.FASTLY_LOG_LINE_SAFE_MAX / lf.FASTLY_LOG_LINE_DELIVER_MAX < 0.80
+
+
+def test_small_config_no_warning():
+    """A minimal config has tons of slack — no warning, no false alarm."""
+    cfg = {"groups": ["A"], "field_overrides": {}}
+    estimate = lf.estimate_log_line_bytes(cfg)
+    assert estimate < lf.FASTLY_LOG_LINE_SAFE_MAX
+    assert lf.check_log_line_budget(cfg) is None
+
+
+def test_warn_band_returns_approaching_limit():
+    """When estimate crosses safe_max but stays under deliver_max, the warn
+    band fires. ~20 fat custom fields land around ~11.7 KB — squarely in
+    the warn zone (9830 < x < 16384).
+    """
+    cfg = {
+        "groups": ["A", "B", "C", "D"],
+        "field_overrides": {},
+        "custom_fields": _make_custom_fields(count=20, bytes_each=500),
+    }
+    estimate = lf.estimate_log_line_bytes(cfg)
+    assert lf.FASTLY_LOG_LINE_SAFE_MAX <= estimate < lf.FASTLY_LOG_LINE_DELIVER_MAX, (
+        f"test fixture drifted; estimate {estimate} is no longer in the warn band"
+    )
+
+    warning = lf.check_log_line_budget(cfg)
+    assert warning is not None
+    assert warning["code"] == "LOG_LINE_APPROACHING_LIMIT"
+    assert warning["severity"] == "warn"
+    assert warning["estimate_bytes"] == estimate
+    assert warning["deliver_max_bytes"] == lf.FASTLY_LOG_LINE_DELIVER_MAX
+    assert warning["safe_max_bytes"] == lf.FASTLY_LOG_LINE_SAFE_MAX
+    # The message must surface the actual size and the cap so the user
+    # knows how much to trim. CustomFieldDrawer reads `message` verbatim.
+    assert str(estimate) in warning["message"]
+    assert "16" in warning["message"]
+
+
+def test_error_band_returns_too_large():
+    """Past the hard cap the warning escalates to error severity. ~20
+    1-KiB custom fields land at ~20.7 KB — well past the 16 KiB cap.
+    """
+    cfg = {
+        "groups": [],
+        "field_overrides": {},
+        "custom_fields": _make_custom_fields(count=20, bytes_each=1024),
+    }
+    estimate = lf.estimate_log_line_bytes(cfg)
+    assert estimate >= lf.FASTLY_LOG_LINE_DELIVER_MAX
+
+    warning = lf.check_log_line_budget(cfg)
+    assert warning is not None
+    assert warning["code"] == "LOG_LINE_TOO_LARGE"
+    assert warning["severity"] == "error"
+    assert warning["estimate_bytes"] == estimate
+    # The error message must mention "truncate" / "16" so users see the
+    # operational consequence (data loss), not just the threshold.
+    assert "truncate" in warning["message"].lower()
+    assert "16" in warning["message"]
+
+
+def test_get_log_fields_endpoint_surfaces_warning(tmp_path, monkeypatch):
+    """The GET /api/services/{id}/log-fields response must include
+    ``line_budget_warning`` so the frontend can render it. Without this
+    field on the wire, the helper would be dead code.
+    """
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    svc_id = "test_svc_log_budget_get"
+    cfg = {
+        "service_id": svc_id,
+        "log_fields": {
+            "schema_version": 2,
+            "groups": ["A", "B", "C", "D"],
+            "field_overrides": {},
+            "custom_fields": _make_custom_fields(count=20, bytes_each=500),
+        },
+    }
+    config.save_config(svc_id, cfg)
+
+    client = TestClient(app)
+    resp = client.get(f"/api/services/{svc_id}/log-fields")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "line_budget_warning" in body
+    warning = body["line_budget_warning"]
+    assert warning is not None
+    assert warning["code"] == "LOG_LINE_APPROACHING_LIMIT"
+
+
+def test_post_log_fields_endpoint_surfaces_warning(tmp_path, monkeypatch):
+    """The POST endpoint must also surface the warning so the save flow
+    can show the same inline banner as the load flow.
+
+    Falco/state_sync are patched to keep the test offline.
+    """
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    svc_id = "test_svc_log_budget_post"
+    config.save_config(
+        svc_id,
+        {
+            "service_id": svc_id,
+            "log_fields": {"schema_version": 2, "groups": ["A"]},
+        },
+    )
+
+    payload = {
+        "log_fields": {
+            "schema_version": 2,
+            "groups": ["A", "B", "C", "D"],
+            "custom_fields": _make_custom_fields(count=20, bytes_each=500),
+        }
+    }
+    client = TestClient(app)
+    # export_admin_state hits state_sync internals; we don't need its
+    # side effects for this assertion.
+    with patch("backend.state_sync.export_admin_state", return_value=None):
+        resp = client.post(f"/api/services/{svc_id}/log-fields", json=payload)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "line_budget_warning" in body
+    warning = body["line_budget_warning"]
+    assert warning is not None
+    assert warning["code"] == "LOG_LINE_APPROACHING_LIMIT"
+
+
+def test_post_no_change_path_does_not_crash(tmp_path, monkeypatch):
+    """When the POST handler short-circuits on a no-op change, it returns
+    early WITHOUT the warning key. That branch must not crash and the
+    response shape is allowed to omit ``line_budget_warning``.
+    Locking this in prevents an over-eager refactor from changing the
+    return shape and breaking the no-op contract.
+    """
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    svc_id = "test_svc_log_budget_noop"
+    initial = {
+        "service_id": svc_id,
+        "log_fields": {"schema_version": 2, "groups": ["A"]},
+    }
+    config.save_config(svc_id, initial)
+    # Pre-compute hash so the next save is recognized as a no-op.
+    cfg = config.load_config(svc_id)
+    cfg["log_fields"]["format_hash"] = lf.format_hash(cfg["log_fields"])
+    config.save_config(svc_id, cfg)
+
+    client = TestClient(app)
+    resp = client.post(
+        f"/api/services/{svc_id}/log-fields",
+        json={"log_fields": cfg["log_fields"]},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body.get("ok") is True
+
+
+def test_generate_log_format_clamps_to_deliver_max_via_budget():
+    """Regression for F013 (audit run 7ba15352).
+
+    The prior generate_log_format() applied per-field substr() limits in
+    isolation: url(2000) + ua(1000) + referer(1000) + 7 custom fields *
+    2000 = ~18 KB substr cap budget, which let a single request's
+    interpolated log line punch through Fastly's 16 KiB silent-truncation
+    cap. Fastly drops the truncated mid-string line entirely, blinding
+    the audit trail (repudiation).
+
+    The aggregate-budget guard tracks a running ``budget`` and clamps
+    each variable-length field's substr cap to ``min(configured, budget)``.
+    We verify by enumerating all substr(*, 0, N) caps in the generated
+    VCL and asserting their sum stays below FASTLY_LOG_LINE_DELIVER_MAX.
+    """
+    import re
+
+    cfg = {
+        # Force the worst-case shape from the audit: url + ua + referer
+        # at max, plus 10 huge custom fields. Without the budget, sum
+        # would be 2000 + 1000 + 1000 + 10*2000 = 24 KB.
+        "field_limits": {"url": 4000, "ua": 4000, "referer": 4000},
+        "custom_fields": _make_custom_fields(10, bytes_each=4000),
+        # Per-field byte_limit overrides (mirror real config shape).
+        "groups": {"core": True, "a": True},
+    }
+    # Attach byte_limit so each custom field requests 4000 bytes.
+    for cf in cfg["custom_fields"]:
+        cf["byte_limit"] = 4000
+
+    fmt = lf.generate_log_format(cfg)
+
+    caps = [int(m) for m in re.findall(r"substr\([^)]*, *0, *(\d+)\)", fmt)]
+    assert caps, f"expected substr() caps in generated format, got: {fmt[:300]}…"
+    total = sum(caps)
+    assert total <= lf.FASTLY_LOG_LINE_DELIVER_MAX, (
+        f"aggregate substr-cap budget {total} exceeds FASTLY_LOG_LINE_DELIVER_MAX "
+        f"{lf.FASTLY_LOG_LINE_DELIVER_MAX} — F013 budget clamp regressed"
+    )
+
+
+# ── Merged from tests/core/test_field_registry.py ──
+def test_registry_imports_and_is_non_empty() -> None:
+    """The module loads at import time and exposes a populated REGISTRY."""
+    assert isinstance(REGISTRY, tuple)
+    assert len(REGISTRY) > 0
+    assert all(isinstance(f, LogField) for f in REGISTRY)
+
+
+def test_registry_is_frozen() -> None:
+    """Instances are immutable — accidental mutation is a TypeError, not a silent change."""
+    sample = REGISTRY[0]
+    with pytest.raises((AttributeError, TypeError)):
+        sample.code = "mutated"  # type: ignore[misc]
+
+
+def test_by_code_is_readonly_view() -> None:
+    """`BY_CODE` is a `MappingProxyType` — direct mutation raises."""
+    with pytest.raises(TypeError):
+        BY_CODE["bogus"] = REGISTRY[0]  # type: ignore[index]
+
+
+def test_every_field_round_trips_through_lookup() -> None:
+    """`get(code).code == code` for every field. KeyError on bogus codes."""
+    for f in REGISTRY:
+        assert fr.get(f.code) is f
+        assert fr.try_get(f.code) is f
+
+    assert fr.try_get("__not_a_real_code__") is None
+    with pytest.raises(KeyError):
+        fr.get("__not_a_real_code__")
+
+
+def test_field_codes_are_unique() -> None:
+    """No duplicate codes — the BY_CODE map invariant."""
+    codes = [f.code for f in REGISTRY]
+    assert len(codes) == len(set(codes))
+
+
+def test_registry_codes_match_log_fields() -> None:
+    """The registry covers every code in the legacy LOG_FIELD_CATALOG.
+
+    This is the parity guarantee that lets callers migrate one-at-a-time:
+    while both views are live, they must agree on the set of codes.
+    """
+    legacy = {entry["id"] for entry in LOG_FIELD_CATALOG}
+    new = set(BY_CODE)
+    missing_from_new = legacy - new
+    missing_from_legacy = new - legacy
+    assert not missing_from_new, f"registry is missing legacy codes: {missing_from_new}"
+    assert not missing_from_legacy, f"registry has extra codes not in legacy: {missing_from_legacy}"
+
+
+def test_registry_codes_match_builtin_set() -> None:
+    """`_BUILTIN_FIELD_NAMES` (the custom-field validation gate) and the
+    registry agree on what counts as a built-in name.
+
+    A divergence here would let a user create a custom field whose name
+    shadows a built-in one — exactly the failure that `validate_custom_field`
+    is supposed to catch.
+    """
+    assert set(BY_CODE) == set(_BUILTIN_FIELD_NAMES)
+
+
+@pytest.mark.security_regression
+def test_wire_order_matches_legacy_emission_order() -> None:
+    """Emission order in REGISTRY is byte-identical to the legacy catalog's VCL emission order.
+
+    The Rust scorer reads positional JSON keys; reordering REGISTRY rows
+    without coordinating with `compute/` silently breaks scorer parity.
+    This test is the boot-time gate that fails loudly in CI.
+    """
+    legacy_emission_order = tuple(entry["id"] for entry in LOG_FIELD_CATALOG if entry["vcl"] is not None)
+    assert tuple(f.code for f in REGISTRY if not f.is_derived) == legacy_emission_order
+
+
+def test_default_off_codes_match_legacy_catalog() -> None:
+    """The registry's ``default_off`` flags match ``log_fields.DEFAULT_OFF_FIELD_IDS``."""
+    from backend.core.log_fields import DEFAULT_OFF_FIELD_IDS
+
+    legacy = {entry["id"] for entry in LOG_FIELD_CATALOG if entry.get("default_off")}
+    default_off_codes = {f.code for f in REGISTRY if f.default_off}
+    assert default_off_codes == legacy
+    assert default_off_codes == DEFAULT_OFF_FIELD_IDS
+    assert "cookie_session" in default_off_codes
+
+
+def test_by_group_partitions_registry() -> None:
+    """Every field appears in exactly one group bucket. Together they cover REGISTRY."""
+    seen: set[str] = set()
+    for group, fields in BY_GROUP.items():
+        for f in fields:
+            assert f.group is group
+            assert f.code not in seen, f"{f.code} appears in multiple group buckets"
+            seen.add(f.code)
+    assert seen == set(BY_CODE)
+
+
+def test_derived_fields_have_no_vcl() -> None:
+    """`is_derived` is exactly the `vcl is None` predicate."""
+    for f in REGISTRY:
+        assert f.is_derived is (f.vcl is None)
+
+
+@given(code=st.sampled_from(sorted(f.code for f in REGISTRY)))
+def test_hypothesis_every_code_lookup_succeeds(code: str) -> None:
+    """For every known code, `get` returns a field whose `.code` matches input."""
+    f = fr.get(code)
+    assert f.code == code
+    # Derived properties never raise for any known field.
+    _ = f.is_derived
+
+
+def test_required_by_is_tuple_of_strings() -> None:
+    """Each field's `required_by` is a tuple of insight-id-shaped strings.
+
+    Referential integrity between `required_by` and `INSIGHT_DEFINITIONS`
+    is NOT asserted: the legacy catalog already contains references to
+    insight ids that don't live in INSIGHT_DEFINITIONS (e.g.
+    `image_optimization_opportunities`), and fixing that data drift is
+    out of scope for the registry scaffolding. When the migration moves
+    insight definitions into the registry too, this test should be
+    replaced with a referential-integrity check.
+    """
+    for f in REGISTRY:
+        assert isinstance(f.required_by, tuple)
+        for insight_id in f.required_by:
+            assert isinstance(insight_id, str) and insight_id  # non-empty
+
+
+def test_insight_required_fields_exist_in_registry() -> None:
+    """Each insight's `required_fields` names a real field code."""
+    from backend.core.log_fields import INSIGHT_DEFINITIONS
+
+    for insight in INSIGHT_DEFINITIONS:
+        for code in insight["required_fields"]:
+            assert fr.try_get(code) is not None, f"insight {insight['id']!r} requires unknown field {code!r}"
+
+
+_RE_EXPORTED_HELPERS = (
+    "generate_log_format",
+    "format_hash",
+    "get_lf_config",
+    "estimate_log_line_bytes",
+    "resolve_enabled_fields",
+    "check_log_line_budget",
+    "validate_custom_field",
+    "get_required_edge_headers",
+    "get_catalog_for_api",
+    "get_groups_for_api",
+)
+
+_RE_EXPORTED_CONSTANTS = (
+    "LOG_FIELD_CATALOG",
+    "GROUP_INFO",
+    "PRESETS",
+    "INSIGHT_DEFINITIONS",
+    "VALID_NAME_RE",
+)
+
+
+@pytest.mark.parametrize("name", _RE_EXPORTED_HELPERS)
+def test_helper_is_same_object_as_log_fields(name: str) -> None:
+    """`field_registry.HELPER is log_fields.HELPER` for every re-exported helper."""
+    from backend.core import log_fields as lf
+
+    assert hasattr(fr, name), f"field_registry is missing helper {name!r}"
+    assert hasattr(lf, name), f"log_fields is missing helper {name!r}"
+    assert getattr(fr, name) is getattr(lf, name), (
+        f"{name!r} on field_registry is not the same object as on log_fields — "
+        "re-export drift will break the @patch('backend.core.log_fields.X') pattern"
+    )
+
+
+@pytest.mark.parametrize("name", _RE_EXPORTED_CONSTANTS)
+def test_constant_is_same_object_as_log_fields(name: str) -> None:
+    """`field_registry.CONSTANT is log_fields.CONSTANT` for every re-exported constant."""
+    from backend.core import log_fields as lf
+
+    assert hasattr(fr, name), f"field_registry is missing constant {name!r}"
+    assert hasattr(lf, name), f"log_fields is missing constant {name!r}"
+    assert getattr(fr, name) is getattr(lf, name), (
+        f"{name!r} on field_registry is not the same object as on log_fields — "
+        "callers reading through the registry will miss mutations on log_fields"
+    )
+
+
+# ── Merged from tests/core/test_sql_ident.py ──
+BACKEND = pathlib.Path(__file__).resolve().parents[2] / "backend"
+
+
+@pytest.mark.parametrize("name", ["lake", "_x", "a1", "Logs_Foo", "client_vitals", "_"])
+def test_accepts_bare_identifiers(name: str) -> None:
+    assert sql_ident.is_safe_ident(name) is True
+    assert sql_ident.require_safe_ident(name, "bad ident") == name
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["", "1abc", "a-b", 'a"b', "a b", "a;DROP", "a\n", "x.y", "é", "lake'--"],
+)
+def test_rejects_everything_else(name: str) -> None:
+    assert sql_ident.is_safe_ident(name) is False
+    with pytest.raises(ValueError, match="bad ident"):
+        sql_ident.require_safe_ident(name, "bad ident")
+
+
+def test_rejects_non_strings() -> None:
+    assert sql_ident.is_safe_ident(None) is False  # type: ignore[arg-type]
+    assert sql_ident.is_safe_ident(5) is False  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        sql_ident.require_safe_ident(None, "bad ident")  # type: ignore[arg-type]
+
+
+def test_error_message_embeds_label_and_repr() -> None:
+    with pytest.raises(ValueError) as exc:
+        sql_ident.require_safe_ident("a-b", "invalid ducklake alias")
+    assert str(exc.value) == "invalid ducklake alias: 'a-b'"
+
+
+def test_bare_identifier_regex_has_one_owner() -> None:
+    """No module besides sql_ident may declare the bare-identifier regex literal."""
+    needles = ("[A-Za-z_][A-Za-z0-9_]*",)
+    offenders = []
+    for path in BACKEND.rglob("*.py"):
+        if path.name == "sql_ident.py":
+            continue
+        text = path.read_text()
+        # pg_connection's unanchored token matcher and clickhouse param-name
+        # matcher are lexers, not identifier validators.
+        if path.name in {"pg_connection.py", "clickhouse_client.py"}:
+            continue
+        if any(n in text for n in needles):
+            offenders.append(str(path.relative_to(BACKEND)))
+    assert offenders == [], f"use backend.core.sql_ident instead of a private identifier regex: {offenders}"

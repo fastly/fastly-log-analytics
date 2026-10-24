@@ -112,20 +112,14 @@ def _run_metadata_sync(
     # it was explicitly passed in. If a manual run is triggered without
     # start_time, it means "Import All", so we should clear any existing limit.
 
-    if not start_time and not is_manual:
-        prov = cfg.get("provisioning", {})
-        tr = prov.get("time_range")
-        if tr and tr.get("start"):
-            start_time = tr["start"]
-            logger.info("[scheduler] %s: Using configured start_time limit: %s", service_id, start_time)
+    from backend.cron.jobs._common import apply_time_range_pinning, get_service_display_label
 
     start_time_exec = time.time()
 
     def elapsed() -> str:
         return _elapsed_since(start_time_exec)
 
-    _svc_name = cfg.get("name", service_id) if cfg else service_id
-    _display = f"{_svc_name} ({service_id})" if _svc_name != service_id else service_id
+    _display = get_service_display_label(service_id, cfg)
     with cron_run(
         service_id,
         "metadata_sync",
@@ -199,32 +193,18 @@ def _run_metadata_sync(
             return
 
         # 2. Sync data files (Pull-to-Local caching)
+        start_time, end_time = apply_time_range_pinning(
+            service_id,
+            cfg,
+            src,
+            start_time=start_time,
+            end_time=end_time,
+            is_manual=is_manual,
+            pin_explicit_range=True,
+        )
         msg = "Scanning Iceberg table for new data files..."
         if start_time or end_time:
             msg += f" (Range: {start_time or 'Start'} to {end_time or 'End'})"
-
-            # Save the manually requested range so the DuckDB view can strictly bound to it
-            def _pin_time_range(c: dict) -> None:
-                time_range = c.setdefault("provisioning", {}).setdefault("time_range", {})
-                if start_time:
-                    time_range["start"] = start_time
-                if end_time:
-                    time_range["end"] = end_time
-
-            _pin_time_range(cfg)
-            prov = cfg["provisioning"]
-            svcconfig.mutate_config(service_id, _pin_time_range)
-            # Update local src reference since we mutated cfg
-            src["time_range"] = prov["time_range"]
-        elif is_manual:
-            # Manual "Sync All": clear any previously pinned range
-            prov = cfg.get("provisioning", {})
-            if "time_range" in prov:
-                del prov["time_range"]
-                cfg["provisioning"] = prov
-                svcconfig.mutate_config(service_id, lambda c: c.get("provisioning", {}).pop("time_range", None))
-                src["time_range"] = None
-                logger.info("[scheduler] %s: Manual sync-all, cleared time_range limit.", service_id)
 
         _log_and_add_progress(run_id, service_id, job_name="metadata_sync", event={"type": "status", "message": msg})
 
@@ -372,18 +352,13 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
     from backend.cron.decorators import dev_mode_no_crons
+    from backend.cron.jobs._common import get_service_display_label
     from backend.utils.ngwaf import fetch_verified_bots_paged
-    from backend.utils.ngwaf_bot_cache import cleanup_old_bots, ensure_schema, upsert_bots
+    from backend.utils.ngwaf_bot_cache import cleanup_old_bots, upsert_bots
 
     if dev_mode_no_crons():
         logger.info("⏸️  \x1b[36m[ngwaf_sync]\x1b[0m %s: dev_mode_no_crons active, skipping NGWAF sync.", service_id)
         return
-
-    # Make sure the cache file + tables exist before anything else touches it.
-    try:
-        ensure_schema()
-    except Exception:
-        pass
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -402,7 +377,7 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
         logger.warning("[ngwaf_sync] %s: no fastly_api_key configured, skipping.", service_id)
         return
 
-    svc_display = cfg.get("name", service_id)
+    svc_display = get_service_display_label(service_id, cfg)
 
     prov = cfg.get("provisioning", {})
     retention_days = int(prov.get("cron_ngwaf", {}).get("log_retention_days", 30))

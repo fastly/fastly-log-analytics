@@ -8,7 +8,7 @@ import { ScorerFailOpenHelp } from '@/components/SessionScoring/help-content'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { components } from '@/types/api.generated'
 
-import { useScoringQuery } from './useScoringQuery'
+import { useScoringQuery } from './useScorerTimeseries'
 import { client } from '@/lib/api'
 
 import { formatCount } from '@/lib/format'

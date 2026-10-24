@@ -2,10 +2,74 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import re
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from backend.high_scale._projection_utils import range_value
 from backend.utils.date_utils import safe_iso
+
+_DOMAIN_IDENT_RE = re.compile(r"^[a-z0-9_]+$")
+
+VISIBLE_PUBLICATION_FENCE_SQL = (
+    "publication_state='visible' "
+    "AND batch_id IN ("
+    "SELECT batch_id FROM high_scale_batch_publications FINAL "
+    "WHERE service_id={service_id:String} AND publication_state='visible')"
+)
+
+
+def visible_publication_fence_sql(domain: str | None = None) -> str:
+    """Return the publication-fence SQL predicate, optionally scoped to ``domain``."""
+    if domain is None:
+        return VISIBLE_PUBLICATION_FENCE_SQL
+    if not _DOMAIN_IDENT_RE.fullmatch(domain):
+        raise ValueError(f"Invalid publication domain identifier: {domain!r}")
+    return (
+        "publication_state='visible' "
+        "AND batch_id IN ("
+        "SELECT batch_id FROM high_scale_batch_publications FINAL "
+        f"WHERE service_id={{service_id:String}} AND domain='{domain}' "
+        "AND publication_state='visible')"
+    )
+
+
+def visible_fact_clauses(domain: str) -> list[str]:
+    """Predicates (with a ``{service_id:String}`` parameter) limiting a fact table to visible batches of ``domain``."""
+    if not _DOMAIN_IDENT_RE.fullmatch(domain):
+        raise ValueError(f"Invalid publication domain identifier: {domain!r}")
+    return [
+        "service_id={service_id:String}",
+        "publication_state='visible'",
+        "batch_id IN ("
+        "SELECT batch_id FROM high_scale_batch_publications FINAL "
+        f"WHERE service_id={{service_id:String}} AND domain='{domain}' "
+        "AND publication_state='visible')",
+    ]
+
+
+def parse_time_window(
+    start_time: str | None,
+    end_time: str | None,
+    default: timedelta = timedelta(days=1),
+    *,
+    utc: bool = False,
+    now: datetime | None = None,
+) -> tuple[datetime, datetime]:
+    """Parse ``(start_time, end_time)`` ISO bounds, defaulting ``end`` to ``now`` and ``start`` to ``end - default``."""
+    end = range_value(end_time) if end_time else (now or datetime.now(UTC))
+    if utc:
+        end = end.replace(tzinfo=UTC) if end.tzinfo is None else end.astimezone(UTC)
+    start = range_value(start_time) if start_time else (end - default)
+    if utc:
+        start = start.replace(tzinfo=UTC) if start.tzinfo is None else start.astimezone(UTC)
+    return start, end
+
+
+def inclusive_minute_end(end: datetime) -> datetime:
+    """Extend a whole-minute upper bound by 1 minute so ``event_timestamp < end_upper`` includes the minute."""
+    return end + timedelta(minutes=1) if end.second == 0 and end.microsecond == 0 else end
+
 
 _TIMESERIES_METRICS: dict[tuple[str, str], tuple[str, float]] = {
     ("ttfb", "p50"): ("latency_us", 0.5),

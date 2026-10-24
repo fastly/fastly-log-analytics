@@ -1,29 +1,4 @@
-"""Tests for :mod:`backend.cron.jobs.sync`.
-
-Pins the orchestration shape of ``_run_log_discovery_cron`` (per-tick FOS
-ingest) and ``_run_full_sweep`` (daily catch-net LIST). Both jobs are
-heavy wrappers around ``backend.core.ingest.ingest`` — these tests stub
-the ingest generator and assert the surrounding event/log/skip/error
-plumbing.
-
-Late imports inside the function bodies (``from backend.core.duckdb
-import refresh_config_status``) are patched at the source module
-(``backend.core.duckdb.refresh_config_status``) — that path resolves the
-name on each call, which is what the late ``from … import …`` statement
-actually performs. Module-level imports — ``_log_and_add_progress``,
-``_check_disk_space``, ``_extract_log_text`` from
-``backend.cron.scheduler`` — must be patched on
-``backend.cron.jobs.sync`` itself because the name was bound there at
-import time and the function body never re-resolves it.
-
-The ``_usage_log_phase`` inner helper defined inside
-``_run_log_discovery_cron`` cannot be intercepted at module level (it is a
-local closure). Its body's source-module imports
-(``backfill_fastly_edge_writes``, ``reconcile_fastly_stats``,
-``run_usage_log_cleanup``) ARE patchable on their source modules and we
-stub them out everywhere ``_run_log_discovery_cron`` is exercised so the
-phase becomes a no-op that doesn't leak DB I/O.
-"""
+"""Consolidated tests for test_sync_job."""
 
 from __future__ import annotations
 
@@ -1551,3 +1526,664 @@ def test_lifecycle_high_scale_missing_broker_row_has_no_log_output(monkeypatch, 
     assert kwargs["summary"] == "Celery ingest misconfigured: no broker URL"
     assert kwargs["error_message"] == "DEPLOYMENT_MODE=high_scale requires CELERY_BROKER_URL"
     assert kwargs["log_output"] is None
+
+
+# ── Merged from test_log_discovery_contract.py ──────────────────────────────────────────────
+
+import logging
+import stat
+from unittest.mock import patch
+
+import pytest
+from starlette.testclient import TestClient
+
+from backend.cron.jobs import sync as sync_mod
+from backend.cron.scheduler import Scheduler
+from backend.deps import get_service_id, get_source, require_admin
+from backend.main import app
+
+
+@pytest.fixture
+def log_discovery_test_source(monkeypatch, tmp_path):
+    service_id = "svc-log-discovery-contract"
+    cache_root = tmp_path / "cache" / service_id
+    cache_root.mkdir(parents=True, exist_ok=True)
+    src = {
+        "name": service_id,
+        "service_id": service_id,
+        "bucket": "test-log-discovery-bucket",
+        "_cache_dir_override": str(cache_root),
+        "provisioning": {
+            "access_level": "read_write",
+            "cron_sync": {"enabled": True},
+        },
+    }
+    monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src if sid == service_id else None)
+    monkeypatch.setattr("backend.config.load_config", lambda sid: src if sid == service_id else None)
+    return src
+
+
+def test_contract_1_manual_trigger_with_synthetic_gz_in_fos(log_discovery_test_source):
+    """Checklist Item 1:
+    Trigger POST /api/admin/sync/{service_id} with synthetic .gz files in FOS; verify HTTP 200 response.
+    """
+    service_id = log_discovery_test_source["service_id"]
+    started = {}
+
+    def fake_start_cron_run(src, task):
+        started["task"] = task
+        return "run-contract-sync-123"
+
+    app.dependency_overrides[get_source] = lambda: log_discovery_test_source
+    app.dependency_overrides[get_service_id] = lambda: service_id
+    try:
+        with (
+            patch("backend.core.duckdb.start_cron_run", side_effect=fake_start_cron_run),
+            patch("backend.cron_progress.start_progress"),
+            patch("backend.cron.jobs.sync._run_log_discovery_cron"),
+            patch("backend.repositories.dashboard.invalidate_service"),
+        ):
+            client = TestClient(app)
+            resp = client.post(
+                f"/api/admin/sync/{service_id}",
+                headers={"x-fastly-service-id": service_id},
+            )
+
+        assert resp.status_code == 200, f"Expected 200, got: {resp.text}"
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["run_id"] == "run-contract-sync-123"
+        assert "started" in body["message"].lower()
+        assert started["task"] == "log_discovery"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_contract_2_cron_runs_records_success_and_nonzero_files_ingested(log_discovery_test_source):
+    """Checklist Item 2:
+    Confirm execution records in cron_runs with status success and non-zero files_ingested.
+    """
+    from backend.core import metadata as metadata_db
+
+    service_id = log_discovery_test_source["service_id"]
+    source_name = log_discovery_test_source["name"]
+
+    # Start run
+    run_id = metadata_db.start_cron_run(service_id, "log_discovery")
+    assert run_id is not None
+
+    # Complete run with success and non-zero files ingested
+    metadata_db.log_cron_run(
+        service_id,
+        "log_discovery",
+        duration_s=1.25,
+        status="success",
+        run_id=run_id,
+        files_downloaded=5,
+        rows_ingested=150,
+        summary="Ingested 5 file(s) (150 rows) in 1.25s",
+    )
+
+    total, runs = metadata_db.get_cron_runs(source_name, task="log_discovery", per_page=5)
+    assert total >= 1
+    assert runs[0]["status"] == "success"
+    assert runs[0]["files_downloaded"] == 5
+    assert runs[0]["rows_ingested"] == 150
+
+
+def test_contract_3_usage_log_attributes_fos_class_a_list_and_class_b_get_to_cron_log_discovery(
+    log_discovery_test_source, monkeypatch
+):
+    """Checklist Item 3:
+    Verify the PostgreSQL usage_log table attributes FOS Class A LIST and Class B GET calls to cron.log_discovery.
+    Also verifies that the cron_task wrapper executes with process_context='cron.log_discovery' and flushes on exit.
+    """
+    from backend.core import metadata as metadata_db
+    from backend.core.metadata import usage_log_db
+    from backend.utils.telemetry import get_process_context
+
+    service_id = log_discovery_test_source["service_id"]
+    observed: dict[str, object] = {}
+    flush_contexts: list[str | None] = []
+
+    def fake_ingest_followups(*args, **kwargs):
+        observed["context"] = get_process_context()
+        yield {"type": "done", "files": 0, "rows": 0, "corrupt": 0}
+
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: log_discovery_test_source)
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda *a, **kw: 999)
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", lambda *a, **kw: None)
+    monkeypatch.setattr("backend.cron.jobs.sync._ingest_with_adaptive_followups", fake_ingest_followups)
+    monkeypatch.setattr("backend.cron.jobs.sync._claim_heavy_refresh", lambda sid: False)
+    monkeypatch.setattr("backend.cron_progress.start_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("backend.cron_progress.end_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "backend.utils.usage_logger.flush_usage_log",
+        lambda sid: flush_contexts.append(get_process_context()),
+    )
+
+    sync_mod._run_log_discovery_cron(service_id, force=True)
+
+    assert observed["context"] == "cron.log_discovery", (
+        f"Execution must run under process_context='cron.log_discovery', got {observed['context']!r}"
+    )
+    assert flush_contexts == ["cron.log_discovery"], (
+        f"Usage log flush must run under process_context='cron.log_discovery', got {flush_contexts}"
+    )
+
+    # Emulate FOS Class A LIST and Class B GET calls captured during log discovery
+    fos_calls = [
+        {
+            "method": "LISTOBJECTSV2",
+            "service": "FOS",
+            "details": "Class A · list",
+            "url": "s3://test-bucket/raw/request/",
+        },
+        {
+            "method": "GETOBJECT",
+            "service": "FOS",
+            "bytes": 65536,
+            "details": "Class B · get",
+            "url": "s3://test-bucket/raw/request/log.gz",
+        },
+    ]
+
+    metadata_db.log_usage_calls(service_id, fos_calls, process_context="cron.log_discovery")
+
+    con = usage_log_db.get_con(service_id)
+    rows = con.execute(
+        "SELECT operation_class, process_context, operation_type FROM usage_log WHERE service_id = ? ORDER BY id",
+        (service_id,),
+    ).fetchall()
+
+    list_rows = [r for r in rows if r["operation_type"] == "LISTOBJECTSV2"]
+    assert list_rows, "Must record LISTOBJECTSV2 in usage_log"
+    assert list_rows[-1]["operation_class"] == "A", "LISTOBJECTSV2 must be classified as Class A"
+    assert list_rows[-1]["process_context"] == "cron.log_discovery", (
+        "LISTOBJECTSV2 must be attributed to cron.log_discovery"
+    )
+
+    get_rows = [r for r in rows if r["operation_type"] == "GETOBJECT"]
+    assert get_rows, "Must record GETOBJECT in usage_log"
+    assert get_rows[-1]["operation_class"] == "B", "GETOBJECT must be classified as Class B"
+    assert get_rows[-1]["process_context"] == "cron.log_discovery", "GETOBJECT must be attributed to cron.log_discovery"
+
+
+def test_contract_6_safety_gate_under_fla_dev_no_crons(log_discovery_test_source, monkeypatch, caplog):
+    """Checklist Item 6:
+    Under FLA_DEV_NO_CRONS=1, verify job does not register or execute.
+    """
+    service_id = log_discovery_test_source["service_id"]
+    monkeypatch.setenv("FLA_DEV_NO_CRONS", "1")
+
+    # 1. Registration check: Scheduler._register_dev_local_safe_jobs must NOT register log_discovery
+    sched = Scheduler()
+    with (
+        patch("backend.config.list_configs", return_value=[log_discovery_test_source]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=log_discovery_test_source),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch.object(sched._sched, "add_job") as add_job,
+    ):
+        sched._register_dev_local_safe_jobs()
+        job_ids = [c.kwargs["id"] for c in add_job.call_args_list]
+        assert f"log_discovery_{service_id}" not in job_ids, (
+            "log_discovery must never register under FLA_DEV_NO_CRONS=1"
+        )
+
+    # 2. Execution check: direct invocation must refuse execution and log warning citing FLA_DEV_NO_CRONS=1
+    caplog.set_level(logging.WARNING)
+    with patch("backend.core.duckdb.get_source_for_service") as get_src:
+        res = sync_mod._run_log_discovery_cron(service_id, force=True)
+        get_src.assert_not_called()
+        assert res is None or res.get("status") == "skipped"
+
+    assert any("FLA_DEV_NO_CRONS=1" in record.message for record in caplog.records), (
+        "Execution refusal log must cite FLA_DEV_NO_CRONS=1"
+    )
+
+
+def test_contract_8_malformed_corrupt_caps_and_analyst_denial(log_discovery_test_source, tmp_path, monkeypatch):
+    """Checklist Item 8:
+    Verify malformed-line and corrupt-gzip outcomes, per-category counters, error status,
+    immediate per-service cap eviction, private evidence downloads, and Analyst Path A/B denial.
+    """
+    from backend.core import quarantine
+    from backend.core.metadata.quarantine import list_quarantine_evidence
+
+    service_id = log_discovery_test_source["service_id"]
+
+    # 1. FIFO cap eviction & 0o600 / 0o700 private permissions
+    monkeypatch.setattr(quarantine, "QUARANTINE_ITEM_CAP", 2)
+    payloads = [b'{"line": 1}\n', b'{"line": 2}\n', b'{"line": 3}\n']
+    results = [
+        quarantine.capture_evidence(
+            service_id,
+            "request",
+            f"raw/request/part_{i}.log.gz",
+            payload,
+            line_ordinal=i,
+            byte_offset=0,
+            error_category="invalid_json",
+            error_text="malformed json test",
+        )
+        for i, payload in enumerate(payloads, start=1)
+    ]
+
+    # Third insertion must trigger eviction of item 1
+    assert results[2]["cap_evictions"] == 1
+    items = list_quarantine_evidence(service_id)
+    assert len(items) == 2
+    remaining_ids = {item["id"] for item in items}
+    assert int(results[0]["id"]) not in remaining_ids
+    assert int(results[2]["id"]) in remaining_ids
+
+    # Check evidence file permission 0o600 and dir permission 0o700
+    evidence_path = quarantine._evidence_path(service_id, int(results[2]["id"]))
+    assert stat.S_IMODE(evidence_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(evidence_path.parent.stat().st_mode) == 0o700
+
+    # 2. Private evidence download via API
+    item, evidence_file = quarantine.read_evidence(service_id, int(results[2]["id"]))
+    try:
+        assert evidence_file.read() == payloads[2]
+    finally:
+        evidence_file.close()
+
+    app.dependency_overrides[get_source] = lambda: log_discovery_test_source
+    app.dependency_overrides[get_service_id] = lambda: service_id
+    try:
+        client = TestClient(app)
+        download_resp = client.get(f"/api/admin/quarantine/download/{results[2]['id']}")
+        assert download_resp.status_code == 200
+        assert download_resp.content == payloads[2]
+
+        # 3. Analyst Path B denial (require_admin blocks remote analyst)
+        from fastapi import HTTPException
+
+        def reject_analyst():
+            raise HTTPException(status_code=403, detail={"error": "admin_only"})
+
+        app.dependency_overrides[require_admin] = reject_analyst
+        denied_resp = client.get(f"/api/admin/quarantine/download/{results[2]['id']}")
+        assert denied_resp.status_code == 403
+        assert denied_resp.json()["detail"]["error"] == "admin_only"
+
+        # 4. Analyst Path A denial (read_only instance cannot trigger sync)
+        ro_source = {**log_discovery_test_source, "access_level": "read_only"}
+        app.dependency_overrides[get_source] = lambda: ro_source
+        app.dependency_overrides.pop(require_admin, None)
+        sync_denied_resp = client.post(
+            f"/api/admin/sync/{service_id}",
+            headers={"x-fastly-service-id": service_id},
+        )
+        assert sync_denied_resp.status_code == 403
+        assert "read-only" in sync_denied_resp.json()["detail"].lower()
+    finally:
+        app.dependency_overrides.clear()
+
+
+# ── Merged from test_commit.py ──────────────────────────────────────────────
+
+
+import pytest
+
+from backend.cron.jobs import commit
+
+
+class TestCommitJob:
+    @pytest.fixture
+    def stub_load_config(self, monkeypatch):
+        cfg = {
+            "service_id": "svc-1",
+            "name": "svc-1",
+            "provisioning": {"cron_sync": {"enabled": True, "commit_interval_mins": 5}},
+        }
+        load = MagicMock(return_value=cfg)
+        monkeypatch.setattr("backend.config.load_config", load)
+        return {"load": load, "cfg": cfg}
+
+    def test_returns_when_config_missing(self, monkeypatch):
+
+        monkeypatch.setattr("backend.config.load_config", MagicMock(return_value=None))
+        get_src = MagicMock()
+        monkeypatch.setattr("backend.core.duckdb.get_source_for_service", get_src)
+        commit._run_commit.__wrapped__("ghost-svc")
+        get_src.assert_not_called()
+
+    def test_returns_when_source_missing(self, monkeypatch, stub_load_config):
+        monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: None)
+        start = MagicMock()
+        monkeypatch.setattr("backend.core.duckdb.start_cron_run", start)
+        commit._run_commit.__wrapped__("svc-1")
+        start.assert_not_called()
+
+    def test_read_only_source_skipped_without_force(self, monkeypatch, stub_load_config):
+        """A read_only source must NOT run commit unless force=True is
+        passed (manual admin trigger). This is the contract that prevents
+        a read-only mirror from clobbering the writer's snapshots."""
+        ro_src = {"name": "ro", "service_id": "svc-1", "access_level": "read_only"}
+        monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: ro_src)
+        start = MagicMock()
+        monkeypatch.setattr("backend.core.duckdb.start_cron_run", start)
+
+        commit._run_commit.__wrapped__("svc-1")  # force defaults False
+
+        start.assert_not_called()
+
+    def test_disabled_sync_skipped_without_force(self, monkeypatch, stub_load_config, stub_source):
+        """cron_sync.enabled=False without force → no-op. The shared
+        ``cron_sync`` config gates both ingest and commit so they can be
+        suspended together for maintenance windows."""
+        stub_load_config["cfg"]["provisioning"]["cron_sync"]["enabled"] = False
+        start = MagicMock()
+        monkeypatch.setattr("backend.core.duckdb.start_cron_run", start)
+        commit._run_commit.__wrapped__("svc-1")
+        start.assert_not_called()
+
+    def test_disk_check_failure_logs_error_and_returns(
+        self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+    ):
+        """Disk space below floor → log_cron_run with 'error' + 'Commit
+        aborted: ...', commit_buffer never runs. The whole point of the
+        pre-check is that a midway disk failure during commit would corrupt
+        the iceberg state — refusing to start is the safe move."""
+        # ``_check_disk_space`` was bound on ``backend.cron.jobs.commit`` at
+        # import time via ``from backend.cron.scheduler import _check_disk_space``.
+        # Patch where the name lives so the body resolves to our mock.
+        monkeypatch.setattr("backend.cron.jobs.commit._check_disk_space", lambda *a, **kw: (False, "disk 95% full"))
+        cb = MagicMock()
+        monkeypatch.setattr("backend.core.iceberg.commit_buffer", cb)
+
+        commit._run_commit.__wrapped__("svc-1")
+
+        cb.assert_not_called()
+        args, kwargs = stub_cron_envelope["log"].call_args
+        assert args[3] == "error"
+        assert "disk 95% full" in kwargs["error_message"]
+        assert "Commit aborted" in kwargs["summary"]
+
+    def test_success_with_committed_files_logs_summary_and_refreshes_view(
+        self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+    ):
+        """Happy path: commit_buffer returns rows_committed > 0 →
+        log_cron_run records 'success' with the row count + snapshot id,
+        refresh_view_and_warm_pool fires, and metadata_sync is dispatched."""
+        monkeypatch.setattr(
+            "backend.core.iceberg.commit_buffer",
+            MagicMock(return_value={"files_committed": 2, "rows_committed": 1234, "snapshot_id": 8675309}),
+        )
+
+        commit._run_commit.__wrapped__("svc-1")
+
+        args, kwargs = stub_cron_envelope["log"].call_args
+        assert args[3] == "success"
+        assert kwargs["rows_ingested"] == 1234
+        assert "1234 rows" in kwargs["summary"]
+        assert "8675309" in kwargs["summary"]
+
+        from backend.cron.jobs import _common
+        from backend.cron.jobs.metadata import dispatch_post_commit_metadata_sync
+
+        _common.refresh_view_and_warm_pool.assert_called_once()
+        dispatch_post_commit_metadata_sync.assert_called_once_with("svc-1")
+
+    def test_success_no_files_committed_logs_no_new_data(
+        self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+    ):
+        """Empty buffer → status='success' (NOT a failure mode) with the
+        'No new data to commit' summary. metadata_sync should NOT be
+        triggered (no new data to sync)."""
+        monkeypatch.setattr(
+            "backend.core.iceberg.commit_buffer",
+            MagicMock(return_value={"files_committed": 0, "rows_committed": 0, "snapshot_id": None}),
+        )
+
+        commit._run_commit.__wrapped__("svc-1")
+
+        args, kwargs = stub_cron_envelope["log"].call_args
+        assert args[3] == "success"
+        assert "No new data" in kwargs["summary"]
+
+        from backend.cron.jobs.metadata import dispatch_post_commit_metadata_sync
+
+        dispatch_post_commit_metadata_sync.assert_not_called()
+
+    def test_metadata_sync_dispatch_failure_does_not_fail_durable_commit(
+        self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+    ):
+        monkeypatch.setattr("backend.cron.jobs.commit._log_and_add_progress", stub_cron_envelope["log_event"])
+        monkeypatch.setattr(
+            "backend.core.iceberg.commit_buffer",
+            MagicMock(return_value={"files_committed": 1, "rows_committed": 12, "snapshot_id": "ducklake"}),
+        )
+        monkeypatch.setattr(
+            "backend.cron.jobs.metadata.dispatch_post_commit_metadata_sync",
+            MagicMock(side_effect=RuntimeError("worker unavailable")),
+        )
+
+        commit._run_commit.__wrapped__("svc-1")
+
+        assert stub_cron_envelope["log"].call_args.args[3] == "success"
+        assert any(
+            call.kwargs.get("event", {}).get("type") == "warning"
+            for call in stub_cron_envelope["log_event"].call_args_list
+        )
+
+    def test_commit_failure_without_progress_is_not_a_successful_noop(
+        self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+    ):
+        monkeypatch.setattr(
+            "backend.core.iceberg.commit_buffer",
+            MagicMock(
+                return_value={
+                    "files_committed": 0,
+                    "rows_committed": 0,
+                    "snapshot_id": "ducklake",
+                    "error": "write attach unavailable",
+                }
+            ),
+        )
+
+        commit._run_commit.__wrapped__("svc-1")
+
+        args, kwargs = stub_cron_envelope["log"].call_args
+        assert args[3] == "error"
+        assert kwargs["error_message"] == "write attach unavailable"
+        assert "No buffer files committed" in kwargs["summary"]
+
+    def test_quarantined_files_log_incomplete_commit(
+        self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+    ):
+        """Quarantining unreadable input is surfaced as an error, not a successful drain."""
+        monkeypatch.setattr("backend.cron.jobs.commit._log_and_add_progress", stub_cron_envelope["log_event"])
+        monkeypatch.setattr(
+            "backend.core.iceberg.commit_buffer",
+            MagicMock(
+                return_value={
+                    "files_committed": 5,
+                    "rows_committed": 100,
+                    "snapshot_id": 1,
+                    "quarantined_files": 2,
+                }
+            ),
+        )
+
+        commit._run_commit.__wrapped__("svc-1")
+
+        args, kwargs = stub_cron_envelope["log"].call_args
+        assert args[3] == "error"
+        assert "quarantined 2" in kwargs["summary"]
+        assert "2 unreadable buffer file(s) quarantined" in kwargs["error_message"]
+        assert stub_cron_envelope["log_event"].call_args.kwargs["event"]["type"] == "error"
+
+    def test_partial_commit_error_preserves_counts_and_refreshes_durable_rows(
+        self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+    ):
+        monkeypatch.setattr(
+            "backend.core.iceberg.commit_buffer",
+            MagicMock(
+                return_value={
+                    "files_committed": 1,
+                    "rows_committed": 12,
+                    "snapshot_id": "ducklake",
+                    "quarantined_files": 0,
+                    "error": "later chunk attach failed",
+                }
+            ),
+        )
+
+        commit._run_commit.__wrapped__("svc-1")
+
+        args, kwargs = stub_cron_envelope["log"].call_args
+        assert args[3] == "error"
+        assert kwargs["rows_ingested"] == 12
+        assert kwargs["error_message"] == "later chunk attach failed"
+        assert "Committed 1 buffer file(s) (12 rows)" in kwargs["summary"]
+        assert "commit incomplete: later chunk attach failed" in kwargs["summary"]
+        from backend.cron.jobs import _common
+
+        _common.refresh_view_and_warm_pool.assert_called_once()
+
+    def test_high_scale_commit_uses_ledger_merge_not_standard_buffer(
+        self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+    ):
+        monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+        merge_calls = []
+        monkeypatch.setattr("backend.core.ingest.merge_lake_files", lambda sid: merge_calls.append(("merge", sid)))
+        monkeypatch.setattr(
+            "backend.core.ingest.finalize_committed_raw",
+            lambda sid: merge_calls.append(("finalize", sid)) or {"delete_after": False, "deleted": 0},
+        )
+        meta_con = MagicMock()
+        meta_con.execute.side_effect = [
+            MagicMock(fetchone=MagicMock(return_value=None)),
+            MagicMock(fetchone=MagicMock(return_value=(0,))),
+        ]
+        monkeypatch.setattr("backend.core.metadata.base.get_con", lambda sid: meta_con)
+        standard_commit = MagicMock()
+        monkeypatch.setattr("backend.core.iceberg.commit_buffer", standard_commit)
+
+        commit._run_commit.__wrapped__("svc-1")
+
+        assert merge_calls == [("merge", "svc-1"), ("finalize", "svc-1")]
+        standard_commit.assert_not_called()
+        args, kwargs = stub_cron_envelope["log"].call_args
+        assert args[3] == "success"
+        assert "merged small lake files" in kwargs["summary"]
+        from backend.cron.jobs.metadata import dispatch_post_commit_metadata_sync
+
+        dispatch_post_commit_metadata_sync.assert_not_called()
+
+    def test_unexpected_exception_logged_as_error(self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope):
+        """Uncaught exception in commit_buffer → status='error' AND
+        end_progress STILL fires in the finally block. Pinned because a
+        skipped end_progress would leak a 'running' progress row that
+        the dashboard's live indicator never clears."""
+        monkeypatch.setattr(
+            "backend.core.iceberg.commit_buffer",
+            MagicMock(side_effect=RuntimeError("snapshot conflict")),
+        )
+
+        commit._run_commit.__wrapped__("svc-1")
+
+        args, kwargs = stub_cron_envelope["log"].call_args
+        assert args[3] == "error"
+        assert "snapshot conflict" in kwargs["error_message"]
+        stub_cron_envelope["end_progress"].assert_called_once()
+
+    def test_lease_held_is_clean_skip_without_row_or_progress(
+        self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+    ):
+        stub_cron_envelope["start"].side_effect = CronLeaseHeldError("lease held")
+        cb = MagicMock()
+        monkeypatch.setattr("backend.core.iceberg.commit_buffer", cb)
+
+        commit._run_commit.__wrapped__("svc-1")
+
+        cb.assert_not_called()
+        stub_cron_envelope["log"].assert_not_called()
+        stub_cron_envelope["end_progress"].assert_not_called()
+
+    def test_caller_supplied_run_id_is_reused_without_new_lease(
+        self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+    ):
+        monkeypatch.setattr(
+            "backend.core.iceberg.commit_buffer",
+            MagicMock(return_value={"files_committed": 0, "rows_committed": 0}),
+        )
+
+        commit._run_commit.__wrapped__("svc-1", run_id=77)
+
+        stub_cron_envelope["start"].assert_not_called()
+        assert stub_cron_envelope["log"].call_args.kwargs["run_id"] == 77
+        stub_cron_envelope["end_progress"].assert_called_once_with(77)
+
+    def test_disk_check_failure_row_has_no_log_output_and_progress_is_closed(
+        self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+    ):
+        monkeypatch.setattr("backend.cron.jobs.commit._check_disk_space", lambda *a, **kw: (False, "disk 95% full"))
+
+        commit._run_commit.__wrapped__("svc-1")
+
+        stub_cron_envelope["log"].assert_called_once()
+        assert stub_cron_envelope["log"].call_args.kwargs["log_output"] is None
+        stub_cron_envelope["end_progress"].assert_called_once_with(33)
+
+    def test_exception_after_success_row_overwrites_with_error_row(
+        self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+    ):
+        monkeypatch.setattr(
+            "backend.core.iceberg.commit_buffer",
+            MagicMock(return_value={"files_committed": 1, "rows_committed": 5, "snapshot_id": 9}),
+        )
+        monkeypatch.setattr(
+            "backend.cron.jobs._common.refresh_view_and_warm_pool", MagicMock(side_effect=RuntimeError("warm failed"))
+        )
+
+        commit._run_commit.__wrapped__("svc-1")
+
+        statuses = [c.args[3] for c in stub_cron_envelope["log"].call_args_list]
+        assert statuses == ["success", "error"]
+        last = stub_cron_envelope["log"].call_args
+        assert last.kwargs["summary"] == "Buffer commit failed"
+        assert last.kwargs["error_message"] == "warm failed"
+
+    def test_high_scale_failure_records_error_row_without_log_output(
+        self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+    ):
+        monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+        monkeypatch.setattr("backend.core.ingest.merge_lake_files", MagicMock(side_effect=RuntimeError("merge broke")))
+
+        commit._run_commit.__wrapped__("svc-1")
+
+        stub_cron_envelope["log"].assert_called_once()
+        args, kwargs = stub_cron_envelope["log"].call_args
+        assert args[3] == "error"
+        assert kwargs["summary"] == "DuckLake merge / raw finalization failed"
+        assert kwargs["error_message"] == "merge broke"
+        assert kwargs["log_output"] is None
+        assert kwargs["run_id"] == 33
+
+    def test_high_scale_previous_commit_lookup_is_scoped_to_the_service(
+        self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+    ):
+        monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+        monkeypatch.setattr("backend.core.ingest.merge_lake_files", lambda sid: None)
+        monkeypatch.setattr(
+            "backend.core.ingest.finalize_committed_raw", lambda sid: {"delete_after": False, "deleted": 0}
+        )
+        meta_con = MagicMock()
+        meta_con.execute.side_effect = [
+            MagicMock(fetchone=MagicMock(return_value=None)),
+            MagicMock(fetchone=MagicMock(return_value=(4,))),
+        ]
+        monkeypatch.setattr("backend.core.metadata.base.get_con", lambda sid: meta_con)
+
+        commit._run_commit.__wrapped__("svc-1")
+
+        sql, params = meta_con.execute.call_args_list[0].args
+        assert "service_id = ? AND task = 'commit'" in sql
+        assert params == ("svc-1",)
+        assert stub_cron_envelope["log"].call_args.kwargs["files_downloaded"] == 4

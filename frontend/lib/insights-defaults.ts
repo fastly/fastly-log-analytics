@@ -33,7 +33,7 @@ export const BASELINE_OPTIONS = [
 // The historical default (also the backend default): recent 24h vs previous 7d.
 // Used whenever we have no extents to adapt to, so behavior is unchanged for
 // services with no data and on the server/first render.
-export const STATIC_DEFAULT = { window: '24', baseline: '168' } as const
+const STATIC_DEFAULT = { window: '24', baseline: '168' } as const
 
 // Hours of history available = now − earliest_log_at. The baseline period the
 // Insights query compares against reaches back (now − baseline − window), so

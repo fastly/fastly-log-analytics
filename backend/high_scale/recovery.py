@@ -21,21 +21,81 @@ import structlog
 
 from backend.high_scale.archive_models import ArchiveManifest
 from backend.high_scale.archive_publication import ArchivePublication
+from backend.high_scale.ingest_controller import _enrich_high_scale_ngwaf_bots
 from backend.high_scale.publication import ClickHousePublication
-from backend.high_scale.recovery_capacity import (
-    RecoveryCapacityMeasurement,
-    RecoveryCapacityReport,
-    evaluate_recovery_capacity,
-)
 from backend.high_scale.replay import (
     ProjectionReplayResult,
+    _batch_from_rows,
+    _load_manifest_request_events,
     replay_cmcd_projections,
     replay_manifest,
     replay_origin_projections,
     replay_performance_projections,
 )
+from backend.high_scale.security_projection import build_security_projection_rows
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class RecoveryCapacityMeasurement:
+    events_per_second: int
+    recovery_window_seconds: int
+    archive_read_events_per_second: int
+    decode_events_per_second: int
+    aggregate_events_per_second: int
+    clickhouse_insert_events_per_second: int
+    replication_factor: int
+    live_ingest_reservation: float
+
+    def validate(self) -> None:
+        if self.events_per_second <= 0 or self.recovery_window_seconds <= 0:
+            raise ValueError("event rate and recovery window must be positive")
+        if (
+            min(
+                self.archive_read_events_per_second,
+                self.decode_events_per_second,
+                self.aggregate_events_per_second,
+                self.clickhouse_insert_events_per_second,
+            )
+            <= 0
+        ):
+            raise ValueError("all recovery throughput measurements must be positive")
+        if self.replication_factor < 1:
+            raise ValueError("replication factor must be positive")
+        if not 0 <= self.live_ingest_reservation < 1:
+            raise ValueError("live ingest reservation must be in [0, 1)")
+
+
+@dataclass(frozen=True)
+class RecoveryCapacityReport:
+    required_events_per_second: float
+    limiting_stage: str
+    limiting_events_per_second: int
+    replication_adjusted_insert_events_per_second: float
+    feasible: bool
+
+
+def evaluate_recovery_capacity(measurement: RecoveryCapacityMeasurement) -> RecoveryCapacityReport:
+    """Evaluate a measured recovery profile without claiming unmeasured capacity."""
+
+    measurement.validate()
+    required = (
+        measurement.events_per_second
+        * 86_400
+        / measurement.recovery_window_seconds
+        / (1 - measurement.live_ingest_reservation)
+    )
+    stages = {
+        "archive_read": measurement.archive_read_events_per_second,
+        "decode": measurement.decode_events_per_second,
+        "aggregate_rebuild": measurement.aggregate_events_per_second,
+        "clickhouse_insert": measurement.clickhouse_insert_events_per_second // measurement.replication_factor,
+    }
+    limiting_stage, limiting_rate = min(stages.items(), key=lambda item: item[1])
+    replication_adjusted = measurement.clickhouse_insert_events_per_second / measurement.replication_factor
+    feasible = limiting_rate >= required
+    return RecoveryCapacityReport(required, limiting_stage, limiting_rate, replication_adjusted, feasible)
 
 
 class ArchiveManifestCatalog(Protocol):
@@ -377,6 +437,56 @@ def rebuild_performance_projections_from_fos(
         service_id=service_id,
         projection_label="Performance",
         replay_fn=replay_performance_projections,
+        now=now,
+        window=window,
+        rebuild_id=rebuild_id,
+        capacity=capacity,
+    )
+
+
+def replay_security_projections(
+    manifest: ArchiveManifest,
+    archive: ArchivePublication,
+    publication: ClickHousePublication,
+    *,
+    rebuild_id: str,
+) -> ProjectionReplayResult:
+    serving_rows = _load_manifest_request_events(manifest, archive, projection_label="Security")
+    _enrich_high_scale_ngwaf_bots(serving_rows)
+    projection = build_security_projection_rows(serving_rows)
+    published = 0
+    if projection.dimension_rows:
+        result = publication.publish(
+            _batch_from_rows(
+                f"rebuild-security:{rebuild_id}:{manifest.manifest_id}:dimensions",
+                manifest,
+                projection.dimension_rows,
+                domain="security_dimensions",
+            )
+        )
+        published = result.rows_visible
+    return ProjectionReplayResult(manifest.manifest_id, len(serving_rows), published)
+
+
+def rebuild_security_projections_from_fos(
+    catalog: ArchiveManifestCatalog,
+    archive: ArchivePublication,
+    publication: ClickHousePublication,
+    *,
+    service_id: str,
+    now: datetime | None = None,
+    window: timedelta = timedelta(days=30),
+    rebuild_id: str | None = None,
+    capacity: RecoveryCapacityMeasurement | None = None,
+) -> RecoveryReport:
+    """Populate ``security_dimensions`` from FOS archive manifests over ``window``."""
+    return _rebuild_request_projections_from_fos(
+        catalog,
+        archive,
+        publication,
+        service_id=service_id,
+        projection_label="Security",
+        replay_fn=replay_security_projections,
         now=now,
         window=window,
         rebuild_id=rebuild_id,

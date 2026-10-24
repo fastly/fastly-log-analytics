@@ -23,15 +23,15 @@ import threading
 from datetime import UTC, datetime
 
 from backend.core import share_db
-from backend.utils.date_utils import iso_z_now
+from backend.utils.date_utils import iso_z_now, parse_iso_utc
 
-from .fingerprint import compute_fingerprint
-from .rate_limiter import LOGIN_FAILURE_WINDOW_S, _LoginRateLimiter
 from .session import (
     ABSOLUTE_TIMEOUT_S,
     IDLE_TIMEOUT_S,
+    LOGIN_FAILURE_WINDOW_S,
     AnalystSession,
-    parse_iso_z,
+    _LoginRateLimiter,
+    compute_fingerprint,
 )
 from .state import (
     TunnelState,
@@ -91,10 +91,9 @@ class TunnelManager:
         now = datetime.now(UTC)
         with self._lock:
             for row in rows:
-                try:
-                    login = parse_iso_z(row["login_time"])
-                    last = parse_iso_z(row["last_active_time"])
-                except Exception:
+                login = parse_iso_utc(row["login_time"])
+                last = parse_iso_utc(row["last_active_time"])
+                if login is None or last is None:
                     share_db.delete_session(row["session_id"])
                     continue
                 if (now - login).total_seconds() > ABSOLUTE_TIMEOUT_S:
@@ -272,10 +271,9 @@ class TunnelManager:
             if session is None:
                 return None
             now = datetime.now(UTC)
-            try:
-                login = parse_iso_z(session.login_time)
-                last = parse_iso_z(session.last_active_time)
-            except Exception:
+            login = parse_iso_utc(session.login_time)
+            last = parse_iso_utc(session.last_active_time)
+            if login is None or last is None:
                 self._evict(session, reason="invalid timestamp", event="SESSION_TIMEOUT")
                 return None
             if (now - login).total_seconds() > ABSOLUTE_TIMEOUT_S:
@@ -383,13 +381,6 @@ class TunnelManager:
                     n += 1
         return n
 
-    def clear_all_sessions(self, *, reason: str = "panic") -> int:
-        with self._lock:
-            ids = list(self._sessions.keys())
-            for sid in ids:
-                self.boot_session(sid, reason=reason)
-            return len(ids)
-
     def _evict(self, session: AnalystSession, *, reason: str, event: str) -> None:
         # Called under self._lock.
         self._sessions.pop(session.session_id, None)
@@ -450,11 +441,10 @@ class TunnelManager:
         with self._lock:
             current_uptime_s: int | None = None
             if self._state.started_at:
-                try:
-                    started = parse_iso_z(self._state.started_at)
-                    current_uptime_s = max(0, int((datetime.now(UTC) - started).total_seconds()))
-                except Exception:
-                    current_uptime_s = None
+                started = parse_iso_utc(self._state.started_at)
+                current_uptime_s = (
+                    max(0, int((datetime.now(UTC) - started).total_seconds())) if started is not None else None
+                )
             return {
                 "heartbeat_unauth_count": self._heartbeat_unauth_count,
                 "current_uptime_s": current_uptime_s,
@@ -533,7 +523,8 @@ class TunnelManager:
         with self._lock:
             n = len(self._sessions)
             self._record_uptime_history(reason="panic")
-            self.clear_all_sessions(reason="panic")
+            for sid in list(self._sessions.keys()):
+                self.boot_session(sid, reason="panic")
             self._state.public_endpoint = None
             self._state.started_at = None
             clear_persisted_state()
@@ -553,7 +544,9 @@ class TunnelManager:
         if not self._state.started_at:
             return
         try:
-            started = parse_iso_z(self._state.started_at)
+            started = parse_iso_utc(self._state.started_at)
+            if started is None:
+                return
             ended = datetime.now(UTC)
             self._tunnel_uptime_history.append(
                 {

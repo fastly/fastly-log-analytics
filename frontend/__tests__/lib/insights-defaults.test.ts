@@ -4,8 +4,9 @@ import {
   historyHoursFromExtents,
   WINDOW_OPTIONS,
   BASELINE_OPTIONS,
-  STATIC_DEFAULT,
 } from '@/lib/insights-defaults'
+
+const STATIC_DEFAULT = { window: '24', baseline: '168' } as const
 
 const WIN = new Set(WINDOW_OPTIONS.map((o) => o.value))
 const BASE = new Set(BASELINE_OPTIONS.map((o) => o.value))

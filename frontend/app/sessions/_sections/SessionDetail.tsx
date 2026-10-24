@@ -28,9 +28,9 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { useDateFormat } from '@/hooks/useDateFormat'
-import { useFieldLabel } from '@/hooks/useFieldLabel'
+import { useFieldLabel } from '@/hooks/useLogFieldsCatalog'
 import type { LabelRow, LabelValue } from '@/hooks/useScoringLabels'
-import { buildSessionDashboardUrl, buildStreamDetailUrl } from '@/lib/session-urls'
+import { buildSessionDashboardUrl, buildStreamDetailUrl } from '@/lib/navigation'
 import { OBJECT_TYPE_LABELS, STREAM_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from '@/app/streaming/_sections/streamingInfo'
 import type { Session, SessionDetailResponse, SessionsResponse } from '@/types/api'
 

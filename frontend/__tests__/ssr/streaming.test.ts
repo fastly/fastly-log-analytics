@@ -4,7 +4,7 @@ import { hydrate, QueryClient } from '@tanstack/react-query'
 import { setupNextHeadersMock, withTestHttpServer } from '../helpers/ssr'
 import { resolveRangeWire } from '@/lib/range-wire'
 import { seedDehydratedState } from '@/lib/ssr/seed'
-import { fetchStreamingServerSide } from '@/lib/ssr/streaming'
+import { fetchStreamingServerSide } from '@/lib/ssr/upstream'
 import { quantizeAnchor } from '@/lib/time-window'
 
 const { setHeaders, setCookies } = setupNextHeadersMock()

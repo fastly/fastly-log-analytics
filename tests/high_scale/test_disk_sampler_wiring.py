@@ -159,7 +159,7 @@ def test_health_snapshot_omits_the_high_scale_key_in_standard_mode(client) -> No
 
 import pytest
 
-from backend.high_scale.disk_guard import VolumeStats, evaluate_disk_state
+from backend.high_scale.disk_sampler import VolumeStats, evaluate_disk_state
 
 
 def volume_stats(*, free_fraction: float, total_bytes: int = 1_000_000_000, one_batch_bytes: int = 0) -> VolumeStats:

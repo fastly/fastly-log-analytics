@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { copyToClipboard } from '@/lib/utils'
 
 /**
  * Auto-resetting flash state with automatic unmount timer cleanup.
@@ -51,4 +52,22 @@ export function useAutoFlash<T = true>(resetMs: number = 2000) {
     set,
     clear,
   }
+}
+
+/**
+ * Copy a string to the clipboard and surface a "just copied" flag that
+ * auto-resets after ``resetMs``.
+ */
+export function useCopyToClipboard(resetMs: number = 1500) {
+  const { active: copied, flash } = useAutoFlash(resetMs)
+
+  const copy = useCallback(
+    async (value: string) => {
+      if (await copyToClipboard(value)) {
+        flash()
+      }
+    },
+    [flash],
+  )
+  return { copied, copy }
 }

@@ -29,7 +29,7 @@ let __fieldValues: { values: { value: string; count: number; label?: string }[] 
 }
 let __isLoading = false
 
-vi.mock('@/hooks/useFieldValues', () => ({
+vi.mock('@/hooks/useLogFieldsCatalog', () => ({
   useFieldValues: () => ({ data: __fieldValues, isLoading: __isLoading, isFetching: false }),
 }))
 

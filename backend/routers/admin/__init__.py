@@ -99,5 +99,4 @@ __all__ = [
     "_fetch_file_to_zip",
     "_DIR_SIZE_CACHE",
     "_get_dir_size",
-    "_scan_dir_size",
 ]

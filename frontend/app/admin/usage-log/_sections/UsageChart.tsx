@@ -16,7 +16,7 @@ import {
 } from '@/components/ui/select'
 import { Database, AlertTriangle, Loader2 } from 'lucide-react'
 import { useMounted } from '@/hooks/useMounted'
-import { CHART_COLORS } from '@/lib/chart-colors'
+import { CHART_COLORS } from '@/lib/chart-builders'
 
 const LOG_ACCOUNTING_PRESETS = [
   { label: 'Last 1h', hours: 1, by: 'hour' as const },

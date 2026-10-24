@@ -144,28 +144,10 @@ def oldest_unenriched_timestamp(src: dict) -> str | None:
     Using the log table as the source of truth means we never skip historical
     records — we sync exactly as far back as the data that needs enrichment.
     """
-    import os
-
-    from backend import config as svcconfig
     from backend.core.duckdb import get_connection
     from backend.repositories._base import _safe_table
-    from backend.utils.ngwaf_bot_cache import ensure_schema as _ensure_cache_schema
 
-    # Ensure the cache schema exists before any read attempts. Without this,
-    # the very first sync (cache file is 0 bytes) sees the LEFT JOIN against
-    # ngwaf_bots throw, returns None, exits the cron, and the schema is never
-    # created — leaving the sync permanently broken.
-    try:
-        _ensure_cache_schema()
-    except Exception:
-        logger.debug("oldest_unenriched_timestamp: _ensure_cache_schema failed (ignored)", exc_info=True)
-
-    ngwaf_db = svcconfig.ngwaf_db_path()
     table_name = _safe_table(src["name"])
-
-    default_ngwaf_db = str(svcconfig.DATA_DIR / "ngwaf_bot_cache.db")
-    if ngwaf_db and ngwaf_db != default_ngwaf_db and not os.path.exists(ngwaf_db):
-        return None
 
     try:
         # read_only: ATTACH + SELECT only, no writes.

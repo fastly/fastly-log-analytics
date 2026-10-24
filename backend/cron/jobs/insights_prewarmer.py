@@ -238,8 +238,8 @@ def _run_insights_prewarmer(service_id: str) -> None:
     from backend.core.duckdb import get_connection, get_source_for_service
     from backend.repositories.insights import get_insights
     from backend.utils.active_requests import should_defer_cron, yield_to_api
-    from backend.utils.insights_defaults import history_hours_from_earliest, pick_insights_default
     from backend.utils.remote_access import resolve_analyst_insights_clamp
+    from backend.utils.time_window import history_hours_from_earliest, pick_insights_default
     from backend.utils.tunnel import get_tunnel_manager
 
     src = get_source_for_service(service_id)

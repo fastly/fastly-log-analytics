@@ -11,9 +11,9 @@ import pyarrow.parquet as pq
 from backend.high_scale.archive_models import ArchiveManifest
 from backend.high_scale.archive_publication import ArchivePublication
 from backend.high_scale.archive_writer import event_digest
+from backend.high_scale.cmcd import project_cmcd
 from backend.high_scale.origin_projection import build_origin_projection_rows
 from backend.high_scale.performance_projection import build_performance_projection_rows
-from backend.high_scale.projections import project_cmcd
 from backend.high_scale.publication import (
     ClickHousePublication,
     PublicationResult,

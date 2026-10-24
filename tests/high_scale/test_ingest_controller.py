@@ -661,8 +661,7 @@ import logging
 from unittest.mock import patch
 
 from backend.high_scale import worker
-from backend.high_scale.config import from_environment
-from backend.high_scale.models import HighScaleConfig, TopologyProfile
+from backend.high_scale.models import HighScaleConfig, TopologyProfile, from_environment
 
 
 def _config(profile: str) -> HighScaleConfig:
@@ -699,7 +698,7 @@ def test_config_validation_accepts_every_profile_the_topology_module_builds() ->
 
 def test_validation_follows_the_topology_module_not_a_duplicated_name_list() -> None:
     sentinel = TopologyProfile("sentinel", 1, 1, True, False, 1)
-    with patch("backend.high_scale.topology.build_topology_profile", return_value=sentinel):
+    with patch("backend.high_scale.models.build_topology_profile", return_value=sentinel):
         assert _config("anything").topology_profile() is sentinel
         _config("anything").validate()
 

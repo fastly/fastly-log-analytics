@@ -2,7 +2,9 @@
 
 import * as React from 'react'
 import { flexRender, type Header } from '@tanstack/react-table'
-import { ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react'
+import { ArrowDown, ArrowUp, ArrowUpDown, GripVertical } from 'lucide-react'
+import { useSortable } from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 
 import { TableHead } from '@/components/ui/table'
 import { cn } from '@/lib/utils'
@@ -78,3 +80,45 @@ export const StaticTableHeader = <TData,>({ header }: { header: Header<TData, un
     <HeaderCellContent header={header} />
   </TableHead>
 )
+
+export const DraggableTableHeader = <TData,>({ header }: { header: Header<TData, unknown> }) => {
+  const { attributes, isDragging, listeners, setNodeRef, transform, transition } = useSortable({
+    id: header.column.id,
+  })
+
+  const style: React.CSSProperties = {
+    opacity: isDragging ? 0.8 : 1,
+    position: 'relative',
+    transform: CSS.Translate.toString(transform),
+    transition,
+    whiteSpace: 'nowrap',
+    width: header.column.getSize(),
+    zIndex: isDragging ? 1 : 0,
+  }
+
+  return (
+    <TableHead
+      ref={setNodeRef}
+      style={style}
+      aria-sort={getHeaderAriaSort(header)}
+      className={cn(
+        'relative group select-none border-r last:border-r-0 px-0',
+        isDragging && 'bg-muted shadow-md z-10',
+      )}
+    >
+      <HeaderCellContent
+        header={header}
+        dragHandle={
+          <div
+            {...attributes}
+            {...listeners}
+            className="opacity-0 group-hover:opacity-50 hover:!opacity-100 cursor-grab active:cursor-grabbing p-1 rounded"
+            title="Drag to reorder"
+          >
+            <GripVertical className="w-3.5 h-3.5" />
+          </div>
+        }
+      />
+    </TableHead>
+  )
+}

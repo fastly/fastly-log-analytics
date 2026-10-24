@@ -44,6 +44,8 @@ vi.mock('@/hooks/useUrlServiceSync', () => ({
 // watermark test overrides via vi.mocked(useIsAnalyst).mockReturnValue.
 vi.mock('@/hooks/useIsAnalyst', () => ({
   useIsAnalyst: vi.fn(),
+  useMaskIps: () => false,
+  useEnforceMaskedFilters: vi.fn(),
 }))
 
 // Mock components

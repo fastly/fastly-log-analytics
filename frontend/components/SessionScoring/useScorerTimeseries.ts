@@ -1,8 +1,61 @@
 'use client'
 
+import {
+  useQuery,
+  type QueryClient,
+  type QueryKey,
+  type UseQueryOptions,
+} from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
 import type { components } from '@/types/api.generated'
-import { useScoringQuery } from './useScoringQuery'
+import {
+  scoringAnalyticsCompositeKey,
+  scoringConfigCompositeKey,
+} from '@/lib/queries/scoring'
+
+export const SCORING_KEY_PREFIXES = [
+  'scoring-status',
+  'scoring-evaluation',
+  'scoring-score-dist',
+  'scoring-latency-timeseries',
+  'scoring-fail-open-breakdown',
+  'scoring-compliance',
+  'scoring-top-flagged',
+  'scoring-per-reason-auc',
+  'scoring-threshold-preview',
+  'scoring-threshold-committed',
+  'scoring-enforce-threshold',
+  'scoring-enforce-status-code',
+  'scoring-l2-enforce',
+  'scoring-exclude-regex',
+  'scoring-matrix-versions',
+  'scoring-audit',
+  'scoring-session-events',
+  'scoring-labels',
+] as const
+
+export function invalidateServiceScoringQueries(queryClient: QueryClient, serviceId: string): void {
+  if (!serviceId) return
+  queryClient.invalidateQueries({ queryKey: scoringAnalyticsCompositeKey(serviceId) })
+  queryClient.invalidateQueries({ queryKey: scoringConfigCompositeKey(serviceId) })
+  for (const prefix of SCORING_KEY_PREFIXES) {
+    queryClient.invalidateQueries({ queryKey: [prefix, serviceId] })
+  }
+}
+
+export function useScoringQuery<TData>(
+  queryKey: QueryKey,
+  fn: () => Promise<{ data?: TData; error?: unknown; response: Response }>,
+  options?: Omit<UseQueryOptions<TData, Error>, 'queryKey' | 'queryFn'>,
+) {
+  return useQuery<TData, Error>({
+    queryKey,
+    queryFn: () => unwrapClient(fn()),
+    staleTime: 60_000,
+    ...options,
+  })
+}
 
 // Derived from the generated OpenAPI schema now that
 // /scoring/latency-timeseries has a real response_model — no more

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
+from backend.high_scale._common import format_iso_utc as _iso
+from backend.high_scale._common import parse_time_window, visible_fact_clauses
 from backend.high_scale._filters import request_filter_clauses
 from backend.high_scale._projection_utils import range_value
-from backend.high_scale._scope import visible_fact_clauses
 from backend.high_scale.registry import HighScaleService
 from backend.models.dashboard import SessionDetailRequest, SessionsRequest
 from backend.repositories.utils.response_cache import (
@@ -226,18 +227,6 @@ _FILTERED = """
 """
 
 
-def _parse_ts(val: str | None) -> datetime | None:
-    return range_value(val) if val else None
-
-
-def _window(start_time: str | None, end_time: str | None, default: timedelta) -> tuple[datetime, datetime]:
-    end_dt = _parse_ts(end_time) or datetime.now(UTC)
-    return _parse_ts(start_time) or (end_dt - default), end_dt
-
-
-from backend.high_scale._common import format_iso_utc as _iso
-
-
 def _asn_label_map(service_id: str, asns: list[int]) -> dict[int, str]:
     from backend.core import duckdb as _db
 
@@ -249,7 +238,7 @@ def _as_dt(val: Any) -> datetime | None:
     if isinstance(val, datetime):
         return val
     if isinstance(val, str):
-        return _parse_ts(val)
+        return range_value(val) if val else None
     return None
 
 
@@ -347,7 +336,7 @@ def _enrich_paginated_sessions(
 def sessions_endpoint(
     service: HighScaleService, req: SessionsRequest, start_time: str | None, end_time: str | None
 ) -> dict[str, Any]:
-    start_dt, end_dt = _window(start_time, end_time, timedelta(days=7))
+    start_dt, end_dt = parse_time_window(start_time, end_time, timedelta(days=7))
     min_reqs_flag = req.min_reqs_flag if req.min_reqs_flag is not None else _DEFAULT_MIN_REQS_FLAG
     min_4xx_pct_flag = req.min_4xx_pct_flag if req.min_4xx_pct_flag is not None else _DEFAULT_MIN_4XX_PCT_FLAG
     filter_clauses, filter_params = request_filter_clauses(req.filters)
@@ -467,7 +456,7 @@ def sessions_detail(
     ip: str,
     ja4: str | None,
 ) -> dict[str, Any]:
-    start_dt, end_dt = _window(start_time, end_time, timedelta(days=7))
+    start_dt, end_dt = parse_time_window(start_time, end_time, timedelta(days=7))
     clauses = [
         *visible_fact_clauses("request"),
         "client_ip = {ip:String}",

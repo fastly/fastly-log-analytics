@@ -2,6 +2,14 @@ import { useCallback, useMemo } from 'react'
 import { useTimezoneStore } from '@/stores/timezoneStore'
 import { formatDate, formatRelative, formatTimeAgo, getTimezoneAbbr } from '@/lib/date'
 
+/**
+ * Active timezone (IANA tz string). Subscribe here when a component formats
+ * dates or labels axes; orthogonal to time range and service selection.
+ */
+export function useTimezone(): string {
+  return useTimezoneStore(s => s.timezone)
+}
+
 export function useDateFormat() {
   const timezone = useTimezoneStore(state => state.timezone)
 

@@ -8,7 +8,7 @@ import {
 } from '@/components/ui/dialog'
 import { Badge } from '@/components/ui/badge'
 import { Globe } from 'lucide-react'
-import type { InsightContent, InsightHelpModalProps } from './types'
+import type { InsightContent, InsightHelpModalProps } from '../shared'
 import { getSecurityContent } from './sections/security'
 import { getCacheContent } from './sections/cache'
 import { getErrorsContent } from './sections/errors'

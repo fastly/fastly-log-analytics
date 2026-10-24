@@ -722,7 +722,6 @@ def enrich_bot_metadata(df: Any) -> None:
 
     # 1. Arcjet/Well-Known Bot Matching & IP feed matching
     if "ua" in df.columns and "ip" in df.columns:
-        from backend.utils.bot_sources import build_matcher
         from backend.utils.rdns_cache import classify, get_hostnames
 
         match_ua = build_matcher()

@@ -3,7 +3,7 @@
 import * as React from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
-import { SSEModal } from '@/components/SSEModal/SSEModal'
+import { SSEModal } from '@/components/SSEModal'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -36,11 +36,11 @@ type StorageResponse = {
   // disables the input + shows a tooltip explaining the override.
   ingested_files_locked?: boolean
 }
-export type _TableStatParity = Expect<WireParity<TableStat, components['schemas']['MetadataTableStat']>>
-export type _RetentionParity = Expect<
+type _TableStatParity = Expect<WireParity<TableStat, components['schemas']['MetadataTableStat']>>
+type _RetentionParity = Expect<
   WireParity<StorageResponse['retention'], components['schemas']['MetadataRetentionValues']>
 >
-export type _StorageParity = Expect<WireParity<StorageResponse, components['schemas']['MetadataStorageResponse']>>
+type _StorageParity = Expect<WireParity<StorageResponse, components['schemas']['MetadataStorageResponse']>>
 // Tables we surface in the table list. Order matters — the first three
 // are the trimmable ones, shown first; the rest are reference data.
 const TRIMMABLE = ['usage_log', 'ingested_files', 'cron_runs'] as const

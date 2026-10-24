@@ -31,11 +31,11 @@ from backend.core.oauth import flow_state
 from backend.core.oauth import registry as oauth_registry
 from backend.core.oauth.client import OIDCError
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
-from backend.utils.analyst_session import (
+from backend.utils.auth import (
     analyst_cookie_is_secure,
     set_analyst_session_cookies,
 )
-from backend.utils.analyst_session import (
+from backend.utils.auth import (
     safe_audit_email as _safe_audit_email,
 )
 from backend.utils.remote_access import client_ip

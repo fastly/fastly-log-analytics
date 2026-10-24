@@ -17,7 +17,7 @@ import type { components } from '@/types/api.generated';
 import { DisableRumDialog } from './DisableRumDialog';
 import { EnableRumDialog } from './EnableRumDialog';
 import { RumFaroVersionCard } from './RumFaroVersionCard';
-import { useRumStatus } from '@/hooks/useRumStatus';
+import { useRumStatus } from '@/hooks/useServiceQuery';
 import { formatLocalDateTime } from '@/lib/date';
 
 export function RumStatusPanel() {

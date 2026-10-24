@@ -26,7 +26,7 @@ vi.mock('@/components/PlotlyChart', async () => (await import('../../helpers/pag
 vi.mock('@/components/DataTable', async () => (await import('../../helpers/page-smoke')).interactiveDataTableModuleMock(dataTableMock))
 vi.mock('@/components/FilterValueCell', async () => (await import('../../helpers/page-smoke')).filterValueCellModuleMock())
 vi.mock('@/lib/date', () => ({ formatDate: (t: string) => t }))
-vi.mock('@/hooks/useActiveLogFields', async () => (await import('../../helpers/page-smoke')).activeLogFieldsSetModuleMock(activeFields))
+vi.mock('@/hooks/useLogFieldsCatalog', async () => (await import('../../helpers/page-smoke')).activeLogFieldsSetModuleMock(activeFields))
 
 import { BotsSection } from '@/app/security/_sections/BotsSection'
 

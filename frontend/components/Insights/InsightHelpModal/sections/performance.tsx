@@ -7,7 +7,7 @@ import {
   Info,
   Network,
 } from 'lucide-react'
-import type { InsightContent } from '../types'
+import type { InsightContent } from '../../shared'
 
 export function getPerformanceContent(id: string): InsightContent | null {
   switch (id) {

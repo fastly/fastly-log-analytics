@@ -1,41 +1,27 @@
 /**
  * @vitest-environment jsdom
  *
- * Tests for FilterBar — the FE's primary filter UI. Bug-prone because
- * it juggles 3 stores (filter, service, timezone), date-picker local
- * state, virtual filter columns (_bot_name, _ngwaf_bot_name,
- * waf_sig_ind), and Next/router navigation.
- *
- * Migration (TESTING_PLAN_3 item 10): fireEvent → userEvent, querySelector
- * → getByRole. Real user-event clicks model the focus + pointer chain
- * that fireEvent.click skips; getByRole assertions describe what an
- * assistive-tech user actually navigates, so a regression in the
- * aria-label or button-role surfaces as a test failure.
- *
- * Focus: filter-chip rendering and store interactions. The date-picker
- * + compare-mode flows are out of scope (covered by Playwright E2E).
+ * Consolidated tests for FilterBar, ActiveFiltersBanner, and AddFilterDialogContent.
  */
-import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
-import { render, screen, cleanup, act } from '@testing-library/react'
+import { stubResizeObserver, stubPointerCaptureAndScroll } from '@/__tests__/helpers/browser-stubs'
+import { render, screen, cleanup, act, fireEvent, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeEach, beforeAll, afterEach } from 'vitest'
 import { axe } from 'vitest-axe'
 import React from 'react'
 import { FilterBar } from '@/components/FilterBar/FilterBar'
+import { ActiveFiltersBanner } from '@/components/FilterBar/ActiveFiltersBanner'
+import { AddFilterDialogContent } from '@/components/FilterBar/AddFilterDialogContent'
+import { Dialog } from '@/components/ui/dialog'
 import { useFilterStore } from '@/stores/filterStore'
 import { useServiceStore } from '@/stores/serviceStore'
 
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/dashboard'))
 
-// Captures the predicate FilterBar passes to useIsFetching so the
-// loading-dot-allowlist test below can assert it directly against
-// synthetic Query keys, no full render needed.
 let __capturedPredicate: ((q: { queryKey?: readonly unknown[] }) => boolean) | null = null
-
-// Drives FilterBar's single useQuery (the /api/log-extents poll). Default
-// undefined preserves the no-snap behavior the chip-rendering tests assume;
-// the auto-range-snap tests set this to exercise the extents → range effect.
 let __logExtentsData: unknown = undefined
+let maskIps = false
+let suggestionValues: { value: string | null; label?: string; count: number }[] = []
 
 vi.mock('@tanstack/react-query', async () => {
   const actual = await vi.importActual<typeof import('@tanstack/react-query')>(
@@ -44,11 +30,6 @@ vi.mock('@tanstack/react-query', async () => {
   return {
     ...actual,
     useQuery: () => ({ data: __logExtentsData, isLoading: false, error: null }),
-    // FilterBar uses queryClient.getQueryState(['bootstrap']) to gate
-    // its log-extents query on bootstrap pending. The test doesn't
-    // mount a QueryClientProvider; return a stub whose getQueryState
-    // says "no bootstrap observed" so the FilterBar code path doesn't
-    // crash and falls through to its existing enabled gate.
     useQueryClient: () => ({ getQueryState: () => undefined }),
     useIsFetching: (opts?: { predicate?: typeof __capturedPredicate }) => {
       if (opts?.predicate) __capturedPredicate = opts.predicate
@@ -56,6 +37,21 @@ vi.mock('@tanstack/react-query', async () => {
     },
   }
 })
+
+vi.mock('@/hooks/useIsAnalyst', () => ({
+  useIsAnalyst: () => false,
+  useMaskIps: () => maskIps,
+  useEnforceMaskedFilters: () => {},
+}))
+vi.mock('@/hooks/useLogFieldsCatalog', () => ({
+  useLogFieldsCatalog: () => ({ data: undefined }),
+  useFieldLabel: () => (f: string) => f,
+  useFieldValues: () => ({ data: { values: suggestionValues }, isLoading: false }),
+}))
+vi.mock('@/components/ui/scroll-area', () => ({
+  ScrollArea: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+}))
+vi.mock('@/hooks/useDebounce', () => ({ useDebounce: (v: string) => v }))
 
 vi.mock('@/components/FilterBar/AddFilterDialog', () => ({
   AddFilterDialog: () => <button data-testid="add-filter-stub">Add Filter</button>,
@@ -69,13 +65,17 @@ vi.mock('@/components/FilterBar/ViewSelector', () => ({
 
 beforeAll(() => {
   stubResizeObserver()
+  stubPointerCaptureAndScroll()
 })
 
 afterEach(() => cleanup())
 
 beforeEach(() => {
   __logExtentsData = undefined
+  maskIps = false
+  suggestionValues = []
   act(() => {
+    useFilterStore.getState().resetAll()
     useFilterStore.setState({
       filters: [],
       edgeOnly: false,
@@ -90,7 +90,6 @@ describe('FilterBar — filter chip rendering', () => {
   it('renders no chips when filters is empty', () => {
     render(<FilterBar />)
     expect(screen.getByTestId('add-filter-stub')).toBeTruthy()
-    // No mode-toggle buttons present when no chips
     expect(screen.queryByRole('button', { name: /toggle include\/exclude/i })).toBeNull()
   })
 
@@ -121,21 +120,18 @@ describe('FilterBar — filter chip rendering', () => {
       })
     })
     render(<FilterBar />)
-    // The chip toggle's aria-label was rewritten for axe (commit 1627762)
-    // from the static "Toggle Include/Exclude" to the dynamic
-    // "Including <col>=<val>. Activate to toggle." / "Excluding ...".
-    // Match the new per-chip name to scope correctly.
     const toggles = screen.getAllByRole('button', { name: /(including|excluding) country=.* activate to toggle/i })
     const glyphs = toggles.map((b) => b.textContent?.trim())
     expect(glyphs).toContain('+')
     expect(glyphs).toContain('-')
   })
 
-  it('_ngwaf_bot_name filter renders "Fastly Verified Bot:" prefix', () => {
+  it('_ngwaf_bot_name filter renders "Fastly Verified Bot:" prefix and _bot_name renders "Bot:"', () => {
     act(() => {
       useFilterStore.setState({
         filters: [
           { id: 'b1', column: '_ngwaf_bot_name', value: 'GoogleBot', mode: 'include' },
+          { id: 'b2', column: '_bot_name', value: 'googlebot', mode: 'include' },
         ],
       })
     })
@@ -143,15 +139,6 @@ describe('FilterBar — filter chip rendering', () => {
     expect(screen.getByText('Fastly Verified Bot:')).toBeTruthy()
     expect(screen.getByText('GoogleBot')).toBeTruthy()
     expect(screen.queryByText('_ngwaf_bot_name:')).toBeNull()
-  })
-
-  it('_bot_name filter renders "Bot:" prefix', () => {
-    act(() => {
-      useFilterStore.setState({
-        filters: [{ id: 'b2', column: '_bot_name', value: 'googlebot', mode: 'include' }],
-      })
-    })
-    render(<FilterBar />)
     expect(screen.getByText('Bot:')).toBeTruthy()
     expect(screen.queryByText('_bot_name:')).toBeNull()
   })
@@ -169,13 +156,7 @@ describe('FilterBar — filter chip rendering', () => {
     render(<FilterBar />)
 
     expect(useFilterStore.getState().filters).toHaveLength(2)
-
-    // Aria-label scopes each remove button to its chip — no fragile
-    // class-name selectors.
-    const removeUS = screen.getByRole('button', {
-      name: /remove filter country: US/i,
-    })
-
+    const removeUS = screen.getByRole('button', { name: /remove filter country: US/i })
     await user.click(removeUS)
     expect(useFilterStore.getState().filters).toHaveLength(1)
     expect(useFilterStore.getState().filters[0].id).toBe('f2')
@@ -190,23 +171,15 @@ describe('FilterBar — filter chip rendering', () => {
     })
     render(<FilterBar />)
 
-    // Per-chip aria-label (see "+/-" rendering test above for the
-    // commit that rewrote this from the static toggle label).
     const toggle = screen.getByRole('button', { name: /(including|excluding) country=.* activate to toggle/i })
-
     await user.click(toggle)
     expect(useFilterStore.getState().filters[0].mode).toBe('exclude')
 
-    // After flip the accessible name updates to reflect the new mode.
     const toggleAfter = screen.getByRole('button', { name: /(including|excluding) country=.* activate to toggle/i })
     await user.click(toggleAfter)
     expect(useFilterStore.getState().filters[0].mode).toBe('include')
   })
 
-  // TESTING_PLAN_3 item 19. Filter chips use aria-labels (verified by the
-  // remove-button test above) and the +/- toggle has an aria-label too.
-  // Pin those with axe so a future refactor that swaps to icon-only buttons
-  // without aria text trips this assertion before merge.
   it('has no axe-detectable a11y violations when chips are present', async () => {
     act(() => {
       useFilterStore.setState({
@@ -249,7 +222,6 @@ describe('FilterBar — pill-flash predicate (time-bound allowlist)', () => {
     expect(__capturedPredicate).not.toBeNull()
     const p = __capturedPredicate!
 
-    // Allowlisted (date-range-driven queries).
     expect(p({ queryKey: ['dashboard', 'aggregates', 'svc'] })).toBe(true)
     expect(p({ queryKey: ['sessions', 'list', 'svc'] })).toBe(true)
     expect(p({ queryKey: ['usage', 'bandwidth', 'svc'] })).toBe(true)
@@ -257,11 +229,10 @@ describe('FilterBar — pill-flash predicate (time-bound allowlist)', () => {
     expect(p({ queryKey: ['usage-log', 'head', 'svc'] })).toBe(true)
   })
 
-  it('returns false for background polls that previously flickered the pill', () => {
+  it('returns false for background polls and empty/malformed query keys', () => {
     render(<FilterBar />)
     const p = __capturedPredicate!
 
-    // The background polls we explicitly stopped flashing the pill for.
     expect(p({ queryKey: ['log-extents', 'svc'] })).toBe(false)
     expect(p({ queryKey: ['bootstrap'] })).toBe(false)
     expect(p({ queryKey: ['sync-status', 'svc'] })).toBe(false)
@@ -272,13 +243,104 @@ describe('FilterBar — pill-flash predicate (time-bound allowlist)', () => {
     expect(p({ queryKey: ['admin', 'share', 'live'] })).toBe(false)
     expect(p({ queryKey: ['system-jobs'] })).toBe(false)
     expect(p({ queryKey: ['alerts', 'svc'] })).toBe(false)
-  })
-
-  it('returns false for empty / malformed query keys', () => {
-    render(<FilterBar />)
-    const p = __capturedPredicate!
     expect(p({ queryKey: undefined })).toBe(false)
     expect(p({ queryKey: [] })).toBe(false)
     expect(p({ queryKey: [123] })).toBe(false)
+  })
+})
+
+describe('ActiveFiltersBanner', () => {
+  it('renders nothing when no filters and edgeOnly is off', () => {
+    const { container } = render(<ActiveFiltersBanner />)
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('renders a pill for each active filter and has region role', () => {
+    useFilterStore.getState().addFilter('country', 'US', 'include')
+    useFilterStore.getState().addFilter('status', '500', 'exclude')
+
+    render(<ActiveFiltersBanner />)
+    expect(screen.getByText('country:')).toBeInTheDocument()
+    expect(screen.getByText('US')).toBeInTheDocument()
+    expect(screen.getByText('status:')).toBeInTheDocument()
+    expect(screen.getByText('500')).toBeInTheDocument()
+    expect(
+      screen.getByRole('region', { name: /active filters from other pages/i }),
+    ).toBeInTheDocument()
+  })
+
+  it('renders the "Edge only" badge and "Clear all" wipes filters + edgeOnly', () => {
+    useFilterStore.getState().addFilter('country', 'US', 'include')
+    useFilterStore.getState().toggleEdgeOnly()
+
+    render(<ActiveFiltersBanner />)
+    expect(screen.getByText('Edge only')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /clear all/i }))
+
+    expect(useFilterStore.getState().filters).toHaveLength(0)
+    expect(useFilterStore.getState().edgeOnly).toBe(false)
+  })
+})
+
+function renderDialogContent(onClose: () => void = () => {}) {
+  return render(
+    <Dialog open>
+      <AddFilterDialogContent onClose={onClose} />
+    </Dialog>,
+  )
+}
+
+describe('AddFilterDialogContent', () => {
+  it('keeps Apply Filter disabled until a value is typed', async () => {
+    const user = userEvent.setup()
+    renderDialogContent()
+    const apply = screen.getByRole('button', { name: /Apply Filter/ }) as HTMLButtonElement
+    expect(apply.disabled).toBe(true)
+    await user.type(screen.getByPlaceholderText('Type a ip value...'), '1.2.3.4')
+    await waitFor(() => expect(apply.disabled).toBe(false))
+  })
+
+  it('adds an include filter for the default field and closes', async () => {
+    const user = userEvent.setup()
+    const onClose = vi.fn()
+    renderDialogContent(onClose)
+    await user.type(screen.getByPlaceholderText('Type a ip value...'), '1.2.3.4')
+    await user.click(screen.getByRole('button', { name: /Apply Filter/ }))
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1))
+    const [filter] = useFilterStore.getState().filters
+    expect(filter).toMatchObject({ column: 'ip', value: '1.2.3.4', mode: 'include' })
+  })
+
+  it('honours the Exclude tab and submits on Enter', async () => {
+    const user = userEvent.setup()
+    const onClose = vi.fn()
+    renderDialogContent(onClose)
+    await user.click(screen.getByRole('tab', { name: /Exclude/ }))
+    await user.type(screen.getByPlaceholderText('Type a ip value...'), 'bad{Enter}')
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1))
+    expect(useFilterStore.getState().filters[0]).toMatchObject({ column: 'ip', value: 'bad', mode: 'exclude' })
+  })
+
+  it('defaults a masking analyst to the url field', async () => {
+    maskIps = true
+    const user = userEvent.setup()
+    renderDialogContent()
+    await user.type(screen.getByPlaceholderText('Type a url value...'), '/x')
+    await user.click(screen.getByRole('button', { name: /Apply Filter/ }))
+    await waitFor(() => expect(useFilterStore.getState().filters.length).toBe(1))
+    expect(useFilterStore.getState().filters[0]).toMatchObject({ column: 'url', value: '/x' })
+  })
+
+  it('fills the value from a suggestion without submitting', async () => {
+    suggestionValues = [{ value: 'US', label: 'United States', count: 1200 }]
+    const user = userEvent.setup()
+    const onClose = vi.fn()
+    renderDialogContent(onClose)
+    const input = screen.getByPlaceholderText('Type a ip value...') as HTMLInputElement
+    await user.type(input, 'U')
+    await user.click(await screen.findByRole('button', { name: /United States/ }))
+    expect(input.value).toBe('US')
+    expect(onClose).not.toHaveBeenCalled()
+    expect(useFilterStore.getState().filters.length).toBe(0)
   })
 })

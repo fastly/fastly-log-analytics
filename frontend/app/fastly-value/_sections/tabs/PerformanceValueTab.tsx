@@ -7,7 +7,7 @@ import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { formatMs } from '@/lib/format'
 import type { components } from '@/types/api.generated'
-import { CHART_COLORS } from '@/lib/chart-colors'
+import { CHART_COLORS } from '@/lib/chart-builders'
 
 type PerformanceData = components['schemas']['PerformanceMetrics']
 

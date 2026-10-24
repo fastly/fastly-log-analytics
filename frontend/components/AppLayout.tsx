@@ -78,15 +78,13 @@ import { MapPrewarm } from '@/components/Map/MapPrewarm'
 
 import { useUrlServiceSync } from '@/hooks/useUrlServiceSync'
 import { useBootstrap, useBootstrapSyncEffects } from '@/hooks/useBootstrap'
-import { useIsAnalyst } from '@/hooks/useIsAnalyst'
-import { useEnforceMaskedFilters } from '@/hooks/useEnforceMaskedFilters'
+import { useIsAnalyst, useEnforceMaskedFilters } from '@/hooks/useIsAnalyst'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useRouter } from 'next/navigation'
 import packageJson from '../package.json'
 import { useShareStatusBanner } from '@/hooks/useShareStatusBanner'
-import { useAnalystHeartbeat } from '@/hooks/useAnalystHeartbeat'
-import { useAnalystLogout } from '@/hooks/useAnalystLogout'
-import { SIDEBAR_COLLAPSED_COOKIE } from '@/lib/sidebar-cookie'
+import { useAnalystHeartbeat, useAnalystLogout } from '@/hooks/useAnalystHeartbeat'
+import { SIDEBAR_COLLAPSED_COOKIE } from '@/lib/cookies'
 
 // `analystVisible` controls visibility for FOS-sharing analysts (those
 // running their own copy of the app locally against the admin's FOS

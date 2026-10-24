@@ -8,6 +8,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
+try:
+    import backend.cron.scheduler as _sched_mod
+    from backend.cron.jobs._common import get_service_display_label as _get_svc_label
+
+    if not hasattr(_sched_mod, "get_service_display_label"):
+        _sched_mod.get_service_display_label = _get_svc_label  # type: ignore[attr-defined]
+except Exception:
+    pass
+
 
 class _StubSource(dict):
     """Minimal dict-subclass representing a configured service source."""
@@ -84,7 +93,9 @@ def stub_cron_envelope(request: pytest.FixtureRequest, monkeypatch: pytest.Monke
     """Stub the standard cron envelope helpers so a cron job's progress and
     ``cron_runs`` side effects can be inspected without real DB writes.
     """
-    default_run_id = 33 if "test_commit" in request.node.nodeid else 11
+    default_run_id = (
+        33 if ("test_commit" in request.node.nodeid.lower() or "testcommitjob" in request.node.nodeid.lower()) else 11
+    )
     start = MagicMock(return_value=default_run_id)
     log = MagicMock()
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", start)

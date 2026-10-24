@@ -30,13 +30,16 @@ vi.mock('next/dynamic', () => ({
 }))
 
 vi.mock('@/components/SessionScoring/RocPrCurves', () => ({ RocPrCurves: () => null }))
-vi.mock('@/components/SessionScoring/ScoreDistChart', () => ({ ScoreDistChart: () => null }))
+vi.mock('@/components/SessionScoring/StackedHourlyBarChart', () => ({
+  ScoreDistChart: () => null,
+  ComplianceChart: () => null,
+  StackedHourlyBarChart: () => null,
+}))
 vi.mock('@/components/SessionScoring/ScorerLatencyChart', () => ({ ScorerLatencyChart: () => null }))
 vi.mock('@/components/SessionScoring/ScorerErrorsChart', () => ({ ScorerErrorsChart: () => null }))
 vi.mock('@/components/SessionScoring/ScorerFailOpenBreakdownCard', () => ({
   ScorerFailOpenBreakdownCard: () => null,
 }))
-vi.mock('@/components/SessionScoring/ComplianceChart', () => ({ ComplianceChart: () => null }))
 vi.mock('@/components/SessionScoring/ScoringHealthCard', () => ({ ScoringHealthCard: () => null }))
 vi.mock('@/components/SessionScoring/StatusPanel', () => ({
   StatusPanel: ({ serviceId }: { serviceId: string }) => (

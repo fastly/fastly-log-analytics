@@ -7,9 +7,7 @@ maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs')
 import { useTheme } from 'next-themes'
 import { DashboardMapData } from '@/types/api'
 import countryCodes from '@/lib/country-codes.json'
-import { countryFill } from '@/components/Map/colors'
-import { NORMALIZE_COUNTRY } from '@/components/Map/shared'
-import { useMapResize } from '@/components/Map/useMapResize'
+import { countryFill, NORMALIZE_COUNTRY, useMapResize } from '@/components/Map/shared'
 import { addCountryBaseLayer, createBaseMap, removeMapTabStops, updateCountryBaseLayerTheme } from '@/components/Map/baseLayers'
 import { formatCompactCount, resolveCountryName, formatCount } from '@/lib/format'
 const alpha3ToAlpha2: Record<string, string> = {}

@@ -22,7 +22,7 @@ import type { components } from '@/types/api.generated'
 
 import { formatCount } from '@/lib/format'
 import { useOpenGeneration } from '@/hooks/useDerivedState'
-import { invalidateServiceScoringQueries } from './useScoringQuery'
+import { invalidateServiceScoringQueries } from './useScorerTimeseries'
 type RetrainResult = components['schemas']['ScoringRetrainResponse']
 
 interface RetrainButtonProps {

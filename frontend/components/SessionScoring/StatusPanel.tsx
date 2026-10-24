@@ -3,7 +3,7 @@
 import * as React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, ExternalLink, Info, Power, PowerOff, RefreshCw, ShieldCheck, ShieldOff } from 'lucide-react'
-import { invalidateServiceScoringQueries, useScoringQuery } from './useScoringQuery'
+import { invalidateServiceScoringQueries, useScoringQuery } from './useScorerTimeseries'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'

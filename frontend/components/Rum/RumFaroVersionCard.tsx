@@ -12,7 +12,7 @@ import { unwrapClient } from '@/lib/api-client';
 import { useIsAnalyst } from '@/hooks/useIsAnalyst';
 import type { components } from '@/types/api.generated';
 import { RumSettingsDialog } from './RumSettingsDialog';
-import { useRumStatus } from '@/hooks/useRumStatus';
+import { useRumStatus } from '@/hooks/useServiceQuery';
 import { queryKeys } from '@/lib/query-keys';
 
 type RumVersionsResponse = components['schemas']['RumVersionsResponse'];

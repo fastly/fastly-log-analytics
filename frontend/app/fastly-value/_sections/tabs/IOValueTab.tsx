@@ -9,10 +9,10 @@ import { PlotlyChart } from '@/components/PlotlyChart'
 import { formatCompactCount, formatBytes, formatCurrency } from '@/lib/format'
 import { FilterValueCell } from '@/components/FilterValueCell'
 import type { components } from '@/types/api.generated'
-import { CHART_COLORS } from '@/lib/chart-colors'
-import { SkeletonGrid } from '@/components/ui/skeleton-grid'
+import { CHART_COLORS } from '@/lib/chart-builders'
+import { SkeletonGrid } from '@/components/ui/skeleton'
 import type { ColumnDef } from '@tanstack/react-table'
-import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
+import { DataTableReadonly } from '@/components/DataTable'
 
 type IOData = components['schemas']['IOMetrics']
 

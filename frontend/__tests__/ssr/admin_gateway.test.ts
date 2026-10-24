@@ -206,3 +206,242 @@ describe('certificate gateway SSR trust', () => {
     )
   })
 })
+
+describe('fetchTosServerSide', () => {
+  beforeEach(() => {
+    delete process.env.ADMIN_GATEWAY_SECRET
+    delete process.env.ADMIN_GATEWAY_REQUIRED
+    setCookies('session=abc123')
+    inbound({
+      'x-proxied-by-caddy': 'true',
+      host: 'fastly-log-analytics.global.ssl.fastly.net',
+    })
+  })
+
+  it('returns null when API_PROXY_URL is unset (pure `next dev` outside docker compose)', async () => {
+    const { fetchTosServerSide } = await import('@/lib/ssr/admin_gateway')
+    const out = await fetchTosServerSide()
+    expect(out).toBeNull()
+  })
+
+  it('returns null on a non-2xx, non-401 upstream response', async () => {
+    process.env.API_PROXY_URL = 'http://127.0.0.1:1'
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { fetchTosServerSide } = await import('@/lib/ssr/admin_gateway')
+    const out = await fetchTosServerSide()
+    expect(out).toBeNull()
+    expect(warn).toHaveBeenCalled()
+  })
+
+  it("returns 'unauthenticated' on a 401 upstream response (analyst session missing/invalid)", async () => {
+    await withTestHttpServer(
+      (_req, res) => {
+        res.statusCode = 401
+        res.end('{"detail":"unauthenticated"}')
+      },
+      async () => {
+        const { fetchTosServerSide } = await import('@/lib/ssr/admin_gateway')
+        const out = await fetchTosServerSide()
+        expect(out).toBe('unauthenticated')
+      },
+    )
+  })
+
+  it('returns null on a parse error from a malformed upstream body', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await withTestHttpServer(
+      (_req, res) => {
+        res.statusCode = 200
+        res.end('not json {{{')
+      },
+      async () => {
+        const { fetchTosServerSide } = await import('@/lib/ssr/admin_gateway')
+        const out = await fetchTosServerSide()
+        expect(out).toBeNull()
+        expect(warn).toHaveBeenCalled()
+      },
+    )
+  })
+
+  it('hits the upstream with the expected headers when Caddy marker is present', async () => {
+    setCookies('session=xyz; theme=dark')
+    inbound({
+      'x-proxied-by-caddy': 'true',
+      host: 'fastly-log-analytics.global.ssl.fastly.net',
+    })
+
+    await withTestHttpServer(
+      (_req, res) => {
+        res.statusCode = 200
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify({ version: 'v1', text: 'TOS body' }))
+      },
+      async (srv) => {
+        const { fetchTosServerSide } = await import('@/lib/ssr/admin_gateway')
+        const out = await fetchTosServerSide()
+        expect(out).toEqual({ version: 'v1', text: 'TOS body' })
+        const capturedHeaders = srv.lastRequest!.headers
+        expect(capturedHeaders['x-remote-analyst']).toBe('1')
+        expect(capturedHeaders.host).toBe('fastly-log-analytics.global.ssl.fastly.net')
+        expect(capturedHeaders.cookie).toBe('session=xyz; theme=dark')
+      },
+    )
+  })
+
+  it('fail-closed: non-loopback Host + no Caddy marker → null + warns', async () => {
+    process.env.API_PROXY_URL = 'http://127.0.0.1:1'
+    setCookies('')
+    inbound({ host: 'fastly-log-analytics.global.ssl.fastly.net' })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { fetchTosServerSide } = await import('@/lib/ssr/admin_gateway')
+    const out = await fetchTosServerSide()
+    expect(out).toBeNull()
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('no X-Proxied-By-Caddy marker'))
+  })
+
+  it('admin SSH-tunnel: loopback Host + no Caddy marker → forwards as admin (no X-Remote-Analyst)', async () => {
+    setCookies('')
+    inbound({ host: 'localhost:3001' })
+
+    await withTestHttpServer(
+      (_req, res) => {
+        res.statusCode = 200
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify({ version: 'v1', text: 'TOS body' }))
+      },
+      async (srv) => {
+        const { fetchTosServerSide } = await import('@/lib/ssr/admin_gateway')
+        const out = await fetchTosServerSide()
+        expect(out).toEqual({ version: 'v1', text: 'TOS body' })
+        expect(srv.lastRequest?.headers['x-remote-analyst']).toBeUndefined()
+      },
+    )
+  })
+
+  it('fail-closed: no Caddy marker + absent Host → null (drift / SSRF without a loopback Host)', async () => {
+    process.env.API_PROXY_URL = 'http://127.0.0.1:1'
+    setCookies('')
+    inbound({})
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { fetchTosServerSide } = await import('@/lib/ssr/admin_gateway')
+    const out = await fetchTosServerSide()
+    expect(out).toBeNull()
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('no X-Proxied-By-Caddy marker'))
+  })
+})
+
+describe('fetchCronRunsServerSide (logs SSR)', () => {
+  beforeEach(() => {
+    delete process.env.ADMIN_GATEWAY_SECRET
+    delete process.env.ADMIN_GATEWAY_REQUIRED
+  })
+
+  it('returns null without a serviceId', async () => {
+    process.env.API_PROXY_URL = 'http://127.0.0.1:1'
+    const { fetchCronRunsServerSide } = await import('@/lib/ssr/admin_gateway')
+    expect(await fetchCronRunsServerSide(undefined)).toBeNull()
+  })
+
+  it('fail-closed: no Caddy marker + non-loopback Host → null, never forwarded', async () => {
+    inbound({ host: 'fastly-log-analytics.global.ssl.fastly.net' })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await withTestHttpServer(
+      (_req, res) => {
+        res.statusCode = 200
+        res.end('{"rows":[]}')
+      },
+      async (srv) => {
+        const { fetchCronRunsServerSide } = await import('@/lib/ssr/admin_gateway')
+        const out = await fetchCronRunsServerSide('svc-1')
+        expect(out).toBeNull()
+        expect(srv.requests).toHaveLength(0)
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('non-loopback/absent Host'))
+      },
+    )
+  })
+
+  it('admin SSH-tunnel (loopback Host, no marker): forwards as admin with service id', async () => {
+    inbound({ host: 'localhost:3001' })
+    await withTestHttpServer(
+      (_req, res) => {
+        res.statusCode = 200
+        res.setHeader('Content-Type', 'application/json')
+        res.end('{"rows":[1,2,3]}')
+      },
+      async (srv) => {
+        const { fetchCronRunsServerSide } = await import('@/lib/ssr/admin_gateway')
+        const out = await fetchCronRunsServerSide('svc-1')
+        expect(out).toEqual({ rows: [1, 2, 3] })
+        expect(srv.lastRequest?.headers['x-remote-analyst']).toBeUndefined()
+        expect(srv.lastRequest?.headers['x-fastly-service-id']).toBe('svc-1')
+      },
+    )
+  })
+
+  it('analyst (Caddy marker): forwards as remote-analyst', async () => {
+    inbound({
+      'x-proxied-by-caddy': 'true',
+      host: 'fastly-log-analytics.global.ssl.fastly.net',
+    })
+    await withTestHttpServer(
+      (_req, res) => {
+        res.statusCode = 200
+        res.setHeader('Content-Type', 'application/json')
+        res.end('{"rows":[1,2,3]}')
+      },
+      async (srv) => {
+        const { fetchCronRunsServerSide } = await import('@/lib/ssr/admin_gateway')
+        const out = await fetchCronRunsServerSide('svc-1')
+        expect(out).toEqual({ rows: [1, 2, 3] })
+        expect(srv.lastRequest?.headers['x-remote-analyst']).toBe('1')
+        expect(srv.lastRequest?.headers['x-fastly-service-id']).toBe('svc-1')
+      },
+    )
+  })
+})
+
+describe('fetchUsageLogServerSide (usage-log SSR)', () => {
+  const args = { serviceId: 'svc-1', start: '2026-06-01', end: '2026-06-17', pageSize: 50 }
+
+  beforeEach(() => {
+    delete process.env.ADMIN_GATEWAY_SECRET
+    delete process.env.ADMIN_GATEWAY_REQUIRED
+  })
+
+  it('fail-closed: no Caddy marker + non-loopback Host → null, never forwarded', async () => {
+    inbound({ host: 'fastly-log-analytics.global.ssl.fastly.net' })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await withTestHttpServer(
+      (_req, res) => {
+        res.statusCode = 200
+        res.end('{"rows":[]}')
+      },
+      async (srv) => {
+        const { fetchUsageLogServerSide } = await import('@/lib/ssr/admin_gateway')
+        const out = await fetchUsageLogServerSide(args)
+        expect(out).toBeNull()
+        expect(srv.requests).toHaveLength(0)
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('non-loopback/absent Host'))
+      },
+    )
+  })
+
+  it('admin SSH-tunnel (loopback Host, no marker): forwards as admin with the query string', async () => {
+    inbound({ host: 'localhost:3001' })
+    await withTestHttpServer(
+      (_req, res) => {
+        res.statusCode = 200
+        res.setHeader('Content-Type', 'application/json')
+        res.end('{"rows":[1]}')
+      },
+      async (srv) => {
+        const { fetchUsageLogServerSide } = await import('@/lib/ssr/admin_gateway')
+        const out = await fetchUsageLogServerSide(args)
+        expect(out).toEqual({ rows: [1] })
+        expect(srv.lastRequest?.headers['x-remote-analyst']).toBeUndefined()
+        expect(srv.lastRequest?.url).toContain('/api/admin/usage-log?')
+        expect(srv.lastRequest?.url).toContain('service_id=svc-1')
+      },
+    )
+  })
+})

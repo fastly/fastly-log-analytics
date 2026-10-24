@@ -40,7 +40,7 @@ vi.mock('@/lib/api', () => ({
 
 // useFieldLabel pulls a catalog over the network; replace with an
 // identity mapper so the timeline columns render predictably.
-vi.mock('@/hooks/useFieldLabel', () => ({
+vi.mock('@/hooks/useLogFieldsCatalog', () => ({
   useFieldLabel: () => (id: string) => id,
 }))
 
@@ -279,4 +279,26 @@ describe('SessionDetail', () => {
     )
     expect(screen.getByTestId('flag-popover')).toBeInTheDocument()
   })
+
+  it('UX-5: shows an inline error + Retry (not a bare empty table) when the detail query 5xxs', async () => {
+    postMock.mockRejectedValueOnce(new Error('detail boom'))
+    renderSessionDetail(
+      <SessionDetail
+        selectedSession={makeSession({ ip: '1.2.3.4' })}
+        setSelectedSession={vi.fn()}
+        activeServiceId="test-svc"
+        data={undefined}
+        labels={[]}
+        labelBySid={new Map()}
+        onFlagged={vi.fn()}
+      />,
+    )
+    await waitFor(
+      () => {
+        expect(screen.getByRole('alert')).toHaveTextContent(/failed to load session detail/i)
+      },
+      { timeout: 10000 },
+    )
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
+  }, 15000)
 })

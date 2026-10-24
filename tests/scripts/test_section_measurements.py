@@ -1,5 +1,209 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
+import pytest
+
+from scripts.lib.section_measurements import describe_response
+
+
+def test_controlled_sampling_flag_does_not_bypass_prerequisite_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts.dev import section_sweep
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("live transport must not run")
+
+    monkeypatch.setattr(section_sweep, "_post", forbidden)
+    assert section_sweep.main(["--env", "local-standard", "--controlled-cache-pair"]) == 2
+
+
+def test_follower_sections_are_not_current_execution() -> None:
+    result = describe_response(
+        {
+            "_response_cache": {
+                "state": "unknown",
+                "ttl_seconds": 15,
+                "prewarmer": False,
+                "single_flight": "follower",
+                "wait_ms": 8,
+            },
+            "_section_timings": [{"section": "query", "time_ms": 5, "current_execution": True, "source": "fact"}],
+        }
+    )
+    component = result["components"][0]
+    assert component["single_flight"] == "follower"
+    assert component["wait_ms"] == 8
+    assert component["sections"][0]["current_execution"] is False
+    assert "shared_execution" in component["gaps"]
+
+
+def test_self_scoped_health_hit_does_not_suppress_independent_shielding() -> None:
+    child = {
+        "_response_cache": {"state": "miss", "prewarmer": False},
+        "_section_timings": [{"section": "shielding", "time_ms": 10, "current_execution": True, "source": "live"}],
+    }
+    payload = {"_response_cache": {"state": "hit", "scope": "self", "prewarmer": False}, "shielding_analysis": child}
+    result = describe_response(payload)
+    assert result["components"][1]["sections"][0]["current_execution"] is True
+    enclosing = describe_response({"_is_cached": True, "health": payload})
+    assert enclosing["components"][2]["sections"][0]["current_execution"] is False
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.waits: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.waits.append(seconds)
+        self.now += seconds
+
+
+def _component(state: str, **extra: object) -> dict:
+    return {"_response_cache": {"state": state, "ttl_seconds": 15, "prewarmer": False, **extra}}
+
+
+def test_expiry_sampler_keeps_payload_exact_and_requires_miss_then_hit() -> None:
+    from scripts.lib.cache_sampling import sample_cache_pair
+
+    clock = _Clock()
+    payload = {"anchor": "2026-10-22T00:00:00Z", "filters": {"status": {"values": ["200"]}}}
+    expected = deepcopy(payload)
+    calls = []
+    answers = iter([_component("hit"), _component("miss"), _component("hit")])
+
+    def request(body: dict, timeout: float) -> dict:
+        calls.append((deepcopy(body), timeout, clock.now))
+        body.clear()
+        return next(answers)
+
+    result = sample_cache_pair(request, payload, max_seconds=60, monotonic=clock.monotonic, sleep=clock.sleep)
+    assert result["status"] == "observed"
+    assert result["components"]["response"] == {"status": "observed", "miss_sample": 2, "hit_sample": 3}
+    assert [call[0] for call in calls] == [expected] * 3
+    assert calls[1][2] >= 15
+    assert payload == expected
+    assert result["database_cache_state"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    "answer", [_component("unknown"), _component("miss", single_flight="follower"), {"_is_cached": False}]
+)
+def test_unknown_and_shared_results_cannot_establish_a_pair(answer: dict) -> None:
+    from scripts.lib.cache_sampling import sample_cache_pair
+
+    clock = _Clock()
+    result = sample_cache_pair(
+        lambda body, timeout: answer, {}, max_seconds=30, monotonic=clock.monotonic, sleep=clock.sleep
+    )
+    assert result["status"] == "incomplete"
+    assert len(result["samples"]) <= 4
+    assert result["gaps"]
+
+
+def test_repopulation_and_independent_components_do_not_manufacture_a_pair() -> None:
+    from scripts.lib.cache_sampling import sample_cache_pair
+
+    clock = _Clock()
+    answers = iter(
+        [
+            {"aggregates": _component("hit"), "top_bots": _component("hit")},
+            {"aggregates": _component("miss"), "top_bots": _component("hit")},
+            {"aggregates": _component("hit"), "top_bots": _component("hit")},
+            {"aggregates": _component("hit"), "top_bots": _component("hit")},
+        ]
+    )
+    result = sample_cache_pair(
+        lambda body, timeout: next(answers), {}, max_seconds=45, monotonic=clock.monotonic, sleep=clock.sleep
+    )
+    assert result["components"]["aggregates"]["status"] == "observed"
+    assert result["components"]["top_bots"]["status"] == "incomplete"
+    assert result["status"] == "incomplete"
+
+
+def test_bypass_is_not_a_miss_and_failures_are_safe() -> None:
+    from scripts.lib.cache_sampling import sample_cache_pair
+
+    clock = _Clock()
+    bypass = sample_cache_pair(
+        lambda body, timeout: _component("bypass"), {}, monotonic=clock.monotonic, sleep=clock.sleep
+    )
+    assert bypass["status"] == "not_applicable"
+    assert bypass["components"]["response"]["status"] == "bypass"
+
+    def fail(body: dict, timeout: float) -> dict:
+        raise OSError("secret URL or cookie")
+
+    failed = sample_cache_pair(fail, {}, monotonic=clock.monotonic, sleep=clock.sleep)
+    assert failed["status"] == "incomplete"
+    assert failed["samples"][0]["error"] == "OSError"
+    assert "secret" not in str(failed)
+
+
+def test_initial_miss_is_only_a_baseline_until_ttl_expiry() -> None:
+    from scripts.lib.cache_sampling import sample_cache_pair
+
+    clock = _Clock()
+    answers = iter([_component("miss"), _component("hit"), _component("miss"), _component("hit")])
+    result = sample_cache_pair(
+        lambda body, timeout: next(answers),
+        {},
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+    assert result["status"] == "observed"
+    assert result["components"]["response"] == {"status": "observed", "miss_sample": 3, "hit_sample": 4}
+    assert sum(clock.waits) >= 15
+
+
+def test_historical_child_hit_cannot_complete_a_current_miss_pair() -> None:
+    from scripts.lib.cache_sampling import sample_cache_pair
+
+    clock = _Clock()
+    answers = iter(
+        [
+            {"_response_cache": {"state": "bypass", "prewarmer": False}, "aggregates": _component("miss")},
+            {
+                "_response_cache": {"state": "hit", "ttl_seconds": 15, "prewarmer": False},
+                "aggregates": _component("hit"),
+            },
+        ]
+    )
+    result = sample_cache_pair(
+        lambda body, timeout: next(answers),
+        {},
+        max_samples=2,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+    assert result["components"]["aggregates"]["status"] == "incomplete"
+    assert "hit_sample" not in result["components"]["aggregates"]
+
+
+def test_expiry_sampler_honors_attempt_and_wall_time_bounds() -> None:
+    from scripts.lib.cache_sampling import sample_cache_pair
+
+    clock = _Clock()
+    timeouts = []
+
+    def request(body: dict, timeout: float) -> dict:
+        timeouts.append(timeout)
+        clock.now += timeout
+        return _component("miss")
+
+    result = sample_cache_pair(request, {}, max_seconds=10, monotonic=clock.monotonic, sleep=clock.sleep)
+    assert timeouts == [10]
+    assert result["status"] == "incomplete"
+    assert clock.now == 10
+    with pytest.raises(ValueError):
+        sample_cache_pair(request, {}, max_seconds=float("nan"))
+
+
+# ── Merged from test_section_measurements.py ──────────────────────────────────────────────────────
+
 import json
 import math
 import subprocess
@@ -8,7 +212,6 @@ from pathlib import Path
 import pytest
 
 from scripts.lib.section_measurements import (
-    describe_response,
     distribution,
     rank_sections,
     visible_results_budget_ms,
@@ -510,3 +713,166 @@ def test_duplicate_sample_ids_do_not_manufacture_repeatability() -> None:
     sample = _sample(1)
     assert rank_sections([sample, sample])[0]["distribution_ms"]["count"] == 1
     assert rank_sections([sample, sample])[0]["repeatable"] is False
+
+
+# ── Merged from test_section_sweep.py ──────────────────────────────────────────────────────
+
+"""Pure-logic measurement-harness tests; no environment access."""
+
+import stat
+
+import pytest
+
+from scripts.dev import section_sweep as sweep
+
+
+def _rec(endpoint: str, window: str, sections: list[dict]) -> dict:
+    sample = {
+        "sample_id": endpoint,
+        "environment": "remote-standard",
+        "role": "admin",
+        "endpoint": endpoint,
+        "window": window,
+        "payload": {"range_token": window, "filters": {}},
+        "response": describe_response({"_section_timings": sections}),
+        "wall_ms": 1.0,
+        "gaps": ["response_cache_unknown"],
+    }
+    return {"endpoint": endpoint, "window": window, "samples": [sample], "payload": sample["payload"]}
+
+
+def test_find_offenders_ranks_sections_and_keeps_unknown_evidence() -> None:
+    records = [
+        _rec("security", "7d", [{"section": "proxies", "time_ms": 1500, "source": "live"}]),
+        _rec("origin", "3d", [{"section": "slow_urls_query", "time_ms": 2500}, {"section": "tiny", "time_ms": 10}]),
+        {"endpoint": "network", "window": "3d", "samples": [], "error": "HTTPError"},
+    ]
+    offenders = sweep.find_offenders(records, budget_ms=500)
+    assert [(row["endpoint"], row["section"]) for row in offenders] == [
+        ("origin", "slow_urls_query"),
+        ("security", "proxies"),
+    ]
+    assert all(row["cache_state"] == "unknown" and not row["repeatable"] for row in offenders)
+
+
+def test_render_report_lists_rows_errors_and_offenders() -> None:
+    text = sweep.render_report(
+        [
+            _rec("security", "3d", [{"section": "temp_table_create", "time_ms": 900}]),
+            {"endpoint": "origin", "window": "3d", "samples": [], "error": "URLError"},
+        ],
+        budget_ms=500,
+    )
+    assert "| security | 3d |" in text
+    assert "URLError" in text
+    assert "temp_table_create" in text
+    assert "incomplete" in text
+    assert "cold" not in text.lower()
+    assert "warm" not in text.lower()
+
+
+def test_repeated_sampling_keeps_exact_payload_errors_and_independent_cache_states(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = {
+        "range_token": "7d",
+        "anchor": "2026-10-21T00:00:00Z",
+        "filters": {"status": {"mode": "include", "values": ["200"]}, "method": {"mode": "include", "values": ["GET"]}},
+    }
+    expected = deepcopy(body)
+    responses = iter([({"_is_cached": True}, 10), OSError("PRIVATE URL token"), ({"_is_cached": False}, 900)])
+    calls = []
+
+    def post(*args: object, **kwargs: object) -> tuple[dict, float]:
+        calls.append(deepcopy(args[3]))
+        value = next(responses)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(sweep, "_post", post)
+    result = sweep.sweep_one(
+        "https://example.com",
+        "TestLogSvcABC123",
+        "security",
+        "/api/security/aggregates",
+        body,
+        "7d",
+        5,
+        sample_count=3,
+        environment="remote-standard",
+    )
+    assert calls == [expected] * 3
+    assert result["payload"] == expected
+    assert body == expected
+    samples = result["samples"]
+    assert len(samples) == 3
+    assert samples[0]["response"]["components"][0]["cache_state"] == "hit"
+    assert samples[1]["error"] == "OSError"
+    assert samples[2]["response"]["components"][0]["cache_state"] == "unknown"
+    assert "PRIVATE" not in str(result)
+    assert result["qualification"] == "incomplete"
+    assert result["visible_results_budget_ms"] == 10000
+    assert result["whole_request_budget_policy"] == "diagnostic_only"
+    assert result["whole_request_budget_ms"] is None
+    assert "page_ready_unmeasured" in result["gaps"]
+    assert not any("cold" in key or "warm" in key for key in result)
+
+
+def test_mixed_component_cache_states_are_not_dropped_from_distributions(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sweep, "_post", lambda *args, **kwargs: ({"_is_cached": False, "aggregates": {"_is_cached": True}}, 10)
+    )
+    result = sweep.sweep_one(
+        "https://example.com",
+        "TestLogSvcABC123",
+        "dashboard",
+        "/api/dashboard/bundle",
+        {"filters": {}},
+        "24h",
+        5,
+        sample_count=1,
+    )
+    assert result["request_distribution_by_cache_state_ms"]["mixed"]["count"] == 1
+    assert sum(row["count"] for row in result["request_distribution_by_cache_state_ms"].values()) == 1
+
+
+def test_sweep_cli_blocks_network_without_verified_prerequisites(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("Prerequisite failure must happen before any live request")
+
+    monkeypatch.setattr(sweep, "run_sweep", forbidden)
+    assert sweep.main(["--env", "remote-standard", "--service-id", "TestLogSvcABC123"]) == 2
+    evidence = tmp_path / "evidence.json"
+    evidence.write_text('{"environment":"remote-standard", "checks":{}}')
+    assert (
+        sweep.main(["--env", "remote-standard", "--service-id", "TestLogSvcABC123", "--prerequisites", str(evidence)])
+        == 2
+    )
+
+
+def test_gate_rejects_other_environment_missing_or_unverified_evidence() -> None:
+    assert "environment_mismatch" in sweep.prerequisite_gaps({"environment": "local-standard"}, "remote-standard")
+    assert "cache_reporting" in sweep.prerequisite_gaps(
+        {"environment": "remote-standard", "checks": {"cache_reporting": {"status": "unknown"}}}, "remote-standard"
+    )
+
+
+def test_exact_filter_payload_artifacts_are_owner_only_and_symlinks_are_rejected(tmp_path) -> None:
+    report = {"payload": {"filters": {"url": {"values": ["/video?signature=PRIVATE"]}}}}
+    path = tmp_path / "report.json"
+    path.write_text("old")
+    path.chmod(0o644)
+    sweep.write_report(path, report)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert "signature=PRIVATE" in path.read_text()
+    link = tmp_path / "link.json"
+    link.symlink_to(path)
+    with pytest.raises(OSError):
+        sweep.write_report(link, {"changed": True})
+    assert "signature=PRIVATE" in path.read_text()
+
+
+def test_gate_rejects_claimed_checks_without_evidence() -> None:
+    report = {"environment": "remote-standard", "checks": {key: {"status": "verified"} for key in sweep.PREREQUISITES}}
+    assert set(sweep.prerequisite_gaps(report, "remote-standard")) == set(sweep.PREREQUISITES)

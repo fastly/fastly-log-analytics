@@ -143,36 +143,9 @@ class HighScaleWorkerCoordinator:
             raise ValueError("source object listing exceeded page_size")
 
         expired_sources = self._expired_claim_descriptors(service_id, domain)
-        discovered_by_key: dict[str, Any] = {}
-        batch_discover_fn = (
-            getattr(self._control, "discover_sources_batch", None) if self._control is not None else None
-        )
-        if (
-            self._control is not None
-            and objects
-            and callable(batch_discover_fn)
-            and getattr(type(self._control), "discover_sources_batch", None) is not None
-        ):
-            try:
-                batch_records = batch_discover_fn(
-                    service_id,
-                    domain,
-                    objects,
-                    expected_owner=current_owner,
-                    expected_owner_epoch=epoch,
-                )
-                for rec in batch_records or ():
-                    obj_key = getattr(rec, "object_key", None)
-                    if isinstance(obj_key, str):
-                        discovered_by_key[obj_key] = rec
-            except TypeError:
-                for source in objects:
-                    discovered_by_key[source.object_key] = self._discover(
-                        service_id, domain, source, current_owner, epoch
-                    )
-        else:
-            for source in objects:
-                discovered_by_key[source.object_key] = self._discover(service_id, domain, source, current_owner, epoch)
+        discovered_by_key: dict[str, Any] = {
+            source.object_key: self._discover(service_id, domain, source, current_owner, epoch) for source in objects
+        }
 
         next_cursor = page.next_cursor
         if next_cursor is None:

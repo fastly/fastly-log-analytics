@@ -183,9 +183,7 @@ def test_enqueue_drops_new_ips_once_pending_backlog_at_cap(monkeypatch):
     # At cap now — the next enqueue must be a no-op, not a partial insert.
     n = rdns_cache.enqueue(["3.3.3.3", "4.4.4.4"])
     assert n == 0
-    stats = rdns_cache.get_stats()
-    assert stats["total"] == 2
-    assert stats["pending"] == 2
+    assert rdns_cache._get_pending_count() == 2
 
 
 def test_enqueue_resumes_once_backlog_drains_below_cap(monkeypatch):
@@ -231,20 +229,6 @@ def test_get_hostnames_batch_returns_cached_and_enqueues_missing():
 def test_get_hostnames_batch_empty_input_is_noop():
     assert rdns_cache.get_hostnames([]) == {}
     assert rdns_cache.get_hostnames(["", None]) == {}  # type: ignore[list-item]
-
-
-def test_get_stats_returns_zero_when_db_missing():
-    """If the DB file doesn't exist, stats should not raise."""
-    stats = rdns_cache.get_stats()
-    assert stats["total"] == 0
-    assert stats["pending"] == 0
-
-
-def test_get_stats_counts_total_and_pending():
-    rdns_cache.enqueue(["1.1.1.1", "2.2.2.2", "3.3.3.3"])
-    stats = rdns_cache.get_stats()
-    assert stats["total"] == 3
-    assert stats["pending"] == 3
 
 
 # ── _do_lookup: DNS resolution with FCrDNS ──────────────────────────────────
@@ -350,9 +334,7 @@ def test_enrich_batch_resolves_pending_ips():
 
     assert summary["resolved"] == 2
     assert summary["errors"] == 0
-    # Stats reflect the resolved state
-    stats = rdns_cache.get_stats()
-    assert stats["pending"] == 0
+    assert rdns_cache._get_pending_count() == 0
 
 
 def test_enrich_batch_counts_errors_separately():
@@ -438,8 +420,12 @@ def test_reap_deletes_stale_nxdomain_rows_past_retention(monkeypatch):
     result = rdns_cache._reap_stale_rows()
 
     assert result["stale_deleted"] == 1
-    stats = rdns_cache.get_stats()
-    assert stats["total"] == 1  # the 1-day-old row survives
+    con = rdns_cache._write_con()
+    try:
+        total = con.execute("SELECT count(*) FROM rdns").fetchone()[0]
+    finally:
+        con.close()
+    assert total == 1  # the 1-day-old row survives
 
 
 def test_reap_never_deletes_pending_rows_regardless_of_age():
@@ -455,7 +441,7 @@ def test_reap_never_deletes_pending_rows_regardless_of_age():
 
     rdns_cache._reap_stale_rows()
 
-    assert rdns_cache.get_stats()["pending"] == 1
+    assert rdns_cache._get_pending_count() == 1
 
 
 @pytest.mark.security_regression

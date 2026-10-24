@@ -1,7 +1,7 @@
 import { Suspense } from 'react'
 import { HydrationBoundary } from '@tanstack/react-query'
 
-import { fetchAssetsServerSide } from '@/lib/ssr/assets'
+import { fetchAssetsServerSide } from '@/lib/ssr/upstream'
 import { seedDehydratedState } from '@/lib/ssr/seed'
 import { resolvePageServiceId } from '@/lib/ssr/service'
 import AssetsClient from './_sections/AssetsClient'

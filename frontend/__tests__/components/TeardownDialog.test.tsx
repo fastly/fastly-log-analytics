@@ -8,7 +8,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, test, vi } from 'vitest'
-import { TeardownDialog } from '@/components/TeardownDialog/TeardownDialog'
+import { TeardownDialog } from '@/components/TeardownDialog'
 import { createUseSSEMock } from '../helpers/sse-mock'
 import type { ServiceConfig } from '@/types/api'
 import React from 'react'

@@ -158,7 +158,7 @@ def _watermark(
     *,
     owner_epoch: int,
 ) -> ServingWatermark:
-    from backend.high_scale._scope import visible_publication_fence_sql
+    from backend.high_scale._common import visible_publication_fence_sql
 
     table = _WATERMARK_TABLES[domain]
     fence_sql = visible_publication_fence_sql(domain)

@@ -4,8 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from backend.high_scale.aggregate_query import query_clickhouse_aggregate
-from backend.high_scale.aggregates import AggregateRequest
+from backend.high_scale.aggregate_query import AggregateRequest, query_clickhouse_aggregate
 from backend.high_scale.archive_models import ServingWatermark
 
 NOW = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
@@ -253,7 +252,7 @@ def test_unsupported_domain_is_rejected() -> None:
 
 import pytest
 
-from backend.high_scale.projections import project_cmcd
+from backend.high_scale.cmcd import project_cmcd
 
 
 def test_cmcd_projection_preserves_request_identity_and_full_session_id() -> None:
@@ -381,21 +380,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from backend.high_scale import publication, raw_query, sessions
-
-
-@pytest.mark.parametrize("module", [sessions])
-def test_parse_ts_range_value_family(module) -> None:
-    assert module._parse_ts(None) is None
-    assert module._parse_ts("") is None
-    assert module._parse_ts("2026-01-02").tzinfo is None
-    assert module._parse_ts("2026-01-02T03:04:05Z") == datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
-    assert module._parse_ts("2026-01-02T03:04:05+02:00").utcoffset().total_seconds() == 7200
-
-
-def test_sessions_parse_ts_raises_on_garbage() -> None:
-    with pytest.raises(ValueError):
-        sessions._parse_ts("not-a-date")
+from backend.high_scale import publication, raw_query
 
 
 def test_publication_timestamp_assumes_utc_for_naive_and_wraps_errors() -> None:
@@ -425,7 +410,7 @@ import random
 
 import pytest
 
-from backend.high_scale._sketch import RELATIVE_ERROR, sketch
+from backend.high_scale._projection_utils import RELATIVE_ERROR, sketch
 
 
 def _weighted_quantile(centroids: list[float], counts: list[int], q: float) -> float:

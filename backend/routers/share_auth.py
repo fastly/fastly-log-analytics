@@ -20,7 +20,7 @@ from backend.models.share_auth import (
     TosAckPayload,
     TosDocument,
 )
-from backend.utils.analyst_session import (
+from backend.utils.auth import (
     ANALYST_PENDING_SESSION_COOKIE,
     ANALYST_SESSION_COOKIE,
     analyst_cookie_is_secure,

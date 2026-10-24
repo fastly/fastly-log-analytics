@@ -10,14 +10,15 @@ const mocks = vi.hoisted(() => ({
   analyst: vi.fn(),
 }))
 
-vi.mock('@/hooks/useSyncStatus', () => ({
+vi.mock('@/hooks/useSyncStatus', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useSyncStatus')>()),
   useSyncStatus: () => mocks.status(),
+  useLastSync: () => mocks.lastSync(),
 }))
 vi.mock('@/hooks/useIsAnalyst', () => ({
   useIsAnalyst: () => mocks.analyst(),
 }))
 vi.mock('@/hooks/useBootstrap', () => ({ useBootstrap: () => mocks.bootstrap() }))
-vi.mock('@/hooks/useLastSync', () => ({ useLastSync: () => mocks.lastSync() }))
 vi.mock('@/hooks/useHeaderBadgeStream', () => ({ useHeaderBadgeStream: () => ({ state: 'idle' }) }))
 vi.mock('@/hooks/useAdminEventStream', () => ({ useAdminEventStream: () => ({ state: 'idle' }) }))
 vi.mock('@/hooks/useDateFormat', () => ({ useDateFormat: () => ({ full: 'yyyy-MM-dd', abbr: 'HH:mm' }) }))

@@ -9,13 +9,13 @@ column is missing; ClickHouse failures propagate rather than becoming empty char
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from backend.core.high_scale_sections import HighScaleSections
-from backend.high_scale._projection_utils import range_value
+from backend.high_scale._common import parse_time_window
 from backend.high_scale.registry import HighScaleService
+from backend.high_scale.schema import build_cmcd_projection_key
 from backend.models.cmcd import CmcdRequest
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
@@ -25,6 +25,48 @@ from backend.repositories.utils.response_cache import (
     serialize_filters_for_key,
 )
 from backend.utils.cache_registry import CacheRegistry
+
+
+def project_cmcd(request_event: Mapping[str, Any]) -> dict[str, Any] | None:
+    raw_fields = request_event.get("cmcd")
+    if raw_fields is None:
+        return None
+    if not isinstance(raw_fields, Mapping):
+        raise ValueError("CMCD fields must be a mapping")
+    request_event_id = request_event.get("event_id")
+    if not isinstance(request_event_id, str) or not request_event_id:
+        raise ValueError("CMCD projection requires request_event_id")
+    service_id = request_event.get("service_id")
+    if not isinstance(service_id, str) or not service_id:
+        raise ValueError("CMCD projection requires service_id")
+    projection = {
+        "projection_key": build_cmcd_projection_key({"request_event_id": request_event_id}),
+        "request_event_id": request_event_id,
+        "service_id": service_id,
+        "timestamp": request_event.get("timestamp"),
+        "cmcd_version": request_event.get("cmcd_version"),
+        "sid": request_event.get("sid"),
+        "country": _country(request_event.get("country")),
+        "asn": _asn(request_event.get("asn")),
+        "fields": dict(raw_fields),
+    }
+    return projection
+
+
+def _country(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _asn(value: object) -> int | None:
+    """A positive AS number, or None: the analytics group by ASN, never by a malformed label."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip()) or None
+    return None
+
 
 _memo = ResponseMemo(ttl=30.0, maxsize=128, prewarmer=False)
 CacheRegistry.register("hs_cmcd_aggregates_memo", _memo.cache)
@@ -156,16 +198,6 @@ def _pad(
     return padded
 
 
-def _utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-
-
-def _window(start_time: str | None, end_time: str | None) -> tuple[datetime, datetime]:
-    end = _utc(range_value(end_time)) if end_time else datetime.now(UTC)
-    start = _utc(range_value(start_time)) if start_time else end - _DEFAULT_WINDOW
-    return start, end
-
-
 def _sessions_ts(rows: Iterable[dict[str, Any]], new_sessions: Mapping[str, int]) -> dict[str, dict[str, Any]]:
     return {
         str(row["bucket"]): {
@@ -220,7 +252,7 @@ def _cmcd_aggregates_compute(
     sections: set[Any] | None,
     mask_ips: bool,
 ) -> dict[str, Any]:
-    start, end = _window(start_time, end_time)
+    start, end = parse_time_window(start_time, end_time, _DEFAULT_WINDOW, utc=True)
     where, params = _scope(service, req, start, end)
     events = _EVENTS.format(where=where)
     execute = service.client.execute
@@ -537,14 +569,8 @@ def _cmcd_aggregates_compute(
 
         tasks.append(("session_duration", _run_session_duration))
 
-    if len(tasks) == 1:
-        name, fn = tasks[0]
-        result.update(trace.run(name, fn, source="projected_fact"))
-    elif tasks:
-        with ThreadPoolExecutor(max_workers=min(8, len(tasks))) as pool:
-            futures = [trace.submit(pool, name, fn, source="projected_fact") for name, fn in tasks]
-            for fut in futures:
-                result.update(fut.result())
+    for d in trace.run_parallel(tasks, source="projected_fact", max_workers=8).values():
+        result.update(d)
 
     result["section_timings"] = trace.timings()
     return result

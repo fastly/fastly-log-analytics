@@ -51,8 +51,7 @@ from backend.deps import get_service_id
 from backend.sync_status_publisher import publisher as sync_status_publisher
 from backend.system_metrics_sampler import sample_system_metrics_cached
 from backend.utils.router_utils import make_error
-from backend.utils.sse import sse_response
-from backend.utils.sse_subscription import iter_with_disconnect_ping
+from backend.utils.sse import iter_with_disconnect_ping, sse_response
 
 from ._router import router
 from .sync_status import compute_sync_status_cached

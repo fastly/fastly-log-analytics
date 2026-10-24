@@ -1,6 +1,6 @@
 import { HydrationBoundary } from '@tanstack/react-query'
 
-import { fetchMetricHistoryBatchServerSide } from '@/lib/ssr/admin_trends'
+import { fetchMetricHistoryBatchServerSide } from '@/lib/ssr/admin_gateway'
 import { seedDehydratedState } from '@/lib/ssr/seed'
 import AdminTrendsClient from './_sections/AdminTrendsClient'
 import { queryKeys } from '@/lib/query-keys'

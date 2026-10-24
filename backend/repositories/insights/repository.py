@@ -82,6 +82,40 @@ def _execute_on_cursor(
     return res
 
 
+def _exec_coalesced(
+    runner: QueryRunner,
+    sql: str,
+    params: list,
+    shadow_cursor: duckdb.DuckDBPyConnection | None = None,
+    debug_lock: threading.Lock | None = None,
+    *,
+    chunked: bool = False,
+    fetch_one: bool = False,
+) -> Any:
+    cur = (
+        _execute_on_cursor(runner, debug_lock, shadow_cursor, sql, params)
+        if shadow_cursor is not None and debug_lock is not None
+        else runner.execute(sql, params)
+    )
+    if chunked:
+        return (r for batch in iter(lambda: cur.fetchmany(10000) or [], []) for r in batch)
+    return cur.fetchone() if fetch_one else cur.fetchall()
+
+
+_TOP_K = 15
+
+
+def _push_top_k(heap: list[tuple], score: Any, counter: int, item: tuple, k: int = _TOP_K) -> None:
+    if len(heap) < k:
+        heapq.heappush(heap, (score, counter, item))
+    else:
+        heapq.heappushpop(heap, (score, counter, item))
+
+
+def _heap_to_sorted_items(heap: list[tuple]) -> list[tuple]:
+    return [entry[2] for entry in sorted(heap, key=lambda e: e[0], reverse=True)]
+
+
 def _coalesced_city_aggregates(
     runner: QueryRunner,
     table_name: str,
@@ -122,10 +156,7 @@ def _coalesced_city_aggregates(
         region_sel=region_sel,
         country_sel=country_sel,
     )
-    if shadow_cursor is not None and debug_lock is not None:
-        rows = _execute_on_cursor(runner, debug_lock, shadow_cursor, sql, [window_start_s, window_start_s]).fetchall()
-    else:
-        rows = runner.execute(sql, [window_start_s, window_start_s]).fetchall()
+    rows = _exec_coalesced(runner, sql, [window_start_s, window_start_s], shadow_cursor, debug_lock)
 
     surges: list[tuple] = []
     error_spikes: list[tuple] = []
@@ -237,12 +268,6 @@ def _coalesced_url_aggregates(
         )
     else:
         sql = COALESCED_URL_AGGREGATES.format(table_name=table_name)
-    if shadow_cursor is not None and debug_lock is not None:
-        result_cursor = _execute_on_cursor(runner, debug_lock, shadow_cursor, sql, [window_start_s, window_start_s])
-    else:
-        result_cursor = runner.execute(sql, [window_start_s, window_start_s])
-
-    _TOP_K = 15
     error_spikes_heap: list[tuple] = []
     cache_collapse_heap: list[tuple] = []
     cacheability_regression_heap: list[tuple] = []
@@ -253,12 +278,6 @@ def _coalesced_url_aggregates(
     image_opt_heap: list[tuple] = []
     cache_ttl_heap: list[tuple] = []
     origin_retries_heap: list[tuple] = []
-
-    def _push_top_k(heap: list[tuple], score: float, counter: int, item: tuple, k: int = _TOP_K) -> None:
-        if len(heap) < k:
-            heapq.heappush(heap, (score, counter, item))
-        else:
-            heapq.heappushpop(heap, (score, counter, item))
 
     has_pcr = bool(
         use_extended
@@ -277,174 +296,165 @@ def _coalesced_url_aggregates(
     has_oret = bool(use_extended and actual_cols is not None and "oretries" in actual_cols)
 
     counter = 0
+    for r in _exec_coalesced(runner, sql, [window_start_s, window_start_s], shadow_cursor, debug_lock, chunked=True):
+        if use_extended:
+            (
+                url,
+                w_total,
+                b_total,
+                w_5xx,
+                b_5xx,
+                w_hits,
+                b_hits,
+                w_miss,
+                b_miss,
+                w_pass,
+                b_pass,
+                w_lat_total,
+                b_lat_total,
+                w_p95,
+                b_p95,
+                w_p99,
+                w_p50,
+                is_probe,
+                w_4xx,
+                is_comp,
+                pcr_w_uncomp,
+                pcr_w_total,
+                pcr_b_uncomp,
+                pcr_b_total,
+                is_img,
+                img_w_cnt,
+                img_w_bytes,
+                img_w_avg_bytes,
+                img_w_mobile,
+                ttl_w_cnt,
+                ttl_w_avg_ttl,
+                ttl_w_avg_hits,
+                ttl_w_avg_age,
+                oret_w_cnt,
+                oret_w_avg,
+                oret_w_max,
+            ) = r
+        else:
+            (
+                url,
+                w_total,
+                b_total,
+                w_5xx,
+                b_5xx,
+                w_hits,
+                b_hits,
+                w_miss,
+                b_miss,
+                w_pass,
+                b_pass,
+                w_lat_total,
+                b_lat_total,
+                w_p95,
+                b_p95,
+                w_p99,
+                w_p50,
+            ) = r
 
-    while True:
-        rows = result_cursor.fetchmany(10000)
-        if not rows:
-            break
-        for r in rows:
-            if use_extended:
-                (
-                    url,
-                    w_total,
-                    b_total,
-                    w_5xx,
-                    b_5xx,
-                    w_hits,
-                    b_hits,
-                    w_miss,
-                    b_miss,
-                    w_pass,
-                    b_pass,
-                    w_lat_total,
-                    b_lat_total,
-                    w_p95,
-                    b_p95,
-                    w_p99,
-                    w_p50,
-                    is_probe,
-                    w_4xx,
-                    is_comp,
-                    pcr_w_uncomp,
-                    pcr_w_total,
-                    pcr_b_uncomp,
-                    pcr_b_total,
-                    is_img,
-                    img_w_cnt,
-                    img_w_bytes,
-                    img_w_avg_bytes,
-                    img_w_mobile,
-                    ttl_w_cnt,
-                    ttl_w_avg_ttl,
-                    ttl_w_avg_hits,
-                    ttl_w_avg_age,
-                    oret_w_cnt,
-                    oret_w_avg,
-                    oret_w_max,
-                ) = r
-            else:
-                (
-                    url,
-                    w_total,
-                    b_total,
-                    w_5xx,
-                    b_5xx,
-                    w_hits,
-                    b_hits,
-                    w_miss,
-                    b_miss,
-                    w_pass,
-                    b_pass,
-                    w_lat_total,
-                    b_lat_total,
-                    w_p95,
-                    b_p95,
-                    w_p99,
-                    w_p50,
-                ) = r
+        w_total_i = w_total or 0
+        b_total_i = b_total or 0
+        counter += 1
 
-            w_total_i = w_total or 0
-            b_total_i = b_total or 0
-            counter += 1
+        # ── error_spikes ──────────────────────────────────────────────────
+        if w_total_i >= 3:
+            w_rate_e = (w_5xx or 0) / w_total_i if w_total_i else 0.0
+            b_rate_e = ((b_5xx or 0) / b_total_i) if b_total_i else None
+            if w_rate_e >= 0.05 and (b_total_i < 10 or (b_rate_e is not None and w_rate_e >= b_rate_e * 2 + 0.05)):
+                item = (url, w_rate_e, b_rate_e, w_5xx, w_total, b_total)
+                score = (w_rate_e or 0) - (b_rate_e or 0)
+                _push_top_k(error_spikes_heap, score, counter, item)
 
-            # ── error_spikes ──────────────────────────────────────────────────
-            if w_total_i >= 3:
-                w_rate_e = (w_5xx or 0) / w_total_i if w_total_i else 0.0
-                b_rate_e = ((b_5xx or 0) / b_total_i) if b_total_i else None
-                if w_rate_e >= 0.05 and (b_total_i < 10 or (b_rate_e is not None and w_rate_e >= b_rate_e * 2 + 0.05)):
-                    item = (url, w_rate_e, b_rate_e, w_5xx, w_total, b_total)
-                    score = (w_rate_e or 0) - (b_rate_e or 0)
-                    _push_top_k(error_spikes_heap, score, counter, item)
+        # ── cache_collapse ────────────────────────────────────────────────
+        w_cacheable = (w_hits or 0) + (w_miss or 0)
+        b_cacheable = (b_hits or 0) + (b_miss or 0)
+        if w_cacheable >= 5 and b_cacheable >= 20:
+            w_rate_c = (w_hits or 0) / w_cacheable if w_cacheable else 0.0
+            b_rate_c = (b_hits or 0) / b_cacheable if b_cacheable else 0.0
+            if b_rate_c >= 0.40 and w_rate_c <= b_rate_c - 0.20 and w_rate_c <= b_rate_c * 0.6:
+                item_cc: tuple = (url, w_rate_c, b_rate_c, w_cacheable, b_cacheable)
+                score = (b_rate_c or 0) - (w_rate_c or 0)
+                _push_top_k(cache_collapse_heap, score, counter, item_cc)
 
-            # ── cache_collapse ────────────────────────────────────────────────
-            w_cacheable = (w_hits or 0) + (w_miss or 0)
-            b_cacheable = (b_hits or 0) + (b_miss or 0)
-            if w_cacheable >= 5 and b_cacheable >= 20:
-                w_rate_c = (w_hits or 0) / w_cacheable if w_cacheable else 0.0
-                b_rate_c = (b_hits or 0) / b_cacheable if b_cacheable else 0.0
-                if b_rate_c >= 0.40 and w_rate_c <= b_rate_c - 0.20 and w_rate_c <= b_rate_c * 0.6:
-                    item_cc: tuple = (url, w_rate_c, b_rate_c, w_cacheable, b_cacheable)
-                    score = (b_rate_c or 0) - (w_rate_c or 0)
-                    _push_top_k(cache_collapse_heap, score, counter, item_cc)
+        # ── cacheability_regression ───────────────────────────────────────
+        if w_total_i >= 10 and b_total_i >= 50:
+            w_pass_rate = (w_pass or 0) / w_total_i if w_total_i else 0.0
+            b_pass_rate = (b_pass or 0) / b_total_i if b_total_i else 0.0
+            if b_pass_rate <= 0.20 and w_pass_rate >= 0.50 and w_pass_rate >= b_pass_rate + 0.30:
+                item_cr: tuple = (url, w_pass_rate, b_pass_rate, w_total, b_total)
+                score = (w_pass_rate or 0) - (b_pass_rate or 0)
+                _push_top_k(cacheability_regression_heap, score, counter, item_cr)
 
-            # ── cacheability_regression ───────────────────────────────────────
-            if w_total_i >= 10 and b_total_i >= 50:
-                w_pass_rate = (w_pass or 0) / w_total_i if w_total_i else 0.0
-                b_pass_rate = (b_pass or 0) / b_total_i if b_total_i else 0.0
-                if b_pass_rate <= 0.20 and w_pass_rate >= 0.50 and w_pass_rate >= b_pass_rate + 0.30:
-                    item_cr: tuple = (url, w_pass_rate, b_pass_rate, w_total, b_total)
-                    score = (w_pass_rate or 0) - (b_pass_rate or 0)
-                    _push_top_k(cacheability_regression_heap, score, counter, item_cr)
+        # ── latency_regression ────────────────────────────────────────────
+        if (
+            w_total_i >= 5
+            and b_total_i >= 20
+            and w_p95 is not None
+            and b_p95 is not None
+            and w_p95 >= b_p95 * 2.0
+            and w_p95 - b_p95 >= 200
+        ):
+            item_lr: tuple = (url, w_p95, b_p95, w_total, b_total)
+            score = (w_p95 / b_p95) if b_p95 else 0.0
+            _push_top_k(latency_regression_heap, score, counter, item_lr)
 
-            # ── latency_regression ────────────────────────────────────────────
+        # ── tail_latency (window-only) ────────────────────────────────────
+        if w_lat_total is not None and w_lat_total >= 20 and w_p99 is not None and w_p50 is not None and w_p50 > 0:
+            ratio = round(w_p99 / w_p50, 1)
+            if ratio > 5:
+                item_tl: tuple = (url, w_p99, w_p50, ratio, w_lat_total)
+                _push_top_k(tail_latency_heap, ratio or 0.0, counter, item_tl)
+
+        if use_extended:
+            # ── new_probe_urls ────────────────────────────────────────────
+            if is_probe and w_total_i > 0 and b_total_i == 0:
+                w_error_pct = (w_4xx or 0) * 100.0 / w_total_i
+                item_npu: tuple = (url, w_total_i, b_total_i, w_error_pct)
+                _push_top_k(new_probe_urls_heap, float(w_total_i), counter, item_npu, k=25)
+
+            # ── payload_compression_regression ────────────────────────────
+            if has_pcr and is_comp and (pcr_w_total or 0) >= 10 and (pcr_b_total or 0) >= 50:
+                w_rate_p = (pcr_w_uncomp or 0) / pcr_w_total
+                b_rate_p = (pcr_b_uncomp or 0) / pcr_b_total
+                if b_rate_p <= 0.20 and w_rate_p >= 0.50 and w_rate_p >= b_rate_p + 0.30:
+                    item_pcr: tuple = (url, w_rate_p, b_rate_p, pcr_w_total, pcr_b_total)
+                    _push_top_k(payload_comp_heap, w_rate_p - b_rate_p, counter, item_pcr, k=15)
+
+            # ── image_optimization_opportunities ──────────────────────────
+            if has_img and is_img and (img_w_bytes or 0) > 524288:
+                avg_kb = round((img_w_avg_bytes or 0.0) / 1024.0, 1)
+                mobile_ratio = ((img_w_mobile or 0) * 1.0 / img_w_cnt) if img_w_cnt else 0.0
+                item_img: tuple = (url, img_w_cnt, img_w_bytes, avg_kb, mobile_ratio)
+                _push_top_k(image_opt_heap, float(img_w_bytes), counter, item_img, k=15)
+
+            # ── cache_ttl_mismatch ────────────────────────────────────────
             if (
-                w_total_i >= 5
-                and b_total_i >= 20
-                and w_p95 is not None
-                and b_p95 is not None
-                and w_p95 >= b_p95 * 2.0
-                and w_p95 - b_p95 >= 200
+                has_ttl
+                and (ttl_w_cnt or 0) >= 10
+                and ttl_w_avg_hits is not None
+                and ttl_w_avg_hits < 2
+                and ttl_w_avg_ttl is not None
+                and ttl_w_avg_ttl > 60
             ):
-                item_lr: tuple = (url, w_p95, b_p95, w_total, b_total)
-                score = (w_p95 / b_p95) if b_p95 else 0.0
-                _push_top_k(latency_regression_heap, score, counter, item_lr)
+                item_ttl: tuple = (
+                    url,
+                    round(ttl_w_avg_ttl, 0),
+                    round(ttl_w_avg_hits, 1),
+                    round(ttl_w_avg_age or 0.0, 0),
+                    ttl_w_cnt,
+                )
+                _push_top_k(cache_ttl_heap, float(ttl_w_avg_ttl), counter, item_ttl, k=20)
 
-            # ── tail_latency (window-only) ────────────────────────────────────
-            if w_lat_total is not None and w_lat_total >= 20 and w_p99 is not None and w_p50 is not None and w_p50 > 0:
-                ratio = round(w_p99 / w_p50, 1)
-                if ratio > 5:
-                    item_tl: tuple = (url, w_p99, w_p50, ratio, w_lat_total)
-                    _push_top_k(tail_latency_heap, ratio or 0.0, counter, item_tl)
-
-            if use_extended:
-                # ── new_probe_urls ────────────────────────────────────────────
-                if is_probe and w_total_i > 0 and b_total_i == 0:
-                    w_error_pct = (w_4xx or 0) * 100.0 / w_total_i
-                    item_npu: tuple = (url, w_total_i, b_total_i, w_error_pct)
-                    _push_top_k(new_probe_urls_heap, float(w_total_i), counter, item_npu, k=25)
-
-                # ── payload_compression_regression ────────────────────────────
-                if has_pcr and is_comp and (pcr_w_total or 0) >= 10 and (pcr_b_total or 0) >= 50:
-                    w_rate_p = (pcr_w_uncomp or 0) / pcr_w_total
-                    b_rate_p = (pcr_b_uncomp or 0) / pcr_b_total
-                    if b_rate_p <= 0.20 and w_rate_p >= 0.50 and w_rate_p >= b_rate_p + 0.30:
-                        item_pcr: tuple = (url, w_rate_p, b_rate_p, pcr_w_total, pcr_b_total)
-                        _push_top_k(payload_comp_heap, w_rate_p - b_rate_p, counter, item_pcr, k=15)
-
-                # ── image_optimization_opportunities ──────────────────────────
-                if has_img and is_img and (img_w_bytes or 0) > 524288:
-                    avg_kb = round((img_w_avg_bytes or 0.0) / 1024.0, 1)
-                    mobile_ratio = ((img_w_mobile or 0) * 1.0 / img_w_cnt) if img_w_cnt else 0.0
-                    item_img: tuple = (url, img_w_cnt, img_w_bytes, avg_kb, mobile_ratio)
-                    _push_top_k(image_opt_heap, float(img_w_bytes), counter, item_img, k=15)
-
-                # ── cache_ttl_mismatch ────────────────────────────────────────
-                if (
-                    has_ttl
-                    and (ttl_w_cnt or 0) >= 10
-                    and ttl_w_avg_hits is not None
-                    and ttl_w_avg_hits < 2
-                    and ttl_w_avg_ttl is not None
-                    and ttl_w_avg_ttl > 60
-                ):
-                    item_ttl: tuple = (
-                        url,
-                        round(ttl_w_avg_ttl, 0),
-                        round(ttl_w_avg_hits, 1),
-                        round(ttl_w_avg_age or 0.0, 0),
-                        ttl_w_cnt,
-                    )
-                    _push_top_k(cache_ttl_heap, float(ttl_w_avg_ttl), counter, item_ttl, k=20)
-
-                # ── origin_retries ────────────────────────────────────────────
-                if has_oret and (oret_w_cnt or 0) >= 5 and oret_w_avg is not None:
-                    avg_ret = round(oret_w_avg, 2)
-                    item_oret: tuple = (url, oret_w_cnt, avg_ret, oret_w_max)
-                    _push_top_k(origin_retries_heap, float(avg_ret), counter, item_oret, k=10)
-
-    def _heap_to_sorted_items(heap: list[tuple]) -> list[tuple]:
-        # heap is (score, counter, item); return items sorted by score desc.
-        return [entry[2] for entry in sorted(heap, key=lambda e: e[0], reverse=True)]
+            # ── origin_retries ────────────────────────────────────────────
+            if has_oret and (oret_w_cnt or 0) >= 5 and oret_w_avg is not None:
+                avg_ret = round(oret_w_avg, 2)
+                item_oret: tuple = (url, oret_w_cnt, avg_ret, oret_w_max)
+                _push_top_k(origin_retries_heap, float(avg_ret), counter, item_oret, k=10)
 
     res: dict[str, list[tuple]] = {
         "error_spikes": _heap_to_sorted_items(error_spikes_heap),
@@ -501,23 +511,11 @@ def _coalesced_ip_security_aggregates(
         )
     else:
         sql = COALESCED_IP_SECURITY_AGGREGATES.format(table_name=table_name)
-    if shadow_cursor is not None and debug_lock is not None:
-        result_cursor = _execute_on_cursor(runner, debug_lock, shadow_cursor, sql, [window_start_s, window_start_s])
-    else:
-        result_cursor = runner.execute(sql, [window_start_s, window_start_s])
-
-    _TOP_K = 15
     low_and_slow_heap: list[tuple] = []
     credential_enumeration_heap: list[tuple] = []
     content_discovery_heap: list[tuple] = []
     orphaned_deep_crawl_heap: list[tuple] = []
     session_harvesting_heap: list[tuple] = []
-
-    def _push_top_k(heap: list[tuple], sortkey: tuple, counter: int, item: tuple) -> None:
-        if len(heap) < _TOP_K:
-            heapq.heappush(heap, (sortkey, counter, item))
-        else:
-            heapq.heappushpop(heap, (sortkey, counter, item))
 
     has_odc = bool(use_extended and actual_cols is not None and "referer" in actual_cols)
     has_sh = bool(use_extended and actual_cols is not None and "cookie_session" in actual_cols)
@@ -529,120 +527,112 @@ def _coalesced_ip_security_aggregates(
     baseline_scale = max(baseline_hours, 1.0)
     counter = 0
 
-    while True:
-        rows = result_cursor.fetchmany(10000)
-        if not rows:
-            break
-        for r in rows:
-            if use_extended:
-                (
-                    ip,
-                    ls_hits,
-                    ls_distinct,
-                    ls_min_sec,
-                    ls_max_sec,
-                    ce_w_denied,
-                    ce_w_attempts,
-                    ce_w_paths,
-                    ce_b_denied,
-                    cd_w_404,
-                    cd_w_total,
-                    cd_distinct_404,
-                    cd_b_404,
-                    odc_w_reqs,
-                    odc_w_urls,
-                    odc_b_reqs,
-                    sh_w_sessions,
-                    sh_w_reqs,
-                    sh_b_sessions,
-                    rsa_w_cnt,
-                    rsa_w_max,
-                    rsa_b_min,
-                    _rsa_b_max,
-                    ca_w_cnt,
-                    ca_w_max,
-                    ca_b_min,
-                    _ca_b_max,
-                ) = r
-            else:
-                (
-                    ip,
-                    ls_hits,
-                    ls_distinct,
-                    ls_min_sec,
-                    ls_max_sec,
-                    ce_w_denied,
-                    ce_w_attempts,
-                    ce_w_paths,
-                    ce_b_denied,
-                    cd_w_404,
-                    cd_w_total,
-                    cd_distinct_404,
-                    cd_b_404,
-                ) = r
-            counter += 1
+    for r in _exec_coalesced(runner, sql, [window_start_s, window_start_s], shadow_cursor, debug_lock, chunked=True):
+        if use_extended:
+            (
+                ip,
+                ls_hits,
+                ls_distinct,
+                ls_min_sec,
+                ls_max_sec,
+                ce_w_denied,
+                ce_w_attempts,
+                ce_w_paths,
+                ce_b_denied,
+                cd_w_404,
+                cd_w_total,
+                cd_distinct_404,
+                cd_b_404,
+                odc_w_reqs,
+                odc_w_urls,
+                odc_b_reqs,
+                sh_w_sessions,
+                sh_w_reqs,
+                sh_b_sessions,
+                rsa_w_cnt,
+                rsa_w_max,
+                rsa_b_min,
+                _rsa_b_max,
+                ca_w_cnt,
+                ca_w_max,
+                ca_b_min,
+                _ca_b_max,
+            ) = r
+        else:
+            (
+                ip,
+                ls_hits,
+                ls_distinct,
+                ls_min_sec,
+                ls_max_sec,
+                ce_w_denied,
+                ce_w_attempts,
+                ce_w_paths,
+                ce_b_denied,
+                cd_w_404,
+                cd_w_total,
+                cd_distinct_404,
+                cd_b_404,
+            ) = r
+        counter += 1
 
-            # ── low_and_slow ──────────────────────────────────────────────────
-            ls_hits_i = ls_hits or 0
-            ls_distinct_i = ls_distinct or 0
-            span_s = (ls_max_sec - ls_min_sec) if (ls_min_sec is not None and ls_max_sec is not None) else 0
-            if ls_hits_i >= 5 and ls_distinct_i >= 3 and span_s >= 600 and (ls_hits_i / span_s) < 0.2:
-                rps = round(ls_hits_i / span_s, 5)
-                item_ls: tuple = (ip, ls_hits_i, ls_distinct_i, span_s, rps)
-                _push_top_k(low_and_slow_heap, (ls_distinct_i, span_s), counter, item_ls)
+        # ── low_and_slow ──────────────────────────────────────────────────
+        ls_hits_i = ls_hits or 0
+        ls_distinct_i = ls_distinct or 0
+        span_s = (ls_max_sec - ls_min_sec) if (ls_min_sec is not None and ls_max_sec is not None) else 0
+        if ls_hits_i >= 5 and ls_distinct_i >= 3 and span_s >= 600 and (ls_hits_i / span_s) < 0.2:
+            rps = round(ls_hits_i / span_s, 5)
+            item_ls: tuple = (ip, ls_hits_i, ls_distinct_i, span_s, rps)
+            _push_top_k(low_and_slow_heap, (ls_distinct_i, span_s), counter, item_ls)
 
-            # ── credential_enumeration ────────────────────────────────────────
-            ce_w_denied_i = ce_w_denied or 0
-            if ce_w_denied_i >= 20:
-                ce_ratio = (ce_w_denied_i / ce_w_attempts) if ce_w_attempts else 0.0
-                b_norm = (ce_b_denied or 0) / baseline_scale * window_hours * 3 + 5
-                if ce_ratio >= 0.5 and ce_w_denied_i > b_norm:
-                    item_ce: tuple = (ip, ce_w_denied_i, ce_w_attempts, ce_w_paths, ce_b_denied)
-                    _push_top_k(credential_enumeration_heap, (ce_w_denied_i,), counter, item_ce)
+        # ── credential_enumeration ────────────────────────────────────────
+        ce_w_denied_i = ce_w_denied or 0
+        if ce_w_denied_i >= 20:
+            ce_ratio = (ce_w_denied_i / ce_w_attempts) if ce_w_attempts else 0.0
+            b_norm = (ce_b_denied or 0) / baseline_scale * window_hours * 3 + 5
+            if ce_ratio >= 0.5 and ce_w_denied_i > b_norm:
+                item_ce: tuple = (ip, ce_w_denied_i, ce_w_attempts, ce_w_paths, ce_b_denied)
+                _push_top_k(credential_enumeration_heap, (ce_w_denied_i,), counter, item_ce)
 
-            # ── content_discovery ─────────────────────────────────────────────
-            cd_w_404_i = cd_w_404 or 0
-            cd_distinct_404_i = cd_distinct_404 or 0
-            if cd_w_404_i >= 20 and cd_distinct_404_i >= 15:
-                cd_ratio = (cd_w_404_i / cd_w_total) if cd_w_total else 0.0
-                if cd_ratio >= 0.7:
-                    item_cd: tuple = (ip, cd_w_404_i, cd_w_total, cd_distinct_404_i, cd_b_404)
-                    _push_top_k(content_discovery_heap, (cd_w_404_i,), counter, item_cd)
+        # ── content_discovery ─────────────────────────────────────────────
+        cd_w_404_i = cd_w_404 or 0
+        cd_distinct_404_i = cd_distinct_404 or 0
+        if cd_w_404_i >= 20 and cd_distinct_404_i >= 15:
+            cd_ratio = (cd_w_404_i / cd_w_total) if cd_w_total else 0.0
+            if cd_ratio >= 0.7:
+                item_cd: tuple = (ip, cd_w_404_i, cd_w_total, cd_distinct_404_i, cd_b_404)
+                _push_top_k(content_discovery_heap, (cd_w_404_i,), counter, item_cd)
 
-            if use_extended:
-                # ── orphaned_deep_crawl ───────────────────────────────────────
-                if has_odc and (odc_w_reqs or 0) >= 50 and (odc_w_urls or 0) >= 10:
-                    b_reqs_i = odc_b_reqs or 0
-                    reqs_per_url = odc_w_reqs * 1.0 / max(odc_w_urls, 1.0)
-                    surge_ratio = odc_w_reqs * 1.0 / max(b_reqs_i / baseline_scale * window_hours, 1.0)
-                    item_odc: tuple = (ip, odc_w_reqs, odc_w_urls, b_reqs_i, reqs_per_url, surge_ratio)
-                    _push_top_k(orphaned_deep_crawl_heap, (odc_w_reqs,), counter, item_odc)
+        if use_extended:
+            # ── orphaned_deep_crawl ───────────────────────────────────────
+            if has_odc and (odc_w_reqs or 0) >= 50 and (odc_w_urls or 0) >= 10:
+                b_reqs_i = odc_b_reqs or 0
+                reqs_per_url = odc_w_reqs * 1.0 / max(odc_w_urls, 1.0)
+                surge_ratio = odc_w_reqs * 1.0 / max(b_reqs_i / baseline_scale * window_hours, 1.0)
+                item_odc: tuple = (ip, odc_w_reqs, odc_w_urls, b_reqs_i, reqs_per_url, surge_ratio)
+                _push_top_k(orphaned_deep_crawl_heap, (odc_w_reqs,), counter, item_odc)
 
-                # ── session_harvesting ────────────────────────────────────────
-                if has_sh and (sh_w_sessions or 0) >= 20:
-                    b_sess_i = sh_b_sessions or 0
-                    if sh_w_sessions > b_sess_i * 2 + 10:
-                        item_sh: tuple = (ip, sh_w_sessions, sh_w_reqs, b_sess_i)
-                        _push_top_k(session_harvesting_heap, (sh_w_sessions,), counter, item_sh)
+            # ── session_harvesting ────────────────────────────────────────
+            if has_sh and (sh_w_sessions or 0) >= 20:
+                b_sess_i = sh_b_sessions or 0
+                if sh_w_sessions > b_sess_i * 2 + 10:
+                    item_sh: tuple = (ip, sh_w_sessions, sh_w_reqs, b_sess_i)
+                    _push_top_k(session_harvesting_heap, (sh_w_sessions,), counter, item_sh)
 
-                # ── request_size_anomaly exact lower-bound check ──────────────
-                # Since min(B) <= P95(B), max_w > P95(B)*3 requires max_w > min(B)*3.
-                if has_rsa and (rsa_w_cnt or 0) >= 3 and rsa_b_min is not None and (rsa_w_max or 0) > rsa_b_min * 3:
-                    rsa_candidates += 1
+            # ── request_size_anomaly exact lower-bound check ──────────────
+            # Since min(B) <= P95(B), max_w > P95(B)*3 requires max_w > min(B)*3.
+            if has_rsa and (rsa_w_cnt or 0) >= 3 and rsa_b_min is not None and (rsa_w_max or 0) > rsa_b_min * 3:
+                rsa_candidates += 1
 
-                # ── connection_abuse exact lower-bound check ──────────────────
-                if (
-                    has_ca
-                    and (ca_w_cnt or 0) >= 5
-                    and (ca_w_max or 0) >= 50
-                    and ca_b_min is not None
-                    and (ca_w_max or 0) > ca_b_min * 3
-                ):
-                    ca_candidates += 1
-
-    def _heap_to_sorted_items(heap: list[tuple]) -> list[tuple]:
-        # heap is (sortkey, counter, item); return items sorted by sortkey desc.
-        return [entry[2] for entry in sorted(heap, key=lambda e: e[0], reverse=True)]
+            # ── connection_abuse exact lower-bound check ──────────────────
+            if (
+                has_ca
+                and (ca_w_cnt or 0) >= 5
+                and (ca_w_max or 0) >= 50
+                and ca_b_min is not None
+                and (ca_w_max or 0) > ca_b_min * 3
+            ):
+                ca_candidates += 1
 
     res: dict[str, list[tuple]] = {
         "low_and_slow": _heap_to_sorted_items(low_and_slow_heap),
@@ -683,10 +673,7 @@ def _coalesced_asn_aggregates(
         retrans_sel='"retrans"' if "retrans" in actual_cols else "NULL::DOUBLE",
         p_type_sel='"p_type"' if "p_type" in actual_cols else "NULL::VARCHAR",
     )
-    if shadow_cursor is not None and debug_lock is not None:
-        rows = _execute_on_cursor(runner, debug_lock, shadow_cursor, sql, [window_start_s, window_start_s]).fetchall()
-    else:
-        rows = runner.execute(sql, [window_start_s, window_start_s]).fetchall()
+    rows = _exec_coalesced(runner, sql, [window_start_s, window_start_s], shadow_cursor, debug_lock)
 
     w_total_all = sum(int(r[1] or 0) for r in rows)
     b_total_all = sum(int(r[2] or 0) for r in rows)
@@ -816,10 +803,7 @@ def _coalesced_scalar_aggregates(
         oconnect_ms_sel='"oconnect_ms"' if has_oconnect else "NULL::DOUBLE",
         ottfb_sel='"ottfb"' if has_ottfb else "NULL::DOUBLE",
     )
-    if shadow_cursor is not None and debug_lock is not None:
-        row = _execute_on_cursor(runner, debug_lock, shadow_cursor, sql, [window_start_s, window_start_s]).fetchone()
-    else:
-        row = runner.execute(sql, [window_start_s, window_start_s]).fetchone()
+    row = _exec_coalesced(runner, sql, [window_start_s, window_start_s], shadow_cursor, debug_lock, fetch_one=True)
 
     res: dict[str, list[tuple]] = {}
     if not row:
@@ -935,12 +919,7 @@ def _coalesced_fp_aggregates(
         asn_sel='"asn"' if "asn" in actual_cols else "NULL::BIGINT",
         is_non_hosting_sel='("p_type" IS NULL OR "p_type" != \'hosting\')' if "p_type" in actual_cols else "true",
     )
-    if shadow_cursor is not None and debug_lock is not None:
-        raw_rows = _execute_on_cursor(
-            runner, debug_lock, shadow_cursor, sql, [window_start_s, window_start_s]
-        ).fetchall()
-    else:
-        raw_rows = runner.execute(sql, [window_start_s, window_start_s]).fetchall()
+    raw_rows = _exec_coalesced(runner, sql, [window_start_s, window_start_s], shadow_cursor, debug_lock)
 
     baseline_scale = max(float(baseline_hours), 1.0)
     win_h = float(window_hours)
@@ -1044,12 +1023,7 @@ def _coalesced_dim_aggregates(
         referer_sel='"referer"' if has_referer else "NULL::VARCHAR",
         ua_sel='"ua"' if has_ua else "NULL::VARCHAR",
     )
-    if shadow_cursor is not None and debug_lock is not None:
-        raw_rows = _execute_on_cursor(
-            runner, debug_lock, shadow_cursor, sql, [window_start_s, window_start_s]
-        ).fetchall()
-    else:
-        raw_rows = runner.execute(sql, [window_start_s, window_start_s]).fetchall()
+    raw_rows = _exec_coalesced(runner, sql, [window_start_s, window_start_s], shadow_cursor, debug_lock)
 
     # GROUPING_ID(country, p_type, method, c_type, c_speed, ost, oip, referer, ua)
     # Bit positions (8..0):
@@ -1203,30 +1177,25 @@ def _coalesced_dim_aggregates(
         else:
             res["origin_ip_failure"] = []
 
-    if has_referer:
-        ref_w_total = sum(wc for _, wc, _ in referer_rows)
-        ref_b_total = sum(bc for _, _, bc in referer_rows)
-        ref_out: list[tuple] = []
-        if ref_w_total > 0:
-            for ref, wc, bc in referer_rows:
-                if ref is not None and ref != "":
-                    if (wc * 1.0 / ref_w_total) >= 0.20:
-                        if ref_b_total == 0 or (wc * 1.0 / ref_w_total) >= (bc * 1.0 / ref_b_total) * 3 + 0.10:
-                            ref_out.append((ref, wc, bc, ref_b_total, ref_w_total))
-        ref_out.sort(key=lambda r: r[1], reverse=True)
-        res["referer_monoculture"] = ref_out[:10]
+    def _monoculture(rows_in: list[tuple], min_share: float, skip_empty: bool) -> list[tuple]:
+        w_tot = sum(wc for _, wc, _ in rows_in)
+        b_tot = sum(bc for _, _, bc in rows_in)
+        if w_tot <= 0:
+            return []
+        out = [
+            (val, wc, bc, b_tot, w_tot)
+            for val, wc, bc in rows_in
+            if (not skip_empty or (val is not None and val != ""))
+            and (wc * 1.0 / w_tot) >= min_share
+            and (b_tot == 0 or (wc * 1.0 / w_tot) >= (bc * 1.0 / b_tot) * 3 + 0.10)
+        ]
+        out.sort(key=lambda r: r[1], reverse=True)
+        return out[:10]
 
+    if has_referer:
+        res["referer_monoculture"] = _monoculture(referer_rows, 0.20, skip_empty=True)
     if has_ua:
-        ua_w_total = sum(wc for _, wc, _ in ua_rows)
-        ua_b_total = sum(bc for _, _, bc in ua_rows)
-        ua_out: list[tuple] = []
-        if ua_w_total > 0:
-            for ua_val, wc, bc in ua_rows:
-                if (wc * 1.0 / ua_w_total) >= 0.25:
-                    if ua_b_total == 0 or (wc * 1.0 / ua_w_total) >= (bc * 1.0 / ua_b_total) * 3 + 0.10:
-                        ua_out.append((ua_val, wc, bc, ua_b_total, ua_w_total))
-        ua_out.sort(key=lambda r: r[1], reverse=True)
-        res["ua_monoculture"] = ua_out[:10]
+        res["ua_monoculture"] = _monoculture(ua_rows, 0.25, skip_empty=False)
 
     return res
 
@@ -1260,12 +1229,7 @@ def _coalesced_geo_latency_aggregates(
         ottfb_sel='"ottfb"' if has_ottfb else "NULL::DOUBLE",
         delivery_rate_sel='"delivery_rate"' if has_metro_dr else "NULL::DOUBLE",
     )
-    if shadow_cursor is not None and debug_lock is not None:
-        raw_rows = _execute_on_cursor(
-            runner, debug_lock, shadow_cursor, sql, [window_start_s, window_start_s]
-        ).fetchall()
-    else:
-        raw_rows = runner.execute(sql, [window_start_s, window_start_s]).fetchall()
+    raw_rows = _exec_coalesced(runner, sql, [window_start_s, window_start_s], shadow_cursor, debug_lock)
 
     # GROUPING_ID(pop, server_region, metro)
     # (pop)           -> 0b011 = 3
@@ -1414,6 +1378,29 @@ def check_insights_cache(
     return None
 
 
+def _compute_clamped_insight_windows(
+    window_hours: float,
+    baseline_hours: float,
+    clamp_start: str | None = None,
+    clamp_end: str | None = None,
+) -> tuple[datetime, str, str, str]:
+    from backend.utils.date_utils import parse_iso_utc
+
+    now = datetime.now(UTC)
+    if clamp_end:
+        ce = parse_iso_utc(clamp_end)
+        if ce and ce < now:
+            now = ce
+    window_start = now - timedelta(hours=window_hours)
+    baseline_start = now - timedelta(hours=baseline_hours + window_hours)
+    if clamp_start:
+        cs = parse_iso_utc(clamp_start)
+        if cs:
+            baseline_start = max(baseline_start, cs)
+            window_start = max(window_start, cs)
+    return now, now.isoformat(), window_start.isoformat(), baseline_start.isoformat()
+
+
 def get_insights(
     con: duckdb.DuckDBPyConnection,
     src: dict,
@@ -1454,57 +1441,25 @@ def get_insights(
     the cache key so a masked analyst result and an unmasked one never share an
     entry.
     """
-    from backend.utils.date_utils import parse_iso_utc
-
     source_name = src["name"]
     table_name = _safe_table(source_name)
+    now, now_s, window_start_s, baseline_start_s = _compute_clamped_insight_windows(
+        window_hours, baseline_hours, clamp_start, clamp_end
+    )
 
-    now = datetime.now(UTC)
-    window_start = now - timedelta(hours=window_hours)
-    baseline_start = now - timedelta(hours=baseline_hours + window_hours)
-
-    # M2: clamp to the analyst's window. ``clamp_end`` ceilings the anchor
-    # (absolute-window invites can end in the past → re-derive the relative
-    # boundaries off the clamped anchor); ``clamp_start`` floors the earliest
-    # scanned row. None on both = admin / prewarmer = no clamp.
-    if clamp_end:
-        ce = parse_iso_utc(clamp_end)
-        if ce and ce < now:
-            now = ce
-            window_start = now - timedelta(hours=window_hours)
-            baseline_start = now - timedelta(hours=baseline_hours + window_hours)
-    if clamp_start:
-        cs = parse_iso_utc(clamp_start)
-        if cs:
-            baseline_start = max(baseline_start, cs)
-            window_start = max(window_start, cs)
-
-    now_s = now.isoformat()
-    window_start_s = window_start.isoformat()
-    baseline_start_s = baseline_start.isoformat()
-
-    # Stable, time-independent cache key. The previous shape folded the raw
-    # ``clamp_start``/``clamp_end`` into the key; the admin path (None,None)
-    # was stable, but every analyst request stamped a fresh ``now`` into those
-    # bounds, so the analyst key never repeated → they recomputed on EVERY
-    # call (the "broken for analysts" perf-audit finding). Now the analyst key
-    # uses ``clamp_cache_key`` (keyed on the invite's WINDOW PARAMETERS, not
-    # the rolling resolved bounds), so repeated analyst requests reuse one
-    # entry — mirroring the admin time-independent key + the BoundedTTLCache's
-    # own auto-expiry for freshness. The resolved bounds still drive the scan;
-    # only the KEY is stabilized, so a cache hit is ≤TTL stale, identical to
-    # the admin contract. The prewarmer (every 240 s, TTL 300 s,
-    # force_refresh) re-writes the entry under the TTL so a user never pays
-    # cold compute.
-    #
-    # ``key_clamp`` resolution:
-    #   - clamp_cache_key set  → stable analyst key (router / prewarmer).
-    #   - no key but a clamp   → legacy rolling-bounds key, so any non-router
-    #                            caller keeps the clamped/unclamped isolation
-    #                            guarantee (a scoped result never reads or
-    #                            overwrites the admin entry).
-    #   - neither              → "" (the admin / prewarmer unclamped shape).
-    # ``mask_ips`` stays in the key so masked and unmasked never share.
+    cached = check_insights_cache(
+        src,
+        window_hours=window_hours,
+        baseline_hours=baseline_hours,
+        clamp_start=clamp_start,
+        clamp_end=clamp_end,
+        mask_ips=mask_ips,
+        clamp_cache_key=clamp_cache_key,
+        force_refresh=force_refresh,
+        filters=filters,
+    )
+    if cached is not None:
+        return cached
     cache_key = _build_insights_cache_key(
         source_name,
         window_hours=window_hours,
@@ -1515,19 +1470,6 @@ def get_insights(
         clamp_cache_key=clamp_cache_key,
         filters=filters,
     )
-    if INSIGHTS_CACHE_TTL > 0 and not force_refresh:
-        with _insights_cache_lock:
-            entry = _insights_cache.get(cache_key)
-        if entry is not None:
-            cached = entry[1].copy()
-            # The response model's field is ``is_cached`` with
-            # serialization_alias ``_is_cached`` (see BaseResponse). Stamping
-            # ``_is_cached`` here is dropped on validation — Pydantic matches
-            # the unaliased field name — so every cache hit serialized as
-            # ``"_is_cached": false``. Stamp the field name so the marker
-            # survives. (Mirrors the dashboard.py fix.)
-            cached["is_cached"] = True
-            return cached
 
     runner = QueryRunner(con, src)
     actual_cols = runner.get_schema_cols()
@@ -1776,21 +1718,12 @@ def get_insights(
         # swallows its own exception exactly as the sequential code did —
         # falling back to ``{}`` / ``None`` never breaks the other 3 tasks or
         # the page.
-        def _task_city() -> dict[str, list[tuple]]:
-            # Only fires when ALL 4 city-based insights are eligible (city +
-            # status + elapsed + timestamp all in schema). When a service is
-            # missing one of those columns the per-insight scans still run
-            # for the eligible subset (handled in the per-insight loop below).
-            if not (
-                "city" in actual_cols
-                and "status" in actual_cols
-                and "elapsed" in actual_cols
-                and "timestamp" in actual_cols
-            ):
-                return {}
-            try:
-                cur = runner.con.cursor()
-                return _coalesced_city_aggregates(
+        _coalesced_specs: list[tuple[str, bool, str, tuple, dict[str, Any]]] = [
+            (
+                "city",
+                {"city", "status", "elapsed", "timestamp"}.issubset(actual_cols),
+                "_coalesced_city_aggregates",
+                (
                     runner,
                     table_name,
                     window_start_s,
@@ -1799,200 +1732,86 @@ def get_insights(
                     country_sel,
                     window_hours,
                     baseline_hours,
-                    shadow_cursor=cur,
-                    debug_lock=_debug_lock,
-                )
-            except Exception as e:
-                # Fall back transparently to per-insight scans; never break
-                # the page on a coalesced-path bug.
-                import logging
-
-                logging.getLogger(__name__).warning("[insights] coalesced city aggregates failed, falling back: %s", e)
-                return {}
-
-        def _task_url() -> dict[str, list[tuple]]:
-            # Fires only when all the columns the CTE touches are present
-            # (url, status, cache, elapsed, timestamp).
-            if not (
-                "url" in actual_cols
-                and "status" in actual_cols
-                and "cache" in actual_cols
-                and "elapsed" in actual_cols
-                and "timestamp" in actual_cols
-            ):
-                return {}
-            try:
-                cur = runner.con.cursor()
-                return _coalesced_url_aggregates(
-                    runner,
-                    table_name,
-                    window_start_s,
-                    actual_cols=actual_cols,
-                    shadow_cursor=cur,
-                    debug_lock=_debug_lock,
-                )
-            except Exception as e:
-                import logging
-
-                logging.getLogger(__name__).warning("[insights] coalesced URL aggregates failed, falling back: %s", e)
-                return {}
-
-        def _task_ip() -> dict[str, list[tuple]]:
-            # Fires only when all the columns the CTE touches are present
-            # (ip, url, status, timestamp).
-            if not (
-                "ip" in actual_cols and "url" in actual_cols and "status" in actual_cols and "timestamp" in actual_cols
-            ):
-                return {}
-            try:
-                cur = runner.con.cursor()
-                return _coalesced_ip_security_aggregates(
-                    runner,
-                    table_name,
-                    window_start_s,
-                    window_hours,
-                    baseline_hours,
-                    actual_cols=actual_cols,
-                    shadow_cursor=cur,
-                    debug_lock=_debug_lock,
-                )
-            except Exception as e:
-                import logging
-
-                logging.getLogger(__name__).warning(
-                    "[insights] coalesced IP-security aggregates failed, falling back: %s", e
-                )
-                return {}
-
-        def _task_asn() -> dict[str, list[tuple]]:
-            if not ("asn" in actual_cols and "timestamp" in actual_cols):
-                return {}
-            try:
-                cur = runner.con.cursor()
-                return _coalesced_asn_aggregates(
-                    runner,
-                    table_name,
-                    window_start_s,
-                    actual_cols,
-                    shadow_cursor=cur,
-                    debug_lock=_debug_lock,
-                )
-            except Exception as e:
-                import logging
-
-                logging.getLogger(__name__).warning("[insights] coalesced ASN aggregates failed, falling back: %s", e)
-                return {}
-
-        def _task_scalar() -> dict[str, list[tuple]]:
-            if not (
+                ),
+                {},
+            ),
+            (
+                "URL",
+                {"url", "status", "cache", "elapsed", "timestamp"}.issubset(actual_cols),
+                "_coalesced_url_aggregates",
+                (runner, table_name, window_start_s),
+                {"actual_cols": actual_cols},
+            ),
+            (
+                "IP-security",
+                {"ip", "url", "status", "timestamp"}.issubset(actual_cols),
+                "_coalesced_ip_security_aggregates",
+                (runner, table_name, window_start_s, window_hours, baseline_hours),
+                {"actual_cols": actual_cols},
+            ),
+            (
+                "FP",
+                {"timestamp", "ip"}.issubset(actual_cols),
+                "_coalesced_fp_aggregates",
+                (runner, table_name, window_start_s, window_hours, baseline_hours, actual_cols),
+                {},
+            ),
+            (
+                "dim",
+                "timestamp" in actual_cols,
+                "_coalesced_dim_aggregates",
+                (runner, table_name, window_start_s, actual_cols),
+                {},
+            ),
+            (
+                "geo-latency",
+                "timestamp" in actual_cols,
+                "_coalesced_geo_latency_aggregates",
+                (runner, table_name, window_start_s, actual_cols),
+                {},
+            ),
+            (
+                "ASN",
+                {"asn", "timestamp"}.issubset(actual_cols),
+                "_coalesced_asn_aggregates",
+                (runner, table_name, window_start_s, actual_cols),
+                {},
+            ),
+            (
+                "scalar",
                 "timestamp" in actual_cols
-                and (
-                    "transport" in actual_cols
-                    or "cache" in actual_cols
-                    or "oconnect_ms" in actual_cols
-                    or "ottfb" in actual_cols
-                )
-            ):
+                and bool({"transport", "cache", "oconnect_ms", "ottfb"}.intersection(actual_cols)),
+                "_coalesced_scalar_aggregates",
+                (runner, table_name, window_start_s, actual_cols),
+                {},
+            ),
+        ]
+
+        def _run_coalesced_spec(
+            spec: tuple[str, bool, str, tuple, dict[str, Any]],
+        ) -> dict[str, list[tuple]]:
+            label, enabled, fn_name, args, kwargs = spec
+            if not enabled:
                 return {}
             try:
                 cur = runner.con.cursor()
-                return _coalesced_scalar_aggregates(
-                    runner,
-                    table_name,
-                    window_start_s,
-                    actual_cols,
-                    shadow_cursor=cur,
-                    debug_lock=_debug_lock,
-                )
+                fn = globals()[fn_name]
+                return fn(*args, shadow_cursor=cur, debug_lock=_debug_lock, **kwargs)
             except Exception as e:
-                import logging
-
-                logging.getLogger(__name__).warning(
-                    "[insights] coalesced scalar aggregates failed, falling back: %s", e
-                )
-                return {}
-
-        def _task_fp() -> dict[str, list[tuple]]:
-            if not ("timestamp" in actual_cols and "ip" in actual_cols):
-                return {}
-            try:
-                cur = runner.con.cursor()
-                return _coalesced_fp_aggregates(
-                    runner,
-                    table_name,
-                    window_start_s,
-                    window_hours,
-                    baseline_hours,
-                    actual_cols,
-                    shadow_cursor=cur,
-                    debug_lock=_debug_lock,
-                )
-            except Exception as e:
-                import logging
-
-                logging.getLogger(__name__).warning("[insights] coalesced FP aggregates failed, falling back: %s", e)
-                return {}
-
-        def _task_dim() -> dict[str, list[tuple]]:
-            if "timestamp" not in actual_cols:
-                return {}
-            try:
-                cur = runner.con.cursor()
-                return _coalesced_dim_aggregates(
-                    runner,
-                    table_name,
-                    window_start_s,
-                    actual_cols,
-                    shadow_cursor=cur,
-                    debug_lock=_debug_lock,
-                )
-            except Exception as e:
-                import logging
-
-                logging.getLogger(__name__).warning("[insights] coalesced dim aggregates failed, falling back: %s", e)
-                return {}
-
-        def _task_geo_lat() -> dict[str, list[tuple]]:
-            if "timestamp" not in actual_cols:
-                return {}
-            try:
-                cur = runner.con.cursor()
-                return _coalesced_geo_latency_aggregates(
-                    runner,
-                    table_name,
-                    window_start_s,
-                    actual_cols,
-                    shadow_cursor=cur,
-                    debug_lock=_debug_lock,
-                )
-            except Exception as e:
-                import logging
-
-                logging.getLogger(__name__).warning(
-                    "[insights] coalesced geo-latency aggregates failed, falling back: %s", e
-                )
+                logger.warning("[insights] coalesced %s aggregates failed, falling back: %s", label, e)
                 return {}
 
         max_coalesce_workers = max(1, min(max_workers, 4))
+        precomputed: dict[str, list[tuple]] = {}
         with ThreadPoolExecutor(
             max_workers=max_coalesce_workers, thread_name_prefix="insights-coalesce"
         ) as _coalesce_pool:
-            _fut_city = _coalesce_pool.submit(contextvars.copy_context().run, _task_city)
-            _fut_url = _coalesce_pool.submit(contextvars.copy_context().run, _task_url)
-            _fut_ip = _coalesce_pool.submit(contextvars.copy_context().run, _task_ip)
-            _fut_fp = _coalesce_pool.submit(contextvars.copy_context().run, _task_fp)
-            _fut_dim = _coalesce_pool.submit(contextvars.copy_context().run, _task_dim)
-            _fut_geo_lat = _coalesce_pool.submit(contextvars.copy_context().run, _task_geo_lat)
-            _fut_asn = _coalesce_pool.submit(contextvars.copy_context().run, _task_asn)
-            _fut_scalar = _coalesce_pool.submit(contextvars.copy_context().run, _task_scalar)
-            city_precomputed = _fut_city.result()
-            url_precomputed = _fut_url.result()
-            ip_security_precomputed = _fut_ip.result()
-            fp_precomputed = _fut_fp.result()
-            dim_precomputed = _fut_dim.result()
-            geo_lat_precomputed = _fut_geo_lat.result()
-            asn_precomputed = _fut_asn.result()
-            scalar_precomputed = _fut_scalar.result()
+            futs = [
+                _coalesce_pool.submit(contextvars.copy_context().run, _run_coalesced_spec, spec)
+                for spec in _coalesced_specs
+            ]
+            for fut in futs:
+                precomputed.update(fut.result())
 
         for definition in registry.get_all():
             # Check if all required fields are present
@@ -2032,22 +1851,8 @@ def get_insights(
                     # `# row schema: [...]` processor contract.
                     default_sql = getattr(_insights_sql, d.id.upper(), None)
                     is_default_template = default_sql is None or d.sql_template == default_sql
-                    if is_default_template and d.id in city_precomputed:
-                        rows = city_precomputed[d.id]
-                    elif is_default_template and d.id in url_precomputed:
-                        rows = url_precomputed[d.id]
-                    elif is_default_template and d.id in ip_security_precomputed:
-                        rows = ip_security_precomputed[d.id]
-                    elif is_default_template and d.id in fp_precomputed:
-                        rows = fp_precomputed[d.id]
-                    elif is_default_template and d.id in dim_precomputed:
-                        rows = dim_precomputed[d.id]
-                    elif is_default_template and d.id in geo_lat_precomputed:
-                        rows = geo_lat_precomputed[d.id]
-                    elif is_default_template and d.id in asn_precomputed:
-                        rows = asn_precomputed[d.id]
-                    elif is_default_template and d.id in scalar_precomputed:
-                        rows = scalar_precomputed[d.id]
+                    if is_default_template and d.id in precomputed:
+                        rows = precomputed[d.id]
                     else:
                         try:
                             sql = d.sql_template.format(
@@ -2229,30 +2034,12 @@ def get_cache_collapse_detail(
 ) -> dict:
     """Compute detailed timeline and eviction points for a specific URL."""
     from backend.core.share_db.validation import mask_ip
-    from backend.utils.date_utils import parse_iso_utc
 
     source_name = src["name"]
     table_name = _safe_table(source_name)
-
-    now = datetime.now(UTC)
-    window_start = now - timedelta(hours=window_hours)
-    baseline_start = now - timedelta(hours=baseline_hours + window_hours)
-
-    if clamp_end:
-        ce = parse_iso_utc(clamp_end)
-        if ce and ce < now:
-            now = ce
-            window_start = now - timedelta(hours=window_hours)
-            baseline_start = now - timedelta(hours=baseline_hours + window_hours)
-    if clamp_start:
-        cs = parse_iso_utc(clamp_start)
-        if cs:
-            baseline_start = max(baseline_start, cs)
-            window_start = max(window_start, cs)
-
-    now_s = now.isoformat()
-    window_start_s = window_start.isoformat()
-    baseline_start_s = baseline_start.isoformat()
+    _, now_s, window_start_s, baseline_start_s = _compute_clamped_insight_windows(
+        window_hours, baseline_hours, clamp_start, clamp_end
+    )
 
     runner = QueryRunner(con, src)
 

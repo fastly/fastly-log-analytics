@@ -14,9 +14,9 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
-import { useMaskIps } from '@/hooks/useMaskIps'
+import { useMaskIps } from '@/hooks/useIsAnalyst'
 import { isIpFamilyField } from '@/lib/pii'
-import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
+import { useCopyToClipboard } from '@/hooks/useAutoFlash'
 
 interface TopTenTableProps {
   title: string

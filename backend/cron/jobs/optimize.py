@@ -122,15 +122,9 @@ def _run_optimize(service_id: str, manual: bool = False) -> dict | None:
     if run.result is not None:
         outcome = run.result
 
-    try:
-        from backend.sync_status_publisher import publisher as _sync_status_publisher
-        from backend.sync_status_snapshot import compute_sync_status_cached
+    from backend.cron.jobs._common import publish_sync_status_safe
 
-        _snapshot = compute_sync_status_cached(service_id)
-        if _snapshot is not None:
-            _sync_status_publisher.publish(service_id, _snapshot)
-    except Exception:
-        logger.exception("[%s] %s: sync-status SSE publish failed", "scheduler", service_id)
+    publish_sync_status_safe(service_id, "scheduler")
 
     logger.info("🏁  \x1b[92m[optimize]\x1b[0m %s: Optimize job finished.", _display)
     return outcome

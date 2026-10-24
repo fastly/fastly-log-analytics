@@ -175,7 +175,7 @@ def test_errors_only_and_null_metric_rows_remain_honest() -> None:
 
 import pytest
 
-from backend.high_scale._rum_fields import rum_environment, rum_error_position
+from backend.high_scale.publication import rum_environment, rum_error_position
 
 
 def test_flat_beacon_keys_are_extracted_verbatim() -> None:

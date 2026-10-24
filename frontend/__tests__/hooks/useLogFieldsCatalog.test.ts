@@ -1,8 +1,6 @@
 /**
  * R-10 (testing_suite_audit_2026-06-14.md). Exercises `useLogFieldsCatalog`
- * end-to-end against MSW: the hook reads the active service id from the
- * mocked Zustand store, fires `GET /api/log-fields/catalog?service_id=<sid>`,
- * and returns the parsed payload.
+ * and `useActiveLogFields` against MSW and React Query cache.
  *
  * @vitest-environment jsdom
  */
@@ -12,6 +10,13 @@ import { http, HttpResponse } from 'msw'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 import { server } from '@/__tests__/helpers/msw/server'
+import { queryKeys } from '@/lib/query-keys'
+
+const useBootstrap = vi.fn()
+
+vi.mock('@/hooks/useBootstrap', () => ({
+  useBootstrap: () => useBootstrap(),
+}))
 
 vi.mock('@/stores/serviceStore', () => {
   const state = {
@@ -29,8 +34,11 @@ vi.mock('@/stores/serviceStore', () => {
 
 const API_BASE = 'http://127.0.0.1:8000'
 
-function wrapper() {
-  const qc = createTestQueryClient({ queries: { gcTime: 0, staleTime: 0 } })
+function wrapper(catalogSeed?: unknown) {
+  const qc = createTestQueryClient({ queries: { gcTime: Infinity, staleTime: 0 } })
+  if (catalogSeed !== undefined) {
+    qc.setQueryData(queryKeys.logFieldsCatalog('svc-1'), catalogSeed)
+  }
   return makeQueryWrapper(qc)
 }
 
@@ -86,5 +94,73 @@ describe('useLogFieldsCatalog (MSW)', () => {
     const { result } = renderHook(() => useLogFieldsCatalog(), { wrapper: wrapper() })
 
     await waitFor(() => expect(result.current.isError).toBe(true))
+  })
+})
+
+const CATALOG = {
+  groups: [
+    { id: 'L', label: 'Origin Metrics', fields: ['ottfb', 'ottlb', 'oip', 'prid'] },
+    { id: 'D', label: 'Geolocation', fields: ['country', 'city', 'region'] },
+  ],
+}
+
+describe('useActiveLogFields', () => {
+  beforeEach(() => {
+    useBootstrap.mockReset()
+  })
+
+  it('reports not-ready and treats everything as active until bootstrap lands', async () => {
+    useBootstrap.mockReturnValue({ data: undefined })
+    const { useActiveLogFields } = await import('@/hooks/useLogFieldsCatalog')
+    const { result } = renderHook(() => useActiveLogFields(), { wrapper: wrapper(CATALOG) })
+    expect(result.current.ready).toBe(false)
+    expect(result.current.isFieldActive('ottfb')).toBe(true)
+    expect(result.current.isFieldActive('anything')).toBe(true)
+    expect(result.current.isGroupActive('L')).toBe(true)
+  })
+
+  it('treats an empty active_log_field_ids list as not-ready (everything active)', async () => {
+    useBootstrap.mockReturnValue({ data: { active_log_field_ids: [] } })
+    const { useActiveLogFields } = await import('@/hooks/useLogFieldsCatalog')
+    const { result } = renderHook(() => useActiveLogFields(), { wrapper: wrapper(CATALOG) })
+    expect(result.current.ready).toBe(false)
+    expect(result.current.isFieldActive('ottfb')).toBe(true)
+  })
+
+  it('honours active_log_field_ids when populated', async () => {
+    useBootstrap.mockReturnValue({ data: { active_log_field_ids: ['ottfb', 'country'] } })
+    const { useActiveLogFields } = await import('@/hooks/useLogFieldsCatalog')
+    const { result } = renderHook(() => useActiveLogFields(), { wrapper: wrapper(CATALOG) })
+    expect(result.current.ready).toBe(true)
+    expect(result.current.isFieldActive('ottfb')).toBe(true)
+    expect(result.current.isFieldActive('ja3')).toBe(false)
+  })
+
+  it('isGroupActive is true when ANY field of the group is active', async () => {
+    useBootstrap.mockReturnValue({ data: { active_log_field_ids: ['country'] } })
+    const { useActiveLogFields } = await import('@/hooks/useLogFieldsCatalog')
+    const { result } = renderHook(() => useActiveLogFields(), { wrapper: wrapper(CATALOG) })
+    expect(result.current.isGroupActive('D')).toBe(true)
+    expect(result.current.isGroupActive('L')).toBe(false)
+  })
+
+  it('isGroupActive is false for an unknown group id', async () => {
+    useBootstrap.mockReturnValue({ data: { active_log_field_ids: ['ottfb'] } })
+    const { useActiveLogFields } = await import('@/hooks/useLogFieldsCatalog')
+    const { result } = renderHook(() => useActiveLogFields(), { wrapper: wrapper(CATALOG) })
+    expect(result.current.isGroupActive('ZZ')).toBe(false)
+  })
+
+  it('does not throw when the catalog is missing (still resolves fields)', async () => {
+    useBootstrap.mockReturnValue({ data: { active_log_field_ids: ['ottfb'] } })
+    server.use(
+      http.get(`${API_BASE}/api/log-fields/catalog`, () =>
+        HttpResponse.json({ error: 'missing' }, { status: 500 }),
+      ),
+    )
+    const { useActiveLogFields } = await import('@/hooks/useLogFieldsCatalog')
+    const { result } = renderHook(() => useActiveLogFields(), { wrapper: wrapper() })
+    expect(result.current.isFieldActive('ottfb')).toBe(true)
+    expect(result.current.isGroupActive('L')).toBe(false)
   })
 })

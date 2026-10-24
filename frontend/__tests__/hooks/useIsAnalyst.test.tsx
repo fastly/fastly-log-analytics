@@ -1,28 +1,29 @@
 /**
  * @vitest-environment jsdom
  *
- * useIsAnalyst — gates admin-only UI surfaces and controls the 401
- * redirect target (analyst → /share-login, admin → surface error).
- *
- * Returns true when EITHER condition holds:
- *   1. activeService.accessLevel === 'read_only'
- *   2. bootstrap.settings.is_remote_analyst === true
+ * Tests for useIsAnalyst, useMaskIps, and useEnforceMaskedFilters.
  */
-import { renderHook } from '@testing-library/react'
+import { renderHook, waitFor } from '@testing-library/react'
 import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
 import { describe, it, expect, beforeEach } from 'vitest'
 
-import { useIsAnalyst } from '@/hooks/useIsAnalyst'
+import { useIsAnalyst, useMaskIps, useEnforceMaskedFilters } from '@/hooks/useIsAnalyst'
 import { queryKeys } from '@/lib/query-keys'
 import { useServiceStore } from '@/stores/serviceStore'
+import { useFilterStore } from '@/stores/filterStore'
 
-function makeWrapper(opts: { isRemoteAnalyst?: boolean } = {}) {
+function makeWrapper(opts: { isRemoteAnalyst?: boolean; maskIps?: boolean } = {}) {
   const qc = createTestQueryClient()
   const settings: Record<string, unknown> = {}
   if (opts.isRemoteAnalyst !== undefined) {
     settings.is_remote_analyst = opts.isRemoteAnalyst
   }
-  qc.setQueryData(queryKeys.bootstrap(), { settings })
+  if (opts.maskIps !== undefined) {
+    settings.mask_ips = opts.maskIps
+  }
+  if (Object.keys(settings).length > 0 || opts.isRemoteAnalyst !== undefined) {
+    qc.setQueryData(queryKeys.bootstrap(), { settings })
+  }
   return makeQueryWrapper(qc)
 }
 
@@ -88,5 +89,44 @@ describe('useIsAnalyst', () => {
       wrapper: makeWrapper({ isRemoteAnalyst: false }),
     })
     expect(result.current).toBe(false)
+  })
+})
+
+describe('useMaskIps', () => {
+  it('is true when bootstrap.settings.mask_ips is true', () => {
+    const { result } = renderHook(() => useMaskIps(), { wrapper: makeWrapper({ maskIps: true }) })
+    expect(result.current).toBe(true)
+  })
+
+  it('is false when mask_ips is false or absent', () => {
+    const { result: off } = renderHook(() => useMaskIps(), { wrapper: makeWrapper({ maskIps: false }) })
+    expect(off.current).toBe(false)
+    const { result: missing } = renderHook(() => useMaskIps(), { wrapper: makeWrapper() })
+    expect(missing.current).toBe(false)
+  })
+})
+
+describe('useEnforceMaskedFilters', () => {
+  beforeEach(() => {
+    useFilterStore.getState().clearFilters()
+  })
+
+  it('strips IP-family filters (incl. dedup-suffixed) when masking', async () => {
+    const store = useFilterStore.getState()
+    store.addFilter('ip', '73.217.41.5', 'include')
+    store.addFilter('country', 'US', 'include')
+    renderHook(() => useEnforceMaskedFilters(), { wrapper: makeWrapper({ maskIps: true }) })
+    await waitFor(() => {
+      const cols = useFilterStore.getState().filters.map(f => f.column)
+      expect(cols).not.toContain('ip')
+      expect(cols).toContain('country')
+    })
+  })
+
+  it('leaves IP filters in place when NOT masking', async () => {
+    useFilterStore.getState().addFilter('ip', '73.217.41.5', 'include')
+    renderHook(() => useEnforceMaskedFilters(), { wrapper: makeWrapper({ maskIps: false }) })
+    await new Promise(r => setTimeout(r, 0))
+    expect(useFilterStore.getState().filters.map(f => f.column)).toContain('ip')
   })
 })

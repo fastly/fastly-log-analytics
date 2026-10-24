@@ -52,8 +52,9 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
     if not sync_cfg.get("enabled", True) and not force:
         return
 
-    _svc_name = cfg.get("name", service_id)
-    _display = f"{_svc_name} ({service_id})" if _svc_name != service_id else service_id
+    from backend.cron.jobs._common import _buffer_result_error, get_service_display_label
+
+    _display = get_service_display_label(service_id, cfg)
     with cron_run(
         service_id,
         "commit",
@@ -143,12 +144,7 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
             result = db_iceberg.commit_buffer(src, progress_callback=_commit_progress)
             quarantined = int(result.get("quarantined_files", 0) or 0)
             quarantine_suffix = f" ⚠ quarantined {quarantined} unreadable file(s)" if quarantined else ""
-            commit_error_parts = []
-            if result.get("error"):
-                commit_error_parts.append(str(result["error"]))
-            if quarantined:
-                commit_error_parts.append(f"{quarantined} unreadable buffer file(s) quarantined")
-            commit_error = "; ".join(commit_error_parts)
+            commit_error = _buffer_result_error(result, "") or ""
             incomplete_suffix = f"; commit incomplete: {commit_error}" if commit_error else ""
             # Post-commit backlog probe: if anything is still in the buffer after a
             # successful commit, the next commit was racing with a fresh ingest OR

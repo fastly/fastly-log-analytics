@@ -10,8 +10,10 @@ vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).n
 // these tests don't need a QueryClientProvider. Default off (admin / no
 // masking); the masking case below re-programs it.
 const useMaskIpsMock = vi.fn(() => false)
-vi.mock('@/hooks/useMaskIps', () => ({
+vi.mock('@/hooks/useIsAnalyst', () => ({
+  useIsAnalyst: () => false,
   useMaskIps: () => useMaskIpsMock(),
+  useEnforceMaskedFilters: () => {},
 }))
 
 import { usePathname } from 'next/navigation'

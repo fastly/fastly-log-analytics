@@ -3,6 +3,8 @@ import logging
 import os
 import re
 import threading
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,26 @@ def get_pop_locations():
     return []
 
 
+def _load_mtime_cached(slot: str, lock: threading.Lock, builder: Callable[[list[Any]], dict]) -> dict:
+    try:
+        mtime_ns = os.stat(CACHE_FILE).st_mtime_ns
+    except FileNotFoundError:
+        return {}
+
+    cached = globals()[slot]
+    if cached is not None and cached[0] == mtime_ns:
+        return cached[1]
+
+    resp_data = get_pop_locations()
+    if not isinstance(resp_data, list):
+        return {}
+
+    result = builder(resp_data)
+    with lock:
+        globals()[slot] = (mtime_ns, result)
+    return result
+
+
 def get_pop_lat_lon_map():
     """Return a mapping of POP code to (lat, lon) using cached data.
 
@@ -70,31 +92,18 @@ def get_pop_lat_lon_map():
     fetch_pop_locations writes via overwrite so a real change bumps the
     mtime and busts the cache automatically.
     """
-    global _lat_lon_cache
-    try:
-        mtime_ns = os.stat(CACHE_FILE).st_mtime_ns
-    except FileNotFoundError:
-        return {}
-
-    cached = _lat_lon_cache
-    if cached is not None and cached[0] == mtime_ns:
-        return cached[1]
-
-    resp_data = get_pop_locations()
-    if not isinstance(resp_data, list):
-        return {}
-    # Standard /datacenters format (flat list of dicts with 'code', 'coordinates')
-    result = {
-        str(p["code"]).upper(): (p["coordinates"]["latitude"], p["coordinates"]["longitude"])
-        for p in resp_data
-        if p.get("code")
-        and "coordinates" in p
-        and p["coordinates"].get("latitude") is not None
-        and p["coordinates"].get("longitude") is not None
-    }
-    with _lat_lon_cache_lock:
-        _lat_lon_cache = (mtime_ns, result)
-    return result
+    return _load_mtime_cached(
+        "_lat_lon_cache",
+        _lat_lon_cache_lock,
+        lambda resp_data: {
+            str(p["code"]).upper(): (p["coordinates"]["latitude"], p["coordinates"]["longitude"])
+            for p in resp_data
+            if p.get("code")
+            and "coordinates" in p
+            and p["coordinates"].get("latitude") is not None
+            and p["coordinates"].get("longitude") is not None
+        },
+    )
 
 
 def get_pop_location_map() -> dict[str, dict]:
@@ -108,36 +117,23 @@ def get_pop_location_map() -> dict[str, dict]:
     left blank — the frontend's formatPopGeo degrades gracefully. Exposed to
     the frontend via the bootstrap ``pop_geo`` field.
     """
-    global _loc_cache
-    try:
-        mtime_ns = os.stat(CACHE_FILE).st_mtime_ns
-    except FileNotFoundError:
-        return {}
 
-    cached = _loc_cache
-    if cached is not None and cached[0] == mtime_ns:
-        return cached[1]
+    def _build(resp_data: list[Any]) -> dict[str, dict]:
+        result: dict[str, dict] = {}
+        for p in resp_data:
+            if not isinstance(p, dict) or not p.get("code"):
+                continue
+            shield_parts = str(p.get("shield") or "").split("-")
+            region = shield_parts[1] if len(shield_parts) == 3 else ""
+            country = shield_parts[-1] if len(shield_parts) >= 2 else ""
+            result[str(p["code"]).upper()] = {
+                "city": str(p.get("name") or ""),
+                "region": region,
+                "country": country,
+            }
+        return result
 
-    resp_data = get_pop_locations()
-    if not isinstance(resp_data, list):
-        return {}
-
-    result: dict[str, dict] = {}
-    for p in resp_data:
-        if not isinstance(p, dict) or not p.get("code"):
-            continue
-        shield_parts = str(p.get("shield") or "").split("-")
-        region = shield_parts[1] if len(shield_parts) == 3 else ""
-        country = shield_parts[-1] if len(shield_parts) >= 2 else ""
-        result[str(p["code"]).upper()] = {
-            "city": str(p.get("name") or ""),
-            "region": region,
-            "country": country,
-        }
-
-    with _loc_cache_lock:
-        _loc_cache = (mtime_ns, result)
-    return result
+    return _load_mtime_cached("_loc_cache", _loc_cache_lock, _build)
 
 
 def _effective_pop_lat_lon_map() -> dict[str, tuple[float, float]]:
@@ -160,6 +156,16 @@ def _haversine_sql_expr(lat_col: str, lon_col: str, pop_lat: float, pop_lon: flo
     )
 
 
+def _build_pop_case_sql(
+    pop_col: str,
+    value_fn: Callable[[float, float], object],
+    else_expr: object,
+) -> str:
+    coords = _effective_pop_lat_lon_map()
+    whens = [f"WHEN {pop_col} = '{code}' THEN {value_fn(plat, plon)}" for code, (plat, plon) in coords.items()]
+    return "CASE " + " ".join(whens) + f" ELSE {else_expr} END"
+
+
 def build_pop_haversine_case_sql(
     pop_col: str = "pop",
     lat_col: str = "lat",
@@ -168,24 +174,18 @@ def build_pop_haversine_case_sql(
     default_lon: float = -97.0,
 ) -> str:
     """Build a SQL CASE expression computing Haversine distance (km) from POP to client (lat, lon)."""
-    coords = _effective_pop_lat_lon_map()
-    whens = [
-        f"WHEN {pop_col} = '{code}' THEN {_haversine_sql_expr(lat_col, lon_col, plat, plon)}"
-        for code, (plat, plon) in coords.items()
-    ]
-    else_expr = _haversine_sql_expr(lat_col, lon_col, float(default_lat), float(default_lon))
-    return "CASE " + " ".join(whens) + f" ELSE {else_expr} END"
+    return _build_pop_case_sql(
+        pop_col,
+        lambda plat, plon: _haversine_sql_expr(lat_col, lon_col, plat, plon),
+        _haversine_sql_expr(lat_col, lon_col, float(default_lat), float(default_lon)),
+    )
 
 
 def build_pop_lat_case_sql(pop_col: str = "pop", default_lat: float = 38.0) -> str:
     """Build a SQL CASE expression mapping POP code to latitude."""
-    coords = _effective_pop_lat_lon_map()
-    whens = [f"WHEN {pop_col} = '{code}' THEN {plat}" for code, (plat, _plon) in coords.items()]
-    return "CASE " + " ".join(whens) + f" ELSE {float(default_lat)} END"
+    return _build_pop_case_sql(pop_col, lambda plat, _plon: plat, float(default_lat))
 
 
 def build_pop_lon_case_sql(pop_col: str = "pop", default_lon: float = -97.0) -> str:
     """Build a SQL CASE expression mapping POP code to longitude."""
-    coords = _effective_pop_lat_lon_map()
-    whens = [f"WHEN {pop_col} = '{code}' THEN {plon}" for code, (_plat, plon) in coords.items()]
-    return "CASE " + " ".join(whens) + f" ELSE {float(default_lon)} END"
+    return _build_pop_case_sql(pop_col, lambda _plat, plon: plon, float(default_lon))

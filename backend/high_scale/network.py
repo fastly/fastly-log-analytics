@@ -29,7 +29,7 @@ from backend.models.network import (
 )
 from backend.models.origin import OriginShieldingAnalysisResponse
 from backend.repositories.utils.response_cache import cache_result
-from backend.utils.geo import format_city_label
+from backend.utils.countries import format_city_label
 
 
 def _health_score(
@@ -67,7 +67,7 @@ _PLOSS = "toFloat64OrNull(custom_fields['ploss'])"
 _STATUS = "toInt32OrZero(custom_fields['status'])"
 _ASN = "toInt32OrNull(custom_fields['asn'])"
 
-from backend.high_scale._scope import visible_publication_fence_sql
+from backend.high_scale._common import parse_time_window, visible_publication_fence_sql
 
 _BASE_WHERE = (
     f"service_id={{service_id:String}} AND {visible_publication_fence_sql('request')} "
@@ -208,8 +208,7 @@ def origin_shielding_analysis(
     service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
 ) -> OriginShieldingAnalysisResponse:
     """Serve ``/api/origin/shielding-analysis`` from ClickHouse with the Network card's query."""
-    end = _range_value(end_time) or datetime.now(UTC)
-    start = _range_value(start_time) or (end - timedelta(days=1))
+    start, end = parse_time_window(start_time, end_time)
     trace = HighScaleSections(service.service_id, "origin")
     analysis = trace.run(
         "shielding_analysis",
@@ -235,9 +234,7 @@ def origin_shielding_analysis(
 def network_health(
     service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
 ) -> NetworkHealthResponse:
-    now = datetime.now(UTC)
-    end = _range_value(end_time) or now
-    start = _range_value(start_time) or (end - timedelta(days=1))
+    start, end = parse_time_window(start_time, end_time)
     bucket_seconds = int(getattr(req, "bucket_seconds", 300) or 300)
     top_n = int(getattr(req, "top_n", 30) or 30)
     map_asn = str(getattr(req, "map_asn", "all") or "all")
@@ -671,9 +668,7 @@ def network_health(
 def network_quality(
     service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
 ) -> NetworkQualityResponse:
-    now = datetime.now(UTC)
-    end = _range_value(end_time) or now
-    start = _range_value(start_time) or (end - timedelta(days=1))
+    start, end = parse_time_window(start_time, end_time)
     region_country = getattr(req, "region_country", "US") or "US"
     filter_sql, filter_params = _filter_clause(getattr(req, "filters", None))
     params = {
@@ -824,9 +819,7 @@ def get_transport_metrics(
     end_time: str | None,
     filters: Any = None,
 ) -> TransportMetrics:
-    now = datetime.now(UTC)
-    end = _range_value(end_time) or now
-    start = _range_value(start_time) or (end - timedelta(days=1))
+    start, end = parse_time_window(start_time, end_time)
     filter_sql, filter_params = _filter_clause(filters)
     params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
     base_where = f"{_BASE_WHERE}{filter_sql}"

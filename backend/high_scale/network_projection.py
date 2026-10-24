@@ -15,6 +15,9 @@ from backend.high_scale._projection_utils import (
     finite_float as _finite_float,
 )
 from backend.high_scale._projection_utils import (
+    optional_int as _finite_int,
+)
+from backend.high_scale._projection_utils import (
     percentiles as _percentiles,
 )
 from backend.high_scale._projection_utils import (
@@ -128,13 +131,3 @@ def _dimension_row(
         "ttfb_p50_us": ttfb_p50,
         "ttfb_p95_us": ttfb_p95,
     }
-
-
-def _finite_int(value: object) -> int | None:
-    if isinstance(value, bool) or value in (None, ""):
-        return None
-    try:
-        parsed = int(str(value))
-    except (TypeError, ValueError):
-        return None
-    return parsed

@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
+
+from backend.high_scale._projection_utils import bucket as _bucket
 
 # One dimension per event field actually read by AggregateStore's bounded
 # heavy-hitter tracking (aggregates.py) — kept in sync deliberately, since
@@ -68,7 +70,6 @@ _SOURCE_FIELD_OVERRIDES: dict[str, str] = {
     "client_ip": "ip",
     "cmcd_session": "sid",
 }
-_BUCKET_SECONDS = 60
 
 
 def compute_dimension_counts(
@@ -85,7 +86,7 @@ def compute_dimension_counts(
     dimensions = DIMENSIONS_BY_DOMAIN[domain]
     counts: Counter[tuple[str, str, datetime]] = Counter()
     for row in rows:
-        bucket = _bucket(row)
+        bucket = _bucket(row.get("timestamp"))
         if bucket is None:
             continue
         for dimension in dimensions:
@@ -96,18 +97,3 @@ def compute_dimension_counts(
         {"dimension": dimension, "value": value, "bucket_start": bucket.isoformat(), "count": count}
         for (dimension, value, bucket), count in counts.items()
     )
-
-
-def _bucket(row: Mapping[str, Any]) -> datetime | None:
-    value = row.get("timestamp")
-    if isinstance(value, datetime):
-        timestamp = value.astimezone(UTC)
-    elif isinstance(value, str):
-        try:
-            timestamp = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
-        except ValueError:
-            return None
-    else:
-        return None
-    epoch_seconds = int(timestamp.timestamp())
-    return datetime.fromtimestamp(epoch_seconds - epoch_seconds % _BUCKET_SECONDS, tz=UTC)

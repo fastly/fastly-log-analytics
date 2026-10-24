@@ -7,7 +7,7 @@ import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { CardErrorState } from '@/components/CardErrorState'
 import { ScoringHealthHelp } from '@/components/SessionScoring/help-content'
 
-import { useScoringQuery } from './useScoringQuery'
+import { useScoringQuery } from './useScorerTimeseries'
 import { client } from '@/lib/api'
 
 import { formatCount } from '@/lib/format'

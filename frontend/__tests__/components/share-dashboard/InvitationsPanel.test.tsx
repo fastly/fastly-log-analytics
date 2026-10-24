@@ -1,13 +1,18 @@
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { http, HttpResponse } from 'msw'
 import React from 'react'
 
+import { server } from '@/__tests__/helpers/msw/server'
+import { useServiceStore } from '@/stores/serviceStore'
 import { InvitationsPanel } from '@/components/share-dashboard/InvitationsPanel'
+import { CreateInviteDialog } from '@/components/share-dashboard/CreateInviteDialog'
+import { useTableSort, type SortAccessors } from '@/components/share-dashboard/sortable'
 import type { ShareStatus } from '@/components/share-dashboard/utils'
 import { stubMatchMedia } from '@/__tests__/helpers/browser-stubs'
 
-// Radix primitives (Popover/Checkbox) need these in jsdom.
+// Radix primitives (Popover/Dialog/Select/Checkbox) need these in jsdom.
 stubMatchMedia()
 window.HTMLElement.prototype.scrollIntoView = vi.fn()
 
@@ -118,4 +123,157 @@ test('share-card copy does not show success when the clipboard write is rejected
     fireEvent.click(alice)
   })
   expect(hasCheck(alice)).toBe(false)
+})
+
+// --- CreateInviteDialog --------------------------------------------------
+
+const services: ShareStatus['services'] = [{ service_id: 'svcA', name: 'Service A' }]
+
+interface InviteBody {
+  allow_concurrent_sessions?: boolean
+}
+
+function captureInviteBody(): { current: InviteBody | undefined } {
+  const captured: { current: InviteBody | undefined } = { current: undefined }
+  server.use(
+    http.post('*/api/admin/share/invites', async ({ request }) => {
+      captured.current = (await request.json()) as InviteBody
+      return HttpResponse.json({ id: 'i1' })
+    }),
+  )
+  return captured
+}
+
+async function fillRequiredFields(user: ReturnType<typeof userEvent.setup>) {
+  await user.type(screen.getByLabelText('Name'), 'Jane')
+  await user.type(screen.getByLabelText('Email'), 'jane@example.com')
+  await user.type(screen.getByLabelText('Passcode'), 'ocean-breeze-cabin-42')
+  await user.click(screen.getByRole('checkbox', { name: /Service A/i }))
+}
+
+describe('CreateInviteDialog', () => {
+  beforeEach(() => {
+    // The api-client middleware aborts requests when no service is active.
+    useServiceStore.setState({ activeServiceId: 'svcA' })
+  })
+
+  test('CreateInviteDialog sends allow_concurrent_sessions=true when the shared-logins box is checked', async () => {
+    const user = userEvent.setup()
+    const posted = captureInviteBody()
+
+    render(
+      <CreateInviteDialog open onOpenChange={vi.fn()} services={services} onCreated={vi.fn()} />,
+    )
+
+    await fillRequiredFields(user)
+    await user.click(screen.getByRole('checkbox', { name: /multiple people to use this link/i }))
+    await user.click(screen.getByRole('button', { name: /create invite/i }))
+
+    await waitFor(() => expect(posted.current).toBeDefined())
+    expect(posted.current?.allow_concurrent_sessions).toBe(true)
+  })
+
+  test('CreateInviteDialog defaults allow_concurrent_sessions to false', async () => {
+    const user = userEvent.setup()
+    const posted = captureInviteBody()
+
+    render(
+      <CreateInviteDialog open onOpenChange={vi.fn()} services={services} onCreated={vi.fn()} />,
+    )
+
+    await fillRequiredFields(user)
+    await user.click(screen.getByRole('button', { name: /create invite/i }))
+
+    await waitFor(() => expect(posted.current).toBeDefined())
+    expect(posted.current?.allow_concurrent_sessions).toBe(false)
+  })
+
+  test('CreateInviteDialog OAuth mode hides the passcode field and shows the provider selector', async () => {
+    server.use(
+      http.get('/api/admin/share/oauth-providers', () =>
+        HttpResponse.json({ providers: [{ id: 'google', display_name: 'Google Workspace', enabled: true }] }),
+      ),
+    )
+    const user = userEvent.setup()
+    render(<CreateInviteDialog open onOpenChange={vi.fn()} services={services} onCreated={vi.fn()} />)
+
+    expect(screen.getByLabelText('Passcode')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('radio', { name: /SSO/i }))
+    expect(screen.queryByLabelText('Passcode')).toBeNull()
+    expect(await screen.findByLabelText('Identity provider')).toBeInTheDocument()
+    await user.type(screen.getByLabelText('Name'), 'Jane')
+    await user.type(screen.getByLabelText('Email'), 'jane@example.com')
+    await user.click(screen.getByRole('checkbox', { name: /Service A/i }))
+    expect(screen.getByRole('button', { name: /create invite/i })).toBeDisabled()
+  })
+
+  test('CreateInviteDialog OAuth mode with no configured providers stays unsubmittable', async () => {
+    server.use(http.get('/api/admin/share/oauth-providers', () => HttpResponse.json({ providers: [] })))
+    const user = userEvent.setup()
+    render(<CreateInviteDialog open onOpenChange={vi.fn()} services={services} onCreated={vi.fn()} />)
+
+    await user.type(screen.getByLabelText('Name'), 'Jane')
+    await user.type(screen.getByLabelText('Email'), 'jane@example.com')
+    await user.click(screen.getByRole('checkbox', { name: /Service A/i }))
+    await user.click(screen.getByRole('radio', { name: /SSO/i }))
+
+    expect(await screen.findByText(/add one to the registry first/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /create invite/i })).toBeDisabled()
+  })
+})
+
+// --- useTableSort --------------------------------------------------------
+
+type SortRow = { name: string; n: number | null }
+
+const sortRows: SortRow[] = [
+  { name: 'bravo', n: 2 },
+  { name: 'alpha', n: null },
+  { name: 'charlie', n: 1 },
+]
+
+const sortAccessors: SortAccessors<SortRow> = {
+  name: (r) => r.name,
+  n: (r) => r.n,
+}
+
+const names = (rs: SortRow[]) => rs.map((r) => r.name)
+
+describe('useTableSort', () => {
+  test('default sorts by the given key/direction', () => {
+    const { result } = renderHook(() =>
+      useTableSort(sortRows, sortAccessors, { defaultKey: 'name', defaultDir: 'asc' }),
+    )
+    expect(names(result.current.sorted)).toEqual(['alpha', 'bravo', 'charlie'])
+    expect(result.current.sortKey).toBe('name')
+    expect(result.current.sortDir).toBe('asc')
+  })
+
+  test('toggling the active key flips asc <-> desc', () => {
+    const { result } = renderHook(() =>
+      useTableSort(sortRows, sortAccessors, { defaultKey: 'name', defaultDir: 'asc' }),
+    )
+    act(() => result.current.toggle('name'))
+    expect(result.current.sortDir).toBe('desc')
+    expect(names(result.current.sorted)).toEqual(['charlie', 'bravo', 'alpha'])
+  })
+
+  test('nulls always sort last, regardless of direction', () => {
+    const { result } = renderHook(() =>
+      useTableSort(sortRows, sortAccessors, { defaultKey: 'n', defaultDir: 'desc' }),
+    )
+    expect(names(result.current.sorted)).toEqual(['bravo', 'charlie', 'alpha'])
+    act(() => result.current.toggle('n')) // -> asc
+    expect(names(result.current.sorted)).toEqual(['charlie', 'bravo', 'alpha'])
+  })
+
+  test('switching to a new key resets direction to desc', () => {
+    const { result } = renderHook(() =>
+      useTableSort(sortRows, sortAccessors, { defaultKey: 'name', defaultDir: 'asc' }),
+    )
+    act(() => result.current.toggle('n'))
+    expect(result.current.sortKey).toBe('n')
+    expect(result.current.sortDir).toBe('desc')
+  })
 })

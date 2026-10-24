@@ -22,7 +22,7 @@ vi.mock('@/hooks/useIsDataReady', () => ({
   useBootstrapResolved: () => true,
 }))
 
-vi.mock('@/hooks/useTimeRange', () => ({
+vi.mock('@/hooks/useReportRangeAnchor', () => ({
   useTimeRange: () => ({
     startTime: '2026-09-11T00:00:00Z',
     endTime: '2026-09-11T01:00:00Z',

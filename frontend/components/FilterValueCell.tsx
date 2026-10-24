@@ -4,11 +4,10 @@ import * as React from 'react'
 import { usePathname } from 'next/navigation'
 import { ChevronDown, ExternalLink, Filter, Copy } from 'lucide-react'
 
-import { cn } from '@/lib/utils'
+import { cn, copyToClipboard } from '@/lib/utils'
 import { useFilterStore } from '@/stores/filterStore'
-import { useMaskIps } from '@/hooks/useMaskIps'
+import { useMaskIps } from '@/hooks/useIsAnalyst'
 import { isIpFamilyField } from '@/lib/pii'
-import { copyToClipboard } from '@/lib/clipboard'
 import {
   DropdownMenu,
   DropdownMenuTrigger,

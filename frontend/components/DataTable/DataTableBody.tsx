@@ -1,14 +1,61 @@
 'use client'
 
 import * as React from 'react'
-import type { ColumnDef, Row, Table as TableInstance, VisibilityState } from '@tanstack/react-table'
+import { flexRender, type ColumnDef, type Row, type Table as TableInstance, type VisibilityState } from '@tanstack/react-table'
 import type { Virtualizer } from '@tanstack/react-virtual'
 import { Inbox } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { TableBody, TableCell, TableRow } from '@/components/ui/table'
+import { cn } from '@/lib/utils'
 
-import { MemoizedTableRow } from './Body'
+interface TableRowProps<TData> {
+  row: Row<TData>
+  onRowClick?: (row: TData) => void
+  rowClassName?: string
+  columnVisibility: VisibilityState
+  columnSizing?: Record<string, number>
+}
+
+function TableRowImpl<TData>({ row, onRowClick, rowClassName }: TableRowProps<TData>) {
+  return (
+    <TableRow
+      data-state={row.getIsSelected() && 'selected'}
+      onClick={() => onRowClick?.(row.original)}
+      tabIndex={onRowClick ? 0 : undefined}
+      onKeyDown={
+        onRowClick
+          ? (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                onRowClick(row.original)
+              }
+            }
+          : undefined
+      }
+      className={cn(
+        onRowClick &&
+          'cursor-pointer hover:bg-muted/50 focus-visible:outline-none focus-visible:bg-muted/50 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring',
+        rowClassName,
+      )}
+    >
+      {row.getVisibleCells().map((cell) => {
+        const meta = cell.column.columnDef.meta as { cellClassName?: string } | undefined
+        return (
+          <TableCell
+            key={cell.id}
+            style={{ width: cell.column.getSize(), maxWidth: cell.column.getSize() }}
+            className={cn('truncate', meta?.cellClassName)}
+          >
+            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+          </TableCell>
+        )
+      })}
+    </TableRow>
+  )
+}
+
+export const MemoizedTableRow = React.memo(TableRowImpl) as typeof TableRowImpl
 
 interface DataTableBodyProps<TData, TValue> {
   table: TableInstance<TData>
@@ -78,7 +125,6 @@ export function DataTableBody<TData, TValue>({
                 rowClassName={getRowClassName ? getRowClassName(row.original) : undefined}
                 columnVisibility={columnVisibility}
                 columnSizing={columnSizing}
-                columns={columns}
               />
             )
           })}

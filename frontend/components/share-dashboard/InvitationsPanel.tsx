@@ -25,11 +25,10 @@ import { unwrapClient } from '@/lib/api-client'
 
 import { CreateInviteDialog } from './CreateInviteDialog'
 import { SortableHead, useTableSort, type SortAccessors } from './sortable'
-import { useShareMutation } from './useShareMutation'
+import { useShareMutation } from './utils'
 import { type Invite, type ShareStatus } from './utils'
 import { formatDeterministicUTC } from '@/lib/date'
-import { useAutoFlash } from '@/hooks/useAutoFlash'
-import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
+import { useAutoFlash, useCopyToClipboard } from '@/hooks/useAutoFlash'
 
 interface InvitationsPanelProps {
   status: ShareStatus | null

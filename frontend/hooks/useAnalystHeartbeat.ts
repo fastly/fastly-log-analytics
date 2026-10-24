@@ -78,3 +78,32 @@ export function useAnalystHeartbeat({
 
   return { disconnected }
 }
+
+/**
+ * Self-service logout for remote analysts.
+ *
+ * POSTs ``/api/share/logout`` which evicts the analyst's server-side session
+ * and clears the ``analyst_session_id`` / ``analyst_pending_session_id``
+ * cookies, then hard-navigates to ``/share-login``.
+ */
+export function useAnalystLogout(): { logout: () => Promise<void>; isLoggingOut: boolean } {
+  const [isLoggingOut, setIsLoggingOut] = React.useState(false)
+
+  const logout = React.useCallback(async () => {
+    if (isLoggingOut) return
+    setIsLoggingOut(true)
+    try {
+      await analystFetch('/api/share/logout', { method: 'POST' }, 10_000)
+    } catch {
+      // Swallow — redirect anyway (see docstring).
+    } finally {
+      if (typeof window !== 'undefined') {
+        window.location.assign('/share-login')
+      } else {
+        setIsLoggingOut(false)
+      }
+    }
+  }, [isLoggingOut])
+
+  return { logout, isLoggingOut }
+}

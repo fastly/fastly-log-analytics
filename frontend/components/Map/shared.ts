@@ -1,3 +1,5 @@
+import { useEffect, type RefObject } from 'react'
+
 export const NORMALIZE_COUNTRY: Record<string, string> = {
   'United States': 'United States of America',
   'Russia': 'Russia',
@@ -24,4 +26,43 @@ export function rafThrottle<TArgs extends unknown[]>(fn: (...args: TArgs) => voi
       lastArgs = null
     })
   }
+}
+
+const COUNTRY_FILL_DARK = '#27272a'
+const COUNTRY_FILL_LIGHT = '#e4e4e7'
+const COUNTRY_OUTLINE_DARK = '#3f3f46'
+const COUNTRY_OUTLINE_LIGHT = '#d4d4d8'
+
+export function countryFill(isDark: boolean): string {
+  return isDark ? COUNTRY_FILL_DARK : COUNTRY_FILL_LIGHT
+}
+
+export function countryOutline(isDark: boolean): string {
+  return isDark ? COUNTRY_OUTLINE_DARK : COUNTRY_OUTLINE_LIGHT
+}
+
+type Resizable = { resize: () => unknown }
+
+/**
+ * Re-measure a MapLibre map when its container changes size. MapLibre captures
+ * the container size at construction and does not re-measure when a flex
+ * parent grows, a card collapses, or a modal finishes animating in.
+ */
+export function observeMapResize(container: Element, getMap: () => Resizable | null | undefined): () => void {
+  const ro = new ResizeObserver(() => {
+    getMap()?.resize()
+  })
+  ro.observe(container)
+  return () => ro.disconnect()
+}
+
+export function useMapResize(
+  mapRef: RefObject<Resizable | null>,
+  containerRef: RefObject<Element | null>,
+): void {
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    return observeMapResize(el, () => mapRef.current)
+  }, [mapRef, containerRef])
 }

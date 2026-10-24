@@ -2,18 +2,18 @@
 
 import * as React from 'react'
 import { ScrollText, Info } from 'lucide-react'
-import { useScoringQuery } from './useScoringQuery'
+import { useScoringQuery } from './useScorerTimeseries'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { CardErrorState } from '@/components/CardErrorState'
 import { AuditLogHelp } from '@/components/SessionScoring/help-content'
 import { Badge } from '@/components/ui/badge'
 import type { ColumnDef } from '@tanstack/react-table'
-import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
+import { DataTableReadonly } from '@/components/DataTable'
 import { client } from '@/lib/api'
 import { formatTimeAgo } from '@/lib/date'
 import type { components } from '@/types/api.generated'
-import { SkeletonGrid } from '@/components/ui/skeleton-grid'
+import { SkeletonGrid } from '@/components/ui/skeleton'
 
 interface AuditLogTabProps {
   serviceId: string

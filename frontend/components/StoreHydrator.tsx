@@ -4,7 +4,7 @@ import { useEffect } from 'react'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useTimezoneStore } from '@/stores/timezoneStore'
 import { useDebugStore } from '@/stores/debugStore'
-import { setActiveServiceCookie } from '@/lib/active-service-cookie'
+import { setActiveServiceCookie } from '@/lib/cookies'
 
 // Rehydrate the persisted Zustand stores AFTER mount.
 //

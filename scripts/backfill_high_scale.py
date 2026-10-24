@@ -16,7 +16,7 @@ from backend.core.clickhouse_client import ClickHouseClient
 from backend.high_scale.aggregate_batch_adapter import AggregateBatchAdapter
 from backend.high_scale.postgres_control import PostgresControlPlane
 from backend.high_scale.publication import ClickHouseBatchAdapter, ClickHousePublication, PostgresBatchManifestStore
-from backend.high_scale.recovery_capacity import RecoveryCapacityMeasurement
+from backend.high_scale.recovery import RecoveryCapacityMeasurement
 from backend.high_scale.registry import get_high_scale_service_registry
 from backend.high_scale.registry_bootstrap import register_high_scale_services_from_environment
 

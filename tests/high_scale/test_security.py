@@ -327,32 +327,36 @@ def _proxy_client() -> _Client:
 
 def test_proxies_report_real_counts_quality_isps_and_clients():
     with patch("backend.core.duckdb.get_asn_names", return_value={15169: "Example Net"}):
-        res = hs.get_proxies_data(_service(_proxy_client()), _req(), START, END)
-    assert (res["active_proxies_count"], res["tunnel_requests_count"], res["distance_mismatches_count"]) == (3, 40, 2)
-    assert [(q["label"], q["value"]) for q in res["traffic_quality"]] == [
+        res = hs.security_aggregates(_service(_proxy_client()), _req(), START, END, sections={"proxies"})
+    assert (res.active_proxies_count, res.tunnel_requests_count, res.distance_mismatches_count) == (3, 40, 2)
+    assert [(q.label, q.value) for q in res.traffic_quality] == [
         ("Direct Connection", 75.0),
         ("Active Tunnel / Proxy", 25.0),
     ]
-    assert [(i["isp"], i["asn"], i["count"]) for i in res["suspicious_isps"]] == [
+    assert [(i.isp, i.asn, i.count) for i in res.suspicious_isps] == [
         ("Example Net", 15169, 25),
         ("Unknown ISP", None, 1),
     ]
-    client = res["active_clients"][0]
-    assert client["ip"] == "198.51.100.77"
-    assert client["asn_name"] == "Example Net"
-    assert client["impossible_distance"] is True
-    assert client["risk_level"] == "High"
-    assert client["city"] is None
-    assert client["country"] == "GB"
-    assert client["distance_km"] == 8800.4
+    client = res.active_clients[0]
+    assert client.ip == "198.51.100.77"
+    assert client.asn_name == "Example Net"
+    assert client.impossible_distance is True
+    assert client.risk_level == "High"
+    assert client.city is None
+    assert client.country == "GB"
+    assert client.distance_km == 8800.4
 
 
 def test_proxies_mask_client_ips_for_analyst_sessions():
     with patch("backend.core.duckdb.get_asn_names", return_value={}):
-        masked = hs.get_proxies_data(_service(_proxy_client()), _req(), START, END, mask_ips=True)
-        clear = hs.get_proxies_data(_service(_proxy_client()), _req(), START, END, mask_ips=False)
-    assert masked["active_clients"][0]["ip"] == "198.51.100.xxx"
-    assert clear["active_clients"][0]["ip"] == "198.51.100.77"
+        masked = hs.security_aggregates(
+            _service(_proxy_client()), _req(), START, END, sections={"proxies"}, mask_ips=True
+        )
+        clear = hs.security_aggregates(
+            _service(_proxy_client()), _req(), START, END, sections={"proxies"}, mask_ips=False
+        )
+    assert masked.active_clients[0].ip == "198.51.100.xxx"
+    assert clear.active_clients[0].ip == "198.51.100.77"
 
 
 def test_top_ips_header_masks_ips_for_analyst_sessions():
@@ -370,16 +374,16 @@ def test_proxies_section_is_served_inside_aggregates_with_masking():
 
 def test_proxies_with_no_rows_report_zero_without_dividing_by_nothing():
     with patch("backend.core.duckdb.get_asn_names", return_value={}):
-        res = hs.get_proxies_data(_service(_Client()), _req(), START, END)
-    assert res["active_proxies_count"] == 0
-    assert res["traffic_quality"] == []
-    assert res["active_clients"] == []
+        res = hs.security_aggregates(_service(_Client()), _req(), START, END, sections={"proxies"})
+    assert res.active_proxies_count == 0
+    assert res.traffic_quality == []
+    assert res.active_clients == []
 
 
 def test_active_clients_list_high_risk_first():
     client = _proxy_client()
     with patch("backend.core.duckdb.get_asn_names", return_value={}):
-        hs.get_proxies_data(_service(client), _req(), START, END)
+        hs.security_aggregates(_service(client), _req(), START, END, sections={"proxies"})
     assert "ORDER BY multiIf(risk_level = 'High', 0, risk_level = 'Medium', 1, 2)" in client.call("active_clients")[0]
 
 
@@ -389,54 +393,6 @@ def test_clickhouse_failures_propagate_instead_of_rendering_empty_cards():
         hs.security_aggregates(_service(client), _req(), START, END, sections={"proxy_dist"})
     with pytest.raises(RuntimeError, match="clickhouse unavailable"):
         hs.top_bots(_service(client), _req(), START, END)
-    with pytest.raises(RuntimeError, match="clickhouse unavailable"):
-        hs.get_security_threat_intel(_service(client), START, END)
-
-
-def test_threat_intel_returns_ranked_fingerprints():
-    client = _Client(
-        {
-            "threat_intel": [
-                {
-                    "tls_fingerprint": "ja3-a",
-                    "requests": "30",
-                    "top_country": "US",
-                    "matched_waf_rules_count": "2",
-                    "bot_percentage": 12.5,
-                    "is_anonymized_proxy": 1,
-                },
-                {
-                    "tls_fingerprint": "ja3-b",
-                    "requests": "5",
-                    "top_country": "",
-                    "matched_waf_rules_count": "0",
-                    "bot_percentage": 0.0,
-                    "is_anonymized_proxy": 0,
-                },
-            ]
-        }
-    )
-    res = hs.get_security_threat_intel(_service(client), START, END)
-    assert res == {
-        "data": [
-            {
-                "tls_fingerprint": "ja3-a",
-                "requests": 30,
-                "top_country": "US",
-                "matched_waf_rules_count": 2,
-                "bot_percentage": 12.5,
-                "is_anonymized_proxy": True,
-            },
-            {
-                "tls_fingerprint": "ja3-b",
-                "requests": 5,
-                "top_country": "Unknown",
-                "matched_waf_rules_count": 0,
-                "bot_percentage": 0.0,
-                "is_anonymized_proxy": False,
-            },
-        ]
-    }
 
 
 def test_dashboard_bundle_serves_real_top_bots():

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Integration tests for RemoteAccessMiddleware.
 
 Uses TestClient against the real ``backend.main.app`` with the share DB
@@ -5,8 +7,6 @@ isolated per-test. The middleware classifies requests via socket peer +
 ``X-Remote-Analyst`` header coordination, so tests just toggle that header
 to flip between local-admin and analyst branches.
 """
-
-from __future__ import annotations
 
 import pytest
 from fastapi import FastAPI
@@ -1421,3 +1421,984 @@ def test_xff_list_is_normalised_to_comma_space_separated_masked_elements():
 def test_non_ip_values_keep_their_padding_verbatim():
     assert _mask_ip_scalar("  hello world\n") == "  hello world\n"
     assert _mask_ip_scalar("1.2.3.4, not-an-ip ") == "1.2.3.4, not-an-ip "
+
+
+# ── Merged from test_admin_gateway.py ──────────────────────────────────────────────────────
+
+from unittest.mock import MagicMock
+
+import pytest
+from fastapi import Request
+from starlette.requests import Request as StarletteRequest
+
+from backend.utils.remote_access import (
+    is_request_remote,
+    validate_admin_gateway_config,
+)
+
+SECRET = "test-gateway-secret-with-at-least-32-characters"
+HEADER = "X-Admin-Gateway-Token"
+
+
+def _request(peer: str, headers: dict[str, str] | None = None) -> StarletteRequest:
+    return StarletteRequest(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/bootstrap",
+            "headers": [(key.lower().encode(), value.encode()) for key, value in (headers or {}).items()],
+            "client": (peer, 1234),
+            "server": ("testserver", 80),
+            "scheme": "http",
+            "query_string": b"",
+        }
+    )
+
+
+@pytest.fixture
+def gateway_client(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("ADMIN_GATEWAY_SECRET", SECRET)
+    monkeypatch.setenv("ADMIN_GATEWAY_REQUIRED", "1")
+    manager = MagicMock()
+    manager.is_sharing_active.return_value = False
+    manager.validate_session.return_value = None
+    monkeypatch.setattr("backend.utils.remote_access.get_tunnel_manager", lambda: manager)
+    app = FastAPI()
+    app.add_middleware(RemoteAccessMiddleware)
+
+    @app.get("/api/admin/probe")
+    def probe(request: Request) -> dict[str, bool]:
+        return {"is_remote": request.state.is_remote}
+
+    @app.get("/api/health")
+    def health() -> dict[str, bool]:
+        return {"ok": True}
+
+    @app.post("/api/admin/probe")
+    def mutate() -> dict[str, bool]:
+        return {"ok": True}
+
+    @app.get("/api/admin/recheck")
+    def recheck(request: Request) -> dict[str, bool]:
+        return {
+            "is_remote": is_request_remote(request),
+            "credential_visible": HEADER in request.headers,
+        }
+
+    with TestClient(app) as client:
+        yield client
+
+
+@pytest.mark.security_regression
+@pytest.mark.parametrize("peer", ["127.0.0.1", "10.12.1.2", "203.0.113.1"])
+def test_valid_gateway_authenticates_independently_of_peer(monkeypatch, peer):
+    monkeypatch.setenv("ADMIN_GATEWAY_SECRET", SECRET)
+    assert not is_request_remote(_request(peer, {HEADER: SECRET}))
+
+
+@pytest.mark.security_regression
+@pytest.mark.parametrize("peer", ["127.0.0.1", "10.12.1.2", "203.0.113.1"])
+def test_required_gateway_disables_ip_based_admin(monkeypatch, peer):
+    monkeypatch.setenv("ADMIN_GATEWAY_REQUIRED", "1")
+    monkeypatch.setenv("LOCAL_ADMIN_CIDRS", "10.12.0.0/16")
+    assert is_request_remote(_request(peer))
+
+
+@pytest.mark.security_regression
+@pytest.mark.parametrize("supplied", ["forged", "", "non-ascii-\u00e9"])
+def test_wrong_gateway_token_does_not_authenticate(monkeypatch, supplied):
+    monkeypatch.setenv("ADMIN_GATEWAY_SECRET", SECRET)
+    assert is_request_remote(_request("127.0.0.1", {HEADER: supplied}))
+
+
+@pytest.mark.security_regression
+def test_short_or_missing_configured_secret_cannot_authenticate(monkeypatch):
+    monkeypatch.setenv("ADMIN_GATEWAY_SECRET", "short")
+    assert is_request_remote(_request("127.0.0.1", {HEADER: "short"}))
+    monkeypatch.delenv("ADMIN_GATEWAY_SECRET")
+    assert is_request_remote(_request("127.0.0.1", {HEADER: SECRET}))
+
+
+def test_legacy_loopback_behavior_remains_when_gateway_unconfigured(monkeypatch):
+    monkeypatch.delenv("ADMIN_GATEWAY_REQUIRED", raising=False)
+    monkeypatch.delenv("ADMIN_GATEWAY_SECRET", raising=False)
+    assert not is_request_remote(_request("127.0.0.1"))
+    assert is_request_remote(_request("203.0.113.1"))
+
+
+def test_gateway_scrubs_credentials_and_retains_authenticated_request_state(gateway_client):
+    response = gateway_client.get("/api/admin/recheck", headers={HEADER: SECRET})
+    assert response.status_code == 200
+    assert response.json() == {"is_remote": False, "credential_visible": False}
+
+
+@pytest.mark.security_regression
+def test_forged_gateway_header_is_rejected_even_on_loopback(gateway_client):
+    response = gateway_client.get("/api/admin/probe", headers={HEADER: "forged"})
+    assert response.status_code == 401
+    assert response.json() == {"error": "admin_gateway_invalid"}
+
+
+@pytest.mark.security_regression
+def test_uncredentialed_loopback_cannot_reach_admin_in_required_mode(gateway_client):
+    response = gateway_client.get("/api/admin/probe")
+    assert response.status_code == 401
+    assert response.json()["error"] == "unauthenticated"
+
+
+def test_required_gateway_does_not_break_cheap_liveness(gateway_client):
+    response = gateway_client.get("/api/health")
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
+@pytest.mark.security_regression
+def test_public_marker_cannot_be_promoted_with_gateway_token(gateway_client):
+    response = gateway_client.get("/api/admin/probe", headers={HEADER: SECRET, "X-Proxied-By-Caddy": "1"})
+    assert response.status_code == 401
+    assert response.json()["error"] == "admin_gateway_invalid"
+
+
+@pytest.mark.security_regression
+def test_duplicate_gateway_headers_are_rejected(gateway_client):
+    response = gateway_client.get("/api/admin/probe", headers=[(HEADER, SECRET), (HEADER, "forged")])
+    assert response.status_code == 401
+
+
+def test_required_gateway_without_secret_fails_configuration(monkeypatch):
+    monkeypatch.setenv("ADMIN_GATEWAY_REQUIRED", "1")
+    monkeypatch.delenv("ADMIN_GATEWAY_SECRET", raising=False)
+    with pytest.raises(ValueError, match="at least 32"):
+        validate_admin_gateway_config()
+
+
+def test_configured_short_gateway_secret_fails_configuration(monkeypatch):
+    monkeypatch.setenv("ADMIN_GATEWAY_SECRET", "short")
+    with pytest.raises(ValueError, match="at least 32"):
+        validate_admin_gateway_config()
+
+
+def test_configured_gateway_passes_configuration(monkeypatch):
+    monkeypatch.setenv("ADMIN_GATEWAY_REQUIRED", "1")
+    monkeypatch.setenv("ADMIN_GATEWAY_SECRET", SECRET)
+    validate_admin_gateway_config()
+
+
+def test_invalid_required_mode_fails_configuration(monkeypatch):
+    monkeypatch.setenv("ADMIN_GATEWAY_REQUIRED", "true")
+    with pytest.raises(ValueError, match="must be 0 or 1"):
+        validate_admin_gateway_config()
+
+
+@pytest.mark.security_regression
+@pytest.mark.parametrize("origin", ["https://attacker.example", "null", "https://testserver.attacker.example"])
+def test_gateway_blocks_cross_origin_browser_mutations(gateway_client, origin):
+    response = gateway_client.post("/api/admin/probe", headers={HEADER: SECRET, "Origin": origin})
+    assert response.status_code == 403
+    assert response.json()["error"] == "admin_origin_not_allowed"
+
+
+def test_gateway_accepts_same_origin_browser_mutations(gateway_client):
+    response = gateway_client.post("/api/admin/probe", headers={HEADER: SECRET, "Origin": "https://testserver"})
+    assert response.status_code == 200
+
+
+def test_gateway_accepts_certificate_authenticated_cli_without_origin(gateway_client):
+    response = gateway_client.post("/api/admin/probe", headers={HEADER: SECRET})
+    assert response.status_code == 200
+
+
+@pytest.mark.security_regression
+def test_gateway_rejects_browser_cross_site_fetch_metadata(gateway_client):
+    response = gateway_client.get("/api/admin/probe", headers={HEADER: SECRET, "Sec-Fetch-Site": "cross-site"})
+    assert response.status_code == 403
+
+
+# ── Merged from test_route_table_tripwire.py ──────────────────────────────────────────────────────
+
+"""Tripwire: every real route must be consciously classified for analyst reach.
+
+Why this exists (2026-08 RBAC audit): the analyst blocklist in
+``backend.utils.remote_access`` is hand-curated. A new route is analyst-
+reachable by default unless someone remembers to add it to a blocked-prefix /
+blocked-subpath / suffix-gate entry. That is exactly how
+``/api/services/{id}/rum/status``, ``/rum/enable``, and ``/rum/disable``
+shipped without gating in the first place — and ``tests/remote_access/
+test_middleware.py`` could not have caught it because that suite builds its
+test app from HAND-COPIED STUB ROUTES, so a real route nobody wrote a stub
+for is invisible to it.
+
+This test closes that gap by walking the REAL app's route table
+(``backend.main.app.openapi()["paths"]``, the convention this repo already
+uses for whole-surface OpenAPI checks — see
+``tests/test_error_envelope_contract.py``) and forcing every single
+``(method, path)`` into one of exactly three buckets:
+
+  1. Blocked — ``_is_blocked_path()`` returns True for the (parameter-
+     substituted) path. No inventory entry needed; the blocklist function
+     itself is already covered by ``tests/routers/test_rbac_audit_fixes.py``.
+  2. ``_READ_ALLOWLIST`` — a GET/HEAD route an analyst may reach, grouped by
+     rationale below. This is the reviewable "what can an analyst see"
+     surface.
+  3. ``_WRITE_VERB_GATE_ROUTES`` — a POST route an analyst may reach ONLY
+     because it isn't blocked AND its path starts with an entry in
+     ``_ANALYST_ALLOWED_WRITE_PREFIXES`` (the read-shaped-POST verb gate in
+     remote_access.py). Listed separately from the read allowlist — and
+     cross-checked against the actual prefix set below — because a route
+     landing here is NOT individually reviewed; it rides on a blanket prefix
+     allowance. Treating that as equivalent to a deliberate per-route
+     classification would hide exactly the kind of drift this test exists to
+     catch, so ``test_write_gate_routes_actually_rely_on_the_verb_gate``
+     makes the reliance explicit and asserts nothing in this bucket is
+     independently blocklisted.
+
+A route that lands in NEITHER "blocked" NOR either inventory reds this
+suite — that is the entire point. See
+``test_unclassified_route_fails_the_tripwire`` for a live demonstration
+using a route injected straight into the real app's router (proving the
+mechanism, not a copy of it).
+
+Populated from CURRENT behavior so this passes on today's tree — it is a
+tripwire for future drift, not a re-litigation of existing classifications.
+Four routes below are marked FLAGGED FOR TRIAGE: the audit found them
+analyst-reachable and unclassified, but nobody has confirmed whether that's
+correct, so they are listed as-is (not endorsed as reviewed-safe) purely so
+the suite reflects reality today.
+"""
+
+import re
+
+import pytest
+
+from backend.main import app as _main_app
+from backend.utils.remote_access import _ANALYST_ALLOWED_WRITE_PREFIXES, _UNAUTH_ANALYST_PATHS, _is_blocked_path
+
+_HTTP_METHODS = ("get", "post", "put", "patch", "delete")
+
+# Plausible, non-identifying placeholder values for every path parameter name
+# used across the route table. No real service/session/invite IDs — this is
+# a public repo (see infra-leak-sweep).
+_PATH_PARAM_SUBSTITUTIONS = {
+    "service_id": "svc1",
+    "domain": "rum_vitals",
+    "export_id": "export1",
+    "job_id": "job1",
+    "alert_id": "alert1",
+    "invite_id": "invite1",
+    "session_id": "sess1",
+    "quarantine_id": "quar1",
+    "source_id": "src1",
+    "qid": "q1",
+    "log_id": "1",
+    "run_id": "run1",
+    "field_name": "field1",
+    "label_id": "label1",
+    "item_id": "1",
+    "version": "v1",
+    "sid": "sid1",
+    "view_id": "view1",
+    "tab": "overview",
+    "token": "tok1",
+}
+
+_PARAM_RE = re.compile(r"\{([^}]+)\}")
+
+
+def _substitute(path: str) -> str:
+    """Replace every ``{param}`` segment with a plausible placeholder.
+
+    Raises if a route introduces a path-parameter name this file doesn't
+    know about yet — fail loudly rather than silently leaving a brace in
+    the path (which would never match any blocklist regex and could mask
+    a real gap).
+    """
+
+    def _rep(m: re.Match[str]) -> str:
+        name = m.group(1)
+        if name not in _PATH_PARAM_SUBSTITUTIONS:
+            raise AssertionError(
+                f"route path parameter {name!r} (from {path!r}) has no placeholder in "
+                "_PATH_PARAM_SUBSTITUTIONS — add one so this tripwire can classify the route"
+            )
+        return _PATH_PARAM_SUBSTITUTIONS[name]
+
+    return _PARAM_RE.sub(_rep, path)
+
+
+def _real_routes() -> list[tuple[str, str]]:
+    """Every ``(METHOD, path_template)`` from the real app's OpenAPI surface.
+
+    Sorted so the test is deterministic regardless of dict/route
+    registration order.
+    """
+    paths = _main_app.openapi()["paths"]
+    out: list[tuple[str, str]] = []
+    for path in paths:
+        for method in _HTTP_METHODS:
+            if method in paths[path]:
+                out.append((method.upper(), path))
+    return sorted(out)
+
+
+# ── Bucket 2: analyst-reachable GET/HEAD reads ──────────────────────────────
+#
+# Each group names WHY the class of routes is analyst-appropriate. Keep this
+# reviewable — new entries should read as a deliberate decision, not a bare
+# string appended to make the test pass.
+
+_READ_ALLOWLIST: set[tuple[str, str]] = {
+    # Pre-session / unauthenticated share flow. Mirrors _UNAUTH_ANALYST_PATHS
+    # and the /api/share/oauth/* prefix exemption in the middleware — reached
+    # before any analyst session cookie exists.
+    ("GET", "/api/health"),
+    ("GET", "/api/bootstrap"),
+    ("GET", "/api/share/auth-config"),
+    ("GET", "/api/share/heartbeat"),
+    ("GET", "/api/share/tos"),
+    ("GET", "/api/share/oauth/authorize"),
+    ("GET", "/api/share/oauth/callback"),
+    # Public-facing dynamic JS assets and beacon telemetry endpoints.
+    # Safe to load anonymously (no credentials required).
+    ("GET", "/js/rum.js"),
+    ("GET", "/js/faro-sdk.js"),
+    # Reference / catalog data: no per-service secrets, needed to drive the
+    # analyst UI's filter and field pickers.
+    ("GET", "/api/log-fields/catalog"),
+    ("GET", "/api/presets"),
+    ("GET", "/api/schema"),
+    ("GET", "/api/services"),
+    ("GET", "/api/insight-availability"),
+    ("GET", "/api/views/{service_id}"),
+    # Header-badge data + its live-push channel — analyst-safe siblings of
+    # the admin-only /api/sync-status / /api/sync-status/stream (see the
+    # _ANALYST_SSE_ALLOWLIST comment on /api/log-extents/stream).
+    ("GET", "/api/log-extents"),
+    ("GET", "/api/log-extents/stream"),
+    # Session-scoring analyst-safe reads: the suffix gate
+    # (_ANALYST_BLOCKED_SCORING_SUFFIXES) already keeps /config, /status,
+    # /audit, /threshold, /exclude-regex, /enforce-*, /matrix-versions,
+    # /dashboard, and /evaluation/per-reason admin-only. Everything below is
+    # the deliberately-open complement (see the module docstring on that
+    # suffix gate in remote_access.py).
+    ("GET", "/api/services/{service_id}/scoring/analytics"),
+    ("GET", "/api/services/{service_id}/scoring/compliance-breakdown"),
+    ("GET", "/api/services/{service_id}/scoring/curves"),
+    ("GET", "/api/services/{service_id}/scoring/evaluation"),
+    ("GET", "/api/services/{service_id}/scoring/health"),
+    ("GET", "/api/services/{service_id}/scoring/labels"),
+    ("GET", "/api/services/{service_id}/scoring/latency-timeseries"),
+    ("GET", "/api/services/{service_id}/scoring/score-distribution"),
+    ("GET", "/api/services/{service_id}/scoring/sessions/{sid}/events"),
+    ("GET", "/api/services/{service_id}/scoring/threshold-preview"),
+    ("GET", "/api/services/{service_id}/scoring/top-flagged"),
+    # RUM analyst-safe reads: the /rum/ suffix gate
+    # (_ANALYST_BLOCKED_RUM_SUFFIXES) blocks /enable, /disable, /versions,
+    # /upgrade. /rum/status is intentionally open (route projects down to
+    # {enabled, enabled_at} for analysts) and the beacon-telemetry reads
+    # below carry no operator-config disclosure — see the module comment
+    # above _ANALYST_BLOCKED_RUM_SUFFIXES.
+    ("GET", "/api/services/{service_id}/rum/status"),
+    ("GET", "/api/services/{service_id}/rum/beacon-health"),
+    ("GET", "/api/services/{service_id}/rum/analytics"),
+    ("GET", "/api/services/{service_id}/rum/live-events"),
+    # Control Room's live metrics push channel (S-1 audit decision):
+    # aggregate rps/error-rate/cache-ratio, no PII, no infra details.
+    ("GET", "/api/services/{service_id}/realtime-stream"),
+    # Control Room's bounded recent 4xx/5xx request-event feed (analyst-safe masked client IPs).
+    ("GET", "/api/services/{service_id}/control-room/error-stream"),
+    # Security proxies export: read-only CSV export of security proxies.
+    ("GET", "/api/security/proxies/export"),
+    # Network pop-health & security threat-intel (read-only analytical endpoints)
+    ("GET", "/api/assets/aggregates"),
+    ("GET", "/api/network/bundle"),
+    ("GET", "/api/network/pop-health"),
+    ("GET", "/api/security/bundle"),
+    ("GET", "/api/security/threat-intel"),
+    ("GET", "/api/query/schema/{service_id}"),
+    ("GET", "/api/high-scale/request-facts"),
+    ("GET", "/api/high-scale/services/{service_id}/exports/{export_id}"),
+    ("GET", "/api/high-scale/services/{service_id}/queries/{job_id}"),
+    # ── FLAGGED FOR TRIAGE ───────────────────────────────────────────────
+    # The 2026-08 RBAC audit found these four analyst-reachable with NO
+    # explicit classification anywhere (not in a blocked-prefix/subpath/
+    # suffix entry, not previously reviewed as safe). They are listed here
+    # ONLY so this tripwire reflects today's actual behavior — this is NOT
+    # an endorsement that they should stay open. See the follow-up report
+    # for the triage recommendation on each.
+    ("GET", "/api/services/{service_id}/cmcd/status"),
+    ("GET", "/api/services/{service_id}/control-room/wizard/state"),
+    ("GET", "/api/services/{service_id}/control-room/{tab}"),
+    ("GET", "/api/services/{service_id}/realtime-seed"),
+}
+
+# ── Bucket 3: mutating routes that reach the handler ONLY via the blunt
+# read-only-verb gate (POST + a matching _ANALYST_ALLOWED_WRITE_PREFIXES
+# prefix), not because anyone reviewed the individual route. Kept separate
+# from _READ_ALLOWLIST on purpose — see the module docstring and
+# test_write_gate_routes_actually_rely_on_the_verb_gate below, which proves
+# the reliance rather than asserting it by fiat.
+_WRITE_VERB_GATE_ROUTES: set[tuple[str, str]] = {
+    ("POST", "/api/share/acknowledge"),
+    ("POST", "/api/share/claim/{token}"),
+    ("POST", "/api/share/login"),
+    ("POST", "/api/share/logout"),
+    ("POST", "/api/assets/aggregates"),
+    ("POST", "/api/dashboard/aggregates"),
+    ("POST", "/api/dashboard/bundle"),
+    ("POST", "/api/dashboard/field-values"),
+    ("POST", "/api/dashboard/raw/csv"),
+    ("POST", "/api/security/aggregates"),
+    ("POST", "/api/origin/aggregates"),
+    ("POST", "/api/origin/ip-health"),
+    ("POST", "/api/origin/path-breakdown"),
+    ("POST", "/api/origin/pop-latency"),
+    ("POST", "/api/origin/shielding-analysis"),
+    ("POST", "/api/origin/slow-urls"),
+    ("POST", "/api/origin/status-codes"),
+    ("POST", "/api/origin/summary"),
+    ("POST", "/api/origin/timeseries"),
+    ("POST", "/api/performance/aggregates"),
+    ("POST", "/api/insights"),
+    ("POST", "/api/insights/cache-collapse-detail"),
+    ("POST", "/api/network-health"),
+    ("POST", "/api/network-quality"),
+    ("POST", "/api/network/bundle"),
+    ("POST", "/api/origin/drilldown"),
+    ("POST", "/api/query"),
+    ("POST", "/api/security/bundle"),
+    ("POST", "/api/sessions"),
+    ("POST", "/api/sessions/detail"),
+    ("POST", "/api/cmcd/aggregates"),
+    ("POST", "/api/value/summary"),
+    ("POST", "/api/web-vitals"),
+    ("POST", "/api/ux-events"),
+    ("POST", "/api/high-scale/request-facts"),
+    ("POST", "/api/high-scale/services/{service_id}/request-facts"),
+    ("POST", "/api/high-scale/services/{service_id}/rum-facts/{domain}"),
+    ("POST", "/api/high-scale/services/{service_id}/cmcd-facts"),
+    ("POST", "/api/high-scale/services/{service_id}/aggregates"),
+    ("POST", "/api/high-scale/services/{service_id}/queries"),
+    ("POST", "/api/high-scale/services/{service_id}/queries/{job_id}/cancel"),
+    ("POST", "/api/high-scale/services/{service_id}/exports"),
+    ("POST", "/api/high-scale/services/{service_id}/exports/{export_id}/cancel"),
+}
+
+_ALL_INVENTORIED = _READ_ALLOWLIST | _WRITE_VERB_GATE_ROUTES
+
+
+def _is_unauth_path(path: str) -> bool:
+    return path in _UNAUTH_ANALYST_PATHS or path.startswith("/api/share/claim/") or path.startswith("/api/share/oauth/")
+
+
+def _verb_gate_blocks(method: str, substituted_path: str) -> bool:
+    """Mirror the read-only-verb gate in ``RemoteAccessMiddleware.dispatch``
+    (backend/utils/remote_access.py): PUT/PATCH/DELETE are unconditionally
+    refused for analysts, and POST is refused unless the path is unauthenticated
+    or starts with an ``_ANALYST_ALLOWED_WRITE_PREFIXES`` entry. Kept in lockstep with that
+    logic on purpose — this is what makes ``_WRITE_VERB_GATE_ROUTES`` mean
+    "reachable ONLY via this gate" rather than an assumption.
+    """
+    if method in ("PUT", "PATCH", "DELETE"):
+        return True
+    if method == "POST":
+        if _is_unauth_path(substituted_path):
+            return False
+        return not any(substituted_path.startswith(pfx) for pfx in _ANALYST_ALLOWED_WRITE_PREFIXES)
+    return False
+
+
+@pytest.mark.security_regression
+def test_every_real_route_is_blocked_or_inventoried():
+    """The tripwire. A route that is neither blocked nor in an inventory
+    means someone shipped a new analyst-reachable endpoint without
+    consciously classifying it — exactly the RUM/status gap this test
+    exists to prevent from recurring silently."""
+    uninventoried: list[str] = []
+    for method, path in _real_routes():
+        substituted = _substitute(path)
+        if _is_blocked_path(substituted):
+            continue
+        if _verb_gate_blocks(method, substituted):
+            continue
+        if (method, path) in _ALL_INVENTORIED:
+            continue
+        uninventoried.append(f"{method} {path}")
+
+    assert not uninventoried, (
+        "Route(s) reachable by an authenticated analyst with NO explicit classification:\n  "
+        + "\n  ".join(uninventoried)
+        + "\n\nEither add a blocklist entry in backend/utils/remote_access.py "
+        "(_ANALYST_BLOCKED_PREFIXES / _ANALYST_BLOCKED_SUBPATHS / a suffix gate / "
+        "_ANALYST_BLOCKED_SUBPATH_REGEX) if the route should be admin-only, "
+        "or add it to _READ_ALLOWLIST / _WRITE_VERB_GATE_ROUTES in this file "
+        "with a comment explaining why an analyst may reach it."
+    )
+
+
+@pytest.mark.security_regression
+def test_inventory_has_no_stale_entries():
+    """Catches the opposite drift: an inventory entry for a route that no
+    longer exists, or one that got blocked out from under the inventory
+    (which would make the entry misleadingly imply "reviewed and open" for
+    a route that's actually closed). Keeps the inventory an accurate map of
+    current behavior rather than an ever-growing junk drawer."""
+    real = set(_real_routes())
+    stale = [f"{m} {p}" for (m, p) in _ALL_INVENTORIED if (m, p) not in real]
+    assert not stale, f"Inventory entries for routes that no longer exist in the app: {stale}"
+
+    now_blocked = [f"{m} {p}" for (m, p) in _ALL_INVENTORIED if _is_blocked_path(_substitute(p))]
+    assert not now_blocked, (
+        f"Inventory entries for routes that are now blocked by _is_blocked_path: {now_blocked}. "
+        "Remove them from _READ_ALLOWLIST/_WRITE_VERB_GATE_ROUTES — they're covered by the "
+        "blocklist now, the inventory entry is stale."
+    )
+
+
+@pytest.mark.security_regression
+def test_write_gate_routes_actually_rely_on_the_verb_gate():
+    """Makes explicit what _WRITE_VERB_GATE_ROUTES membership actually means:
+    every entry is a POST route, is NOT individually blocklisted, and is
+    reachable ONLY because its path starts with an
+    _ANALYST_ALLOWED_WRITE_PREFIXES entry. If a future change moves one of
+    these onto an explicit per-route review, move it to _READ_ALLOWLIST
+    (renaming aside, that bucket means "reviewed"); if the write-prefix set
+    ever stops covering one of these paths the route becomes blocked and
+    belongs in neither bucket — test_inventory_has_no_stale_entries catches
+    that flip.
+    """
+    for method, path in _WRITE_VERB_GATE_ROUTES:
+        assert method == "POST", f"{method} {path} is in _WRITE_VERB_GATE_ROUTES but isn't a POST route"
+        substituted = _substitute(path)
+        assert not _is_blocked_path(substituted), (
+            f"{method} {path} is individually blocklisted — it doesn't need the verb gate, "
+            "this entry is redundant/misclassified"
+        )
+        assert any(substituted.startswith(pfx) for pfx in _ANALYST_ALLOWED_WRITE_PREFIXES), (
+            f"{method} {path} is not covered by any _ANALYST_ALLOWED_WRITE_PREFIXES entry — "
+            "it shouldn't be reachable at all, so it doesn't belong in _WRITE_VERB_GATE_ROUTES"
+        )
+
+
+@pytest.mark.security_regression
+def test_unclassified_route_fails_the_tripwire():
+    """Proves the tripwire actually fires. Injects a throwaway route into
+    the REAL app's router (the same object test_every_real_route_is_blocked_or_inventoried
+    walks) that is neither blocked nor inventoried, re-runs the same
+    classification logic inline, and asserts it is reported as
+    unclassified. The route is removed in a ``finally`` so it can't leak
+    into any other test in the session.
+
+    This is the "prove the test can fail" requirement — a route that is
+    analyst-reachable and unclassified must show up, or this tripwire is
+    decorative.
+    """
+    dummy_path = "/api/__tripwire_dummy_unclassified_route__"
+
+    async def _dummy_handler():
+        return {"ok": True}
+
+    # Must be a proper APIRoute (via add_api_route), not a bare
+    # starlette.routing.Route — FastAPI's OpenAPI generator only inspects
+    # APIRoute instances, so a plain Route would silently vanish from
+    # app.openapi()["paths"] and this proof-of-mechanism would be testing
+    # nothing.
+    _main_app.router.add_api_route(dummy_path, _dummy_handler, methods=["GET"])
+    # FastAPI caches the generated OpenAPI schema on first access (including
+    # from any earlier test in this session) — invalidate it so the schema
+    # we inspect actually reflects the just-added dummy route.
+    _main_app.openapi_schema = None
+    try:
+        paths = _main_app.openapi()["paths"]
+        assert dummy_path in paths, "test setup bug: dummy route didn't register in the OpenAPI surface"
+
+        found_uninventoried = False
+        for method in _HTTP_METHODS:
+            if method not in paths[dummy_path]:
+                continue
+            if _is_blocked_path(dummy_path):
+                continue
+            if _verb_gate_blocks(method.upper(), dummy_path):
+                continue
+            if (method.upper(), dummy_path) in _ALL_INVENTORIED:
+                continue
+            found_uninventoried = True
+
+        assert found_uninventoried, (
+            "Injected an unclassified dummy route but the tripwire logic did not flag it — "
+            "the tripwire itself is broken"
+        )
+    finally:
+        _main_app.router.routes[:] = [r for r in _main_app.router.routes if getattr(r, "path", None) != dummy_path]
+        # FastAPI/Starlette cache the generated OpenAPI schema on first
+        # access; clear it so later tests in the same process (or a rerun
+        # of this test) see a route table without the dummy entry.
+        _main_app.openapi_schema = None
+
+
+# ── Merged from test_rum_debug_envelope.py ──────────────────────────────────────────────────────
+
+"""Analyst responses from the RUM routes must not carry ``_debug_*`` telemetry unless the share setting allows it.
+
+``routers/rum._inject_telemetry`` injects ``_debug_queries`` / ``_debug_sqlite`` / ``_debug_calls`` /
+``_is_cached`` UNCONDITIONALLY (it ignores ``DEBUG_RESPONSES``); the only thing keeping SQL text and
+FOS/CDN call details away from an analyst is ``RemoteAccessMiddleware._strip_analyst_envelope``. These
+tests drive the REAL RUM router behind the REAL middleware so that guard cannot silently regress.
+"""
+
+from unittest.mock import PropertyMock, patch
+
+import pytest
+
+from tests.conftest import override_request_context
+
+_SVC = "svcA"
+_HEADERS = {"X-Remote-Analyst": "1", "Host": "testserver"}
+_ENVELOPE_PREFIXES = ("_debug", "debug_")
+
+
+def _rum_app() -> FastAPI:
+    from backend.core.request_context import build_request_context
+    from backend.routers import rum, share_auth
+
+    app = FastAPI()
+    app.add_middleware(RemoteAccessMiddleware)
+    app.include_router(share_auth.router)
+    app.include_router(rum.router)
+    app.dependency_overrides[build_request_context] = override_request_context(
+        source={"name": _SVC, "service_id": _SVC}
+    )
+    return app
+
+
+@pytest.fixture(autouse=True)
+def _reset_debug_visibility_settings():
+    """Share settings persist in the (per-worker) metadata DB; restore the defaults so a test that
+    opens the debug envelope cannot leak it into whatever test runs next on the same worker."""
+    yield
+    share_db.set_setting("query_debug_visibility", "disabled")
+    share_db.set_setting("api_call_debug_visibility", "disabled")
+
+
+@pytest.fixture
+def analyst_client():
+    with TestClient(_rum_app()) as c:
+        _start_share()
+        _login_analyst(c, _seed_invite(service_ids=[_SVC]))
+        yield c
+
+
+def _beacon_health_disabled(client):
+    return client.get(f"/api/services/{_SVC}/rum/beacon-health", headers=_HEADERS)
+
+
+def _beacon_health_check_failed(client):
+    cfg = {"rum": {"enabled": True}}
+    with (
+        patch("backend.routers.rum.svcconfig.load_config", return_value=cfg),
+        patch("backend.routers.rum.rum_source_for", side_effect=RuntimeError("boom")),
+    ):
+        return client.get(f"/api/services/{_SVC}/rum/beacon-health", headers=_HEADERS)
+
+
+def _analytics_no_data(client):
+    with (
+        patch("backend.routers.rum.rum_source_for", return_value={"name": f"{_SVC}_rum"}),
+        patch("backend.routers.rum._ConnectionHolder", _Holder),
+        patch("backend.routers.rum.execute_with_stale_view_retry", return_value={"no_data": True}),
+    ):
+        return client.get(f"/api/services/{_SVC}/rum/analytics", headers=_HEADERS)
+
+
+class _Holder:
+    def __init__(self, *_a, **_k):
+        pass
+
+    def __enter__(self):
+        return object()
+
+    def __exit__(self, *_a):
+        return False
+
+
+def _analytics_success(client):
+    """The data-bearing branch builds its own dict and calls ``_inject_telemetry`` separately from no_data."""
+    db_res = {
+        "no_data": False,
+        "total_beacons": 7,
+        "pageviews": 5,
+        "interactions": 1,
+        "errors_count": 1,
+        "vitals_rows": [("LCP", 2100.0, 10, 8, 1, 1)],
+        "worst_pages_rows": [("/p", 4, 120.0, 2100.0, 0.05, 0.1)],
+        "errors_rows": [("boom", "app.js", 3, 4, 2)],
+        "trends_rows": [],
+        "browsers": {"Firefox": 7},
+        "os": {"macOS": 7},
+        "devices": {"desktop": 7},
+    }
+    with (
+        patch("backend.routers.rum.rum_source_for", return_value={"name": f"{_SVC}_rum"}),
+        patch("backend.routers.rum._ConnectionHolder", _Holder),
+        patch("backend.routers.rum.execute_with_stale_view_retry", return_value=db_res),
+    ):
+        return client.get(f"/api/services/{_SVC}/rum/analytics", headers=_HEADERS)
+
+
+_HS_ANALYTICS = {
+    "is_mock": False,
+    "no_data": False,
+    "beacon_count": 3,
+    "pageview_count": 3,
+    "interaction_count": 0,
+    "error_count": 0,
+    "vitals": {
+        "lcp": {"p75": 2.1, "distribution": {"good": 80, "needs_improvement": 15, "poor": 5}},
+        "cls": {"p75": 0.05, "distribution": {"good": 90, "needs_improvement": 8, "poor": 2}},
+        "inp": {"p75": 180, "distribution": {"good": 85, "needs_improvement": 10, "poor": 5}},
+        "fid": {"p75": 12.0, "fcp": 1.1, "ttfb": 0.4},
+    },
+    "worst_pages": [],
+    "errors": [],
+    "trends": {
+        "timestamps": ["2026-10-17T00:00:00Z"],
+        "lcp": [2.1],
+        "cls": [0.05],
+        "error_rate": [0.0],
+        "pageviews": [3],
+        "interactions": [0],
+        "errors": [0],
+    },
+    "environments": {"browsers": {}, "os": {}, "devices": {}},
+}
+
+
+def _hs_beacon_health(client):
+    """High-scale branch: real ``rum_beacon_health`` over a stub ClickHouse client."""
+
+    class _Client:
+        def execute(self, sql, params=None):
+            return [{"c": 3}]
+
+    class _Service:
+        service_id = _SVC
+        client = _Client()
+
+    with patch("backend.core.request_context.RequestContext.high_scale", new_callable=PropertyMock) as hs:
+        hs.return_value = _Service()
+        return client.get(f"/api/services/{_SVC}/rum/beacon-health", headers=_HEADERS)
+
+
+def _hs_analytics(client):
+    with (
+        patch("backend.core.request_context.RequestContext.high_scale", new_callable=PropertyMock) as hs,
+        patch("backend.high_scale.rum.rum_analytics", return_value=dict(_HS_ANALYTICS)),
+    ):
+        hs.return_value = object()
+        return client.get(f"/api/services/{_SVC}/rum/analytics", headers=_HEADERS)
+
+
+_ROUTES = [
+    _beacon_health_disabled,
+    _beacon_health_check_failed,
+    _analytics_no_data,
+    _analytics_success,
+    _hs_beacon_health,
+    _hs_analytics,
+]
+
+
+def _envelope_keys(body: dict) -> list[str]:
+    return [k for k in body if k.startswith(_ENVELOPE_PREFIXES) or k == "_is_cached"]
+
+
+@pytest.mark.security_regression
+@pytest.mark.parametrize("call", _ROUTES, ids=lambda f: f.__name__)
+def test_analyst_rum_response_has_no_debug_envelope_by_default(analyst_client, call) -> None:
+    resp = call(analyst_client)
+    assert resp.status_code == 200, resp.text
+    assert _envelope_keys(resp.json()) == []
+
+
+@pytest.mark.security_regression
+@pytest.mark.parametrize("call", _ROUTES, ids=lambda f: f.__name__)
+def test_share_setting_opens_only_the_matching_envelope_keys(analyst_client, call) -> None:
+    """The injection is real (otherwise the default-case test proves nothing): the share settings are
+    what release the keys, and each setting releases only its own half."""
+    share_db.set_setting("query_debug_visibility", "analysts")
+    body = call(analyst_client).json()
+    assert "_debug_queries" in body
+    assert "_debug_calls" not in body
+
+    share_db.set_setting("query_debug_visibility", "disabled")
+    share_db.set_setting("api_call_debug_visibility", "both")
+    body = call(analyst_client).json()
+    assert "_debug_calls" in body
+    assert "_debug_queries" not in body
+    assert "_debug_sqlite" not in body
+
+
+@pytest.mark.security_regression
+def test_admin_rum_response_still_carries_the_envelope() -> None:
+    """Control: the loopback admin (no analyst session) keeps the unconditional injection."""
+    with TestClient(_rum_app()) as c:
+        body = c.get(f"/api/services/{_SVC}/rum/beacon-health").json()
+    assert {"_debug_queries", "_debug_calls"} <= set(body)
+
+
+@pytest.mark.security_regression
+def test_analyst_high_scale_query_response_has_no_debug_envelope() -> None:
+    """``backend/high_scale/query.py`` returns BOTH ``debug_queries`` and ``_debug_queries`` (plus
+    ``debug_calls``) at the top level; the analyst middleware must strip every spelling."""
+    from backend.core.request_context import build_request_context
+    from backend.routers import query, share_auth
+
+    app = FastAPI()
+    app.add_middleware(RemoteAccessMiddleware)
+    app.include_router(share_auth.router)
+    app.include_router(query.router)
+    app.dependency_overrides[build_request_context] = override_request_context(
+        source={"name": _SVC, "service_id": _SVC}
+    )
+    hs_result = {
+        "columns": ["n"],
+        "data": [{"n": 1}],
+        "row_count": 1,
+        "total_rows": 1,
+        "truncated": False,
+        "elapsed_ms": 1,
+        "debug_queries": [{"sql": "SELECT secret FROM ch_table", "time_ms": 1, "engine": "ClickHouse"}],
+        "_debug_queries": [{"sql": "SELECT secret FROM ch_table", "time_ms": 1, "engine": "ClickHouse"}],
+        "debug_calls": [{"method": "GET", "path": "/internal"}],
+    }
+
+    def _post(c):
+        with (
+            patch("backend.core.request_context.RequestContext.high_scale", new_callable=PropertyMock) as hs,
+            patch("backend.high_scale.query.query_endpoint", return_value=dict(hs_result)),
+        ):
+            hs.return_value = object()
+            return c.post(
+                f"/api/query?service_id={_SVC}",
+                json={"sql": "SELECT 1"},
+                headers={**_HEADERS, "Origin": "https://testserver"},
+            )
+
+    with TestClient(app) as c:
+        _start_share()
+        _login_analyst(c, _seed_invite(service_ids=[_SVC]))
+        resp = _post(c)
+        assert resp.status_code == 200, resp.text
+        assert _envelope_keys(resp.json()) == []
+        assert "ch_table" not in resp.text
+
+        share_db.set_setting("query_debug_visibility", "analysts")
+        body = _post(c).json()
+        assert "_debug_queries" in body
+        assert "debug_calls" not in body and "_debug_calls" not in body
+
+
+# ── Merged from test_debug_envelope_sites.py ──
+
+import asyncio
+import json
+
+import pytest
+from fastapi.responses import StreamingResponse
+
+from backend.utils.remote_access import _strip_analyst_envelope
+
+_ENVELOPE = {
+    "ok": True,
+    "_debug_queries": [{"sql": "SELECT secret FROM t"}],
+    "_debug_sqlite": [{"sql": "SELECT 1"}],
+    "_debug_postgres": [{"sql": "SELECT 2"}],
+    "_debug_calls": [{"path": "/service/abc"}],
+    "_is_cached": False,
+}
+
+
+def _json_stream(payload: dict) -> StreamingResponse:
+    body = json.dumps(payload).encode()
+
+    async def _gen():
+        yield body
+
+    resp = StreamingResponse(_gen(), media_type="application/json")
+    resp.headers["content-type"] = "application/json"
+    return resp
+
+
+def _strip(payload: dict, *, query: str = "disabled", api: str = "disabled") -> dict:
+    settings = {"query_debug_visibility": query, "api_call_debug_visibility": api}
+    with patch("backend.core.share_db.settings.get_setting", side_effect=lambda k, d=None: settings.get(k, d)):
+        out = asyncio.run(_strip_analyst_envelope(_json_stream(payload)))
+    return json.loads(out.body)
+
+
+@pytest.mark.security_regression
+def test_strip_removes_every_debug_key_when_analyst_visibility_is_disabled():
+    assert _strip(_ENVELOPE) == {"ok": True}
+
+
+@pytest.mark.security_regression
+def test_strip_removes_the_postgres_spelling_of_the_query_envelope():
+    out = _strip({**_ENVELOPE, "debug_postgres": [{"sql": "SELECT 3"}]})
+
+    assert not [k for k in out if "postgres" in k]
+
+
+@pytest.mark.security_regression
+def test_strip_keeps_the_postgres_envelope_only_when_query_visibility_is_enabled_for_analysts():
+    out = _strip(_ENVELOPE, query="analysts")
+
+    assert out["_debug_postgres"] == [{"sql": "SELECT 2"}]
+    assert out["_debug_sqlite"] == [{"sql": "SELECT 1"}]
+    assert "_debug_calls" not in out
+
+
+def _admin_app() -> FastAPI:
+    from backend.core.request_context import build_request_context
+    from backend.routers import admin, provision, services, share_auth
+
+    app = FastAPI()
+    app.add_middleware(RemoteAccessMiddleware)
+    app.include_router(share_auth.router)
+    app.include_router(provision.router)
+    app.include_router(services.router)
+    app.include_router(admin.router)
+    app.dependency_overrides[build_request_context] = override_request_context(
+        source={"name": _SVC, "service_id": _SVC}
+    )
+    return app
+
+
+@pytest.fixture
+def admin_analyst_client():
+    with TestClient(_admin_app()) as c:
+        _start_share()
+        _login_analyst(c, _seed_invite(service_ids=[_SVC]))
+        yield c
+
+
+_ADMIN_SITES = [
+    ("POST", "/api/provision/validate", {"token": "t", "service_id": _SVC}),
+    ("GET", "/api/provision/check-domain?prefix=abc", None),
+    ("POST", "/api/provision/check-fos", {"bucket": "b", "region": "us-east-1", "access_key": "a", "secret_key": "s"}),
+    ("GET", "/api/audit-logs", None),
+    ("GET", "/api/admin/iceberg-calendar", None),
+    ("GET", f"/api/services/{_SVC}/log-fields", None),
+    ("POST", f"/api/services/{_SVC}/generate-viewer-key", None),
+]
+
+
+@pytest.mark.parametrize("visibility", ["disabled", "both"])
+@pytest.mark.parametrize(("method", "path", "body"), _ADMIN_SITES)
+@pytest.mark.security_regression
+def test_analyst_cannot_reach_envelope_bearing_admin_routes(admin_analyst_client, method, path, body, visibility):
+    share_db.set_setting("query_debug_visibility", visibility)
+    share_db.set_setting("api_call_debug_visibility", visibility)
+
+    r = admin_analyst_client.request(method, path, json=body, headers=_HEADERS)
+
+    assert r.status_code == 403
+    assert not [k for k in r.json() if k.startswith(("_debug", "debug_"))]

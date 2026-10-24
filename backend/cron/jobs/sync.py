@@ -215,43 +215,23 @@ def _run_log_discovery_cron(
 
     delete_after = svcconfig.resolve_raw_delete_after(cfg, delete_after)
 
-    _svc_name = cfg.get("name", service_id) if cfg else service_id
-    _display = f"{_svc_name} ({service_id})" if _svc_name != service_id else service_id
+    from backend.cron.jobs._common import apply_time_range_pinning, get_service_display_label
+
+    _display = get_service_display_label(service_id, cfg)
 
     # ── 1. Ingest ─────────────────────────────────────────────────────────────
     if sync_enabled or force:
         # For manual runs (run_id is not None), we ignore the default limit unless
         # it was explicitly passed in.
         is_manual = run_id is not None
-
-        if not start_time and not is_manual:
-            tr = prov.get("time_range")
-            if tr and tr.get("start"):
-                start_time = tr["start"]
-                logger.info("[scheduler] %s: Using configured start_time limit: %s", service_id, start_time)
-            elif cfg.get("created_at"):
-                start_time = cfg["created_at"]
-                logger.info(
-                    "[scheduler] %s: Fallback to service creation time as start_time limit: %s", service_id, start_time
-                )
-
-                def _pin_time_range(c: dict) -> None:
-                    c.setdefault("provisioning", {}).setdefault("time_range", {})["start"] = start_time
-
-                _pin_time_range(cfg)
-                svcconfig.mutate_config(service_id, _pin_time_range)
-                tr = cfg["provisioning"]["time_range"]
-                src["time_range"] = tr
-                logger.info("[scheduler] %s: Saved service creation time as start_time limit to config.", service_id)
-        elif is_manual and not start_time:
-            # Manual "Sync All": clear any previously pinned range
-            prov = cfg.get("provisioning", {})
-            if "time_range" in prov:
-                del prov["time_range"]
-                cfg["provisioning"] = prov
-                svcconfig.mutate_config(service_id, lambda c: c.get("provisioning", {}).pop("time_range", None))
-                src["time_range"] = None
-                logger.info("[scheduler] %s: Manual sync-all, cleared time_range limit.", service_id)
+        start_time, _ = apply_time_range_pinning(
+            service_id,
+            cfg,
+            src,
+            start_time=start_time,
+            is_manual=is_manual,
+            fallback_to_created_at=True,
+        )
 
         with cron_run(
             service_id,
@@ -363,7 +343,7 @@ def _run_log_discovery_cron(
 
             def _publish_pass_rows() -> None:
                 nonlocal published_pass_rows
-                from backend.cron.jobs._common import refresh_view_and_warm_pool
+                from backend.cron.jobs._common import publish_sync_status_safe, refresh_view_and_warm_pool
 
                 def _progress(ev: dict) -> None:
                     _log_and_add_progress(run_id, service_id, job_name="log_discovery", event=ev)
@@ -371,15 +351,7 @@ def _run_log_discovery_cron(
                 refresh_view_and_warm_pool(
                     src, service_id, log_prefix=f"{elapsed()} [adaptive] ", progress_log=_progress
                 )
-                try:
-                    from backend.sync_status_publisher import publisher as _pub
-                    from backend.sync_status_snapshot import compute_sync_status_cached as _snap
-
-                    snapshot = _snap(service_id)
-                    if snapshot is not None:
-                        _pub.publish(service_id, snapshot)
-                except Exception:
-                    logger.exception("[scheduler] %s: adaptive-pass status publish failed", service_id)
+                publish_sync_status_safe(service_id, "scheduler")
                 published_pass_rows = inserted_rows
 
             try:

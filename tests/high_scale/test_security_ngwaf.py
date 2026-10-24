@@ -18,7 +18,7 @@ from backend.high_scale.publication import (
     InsertReceipt,
 )
 from backend.high_scale.publication import _extract_custom_fields as persisted_fact_fields
-from backend.high_scale.security_replay import rebuild_security_projections_from_fos, replay_security_projections
+from backend.high_scale.recovery import rebuild_security_projections_from_fos, replay_security_projections
 from backend.high_scale.source_discovery import SourceObjectDescriptor
 from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
 

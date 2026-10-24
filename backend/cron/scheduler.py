@@ -212,16 +212,13 @@ def _log_and_add_progress(
     run_id can be None when start_cron_run failed to register the run; in
     that case add_progress no-ops and only the log message is emitted.
     """
+    from backend.cron.jobs._common import get_service_display_label
     from backend.cron_progress import add_progress
 
     add_progress(run_id, event)
     msg = event.get("message")
     if msg:
-        from backend import config as svcconfig
-
-        cfg = svcconfig.load_config(service_id)
-        svc_name = cfg.get("name", service_id) if cfg else service_id
-        display = f"{svc_name} ({service_id})" if svc_name != service_id else service_id
+        display = get_service_display_label(service_id)
 
         t = event.get("type", "info")
         # type="status" events are per-phase timing messages (e.g.
@@ -597,16 +594,128 @@ class Scheduler:
             self._job_ids[snapshot_id] = snapshot_id
             logger.info("📈 \x1b[34m[metric_snapshot]\x1b[0m Registered metric snapshot job (every 60s).")
 
-    def _register_dev_local_safe_jobs(self) -> None:
-        """FLA_DEV_NO_CRONS allowlist: register ONLY the local-only jobs.
+    def _sync_local_compaction_jobs(
+        self,
+        service_id: str,
+        cfg: dict,
+        seen_ids: set[str] | None = None,
+        *,
+        dev_local: bool = False,
+    ) -> None:
+        """Register local-only compaction and rollup jobs for a service."""
+        from backend.cron.jobs.compaction import (
+            _run_local_compact,
+            _run_partial_hour_merge,
+            _run_rollup_compact_daily,
+            _run_rollup_hour_heal,
+        )
 
-        ``local_compact`` + ``rollup_compact`` + ``rollup_heal`` +
-        ``partial_hour_merge`` + ``insights_prewarmer`` rewrite or prewarm
-        the local cache and never touch the shared FOS bucket or send
-        anything outbound, so they're safe to run against a dev backend that
-        reads the same FOS bucket as prod. Everything else stays gated off
-        (see :func:`dev_mode_no_crons`); the FOS-writing jobs
-        (``optimize``/``commit``/``expire``) are deliberately NOT here.
+        prov = cfg.get("provisioning", {})
+        compact_cfg = prov.get("cron_compact", {})
+        tag = "(dev-local) " if dev_local else ""
+
+        lc_job_id = f"local_compact_{service_id}"
+        if seen_ids is not None:
+            seen_ids.add(lc_job_id)
+        if lc_job_id not in self._job_ids:
+            lc_interval_mins = max(1, int(os.environ.get("LOCAL_COMPACT_INTERVAL_MIN", "2")))
+            self._add_job(
+                _run_local_compact,
+                "interval",
+                minutes=lc_interval_mins,
+                jitter=10,
+                args=[service_id],
+                id=lc_job_id,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=60,
+            )
+            self._job_ids[lc_job_id] = lc_job_id
+            logger.info(
+                "⚙️  [scheduler] %sRegistered %s%s (every %d min, local-only).",
+                tag,
+                "" if dev_local else "local_compact job ",
+                lc_job_id,
+                lc_interval_mins,
+            )
+
+        ph_job_id = f"partial_hour_merge_{service_id}"
+        if partial_hour_merge_enabled():
+            if seen_ids is not None:
+                seen_ids.add(ph_job_id)
+            if ph_job_id not in self._job_ids:
+                ph_interval_sec = partial_hour_merge_interval_sec()
+                self._add_job(
+                    _run_partial_hour_merge,
+                    "interval",
+                    seconds=ph_interval_sec,
+                    jitter=5,
+                    args=[service_id],
+                    id=ph_job_id,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=60,
+                )
+                self._job_ids[ph_job_id] = ph_job_id
+                logger.info(
+                    "⚡ [scheduler] %sRegistered %s%s (every %ds, local-only).",
+                    tag,
+                    "" if dev_local else "partial_hour_merge job ",
+                    ph_job_id,
+                    ph_interval_sec,
+                )
+
+        if compact_cfg.get("enabled", True) and prov.get("access_level") != "read_only":
+            rc_job_id = f"rollup_compact_{service_id}"
+            if seen_ids is not None:
+                seen_ids.add(rc_job_id)
+            if rc_job_id not in self._job_ids:
+                self._add_job(
+                    _run_rollup_compact_daily,
+                    "cron",
+                    hour=2,
+                    minute=0,
+                    args=[service_id],
+                    id=rc_job_id,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=3600,
+                )
+                self._job_ids[rc_job_id] = rc_job_id
+                logger.info(
+                    "📦 [scheduler] %sRegistered %s%s (daily 02:00 UTC).",
+                    tag,
+                    "" if dev_local else "rollup compaction job ",
+                    rc_job_id,
+                )
+
+            rh_job_id = f"rollup_heal_{service_id}"
+            if seen_ids is not None:
+                seen_ids.add(rh_job_id)
+            if rh_job_id not in self._job_ids:
+                self._add_job(
+                    _run_rollup_hour_heal,
+                    "cron",
+                    minute=5,
+                    next_run_time=datetime.now(UTC) + timedelta(seconds=5),
+                    args=[service_id],
+                    id=rh_job_id,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=900,
+                )
+                self._job_ids[rh_job_id] = rh_job_id
+                logger.info(
+                    "🩹 [scheduler] %sRegistered %s%s (hourly at :05).",
+                    tag,
+                    "" if dev_local else "rollup hour-heal job ",
+                    rh_job_id,
+                )
+
+    def _register_dev_local_safe_jobs(self) -> None:
+        """Register ONLY the local-only compaction crons (plus the global
+        metric-snapshot & recycle jobs if enabled by their own env vars)
+        when ``FLA_DEV_NO_CRONS=1`` and ``FLA_DEV_LOCAL_CRONS=1`` (default).
 
         Mirrors the trigger config of the same jobs in :meth:`_sync_jobs` —
         keep them in sync. Runs once at startup;
@@ -619,8 +728,6 @@ class Scheduler:
 
         from backend import config as svcconfig
         from backend.core.duckdb import get_source_for_service, is_configured
-        from backend.cron.jobs.compaction import _run_local_compact, _run_rollup_compact_daily, _run_rollup_hour_heal
-        from backend.cron.jobs.partial_hour import _run_partial_hour_merge
         from backend.high_scale.registry import get_high_scale_service_registry
 
         seen_ids: set[str] = set()
@@ -638,107 +745,10 @@ class Scheduler:
                 continue
 
             prov = cfg.get("provisioning", {})
-
-            # local_compact — local-only parquet compaction, always-on
-            # (no config/access gate), every 2 min (or LOCAL_COMPACT_INTERVAL_MIN). Matches _sync_jobs.
-            lc_job_id = f"local_compact_{service_id}"
-            if lc_job_id not in self._job_ids:
-                lc_interval_mins = max(1, int(os.environ.get("LOCAL_COMPACT_INTERVAL_MIN", "2")))
-                self._add_job(
-                    _run_local_compact,
-                    "interval",
-                    minutes=lc_interval_mins,
-                    jitter=10,
-                    args=[service_id],
-                    id=lc_job_id,
-                    max_instances=1,
-                    coalesce=True,
-                    misfire_grace_time=60,
-                )
-                self._job_ids[lc_job_id] = lc_job_id
-                logger.info(
-                    "⚙️  [scheduler] (dev-local) Registered %s (every %d min, local-only).", lc_job_id, lc_interval_mins
-                )
-
-            # partial_hour_merge — local-only partial-hour rollup merge,
-            # always-on, every 30s (or PARTIAL_HOUR_MERGE_INTERVAL_SEC). Same local-only
-            # safety profile as local_compact (never touches the shared FOS bucket),
-            # so it belongs in the dev-safe allowlist too. Matches _sync_jobs.
-            ph_job_id = f"partial_hour_merge_{service_id}"
-            if partial_hour_merge_enabled() and ph_job_id not in self._job_ids:
-                ph_interval_sec = partial_hour_merge_interval_sec()
-                self._add_job(
-                    _run_partial_hour_merge,
-                    "interval",
-                    seconds=ph_interval_sec,
-                    jitter=5,
-                    args=[service_id],
-                    id=ph_job_id,
-                    max_instances=1,
-                    coalesce=True,
-                    misfire_grace_time=60,
-                )
-                self._job_ids[ph_job_id] = ph_job_id
-                logger.info(
-                    "⚡ [scheduler] (dev-local) Registered %s (every %ds, local-only).",
-                    ph_job_id,
-                    ph_interval_sec,
-                )
-
-            # rollup_compact — local-only per-day rollup compaction, daily
-            # 02:00 UTC, gated on cron_compact.enabled + read-write.
-            # Matches _sync_jobs.
-            prov = cfg.get("provisioning", {})
-            compact_cfg = prov.get("cron_compact", {})
-            if compact_cfg.get("enabled", True) and prov.get("access_level") != "read_only":
-                rc_job_id = f"rollup_compact_{service_id}"
-                if rc_job_id not in self._job_ids:
-                    self._add_job(
-                        _run_rollup_compact_daily,
-                        "cron",
-                        hour=2,
-                        minute=0,
-                        args=[service_id],
-                        id=rc_job_id,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=3600,
-                    )
-                    self._job_ids[rc_job_id] = rc_job_id
-                    logger.info("📦 [scheduler] (dev-local) Registered %s (daily 02:00 UTC).", rc_job_id)
-
-                # rollup_heal — hourly hour-bundle self-heal, local-only
-                # rollup writes (see _run_rollup_hour_heal). Matches
-                # _sync_jobs.
-                rh_job_id = f"rollup_heal_{service_id}"
-                if rh_job_id not in self._job_ids:
-                    self._add_job(
-                        _run_rollup_hour_heal,
-                        "cron",
-                        minute=5,
-                        next_run_time=datetime.now(UTC) + timedelta(seconds=5),
-                        args=[service_id],
-                        id=rh_job_id,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=900,
-                    )
-                    self._job_ids[rh_job_id] = rh_job_id
-                    logger.info("🩹 [scheduler] (dev-local) Registered %s (hourly at :05).", rh_job_id)
-
-            # insights_prewarmer — local-safe read-only cache prewarmer,
-            # populates in-memory cache, never touches FOS or writes data.
-            # Permitted under FLA_DEV_NO_CRONS=1.
+            self._sync_local_compaction_jobs(service_id, cfg, dev_local=True)
             self._register_insights_prewarmer_job(service_id, seen_ids, prov)
 
-        # Operational-vital snapshots is local-safe (samples local host/process/db
-        # vitals, no FOS writes) → safe under the dev kill switch.
         self._register_metric_snapshot_job()
-
-        # DuckDB instance recycle is local-safe (closes/reopens local conns,
-        # no FOS writes) → safe under the dev kill switch. Still OFF unless
-        # DUCKDB_RECYCLE_INTERVAL_MIN>0. No seen_ids here (dev path doesn't
-        # stale-sweep).
         self._register_recycle_job()
 
     def _sync_jobs(self) -> None:
@@ -746,7 +756,6 @@ class Scheduler:
         from backend import config as svcconfig
         from backend.core.duckdb import get_source_for_service, is_configured
         from backend.cron.jobs.commit import _run_commit
-        from backend.cron.jobs.compaction import _run_local_compact, _run_rollup_compact_daily, _run_rollup_hour_heal
         from backend.cron.jobs.expire import _run_expire_snapshots
         from backend.cron.jobs.metadata import (
             _run_bot_data_refresh,
@@ -757,7 +766,6 @@ class Scheduler:
             _run_share_audit_purge,
         )
         from backend.cron.jobs.optimize import _run_optimize
-        from backend.cron.jobs.partial_hour import _run_partial_hour_merge
         from backend.cron.jobs.rum_commit import _run_rum_commit
         from backend.cron.jobs.rum_sync import _run_rum_sync
         from backend.cron.jobs.sync import _run_full_sweep, _run_gap_heal
@@ -899,7 +907,7 @@ class Scheduler:
             # diffs a lookback FOS LIST. Its own schedule entry (every 15 min):
             # the previous `now.minute % 15 == 0` gate inside the discovery tick
             if svcconfig.is_high_scale_mode(src):
-                from backend.cron.jobs.ledger import _run_ledger_sweep
+                from backend.cron.jobs.rum_ledger import _run_ledger_sweep
 
                 sweep_cfg = prov.get("cron_ledger_sweep", {})
                 if sweep_cfg.get("enabled", True):
@@ -1103,125 +1111,9 @@ class Scheduler:
                         opt_job_id,
                     )
 
-            # ── Local-only compaction every 2 min ─────────────────────────────
-            # Runs for ALL services regardless of access_level — admins
-            # (read-write) AND analysts (read-only, sharing the FOS bucket
-            # with the admin). It only touches the LOCAL cache so it's
-            # safe for analyst processes that have no FOS write access.
-            # Outside the `compact_cfg.enabled` gate above because that
-            # gate is for the FOS-touching optimize cron; this one is
-            # always-on so every dashboard (admin or analyst) gets the
-            # same fast scans.
-            lc_job_id = f"local_compact_{service_id}"
-            seen_ids.add(lc_job_id)
-            if lc_job_id not in self._job_ids:
-                lc_interval_mins = max(1, int(os.environ.get("LOCAL_COMPACT_INTERVAL_MIN", "2")))
-                self._add_job(
-                    _run_local_compact,
-                    "interval",
-                    minutes=lc_interval_mins,
-                    jitter=10,
-                    args=[service_id],
-                    id=lc_job_id,
-                    max_instances=1,
-                    coalesce=True,
-                    misfire_grace_time=60,
-                )
-                self._job_ids[lc_job_id] = lc_job_id
-                logger.info(
-                    "⚙️  [scheduler] Registered local_compact job %s (every %d min, local-only).",
-                    lc_job_id,
-                    lc_interval_mins,
-                )
-
-            # ── Partial-hour incremental merge (speed layer) ──────────────────
-            # 30s cadence — folds newly-landed buffer/active-hour-partition
-            # files into the pod-local partial-hour rollup so the active-hour
-            # live scan (execute_top_n_rollups / try_time_series_from_rollup /
-            # try_count_from_rollup) only needs to cover "since the last tick"
-            # instead of "since the top of the hour". Always-on like
-            # local_compact — benefits file-mode and durable-mode services
-            # alike. Back off to a longer interval here (and in the misfire
-            # grace) if profiling shows contention with request-serving.
-            ph_job_id = f"partial_hour_merge_{service_id}"
-            if partial_hour_merge_enabled():
-                seen_ids.add(ph_job_id)
-            if partial_hour_merge_enabled() and ph_job_id not in self._job_ids:
-                ph_interval_sec = partial_hour_merge_interval_sec()
-                self._add_job(
-                    _run_partial_hour_merge,
-                    "interval",
-                    seconds=ph_interval_sec,
-                    jitter=5,
-                    args=[service_id],
-                    id=ph_job_id,
-                    max_instances=1,
-                    coalesce=True,
-                    misfire_grace_time=60,
-                )
-                self._job_ids[ph_job_id] = ph_job_id
-                logger.info(
-                    "⚡ [scheduler] Registered partial_hour_merge job %s (every %ds, local-only).",
-                    ph_job_id,
-                    ph_interval_sec,
-                )
-
-            # ── Insights cache prewarmer (perf #76) ───────────────────────────
+            # ── Local-only compaction & rollup jobs + insights prewarmer ─────
+            self._sync_local_compaction_jobs(service_id, cfg, seen_ids=seen_ids, dev_local=False)
             self._register_insights_prewarmer_job(service_id, seen_ids, prov)
-
-            # ── Daily rollup compaction (per-day parquet from per-hour) ────
-            # 02:00 UTC — runs before optimize (04:00) so per-day rollups
-            # are ready when the next day's queries start. Only for
-            # read-write services that own the rollup data.
-            if compact_cfg.get("enabled", True) and prov.get("access_level") != "read_only":
-                rc_job_id = f"rollup_compact_{service_id}"
-                seen_ids.add(rc_job_id)
-                if rc_job_id not in self._job_ids:
-                    self._add_job(
-                        _run_rollup_compact_daily,
-                        "cron",
-                        hour=2,
-                        minute=0,
-                        args=[service_id],
-                        id=rc_job_id,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=3600,
-                    )
-                    self._job_ids[rc_job_id] = rc_job_id
-                    logger.info(
-                        "📦 [scheduler] Registered rollup compaction job %s (daily 02:00 UTC).",
-                        rc_job_id,
-                    )
-
-                # ── Hourly hour-bundle self-heal ───────────────────────────
-                # :05 past each hour (Fastly log delivery lags a few
-                # minutes, so the just-closed hour's rows have landed by
-                # then). Rebuilds bundles for closed hours the per-sync
-                # recompute missed — on bursty services nothing straddles
-                # the hour boundary, so without this every closed hour of
-                # the current day is silently absent from top-N until the
-                # 02:00 deep pass. Same gate as rollup_compact (local-only
-                # rollup writes, read-write services only).
-                rh_job_id = f"rollup_heal_{service_id}"
-                seen_ids.add(rh_job_id)
-                if rh_job_id not in self._job_ids:
-                    self._add_job(
-                        _run_rollup_hour_heal,
-                        "cron",
-                        minute=5,
-                        next_run_time=datetime.now(UTC) + timedelta(seconds=5),
-                        args=[service_id],
-                        id=rh_job_id,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=900,
-                    )
-                    self._job_ids[rh_job_id] = rh_job_id
-                    logger.info(
-                        "🩹 [scheduler] Registered rollup hour-heal job %s (hourly at :05).",
-                        rh_job_id,
-                    )
 
             # ── expire-snapshots job (hourly by default) ───────────────────────
             # Was weekly (Sun 04:00 UTC), which produced a week-long performance

@@ -31,14 +31,13 @@ describe('resolveInsightsDefault (key-match contract)', () => {
 
   it('no extents → STATIC_DEFAULT tokens (matches client no-data path)', async () => {
     const { resolveInsightsDefault } = await import('@/lib/ssr/insights')
-    const { STATIC_DEFAULT } = await import('@/lib/insights-defaults')
     expect(resolveInsightsDefault(null)).toEqual({
-      windowHours: STATIC_DEFAULT.window,
-      baselineHours: STATIC_DEFAULT.baseline,
+      windowHours: '24',
+      baselineHours: '168',
     })
     expect(resolveInsightsDefault(undefined)).toEqual({
-      windowHours: STATIC_DEFAULT.window,
-      baselineHours: STATIC_DEFAULT.baseline,
+      windowHours: '24',
+      baselineHours: '168',
     })
   })
 })

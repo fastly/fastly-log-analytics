@@ -1,8 +1,8 @@
 """Shared helpers for the admin router package.
 
 Houses the streaming-zip plumbing (`_QueueFile`, `_AbortableQueue`,
-`ClientDisconnected`, `_stream_from_worker`, `_fetch_file_to_zip`) and
-the source resolver (`_resolve_source`) used by ingest + download
+`ClientDisconnected`, `_stream_from_worker`, `_fetch_file_to_zip`,
+`stream_zip`) and small response/source helpers used across admin
 endpoints.
 
 Re-exported from ``backend.routers.admin`` for external test compat.
@@ -171,3 +171,30 @@ def _fetch_file_to_zip(
     except Exception:
         logger.error("Error fetching %s from FOS", key, exc_info=True)
         return False
+
+
+def attach_debug_db_snapshot(payload: dict) -> dict:
+    """Attach ``_debug_sqlite`` and ``_debug_postgres`` when debug responses are enabled."""
+    from backend.models.common import _debug_responses_enabled
+
+    if _debug_responses_enabled():
+        from backend.utils.telemetry import get_sqlite_queries
+
+        ds = list(get_sqlite_queries())
+        payload["_debug_sqlite"] = ds
+        payload["_debug_postgres"] = ds
+    return payload
+
+
+def service_id_from_source(
+    source: dict,
+    service_id: str | None = None,
+    *,
+    prefer_name: bool = False,
+) -> str:
+    """Resolve ``service_id`` from an explicit override or the ``source`` dict."""
+    if service_id:
+        return service_id
+    if prefer_name:
+        return source.get("name") or source.get("service_id") or ""
+    return source.get("service_id") or source.get("name") or ""

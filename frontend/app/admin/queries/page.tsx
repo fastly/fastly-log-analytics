@@ -59,7 +59,7 @@ import type {
   SnapshotResponse,
   ViewMode,
 } from './_types'
-import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
+import { useCopyToClipboard } from '@/hooks/useAutoFlash'
 import { queryKeys } from '@/lib/query-keys'
 
 const DEFAULT_SLOW_THRESHOLD_MS = 500

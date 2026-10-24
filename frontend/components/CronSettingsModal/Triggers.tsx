@@ -14,7 +14,7 @@ import { RetentionSelect } from '@/components/ui/retention-select'
 import { Shield } from 'lucide-react'
 import {
   NGWAF_INTERVAL_OPTIONS,
-} from './constants'
+} from './Schedule'
 
 interface NgwafSectionProps {
   ngwafInterval: string

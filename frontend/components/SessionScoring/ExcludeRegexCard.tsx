@@ -3,7 +3,7 @@
 import * as React from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Check, Filter, Loader2, RotateCcw } from 'lucide-react'
-import { useScoringQuery } from './useScoringQuery'
+import { useScoringQuery } from './useScorerTimeseries'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { Alert, AlertDescription } from '@/components/ui/alert'

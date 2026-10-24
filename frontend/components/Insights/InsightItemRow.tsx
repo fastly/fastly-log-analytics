@@ -2,20 +2,20 @@ import React from 'react'
 import Link from 'next/link'
 import { ArrowUpRight, MapIcon, LineChart, ScanSearch } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { DeltaIndicator } from '@/components/DeltaIndicator'
 import { useServiceStore } from '@/stores/serviceStore'
 import { InsightCardData } from '@/types/api'
-import type {
-  BotFindingModalData,
-  ImpossibleDistanceData,
-  ImpossibleDistanceItem,
-  RepeatedPatternsFpItem,
-  RepeatedPatternsItem,
-  ScriptedTrafficData,
-} from './types'
+import {
+  buildInvestigateHref,
+  DeltaIndicator,
+  type BotFindingModalData,
+  type ImpossibleDistanceData,
+  type ImpossibleDistanceItem,
+  type RepeatedPatternsFpItem,
+  type RepeatedPatternsItem,
+  type ScriptedTrafficData,
+} from './shared'
 
 import { formatCount, formatCountMaybe } from '@/lib/format'
-import { buildInvestigateHref } from './shared'
 
 interface InsightItemRowProps {
   /** The owning card; its `id` fixes the type of `items[index].meta`. */

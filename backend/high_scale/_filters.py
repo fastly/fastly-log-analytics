@@ -132,7 +132,7 @@ def build_published_facts_where(
     domain: str = "request",
 ) -> tuple[str, dict[str, Any]]:
     """Build ClickHouse WHERE predicate and params for published fact rows."""
-    from backend.high_scale._scope import visible_publication_fence_sql
+    from backend.high_scale._common import visible_publication_fence_sql
 
     filter_sql, filter_params = build_clickhouse_filters(dict(filters or {}))
     clauses = ["service_id={service_id:String}", visible_publication_fence_sql(domain), filter_sql]

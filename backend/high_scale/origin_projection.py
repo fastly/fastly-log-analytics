@@ -15,12 +15,17 @@ from backend.high_scale._projection_utils import (
     finite_float as _finite_float,
 )
 from backend.high_scale._projection_utils import (
+    optional_int as _integer,
+)
+from backend.high_scale._projection_utils import (
     percentiles as _percentiles,
+)
+from backend.high_scale._projection_utils import (
+    sketch as _sketch,
 )
 from backend.high_scale._projection_utils import (
     text as _text,
 )
-from backend.high_scale._sketch import sketch as _sketch
 
 
 @dataclass(frozen=True)
@@ -206,13 +211,6 @@ def _origin_latency_us(row: Mapping[str, Any]) -> float | None:
         return ottfb
     ttfb = _finite_float(row.get("ttfb"))
     return ttfb * 1_000_000.0 if ttfb is not None else None
-
-
-def _integer(value: object) -> int | None:
-    parsed = _finite_float(value)
-    if parsed is None or not parsed.is_integer():
-        return None
-    return int(parsed)
 
 
 def _non_negative_integer(value: object) -> int | None:

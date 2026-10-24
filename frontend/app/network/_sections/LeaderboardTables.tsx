@@ -3,7 +3,7 @@
 import React from 'react'
 import type { ColumnDef } from '@tanstack/react-table'
 
-import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
+import { DataTableReadonly } from '@/components/DataTable'
 import { FilterValueCell } from '@/components/FilterValueCell'
 import { Badge } from '@/components/ui/badge'
 import { formatCount } from '@/lib/format'

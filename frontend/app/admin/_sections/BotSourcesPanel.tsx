@@ -4,13 +4,13 @@ import { ELAPSED_RELATIVE_AGO_JUST_NOW, formatCount, formatElapsed } from '@/lib
 import { useQuery } from '@tanstack/react-query'
 import { adminFetch, client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
-import { downloadBlob } from '@/lib/download'
+import { downloadBlob } from '@/lib/utils'
 import { useMounted } from '@/hooks/useMounted'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { components } from '@/types/api.generated'
 import type { ColumnDef } from '@tanstack/react-table'
-import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
+import { DataTableReadonly } from '@/components/DataTable'
 
 type BotSourceList = components['schemas']['BotSourcesResponse']
 type BotSource = components['schemas']['BotSourceMeta']

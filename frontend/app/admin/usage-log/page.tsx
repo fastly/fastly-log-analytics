@@ -1,6 +1,6 @@
 import { HydrationBoundary } from '@tanstack/react-query'
 
-import { fetchUsageLogServerSide } from '@/lib/ssr/usage_log'
+import { fetchUsageLogServerSide } from '@/lib/ssr/admin_gateway'
 import { seedDehydratedState } from '@/lib/ssr/seed'
 import { resolvePageServiceId } from '@/lib/ssr/service'
 import { toQueryDate } from './_sections/shared'

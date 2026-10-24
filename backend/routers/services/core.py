@@ -322,9 +322,6 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
                                         yield json.dumps({"type": normalized_status, "message": msg})
                                     return
                     except Exception as e:
-                        import logging
-
-                        logger = logging.getLogger("backend.routers.services.core")
                         logger.error(f"Error fetching historical logs for run {run_id}: {e}")
 
                 if last_idx == 0 and retries < max_retries:

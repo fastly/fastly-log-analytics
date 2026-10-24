@@ -1,10 +1,5 @@
 /**
- * R-3a C-4. PlotlyChart is the thin React shell around react-plotly.js's
- * factory build. The async ``next/dynamic`` import for the actual Plot
- * component is mocked out so we can drive it synchronously and assert
- * the props PlotlyChart passes in (layout merge, defaults, callbacks).
- * We also verify the IntersectionObserver visibility gate and the
- * always-rendered ChartA11yTable companion.
+ * Consolidated tests for PlotlyChart, ChartA11yTable, and tracesToTable.
  *
  * @vitest-environment jsdom
  */
@@ -13,10 +8,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import React from 'react'
 
 import { PlotlyChart } from '@/components/PlotlyChart/PlotlyChart'
+import { ChartA11yTable } from '@/components/PlotlyChart/ChartA11yTable'
+import { tracesToTable } from '@/components/PlotlyChart/tracesToTable'
 import type { PlotlyConfig, PlotlyGraphDiv, PlotlyLayout, PlotlyRelayoutEvent } from '@/types/plotly'
 import { stubResizeObserver } from '../../helpers/browser-stubs'
 
-// Capture every Plot render so each test can pull its most recent props.
 type PlotStubProps = {
   layout?: PlotlyLayout
   config?: PlotlyConfig
@@ -25,8 +21,6 @@ type PlotStubProps = {
 }
 const plotCalls: PlotStubProps[] = []
 
-// ``next/dynamic`` normally returns a lazy wrapper around the loader.
-// For tests, return a stub that records its props and renders a marker.
 vi.mock('next/dynamic', () => ({
   __esModule: true,
   default: () => {
@@ -42,7 +36,6 @@ vi.mock('next-themes', () => ({
   useTheme: () => ({ theme: 'light' }),
 }))
 
-// IntersectionObserver: capture the callback so tests can fire it.
 let lastIOCallback: ((entries: Array<{ isIntersecting: boolean }>) => void) | null = null
 let lastIOOptions: IntersectionObserverInit | null = null
 class MockIntersectionObserver {
@@ -71,7 +64,6 @@ describe('PlotlyChart', () => {
   it('withholds the Plot subtree until IntersectionObserver fires isIntersecting', async () => {
     render(<PlotlyChart data={[]} a11yTitle="x" />)
     expect(screen.queryByTestId('plot-stub')).toBeNull()
-    // Simulate the observer callback flipping the gate.
     expect(lastIOCallback).not.toBeNull()
     await act(async () => {
       lastIOCallback!([{ isIntersecting: true }])
@@ -112,7 +104,6 @@ describe('PlotlyChart', () => {
   it('always renders the ChartA11yTable companion alongside the chart', () => {
     const data = [{ x: ['a', 'b'], y: [1, 2], name: 'series' }]
     render(<PlotlyChart data={data} a11yTitle="My A11y Caption" />)
-    // The table renders even before the chart visibility gate flips.
     const table = screen.getByRole('table')
     expect(table).toBeInTheDocument()
     const caption = document.querySelector('caption')
@@ -124,8 +115,6 @@ describe('PlotlyChart', () => {
     render(<PlotlyChart data={[]} onRelayout={onRelayout} a11yTitle="x" />)
     await act(async () => { lastIOCallback!([{ isIntersecting: true }]) })
     const props = plotCalls.at(-1)!
-    // Simulate Plotly invoking onInitialized with a fake graphDiv that
-    // records ``on(eventName, handler)`` so we can fire it manually.
     let handler: ((e: PlotlyRelayoutEvent) => void) | undefined
     const fakeGraphDiv: PlotlyGraphDiv = Object.assign(document.createElement('div'), {
       on: (name: string, h: (e: PlotlyRelayoutEvent) => void) => {
@@ -148,5 +137,109 @@ describe('PlotlyChart', () => {
     expect(props.config?.responsive).toBe(true)
     expect(props.config?.displayModeBar).toBe(false)
     expect(props.onUpdate).toBe(onUpdate)
+  })
+})
+
+describe('ChartA11yTable', () => {
+  it('renders an sr-only table from a tracesToTable-shaped input with scope="col" headers', () => {
+    const traces = [
+      { x: ['a', 'b'], y: [1, 2], name: 'Series 1' },
+      { x: ['a', 'b'], y: [3, 4], name: 'Series 2' },
+    ]
+    const shape = tracesToTable(traces, 'Requests over time')
+    const { container } = render(<ChartA11yTable shape={shape} />)
+    const table = container.querySelector('table')
+    expect(table).not.toBeNull()
+    expect(table?.className).toContain('sr-only')
+    expect(screen.getByRole('columnheader', { name: 'x' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Series 1' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Series 2' })).toBeInTheDocument()
+    expect(screen.getAllByRole('cell').length).toBeGreaterThan(0)
+    expect(document.querySelector('caption')?.textContent).toBe('Requests over time')
+    const ths = container.querySelectorAll('thead th')
+    ths.forEach((th) => expect(th.getAttribute('scope')).toBe('col'))
+  })
+
+  it('emits a no-data fallback (not a table) for an empty shape or heatmap', () => {
+    const shape = tracesToTable([], 'Empty chart')
+    const { container } = render(<ChartA11yTable shape={shape} />)
+    expect(container.querySelector('table')).toBeNull()
+    expect(container.textContent).toContain('Empty chart')
+    expect(container.textContent).toContain('no readable data')
+
+    const heatmap = [
+      {
+        type: 'heatmap',
+        x: ['t1', 't2'],
+        y: ['asnA', 'asnB'],
+        z: [[1, 2], [5, 6]],
+      },
+    ]
+    const hmShape = tracesToTable(heatmap, 'ASN heatmap')
+    expect(hmShape.empty).toBe(true)
+    expect(hmShape.rows).toHaveLength(0)
+  })
+
+  it('caps very large flat tables and announces the truncation', () => {
+    const x = Array.from({ length: 1200 }, (_, i) => i)
+    const y = x.map((n) => n * 2)
+    const shape = tracesToTable([{ x, y, name: 'S' }], 'Big chart')
+    expect(shape.rows).toHaveLength(500)
+    expect(shape.truncatedFrom).toBe(1200)
+    render(<ChartA11yTable shape={shape} />)
+    expect(document.querySelector('caption')?.textContent).toContain(
+      'showing first 500 of 1200 rows',
+    )
+  })
+})
+
+describe('tracesToTable', () => {
+  it('returns an empty shape when data is not an array or is empty', () => {
+    expect(tracesToTable(null)).toMatchObject({ empty: true, rows: [] })
+    expect(tracesToTable({})).toMatchObject({ empty: true, rows: [] })
+    expect(tracesToTable(undefined)).toMatchObject({ empty: true, rows: [] })
+    expect(tracesToTable([])).toMatchObject({ empty: true, rows: [] })
+    expect(tracesToTable([], 'My chart').title).toBe('My chart')
+    expect(tracesToTable([]).title).toBe('Chart data')
+  })
+
+  it('converts single and multi-trace line/bar traces, filling missing x values and nulls with empty string', () => {
+    const single = tracesToTable(
+      [{ type: 'scatter', mode: 'lines', name: 'Requests', x: ['t1', 't2'], y: [10, null] }],
+      'Time series',
+    )
+    expect(single.empty).toBe(false)
+    expect(single.title).toBe('Time series')
+    expect(single.columns).toEqual(['x', 'Requests'])
+    expect(single.rows).toEqual([
+      ['t1', 10],
+      ['t2', ''],
+    ])
+
+    const multi = tracesToTable([
+      { type: 'scatter', name: 'A', x: ['t1', 't2'], y: [1, 2] },
+      { type: 'scatter', name: 'B', x: ['t2', 't3'], y: [5, 6] },
+    ])
+    expect(multi.columns).toEqual(['x', 'A', 'B'])
+    expect(multi.rows).toEqual([
+      ['t1', 1, ''],
+      ['t2', 2, 5],
+      ['t3', '', 6],
+    ])
+  })
+
+  it('handles pie traces and unnamed traces', () => {
+    const pie = tracesToTable([
+      { type: 'pie', labels: ['US', 'CN'], values: [100, 50], name: 'Country share' },
+    ])
+    expect(pie.title).toBe('Country share')
+    expect(pie.columns).toEqual(['Label', 'Value'])
+    expect(pie.rows).toEqual([
+      ['US', 100],
+      ['CN', 50],
+    ])
+
+    const unnamed = tracesToTable([{ type: 'bar', x: ['a'], y: [1] }])
+    expect(unnamed.columns).toEqual(['x', 'Series 1'])
   })
 })

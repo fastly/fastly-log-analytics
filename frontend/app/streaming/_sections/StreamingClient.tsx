@@ -19,7 +19,7 @@ import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCa
 import { StatCard } from '@/components/ui/stat-card'
 import { DataTable } from '@/components/DataTable'
 import { STREAMING_INFO, OBJECT_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from './streamingInfo'
-import { CHART_COLORS } from '@/lib/chart-colors'
+import { CHART_COLORS } from '@/lib/chart-builders'
 import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
 
 import { formatCountMaybe } from '@/lib/format'

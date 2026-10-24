@@ -1,7 +1,6 @@
 'use client'
 
-import { useElapsedTime } from '@/hooks/useElapsedTime'
-import { useNowMs } from '@/hooks/useNowSeconds'
+import { useElapsedTime, useNowMs } from '@/hooks/useNowSeconds'
 import { formatCompactDuration, toUTCDate } from '@/lib/date'
 
 /** Ticking "Ns" / "Nm Ns" elapsed label for a running job. Callers supply the

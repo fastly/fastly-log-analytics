@@ -26,12 +26,12 @@ import os
 from types import SimpleNamespace
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response
 from sse_starlette.sse import EventSourceResponse
 
 from backend import config as svcconfig
 from backend.core.duckdb import rum_source_for
-from backend.core.faro_versions import fetch_available_faro_versions, get_faro_versions_cached
+from backend.core.faro_versions import DEFAULT_FARO_VERSION, fetch_available_faro_versions, get_faro_versions_cached
 from backend.core.iceberg import execute_with_stale_view_retry
 from backend.core.request_context import RequestContext, build_request_context
 from backend.deps import _ConnectionHolder, get_service_id, require_admin, require_service_access
@@ -59,6 +59,9 @@ from backend.provision.rum_orchestrator_v2 import (
     upgrade_faro_version,
 )
 from backend.repositories import rum as rum_repo
+from backend.repositories.utils.response_cache import bucket_time_to_minute, digest_cache_key
+from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.cache_registry import CacheRegistry
 from backend.utils.date_utils import iso_z, parse_iso_utc
 from backend.utils.error_redaction import correlation_id
 from backend.utils.router_utils import (
@@ -90,11 +93,6 @@ router = APIRouter(prefix="/api/services", tags=["rum"], responses=DEFAULT_ERROR
 
 # APIRouter without a prefix for serving dynamic JS assets and ingesting beacons
 asset_router = APIRouter(tags=["rum-assets"], responses=DEFAULT_ERROR_RESPONSES)
-
-from fastapi import Response
-
-from backend.core.faro_versions import DEFAULT_FARO_VERSION
-from backend.utils.cache_registry import CacheRegistry
 
 _FARO_BUNDLE_CACHE: dict[str, bytes] = {}
 CacheRegistry.register("rum._FARO_BUNDLE_CACHE", _FARO_BUNDLE_CACHE)
@@ -202,6 +200,24 @@ async def get_faro_sdk(request: Request, service_id: str | None = None):
     )
 
 
+def _reload_rum_scheduler_and_cfg(service_id: str, action: str) -> dict[str, Any]:
+    """Reload the scheduler after RUM enable/disable and return the updated service config."""
+    try:
+        from backend.cron.scheduler import get_scheduler
+
+        get_scheduler().reload()
+    except Exception as se:
+        logger.error(f"[rum] Failed to reload scheduler after {action}: {se}")
+    return svcconfig.load_config(service_id) or {}
+
+
+def _normalize_sec(val: float | int | None) -> float | None:
+    """Convert a metric value to seconds rounded to 2 decimal places when > 20ms."""
+    if val is None:
+        return None
+    return round(val / 1000.0, 2) if val > 20 else round(val, 2)
+
+
 @router.post("/{service_id}/rum/enable", dependencies=[Depends(require_admin)])
 async def enable_rum_handler(
     service_id: str = Path(...),
@@ -235,7 +251,6 @@ async def enable_rum_handler(
         logger.warning(f"Could not fetch latest Faro version dynamically, falling back to DEFAULT_FARO_VERSION: {e}")
 
     def stream():
-
         yield json.dumps({"type": "status", "message": f"Enabling Real User Monitoring (RUM) for {service_id}..."})
         try:
             for event in run_with_events(
@@ -248,18 +263,7 @@ async def enable_rum_handler(
             ):
                 yield json.dumps(event)
 
-            # Reload the scheduler to register the new RUM sync/commit jobs!
-            try:
-                from backend.cron.scheduler import get_scheduler
-
-                get_scheduler().reload()
-            except Exception as se:
-                logger.error(f"[rum] Failed to reload scheduler after enable: {se}")
-
-            # Retrieve final RUM config for success response
-            from backend import config as svcconfig
-
-            updated_cfg = svcconfig.load_config(service_id) or {}
+            updated_cfg = _reload_rum_scheduler_and_cfg(service_id, "enable")
             yield json.dumps(
                 {
                     "type": "done",
@@ -288,7 +292,6 @@ async def disable_rum_handler(
     token = require_fastly_token(service_id, body.token)
 
     def stream():
-
         yield json.dumps({"type": "status", "message": f"Disabling Real User Monitoring (RUM) for {service_id}..."})
         try:
             for event in run_with_events(
@@ -302,18 +305,7 @@ async def disable_rum_handler(
             ):
                 yield json.dumps(event)
 
-            # Reload the scheduler to deregister the RUM sync/commit jobs!
-            try:
-                from backend.cron.scheduler import get_scheduler
-
-                get_scheduler().reload()
-            except Exception as se:
-                logger.error(f"[rum] Failed to reload scheduler after disable: {se}")
-
-            # Retrieve final RUM config for success response
-            from backend import config as svcconfig
-
-            updated_cfg = svcconfig.load_config(service_id) or {}
+            updated_cfg = _reload_rum_scheduler_and_cfg(service_id, "disable")
             yield json.dumps(
                 {
                     "type": "done",
@@ -475,8 +467,6 @@ async def upgrade_rum_handler(
                 yield json.dumps(event)
 
             # Retrieve final RUM config for success response
-            from backend import config as svcconfig
-
             updated_cfg = svcconfig.load_config(service_id) or {}
             updated_rum_cfg = updated_cfg.get("rum") or {}
             yield json.dumps(
@@ -874,10 +864,7 @@ async def rum_analytics(
                 elif key == "inp":
                     p75_val = int(p75) if p75 is not None else None
                 else:
-                    if p75 is not None:
-                        p75_val = round(p75 / 1000.0, 2) if p75 > 20 else round(p75, 2)
-                    else:
-                        p75_val = None
+                    p75_val = _normalize_sec(p75)
 
                 vitals[key] = {
                     "p75": p75_val,
@@ -885,28 +872,21 @@ async def rum_analytics(
                 }
             elif key == "fid":
                 vitals["fid"]["p75"] = round(p75, 1) if p75 is not None else None
-            elif key == "fcp":
-                if p75 is not None:
-                    vitals["fid"]["fcp"] = round(p75 / 1000.0, 2) if p75 > 20 else round(p75, 2)
-            elif key == "ttfb":
-                if p75 is not None:
-                    vitals["fid"]["ttfb"] = round(p75 / 1000.0, 2) if p75 > 20 else round(p75, 2)
+            elif key in ("fcp", "ttfb") and p75 is not None:
+                vitals["fid"][key] = _normalize_sec(p75)
 
         # Format worst pages
-        worst_pages = []
-        for path, views, avg_load, lcp, cls, err_rate in db_res["worst_pages_rows"]:
-            worst_pages.append(
-                {
-                    "path": path,
-                    "views": views,
-                    "avg_load_time": round(avg_load / 1000.0, 2) if avg_load > 20 else round(avg_load, 2),
-                    "lcp_p75": round(lcp / 1000.0, 2)
-                    if (lcp is not None and lcp > 20)
-                    else (round(lcp, 2) if lcp is not None else None),
-                    "cls_p75": round(cls, 3) if cls is not None else None,
-                    "error_rate": round(err_rate, 2) if err_rate is not None else 0.0,
-                }
-            )
+        worst_pages = [
+            {
+                "path": path,
+                "views": views,
+                "avg_load_time": _normalize_sec(avg_load),
+                "lcp_p75": _normalize_sec(lcp),
+                "cls_p75": round(cls, 3) if cls is not None else None,
+                "error_rate": round(err_rate, 2) if err_rate is not None else 0.0,
+            }
+            for path, views, avg_load, lcp, cls, err_rate in db_res["worst_pages_rows"]
+        ]
 
         # Format exceptions
         errors = [
@@ -956,13 +936,8 @@ async def rum_analytics(
                 dt = hour_ts
             bucket_key = dt.strftime(fmt)
             if bucket_key in trend_buckets:
-                lcp_val = (
-                    round(lcp / 1000.0, 2)
-                    if (lcp is not None and lcp > 20)
-                    else (round(lcp, 2) if lcp is not None else None)
-                )
                 trend_buckets[bucket_key] = {
-                    "lcp": lcp_val,
+                    "lcp": _normalize_sec(lcp),
                     "cls": round(cls, 3) if cls is not None else None,
                     "error_rate": round(error_rate, 2) if error_rate is not None else 0.0,
                     "pageviews": int(pvs or 0),
@@ -1033,12 +1008,8 @@ async def rum_analytics(
         )
 
 
-from backend.repositories.utils.response_cache import bucket_time_to_minute, digest_cache_key
-from backend.utils.bounded_cache import BoundedTTLCache
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
-
 _live_events_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=15)
-_CacheRegistry.register("rum._live_events_cache", _live_events_cache)
+CacheRegistry.register("rum._live_events_cache", _live_events_cache)
 
 
 @router.get("/{service_id}/rum/live-events", response_model=list[RumLiveEventItem])
@@ -1075,8 +1046,6 @@ async def rum_live_events(
 
     # 2. Establish fallback ranges
     if not start_time and not end_time:
-        from backend.utils.date_utils import iso_z
-
         end_dt = datetime.datetime.now(datetime.UTC)
         start_dt = end_dt - datetime.timedelta(hours=24)
         start_time = iso_z(start_dt)
@@ -1114,8 +1083,6 @@ async def rum_live_events(
     try:
 
         def _get_live_events(con):
-            from backend.utils.date_utils import iso_z
-
             actual_cols = [c for c in rum_repo.get_client_vitals_columns(con) if c in _FILTER_COLUMNS] or list(
                 _FILTER_COLUMNS
             )

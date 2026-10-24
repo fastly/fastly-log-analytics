@@ -10,7 +10,7 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
-import { useScoringQuery } from './useScoringQuery'
+import { useScoringQuery } from './useScorerTimeseries'
 
 interface PerReasonAucCardProps {
   serviceId: string

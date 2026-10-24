@@ -27,7 +27,7 @@ import type { FeatureCollection } from 'geojson'
 import type { Map as MapLibreMap, MapOptions } from 'maplibre-gl'
 import type { GeometryCollection, Topology } from 'topojson-specification'
 
-import { countryFill, countryOutline } from './colors'
+import { countryFill, countryOutline } from './shared'
 
 declare const sampleMap: MapLibreMap
 

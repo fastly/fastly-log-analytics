@@ -2,10 +2,10 @@
 
 import { useState } from 'react'
 import type { ColumnDef } from '@tanstack/react-table'
-import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
+import { DataTableReadonly } from '@/components/DataTable'
 import { AlertCircle, ArrowLeft, ArrowRight, Database, Filter, X } from 'lucide-react'
 import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useIsDataReady'
-import { useTimeRange } from '@/hooks/useTimeRange'
+import { useTimeRange } from '@/hooks/useReportRangeAnchor'
 import { useHighScaleRequestFacts } from '@/hooks/useHighScaleRequestFacts'
 import { extractApiError } from '@/lib/api'
 import { ELAPSED_FRESHNESS, formatElapsed } from '@/lib/format'

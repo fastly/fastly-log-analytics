@@ -14,7 +14,7 @@ import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 import { formatPctValue } from '@/lib/format'
 
-import { useScoringQuery } from '../useScoringQuery'
+import { useScoringQuery } from '../useScorerTimeseries'
 import { scoringAnalyticsCompositeKey, scoringConfigCompositeKey } from '@/lib/queries/scoring'
 
 /**

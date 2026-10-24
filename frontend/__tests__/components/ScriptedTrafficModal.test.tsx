@@ -14,7 +14,7 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest'
 import React from 'react'
 import { InsightItemRow } from '@/components/Insights/InsightItemRow'
 import { ScriptedTrafficModal } from '@/components/Insights/ScriptedTrafficModal'
-import type { ScriptedTrafficData } from '@/components/Insights/types'
+import type { ScriptedTrafficData } from '@/components/Insights/shared'
 import type { InsightCardData } from '@/types/api'
 
 beforeAll(() => {

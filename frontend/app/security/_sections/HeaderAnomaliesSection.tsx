@@ -9,7 +9,7 @@ import { FilterValueCell } from '@/components/FilterValueCell'
 import { ChartEmptyState } from '@/components/ChartEmptyState'
 import { formatCountMaybe } from '@/lib/format'
 import { SECURITY_INFO, TOP_IP_COLUMN_IDS } from './securityInfo'
-import { useActiveLogFields } from '@/hooks/useActiveLogFields'
+import { useActiveLogFields } from '@/hooks/useLogFieldsCatalog'
 import type { PlotlyTrace } from '@/types/plotly'
 import type { components } from '@/types/api.generated'
 

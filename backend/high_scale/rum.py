@@ -7,8 +7,13 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from backend.high_scale._common import format_iso_utc_or_empty as _iso
+from backend.high_scale._common import (
+    parse_time_window,
+    visible_fact_clauses,
+    visible_publication_fence_sql,
+)
 from backend.high_scale._projection_utils import range_value
-from backend.high_scale._scope import visible_fact_clauses
 from backend.high_scale.registry import HighScaleService
 from backend.repositories.utils.filters import filter_spec_attr, normalize_filter_key
 
@@ -61,16 +66,11 @@ def _filter_clauses(filters: Mapping[str, Any] | None) -> tuple[list[str], dict[
     return clauses, params
 
 
-from backend.high_scale._common import format_iso_utc_or_empty as _iso
-
-
 def rum_beacon_health(
     service: HighScaleService,
     *,
     source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    from backend.high_scale._scope import visible_publication_fence_sql
-
     if isinstance(source, dict) and (
         (isinstance(source.get("rum"), dict) and source["rum"].get("enabled") is False)
         or source.get("rum_enabled") is False
@@ -131,11 +131,7 @@ def rum_analytics(
     Counts use beacon identity, not metric-row count. All SQL goes through the
     instrumented client; dependency failures must not become empty chart data.
     """
-    now = datetime.now(UTC)
-    start = range_value(start_time) if start_time else now - timedelta(hours=24)
-    end = range_value(end_time) if end_time else now
-    start = start.replace(tzinfo=UTC) if start.tzinfo is None else start.astimezone(UTC)
-    end = end.replace(tzinfo=UTC) if end.tzinfo is None else end.astimezone(UTC)
+    start, end = parse_time_window(start_time, end_time, utc=True, now=datetime.now(UTC))
     if end < start:
         raise ValueError("RUM end time precedes start time")
     filter_clauses, filter_params = _filter_clauses(filters)
@@ -404,9 +400,7 @@ def rum_live_events(
     limit: int,
     filters: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    now = datetime.now(UTC)
-    end_dt = range_value(end_time) if end_time else now
-    start_dt = range_value(start_time) if start_time else (end_dt - timedelta(days=1))
+    start_dt, end_dt = parse_time_window(start_time, end_time, now=datetime.now(UTC))
     filter_clauses, filter_params = _filter_clauses(filters)
     window = ["event_timestamp >= {start_time:DateTime64(3)}", "event_timestamp <= {end_time:DateTime64(3)}"]
 

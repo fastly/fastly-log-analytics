@@ -6,7 +6,7 @@ import { useSessionRoleStore } from '@/stores/sessionRoleStore'
 import { useServiceStore } from '@/stores/serviceStore'
 import { usePopGeoStore } from '@/stores/popGeoStore'
 import { useDebugStore } from '@/stores/debugStore'
-import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
+import { DEBUG_RESPONSES_COOKIE } from '@/lib/cookies'
 import { useEffect, useSyncExternalStore } from 'react'
 import { toService } from '@/types/api'
 

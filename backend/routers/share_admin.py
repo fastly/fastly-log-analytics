@@ -84,6 +84,15 @@ def share_banner():
     }
 
 
+def _list_invites_with_last_login() -> list[dict]:
+    """Return remote invites enriched with ``last_login_at`` from audit logs."""
+    invites = share_db.get_remote_invites()
+    last_login_by_email = share_db.get_last_login_by_email()
+    for inv in invites:
+        inv["last_login_at"] = last_login_by_email.get((inv.get("email") or "").strip().lower())
+    return invites
+
+
 def build_share_status() -> dict:
     """Compose the /admin/share/status response shape.
 
@@ -95,14 +104,7 @@ def build_share_status() -> dict:
     """
     mgr = get_tunnel_manager()
     state = mgr.state
-    invites = share_db.get_remote_invites()
-    # Attach each invite's last login (derived from the successful-login audit
-    # events) so the admin can see who is actually using the app at a glance.
-    # Joined on lowercased email (the only key audit rows carry); one invite per
-    # email in practice.
-    last_login_by_email = share_db.get_last_login_by_email()
-    for inv in invites:
-        inv["last_login_at"] = last_login_by_email.get((inv.get("email") or "").strip().lower())
+    invites = _list_invites_with_last_login()
     sessions = [s.to_dict() for s in mgr.list_sessions()]
     audit = share_db.get_share_audit_logs(limit=50)
     services = []
@@ -222,11 +224,7 @@ def share_panic():
 
 @router.get("/invites", response_model=ShareInvitesResponse, response_model_exclude_unset=True)
 def list_invites():
-    invites = share_db.get_remote_invites()
-    last_login_by_email = share_db.get_last_login_by_email()
-    for inv in invites:
-        inv["last_login_at"] = last_login_by_email.get((inv.get("email") or "").strip().lower())
-    return {"invites": invites}
+    return {"invites": _list_invites_with_last_login()}
 
 
 @router.post("/invites", response_model=InviteRecord, response_model_exclude_unset=True)
@@ -655,8 +653,6 @@ def trigger_share_purge(
     ),
 ):
     """Trigger manual retention cleanup of audit logs, expired invites, tokens, and stale sessions."""
-    from backend.core import share_db
-
     if audit_retention_days is None:
         raw = share_db.get_setting(share_db.SHARE_AUDIT_RETENTION_DAYS_KEY, "90")
         try:

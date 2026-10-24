@@ -13,7 +13,7 @@ import { StatCard } from '@/components/ui/stat-card'
 import { Button } from '@/components/ui/button'
 import { ButtonGroup } from '@/components/ui/button-group'
 import { Skeleton } from '@/components/ui/skeleton'
-import { SkeletonGrid } from '@/components/ui/skeleton-grid'
+import { SkeletonGrid } from '@/components/ui/skeleton'
 import { PlotlyChart } from '@/components/PlotlyChart/PlotlyChart'
 import { CostCalculator } from '@/components/CostCalculator/CostCalculator'
 import { Database, HardDrive, Zap, DollarSign, Activity as ActivityIcon } from 'lucide-react'
@@ -52,7 +52,7 @@ const FosOperationsHelp = ({ note }: { note?: string }) => (
 import { useRouter } from 'next/navigation'
 import { useServiceStore } from '@/stores/serviceStore'
 import { buildServiceHref } from '@/lib/navigation'
-import { CHART_COLORS } from '@/lib/chart-colors'
+import { CHART_COLORS } from '@/lib/chart-builders'
 
 export default function UsagePage() {
   return (

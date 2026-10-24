@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from datetime import timedelta
 
-from backend.high_scale.security_replay import rebuild_security_projections_from_fos
+from backend.high_scale.recovery import rebuild_security_projections_from_fos
 from scripts.backfill_high_scale import (
     AggregateBatchAdapter,
     ClickHouseClient,

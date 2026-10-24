@@ -19,6 +19,7 @@ from backend.models.admin import MetricHistoryBatchResponse
 from backend.utils.date_utils import parse_relative_time_window
 from backend.utils.router_utils import bad_request
 
+from ._helpers import attach_debug_db_snapshot
 from ._router import router
 
 _MAX_LOOKBACK_DAYS = 30
@@ -48,13 +49,4 @@ def metric_history_batch(
         )
     cutoff = parse_relative_time_window(since, max_lookback_days=_MAX_LOOKBACK_DAYS)
     raw = metric_snapshots.get_batch(since=cutoff)
-    payload: dict = {"series": raw}
-    from backend.models.common import _debug_responses_enabled
-
-    if _debug_responses_enabled():
-        from backend.utils.telemetry import get_sqlite_queries
-
-        ds = list(get_sqlite_queries())
-        payload["_debug_sqlite"] = ds
-        payload["_debug_postgres"] = ds
-    return JSONResponse(content=payload)
+    return JSONResponse(content=attach_debug_db_snapshot({"series": raw}))

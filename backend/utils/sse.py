@@ -22,9 +22,47 @@ import threading
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Generator, Iterator
 from typing import Any
 
+from fastapi import Request
 from sse_starlette.sse import EventSourceResponse
 
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS
+
+
+async def iter_with_disconnect_ping[T](
+    source: AsyncIterable[T],
+    request: Request,
+    *,
+    ping_seconds: float = 15,
+) -> AsyncIterator[T]:
+    """Yield each payload from ``source`` until the request disconnects.
+
+    Polls ``request.is_disconnected()`` every ``ping_seconds`` regardless
+    of whether ``source`` is producing — so idle publishers don't leave
+    a disconnected client's subscriber registered. The ``source``
+    iterator's ``__anext__()`` task is shielded across timeouts so it
+    stays parked on the publisher's queue between disconnect checks.
+    """
+    aiter = source.__aiter__()
+    pending: asyncio.Future[T] | None = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(aiter.__anext__())
+            try:
+                payload = await asyncio.wait_for(asyncio.shield(pending), timeout=ping_seconds)
+            except TimeoutError:
+                if await request.is_disconnected():
+                    return
+                continue
+            except StopAsyncIteration:
+                return
+            pending = None
+            if await request.is_disconnected():
+                return
+            yield payload
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
 
 
 class ClientDisconnected(Exception):

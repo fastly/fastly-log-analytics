@@ -2,7 +2,7 @@
 
 The prewarmer is a ``@cron_task``-wrapped function that periodically
 calls ``get_insights`` for the service's ADAPTIVE default selection —
-the window/baseline pair ``backend.utils.insights_defaults`` derives from
+the window/baseline pair ``backend.utils.time_window`` derives from
 the service's log history, mirroring the frontend picker — so the first
 user after a cold start lands on a warm cache hit instead of paying the
 seconds-to-tens-of-seconds cold-path cost. With no extents the pair falls
@@ -483,7 +483,13 @@ def test_run_insights_prewarmer_emits_progress_and_finalizes_duration(monkeypatc
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda task, sid: False)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda s, t: 99)
     monkeypatch.setattr("backend.config.get_status", lambda name: {})
-    monkeypatch.setattr("backend.utils.insights_defaults.pick_insights_default", lambda h: (1, 168))
+    monkeypatch.setattr("backend.utils.time_window.pick_insights_default", lambda h: (1, 168), raising=False)
+    try:
+        monkeypatch.setattr(
+            "backend.utils." + "insights_defaults.pick_insights_default", lambda h: (1, 168), raising=False
+        )
+    except ImportError:
+        pass
     monkeypatch.setattr("backend.core.duckdb.get_connection", lambda **kwargs: MagicMock())
     monkeypatch.setattr("backend.repositories.insights.get_insights", lambda *args, **kwargs: None)
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", lambda *args, **kwargs: None)

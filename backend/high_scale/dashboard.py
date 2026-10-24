@@ -9,16 +9,16 @@ from functools import partial
 from typing import Any
 
 from backend.core.high_scale_sections import HighScaleSections
+from backend.high_scale._common import inclusive_minute_end, visible_fact_clauses
 from backend.high_scale._filters import request_filter_clauses
 from backend.high_scale._projection_utils import (
     range_value as _range_value,
 )
-from backend.high_scale._scope import visible_fact_clauses
 from backend.high_scale.aggregate_query import (
+    AggregateRequest,
     query_clickhouse_aggregate,
     query_clickhouse_aggregates_batch,
 )
-from backend.high_scale.aggregates import AggregateRequest
 from backend.high_scale.registry import HighScaleService
 from backend.models.common import ResponseCacheObservation
 from backend.models.dashboard import (
@@ -386,9 +386,7 @@ def _filtered_aggregates(
     params: dict[str, Any] = {"service_id": service.service_id, **filter_params}
 
     if start is not None and end is not None:
-        from datetime import timedelta
-
-        end_upper = end + timedelta(minutes=1) if end.second == 0 and end.microsecond == 0 else end
+        end_upper = inclusive_minute_end(end)
         clauses.append("event_timestamp >= {start:DateTime64(3)}")
         clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
         params.update({"start": start, "end_upper": end_upper})
@@ -589,9 +587,7 @@ def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: st
         clauses = list(visible_fact_clauses("request"))
         params: dict[str, Any] = {"service_id": service.service_id}
         if start is not None and end is not None:
-            from datetime import timedelta
-
-            end_upper = end + timedelta(minutes=1) if end.second == 0 and end.microsecond == 0 else end
+            end_upper = inclusive_minute_end(end)
             clauses.append("event_timestamp >= {start:DateTime64(3)}")
             clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
             params.update({"start": start, "end_upper": end_upper})
@@ -722,9 +718,7 @@ def field_values(
     clauses = [*visible_fact_clauses("request"), *filter_clauses, f"{sql_col} != ''"]
 
     if start is not None and end is not None:
-        from datetime import timedelta
-
-        end_upper = end + timedelta(minutes=1) if end.second == 0 and end.microsecond == 0 else end
+        end_upper = inclusive_minute_end(end)
         clauses.append("event_timestamp >= {start:DateTime64(3)}")
         clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
         params.update({"start": start, "end_upper": end_upper})
@@ -762,8 +756,6 @@ def raw_df(
     limit: int = 50000,
 ):
     """Fetch raw rows from ClickHouse ``request_facts`` as a pandas DataFrame for CSV export."""
-    from datetime import timedelta
-
     import pandas as pd
 
     from backend.utils.bot_sources import enrich_bot_metadata
@@ -782,7 +774,7 @@ def raw_df(
     start = _range_value(start_time)
     end = _range_value(end_time)
     if start is not None and end is not None:
-        end_upper = end + timedelta(minutes=1) if end.second == 0 and end.microsecond == 0 else end
+        end_upper = inclusive_minute_end(end)
         clauses.append("event_timestamp >= {start:DateTime64(3)}")
         clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
         params.update({"start": start, "end_upper": end_upper})

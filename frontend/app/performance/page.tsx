@@ -3,7 +3,7 @@ import { HydrationBoundary } from '@tanstack/react-query'
 import {
   fetchPerformanceServerSide,
   PERFORMANCE_SSR_DEFAULTS,
-} from '@/lib/ssr/performance'
+} from '@/lib/ssr/upstream'
 import { seedDehydratedState } from '@/lib/ssr/seed'
 import { resolvePageServiceId } from '@/lib/ssr/service'
 import PerformanceClient from './_sections/PerformanceClient'

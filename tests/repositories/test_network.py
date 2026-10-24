@@ -16,7 +16,7 @@ from backend.repositories.network import (
     get_health,
     get_quality,
 )
-from backend.utils.geo import format_city_label
+from backend.utils.countries import format_city_label
 from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
 
 

@@ -23,11 +23,6 @@ def _get_readonly_conn():
     return get_pg_readonly_connection()
 
 
-def ensure_schema() -> None:
-    """No-op under Postgres — schema is bootstrapped by pg_schema.py."""
-    pass
-
-
 def get_last_timestamp(workspace_id: str) -> str | None:
     """Return last_timestamp_synced for workspace, or None if no sync has run yet."""
     con = _get_readonly_conn()

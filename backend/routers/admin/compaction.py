@@ -26,6 +26,7 @@ from backend.models.admin import (
     RollupStatusResponse,
 )
 
+from ._helpers import service_id_from_source
 from ._router import router
 
 logger = logging.getLogger(__name__)
@@ -68,7 +69,7 @@ def optimize_service(
     """
     from backend.cron.jobs.optimize import _run_optimize
 
-    sid = service_id or source.get("name") or source.get("service_id", "")
+    sid = service_id_from_source(source, service_id, prefer_name=True)
     res = _run_optimize(sid, manual=True)
     if isinstance(res, dict):
         return OptimizeNowResponse(**res)
@@ -121,8 +122,6 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
 
     Returns the count of bundles written per kind.
     """
-    import logging
-
     from backend.core import rollups
     from backend.core.rollups._common import (
         SESSIONS_BUNDLE_FILENAME,
@@ -133,14 +132,14 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     from backend.core.rollups.spec import ADMIN_BACKFILLS, DAY_COMPACTORS
     from backend.core.rollups.time_series import build_time_series_bundles
 
-    sid = source.get("service_id") or source.get("name") or ""
+    sid = service_id_from_source(source)
     n_ts = backfill_missing_bundles(
         sid,
         source,
         bundle_filename=TIME_SERIES_BUNDLE_FILENAME,
         label="time_series",
         builder=build_time_series_bundles,
-        logger=logging.getLogger(__name__),
+        logger=logger,
     )
     n_sess = backfill_missing_bundles(
         sid,
@@ -148,7 +147,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         bundle_filename=SESSIONS_BUNDLE_FILENAME,
         label="sessions",
         builder=build_session_bundles,
-        logger=logging.getLogger(__name__),
+        logger=logger,
     )
 
     # The backfill table lives in backend.core.rollups.spec. status_codes has
@@ -180,7 +179,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
                 if bucket_count is not None:
                     n_rum = bucket_count or 0
     except Exception as rum_backfill_err:
-        logging.getLogger(__name__).warning("RUM aggregates backfill failed: %s", rum_backfill_err, exc_info=True)
+        logger.warning("RUM aggregates backfill failed: %s", rum_backfill_err, exc_info=True)
 
     return {"time_series": n_ts, "sessions": n_sess, **counts, "rum": n_rum}
 
@@ -196,7 +195,6 @@ def consolidate_rollups(source: dict = Depends(get_source)) -> ConsolidateRollup
     Sweeps hour_ip_spread, compacts closed days into day_bundled files, and prunes
     per-field and obsolete hourly files older than 14 days.
     """
-    import os
     import time
 
     from backend.core.rollups import (
@@ -208,7 +206,7 @@ def consolidate_rollups(source: dict = Depends(get_source)) -> ConsolidateRollup
     from backend.core.rollups.hour_bundles import bundle_hours_ip_spread
     from backend.core.rollups.recompute import cleanup_old_rollups
 
-    sid = source.get("service_id") or source.get("name") or ""
+    sid = service_id_from_source(source)
     t0 = time.time()
 
     def _count_files(root: str) -> int:
@@ -285,8 +283,8 @@ def rollup_compact_now(
     source: dict = Depends(get_source),
 ) -> RollupCompactResponse:
     """Manually trigger daily rollup compaction for closed days over a 30-day window."""
-    sid = service_id or source.get("name") or source.get("service_id")
-    from backend.cron.jobs.rollup_compact import _run_rollup_compact_daily
+    sid = service_id_from_source(source, service_id, prefer_name=True)
+    from backend.cron.jobs.compaction import _run_rollup_compact_daily
 
     res = _run_rollup_compact_daily(sid, manual=True)
     return RollupCompactResponse(**res)
@@ -317,7 +315,7 @@ def rollup_heal_now(
     source: dict = Depends(get_source),
 ) -> RollupHealResponse:
     """Manually trigger hourly rollup healing for missing closed-hour bundles over 48h."""
-    sid = service_id or source.get("service_id") or source.get("name") or ""
+    sid = service_id_from_source(source, service_id)
     from backend.cron.jobs.compaction import _run_rollup_hour_heal
 
     res = _run_rollup_hour_heal(sid, manual=True)
@@ -339,7 +337,7 @@ def rollup_status(
     source: dict = Depends(get_source),
 ) -> RollupStatusResponse:
     """Inspect the status of day and hour rollup bundles."""
-    sid = service_id or source.get("service_id") or source.get("name") or ""
+    sid = service_id_from_source(source, service_id)
     from backend.core.rollups._common import _day_bundled_root, _hour_bundled_root
 
     day_root = _day_bundled_root(source)
@@ -440,7 +438,7 @@ def partial_hour_merge_now(
     Folds newly-arrived buffer parquets into the active hour's partial-hour rollup.
     Local-only operation; zero FOS egress.
     """
-    sid = service_id or source.get("service_id", source.get("name", ""))
+    sid = service_id_from_source(source, service_id)
     from backend.core.field_registry import derived
     from backend.core.rollups.partial_hour import gc_stale_partial_hours, merge_partial_hour
     from backend.repositories._base import _LIVE_TOPN_SKIP_FIELDS
@@ -482,7 +480,7 @@ def partial_hour_status(
         read_partial_hour_watermark,
     )
 
-    sid = service_id or source.get("service_id", source.get("name", ""))
+    sid = service_id_from_source(source, service_id)
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
     watermark = read_partial_hour_watermark(source, active_hour)
     file_exists = os.path.isfile(_all_fields_path(source, active_hour))
@@ -626,7 +624,7 @@ def metadata_cleanup_now(
     from backend.core.metadata import cleanup_metadata
     from backend.utils.sse import stream_sse_from_worker
 
-    service_id = service_id or source.get("name") or source.get("service_id", "")
+    service_id = service_id_from_source(source, service_id, prefer_name=True)
     cfg = svcconfig.load_config(service_id) or {}
     retention = cfg.get("metadata_retention") or {}
 

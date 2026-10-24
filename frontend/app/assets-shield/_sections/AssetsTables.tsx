@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { Loader2 } from 'lucide-react'
 import type { ColumnDef } from '@tanstack/react-table'
 
-import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
+import { DataTableReadonly } from '@/components/DataTable'
 import { formatBytes, formatCount } from '@/lib/format'
 import type { components } from '@/types/api.generated'
 

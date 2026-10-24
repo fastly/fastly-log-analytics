@@ -9,7 +9,7 @@ import { queryKeys } from '@/lib/query-keys'
 import { downloadBlob } from '@/lib/utils'
 import { extractApiError } from '@/lib/api'
 import type { ColumnDef } from '@tanstack/react-table'
-import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
+import { DataTableReadonly } from '@/components/DataTable'
 
 export function CustomFieldsManager({ serviceId }: { serviceId: string }) {
   const queryClient = useQueryClient()

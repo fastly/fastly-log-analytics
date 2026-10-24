@@ -11,7 +11,7 @@ import {
 } from '@/components/ui/dialog'
 import { ScanSearch, Gauge, Timer, Activity, Repeat, Hash, Users, Clock } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { ScriptedTrafficData } from './types'
+import { ScriptedTrafficData } from './shared'
 
 import { formatCount } from '@/lib/format'
 import { formatDuration } from '@/lib/date'

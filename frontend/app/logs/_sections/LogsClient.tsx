@@ -19,7 +19,7 @@ import { NoServiceSelected } from '@/components/NoServiceSelected'
 import { useBootstrapResolved } from '@/hooks/useIsDataReady'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { SyncFromCloudModal } from '@/components/SyncFromCloudModal/SyncFromCloudModal'
-import { ingestedFilesColumns } from '@/lib/table-columns'
+import { ingestedFilesColumns } from '@/lib/table-utils'
 import { PageHeader } from '@/components/ui/page-header'
 
 import { useLogsPageState } from '../_state'

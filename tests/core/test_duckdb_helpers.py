@@ -22,11 +22,34 @@ code shares:
 
 from __future__ import annotations
 
+import gc
+import os
+import threading
+import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
+import duckdb
 import pytest
 
+import backend.core.duckdb as d
+import backend.core.duckdb as duckdb_mod
+import backend.core.duckdb_recycle as rec
+from backend.core.duckdb import (
+    DBBusyError,
+    _safe_table_name,
+    format_asn_label,
+    get_connection,
+    rum_duckdb_path,
+    rum_source_for,
+)
+from backend.core.duckdb_pool import _Pool
+from backend.core.iceberg.view import _get_service_lock
+from backend.core.log_fields import LOG_FIELD_CATALOG
 
+
+# ── Merged from tests/core/test_duckdb_helpers.py ──
 def test_load_httpfs_prefers_cached_extension_without_installing():
     import backend.core.duckdb as db_mod
 
@@ -52,9 +75,6 @@ def test_load_httpfs_installs_when_cached_extension_is_missing():
         "INSTALL httpfs;",
         "LOAD httpfs;",
     ]
-
-
-# ── _safe_iso (datetime → ISO-Z) ─────────────────────────────────────────
 
 
 def test_safe_iso_none_returns_none():
@@ -99,9 +119,6 @@ def test_safe_iso_falls_back_to_str_for_unknown_types():
 
     assert _safe_iso("already-a-string") == "already-a-string"
     assert _safe_iso(42) == "42"
-
-
-# ── _get_dma_map (cached JSON loader) ────────────────────────────────────
 
 
 def test_get_dma_map_returns_empty_dict_when_no_data_file(tmp_path, monkeypatch):
@@ -183,9 +200,6 @@ def test_get_dma_map_caches_result(tmp_path, monkeypatch):
     assert out1 is out2
 
 
-# ── _safe_table_name (SQL identifier sanitisation) ──────────────────────
-
-
 def test_safe_table_name_strips_non_alphanumeric_and_lowercases():
     """Non-alphanumeric chars → ``_``. Pinned because service names
     contain dots / hyphens that are invalid SQL identifiers — losing
@@ -212,9 +226,6 @@ def test_safe_table_name_strips_leading_trailing_underscores():
     from backend.core.duckdb import _safe_table_name
 
     assert _safe_table_name("---test---") == "logs_test"
-
-
-# ── _cache_dir (local cache for source) ─────────────────────────────────
 
 
 def test_cache_dir_uses_bucket_for_scoping():
@@ -245,9 +256,6 @@ def test_cache_dir_falls_back_to_default_when_no_bucket():
 
     out = _cache_dir({})
     assert "default" in out
-
-
-# ── _data_stats_fingerprint (get_sync_status data-side COUNT cache key) ──
 
 
 def test_data_stats_fingerprint_returns_none_when_data_dir_absent(tmp_path):
@@ -332,9 +340,6 @@ def test_data_stats_fingerprint_ignores_buffer_changes(tmp_path):
     assert fp_before == fp_after_add == fp_after_drain
 
 
-# ── is_configured ───────────────────────────────────────────────────────
-
-
 def test_is_configured_true_for_fully_populated_source():
     """All four required fields populated → True. Pinned because the
     scheduler skips unconfigured services from job registration."""
@@ -364,9 +369,6 @@ def test_is_configured_false_when_required_field_is_empty_string():
 
     src = {"endpoint": "e", "access_key_id": "", "secret_access_key": "s", "bucket": "b"}
     assert is_configured(src) is False
-
-
-# ── _build_default_source / reload_default_source ───────────────────────
 
 
 def test_build_default_source_returns_empty_when_no_configs():
@@ -443,9 +445,6 @@ def test_reload_default_source_updates_module_globals():
         db_mod.DUCKDB_PATH = original_default.get("duckdb_path", "logs.duckdb")
 
 
-# ── get_source_for_service ──────────────────────────────────────────────
-
-
 def test_get_source_for_service_returns_none_for_unknown_service():
     """No matching config + no cdn_service_id match → None. Pinned
     because callers check `if src` before using — None is the
@@ -494,9 +493,6 @@ def test_get_source_for_service_falls_back_to_cdn_service_id_match():
     assert out["name"] == "log-svc"
 
 
-# ── _ensure_source_registered / record_audit / start_cron_run ───────
-
-
 def test_ensure_source_registered_passes_config_json_to_metadata_db():
     """Builds a JSON blob of the source's FOS+CDN config and registers
     it via metadata_db. Pinned because the persisted blob is what
@@ -539,9 +535,6 @@ def test_start_cron_run_delegates_to_metadata():
 
     assert run_id == 99
     mock_start.assert_called_once_with("svc-1", "sync")
-
-
-# ── _execute_query_with_retry (transient retry / fail-fast) ──────────────
 
 
 def test_execute_query_with_retry_returns_immediately_on_success():
@@ -642,9 +635,6 @@ def test_execute_query_with_retry_gives_up_after_max_retries():
     assert fake_con.execute.call_count == 3
 
 
-# ── clear_initialization_state / close_all_connections ──────────────────
-
-
 def test_clear_initialization_state_removes_path_from_set():
     """`clear_initialization_state` removes the path from the
     `_initialized_paths` global. Pinned because DDL re-runs depend on
@@ -676,9 +666,6 @@ def test_close_all_connections_is_noop():
     close_all_connections()
 
 
-# ── DBBusyError ─────────────────────────────────────────────────────────
-
-
 def test_dbbusy_error_is_an_exception_subclass():
     """`DBBusyError` is an Exception subclass admin endpoints catch
     to convert to 503. Pinned because losing the exception base
@@ -689,9 +676,6 @@ def test_dbbusy_error_is_an_exception_subclass():
     # Instantiable + carries message
     err = DBBusyError("locked")
     assert str(err) == "locked"
-
-
-# ── log_cron_run (success/error/skip persistence) ──────────────────────
 
 
 def test_log_cron_run_persists_error_runs_regardless_of_log_enabled():
@@ -868,9 +852,6 @@ def test_log_cron_run_swallows_metadata_db_exception():
         log_cron_run({"name": "svc"}, "sync", 1.0, "success")
 
 
-# ── get_sync_status configured-false short-circuit ─────────────────────
-
-
 def test_get_sync_status_returns_configured_false_when_not_configured():
     """Unconfigured source → minimal dict with `configured=False`.
     Pinned because the FE renders the "first-time setup" CTA from
@@ -1002,9 +983,6 @@ def test_get_sync_status_skip_fos_returns_cached_status_immediately():
     mock_summary.assert_not_called()
 
 
-# ── get_raw_tree_node directory/file tree builder ─────────────────────
-
-
 def test_get_raw_tree_node_returns_empty_children_when_not_configured():
     """Unconfigured source → empty children list (not crash). Pinned
     because the admin file-browser endpoint calls this on every
@@ -1081,9 +1059,6 @@ def test_get_raw_tree_node_swallows_s3_exception_returns_empty():
         out = get_raw_tree_node(src)
 
     assert out == {"children": []}
-
-
-# ── format_asn_label / enrich_asn_labels / get_asn_names ──────────────
 
 
 def test_format_asn_label_falls_back_to_AS_number_when_name_missing():
@@ -1216,9 +1191,6 @@ def test_enrich_asn_labels_skips_lookup_when_no_numeric_values():
         enrich_asn_labels(values, "svc-1")
 
     mock_get.assert_not_called()
-
-
-# ── update_cron_duration / log_usage_calls / purge_usage_log ─────────
 
 
 def test_update_cron_duration_extracts_service_id_from_source_name():
@@ -1634,6 +1606,787 @@ def test_refresh_config_status_opens_read_only_connection():
     )
 
 
-# Silence ruff unused-imports
 _ = MagicMock
+
 _ = pytest
+
+
+# ── Merged from tests/core/test_duckdb_utils.py ──
+class TestFormatAsnLabel:
+    def test_name_and_number(self):
+        assert format_asn_label(7922, "Comcast Cable Communications") == "Comcast Cable Communications (7922)"
+
+    def test_empty_name_returns_as_prefix(self):
+        assert format_asn_label(1234, "") == "AS1234"
+
+    def test_name_already_as_prefixed_returns_as_prefix(self):
+        # "AS7922" is a bare ASN alias, not a human name — collapse it.
+        assert format_asn_label(7922, "AS7922") == "AS7922"
+
+    def test_name_with_special_chars(self):
+        result = format_asn_label(1, "O'Reilly & Associates")
+        assert result == "O'Reilly & Associates (1)"
+
+    def test_large_asn(self):
+        assert format_asn_label(4294967295, "Max ASN") == "Max ASN (4294967295)"
+
+    def test_asn_zero(self):
+        assert format_asn_label(0, "") == "AS0"
+
+
+class TestSafeTableName:
+    def test_simple_name(self):
+        assert _safe_table_name("my_service") == "logs_my_service"
+
+    def test_strips_special_chars(self):
+        # The impl strips trailing underscores, so trailing ! becomes _ then is stripped.
+        assert _safe_table_name("my-service!") == "logs_my_service"
+
+    def test_lowercases(self):
+        assert _safe_table_name("MyService") == "logs_myservice"
+
+    def test_default_name(self):
+        assert _safe_table_name("default") == "logs"
+
+    def test_leading_trailing_underscores_stripped(self):
+        result = _safe_table_name("_my_service_")
+        assert not result[len("logs_") :].startswith("_")
+        assert not result.endswith("_")
+
+    def test_spaces_become_underscores(self):
+        assert _safe_table_name("my service") == "logs_my_service"
+
+    def test_dots_become_underscores(self):
+        result = _safe_table_name("service.name.v2")
+        assert result == "logs_service_name_v2"
+
+
+class TestGetConnectionLockHandling:
+    """``get_connection`` treats certain DuckDB error messages as transient
+    locks and retries; everything else propagates immediately.
+
+    Regression scope: the "different configuration" message (DuckDB raises
+    it when a connection already exists with a different ``read_only``
+    flag — e.g. a cron is writing while a dashboard request opens
+    read-only) must be treated as a lock. Without that mapping, the
+    dashboard request 500s instead of waiting for the cron to finish.
+    """
+
+    def test_classic_locked_error_retries_then_raises_db_busy(self):
+        with patch(
+            "backend.core.duckdb.duckdb.connect",
+            side_effect=Exception("database is locked"),
+        ):
+            with pytest.raises(DBBusyError, match=r"locked by another process.*path=/tmp/_test\.duckdb"):
+                get_connection(source={"duckdb_path": "/tmp/_test.duckdb"}, max_wait=0.1)
+
+    def test_lock_timeout_logs_topology_context(self, caplog):
+        with patch(
+            "backend.core.duckdb.duckdb.connect",
+            side_effect=Exception("database is locked"),
+        ):
+            with caplog.at_level("ERROR", logger="backend.core.duckdb"):
+                with pytest.raises(DBBusyError):
+                    get_connection(
+                        source={"logging_service_id": "svc-1", "duckdb_path": "/tmp/_test.duckdb"},
+                        max_wait=0.1,
+                        read_only=True,
+                    )
+
+        record = next(r for r in caplog.records if r.getMessage().startswith("duckdb_connection_lock_timeout"))
+        assert record.args["service_id"] == "svc-1"
+        assert record.args["db_path"] == "/tmp/_test.duckdb"
+        assert record.args["read_only"] is True
+        assert record.args["deployment_mode"] == "standard"
+
+    def test_conflict_error_retries_then_raises_db_busy(self):
+        """``"conflict"`` in the message is the original lock signal —
+        pinned alongside the new "different configuration" case so the
+        deny-list doesn't regress."""
+        with patch(
+            "backend.core.duckdb.duckdb.connect",
+            side_effect=Exception("write-write conflict on table"),
+        ):
+            with pytest.raises(DBBusyError):
+                get_connection(source={"duckdb_path": "/tmp/_test.duckdb"}, max_wait=0.1)
+
+    def test_different_configuration_error_treated_as_transient_lock(self):
+        """REGRESSION: DuckDB raises ``"Can't open a connection to same
+        database file with a different configuration..."`` when an existing
+        connection has a different ``read_only`` flag. Before the fix this
+        message wasn't in the lock-detection deny-list, so it propagated
+        immediately as a 500. Now it retries and converts to DBBusyError
+        — the request layer maps DBBusyError → 503 → React Query keeps
+        cached data instead of clearing the UI."""
+        err_msg = (
+            "Connection Error: Can't open a connection to same database file "
+            "with a different configuration than existing connections"
+        )
+        with patch("backend.core.duckdb.duckdb.connect", side_effect=Exception(err_msg)):
+            with pytest.raises(DBBusyError):
+                get_connection(source={"duckdb_path": "/tmp/_test.duckdb"}, max_wait=0.1)
+
+    def test_unexpected_error_propagates_immediately(self):
+        """Non-lock errors (perms, missing parent dir, OOM) must propagate
+        immediately — pinned because retrying through these wastes max_wait
+        seconds and the actual error message gets shadowed by DBBusyError."""
+        with patch(
+            "backend.core.duckdb.duckdb.connect",
+            side_effect=Exception("Permission denied: /var/duckdb"),
+        ):
+            with pytest.raises(Exception, match="Permission denied"):
+                get_connection(source={"duckdb_path": "/tmp/_test.duckdb"}, max_wait=0.1)
+
+
+def test_threads_setting_is_instance_global(tmp_path):
+    db = str(tmp_path / "svc.duckdb")
+    a = duckdb.connect(db)
+    b = duckdb.connect(db)
+    try:
+        a.execute("SET threads = 1")
+        b.execute("SET threads = 3")
+        assert a.execute("SELECT current_setting('threads')").fetchone()[0] == 3
+    finally:
+        a.close()
+        b.close()
+
+
+def test_pool_fresh_build_never_sets_threads(monkeypatch):
+    monkeypatch.setenv("DUCKDB_POOL_CONN_THREADS", "1")
+    pool = _Pool(service_key="test_no_threads", max_size=1)
+    mock_conn = MagicMock(spec=duckdb.DuckDBPyConnection)
+    with (
+        patch("backend.core.duckdb.get_connection", return_value=mock_conn),
+        patch("backend.core.iceberg.view._view_cache", {}),
+        patch("backend.core.iceberg.view.update_iceberg_view"),
+    ):
+        pool.acquire(src={"name": "test_no_threads"}, max_wait=0.5)
+    executed = [str(c.args[0]).lower() for c in mock_conn.execute.call_args_list if c.args]
+    assert not any("threads" in s for s in executed), executed
+
+
+def test_ensure_threads_only_sets_when_value_differs(tmp_path):
+    con = duckdb.connect(str(tmp_path / "svc.duckdb"))
+    try:
+        con.execute("SET threads = 2")
+        spy = MagicMock(wraps=con)
+        duckdb_mod._ensure_threads(spy, 2)
+        assert not any("SET threads" in str(c.args[0]) for c in spy.execute.call_args_list)
+        duckdb_mod._ensure_threads(spy, 3)
+        assert con.execute("SELECT current_setting('threads')").fetchone()[0] == 3
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        ("/data/.duckdb/svc.duckdb", "/data/.duckdb/svc.rum.duckdb"),
+        ("svc", "svc.rum.duckdb"),
+        ("/a.duckdb.duckdb", "/a.duckdb.rum.duckdb"),
+    ],
+)
+def test_rum_duckdb_path(given: str, expected: str) -> None:
+    assert rum_duckdb_path(given) == expected
+
+
+def test_rum_source_for_only_rewrites_suffix() -> None:
+    out = rum_source_for({"name": "svc", "duckdb_path": "/data/.duckdb/svc.duckdb"})
+    assert out["duckdb_path"] == "/data/.duckdb/svc.rum.duckdb"
+    assert out["name"] == "svc::rum"
+
+
+def test_rum_source_for_is_shallow_and_leaves_original_untouched() -> None:
+    nested = {"k": "v"}
+    source = {"name": "svc", "duckdb_path": "/d/svc.duckdb", "opts": nested}
+
+    out = rum_source_for(source)
+
+    assert source == {"name": "svc", "duckdb_path": "/d/svc.duckdb", "opts": nested}
+    assert out is not source
+    # Nested values are shared by design: callers only read them.
+    assert out["opts"] is nested
+
+
+# ── Merged from tests/core/test_duckdb_type_roundtrip.py ──
+def test_catalog_uses_only_known_duckdb_types():
+    """Sanity: ingest assumes a fixed set of types. New ones must be
+    added to ``_TYPE_BOUNDARIES`` below before they'll be tested."""
+    seen = Counter(f["duckdb_type"] for f in LOG_FIELD_CATALOG)
+    unknown = set(seen) - set(_TYPE_BOUNDARIES)
+    assert not unknown, f"new duckdb_type(s) in catalog need test coverage: {unknown}"
+
+
+_TYPE_BOUNDARIES: dict[str, list] = {
+    "TIMESTAMP": [
+        "2026-05-15 12:00:00",
+        "1970-01-01 00:00:00",
+        "2099-12-31 23:59:59.999",
+    ],
+    "VARCHAR": [
+        "",
+        "ascii",
+        "héllo wörld",  # latin-1 + diacritics
+        "日本語",  # multi-byte CJK
+        "with 'quote' and \"dquote\" and \\backslash",
+        "x" * 5000,  # long string
+    ],
+    "BOOLEAN": [True, False],
+    "UTINYINT": [0, 255, 1, 127],  # 0..255
+    "USMALLINT": [0, 65535, 1, 32768],  # 0..65535
+    "UINTEGER": [0, 4_294_967_295, 1, 2_147_483_648],  # 0..2^32-1
+    "UBIGINT": [0, 18_446_744_073_709_551_615, 1, 9_223_372_036_854_775_808],  # 0..2^64-1
+    "BIGINT": [-9_223_372_036_854_775_808, 9_223_372_036_854_775_807, 0, -1],
+    "FLOAT": [0.0, 3.14159, -1.5, 1e10, -1e10, 1e-10],
+    "DOUBLE": [0.0, 3.141592653589793, -1.5e100, 1e300, -1e300],
+}
+
+
+@pytest.mark.parametrize("ddb_type", sorted(_TYPE_BOUNDARIES))
+def test_type_round_trip(ddb_type):
+    """For each declared catalog type, boundary values write and read back
+    correctly. Catches sign-flip, truncation, NaN handling, unicode bugs."""
+    con = duckdb.connect(":memory:")
+    try:
+        con.execute(f"CREATE TABLE t (val {ddb_type})")
+        for v in _TYPE_BOUNDARIES[ddb_type]:
+            con.execute("INSERT INTO t VALUES (?)", (v,))
+
+        rows = con.execute("SELECT val FROM t ORDER BY rowid").fetchall()
+        got = [r[0] for r in rows]
+
+        # For floats, allow tiny drift; for everything else require exact.
+        if ddb_type in ("FLOAT", "DOUBLE"):
+            assert len(got) == len(_TYPE_BOUNDARIES[ddb_type])
+            for expected, actual in zip(_TYPE_BOUNDARIES[ddb_type], got):
+                if expected == 0.0:
+                    assert actual == 0.0
+                else:
+                    rel = abs(actual - expected) / abs(expected)
+                    assert rel < 1e-5, f"{ddb_type} drift: {expected!r} → {actual!r} (rel={rel})"
+        elif ddb_type == "TIMESTAMP":
+            # DuckDB returns datetime objects; compare ISO strings
+            for expected, actual in zip(_TYPE_BOUNDARIES[ddb_type], got):
+                assert str(actual).startswith(str(expected)[:19]), (
+                    f"timestamp lost precision: {expected!r} → {actual!r}"
+                )
+        else:
+            assert got == _TYPE_BOUNDARIES[ddb_type]
+    finally:
+        con.close()
+
+
+def test_unsigned_types_reject_negative_values():
+    """Sanity: attempting to insert a negative value into an unsigned
+    column must error, not silently wrap. If it ever silently wraps,
+    we'd lose data integrity in custom-field ingest."""
+    con = duckdb.connect(":memory:")
+    try:
+        con.execute("CREATE TABLE t (val UINTEGER)")
+        with pytest.raises(duckdb.Error):
+            con.execute("INSERT INTO t VALUES (-1)")
+    finally:
+        con.close()
+
+
+def test_varchar_preserves_full_unicode_byte_length():
+    """A 4-byte UTF-8 codepoint must round-trip without truncation."""
+    con = duckdb.connect(":memory:")
+    try:
+        con.execute("CREATE TABLE t (val VARCHAR)")
+        emoji = "🚀" * 100  # 4-byte codepoint repeated
+        con.execute("INSERT INTO t VALUES (?)", (emoji,))
+        # DuckDB: ``length`` counts codepoints, ``strlen`` counts UTF-8 bytes.
+        got = con.execute("SELECT val, length(val), strlen(val) FROM t").fetchone()
+        assert got[0] == emoji
+        assert got[1] == 100  # 100 codepoints
+        assert got[2] == 400  # 4 bytes each → 400 bytes total
+    finally:
+        con.close()
+
+
+def test_double_preserves_more_precision_than_float():
+    """``ottfb`` and ``ottlb`` use DOUBLE to preserve sub-microsecond
+    timing. A regression to FLOAT would silently lose ~5 decimal places.
+    """
+    con = duckdb.connect(":memory:")
+    try:
+        con.execute("CREATE TABLE t (f FLOAT, d DOUBLE)")
+        precise = 123456.789012345
+        con.execute("INSERT INTO t VALUES (?, ?)", (precise, precise))
+        f_val, d_val = con.execute("SELECT f, d FROM t").fetchone()
+        # IEEE-754 single (FLOAT) has ~7 significant decimal digits; for a
+        # value with 6 integer digits that's roughly 4-5 e-5 precision.
+        # IEEE-754 double has ~15 digits → effectively exact here.
+        assert abs(f_val - precise) > 1e-5, f"FLOAT should drift past 1e-5, drift={f_val - precise}"
+        assert abs(d_val - precise) < 1e-9, f"DOUBLE should be exact-ish: drift={d_val - precise}"
+    finally:
+        con.close()
+
+
+def test_timestamptz_with_explicit_offsets_round_trip():
+    """``backend.core.ingest`` casts the ``timestamp`` field to TIMESTAMPTZ
+    (not plain TIMESTAMP) and the ``end_time`` filter binds ``?::TIMESTAMPTZ``.
+    The plain TIMESTAMP cases above don't validate that values with
+    explicit timezone offsets survive the round-trip — pinned here so a
+    DuckDB minor that changed TZ semantics would fail loudly.
+    """
+    con = duckdb.connect(":memory:")
+    try:
+        # Load ICU so TIMESTAMPTZ formatting is deterministic across hosts.
+        con.execute("INSTALL icu; LOAD icu;")
+        con.execute("SET TimeZone = 'UTC'")
+        con.execute("CREATE TABLE t (ts TIMESTAMPTZ)")
+        # ISO 8601 strings with explicit offsets — DuckDB casts each to
+        # UTC internally; the round-trip must preserve the instant.
+        values = [
+            ("2026-05-15T12:00:00+00:00", "2026-05-15 12:00:00+00"),
+            ("2026-05-15T12:00:00-07:00", "2026-05-15 19:00:00+00"),
+            ("2026-05-15T17:30:00+05:30", "2026-05-15 12:00:00+00"),
+        ]
+        for raw, _ in values:
+            con.execute("INSERT INTO t VALUES (?::TIMESTAMPTZ)", (raw,))
+
+        # Sort by ts so the comparison order is deterministic.
+        rows = con.execute(
+            "SELECT strftime(ts, '%Y-%m-%d %H:%M:%S') AS s, "
+            "       (ts AT TIME ZONE 'UTC')::TIMESTAMP AS utc_ts "
+            "FROM t ORDER BY rowid"
+        ).fetchall()
+        # Strings normalise to UTC; the three rows above all encode the
+        # same UTC instant 2026-05-15 12:00:00 EXCEPT the second row
+        # (which is 19:00:00 UTC). Cross-check on the UTC string.
+        utc_strs = [r[0] for r in rows]
+        assert utc_strs == ["2026-05-15 12:00:00", "2026-05-15 19:00:00", "2026-05-15 12:00:00"]
+    finally:
+        con.close()
+
+
+def test_timestamptz_end_time_filter_pushdown_excludes_future_rows():
+    """The ``end_time`` filter binds the cutoff as ``?::TIMESTAMPTZ``.
+    Pin that ``ts <= ?::TIMESTAMPTZ`` correctly excludes a row whose
+    timestamp is past the cutoff, even when row TZ != cutoff TZ.
+    """
+    con = duckdb.connect(":memory:")
+    try:
+        con.execute("INSTALL icu; LOAD icu;")
+        con.execute("SET TimeZone = 'UTC'")
+        con.execute("CREATE TABLE t (ts TIMESTAMPTZ)")
+        # Row at 2026-05-15 11:59:59 UTC (under cutoff).
+        con.execute("INSERT INTO t VALUES ('2026-05-15T11:59:59Z'::TIMESTAMPTZ)")
+        # Row at 2026-05-15 12:00:01 UTC (over cutoff).
+        con.execute("INSERT INTO t VALUES ('2026-05-15T12:00:01Z'::TIMESTAMPTZ)")
+        # Cutoff supplied in a non-UTC offset to exercise the cast path
+        # ingest actually uses (the API serialises whatever the analyst
+        # picked in their tz).
+        cutoff = "2026-05-15T05:00:00-07:00"  # = 12:00:00 UTC
+        n = con.execute("SELECT COUNT(*) FROM t WHERE ts <= ?::TIMESTAMPTZ", (cutoff,)).fetchone()[0]
+        assert n == 1, f"expected 1 row at/under cutoff, got {n}"
+    finally:
+        con.close()
+
+
+def test_microsecond_precision_for_elapsed_ottfb_round_trip_via_parquet():
+    """Pin that microsecond-scale values for elapsed / ottfb / ottlb
+    survive a parquet write + read cycle without truncation. Catches
+    Arrow / Parquet codec drift that would silently lose precision on
+    timing fields (e.g. p99 latency reported as 63 ms instead of 63 µs).
+    """
+    import os
+    import tempfile
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    # Realistic microsecond-scale values: 50ms request, 1.234s request,
+    # 63s long-poll (prod p99 per memory note), and one large UBIGINT
+    # that DOUBLE could not represent precisely.
+    elapsed_us = [50_000, 1_234_567, 63_000_000, 9_007_199_254_740_993]
+    # ottfb/ottlb are also UBIGINT per the catalog. Use sub-ms values
+    # that would round if accidentally cast to ms.
+    ottfb_us = [128, 4_287, 12_345_678, 1_000_001]
+
+    table = pa.table(
+        {
+            "elapsed": pa.array(elapsed_us, type=pa.uint64()),
+            "ottfb": pa.array(ottfb_us, type=pa.uint64()),
+        }
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "timing.parquet")
+        pq.write_table(table, path, compression="zstd")
+
+        con = duckdb.connect(":memory:")
+        try:
+            rows = con.execute(f"SELECT elapsed, ottfb FROM read_parquet('{path}') ORDER BY elapsed").fetchall()
+        finally:
+            con.close()
+
+    # Sort the expected list by elapsed to match the SQL ORDER BY.
+    expected = sorted(zip(elapsed_us, ottfb_us))
+    assert rows == expected, f"microsecond values drifted across parquet RT: {rows} != {expected}"
+
+
+# ── Merged from tests/core/test_duckdb_concurrency.py ──
+def _src(db_path: str) -> dict:
+    """Minimal source dict the connection setup will accept.
+
+    ``_configure_fos`` runs unconditionally and reads several keys; supply
+    empty strings to match the default-source pattern in
+    [_build_default_source](../../backend/core/duckdb.py#L93).
+    """
+    return {
+        "name": "test",
+        "duckdb_path": db_path,
+        "endpoint": "",
+        "access_key_id": "",
+        "secret_access_key": "",
+        "region": "us-east-1",
+        "bucket": "",
+        "prefix": "",
+        "cdn_url": "",
+        "cdn_secret": "",
+    }
+
+
+def _make_failing_connect(fail_count: int, real_connect, target_path: str):
+    """Return a duckdb.connect stand-in that fails ``fail_count`` times
+    with a lock error, then delegates to the real connect.
+    """
+    state = {"calls": 0}
+
+    def _fake(db_path, read_only=False):
+        if db_path != target_path:
+            return real_connect(db_path, read_only=read_only)
+        state["calls"] += 1
+        if state["calls"] <= fail_count:
+            # The substring must match one of the patterns get_connection
+            # treats as a lock error: "conflict", "locked", or
+            # "different configuration". Use "locked" — most representative.
+            raise duckdb.Error("Could not set lock on file: database is locked")
+        return real_connect(db_path, read_only=read_only)
+
+    return _fake, state
+
+
+def test_succeeds_after_transient_lock_errors(tmp_path, monkeypatch):
+    """Three lock failures, then success."""
+    db_path = str(tmp_path / "retry.duckdb")
+    # Pre-create the file so the `if not os.path.exists` branch in get_connection doesn't run and confuse the call counts
+    duckdb.connect(db_path).close()
+
+    real_connect = duckdb.connect
+    fake, state = _make_failing_connect(fail_count=3, real_connect=real_connect, target_path=db_path)
+    monkeypatch.setattr(duckdb_mod.duckdb, "connect", fake)
+
+    # Reproduce an earlier test's background work while these patches are live.
+    def unrelated_work():
+        duckdb.connect(str(tmp_path / "unrelated.duckdb")).close()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(unrelated_work).result()
+    assert state["calls"] == 0
+
+    src = _src(db_path)
+    con = get_connection(src, max_wait=5.0, read_only=False)
+    try:
+        assert con.execute("SELECT 1").fetchone() == (1,)
+    finally:
+        con.close()
+
+    assert state["calls"] == 4, "should have retried 3 times then succeeded on the 4th call"
+
+
+def test_uses_exponential_backoff(tmp_path, monkeypatch):
+    """Sleep durations should roughly double up to the cap. We capture the
+    sleep arguments rather than measuring wall time so the test isn't flaky
+    on slow CI."""
+    db_path = str(tmp_path / "backoff.duckdb")
+    duckdb.connect(db_path).close()
+
+    real_connect = duckdb.connect
+    fake, _ = _make_failing_connect(fail_count=5, real_connect=real_connect, target_path=db_path)
+    monkeypatch.setattr(duckdb_mod.duckdb, "connect", fake)
+
+    sleeps: list[float] = []
+    real_sleep = time.sleep
+
+    def _capture_sleep(seconds):
+        if threading.current_thread() is threading.main_thread():
+            sleeps.append(seconds)
+            real_sleep(0)
+        else:
+            real_sleep(seconds)
+
+    monkeypatch.setattr(duckdb_mod.time, "sleep", _capture_sleep)
+
+    # Trigger the False branch of _capture_sleep from a background thread
+    bg_sleeps = []
+
+    def bg_thread():
+        duckdb_mod.time.sleep(1.23)
+        bg_sleeps.append(1.23)
+
+    t = threading.Thread(target=bg_thread)
+    t.start()
+    t.join()
+
+    src = _src(db_path)
+    con = get_connection(src, max_wait=30.0, read_only=False)
+    con.close()
+
+    # Five retries → five sleeps.
+    assert len(sleeps) == 5
+    assert bg_sleeps == [1.23]
+    # 50ms, 100ms, 200ms, 400ms, then capped at 500ms.
+    # Allow tiny floating-point fuzz.
+    expected = [0.05, 0.10, 0.20, 0.40, 0.50]
+    for i, (got, want) in enumerate(zip(sleeps, expected)):
+        assert abs(got - want) < 1e-6, f"sleep #{i + 1}: expected {want}s, got {got}s. Full sequence: {sleeps}"
+
+
+def test_deadline_exceeded_raises_dbbusyerror(tmp_path, monkeypatch):
+    """When the deadline is reached, the caller sees DBBusyError — not a
+    raw DuckDB exception. This is the contract dashboards rely on to
+    translate to a clean 'system busy, retry' response."""
+    db_path = str(tmp_path / "busy.duckdb")
+
+    real_connect = duckdb.connect
+    calls = {"n": 0}
+
+    def _always_locked(path, read_only=False):
+        if path != db_path:
+            return real_connect(path, read_only=read_only)
+        calls["n"] += 1
+        raise duckdb.Error("Could not set lock on file: database is locked")
+
+    monkeypatch.setattr(duckdb_mod.duckdb, "connect", _always_locked)
+
+    # Patch sleep to a no-op so the test runs fast — the deadline still
+    # advances via time.monotonic().
+    real_sleep = time.sleep
+    owner = threading.current_thread()
+    monkeypatch.setattr(
+        duckdb_mod.time, "sleep", lambda s: None if threading.current_thread() is owner else real_sleep(s)
+    )
+
+    src = _src(db_path)
+    with pytest.raises(DBBusyError) as excinfo:
+        get_connection(src, max_wait=0.2)
+
+    assert "locked by another process" in str(excinfo.value)
+    # __cause__ preserves the original DuckDB error for forensic debugging.
+    assert excinfo.value.__cause__ is not None
+    assert calls["n"] > 1
+
+
+def test_non_lock_error_is_not_retried(tmp_path, monkeypatch):
+    """Random errors must propagate immediately — retry would mask bugs."""
+    db_path = str(tmp_path / "boom.duckdb")
+    calls = {"n": 0}
+    real_connect = duckdb.connect
+
+    def _boom(path, read_only=False):
+        if path != db_path:
+            return real_connect(path, read_only=read_only)
+        calls["n"] += 1
+        raise duckdb.Error("Catastrophic failure: something unrelated to locking")
+
+    monkeypatch.setattr(duckdb_mod.duckdb, "connect", _boom)
+
+    src = _src(db_path)
+    with pytest.raises(duckdb.Error, match="Catastrophic failure"):
+        get_connection(src, max_wait=5.0, read_only=False)
+
+    assert calls["n"] == 1, "non-lock errors must not be retried"
+
+
+def test_writer_then_reader_release_path(tmp_path):
+    """Sanity: open a writer, close it, then a reader succeeds without
+    retries. Ensures the retry path is contention-only — no false positives
+    in the no-contention case."""
+    db_path = str(tmp_path / "release.duckdb")
+
+    boot = duckdb.connect(db_path)
+    boot.execute("CREATE TABLE t(x INTEGER)")
+    boot.close()
+
+    src = _src(db_path)
+
+    # Open and immediately close a writer.
+    w = get_connection(src, read_only=False)
+    w.close()
+
+    # Reader should sail through.
+    r = get_connection(src, read_only=True)
+    try:
+        r.execute("SELECT count(*) FROM t").fetchone()
+    finally:
+        r.close()
+
+
+# ── Merged from tests/core/test_duckdb_recycle.py ──
+def test_live_set_hits_zero_with_real_conns(tmp_path):
+    """Real DuckDB conns registered in the liveness set drop to zero once closed
+    and GC'd — the authoritative signal the recycle waits on."""
+    dbfile = str(tmp_path / "real.duckdb")
+    path = os.path.abspath(dbfile)
+    assert d.live_connection_count(path) == 0
+
+    conns = [duckdb.connect(dbfile) for _ in range(3)]
+    for c in conns:
+        d._register_live_connection(c, path)
+    assert d.live_connection_count(path) == 3
+
+    for c in conns:
+        c.close()
+    conns.clear()
+    c = None  # drop the lingering loop-variable ref to the last conn
+    gc.collect()
+    assert d.live_connection_count(path) == 0
+
+
+def test_recycle_once_no_services(monkeypatch):
+    monkeypatch.setattr(rec.svcconfig, "list_configs", lambda: [])
+    assert rec.recycle_once() == "no services configured"
+
+
+def test_sources_grouped_by_db_path(monkeypatch):
+    """Two services sharing a duckdb_path land in one group (one instance)."""
+    cfgs = [
+        {"name": "svc1", "duckdb_path": "/tmp/shared.duckdb"},
+        {"name": "svc2", "duckdb_path": "/tmp/shared.duckdb"},
+    ]
+    monkeypatch.setattr(rec.svcconfig, "list_configs", lambda: cfgs)
+    monkeypatch.setattr(rec._db, "_source_from_config", lambda c: c)
+
+    groups = rec._sources_by_db_path()
+    assert len(groups) == 1
+    ((only_path, sources),) = groups.items()
+    assert only_path == os.path.abspath("/tmp/shared.duckdb")
+    assert {s["name"] for s in sources} == {"svc1", "svc2"}
+
+
+def test_recycle_db_path_success_releases_barrier_and_lock(tmp_path):
+    """With no pools and no live conns, a recycle reports 'recycled' and always
+    leaves the barrier cleared and the service lock released."""
+    path = os.path.abspath(str(tmp_path / "ok.duckdb"))
+    src = {"name": "rec_ok_svc", "duckdb_path": path}
+
+    result = rec._recycle_db_path(path, [src])
+
+    assert result["status"] == "recycled"
+    assert result["live_after"] == 0
+    # Barrier cleared.
+    assert path not in d._recycle_barrier_active
+    # Lock fully released (acquirable again right away).
+    lock = _get_service_lock("rec_ok_svc")
+    assert lock.acquire(blocking=False) is True
+    lock.release()
+
+
+def test_recycle_db_path_skips_when_write_lock_busy(tmp_path, monkeypatch):
+    """If a writer holds the service lock, recycle aborts cleanly (no barrier)."""
+    monkeypatch.setenv("DUCKDB_RECYCLE_LOCK_TIMEOUT_MS", "100")
+    path = os.path.abspath(str(tmp_path / "busy.duckdb"))
+    src = {"name": "rec_busy_svc", "duckdb_path": path}
+    lock = _get_service_lock("rec_busy_svc")
+
+    held = threading.Event()
+    release = threading.Event()
+
+    def holder():
+        lock.acquire()
+        held.set()
+        release.wait(timeout=5.0)
+        lock.release()
+
+    th = threading.Thread(target=holder)
+    th.start()
+    held.wait(timeout=2.0)
+    try:
+        result = rec._recycle_db_path(path, [src])
+        assert result["status"] == "skipped_locked"
+        # Recycle never raised the barrier because it bailed before acquiring.
+        assert path not in d._recycle_barrier_active
+    finally:
+        release.set()
+        th.join(timeout=2.0)
+
+
+def test_barrier_no_block_when_clear():
+    """_barrier_wait returns immediately when no barrier is active."""
+    t0 = time.monotonic()
+    d._barrier_wait("/tmp/no-barrier.duckdb")
+    assert time.monotonic() - t0 < 0.1
+
+
+def test_barrier_blocks_then_fails_open(monkeypatch):
+    """With a barrier set and never cleared, _barrier_wait returns after the cap
+    (fail-open) — it must never block a connection open indefinitely."""
+    monkeypatch.setenv("DUCKDB_RECYCLE_BARRIER_CAP_MS", "150")
+    path = "/tmp/failopen.duckdb"
+    d.set_recycle_barrier(path, True)
+    try:
+        t0 = time.monotonic()
+        d._barrier_wait(path)
+        elapsed = time.monotonic() - t0
+        # Returned by fail-open, ~cap, even though the barrier is still set.
+        assert 0.1 <= elapsed < 0.6
+        assert path in d._recycle_barrier_active
+    finally:
+        d.set_recycle_barrier(path, False)
+
+
+def test_barrier_cleared_unblocks_immediately(monkeypatch):
+    """Clearing the barrier wakes a parked waiter well before the cap."""
+    monkeypatch.setenv("DUCKDB_RECYCLE_BARRIER_CAP_MS", "5000")
+    path = "/tmp/cleared.duckdb"
+    d.set_recycle_barrier(path, True)
+    elapsed = {}
+
+    def waiter():
+        t0 = time.monotonic()
+        d._barrier_wait(path)
+        elapsed["t"] = time.monotonic() - t0
+
+    th = threading.Thread(target=waiter)
+    th.start()
+    time.sleep(0.1)
+    d.set_recycle_barrier(path, False)  # clear → should wake the waiter now
+    th.join(timeout=2.0)
+    assert not th.is_alive()
+    assert elapsed["t"] < 1.0  # nowhere near the 5s cap
+
+
+def test_barrier_per_db_path_isolation(monkeypatch):
+    """A barrier on one db file must not block opens against a different file."""
+    monkeypatch.setenv("DUCKDB_RECYCLE_BARRIER_CAP_MS", "5000")
+    a, b = "/tmp/path_a.duckdb", "/tmp/path_b.duckdb"
+    d.set_recycle_barrier(a, True)
+    try:
+        t0 = time.monotonic()
+        d._barrier_wait(b)  # different path — must not block
+        assert time.monotonic() - t0 < 0.2
+    finally:
+        d.set_recycle_barrier(a, False)
+
+
+def test_live_connection_set_tracks_and_drops():
+    """Registered conns count as live; once unreferenced + GC'd they drop out."""
+    path = "/tmp/liveset.duckdb"
+    before = d.live_connection_count(path)
+    conns = [MagicMock() for _ in range(3)]
+    for c in conns:
+        d._register_live_connection(c, path)
+    assert d.live_connection_count(path) == before + 3
+    conns.clear()
+    c = None  # drop the lingering loop-variable ref to the last conn
+    gc.collect()
+    assert d.live_connection_count(path) == before
+
+
+def test_current_rss_bytes_returns_positive():
+    rss = d.current_rss_bytes()
+    assert rss is None or rss > 0

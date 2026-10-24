@@ -19,11 +19,14 @@ Per the plan:
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
+import os
 import re
 import secrets
 import time
+from urllib.parse import urlparse
 
 from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -31,15 +34,37 @@ from starlette.responses import JSONResponse, Response
 
 from backend.core import share_db
 from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS
-from backend.utils.admin_gateway import (
-    ADMIN_GATEWAY_HEADER,
-    admin_gateway_required,
-    authenticated_admin_gateway,
-)
 from backend.utils.rate_limit import SlidingWindowLimiter
 from backend.utils.tunnel import compute_fingerprint, get_tunnel_manager
 
 logger = logging.getLogger(__name__)
+
+ADMIN_GATEWAY_HEADER = "X-Admin-Gateway-Token"
+
+
+def admin_gateway_required() -> bool:
+    return os.getenv("ADMIN_GATEWAY_REQUIRED", "") == "1"
+
+
+def validate_admin_gateway_config() -> None:
+    if os.getenv("ADMIN_GATEWAY_REQUIRED", "") not in ("", "0", "1"):
+        raise ValueError("ADMIN_GATEWAY_REQUIRED must be 0 or 1")
+    secret = os.getenv("ADMIN_GATEWAY_SECRET", "")
+    if (admin_gateway_required() or secret) and len(secret) < 32:
+        raise ValueError("ADMIN_GATEWAY_SECRET must contain at least 32 characters for admin gateway access")
+
+
+def authenticated_admin_gateway(request: Request) -> bool:
+    if getattr(request.state, "admin_gateway_authenticated", False):
+        return True
+    if request.headers.get("x-proxied-by-caddy"):
+        return False
+    secret = os.getenv("ADMIN_GATEWAY_SECRET", "")
+    values = request.headers.getlist(ADMIN_GATEWAY_HEADER)
+    if len(secret) < 32 or len(values) != 1:
+        return False
+    return hmac.compare_digest(values[0].encode("utf-8"), secret.encode("utf-8"))
+
 
 # Response envelope fields that carry server-internal telemetry. Stripped
 # Cap on how many bytes of a POST body the middleware will buffer to
@@ -211,7 +236,6 @@ _ANALYST_ALLOWED_WRITE_PREFIXES = (
     "/api/value/",  # POST /api/value/summary — service summary read-only query
     "/api/web-vitals",  # POST /api/web-vitals — browser perf beacon (no PII)
     "/api/charts/",
-    "/api/web-vitals",  # POST /api/web-vitals — client perf telemetry
     "/api/ux-events",  # POST /api/ux-events — DataTable column reorders + sibling UX signals
     "/api/assets/",  # POST /api/assets/aggregates — assets/shield read-only query
     "/api/high-scale/",  # POST high-scale request-fact queries are read-only
@@ -266,7 +290,6 @@ _LOCAL_HOST_ALLOWLIST = {
     "web",
 }
 
-import os
 
 # Admins can extend the local host allowlist via comma-separated hostnames in env:
 # e.g., LOCAL_HOSTS=backend,frontend,my-custom-service
@@ -456,18 +479,11 @@ def _local_host_allowed(host_header: str) -> bool:
     return "*" in _LOCAL_HOST_ALLOWLIST or base in _LOCAL_HOST_ALLOWLIST
 
 
-def _remote_host_allowed(host_header: str) -> bool:
-    if not host_header:
-        return False
-    base = host_header.split(":")[0].lower()
-    if "*" in _LOCAL_HOST_ALLOWLIST or base in _LOCAL_HOST_ALLOWLIST:
-        return True
+def _allowed_remote_hosts() -> list[str]:
     mgr = get_tunnel_manager()
     state = mgr.state
     candidates: list[str] = []
     if state.public_endpoint:
-        from urllib.parse import urlparse
-
         pe = urlparse(state.public_endpoint)
         if pe.hostname:
             candidates.append(pe.hostname.lower())
@@ -483,41 +499,27 @@ def _remote_host_allowed(host_header: str) -> bool:
                     if val and isinstance(val, str):
                         candidates.append(val.strip().lower())
     except Exception:
-        logger.debug("_remote_host_allowed: step failed (ignored)", exc_info=True)
+        logger.debug("_allowed_remote_hosts: step failed (ignored)", exc_info=True)
 
-    return any(base == c for c in candidates)
+    return candidates
+
+
+def _remote_host_allowed(host_header: str) -> bool:
+    if not host_header:
+        return False
+    base = host_header.split(":")[0].lower()
+    if "*" in _LOCAL_HOST_ALLOWLIST or base in _LOCAL_HOST_ALLOWLIST:
+        return True
+    return any(base == c for c in _allowed_remote_hosts())
 
 
 def _origin_allowed(origin: str) -> bool:
     if not origin:
         return False
-    from urllib.parse import urlparse
-
-    parsed = urlparse(origin)
-    host = (parsed.hostname or "").lower()
+    host = (urlparse(origin).hostname or "").lower()
     if not host:
         return False
-    mgr = get_tunnel_manager()
-    state = mgr.state
-    if state.public_endpoint:
-        pe = urlparse(state.public_endpoint)
-        if pe.hostname and pe.hostname.lower() == host:
-            return True
-
-    try:
-        from backend import config
-
-        for cfg in config.list_configs():
-            rf = cfg.get("remote_frontend")
-            if isinstance(rf, dict):
-                for k in ("domain_name", "origin_host", "override_host"):
-                    val = rf.get(k)
-                    if val and isinstance(val, str) and val.strip().lower() == host:
-                        return True
-    except Exception:
-        logger.debug("_origin_allowed: step failed (ignored)", exc_info=True)
-
-    return False
+    return any(host == c for c in _allowed_remote_hosts())
 
 
 def _is_blocked_path(path: str) -> bool:

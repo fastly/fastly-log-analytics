@@ -5,7 +5,7 @@ import {
   TrendingDown,
   Info,
 } from 'lucide-react'
-import type { InsightContent } from '../types'
+import type { InsightContent } from '../../shared'
 
 export function getOptimizationContent(id: string): InsightContent | null {
   switch (id) {

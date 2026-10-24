@@ -32,7 +32,7 @@ import { request as httpsRequest } from 'node:https'
 
 import { cookies, headers } from 'next/headers'
 
-import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
+import { DEBUG_RESPONSES_COOKIE } from '@/lib/cookies'
 
 // Bootstrap can take 1-3s under cron contention on prod (full FOS scan
 // + iceberg manifest walk). 5s is generous but bounded — past that

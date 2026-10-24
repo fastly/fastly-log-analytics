@@ -17,8 +17,7 @@ from backend.models.admin import IngestedFilesResponse, LogExtentsResponse, Sync
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.sync_status_publisher import publisher as sync_status_publisher
 from backend.utils.router_utils import make_error, query_errors, raise_internal, require_service_id
-from backend.utils.sse import sse_response
-from backend.utils.sse_subscription import iter_with_disconnect_ping
+from backend.utils.sse import iter_with_disconnect_ping, sse_response
 
 logger = logging.getLogger(__name__)
 

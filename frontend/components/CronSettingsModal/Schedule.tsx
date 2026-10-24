@@ -13,10 +13,35 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { RetentionSelect } from '@/components/ui/retention-select'
-import {
-  COMMIT_INTERVAL_OPTIONS,
-  SYNC_INTERVAL_OPTIONS,
-} from './constants'
+
+export const SYNC_INTERVAL_OPTIONS = [
+  { value: '1', label: 'Every 1 minute' },
+  { value: '5', label: 'Every 5 minutes' },
+  { value: '15', label: 'Every 15 minutes' },
+  { value: '30', label: 'Every 30 minutes' },
+  { value: '60', label: 'Every 1 hour' },
+  { value: '360', label: 'Every 6 hours' },
+]
+
+export const COMMIT_INTERVAL_OPTIONS = [
+  { value: '1', label: 'Every 1 minute' },
+  { value: '2', label: 'Every 2 minutes' },
+  { value: '5', label: 'Every 5 minutes' },
+  { value: '10', label: 'Every 10 minutes' },
+  { value: '15', label: 'Every 15 minutes' },
+  { value: '30', label: 'Every 30 minutes' },
+  { value: '60', label: 'Every 1 hour' },
+]
+
+export const NGWAF_INTERVAL_OPTIONS = [
+  { value: '60', label: 'Every 1 hour' },
+  { value: '180', label: 'Every 3 hours' },
+  { value: '360', label: 'Every 6 hours' },
+  { value: '720', label: 'Every 12 hours' },
+  { value: '1440', label: 'Every 24 hours' },
+  { value: '4320', label: 'Every 3 days' },
+  { value: '10080', label: 'Every 7 days' },
+]
 
 interface AnalystSchedulePanelProps {
   syncEnabled: boolean

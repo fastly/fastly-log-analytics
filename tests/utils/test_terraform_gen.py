@@ -1,26 +1,4 @@
-"""Tests for backend.utils.terraform_gen.generate_terraform.
-
-This module ships ``.tf.json`` files that customers run ``terraform apply``
-against. A malformed file means a broken customer infra deploy, so the
-suite focuses on:
-
-- Output is valid JSON and passes ``terraform fmt -check`` (canonical formatting).
-- Output is byte-identical across repeated calls (idempotent).
-- Custom fields produce matching ``capture_snippets/*.vcl`` files.
-- User-supplied strings (bucket, endpoint_name, custom_condition) flow through
-  ``json.dumps`` so quote / backslash / newline injection is structurally
-  impossible. The remaining Terraform-template prefix (``${``, ``%{``) is
-  still escaped explicitly — covered by :func:`test_template_prefix_escape`.
-
-``terraform validate`` requires provider downloads (network). It's run when
-``TERRAFORM_VALIDATE=1`` is set in the environment (CI), and skipped
-otherwise so the suite stays fast and offline-friendly locally.
-
-5b.3a migrated the generator from f-string HCL to ``.tf.json`` (Terraform's
-JSON config syntax). The output filenames carry the ``.tf.json`` suffix;
-Terraform accepts ``.tf`` and ``.tf.json`` interchangeably in the same
-module.
-"""
+"""Consolidated tests for test_terraform_gen."""
 
 from __future__ import annotations
 
@@ -72,7 +50,8 @@ def _baseline_cfg() -> dict:
     }
 
 
-def _write_files(out: dict[str, str], dest: str) -> None:
+def _write_files(out: dict[str, str], dest: str | Path) -> None:
+    dest = os.fspath(dest)
     """Write generator output to ``dest``, mirroring the zip-export layout."""
     for fname, content in out.items():
         if fname == "instructions":
@@ -498,3 +477,105 @@ def test_baseline_output_matches_snapshot(snapshot):
     hex64 = _re.compile(r"\b[0-9a-f]{64}\b")
     snapshot_view = {fname: hex64.sub("<HEX64>", content) for fname, content in sorted(out.items())}
     assert snapshot_view == snapshot
+
+
+# ── Merged from test_terraform_resource_graph.py ──────────────────────────────────────────────
+
+import os
+import shutil
+from pathlib import Path
+
+import pytest
+
+TERRAFORM_INSTALLED = shutil.which("terraform") is not None
+RUN_VALIDATE = os.environ.get("TERRAFORM_VALIDATE") == "1"
+
+TFTEST_DIR = Path(__file__).parent / "terraform_tests"
+
+
+# `terraform init` + `terraform test` (plan mode) is ~46s solo; under `make
+# ci`'s `-n auto` it also serializes behind the sibling `terraform validate`
+# test on the shared `tf_provider_cache.lock`, so the lock-wait eats into the
+# default 60s pytest-timeout. The thread-method timeout `os._exit()`s the xdist
+# worker — failing this test *and* discarding the worker's coverage data. Give
+# it generous headroom (the suite-wide 10-min CI timeout is the real backstop).
+# Heavyweight real-terraform subprocess: run in the dedicated serial (`-n 0`,
+# un-niced) test-ci step, excluded from the niced `-n auto` pool where its
+# xdist worker hard-crashed (see Makefile/ci.yml split).
+@pytest.mark.terraform_cli
+@pytest.mark.timeout(300)
+@pytest.mark.skipif(
+    not (TERRAFORM_INSTALLED and RUN_VALIDATE),
+    reason="set TERRAFORM_VALIDATE=1 + install terraform to run resource-graph assertions",
+)
+def test_resource_graph_assertions_via_terraform_test(tmp_path):
+    out = generate_terraform(_baseline_cfg(), "AKIA_TEST_KEY", "secret_test_value")
+    _write_files(out, tmp_path)
+
+    # Stub provider configs — `command = plan` in the .tftest.hcl means no
+    # real API calls happen, but the providers still need to *initialize*.
+    # The skip_* flags neutralize AWS's IMDS/STS auth dance. The Fastly
+    # provider accepts a non-empty api_key for plan-only operations.
+    (tmp_path / "_providers.tf").write_text(
+        """
+provider "aws" {
+  region                      = "us-east-1"
+  access_key                  = "AKIA_TEST_KEY"
+  secret_key                  = "secret_test_value"
+  skip_credentials_validation = true
+  skip_region_validation      = true
+  skip_requesting_account_id  = true
+  skip_metadata_api_check     = true
+}
+
+provider "fastly" {
+  api_key = "fastly-test-key"
+}
+"""
+    )
+
+    # `terraform test` looks for .tftest.hcl in the module root or the
+    # `tests/` subdir. Copy the resource_graph file in so the layout is
+    # what the CLI expects.
+    shutil.copy(TFTEST_DIR / "resource_graph.tftest.hcl", tmp_path / "resource_graph.tftest.hcl")
+
+    from pathlib import Path
+
+    from filelock import FileLock
+
+    cache_dir = Path(__file__).parents[2] / "cache" / "tf_provider_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["TF_PLUGIN_CACHE_DIR"] = str(cache_dir)
+
+    lock_path = cache_dir.parent / "tf_provider_cache.lock"
+    with FileLock(str(lock_path)):
+        init = subprocess.run(
+            ["terraform", "init", "-backend=false", "-input=false", "-no-color"],
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert init.returncode == 0, f"terraform init failed:\n{init.stdout}\n{init.stderr}"
+
+        # `terraform test` runs each `run` block and reports per-assertion failures.
+        test = subprocess.run(
+            ["terraform", "test", "-no-color"],
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert test.returncode == 0, (
+            f"terraform test failed (resource-graph assertion broke):\n"
+            f"--- stdout ---\n{test.stdout}\n"
+            f"--- stderr ---\n{test.stderr}"
+        )
+
+    # Sanity: every run block should report as `pass`. The stdout has
+    # lines like "  run \"foo\"... pass". If the binary's output format
+    # changes, the rc check above is still the source of truth.
+    assert "fail" not in test.stdout.lower() or "0 failed" in test.stdout.lower(), (
+        f"unexpected failure in terraform test output:\n{test.stdout}"
+    )

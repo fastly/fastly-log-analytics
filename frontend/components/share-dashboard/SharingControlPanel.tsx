@@ -11,7 +11,7 @@ import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 import { useSearchParams } from 'next/navigation'
 
-import { useShareMutation } from './useShareMutation'
+import { useShareMutation } from './utils'
 import { type ShareStatus } from './utils'
 import { formatDuration } from '@/lib/date'
 

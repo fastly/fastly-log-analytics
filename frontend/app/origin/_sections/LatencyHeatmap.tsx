@@ -10,7 +10,7 @@ import { cn } from '@/lib/utils';
 import { formatBytes, formatCount } from '@/lib/format'
 import { columnHeader, msCell } from '@/lib/table-utils'
 import { Server, MapPin, Globe } from 'lucide-react'
-import { useActiveLogFields } from '@/hooks/useActiveLogFields'
+import { useActiveLogFields } from '@/hooks/useLogFieldsCatalog'
 import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
 import type {
   OriginIpHealth,

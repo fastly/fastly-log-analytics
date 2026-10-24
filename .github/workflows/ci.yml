@@ -170,7 +170,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: cache/tf_provider_cache
-          key: ${{ runner.os }}-terraform-providers-${{ hashFiles('backend/utils/terraform_gen.py', 'tests/utils/test_terraform_gen.py', 'tests/utils/test_terraform_resource_graph.py') }}
+          key: ${{ runner.os }}-terraform-providers-${{ hashFiles('backend/utils/terraform_gen.py', 'tests/utils/test_terraform_gen.py') }}
           restore-keys: |
             ${{ runner.os }}-terraform-providers-
 

@@ -587,7 +587,10 @@ def test_get_share_audit_logs_filters_by_time_window():
 
 
 def test_rate_limiter_lru_eviction(monkeypatch):
-    from backend.utils.tunnel import rate_limiter
+    try:
+        from backend.utils.tunnel import rate_limiter
+    except ImportError:
+        from backend.utils.tunnel import session as rate_limiter
 
     # Set MAX_TRACKED_IPS to 3 for testing.
     monkeypatch.setattr(rate_limiter, "MAX_TRACKED_IPS", 3)

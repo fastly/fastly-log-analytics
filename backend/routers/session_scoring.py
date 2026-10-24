@@ -268,6 +268,12 @@ def _bust_analytics_cache(service_id: str | None = None) -> None:
                 del _analytics_cache[k]
 
 
+def _tenant_matrix_path(service_id: str):
+    from backend.provision.session_scoring_orchestrator import _MATRIX_PATH
+
+    return _MATRIX_PATH.with_name(f"{_MATRIX_PATH.stem}_{service_id}{_MATRIX_PATH.suffix}")
+
+
 def _load_matrix(service_id: str) -> dict | None:
     """Load the trained L2 transition matrix for ``service_id``.
 
@@ -289,7 +295,7 @@ def _load_matrix(service_id: str) -> dict | None:
     from backend.provision.session_scoring_orchestrator import _MATRIX_PATH
 
     # 1. Tenant-scoped local matrix.
-    tenant_path = _MATRIX_PATH.with_name(f"{_MATRIX_PATH.stem}_{service_id}{_MATRIX_PATH.suffix}")
+    tenant_path = _tenant_matrix_path(service_id)
     try:
         if tenant_path.exists():
             with tenant_path.open() as f:
@@ -837,7 +843,6 @@ def scoring_labels_create(
 ) -> dict:
     """Create or update a label. Upserts on (service_id, sid)."""
     from backend.scoring import labels as _labels
-    from backend.utils.auth import require_service_in_scope
 
     require_service_in_scope(request, service_id)
 
@@ -919,7 +924,6 @@ def scoring_labels_delete(
     documented in the audit (loopback-only, not token-gated).
     """
     from backend.scoring import labels as _labels
-    from backend.utils.auth import require_service_in_scope
 
     require_service_in_scope(request, service_id)
 
@@ -934,6 +938,18 @@ def scoring_labels_delete(
 # above as _query_logs / _fetch_session_events / _reconstruct_labeled_sessions).
 # Route handlers build SQL strings (table-name validated via
 # _safe_table_name) and delegate execution + telemetry attribution there.
+
+
+def _prepare_scoring_query(
+    request: Request, service_id: str, since_hours: int
+) -> tuple[str, set[str], str, str | None]:
+    from backend.core.duckdb import _safe_table_name
+
+    _enforce_scoring_service_scope(request, service_id)
+    cols = _table_columns(service_id)
+    src = _scoring_source(_safe_table_name(service_id), cols)
+    ts_pred, win_disc = _scoring_time_window(request, since_hours)
+    return src, cols, ts_pred, win_disc
 
 
 @router.get(
@@ -953,12 +969,7 @@ def scoring_top_flagged(
     cookie_compliance. Joining against the labels table is left to the
     UI (so it can show "currently labeled X" badges without paying the
     JOIN cost server-side)."""
-    from backend.core.duckdb import _safe_table_name
-
-    _enforce_scoring_service_scope(request, service_id)
-    table = _safe_table_name(service_id)
-    src = _scoring_source(table, _table_columns(service_id))
-    ts_pred, win_disc = _scoring_time_window(request, since_hours)
+    src, _cols, ts_pred, win_disc = _prepare_scoring_query(request, service_id, since_hours)
     # ``ip`` is masked for analysts by the response middleware's key-name
     # pass (the column is literally ``ip``); ``ua`` / ``url`` are left intact
     # because analysts triage flagged sessions on them.
@@ -984,12 +995,7 @@ def scoring_score_distribution(
     """Hourly buckets × score buckets (0, 25, 50, 75, 100). Returns a flat
     list of {hour, bucket, count} rows; the frontend pivots for the
     histogram."""
-    from backend.core.duckdb import _safe_table_name
-
-    _enforce_scoring_service_scope(request, service_id)
-    table = _safe_table_name(service_id)
-    src = _scoring_source(table, _table_columns(service_id))
-    ts_pred, win_disc = _scoring_time_window(request, since_hours)
+    src, _cols, ts_pred, win_disc = _prepare_scoring_query(request, service_id, since_hours)
     return _cached(
         ("score-distribution", service_id, since_hours, win_disc),
         lambda: {
@@ -1011,12 +1017,7 @@ def scoring_compliance_breakdown(
 ) -> dict:
     """Hourly count grouped by edge_cookie_compliance (ok / missing /
     tampered / expired / unknown)."""
-    from backend.core.duckdb import _safe_table_name
-
-    _enforce_scoring_service_scope(request, service_id)
-    table = _safe_table_name(service_id)
-    src = _scoring_source(table, _table_columns(service_id))
-    ts_pred, win_disc = _scoring_time_window(request, since_hours)
+    src, _cols, ts_pred, win_disc = _prepare_scoring_query(request, service_id, since_hours)
     return _cached(
         ("compliance-breakdown", service_id, since_hours, win_disc),
         lambda: {
@@ -1056,14 +1057,7 @@ def scoring_latency_timeseries(
     regardless of width), and ``granularity`` ("minute"|"hour") is returned
     so the UI can label the axis.
     """
-    from backend.core.duckdb import _safe_table_name
-
-    _enforce_scoring_service_scope(request, service_id)
-    table = _safe_table_name(service_id)
-    ts_pred, win_disc = _scoring_time_window(request, since_hours)
-
-    cols = _table_columns(service_id)
-    src = _scoring_source(table, cols)
+    src, cols, ts_pred, win_disc = _prepare_scoring_query(request, service_id, since_hours)
     has_rtt = "edge_score_rtt_us" in cols
     has_exec = "edge_score_exec_us" in cols
 
@@ -1102,17 +1096,10 @@ def scoring_health(
     count (rows where the scorer's deliver-stage subfields didn't land —
     typically a Compute timeout or auth mismatch).
     """
-    from backend.core.duckdb import _safe_table_name
-
-    _enforce_scoring_service_scope(request, service_id)
-    table = _safe_table_name(service_id)
-    ts_pred, win_disc = _scoring_time_window(request, since_hours)
-
     # Scorer-latency columns are optional (present only after a service is
     # re-provisioned post-2026-06-17). Detect them so the query degrades to
     # the pre-latency shape on older services instead of a binder error.
-    cols = _table_columns(service_id)
-    src = _scoring_source(table, cols)
+    src, cols, ts_pred, win_disc = _prepare_scoring_query(request, service_id, since_hours)
     has_rtt = "edge_score_rtt_us" in cols
     has_exec = "edge_score_exec_us" in cols
 
@@ -1453,13 +1440,9 @@ def scoring_threshold_preview(
     Cached 30s under the existing ``_cached`` pattern; the cache key
     includes the threshold so dragging the slider re-fetches.
     """
-    from backend.core.duckdb import _safe_table_name
     from backend.scoring import labels as _labels
 
-    _enforce_scoring_service_scope(request, service_id)
-    table = _safe_table_name(service_id)
-    src = _scoring_source(table, _table_columns(service_id))
-    ts_pred, win_disc = _scoring_time_window(request, since_hours)
+    src, _cols, ts_pred, win_disc = _prepare_scoring_query(request, service_id, since_hours)
     threshold_int = int(threshold)
 
     def _produce() -> dict:

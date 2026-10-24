@@ -15,7 +15,7 @@ import {
   BOT_EFFICIENCY_COLUMN_IDS,
   FINGERPRINT_COLUMN_IDS,
 } from './securityInfo'
-import { useActiveLogFields } from '@/hooks/useActiveLogFields'
+import { useActiveLogFields } from '@/hooks/useLogFieldsCatalog'
 import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
 import type { components } from '@/types/api.generated'
 

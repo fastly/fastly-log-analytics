@@ -6,7 +6,7 @@ import { ColumnDef } from '@tanstack/react-table'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { TopFlaggedHelp } from '@/components/SessionScoring/help-content'
-import { DataTable, ColumnVisibilityDropdown, DateTimeCell } from '@/components/DataTable'
+import { DataTable, ColumnVisibilityDropdown, DateTimeCell, columnIdOf } from '@/components/DataTable'
 import { Badge } from '@/components/ui/badge'
 import {
   Select,
@@ -19,10 +19,9 @@ import { useScoringLabels } from '@/hooks/useScoringLabels'
 
 import { FlagSessionPopover } from './FlagSessionPopover'
 import { SessionEventsDialog } from './SessionEventsDialog'
-import { useScoringQuery } from './useScoringQuery'
+import { useScoringQuery } from './useScorerTimeseries'
 import { client } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
-import { columnIdOf } from '@/components/DataTable/columnId'
 import type { components } from '@/types/api.generated'
 
 interface TopFlaggedTableProps {

@@ -1,7 +1,7 @@
 import { Suspense } from 'react'
 import { HydrationBoundary } from '@tanstack/react-query'
 
-import { fetchStreamingServerSide } from '@/lib/ssr/streaming'
+import { fetchStreamingServerSide } from '@/lib/ssr/upstream'
 import { seedDehydratedState } from '@/lib/ssr/seed'
 import { resolvePageServiceId } from '@/lib/ssr/service'
 import StreamingLoading from './loading'

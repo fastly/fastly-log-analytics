@@ -365,89 +365,9 @@ def validate_user_sql(
 
     t0 = time.monotonic()
 
-    # Parse via json_serialize_sql. Any parser exception OR a returned
-    # ``{"error": true, ...}`` envelope counts as a rejection (fail
-    # closed). This forces the parser to see ALL whitespace and bracket
-    # balance issues at validation time, not at execution time when a
-    # malformed payload could land halfway through a statement.
-    try:
-        row = parser_con.execute("SELECT json_serialize_sql(?)", [sql]).fetchone()
-    except Exception as exc:
-        _reject(
-            sql,
-            "parse_error",
-            f"SQL parse failed: {exc}",
-            session_id,
-            service_id,
-        )
-
-    if not row or row[0] is None:
-        _reject(sql, "parse_empty", "SQL parse returned no output", session_id, service_id)
-
-    try:
-        parsed = json.loads(row[0])
-    except json.JSONDecodeError as exc:
-        _reject(sql, "parse_invalid_json", f"json_serialize_sql output invalid: {exc}", session_id, service_id)
-
-    if not isinstance(parsed, dict):
-        _reject(sql, "parse_unexpected_shape", "expected JSON object", session_id, service_id)
-
-    # The parser surfaces malformed SQL as ``{"error": true, ...}``
-    # rather than raising — fail closed on that branch.
-    if parsed.get("error") is True:
-        err_type = parsed.get("error_type", "")
-        err_msg = parsed.get("error_message", "<unknown>")
-        _reject(
-            sql,
-            f"parse_error:{err_type}",
-            f"SQL parse error: {err_msg}",
-            session_id,
-            service_id,
-        )
-
-    statements = parsed.get("statements")
-    if not isinstance(statements, list) or len(statements) == 0:
-        _reject(sql, "no_statements", "no parseable statements", session_id, service_id)
-    if len(statements) > 1:
-        _reject(
-            sql,
-            "multi_statement",
-            f"only one statement allowed, got {len(statements)}",
-            session_id,
-            service_id,
-        )
-
-    # Statement-type whitelist. SELECT and CTE-wrapping WITH both
-    # surface as a ``SELECT_NODE`` inside ``node``. SET_OPERATION_NODE
-    # is UNION/INTERSECT/EXCEPT — also legitimate.
-    stmt = statements[0]
-    node = stmt.get("node") if isinstance(stmt, dict) else None
-    node_type = node.get("type") if isinstance(node, dict) else None
-    if node_type not in ALLOWED_STATEMENT_TYPES:
-        _reject(
-            sql,
-            f"statement_type:{node_type or '?'}",
-            f"only SELECT / WITH / UNION statements allowed (got {node_type})",
-            session_id,
-            service_id,
-        )
-
-    # SHOW / DESCRIBE / SUMMARIZE parse as SELECT_NODE with from_table
-    # of type "SHOW_REF" — they slip past the statement-type gate above.
-    # Reject them outright on the user-query path: SHOW TABLES leaks foreign
-    # service table names (cross-tenant catalog disclosure) and DESCRIBE
-    # leaks schemas. is_simple_select_statement already filters these for
-    # the auto-LIMIT path; the validator now matches that contract.
-    if isinstance(node, dict):
-        from_table = node.get("from_table")
-        if isinstance(from_table, dict) and from_table.get("type") == "SHOW_REF":
-            _reject(
-                sql,
-                "show_ref",
-                "SHOW / DESCRIBE / SUMMARIZE statements are not allowed via /api/query",
-                session_id,
-                service_id,
-            )
+    parsed, _node, err_code, err_msg = _parse_single_select_node(sql, parser_con)
+    if err_code is not None or parsed is None:
+        _reject(sql, err_code or "parse_error", err_msg or "SQL parse error", session_id, service_id)
 
     # Recursive walk: catalog blocklist (table_name / schema_name /
     # catalog_name) + function denylist + optional per-call allowed_tables.
@@ -788,39 +708,58 @@ def escape_sql_literal(value: str) -> str:
     return value.replace("'", "''")
 
 
+def _parse_single_select_node(
+    sql: str,
+    parser_con: duckdb.DuckDBPyConnection,
+    *,
+    allow_multi: bool = False,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None, str | None]:
+    """Serialize ``sql`` via ``json_serialize_sql`` and verify the top-level SELECT/UNION node."""
+    try:
+        row = parser_con.execute("SELECT json_serialize_sql(?)", [sql]).fetchone()
+    except Exception as exc:
+        return None, None, "parse_error", f"SQL parse failed: {exc}"
+    if not row or row[0] is None:
+        return None, None, "parse_empty", "SQL parse returned no output"
+    try:
+        parsed = json.loads(row[0])
+    except json.JSONDecodeError as exc:
+        return None, None, "parse_invalid_json", f"json_serialize_sql output invalid: {exc}"
+    if not isinstance(parsed, dict):
+        return None, None, "parse_unexpected_shape", "expected JSON object"
+    if parsed.get("error") is True:
+        err_type = parsed.get("error_type", "")
+        err_msg = parsed.get("error_message", "<unknown>")
+        return None, None, f"parse_error:{err_type}", f"SQL parse error: {err_msg}"
+
+    statements = parsed.get("statements")
+    if not isinstance(statements, list) or len(statements) == 0:
+        return None, None, "no_statements", "no parseable statements"
+    if not allow_multi and len(statements) > 1:
+        return None, None, "multi_statement", f"only one statement allowed, got {len(statements)}"
+
+    stmt = statements[0]
+    node = stmt.get("node") if isinstance(stmt, dict) else None
+    node_type = node.get("type") if isinstance(node, dict) else None
+    if not isinstance(node, dict) or node_type not in ALLOWED_STATEMENT_TYPES:
+        return (
+            None,
+            None,
+            f"statement_type:{node_type or '?'}",
+            f"only SELECT / WITH / UNION statements allowed (got {node_type})",
+        )
+
+    from_table = node.get("from_table")
+    if isinstance(from_table, dict) and from_table.get("type") == "SHOW_REF":
+        return None, None, "show_ref", "SHOW / DESCRIBE / SUMMARIZE statements are not allowed via /api/query"
+
+    return parsed, node, None, None
+
+
 def is_simple_select_statement(sql: str, *, parser_con: duckdb.DuckDBPyConnection) -> bool:
     """Return True iff ``sql`` parses as a SELECT-like statement that returns
     a result set (e.g. SELECT, WITH, VALUES, FROM, TABLE) and is not a
     SHOW/DESCRIBE/SUMMARIZE or other fixed-shape metadata statement.
     """
-    try:
-        row = parser_con.execute("SELECT json_serialize_sql(?)", [sql]).fetchone()
-    except Exception:
-        return False
-    if not row or row[0] is None:
-        return False
-    try:
-        parsed = json.loads(row[0])
-    except Exception:
-        return False
-    if not isinstance(parsed, dict) or parsed.get("error"):
-        return False
-
-    statements = parsed.get("statements")
-    if not isinstance(statements, list) or not statements:
-        return False
-
-    stmt = statements[0]
-    node = stmt.get("node") if isinstance(stmt, dict) else None
-    if not isinstance(node, dict):
-        return False
-
-    node_type = node.get("type")
-    if node_type not in ("SELECT_NODE", "SET_OPERATION_NODE"):
-        return False
-
-    from_table = node.get("from_table")
-    if isinstance(from_table, dict) and from_table.get("type") == "SHOW_REF":
-        return False
-
-    return True
+    _parsed, node, err_code, _err_msg = _parse_single_select_node(sql, parser_con, allow_multi=True)
+    return err_code is None and node is not None

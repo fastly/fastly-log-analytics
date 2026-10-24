@@ -79,3 +79,13 @@ export function useNowMs(enabled = true): number {
     _getServerSnapshot,
   )
 }
+
+/**
+ * Returns seconds elapsed since `startedAt` using the shared 1-second tick.
+ * Pass null/undefined to pause (returns 0).
+ */
+export function useElapsedTime(startedAt: string | null | undefined): number {
+  const nowMs = useNowMs(Boolean(startedAt))
+  if (!startedAt) return 0
+  return Math.max(0, (nowMs - new Date(startedAt).getTime()) / 1000)
+}

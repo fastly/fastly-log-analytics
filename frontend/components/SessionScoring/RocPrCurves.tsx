@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import { Info, LineChart } from 'lucide-react'
-import { useScoringQuery } from './useScoringQuery'
+import { useScoringQuery } from './useScorerTimeseries'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { CardErrorState } from '@/components/CardErrorState'
@@ -11,7 +11,7 @@ import { PlotlyChart } from '@/components/PlotlyChart'
 import { Skeleton } from '@/components/ui/skeleton'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
-import { CHART_COLORS } from '@/lib/chart-colors'
+import { CHART_COLORS } from '@/lib/chart-builders'
 
 // Generated from the /scoring/curves response_model — single source of truth.
 type CurvePoint = NonNullable<components['schemas']['ScoringCurvePoint']>

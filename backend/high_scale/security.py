@@ -19,12 +19,12 @@ import contextvars
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from backend.core.high_scale_sections import HighScaleSections, clickhouse_source
+from backend.high_scale._common import _bucket_case, parse_time_window, visible_publication_fence_sql
 from backend.high_scale._filters import build_clickhouse_filters as _build_clickhouse_filters
-from backend.high_scale._projection_utils import range_value as _range_value
 from backend.high_scale.registry import HighScaleService
 from backend.models.security import (
     SecurityAggregatesResponse,
@@ -71,7 +71,6 @@ _REQ_HEADER_LAST = ">32KB"
 _CONN_REUSE_BUCKETS = ((1, "1 (None)"), (5, "2-5"), (20, "6-20"), (100, "21-100"))
 _CONN_REUSE_LAST = ">100"
 
-from backend.high_scale._scope import visible_publication_fence_sql
 from backend.utils.pop_utils import _effective_pop_lat_lon_map
 
 # Same POP coordinates as the standard GET_PROXY_STATS / GET_ACTIVE_PROXY_CLIENTS
@@ -81,9 +80,6 @@ _POP_DEFAULT = (38.0, -97.0)
 
 _IS_IPV6 = "lower(custom_fields['is_ipv6']) IN ('1', 'true', 't', 'yes')"
 _IS_BOT = "lower(custom_fields['is_bot']) IN ('1', 'true', 't', 'yes')"
-
-
-from backend.high_scale._common import _bucket_case
 
 
 def _pop_coord(index: int, default: float) -> str:
@@ -115,8 +111,7 @@ class _Scope:
 
 
 def _scope(service: HighScaleService, req: Any, start_time: str | None, end_time: str | None) -> _Scope:
-    end = _range_value(end_time) or datetime.now(UTC)
-    start = _range_value(start_time) or (end - timedelta(days=1))
+    start, end = parse_time_window(start_time, end_time)
     filter_sql, filter_params = _build_clickhouse_filters(getattr(req, "filters", None) or {})
     where = (
         f"service_id={{service_id:String}} AND {visible_publication_fence_sql('request')} "
@@ -556,9 +551,13 @@ def security_aggregates(
             return "projection" if key.startswith("ngwaf_") and not scope.filtered else "fact"
 
         res: dict[str, Any] = {}
-        if len(tasks) == 1:
-            k, fn = tasks[0]
-            val = trace.run(k, fn, source=source_for(k), activity="overhead" if k == "ngwaf_configured" else "compute")
+        for k, val in trace.run_parallel(
+            tasks,
+            source=source_for,
+            activity=lambda k: "overhead" if k == "ngwaf_configured" else "compute",
+            max_workers=8,
+            thread_name_prefix="hs-sec",
+        ).items():
             if k == "_top_bots":
                 res["bots"] = val["bots"]
                 res["ngwaf_bots"] = val["ngwaf_bots"]
@@ -566,30 +565,6 @@ def security_aggregates(
                 res.update(val)
             else:
                 res[k] = val
-        elif tasks:
-            with ThreadPoolExecutor(max_workers=min(8, len(tasks)), thread_name_prefix="hs-sec") as pool:
-                futs = [
-                    (
-                        k,
-                        trace.submit(
-                            pool,
-                            k,
-                            fn,
-                            source=source_for(k),
-                            activity="overhead" if k == "ngwaf_configured" else "compute",
-                        ),
-                    )
-                    for k, fn in tasks
-                ]
-                for k, fut in futs:
-                    val = fut.result()
-                    if k == "_top_bots":
-                        res["bots"] = val["bots"]
-                        res["ngwaf_bots"] = val["ngwaf_bots"]
-                    elif k == "_proxies":
-                        res.update(val)
-                    else:
-                        res[k] = val
         res["section_timings"] = trace.timings()
         _memo.put(memo_key, dict(res))
         return res

@@ -11,7 +11,7 @@ import { cn } from '@/lib/utils'
 import { useEffectiveServiceId } from '@/hooks/useIsDataReady'
 import { useSessionRoleStore } from '@/stores/sessionRoleStore'
 import { InsightCard, SEVERITY_BADGE_CLASS } from '@/components/Insights/InsightCard'
-import { InsightCardSkeleton } from '@/components/Insights/InsightCardSkeleton'
+import { InsightCardSkeleton } from '@/components/Insights/InsightCard'
 import { Button } from '@/components/ui/button'
 import {
   Select,

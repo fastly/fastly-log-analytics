@@ -18,8 +18,11 @@ from backend.core import metadata
 from backend.core.request_context import RequestContext, build_request_context
 from backend.core.share_db.validation import mask_ip
 from backend.deps import require_admin
-from backend.high_scale.aggregate_query import DEFAULT_AGGREGATE_DIMENSIONS, query_clickhouse_aggregate
-from backend.high_scale.aggregates import AggregateRequest
+from backend.high_scale.aggregate_query import (
+    DEFAULT_AGGREGATE_DIMENSIONS,
+    AggregateRequest,
+    query_clickhouse_aggregate,
+)
 from backend.high_scale.exports import ExportJob, ExportManager, get_export_manager
 from backend.high_scale.historical_jobs import HistoricalJobManager, get_historical_job_manager
 from backend.high_scale.query_router import QueryIntent, QueryRouter, QueryTier
@@ -77,46 +80,15 @@ def _export_response(service_id: str, job: ExportJob, *, cancelled: bool | None 
     return HighScaleExportCancelResponse.with_telemetry(cancelled=cancelled, **payload)
 
 
-def _query_export_rows(
-    req: HighScaleExportRequest,
-    service,
-    *,
-    start: datetime,
-    end: datetime,
-):
-    if req.domain == "request":
-        return query_request_facts(
-            service.client,
-            service_id=service.service_id,
-            start=start,
-            end=end,
-            cursor_secret=service.cursor_secret,
-            watermark=service.watermark_for("request"),
-            limit=req.limit,
-            cursor=req.cursor,
-        ).rows
-    if req.domain == "cmcd":
-        return query_cmcd_facts(
-            service.client,
-            service_id=service.service_id,
-            start=start,
-            end=end,
-            cursor_secret=service.cursor_secret,
-            watermark=service.watermark_for("cmcd"),
-            limit=req.limit,
-            cursor=req.cursor,
-        ).rows
-    return query_rum_facts(
-        service.client,
-        service_id=service.service_id,
-        domain=req.domain,
-        start=start,
-        end=end,
-        cursor_secret=service.cursor_secret,
-        watermark=service.watermark_for(req.domain),
-        limit=req.limit,
-        cursor=req.cursor,
-    ).rows
+def _clamp_and_parse_window(
+    ctx: RequestContext, start_time: str | None, end_time: str | None
+) -> tuple[datetime, datetime]:
+    start_raw, end_raw = ctx.clamp(start_time, end_time)
+    start = parse_iso_utc(start_raw)
+    end = parse_iso_utc(end_raw)
+    if start is None or end is None:
+        raise ValueError("start_time and end_time are required ISO-8601 timestamps")
+    return start, end
 
 
 def _serialize_export_row(row: dict) -> bytes:
@@ -137,12 +109,8 @@ def request_export(
     manager: ExportManager = Depends(get_export_manager),
 ):
     service = _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=True, mismatch_on_scope=True)
-    start_raw, end_raw = ctx.clamp(req.start_time, req.end_time)
-    start = parse_iso_utc(start_raw)
-    end = parse_iso_utc(end_raw)
-    if start is None or end is None:
-        raise ValueError("start_time and end_time are required ISO-8601 timestamps")
-    rows = _query_export_rows(req, service, start=start, end=end)
+    start, end = _clamp_and_parse_window(ctx, req.start_time, req.end_time)
+    rows = _fetch_facts_page(service, req.domain, start=start, end=end, limit=req.limit, cursor=req.cursor).rows
     export_id = uuid4().hex
     manager.submit(export_id, rows, _serialize_export_row)
     with _export_owners_lock:
@@ -364,11 +332,7 @@ def _execute_request_facts_query(
         if not req_start:
             req_start = iso_z(now_dt - timedelta(hours=24))
 
-    start_raw, end_raw = ctx.clamp(req_start, req_end)
-    start = parse_iso_utc(start_raw)
-    end = parse_iso_utc(end_raw)
-    if start is None or end is None:
-        raise ValueError("start_time and end_time are required ISO-8601 timestamps")
+    start, end = _clamp_and_parse_window(ctx, req_start, req_end)
 
     service = registry.resolve(ctx.service_id)
     if service is None:
@@ -408,11 +372,7 @@ def _execute_request_facts_query(
             for k in ("status", "pop", "host"):
                 if k not in row and cf.get(k) is not None:
                     row[k] = cf[k]
-    if mask_ips_for(ctx.analyst_session):
-        for row in rows:
-            value = row.get("client_ip")
-            if isinstance(value, str):
-                row["client_ip"] = mask_ip(value)
+    _mask_client_ip_rows(rows, ctx)
 
     meta = page.metadata
     return HighScaleRequestFactResponse.with_telemetry(
@@ -587,11 +547,7 @@ def rum_facts(
         raise HTTPException(status_code=404, detail=make_error("not_found", "RUM domain not found"))
     service = _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=True)
 
-    start_raw, end_raw = ctx.clamp(req.start_time, req.end_time)
-    start = parse_iso_utc(start_raw)
-    end = parse_iso_utc(end_raw)
-    if start is None or end is None:
-        raise ValueError("start_time and end_time are required ISO-8601 timestamps")
+    start, end = _clamp_and_parse_window(ctx, req.start_time, req.end_time)
 
     try:
         watermark = service.watermark_for(domain)
@@ -611,12 +567,7 @@ def rum_facts(
         limit=req.limit,
         cursor=req.cursor,
     )
-    rows = [dict(row) for row in page.rows]
-    if mask_ips_for(ctx.analyst_session):
-        for row in rows:
-            value = row.get("client_ip")
-            if isinstance(value, str):
-                row["client_ip"] = mask_ip(value)
+    rows = _mask_client_ip_rows([dict(row) for row in page.rows], ctx)
     return HighScaleRumFactResponse.with_telemetry(
         rows=rows,
         next_cursor=page.next_cursor,
@@ -636,11 +587,7 @@ def cmcd_facts(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
 ):
     service = _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=False)
-    start_raw, end_raw = ctx.clamp(req.start_time, req.end_time)
-    start = parse_iso_utc(start_raw)
-    end = parse_iso_utc(end_raw)
-    if start is None or end is None:
-        raise ValueError("start_time and end_time are required ISO-8601 timestamps")
+    start, end = _clamp_and_parse_window(ctx, req.start_time, req.end_time)
     try:
         watermark = service.watermark_for("cmcd")
     except KeyError:
@@ -679,11 +626,7 @@ def aggregates(
 ):
     service = _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=True)
 
-    start_raw, end_raw = ctx.clamp(req.start_time, req.end_time)
-    start = parse_iso_utc(start_raw)
-    end = parse_iso_utc(end_raw)
-    if start is None or end is None:
-        raise ValueError("start_time and end_time are required ISO-8601 timestamps")
+    start, end = _clamp_and_parse_window(ctx, req.start_time, req.end_time)
 
     try:
         watermark = service.watermark_for(req.domain)
@@ -784,11 +727,7 @@ def submit_query(
 ):
     service = _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=True)
 
-    start_raw, end_raw = ctx.clamp(req.start_time, req.end_time)
-    start = parse_iso_utc(start_raw)
-    end = parse_iso_utc(end_raw)
-    if start is None or end is None:
-        raise ValueError("start_time and end_time are required ISO-8601 timestamps")
+    start, end = _clamp_and_parse_window(ctx, req.start_time, req.end_time)
 
     plan = QueryRouter().plan(
         RouterQueryRequest(

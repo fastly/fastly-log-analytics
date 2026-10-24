@@ -3,8 +3,29 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
 from datetime import UTC, datetime
 from typing import overload
+
+GAMMA = 1.02
+RELATIVE_ERROR = (GAMMA - 1.0) / (GAMMA + 1.0)
+_LOG_GAMMA = math.log(GAMMA)
+
+
+def _centroid(value: float) -> float:
+    if value == 0.0:
+        return 0.0
+    magnitude = abs(value)
+    index = math.ceil(math.log(magnitude) / _LOG_GAMMA)
+    centre = 2.0 * GAMMA**index / (GAMMA + 1.0)
+    return math.copysign(centre, value)
+
+
+def sketch(values: list[float]) -> tuple[list[float], list[int]]:
+    """Return ``(centroids, counts)`` sorted by centroid; every observation is counted once."""
+    histogram = Counter(_centroid(value) for value in values)
+    centroids = sorted(histogram)
+    return centroids, [histogram[centroid] for centroid in centroids]
 
 
 @overload
@@ -48,6 +69,13 @@ def finite_float(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if math.isfinite(parsed) else None
+
+
+def optional_int(value: object) -> int | None:
+    parsed = finite_float(value)
+    if parsed is None or not parsed.is_integer():
+        return None
+    return int(parsed)
 
 
 def percentiles(values: list[float], qs: tuple[float, ...]) -> list[float | None]:

@@ -3,7 +3,7 @@ import { HydrationBoundary } from '@tanstack/react-query'
 import {
   fetchSecurityServerSide,
   SECURITY_SSR_DEFAULTS,
-} from '@/lib/ssr/security'
+} from '@/lib/ssr/upstream'
 import { seedDehydratedState } from '@/lib/ssr/seed'
 import { resolvePageServiceId } from '@/lib/ssr/service'
 import SecurityClient from './_sections/SecurityClient'

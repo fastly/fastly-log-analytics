@@ -32,7 +32,7 @@ vi.mock('@/components/charts/TimeSeriesChart', () => ({
 vi.mock('@/components/PlotlyChart/PlotlyChart', async () => (await import('@/__tests__/helpers/page-smoke')).plotlyChartModuleMock())
 
 const { activeFields } = vi.hoisted(() => ({ activeFields: new Set<string>() }))
-vi.mock('@/hooks/useActiveLogFields', async () => (await import('@/__tests__/helpers/page-smoke')).activeLogFieldsSetModuleMock(activeFields))
+vi.mock('@/hooks/useLogFieldsCatalog', async () => (await import('@/__tests__/helpers/page-smoke')).activeLogFieldsSetModuleMock(activeFields))
 
 import { TrafficChart } from '@/app/dashboard/_sections/TrafficChart'
 import type { ReportConfiguration } from '@/hooks/useReportConfig'

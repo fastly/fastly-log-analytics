@@ -12,8 +12,11 @@ from structlog.testing import capture_logs
 
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.publication import ClickHousePublication, InMemoryBatchManifestStore
-from backend.high_scale.recovery import rebuild_origin_projections_from_fos, rebuild_serving_state_from_fos
-from backend.high_scale.recovery_capacity import RecoveryCapacityMeasurement
+from backend.high_scale.recovery import (
+    RecoveryCapacityMeasurement,
+    rebuild_origin_projections_from_fos,
+    rebuild_serving_state_from_fos,
+)
 from tests.high_scale.test_recovery import NOW, ReplayClient, _Catalog, _manifest
 
 
@@ -150,8 +153,7 @@ def _run_cli(cli, monkeypatch, tmp_path, measurement: dict | None, *, complete: 
     def fake_rebuild(*args, **kwargs):
         seen.update(kwargs)
         capacity = kwargs.get("capacity")
-        from backend.high_scale.recovery import RecoveryReport
-        from backend.high_scale.recovery_capacity import evaluate_recovery_capacity
+        from backend.high_scale.recovery import RecoveryReport, evaluate_recovery_capacity
 
         report = evaluate_recovery_capacity(capacity) if capacity else None
         return RecoveryReport(

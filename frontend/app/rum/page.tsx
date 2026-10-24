@@ -1,6 +1,6 @@
 import { HydrationBoundary } from '@tanstack/react-query';
 
-import { fetchRumStatusServerSide } from '@/lib/ssr/rum';
+import { fetchRumStatusServerSide } from '@/lib/ssr/upstream';
 import { seedDehydratedState } from '@/lib/ssr/seed';
 import { resolvePageServiceId } from '@/lib/ssr/service';
 import RumPageClient from './_sections/RumPageClient';

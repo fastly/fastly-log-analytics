@@ -5,9 +5,9 @@ import { PlotlyChart } from '@/components/PlotlyChart'
 import { useTimeseriesToTraces } from '@/hooks/useTimeseriesToTraces'
 import { ChartEmptyState } from '@/components/ChartEmptyState'
 import { SECURITY_INFO } from './securityInfo'
-import { useActiveLogFields } from '@/hooks/useActiveLogFields'
+import { useActiveLogFields } from '@/hooks/useLogFieldsCatalog'
 import type { components } from '@/types/api.generated'
-import { CHART_COLORS } from '@/lib/chart-colors'
+import { CHART_COLORS } from '@/lib/chart-builders'
 import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
 
 type SecurityData = components['schemas']['SecurityAggregatesResponse']

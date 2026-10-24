@@ -130,3 +130,71 @@ def publish_sync_status_safe(service_id: str, log_label: str = "scheduler") -> N
             _sync_status_publisher.publish(service_id, snapshot)
     except Exception:
         logger.exception("[%s] %s: sync-status SSE publish failed", log_label, service_id)
+
+
+def _buffer_result_error(result: dict, default_error: str | None = None) -> str | None:
+    """Extract combined error and quarantined-file message from a ``commit_buffer`` result dict."""
+    parts: list[str] = []
+    if result.get("error"):
+        parts.append(str(result["error"]))
+    quarantined = int(result.get("quarantined_files", 0) or 0)
+    if quarantined:
+        parts.append(f"{quarantined} unreadable buffer file(s) quarantined")
+    return "; ".join(parts) if parts else default_error
+
+
+def apply_time_range_pinning(
+    service_id: str,
+    cfg: dict,
+    src: dict,
+    *,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    is_manual: bool = False,
+    fallback_to_created_at: bool = False,
+    pin_explicit_range: bool = False,
+    get_scheduler_fn: Callable | None = None,
+) -> tuple[str | None, str | None]:
+    """Resolve and persist provisioning ``time_range`` bounds for sync/metadata jobs."""
+    from backend import config as svcconfig
+
+    prov = cfg.get("provisioning", {})
+    should_pin = False
+    if not start_time and not is_manual:
+        tr = prov.get("time_range")
+        if tr and tr.get("start"):
+            start_time = tr["start"]
+            logger.info("[scheduler] %s: Using configured start_time limit: %s", service_id, start_time)
+            should_pin = pin_explicit_range
+        elif fallback_to_created_at and cfg.get("created_at"):
+            start_time = cfg["created_at"]
+            logger.info(
+                "[scheduler] %s: Fallback to service creation time as start_time limit: %s", service_id, start_time
+            )
+            should_pin = True
+    elif pin_explicit_range and (start_time or end_time):
+        should_pin = True
+
+    if should_pin and (start_time or end_time):
+
+        def _pin_time_range(c: dict) -> None:
+            time_range = c.setdefault("provisioning", {}).setdefault("time_range", {})
+            if start_time:
+                time_range["start"] = start_time
+            if end_time:
+                time_range["end"] = end_time
+
+        _pin_time_range(cfg)
+        svcconfig.mutate_config(service_id, _pin_time_range)
+        src["time_range"] = cfg["provisioning"]["time_range"]
+        if fallback_to_created_at:
+            logger.info("[scheduler] %s: Saved service creation time as start_time limit to config.", service_id)
+    elif is_manual and not start_time and not end_time:
+        if "time_range" in prov:
+            del prov["time_range"]
+            cfg["provisioning"] = prov
+            svcconfig.mutate_config(service_id, lambda c: c.get("provisioning", {}).pop("time_range", None))
+            src["time_range"] = None
+            logger.info("[scheduler] %s: Manual sync-all, cleared time_range limit.", service_id)
+
+    return start_time, end_time

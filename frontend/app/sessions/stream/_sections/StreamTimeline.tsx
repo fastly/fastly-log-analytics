@@ -5,7 +5,7 @@ import { PlotlyChart } from '@/components/PlotlyChart'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { Activity } from 'lucide-react'
 import type { TimelinePoint } from './useStreamAggregates'
-import { CHART_COLORS } from '@/lib/chart-colors'
+import { CHART_COLORS } from '@/lib/chart-builders'
 
 const TIMELINE_LAYOUT = {
   yaxis: { title: { text: 'kbps' } },

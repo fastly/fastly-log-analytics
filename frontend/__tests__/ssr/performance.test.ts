@@ -30,7 +30,7 @@ describe('SSR-seed key ↔ client first-paint key byte-match', () => {
   it('the page.tsx seed key === the client key', async () => {
     const { hashKey } = await import('@tanstack/react-query')
     const { resolveDefaultSsrRangeKey } = await import('@/lib/ssr/upstream')
-    const { PERFORMANCE_SSR_DEFAULTS } = await import('@/lib/ssr/performance')
+    const { PERFORMANCE_SSR_DEFAULTS } = await import('@/lib/ssr/upstream')
 
     const serviceId = 'svc-1'
     const { rangeToken, anchor } = resolveDefaultSsrRangeKey(new Date('2026-06-29T12:00:30Z'))
@@ -44,7 +44,7 @@ describe('SSR-seed key ↔ client first-paint key byte-match', () => {
 describe('fetchPerformanceServerSide (performance SSR)', () => {
   it('returns null without a serviceId (no upstream call)', async () => {
     process.env.API_PROXY_URL = 'http://127.0.0.1:1'
-    const { fetchPerformanceServerSide } = await import('@/lib/ssr/performance')
+    const { fetchPerformanceServerSide } = await import('@/lib/ssr/upstream')
     expect(await fetchPerformanceServerSide(undefined)).toBeNull()
   })
 
@@ -57,7 +57,7 @@ describe('fetchPerformanceServerSide (performance SSR)', () => {
         res.end('{}')
       },
       async (srv) => {
-        const { fetchPerformanceServerSide } = await import('@/lib/ssr/performance')
+        const { fetchPerformanceServerSide } = await import('@/lib/ssr/upstream')
         const out = await fetchPerformanceServerSide('svc-1')
         expect(out).toBeNull()
         expect(srv.requests).toHaveLength(0)
@@ -78,7 +78,7 @@ describe('fetchPerformanceServerSide (performance SSR)', () => {
         const {
           fetchPerformanceServerSide,
           PERFORMANCE_SSR_DEFAULTS,
-        } = await import('@/lib/ssr/performance')
+        } = await import('@/lib/ssr/upstream')
         const now = new Date('2026-06-29T12:00:30Z')
         const out = await fetchPerformanceServerSide('svc-1', now)
 
@@ -114,7 +114,7 @@ describe('fetchPerformanceServerSide (performance SSR)', () => {
           res.end('boom')
         },
         async () => {
-          const { fetchPerformanceServerSide } = await import('@/lib/ssr/performance')
+          const { fetchPerformanceServerSide } = await import('@/lib/ssr/upstream')
           const out = await fetchPerformanceServerSide('svc-1')
           expect(out).toBeNull()
         },

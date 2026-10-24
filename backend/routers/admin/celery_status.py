@@ -20,6 +20,7 @@ from backend.models.admin_status import (
     IngestLedgerActionResponse,
     IngestLedgerListResponse,
 )
+from backend.routers.admin._helpers import attach_debug_db_snapshot
 from backend.routers.admin._router import router
 
 
@@ -32,16 +33,7 @@ from backend.routers.admin._router import router
 def api_celery_status():
     """Expose Celery queue depths, worker status, APScheduler schedule, and
     ingest-ledger summary."""
-    res = dict(get_celery_status())
-    from backend.models.common import _debug_responses_enabled
-
-    if _debug_responses_enabled():
-        from backend.utils.telemetry import get_sqlite_queries
-
-        ds = list(get_sqlite_queries())
-        res["_debug_sqlite"] = ds
-        res["_debug_postgres"] = ds
-    return res
+    return attach_debug_db_snapshot(dict(get_celery_status()))
 
 
 @router.get(

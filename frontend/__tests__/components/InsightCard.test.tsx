@@ -23,6 +23,9 @@ import type { InsightCardData } from '@/types/api'
 
 beforeAll(() => {
   stubResizeObserver()
+  if (typeof Element !== 'undefined' && !Element.prototype.getAnimations) {
+    Element.prototype.getAnimations = () => []
+  }
 })
 
 // Project's vitest setup doesn't auto-cleanup between tests, so do it manually.
@@ -33,10 +36,6 @@ afterEach(() => cleanup())
 vi.mock('@/components/Insights/InsightHelpModal', () => ({
   InsightHelpModal: ({ isOpen }: { isOpen: boolean }) =>
     isOpen ? <div data-testid="help-modal-open" /> : null,
-}))
-vi.mock('@/components/Insights/InsightDataModal', () => ({
-  InsightDataModal: ({ isOpen }: { isOpen: boolean }) =>
-    isOpen ? <div data-testid="data-modal-open" /> : null,
 }))
 vi.mock('@/components/Insights/ImpossibleDistanceModal', () => ({
   ImpossibleDistanceModal: ({ isOpen }: { isOpen: boolean }) =>

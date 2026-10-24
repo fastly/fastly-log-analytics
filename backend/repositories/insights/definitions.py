@@ -4,9 +4,91 @@ from typing import Any
 
 from backend.core.share_db.validation import mask_ip
 from backend.repositories._sql import insights as SQL
-from backend.utils.geo import format_city_label
+from backend.utils.countries import format_city_label
 
 from .registry import InsightCategory, InsightDefinition, registry
+
+
+def _mask_ip_if_needed(ip: Any, context: dict) -> Any:
+    return mask_ip(ip) if (context.get("mask_ips") and ip) else ip
+
+
+def _fmt_asn_label(asn: Any, context: dict) -> str:
+    names_map = context.get("asn_names", {})
+    return f"AS{asn} ({names_map[asn]})" if asn in names_map else f"AS{asn}"
+
+
+def _fmt_metro_label(metro: Any, context: dict) -> str:
+    return context.get("dma_map", {}).get(str(metro)) or f"DMA {metro}"
+
+
+def _p95_latency_item(
+    label: str,
+    w_p95: Any,
+    b_p95: Any,
+    reqs: Any,
+    filters: dict[str, Any],
+    *,
+    reqs_key: str = "window_requests",
+) -> dict[str, Any]:
+    w_f = float(w_p95 or 0)
+    b_f = float(b_p95 or 0)
+    return {
+        "label": label,
+        "current_val": w_f,
+        "baseline_val": b_f,
+        "unit": "ms (P95)",
+        "meta": {
+            "regression_ratio": float(w_p95 / b_p95) if b_p95 else 0,
+            reqs_key: reqs,
+            "filters": filters,
+        },
+        "severity": "critical" if w_f >= 5000 else "warning",
+    }
+
+
+def _monoculture_processor(row: tuple, filter_key: str) -> dict:
+    val, w_cnt, b_cnt, b_total, w_total = row
+    w_rate = float(w_cnt * 100.0 / w_total) if w_total else 0.0
+    return {
+        "label": val or "(empty)",
+        "current_val": w_rate,
+        "baseline_val": float(b_cnt * 100.0 / b_total) if b_total else 0.0,
+        "unit": "% of traffic",
+        "meta": {"requests": w_cnt, "filters": {filter_key: val}},
+        "severity": "critical" if w_rate >= 50 else "warning",
+    }
+
+
+def _ip_max_vs_p95_processor(
+    row: tuple,
+    context: dict,
+    *,
+    unit: str,
+    max_key: str,
+    avg_key: str,
+    crit_thresh: int,
+) -> dict:
+    ip = _mask_ip_if_needed(row[0], context)
+    max_val = int(row[1] or 0)
+    avg_val = int(row[2] or 0)
+    b_p95 = int(row[4] or 0)
+    return {
+        "label": ip or "(unknown)",
+        "current_val": max_val,
+        "baseline_val": b_p95,
+        "baseline_label": "P95 baseline",
+        "unit": unit,
+        "meta": {
+            max_key: max_val,
+            avg_key: avg_val,
+            "requests": row[3],
+            "p95_baseline": b_p95,
+            "filters": {"ip": ip},
+        },
+        "severity": "critical" if (row[1] or 0) > crit_thresh else "warning",
+    }
+
 
 # ── 1. Error Spikes ───────────────────────────────────────────────────────
 
@@ -158,18 +240,14 @@ registry.register(
 
 def city_latency_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [label, city, region, country, w_p95, b_p95, w_total, b_total]
-    return {
-        "label": format_city_label(row[1], row[3], row[2]),
-        "current_val": float(row[4] or 0),
-        "baseline_val": float(row[5] or 0),
-        "unit": "ms (P95)",
-        "meta": {
-            "regression_ratio": float(row[4] / row[5]) if row[5] else 0,
-            "requests": row[6],
-            "filters": {"city": row[1], "region": row[2] if row[2] else None, "country": row[3]},
-        },
-        "severity": "critical" if float(row[4] or 0) >= 5000 else "warning",
-    }
+    return _p95_latency_item(
+        format_city_label(row[1], row[3], row[2]),
+        row[4],
+        row[5],
+        row[6],
+        {"city": row[1], "region": row[2] if row[2] else None, "country": row[3]},
+        reqs_key="requests",
+    )
 
 
 registry.register(
@@ -216,19 +294,7 @@ registry.register(
 
 def ua_monoculture_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [ua, w_cnt, b_cnt, b_total, w_total]
-    ua, w_cnt, b_cnt, b_total, w_total = row
-    # SQL HAVING clause guarantees w_total > 0, but guard severity too
-    # so a future SQL refactor that drops the HAVING can't crash the
-    # processor with ZeroDivisionError.
-    w_rate = float(w_cnt * 100.0 / w_total) if w_total else 0.0
-    return {
-        "label": ua or "(empty)",
-        "current_val": w_rate,
-        "baseline_val": float(b_cnt * 100.0 / b_total) if b_total else 0.0,
-        "unit": "% of traffic",
-        "meta": {"requests": w_cnt, "filters": {"ua": ua}},
-        "severity": "critical" if w_rate >= 50 else "warning",
-    }
+    return _monoculture_processor(row, "ua")
 
 
 registry.register(
@@ -343,17 +409,9 @@ registry.register(
 def asn_concentration_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [asn, w_cnt, b_cnt, b_total, w_total]
     asn, w_cnt, b_cnt, b_total, w_total = row
-    names_map = context.get("asn_names", {})
-    asn_label = f"AS{asn}"
-    if asn in names_map:
-        asn_label += f" ({names_map[asn]})"
-
-    # SQL HAVING clause guarantees w_total > 0, but guard severity too
-    # so a future SQL refactor that drops the HAVING can't crash the
-    # processor with ZeroDivisionError.
     w_rate = float(w_cnt * 100.0 / w_total) if w_total else 0.0
     return {
-        "label": asn_label,
+        "label": _fmt_asn_label(asn, context),
         "current_val": w_rate,
         "baseline_val": float(b_cnt * 100.0 / b_total) if b_total else 0.0,
         "unit": "% of traffic",
@@ -380,18 +438,8 @@ registry.register(
 def asn_metro_performance_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [asn, metro, w_med, b_med, w_total, b_total]
     asn = row[0]
-    metro = str(row[1])
-    dma_map = context.get("dma_map", {})
-    names_map = context.get("asn_names", {})
-
-    asn_label = f"AS{asn}"
-    if asn in names_map:
-        asn_label += f" ({names_map[asn]})"
-
-    metro_label = dma_map.get(metro) or f"DMA {metro}"
-
     return {
-        "label": f"{asn_label} in {metro_label}",
+        "label": f"{_fmt_asn_label(asn, context)} in {_fmt_metro_label(row[1], context)}",
         "current_val": float(row[2] or 0),
         "baseline_val": float(row[3] or 0),
         "unit": "ms RTT",
@@ -479,18 +527,7 @@ registry.register(
 
 def latency_regression_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [url, w_p95, b_p95, w_total, b_total]
-    return {
-        "label": row[0] or "(empty)",
-        "current_val": float(row[1] or 0),
-        "baseline_val": float(row[2] or 0),
-        "unit": "ms (P95)",
-        "meta": {
-            "regression_ratio": float(row[1] / row[2]) if row[2] else 0,
-            "window_requests": row[3],
-            "filters": {"url": row[0]},
-        },
-        "severity": "critical" if float(row[1] or 0) >= 5000 else "warning",
-    }
+    return _p95_latency_item(row[0] or "(empty)", row[1], row[2], row[3], {"url": row[0]})
 
 
 registry.register(
@@ -510,9 +547,7 @@ registry.register(
 
 def impossible_distance_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [fp, hits, worst_excess_km, max_dist_km, min_allowed_km, pop, sample_ip, client_lat, client_lon, pop_lat, pop_lon, tcp_rtt, country, city]
-    sample_ip = row[6]
-    if context.get("mask_ips") and sample_ip:
-        sample_ip = mask_ip(sample_ip)
+    sample_ip = _mask_ip_if_needed(row[6], context)
     return {
         "label": row[0],
         "current_val": round(float(row[3]), 0),
@@ -623,29 +658,9 @@ registry.register(
 
 def request_size_anomaly_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [ip, max_bytes, avg_bytes, w_total, b_p95]
-    # M3: this insight is keyed on the client IP — it appears in the label AND
-    # in meta.filters.ip (which also seeds investigate_url). The response
-    # middleware masks the filters.ip KEY but not the label or the URL, so an
-    # analyst with mask_ips would still read the raw IP. Mask at the source so
-    # all three are consistent.
-    ip = row[0]
-    if context.get("mask_ips") and ip:
-        ip = mask_ip(ip)
-    return {
-        "label": ip or "(unknown)",
-        "current_val": int(row[1] or 0),
-        "baseline_val": int(row[4] or 0),
-        "baseline_label": "P95 baseline",
-        "unit": "bytes (max header)",
-        "meta": {
-            "max_bytes": int(row[1] or 0),
-            "avg_bytes": int(row[2] or 0),
-            "requests": row[3],
-            "p95_baseline": int(row[4] or 0),
-            "filters": {"ip": ip},
-        },
-        "severity": "critical" if (row[1] or 0) > 64000 else "warning",
-    }
+    return _ip_max_vs_p95_processor(
+        row, context, unit="bytes (max header)", max_key="max_bytes", avg_key="avg_bytes", crit_thresh=64000
+    )
 
 
 registry.register(
@@ -665,26 +680,9 @@ registry.register(
 
 def connection_abuse_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [ip, max_reqs, avg_reqs, w_total, b_p95]
-    # M3: IP-keyed (label + meta.filters.ip + investigate_url) — mask at the
-    # source when the analyst policy sets mask_ips. See request_size_anomaly.
-    ip = row[0]
-    if context.get("mask_ips") and ip:
-        ip = mask_ip(ip)
-    return {
-        "label": ip or "(unknown)",
-        "current_val": int(row[1] or 0),
-        "baseline_val": int(row[4] or 0),
-        "baseline_label": "P95 baseline",
-        "unit": "reqs/conn (max)",
-        "meta": {
-            "max_conn_reqs": int(row[1] or 0),
-            "avg_conn_reqs": int(row[2] or 0),
-            "requests": row[3],
-            "p95_baseline": int(row[4] or 0),
-            "filters": {"ip": ip},
-        },
-        "severity": "critical" if (row[1] or 0) > 500 else "warning",
-    }
+    return _ip_max_vs_p95_processor(
+        row, context, unit="reqs/conn (max)", max_key="max_conn_reqs", avg_key="avg_conn_reqs", crit_thresh=500
+    )
 
 
 registry.register(
@@ -704,18 +702,7 @@ registry.register(
 
 def region_latency_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [server_region, w_p95, b_p95, w_total, b_total, ottfb_p95]
-    item: dict[str, Any] = {
-        "label": row[0] or "(unknown)",
-        "current_val": float(row[1] or 0),
-        "baseline_val": float(row[2] or 0),
-        "unit": "ms (P95)",
-        "meta": {
-            "regression_ratio": float(row[1] / row[2]) if row[2] else 0,
-            "window_requests": row[3],
-            "filters": {"server_region": row[0]},
-        },
-        "severity": "critical" if float(row[1] or 0) >= 5000 else "warning",
-    }
+    item = _p95_latency_item(row[0] or "(unknown)", row[1], row[2], row[3], {"server_region": row[0]})
     if row[5] is not None:
         item["meta"]["ottfb_p95_ms"] = float(row[5])
     return item
@@ -956,9 +943,7 @@ def _process_repeated_patterns(
     mask_key: bool,
     context: dict,
 ) -> dict:
-    entity = row[0]
-    if mask_key and context.get("mask_ips") and entity:
-        entity = mask_ip(entity)
+    entity = _mask_ip_if_needed(row[0], context) if mask_key else row[0]
 
     n_gaps = int(row[1] or 0)
     n_events = int(row[2] or 0)
@@ -1088,11 +1073,7 @@ registry.register(
 
 def low_and_slow_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [ip, hits, distinct_paths, span_s, rps]
-    # IP-keyed (label + meta.filters.ip + investigate_url) — mask at the source
-    # when the analyst policy sets mask_ips. See request_size_anomaly.
-    ip = row[0]
-    if context.get("mask_ips") and ip:
-        ip = mask_ip(ip)
+    ip = _mask_ip_if_needed(row[0], context)
     hits = int(row[1] or 0)
     distinct_paths = int(row[2] or 0)
     span_s = int(row[3] or 0)
@@ -1133,10 +1114,7 @@ registry.register(
 
 def credential_enumeration_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [ip, w_denied, w_attempts, w_paths, b_denied]
-    # IP-keyed — mask at the source when the analyst policy sets mask_ips.
-    ip = row[0]
-    if context.get("mask_ips") and ip:
-        ip = mask_ip(ip)
+    ip = _mask_ip_if_needed(row[0], context)
     w_denied = int(row[1] or 0)
     w_attempts = int(row[2] or 0)
     w_paths = int(row[3] or 0)
@@ -1189,13 +1167,8 @@ def network_asn_health_processor(row: tuple, definition: InsightDefinition, cont
     b_retrans = float(row[6] or 0)
     w_total = int(row[7] or 0)
 
-    names_map = context.get("asn_names", {})
-    asn_label = f"AS{asn}"
-    if asn in names_map:
-        asn_label += f" ({names_map[asn]})"
-
     return {
-        "label": asn_label,
+        "label": _fmt_asn_label(asn, context),
         "current_val": round(w_ploss * 100, 2),
         "baseline_val": round(b_ploss * 100, 2),
         "unit": "% packet loss",
@@ -1232,11 +1205,7 @@ registry.register(
 
 def content_discovery_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [ip, w_404, w_total, distinct_404, b_404]
-    # IP-keyed — mask at the source when the analyst policy sets mask_ips.
-    # See request_size_anomaly / credential_enumeration.
-    ip = row[0]
-    if context.get("mask_ips") and ip:
-        ip = mask_ip(ip)
+    ip = _mask_ip_if_needed(row[0], context)
     w_404 = int(row[1] or 0)
     w_total = int(row[2] or 0)
     distinct_404 = int(row[3] or 0)
@@ -1280,16 +1249,7 @@ registry.register(
 
 def referer_monoculture_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [referer, w_cnt, b_cnt, b_total, w_total]
-    referer, w_cnt, b_cnt, b_total, w_total = row
-    w_rate = float(w_cnt * 100.0 / w_total) if w_total else 0.0
-    return {
-        "label": referer or "(empty)",
-        "current_val": w_rate,
-        "baseline_val": float(b_cnt * 100.0 / b_total) if b_total else 0.0,
-        "unit": "% of traffic",
-        "meta": {"requests": w_cnt, "filters": {"referer": referer}},
-        "severity": "critical" if w_rate >= 50 else "warning",
-    }
+    return _monoculture_processor(row, "referer")
 
 
 registry.register(
@@ -1342,12 +1302,8 @@ registry.register(
 def new_asn_traffic_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [asn, w_cnt, b_cnt]
     asn, w_cnt, b_cnt = row
-    names_map = context.get("asn_names", {})
-    asn_label = f"AS{asn}"
-    if asn in names_map:
-        asn_label += f" ({names_map[asn]})"
     return {
-        "label": asn_label,
+        "label": _fmt_asn_label(asn, context),
         "current_val": w_cnt,
         "baseline_val": 0,
         "unit": "requests",
@@ -1377,12 +1333,8 @@ def asn_hosting_shift_processor(row: tuple, definition: InsightDefinition, conte
     asn, w_hosting, w_total, b_hosting, b_total = row
     w_ratio = round(float(w_hosting * 100.0 / w_total), 1) if w_total else 0.0
     b_ratio = round(float(b_hosting * 100.0 / b_total), 1) if b_total else 0.0
-    names_map = context.get("asn_names", {})
-    asn_label = f"AS{asn}"
-    if asn in names_map:
-        asn_label += f" ({names_map[asn]})"
     return {
-        "label": asn_label,
+        "label": _fmt_asn_label(asn, context),
         "current_val": w_ratio,
         "baseline_val": b_ratio,
         "unit": "% hosting",
@@ -1415,13 +1367,11 @@ registry.register(
 def metro_delivery_degradation_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [metro, w_med, b_med, w_total, b_total]
     metro = row[0]
-    dma_map = context.get("dma_map", {})
-    metro_label = dma_map.get(str(metro)) or f"DMA {metro}"
     # delivery_rate is bytes/sec; present as Mbps (×8 / 1e6).
     w_mbps = round(float(row[1] or 0) * 8 / 1e6, 1)
     b_mbps = round(float(row[2] or 0) * 8 / 1e6, 1)
     return {
-        "label": metro_label,
+        "label": _fmt_metro_label(metro, context),
         "current_val": w_mbps,
         "baseline_val": b_mbps,
         "unit": "Mbps (median)",
@@ -1489,18 +1439,7 @@ registry.register(
 
 def pop_latency_regression_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [pop, w_p95, b_p95, w_total, b_total]
-    return {
-        "label": row[0] or "(unknown)",
-        "current_val": float(row[1] or 0),
-        "baseline_val": float(row[2] or 0),
-        "unit": "ms (P95)",
-        "meta": {
-            "regression_ratio": float(row[1] / row[2]) if row[2] else 0,
-            "window_requests": row[3],
-            "filters": {"pop": row[0]},
-        },
-        "severity": "critical" if float(row[1] or 0) >= 5000 else "warning",
-    }
+    return _p95_latency_item(row[0] or "(unknown)", row[1], row[2], row[3], {"pop": row[0]})
 
 
 registry.register(
@@ -1629,12 +1568,7 @@ registry.register(
 
 def session_harvesting_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [ip, w_sessions, w_reqs, b_sessions]
-    # IP-keyed — mask at the source when the analyst policy sets mask_ips. The
-    # cookie_session hash is only COUNTED upstream (never selected), so no session
-    # id can appear in the card; only the client IP needs masking here.
-    ip = row[0]
-    if context.get("mask_ips") and ip:
-        ip = mask_ip(ip)
+    ip = _mask_ip_if_needed(row[0], context)
     w_sessions = int(row[1] or 0)
     w_reqs = int(row[2] or 0)
     b_sessions = int(row[3] or 0)
@@ -1814,9 +1748,7 @@ registry.register(
 
 def orphaned_deep_crawl_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [ip, w_reqs, w_distinct_urls, b_reqs, requests_per_url, surge_ratio]
-    ip = row[0]
-    if context.get("mask_ips") and ip:
-        ip = mask_ip(ip)
+    ip = _mask_ip_if_needed(row[0], context)
     w_reqs = int(row[1] or 0)
     w_distinct = int(row[2] or 0)
     b_reqs = int(row[3] or 0)

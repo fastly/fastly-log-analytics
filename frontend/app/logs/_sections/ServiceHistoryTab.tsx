@@ -18,7 +18,7 @@ import {
 // Direct import (not via the barrel) so the page bundle drops the
 // @dnd-kit tree that the reorder-enabled DataTable pulls in. The
 // dropdown column picker above already covers hide/show.
-import { DataTableReadonly as DataTable } from '@/components/DataTable/DataTableReadonly'
+import { DataTableReadonly as DataTable } from '@/components/DataTable'
 import { ColumnDef } from '@tanstack/react-table'
 import { queryKeys } from '@/lib/query-keys'
 

@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { redirect } from 'next/navigation'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { fetchTosServerSide } from '@/lib/ssr/tos'
+import { fetchTosServerSide } from '@/lib/ssr/admin_gateway'
 import { AcknowledgeButton } from './AcknowledgeButton'
 import { AcknowledgeFallback } from './AcknowledgeFallback'
 

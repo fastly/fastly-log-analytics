@@ -17,7 +17,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { formatValue, formatCount, formatCountMaybe } from '@/lib/format'
 import { PopLabel } from '@/components/PopLabel'
 import { useDebounce } from '@/hooks/useDebounce'
-import { useFieldValues } from '@/hooks/useFieldValues'
+import { useFieldValues } from '@/hooks/useLogFieldsCatalog'
 
 interface FieldSearchDialogProps {
   field: string

@@ -86,6 +86,7 @@ _scoring_time_window = _ss._scoring_time_window  # type: ignore[has-type]
 _reconstruct_labeled_sessions = _ss._reconstruct_labeled_sessions  # type: ignore[has-type]
 _MIN_LABELS_PER_CLASS = _ss._MIN_LABELS_PER_CLASS  # type: ignore[has-type]
 _table_columns = _ss._table_columns  # type: ignore[has-type]
+_tenant_matrix_path = _ss._tenant_matrix_path  # type: ignore[has-type]
 
 # Composite-endpoint dependencies — the /scoring/dashboard composite at the
 # bottom of this file calls back into the analytics endpoints that live in
@@ -302,7 +303,6 @@ def scoring_retrain(
 
     from backend import config as svcconfig
     from backend.core.duckdb import get_connection, get_source_for_service
-    from backend.provision.session_scoring_orchestrator import _MATRIX_PATH
     from backend.scoring import fixtures as _fixtures
     from backend.scoring import labels as _labels
     from backend.scoring import matrix as _matrix
@@ -355,7 +355,7 @@ def scoring_retrain(
     # image mount), we still succeed by relying on FOS as the durable
     # store. _load_matrix() will pull from FOS next call.
     try:
-        tenant_matrix_path = _MATRIX_PATH.with_name(f"{_MATRIX_PATH.stem}_{service_id}{_MATRIX_PATH.suffix}")
+        tenant_matrix_path = _tenant_matrix_path(service_id)
         tenant_matrix_path.parent.mkdir(parents=True, exist_ok=True)
         with tenant_matrix_path.open("w") as f:
             import json as _json
@@ -810,6 +810,29 @@ def scoring_exclude_regex_get(service_id: ServiceId) -> dict:
     }
 
 
+def _require_scoring_enabled_and_token(service_id: str, token: str) -> str:
+    from backend import config as svcconfig
+
+    cfg = svcconfig.load_config(service_id) or {}
+    if not (cfg.get("scoring") or {}).get("enabled"):
+        raise HTTPException(status_code=400, detail={"error": "Session scoring is not enabled for this service"})
+    resolved_token = resolve_fastly_token(service_id, token)
+    if not resolved_token:
+        raise HTTPException(status_code=400, detail={"error": "Fastly API token required"})
+    return resolved_token
+
+
+def _validate_service_exclude_regex(service_id: str, raw: str):
+    from backend.provision.session_scoring_vcl import recv_snippet
+    from backend.utils.vcl_validator import validate_recv_exclusion_regex_with_lint
+
+    return validate_recv_exclusion_regex_with_lint(
+        raw,
+        build_full_snippet=lambda cleaned_regex: recv_snippet(service_id, exclude_url_regex=cleaned_regex or None),
+        require_falco=os.environ.get("SCORING_REQUIRE_FALCO", "1") != "0",
+    )
+
+
 @router.put(
     "/{service_id}/scoring/exclude-regex",
     response_model=ScoringExcludeRegexPutResponse,
@@ -850,42 +873,14 @@ def scoring_exclude_regex_put(
             },
         )
 
-    from backend import config as svcconfig
     from backend.core import metadata as metadata_db
     from backend.provision.session_scoring_orchestrator import update_recv_exclusion_regex
-    from backend.provision.session_scoring_vcl import recv_snippet
-    from backend.utils.vcl_validator import (
-        RegexValidationError,
-        validate_recv_exclusion_regex_with_lint,
-    )
+    from backend.utils.vcl_validator import RegexValidationError
 
-    raw = body.regex
-
-    cfg = svcconfig.load_config(service_id) or {}
-    scoring = cfg.get("scoring") or {}
-    if not scoring.get("enabled"):
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "Session scoring is not enabled for this service"},
-        )
-    resolved_token = resolve_fastly_token(service_id, token)
-    if not resolved_token:
-        raise HTTPException(status_code=400, detail={"error": "Fastly API token required"})
-
-    # Layers 1 + 2: input policy + falco static analysis on the
-    # assembled snippet. We close over the per-service ids so the
-    # validator can build the full snippet body.
-    def _build(cleaned_regex: str) -> str:
-        return recv_snippet(service_id, exclude_url_regex=cleaned_regex or None)
+    resolved_token = _require_scoring_enabled_and_token(service_id, token)
 
     try:
-        cleaned, lint = validate_recv_exclusion_regex_with_lint(
-            raw,
-            build_full_snippet=_build,
-            # Production keeps falco mandatory; tests / local dev where
-            # falco isn't on PATH can override via env.
-            require_falco=os.environ.get("SCORING_REQUIRE_FALCO", "1") != "0",
-        )
+        cleaned, lint = _validate_service_exclude_regex(service_id, body.regex)
     except RegexValidationError as exc:
         raise HTTPException(
             status_code=400,
@@ -953,23 +948,10 @@ def scoring_exclude_regex_validate(
     for a preview. False-positives between falco and Fastly's compiler are
     rare; the publish flow still catches them.
     """
-    from backend.provision.session_scoring_vcl import recv_snippet
-    from backend.utils.vcl_validator import (
-        RegexValidationError,
-        validate_recv_exclusion_regex_with_lint,
-    )
-
-    raw = body.regex
-
-    def _build(cleaned_regex: str) -> str:
-        return recv_snippet(service_id, exclude_url_regex=cleaned_regex or None)
+    from backend.utils.vcl_validator import RegexValidationError
 
     try:
-        _cleaned, lint = validate_recv_exclusion_regex_with_lint(
-            raw,
-            build_full_snippet=_build,
-            require_falco=os.environ.get("SCORING_REQUIRE_FALCO", "1") != "0",
-        )
+        _cleaned, lint = _validate_service_exclude_regex(service_id, body.regex)
     except RegexValidationError as exc:
         return {
             "ok": False,
@@ -1068,7 +1050,6 @@ def scoring_enforce_status_code_put(
             },
         )
 
-    from backend import config as svcconfig
     from backend.core import metadata as metadata_db
     from backend.provision.session_scoring_orchestrator import update_enforce_status_code
     from backend.provision.session_scoring_vcl import (
@@ -1085,17 +1066,7 @@ def scoring_enforce_status_code_put(
             },
         )
 
-    cfg = svcconfig.load_config(service_id) or {}
-    scoring = cfg.get("scoring") or {}
-    if not scoring.get("enabled"):
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "Session scoring is not enabled for this service"},
-        )
-
-    resolved_token = resolve_fastly_token(service_id, token)
-    if not resolved_token:
-        raise HTTPException(status_code=400, detail={"error": "Fastly API token required"})
+    resolved_token = _require_scoring_enabled_and_token(service_id, token)
 
     try:
         result = update_enforce_status_code(service_id, resolved_token, new_status_code=new_code)
@@ -1183,7 +1154,6 @@ def scoring_matrix_versions_restore(
 
     from backend import config as svcconfig
     from backend.core import metadata as metadata_db
-    from backend.provision.session_scoring_orchestrator import _MATRIX_PATH
     from backend.state_sync import restore_scoring_matrix_version
 
     result = restore_scoring_matrix_version(service_id, version)
@@ -1198,7 +1168,7 @@ def scoring_matrix_versions_restore(
     # shadowing it. (_load_matrix's resolution order consults only the
     # tenant path — the pre-audit-005 shared matrix.json is never read,
     # and prod was verified clean of it on 2026-07-06.)
-    tenant_matrix_path = _MATRIX_PATH.with_name(f"{_MATRIX_PATH.stem}_{service_id}{_MATRIX_PATH.suffix}")
+    tenant_matrix_path = _tenant_matrix_path(service_id)
     try:
         if tenant_matrix_path.exists():
             tenant_matrix_path.unlink()
@@ -1612,38 +1582,26 @@ def scoring_dashboard(
             for k, fut in futs.items():
                 results[k] = fut.result()
 
-        evaluation = results["evaluation"]
-        evaluation_per_reason = results["evaluation_per_reason"]
-        health = results["health"]
-        top_flagged = results["top_flagged"]
-        score_distribution = results["score_distribution"]
-        compliance_breakdown = results["compliance_breakdown"]
-        curves = results["curves"]
-        threshold_preview = results["threshold_preview"]
-        config_threshold = scoring_threshold_get(service_id)
-        exclude_regex = scoring_exclude_regex_get(service_id)
-        enforce_status_code = scoring_enforce_status_code_get(service_id)
-
         return {
             "since_hours": since_hours,
             "threshold": threshold,
             "status": status_block,
-            "evaluation": evaluation,
-            "evaluation_per_reason": evaluation_per_reason,
-            "health": health,
-            "top_flagged": top_flagged,
-            "score_distribution": score_distribution,
-            "compliance_breakdown": compliance_breakdown,
-            "curves": curves,
-            "threshold_preview": threshold_preview,
+            "evaluation": results["evaluation"],
+            "evaluation_per_reason": results["evaluation_per_reason"],
+            "health": results["health"],
+            "top_flagged": results["top_flagged"],
+            "score_distribution": results["score_distribution"],
+            "compliance_breakdown": results["compliance_breakdown"],
+            "curves": results["curves"],
+            "threshold_preview": results["threshold_preview"],
             # `config_threshold` is intentionally distinct from the
             # top-level `threshold` (which is the per-request slider
             # cutoff fed into threshold_preview). The config block
             # mirrors /scoring/config's shape so the frontend can read
             # the persisted operator preferences off the same payload.
-            "config_threshold": config_threshold,
-            "exclude_regex": exclude_regex,
-            "enforce_status_code": enforce_status_code,
+            "config_threshold": scoring_threshold_get(service_id),
+            "exclude_regex": scoring_exclude_regex_get(service_id),
+            "enforce_status_code": scoring_enforce_status_code_get(service_id),
         }
 
     return _cached(cache_key, _produce)

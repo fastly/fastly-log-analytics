@@ -14,14 +14,13 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
 from backend.core.metadata.state import list_audit, record_audit
 from backend.core.share_db.validation import mask_ip
 from backend.deps import ServiceId, require_admin, require_service_access
-from backend.high_scale.aggregate_query import query_clickhouse_aggregate
-from backend.high_scale.aggregates import AggregateRequest
+from backend.high_scale.aggregate_query import AggregateRequest, query_clickhouse_aggregate
 from backend.high_scale.registry import HighScaleServiceRegistryProtocol, get_high_scale_service_registry
 from backend.models.control_room import (
     ControlRoomActionResponse,
@@ -120,8 +119,6 @@ def control_room_mitigations(
     _access: str | None = Depends(require_service_access),
 ):
     """Block/tarpit mitigation actions (Phase 0 stub)."""
-    from fastapi import HTTPException
-
     raise HTTPException(
         status_code=501, detail={"error": "not_implemented", "message": "Mitigations not yet implemented."}
     )
@@ -136,8 +133,6 @@ def control_room_rules(
     _access: str | None = Depends(require_service_access),
 ):
     """Create rules (Phase 0 stub)."""
-    from fastapi import HTTPException
-
     raise HTTPException(status_code=501, detail={"error": "not_implemented", "message": "Rules not yet implemented."})
 
 
@@ -150,8 +145,6 @@ def control_room_allowlist(
     _access: str | None = Depends(require_service_access),
 ):
     """Manage allowlist (Phase 0 stub)."""
-    from fastapi import HTTPException
-
     raise HTTPException(
         status_code=501, detail={"error": "not_implemented", "message": "Allowlist not yet implemented."}
     )
@@ -166,8 +159,6 @@ def control_room_big_red_button(
     _access: str | None = Depends(require_service_access),
 ):
     """Emergency disable (Phase 0 stub)."""
-    from fastapi import HTTPException
-
     raise HTTPException(
         status_code=501, detail={"error": "not_implemented", "message": "Big red button not yet implemented."}
     )
@@ -182,8 +173,6 @@ def control_room_cost_governor(
     _access: str | None = Depends(require_service_access),
 ):
     """Cost kill switch (Phase 0 stub)."""
-    from fastapi import HTTPException
-
     raise HTTPException(
         status_code=501, detail={"error": "not_implemented", "message": "Cost governor not yet implemented."}
     )
@@ -270,7 +259,7 @@ async def realtime_stream(
     """
     from backend.core.realtime.poller import poller
     from backend.core.realtime.publisher import publisher as rt_publisher
-    from backend.utils.sse_subscription import iter_with_disconnect_ping
+    from backend.utils.sse import iter_with_disconnect_ping
 
     poller.ensure_polling(service_id)
 
@@ -419,8 +408,6 @@ async def control_room_correlate(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
 ):
     """Top-N breakdown by a log field within a recent time window."""
-    from fastapi import HTTPException
-
     from backend.core import duckdb as _db
     from backend.core import field_registry
     from backend.repositories._base import _safe_table
@@ -578,7 +565,5 @@ def control_room_tab(
 ):
     """Return data for a control-room tab."""
     if tab not in TAB_STUBS:
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=404, detail={"error": "unknown_tab", "tab": tab})
     return TAB_STUBS[tab]

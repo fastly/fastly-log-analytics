@@ -4,7 +4,7 @@ import {
   fetchOriginServerSide,
   ORIGIN_SSR_DEFAULTS,
   ORIGIN_SSR_SECTIONS,
-} from '@/lib/ssr/origin'
+} from '@/lib/ssr/upstream'
 import { seedDehydratedState } from '@/lib/ssr/seed'
 import { resolvePageServiceId } from '@/lib/ssr/service'
 import OriginClient from './_sections/OriginClient'

@@ -14,7 +14,7 @@ import { useSSE, type SSELine } from '@/hooks/useSSE'
 import { useDerivedState, useOpenGeneration } from '@/hooks/useDerivedState'
 import { SSEActionDialogShell, SSEExecutionSection } from '@/components/SSEModal'
 import { adminFetch } from '@/lib/api'
-import { useRumStatus } from '@/hooks/useRumStatus'
+import { useRumStatus } from '@/hooks/useServiceQuery'
 import { queryKeys } from '@/lib/query-keys'
 
 const RUM_FIELDS = [

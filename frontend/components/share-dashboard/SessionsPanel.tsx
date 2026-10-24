@@ -16,7 +16,7 @@ import {
 import { client } from '@/lib/api'
 
 import { SortableHead, useTableSort, type SortAccessors } from './sortable'
-import { useShareMutation } from './useShareMutation'
+import { useShareMutation } from './utils'
 import {
   type ShareSession,
   type ShareStatus,

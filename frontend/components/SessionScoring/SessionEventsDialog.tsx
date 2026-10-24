@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import { Activity, ChevronRight } from 'lucide-react'
-import { useScoringQuery } from './useScoringQuery'
+import { useScoringQuery } from './useScorerTimeseries'
 
 import {
   Dialog,
@@ -16,7 +16,7 @@ import { Badge } from '@/components/ui/badge'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
 import { formatLocalDateTime } from '@/lib/date'
-import { SkeletonGrid } from '@/components/ui/skeleton-grid'
+import { SkeletonGrid } from '@/components/ui/skeleton'
 import { keyByOccurrence } from '@/lib/utils'
 
 type SessionEvent = components['schemas']['ScoringSessionEvent']

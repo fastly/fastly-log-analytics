@@ -46,7 +46,7 @@ describe('SSR-seed key ↔ client first-paint key byte-match', () => {
     const { hashKey } = await import('@tanstack/react-query')
     const { resolveDefaultSsrRangeKey } = await import('@/lib/ssr/upstream')
     const { ORIGIN_SSR_DEFAULTS, ORIGIN_SSR_SECTIONS } = await import(
-      '@/lib/ssr/origin'
+      '@/lib/ssr/upstream'
     )
 
     const serviceId = 'svc-1'
@@ -100,7 +100,7 @@ describe('SSR-seed key ↔ client first-paint key byte-match', () => {
 describe('fetchOriginServerSide (origin SSR)', () => {
   it('returns null without a serviceId (no upstream call)', async () => {
     process.env.API_PROXY_URL = 'http://127.0.0.1:1'
-    const { fetchOriginServerSide } = await import('@/lib/ssr/origin')
+    const { fetchOriginServerSide } = await import('@/lib/ssr/upstream')
     expect(await fetchOriginServerSide(undefined)).toBeNull()
   })
 
@@ -113,7 +113,7 @@ describe('fetchOriginServerSide (origin SSR)', () => {
         res.end('{"summary":{}}')
       },
       async (srv) => {
-        const { fetchOriginServerSide } = await import('@/lib/ssr/origin')
+        const { fetchOriginServerSide } = await import('@/lib/ssr/upstream')
         const out = await fetchOriginServerSide('svc-1')
         expect(out).toBeNull()
         expect(srv.requests).toHaveLength(0)
@@ -132,7 +132,7 @@ describe('fetchOriginServerSide (origin SSR)', () => {
       },
       async (srv) => {
         const { fetchOriginServerSide, ORIGIN_SSR_DEFAULTS, ORIGIN_SSR_SECTIONS } = await import(
-          '@/lib/ssr/origin'
+          '@/lib/ssr/upstream'
         )
         const now = new Date('2026-06-29T12:00:30Z')
         const out = await fetchOriginServerSide('svc-1', now)
@@ -184,7 +184,7 @@ describe('fetchOriginServerSide (origin SSR)', () => {
         res.end('{"summary":{"has_data":true}}')
       },
       async (srv) => {
-        const { fetchOriginServerSide } = await import('@/lib/ssr/origin')
+        const { fetchOriginServerSide } = await import('@/lib/ssr/upstream')
         const out = await fetchOriginServerSide('svc-1')
         expect(out).not.toBeNull()
         expect(out!.data).toEqual({ summary: { has_data: true } })

@@ -1830,6 +1830,106 @@ class QueryRunner:
     # "1 second" is excluded because the rollup is per-minute (no intra-minute
     # resolution to give back). Other intervals fall through to raw.
     _TS_ROLLUP_INTERVALS: frozenset[str] = frozenset({"1 minute", "1 hour", "1 day"})
+    _HOUR_START_TS_SQL_EXPR: str = (
+        "TRY_CAST(CASE WHEN LENGTH(CAST(hour_start AS VARCHAR)) = 13 "
+        "THEN CAST(hour_start AS VARCHAR) || ':00:00Z' "
+        "ELSE CAST(hour_start AS VARCHAR) END AS TIMESTAMPTZ)"
+    )
+
+    def _plan_scalar_rollup_window(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        can_use_overview: bool,
+        require_minute_aligned: bool,
+        observed: ReaderCoverage,
+    ) -> tuple[datetime, datetime, Any] | None:
+        from datetime import timedelta
+
+        from backend.repositories._rollup_planner import plan_time_series_rollup_window
+        from backend.utils.date_utils import parse_iso_utc
+
+        if not start_time or not end_time:
+            observed.eligibility_reason = "bounds_missing"
+            return None
+        # parse_iso_utc always returns tz-aware UTC, which is what bundle directory
+        # names and active_hour_str comparisons assume (fixes 2026-06-11 CDT tail bug).
+        st = parse_iso_utc(start_time)
+        et = parse_iso_utc(end_time)
+        if st is None or et is None or et <= st:
+            observed.eligibility_reason = "invalid_window"
+            return None
+        observed.window_start, observed.window_end = st.isoformat(), et.isoformat()
+        if require_minute_aligned and (st.second or st.microsecond or et.second or et.microsecond):
+            observed.eligibility_reason = "unsupported_interval"
+            return None
+        if (et - st) > timedelta(days=366):
+            observed.eligibility_reason = "window_too_long"
+            return None
+        observed.eligible, observed.eligibility_reason = True, "eligible"
+        observed.scalar_plan = ScalarRollupCoverage()
+
+        wplan = plan_time_series_rollup_window(
+            self.src,
+            st,
+            et,
+            can_use_overview=can_use_overview,
+            coverage_mod=rollup_coverage,
+            plan_hourly_read_fn=plan_hourly_read,
+            observation=observed.scalar_plan,
+        )
+        if wplan is None:
+            observed.outcome = "no_coverage"
+            return None
+        observed.outcome = "unknown"
+        observed.live_top_up = "outside_window"
+        return st, et, wplan
+
+    def _resolve_scalar_live_source(
+        self,
+        st: datetime,
+        et: datetime,
+        wplan: Any,
+        *,
+        adjust_partial_hour: bool,
+        unfiltered_window: bool,
+        get_direct_tmp: Callable[[datetime, datetime], str | None],
+        table_name: str,
+        where_clause: str,
+        observed: ReaderCoverage,
+    ) -> tuple[str | None, str, str, str, int, str | None, bool]:
+        from datetime import UTC
+
+        live_start = max(st, wplan.active_hour_dt)
+        live_end = et
+        if adjust_partial_hour:
+            live_start, _partial_rows, partial_total = self._partial_hour_adjusted_live_start(
+                live_start, wplan.active_hour_str, live_end
+            )
+        else:
+            partial_total = 0
+        live_st_tz = live_start.astimezone(UTC).isoformat()
+        live_et_tz = live_end.astimezone(UTC).isoformat()
+        observed.live_start, observed.live_end = live_st_tz, live_et_tz
+
+        direct_live_tmp: str | None = None
+        live_needs_params = False
+        if unfiltered_window:
+            try:
+                direct_live_tmp = get_direct_tmp(live_start, live_end)
+            except Exception:
+                direct_live_tmp = None
+        if direct_live_tmp == "__empty__":
+            live_source, live_where = None, "1=1"
+        elif direct_live_tmp is not None:
+            live_source, live_where = direct_live_tmp, "1=1"
+        else:
+            live_source, live_where = table_name, where_clause
+            live_needs_params = True
+
+        observed.live_top_up = "empty" if live_source is None else "unverified"
+        return live_source, live_where, live_st_tz, live_et_tz, partial_total, direct_live_tmp, live_needs_params
 
     def try_time_series_from_rollup(
         self,
@@ -1845,36 +1945,8 @@ class QueryRunner:
         """Serve the dashboard time_series chart from per-hour rollup parquets
         when eligible, falling back transparently to ``None`` otherwise (the
         caller then runs its existing raw query).
-
-        Eligibility:
-          * ``chart_metric`` in :attr:`_TS_ROLLUP_METRIC_PARTS`.
-          * ``interval`` in :attr:`_TS_ROLLUP_INTERVALS`.
-          * Both ``start_time`` and ``end_time`` parse as ISO-8601 UTC.
-          * Every closed hour in the requested window has a
-            ``time_series.parquet`` on disk (a single missing closed hour
-            disqualifies the whole window — falling back is safer than
-            rendering an undercount).
-
-        Active-hour handling: hours at or after the current UTC hour aren't
-        rolled up (the bundler skips them — see
-        :func:`backend.core.rollups.build_time_series_bundles`). If the
-        window includes the active hour we run the live SQL for that hour
-        only — preferring a direct buffer + active-hourly-partition read
-        over the bound iceberg view (see the ``crosses_active`` block) —
-        UNION ALL it with the rollup-served portion, and re-aggregate
-        in an outer ``GROUP BY out_bucket`` so the chart is always current to
-        the second AND a coarse bucket (e.g. ``1 day``) that straddles the
-        closed/active boundary combines into one value instead of being
-        emitted twice.
-
-        Returns the same shape as the inline raw block in
-        ``dashboard.py:get_aggregates``:
-        ``[{"time": iso_string, "value": float}, ...]``, ordered by bucket.
-        ``None`` means "not eligible — caller should run its raw query".
         """
-        from datetime import UTC, timedelta
-
-        from backend.utils.date_utils import parse_iso_utc
+        from datetime import UTC
 
         observed = ReaderCoverage(reader="dashboard.time_series", eligible=False, outcome="ineligible")
         self.reader_coverage.append(observed)
@@ -1884,78 +1956,27 @@ class QueryRunner:
         if interval not in self._TS_ROLLUP_INTERVALS:
             observed.eligibility_reason = "unsupported_interval"
             return None
-        if not start_time or not end_time:
-            observed.eligibility_reason = "bounds_missing"
-            return None
-        # parse_iso_utc is the project-standard helper — it always returns
-        # tz-aware UTC, which is what the bundle directory names and the
-        # active_hour_str comparison below both assume. Using raw
-        # datetime.fromisoformat here is what caused the 2026-06-11 missing-
-        # tail bug: cursor kept the request's input tz (CDT for a FE in
-        # Central) and looked up bundles by CDT-named hours, missing the
-        # last 5 hours of a 24h window.
-        st = parse_iso_utc(start_time)
-        et = parse_iso_utc(end_time)
-        if st is None or et is None:
-            observed.eligibility_reason = "invalid_window"
-            return None
-        if et <= st:
-            observed.eligibility_reason = "invalid_window"
-            return None
-        observed.window_start, observed.window_end = st.isoformat(), et.isoformat()
-        if (et - st) > timedelta(days=366):
-            observed.eligibility_reason = "window_too_long"
-            return None
-        observed.eligible, observed.eligibility_reason = True, "eligible"
-        observed.scalar_plan = ScalarRollupCoverage()
-
-        # st is UTC (parse_iso_utc guarantees it). For multi-week windows
-        # (7d–90d), prefer closed-day bundles (`day_bundled/day=D/time_series.parquet`,
-        # or `day_bundled/day=D/overview.parquet` when `chart_metric == "requests"`
-        # and `interval in ("1 hour", "1 day")`) for the contiguous closed-day prefix
-        # before falling back to hourly bundles for recent days. This prevents
-        # 30d windows from disqualifying when >7d hourly `time_series.parquet` files
-        # are retired, and cuts 30d parquet file reads from ~720 hourly files to ~30.
-        from backend.repositories._rollup_planner import plan_time_series_rollup_window
-
-        wplan = plan_time_series_rollup_window(
-            self.src,
-            st,
-            et,
+        planned = self._plan_scalar_rollup_window(
+            start_time,
+            end_time,
             can_use_overview=chart_metric == "requests" and interval in ("1 hour", "1 day"),
-            coverage_mod=rollup_coverage,
-            plan_hourly_read_fn=plan_hourly_read,
-            observation=observed.scalar_plan,
+            require_minute_aligned=False,
+            observed=observed,
         )
-        if wplan is None:
-            observed.outcome = "no_coverage"
+        if planned is None:
             return None
-        observed.outcome = "unknown"
-        observed.live_top_up = "outside_window"
-        rollup_paths = wplan.rollup_paths
-        day_ov_paths = wplan.day_ov_paths
-        crosses_active = wplan.crosses_active
-        active_hour_str, active_hour_dt = wplan.active_hour_str, wplan.active_hour_dt
-        missing_hours = wplan.missing_hours
-        heal_where_sql = wplan.heal_where_sql
+        st, et, wplan = planned
 
         parts = self._TS_ROLLUP_METRIC_PARTS[chart_metric]
-        # Bucket is TIMESTAMPTZ in the bundle parquets (older notes about
-        # "naive TIMESTAMP" referred to a since-removed schema). Use
-        # TIMESTAMPTZ literals so the comparison is unambiguous regardless
-        # of DuckDB's session timezone — without the explicit offset, a
-        # session tz like CDT silently shifts the filter by 5 hours and
-        # drops bundles at the window's edges.
+        # Bucket is TIMESTAMPTZ in the bundle parquets; use TIMESTAMPTZ literals
+        # so comparisons are unambiguous regardless of DuckDB's session timezone.
         st_tz = st.astimezone(UTC).isoformat()
         st_hour_tz = st.replace(minute=0, second=0, microsecond=0).astimezone(UTC).isoformat()
         et_tz = et.astimezone(UTC).isoformat()
 
-        # Each branch emits raw (num, den) per bucket; the outer query below
-        # re-aggregates. Both branches MUST expose the same column shape
-        # (out_bucket, num, den) for the UNION ALL.
         select_clauses: list[str] = []
-        if rollup_paths:
-            paths_sql = quote_path_list(rollup_paths)
+        if wplan.rollup_paths:
+            paths_sql = quote_path_list(wplan.rollup_paths)
             select_clauses.append(
                 f"SELECT time_bucket(INTERVAL '{interval}', bucket) AS out_bucket, "
                 f"       {parts['num_rollup']} AS num, {parts['den_rollup']} AS den "
@@ -1964,13 +1985,9 @@ class QueryRunner:
                 f"  AND bucket < TIMESTAMPTZ '{et_tz}' "
                 f"GROUP BY 1"
             )
-        if day_ov_paths:
-            ov_paths_sql = quote_path_list(day_ov_paths)
-            hour_ts_expr = (
-                "TRY_CAST(CASE WHEN LENGTH(CAST(hour_start AS VARCHAR)) = 13 "
-                "THEN CAST(hour_start AS VARCHAR) || ':00:00Z' "
-                "ELSE CAST(hour_start AS VARCHAR) END AS TIMESTAMPTZ)"
-            )
+        if wplan.day_ov_paths:
+            ov_paths_sql = quote_path_list(wplan.day_ov_paths)
+            hour_ts_expr = self._HOUR_START_TS_SQL_EXPR
             select_clauses.append(
                 f"SELECT time_bucket(INTERVAL '{interval}', {hour_ts_expr}) AS out_bucket, "
                 f"       {parts['num_rollup']} AS num, {parts['den_rollup']} AS den "
@@ -1980,12 +1997,7 @@ class QueryRunner:
                 f"GROUP BY 1"
             )
 
-        # Missing-hour live heal: a CLOSED hour in [st, et) with no
-        # time_series bundle at all is a writer-coverage gap, not proof of
-        # zero traffic, so the plan lists it for a live scan of the raw base
-        # table. Uses a literal, unparameterized where-clause — sidesteps
-        # bound-parameter bookkeeping across UNION ALL branches.
-        if missing_hours:
+        if wplan.missing_hours:
             from backend.core.rollups import _safe_table_for
 
             heal_base_table = _safe_table_for(self.src)
@@ -1995,71 +2007,40 @@ class QueryRunner:
                     f"SELECT time_bucket(INTERVAL '{interval}', timestamp) AS out_bucket, "
                     f"       {parts['num_live']} AS num, {parts['den_live']} AS den "
                     f"FROM {heal_base_table} "
-                    f"WHERE {heal_where_sql} "
+                    f"WHERE {wplan.heal_where_sql} "
                     f"GROUP BY 1"
                 )
 
         direct_live_tmp: str | None = None
         live_needs_params = False
-        if crosses_active:
-            # Live SQL for the [max(st, active_hour_start), et) slice, using
-            # the same metric-derivation logic as the rollup branch so the
-            # buckets align exactly.
-            live_start = max(st, active_hour_dt)
-            # Only "requests" has a compensating partial-rollup merge below
-            # (the other metrics' num/den semantics differ per-metric and
-            # aren't derivable from partial_rows' plain (field, value, count)
-            # shape). Narrowing live_start for those metrics without a
-            # compensating clause would silently drop the
-            # [original_live_start, watermark) range from BOTH branches —
-            # the rollup branch never covers it (still-open hour) and the
-            # narrowed live branch would skip it too. So non-"requests"
-            # metrics keep scanning their full original live range,
-            # unchanged from before partial-hour support existed.
-            live_end = et
-            if chart_metric == "requests":
-                live_start, _partial_rows, partial_total = self._partial_hour_adjusted_live_start(
-                    live_start, active_hour_str, live_end
-                )
-            else:
-                partial_total = 0
-            live_st_tz = live_start.astimezone(UTC).isoformat()
-            live_et_tz = live_end.astimezone(UTC).isoformat()
-            observed.live_start, observed.live_end = live_st_tz, live_et_tz
+        if wplan.crosses_active:
+            live_cols = parts["live_cols"]
 
-            # Fast path: read buffer + active hourly partition directly,
-            # bypassing the bound iceberg view — same trick as the top-N
-            # live branch. Reading the 1-hour slice through the view pays
-            # its manifest/union/CASE-projection overhead every load (~60-90ms
-            # observed on prod 2026-07-06 vs ~6ms direct). Gated on the
-            # caller declaring ``unfiltered_window=True`` (the dashboard's
-            # ``use_rollups`` path): the direct read applies ONLY its own
-            # timestamp clamp, so a where_clause carrying row filters would
-            # be silently ignored on the live slice. Falls back to the
-            # view-based scan when the direct read is unavailable (no files
-            # on disk, schema mismatch, ...).
-            if unfiltered_window:
-                live_cols = parts["live_cols"]
-                try:
-                    # Schema lookup only when the metric projects extra
-                    # columns — the default `requests` metric needs just
-                    # `timestamp`, which the direct read always includes.
-                    _cols: list[str] = self.get_schema_cols() if live_cols else []
-                    if all(c in _cols for c in live_cols):
-                        direct_live_tmp = self._create_active_hour_temp_direct(
-                            list(live_cols), _cols, live_start, live_end
-                        )
-                except Exception:
-                    direct_live_tmp = None
-            if direct_live_tmp == "__empty__":
-                live_source = None
-            elif direct_live_tmp is not None:
-                live_source, live_where = direct_live_tmp, "1=1"
-            else:
-                live_source, live_where = table_name, where_clause
-                live_needs_params = True
+            def _make_ts_direct_tmp(l_start: datetime, l_end: datetime) -> str | None:
+                _cols: list[str] = self.get_schema_cols() if live_cols else []
+                if all(c in _cols for c in live_cols):
+                    return self._create_active_hour_temp_direct(list(live_cols), _cols, l_start, l_end)
+                return None
 
-            observed.live_top_up = "empty" if live_source is None else "unverified"
+            (
+                live_source,
+                live_where,
+                live_st_tz,
+                live_et_tz,
+                partial_total,
+                direct_live_tmp,
+                live_needs_params,
+            ) = self._resolve_scalar_live_source(
+                st,
+                et,
+                wplan,
+                adjust_partial_hour=(chart_metric == "requests"),
+                unfiltered_window=unfiltered_window,
+                get_direct_tmp=_make_ts_direct_tmp,
+                table_name=table_name,
+                where_clause=where_clause,
+                observed=observed,
+            )
             if live_source is not None:
                 select_clauses.append(
                     f"SELECT time_bucket(INTERVAL '{interval}', timestamp) AS out_bucket, "
@@ -2072,14 +2053,7 @@ class QueryRunner:
                 )
 
             if partial_total:
-                # partial_total is only ever non-zero when chart_metric ==
-                # "requests" (see the narrowing gate above) — every other
-                # metric's num/den semantics aren't derivable from
-                # partial_rows' plain (field, value, count) shape. Read
-                # from the writer's synthetic __total__ row (C1, final
-                # whole-branch review) — summing partial_rows itself would
-                # count each request once per populated field.
-                partial_bucket_tz = active_hour_dt.astimezone(UTC).isoformat()
+                partial_bucket_tz = wplan.active_hour_dt.astimezone(UTC).isoformat()
                 select_clauses.append(
                     f"SELECT TIMESTAMPTZ '{partial_bucket_tz}' AS out_bucket, "
                     f"       {partial_total} AS num, {partial_total} AS den"
@@ -2089,21 +2063,10 @@ class QueryRunner:
             observed.outcome = "served"
             return []
 
-        # Re-aggregate the UNION in an outer GROUP BY out_bucket. The rollup
-        # (closed hours) and live (active hour) slices are disjoint at the HOUR
-        # grain, but once time_bucket() re-buckets to a COARSER grain (1 day)
-        # the active day appears in BOTH slices and must be summed into one row
-        # — not emitted twice. Rebuilding the metric from SUM(num)/SUM(den)
-        # here (instead of combining per-branch pre-divided rates) keeps rate
-        # metrics correct across that seam.
         if parts["kind"] == "count":
             value_expr = "CAST(SUM(num) AS BIGINT)"
         else:  # rate
             value_expr = "ROUND(SUM(num) * 100.0 / NULLIF(SUM(den), 0), 2)"
-
-        if not select_clauses:
-            observed.outcome = "served"
-            return []
 
         unioned = " UNION ALL ".join(f"({c})" for c in select_clauses)
         final_sql = (
@@ -2123,9 +2086,6 @@ class QueryRunner:
         except duckdb.InterruptException:
             raise
         except duckdb.Error as e:
-            # Any read failure (stale view, missing column, schema drift
-            # in older bundles, …) drops us to the raw path. Logged at
-            # debug — the caller will produce a working result anyway.
             _logger.debug("[time_series_rollup] read failed, falling back to raw: %s", e)
             observed.outcome = "read_failed"
             if observed.closed_hour_heal == "planned":
@@ -2163,77 +2123,40 @@ class QueryRunner:
 
         Returns the total row count (int), or None to fall back to raw query.
         """
-        from datetime import UTC, timedelta
-
-        from backend.utils.date_utils import parse_iso_utc
+        from datetime import UTC
 
         observed = ReaderCoverage(reader="dashboard.count", eligible=False, outcome="ineligible")
         self.reader_coverage.append(observed)
         if not unfiltered_window:
             observed.eligibility_reason = "filtered"
             return None
-        if not start_time or not end_time:
-            observed.eligibility_reason = "bounds_missing"
-            return None
-
-        st = parse_iso_utc(start_time)
-        et = parse_iso_utc(end_time)
-        if st is None or et is None or et <= st:
-            observed.eligibility_reason = "invalid_window"
-            return None
-        observed.window_start, observed.window_end = st.isoformat(), et.isoformat()
-        if st.second or st.microsecond or et.second or et.microsecond:
-            observed.eligibility_reason = "unsupported_interval"
-            return None
-        if (et - st) > timedelta(days=366):
-            observed.eligibility_reason = "window_too_long"
-            return None
-        observed.eligible, observed.eligibility_reason = True, "eligible"
-        observed.scalar_plan = ScalarRollupCoverage()
-
-        from backend.repositories._rollup_planner import plan_time_series_rollup_window
-
-        wplan = plan_time_series_rollup_window(
-            self.src,
-            st,
-            et,
+        planned = self._plan_scalar_rollup_window(
+            start_time,
+            end_time,
             can_use_overview=True,
-            coverage_mod=rollup_coverage,
-            plan_hourly_read_fn=plan_hourly_read,
-            observation=observed.scalar_plan,
+            require_minute_aligned=True,
+            observed=observed,
         )
-        if wplan is None:
-            observed.outcome = "no_coverage"
+        if planned is None:
             return None
-        observed.outcome = "unknown"
-        observed.live_top_up = "outside_window"
-        rollup_paths = wplan.rollup_paths
-        day_ov_paths = wplan.day_ov_paths
-        crosses_active = wplan.crosses_active
-        active_hour_str, active_hour_dt = wplan.active_hour_str, wplan.active_hour_dt
-        missing_hours = wplan.missing_hours
-        heal_where_sql = wplan.heal_where_sql
+        st, et, wplan = planned
 
         st_tz = st.astimezone(UTC).isoformat()
         st_hour_tz = st.replace(minute=0, second=0, microsecond=0).astimezone(UTC).isoformat()
         et_tz = et.astimezone(UTC).isoformat()
 
         select_clauses: list[str] = []
-        if rollup_paths:
-            paths_sql = quote_path_list(rollup_paths)
+        if wplan.rollup_paths:
+            paths_sql = quote_path_list(wplan.rollup_paths)
             select_clauses.append(
                 f"SELECT {metric_expressions.sum_or_zero('requests')} AS num "
                 f"FROM read_parquet([{paths_sql}]) "
                 f"WHERE bucket >= TIMESTAMPTZ '{st_tz}' "
                 f"  AND bucket < TIMESTAMPTZ '{et_tz}'"
             )
-        if day_ov_paths:
-            ov_paths_sql = quote_path_list(day_ov_paths)
-            hour_ts_expr = (
-                "TRY_CAST(CASE WHEN LENGTH(CAST(hour_start AS VARCHAR)) = 13 "
-                "THEN CAST(hour_start AS VARCHAR) || ':00:00Z' "
-                "ELSE CAST(hour_start AS VARCHAR) END AS TIMESTAMPTZ)"
-            )
+        if wplan.day_ov_paths:
+            ov_paths_sql = quote_path_list(wplan.day_ov_paths)
+            hour_ts_expr = self._HOUR_START_TS_SQL_EXPR
             select_clauses.append(
                 f"SELECT {metric_expressions.sum_or_zero('requests')} AS num "
                 f"FROM read_parquet([{ov_paths_sql}]) "
@@ -2241,48 +2164,38 @@ class QueryRunner:
                 f"  AND {hour_ts_expr} < TIMESTAMPTZ '{et_tz}'"
             )
 
-        # Missing-hour live heal: see try_time_series_from_rollup — a CLOSED
-        # hour with no time_series bundle is a writer-coverage gap, not zero
-        # traffic.
-        if missing_hours:
+        if wplan.missing_hours:
             from backend.core.rollups import _safe_table_for
 
             heal_base_table = _safe_table_for(self.src)
             observed.closed_hour_heal = "planned" if heal_base_table else "unavailable"
             if heal_base_table:
-                select_clauses.append(f"SELECT COUNT(*) AS num FROM {heal_base_table} WHERE {heal_where_sql}")
+                select_clauses.append(f"SELECT COUNT(*) AS num FROM {heal_base_table} WHERE {wplan.heal_where_sql}")
 
         direct_live_tmp: str | None = None
         live_needs_params = False
-        if crosses_active:
-            live_start = max(st, active_hour_dt)
-            live_end = et
-            live_start, _partial_rows, partial_total = self._partial_hour_adjusted_live_start(
-                live_start, active_hour_str, live_end
+        if wplan.crosses_active:
+            (
+                live_source,
+                live_where,
+                live_st_tz,
+                live_et_tz,
+                partial_total,
+                direct_live_tmp,
+                live_needs_params,
+            ) = self._resolve_scalar_live_source(
+                st,
+                et,
+                wplan,
+                adjust_partial_hour=True,
+                unfiltered_window=unfiltered_window,
+                get_direct_tmp=lambda l_start, l_end: self._create_active_hour_temp_direct(
+                    projected_fields or [], actual_cols or [], l_start, l_end
+                ),
+                table_name=table_name,
+                where_clause=where_clause,
+                observed=observed,
             )
-            live_st_tz = live_start.astimezone(UTC).isoformat()
-            live_et_tz = live_end.astimezone(UTC).isoformat()
-            observed.live_start, observed.live_end = live_st_tz, live_et_tz
-
-            if unfiltered_window:
-                try:
-                    direct_live_tmp = self._create_active_hour_temp_direct(
-                        projected_fields or [],
-                        actual_cols or [],
-                        live_start,
-                        live_end,
-                    )
-                except Exception:
-                    direct_live_tmp = None
-            if direct_live_tmp == "__empty__":
-                live_source = None
-            elif direct_live_tmp is not None:
-                live_source, live_where = direct_live_tmp, "1=1"
-            else:
-                live_source, live_where = table_name, where_clause
-                live_needs_params = True
-
-            observed.live_top_up = "empty" if live_source is None else "unverified"
             if live_source is not None:
                 select_clauses.append(
                     f"SELECT COUNT(*) AS num "
@@ -2293,9 +2206,6 @@ class QueryRunner:
                 )
 
             if partial_total:
-                # Read from the writer's synthetic __total__ row (C1, final
-                # whole-branch review) — summing partial_rows itself would
-                # count each request once per populated field.
                 select_clauses.append(f"SELECT {partial_total} AS num")
 
         if not select_clauses:
@@ -3377,63 +3287,56 @@ class QueryRunner:
         from backend.core.rollups import _safe_table_for
 
         base_table = _safe_table_for(self.src)
+        rtt_min_coal = metric_expressions.coalesce("rtt_min_p50_us", "rtt_p50_us")
 
         if et > active_hour_start:
             ah_iso = active_hour_start.isoformat()
-
-            # The active hour duration in seconds for throughput calculation
             active_duration_secs = max(1, (et - active_hour_start).total_seconds())
-
+            cols = set(self.get_schema_cols())
+            has_rtt_min = "rtt_min" in cols
+            rtt_base = (
+                "CAST(approx_quantile(rtt_min, 0.5) AS DOUBLE)"
+                if has_rtt_min
+                else "CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE)"
+            )
+            rtt_cong = (
+                f"CAST(approx_quantile(tcp_rtt, 0.5) AS BIGINT) - CAST({metric_expressions.coalesce('approx_quantile(rtt_min, 0.5)', 'approx_quantile(tcp_rtt, 0.5)')} AS BIGINT)"
+                if has_rtt_min
+                else "0::BIGINT"
+            )
+            ploss_expr = "CAST(AVG(ploss) AS DOUBLE)" if "ploss" in cols else "0::DOUBLE"
+            jitter_expr = "CAST(approx_quantile(rtt_var, 0.5) AS DOUBLE)" if "rtt_var" in cols else "0::DOUBLE"
             sql = (
-                f"SELECT * FROM ("
-                f"  SELECT"
-                f"    asn,"
-                f"    hour_ts                                                             AS bucket_ts,"
+                f"SELECT * FROM (  SELECT    asn,    hour_ts                                                             AS bucket_ts,"
                 f"    resp_bytes_sum / 3600.0                                            AS throughput_bps,"
                 f"    rtt_p50_us                                                         AS rtt_med_us,"
                 f"    rtt_min_p50_us                                                     AS rtt_baseline_us,"
-                f"    CAST(rtt_p50_us AS BIGINT) - CAST(COALESCE(rtt_min_p50_us, rtt_p50_us) AS BIGINT) AS rtt_congestion_us,"
+                f"    CAST(rtt_p50_us AS BIGINT) - CAST({rtt_min_coal} AS BIGINT) AS rtt_congestion_us,"
                 f"    ploss_sum / NULLIF(ploss_count, 0)                                AS avg_ploss,"
                 f"    rtt_var_p50_us                                                     AS jitter_us,"
                 f"    errors * 100.0 / NULLIF(reqs, 0)                                  AS error_pct,"
                 f"    CAST(reqs AS BIGINT)                                               AS reqs"
-                f"   FROM read_parquet([{paths_sql}])"
-                f"   WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
-                f"   UNION ALL "
-                f"   SELECT"
-                f"    asn,"
-                f"    TIMESTAMPTZ '{ah_iso}' AS bucket_ts,"
+                f"   FROM read_parquet([{paths_sql}])   WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
+                f"   UNION ALL    SELECT    asn,    TIMESTAMPTZ '{ah_iso}' AS bucket_ts,"
                 f"    CAST(SUM(resp_bytes) AS DOUBLE) / {active_duration_secs} AS throughput_bps,"
-                f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_med_us,"
-                f"    {'CAST(approx_quantile(rtt_min, 0.5) AS DOUBLE)' if 'rtt_min' in set(self.get_schema_cols()) else 'CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE)'} AS rtt_baseline_us,"
-                f"    {'CAST(approx_quantile(tcp_rtt, 0.5) AS BIGINT) - CAST(' + metric_expressions.coalesce('approx_quantile(rtt_min, 0.5)', 'approx_quantile(tcp_rtt, 0.5)') + ' AS BIGINT)' if 'rtt_min' in set(self.get_schema_cols()) else '0::BIGINT'} AS rtt_congestion_us,"
-                f"    {'CAST(AVG(ploss) AS DOUBLE)' if 'ploss' in set(self.get_schema_cols()) else '0::DOUBLE'} AS avg_ploss,"
-                f"    {'CAST(approx_quantile(rtt_var, 0.5) AS DOUBLE)' if 'rtt_var' in set(self.get_schema_cols()) else '0::DOUBLE'} AS jitter_us,"
+                f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_med_us,    {rtt_base} AS rtt_baseline_us,"
+                f"    {rtt_cong} AS rtt_congestion_us,    {ploss_expr} AS avg_ploss,    {jitter_expr} AS jitter_us,"
                 f"    CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS DOUBLE) * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,"
-                f"    CAST(COUNT(*) AS BIGINT) AS reqs"
-                f"   FROM {base_table} "
-                f"   WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'"
-                f"     AND asn IS NOT NULL"
-                f"   GROUP BY asn"
-                f")"
-                f" ORDER BY reqs DESC"
+                f"    CAST(COUNT(*) AS BIGINT) AS reqs   FROM {base_table} "
+                f"   WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'     AND asn IS NOT NULL   GROUP BY asn) ORDER BY reqs DESC"
             )
         else:
             sql = (
-                f"SELECT"
-                f"  asn,"
-                f"  hour_ts                                                             AS bucket_ts,"
+                f"SELECT  asn,  hour_ts                                                             AS bucket_ts,"
                 f"  resp_bytes_sum / 3600.0                                            AS throughput_bps,"
                 f"  rtt_p50_us                                                         AS rtt_med_us,"
                 f"  rtt_min_p50_us                                                     AS rtt_baseline_us,"
-                f"  CAST(rtt_p50_us AS BIGINT) - CAST(COALESCE(rtt_min_p50_us, rtt_p50_us) AS BIGINT) AS rtt_congestion_us,"
+                f"  CAST(rtt_p50_us AS BIGINT) - CAST({rtt_min_coal} AS BIGINT) AS rtt_congestion_us,"
                 f"  ploss_sum / NULLIF(ploss_count, 0)                                AS avg_ploss,"
                 f"  rtt_var_p50_us                                                     AS jitter_us,"
                 f"  errors * 100.0 / NULLIF(reqs, 0)                                  AS error_pct,"
                 f"  CAST(reqs AS BIGINT)                                               AS reqs"
-                f" FROM read_parquet([{paths_sql}])"
-                f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
-                f" ORDER BY reqs DESC"
+                f" FROM read_parquet([{paths_sql}]) WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}' ORDER BY reqs DESC"
             )
         rows = self._exec_rollup(sql, tag="network_heatmap_rollup")
         if not rows:
@@ -3452,31 +3355,12 @@ class QueryRunner:
         """Serve the /api/network-health ``map_buckets`` + ``cities`` +
         ``metro_leaderboard`` sections from per-hour network_geo parquets.
 
-        Same eligibility posture as :meth:`try_network_heatmap_from_rollup`
-        (unfiltered, >= 48 h, >= 50% closed-hour coverage). Also returns
-        ``None`` when ``map_asn != "all"`` because the geo rollup is built
-        across all ASNs and cannot serve per-ASN map drill-down.
-
-        Returns ``(map_rows, metro_rows)`` on hit:
-          - ``map_rows``: list of tuples shaped as
-            ``(country, city, lat, lon, metro, bucket_ts, rtt_med, avg_ploss,
-               error_pct, reqs)`` — matching positions ``r[0]–r[9]`` in the
-            live ``MAP_BY_COUNTRY_BUCKET`` loop (top 5000 by reqs).
-          - ``metro_rows``: list of tuples shaped as
-            ``(country, city, region, metro, rtt_med_us, avg_ploss, error_pct,
-               reqs)`` — matching positions ``r[0]–r[7]`` in the live
-            ``METRO_LEADERBOARD`` loop (top 100). ``region`` is always ``''``
-            (the city display falls back to city + country in format_city_label).
-
-        Returns ``None`` on any eligibility miss / read error.
+        Returns ``(map_rows, metro_rows)`` on hit or ``None`` on eligibility miss / read error.
         """
         from backend.core.rollups._common import NETWORK_GEO_BUNDLE_FILENAME
 
-        if int(bucket_seconds) > 3600:
+        if int(bucket_seconds) > 3600 or map_asn != "all":
             return None
-
-        if map_asn != "all":
-            return None  # per-ASN map drill-down not supported by geo rollup
 
         win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=24)
         if win is None:
@@ -3491,9 +3375,6 @@ class QueryRunner:
         st_iso = st.isoformat()
         et_iso = et.isoformat()
 
-        # Map rows: per (geocell, hour) — one heatmap time-bucket per hour.
-        # Row shape matches MAP_BY_COUNTRY_BUCKET output:
-        #   (country, city, lat, lon, metro, bucket_ts, rtt_med, avg_ploss, error_pct, reqs)
         from datetime import UTC, datetime
 
         active_hour_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
@@ -3520,97 +3401,52 @@ class QueryRunner:
         if et > active_hour_start:
             ah_iso = active_hour_start.isoformat()
             map_sql = (
-                f"SELECT * FROM ("
-                f"  SELECT"
-                f"    country, city, lat, lon, metro, hour_ts AS bucket_ts,"
-                f"    rtt_sum / NULLIF(rtt_count, 0) AS rtt_med_us,"
-                f"    ploss_sum / NULLIF(ploss_count, 0) AS avg_ploss,"
-                f"    errors * 100.0 / NULLIF(reqs, 0) AS error_pct,"
-                f"    CAST(reqs AS BIGINT) AS reqs"
-                f"  FROM read_parquet([{paths_sql}])"
-                f"  WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
-                f"  UNION ALL "
-                f"  SELECT"
-                f"    country,"
-                f"    {city_col} AS city,"
-                f"    {lat_col} AS lat,"
-                f"    {lon_col} AS lon,"
-                f"    {metro_col} AS metro,"
-                f"    TIMESTAMPTZ '{ah_iso}' AS bucket_ts,"
-                f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_med_us,"
-                f"    {ploss_live_expr} AS avg_ploss,"
+                f"SELECT * FROM (  SELECT    country, city, lat, lon, metro, hour_ts AS bucket_ts,"
+                f"    rtt_sum / NULLIF(rtt_count, 0) AS rtt_med_us,    ploss_sum / NULLIF(ploss_count, 0) AS avg_ploss,"
+                f"    errors * 100.0 / NULLIF(reqs, 0) AS error_pct,    CAST(reqs AS BIGINT) AS reqs"
+                f"  FROM read_parquet([{paths_sql}])  WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
+                f"  UNION ALL   SELECT    country,    {city_col} AS city,    {lat_col} AS lat,    {lon_col} AS lon,"
+                f"    {metro_col} AS metro,    TIMESTAMPTZ '{ah_iso}' AS bucket_ts,"
+                f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_med_us,    {ploss_live_expr} AS avg_ploss,"
                 f"    CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS DOUBLE) * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,"
-                f"    CAST(COUNT(*) AS BIGINT) AS reqs"
-                f"  FROM {base_table} "
-                f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'"
-                f"    AND country IS NOT NULL AND country != ''"
-                f"  GROUP BY country, {city_grp}, {lat_grp}, {lon_grp}, {metro_grp}"
-                f") ORDER BY bucket_ts, reqs DESC LIMIT 5000"
+                f"    CAST(COUNT(*) AS BIGINT) AS reqs  FROM {base_table} "
+                f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'    AND country IS NOT NULL AND country != ''"
+                f"  GROUP BY country, {city_grp}, {lat_grp}, {lon_grp}, {metro_grp}) ORDER BY bucket_ts, reqs DESC LIMIT 5000"
             )
             metro_sql = (
                 f"SELECT country, city, CAST('' AS VARCHAR) AS region, metro, "
                 f"  CAST(SUM(rtt_med_us * reqs) / NULLIF(SUM(reqs), 0) AS DOUBLE) AS rtt_med_us,"
                 f"  CAST(SUM(avg_ploss * reqs) / NULLIF(SUM(reqs), 0) AS DOUBLE) AS avg_ploss,"
                 f"  CAST(SUM(error_pct * reqs) / NULLIF(SUM(reqs), 0) AS DOUBLE) AS error_pct,"
-                f"  CAST(SUM(reqs) AS BIGINT) AS total_reqs "
-                f"FROM ("
-                f"  SELECT country, city, metro,"
-                f"    SUM(rtt_sum) / NULLIF(SUM(rtt_count), 0) AS rtt_med_us,"
-                f"    SUM(ploss_sum) / NULLIF(SUM(ploss_count), 0) AS avg_ploss,"
-                f"    SUM(errors) * 100.0 / NULLIF(SUM(reqs), 0) AS error_pct,"
-                f"    CAST(SUM(reqs) AS BIGINT) AS reqs"
-                f"  FROM read_parquet([{paths_sql}])"
-                f"  WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
-                f"  GROUP BY country, city, metro"
-                f"  UNION ALL "
-                f"  SELECT country, {city_col} AS city, {metro_col} AS metro,"
-                f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_med_us,"
-                f"    {ploss_live_expr} AS avg_ploss,"
+                f"  CAST(SUM(reqs) AS BIGINT) AS total_reqs FROM (  SELECT country, city, metro,"
+                f"    SUM(rtt_sum) / NULLIF(SUM(rtt_count), 0) AS rtt_med_us,    SUM(ploss_sum) / NULLIF(SUM(ploss_count), 0) AS avg_ploss,"
+                f"    SUM(errors) * 100.0 / NULLIF(SUM(reqs), 0) AS error_pct,    CAST(SUM(reqs) AS BIGINT) AS reqs"
+                f"  FROM read_parquet([{paths_sql}])  WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
+                f"  GROUP BY country, city, metro  UNION ALL   SELECT country, {city_col} AS city, {metro_col} AS metro,"
+                f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_med_us,    {ploss_live_expr} AS avg_ploss,"
                 f"    CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS DOUBLE) * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,"
-                f"    CAST(COUNT(*) AS BIGINT) AS reqs"
-                f"  FROM {base_table} "
-                f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'"
-                f"    AND country IS NOT NULL AND country != ''"
-                f"  GROUP BY country, {city_grp}, {metro_grp}"
-                f") GROUP BY country, city, metro ORDER BY total_reqs DESC LIMIT 100"
+                f"    CAST(COUNT(*) AS BIGINT) AS reqs  FROM {base_table} "
+                f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'    AND country IS NOT NULL AND country != ''"
+                f"  GROUP BY country, {city_grp}, {metro_grp}) GROUP BY country, city, metro ORDER BY total_reqs DESC LIMIT 100"
             )
         else:
             map_sql = (
-                f"SELECT"
-                f"  country,"
-                f"  city,"
-                f"  lat,"
-                f"  lon,"
-                f"  metro,"
+                f"SELECT  country,  city,  lat,  lon,  metro,"
                 f"  hour_ts                                           AS bucket_ts,"
                 f"  rtt_sum / NULLIF(rtt_count, 0)                  AS rtt_med_us,"
                 f"  ploss_sum / NULLIF(ploss_count, 0)              AS avg_ploss,"
                 f"  errors * 100.0 / NULLIF(reqs, 0)                AS error_pct,"
                 f"  CAST(reqs AS BIGINT)                             AS reqs"
-                f" FROM read_parquet([{paths_sql}])"
-                f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
-                f" ORDER BY hour_ts, reqs DESC"
-                f" LIMIT 5000"
+                f" FROM read_parquet([{paths_sql}]) WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}' ORDER BY hour_ts, reqs DESC LIMIT 5000"
             )
-
-            # Metro rows: aggregated across all hours — no time dimension.
-            # Row shape matches METRO_LEADERBOARD output:
-            #   (country, city, region, metro, rtt_med_us, avg_ploss, error_pct, reqs)
             metro_sql = (
-                f"SELECT"
-                f"  country,"
-                f"  city,"
-                f"  CAST('' AS VARCHAR)                                   AS region,"
-                f"  metro,"
+                f"SELECT  country,  city,  CAST('' AS VARCHAR)                                   AS region,  metro,"
                 f"  SUM(rtt_sum) / NULLIF(SUM(rtt_count), 0)             AS rtt_med_us,"
                 f"  SUM(ploss_sum) / NULLIF(SUM(ploss_count), 0)         AS avg_ploss,"
                 f"  SUM(errors) * 100.0 / NULLIF(SUM(reqs), 0)           AS error_pct,"
                 f"  CAST(SUM(reqs) AS BIGINT)                             AS total_reqs"
-                f" FROM read_parquet([{paths_sql}])"
-                f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
-                f" GROUP BY country, city, metro"
-                f" ORDER BY total_reqs DESC"
-                f" LIMIT 100"
+                f" FROM read_parquet([{paths_sql}]) WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
+                f" GROUP BY country, city, metro ORDER BY total_reqs DESC LIMIT 100"
             )
         try:
             map_rows = self.execute(map_sql).fetchall()
@@ -4088,6 +3924,61 @@ class QueryRunner:
         ][:10]
         return {"top": top, "total": total}
 
+    def _ngwaf_active_hour_live_rows(
+        self,
+        st: datetime,
+        et: datetime,
+        *,
+        select_cols_sql: str,
+        cache_table: str,
+        group_by_sql: str,
+        log_tag: str,
+        observed: ReaderCoverage | None = None,
+    ) -> list[tuple]:
+        from datetime import UTC, datetime, timedelta
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        live_start = max(active_dt, st)
+        live_end = min(active_dt + timedelta(hours=1), et)
+        if observed is not None:
+            observed.live_top_up = "outside_window"
+        if live_start >= live_end:
+            return []
+        if observed is not None:
+            observed.live_start, observed.live_end = live_start.isoformat(), live_end.isoformat()
+            observed.live_top_up = "missing_column"
+        cols = self.get_schema_cols()
+        if "waf_req_id" not in cols:
+            return []
+        tmp = self._create_active_hour_temp_direct(["waf_req_id"], cols, live_start, live_end)
+        if observed is not None:
+            observed.live_top_up = "unavailable"
+        if tmp == "__empty__":
+            if observed is not None:
+                observed.live_top_up = "empty"
+            return []
+        if tmp is None:
+            return []
+        try:
+            live_q = (
+                f"SELECT {select_cols_sql}, CAST(COUNT(*) AS BIGINT) AS c "
+                f'FROM "{tmp}" t '
+                f"INNER JOIN temp.{cache_table} nb USING (waf_req_id) "
+                f"WHERE nb.bot_name IS NOT NULL "
+                f"GROUP BY {group_by_sql}"
+            )
+            rows = self.execute(live_q).fetchall()
+            if observed is not None:
+                observed.live_top_up = "used"
+            return rows
+        except duckdb.Error as e:
+            if observed is not None:
+                observed.live_top_up = "failed"
+            _logger.debug("[%s] live top-up failed (skipped): %s", log_tag, e)
+            return []
+        finally:
+            self.release_active_direct_temp(tmp)
+
     def try_ngwaf_top_bots_from_rollup(
         self,
         start_time: str | None,
@@ -4098,31 +3989,7 @@ class QueryRunner:
     ) -> list[dict] | None:
         """Serve ``get_top_bots``' ``ngwaf_bots`` panel from the per-hour/
         per-day ``ngwaf_bots`` parquets + a live active-hour top-up.
-
-        The rollup writer already joined each closed hour's ``waf_req_id``s
-        against the SQLite bot cache (see
-        :mod:`backend.core.rollups.ngwaf_bots`), so this reader SUMs tiny
-        aggregated parquets instead of the per-request direct join over the
-        raw window (~115ms on prod 24h, 2026-07-07). EXACT SUM; no
-        ``_approx``.
-
-        ``min_hours=2`` (not the 48h default): the fallback is a dedicated
-        window join, so the rollup should win at the default 24h window.
-
-        Active hour ∩ window merges live via the direct buffer read +
-        ``ngwaf_top`` join — the caller has already ATTACHed the cache (this
-        reader is only invoked from the ``ngwaf_attached`` branch). A failed
-        top-up is skipped, not escalated (bounded staleness ≤1h, same
-        posture as the conn_requests histogram reader).
-
-        Returns ``[{"name", "category", "request_count"}, ...]`` sorted by
-        count descending, capped at ``n`` — the exact shape the direct-join
-        branch produces. An EMPTY list is a valid result (covered window,
-        zero bots); ``None`` means ineligible/no coverage → caller falls
-        back to the direct join.
         """
-        from datetime import UTC, datetime, timedelta
-
         from backend.core.rollups._common import NGWAF_BOTS_BUNDLE_FILENAME
 
         observed = ReaderCoverage(reader="dashboard.ngwaf_bots", minimum_window_hours=2)
@@ -4148,12 +4015,8 @@ class QueryRunner:
             f"FROM read_parquet([{paths_sql}]) "
             f"GROUP BY bot_name, category"
         )
-        try:
-            rows = self.execute(sql).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[ngwaf_bots_rollup] read failed, falling back: %s", e)
+        rows = self._exec_rollup(sql, tag="ngwaf_bots_rollup")
+        if rows is None:
             observed.outcome = "read_failed"
             return None
 
@@ -4162,39 +4025,17 @@ class QueryRunner:
             key = (bot_name, category)
             counts[key] = counts.get(key, 0) + int(cnt or 0)
 
-        # Live top-up: [active hour ∩ window). Closed hours are all rollup-
-        # served (_collect_rollup_paths stops at the active hour).
-        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        live_start = max(active_dt, st)
-        live_end = min(active_dt + timedelta(hours=1), et)
-        observed.live_top_up = "outside_window"
-        if live_start < live_end:
-            observed.live_start, observed.live_end = live_start.isoformat(), live_end.isoformat()
-            observed.live_top_up = "missing_column"
-            cols = self.get_schema_cols()
-            if "waf_req_id" in cols:
-                tmp = self._create_active_hour_temp_direct(["waf_req_id"], cols, live_start, live_end)
-                observed.live_top_up = "unavailable"
-                if tmp == "__empty__":
-                    observed.live_top_up = "empty"
-                elif tmp is not None:
-                    try:
-                        live_q = (
-                            f"SELECT nb.bot_name, nb.category, CAST(COUNT(*) AS BIGINT) AS c "
-                            f'FROM "{tmp}" t '
-                            f"INNER JOIN temp.ngwaf_top_ngwaf_bots nb USING (waf_req_id) "
-                            f"WHERE nb.bot_name IS NOT NULL "
-                            f"GROUP BY 1, 2"
-                        )
-                        for bot_name, category, cnt in self.execute(live_q).fetchall():
-                            key = (bot_name, category)
-                            counts[key] = counts.get(key, 0) + int(cnt or 0)
-                        observed.live_top_up = "used"
-                    except duckdb.Error as e:
-                        observed.live_top_up = "failed"
-                        _logger.debug("[ngwaf_bots_rollup] live top-up failed (skipped): %s", e)
-                    finally:
-                        self.release_active_direct_temp(tmp)
+        for bot_name, category, cnt in self._ngwaf_active_hour_live_rows(
+            st,
+            et,
+            select_cols_sql="nb.bot_name, nb.category",
+            cache_table="ngwaf_top_ngwaf_bots",
+            group_by_sql="1, 2",
+            log_tag="ngwaf_bots_rollup",
+            observed=observed,
+        ):
+            key = (bot_name, category)
+            counts[key] = counts.get(key, 0) + int(cnt or 0)
 
         ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[: max(0, int(n))]
         observed.outcome = "served"
@@ -4210,14 +4051,7 @@ class QueryRunner:
         """Serve ``/api/security/aggregates``' ``ngwaf_verified_bots`` panel
         from per-hour/per-day ``ngwaf_bots.parquet`` files + a live active-hour
         top-up over the direct buffer/hourly temp.
-
-        Counts SUM exactly across hours — no ``_approx`` flag. Pre-rebundle
-        3-column ``ngwaf_bots.parquet`` files (missing ``wellknown_bot_name``,
-        Trap #24) are detected via footer schema inspection and return ``None``
-        so the caller falls back to the live temp scan until backfilled.
         """
-        from datetime import UTC, datetime, timedelta
-
         import pyarrow.parquet as pq
 
         from backend.core.rollups._common import NGWAF_BOTS_BUNDLE_FILENAME
@@ -4253,32 +4087,16 @@ class QueryRunner:
             key = (bot_name, wellknown_bot_name, category)
             counts[key] = counts.get(key, 0) + int(cnt or 0)
 
-        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        live_start = max(active_dt, st)
-        live_end = min(active_dt + timedelta(hours=1), et)
-        if live_start < live_end:
-            cols = self.get_schema_cols()
-            if "waf_req_id" in cols:
-                tmp = self._create_active_hour_temp_direct(["waf_req_id"], cols, live_start, live_end)
-                if tmp == "__empty__":
-                    pass
-                elif tmp is not None:
-                    try:
-                        live_q = (
-                            f"SELECT nb.bot_name, nb.wellknown_bot_name, nb.category, "
-                            f"       CAST(COUNT(*) AS BIGINT) AS c "
-                            f'FROM "{tmp}" t '
-                            f"INNER JOIN temp.ngwaf_cache_ngwaf_bots nb USING (waf_req_id) "
-                            f"WHERE nb.bot_name IS NOT NULL "
-                            f"GROUP BY 1, 2, 3"
-                        )
-                        for bot_name, wellknown_bot_name, category, cnt in self.execute(live_q).fetchall():
-                            key = (bot_name, wellknown_bot_name, category)
-                            counts[key] = counts.get(key, 0) + int(cnt or 0)
-                    except duckdb.Error as e:
-                        _logger.debug("[ngwaf_verified_bots_rollup] live top-up failed (skipped): %s", e)
-                    finally:
-                        self.release_active_direct_temp(tmp)
+        for bot_name, wellknown_bot_name, category, cnt in self._ngwaf_active_hour_live_rows(
+            st,
+            et,
+            select_cols_sql="nb.bot_name, nb.wellknown_bot_name, nb.category",
+            cache_table="ngwaf_cache_ngwaf_bots",
+            group_by_sql="1, 2, 3",
+            log_tag="ngwaf_verified_bots_rollup",
+        ):
+            key = (bot_name, wellknown_bot_name, category)
+            counts[key] = counts.get(key, 0) + int(cnt or 0)
 
         ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
         return [
@@ -4302,15 +4120,7 @@ class QueryRunner:
         """Serve ``/api/security/aggregates``' ``ngwaf_verified_bots_ts`` panel
         from minute-granular ``ngwaf_bots_ts.parquet`` files + a live
         active-hour top-up over the direct buffer/hourly temp.
-
-        Re-bucketing from stored 1-minute granularity is exact whenever
-        ``bucket_seconds`` is a whole number of minutes. Counts SUM exactly
-        across hours — no ``_approx`` flag. Returns ``[(bucket_ts, bot_name,
-        count), ...]`` ordered by ``(bucket_ts, bot_name)``, or ``None`` on
-        any eligibility miss / read error.
         """
-        from datetime import UTC, datetime, timedelta
-
         from backend.core.rollups._common import NGWAF_BOTS_TS_BUNDLE_FILENAME
 
         if has_filters or not start_time or not end_time:
@@ -4351,33 +4161,16 @@ class QueryRunner:
             key = (bucket, str(bot_name))
             counts[key] = counts.get(key, 0) + int(cnt or 0)
 
-        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        live_start = max(active_dt, st)
-        live_end = min(active_dt + timedelta(hours=1), et)
-        if live_start < live_end:
-            cols = self.get_schema_cols()
-            if "waf_req_id" in cols:
-                tmp = self._create_active_hour_temp_direct(["waf_req_id"], cols, live_start, live_end)
-                if tmp == "__empty__":
-                    pass
-                elif tmp is not None:
-                    try:
-                        live_q = (
-                            f"SELECT time_bucket(INTERVAL '{n} seconds', t.timestamp) AS bucket, "
-                            f"       nb.bot_name, "
-                            f"       CAST(COUNT(*) AS BIGINT) AS c "
-                            f'FROM "{tmp}" t '
-                            f"INNER JOIN temp.ngwaf_cache_ngwaf_bots nb USING (waf_req_id) "
-                            f"WHERE nb.bot_name IS NOT NULL "
-                            f"GROUP BY 1, 2"
-                        )
-                        for bucket, bot_name, cnt in self.execute(live_q).fetchall():
-                            key = (bucket, str(bot_name))
-                            counts[key] = counts.get(key, 0) + int(cnt or 0)
-                    except duckdb.Error as e:
-                        _logger.debug("[ngwaf_verified_bots_ts_rollup] live top-up failed (skipped): %s", e)
-                    finally:
-                        self.release_active_direct_temp(tmp)
+        for bucket, bot_name, cnt in self._ngwaf_active_hour_live_rows(
+            st,
+            et,
+            select_cols_sql=f"time_bucket(INTERVAL '{n} seconds', t.timestamp) AS bucket, nb.bot_name",
+            cache_table="ngwaf_cache_ngwaf_bots",
+            group_by_sql="1, 2",
+            log_tag="ngwaf_verified_bots_ts_rollup",
+        ):
+            key = (bucket, str(bot_name))
+            counts[key] = counts.get(key, 0) + int(cnt or 0)
 
         return [(b, bn, c) for (b, bn), c in sorted(counts.items())]
 
@@ -4890,29 +4683,21 @@ class QueryRunner:
             # Simplify projection and filter predicates to allow direct column
             # scan pushdown inside DuckDB, avoiding intermediate subqueries/views.
             if col_type == "VARCHAR":
-                branches.append(
-                    f"(SELECT '{field_lit}' AS field, \"{sql_col}\" AS value, count(*) AS c "
-                    f"FROM {table_name} "
-                    f'WHERE "{sql_col}" IS NOT NULL AND "{sql_col}" != \'\' '
-                    f"GROUP BY 2 "
-                    f"QUALIFY ROW_NUMBER() OVER (ORDER BY c DESC) <= {field_limit})"
-                )
+                val_expr = f'"{sql_col}"'
+                where_pred = f'"{sql_col}" IS NOT NULL AND "{sql_col}" != \'\''
             elif field in INT_AGGREGATE_FIELDS:
-                branches.append(
-                    f"(SELECT '{field_lit}' AS field, CAST(CAST(ROUND(\"{sql_col}\") AS INTEGER) AS VARCHAR) AS value, count(*) AS c "
-                    f"FROM {table_name} "
-                    f'WHERE "{sql_col}" IS NOT NULL '
-                    f"GROUP BY 2 "
-                    f"QUALIFY ROW_NUMBER() OVER (ORDER BY c DESC) <= {field_limit})"
-                )
+                val_expr = f'CAST(CAST(ROUND("{sql_col}") AS INTEGER) AS VARCHAR)'
+                where_pred = f'"{sql_col}" IS NOT NULL'
             else:
-                branches.append(
-                    f"(SELECT '{field_lit}' AS field, CAST(\"{sql_col}\" AS VARCHAR) AS value, count(*) AS c "
-                    f"FROM {table_name} "
-                    f'WHERE "{sql_col}" IS NOT NULL '
-                    f"GROUP BY 2 "
-                    f"QUALIFY ROW_NUMBER() OVER (ORDER BY c DESC) <= {field_limit})"
-                )
+                val_expr = f'CAST("{sql_col}" AS VARCHAR)'
+                where_pred = f'"{sql_col}" IS NOT NULL'
+            branches.append(
+                f"(SELECT '{field_lit}' AS field, {val_expr} AS value, count(*) AS c "
+                f"FROM {table_name} "
+                f"WHERE {where_pred} "
+                f"GROUP BY 2 "
+                f"QUALIFY ROW_NUMBER() OVER (ORDER BY c DESC) <= {field_limit})"
+            )
             field_order.append(field)
 
         if not branches:
@@ -4929,6 +4714,9 @@ class QueryRunner:
         has_filters: bool,
     ) -> list[tuple] | None:
         """Serve the /api/network/pop-health panel from parquets."""
+        from datetime import UTC, datetime
+
+        from backend.core.rollups import _safe_table_for
         from backend.core.rollups._common import POP_HEALTH_BUNDLE_FILENAME
 
         win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=24)
@@ -4941,56 +4729,33 @@ class QueryRunner:
             return None
 
         paths_sql = quote_path_list(rollup_paths)
-
-        from datetime import UTC, datetime
-
         active_hour_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        from backend.core.rollups import _safe_table_for
-
         base_table = _safe_table_for(self.src)
 
         if et > active_hour_start:
             ah_iso = active_hour_start.isoformat()
             et_iso = et.isoformat()
             query = (
-                f"SELECT pop,"
-                f"  CAST(SUM(requests) AS BIGINT),"
-                f"  CAST(SUM(errors) AS BIGINT),"
-                f"  CAST(SUM(cache_hits) AS BIGINT),"
-                f"  CAST(SUM(bandwidth_bytes) AS BIGINT),"
-                f"  CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE),"
-                f"  CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) "
-                f"FROM ("
+                f"SELECT pop,  CAST(SUM(requests) AS BIGINT),  CAST(SUM(errors) AS BIGINT),  CAST(SUM(cache_hits) AS BIGINT),"
+                f"  CAST(SUM(bandwidth_bytes) AS BIGINT),  CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE),"
+                f"  CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM ("
                 f"  SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms "
-                f"  FROM read_parquet([{paths_sql}]) "
-                f"  WHERE pop IS NOT NULL AND pop != '' "
-                f"  UNION ALL "
+                f"  FROM read_parquet([{paths_sql}])   WHERE pop IS NOT NULL AND pop != ''   UNION ALL "
                 f"  SELECT pop, CAST(COUNT(*) AS BIGINT) AS requests, "
                 f"         CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS BIGINT) AS errors, "
                 f"         CAST(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) AS BIGINT) AS cache_hits, "
                 f"         CAST(SUM(resp_bytes) AS BIGINT) AS bandwidth_bytes, "
                 f"         CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS p50_rtt_us, "
-                f"         CAST(approx_quantile(ttfb, 0.95) * 1000.0 AS DOUBLE) AS p95_ttfb_ms "
-                f"  FROM {base_table} "
-                f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}' "
-                f"    AND pop IS NOT NULL AND pop != '' "
-                f"  GROUP BY pop"
-                f") "
-                f"GROUP BY pop"
+                f"         CAST(approx_quantile(ttfb, 0.95) * 1000.0 AS DOUBLE) AS p95_ttfb_ms   FROM {base_table} "
+                f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'     AND pop IS NOT NULL AND pop != '' "
+                f"  GROUP BY pop) GROUP BY pop"
             )
         else:
             query = (
-                f"SELECT "
-                f"  pop, "
-                f"  CAST(SUM(requests) AS BIGINT), "
-                f"  CAST(SUM(errors) AS BIGINT), "
-                f"  CAST(SUM(cache_hits) AS BIGINT), "
-                f"  CAST(SUM(bandwidth_bytes) AS BIGINT), "
-                f"  CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), "
+                f"SELECT   pop,   CAST(SUM(requests) AS BIGINT),   CAST(SUM(errors) AS BIGINT),   CAST(SUM(cache_hits) AS BIGINT), "
+                f"  CAST(SUM(bandwidth_bytes) AS BIGINT),   CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), "
                 f"  CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) "
-                f"FROM read_parquet([{paths_sql}]) "
-                f"WHERE pop IS NOT NULL AND pop != '' "
-                f"GROUP BY pop"
+                f"FROM read_parquet([{paths_sql}]) WHERE pop IS NOT NULL AND pop != '' GROUP BY pop"
             )
         return self.execute(query).fetchall()
 

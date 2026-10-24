@@ -16,11 +16,11 @@ from backend.high_scale.aggregate_writer import compute_dimension_counts
 from backend.high_scale.archive_models import ArchiveManifest, ArchiveSourceObject
 from backend.high_scale.archive_publication import ArchivePublication
 from backend.high_scale.archive_writer import write_batch_archive_checkpoint
+from backend.high_scale.cmcd import project_cmcd
 from backend.high_scale.decoder import DecodeResult, decode_source_object
 from backend.high_scale.network_projection import build_network_projection_rows
 from backend.high_scale.origin_projection import build_origin_projection_rows
 from backend.high_scale.performance_projection import build_performance_projection_rows
-from backend.high_scale.projections import project_cmcd
 from backend.high_scale.publication import (
     ClickHousePublication,
     HighScaleBatch,
@@ -202,10 +202,6 @@ class HighScaleIngestController:
         all_events: list[dict[str, Any]] = []
         total_accepted = 0
         total_quarantined = 0
-        counts_batch: list[tuple[str, int, int]] = []
-        has_batch_counts = (
-            self._control is not None and getattr(type(self._control), "record_source_counts_batch", None) is not None
-        )
 
         for descriptor, payload in sources_payloads:
             if self._control is None:
@@ -247,16 +243,13 @@ class HighScaleIngestController:
             total_quarantined += decoded.quarantined_rows
 
             if self._control is not None:
-                if has_batch_counts:
-                    counts_batch.append((descriptor.object_key, decoded.accepted_rows, decoded.quarantined_rows))
-                else:
-                    self._control.record_source_counts(
-                        service_id,
-                        descriptor.object_key,
-                        accepted_rows=decoded.accepted_rows,
-                        malformed_rows=decoded.quarantined_rows,
-                        expected_owner_epoch=owner.owner_epoch,
-                    )
+                self._control.record_source_counts(
+                    service_id,
+                    descriptor.object_key,
+                    accepted_rows=decoded.accepted_rows,
+                    malformed_rows=decoded.quarantined_rows,
+                    expected_owner_epoch=owner.owner_epoch,
+                )
             else:
                 self._ledger.record_counts(
                     service_id,
@@ -279,37 +272,6 @@ class HighScaleIngestController:
 
             decoded_sources.append((descriptor, decoded, archive_rows))
             all_events.extend(decoded.events)
-
-        if self._control is not None and counts_batch:
-            batch_counts_fn = getattr(self._control, "record_source_counts_batch", None)
-            if (
-                callable(batch_counts_fn)
-                and getattr(type(self._control), "record_source_counts_batch", None) is not None
-            ):
-                try:
-                    batch_counts_fn(
-                        service_id,
-                        counts_batch,
-                        expected_owner_epoch=owner.owner_epoch,
-                    )
-                except TypeError:
-                    for object_key, accepted_rows, malformed_rows in counts_batch:
-                        self._control.record_source_counts(
-                            service_id,
-                            object_key,
-                            accepted_rows=accepted_rows,
-                            malformed_rows=malformed_rows,
-                            expected_owner_epoch=owner.owner_epoch,
-                        )
-            else:
-                for object_key, accepted_rows, malformed_rows in counts_batch:
-                    self._control.record_source_counts(
-                        service_id,
-                        object_key,
-                        accepted_rows=accepted_rows,
-                        malformed_rows=malformed_rows,
-                        expected_owner_epoch=owner.owner_epoch,
-                    )
 
         total_rows = total_accepted + total_quarantined
         if total_rows > 0 and (total_quarantined / total_rows) > max_dead_letter_ratio:

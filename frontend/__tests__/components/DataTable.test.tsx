@@ -22,7 +22,7 @@ import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest'
 import { axe } from 'vitest-axe'
 import React from 'react'
 import { DataTable } from '@/components/DataTable/DataTable'
-import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
+import { DataTableReadonly } from '@/components/DataTable'
 import { DateTimeCell } from '@/components/DataTable/DateTimeCell'
 import type { ColumnDef } from '@tanstack/react-table'
 

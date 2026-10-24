@@ -10,7 +10,7 @@ import { useMounted } from '@/hooks/useMounted'
 import { useServiceStore } from '@/stores/serviceStore'
 // Direct import (not via the barrel) so the page bundle drops the
 // @dnd-kit tree that the reorder-enabled DataTable pulls in.
-import { DataTableReadonly as DataTable } from '@/components/DataTable/DataTableReadonly'
+import { DataTableReadonly as DataTable } from '@/components/DataTable'
 import { ProvisionWizard } from '@/components/ProvisionWizard/ProvisionWizard'
 import { TeardownDialog } from '@/components/TeardownDialog'
 import { DeleteDataDialog } from '@/components/DeleteDataDialog'

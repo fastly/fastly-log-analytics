@@ -6,17 +6,17 @@ import type { DehydratedState } from "@tanstack/react-query";
 import "./globals.css";
 import "maplibre-gl/dist/maplibre-gl.css";
 import QueryProvider from "@/components/QueryProvider";
-import ThemeProvider from "@/components/ThemeProvider";
+import { ThemeProvider } from "next-themes";
 import { AppLayout } from "@/components/AppLayout";
 import { ServerFooter } from "@/components/ServerFooter";
 import { StoreHydrator } from "@/components/StoreHydrator";
-import { SIDEBAR_COLLAPSED_COOKIE } from "@/lib/sidebar-cookie";
+import { SIDEBAR_COLLAPSED_COOKIE } from "@/lib/cookies";
 import { ErrorBoundaryWithRouteReset } from "@/components/ErrorBoundary";
 import { ReloadLoopGuard } from "@/components/ReloadLoopGuard";
 import { WebVitalsReporter } from "@/components/WebVitalsReporter/WebVitalsReporter";
 import { queryKeys, seedBootstrapDependentCaches } from "@/lib/query-keys";
 import { fetchBootstrapServerSide } from "@/lib/ssr/bootstrap";
-import { shouldLoadRumScript } from "@/lib/rum-script";
+import { shouldLoadRumScript } from "@/lib/ssr/upstream";
 
 const inter = Inter({ subsets: ["latin"] });
 

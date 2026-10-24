@@ -1,15 +1,28 @@
-"""Tests for backend/utils/ngwaf.py — NGWAF API client."""
+"""Tests for backend/utils/ngwaf.py and backend/utils/ngwaf_bot_cache.py."""
 
+from __future__ import annotations
+
+import os
 import urllib.parse
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
+import pytest
+import vcr
+
+from backend.core.metadata import pg_connection
 from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.utils.ngwaf import (
     _extract_bot_record,
     _get_relative_time_range,
     fetch_verified_bots_paged,
     oldest_unenriched_timestamp,
+)
+from backend.utils.ngwaf_bot_cache import (
+    cleanup_old_bots,
+    get_cache_stats,
+    get_last_timestamp,
+    upsert_bots,
 )
 
 # ── _extract_bot_record ───────────────────────────────────────────────────────
@@ -124,7 +137,6 @@ def test_extract_bot_record_ignores_non_verified_bot_subcategory():
 
 
 def _make_page(data: list, next_cursor: str = "") -> dict:
-    """A parsed NGWAF response dict, as the central ``fastly()`` client returns it."""
     return {"data": data, "meta": {"next_cursor": next_cursor}}
 
 
@@ -157,8 +169,6 @@ def test_fetch_verified_bots_paged_single_page():
 
 
 def test_fetch_verified_bots_paged_routes_through_central_client():
-    """The call must go through the central ``fastly()`` wrapper: GET, the
-    workspace path under /ngwaf/v1, and the token threaded as the ``token`` kwarg."""
     responses = [_make_page([_bot_request("req1")], next_cursor="")]
 
     with patch("backend.core.fastly.client.fastly", side_effect=responses) as mock_fastly:
@@ -172,7 +182,6 @@ def test_fetch_verified_bots_paged_routes_through_central_client():
 
 
 def test_fetch_verified_bots_paged_stops_on_empty_cursor():
-    """Empty string cursor must stop pagination (API uses '' not null)."""
     responses = [_make_page([_bot_request("req1")], next_cursor="")]
 
     with patch("backend.core.fastly.client.fastly", side_effect=responses):
@@ -195,12 +204,10 @@ def test_fetch_verified_bots_paged_multi_page():
     assert len(pages) == 2
     assert pages[0][0][0]["waf_req_id"] == "req1"
     assert pages[1][0][0]["waf_req_id"] == "req2"
-    # Second request carries the cursor from page 1 in the query string.
     assert "cursor=cursor-abc" in mock_fastly.call_args_list[1].args[1]
 
 
 def test_fetch_verified_bots_paged_skips_non_verified_bot_records():
-    """Records without VERIFIED-BOT signal are excluded from page_records."""
     non_bot = {
         "id": "req_no_bot",
         "signals": [{"id": "DATACENTER", "location": "AWS"}],
@@ -214,7 +221,7 @@ def test_fetch_verified_bots_paged_skips_non_verified_bot_records():
 
     records, _, raw_count = pages[0]
     assert len(records) == 1
-    assert raw_count == 2  # 2 total, 1 filtered to VERIFIED-BOT
+    assert raw_count == 2
     assert records[0]["waf_req_id"] == "req_bot"
 
 
@@ -249,14 +256,12 @@ def test_fetch_verified_bots_paged_empty_page_yields_none_timestamp():
 
 
 def _parse_q(mock_fastly: MagicMock) -> str:
-    """Pull the ``q`` query param from the path passed to ``fastly()``."""
     path = mock_fastly.call_args.args[1]
     parsed = urllib.parse.urlparse(path)
     return urllib.parse.parse_qs(parsed.query).get("q", [""])[0]
 
 
 def test_fetch_verified_bots_paged_uses_proper_query_syntax():
-    # Setup: 4.5 days ago
     from_dt = datetime.now(UTC) - timedelta(days=4, hours=12)
     from_ts = from_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -267,9 +272,6 @@ def test_fetch_verified_bots_paged_uses_proper_query_syntax():
         parsed = urllib.parse.urlparse(path)
         params = urllib.parse.parse_qs(parsed.query)
 
-        # Implementation should have:
-        # q containing 'from:-5d'
-        # no separate 'from' or 'until' params
         q = params.get("q", [""])[0]
         assert "from:-5d" in q
         assert "from" not in params
@@ -277,7 +279,6 @@ def test_fetch_verified_bots_paged_uses_proper_query_syntax():
 
 
 def test_fetch_verified_bots_paged_rounds_up_to_15min():
-    # Setup: 12 minutes ago
     from_dt = datetime.now(UTC) - timedelta(minutes=12)
     from_ts = from_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -291,41 +292,30 @@ def test_fetch_verified_bots_paged_rounds_up_to_15min():
 
 
 def test_relative_time_range_passes_through_existing_negative_string():
-    """Already-relative inputs (``-3d``, ``-5min``) round-trip unchanged.
-    Callers pass these when they want to skip the auto-rounding."""
     assert _get_relative_time_range("-3d") == "-3d"
     assert _get_relative_time_range("-15min") == "-15min"
 
 
 def test_relative_time_range_invalid_format_returns_default_1d():
-    """Garbage input → safe default. ``-1d`` won't lose data — it'll
-    just over-fetch on the next page — whereas raising would kill the
-    whole bot-sync cron."""
     assert _get_relative_time_range("not-a-timestamp") == "-1d"
     assert _get_relative_time_range("") == "-1d"
 
 
 def test_relative_time_range_hour_range_rounds_up():
-    """4.5 hours ago → ``-5h`` (math.ceil)."""
     from_dt = datetime.now(UTC) - timedelta(hours=4, minutes=30)
     out = _get_relative_time_range(from_dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
     assert out == "-5h"
 
 
 def test_relative_time_range_minute_range_rounds_up_to_15min_multiple():
-    """40 minutes ago → ``-45min`` (next 15-min increment)."""
     from_dt = datetime.now(UTC) - timedelta(minutes=40)
     out = _get_relative_time_range(from_dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
     assert out == "-45min"
 
 
 def test_relative_time_range_minimum_is_15min_even_for_recent_ts():
-    """``ts`` that's only ~5 seconds in the past → still ``-15min``,
-    not ``-0min``. ``max(mins, 1)`` exists for clock-skew safety; the
-    actual rounding-up to 15 happens before the max."""
     from_dt = datetime.now(UTC) - timedelta(seconds=5)
     out = _get_relative_time_range(from_dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
-    # Round up to nearest 15: 5s → 15min
     assert out == "-15min"
 
 
@@ -333,8 +323,6 @@ def test_relative_time_range_minimum_is_15min_even_for_recent_ts():
 
 
 def test_fetch_verified_bots_paged_includes_until_when_provided():
-    """``until_ts`` adds an ``until:`` clause to the q parameter. Used
-    by backfill sync to limit the range when chunking."""
     from_dt = datetime.now(UTC) - timedelta(days=3)
     until_dt = datetime.now(UTC) - timedelta(days=1)
 
@@ -357,56 +345,41 @@ def test_fetch_verified_bots_paged_includes_until_when_provided():
 
 
 def test_oldest_unenriched_returns_none_when_ngwaf_db_missing(tmp_path):
-    """No ngwaf_bot_cache.db file → no work to do, return None.
-    The sync cron uses this to decide whether to back-fill."""
+    """When no unenriched rows or connection cannot attach, return None."""
     src = {"name": "svc1"}
 
     with (
         patch("backend.config.ngwaf_db_path", return_value=str(tmp_path / "missing.db")),
-        patch("backend.utils.ngwaf_bot_cache.ensure_schema"),
+        patch("backend.core.duckdb.get_connection", side_effect=CronLeaseHeldError("no db")),
     ):
         assert oldest_unenriched_timestamp(src) is None
 
 
 def test_oldest_unenriched_returns_none_on_unexpected_exception(tmp_path):
-    """Any error (DuckDB connection failure, missing log table) → None.
-    Pinned because the sync cron treats None as "skip this iteration"
-    — a raise would abort the whole cron job."""
-    ngwaf_db = tmp_path / "ngwaf.db"
-    ngwaf_db.touch()  # Just needs to exist
-    src = {"name": "svc1"}
-
-    with (
-        patch("backend.config.ngwaf_db_path", return_value=str(ngwaf_db)),
-        patch("backend.utils.ngwaf_bot_cache.ensure_schema"),
-        patch("backend.core.duckdb.get_connection", side_effect=CronLeaseHeldError("DB busy")),
-    ):
-        assert oldest_unenriched_timestamp(src) is None
-
-
-def test_oldest_unenriched_tolerates_ensure_schema_failure(tmp_path):
-    """``ensure_schema`` errors are swallowed — the function may be
-    called on a brand-new install where the cache file is 0 bytes;
-    the first-sync path must still complete."""
     ngwaf_db = tmp_path / "ngwaf.db"
     ngwaf_db.touch()
     src = {"name": "svc1"}
 
     with (
         patch("backend.config.ngwaf_db_path", return_value=str(ngwaf_db)),
-        patch(
-            "backend.utils.ngwaf_bot_cache.ensure_schema",
-            side_effect=RuntimeError("can't open cache"),
-        ),
         patch("backend.core.duckdb.get_connection", side_effect=CronLeaseHeldError("DB busy")),
     ):
-        # Must not raise — ensure_schema error is caught
+        assert oldest_unenriched_timestamp(src) is None
+
+
+def test_oldest_unenriched_tolerates_ensure_schema_failure(tmp_path):
+    ngwaf_db = tmp_path / "ngwaf.db"
+    ngwaf_db.touch()
+    src = {"name": "svc1"}
+
+    with (
+        patch("backend.config.ngwaf_db_path", return_value=str(ngwaf_db)),
+        patch("backend.core.duckdb.get_connection", side_effect=CronLeaseHeldError("DB busy")),
+    ):
         assert oldest_unenriched_timestamp(src) is None
 
 
 def test_oldest_unenriched_returns_formatted_timestamp_when_row_found(tmp_path):
-    """Happy path: the LEFT JOIN finds a row with a min timestamp, the
-    helper formats it as an ISO-Z string the NGWAF API accepts."""
     ngwaf_db = tmp_path / "ngwaf.db"
     ngwaf_db.touch()
     src = {"name": "svc1"}
@@ -421,10 +394,207 @@ def test_oldest_unenriched_returns_formatted_timestamp_when_row_found(tmp_path):
 
     with (
         patch("backend.config.ngwaf_db_path", return_value=str(ngwaf_db)),
-        patch("backend.utils.ngwaf_bot_cache.ensure_schema"),
         patch("backend.core.duckdb.get_connection", return_value=fake_con),
         patch("backend.repositories._base.attach_ngwaf_cache", return_value=attached_cm),
     ):
         out = oldest_unenriched_timestamp(src)
 
     assert out == "2026-04-15T12:30:00Z"
+
+
+# ── Merged from test_ngwaf_bot_cache.py ──────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def isolated_db():
+    """Wipe the cache tables before each test."""
+    con = pg_connection.get_pg_thread_connection()
+    try:
+        con.execute("DELETE FROM ngwaf_bots")
+        con.execute("DELETE FROM ngwaf_sync_state")
+        con.commit()
+    except Exception:
+        con.rollback()
+    yield
+
+
+def test_get_last_timestamp_returns_none_when_no_state():
+    ts = get_last_timestamp("ws-missing")
+    assert ts is None
+
+
+def test_get_last_timestamp_returns_stored_value_after_upsert():
+    upsert_bots([], "ws1", latest_timestamp="2026-05-06T12:00:00Z")
+    assert get_last_timestamp("ws1") == "2026-05-06T12:00:01Z"
+
+
+def test_get_last_timestamp_isolated_per_workspace():
+    upsert_bots([], "ws-a", latest_timestamp="2026-05-01T00:00:00Z")
+    ts = get_last_timestamp("ws-b")
+    assert ts is None
+
+
+def test_upsert_bots_stores_records():
+    records = [
+        {
+            "waf_req_id": "req1",
+            "bot_name": "OpenAI SearchBot",
+            "category": "AI-FETCHER",
+            "wellknown_bot_id": "openai-searchbot",
+            "wellknown_bot_name": "OpenAI SearchBot crawler",
+        }
+    ]
+    upsert_bots(records, "ws1", latest_timestamp="2026-05-07T10:00:00Z")
+    assert get_last_timestamp("ws1") == "2026-05-07T10:00:01Z"
+
+
+def test_upsert_bots_is_idempotent():
+    record = {
+        "waf_req_id": "req-dup",
+        "bot_name": "AhrefsBot",
+        "category": "SEO",
+        "wellknown_bot_id": None,
+        "wellknown_bot_name": None,
+    }
+    upsert_bots([record], "ws1", latest_timestamp="2026-05-07T08:00:00Z")
+    upsert_bots([record], "ws1", latest_timestamp="2026-05-07T09:00:00Z")
+    assert get_last_timestamp("ws1") == "2026-05-07T09:00:01Z"
+
+
+def test_upsert_bots_skips_records_without_waf_req_id():
+    records = [{"waf_req_id": None, "bot_name": "Phantom"}]
+    upsert_bots(records, "ws1", latest_timestamp="2026-05-07T00:00:00Z")
+    assert get_last_timestamp("ws1") == "2026-05-07T00:00:01Z"
+
+
+def test_upsert_bots_does_not_update_timestamp_when_none():
+    upsert_bots([], "ws1", latest_timestamp="2026-05-07T06:00:00Z")
+    upsert_bots([], "ws1", latest_timestamp=None)
+    assert get_last_timestamp("ws1") == "2026-05-07T06:00:01Z"
+
+
+def test_upsert_bots_stores_wellknown_null_correctly():
+    records = [
+        {
+            "waf_req_id": "req-unknown",
+            "bot_name": "UnknownNewBot",
+            "category": "AI-FETCHER",
+            "wellknown_bot_id": None,
+            "wellknown_bot_name": None,
+        }
+    ]
+    upsert_bots(records, "ws1", latest_timestamp="2026-05-07T10:00:00Z")
+    assert get_last_timestamp("ws1") == "2026-05-07T10:00:01Z"
+
+
+def test_cleanup_old_bots_removes_old_rows():
+    upsert_bots(
+        [
+            {
+                "waf_req_id": "old-req",
+                "bot_name": "OldBot",
+                "category": None,
+                "wellknown_bot_id": None,
+                "wellknown_bot_name": None,
+            }
+        ],
+        "ws1",
+        latest_timestamp="2026-04-01T00:00:00Z",
+    )
+
+    old_ts = (datetime.now(UTC) - timedelta(days=40)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    con = pg_connection.get_pg_thread_connection()
+    con.execute("UPDATE ngwaf_bots SET synced_at = ? WHERE waf_req_id = 'old-req'", (old_ts,))
+    con.commit()
+
+    deleted = cleanup_old_bots(retention_days=30)
+    assert deleted == 1
+
+
+def test_cleanup_old_bots_keeps_recent_rows():
+    upsert_bots(
+        [
+            {
+                "waf_req_id": "new-req",
+                "bot_name": "NewBot",
+                "category": None,
+                "wellknown_bot_id": None,
+                "wellknown_bot_name": None,
+            }
+        ],
+        "ws1",
+        latest_timestamp="2026-05-07T00:00:00Z",
+    )
+    deleted = cleanup_old_bots(retention_days=30)
+    assert deleted == 0
+
+
+def test_cleanup_old_bots_returns_zero_on_empty_table():
+    deleted = cleanup_old_bots(retention_days=30)
+    assert deleted == 0
+
+
+def test_ensure_schema_and_get_cache_stats():
+    upsert_bots(
+        [{"waf_req_id": "stat-bot-1", "bot_name": "Googlebot"}],
+        "ws-stats",
+        latest_timestamp="2026-05-15T00:00:00Z",
+    )
+    stats = get_cache_stats()
+    assert stats["total_cached_bots"] == 1
+    assert "ws-stats" in stats["workspaces"]
+    assert stats["top_bots"].get("Googlebot") == 1
+
+
+# ── Merged from test_ngwaf_vcr.py ────────────────────────────────────────────
+
+CASSETTE_DIR = os.path.join(os.path.dirname(__file__), "..", "cassettes")
+
+_my_vcr = vcr.VCR(
+    cassette_library_dir=CASSETTE_DIR,
+    record_mode="none",
+    filter_headers=[("Fastly-Key", "REDACTED"), ("Authorization", "REDACTED")],
+    match_on=["method", "scheme", "host", "port", "path", "query"],
+)
+
+
+def test_single_page_yields_two_verified_bots():
+    with _my_vcr.use_cassette("ngwaf_verified_bots_single_page.yaml"):
+        pages = list(
+            fetch_verified_bots_paged(
+                api_key="test-token-not-real",
+                workspace_id="ws-test-1",
+                from_ts="-1h",
+                page_limit=500,
+            )
+        )
+
+    assert len(pages) == 1, f"expected exactly one page, got {len(pages)}"
+    records, latest_ts, raw_count = pages[0]
+
+    assert raw_count == 3, "raw_count should include all records pre-filter"
+    assert len(records) == 2, f"only 2 of 3 records have VERIFIED-BOT signal; got {len(records)}: {records!r}"
+
+    bot_names = sorted(r["bot_name"] for r in records)
+    assert bot_names == ["bingbot", "googlebot"]
+
+    categories = sorted(r["category"] for r in records)
+    assert categories == ["SEARCH-ENGINE", "SEARCH-ENGINE"]
+
+    assert latest_ts == "2026-05-26T10:05:00Z"
+
+
+def test_cassette_no_match_raises_loudly():
+    with _my_vcr.use_cassette("ngwaf_verified_bots_single_page.yaml"):
+        with pytest.raises(Exception) as excinfo:
+            list(
+                fetch_verified_bots_paged(
+                    api_key="test-token-not-real",
+                    workspace_id="ws-DIFFERENT",
+                    from_ts="-1h",
+                    page_limit=500,
+                )
+            )
+        assert "no match" in str(excinfo.value).lower() or "cannot" in str(excinfo.value).lower(), (
+            f"expected vcrpy refusal, got: {excinfo.value!r}"
+        )

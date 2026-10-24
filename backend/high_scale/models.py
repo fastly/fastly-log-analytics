@@ -2,16 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass
-
-
-@dataclass(frozen=True)
-class RetentionRecommendation:
-    hot_retention_seconds: int
-    warm_retention_seconds: int
-    protected_free_bytes: int
-    estimated_hot_bytes: int
-    estimated_warm_bytes: int
 
 
 @dataclass(frozen=True)
@@ -22,6 +15,14 @@ class TopologyProfile:
     persistent_serving_storage: bool
     production_ha: bool
     shard_count: int = 1
+
+
+def build_topology_profile(profile_name: str) -> TopologyProfile:
+    if profile_name == "local":
+        return TopologyProfile("local", 1, 1, True, False, 1)
+    if profile_name == "portable-production":
+        return TopologyProfile("portable-production", 2, 3, True, True, 3)
+    raise ValueError("unknown high-scale topology profile")
 
 
 @dataclass(frozen=True)
@@ -55,41 +56,28 @@ class HighScaleConfig:
 
 def _resolve_topology_profile(profile_name: str) -> TopologyProfile:
     """Single source of truth for profile names and replica/Keeper expectations."""
-    from backend.high_scale.topology import build_topology_profile
-
     try:
         return build_topology_profile(profile_name)
     except ValueError:
         raise ValueError("high-scale profile must be local or portable-production") from None
 
 
-def recommend_retention(
-    *,
-    service_rate: int,
-    row_width_bytes: int,
-    disk_bytes: int,
-    reserve_fraction: float = 0.20,
-    rum_rate: int = 0,
-    enabled_field_count: int = 1,
-    bytes_per_enabled_field: int = 0,
-) -> RetentionRecommendation:
-    if service_rate <= 0 or row_width_bytes <= 0 or disk_bytes <= 0 or rum_rate < 0:
-        raise ValueError("service rate, row width, and disk capacity must be positive")
-    if enabled_field_count <= 0 or bytes_per_enabled_field < 0:
-        raise ValueError("enabled field sizing values are invalid")
-    if not 0 < reserve_fraction < 1:
-        raise ValueError("reserve_fraction must be between 0 and 1")
-    protected = int(disk_bytes * reserve_fraction)
-    available = disk_bytes - protected
-    total_rate = service_rate + rum_rate
-    effective_row_width = row_width_bytes + enabled_field_count * bytes_per_enabled_field
-    bytes_per_second = total_rate * effective_row_width
-    hot_seconds = min(86_400, max(3_600, available // max(bytes_per_second * 4, 1)))
-    warm_seconds = min(60 * 86_400, max(hot_seconds, available // max(bytes_per_second, 1)))
-    return RetentionRecommendation(
-        hot_retention_seconds=int(hot_seconds),
-        warm_retention_seconds=int(warm_seconds),
-        protected_free_bytes=protected,
-        estimated_hot_bytes=int(bytes_per_second * hot_seconds),
-        estimated_warm_bytes=int(bytes_per_second * warm_seconds),
+def from_environment(env: Mapping[str, str] | None = None) -> HighScaleConfig:
+    source = os.environ if env is None else env
+    config = HighScaleConfig(
+        enabled=source.get("HIGH_SCALE_ENABLED", "").lower() in {"1", "true", "yes"},
+        clickhouse_url=source.get("HIGH_SCALE_CLICKHOUSE_URL"),
+        fos_bucket=source.get("HIGH_SCALE_FOS_BUCKET"),
+        archive_manifest_dsn=source.get("HIGH_SCALE_ARCHIVE_MANIFEST_DSN"),
+        worker_queue_url=source.get("HIGH_SCALE_WORKER_QUEUE_URL"),
+        persistent_storage=source.get("HIGH_SCALE_PERSISTENT_STORAGE", "true").lower() not in {"0", "false", "no"},
+        profile=source.get("HIGH_SCALE_PROFILE", "local"),
     )
+    config.validate()
+    return config
+
+
+def topology_from_environment(env: Mapping[str, str] | None = None) -> TopologyProfile:
+    """Resolve and validate the active topology profile from environment variables."""
+    source = os.environ if env is None else env
+    return _resolve_topology_profile(source.get("HIGH_SCALE_PROFILE", "local"))

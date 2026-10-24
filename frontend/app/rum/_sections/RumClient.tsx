@@ -10,7 +10,7 @@ import { RumStatusPanel } from '@/components/Rum/RumStatusPanel';
 import { DashboardSkeleton } from '@/components/skeletons/PageSkeleton';
 import { PlotlyChart } from '@/components/PlotlyChart';
 import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart';
-import { useTimezone } from '@/hooks/useTimezone';
+import { useTimezone } from '@/hooks/useDateFormat';
 import { formatDate } from '@/lib/date';
 import { Terminal, Activity, Monitor, ShieldAlert, Cpu, PieChart, TrendingUp, Eye } from 'lucide-react';
 import { adminJsonResult } from '@/lib/api';
@@ -27,10 +27,10 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { DataTable } from '@/components/DataTable/DataTable';
-import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly';
+import { DataTableReadonly } from '@/components/DataTable';
 import { ColumnDef } from '@tanstack/react-table';
-import { useRumStatus } from '@/hooks/useRumStatus';
-import { CHART_COLORS } from '@/lib/chart-colors'
+import { useRumStatus } from '@/hooks/useServiceQuery';
+import { CHART_COLORS } from '@/lib/chart-builders'
 
 import { formatCount } from '@/lib/format'
 interface RumClientProps extends Pick<RangeWireArgs, 'relativeRange' | 'isAutoRange' | 'anchor'> {

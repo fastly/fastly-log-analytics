@@ -27,7 +27,7 @@ import { useStreamAggregates } from './useStreamAggregates'
 import { StreamTimeline } from './StreamTimeline'
 
 import { formatDuration } from '@/lib/date'
-import { CHART_COLORS } from '@/lib/chart-colors'
+import { CHART_COLORS } from '@/lib/chart-builders'
 
 const NETWORK_LAYOUT = {
   yaxis: { title: { text: 'Throughput (kbps)' } },

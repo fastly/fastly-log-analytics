@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from backend.high_scale._common import parse_time_window, visible_fact_clauses
 from backend.high_scale._filters import request_filter_clauses
-from backend.high_scale._projection_utils import range_value
-from backend.high_scale._scope import visible_fact_clauses
 from backend.high_scale.registry import HighScaleService
 from backend.models.assets import AssetsAggregatesResponse, AssetsRequest
 from backend.repositories.utils.response_cache import (
@@ -115,9 +113,7 @@ def assets_aggregates(
     start_time: str | None,
     end_time: str | None,
 ) -> AssetsAggregatesResponse:
-    now = datetime.now(UTC)
-    end_dt = range_value(end_time) if end_time else now
-    start_dt = range_value(start_time) if start_time else (end_dt - timedelta(days=1))
+    start_dt, end_dt = parse_time_window(start_time, end_time)
 
     cache_key = digest_cache_key(
         {

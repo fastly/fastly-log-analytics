@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Any
 
 from backend.cron.decorators import cron_task
 from backend.cron.scheduler import (
@@ -315,5 +316,176 @@ def _run_rollup_hour_heal(
     return run.result if run.result is not None else outcome
 
 
-# Re-exported from dedicated job module
-from backend.cron.jobs.rollup_compact import _run_rollup_compact_daily  # noqa: F401
+def _call_with_lookback(fn: Any, *args: Any, lookback_days: int = 30) -> Any:
+    return fn(*args, lookback_days=lookback_days)
+
+
+@cron_task("rollup_compact_daily", job_name="rollup_compact_daily")
+def _run_rollup_compact_daily(
+    service_id: str,
+    manual: bool = False,
+    run_id: int | None = None,
+) -> dict:
+    from backend.core import rollups
+    from backend.core.duckdb import get_source_for_service
+    from backend.core.rollups import (
+        backfill_day_bundles,
+        backfill_missing_hour_bundles,
+        backfill_missing_hour_ip_spread,
+        compact_closed_days_to_daily,
+        retire_compacted_hour_bundles,
+    )
+    from backend.core.rollups._common import _day_bundled_root
+    from backend.core.rollups.recompute import cleanup_old_rollups
+    from backend.core.rollups.spec import DAY_COMPACTORS
+    from backend.cron.jobs._common import has_sufficient_disk_space
+    from backend.cron.lifecycle import cron_run, record_skip_row
+    from backend.utils.active_requests import should_defer_cron
+
+    if not manual and should_defer_cron("rollup_compact", service_id):
+        logger.info("⏸️  [rollup-compact] %s: deferring due to active user queries", service_id)
+        return {"status": "deferred", "service_id": service_id, "summary": "Deferred due to active queries"}
+
+    src = get_source_for_service(service_id)
+    if src is None:
+        return {"status": "error", "service_id": service_id, "summary": "Source not found"}
+
+    ok_disk, msg = has_sufficient_disk_space(_day_bundled_root(src), "rollup-compact", service_id)
+    if not ok_disk:
+        record_skip_row(
+            src,
+            "rollup_compact_daily",
+            "Skipped due to low disk space",
+            status="warning",
+            error_message=msg,
+            run_id=run_id,
+        )
+        return {"status": "warning", "service_id": service_id, "summary": msg}
+
+    _display = _display_label(src, service_id)
+    outcome: dict = {}
+    with cron_run(
+        service_id,
+        "rollup_compact_daily",
+        source=src,
+        run_id=run_id,
+        error_summary="Daily rollup compaction failed",
+        error_result=lambda exc: {
+            "status": "error",
+            "service_id": service_id,
+            "summary": str(exc),
+            "errors": [str(exc)],
+        },
+        include_log_output=False,
+        progress_task="rollup_compact",
+        skip_log_prefix="rollup-compact",
+    ) as run:
+        if run.skipped:
+            return {"status": "skipped", "service_id": service_id, "summary": run.skip_reason}
+        if run.aborted:
+            return dict(run.result) if run.result is not None else outcome
+        logger.info("🏎️  [rollup-compact] %s: Daily rollup compaction started.", _display)
+
+        subsystem_errors: list[str] = []
+        for label, fn in (
+            ("missing_hour_bundles", backfill_missing_hour_bundles),
+            ("ip_spread", backfill_missing_hour_ip_spread),
+        ):
+            try:
+                _call_with_lookback(fn, service_id, src, lookback_days=30)
+            except Exception as e:
+                subsystem_errors.append(f"{label}: {e}")
+                logger.warning("[rollup-compact] %s: %s self-heal failed: %s", _display, label, e)
+
+        rebuilt = _call_with_lookback(compact_closed_days_to_daily, service_id, src, lookback_days=30)
+
+        try:
+            bundled = _call_with_lookback(backfill_day_bundles, service_id, src, lookback_days=30)
+        except Exception as e:
+            subsystem_errors.append(f"day_bundles: {e}")
+            logger.warning("[rollup-compact] %s: day-bundle backfill failed: %s", _display, e)
+            bundled = 0
+
+        for spec in DAY_COMPACTORS:
+            try:
+                _call_with_lookback(getattr(rollups, spec.compactor), service_id, src, lookback_days=30)
+            except Exception as e:
+                subsystem_errors.append(f"{spec.label}: {e}")
+                logger.warning("[rollup-compact] %s: %s failed: %s", _display, spec.label, e)
+
+        retired_files, retired_bytes = 0, 0
+        try:
+            retired_files, retired_bytes = _call_with_lookback(
+                retire_compacted_hour_bundles, service_id, src, lookback_days=30
+            )
+        except Exception as e:
+            subsystem_errors.append(f"retirement: {e}")
+            logger.warning("[rollup-compact] %s: retirement failed: %s", _display, e)
+
+        try:
+            retention_months = int(src.get("rollup_retention_months", 12))
+            max_age_days = int(src.get("rollups_days", retention_months * 30))
+            if max_age_days > 0:
+                cleanup_old_rollups(service_id, src, max_age_days=max_age_days, hour_bundle_max_age_days=14)
+        except Exception as e:
+            logger.warning("[rollup-compact] %s: cleanup pass failed: %s", _display, e)
+
+        summary = (
+            f"Rebuilt {rebuilt} (field, day) file(s); bundled {bundled} day(s); "
+            f"retired {retired_files} hourly file(s) ({retired_bytes / 1024:.1f}KB)."
+        )
+        status = "warning" if subsystem_errors else "success"
+        err_msg = "; ".join(subsystem_errors) if subsystem_errors else None
+        run.record(status, summary=summary, error_message=err_msg)
+        outcome = {
+            "status": status,
+            "service_id": service_id,
+            "rebuilt": rebuilt,
+            "bundled": bundled,
+            "retired_files": retired_files,
+            "retired_bytes": retired_bytes,
+            "duration_s": round(run.elapsed(), 2),
+            "summary": summary,
+            "errors": subsystem_errors if subsystem_errors else None,
+        }
+    return run.result if run.result is not None else outcome
+
+
+@cron_task("partial_hour_merge", job_name="partial_hour_merge")
+def _run_partial_hour_merge(service_id: str) -> None:
+    """Fast (30s) tick that folds newly-landed buffer/active-hour-partition files into the pod-local partial-hour rollup."""
+    from backend.core.duckdb import get_source_for_service
+    from backend.core.field_registry import derived
+    from backend.core.rollups.partial_hour import gc_stale_partial_hours, merge_partial_hour
+    from backend.cron.lifecycle import cron_run
+    from backend.repositories._base import _LIVE_TOPN_SKIP_FIELDS
+    from backend.repositories.dashboard import FIELDS
+    from backend.utils.active_requests import should_defer_cron
+
+    if should_defer_cron("partial_hour_merge", service_id):
+        return
+
+    src = get_source_for_service(service_id)
+    if src is None:
+        return
+
+    with cron_run(
+        service_id,
+        "partial_hour_merge",
+        source=src,
+        skip_log_prefix="partial-hour",
+        error_summary="partial-hour merge failed",
+    ) as run:
+        if run.skipped:
+            return
+
+        logger.info("🕐  [partial-hour] %s: partial-hour merge started.", _display_label(src, service_id))
+        derived_fields = {f.code for f in derived()}
+        merge_fields = [f for f in FIELDS if f not in _LIVE_TOPN_SKIP_FIELDS and f not in derived_fields]
+
+        stats = merge_partial_hour(service_id, src, merge_fields)
+        removed = gc_stale_partial_hours(src)
+        summary = f"Merged {stats['new_files']} new file(s) into hour={stats['hour']}; GC'd {removed} stale hour(s)"
+        run.success(summary)
+        if stats["new_files"]:
+            run.log_progress({"type": "status", "message": summary})

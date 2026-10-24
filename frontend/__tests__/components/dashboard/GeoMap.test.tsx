@@ -44,7 +44,7 @@ vi.mock('next/dynamic', () => ({
 }))
 
 const { activeFields } = vi.hoisted(() => ({ activeFields: new Set<string>() }))
-vi.mock('@/hooks/useActiveLogFields', async () => (await import('../../helpers/page-smoke')).activeLogFieldsSetModuleMock(activeFields))
+vi.mock('@/hooks/useLogFieldsCatalog', async () => (await import('../../helpers/page-smoke')).activeLogFieldsSetModuleMock(activeFields))
 
 vi.mock('@/components/Map/ChoroplethMap', () => ({
   ChoroplethMap: ({ data, onCountryClick }: { data: Array<{ country?: string; name?: string }>; onCountryClick: (c: string) => void }) => (

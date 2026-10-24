@@ -36,8 +36,10 @@ vi.mock('@/hooks/useLogFieldsCatalog', () => ({
 // these tests stay free of a QueryClientProvider. Default off; the masking
 // tests re-program it.
 const useMaskIpsMock = vi.fn(() => false)
-vi.mock('@/hooks/useMaskIps', () => ({
+vi.mock('@/hooks/useIsAnalyst', () => ({
+  useIsAnalyst: () => false,
   useMaskIps: () => useMaskIpsMock(),
+  useEnforceMaskedFilters: () => {},
 }))
 
 import { TopTenTable } from '@/components/Dashboard/TopTenTable'

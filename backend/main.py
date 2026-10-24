@@ -978,8 +978,7 @@ async def telemetry_middleware(request: Request, call_next):
 # reach the telemetry layer so blocked analyst hits don't pollute
 # usage_log with admin-scoped rows AND sets analyst_session early so
 # the inner telemetry middleware can attribute correctly.
-from backend.utils.admin_gateway import validate_admin_gateway_config  # noqa: E402
-from backend.utils.remote_access import RemoteAccessMiddleware  # noqa: E402
+from backend.utils.remote_access import RemoteAccessMiddleware, validate_admin_gateway_config  # noqa: E402
 
 app.add_middleware(RemoteAccessMiddleware)
 

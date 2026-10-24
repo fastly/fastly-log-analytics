@@ -273,13 +273,10 @@ def performance_aggregates(
     *,
     sections: set[str] | None = None,
 ) -> PerformanceAggregatesResponse:
-    import concurrent.futures
-
     wanted = _ALL_SECTIONS if sections is None else sections
     filters = _active_filters(req)
     sort_by = getattr(req, "sort_by", "p99")
     sort_column = _SORT_COLUMNS.get(sort_by, "p99_ms")
-    result: dict[str, Any] = {}
 
     cache_key: str | None = None
     if _HS_PERF_CACHE_TTL > 0 and start_time is not None and end_time is not None:
@@ -372,20 +369,7 @@ def performance_aggregates(
     if "scatter" in wanted:
         tasks.append(("scatter", lambda: _scatter(service, start_time, end_time, filters)))
 
-    if len(tasks) == 1:
-        k, fn = tasks[0]
-        result[k] = trace.run(k, fn, source="fact" if filters else "projection")
-    elif tasks:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as pool:
-            futs = [
-                (
-                    k,
-                    trace.submit(pool, k, fn, source="fact" if filters else "projection"),
-                )
-                for k, fn in tasks
-            ]
-            for k, fut in futs:
-                result[k] = fut.result()
+    result = trace.run_parallel(tasks, source="fact" if filters else "projection")
 
     # Unfiltered top tables request-weight-average per-minute percentiles; filtered ones
     # are exact ClickHouse quantiles over the matching facts.

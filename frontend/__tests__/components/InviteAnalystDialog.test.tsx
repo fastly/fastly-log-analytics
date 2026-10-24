@@ -9,7 +9,7 @@ vi.mock('@/lib/api', () => ({
   getApiBase: vi.fn(() => 'http://test'),
 }))
 
-import { InviteAnalystDialog } from '@/components/InviteAnalystDialog/InviteAnalystDialog'
+import { InviteAnalystDialog } from '@/components/InviteAnalystDialog'
 import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
 import type { ServiceConfig } from '@/types/api'
 

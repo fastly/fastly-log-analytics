@@ -10,7 +10,7 @@ import type { RangeWireArgs } from '@/lib/range-wire'
 import type { ReportLayoutRenderProps } from '@/components/ReportLayout'
 import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
-import { useActiveLogFields } from '@/hooks/useActiveLogFields'
+import { useActiveLogFields } from '@/hooks/useLogFieldsCatalog'
 import { useReportRangeAnchor } from '@/hooks/useReportRangeAnchor'
 import { Server } from 'lucide-react'
 import { ReportLayout } from '@/components/ReportLayout'
@@ -19,7 +19,7 @@ import { formatDate } from '@/lib/date'
 import { Aggregates } from './Aggregates'
 import { Timeseries } from './Timeseries'
 import { LatencyHeatmap } from './LatencyHeatmap'
-import { CHART_COLORS, statusHex } from '@/lib/chart-colors'
+import { CHART_COLORS, statusHex } from '@/lib/chart-builders'
 
 // P-4 slice 4: section-selector mirroring /security, /network, /dashboard,
 // /performance. The origin page renders every section, so the list is the

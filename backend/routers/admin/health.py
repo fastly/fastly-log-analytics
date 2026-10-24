@@ -289,8 +289,8 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
         if _hs_cfg.is_high_scale_mode():
             from dataclasses import asdict
 
-            from backend.high_scale.config import topology_from_environment
             from backend.high_scale.disk_sampler import disk_snapshot_payload
+            from backend.high_scale.models import topology_from_environment
 
             topology: dict | None
             try:
@@ -384,9 +384,6 @@ def api_vcl_health(service_id: str | None = Query(default=None)) -> dict[str, An
             ),
         }
     except Exception as e:
-        import logging
-
-        logger = logging.getLogger(__name__)
         logger.exception("VCL health check failed")
         return {
             "service_id": service_id,

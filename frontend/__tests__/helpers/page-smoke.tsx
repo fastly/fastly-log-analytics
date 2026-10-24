@@ -110,8 +110,9 @@ export function plotlyChartModuleMock(onRender?: (props: ComponentProps<typeof P
 }
 
 /** `@/components/DataTable` smoke stub for page-level tests. */
-export function dataTableModuleMock() {
-  return { DataTable: () => <div data-testid="data-table" />, ColumnVisibilityDropdown: () => null }
+export async function dataTableModuleMock() {
+  const actual = await vi.importActual<typeof import('@/components/DataTable')>('@/components/DataTable')
+  return { ...actual, DataTable: () => <div data-testid="data-table" />, ColumnVisibilityDropdown: () => null }
 }
 
 export type InteractiveTableRow = { name?: string; bot_name?: string; fingerprint?: string; ip?: string }
@@ -146,14 +147,25 @@ export function filterValueCellModuleMock() {
   }
 }
 
-/** `@/hooks/useActiveLogFields` backed by a mutable `Set<string>` for section tests. */
+/** `@/hooks/useLogFieldsCatalog` backed by a mutable `Set<string>` for section tests. */
 export function activeLogFieldsSetModuleMock(activeFields: Set<string>) {
   return {
+    useLogFieldsCatalog: () => ({ data: undefined, isLoading: false }),
+    useFieldLabel: () => (id: string) => id,
+    useFieldValues: () => ({ data: undefined, isLoading: false }),
     useActiveLogFields: () => ({
       ready: true,
       isFieldActive: (id: string) => activeFields.has(id),
       isGroupActive: () => false,
     }),
+  }
+}
+
+/** `@/hooks/useDateFormat` smoke stub for page/component tests. */
+export function dateFormatModuleMock(timezone = 'UTC') {
+  return {
+    useDateFormat: () => (d: unknown) => String(d ?? ''),
+    useTimezone: () => timezone,
   }
 }
 

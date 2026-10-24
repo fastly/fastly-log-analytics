@@ -20,8 +20,69 @@ from backend.high_scale._batch_adapter_base import (
     BaseClickHouseBatchAdapter,
 )
 from backend.high_scale._projection_utils import range_value
-from backend.high_scale._rum_fields import rum_environment, rum_error_position
 from backend.high_scale.schema import build_cmcd_projection_key
+
+_TEXT_ALIASES: dict[str, tuple[str, ...]] = {
+    "country": ("country", "geo_country_code"),
+    "browser": ("browser",),
+    "os": ("os",),
+    "device": ("device",),
+    "city": ("city", "geo_city"),
+    "region": ("region", "geo_region"),
+    "pop": ("pop", "server_pop"),
+    "tls": ("tls", "tls_version"),
+}
+_TTFB_KEYS = ("ttfb", "time_to_first_byte")
+
+
+def _text(value: Any) -> str:
+    if value is None or isinstance(value, bool):
+        return ""
+    return str(value).strip()
+
+
+def _first_text(row: Mapping[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        text = _text(row.get(key))
+        if text:
+            return text
+    return ""
+
+
+def _finite(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(str(value).strip())
+    except ValueError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def rum_environment(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Text environment fields plus ``ttfb`` (None when absent or not finite)."""
+    env: dict[str, Any] = {name: _first_text(row, keys) for name, keys in _TEXT_ALIASES.items()}
+    ttfb: float | None = None
+    for key in _TTFB_KEYS:
+        ttfb = _finite(row.get(key))
+        if ttfb is not None:
+            break
+    env["ttfb"] = ttfb
+    return env
+
+
+def _position(row: Mapping[str, Any], keys: tuple[str, ...]) -> int:
+    for key in keys:
+        number = _finite(row.get(key))
+        if number is not None and number >= 0:
+            return int(number)
+    return 0
+
+
+def rum_error_position(row: Mapping[str, Any]) -> tuple[int, int]:
+    """``(line, column)`` of a JavaScript error; ``0`` when the beacon did not report one."""
+    return _position(row, ("rum_error_line", "error_line")), _position(row, ("rum_error_col", "error_col"))
+
 
 _BATCH_NAMESPACE = UUID("f3e6bd14-9df9-5f8a-9d92-7a4f1fd36d9a")
 _EVENT_NAMESPACE = UUID("8e5d1e37-4e66-5b66-9f4c-73d7c4a3f0d8")

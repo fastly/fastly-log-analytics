@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from backend.core.fastly.rum_provisioning import validate_rum_custom_condition
+from backend.models.admin import ProvisionService
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.provision import (
     CheckFosRequest,
@@ -86,9 +87,6 @@ def _check_domain_available(domain: str, timeout: int = 10) -> tuple[bool, str |
                 return True, f"DNS/Connection error (likely available): {exc.reason}"
         except Exception as exc:
             return False, str(exc)
-
-
-from backend.models.admin import ProvisionService
 
 
 @router.get("/services", response_model=list[ProvisionService])
@@ -847,8 +845,7 @@ def provision_reconcile(body: ProvisionReconcileRequest):
     return stream_sse_from_worker(worker)
 
 
-@router.post("/terraform/preview", response_model=TerraformPreviewResponse)
-def provision_terraform_preview(body: ProvisionConfigRequest):
+def _render_terraform(body: ProvisionConfigRequest) -> dict[str, str]:
     from backend.utils.terraform_gen import generate_terraform
 
     # ``extra="allow"`` on the model captures any future wizard fields
@@ -859,6 +856,11 @@ def provision_terraform_preview(body: ProvisionConfigRequest):
     access_key = cfg.get("fos_access_key") or "YOUR_FOS_ACCESS_KEY"
     secret_key = cfg.get("fos_secret_key") or "YOUR_FOS_SECRET_KEY"
     return generate_terraform(cfg, access_key, secret_key)
+
+
+@router.post("/terraform/preview", response_model=TerraformPreviewResponse)
+def provision_terraform_preview(body: ProvisionConfigRequest):
+    return _render_terraform(body)
 
 
 # No response_model: streams a ZIP (StreamingResponse), declared as a binary
@@ -877,12 +879,7 @@ def provision_terraform_export(body: ProvisionConfigRequest):
     import io
     import zipfile
 
-    from backend.utils.terraform_gen import generate_terraform
-
-    cfg = body.model_dump(exclude_none=True)
-    access_key = cfg.get("fos_access_key") or "YOUR_FOS_ACCESS_KEY"
-    secret_key = cfg.get("fos_secret_key") or "YOUR_FOS_SECRET_KEY"
-    tf_files = generate_terraform(cfg, access_key, secret_key)
+    tf_files = _render_terraform(body)
 
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
@@ -1090,16 +1087,14 @@ def provision_ingest(payload: ProvisionConfigRequest):
         # request body (a deliberate re-pin) still wins over the on-disk
         # value.
         _faro_keys = ("faro_version", "faro_content_hash", "faro_fos_etag_md5", "faro_last_upstream_check")
-        if existing_rum.get("faro_version"):
+        on_disk_rum = existing_cfg.get("rum")
+        faro_src: dict[str, Any] = (
+            existing_rum if existing_rum.get("faro_version") else (on_disk_rum if isinstance(on_disk_rum, dict) else {})
+        )
+        if faro_src.get("faro_version"):
             for k in _faro_keys:
-                if k in existing_rum:
-                    state["rum"][k] = existing_rum[k]
-        else:
-            on_disk_rum = existing_cfg.get("rum")
-            if isinstance(on_disk_rum, dict) and on_disk_rum.get("faro_version"):
-                for k in _faro_keys:
-                    if k in on_disk_rum:
-                        state["rum"][k] = on_disk_rum[k]
+                if k in faro_src:
+                    state["rum"][k] = faro_src[k]
 
     # NB: the token was already validated against this same service_id at the
     # top of the handler (validate_destructive_token above); the prior second
@@ -1281,6 +1276,29 @@ def provision_check_config(
     return results
 
 
+def _require_ngwaf_token(
+    service_id: str,
+    token: str,
+    authorization: str | None,
+    *,
+    missing_message: str = "A Fastly API token is required.",
+) -> str:
+    """Resolve and validate a caller-supplied Fastly token for NGWAF operations."""
+    from backend.utils.fastly_auth import validate_destructive_token
+
+    if authorization and authorization.lower().startswith("bearer "):
+        resolved = authorization[len("bearer ") :].strip()
+    else:
+        resolved = (token or "").strip()
+    if not resolved:
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "token_required", "message": missing_message},
+        )
+    validate_destructive_token(resolved, service_id=service_id)
+    return resolved
+
+
 @router.get(
     "/ngwaf-workspaces",
     response_model=NgwafWorkspacesResponse,
@@ -1306,30 +1324,17 @@ def provision_ngwaf_workspaces(
     Either way an unauthenticated caller can't enumerate workspaces
     even if they reach the loopback admin surface.
     """
+    from backend.core.fastly.models import NgwafWorkspacesResponse
     from backend.provision import fastly
-    from backend.utils.fastly_auth import validate_destructive_token
+    from backend.utils.router_utils import format_debug_request
 
     service_id = require_service_id(service_id)
-    if authorization and authorization.lower().startswith("bearer "):
-        token = authorization[len("bearer ") :].strip()
-    else:
-        token = token.strip()
-    if not token:
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "error": "token_required",
-                "message": "A Fastly API token is required to list NGWAF workspaces.",
-            },
-        )
-    # Secure token validation: we must always run validate_destructive_token
-    # to verify that the token holds the necessary 'global' scope and is
-    # authorized for this tenant's service. This prevents read-only token
-    # bypasses, even if the token matches the server-stored fastly_api_key.
-    validate_destructive_token(token, service_id=service_id)
-
-    from backend.core.fastly.models import NgwafWorkspacesResponse
-    from backend.utils.router_utils import format_debug_request
+    token = _require_ngwaf_token(
+        service_id,
+        token,
+        authorization,
+        missing_message="A Fastly API token is required to list NGWAF workspaces.",
+    )
 
     _ngwaf_url = "https://api.fastly.com/ngwaf/v1/workspaces"
     _req_headers = {"Fastly-Key": token, "Accept": "application/json"}
@@ -1411,27 +1416,10 @@ def provision_set_ngwaf_workspace(
     /api/provision/ block also gates this for analysts.
     """
 
-    from backend.utils.fastly_auth import validate_destructive_token
-    from backend.utils.router_utils import load_service_config, mutate_service_config, stored_fastly_token
+    from backend.utils.router_utils import load_service_config, mutate_service_config
 
-    cfg = load_service_config(service_id)
-
-    if authorization and authorization.lower().startswith("bearer "):
-        token = authorization[len("bearer ") :].strip()
-    else:
-        token = (token or "").strip()
-    stored = stored_fastly_token(cfg)
-    if not token:
-        raise HTTPException(
-            status_code=401,
-            detail={"error": "token_required", "message": "A Fastly API token is required."},
-        )
-
-    # Secure token validation: we must always run validate_destructive_token
-    # to verify that the token holds the necessary 'global' scope and is
-    # authorized for this tenant's service. This prevents read-only token
-    # bypasses, even if the token matches the server-stored fastly_api_key.
-    validate_destructive_token(token, service_id=service_id)
+    load_service_config(service_id)
+    _require_ngwaf_token(service_id, token, authorization)
 
     workspace_id = (body.ngwaf_workspace_id or "").strip() or None
     mutate_service_config(service_id, lambda c: c.__setitem__("ngwaf_workspace_id", workspace_id))

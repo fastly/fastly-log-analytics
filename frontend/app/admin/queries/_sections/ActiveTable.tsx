@@ -26,7 +26,7 @@ import * as React from 'react'
 // drops the @dnd-kit tree that the reorder-enabled DataTable pulls
 // in. The live query monitor is short-lived and doesn't benefit from
 // column reordering.
-import { DataTableReadonly as DataTable } from '@/components/DataTable/DataTableReadonly'
+import { DataTableReadonly as DataTable } from '@/components/DataTable'
 
 import { buildActiveColumns } from './queryColumns'
 import type { ActiveOrPromotedRow, ActiveRow } from '../_types'

@@ -475,6 +475,22 @@ def format_debug_request(
 # layering, and the only callers are routers anyway.
 
 
+def _handle_query_error(
+    e: Exception,
+    *,
+    logger_obj: Logger,
+    code: str,
+    status_code: int,
+) -> NoReturn:
+    if isinstance(e, HTTPException):
+        raise e
+    if isinstance(e, ValueError):
+        raise HTTPException(status_code=400, detail=make_error("bad_request", redact_error_text(e))) from e
+    if isinstance(e, LookupError):
+        raise HTTPException(status_code=404, detail=make_error("not_found", redact_error_text(e))) from e
+    raise_internal(logger_obj, e, code=code, status=status_code)
+
+
 def query_errors(status_code: int = 400, *, code: str = "unhandled_error", logger_obj: Logger = logger):
     """Decorator that maps unhandled exceptions to the unified error envelope.
 
@@ -509,22 +525,13 @@ def query_errors(status_code: int = 400, *, code: str = "unhandled_error", logge
         import asyncio
 
         if asyncio.iscoroutinefunction(fn):
-            # Async handler: await the coroutine and apply the same
-            # exception-mapping. Necessary so an ``async def`` route can
-            # still wear @query_errors and gather concurrent I/O (e.g.
-            # M4 — Fastly call parallelisation in usage.py::prefill).
+
             @wraps(fn)
             async def async_wrapper(*args, **kwargs):
                 try:
                     return await fn(*args, **kwargs)
-                except HTTPException:
-                    raise
-                except ValueError as e:
-                    raise HTTPException(status_code=400, detail=make_error("bad_request", redact_error_text(e)))
-                except LookupError as e:
-                    raise HTTPException(status_code=404, detail=make_error("not_found", redact_error_text(e)))
                 except Exception as e:
-                    raise_internal(logger_obj, e, code=code, status=status_code)
+                    _handle_query_error(e, logger_obj=logger_obj, code=code, status_code=status_code)
 
             return async_wrapper
 
@@ -532,14 +539,8 @@ def query_errors(status_code: int = 400, *, code: str = "unhandled_error", logge
         def wrapper(*args, **kwargs):
             try:
                 return fn(*args, **kwargs)
-            except HTTPException:
-                raise
-            except ValueError as e:
-                raise HTTPException(status_code=400, detail=make_error("bad_request", redact_error_text(e)))
-            except LookupError as e:
-                raise HTTPException(status_code=404, detail=make_error("not_found", redact_error_text(e)))
             except Exception as e:
-                raise_internal(logger_obj, e, code=code, status=status_code)
+                _handle_query_error(e, logger_obj=logger_obj, code=code, status_code=status_code)
 
         return wrapper
 

@@ -16,7 +16,7 @@ import {
   KeyRound,
   Globe,
 } from 'lucide-react'
-import type { InsightContent } from '../types'
+import type { InsightContent } from '../../shared'
 
 export function getSecurityContent(id: string): InsightContent | null {
   switch (id) {

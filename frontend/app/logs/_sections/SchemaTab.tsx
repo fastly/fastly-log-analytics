@@ -2,7 +2,7 @@
 
 import React from 'react'
 import type { ColumnDef } from '@tanstack/react-table'
-import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
+import { DataTableReadonly } from '@/components/DataTable'
 
 import { formatCountMaybe } from '@/lib/format'
 import type { components } from '@/types/api.generated'

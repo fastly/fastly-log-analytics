@@ -38,7 +38,7 @@ describe('SSR-seed key ↔ client first-paint key byte-match', () => {
   it('the page.tsx seed key === the client useServiceQuery key', async () => {
     const { hashKey } = await import('@tanstack/react-query')
     const { resolveDefaultSsrRangeKey } = await import('@/lib/ssr/upstream')
-    const { SECURITY_SSR_DEFAULTS } = await import('@/lib/ssr/security')
+    const { SECURITY_SSR_DEFAULTS } = await import('@/lib/ssr/upstream')
 
     const serviceId = 'svc-1'
     const { rangeToken, anchor } = resolveDefaultSsrRangeKey(new Date('2026-06-29T12:00:30Z'))
@@ -72,7 +72,7 @@ describe('SSR-seed key ↔ client first-paint key byte-match', () => {
 describe('fetchSecurityServerSide (security SSR)', () => {
   it('returns null without a serviceId (no upstream call)', async () => {
     process.env.API_PROXY_URL = 'http://127.0.0.1:1'
-    const { fetchSecurityServerSide } = await import('@/lib/ssr/security')
+    const { fetchSecurityServerSide } = await import('@/lib/ssr/upstream')
     expect(await fetchSecurityServerSide(undefined)).toBeNull()
   })
 
@@ -85,7 +85,7 @@ describe('fetchSecurityServerSide (security SSR)', () => {
         res.end('{}')
       },
       async (srv) => {
-        const { fetchSecurityServerSide } = await import('@/lib/ssr/security')
+        const { fetchSecurityServerSide } = await import('@/lib/ssr/upstream')
         const out = await fetchSecurityServerSide('svc-1')
         expect(out).toBeNull()
         expect(srv.requests).toHaveLength(0)
@@ -104,7 +104,7 @@ describe('fetchSecurityServerSide (security SSR)', () => {
       },
       async (srv) => {
         const { fetchSecurityServerSide, SECURITY_SSR_DEFAULTS, SECURITY_SSR_SECTIONS } = await import(
-          '@/lib/ssr/security'
+          '@/lib/ssr/upstream'
         )
         const now = new Date('2026-06-29T12:00:30Z')
         const out = await fetchSecurityServerSide('svc-1', now)
@@ -146,7 +146,7 @@ describe('fetchSecurityServerSide (security SSR)', () => {
         res.end('{"ngwaf_verified_bots":{"rows":[]}}')
       },
       async (srv) => {
-        const { fetchSecurityServerSide } = await import('@/lib/ssr/security')
+        const { fetchSecurityServerSide } = await import('@/lib/ssr/upstream')
         const out = await fetchSecurityServerSide('svc-1')
         expect(out).not.toBeNull()
         const req = srv.lastRequest!

@@ -2,9 +2,9 @@
 
 import React from 'react'
 import dynamic from 'next/dynamic'
-import { useTimezone } from '@/hooks/useTimezone'
+import { useTimezone } from '@/hooks/useDateFormat'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
-import { useFieldLabel } from '@/hooks/useFieldLabel'
+import { useFieldLabel } from '@/hooks/useLogFieldsCatalog'
 import { useTimeLayout } from '@/lib/chart-helpers'
 import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
 import { useReportRangeAnchor } from '@/hooks/useReportRangeAnchor'

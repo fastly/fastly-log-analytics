@@ -24,7 +24,7 @@ import React from 'react'
 import { DebugPanel } from '@/components/DebugPanel'
 import { useDebugStore } from '@/stores/debugStore'
 import { useServiceStore } from '@/stores/serviceStore'
-import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
+import { DEBUG_RESPONSES_COOKIE } from '@/lib/cookies'
 import { server } from '@/__tests__/helpers/msw/server'
 
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/dashboard'))

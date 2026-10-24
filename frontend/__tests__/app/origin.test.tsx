@@ -24,7 +24,7 @@ vi.mock('@/lib/api', () => ({
 
 vi.mock('@/components/PlotlyChart', async () => (await import('../helpers/page-smoke')).plotlyChartModuleMock())
 vi.mock('@/components/DataTable', async () => (await import('../helpers/page-smoke')).dataTableModuleMock())
-vi.mock('@/hooks/useActiveLogFields', () => ({
+vi.mock('@/hooks/useLogFieldsCatalog', () => ({
   useActiveLogFields: () => ({
     isFieldActive: vi.fn(() => true),
     activeFields: new Set(['ottfb', 'pop', 'oip']),

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useEffectEvent, useState } from 'react'
-import { parseSSEFrames } from '@/lib/sse-parser'
+import { parseSSEFrames } from '@/lib/streamRequest'
 
 /**
  * Shared fetch-based SSE transport primitive.

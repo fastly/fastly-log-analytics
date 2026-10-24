@@ -13,7 +13,7 @@ import {
 import { ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { TRENDS } from '@/lib/constants'
-import { useActiveLogFields } from '@/hooks/useActiveLogFields'
+import { useActiveLogFields } from '@/hooks/useLogFieldsCatalog'
 import type { PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/plotly'
 import type { ReportConfiguration } from '@/hooks/useReportConfig'
 import type { DashboardAggregates, DashboardCatalog } from './types'

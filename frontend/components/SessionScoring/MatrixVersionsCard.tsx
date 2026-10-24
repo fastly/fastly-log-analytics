@@ -3,7 +3,7 @@
 import * as React from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { History, Info, RotateCcw } from 'lucide-react'
-import { invalidateServiceScoringQueries, useScoringQuery } from './useScoringQuery'
+import { invalidateServiceScoringQueries, useScoringQuery } from './useScorerTimeseries'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { CardErrorState } from '@/components/CardErrorState'
@@ -13,7 +13,7 @@ import { Button } from '@/components/ui/button'
 import { CopyButton } from '@/components/ui/copy-button'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import type { ColumnDef } from '@tanstack/react-table'
-import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
+import { DataTableReadonly } from '@/components/DataTable'
 import { client, extractApiError } from '@/lib/api'
 import type { components } from '@/types/api.generated'
 
@@ -26,7 +26,7 @@ type MatrixVersion = components['schemas']['ScoringMatrixVersion']
 
 import { formatBytes } from '@/lib/format'
 import { formatDeterministicUTC } from '@/lib/date'
-import { SkeletonGrid } from '@/components/ui/skeleton-grid'
+import { SkeletonGrid } from '@/components/ui/skeleton'
 
 export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
   const qc = useQueryClient()

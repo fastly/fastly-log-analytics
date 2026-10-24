@@ -213,3 +213,5 @@ export function densifyBarSeries(
   }
   return grid.map((iso) => ({ time: iso, value: byMs.get(parseUtcMs(iso)) ?? 0 }))
 }
+
+export { CHART_COLORS, statusHex } from '@/lib/chart-builders'

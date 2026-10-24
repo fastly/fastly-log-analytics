@@ -16,8 +16,7 @@ import {
   Loader2,
   Zap,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { copyToClipboard } from "@/lib/clipboard";
+import { cn, copyToClipboard } from "@/lib/utils";
 import type { WizardState } from "../useWizardState";
 
 export function TerraformStep({ s }: { s: WizardState }) {

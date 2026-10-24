@@ -65,21 +65,14 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
         try:
             logger.info(f"RUM commit starting for {service_id}")
 
+            from backend.cron.jobs._common import _buffer_result_error
+
             total_committed_vitals = 0
             total_committed_errors = 0
             vitals_err = None
             errors_err = None
             vitals_res = {}
             errors_res = {}
-
-            def _buffer_result_error(result):
-                errors = []
-                if result.get("error"):
-                    errors.append(str(result["error"]))
-                quarantined = int(result.get("quarantined_files", 0) or 0)
-                if quarantined:
-                    errors.append(f"{quarantined} unreadable buffer file(s) quarantined")
-                return "; ".join(errors) or None
 
             # Commit client_vitals
             try:

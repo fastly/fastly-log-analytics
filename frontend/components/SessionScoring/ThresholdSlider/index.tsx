@@ -8,17 +8,136 @@ import { SlidersHorizontal } from 'lucide-react'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { ThresholdSliderHelp } from '@/components/SessionScoring/help-content'
-import { useScoringQuery } from '../useScoringQuery'
+import { useScoringQuery } from '../useScorerTimeseries'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
+import { formatCount, formatPercent } from '@/lib/format'
 import { scoringConfigCompositeKey } from '@/lib/queries/scoring'
 
-import { ThresholdMatrix, type BucketCounts } from './Matrix'
-import { ThresholdPreviewStats } from './Preview'
 import { ThresholdSliderControls } from './Slider'
 import type { Expect, Simplify, WireParity, WithRequired, WithRequiredNullable, components } from '@/types/api'
+
+export type BucketCounts = WithRequired<
+  components['schemas']['ScoringThresholdBucket'],
+  'total' | 'good' | 'bad' | 'unlabeled'
+>
+
+type _BucketCountsParity = Expect<WireParity<BucketCounts, components['schemas']['ScoringThresholdBucket']>>
+
+interface ThresholdMatrixProps {
+  flagged: BucketCounts
+  passed: Omit<BucketCounts, 'total'>
+}
+
+export function ThresholdMatrix({ flagged, passed }: ThresholdMatrixProps) {
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      <Bucket
+        title="Would FLAG"
+        total={flagged.total}
+        good={flagged.good}
+        bad={flagged.bad}
+        unlabeled={flagged.unlabeled}
+        tone="warn"
+      />
+      <Bucket
+        title="Would PASS"
+        total={passed.good + passed.bad + passed.unlabeled}
+        good={passed.good}
+        bad={passed.bad}
+        unlabeled={passed.unlabeled}
+        tone="good"
+      />
+    </div>
+  )
+}
+
+function Bucket({
+  title,
+  total,
+  good,
+  bad,
+  unlabeled,
+  tone,
+}: {
+  title: string
+  total: number
+  good: number
+  bad: number
+  unlabeled: number
+  tone: 'warn' | 'good'
+}) {
+  const tint = tone === 'warn' ? 'border-amber-300 bg-amber-50/50' : 'border-emerald-300 bg-emerald-50/40'
+  return (
+    <div className={`p-3 border rounded-md ${tint}`}>
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{title}</div>
+      <div className="text-xl font-mono font-semibold tabular-nums">{formatCount(total)}</div>
+      <div className="mt-1 space-y-0.5 text-[11px]">
+        <div className="flex justify-between">
+          <span className="text-emerald-700">good</span>
+          <span className="font-mono tabular-nums">{formatCount(good)}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-destructive">bad</span>
+          <span className="font-mono tabular-nums">{formatCount(bad)}</span>
+        </div>
+        <div className="flex justify-between text-muted-foreground">
+          <span>unlabeled</span>
+          <span className="font-mono tabular-nums">{formatCount(unlabeled)}</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+interface ThresholdPreviewStatsProps {
+  precision: number | null
+  recall: number | null
+  totalScoredSessions: number
+  sinceHours: number
+}
+
+export function ThresholdPreviewStats({
+  precision,
+  recall,
+  totalScoredSessions,
+  sinceHours,
+}: ThresholdPreviewStatsProps) {
+  return (
+    <>
+      <div className="grid grid-cols-2 gap-3 text-xs">
+        <Stat
+          label="Precision"
+          value={precision != null ? formatPercent(precision, { decimals: 1 }) : '—'}
+          hint="of labeled flagged sessions, how many are bad"
+        />
+        <Stat
+          label="Recall"
+          value={recall != null ? formatPercent(recall, { decimals: 1 }) : '—'}
+          hint="of all labeled-bad sessions, how many got flagged"
+        />
+      </div>
+
+      <p className="text-[11px] text-muted-foreground italic">
+        {formatCount(totalScoredSessions)} distinct scored sessions in the last{' '}
+        {sinceHours}h. Precision/recall only count sessions you&apos;ve labeled —
+        the &quot;unlabeled&quot; tally is everything else.
+      </p>
+    </>
+  )
+}
+
+function Stat({ label, value, hint }: { label: string; value: string; hint: string }) {
+  return (
+    <div className="p-3 border rounded-md">
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="text-lg font-mono font-semibold tabular-nums">{value}</div>
+      <div className="text-[10px] text-muted-foreground mt-0.5">{hint}</div>
+    </div>
+  )
+}
 
 type ThresholdPreviewResponse = Simplify<
   Omit<
@@ -33,7 +152,7 @@ type ThresholdPreviewResponse = Simplify<
   > & { flagged: BucketCounts; passed: Omit<BucketCounts, 'total'> }
 >
 
-export type _ThresholdPreviewParity = Expect<WireParity<ThresholdPreviewResponse, components['schemas']['ScoringThresholdPreviewResponse']>>
+type _ThresholdPreviewParity = Expect<WireParity<ThresholdPreviewResponse, components['schemas']['ScoringThresholdPreviewResponse']>>
 
 interface ThresholdSliderProps {
   serviceId: string

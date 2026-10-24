@@ -26,7 +26,7 @@ import {
 } from 'lucide-react'
 import { formatBytes, formatCount } from '@/lib/format'
 import { adminFetch } from '@/lib/api'
-import { downloadBlob } from '@/lib/download'
+import { downloadBlob } from '@/lib/utils'
 import type { ServiceConfig } from '@/types/api'
 
 

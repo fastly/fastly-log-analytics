@@ -23,14 +23,53 @@ import {
   horizontalListSortingStrategy,
 } from '@dnd-kit/sortable'
 
-import { DraggableTableHeader } from './Header'
-import { StaticTableHeader } from './StaticHeader'
+import type { ColumnDef } from '@tanstack/react-table'
+import { DraggableTableHeader, StaticTableHeader } from './StaticHeader'
 import { DataTableToolbar } from './Toolbar'
 import { DataTableBody } from './DataTableBody'
 import { DataTablePagination } from './DataTablePagination'
 import { useDataTableState, type DataTableBaseProps } from './useDataTableState'
-import { reportUxEvent } from '@/lib/ux-telemetry'
+import { getApiBase } from '@/lib/api'
+import type { Schema } from '@/types/api'
 import { cn } from '@/lib/utils'
+
+export function columnIdOf<TData, TValue>(c: ColumnDef<TData, TValue>): string {
+  return (
+    c.id ||
+    (typeof (c as { accessorKey?: string }).accessorKey === 'string'
+      ? (c as { accessorKey: string }).accessorKey
+      : '')
+  )
+}
+
+type UxEvent = Schema<'UxEventPayload'>
+
+export function reportUxEvent(evt: UxEvent): void {
+  if (typeof window === 'undefined') return
+  try {
+    const pathname = evt.pathname ?? window.location.pathname
+    const body = JSON.stringify({
+      event: evt.event,
+      pathname,
+      component_id: evt.component_id,
+      details: evt.details ?? {},
+    })
+    const url = `${getApiBase()}/api/ux-events`
+
+    if (typeof navigator !== 'undefined' && 'sendBeacon' in navigator) {
+      const blob = new Blob([body], { type: 'application/json' })
+      if (navigator.sendBeacon(url, blob)) return
+    }
+    void fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      keepalive: true,
+    })
+  } catch {
+    // Swallow — telemetry never breaks the page.
+  }
+}
 
 export interface DataTableProps<TData, TValue> extends DataTableBaseProps<TData, TValue> {
   tableContainerClassName?: string
@@ -209,3 +248,108 @@ function DataTableImpl<TData, TValue>({
 }
 
 export const DataTable = React.memo(DataTableImpl) as typeof DataTableImpl
+
+export type DataTableReadonlyProps<TData, TValue> = DataTableBaseProps<TData, TValue>
+
+function DataTableReadonlyImpl<TData, TValue>({
+  columns,
+  data,
+  searchKey,
+  isLoading,
+  showPagination = true,
+  sorting: controlledSorting,
+  onSortingChange,
+  initialSorting = [],
+  initialVisibility = {},
+  title,
+  compactToolbar = false,
+  extraToolbarContent,
+  renderToolbar,
+  hideToolbar = false,
+  columnVisibility: controlledVisibility,
+  onColumnVisibilityChange,
+  emptyMessage = 'No results.',
+  emptyHint,
+  onClearFilter,
+  onRowClick,
+  getRowClassName,
+  tableCaption,
+}: DataTableReadonlyProps<TData, TValue>) {
+  const {
+    table,
+    rows,
+    rowVirtualizer,
+    tableContainerRef,
+    columnVisibility,
+    columnSizing,
+  } = useDataTableState({
+    columns,
+    data,
+    showPagination,
+    controlledSorting,
+    onSortingChange,
+    initialSorting,
+    controlledVisibility,
+    onColumnVisibilityChange,
+    initialVisibility,
+  })
+
+  return (
+    <div className="w-full">
+      {!hideToolbar &&
+        (renderToolbar ? (
+          renderToolbar(table)
+        ) : (
+          <DataTableToolbar
+            table={table}
+            title={title}
+            searchKey={searchKey}
+            compactToolbar={compactToolbar}
+            extraToolbarContent={extraToolbarContent}
+          />
+        ))}
+
+      <div
+        ref={tableContainerRef}
+        tabIndex={0}
+        className="rounded-md border overflow-auto max-h-[min(600px,calc(100dvh-200px))] w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <Table
+          scrollFocusable={false}
+          style={{ tableLayout: 'fixed', width: table.getTotalSize(), minWidth: '100%' }}
+        >
+          <caption className="sr-only">
+            {tableCaption || (typeof title === 'string' ? title : 'Data Table')}
+          </caption>
+          <TableHeader>
+            {table.getHeaderGroups().map((headerGroup) => (
+              <TableRow key={headerGroup.id}>
+                {headerGroup.headers.map((header) => (
+                  <StaticTableHeader key={header.id} header={header} />
+                ))}
+              </TableRow>
+            ))}
+          </TableHeader>
+          <DataTableBody
+            table={table}
+            rows={rows}
+            rowVirtualizer={rowVirtualizer}
+            columns={columns}
+            columnVisibility={columnVisibility}
+            columnSizing={columnSizing}
+            isLoading={isLoading}
+            onRowClick={onRowClick}
+            getRowClassName={getRowClassName}
+            emptyMessage={emptyMessage}
+            emptyHint={emptyHint}
+            onClearFilter={onClearFilter}
+          />
+        </Table>
+      </div>
+
+      {showPagination && <DataTablePagination table={table} />}
+    </div>
+  )
+}
+
+export const DataTableReadonly = React.memo(DataTableReadonlyImpl) as typeof DataTableReadonlyImpl

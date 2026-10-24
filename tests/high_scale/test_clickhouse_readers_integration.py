@@ -31,12 +31,11 @@ from backend.core.clickhouse_client import ClickHouseClient
 from backend.high_scale import cmcd as hs_cmcd
 from backend.high_scale import sessions as hs_sessions
 from backend.high_scale.archive_models import ServingWatermark
-from backend.high_scale.cmcd import cmcd_aggregates
+from backend.high_scale.cmcd import cmcd_aggregates, project_cmcd
 from backend.high_scale.dashboard import aggregates as dashboard_aggregates
 from backend.high_scale.insights import cache_collapse_detail_endpoint, insights_endpoint
 from backend.high_scale.origin import aggregates as origin_aggregates
 from backend.high_scale.origin_projection import build_origin_projection_rows
-from backend.high_scale.projections import project_cmcd
 from backend.high_scale.registry import HighScaleService
 from backend.high_scale.sessions import sessions_endpoint
 from backend.models.cmcd import CmcdRequest

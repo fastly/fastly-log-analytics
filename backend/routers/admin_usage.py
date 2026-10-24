@@ -39,6 +39,7 @@ from backend.models.admin import (
 )
 from backend.models.common import OkResponse
 from backend.routers import admin as _adm
+from backend.routers.admin._helpers import service_id_from_source
 
 router: APIRouter = _adm.router  # type: ignore
 
@@ -146,7 +147,7 @@ def usage_log_endpoint(
     rate_cdn = float(ul_cfg.get("cdn_egress_rate_per_gb", 0.12))
 
     start_str, end_str = parse_date_window(start, end)
-    service_id = source.get("name") or source.get("service_id", "")
+    service_id = service_id_from_source(source, prefer_name=True)
 
     rows, total, agg_data = metadata_db.get_usage_logs(
         service_id=service_id,
@@ -261,7 +262,7 @@ def usage_log_export(
     from backend.utils.date_utils import parse_date_window
 
     start_str, end_str = parse_date_window(start, end)
-    service_id = source.get("name") or source.get("service_id", "")
+    service_id = service_id_from_source(source, prefer_name=True)
 
     CHUNK = 5_000
 
@@ -344,8 +345,7 @@ def purge_usage_log_endpoint(source: dict = Depends(get_source)):
     """Delete all _usage_log entries for this service from metadata_db (SQLite)."""
     from backend.core import metadata as metadata_db
 
-    service_id = source.get("name") or source.get("service_id", "")
-    metadata_db.clear_usage_log(service_id)
+    metadata_db.clear_usage_log(service_id_from_source(source, prefer_name=True))
     return {"ok": True}
 
 

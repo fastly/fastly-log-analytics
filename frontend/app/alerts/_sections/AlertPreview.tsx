@@ -7,10 +7,9 @@ import { ButtonGroup } from '@/components/ui/button-group'
 import { Label } from '@/components/ui/label'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
-import { useTimeLayout } from '@/lib/chart-helpers'
+import { CHART_COLORS, useTimeLayout } from '@/lib/chart-helpers'
 import { formatDate } from '@/lib/date'
 import { useTimezoneStore } from '@/stores/timezoneStore'
-import { CHART_COLORS } from '@/lib/chart-colors'
 import type { components } from '@/types/api.generated'
 
 interface AlertPreviewProps {

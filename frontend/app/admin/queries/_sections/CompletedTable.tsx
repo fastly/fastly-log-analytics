@@ -21,7 +21,7 @@ import * as React from 'react'
 // Direct import (not via the barrel) so the /admin/queries bundle
 // drops the @dnd-kit tree that the reorder-enabled DataTable pulls
 // in.
-import { DataTableReadonly as DataTable } from '@/components/DataTable/DataTableReadonly'
+import { DataTableReadonly as DataTable } from '@/components/DataTable'
 
 import { buildCompletedColumns } from './queryColumns'
 import type { GroupedCompletedRow } from '../_types'

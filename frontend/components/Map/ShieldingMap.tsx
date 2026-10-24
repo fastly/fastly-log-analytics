@@ -8,7 +8,7 @@ maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs')
 import { useTheme } from 'next-themes'
 import { Shield, Maximize2 } from 'lucide-react'
 import { addCountryBaseLayer, createBaseMap, removeMapTabStops, updateCountryBaseLayerTheme } from '@/components/Map/baseLayers'
-import { observeMapResize } from '@/components/Map/useMapResize'
+import { observeMapResize } from '@/components/Map/shared'
 import { PopLabel } from '@/components/PopLabel'
 import {
   Dialog,
@@ -17,7 +17,7 @@ import {
   DialogTitle,
   DialogDescription,
 } from '@/components/ui/dialog'
-import { CHART_COLORS } from '@/lib/chart-colors'
+import { CHART_COLORS } from '@/lib/chart-builders'
 import type { ShieldingRowInput } from '@/app/network/shielding-rows'
 
 import { formatCount, formatCountMaybe } from '@/lib/format'

@@ -6,12 +6,39 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from backend.high_scale.archive_models import ServingWatermark
 from backend.high_scale.pagination import MAX_PAGE_SIZE, KeysetCursor
-from backend.high_scale.query_contracts import QueryResponseMetadata
 from backend.utils.telemetry import _QUERIES, _RECORDING_TELEMETRY, get_page_load_id, get_queries
+
+QueryStatus = Literal["complete", "partial", "queued", "running", "failed"]
+
+
+@dataclass(frozen=True)
+class QueryResponseMetadata:
+    status: QueryStatus
+    exact: bool
+    coverage: float
+    freshness_lag_seconds: float
+    watermark: ServingWatermark
+    approximation_error: float | None
+    error: str | None
+
+    def validate(self) -> None:
+        if not 0 <= self.coverage <= 1:
+            raise ValueError("query coverage must be between 0 and 1")
+        if self.freshness_lag_seconds < 0:
+            raise ValueError("query freshness lag must be non-negative")
+        if self.exact and self.approximation_error is not None:
+            raise ValueError("exact results cannot report approximation error")
+        if not self.exact and self.approximation_error is None:
+            raise ValueError("approximate results require approximation error")
+        if self.status == "failed" and not self.error:
+            raise ValueError("failed queries require an error")
+        if self.status != "failed" and self.error is not None:
+            raise ValueError("only failed queries may report an error")
+        self.watermark.validate()
 
 
 class QueryClient(Protocol):

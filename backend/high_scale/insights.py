@@ -17,8 +17,8 @@ from typing import Any
 
 from backend.core.clickhouse_client import ClickHouseError
 from backend.core.share_db.validation import mask_ip
+from backend.high_scale._common import visible_fact_clauses
 from backend.high_scale._filters import build_clickhouse_filters
-from backend.high_scale._scope import visible_fact_clauses
 from backend.high_scale.insight_queries import (
     AUTH_REGEX,
     BOT_UA_REGEX,

@@ -26,7 +26,7 @@ from backend.repositories.utils.response_cache import (
     serialize_filters_for_key,
 )
 from backend.repositories.utils.single_flight import coalesce
-from backend.utils.geo import format_city_label
+from backend.utils.countries import format_city_label
 
 
 class _TempTableUnavailable(Exception):
