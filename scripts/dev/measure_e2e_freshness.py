@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import sys
@@ -49,6 +50,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.lib.admin_tls import admin_origin, admin_urlopen, validate_admin_tls_config  # noqa: E402
 from scripts.lib.environments import parse_iso_utc  # noqa: E402
+from scripts.lib.section_measurements import BUDGETS  # noqa: E402
 
 ENVIRONMENTS = {
     "local-std": "Local Standard",
@@ -373,7 +375,7 @@ def compute_lag_statistics(
     baseline_latest_ts: datetime | None = None,
     min_elapsed_s: float = 6.0,
 ) -> dict[str, Any]:
-    """Computes Min, Max, Avg, and P95 lag metrics for header and dashboard."""
+    """Summarize request-watermark recency, not individual event latency."""
     if baseline_latest_ts:
         active_samples = [
             s for s in samples if s.get("header_latest_ts") and s["header_latest_ts"] > baseline_latest_ts
@@ -391,21 +393,34 @@ def compute_lag_statistics(
 
     def _stats(vals: list[float]) -> dict[str, float | None]:
         if not vals:
-            return {"min": None, "max": None, "avg": None, "p95": None}
+            return {"min": None, "max": None, "avg": None, "p95": None, "p99": None}
         s = sorted(vals)
-        p95_idx = min(int(len(s) * 0.95), len(s) - 1)
         return {
             "min": round(min(vals), 1),
             "max": round(max(vals), 1),
             "avg": round(sum(vals) / len(vals), 1),
-            "p95": round(s[p95_idx], 1),
+            "p95": s[math.ceil(len(s) * 0.95) - 1],
+            "p99": s[math.ceil(len(s) * 0.99) - 1],
         }
 
+    header = _stats(head_lags)
+    dashboard = _stats(dash_lags)
+    target_p95_s = BUDGETS["peak_freshness_p95_ms"] / 1000
+    header_p95, dashboard_p95 = header["p95"], dashboard["p95"]
+    if header_p95 is None or dashboard_p95 is None:
+        target_status = "UNMEASURED"
+    elif max(header_p95, dashboard_p95) > target_p95_s:
+        target_status = "ELEVATED"
+    else:
+        target_status = "WITHIN TARGET"
+
     return {
-        "header_lag": _stats(head_lags),
-        "dashboard_lag": _stats(dash_lags),
+        "header_lag": header,
+        "dashboard_lag": dashboard,
         "sample_count": len(active_samples),
         "total_samples": len(samples),
+        "target_p95_s": target_p95_s,
+        "target_status": target_status,
     }
 
 
@@ -624,19 +639,6 @@ def measure_active_traffic_benchmark(
         head_stats = stats["header_lag"]
         dash_stats = stats["dashboard_lag"]
 
-        # Target status assessment
-        if c["is_high_scale"]:
-            target_status = (
-                "PASS (<15s)" if (head_stats["avg"] is not None and head_stats["avg"] <= 15.0) else "ELEVATED"
-            )
-        else:
-            if head_stats["avg"] is not None and head_stats["avg"] <= 20.0:
-                target_status = "PASS (~10-15s)"
-            elif head_stats["avg"] is not None and head_stats["avg"] <= 26.0:
-                target_status = "PASS (Near Target)"
-            else:
-                target_status = "ELEVATED"
-
         res = {
             "env": tgt,
             "name": c["name"],
@@ -644,6 +646,13 @@ def measure_active_traffic_benchmark(
             "cdn_domain": c["cdn_domain"],
             "mode": "active_continuous_traffic",
             "deployment_mode": "high_scale" if c["is_high_scale"] else "standard",
+            "measurement": "request_watermark_recency",
+            "qualification": "incomplete",
+            "unknowns": [
+                "per_event_latency_uncorrelated",
+                "rum_freshness_unmeasured",
+                "clock_uncertainty_unmeasured",
+            ],
             "configured_polling": c["polling"],
             "active_benchmark": {
                 "duration_seconds": duration_s,
@@ -652,7 +661,10 @@ def measure_active_traffic_benchmark(
                 "rum_beacons_sent": total_rum,
                 "header_lag": head_stats,
                 "dashboard_lag": dash_stats,
-                "target_status": target_status,
+                "sample_count": stats["sample_count"],
+                "total_samples": stats["total_samples"],
+                "target_p95_s": stats["target_p95_s"],
+                "target_status": stats["target_status"],
                 "rows_added": max(0, cur_rows - c["base_rows"]),
                 "dash_rows_added": max(0, dash_rows - c["base_dash_rows"]),
             },
@@ -673,7 +685,7 @@ def measure_active_traffic_benchmark(
 
 def print_active_scorecard(results: list[dict[str, Any]]) -> None:
     print(f"\n{'=' * 110}", flush=True)
-    print("                      END-TO-END FRESHNESS & INGEST LAG SCORECARD (ACTIVE TRAFFIC)", flush=True)
+    print("                      REQUEST WATERMARK RECENCY SCORECARD (DIAGNOSTIC ONLY)", flush=True)
     print(f"{'=' * 110}", flush=True)
     print(
         f"{'Environment':<28} │ {'Mode':<11} │ {'Min Lag':<8} │ {'Max Lag':<8} │ {'Avg Lag':<8} │ {'P95 Lag':<8} │ {'Dash Avg':<9} │ {'Requests':<9} │ {'Target Status':<15}",
@@ -706,6 +718,7 @@ def print_active_scorecard(results: list[dict[str, Any]]) -> None:
             flush=True,
         )
 
+    print("Qualification incomplete: request/RUM event latency and clock uncertainty are unverified.", flush=True)
     print(f"{'=' * 110}\n", flush=True)
 
 

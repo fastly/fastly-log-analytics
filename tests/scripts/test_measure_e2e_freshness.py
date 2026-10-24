@@ -146,8 +146,59 @@ def test_rum_beacon_count_supports_standard_and_high_scale_responses(response, e
 def test_compute_lag_statistics_empty_samples():
     stats = compute_lag_statistics([])
     assert stats["sample_count"] == 0
-    assert stats["header_lag"] == {"min": None, "max": None, "avg": None, "p95": None}
-    assert stats["dashboard_lag"] == {"min": None, "max": None, "avg": None, "p95": None}
+    assert stats["header_lag"] == {"min": None, "max": None, "avg": None, "p95": None, "p99": None}
+    assert stats["dashboard_lag"] == {"min": None, "max": None, "avg": None, "p95": None, "p99": None}
+    assert stats["target_status"] == "UNMEASURED"
+
+
+@pytest.mark.parametrize(
+    ("header_lag", "dashboard_lag", "expected"),
+    [
+        (30.2, 10.0, "ELEVATED"),
+        (10.0, 30.2, "ELEVATED"),
+        (20.0, 20.0, "WITHIN TARGET"),
+        (20.04, 20.04, "ELEVATED"),
+    ],
+)
+def test_compute_lag_statistics_assesses_both_p95s_not_the_mean(header_lag, dashboard_lag, expected):
+    stats = compute_lag_statistics(
+        [
+            {"elapsed_s": 6, "header_lag_s": 1.0, "dashboard_lag_s": 1.0},
+            {"elapsed_s": 8, "header_lag_s": header_lag, "dashboard_lag_s": dashboard_lag},
+        ]
+    )
+
+    assert stats["header_lag"]["avg"] < 20
+    assert stats["dashboard_lag"]["avg"] < 20
+    assert stats["target_status"] == expected
+
+
+def test_compute_lag_statistics_uses_shared_freshness_budget(monkeypatch):
+    from scripts.lib.section_measurements import BUDGETS
+
+    monkeypatch.setitem(BUDGETS, "peak_freshness_p95_ms", 25000)
+    stats = compute_lag_statistics([{"elapsed_s": 6, "header_lag_s": 25.0, "dashboard_lag_s": 25.0}])
+
+    assert stats["target_p95_s"] == 25
+    assert stats["target_status"] == "WITHIN TARGET"
+
+
+def test_compute_lag_statistics_uses_nearest_rank_tail_percentiles():
+    stats = compute_lag_statistics(
+        [{"elapsed_s": 6, "header_lag_s": lag, "dashboard_lag_s": lag} for lag in range(1, 21)]
+    )
+
+    assert stats["header_lag"]["p95"] == 19
+    assert stats["header_lag"]["p99"] == 20
+    assert stats["dashboard_lag"]["p95"] == 19
+    assert stats["dashboard_lag"]["p99"] == 20
+
+
+@pytest.mark.parametrize(("header_lag", "dashboard_lag"), [(None, 10), (10, None)])
+def test_compute_lag_statistics_does_not_pass_an_unmeasured_surface(header_lag, dashboard_lag):
+    stats = compute_lag_statistics([{"elapsed_s": 6, "header_lag_s": header_lag, "dashboard_lag_s": dashboard_lag}])
+
+    assert stats["target_status"] == "UNMEASURED"
 
 
 def test_compute_lag_statistics_filters_pre_traffic_and_computes_stats():
