@@ -95,21 +95,6 @@ def _clear_ingested_filenames_cache(service_id: str | None = None) -> None:
             _ingested_filenames_cache.pop(service_id, None)
 
 
-_ORPHAN_THRESHOLD_MINS = 60
-
-# Per-task override of the orphan cutoff used by ``start_cron_run``. A row of
-# the same task still ``running`` past this many minutes is treated as dead and
-# reaped before the guard check, so the next tick can start fresh. ``sync`` is
-# idempotent + incremental (it re-discovers un-ingested files via ``StartAfter``
-# next tick), so a short cutoff just means a stuck sync "dies and picks back up"
-# quickly instead of freezing ingestion for the full default hour. Keep each
-# value safely ABOVE the task's worst-case legit runtime to avoid reaping a
-# healthy slow run (sync's ingest budget is max_seconds=240 → 10 min is ~2.5×).
-# Incident 2026-06-19: a leaked sync row blocked ingestion ~20 min at the old
-# 60-min cutoff. Tasks not listed here fall back to _ORPHAN_THRESHOLD_MINS.
-_TASK_ORPHAN_THRESHOLD_MINS = {"sync": 10, "log_discovery": 10}
-
-
 class InvalidServiceIdError(ValueError):
     """Raised by ``_validate_service_id_or_raise`` when ``service_id`` fails
     format validation. Every ``get_con`` / ``get_con_readonly`` call

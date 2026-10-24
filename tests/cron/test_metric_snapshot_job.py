@@ -19,13 +19,29 @@ from backend.cron.jobs.metric_snapshot import (
 )
 
 
+def _get_history(
+    metric: str,
+    *,
+    since: datetime | str,
+    service_id: str | None = None,
+    task: str | None = None,
+) -> list[dict]:
+    batch = metric_snapshots.get_batch(since=since)
+    parts = [metric]
+    if service_id:
+        parts.append(service_id)
+    if task:
+        parts.append(task)
+    return batch.get("|".join(parts), [])
+
+
 def test_tick_records_active_query_count():
     """Active-query path is the simplest — it doesn't depend on
     per-service state, just the global registry summary."""
     with patch("backend.core.query_registry.query_registry.summary", return_value={"active_total": 3}):
         _run_metric_snapshot()
 
-    out = metric_snapshots.get_history("active_query_count", since=datetime.now(UTC) - timedelta(hours=1))
+    out = _get_history("active_query_count", since=datetime.now(UTC) - timedelta(hours=1))
     assert len(out) >= 1
     assert out[-1]["value"] == 3.0
 
@@ -39,8 +55,8 @@ def test_tick_records_pool_wait_per_service():
         _run_metric_snapshot()
 
     since = datetime.now(UTC) - timedelta(hours=1)
-    a = metric_snapshots.get_history("pool_wait_p95_ms", since=since, service_id="svc-a")
-    b = metric_snapshots.get_history("pool_wait_p95_ms", since=since, service_id="svc-b")
+    a = _get_history("pool_wait_p95_ms", since=since, service_id="svc-a")
+    b = _get_history("pool_wait_p95_ms", since=since, service_id="svc-b")
     assert any(r["value"] == 12.3 for r in a)
     assert any(r["value"] == 45.6 for r in b)
 
@@ -53,7 +69,7 @@ def test_tick_continues_when_one_metric_fails():
         with patch("backend.core.query_registry.query_registry.summary", return_value={"active_total": 7}):
             _run_metric_snapshot()  # must not raise
 
-    out = metric_snapshots.get_history("active_query_count", since=datetime.now(UTC) - timedelta(hours=1))
+    out = _get_history("active_query_count", since=datetime.now(UTC) - timedelta(hours=1))
     assert out and out[-1]["value"] == 7.0
 
 
@@ -76,10 +92,10 @@ def test_sample_celery_queues_records_reachability_and_known_queues():
         _sample_celery_queues()
 
     since = datetime.now(UTC) - timedelta(hours=1)
-    assert metric_snapshots.get_history("celery_broker_reachable", since=since)[-1]["value"] == 1.0
-    assert metric_snapshots.get_history("celery_queue_depth_q.ingest", since=since)[-1]["value"] == 4.0
-    assert metric_snapshots.get_history("celery_queue_depth_q.control", since=since)[-1]["value"] == 0.0
-    assert metric_snapshots.get_history("celery_queue_depth", since=since)[-1]["value"] == 4.0
+    assert _get_history("celery_broker_reachable", since=since)[-1]["value"] == 1.0
+    assert _get_history("celery_queue_depth_q.ingest", since=since)[-1]["value"] == 4.0
+    assert _get_history("celery_queue_depth_q.control", since=since)[-1]["value"] == 0.0
+    assert _get_history("celery_queue_depth", since=since)[-1]["value"] == 4.0
 
 
 def test_sample_celery_queues_records_broker_unreachable():
@@ -90,8 +106,8 @@ def test_sample_celery_queues_records_broker_unreachable():
         _sample_celery_queues()
 
     since = datetime.now(UTC) - timedelta(hours=1)
-    assert metric_snapshots.get_history("celery_broker_reachable", since=since)[-1]["value"] == 0.0
-    assert metric_snapshots.get_history("celery_queue_depth", since=since)[-1]["value"] == 0.0
+    assert _get_history("celery_broker_reachable", since=since)[-1]["value"] == 0.0
+    assert _get_history("celery_queue_depth", since=since)[-1]["value"] == 0.0
 
 
 def test_sample_ingest_ledger_records_each_state():
@@ -102,8 +118,8 @@ def test_sample_ingest_ledger_records_each_state():
         _sample_ingest_ledger()
 
     since = datetime.now(UTC) - timedelta(hours=1)
-    assert metric_snapshots.get_history("ingest_ledger_discovered", since=since)[-1]["value"] == 5.0
-    assert metric_snapshots.get_history("ingest_ledger_claimed", since=since)[-1]["value"] == 2.0
+    assert _get_history("ingest_ledger_discovered", since=since)[-1]["value"] == 5.0
+    assert _get_history("ingest_ledger_claimed", since=since)[-1]["value"] == 2.0
 
 
 # ── _sample_cron_duration: per-service iteration + error containment ──────────
@@ -135,8 +151,8 @@ def test_sample_cron_duration_records_per_service_per_task():
         _sample_cron_duration()
 
     since = datetime.now(UTC) - timedelta(hours=1)
-    a = metric_snapshots.get_history("cron_duration_ms", since=since, service_id="svc-a", task="sync")
-    b = metric_snapshots.get_history("cron_duration_ms", since=since, service_id="svc-b", task="optimize")
+    a = _get_history("cron_duration_ms", since=since, service_id="svc-a", task="sync")
+    b = _get_history("cron_duration_ms", since=since, service_id="svc-b", task="optimize")
     assert any(r["value"] == 500.0 for r in a)  # 0.5 s → 500 ms
     assert any(r["value"] == 2000.0 for r in b)
 
@@ -187,7 +203,7 @@ def test_sample_cron_duration_continues_after_one_service_fails():
         _sample_cron_duration()  # must not raise
 
     since = datetime.now(UTC) - timedelta(hours=1)
-    good = metric_snapshots.get_history("cron_duration_ms", since=since, service_id="svc-good", task="sync")
+    good = _get_history("cron_duration_ms", since=since, service_id="svc-good", task="sync")
     assert any(r["value"] == 1000.0 for r in good)
 
 
@@ -214,7 +230,7 @@ def test_sample_ingest_lag_records_recent_lag():
         _sample_ingest_lag()
 
     since = datetime.now(UTC) - timedelta(hours=1)
-    rows = metric_snapshots.get_history("ingest_lag_s", since=since, service_id="svc-ingest")
+    rows = _get_history("ingest_lag_s", since=since, service_id="svc-ingest")
     assert rows
     # ~600 s, allow ±30 s wall-clock slack.
     assert 570 <= rows[-1]["value"] <= 630
@@ -232,7 +248,7 @@ def test_sample_ingest_lag_skips_when_no_latest_ts():
         _sample_ingest_lag()
 
     since = datetime.now(UTC) - timedelta(hours=1)
-    assert metric_snapshots.get_history("ingest_lag_s", since=since, service_id="svc-empty") == []
+    assert _get_history("ingest_lag_s", since=since, service_id="svc-empty") == []
 
 
 def test_sample_ingest_lag_skips_unparseable_timestamp():
@@ -247,7 +263,7 @@ def test_sample_ingest_lag_skips_unparseable_timestamp():
         _sample_ingest_lag()  # must not raise
 
     since = datetime.now(UTC) - timedelta(hours=1)
-    assert metric_snapshots.get_history("ingest_lag_s", since=since, service_id="svc-bad-ts") == []
+    assert _get_history("ingest_lag_s", since=since, service_id="svc-bad-ts") == []
 
 
 def test_sample_ingest_lag_continues_after_one_service_fails():
@@ -265,7 +281,7 @@ def test_sample_ingest_lag_continues_after_one_service_fails():
         _sample_ingest_lag()  # must not raise
 
     since = datetime.now(UTC) - timedelta(hours=1)
-    assert metric_snapshots.get_history("ingest_lag_s", since=since, service_id="svc-good")
+    assert _get_history("ingest_lag_s", since=since, service_id="svc-good")
 
 
 def test_sample_ingest_lag_skips_configs_without_service_id():
@@ -294,7 +310,7 @@ def test_sample_active_queries_swallows_summary_exception():
 
     # Nothing recorded for this tick.
     since = datetime.now(UTC) - timedelta(seconds=5)
-    pre = metric_snapshots.get_history("active_query_count", since=since)
+    pre = _get_history("active_query_count", since=since)
     assert pre == [] or all(r["value"] != 0 for r in pre[:0])  # vacuous — just pin no-crash
 
 
@@ -323,7 +339,7 @@ def test_sample_os_vitals_parses_proc_meminfo_when_available():
         _sample_os_vitals()  # must not raise
 
     since = datetime.now(UTC) - timedelta(hours=1)
-    rows = metric_snapshots.get_history("mem_used_pct", since=since)
+    rows = _get_history("mem_used_pct", since=since)
     assert rows
     # (1 - 4096/16384) * 100 = 75.0
     assert rows[-1]["value"] == 75.0
@@ -350,7 +366,7 @@ def test_sample_os_vitals_records_disk_usage():
         _sample_os_vitals()  # must not raise
 
     since = datetime.now(UTC) - timedelta(hours=1)
-    rows = metric_snapshots.get_history("disk_used_pct", since=since)
+    rows = _get_history("disk_used_pct", since=since)
     assert rows
     assert rows[-1]["value"] == 50.0
 
@@ -368,7 +384,7 @@ def test_sample_os_vitals_swallows_disk_usage_exception_per_path():
         _sample_os_vitals()  # must not raise
 
     since = datetime.now(UTC) - timedelta(hours=1)
-    rows = metric_snapshots.get_history("disk_used_pct_root", since=since)
+    rows = _get_history("disk_used_pct_root", since=since)
     assert rows
     assert rows[-1]["value"] == 10.0
 

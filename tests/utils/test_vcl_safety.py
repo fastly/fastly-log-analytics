@@ -14,7 +14,6 @@ import pytest
 from backend.utils.vcl_safety import (
     LintResult,
     VclSafetyError,
-    validate_expression,
     validate_log_format_macro,
     validate_quoted_literal,
 )
@@ -56,16 +55,6 @@ class TestValidateQuotedLiteral:
         # legacy `except ValueError` handlers must still catch it
         with pytest.raises(ValueError):
             validate_quoted_literal('"')
-
-
-class TestValidateExpression:
-    def test_accepts_plain_expression(self) -> None:
-        assert validate_expression("req.http.Host") == "req.http.Host"
-
-    @pytest.mark.parametrize("bad", ["a; b", "a /* c */ b", "a // c"])
-    def test_rejects_statement_and_comment_tokens(self, bad: str) -> None:
-        with pytest.raises(VclSafetyError):
-            validate_expression(bad)
 
 
 class TestValidateLogFormatMacro:

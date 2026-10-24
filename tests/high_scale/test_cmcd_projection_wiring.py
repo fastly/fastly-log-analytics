@@ -13,8 +13,6 @@ import pytest
 from backend.core.high_scale_contracts import ArchiveState
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.ingest_controller import HighScaleIngestController
-from backend.high_scale.ledger import HighScaleLedger
-from backend.high_scale.ownership import OwnershipStore
 from backend.high_scale.publication import (
     ClickHousePublication,
     HighScaleBatch,
@@ -23,6 +21,8 @@ from backend.high_scale.publication import (
     _rows_for_domain,
 )
 from backend.high_scale.schema import build_batch_id_from_manifest_id, build_cmcd_projection_key
+from backend.high_scale.source_discovery import SourceObjectDescriptor
+from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
 
 
 class _ClickHouse:
@@ -63,13 +63,12 @@ _PLAIN_LINE = {"timestamp": "2026-09-11T20:00:01Z", "url": "/index.html"}
 
 
 def _ingest(controller: HighScaleIngestController, *lines: dict, domain: str = "request"):
-    return controller.ingest(
+    payload = _payload(*lines)
+    desc = SourceObjectDescriptor("raw/request/one.gz", "sha256:one", len(payload), "v1")
+    return controller.ingest_batch(
         service_id="svc",
         domain=domain,
-        object_key="raw/request/one.gz",
-        checksum="sha256:one",
-        payload=_payload(*lines),
-        version="v1",
+        sources_payloads=[(desc, payload)],
         now=datetime(2026, 9, 11, 20, 0, tzinfo=UTC),
     )
 

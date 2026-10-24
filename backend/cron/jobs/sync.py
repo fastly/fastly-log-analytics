@@ -1292,9 +1292,6 @@ def _run_gap_heal(
             logger.exception("[gap_heal] %s: unexpected error", service_id)
 
 
-# Re-export for backward compatibility
-from backend.cron.jobs.ledger import _run_ledger_sweep as _run_ledger_sweep  # noqa: E402, F401
-
 # R-1: drain the gap-heal trigger timestamp dict between tests so an
 # earlier test's last-trigger doesn't suppress a sweep in the next.
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402

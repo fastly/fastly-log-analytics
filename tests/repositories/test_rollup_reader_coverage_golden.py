@@ -717,7 +717,7 @@ def _run_reader(reader: Reader, sc: Scenario, tmp: Path, probe: _Probe, anchors:
         runner._create_active_hour_temp_direct = lambda *a, **k: "__empty__"  # type: ignore[method-assign]
         runner._partial_hour_adjusted_live_start = lambda live_start, token, end: (live_start, [], 0)  # type: ignore[method-assign]
 
-        rollup_coverage.clear_listdir_cache()
+        rollup_coverage._listdir_cache.clear()
         rr.reset_rollup_coverage_ready()
         probe.counts = {}
         patches = []

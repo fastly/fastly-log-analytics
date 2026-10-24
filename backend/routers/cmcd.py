@@ -52,8 +52,7 @@ def cmcd_aggregates(
         return c
 
     _is_real_repo = getattr(repo.get_cmcd_aggregates, "__module__", "") == "backend.repositories.cmcd"
-    _has_eager_con = ctx._con_override is not None or (ctx._holder is not None and ctx._holder.con is not None)
-    con_arg = _acquire_con() if (_has_eager_con or not _is_real_repo) else _acquire_con
+    con_arg = _acquire_con() if (ctx.has_eager_con or not _is_real_repo) else _acquire_con
 
     res = repo.get_cmcd_aggregates(
         con=con_arg,

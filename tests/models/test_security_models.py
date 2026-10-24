@@ -1,4 +1,4 @@
-from backend.models.security import SecurityProxiesRequest, SecurityProxiesResponse
+from backend.models.security import SecurityAggregatesRequest, SecurityProxiesResponse
 
 
 def test_security_proxies_response_validation():
@@ -33,7 +33,7 @@ def test_security_proxies_response_validation():
     assert resp.active_clients[0].impossible_distance is True
 
 
-def test_security_proxies_request_validation():
-    req = SecurityProxiesRequest(start_time="2026-08-17T00:00:00Z", end_time="2026-08-17T23:59:59Z")
+def test_security_aggregates_request_validation():
+    req = SecurityAggregatesRequest(start_time="2026-08-17T00:00:00Z", end_time="2026-08-17T23:59:59Z")
     assert req.start_time == "2026-08-17T00:00:00Z"
     assert req.end_time == "2026-08-17T23:59:59Z"

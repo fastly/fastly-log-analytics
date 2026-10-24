@@ -35,7 +35,7 @@ from backend.models.provision import (
     TerraformPreviewResponse,
 )
 from backend.provision.fos_setup import _get_fos_s3_client
-from backend.utils.router_utils import make_error, raise_internal, require_service_id
+from backend.utils.router_utils import make_error, raise_internal, require_json_content_type, require_service_id
 from backend.utils.sse import sse_response
 
 logger = logging.getLogger(__name__)
@@ -285,26 +285,9 @@ def provision_check_fos(req: CheckFosRequest):
         return debug_envelope({"ok": False, "error": err_msg}, gated=True, is_cached=None, inject_calls=True)
 
 
-def _require_json_content_type(req: Request) -> None:
-    """Reject any teardown request whose Content-Type isn't application/json.
-
-    CSRF defense: an HTML form with ``enctype=text/plain`` can POST a body
-    that LOOKS like JSON without triggering a CORS preflight. Requiring
-    ``Content-Type: application/json`` forces the browser to preflight any
-    cross-origin call (text/plain is "simple"; application/json is not),
-    blocking the silent-invocation vector. Runs as a Depends() so it fires
-    before FastAPI's body parser — otherwise a malformed text/plain body
-    returns 422 from the parser and the explicit 415 never executes."""
-    if not (req.headers.get("content-type") or "").startswith("application/json"):
-        raise HTTPException(
-            status_code=415,
-            detail=make_error("unsupported_media_type", "Content-Type must be application/json"),
-        )
-
-
 # response_model intentionally omitted: SSE progress stream
 # (EventSourceResponse), not a JSON body.
-@router.post("/teardown", dependencies=[Depends(_require_json_content_type)])
+@router.post("/teardown", dependencies=[Depends(require_json_content_type)])
 def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = None):
     """Destructive service teardown over SSE.
 

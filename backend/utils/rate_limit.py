@@ -142,7 +142,3 @@ class SlidingWindowLimiter:
                 else:
                     locks[key] = int(until - now)
             return counts, locks
-
-    def tracked_keys(self) -> int:
-        with self._lock:
-            return len(self._events)

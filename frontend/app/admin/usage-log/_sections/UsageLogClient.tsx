@@ -17,18 +17,11 @@ import { useRouter } from 'next/navigation'
 import { buildServiceHref } from '@/lib/navigation'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { useMounted } from '@/hooks/useMounted'
-import { formatBytes, formatCount } from '@/lib/format'
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from '@/components/ui/dialog'
+import { formatAbbreviatedCount, formatBytes, formatCount } from '@/lib/format'
+import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import {
   toQueryDate,
   fmtCost,
-  fmtOps,
 } from './shared'
 
 type UsageLogResponse = components['schemas']['UsageLogResponse']
@@ -299,7 +292,7 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
       >
         <StatCard
           title="FOS Class A Ops"
-          value={agg ? fmtOps(agg.total_class_a) : '—'}
+          value={agg ? formatAbbreviatedCount(agg.total_class_a) : '—'}
           icon={Zap}
           iconClassName="text-blue-500"
           className="min-h-[164px]"
@@ -313,7 +306,7 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
         />
         <StatCard
           title="FOS Class B Ops"
-          value={agg ? fmtOps(agg.total_class_b) : '—'}
+          value={agg ? formatAbbreviatedCount(agg.total_class_b) : '—'}
           icon={Database}
           iconClassName="text-green-500"
           className="min-h-[164px]"
@@ -417,22 +410,16 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
       </div>
 
       {/* Purge confirmation dialog */}
-      <Dialog open={purgeOpen} onOpenChange={setPurgeOpen}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Purge all usage logs?</DialogTitle>
-          </DialogHeader>
-          <p className="text-sm text-muted-foreground py-2">
-            This will permanently delete every entry in the usage log for this service. This cannot be undone.
-          </p>
-          <DialogFooter>
-            <Button variant="outline" size="sm" onClick={() => setPurgeOpen(false)}>Cancel</Button>
-            <Button variant="destructive" size="sm" onClick={purgeAll} disabled={purging}>
-              {purging ? 'Purging…' : 'Purge all logs'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        open={purgeOpen}
+        onOpenChange={setPurgeOpen}
+        title="Purge all usage logs?"
+        description="This will permanently delete every entry in the usage log for this service. This cannot be undone."
+        confirmLabel="Purge all logs"
+        isDangerous
+        isPending={purging}
+        onConfirm={purgeAll}
+      />
     </div>
   )
 }

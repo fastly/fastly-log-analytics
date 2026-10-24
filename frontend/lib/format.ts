@@ -43,16 +43,17 @@ export interface ElapsedOptions {
   /** ``Infinity`` caps the ladder at hours. */
   daysFrom?: number
   rounding?: 'floor' | 'round'
-  /** Fixed decimals for the hour / day units (0 = integer via ``rounding``). */
-  fractionDigits?: { hours?: number; days?: number }
+  /** Fixed decimals for the second / minute / hour / day units (0 = integer via ``rounding``). */
+  fractionDigits?: { seconds?: number; minutes?: number; hours?: number; days?: number }
   /** Below this many seconds, render ``just now`` (no suffix). */
   justNowBelow?: number
   suffix?: string
+  fallback?: string
 }
 
 /** Compact elapsed-time ladder: 45s / 12m / 3h / 6d, parameterised so every
  *  caller keeps its own thresholds, rounding and decimals. */
-export function formatElapsed(seconds: number, options: ElapsedOptions = {}): string {
+export function formatElapsed(seconds: number | null | undefined, options: ElapsedOptions = {}): string {
   const {
     minutesFrom = 60,
     hoursFrom = 3600,
@@ -61,13 +62,15 @@ export function formatElapsed(seconds: number, options: ElapsedOptions = {}): st
     fractionDigits = {},
     justNowBelow,
     suffix = '',
+    fallback = '—',
   } = options
+  if (seconds == null || Number.isNaN(seconds)) return fallback
   const r = rounding === 'round' ? Math.round : Math.floor
   const unit = (value: number, digits: number | undefined, label: string) =>
     `${digits ? value.toFixed(digits) : r(value)}${label}${suffix}`
   if (justNowBelow !== undefined && seconds < justNowBelow) return 'just now'
-  if (seconds < minutesFrom) return unit(seconds, 0, 's')
-  if (seconds < hoursFrom) return unit(seconds / 60, 0, 'm')
+  if (seconds < minutesFrom) return unit(seconds, fractionDigits.seconds, 's')
+  if (seconds < hoursFrom) return unit(seconds / 60, fractionDigits.minutes, 'm')
   if (seconds < daysFrom) return unit(seconds / 3600, fractionDigits.hours, 'h')
   return unit(seconds / 86400, fractionDigits.days, 'd')
 }
@@ -174,6 +177,12 @@ export function formatCurrency(amount: number): string {
   return '$' + amount.toFixed(4)
 }
 
+export function formatUSD(n: number, options?: { subDollarDigits?: number }): string {
+  if (n >= 1000) return '$' + n.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  if (n >= 1) return '$' + n.toFixed(2)
+  return '$' + n.toFixed(options?.subDollarDigits ?? 4)
+}
+
 /**
  * Calculates the percentage delta between two numeric values.
  */
@@ -189,4 +198,20 @@ export function calculateDelta(current: number, previous: number | undefined): n
 export function formatPercent(ratio: number, options?: { decimals?: number }): string {
   const decimals = options?.decimals ?? 1
   return `${(ratio * 100).toFixed(decimals)}%`
+}
+
+/**
+ * Formats an already-scaled percentage value (e.g. 12.3 -> "12.3%") with nullish fallback.
+ */
+export function formatPctValue(v: number | null | undefined, decimals?: number): string {
+  if (v == null) return '—'
+  return `${decimals != null ? v.toFixed(decimals) : v}%`
+}
+
+/**
+ * Formats a millisecond value with nullish fallback.
+ */
+export function formatMs(v: number | null | undefined, decimals = 1, unit = ' ms'): string {
+  if (v == null) return '—'
+  return `${v.toFixed(decimals)}${unit}`
 }

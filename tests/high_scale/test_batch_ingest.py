@@ -12,9 +12,7 @@ from backend.high_scale.ingest_controller import (
     BatchIngestResult,
     HighScaleIngestController,
 )
-from backend.high_scale.ledger import HighScaleLedger
 from backend.high_scale.orchestration import HighScaleWorkerCoordinator
-from backend.high_scale.ownership import OwnershipStore
 from backend.high_scale.publication import (
     ClickHousePublication,
     HighScaleBatch,
@@ -28,6 +26,7 @@ from backend.high_scale.source_discovery import (
     SourceObjectMissingError,
     SourceObjectPage,
 )
+from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
 
 
 class _ClickHouse:

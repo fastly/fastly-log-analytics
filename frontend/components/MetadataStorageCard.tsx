@@ -14,7 +14,7 @@ import { unwrapClient } from '@/lib/api-client'
 import type { Expect, WireParity } from '@/types/api'
 import type { components } from '@/types/api.generated'
 
-import { formatBytesTiered, formatCount } from '@/lib/format'
+import { formatBytesTiered, formatCountMaybe } from '@/lib/format'
 import { queryKeys } from '@/lib/query-keys'
 // Deliberate narrowing of the all-optional generated MetadataStorageResponse
 // (+ its MetadataTableStat / MetadataRetentionValues sub-schemas): the
@@ -62,15 +62,6 @@ const TABLE_LABELS: Record<string, { label: string; sub: string }> = {
 
 function labelFor(rawName: string): { label: string; sub: string } {
   return TABLE_LABELS[rawName] ?? { label: rawName, sub: '' }
-}
-
-function fmtBytes(n: number | null | undefined): string {
-  return formatBytesTiered(n, { maxUnit: 'GB' })
-}
-
-function fmtRows(n: number | null | undefined): string {
-  if (n == null) return '–'
-  return formatCount(n)
 }
 
 function fmtDays(n: number): string {
@@ -164,7 +155,7 @@ export function MetadataStorageCard() {
             on-disk size drops to reflect the deletions.
           </p>
           <p className="text-muted-foreground">
-            Current file: <span className="tabular-nums font-medium">{fmtBytes(data.db_bytes)}</span>.
+            Current file: <span className="tabular-nums font-medium">{formatBytesTiered(data.db_bytes, { maxUnit: 'GB' })}</span>.
             VACUUM is single-threaded and rewrites the whole file — on a multi-GB DB it can take
             several minutes. The run is also written to <code className="text-xs">cron_runs</code>
             and surfaces on the Data Management history grid.
@@ -290,8 +281,8 @@ export function MetadataStorageCard() {
                       <div className="text-[11px] sm:text-[10px] text-muted-foreground font-mono">{r.name}</div>
                       {sub && <div className="text-[11px] sm:text-[10px] text-muted-foreground mt-0.5">{sub}</div>}
                     </td>
-                    <td className="px-3 py-2 text-right tabular-nums align-top">{fmtRows(r.stat.rows)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums align-top">{fmtBytes(r.stat.bytes)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums align-top">{formatCountMaybe(r.stat.rows) ?? '–'}</td>
+                    <td className="px-3 py-2 text-right tabular-nums align-top">{formatBytesTiered(r.stat.bytes, { maxUnit: 'GB' })}</td>
                     <td className="px-3 py-2 text-center align-top">
                       {r.trimmable ? (
                         <Badge variant="secondary" className="text-[11px] sm:text-[10px]">
@@ -317,7 +308,7 @@ export function MetadataStorageCard() {
               <tr>
                 <td className="px-3 py-2 font-medium text-xs uppercase tracking-wider">Total DB file</td>
                 <td className="px-3 py-2"></td>
-                <td className="px-3 py-2 text-right font-semibold tabular-nums">{fmtBytes(data.db_bytes)}</td>
+                <td className="px-3 py-2 text-right font-semibold tabular-nums">{formatBytesTiered(data.db_bytes, { maxUnit: 'GB' })}</td>
                 <td className="px-3 py-2"></td>
               </tr>
             </tfoot>

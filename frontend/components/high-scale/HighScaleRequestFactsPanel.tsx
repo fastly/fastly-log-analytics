@@ -67,10 +67,6 @@ const FACT_COLUMNS: ColumnDef<FactRow>[] = [
   },
 ]
 
-function formatFreshness(seconds: number): string {
-  return formatElapsed(seconds, ELAPSED_FRESHNESS)
-}
-
 function Metadata({ metadata }: { metadata: NonNullable<ReturnType<typeof useHighScaleRequestFacts>['data']>['metadata'] }) {
   return (
     <div
@@ -88,7 +84,7 @@ function Metadata({ metadata }: { metadata: NonNullable<ReturnType<typeof useHig
       </div>
       <div className="rounded-lg border bg-muted/30 p-3">
         <div className="text-xs uppercase tracking-wide text-muted-foreground">Freshness</div>
-        <div className="mt-1 font-medium">{formatFreshness(metadata.freshness_lag_seconds)} lag</div>
+        <div className="mt-1 font-medium">{formatElapsed(metadata.freshness_lag_seconds, ELAPSED_FRESHNESS)} lag</div>
       </div>
       <div className="rounded-lg border bg-muted/30 p-3">
         <div className="text-xs uppercase tracking-wide text-muted-foreground">Coverage</div>

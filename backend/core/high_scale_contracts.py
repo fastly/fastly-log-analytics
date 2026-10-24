@@ -9,17 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-HIGH_SCALE_MODE = "high_scale"
-
-HIGH_SCALE_OWNERSHIP = {
-    "source_discovery": "high_scale_ledger",
-    "durable_events": "fos_archive",
-    "serving": "clickhouse",
-    "source_deletion": "archive_deletion_controller",
-    "rum": "high_scale_rum_pipeline",
-    "cmcd": "request_event_projection",
-}
-
 
 class ArchiveState(StrEnum):
     ARTIFACT_UPLOADING = "artifact_uploading"

@@ -39,19 +39,12 @@ def _session(urls: list[str], dwell_s: float = 5.0) -> dict:
 def _matrix_from(funnels: list[tuple[list[str], int]]) -> dict:
     """Build a matrix by repeating each funnel path N times. Returns the
     serialized dict form the scorer consumes."""
-    import io
-    import json
-
-    from backend.scoring.matrix import write_matrix
-
     sessions = []
     for path, repeats in funnels:
         for _ in range(repeats):
             sessions.append(_session(path))
     matrix, _ = build_matrix(sessions)
-    buf = io.StringIO()
-    write_matrix(matrix, "test-v1", buf)
-    return json.loads(buf.getvalue())
+    return matrix.to_json_dict("test-v1")
 
 
 # ── _compute_auc ─────────────────────────────────────────────────────────────
@@ -280,15 +273,12 @@ def test_evaluate_per_reason_returns_buckets_for_every_known_atom():
 def test_known_reason_atoms_track_scorer_emitters():
     """_KNOWN_REASON_ATOMS must mirror what the live scorer actually emits.
 
-    The cookie atoms are exercised directly against the Python reference
-    scorer so the most-recently-broken set stays tied to the producer.
     ``rare-transition`` must be absent — it is emitted by neither the Rust
     prod scorer nor the Python reference (the L2 rule emits
     ``low-transition-prob``), and previously produced a perpetually-empty
     per-rule bucket. ``cookie-replayed`` must be present: the prod (Rust)
     scorer's ``format!("cookie-{}", compliance)`` emits it on the replay
-    path, so it appears in real ``edge_score_reason`` data even though the
-    Python reference scorer does not currently emit it.
+    path, so it appears in real ``edge_score_reason`` data.
     """
     from backend.scoring import scorer as pyscorer
     from backend.scoring.evaluate import _KNOWN_REASON_ATOMS
@@ -296,17 +286,10 @@ def test_known_reason_atoms_track_scorer_emitters():
 
     known = set(_KNOWN_REASON_ATOMS)
 
-    for compliance in ("missing", "expired", "tampered"):
-        res = pyscorer.score_combined(
-            state=None,
-            cookie_compliance=compliance,
-            current_route=Route("/checkout", "checkout"),
-            prev_route=Route("/home", "home"),
-            matrix=None,
-        )
-        emitted = set(res.reasons)
-        assert emitted, f"{compliance} emitted no reason atoms"
-        assert emitted <= known, f"{compliance}: {emitted - known} missing from _KNOWN_REASON_ATOMS"
+    m = {"counts": {"/home": {"/other": 10000}}, "row_totals": {"/home": 10000}, "vocab_size": 100}
+    _, l2_reasons, _ = pyscorer.score_layer2(m, Route("/home", "home"), None, Route("/checkout", "checkout"))
+    assert set(l2_reasons) == {"low-transition-prob"}
+    assert set(l2_reasons) <= known
 
     assert "rare-transition" not in known
     assert known == {

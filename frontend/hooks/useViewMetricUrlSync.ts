@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { parseAsString, useQueryStates } from 'nuqs'
 import { useFilterStore } from '@/stores/filterStore'
-import { useActiveService } from './useActiveService'
+import { useServiceStore } from '@/stores/serviceStore'
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 import { queryKeys } from '@/lib/query-keys'
@@ -40,7 +40,7 @@ export function useViewMetricUrlSync(options?: { setMetric?: (m: string) => void
   // poking `useFilterStore.getState()` (which doesn't exist on the test mock).
   const currentEdgeOnly = useFilterStore(s => s.edgeOnly)
   const currentCompareMode = useFilterStore(s => s.compareMode)
-  const { activeServiceId } = useActiveService()
+  const activeServiceId = useServiceStore(s => s.activeServiceId)
   const queryClient = useQueryClient()
   const setMetric = options?.setMetric
 

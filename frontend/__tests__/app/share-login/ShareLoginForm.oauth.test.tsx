@@ -1,9 +1,13 @@
-import { render, screen } from '@testing-library/react'
+import { render as rtlRender, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
 import { server } from '@/__tests__/helpers/msw/server'
+import { createTestQueryClient, makeQueryWrapper } from '@/__tests__/helpers/query'
 import { ShareLoginForm } from '@/app/share-login/ShareLoginForm'
+
+const render = (ui: React.ReactElement) =>
+  rtlRender(ui, { wrapper: makeQueryWrapper(createTestQueryClient()) })
 
 // Mutable search params so each test can set ?oauth_error / ?return.
 let mockSearch = new URLSearchParams()

@@ -12,7 +12,6 @@ import { queryKeys } from '@/lib/query-keys'
 
 const SEED_KEYS = [queryKeys.syncStatus] as const
 
-export { useIsAnalyst }
 export type SyncStatus = components['schemas']['SyncStatusResponse']
 
 /**

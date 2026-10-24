@@ -287,13 +287,13 @@ def test_writer_behind_short_circuits_without_extra_probes(tmp_path, monkeypatch
 
         monkeypatch.setattr(rollup_coverage.os.path, "isfile", probe)
         source = {"_cache_dir_override": str(tmp_path)}
-        rollup_coverage.clear_listdir_cache()
+        rollup_coverage._listdir_cache.clear()
         expected = rollup_coverage.plan_hourly_read(
             source, START, START + timedelta(hours=3), "time_series.parquet", heal=True
         )
         baseline = probes.copy()
         probes.clear()
-        rollup_coverage.clear_listdir_cache()
+        rollup_coverage._listdir_cache.clear()
         actual = rollup_coverage.plan_hourly_read(
             source, START, START + timedelta(hours=3), "time_series.parquet", heal=True, observation=observed
         )

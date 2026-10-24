@@ -1,73 +1,17 @@
-"""Edge scoring engine: Layer 1 (universal behavioral) + Layer 2 (route
-transition) + combined output.
+"""Edge scoring engine: Layer 2 (route transition) evaluation.
 
 **Reference implementation, not the runtime path.** This module exists to
-serve as the Python-side ground truth in cross-language parity tests; the
-production scoring on every customer request runs in the Rust/Wasm port
-under ``compute/scorer/`` at the edge. The wire-format fixtures in
-``tests/scoring/fixtures/`` are byte-pinned and exercised by both
-implementations — any drift between Python and Rust fails the build.
-Production application code should NOT import ``score_combined``,
-``score_layer1``, or ``ScoreResult.to_headers`` from this module; the
-data path is VCL → Compute scorer → response headers, with no Python
-in the loop.
-
-The math here is deliberately straightforward — no NumPy, no library
-calls inside hot paths, integers + small dicts only — so it's easy to
-keep in lock-step with Rust.
-
-This module is pure: no I/O, no clock reads, no environment lookups. The
-caller is responsible for decoding the cookie (``backend.scoring.cookie``),
-loading the matrix (``backend.scoring.matrix``), and normalizing the
-incoming request URL (``backend.scoring.normalize``). The scorer just
-takes those values and emits a verdict.
+serve as the Python-side ground truth in cross-language parity tests and
+ROC-AUC evaluation; the production scoring on every customer request runs in
+the Rust/Wasm port under ``compute/scorer/`` at the edge.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
 from typing import Final
 
-from backend.scoring.cookie import SessionState, quantize_score
 from backend.scoring.normalize import Route
-
-# ── Layer 1 tuning constants (research doc §4.1) ──────────────────────────────
-
-# "Warmup gate" — timing rules suppressed until the session has a meaningful
-# sample for mean/variance. seq=3 is the minimum for any variance estimate,
-# the doc bumps that to "> 3" so we score from the 4th request onward.
-L1_TIMING_WARMUP_SEQ: Final[int] = 3
-
-# Impossibly Fast: mean dwell < this → fire. 200ms is faster than any human
-# can read+click; lower than a typical TLS RTT to the nearest POP.
-L1_FAST_DWELL_THRESHOLD_S: Final[float] = 0.20
-
-# Robotic Consistency: variance must be below this AND mean dwell in the
-# suspicious band. Variance threshold = 0.05s² captures `sleep(1)` style
-# loops (variance ≈ 0).
-#
-# Security: was 0.5 — there was a "robotic safe zone" between
-# L1_FAST_DWELL_THRESHOLD_S (0.20) and L1_ROBOTIC_DWELL_LOW_S (0.50)
-# where a low-variance bot averaging 0.30s/page scored zero. Lower
-# the threshold to 0.20 so the robotic detector covers the
-# previously-uncovered band.
-L1_ROBOTIC_VARIANCE_THRESHOLD: Final[float] = 0.05
-L1_ROBOTIC_DWELL_LOW_S: Final[float] = 0.20
-L1_ROBOTIC_DWELL_HIGH_S: Final[float] = 3.0
-
-# Score contributions per fired rule. Sum of all L1 rules is capped at 100
-# in the combined output. Cookie compliance dominates because it's the
-# strongest "this is definitely a bot" signal among L1's three rules.
-L1_SCORE_FAST: Final[int] = 50
-L1_SCORE_ROBOTIC: Final[int] = 40
-L1_SCORE_COOKIE_MISSING: Final[int] = 75
-# Security: tampered cookies are a strictly stronger anomaly signal
-# than missing/expired (missing might be a fresh visitor, tampered is
-# intentional). The threshold-matrix admin UI uses score==100 to enable
-# hard-block enforcement, so capping tampered at 75 let attackers stay
-# below the enforcement bar while exhibiting active anomalous behavior.
-L1_SCORE_COOKIE_TAMPERED: Final[int] = 100
 
 # ── Layer 2 tuning constants (research doc §4.2) ──────────────────────────────
 
@@ -97,85 +41,6 @@ def _l2_score_from_trans_prob(p: float) -> int:
     if raw > 100:
         return 100
     return int(round(raw))
-
-
-# ── Combined output ───────────────────────────────────────────────────────────
-
-
-@dataclass
-class ScoreResult:
-    """Output of a single scoring evaluation. Maps 1:1 onto the
-    ``X-Edge-*`` response headers in research doc §6."""
-
-    score: int = 0  # quantized 0-100, the X-Edge-Score header
-    l1_score: int = 0
-    l2_score: int = 0
-    reasons: list[str] = field(default_factory=list)
-    cookie_compliance: str = "ok"  # ok | missing | expired | rotated | tampered
-    # Diagnostics (not in the header set; useful in tests and analyst UI).
-    mean_dwell_s: float = 0.0
-    variance_s2: float = 0.0
-    trans_prob: float = 1.0
-    matrix_version: str = ""
-
-    def to_headers(self) -> dict[str, str]:
-        """Materialize the ``X-Edge-*`` header set per research doc §6."""
-        return {
-            "X-Edge-Score": str(self.score),
-            "X-Edge-Score-L1": str(self.l1_score),
-            "X-Edge-Score-L2": str(self.l2_score),
-            "X-Edge-Cookie-Compliance": self.cookie_compliance,
-            "X-Edge-Score-Reason": ",".join(self.reasons),
-            "X-Edge-Matrix-Version": self.matrix_version,
-        }
-
-
-# ── Layer 1: Universal Behavioral Shield ──────────────────────────────────────
-
-
-def _running_mean_variance(state: SessionState) -> tuple[float, float]:
-    """Compute mean dwell and timing variance from the cookie's running sums.
-
-    Uses the algebraic identity Var(X) = E[X²] − E[X]² so we never need to
-    store the history array. seq=0 case (no transitions yet) returns
-    (0, 0) — the timing rules check the warmup gate separately.
-
-    Divides by the full ``seq`` (whole-session mean). A ``min(seq, 20)``
-    divisor cap was tried and reverted — it inflates the mean over long
-    sessions instead of windowing it (see scorer.rs #038), so it weakens
-    impossibly-fast detection. The real windowed fix (ring buffer of the
-    last N dwells, Cookie schema v3) is the deferred #038 follow-up."""
-    if state.seq <= 0:
-        return 0.0, 0.0
-    mean = state.sum_dt / state.seq
-    second_moment = state.sum_dt_sq / state.seq
-    # Floating-point can push the second moment slightly below mean² when
-    # they're nearly equal (all dwells identical). Clamp to 0.
-    var = max(0.0, second_moment - mean * mean)
-    return mean, var
-
-
-def score_layer1(state: SessionState) -> tuple[int, list[str], float, float]:
-    """Apply the L1 rules to a decoded session state. Returns
-    (score_contribution, reasons, mean_dwell_s, variance_s2)."""
-    mean, var = _running_mean_variance(state)
-    score = 0
-    reasons: list[str] = []
-
-    # Impossibly Fast and Robotic Consistency both share the seq>3 warmup
-    # gate. Below that, only cookie compliance fires (which is handled by
-    # the caller — see score_combined — because it needs to know whether
-    # the cookie was missing/tampered, info that's lost by the time we
-    # have a SessionState in hand).
-    if state.seq > L1_TIMING_WARMUP_SEQ:
-        if mean < L1_FAST_DWELL_THRESHOLD_S:
-            score += L1_SCORE_FAST
-            reasons.append("impossibly-fast")
-        if var < L1_ROBOTIC_VARIANCE_THRESHOLD and L1_ROBOTIC_DWELL_LOW_S <= mean <= L1_ROBOTIC_DWELL_HIGH_S:
-            score += L1_SCORE_ROBOTIC
-            reasons.append("robotic-consistency")
-
-    return min(score, 100), reasons, mean, var
 
 
 # ── Layer 2: Route Transition Shield ──────────────────────────────────────────
@@ -264,93 +129,3 @@ def score_layer2(
     score = _l2_score_from_trans_prob(trans_prob)
     reasons = ["low-transition-prob"] if score >= 50 else []
     return score, reasons, trans_prob
-
-
-# ── Combined evaluation ───────────────────────────────────────────────────────
-
-
-# Length of the L2 opt-in fade-in, in days. Mirrors ``scorer.rs::L2_RAMP_DAYS``.
-L2_RAMP_DAYS = 3.0
-
-
-def _optin_ramp_weight(days_since_optin: float) -> float:
-    """Weight L2 contributes to the combined score as a function of days since
-    the operator opted L2 into enforcement. Linear ramp over [0, L2_RAMP_DAYS]:
-    0 at (and before) the instant of opt-in, 1.0 once the fade-in completes.
-
-    Mirrors ``scorer.rs::optin_ramp_weight``. Whether L2 contributes at all is
-    gated upstream by the operator's explicit opt-in (``score_combined`` forces
-    the weight to 0 when ``l2_enforce_enabled`` is false) — this only shapes the
-    post-opt-in ramp. Replaces the retired deployment-age blend: L2 no longer
-    auto-joins enforcement on a clock."""
-    if days_since_optin <= 0.0:
-        return 0.0
-    if days_since_optin >= L2_RAMP_DAYS:
-        return 1.0
-    return days_since_optin / L2_RAMP_DAYS
-
-
-def score_combined(
-    *,
-    state: SessionState | None,
-    cookie_compliance: str = "ok",
-    current_route: Route,
-    prev_route: Route | None,
-    prev_anchor_route: Route | None = None,
-    matrix: dict | None = None,
-    l2_enforce_enabled: bool = False,
-    l2_days_since_optin: float = 0.0,
-) -> ScoreResult:
-    """One-stop scorer. The caller assembles the inputs from cookie decode
-    + route history + loaded matrix; this function applies all rules,
-    blends, quantizes per §3.3, and returns the headers.
-
-    L2 joins the *enforced* combined score only on explicit operator opt-in
-    (``l2_enforce_enabled``); on opt-in it fades in over ``L2_RAMP_DAYS`` from
-    the opt-in anchor. Flag off → L2 stays observe-only (its sub-score is still
-    computed/emitted, just weighted 0). Mirrors ``scorer.rs::score_combined``.
-
-    ``state=None, cookie_compliance != 'ok'`` is the "no cookie" path —
-    cookie compliance rule fires when seq>1 (i.e. this is NOT the first
-    request from this client) and the cookie is missing/tampered."""
-
-    result = ScoreResult(cookie_compliance=cookie_compliance)
-    result.matrix_version = str(matrix.get("version", "")) if matrix else ""
-
-    # Cookie-compliance rule (§4.1). Note: we don't have seq if state is
-    # None, so the caller must hint "is this multi-request?" via cookie
-    # compliance status. ``missing`` and ``expired`` get the historical
-    # 75; ``tampered`` gets the full 100 (security) because it's a
-    # deliberate evasion signal. ``rotated`` is benign (fresh cookie
-    # post-rotation).
-    l1_from_cookie = 0
-    if cookie_compliance == "tampered":
-        l1_from_cookie = L1_SCORE_COOKIE_TAMPERED
-        result.reasons.append("cookie-tampered")
-    elif cookie_compliance in ("missing", "expired"):
-        l1_from_cookie = L1_SCORE_COOKIE_MISSING
-        result.reasons.append(f"cookie-{cookie_compliance}")
-
-    # Layer 1 timing rules (only meaningful with a valid decoded state).
-    if state is not None:
-        l1_timing, l1_reasons, mean, var = score_layer1(state)
-        result.mean_dwell_s = mean
-        result.variance_s2 = var
-        result.reasons.extend(l1_reasons)
-        result.l1_score = min(100, l1_from_cookie + l1_timing)
-    else:
-        result.l1_score = l1_from_cookie
-
-    # Layer 2 transition rule (gated on matrix availability).
-    l2_score, l2_reasons, trans_prob = score_layer2(matrix, prev_route, prev_anchor_route, current_route)
-    result.l2_score = l2_score
-    result.trans_prob = trans_prob
-    result.reasons.extend(l2_reasons)
-
-    # Combined, quantized per §3.3. L2 is weighted into the enforced score only
-    # on explicit operator opt-in; otherwise its weight is 0 (observe-only).
-    w_l2 = _optin_ramp_weight(l2_days_since_optin) if l2_enforce_enabled else 0.0
-    raw_combined = result.l1_score + result.l2_score * w_l2
-    result.score = quantize_score(raw_combined)
-
-    return result

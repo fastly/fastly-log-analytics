@@ -637,7 +637,6 @@ export const handlers = [
   ),
   http.patch(`${API_BASE}/api/admin/usage-logging`, okFor('/api/admin/usage-logging', 'patch', { ok: true })),
   http.post(`${API_BASE}/api/admin/commit-iceberg`, okFor('/api/admin/commit-iceberg', 'post', { ok: true })),
-  http.post(`${API_BASE}/api/admin/ducklake/migrate`, okFor('/api/admin/ducklake/migrate', 'post', { ok: true, message: 'started', service_id: 'svc-default' })),
   http.post(`${API_BASE}/api/admin/ingest-logs`, okFor('/api/admin/ingest-logs', 'post', { ok: true })),
   http.get(`${API_BASE}/api/admin/iceberg-info`, () =>
     HttpResponse.json({ snapshots: [], current_snapshot_id: null }),

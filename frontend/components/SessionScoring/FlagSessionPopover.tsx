@@ -1,6 +1,7 @@
 'use client'
 
 import * as React from 'react'
+import { useMutation } from '@tanstack/react-query'
 import { Flag, Loader2 } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
@@ -64,22 +65,17 @@ export function FlagSessionPopover({
 }: FlagSessionPopoverProps) {
   const [open, setOpen] = React.useState(false)
   const [notes, setNotes] = React.useState('')
-  const [busy, setBusy] = React.useState<LabelValue | null>(null)
-  const [clearing, setClearing] = React.useState(false)
   const [error, setError] = React.useState('')
 
   const disabled = !sid
 
-  const submit = async (label: LabelValue) => {
-    if (!sid) return
-    setBusy(label)
-    setError('')
-    try {
+  const submitMutation = useMutation({
+    mutationFn: async (label: LabelValue) => {
       await unwrapClient(
         client.POST('/api/services/{service_id}/scoring/labels', {
           params: { path: { service_id: serviceId } },
           body: {
-            sid,
+            sid: sid!,
             label,
             notes,
             flagged_by: 'admin',
@@ -89,33 +85,48 @@ export function FlagSessionPopover({
           },
         }),
       )
+    },
+    onMutate: () => {
+      setError('')
+    },
+    onSuccess: () => {
       setOpen(false)
       setNotes('')
       onFlagged?.()
-    } catch (e) {
+    },
+    onError: (e) => {
       setError(extractApiError(e) || 'Failed to save label')
-    } finally {
-      setBusy(null)
-    }
+    },
+  })
+  const busy = submitMutation.isPending ? (submitMutation.variables ?? null) : null
+  const submit = (label: LabelValue) => {
+    if (!sid) return
+    submitMutation.mutate(label)
   }
 
-  const handleClearLabel = async () => {
-    if (!currentLabelId) return
-    setClearing(true)
-    setError('')
-    try {
+  const clearMutation = useMutation({
+    mutationFn: async () => {
       await unwrapClient(
         client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}', {
-          params: { path: { service_id: serviceId, label_id: currentLabelId } },
+          params: { path: { service_id: serviceId, label_id: currentLabelId! } },
         }),
       )
+    },
+    onMutate: () => {
+      setError('')
+    },
+    onSuccess: () => {
       setOpen(false)
       onFlagged?.()
-    } catch (e) {
+    },
+    onError: (e) => {
       setError(extractApiError(e) || 'Failed to clear label')
-    } finally {
-      setClearing(false)
-    }
+    },
+  })
+  const clearing = clearMutation.isPending
+  const handleClearLabel = () => {
+    if (!currentLabelId) return
+    clearMutation.mutate()
   }
 
   return (

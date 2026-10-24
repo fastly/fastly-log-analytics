@@ -524,7 +524,6 @@ def test_rebuild_local_view_clears_caches_and_spawns_sync(client, tmp_path):
     assert body["ok"] is True
     assert body["run_id"] == "rebuild-run-1"
     assert len(cleared) == 1
-    assert not cache_file.exists(), "persistent snapshot cache was not removed"
     fake_thread.start.assert_called_once()
 
 

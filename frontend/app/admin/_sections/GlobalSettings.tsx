@@ -1,6 +1,6 @@
 'use client'
 import React, { useMemo, useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRouter } from 'next/navigation'
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
@@ -65,7 +65,6 @@ const _PRICING_DEFAULTS = {
 export const PricingSettings = () => {
   const queryClient = useQueryClient()
   const mounted = useMounted()
-  const [saving, setSaving] = useState(false)
   const [editing, setEditing] = useState(false)
 
   const { data: settings, isLoading } = useQuery({
@@ -102,9 +101,8 @@ export const PricingSettings = () => {
     setEditing(false)
   }
 
-  async function handleSave() {
-    setSaving(true)
-    try {
+  const saveMutation = useMutation({
+    mutationFn: async () => {
       await unwrapClient(client.PATCH('/api/admin/usage-logging', {
         body: {
           class_a_rate_per_1k: parseFloat(rateA),
@@ -114,13 +112,18 @@ export const PricingSettings = () => {
           min_billed_days: parseInt(minBilledDays),
         },
       }))
+    },
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['usage-logging-settings'] })
       queryClient.invalidateQueries({ queryKey: ['usage'] })
       queryClient.invalidateQueries({ queryKey: ['usage-log'] })
       setEditing(false)
-    } finally {
-      setSaving(false)
-    }
+    },
+  })
+  const saving = saveMutation.isPending
+
+  function handleSave() {
+    saveMutation.mutate()
   }
 
   if (!mounted || isLoading) return <AnalyticsCard title="FOS Pricing Defaults" isLoading>{null}</AnalyticsCard>
@@ -190,7 +193,6 @@ export function GlobalSettings() {
   const mounted = useMounted()
   const storeServiceId = useServiceStore((s) => s.activeServiceId)
   const activeServiceId = mounted ? storeServiceId : null
-  const [usageLoggingLoading, setUsageLoggingLoading] = useState(false)
   const [popLocationsOpen, setPopLocationsOpen] = useState(false)
 
   const { data: queryUsageLoggingSettings } = useQuery({
@@ -205,27 +207,38 @@ export function GlobalSettings() {
   const usageLoggingEnabled = usageLoggingSettings?.enabled ?? false
   const usageLogRetention = usageLoggingSettings?.retention_days ?? 30
 
-  async function saveUsageLogRetention(days: number) {
-    if (!Number.isFinite(days) || days < 1 || days === usageLogRetention) return
-    queryClient.setQueryData(['usage-logging-settings'], (old: typeof usageLoggingSettings) => ({ ...old, retention_days: days }))
-    try {
+  const retentionMutation = useMutation({
+    mutationFn: async (days: number) => {
       await unwrapClient(client.PATCH('/api/admin/usage-logging', { body: { retention_days: days } }))
-    } finally {
+    },
+    onMutate: (days) => {
+      queryClient.setQueryData(['usage-logging-settings'], (old: typeof usageLoggingSettings) => ({ ...old, retention_days: days }))
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['usage-logging-settings'] })
-    }
+    },
+  })
+
+  function saveUsageLogRetention(days: number) {
+    if (!Number.isFinite(days) || days < 1 || days === usageLogRetention) return
+    retentionMutation.mutate(days)
   }
 
-  async function handleUsageLoggingToggle(enabled: boolean) {
-    queryClient.setQueryData(['usage-logging-settings'], (old: typeof usageLoggingSettings) => ({ ...old, enabled }))
-    setUsageLoggingLoading(true)
-    try {
+  const toggleMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
       await unwrapClient(client.PATCH('/api/admin/usage-logging', { body: { enabled } }))
+    },
+    onMutate: (enabled) => {
+      queryClient.setQueryData(['usage-logging-settings'], (old: typeof usageLoggingSettings) => ({ ...old, enabled }))
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['usage-logging-settings'] })
-    } catch {
-      queryClient.invalidateQueries({ queryKey: ['usage-logging-settings'] })
-    } finally {
-      setUsageLoggingLoading(false)
-    }
+    },
+  })
+  const usageLoggingLoading = toggleMutation.isPending
+
+  function handleUsageLoggingToggle(enabled: boolean) {
+    toggleMutation.mutate(enabled)
   }
 
   return (

@@ -11,14 +11,12 @@ compat shim was retired 2026-07-06 — import directly from here or from
 from __future__ import annotations
 
 import logging
-from typing import Any
-
-logging.getLogger("pyiceberg.io").setLevel(logging.WARNING)
 import os
 import sys
 import threading
 import time
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 # Anchor the logger to the historical ``backend.scheduler`` name so
 # log filters in tests (and downstream parsers) keep working after

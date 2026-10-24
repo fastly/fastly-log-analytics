@@ -234,19 +234,6 @@ def test_list_ingested_files_returns_newest_first(sid):
     assert files[1]["file_name"] == "first.gz"
 
 
-def test_list_ingested_files_for_status_returns_tuples(sid):
-    """The status-cache variant returns tuples (no dict overhead)
-    because the cron is hot. Pinned because the type is part of
-    the contract — callers do tuple unpacking."""
-    metadata_db.insert_ingested_files(sid, [("x.gz", 5, 500)])
-    rows = metadata_db.list_ingested_files_for_status(sid)
-    assert len(rows) == 1
-    fn, _ingested_at, rc, sz = rows[0]
-    assert fn == "x.gz"
-    assert rc == 5
-    assert sz == 500
-
-
 def test_get_node_count_avg_groups_by_basename_timestamp(sid):
     """avg(files-per-flush) groups on the 19-char timestamp prefix of the
     basename. Pinned because the SQL push-down derives the group key via
@@ -964,21 +951,6 @@ def test_usage_class_predicate_matches_across_callers():
         assert _usage_class_predicate(usage_type) == want
 
 
-def test_cron_summary_for_tasks_returns_latest_per_task(sid):
-    """Returns the most recent run's summary for each requested task.
-    Pinned because the admin dashboard's "last sync" card keys on
-    this exact shape."""
-    rid = metadata_db.start_cron_run(sid, "sync")
-    metadata_db.log_cron_run(sid, "sync", duration_s=5.0, status="success", summary="OK", run_id=rid)
-
-    out = metadata_db.cron_summary_for_tasks(sid, tasks=("sync", "commit"))
-    assert "sync" in out
-    assert out["sync"]["status"] == "success"
-    assert out["sync"]["summary"] == "OK"
-    # commit hasn't run — absent from the dict
-    assert "commit" not in out
-
-
 # ── adaptive_stale_minutes (SRE-22) ─────────────────────────────────────────
 
 
@@ -1127,19 +1099,10 @@ def test_register_source_is_idempotent(sid):
     metadata_db.register_source(sid, "svc1", '{"a": 1}', "logs_svc1")
     metadata_db.register_source(sid, "svc1", '{"a": 2}', "logs_svc1")  # must not raise
 
-    out = metadata_db.get_source_by_name(sid, "svc1")
+    con = metadata_db.get_con(sid)
+    out = con.execute("SELECT name, config, table_name FROM sources WHERE name = ?", ("svc1",)).fetchone()
     # First registration's config wins — pin the IDEMPOTENT semantics
     assert json.loads(out["config"])["a"] == 1
-
-
-def test_get_source_by_name_returns_none_for_unknown(sid):
-    assert metadata_db.get_source_by_name(sid, "ghost") is None
-
-
-def test_get_source_by_name_returns_full_dict_when_found(sid):
-    metadata_db.register_source(sid, "svc-a", '{"k": "v"}', "logs_svc_a")
-    out = metadata_db.get_source_by_name(sid, "svc-a")
-    assert out == {"name": "svc-a", "config": '{"k": "v"}', "table_name": "logs_svc_a"}
 
 
 # ── usage_log telemetry ────────────────────────────────────────────────────

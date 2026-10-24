@@ -345,9 +345,6 @@ class NgwafWorkspaceSetResponse(PassthroughModel):
     ngwaf_workspace_id: str | None = None
 
 
-NgwafWorkspaceCreateResponse = NgwafWorkspaceSetResponse
-
-
 class TerraformPreviewResponse(RootModel[dict[str, str]]):
     pass
 

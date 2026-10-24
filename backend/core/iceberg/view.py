@@ -25,7 +25,6 @@ sites keep resolving to the same canonical binding.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import threading
@@ -46,7 +45,7 @@ def __getattr__(name: str):
 
 
 def configure_duckdb_s3(con) -> None:
-    """Install/load DuckDB extensions for Iceberg + httpfs.
+    """Install/load DuckDB extensions for httpfs + parquet.
 
     The fos_proxy SECRET (created in backend.core.duckdb._configure_fos) is
     the sole S3 routing config; this function used to also `SET s3_endpoint`
@@ -54,16 +53,12 @@ def configure_duckdb_s3(con) -> None:
     unmatched URLs and silently bypass telemetry.
     """
     try:
-        con.execute("LOAD iceberg; LOAD avro; LOAD httpfs; LOAD parquet;")
+        con.execute("LOAD httpfs; LOAD parquet;")
     except Exception:
         try:
-            con.execute("INSTALL iceberg; INSTALL avro; INSTALL httpfs; INSTALL parquet;")
-            con.execute("LOAD iceberg; LOAD avro; LOAD httpfs; LOAD parquet;")
+            con.execute("INSTALL httpfs; INSTALL parquet;")
+            con.execute("LOAD httpfs; LOAD parquet;")
         except Exception:
-            # Don't swallow silently: a connection left without the iceberg/
-            # httpfs extensions surfaces later as a confusing "iceberg_scan
-            # does not exist" error far from here. Log + re-raise so the real
-            # setup failure is visible at the point it happens.
             logger.exception("configure_duckdb_s3: failed to INSTALL/LOAD DuckDB extensions")
             raise
 
@@ -120,9 +115,6 @@ def _source_variant_fp(source: dict) -> tuple:
     cron_enabled = bool(((source.get("provisioning") or {}).get("cron_sync") or {}).get("enabled", True))
     return (access, tr_fp, cron_enabled)
 
-
-# Per-source files cache: source_key -> (metadata_loc, snapshot_id, iceberg_loc, local_iceberg_files)
-_snapshot_files_cache: dict[str, tuple] = {}
 
 # Per-source rebuild signal: source_key -> Event set when an in-progress
 # slow-path rebuild finishes. Lets cold parallel waiters wake and use
@@ -197,83 +189,12 @@ def clear_source_caches(source_key: str, *, keep_snapshot_cache: bool = False) -
             _view_cache.pop(k, None)
 
     if not keep_snapshot_cache:
-        for k in list(_snapshot_files_cache.keys()):
-            if k == base_key or k.startswith(f"{base_key}::"):
-                _snapshot_files_cache.pop(k, None)
         try:
             from backend.core._duckdb_status import clear_ducklake_stats_cache
 
             clear_ducklake_stats_cache(base_key)
         except Exception:
             logger.debug("clear_source_caches: clear_ducklake_stats_cache failed (ignored)", exc_info=True)
-
-
-def _get_cache_file(source: dict, name: str) -> str:
-    from backend.core.duckdb import _cache_dir
-
-    d = _cache_dir(source)
-    os.makedirs(d, exist_ok=True)
-    return os.path.join(d, name)
-
-
-def _save_persistent_cache(source: dict):
-    source_key = source.get("name", "default")
-    if source_key not in _snapshot_files_cache:
-        return
-
-    cache_file = _get_cache_file(source, "snapshot_files_cache.json")
-    data = {
-        "metadata_loc": _snapshot_files_cache[source_key][0],
-        "snapshot_id": _snapshot_files_cache[source_key][1],
-        "iceberg_loc": _snapshot_files_cache[source_key][2],
-        "local_iceberg_files": _snapshot_files_cache[source_key][3],
-    }
-    try:
-        with open(cache_file, "w") as f:
-            json.dump(data, f)
-    except Exception:
-        logger.debug("_save_persistent_cache: step failed (ignored)", exc_info=True)
-
-
-def _reconcile_snapshot_cache_after_sync(source: dict, table_name: str = "logs") -> None:
-    """Convert any s3:// URI entries in the cache to local paths for files
-    that have since been downloaded. Called after sync_data finishes a batch
-    so subsequent view builds see the local paths (avoids the URI-vs-glob
-    inconsistency that would silently leave us on the iceberg_scan fallback).
-    """
-    source_key = source.get("name", "default")
-    cache_key = f"{source_key}::{table_name}" if table_name != "logs" else source_key
-    cached = _snapshot_files_cache.get(cache_key)
-    if not cached:
-        return
-
-    from backend.core.duckdb import _cache_dir
-
-    sub_dir = f"data_{table_name}" if table_name != "logs" else "data"
-    cache_dir = os.path.join(_cache_dir(source), sub_dir)
-    metadata_loc, snapshot_id, iceberg_loc, files = cached
-
-    changed = False
-    new_entries: list[str] = []
-    for p in files:
-        if p.startswith("s3://"):
-            local = _core_mod._cloud_uri_to_local_path(p, cache_dir)
-            if local is None:
-                continue
-            if os.path.exists(local):
-                new_entries.append(local)
-                changed = True
-            else:
-                new_entries.append(p)
-        else:
-            new_entries.append(p)
-
-    if changed:
-        _snapshot_files_cache[cache_key] = (metadata_loc, snapshot_id, iceberg_loc, new_entries)
-        try:
-            _save_persistent_cache(source)
-        except Exception:
-            logger.debug("_reconcile_snapshot_cache_after_sync: _save_persistent_cache failed (ignored)", exc_info=True)
 
 
 def get_last_view_stats(source: dict) -> dict:

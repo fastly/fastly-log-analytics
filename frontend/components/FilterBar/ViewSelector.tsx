@@ -25,7 +25,7 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
-import { showToast, showToastWithAction } from '@/lib/toast'
+import { useDeferredDeleteWithUndo } from '@/hooks/useDeferredDeleteWithUndo'
 import type { components } from '@/types/api.generated'
 
 type SavedView = components["schemas"]["SavedViewRecord"]
@@ -52,17 +52,7 @@ export function ViewSelector() {
     enabled: !!activeServiceId && !bootstrapPending,
   })
 
-  // IDs hidden from the list while the post-confirm undo window is open.
-  // The DELETE fires after the toast duration unless Undo cancels the timer.
-  const [pendingDeleteIds, setPendingDeleteIds] = React.useState<Set<string>>(() => new Set())
-  const pendingTimersRef = React.useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
-  React.useEffect(() => {
-    const timers = pendingTimersRef.current
-    return () => {
-      for (const [, t] of timers) clearTimeout(t)
-      timers.clear()
-    }
-  }, [])
+  const { pendingDeleteIds, scheduleDelete } = useDeferredDeleteWithUndo()
 
   // Controlled-mode ConfirmDialog state. We can't use native confirm() — it's
   // unstyled, blocks on iOS WebView, and ignores theme. Track the candidate
@@ -83,14 +73,10 @@ export function ViewSelector() {
   const runDelete = (view: SavedView) => {
     if (!view.id) return
     const id = view.id
-    setPendingDeleteIds((prev) => {
-      const next = new Set(prev)
-      next.add(id)
-      return next
-    })
-    const timer = setTimeout(async () => {
-      pendingTimersRef.current.delete(id)
-      try {
+    scheduleDelete({
+      id,
+      toastMessage: `Deleted view "${view.name}"`,
+      performDelete: async () => {
         await unwrapClient(client.DELETE("/api/views/{view_id}", {
           params: { path: { view_id: id } }
         }))
@@ -98,31 +84,8 @@ export function ViewSelector() {
         // Bootstrap response also carries seeded views; invalidate so the
         // next bootstrap refetch reflects the deletion.
         queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })
-      } catch {
-        setPendingDeleteIds((prev) => {
-          const next = new Set(prev)
-          next.delete(id)
-          return next
-        })
-        showToast(`Failed to delete view "${view.name}"`, 'error')
-      }
-    }, 5500)
-    pendingTimersRef.current.set(id, timer)
-    showToastWithAction(`Deleted view "${view.name}"`, {
-      actionLabel: 'Undo',
-      onAction: () => {
-        const t = pendingTimersRef.current.get(id)
-        if (t) {
-          clearTimeout(t)
-          pendingTimersRef.current.delete(id)
-        }
-        setPendingDeleteIds((prev) => {
-          const next = new Set(prev)
-          next.delete(id)
-          return next
-        })
       },
-      durationMs: 5500,
+      errorMessage: `Failed to delete view "${view.name}"`,
     })
   }
 

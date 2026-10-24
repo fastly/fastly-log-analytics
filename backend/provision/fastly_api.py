@@ -3,18 +3,15 @@ import re
 import shutil
 import urllib.parse
 
-from backend.config import is_rum_enabled
 from backend.core import field_registry as lf
 from backend.core.fastly.client import fastly
 from backend.core.fastly.rum_provisioning import generate_rum_recv_parts
 from backend.core.fastly.service import (
-    ensure_condition,
     ensure_vcl_snippet,
     get_active_version,
     get_generated_vcl,
     list_s3_endpoints,
 )
-from backend.core.fastly.utils import load_vcl, region_endpoint
 from backend.provision.draft_version import draft_version
 from backend.provision.utils import BOLD, _c, fail, info, ok, warn
 from backend.provision.vcl_builder import VclBuilder
@@ -902,44 +899,6 @@ def service_has_scoring_pragmas(service_id: str, token: str) -> bool | None:
     return bool(_FIX_UNSENT_BODY_DRAIN_RE.search(content) and _NO_BODY_IF_BEREQ_GET_OR_HEAD_RE.search(content))
 
 
-def _validate_with_ratelimit_fallback(svc_id, ver, token, *, status_cb=None, ok_msg=None, ok_fallback_msg=None):
-    """Validate ``svc_id``/``ver`` and, if it fails on a missing rate-limiting
-    feature (ratecounter / penaltybox / ratelimit), redeploy the main VCL
-    without rate limiting and re-validate. Returns the final validate result.
-
-    Shared by ``ensure_cdn_service`` and ``redeploy_cdn_vcl`` — both ran the
-    identical GET-validate → keyword-sniff → no-ratelimit redeploy → re-validate
-    sequence. Raises ``RuntimeError`` only for the no-ratelimit fallback that
-    STILL fails to validate (its caller-specific message). A non-rate-limit
-    validation failure is NOT raised here — the helper returns the not-ok
-    result so each caller keeps its own distinct final raise / status branch.
-    ``ok_msg`` / ``ok_fallback_msg`` let a caller emit its success log (the
-    initial-ok and rate-limiting-disabled messages differ per caller); omit
-    them to stay silent on the ok path.
-    """
-    result = fastly("GET", f"/service/{svc_id}/version/{ver}/validate", token=token)
-
-    if result.get("status") != "ok":
-        errors = result.get("errors") or result.get("msg") or result
-        errors_str = str(errors).lower()
-        if any(kw in errors_str for kw in ("ratecounter", "penaltybox", "ratelimit")):
-            warn("Rate limiting not available on this account — redeploying without it")
-            if status_cb:
-                status_cb("⚠️ Rate limiting unavailable; redeploying without it...")
-            vcl_no_rl = load_vcl(rate_limiting=False)
-            fastly("PUT", f"/service/{svc_id}/version/{ver}/vcl/main", {"content": vcl_no_rl}, token=token)
-            result = fastly("GET", f"/service/{svc_id}/version/{ver}/validate", token=token)
-            if result.get("status") != "ok":
-                raise RuntimeError(f"VCL validation failed (no-ratelimit fallback): {result.get('errors')}")
-            if ok_fallback_msg:
-                ok(ok_fallback_msg)
-        return result
-
-    if ok_msg:
-        ok(ok_msg)
-    return result
-
-
 def ensure_cdn_service(
     cfg: dict, fos_access_key: str, fos_secret_key: str, token: str, status_cb=None, on_created=None
 ) -> dict:
@@ -1093,159 +1052,6 @@ def _log_sampling_edge_clause(scoring_enabled: bool) -> str:
     edge hop restart-invariantly, so the post-restart edge pass still logs.
     """
     return "fastly.ff.visits_this_service == 0"
-
-
-def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str, token: str, status_cb=None) -> int:
-    """Safely add a logging endpoint to the target service's active version."""
-    service_id = cfg["logging_service_id"]
-    endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs")
-    region = cfg["fos_region"]
-    bucket = cfg["fos_bucket_name"]
-    period = cfg["log_period"]
-    from backend.provision.log_paths import analytics_log_path
-
-    path = analytics_log_path()
-
-    info(f"Checking active version of service {_c(BOLD, service_id)}…")
-    if status_cb:
-        status_cb(f"🔍 Checking active version of service {service_id}...")
-    active_ver = get_active_version(service_id, token)
-    if active_ver is None:
-        raise RuntimeError(f"Service {service_id} has no active version.")
-    ok(f"Active version: {active_ver}")
-
-    existing = list_s3_endpoints(service_id, active_ver, token)
-    if endpoint_name in existing:
-        ok(f"Logging endpoint '{endpoint_name}' already present on version {active_ver}")
-        if status_cb:
-            status_cb(f"✅ Logging endpoint already present on version {active_ver}.")
-        return active_ver
-
-    info(f"Cloning version {active_ver} → new draft…")
-    if status_cb:
-        status_cb(f"🔄 Cloning version {active_ver} to create a new draft...")
-
-    ts = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-    def _draft_status(msg: str) -> None:
-        info(msg)
-        if status_cb:
-            status_cb(msg)
-
-    def _log_failure(exc: Exception) -> None:
-        fail(str(exc))
-        info(f"Rolling back — re-activating version {active_ver}...")
-
-    with draft_version(
-        service_id,
-        token,
-        base_version=active_ver,
-        call=fastly,
-        comment=f"Provisioning Fastly Object Storage logging at {ts}",
-        status_cb=_draft_status,
-        validate_msg="⏳ Validating draft configuration...",
-        activate_msg="⏳ Activating version {ver}...",
-        on_failure=_log_failure,
-    ) as new_ver:
-        ok(f"Draft version: {new_ver}")
-
-        info(f"Adding Fastly Object Storage logging endpoint '{_c(BOLD, endpoint_name)}'…")
-        if status_cb:
-            status_cb(f"➕ Adding logging endpoint '{endpoint_name}' to draft...")
-
-        # Prefer nested provisioning.* fields, fall back to legacy flat fields for backward compat
-        prov = cfg.get("provisioning", {})
-        sample_rate = prov.get("sample_rate") if "sample_rate" in prov else cfg.get("sample_rate", 100)
-        sample_rate = int(sample_rate) if sample_rate is not None else 100
-        edge_only = prov.get("edge_only") if "edge_only" in prov else cfg.get("edge_only", False)
-        edge_only = bool(edge_only)
-        # ``.get(k, "")`` only defaults when the key is ABSENT; the /execute API
-        # passes custom_condition=None explicitly, so guard with ``or ""``.
-        custom_condition = prov.get("custom_condition") if "custom_condition" in prov else cfg.get("custom_condition")
-        custom_condition = (custom_condition or "").strip()
-
-        scoring_enabled = bool((cfg.get("scoring") or {}).get("enabled"))
-        cond_parts = ["!segmented_caching.is_inner_req"]
-
-        rum_enabled = is_rum_enabled(cfg)
-        if rum_enabled:
-            cond_parts.append('req.url.path != "/rum-beacon"')
-
-        if edge_only:
-            cond_parts.append(_log_sampling_edge_clause(scoring_enabled))
-        if sample_rate < 100:
-            cond_parts.append(f"randombool({sample_rate}, 100)")
-        if custom_condition:
-            cond_parts.append(f"({custom_condition})")
-
-        cond_stmt = " && ".join(cond_parts)
-        cond_name = "Log Sampling"
-        ensure_condition(cond_name, cond_stmt, "RESPONSE", service_id, new_ver, token)
-        resp_condition = cond_name
-
-        log_format = load_log_format(cfg.get("log_fields"))
-        payload = {
-            "name": endpoint_name,
-            "bucket_name": bucket,
-            "domain": region_endpoint(region),
-            "access_key": fos_access_key,
-            "secret_key": fos_secret_key,
-            "path": path,
-            "period": period,
-            "format_version": 2,
-            "format": log_format,
-            "gzip_level": 9,
-            "message_type": "blank",
-            "timestamp_format": "%Y-%m-%dT%H:%M:%S.000",
-            "compression_codec": None,
-            "server_side_encryption": None,
-            "public_key": None,
-        }
-        if resp_condition:
-            payload["response_condition"] = resp_condition
-
-        fastly("POST", f"/service/{service_id}/version/{new_ver}/logging/s3", payload, token=token)
-
-        info("Deploying VCL snippets to capture edge values…")
-        if status_cb:
-            status_cb("⏳ Deploying VCL snippets to capture edge values...")
-
-        install_capture_snippets(
-            service_id,
-            new_ver,
-            cfg.get("log_fields"),
-            token,
-            scoring_enabled=bool((cfg.get("scoring") or {}).get("enabled")),
-        )
-
-        cmcd_block = cfg.get("cmcd") or {}
-        if cmcd_block.get("enabled"):
-            from backend.provision.cmcd_vcl import (
-                CMCD_SNIPPET_NAME,
-                CMCD_SNIPPET_PRIORITY,
-                generate_cmcd_vcl,
-            )
-
-            vcl_snips = generate_cmcd_vcl(
-                mode=cmcd_block.get("mode", "query_string"),
-                version=cmcd_block.get("version", 1),
-            )
-            ensure_vcl_snippet(
-                CMCD_SNIPPET_NAME,
-                "recv",
-                vcl_snips[CMCD_SNIPPET_NAME],
-                CMCD_SNIPPET_PRIORITY,
-                service_id,
-                new_ver,
-                token,
-            )
-
-        ok("Logging endpoint and VCL snippets added to draft")
-
-    ok(f"Version {new_ver} is now active")
-    if status_cb:
-        status_cb(f"✅ Version {new_ver} is now active.")
-    return new_ver
 
 
 # Snippet-ownership attribution for teardown. Every name we install is either

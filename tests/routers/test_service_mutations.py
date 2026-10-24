@@ -565,29 +565,11 @@ def test_custom_field_patch_missing_field_returns_404():
 # ── PATCH duckdb_type change (audit follow-up) ──────────────────────────────
 
 
-def _fake_iceberg_with_field(field_name: str):
-    """Build a mock catalog/table/schema chain whose schema reports the
-    given ``field_name`` — used to drive the PATCH route's inline
-    "is field already in iceberg" check.
-    """
-    from unittest.mock import MagicMock
-
-    fake_field = MagicMock()
-    fake_field.name = field_name
-    schema = MagicMock()
-    schema.fields = [fake_field]
-    table = MagicMock()
-    table.schema.return_value = schema
-    catalog = MagicMock()
-    catalog.load_table.return_value = table
-    return catalog
-
-
 def test_custom_field_patch_rejects_type_change_when_field_in_iceberg():
     """PATCH that changes ``duckdb_type`` MUST 422 when the field already
-    exists in the Iceberg table — type evolution after ingest would
-    silently break readers. The route at services/core.py:1048-1069
-    inspects the iceberg schema inline; this test drives that branch.
+    exists in the committed DuckLake table — type evolution after ingest would
+    silently break readers. The route in services/core.py inspects committed
+    column types via ``_committed_duckdb_field_types``; this test drives that branch.
     """
     saved: dict = {}
 
@@ -596,15 +578,15 @@ def test_custom_field_patch_rejects_type_change_when_field_in_iceberg():
 
         saved.update(copy.deepcopy(cfg))
 
-    catalog = _fake_iceberg_with_field("cf_env")
-
     with (
         patch("backend.config.load_config", return_value=_cfg_with_field()),
         patch("backend.config.mutate_config", side_effect=mutate_via_save(fake_save)),
         patch("backend.provision.validate_log_format", return_value=[]),
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc1", "bucket": "b"}),
-        patch("backend.core.iceberg._get_catalog", return_value=catalog),
-        patch("backend.core.iceberg._table_identifier", return_value=("default", "logs")),
+        patch(
+            "backend.routers.services.core._committed_duckdb_field_types",
+            return_value={"cf_env": "VARCHAR"},
+        ),
     ):
         response = _client().patch(
             "/api/services/svc1/custom-fields/cf_env",
@@ -625,11 +607,9 @@ def test_custom_field_patch_rejects_type_change_when_field_in_iceberg():
 
 
 def test_custom_field_patch_allows_type_change_before_iceberg_write():
-    """When the field has NOT yet been written to Iceberg (the schema
-    doesn't contain it), changing duckdb_type is legal — PATCH 200s.
+    """When the field has NOT yet been written to DuckLake (the committed
+    schema doesn't contain it), changing duckdb_type is legal — PATCH 200s.
     """
-    from unittest.mock import MagicMock
-
     saved: dict = {}
 
     def fake_save(sid, cfg):
@@ -637,21 +617,12 @@ def test_custom_field_patch_allows_type_change_before_iceberg_write():
 
         saved.update(copy.deepcopy(cfg))
 
-    # Schema with NO matching field → the check falls through to a normal save.
-    schema = MagicMock()
-    schema.fields = []  # empty
-    table = MagicMock()
-    table.schema.return_value = schema
-    catalog = MagicMock()
-    catalog.load_table.return_value = table
-
     with (
         patch("backend.config.load_config", return_value=_cfg_with_field()),
         patch("backend.config.mutate_config", side_effect=mutate_via_save(fake_save)),
         patch("backend.provision.validate_log_format", return_value=[]),
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc1", "bucket": "b"}),
-        patch("backend.core.iceberg._get_catalog", return_value=catalog),
-        patch("backend.core.iceberg._table_identifier", return_value=("default", "logs")),
+        patch("backend.routers.services.core._committed_duckdb_field_types", return_value={}),
     ):
         response = _client().patch(
             "/api/services/svc1/custom-fields/cf_env",

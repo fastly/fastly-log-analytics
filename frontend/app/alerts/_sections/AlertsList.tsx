@@ -1,7 +1,7 @@
 'use client'
 
 import React from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 import { showToast } from '@/lib/toast'
@@ -62,45 +62,46 @@ export function AlertsList({
 }: AlertsListProps) {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
   const queryClient = useQueryClient()
-  const [togglingId, setTogglingId] = React.useState<string | null>(null)
-  const [testingId, setTestingId] = React.useState<string | null>(null)
   const { relative, full, abbr } = useDateFormat()
 
-  const toggleEnabled = React.useCallback(async (alert: Alert, newEnabled: boolean) => {
-    const queryKey = ['alerts', activeServiceId]
-
-    // Cancel any in-flight refetches so they don't overwrite the optimistic update
-    await queryClient.cancelQueries({ queryKey })
-
-    const previous = queryClient.getQueryData(queryKey)
-    queryClient.setQueryData(queryKey, (old: { data?: Alert[] } | undefined) => ({
-      ...old,
-      data: old?.data?.map((a) =>
-        a.id === alert.id ? { ...a, enabled: newEnabled } : a
-      ),
-    }))
-
-    setTogglingId(alert.id!)
-    try {
+  const toggleMutation = useMutation({
+    mutationFn: async ({ alert, newEnabled }: { alert: Alert; newEnabled: boolean }) => {
       await unwrapClient(client.PATCH("/api/alerts/{alert_id}/enabled", {
         params: { path: { alert_id: alert.id! } },
         body: { enabled: newEnabled }
       }))
-      queryClient.invalidateQueries({ queryKey: ['alerts'] })
-    } catch (err) {
+    },
+    onMutate: async ({ alert, newEnabled }) => {
+      const queryKey = ['alerts', activeServiceId]
+      await queryClient.cancelQueries({ queryKey })
+      const previous = queryClient.getQueryData(queryKey)
+      queryClient.setQueryData(queryKey, (old: { data?: Alert[] } | undefined) => ({
+        ...old,
+        data: old?.data?.map((a) =>
+          a.id === alert.id ? { ...a, enabled: newEnabled } : a
+        ),
+      }))
+      return { previous, queryKey }
+    },
+    onError: (err, _vars, context) => {
       console.error('Failed to toggle alert', err)
-      queryClient.setQueryData(queryKey, previous)
-    } finally {
-      setTogglingId(null)
-    }
-  }, [activeServiceId, queryClient])
+      if (context?.queryKey) {
+        queryClient.setQueryData(context.queryKey, context.previous)
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['alerts'] })
+    },
+  })
+  const togglingId = toggleMutation.isPending ? (toggleMutation.variables?.alert.id ?? null) : null
+  const toggleEnabled = React.useCallback((alert: Alert, newEnabled: boolean) => {
+    toggleMutation.mutate({ alert, newEnabled })
+  }, [toggleMutation])
 
-  const testNotification = React.useCallback(async (alert: Alert) => {
-    if (!alert.id) return
-    setTestingId(alert.id)
-    try {
+  const testMutation = useMutation({
+    mutationFn: async (alert: Alert) => {
       const { data, error } = await client.POST("/api/alerts/{alert_id}/test", {
-        params: { path: { alert_id: alert.id } },
+        params: { path: { alert_id: alert.id! } },
         body: {
           service_id: activeServiceId || alert.service_id,
           channel_type: "webhook",
@@ -118,13 +119,17 @@ export function AlertsList({
           : 'Alert rule validated (no external channels configured)',
         'success'
       )
-    } catch (err) {
+    },
+    onError: (err) => {
       console.error('Failed to test alert notification', err)
       showToast(extractApiError(err) || 'Failed to test alert notification', 'error')
-    } finally {
-      setTestingId(null)
-    }
-  }, [activeServiceId])
+    },
+  })
+  const testingId = testMutation.isPending ? (testMutation.variables?.id ?? null) : null
+  const testNotification = React.useCallback((alert: Alert) => {
+    if (!alert.id) return
+    testMutation.mutate(alert)
+  }, [testMutation])
 
   const columns = React.useMemo<ColumnDef<Alert>[]>(() => [
     {

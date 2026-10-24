@@ -30,7 +30,7 @@ def _rel(root: Path, paths: list[str]) -> list[str]:
 
 @pytest.fixture(autouse=True)
 def _fresh_listdir() -> None:
-    rollup_coverage.clear_listdir_cache()
+    rollup_coverage._listdir_cache.clear()
 
 
 class TestTopNWindow:

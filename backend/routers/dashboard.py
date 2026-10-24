@@ -80,7 +80,6 @@ def dashboard_aggregates(
     sections = _expand_sections(req.sections)
     its, icr, imd, itn = _resolve_aggregate_flags(req, sections)
     _is_real_repo = getattr(repo.get_aggregates, "__module__", "") == "backend.repositories.dashboard"
-    _has_eager_con = ctx._con_override is not None or (ctx._holder is not None and ctx._holder.con is not None)
     if _is_real_repo:
         cached = repo.peek_aggregates(
             src=ctx.source,
@@ -98,7 +97,7 @@ def dashboard_aggregates(
         if cached is not None:
             return cached
     return repo.get_aggregates(
-        con=ctx.con if (_has_eager_con or not _is_real_repo) else (lambda: ctx.con),
+        con=ctx.con_or_factory(force_eager=not _is_real_repo),
         src=ctx.source,
         start_time=start_time,
         end_time=end_time,

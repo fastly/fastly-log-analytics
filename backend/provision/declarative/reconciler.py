@@ -1162,7 +1162,7 @@ def _apply_diff(
             cfg = json.loads(config_path.read_text())
             bucket_name = cfg.get("fos_bucket") or cfg.get("fos_bucket_name")
             region = cfg.get("fos_region") or "us-east-1"
-            from backend.provision.fastly_api import region_endpoint
+            from backend.core.fastly.utils import region_endpoint
 
             domain = region_endpoint(region)
             access_key = cfg.get("fos_access_key_id") or cfg.get("fos_access_key")

@@ -53,16 +53,8 @@ from backend.models.admin_actions import HealthResponse
 from backend.utils.structlog_config import bridge_uvicorn_loggers, configure_structlog  # noqa: E402
 
 configure_structlog()
-logging.getLogger("pyiceberg.io").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
-
-# Install s3fs/botocore monkeypatches before anything else can touch s3fs.
-# Importing the fs submodule has the side-effect of patching S3FileSystem;
-# pyiceberg lazily instantiates S3FileSystem on first table access, so as
-# long as this lands before the first iceberg call we're safe — but the
-# earlier the better, since any future eager import would otherwise win.
-from backend.core.iceberg import fs as _iceberg_fs_patches  # noqa: E402, F401
 
 # Prevent OpenTelemetry FastAPI instrumentation from crashing on fastapi.routing._IncludedRouter
 try:
@@ -278,33 +270,6 @@ def _ensure_scoring_matrix():
         logging.warning("[fastapi] _ensure_scoring_matrix failed: %s", e)
 
 
-def _start_legacy_adoption(configs: list[dict]) -> None:
-    """Adopt each service's pre-v3 pyiceberg parquet into DuckLake, once ever.
-
-    An operator upgrading 2.x → 3.0 should only have to restart: without
-    this, their pre-upgrade history stays stranded in an Iceberg table
-    nothing reads any more. Runs on its own background thread (adopting a
-    large table registers thousands of files), is guarded by a durable
-    ``cron_runs`` row so a restart never re-adopts — re-adding a path
-    duplicates its rows — and is non-fatal by construction. Observable as
-    ``ducklake_adopt`` rows in ``cron_runs``.
-    """
-    try:
-        from backend.cron.scheduler import dev_mode_no_crons
-
-        if dev_mode_no_crons():
-            logging.info("[fastapi] FLA_DEV_NO_CRONS=1 — skipping legacy DuckLake adoption sweep.")
-            return
-
-        from backend.core.iceberg._ducklake_migration import start_legacy_adoption_sweep
-
-        sids = [sid for cfg in configs if (sid := cfg.get("service_id") or cfg.get("name"))]
-        if start_legacy_adoption_sweep(sids) is not None:
-            logging.info("[fastapi] Legacy DuckLake adoption sweep started for %d service(s).", len(sids))
-    except Exception as e:
-        logging.error("[fastapi] Could not start the legacy DuckLake adoption sweep: %s", e, exc_info=True)
-
-
 _startup_complete = False
 
 
@@ -365,8 +330,6 @@ def _background_startup():
                         "[fastapi] Some services are taking longer to initialize; continuing startup in background."
                     )
                 executor.shutdown(wait=False)
-
-                _start_legacy_adoption(configs)
 
             except Exception as e:
                 logging.error("[fastapi] Background startup error: %s", e, exc_info=True)
@@ -603,14 +566,10 @@ async def _application_lifespan(app: FastAPI):
     # Verify dependencies
     try:
         import pyarrow  # noqa: F401
-        import pyiceberg  # noqa: F401
     except ImportError as e:
         logging.critical(
             "\n[CRITICAL] Missing required dependency: %s\n[CRITICAL] Please run: pip install -e .\n", e.name
         )
-
-    # Stamp process start time immediately (no I/O)
-    _db._PROCESS_START_UTC = datetime.now(UTC)
 
     # Eagerly start the local telemetry proxy. Idempotent —
     # boto3/DuckDB/PyIceberg would lazy-start it on first call otherwise; eager
@@ -1252,7 +1211,7 @@ def health_check(
     False for remote (live-share) callers so analysts only ever get the
     shallow ok/degraded liveness signal.
     """
-    from datetime import UTC, datetime, timedelta
+    from datetime import timedelta
 
     from fastapi.responses import JSONResponse
 

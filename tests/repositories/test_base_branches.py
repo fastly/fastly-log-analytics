@@ -15,43 +15,10 @@ import pytest
 from backend.repositories import _base, rollup_coverage
 from backend.repositories._base import (
     QueryRunner,
-    clear_schema_cols_cache,
     empty_schema_response,
-    error_rate_expr,
     get_source_extent,
     origin_latency_us_expr,
 )
-
-# ── clear_schema_cols_cache: per-service filtering ──────────────────────────
-
-
-def test_clear_schema_cols_cache_per_service_drops_only_matching_entries():
-    """A specific service_id only drops cache entries for that service —
-    other services' cached schemas remain. Pinned because the
-    test-suite uses this to invalidate one service's cache without
-    forcing every other service to re-summarize."""
-    # Seed the cache with two different services.
-    _base._schema_cols_cache[("svc-a", "hash1")] = ["col1", "col2"]
-    _base._schema_cols_cache[("svc-b", "hash2")] = ["col3"]
-    _base._schema_cols_cache[("svc-a", "hash3")] = ["col4"]  # different format hash same svc
-
-    clear_schema_cols_cache("svc-a")
-
-    # All svc-a entries gone regardless of format_hash; svc-b survives.
-    assert ("svc-a", "hash1") not in _base._schema_cols_cache
-    assert ("svc-a", "hash3") not in _base._schema_cols_cache
-    assert _base._schema_cols_cache.get(("svc-b", "hash2")) == ["col3"]
-
-    # Cleanup so other tests start fresh.
-    clear_schema_cols_cache(None)
-
-
-def test_clear_schema_cols_cache_with_none_clears_everything():
-    _base._schema_cols_cache[("svc-x", "h")] = ["c1"]
-    _base._schema_cols_cache[("svc-y", "h")] = ["c2"]
-    clear_schema_cols_cache(None)
-    assert _base._schema_cols_cache == {}
-
 
 # ── _cached_listdir: OSError + cache full ──────────────────────────────────
 
@@ -59,7 +26,7 @@ def test_clear_schema_cols_cache_with_none_clears_everything():
 def test_cached_listdir_returns_empty_on_oserror(tmp_path):
     """A missing or unreadable path returns [] instead of raising —
     callers treat empty and missing identically when walking rollups."""
-    rollup_coverage.clear_listdir_cache()
+    rollup_coverage._listdir_cache.clear()
     nonexistent = str(tmp_path / "does_not_exist")
     out = rollup_coverage.cached_listdir(nonexistent)
     assert out == []
@@ -69,7 +36,7 @@ def test_cached_listdir_flushes_cache_when_full(tmp_path):
     """When the cache reaches the max-entries cap, it's flat-cleared
     before the new entry is added. Pinned to prevent unbounded growth
     on a service with high (hour, field) churn."""
-    rollup_coverage.clear_listdir_cache()
+    rollup_coverage._listdir_cache.clear()
     # Fill the cache to the cap.
     cap = rollup_coverage.LISTDIR_CACHE_MAX_ENTRIES
     for i in range(cap):
@@ -83,7 +50,7 @@ def test_cached_listdir_flushes_cache_when_full(tmp_path):
     # Cache was cleared then re-populated with just the new entry.
     assert len(rollup_coverage._listdir_cache) == 1
     assert p in rollup_coverage._listdir_cache
-    rollup_coverage.clear_listdir_cache()
+    rollup_coverage._listdir_cache.clear()
 
 
 # ── origin_latency_us_expr: column-presence branches ────────────────────────
@@ -113,19 +80,6 @@ def test_origin_latency_us_expr_no_columns_returns_null_literal():
     aggregate doesn't BinderException; the caller renders an empty
     chart."""
     assert origin_latency_us_expr(set()) == "NULL"
-
-
-# ── error_rate_expr: filter clause ──────────────────────────────────────────
-
-
-def test_error_rate_expr_includes_filter_clause_when_provided():
-    expr = error_rate_expr(status_col="status", threshold=500, filter_expr="cache = 'MISS'")
-    assert "FILTER (cache = 'MISS')" in expr
-
-
-def test_error_rate_expr_omits_filter_clause_when_blank():
-    expr = error_rate_expr()
-    assert "FILTER" not in expr
 
 
 # ── empty_schema_response: dict shape ───────────────────────────────────────
@@ -231,4 +185,4 @@ def test_get_schema_cols_cache_hit_skips_summarize():
     mock_get_schema.assert_not_called()
     # Side effect: actual_cols is also populated for subsequent code paths.
     assert runner.actual_cols == {"timestamp", "status", "url"}
-    clear_schema_cols_cache(None)
+    _base._schema_cols_cache.clear()

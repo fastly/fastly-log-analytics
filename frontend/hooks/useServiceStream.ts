@@ -5,20 +5,6 @@ import { useServiceStore } from '@/stores/serviceStore'
 import { buildStreamRequest } from '@/lib/streamRequest'
 import { useEventStream, type EventStreamRequest, type SSEConnectionState } from '@/hooks/useEventStream'
 
-/** Public connection-state for the SSE stream, surfaced for UI affordances.
- *  - ``idle`` — hook disabled (no service / not enabled).
- *  - ``connecting`` — initial connect in progress, never had a frame yet.
- *  - ``open`` — connected, reading the body.
- *  - ``reconnecting`` — connection dropped, sleeping in the backoff window.
- *
- *  There's no ``error`` terminal — the hook retries forever, so callers
- *  treat ``reconnecting`` lasting "too long" as the error condition.
- *
- *  Re-exported from ``useEventStream`` so existing importers of this type from
- *  ``@/hooks/useServiceStream`` keep working unchanged.
- */
-export type { SSEConnectionState }
-
 interface UseServiceStreamOpts {
   /** Pass ``cache: 'no-store'`` for endpoints whose response must not
    *  be cached by the browser fetch layer. */

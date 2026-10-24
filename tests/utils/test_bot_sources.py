@@ -638,8 +638,8 @@ def test_enrich_bot_metadata_adds_bot_name_column_with_match():
 
     df = pd.DataFrame({"ua": ["Googlebot/2.1"], "ip": ["1.2.3.4"]})
     with patch(
-        "backend.utils.rdns_cache.get_hostname",
-        return_value=("crawl-1-2-3-4.googlebot.com", "ok", True),
+        "backend.utils.rdns_cache.get_hostnames",
+        return_value={"1.2.3.4": ("crawl-1-2-3-4.googlebot.com", "ok", True)},
     ):
         bot_sources.enrich_bot_metadata(df)
 

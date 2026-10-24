@@ -277,7 +277,6 @@ class RequestTelemetry:
         "_root_ctx_token",
         "_owns_root_span",
         "_section_timings",
-        "_phase_log",
         "_t_start",
         "is_cached",
     )
@@ -289,7 +288,6 @@ class RequestTelemetry:
         self._root_ctx_token: Any = None
         self._owns_root_span: bool = False
         self._section_timings: list[dict[str, Any]] = []
-        self._phase_log: list[dict[str, Any]] = []
         self._t_start: float = 0.0
         self.is_cached: bool = False
 
@@ -439,36 +437,10 @@ class RequestTelemetry:
             attrs["app.call.bytes"] = int(bytes_count)
         span.add_event(name="external_call", attributes=attrs)
 
-    def record_query(self, sql: str, time_ms: float, label: str = "query") -> None:
-        """Emit a span event for a DuckDB query."""
-        span = self._current_span()
-        if span is None:
-            return
-        span.add_event(
-            name="db.query",
-            attributes={
-                "db.statement": sql.strip()[:4000],  # cap on event-attribute size
-                "db.elapsed_ms": float(time_ms),
-                "db.label": label,
-            },
-        )
-
-    def record_phase(self, name: str, **attrs: Any) -> None:
-        """Append to the phase log (cheaper than a full span, mirrors
-        backend.utils.telemetry's _phase_log shape)."""
-        entry = {"phase": name, **attrs}
-        self._phase_log.append(entry)
-        span = self._current_span()
-        if span is not None:
-            span.add_event(name=f"phase:{name}", attributes={k: str(v) for k, v in attrs.items()})
-
     # ── Debug-panel render shape ──────────────────────────────────────────
 
     def section_timings(self) -> list[dict[str, Any]]:
         return list(self._section_timings)
-
-    def phase_log(self) -> list[dict[str, Any]]:
-        return list(self._phase_log)
 
     # ── Internals ─────────────────────────────────────────────────────────
 

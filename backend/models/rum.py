@@ -136,6 +136,3 @@ class RumLiveEventItem(WireSafeModel):
     browser: str
     os: str
     raw_log: dict[str, Any] = {}
-
-
-RumLiveResponse = list[RumLiveEventItem]

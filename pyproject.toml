@@ -25,7 +25,6 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "pydantic>=2.9",
     "apscheduler>=3.10,<4",
-    "pyiceberg[s3fs,pyarrow,sql-sqlite]>=0.8",
     # Floor at 23.0.1 — the fix for CVE-2026-25087. uv.lock already pins a
     # clean version; this raises the declared floor so Dependabot stops
     # flagging the <23.0.1 range.
@@ -214,12 +213,10 @@ DEP002 = ["python-dotenv", "uvicorn", "pytz", "python-multipart", "anyio"]
 # these on purpose; they're guaranteed by the listed first-class deps:
 #   botocore:  via boto3
 #   yarl:      via aiohttp (used by telemetry_proxy URL parsing)
-#   dateutil:  via pandas (used for ISO-8601 parsing in iceberg sync)
-#   s3fs:      via pyiceberg[s3fs] extra
-#   fsspec:    via s3fs
+#   dateutil:  via pandas (used for ISO-8601 parsing)
 # (starlette removed 2026-06-17 — promoted to a direct dep above to
 # pin >=1.3.1 for Dependabot #19/#20.)
-DEP003 = ["botocore", "yarl", "dateutil", "s3fs", "fsspec"]
+DEP003 = ["botocore", "yarl", "dateutil"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

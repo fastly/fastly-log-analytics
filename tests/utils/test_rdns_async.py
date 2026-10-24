@@ -162,8 +162,9 @@ def test_bulk_update_async_writes_records_in_single_transaction():
     ]
     asyncio.run(rdns_cache._bulk_update_async(records))
 
-    h1, s1, _ = rdns_cache.get_hostname("1.1.1.1")
-    h2, s2, _ = rdns_cache.get_hostname("2.2.2.2")
+    res = rdns_cache.get_hostnames(["1.1.1.1", "2.2.2.2"])
+    h1, s1, _ = res["1.1.1.1"]
+    h2, s2, _ = res["2.2.2.2"]
     assert (h1, s1) == ("one.example.com", "resolved")
     assert (h2, s2) == ("two.example.com", "resolved")
 

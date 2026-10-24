@@ -51,7 +51,7 @@ from backend.models.session_scoring import (
 from backend.utils.auth import require_service_in_scope
 from backend.utils.remote_access import clamp_or_400, get_analyst_time_bounds
 from backend.utils.router_utils import make_error, not_found, resolve_fastly_token, stored_fastly_token
-from backend.utils.sse import sse_response
+from backend.utils.sse import sse_response, stream_iac_reconcile
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/services", tags=["session-scoring"], responses=DEFAULT_ERROR_RESPONSES)
@@ -320,16 +320,6 @@ def _load_matrix(service_id: str) -> dict | None:
 from backend.repositories import session_scoring as _scoring_repo
 
 
-# Convenience wrappers — exist so unit tests can monkey-patch
-# ``backend.repositories.session_scoring.query_logs`` (etc.) and have the
-# patches intercept calls from this module. Plain ``from X import Y as _Y``
-# binds ``_Y`` to the function object at import time and ignores later
-# attribute rebinding on the source module; going through the module
-# attribute each call sidesteps that.
-def _query_logs(service_id: str, sql: str, params: tuple = ()) -> list[dict]:
-    return _scoring_repo.query_logs(service_id, sql, params)
-
-
 def _isoformat_ts(rows: list[dict], *fields: str) -> list[dict]:
     """Stringify DuckDB datetime columns (``timestamp`` / ``hour``) via
     ``.isoformat()`` in place so the typed ``response_model`` can declare them
@@ -446,11 +436,6 @@ _resolve_token = resolve_fastly_token
 
 
 @router.post("/{service_id}/scoring/enable", dependencies=[Depends(require_admin)])
-@router.post(
-    "/{service_id}/session-scoring/enable",
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
-)
 def scoring_enable(
     service_id: str = Path(..., description="Logging service ID to enable scoring on"),
     body: ScoringTokenBody | None = None,
@@ -497,75 +482,57 @@ def scoring_enable(
         service_id, lambda c: c.__setitem__("scoring", {**(c.get("scoring") or {}), "enabled": True})
     )
 
-    from backend.provision.declarative.iac_reconciler import reconcile_infrastructure as enable_scoring
-    from backend.provision.orchestrator import run_with_events
+    safe_scoring_state: dict = {}
 
-    def stream():
-        import json
+    def _done_event() -> dict:
+        cfg = svcconfig.load_config(service_id) or {}
+        scoring = cfg.get("scoring", {})
+        safe_scoring = {k: v for k, v in scoring.items() if k not in _SECRET_KEYS}
+        safe_scoring_state.update(safe_scoring)
+        return {
+            "type": "done",
+            "message": "Session scoring enabled.",
+            "scoring": safe_scoring,
+        }
 
-        yield json.dumps({"type": "status", "message": f"Enabling session scoring for {service_id}..."})
+    def _after_done() -> None:
+        from backend.core import metadata as metadata_db
 
-        try:
-            for event in run_with_events(enable_scoring, service_id, resolved_token):
-                yield json.dumps(event)
-            # run_with_events captures the return value in its own scope; we
-            # don't have direct access here. Re-load the config to surface
-            # the post-state in the final SSE event.
-            from backend import config as svcconfig
+        details = {
+            "scoring_service_id": safe_scoring_state.get("scoring_service_id"),
+            "matrix_version": safe_scoring_state.get("matrix_version"),
+        }
+        metadata_db.record_scoring_audit(service_id, "scoring_enabled", details=details)
+        metadata_db.record_audit(
+            service_id=service_id,
+            event_type="scoring_enabled",
+            details=details,
+            actor="operator",
+        )
 
-            cfg = svcconfig.load_config(service_id) or {}
-            scoring = cfg.get("scoring", {})
-            safe_scoring = {k: v for k, v in scoring.items() if k not in _SECRET_KEYS}
-            yield json.dumps(
-                {
-                    "type": "done",
-                    "message": "Session scoring enabled.",
-                    "scoring": safe_scoring,
-                }
-            )
-            from backend.core import metadata as metadata_db
+    def _error_event(e: Exception) -> dict:
+        from backend.provision.session_scoring_setup import EntitlementError
 
-            metadata_db.record_scoring_audit(
-                service_id,
-                "scoring_enabled",
-                details={
-                    "scoring_service_id": safe_scoring.get("scoring_service_id"),
-                    "matrix_version": safe_scoring.get("matrix_version"),
-                },
-            )
-            metadata_db.record_audit(
-                service_id=service_id,
-                event_type="scoring_enabled",
-                details={
-                    "scoring_service_id": safe_scoring.get("scoring_service_id"),
-                    "matrix_version": safe_scoring.get("matrix_version"),
-                },
-                actor="operator",
-            )
-        except Exception as e:
-            logger.exception("scoring_enable failed for %s", service_id)
-            from backend.provision.session_scoring_setup import EntitlementError
+        err_event: dict = {"type": "error", "message": str(e)}
+        if isinstance(e, EntitlementError):
+            err_event["code"] = e.code
+            if e.link:
+                err_event["link"] = e.link
+        return err_event
 
-            err_event = {"type": "error", "message": str(e)}
-            # A required Fastly product (Compute / Config Store / KV Store) isn't
-            # enabled — surface the machine code + manage.fastly.com deep link so
-            # the SSE modal renders a clickable "enable it" message instead of a
-            # raw HTTP 4xx string.
-            if isinstance(e, EntitlementError):
-                err_event["code"] = e.code
-                if e.link:
-                    err_event["link"] = e.link
-            yield json.dumps(err_event)
-
-    return sse_response(stream())
+    return stream_iac_reconcile(
+        service_id,
+        resolved_token,
+        start_message=f"Enabling session scoring for {service_id}...",
+        done_event=_done_event,
+        after_done=_after_done,
+        error_event=_error_event,
+        log_label="scoring_enable",
+        logger_obj=logger,
+    )
 
 
 @router.post("/{service_id}/scoring/disable", dependencies=[Depends(require_admin)])
-@router.post(
-    "/{service_id}/session-scoring/disable",
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
-)
 def scoring_disable(
     service_id: str = Path(..., description="Logging service ID to disable scoring on"),
     body: ScoringTokenBody | None = None,
@@ -587,42 +554,30 @@ def scoring_disable(
 
     svcconfig.mutate_config(service_id, _disable)
 
-    from backend.provision.declarative.iac_reconciler import reconcile_infrastructure as disable_scoring
-    from backend.provision.orchestrator import run_with_events
+    def _after_done() -> None:
+        from backend.core import metadata as metadata_db
 
-    def stream():
-        import json
+        metadata_db.record_scoring_audit(service_id, "scoring_disabled")
+        metadata_db.record_audit(
+            service_id=service_id,
+            event_type="scoring_disabled",
+            details={},
+            actor="operator",
+        )
 
-        yield json.dumps({"type": "status", "message": f"Disabling session scoring for {service_id}..."})
-
-        try:
-            for event in run_with_events(disable_scoring, service_id, resolved_token):
-                yield json.dumps(event)
-            yield json.dumps({"type": "done", "message": "Session scoring disabled."})
-            from backend.core import metadata as metadata_db
-
-            metadata_db.record_scoring_audit(service_id, "scoring_disabled")
-            metadata_db.record_audit(
-                service_id=service_id,
-                event_type="scoring_disabled",
-                details={},
-                actor="operator",
-            )
-        except Exception as e:
-            logger.exception("scoring_disable failed for %s", service_id)
-            yield json.dumps({"type": "error", "message": str(e)})
-
-    return sse_response(stream())
+    return stream_iac_reconcile(
+        service_id,
+        resolved_token,
+        start_message=f"Disabling session scoring for {service_id}...",
+        done_event={"type": "done", "message": "Session scoring disabled."},
+        after_done=_after_done,
+        log_label="scoring_disable",
+        logger_obj=logger,
+    )
 
 
 @router.get(
     "/{service_id}/scoring/analytics", response_model=ScoringAnalyticsResponse, response_model_exclude_unset=True
-)
-@router.get(
-    "/{service_id}/session-scoring/analytics",
-    response_model=ScoringAnalyticsResponse,
-    response_model_exclude_unset=True,
-    include_in_schema=False,
 )
 def scoring_analytics_composite(
     request: Request,
@@ -674,13 +629,6 @@ def scoring_analytics_composite(
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
 )
-@router.get(
-    "/{service_id}/session-scoring/config",
-    response_model=ScoringConfigCompositeResponse,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
-)
 def scoring_config_composite(
     service_id: str = Path(..., description="Logging service ID"),
 ) -> dict:
@@ -717,13 +665,6 @@ def scoring_config_composite(
     response_model=ScoringStatusResponse,
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
-)
-@router.get(
-    "/{service_id}/session-scoring/status",
-    response_model=ScoringStatusResponse,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
 )
 def scoring_status(
     service_id: str = Path(..., description="Logging service ID"),
@@ -885,12 +826,6 @@ def _scoring_time_window(request: Request, since_hours: int) -> tuple[str, str |
     response_model=ScoringLabelsListResponse,
     response_model_exclude_unset=True,
 )
-@router.get(
-    "/{service_id}/session-scoring/labels",
-    response_model=ScoringLabelsListResponse,
-    response_model_exclude_unset=True,
-    include_in_schema=False,
-)
 def scoring_labels_list(
     request: Request,
     service_id: str = Path(..., description="Logging service ID"),
@@ -908,12 +843,6 @@ def scoring_labels_list(
 
 
 @router.post("/{service_id}/scoring/labels", response_model=ScoringLabelRow, response_model_exclude_unset=True)
-@router.post(
-    "/{service_id}/session-scoring/labels",
-    response_model=ScoringLabelRow,
-    response_model_exclude_unset=True,
-    include_in_schema=False,
-)
 def scoring_labels_create(
     body: ScoringLabelCreate,
     request: Request,
@@ -956,12 +885,6 @@ def scoring_labels_create(
 @router.patch(
     "/{service_id}/scoring/labels/{label_id}", response_model=ScoringLabelRow, response_model_exclude_unset=True
 )
-@router.patch(
-    "/{service_id}/session-scoring/labels/{label_id}",
-    response_model=ScoringLabelRow,
-    response_model_exclude_unset=True,
-    include_in_schema=False,
-)
 def scoring_labels_update(
     body: ScoringLabelUpdate,
     request: Request,
@@ -993,12 +916,6 @@ def scoring_labels_update(
     "/{service_id}/scoring/labels/{label_id}",
     response_model=ScoringLabelDeleteResponse,
     response_model_exclude_unset=True,
-)
-@router.delete(
-    "/{service_id}/session-scoring/labels/{label_id}",
-    response_model=ScoringLabelDeleteResponse,
-    response_model_exclude_unset=True,
-    include_in_schema=False,
 )
 def scoring_labels_delete(
     request: Request,

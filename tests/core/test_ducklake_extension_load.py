@@ -52,13 +52,6 @@ def test_memory_connection_uses_bundled_extension_config(monkeypatch, tmp_path):
     connect.assert_called_once_with(":memory:", config={"allow_unsigned_extensions": "true"})
 
 
-def test_safe_connection_uses_same_bundled_config_as_service_connections(monkeypatch, tmp_path):
-    monkeypatch.setenv("DUCKLAKE_EXTENSION_PATH", "/opt/ducklake/ducklake.duckdb_extension")
-    path = str(tmp_path / "service.duckdb")
-    with duckdb_core._duckdb_connect(path), duckdb_core.get_safe_duckdb_connection(path) as con:
-        assert con.execute("SELECT current_setting('allow_unsigned_extensions')").fetchone() == (True,)
-
-
 def test_bundled_ducklake_load_failure_does_not_install_official_extension(monkeypatch, tmp_path):
     extension = tmp_path / "ducklake.duckdb_extension"
     extension.touch()

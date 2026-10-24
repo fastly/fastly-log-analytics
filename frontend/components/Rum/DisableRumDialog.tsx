@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import {
   Dialog,
   DialogContent,
@@ -14,7 +14,7 @@ import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 import { AlertTriangle, Trash2, AlertCircle } from 'lucide-react'
 import { useSSE } from '@/hooks/useSSE'
-import { SSEProgressView } from '@/components/SSEModal'
+import { SSEDialogFooter, SSEExecutionSection } from '@/components/SSEModal'
 import { cn } from '@/lib/utils'
 import {
   panelDialogContent,
@@ -31,23 +31,23 @@ interface DisableRumDialogProps {
   onComplete?: () => void
 }
 
-export function DisableRumDialog({ service, open, onOpenChange, onComplete }: DisableRumDialogProps) {
+export function DisableRumDialog(props: DisableRumDialogProps) {
+  const { service, open } = props
+  const [generation, setGeneration] = useState(0)
+  const [wasOpen, setWasOpen] = useState(open)
+  if (open !== wasOpen) {
+    setWasOpen(open)
+    if (open) setGeneration((g) => g + 1)
+  }
+  return <DisableRumDialogBody key={`${service?.service_id ?? ''}|${generation}`} {...props} />
+}
+
+function DisableRumDialogBody({ service, open, onOpenChange, onComplete }: DisableRumDialogProps) {
   const [removeCloudFiles, setRemoveCloudFiles] = useState(true)
   const [removeBucket, setRemoveBucket] = useState(false)
   const [isExecuting, setIsExecuting] = useState(false)
 
-  const { lines, status, error: sseError, start, stop, reset } = useSSE()
-
-  // Reset state when dialog closes
-  useEffect(() => {
-    if (!open) {
-      const id = setTimeout(() => {
-        setIsExecuting(false)
-        reset()
-      }, 300)
-      return () => clearTimeout(id)
-    }
-  }, [open, reset])
+  const { lines, status, error: sseError, start, stop } = useSSE()
 
   if (!service) return null
 
@@ -84,21 +84,16 @@ export function DisableRumDialog({ service, open, onOpenChange, onComplete }: Di
 
         <div className="flex-1 overflow-y-auto min-h-0">
           {isExecuting ? (
-            <div className="p-8 space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-               <div className="text-center space-y-2">
-                  <h3 className="text-lg font-semibold tracking-tight">Disabling Real User Monitoring</h3>
-                  <p className="text-sm text-muted-foreground">Removing VCL snippets and custom fields. Please wait...</p>
-               </div>
-
-               <SSEProgressView
-                 lines={lines}
-                 status={status}
-                 error={sseError}
-                 className="h-[300px]"
-                 progressLabel="Progress"
-                 doneMessage="Real User Monitoring disabled successfully!"
-               />
-            </div>
+            <SSEExecutionSection
+              title="Disabling Real User Monitoring"
+              subtitle="Removing VCL snippets and custom fields. Please wait..."
+              lines={lines}
+              status={status}
+              error={sseError}
+              heightClassName="h-[300px]"
+              progressLabel="Progress"
+              doneMessage="Real User Monitoring disabled successfully!"
+            />
           ) : (
             <div className="p-8 space-y-8">
               <Alert variant="destructive" className="bg-destructive/5 text-destructive border-destructive/20">
@@ -153,16 +148,13 @@ export function DisableRumDialog({ service, open, onOpenChange, onComplete }: Di
               </Button>
             </>
           ) : (
-            <>
-              {status !== 'streaming' && (
-                 <Button variant="outline" onClick={() => handleClose(false)} className="h-10 px-6">
-                   {status === 'done' ? 'Close & Reload' : 'Cancel'}
-                 </Button>
-              )}
-              {status === 'streaming' && (
-                <Button variant="outline" onClick={stop} className="h-10 px-6">Stop</Button>
-              )}
-            </>
+            <SSEDialogFooter
+              status={status}
+              onClose={() => handleClose(false)}
+              onStop={stop}
+              doneLabel="Close & Reload"
+              idleOrErrorLabel="Cancel"
+            />
           )}
         </DialogFooter>
       </DialogContent>

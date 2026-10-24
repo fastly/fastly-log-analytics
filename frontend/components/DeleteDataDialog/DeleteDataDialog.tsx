@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   Dialog,
@@ -15,7 +15,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { AlertTriangle, AlertCircle, HardDrive, Cloud } from 'lucide-react'
 import { useSSE } from '@/hooks/useSSE'
-import { SSEProgressView } from '@/components/SSEModal'
+import { SSEDialogFooter, SSEExecutionSection } from '@/components/SSEModal'
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 import { formatBytes, formatCount } from '@/lib/format'
@@ -36,25 +36,24 @@ interface DeleteDataDialogProps {
   onComplete?: () => void
 }
 
-export function DeleteDataDialog({ service, open, onOpenChange, onComplete }: DeleteDataDialogProps) {
+export function DeleteDataDialog(props: DeleteDataDialogProps) {
+  const { service, open } = props
+  const [generation, setGeneration] = useState(0)
+  const [wasOpen, setWasOpen] = useState(open)
+  if (open !== wasOpen) {
+    setWasOpen(open)
+    if (open) setGeneration((g) => g + 1)
+  }
+  return <DeleteDataDialogBody key={`${service?.service_id ?? ''}|${generation}`} {...props} />
+}
+
+function DeleteDataDialogBody({ service, open, onOpenChange, onComplete }: DeleteDataDialogProps) {
   const [isExecuting, setIsExecuting] = useState(false)
   // Type-to-confirm (GitHub-repo-delete style): the destructive button
   // stays disabled until this exactly matches the service name, so a
   // stray click can't wipe the wrong service's log history.
   const [confirmText, setConfirmText] = useState('')
-  const { lines, status, error: sseError, start, stop, reset } = useSSE()
-
-  // Reset state when dialog closes
-  useEffect(() => {
-    if (!open) {
-      const id = setTimeout(() => {
-        setIsExecuting(false)
-        setConfirmText('')
-        reset()
-      }, 300)
-      return () => clearTimeout(id)
-    }
-  }, [open, reset])
+  const { lines, status, error: sseError, start, stop } = useSSE()
 
   // Cloud (Iceberg table) stats for the row being deleted — NOT necessarily
   // the active service, so `service_id` overrides the default x-service-id
@@ -119,21 +118,16 @@ export function DeleteDataDialog({ service, open, onOpenChange, onComplete }: De
 
         <div className="flex-1 overflow-y-auto min-h-0">
           {isExecuting ? (
-            <div className="p-8 space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-              <div className="text-center space-y-2">
-                <h3 className="text-lg font-semibold tracking-tight">Deleting Log Data</h3>
-                <p className="text-sm text-muted-foreground">Please do not close this window until the process is complete.</p>
-              </div>
-
-              <SSEProgressView
-                lines={lines}
-                status={status}
-                error={sseError}
-                className="h-[320px]"
-                progressLabel="Progress"
-                doneMessage="Log data deleted. You may now close this window."
-              />
-            </div>
+            <SSEExecutionSection
+              title="Deleting Log Data"
+              subtitle="Please do not close this window until the process is complete."
+              lines={lines}
+              status={status}
+              error={sseError}
+              heightClassName="h-[320px]"
+              progressLabel="Progress"
+              doneMessage="Log data deleted. You may now close this window."
+            />
           ) : (
             <div className="p-8 space-y-6">
               <Alert variant="destructive" className="bg-destructive/5 text-destructive border-destructive/20">
@@ -233,16 +227,13 @@ export function DeleteDataDialog({ service, open, onOpenChange, onComplete }: De
               </Button>
             </>
           ) : (
-            <>
-              {status !== 'streaming' && (
-                 <Button variant="outline" onClick={() => handleClose(false)} className="h-10 px-6">
-                   {status === 'done' ? 'Close' : 'Cancel'}
-                 </Button>
-              )}
-              {status === 'streaming' && (
-                <Button variant="outline" onClick={stop} className="h-10 px-6">Stop</Button>
-              )}
-            </>
+            <SSEDialogFooter
+              status={status}
+              onClose={() => handleClose(false)}
+              onStop={stop}
+              doneLabel="Close"
+              idleOrErrorLabel="Cancel"
+            />
           )}
         </DialogFooter>
       </DialogContent>

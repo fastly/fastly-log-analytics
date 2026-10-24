@@ -1072,15 +1072,6 @@ def generate_analyst_invite(service_id: str) -> dict:
         )
 
     iceberg_metadata_location = None
-    try:
-        from backend.core import iceberg as db_iceberg
-
-        src = svcconfig.config_to_source(cfg)
-        catalog = db_iceberg._get_catalog(src)  # type: ignore[attr-defined]
-        table = catalog.load_table(db_iceberg._table_identifier(src))  # type: ignore[attr-defined]
-        iceberg_metadata_location = table.metadata_location
-    except Exception:
-        pass
 
     return {
         "name": cfg.get("name", service_id),

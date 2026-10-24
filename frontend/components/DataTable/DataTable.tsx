@@ -24,6 +24,7 @@ import {
 } from '@dnd-kit/sortable'
 
 import { DraggableTableHeader } from './Header'
+import { StaticTableHeader } from './StaticHeader'
 import { DataTableToolbar } from './Toolbar'
 import { DataTableBody } from './DataTableBody'
 import { DataTablePagination } from './DataTablePagination'
@@ -31,13 +32,18 @@ import { useDataTableState, type DataTableBaseProps } from './useDataTableState'
 import { reportUxEvent } from '@/lib/ux-telemetry'
 import { cn } from '@/lib/utils'
 
-interface DataTableProps<TData, TValue> extends DataTableBaseProps<TData, TValue> {
+export interface DataTableProps<TData, TValue> extends DataTableBaseProps<TData, TValue> {
   tableContainerClassName?: string
+  tableClassName?: string
+  headerRowClassName?: string
   initialColumnOrder?: string[]
+  enableColumnReorder?: boolean
 }
 
 function DataTableImpl<TData, TValue>({
   tableContainerClassName,
+  tableClassName,
+  headerRowClassName,
   columns,
   data,
   searchKey,
@@ -48,6 +54,7 @@ function DataTableImpl<TData, TValue>({
   initialSorting = [],
   initialVisibility = {},
   initialColumnOrder,
+  enableColumnReorder = true,
   title,
   compactToolbar = false,
   extraToolbarContent,
@@ -82,7 +89,7 @@ function DataTableImpl<TData, TValue>({
     onColumnVisibilityChange,
     initialVisibility,
     initialColumnOrder,
-    enableColumnOrder: true,
+    enableColumnOrder: enableColumnReorder,
   })
 
   const sensors = useSensors(
@@ -112,6 +119,62 @@ function DataTableImpl<TData, TValue>({
     }
   }
 
+  const tableContainer = (
+    <div
+      ref={tableContainerRef}
+      tabIndex={enableColumnReorder ? undefined : 0}
+      className={cn(
+        "rounded-md border overflow-auto w-full",
+        !enableColumnReorder && "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        tableContainerClassName || "max-h-[min(600px,calc(100dvh-200px))]",
+      )}
+    >
+      <Table
+        scrollFocusable={!enableColumnReorder}
+        className={tableClassName}
+        style={{ tableLayout: 'fixed', width: table.getTotalSize(), minWidth: '100%' }}
+      >
+        <caption className="sr-only">
+          {tableCaption || (typeof title === 'string' ? title : 'Data Table')}
+        </caption>
+        <TableHeader>
+          {table.getHeaderGroups().map((headerGroup) => (
+            <TableRow key={headerGroup.id} className={headerRowClassName}>
+              {enableColumnReorder ? (
+                <SortableContext
+                  items={columnOrder}
+                  strategy={horizontalListSortingStrategy}
+                >
+                  {headerGroup.headers.map((header) => (
+                    <DraggableTableHeader key={header.id} header={header} />
+                  ))}
+                </SortableContext>
+              ) : (
+                headerGroup.headers.map((header) => (
+                  <StaticTableHeader key={header.id} header={header} />
+                ))
+              )}
+            </TableRow>
+          ))}
+        </TableHeader>
+        <DataTableBody
+          table={table}
+          rows={rows}
+          rowVirtualizer={rowVirtualizer}
+          columns={columns}
+          columnVisibility={columnVisibility}
+          columnSizing={columnSizing}
+          isLoading={isLoading}
+          onRowClick={onRowClick}
+          getRowClassName={getRowClassName}
+          emptyMessage={emptyMessage}
+          emptyHint={emptyHint}
+          onClearFilter={onClearFilter}
+        />
+      </Table>
+    </div>
+  )
+
   return (
     <div className="w-full">
       {!hideToolbar && (renderToolbar ? (
@@ -126,49 +189,19 @@ function DataTableImpl<TData, TValue>({
         />
       ))}
 
-      <DndContext
-        id="data-table-dnd"
-        collisionDetection={closestCenter}
-        modifiers={[restrictToHorizontalAxis]}
-        onDragEnd={handleDragEnd}
-        sensors={sensors}
-      >
-        <div ref={tableContainerRef} className={cn("rounded-md border overflow-auto w-full", tableContainerClassName || "max-h-[min(600px,calc(100dvh-200px))]")}>
-          <Table style={{ tableLayout: 'fixed', width: table.getTotalSize(), minWidth: '100%' }}>
-            <caption className="sr-only">
-              {tableCaption || (typeof title === 'string' ? title : 'Data Table')}
-            </caption>
-            <TableHeader>
-              {table.getHeaderGroups().map((headerGroup) => (
-                <TableRow key={headerGroup.id}>
-                  <SortableContext
-                    items={columnOrder}
-                    strategy={horizontalListSortingStrategy}
-                  >
-                    {headerGroup.headers.map((header) => (
-                      <DraggableTableHeader key={header.id} header={header} />
-                    ))}
-                  </SortableContext>
-                </TableRow>
-              ))}
-            </TableHeader>
-            <DataTableBody
-              table={table}
-              rows={rows}
-              rowVirtualizer={rowVirtualizer}
-              columns={columns}
-              columnVisibility={columnVisibility}
-              columnSizing={columnSizing}
-              isLoading={isLoading}
-              onRowClick={onRowClick}
-              getRowClassName={getRowClassName}
-              emptyMessage={emptyMessage}
-              emptyHint={emptyHint}
-              onClearFilter={onClearFilter}
-            />
-          </Table>
-        </div>
-      </DndContext>
+      {enableColumnReorder ? (
+        <DndContext
+          id="data-table-dnd"
+          collisionDetection={closestCenter}
+          modifiers={[restrictToHorizontalAxis]}
+          onDragEnd={handleDragEnd}
+          sensors={sensors}
+        >
+          {tableContainer}
+        </DndContext>
+      ) : (
+        tableContainer
+      )}
 
       {showPagination && <DataTablePagination table={table} />}
     </div>

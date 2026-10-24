@@ -449,15 +449,12 @@ def test_expire_does_not_invalidate_view_caches(tmp_path):
     from backend.core import iceberg as _ice
 
     con = _lake_con(src)
-    _ice._snapshot_files_cache[src["name"]] = ("sentinel",)
     _ice._view_cache[src["name"]] = ("sentinel-too",)
     try:
         out = buffer_mod._ducklake_expire_snapshots(con, src, 1)
         assert out["snapshots_expired_count"] > 0, "premise: the expiry must have done real work"
-        assert _ice._snapshot_files_cache.get(src["name"]) == ("sentinel",)
         assert _ice._view_cache.get(src["name"]) == ("sentinel-too",)
     finally:
-        _ice._snapshot_files_cache.pop(src["name"], None)
         _ice._view_cache.pop(src["name"], None)
         con.close()
 
@@ -471,15 +468,15 @@ def test_retention_delete_does_invalidate_view_caches(tmp_path):
     from backend.core import iceberg as _ice
 
     con = _lake_con(src)
-    _ice._snapshot_files_cache[src["name"]] = ("stale",)
+    _ice._view_cache[src["name"]] = ("stale",)
     _ice._view_cache[f"{src['name']}::client_vitals"] = ("stale-sub",)
     try:
         out = buffer_mod._ducklake_retention_delete(con, src, 30, 0)
         assert out["data_rows_deleted"] == 1
-        assert src["name"] not in _ice._snapshot_files_cache
+        assert src["name"] not in _ice._view_cache
         assert f"{src['name']}::client_vitals" not in _ice._view_cache
     finally:
-        _ice._snapshot_files_cache.pop(src["name"], None)
+        _ice._view_cache.pop(src["name"], None)
         _ice._view_cache.pop(f"{src['name']}::client_vitals", None)
         con.close()
 

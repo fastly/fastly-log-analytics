@@ -1,17 +1,6 @@
-"""Iceberg manifest cache + table-info helpers.
-
-Carved out of ``backend/core/iceberg/_core.py`` (v2.0 file-size sweep
-part 1/3) so the historical monolith stays under 1500 lines.
+"""DuckLake table-info helpers and schema alignment utilities.
 
 Contains:
-- ``_manifest_metadata_cache`` + lock: per-manifest aggregates that
-  survive process restarts.
-- ``_load_manifest_metadata_cache`` / ``_save_manifest_metadata_cache``:
-  persistence helpers.
-- ``_get_scan_lock`` + ``_get_cached_or_scan_metadata``: pyiceberg-era scan
-  dedup + caching layer. No longer called by ``get_table_info`` /
-  ``get_snapshot_calendar`` (see below) post-v3, but left in place — see
-  the DuckLake-native section's comment for why.
 - ``get_table_info`` + ``get_snapshot_calendar`` + ``ducklake_table_exists``:
   DuckLake-native (v3) public-API surface consumed by admin endpoints and
   ``iceberg/lake_info.py``.
@@ -48,12 +37,6 @@ def __getattr__(name: str):
     """Fallback to _core for any module-level constants/helpers we
     didn't re-import explicitly above."""
     return getattr(_core_mod, name)
-
-
-_manifest_metadata_cache: dict[str, tuple] = {}
-_manifest_metadata_cache_lock = threading.Lock()
-_manifest_metadata_loaded: set[str] = set()
-_manifest_metadata_loaded_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------

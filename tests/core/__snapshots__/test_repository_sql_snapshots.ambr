@@ -45,59 +45,52 @@
 # name: test_insights_asn_concentration_sql
   '''
   
-          WITH totals AS (
-              SELECT
-                  COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_total,
-                  COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_total
-              FROM t_logs
-          ),
-          grp AS (
+          WITH grp AS (
               SELECT "asn",
                   COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
                   COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt
-              FROM t_logs WHERE "asn" IS NOT NULL GROUP BY "asn"
+              FROM t_logs GROUP BY "asn"
+          ),
+          with_totals AS (
+              SELECT "asn", w_cnt, b_cnt,
+                  CAST(COALESCE(SUM(w_cnt) OVER (), 0) AS BIGINT) AS w_total,
+                  CAST(COALESCE(SUM(b_cnt) OVER (), 0) AS BIGINT) AS b_total
+              FROM grp
           )
-          SELECT g."asn", g.w_cnt, g.b_cnt, t.b_total, t.w_total
-          FROM grp g, totals t
-          WHERE t.w_total > 0 AND g.w_cnt * 1.0 / t.w_total >= 0.20 AND (t.b_total = 0 OR g.w_cnt * 1.0 / t.w_total >= g.b_cnt * 1.0 / NULLIF(t.b_total, 0) * 3 + 0.10)
-          ORDER BY g.w_cnt DESC LIMIT 10
+          SELECT "asn", w_cnt, b_cnt, b_total, w_total
+          FROM with_totals
+          WHERE w_total > 0 AND ("asn" IS NOT NULL)
+            AND w_cnt * 1.0 / w_total >= 0.20
+            AND (b_total = 0 OR w_cnt * 1.0 / w_total >= b_cnt * 1.0 / NULLIF(b_total, 0) * 3 + 0.10)
+          ORDER BY w_cnt DESC LIMIT 10
       
   '''
 # ---
 # name: test_insights_botnet_grouping_sql
   '''
   
-          WITH base AS NOT MATERIALIZED (
+          WITH base AS (
               SELECT "ja4", "ip",
                   (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
                   (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
               FROM t_logs WHERE "ja4" IS NOT NULL AND "ja4" != ''
           ),
-          win AS (
+          agg AS (
               SELECT "ja4",
-                  COUNT(DISTINCT "ip") AS w_ips,
-                  COUNT(*) AS w_reqs
+                  COUNT(DISTINCT "ip") FILTER (WHERE is_w) AS w_ips,
+                  COUNT(*) FILTER (WHERE is_w) AS w_reqs,
+                  COUNT(DISTINCT "ip") FILTER (WHERE is_b) AS b_ips
               FROM base
-              WHERE is_w
               GROUP BY "ja4"
-              HAVING COUNT(DISTINCT "ip") >= 5
-          ),
-          base_b AS (
-              SELECT b."ja4",
-                  COUNT(DISTINCT b."ip") AS b_ips
-              FROM base b
-              JOIN win w ON b."ja4" = w."ja4"
-              WHERE b.is_b
-              GROUP BY b."ja4"
+              HAVING COUNT(DISTINCT "ip") FILTER (WHERE is_w) >= 5
           )
-          SELECT w."ja4",
-              w.w_ips,
-              w.w_reqs,
-              COALESCE(b.b_ips, 0) AS b_ips,
-              w.w_ips * 1.0 / GREATEST(COALESCE(b.b_ips, 0) / GREATEST(24, 1.0) * 1, 1) AS ip_ratio
-          FROM win w
-          LEFT JOIN base_b b ON w."ja4" = b."ja4"
-          WHERE w.w_ips > COALESCE(b.b_ips, 0) / GREATEST(24, 1.0) * 1 * 3
+          SELECT "ja4",
+              w_ips,
+              w_reqs,
+              b_ips,
+              w_ips * 1.0 / GREATEST(b_ips / GREATEST(24, 1.0) * 1, 1) AS ip_ratio
+          FROM agg
+          WHERE w_ips > b_ips / GREATEST(24, 1.0) * 1 * 3
           ORDER BY ip_ratio DESC LIMIT 10
       
   '''
@@ -175,23 +168,24 @@
 # name: test_insights_proxy_surge_sql
   '''
   
-          WITH base AS (
+          WITH all_p AS (
               SELECT "p_type",
                   COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
                   COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt
-              FROM t_logs WHERE "p_type" IS NOT NULL AND "p_type" != '' GROUP BY "p_type"
+              FROM t_logs WHERE "p_type" IS NOT NULL GROUP BY "p_type"
           ),
           totals AS (
               SELECT
-                  SUM(w_cnt) AS w_proxy_total,
-                  SUM(b_cnt) AS b_proxy_total,
-                  (SELECT COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) FROM t_logs WHERE "p_type" IS NOT NULL) AS w_total_all,
-                  (SELECT COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) FROM t_logs WHERE "p_type" IS NOT NULL) AS b_total_all
-              FROM base
+                  COALESCE(SUM(w_cnt) FILTER (WHERE "p_type" != ''), 0) AS w_proxy_total,
+                  COALESCE(SUM(b_cnt) FILTER (WHERE "p_type" != ''), 0) AS b_proxy_total,
+                  COALESCE(SUM(w_cnt), 0) AS w_total_all,
+                  COALESCE(SUM(b_cnt), 0) AS b_total_all
+              FROM all_p
           )
           SELECT b."p_type", b.w_cnt, b.b_cnt, t.w_total_all, t.b_total_all
-          FROM base b, totals t
-          WHERE (t.w_proxy_total * 100.0 / NULLIF(t.w_total_all, 0)) >= 5
+          FROM all_p b, totals t
+          WHERE b."p_type" != ''
+            AND (t.w_proxy_total * 100.0 / NULLIF(t.w_total_all, 0)) >= 5
             AND (t.w_proxy_total * 100.0 / NULLIF(t.w_total_all, 0)) >= (t.b_proxy_total * 100.0 / NULLIF(t.b_total_all, 0)) * 2 + 5
       
   '''
@@ -199,13 +193,28 @@
 # name: test_insights_waf_signal_spikes_sql
   '''
   
+          WITH waf_combos AS (
+              SELECT "waf_sig",
+                  COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
+                  COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt
+              FROM insights_waf_1
+              WHERE "waf_sig" IS NOT NULL AND "waf_sig" != ''
+              GROUP BY "waf_sig"
+          ),
+          unrolled AS (
+              SELECT trim(unnest(string_split("waf_sig", ','))) AS signal,
+                  w_cnt,
+                  b_cnt
+              FROM waf_combos
+          )
           SELECT signal,
-              COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
-              COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_cnt,
-              w_cnt * 1.0 / GREATEST(COALESCE(b_cnt, 0) * 1.0 / 24 * 1, 0.5) AS spike_ratio
-          FROM insights_waf_1
+              CAST(SUM(w_cnt) AS BIGINT) AS w_cnt,
+              CAST(SUM(b_cnt) AS BIGINT) AS b_cnt,
+              SUM(w_cnt) * 1.0 / GREATEST(COALESCE(SUM(b_cnt), 0) * 1.0 / 24 * 1, 0.5) AS spike_ratio
+          FROM unrolled
+          WHERE signal != '' AND signal != 'BOT-ANALYSIS'
           GROUP BY signal
-          HAVING w_cnt >= 3 AND w_cnt > COALESCE(b_cnt, 0) * 1.0 / 24 * 1 * 2 + 2
+          HAVING SUM(w_cnt) >= 3 AND SUM(w_cnt) > COALESCE(SUM(b_cnt), 0) * 1.0 / 24 * 1 * 2 + 2
           ORDER BY spike_ratio DESC LIMIT 15
       
   '''

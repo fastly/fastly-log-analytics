@@ -1,7 +1,7 @@
 'use client'
 
 import { useDerivedState } from '@/hooks/useDerivedState'
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import {
   Dialog,
   DialogContent,
@@ -20,7 +20,7 @@ import {
   AlertCircle
 } from 'lucide-react'
 import { useSSE } from '@/hooks/useSSE'
-import { SSEProgressView } from '@/components/SSEModal'
+import { SSEDialogFooter, SSEExecutionSection } from '@/components/SSEModal'
 import { cn } from '@/lib/utils'
 import {
   panelDialogContent,
@@ -41,7 +41,18 @@ function isAnalyst(service: ServiceConfig | null) {
   return service?.access_level === 'read_only'
 }
 
-export function TeardownDialog({ service, open, onOpenChange, onComplete }: TeardownDialogProps) {
+export function TeardownDialog(props: TeardownDialogProps) {
+  const { service, open } = props
+  const [generation, setGeneration] = useState(0)
+  const [wasOpen, setWasOpen] = useState(open)
+  if (open !== wasOpen) {
+    setWasOpen(open)
+    if (open) setGeneration((g) => g + 1)
+  }
+  return <TeardownDialogBody key={`${service?.service_id ?? ''}|${generation}`} {...props} />
+}
+
+function TeardownDialogBody({ service, open, onOpenChange, onComplete }: TeardownDialogProps) {
   const [removeLogging, setRemoveLogging] = useState(true)
   // Follows the service's RUM flag until the operator toggles it.
   const [removeRum, setRemoveRum] = useDerivedState(service?.rum_enabled || false)
@@ -56,19 +67,7 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
   // cannot trigger a customer outage without also having a valid Fastly token.
   const [apiToken, setApiToken] = useState('')
 
-  const { lines, status, error: sseError, start, stop, reset } = useSSE()
-
-  // Reset state when dialog closes
-  useEffect(() => {
-    if (!open) {
-      const id = setTimeout(() => {
-        setIsExecuting(false)
-        setApiToken('')
-        reset()
-      }, 300)
-      return () => clearTimeout(id)
-    }
-  }, [open, reset])
+  const { lines, status, error: sseError, start, stop } = useSSE()
 
   if (!service) return null
 
@@ -133,21 +132,16 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
 
         <div className="flex-1 overflow-y-auto min-h-0">
           {isExecuting ? (
-            <div className="p-8 space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-               <div className="text-center space-y-2">
-                  <h3 className="text-lg font-semibold tracking-tight">Executing Teardown Actions</h3>
-                  <p className="text-sm text-muted-foreground">Please do not close this window until the process is complete.</p>
-               </div>
-
-               <SSEProgressView
-                 lines={lines}
-                 status={status}
-                 error={sseError}
-                 className="h-[400px]"
-                 progressLabel="Progress"
-                 doneMessage="Teardown completed successfully! You may now close this window."
-               />
-            </div>
+            <SSEExecutionSection
+              title="Executing Teardown Actions"
+              subtitle="Please do not close this window until the process is complete."
+              lines={lines}
+              status={status}
+              error={sseError}
+              heightClassName="h-[400px]"
+              progressLabel="Progress"
+              doneMessage="Teardown completed successfully! You may now close this window."
+            />
           ) : analyst ? (
             <div className="p-8 space-y-8">
               <Alert variant="destructive" className="bg-destructive/5 text-destructive border-destructive/20">
@@ -344,16 +338,13 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
               </Button>
             </>
           ) : (
-            <>
-              {status !== 'streaming' && (
-                 <Button variant="outline" onClick={() => handleClose(false)} className="h-10 px-6">
-                   {status === 'done' ? 'Close' : 'Cancel'}
-                 </Button>
-              )}
-              {status === 'streaming' && (
-                <Button variant="outline" onClick={stop} className="h-10 px-6">Stop</Button>
-              )}
-            </>
+            <SSEDialogFooter
+              status={status}
+              onClose={() => handleClose(false)}
+              onStop={stop}
+              doneLabel="Close"
+              idleOrErrorLabel="Cancel"
+            />
           )}
         </DialogFooter>
       </DialogContent>

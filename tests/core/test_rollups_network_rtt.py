@@ -34,6 +34,8 @@ from tests._helpers.dates import three_days_ago_iso as _three_days_ago_iso
 from tests._helpers.dates import two_days_ago_iso as _two_days_ago_iso
 from tests._helpers.dates import yesterday_iso as _yesterday_iso
 from tests._helpers.locks import noop_lock as _noop_lock
+from tests._helpers.rollups import make_stub_runner
+from tests._helpers.rollups import write_hour_all_fields as _write_hour_all_fields
 
 pytestmark = pytest.mark.usefixtures("frozen_clock")
 
@@ -54,16 +56,6 @@ def _write_hour_rtt(cache_root: str, hour: str, rows: list[dict]) -> str:
     p = os.path.join(d, "network_rtt.parquet")
     pq.write_table(table, p)
     return p
-
-
-def _write_hour_all_fields(cache_root: str, hour: str) -> None:
-    """Sentinel parquet so the backfill walk treats this hour as touched."""
-    d = os.path.join(cache_root, "rollups", "hour_bundled", f"hour={hour}")
-    os.makedirs(d, exist_ok=True)
-    pq.write_table(
-        pa.table({"field": pa.array(["x"]), "value": pa.array(["y"]), "count": pa.array([1], type=pa.int64())}),
-        os.path.join(d, "all_fields.parquet"),
-    )
 
 
 # ── Writer happy path (no DuckDB execution — directly drive backfill walk) ────
@@ -110,27 +102,7 @@ def test_backfill_skips_hours_already_built(tmp_path):
 
 
 def _stub_runner(cache_root_str: str, src: dict, captured_sql: list[str], stub_rows: list[tuple]):
-    """Build a QueryRunner with execute() stubbed to capture the SQL and
-    return canned rows."""
-    from backend.repositories._base import QueryRunner
-
-    class _Result:
-        def fetchall(self):
-            return stub_rows
-
-        def fetchone(self):
-            return stub_rows[0] if stub_rows else None
-
-    class _Conn:
-        def execute(self, sql, params=None):
-            captured_sql.append(sql)
-            return _Result()
-
-    runner = QueryRunner.__new__(QueryRunner)
-    runner.src = src
-    runner._table = "logs_svc_nr_reader"
-    runner.execute = _Conn().execute  # type: ignore[method-assign]
-    return runner
+    return make_stub_runner(src, captured_sql, stub_rows, table="logs_svc_nr_reader")
 
 
 def test_reader_returns_none_when_filtered(tmp_path):

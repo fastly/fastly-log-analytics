@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
 from typing import Any
 
 from backend.core.metadata.pg_connection import (
@@ -22,10 +21,6 @@ logger = logging.getLogger(__name__)
 
 _DATA_DIR = "data/system"
 _DB_FILENAME = "remote_share.db"
-
-# Module-level state retained for compatibility with monkeypatching fixtures.
-_local = threading.local()
-_initialized: set[str] = set()
 
 
 def db_path(_key: str | None = None) -> str:

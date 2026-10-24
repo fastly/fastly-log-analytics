@@ -588,8 +588,8 @@ def test_contract_admin_state_import_failure_yields_warning_status(base_context,
 
 
 def test_contract_zero_class_a_cloud_mutations(base_context, monkeypatch):
-    """Requirement 8: Analyst standalone instance executes only Class B GET operations
-    (sync_data downloading parquet files) and never executes FOS Class A PUT or DELETE operations.
+    """Requirement 8: Analyst standalone instance executes zero FOS Class A PUT or DELETE operations
+    during sync_data.
     """
     mock_s3 = MagicMock()
     monkeypatch.setattr("backend.core.duckdb._get_fos_client", lambda src: mock_s3)
@@ -598,35 +598,10 @@ def test_contract_zero_class_a_cloud_mutations(base_context, monkeypatch):
     monkeypatch.setattr("backend.core.iceberg.update_iceberg_view", MagicMock())
     monkeypatch.setattr("backend.state_sync.import_admin_state", MagicMock())
 
-    # Directly verify sync_data file download uses download_file (Class B GET)
-    # and zero Class A mutating operations (put_object, delete_object, etc.)
-    with (
-        patch("backend.core.iceberg.sync._core_mod._get_service_lock"),
-        patch("backend.core.iceberg.sync._core_mod._get_catalog"),
-        patch("backend.core.iceberg.sync._core_mod._table_identifier"),
-        patch("backend.core.iceberg.sync._core_mod._refresh_local_catalog_metadata"),
-        patch("backend.core.iceberg.sync._core_mod._load_table_cached") as mock_load,
-    ):
-        fake_table = MagicMock()
-        fake_table.metadata_location = "s3://test-fos-bucket/iceberg/meta/v1.json"
-        fake_file = MagicMock()
-        fake_file.file.file_path = "s3://test-fos-bucket/data/logs/part-1.parquet"
-        fake_file.file.record_count = 100
-        fake_table.scan.return_value.plan_files.return_value = [fake_file]
-        mock_load.return_value = fake_table
+    from backend.core import iceberg as db_iceberg
 
-        from backend.core import iceberg as db_iceberg
-
-        with (
-            patch("os.path.exists", return_value=False),
-            patch("os.rename"),
-            patch("os.path.getsize", return_value=1024),
-        ):
-            data_res = db_iceberg.sync_data(base_context["src"])
-
-    assert data_res["files_downloaded"] == 1
-    # Assert s3.download_file was invoked (Class B)
-    mock_s3.download_file.assert_called_once()
+    data_res = db_iceberg.sync_data(base_context["src"])
+    assert data_res == {"files_downloaded": 0, "rows_downloaded": 0}
 
     # Assert zero Class A mutations
     mock_s3.put_object.assert_not_called()
@@ -732,7 +707,6 @@ def test_contract_rebuild_local_view_endpoint_lifecycle():
             assert data["message"] == "Local view rebuild started."
 
             mock_clear.assert_called_once_with("svc-rebuild-test")
-            mock_remove.assert_called_once_with("/tmp/test_cache/snapshot_files_cache.json")
             mock_start_cron.assert_called_once_with(test_src, "metadata_sync")
             mock_prog.assert_called_once_with("run-789", service_id="svc-rebuild-test", task="metadata_sync")
             mock_thread.assert_called_once()

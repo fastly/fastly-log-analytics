@@ -70,7 +70,7 @@ class TestCeleryStatusHighScaleAndStandard:
 
         with (
             patch("backend.celery_app.app.control.inspect") as mock_inspect,
-            patch("backend.celery_status._get_redis", return_value=_mock_redis(queues)),
+            patch("backend.celery_queue._get_redis", return_value=_mock_redis(queues)),
             patch(
                 "backend.config.list_configs",
                 return_value=[{"service_id": "svc-a"}, {"service_id": "svc-b"}],
@@ -130,7 +130,7 @@ class TestCeleryStatusHighScaleAndStandard:
         and empty ledger."""
         with (
             patch("backend.celery_app.app.control.inspect") as mock_inspect,
-            patch("backend.celery_status._get_redis", return_value=_mock_redis({})),
+            patch("backend.celery_queue._get_redis", return_value=_mock_redis({})),
             patch("backend.config.list_configs", return_value=[]),
         ):
             mock_i = MagicMock()
@@ -155,7 +155,7 @@ class TestCeleryStatusHighScaleAndStandard:
         broken_redis.scan_iter.side_effect = ConnectionError("Valkey connection refused")
         with (
             patch("backend.celery_app.app.control.inspect") as mock_inspect,
-            patch("backend.celery_status._get_redis", return_value=broken_redis),
+            patch("backend.celery_queue._get_redis", return_value=broken_redis),
             patch("backend.config.list_configs", return_value=[]),
         ):
             mock_inspect.side_effect = RuntimeError("Broker connection timeout")
@@ -181,7 +181,7 @@ class TestCeleryStatusHighScaleAndStandard:
         fake_scheduler = SimpleNamespace(scheduler=SimpleNamespace(get_jobs=lambda: [fake_job]))
         with (
             patch(
-                "backend.celery_status._get_redis",
+                "backend.celery_queue._get_redis",
                 side_effect=ConnectionError("Celery broker not configured in standard mode"),
             ),
             patch("backend.config.is_high_scale_mode", return_value=False),
@@ -283,29 +283,6 @@ class TestAnalystRbacRejection:
                 assert resp.json()["detail"]["error"] == "admin_only"
             finally:
                 client.app.dependency_overrides.pop(require_admin, None)
-
-
-def test_task_routes_and_known_queues_consistency():
-    """Verify KNOWN_QUEUES covers all routed queues in backend.celery_app."""
-    import importlib
-
-    from backend.celery_app import app
-    from backend.celery_status import KNOWN_QUEUES
-
-    for mod in app.conf.include:
-        importlib.import_module(mod)
-
-    registered = set(app.tasks.keys())
-    for pattern in app.conf.task_routes:
-        if pattern.endswith("*"):
-            prefix = pattern[:-1]
-            assert any(t.startswith(prefix) for t in registered)
-        else:
-            assert pattern in registered
-
-    routed = {spec["queue"] for spec in app.conf.task_routes.values()}
-    routed.add(app.conf.task_default_queue or "celery")
-    assert routed <= set(KNOWN_QUEUES)
 
 
 class TestIngestLedgerInspectorEndpoints:

@@ -52,7 +52,6 @@ app.conf.update(
         "backend.cron.jobs.compaction",
         "backend.cron.jobs.optimize",
         "backend.cron.jobs.expire",
-        "backend.cron.jobs.metadata",
         "backend.cron.jobs.duckdb_recycle",
         "backend.cron.jobs.insights_prewarmer",
         "backend.cron.jobs.metric_snapshot",
@@ -62,7 +61,6 @@ app.conf.update(
     ],
     task_routes={
         "backend.core.ingest.*": {"queue": "q.ingest"},
-        "backend.cron.jobs.*": {"queue": "q.control"},
     },
 )
 

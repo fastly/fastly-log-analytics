@@ -96,8 +96,6 @@ def cron_task(name: str, job_name: str | None = None):
     """
 
     def decorator(func):
-        from backend.celery_app import app
-
         @wraps(func)
         def wrapper(service_id: str, *args, **kwargs):
             def _body():
@@ -128,17 +126,6 @@ def cron_task(name: str, job_name: str | None = None):
                     )
                     return fut.result()
 
-        # Register celery task
-        task_name = f"{func.__module__}.{func.__name__}_celery"
-
-        @app.task(name=task_name, bind=True)
-        @wraps(func)
-        def celery_wrapper(self, service_id: str, *args, **kwargs):
-            return wrapper(service_id, *args, **kwargs)
-
-        wrapper.celery_task = celery_wrapper
-        wrapper.delay = celery_wrapper.delay
-
         return wrapper
 
     return decorator
@@ -163,8 +150,6 @@ def global_job(job_id: str, *, color: str, tag: str, label: str):
     import time
 
     def decorator(fn):
-        from backend.celery_app import app
-
         @wraps(fn)
         def wrapper() -> None:
             from backend.utils.system_jobs import record_job_run
@@ -185,16 +170,6 @@ def global_job(job_id: str, *, color: str, tag: str, label: str):
                 record_job_run(job_id, "error", time.monotonic() - start, str(e))
                 logger.error("[%s] Failed: %s", job_id, e)
             logger.info("🏁  %s %s job finished.", prefix, label)
-
-        task_name = f"{fn.__module__}.{fn.__name__}_celery"
-
-        @app.task(name=task_name, bind=True)
-        @wraps(fn)
-        def celery_wrapper(self, *args, **kwargs):
-            return wrapper(*args, **kwargs)
-
-        wrapper.celery_task = celery_wrapper
-        wrapper.delay = celery_wrapper.delay
 
         return wrapper
 

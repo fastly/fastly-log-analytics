@@ -11,8 +11,6 @@ import pytest
 
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.ingest_controller import HighScaleIngestController, _enrich_high_scale_ngwaf_bots
-from backend.high_scale.ledger import HighScaleLedger
-from backend.high_scale.ownership import OwnershipStore
 from backend.high_scale.publication import (
     ClickHousePublication,
     HighScaleBatch,
@@ -21,6 +19,8 @@ from backend.high_scale.publication import (
 )
 from backend.high_scale.publication import _extract_custom_fields as persisted_fact_fields
 from backend.high_scale.security_replay import rebuild_security_projections_from_fos, replay_security_projections
+from backend.high_scale.source_discovery import SourceObjectDescriptor
+from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
 
 NOW = datetime(2026, 9, 11, 20, 0, tzinfo=UTC)
 _PG_TARGET = "backend.core.metadata.pg_connection.get_pg_readonly_connection"
@@ -116,13 +116,11 @@ def _controller() -> tuple[HighScaleIngestController, InMemoryObjectStore, _Clic
 
 def _ingest(controller: HighScaleIngestController) -> Any:
     payload = gzip.compress((str(_event("req-1")).replace("'", '"') + "\n").encode())
-    return controller.ingest(
+    desc = SourceObjectDescriptor("raw/request/one.gz", "sha256:source", len(payload), "v1")
+    return controller.ingest_batch(
         service_id="svc",
         domain="request",
-        object_key="raw/request/one.gz",
-        checksum="sha256:source",
-        payload=payload,
-        version="v1",
+        sources_payloads=[(desc, payload)],
         now=NOW,
     )
 

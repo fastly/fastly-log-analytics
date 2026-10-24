@@ -7,7 +7,6 @@ POST /api/services/{service_id}/cmcd/disable
 
 from __future__ import annotations
 
-import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Path
@@ -15,7 +14,7 @@ from fastapi import APIRouter, HTTPException, Path
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.status_reads import CmcdDisableBody, CmcdEnableBody, CmcdStatusResponse
 from backend.utils.router_utils import resolve_fastly_token as _resolve_token
-from backend.utils.sse import sse_response
+from backend.utils.sse import stream_iac_reconcile
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/services", tags=["cmcd-admin"], responses=DEFAULT_ERROR_RESPONSES)
@@ -73,31 +72,22 @@ def cmcd_enable(
         ),
     )
 
-    from backend.provision.declarative.iac_reconciler import reconcile_infrastructure as enable_cmcd
-    from backend.provision.orchestrator import run_with_events
+    def _done_event() -> dict:
+        cfg = svcconfig.load_config(service_id) or {}
+        return {
+            "type": "done",
+            "message": f"CMCD v{version} collection enabled.",
+            "cmcd": cfg.get("cmcd", {}),
+        }
 
-    def stream():
-        yield json.dumps({"type": "status", "message": f"Enabling CMCD v{version} collection for {service_id}..."})
-
-        try:
-            for event in run_with_events(enable_cmcd, service_id, resolved_token):
-                yield json.dumps(event)
-            from backend import config as svcconfig
-
-            cfg = svcconfig.load_config(service_id) or {}
-            cmcd = cfg.get("cmcd", {})
-            yield json.dumps(
-                {
-                    "type": "done",
-                    "message": f"CMCD v{version} collection enabled.",
-                    "cmcd": cmcd,
-                }
-            )
-        except Exception as e:
-            logger.exception("cmcd_enable failed for %s", service_id)
-            yield json.dumps({"type": "error", "message": str(e)})
-
-    return sse_response(stream())
+    return stream_iac_reconcile(
+        service_id,
+        resolved_token,
+        start_message=f"Enabling CMCD v{version} collection for {service_id}...",
+        done_event=_done_event,
+        log_label="cmcd_enable",
+        logger_obj=logger,
+    )
 
 
 @router.post("/{service_id}/cmcd/disable")
@@ -121,18 +111,11 @@ def cmcd_disable(
 
     svcconfig.mutate_config(service_id, _disable)
 
-    from backend.provision.declarative.iac_reconciler import reconcile_infrastructure as disable_cmcd
-    from backend.provision.orchestrator import run_with_events
-
-    def stream():
-        yield json.dumps({"type": "status", "message": f"Disabling CMCD collection for {service_id}..."})
-
-        try:
-            for event in run_with_events(disable_cmcd, service_id, resolved_token):
-                yield json.dumps(event)
-            yield json.dumps({"type": "done", "message": "CMCD collection disabled."})
-        except Exception as e:
-            logger.exception("cmcd_disable failed for %s", service_id)
-            yield json.dumps({"type": "error", "message": str(e)})
-
-    return sse_response(stream())
+    return stream_iac_reconcile(
+        service_id,
+        resolved_token,
+        start_message=f"Disabling CMCD collection for {service_id}...",
+        done_event={"type": "done", "message": "CMCD collection disabled."},
+        log_label="cmcd_disable",
+        logger_obj=logger,
+    )

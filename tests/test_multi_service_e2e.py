@@ -91,12 +91,10 @@ def two_service_env(monkeypatch):
         duckdb_path=svcconfig.duckdb_path("svc-b-id"),
     )
 
-    # A bug smearing source dicts across services surfaces as a misrouted path here.
-    monkeypatch.setattr("backend.core.iceberg._warehouse_uri", lambda s: f"file://{warehouses[s['name']]}")
-    # DuckLake analogue of the _warehouse_uri routing: cloud-backed sources
-    # default DATA_PATH to s3://{bucket}/… (durable FOS), which moto can't
-    # serve to DuckDB's httpfs — pin each service's data path to its local
-    # warehouse dir so a misrouted source still surfaces as a wrong path.
+    # Cloud-backed sources default DATA_PATH to s3://{bucket}/… (durable FOS),
+    # which moto can't serve to DuckDB's httpfs — pin each service's data path
+    # to its local warehouse dir so a misrouted source still surfaces as a
+    # wrong path.
     from backend.core.iceberg import _ducklake as _dl
 
     monkeypatch.setattr(_dl, "_default_data_path", lambda s: warehouses[s["name"]])
@@ -105,8 +103,6 @@ def two_service_env(monkeypatch):
     # _reset_module_caches (autouse) drains these; explicit clear future-proofs that contract.
     from backend.core import iceberg as _ice
 
-    for c in (_ice._catalog_cache, _ice._snapshot_files_cache, _ice._table_object_cache):
-        c.clear()
     if hasattr(_ice, "_view_cache"):
         _ice._view_cache.clear()
 

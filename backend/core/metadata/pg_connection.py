@@ -339,8 +339,6 @@ _IGNORE_TABLES = (
     "ingested_files",
 )
 
-_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
 
 def _rewrite_insert_or(sql: str) -> str:
     """Rewrite ``INSERT OR REPLACE|IGNORE INTO <table>`` to the Postgres

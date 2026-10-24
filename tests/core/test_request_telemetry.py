@@ -192,7 +192,6 @@ def test_request_lifecycle_in_test_mode():
     ctx.end_request()  # idempotent
 
     assert ctx.section_timings() == []
-    assert ctx.phase_log() == []
 
 
 def test_section_records_timing_metadata():
@@ -209,20 +208,10 @@ def test_section_records_timing_metadata():
     ctx.end_request()
 
 
-def test_record_phase_appends_to_log():
-    ctx = request_telemetry.RequestTelemetry("GET", "/api/dashboard/aggregates")
-    ctx.start_request()
-    ctx.record_phase("warmup", cached_temps=2)
-    ctx.record_phase("query", rows=42)
-    log = ctx.phase_log()
-    assert log == [{"phase": "warmup", "cached_temps": 2}, {"phase": "query", "rows": 42}]
-
-
-def test_record_call_and_record_query_do_not_raise_when_no_recording():
+def test_record_call_does_not_raise_when_no_recording():
     ctx = request_telemetry.RequestTelemetry("GET", "/api/x")
     ctx.start_request()
     ctx.record_call("GET", "/v1/services", time_ms=12.3, service="Fastly API", status=200)
-    ctx.record_query("SELECT 1", time_ms=0.4)
     ctx.end_request()
 
 

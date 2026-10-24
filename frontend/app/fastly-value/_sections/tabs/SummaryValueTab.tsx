@@ -12,7 +12,7 @@ import {
   Globe,
 } from 'lucide-react'
 import { StatCard } from '@/components/ui/stat-card'
-import { formatBytes, formatCompactCount } from '@/lib/format'
+import { formatBytes, formatCompactCount, formatPctValue } from '@/lib/format'
 import type { components } from '@/types/api.generated'
 import { OffloadAndCacheCharts } from './OffloadAndCacheCharts'
 
@@ -22,8 +22,6 @@ export default function SummaryValueTab({ data, loading }: { data?: ValueData; l
   const overview = data?.overview
   const caching = data?.caching
   const network = data?.network
-
-  const fmtPct = (v: number | null | undefined) => v != null ? `${v}%` : '—'
 
   return (
     <div className="space-y-6 pt-4">
@@ -69,7 +67,7 @@ export default function SummaryValueTab({ data, loading }: { data?: ValueData; l
           title="Origin Offload"
           icon={ArrowDownToLine}
           loading={loading}
-          value={fmtPct(caching?.origin_offload_pct)}
+          value={formatPctValue(caching?.origin_offload_pct)}
           sub="requests served from cache"
         />
         <StatCard
@@ -84,7 +82,7 @@ export default function SummaryValueTab({ data, loading }: { data?: ValueData; l
             title="HTTP/3 Adoption"
             icon={Wifi}
             loading={loading}
-            value={fmtPct(network.http3_pct)}
+            value={formatPctValue(network.http3_pct)}
             sub="of requests using QUIC"
           />
         )}
@@ -93,7 +91,7 @@ export default function SummaryValueTab({ data, loading }: { data?: ValueData; l
             title="TLS Encrypted"
             icon={Lock}
             loading={loading}
-            value={fmtPct(network.tls_pct)}
+            value={formatPctValue(network.tls_pct)}
             sub={network?.ipv6_pct != null ? `${network.ipv6_pct}% IPv6` : ''}
           />
         )}

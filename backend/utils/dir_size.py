@@ -178,10 +178,6 @@ def walk_dir_stats(path: str) -> tuple[int, int]:
     return (total_size, file_count)
 
 
-def _scan_dir_size(path: str) -> int:
-    return walk_dir_stats(path)[0]
-
-
 # R-1: drain the per-path size cache between tests so a previous test's
 # sandbox directory size doesn't bleed into a later test that reuses the
 # same path string.

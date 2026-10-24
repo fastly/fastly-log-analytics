@@ -3,11 +3,9 @@
 import React from 'react'
 import {
   Loader2,
-  Copy,
-  Check,
 } from 'lucide-react'
-import { Button } from "@/components/ui/button"
 import { Badge } from '@/components/ui/badge'
+import { CopyButton } from '@/components/ui/copy-button'
 import {
   Tooltip,
   TooltipContent,
@@ -18,29 +16,10 @@ import { DateTimeCell } from '@/components/DataTable'
 import { ColumnDef } from '@tanstack/react-table'
 import { cn } from '@/lib/utils'
 import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES } from './CronExplanations'
-import { LiveTimer } from './CronScheduleBox'
-import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
+import { LiveElapsed } from '@/components/LiveElapsed'
 import type { CronRun } from '../_state'
 
 import { formatCount } from '@/lib/format'
-function CopyTextButton({ text, label, title, className }: { text: string; label: string; title: string; className: string }) {
-  const { copied, copy } = useCopyToClipboard(2000)
-  return (
-    <Button
-      variant="ghost"
-      size="icon"
-      aria-label={label}
-      className={className}
-      onClick={(e) => {
-        e.stopPropagation()
-        copy(text)
-      }}
-      title={title}
-    >
-      {copied ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
-    </Button>
-  )
-}
 
 const ADMIN_ONLY_COLUMNS: ColumnDef<CronRun>[] = [
       {
@@ -175,10 +154,11 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
               </TooltipContent>
             </Tooltip>
             {err && (
-              <CopyTextButton
+              <CopyButton
                 text={err}
-                label="Copy full error message"
+                ariaLabel="Copy full error message"
                 title="Copy full error message"
+                stopPropagation
                 className="h-6 w-6 text-muted-foreground hover:text-foreground"
               />
             )}
@@ -198,7 +178,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
         }
         if (row.original.status === 'running') {
           // Use a simple localized timer component for running jobs
-          return <LiveTimer startedAt={row.original.started_at} />
+          return <LiveElapsed startedAt={row.original.started_at} className="font-mono text-blue-700 dark:text-blue-300 tabular-nums text-xs font-medium" />
         }
         const fmt = s < 1 ? `${Math.round(s * 1000)}ms` : s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`
         return <span className="font-mono text-muted-foreground tabular-nums text-xs">{fmt}</span>
@@ -303,10 +283,11 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
                   </TooltipContent>
                 </Tooltip>
                 {row.original.error_message && (
-                  <CopyTextButton
+                  <CopyButton
                     text={row.original.error_message}
-                    label="Copy corrupt-line details"
+                    ariaLabel="Copy corrupt-line details"
                     title="Copy corrupt lines"
+                    stopPropagation
                     className="h-5 w-5 text-muted-foreground hover:text-foreground opacity-0 group-hover/corrupt:opacity-100 transition-opacity"
                   />
                 )}

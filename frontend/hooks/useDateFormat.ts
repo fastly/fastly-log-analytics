@@ -1,6 +1,6 @@
 import { useCallback, useMemo } from 'react'
 import { useTimezoneStore } from '@/stores/timezoneStore'
-import { formatDate, formatRelative, formatCompactRelative, formatTimeAgo, getTimezoneAbbr } from '@/lib/date'
+import { formatDate, formatRelative, formatTimeAgo, getTimezoneAbbr } from '@/lib/date'
 
 export function useDateFormat() {
   const timezone = useTimezoneStore(state => state.timezone)
@@ -12,7 +12,6 @@ export function useDateFormat() {
   const abbr = useCallback(() => getTimezoneAbbr(new Date(), timezone), [timezone])
   const relative = useCallback((date: string | Date) => formatRelative(date), [])
   const timeAgo = useCallback((date: string | Date) => formatTimeAgo(typeof date === 'string' ? date : date.toISOString()), [])
-  const compactRelative = useCallback((date: string | Date) => formatCompactRelative(date), [])
   const format = useCallback((date: string | Date, pattern: string) => formatDate(date, timezone, pattern), [timezone])
 
   return useMemo(() => ({
@@ -23,7 +22,6 @@ export function useDateFormat() {
     abbr,
     relative,
     timeAgo,
-    compactRelative,
     format
-  }), [short, full, time, timeMs, abbr, relative, timeAgo, compactRelative, format])
+  }), [short, full, time, timeMs, abbr, relative, timeAgo, format])
 }

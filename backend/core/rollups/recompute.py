@@ -33,11 +33,9 @@ from ._common import (
     _hour_bundled_root,
     _ip_spread_root,
     _is_safe_ident,
-    _load_markers,
     _publish_field_partitions,
     _rollups_root,
     _safe_table_for,
-    _save_markers,
     acquire_rollup_connection_and_cols,
     parse_hour_token,
     quote_path_list,
@@ -170,49 +168,6 @@ def recompute_touched_hours(service_id: str, source: dict, hours: set[str]) -> N
                     spec.fallback,
                     e,
                 )
-
-
-def backfill_rollups(service_id: str, source: dict, fields: list[str] | None = None) -> None:
-    """One-shot bulk build for all historical hours up to (but not including)
-    the current hour.
-
-    ``fields``: if provided, only backfills the given subset (used when a
-    new custom field is added).
-    Defaults to all eligible fields.
-    """
-    table_ident = _safe_table_for(source)
-    if not table_ident:
-        return
-
-    target_fields = fields if fields is not None else _get_fields(source)
-    if not target_fields:
-        return
-
-    dt_end = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-    where_sql = f"timestamp < '{dt_end.isoformat()}'"
-    _run_per_field_copy(service_id, source, table_ident, where_sql, target_fields)
-
-    # IP-spread companion to the count rollup — see _run_ip_spread_per_field
-    # for why this can't run as a pure SQL COPY. Best-effort; the count
-    # rollup completing successfully is the primary contract of this
-    # call, and the IP-spread reader has its own fallback when files are
-    # missing.
-    try:
-        _run_ip_spread_per_field(service_id, source, table_ident, where_sql, target_fields)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: backfill ip_spread per-field write failed (count rollup unaffected): %s",
-            service_id,
-            e,
-        )
-
-    # Stamp completion in the markers file so _ensure_rollups can detect
-    # which fields still need a backfill on next startup / cfg change.
-    markers = _load_markers(source)
-    stamp = datetime.now(UTC).isoformat()
-    for f in target_fields:
-        markers[f] = stamp
-    _save_markers(source, markers)
 
 
 def _bundle_metadata(path: str) -> pq.FileMetaData | None:

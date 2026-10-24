@@ -15,7 +15,6 @@ import pytest
 from aiohttp import web
 from botocore import UNSIGNED
 from botocore.config import Config
-from moto.server import ThreadedMotoServer
 
 from backend.utils import telemetry_proxy
 
@@ -41,38 +40,6 @@ def _mock_upstream(status=200, headers=None, chunks=(b"",)):
     mock_ctx.__aenter__.return_value = mock_resp
     mock_ctx.__aexit__.return_value = None
     return mock_ctx, mock_resp
-
-
-@pytest.fixture
-async def proxy_server():
-    """Start the proxy in a clean state, poll /healthz until ready, yield it,
-    then shut down and reset module globals.
-
-    Using a fixture (not bare start/stop calls in each test) eliminates two
-    flakiness sources: (1) the asyncio.sleep(0.1) "wait for spin-up" race
-    on slow CI runners, and (2) module-global leakage when a test fails
-    before its stop_proxy_server() call.
-    """
-    telemetry_proxy._reset_for_tests()
-    telemetry_proxy.start_proxy_server()
-    deadline = asyncio.get_event_loop().time() + 5.0
-    while True:
-        try:
-            async with aiohttp.ClientSession() as s:
-                async with s.get(f"{telemetry_proxy.proxy_endpoint()}/healthz") as r:
-                    if r.status == 200:
-                        break
-        except (aiohttp.ClientError, RuntimeError):
-            pass
-        if asyncio.get_event_loop().time() > deadline:
-            telemetry_proxy.stop_proxy_server()
-            raise RuntimeError("proxy did not become healthy in 5s")
-        await asyncio.sleep(0.02)
-    try:
-        yield telemetry_proxy
-    finally:
-        telemetry_proxy.stop_proxy_server()
-        telemetry_proxy._reset_for_tests()
 
 
 async def test_proxy_healthz_returns_200_on_startup(proxy_server):
@@ -304,33 +271,6 @@ async def test_proxy_preserves_url_encoding_on_outbound_wire_so_sigv4_matches(pr
         "proxy decoded %3D -> = on the outbound wire, but botocore signed for %3D. "
         f"wire={received_on_upstream_wire[0]!r} expected={encoded_path!r}"
     )
-
-
-@pytest.fixture
-def moto_s3_server():
-    """Run a real http moto S3 server on a free port and seed a bucket.
-
-    Unlike the broader `s3_mock` fixture in tests/conftest.py (which uses
-    moto's transport patch), this returns a host:port that aiohttp can
-    actually connect to — required for the proxy's E2E SigV4 verification.
-    """
-    server = ThreadedMotoServer(port=0)
-    server.start()
-    host, port = server.get_host_and_port()
-    endpoint_url = f"http://{host}:{port}"
-    seed_client = boto3.client(
-        "s3",
-        endpoint_url=endpoint_url,
-        region_name="us-east-1",
-        aws_access_key_id="testing",
-        aws_secret_access_key="testing",
-        config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
-    )
-    seed_client.create_bucket(Bucket="test-bucket")
-    try:
-        yield endpoint_url, f"{host}:{port}"
-    finally:
-        server.stop()
 
 
 async def test_boto3_unsigned_through_proxy_round_trips_against_moto(proxy_server, moto_s3_server):

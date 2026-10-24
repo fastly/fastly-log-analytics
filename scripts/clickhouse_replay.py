@@ -9,7 +9,7 @@ from dataclasses import asdict
 
 from backend import config
 from backend.core.clickhouse_client import close_clickhouse_client
-from backend.core.clickhouse_export import FosArtifacts, export_snapshot
+from backend.core.clickhouse_export import FosArtifacts
 from backend.core.clickhouse_manifest import PgManifest
 from backend.core.clickhouse_publication import full_rebuild, replay_unpublished
 from backend.core.clickhouse_rows import MAX_BATCH_ROWS, MAX_DATASET_ROWS, utc
@@ -60,20 +60,7 @@ def run(args) -> dict:
             "batch_rows": args.batch_rows,
         }
     if args.export:
-        dataset = export_snapshot(
-            args.service_id,
-            start=utc(args.start),
-            end=utc(args.end),
-            max_rows=args.max_rows,
-            batch_rows=args.batch_rows,
-            ttl_hours=args.ttl_hours,
-        )
-        return {
-            "dataset_id": dataset.dataset_id,
-            "rows": dataset.expected_rows,
-            "source_snapshot": dataset.source_snapshot,
-            "expires_at": dataset.expires_at.isoformat(),
-        }
+        raise RuntimeError("Snapshot export is not available in this CLI mode")
     cfg = config.load_config(args.service_id)
     if not cfg or cfg.get("access_level", "read_write") != "read_write":
         raise ValueError("configured admin service required")

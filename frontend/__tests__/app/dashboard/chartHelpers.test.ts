@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
-import { buildTrafficData, densifyBarSeries, getIntervalSeconds, buildChartLayout } from '@/app/dashboard/_sections/chartHelpers'
+import { buildChartLayout } from '@/app/dashboard/_sections/chartHelpers'
+import { densifyBarSeries } from '@/lib/chart-helpers'
+import { buildTrafficData, getIntervalSeconds } from '@/lib/traffic-chart'
 
 const baseParams = {
   compareAggregates: null,

@@ -44,30 +44,3 @@ class TestConfigToSource:
         assert src["endpoint"] == "cdn.example.com"
         assert src["fos_native_endpoint"] == "us-east-1.object.fastlystorage.app"
         assert src["fos_native_endpoint"] != src["endpoint"]
-
-
-class TestPyIcebergEndpointSelection:
-    """PyIceberg commits new metadata.json files on every snapshot — those
-    PUTs/DELETEs must not go through the CDN."""
-
-    def test_catalog_uses_native_endpoint(self, monkeypatch):
-        captured: dict = {}
-
-        class _StubCatalog:
-            def __init__(self, _name, **props):
-                captured.update(props)
-
-        from backend.core import iceberg as _ic
-
-        monkeypatch.setattr(_ic, "_catalog_cache", {})
-
-        from pyiceberg.catalog import sql as _sql_mod
-
-        monkeypatch.setattr(_sql_mod, "SqlCatalog", _StubCatalog)
-
-        src = svcconfig.config_to_source(_cfg(with_cdn=True))
-        # _catalog_db_path/_warehouse_uri need a duckdb_path; supply one.
-        src["duckdb_path"] = "/tmp/_endpoint_routing_test.duckdb"
-        _ic._get_catalog(src)
-
-        assert captured["s3.endpoint"] == "https://us-east-1.object.fastlystorage.app"

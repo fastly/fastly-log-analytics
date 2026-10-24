@@ -1,12 +1,4 @@
 import pyarrow as pa
-from pyiceberg.schema import Schema
-from pyiceberg.types import (
-    DoubleType,
-    IntegerType,
-    NestedField,
-    StringType,
-    TimestampType,
-)
 
 # PyArrow schemas
 CLIENT_VITALS_ARROW_SCHEMA = pa.schema(
@@ -60,49 +52,4 @@ RUM_TABLE_SCHEMAS = {
 RUM_NATURAL_KEYS: dict[str, tuple[str, ...]] = {
     "client_vitals": ("timestamp", "metric_name", "pathname", "cid", "req_id"),
     "client_errors": ("timestamp", "error_message", "error_file", "error_line", "pathname", "cid", "req_id"),
-}
-
-# PyIceberg schemas
-CLIENT_VITALS_ICEBERG_SCHEMA = Schema(
-    NestedField(field_id=1, name="timestamp", field_type=TimestampType(), required=True),
-    NestedField(field_id=2, name="metric_name", field_type=StringType(), required=True),
-    NestedField(field_id=3, name="metric_value", field_type=DoubleType(), required=True),
-    NestedField(field_id=4, name="metric_rating", field_type=StringType(), required=False),
-    NestedField(field_id=5, name="pathname", field_type=StringType(), required=False),
-    NestedField(field_id=6, name="browser", field_type=StringType(), required=False),
-    NestedField(field_id=7, name="os", field_type=StringType(), required=False),
-    NestedField(field_id=8, name="device", field_type=StringType(), required=False),
-    NestedField(field_id=9, name="cid", field_type=StringType(), required=False),
-    NestedField(field_id=10, name="req_id", field_type=StringType(), required=False),
-    NestedField(field_id=11, name="city", field_type=StringType(), required=False),
-    NestedField(field_id=12, name="region", field_type=StringType(), required=False),
-    NestedField(field_id=13, name="country", field_type=StringType(), required=False),
-    NestedField(field_id=14, name="pop", field_type=StringType(), required=False),
-    NestedField(field_id=15, name="tls", field_type=StringType(), required=False),
-    NestedField(field_id=16, name="ttfb", field_type=DoubleType(), required=False),
-)
-
-CLIENT_ERRORS_ICEBERG_SCHEMA = Schema(
-    NestedField(field_id=1, name="timestamp", field_type=TimestampType(), required=True),
-    NestedField(field_id=2, name="error_message", field_type=StringType(), required=True),
-    NestedField(field_id=3, name="error_file", field_type=StringType(), required=False),
-    NestedField(field_id=4, name="error_line", field_type=IntegerType(), required=False),
-    NestedField(field_id=5, name="error_col", field_type=IntegerType(), required=False),
-    NestedField(field_id=6, name="pathname", field_type=StringType(), required=False),
-    NestedField(field_id=7, name="browser", field_type=StringType(), required=False),
-    NestedField(field_id=8, name="os", field_type=StringType(), required=False),
-    NestedField(field_id=9, name="device", field_type=StringType(), required=False),
-    NestedField(field_id=10, name="cid", field_type=StringType(), required=False),
-    NestedField(field_id=11, name="req_id", field_type=StringType(), required=False),
-    NestedField(field_id=12, name="city", field_type=StringType(), required=False),
-    NestedField(field_id=13, name="region", field_type=StringType(), required=False),
-    NestedField(field_id=14, name="country", field_type=StringType(), required=False),
-    NestedField(field_id=15, name="pop", field_type=StringType(), required=False),
-    NestedField(field_id=16, name="tls", field_type=StringType(), required=False),
-    NestedField(field_id=17, name="ttfb", field_type=DoubleType(), required=False),
-)
-
-RUM_ICEBERG_SCHEMAS = {
-    "client_vitals": CLIENT_VITALS_ICEBERG_SCHEMA,
-    "client_errors": CLIENT_ERRORS_ICEBERG_SCHEMA,
 }

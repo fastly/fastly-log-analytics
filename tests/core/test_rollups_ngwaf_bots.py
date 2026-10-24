@@ -21,6 +21,7 @@ import pytest
 
 from tests._helpers.dates import past_hour as _past_hour
 from tests._helpers.locks import noop_lock as _noop_lock
+from tests._helpers.rollups import build_writer_patches as _build_patches
 
 pytestmark = pytest.mark.usefixtures("frozen_clock")
 
@@ -52,19 +53,6 @@ def _create_cache_db(db_path: str, entries: list[tuple]) -> None:
         )
     con.commit()
     con.close()
-
-
-def _build_patches(cache_root, table: str, con_factory):
-    return (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value=table),
-        patch("backend.core.duckdb.get_connection", side_effect=lambda *a, **k: con_factory()),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
-            side_effect=lambda c, _src, fn: fn(c),
-        ),
-    )
 
 
 # ── Writer ───────────────────────────────────────────────────────────────────

@@ -24,7 +24,6 @@ import logging
 import os
 import re
 import threading
-import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -64,10 +63,6 @@ def _execute_query_with_retry(*a, **kw):
     return _db_main._execute_query_with_retry(*a, **kw)
 
 
-def _fos_glob(*a, **kw):
-    return _db_main._fos_glob(*a, **kw)
-
-
 def _get_fos_client(*a, **kw):
     return _db_main._get_fos_client(*a, **kw)
 
@@ -78,10 +73,6 @@ def get_connection(*a, **kw):
 
 def is_configured(*a, **kw):
     return _db_main.is_configured(*a, **kw)
-
-
-def log_cron_run(*a, **kw):
-    return _db_main.log_cron_run(*a, **kw)
 
 
 # Module-level constants the carved code reads with bare names.
@@ -989,119 +980,6 @@ def get_ingested_files(con: duckdb.DuckDBPyConnection | None, source: dict | Non
     from backend.core import metadata as metadata_db
 
     return metadata_db.list_ingested_files(src["name"])
-
-
-def delete_ingested_files(
-    con: duckdb.DuckDBPyConnection, source: dict | None = None, explicit_files: list[str] | None = None
-):
-    """Delete already-ingested files from Fastly Object Storage for a source.
-
-    Iterative process: performs multiple passes (max 3) to ensure any files
-    ingested or uploaded during the deletion window are caught. Uses bulk
-    deletion for maximum performance and robustness.
-    """
-    src = source or _db_main._DEFAULT_SOURCE
-    if src.get("access_level") == "read_only":
-        yield {"type": "error", "message": "Write operations are disabled in read-only mode."}
-        return
-    glob_pattern = _fos_glob(src)
-    fos_client = _get_fos_client(src)
-    total_deleted = 0
-
-    from backend.core.ingest import _delete_objects_robust
-
-    if explicit_files:
-        keys_to_delete = [
-            f[len(f"s3://{src['bucket']}/") :] for f in explicit_files if f.startswith(f"s3://{src['bucket']}/")
-        ]
-        if not keys_to_delete:
-            yield {"type": "status", "message": "No valid files provided for deletion."}
-            return
-
-        yield {"type": "status", "message": f"Deleting {len(keys_to_delete)} files directly..."}
-        batch_size = 500
-        for i in range(0, len(keys_to_delete), batch_size):
-            batch = keys_to_delete[i : i + batch_size]
-            current_deleted = _delete_objects_robust(fos_client, src["bucket"], batch)
-            total_deleted += current_deleted
-            yield {
-                "type": "progress",
-                "current": min(i + batch_size, len(keys_to_delete)),
-                "total": len(keys_to_delete),
-                "message": f"Deleted {min(i + batch_size, len(keys_to_delete))} of {len(keys_to_delete)} files",
-            }
-
-        yield {
-            "type": "done",
-            "deleted_files": total_deleted,
-            "message": f"Successfully deleted {total_deleted} ingested files from Fastly Object Storage.",
-        }
-        return
-
-    for pass_num in range(1, 4):
-        yield {"type": "status", "message": f"Pass {pass_num}/3: Checking for ingested files..."}
-
-        try:
-            # Query the bucket for current file list
-            from backend.utils.sql_validator import escape_sql_literal
-
-            safe_glob = escape_sql_literal(glob_pattern)
-            all_files = _execute_query_with_retry(con, f"SELECT file FROM glob('{safe_glob}')").fetchall()
-        except Exception as e:
-            yield {"type": "error", "message": f"Failed to list bucket during pass {pass_num}: {e}"}
-            break
-
-        all_file_names = {row[0] for row in all_files}
-
-        # Query local SQLite metadata for ingested list
-        from backend.core import metadata as metadata_db
-
-        ingested_set = metadata_db.get_ingested_filenames(src["name"])
-
-        # Files to delete: intersection of what exists in FOS and what we've already ingested
-        to_delete_paths = sorted(all_file_names & ingested_set)
-
-        if not to_delete_paths:
-            if pass_num == 1:
-                yield {"type": "status", "message": "No ingested files found to delete."}
-            else:
-                yield {"type": "status", "message": "Verification complete: no remaining ingested files found."}
-            break
-
-        # Convert full glob() paths (s3://bucket/key) back to raw keys
-        keys_to_delete = []
-        for path in to_delete_paths:
-            key = path[len(f"s3://{src['bucket']}/") :]
-            keys_to_delete.append(key)
-
-        yield {
-            "type": "status",
-            "message": f"Pass {pass_num}/3: Deleting {len(keys_to_delete)} files in bulk batches...",
-        }
-
-        # Use progress updates for the deletion batches
-        batch_size = 500
-        for i in range(0, len(keys_to_delete), batch_size):
-            batch = keys_to_delete[i : i + batch_size]
-            current_deleted = _delete_objects_robust(fos_client, src["bucket"], batch)
-            total_deleted += current_deleted
-
-            yield {
-                "type": "progress",
-                "current": min(i + batch_size, len(keys_to_delete)),
-                "total": len(keys_to_delete),
-                "message": f"Pass {pass_num}/3: Deleted {min(i + batch_size, len(keys_to_delete))} of {len(keys_to_delete)} files",
-            }
-
-        # Small pause before next pass to allow for eventual consistency
-        if pass_num < 3:
-            time.sleep(0.5)
-
-    yield {
-        "type": "done",
-        "deleted_files": total_deleted,
-        "message": f"Successfully deleted {total_deleted} ingested files from Fastly Object Storage.",
-    }
 
 
 # (source_name, table_name, stats) -> schema_list

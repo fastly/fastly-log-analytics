@@ -42,96 +42,6 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-# ── Unit: get_iceberg_schema after hard delete ───────────────────────────────
-
-
-def _lf(custom_fields: list[dict]) -> dict:
-    return {"schema_version": 2, "groups": ["A"], "custom_fields": custom_fields}
-
-
-def test_hard_delete_middle_field_shifts_later_field_ids():
-    """Surprising-but-real: HARD deleting beta (vs disabling it) lets
-    gamma slide into beta's old ID slot. The lifecycle tests prove the
-    SOFT path holds the slot; this proves the HARD path does NOT.
-
-    This is documented because it's a real schema-evolution foot-gun.
-    The integration test below proves it does not cause data loss in
-    practice — Iceberg's persisted catalog schema is what actually
-    drives column identity at write time, and that catalog only ever
-    has columns ADDED, never removed (see init_iceberg_table).
-
-    If a future refactor either (a) preserves slots across hard delete,
-    or (b) starts honoring the in-memory schema for column-drop, update
-    this test deliberately.
-    """
-    from backend.core import iceberg
-
-    s_before = iceberg.get_iceberg_schema(
-        _lf(
-            [
-                {"name": "alpha", "duckdb_type": "VARCHAR", "enabled": True},
-                {"name": "beta", "duckdb_type": "VARCHAR", "enabled": True},
-                {"name": "gamma", "duckdb_type": "VARCHAR", "enabled": True},
-            ]
-        )
-    )
-    s_after_hard_delete = iceberg.get_iceberg_schema(
-        _lf(
-            [
-                {"name": "alpha", "duckdb_type": "VARCHAR", "enabled": True},
-                {"name": "gamma", "duckdb_type": "VARCHAR", "enabled": True},
-            ]
-        )
-    )
-
-    # alpha is unaffected (it's first alphabetically, so its slot is stable).
-    assert s_before.find_field("alpha").field_id == s_after_hard_delete.find_field("alpha").field_id
-
-    # gamma DOES shift down — this is the documented foot-gun.
-    gamma_before = s_before.find_field("gamma").field_id
-    gamma_after = s_after_hard_delete.find_field("gamma").field_id
-    assert gamma_after == gamma_before - 1, (
-        f"Pinned behavior: hard-deleting an alphabetically-earlier custom field "
-        f"shifts later field IDs down. gamma_before={gamma_before}, "
-        f"gamma_after={gamma_after}. If this changed, see the test docstring."
-    )
-
-    # And beta is gone from the emitted schema (not just absent — fully erased).
-    assert "beta" not in {f.name for f in s_after_hard_delete.fields}
-
-
-def test_hard_delete_field_alphabetically_last_is_pure_truncation():
-    """When the deleted field is the alphabetical tail, the remaining
-    fields keep their original IDs — no shift. This is the most common
-    real-world hard-delete pattern (admin tries a field, decides against
-    it, removes it before any rows are written), so it's worth pinning
-    the safe sub-case explicitly.
-    """
-    from backend.core import iceberg
-
-    s_before = iceberg.get_iceberg_schema(
-        _lf(
-            [
-                {"name": "alpha", "duckdb_type": "VARCHAR", "enabled": True},
-                {"name": "beta", "duckdb_type": "VARCHAR", "enabled": True},
-                {"name": "zeta", "duckdb_type": "VARCHAR", "enabled": True},
-            ]
-        )
-    )
-    s_after = iceberg.get_iceberg_schema(
-        _lf(
-            [
-                {"name": "alpha", "duckdb_type": "VARCHAR", "enabled": True},
-                {"name": "beta", "duckdb_type": "VARCHAR", "enabled": True},
-            ]
-        )
-    )
-
-    assert s_before.find_field("alpha").field_id == s_after.find_field("alpha").field_id
-    assert s_before.find_field("beta").field_id == s_after.find_field("beta").field_id
-    assert "zeta" not in {f.name for f in s_after.fields}
-
-
 # ── Integration: end-to-end ingest → hard-delete → ingest → query ────────────
 
 
@@ -166,9 +76,6 @@ def hard_delete_env(s3_mock, fos_source, monkeypatch, tmp_path):
 
     from backend.core import iceberg as ice
 
-    ice._catalog_cache.clear()
-    ice._snapshot_files_cache.clear()
-    ice._table_object_cache.clear()
     if hasattr(ice, "_view_cache"):
         ice._view_cache.clear()
 
@@ -275,9 +182,6 @@ def test_hard_delete_preserves_old_data_and_allows_new_ingest(hard_delete_env):
     env["set_custom_fields"]([])
 
     # Reset iceberg caches so the next init reloads the table fresh
-    ice._catalog_cache.clear()
-    ice._snapshot_files_cache.clear()
-    ice._table_object_cache.clear()
     if hasattr(ice, "_view_cache"):
         ice._view_cache.clear()
 
@@ -346,13 +250,8 @@ def test_hard_delete_does_not_corrupt_remaining_field_values(hard_delete_env):
     assert next(e for e in events1 if e["type"] == "done")["rows_inserted"] == 2
     ice.commit_buffer(env["fos_source"])
 
-    # Hard-delete alpha. In get_iceberg_schema, beta's in-memory ID will
-    # shift from base+2 to base+1 — but the Iceberg catalog still has
-    # beta at base+2.
+    # Hard-delete alpha.
     env["set_custom_fields"]([{"name": "beta", "duckdb_type": "VARCHAR", "enabled": True, "vcl": '"beta":""'}])
-    ice._catalog_cache.clear()
-    ice._snapshot_files_cache.clear()
-    ice._table_object_cache.clear()
     if hasattr(ice, "_view_cache"):
         ice._view_cache.clear()
     ice.init_iceberg_table(env["fos_source"])

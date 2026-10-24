@@ -204,10 +204,6 @@ def test_sync_orphan_threshold_is_short_and_reaps_at_10_min():
 
     import time_machine
 
-    from backend.core.metadata.base import _TASK_ORPHAN_THRESHOLD_MINS
-
-    assert _TASK_ORPHAN_THRESHOLD_MINS.get("sync") == 10
-
     sid = "svc-sync-threshold"
     t0 = _dt.datetime(2026, 6, 19, 3, 40, 0, tzinfo=_dt.UTC)
     old_id = _seed_running_at(sid, "sync", t0)

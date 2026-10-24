@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import io
-import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -14,7 +12,6 @@ from backend.scoring.fixtures import (
     extract_traces,
     rows_to_events,
     sessionize,
-    write_jsonl,
 )
 
 UTC = UTC
@@ -193,39 +190,6 @@ def test_sessionize_stable_session_id_for_same_input():
     s1 = list(sessionize(events))
     s2 = list(sessionize(_events_for("1.1.1.1", "Mozilla", [base, base + timedelta(seconds=10)])))
     assert s1[0].session_id == s2[0].session_id
-
-
-# ── write_jsonl ───────────────────────────────────────────────────────────────
-
-
-def test_write_jsonl_one_line_per_session_round_trip():
-    base = datetime(2026, 5, 15, 10, 0, 0, tzinfo=UTC)
-    events = [
-        *_events_for("1.1.1.1", "Mozilla", [base, base + timedelta(seconds=10)]),
-        *_events_for("2.2.2.2", "Mozilla", [base + timedelta(seconds=20)]),
-    ]
-    sessions = list(sessionize(events))
-    buf = io.StringIO()
-    count = write_jsonl(sessions, buf)
-    assert count == 2
-
-    lines = buf.getvalue().splitlines()
-    assert len(lines) == 2
-    parsed = [json.loads(line) for line in lines]
-    assert parsed[0]["client_ip"] == "1.1.1.1"
-    assert parsed[0]["event_count"] == 2
-    assert parsed[1]["client_ip"] == "2.2.2.2"
-    # Schema sanity — each event has the right keys.
-    assert set(parsed[0]["events"][0].keys()) == {
-        "ts",
-        "url",
-        "method",
-        "status",
-        "referer",
-        "ttfb_ms",
-        "country",
-        "asn",
-    }
 
 
 # ── extract_traces (with mock DuckDB connection) ──────────────────────────────

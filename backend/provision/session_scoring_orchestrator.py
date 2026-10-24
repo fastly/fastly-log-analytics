@@ -59,7 +59,6 @@ logger = logging.getLogger(__name__)
 # Locations of the matrix files relative to repo root.
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _MATRIX_PATH = _REPO_ROOT / "compute" / "scorer" / "matrix.json"
-_DEPLOY_WASM_SCRIPT = _REPO_ROOT / "scripts" / "scoring" / "deploy_wasm.sh"
 # Prebuilt, matrix-less Wasm package. Built off-VM (Makefile `scorer-package`
 # / deploy_wasm.sh) and committed; the Dockerfile COPYies it into the image so
 # the backend can deploy it via the Fastly API with no toolchain. The matrix
@@ -250,17 +249,6 @@ _SCORING_CUSTOM_FIELDS: list[dict[str, Any]] = [
     },
 ]
 _SCORING_FIELD_NAMES = {cf["name"] for cf in _SCORING_CUSTOM_FIELDS}
-
-
-def get_scoring_fields(enabled: bool) -> list[dict]:
-    """Return Scoring custom fields if enabled, else empty list.
-
-    Used by field registry and reconcilers to generate system fields on-demand
-    based on feature toggles, without persisting them in the config file.
-    """
-    if enabled:
-        return [dict(cf) for cf in _SCORING_CUSTOM_FIELDS]
-    return []
 
 
 def merge_scoring_custom_fields(custom_fields: list[dict] | None) -> list[dict]:

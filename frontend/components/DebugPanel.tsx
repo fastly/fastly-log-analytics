@@ -5,7 +5,8 @@ import { usePathname } from 'next/navigation'
 import { useDebugStore } from '@/stores/debugStore'
 import { useServiceStore } from '@/stores/serviceStore'
 import { Button } from '@/components/ui/button'
-import { ChevronDown, ChevronUp, Database, HardDrive, Network, Trash2, Copy, Check } from 'lucide-react'
+import { CopyButton } from '@/components/ui/copy-button'
+import { ChevronDown, ChevronUp, Database, HardDrive, Network, Trash2 } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge } from '@/components/ui/badge'
 import { client, extractApiError } from '@/lib/api'
@@ -13,7 +14,6 @@ import { unwrapClient } from '@/lib/api-client'
 import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
 import type { components } from '@/types/api.generated'
 import type { DebugCall as ApiDebugCall, DebugQuery as ApiDebugQuery } from '@/types/api'
-import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
 type SqliteRecentResponse = components['schemas']['RecentSqliteResponse']
 type SqliteEntry = components['schemas']['SqliteProfilerEntry']
@@ -25,32 +25,6 @@ type DebugCall = Omit<ApiDebugCall, 'status' | 'caller' | 'details'> & {
   caller?: string
   status: string
   details?: string
-}
-
-interface CopyButtonProps {
-  text: string
-}
-
-function CopyButton({ text }: CopyButtonProps) {
-  const { copied, copy } = useCopyToClipboard(2000)
-
-  const handleCopy = () => copy(text)
-
-  return (
-    <Button
-      variant="ghost"
-      size="icon"
-      className="h-5 w-5 text-muted-foreground hover:text-foreground hover:bg-muted ml-1 shrink-0"
-      onClick={handleCopy}
-      title="Copy for AI Analysis"
-    >
-      {copied ? (
-        <Check className="h-3 w-3 text-green-500" />
-      ) : (
-        <Copy className="h-3 w-3" />
-      )}
-    </Button>
-  )
 }
 
 export function DebugPanel() {

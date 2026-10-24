@@ -1719,27 +1719,6 @@ COALESCED_ASN_AGGREGATES = """
 # ONE ungrouped table scan computing the service-wide counters for
 # http3_fallback and cache_hit_cliff.
 
-COALESCED_SCALAR_AGGREGATES = """
-    WITH base AS (
-        SELECT
-            {transport_sel} AS transport,
-            {cache_sel} AS cache,
-            (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
-            (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
-        FROM {table_name}
-    )
-    SELECT
-        COUNT(*) FILTER (WHERE is_w AND transport IS NOT NULL AND transport != '' AND lower(transport) = 'quic') AS w_quic,
-        COUNT(*) FILTER (WHERE is_w AND transport IS NOT NULL AND transport != '') AS w_tr_total,
-        COUNT(*) FILTER (WHERE is_b AND transport IS NOT NULL AND transport != '' AND lower(transport) = 'quic') AS b_quic,
-        COUNT(*) FILTER (WHERE is_b AND transport IS NOT NULL AND transport != '') AS b_tr_total,
-        COALESCE(SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_w), 0) AS w_hits,
-        COALESCE(SUM(CASE WHEN starts_with(cache, 'HIT') OR starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_w), 0) AS w_cacheable,
-        COALESCE(SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_b), 0) AS b_hits,
-        COALESCE(SUM(CASE WHEN starts_with(cache, 'HIT') OR starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_b), 0) AS b_cacheable
-    FROM base
-    """
-
 COALESCED_SCALAR_EXTENDED_AGGREGATES = """
     WITH base AS (
         SELECT
@@ -2231,7 +2210,6 @@ __all__ = [
     "COALESCED_IP_SECURITY_AGGREGATES",
     "COALESCED_IP_EXTENDED_AGGREGATES",
     "COALESCED_ASN_AGGREGATES",
-    "COALESCED_SCALAR_AGGREGATES",
     "COALESCED_SCALAR_EXTENDED_AGGREGATES",
     "COALESCED_FP_AGGREGATES",
     "COALESCED_DIM_AGGREGATES",

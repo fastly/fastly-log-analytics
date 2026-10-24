@@ -1,6 +1,7 @@
 'use client'
 
 import * as React from 'react'
+import { useMutation } from '@tanstack/react-query'
 import { Globe, AlertTriangle, Loader2 } from 'lucide-react'
 
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -30,14 +31,11 @@ export function TeardownRemoteFrontendDialog({
   onSuccess,
 }: TeardownRemoteFrontendDialogProps) {
   const [open, setOpen] = React.useState(false)
-  const [tearingDown, setTearingDown] = React.useState(false)
   const [error, setError] = React.useState('')
   const [tokenOverride, setTokenOverride] = React.useState('')
 
-  const handleTeardown = async () => {
-    setTearingDown(true)
-    setError('')
-    try {
+  const teardownMutation = useMutation({
+    mutationFn: async () => {
       const { error: apiError } = await client.POST('/api/sharing/teardown-frontend', {
         body: {
           service_id: serviceId,
@@ -48,14 +46,21 @@ export function TeardownRemoteFrontendDialog({
       if (apiError) {
         throw new Error(extractApiError(apiError))
       }
-
+    },
+    onMutate: () => {
+      setError('')
+    },
+    onSuccess: () => {
       setOpen(false)
       onSuccess()
-    } catch (err) {
+    },
+    onError: (err) => {
       setError(extractApiError(err))
-    } finally {
-      setTearingDown(false)
-    }
+    },
+  })
+  const tearingDown = teardownMutation.isPending
+  const handleTeardown = () => {
+    teardownMutation.mutate()
   }
 
   return (

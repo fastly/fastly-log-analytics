@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from backend.core.clickhouse_client import CLICKHOUSE_FACT_COLUMNS, ClickHouseClient, get_clickhouse_client
+from backend.core.clickhouse_client import ClickHouseClient, get_clickhouse_client
 from backend.core.metadata import pg_connection
 from backend.core.metadata.clickhouse_ddl import CLICKHOUSE_CONTROL_DDL
 
@@ -42,10 +42,6 @@ CREATE TABLE IF NOT EXISTS log_facts (
 PARTITION BY (service_id, generation)
 ORDER BY (service_id, generation, batch_id, row_ordinal)
 """
-
-
-def clickhouse_fact_columns() -> tuple[str, ...]:
-    return CLICKHOUSE_FACT_COLUMNS
 
 
 def require_postgres() -> None:

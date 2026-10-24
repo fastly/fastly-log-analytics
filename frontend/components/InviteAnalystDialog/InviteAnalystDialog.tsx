@@ -1,6 +1,7 @@
 'use client'
 
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
+import { useMutation } from '@tanstack/react-query'
 import {
   Dialog,
   DialogContent,
@@ -135,47 +136,51 @@ function CachedInviteBanner({ serviceId, onReveal }: { serviceId: string; onReve
   )
 }
 
-export function InviteAnalystDialog({ service, open, onOpenChange }: InviteAnalystDialogProps) {
-  const [step, setStep] = useState<Step>('confirm')
-  const [error, setError] = useState('')
+export function InviteAnalystDialog(props: InviteAnalystDialogProps) {
+  const { service, open } = props
+  const [generation, setGeneration] = useState(0)
+  const [wasOpen, setWasOpen] = useState(open)
+  if (open !== wasOpen) {
+    setWasOpen(open)
+    if (open) setGeneration((g) => g + 1)
+  }
+  return <InviteAnalystDialogBody key={`${service?.service_id ?? ''}|${generation}`} {...props} />
+}
+
+function InviteAnalystDialogBody({ service, open, onOpenChange }: InviteAnalystDialogProps) {
   const [result, setResult] = useState<AnalystInvite | null>(null)
   const { copied: jsonCopied, copy: copyJson } = useCopyToClipboard(2000)
-  useEffect(() => {
-    if (!open) {
-      const tid = setTimeout(() => {
-        setStep('confirm')
-        setError('')
-        setResult(null)
-      }, 300)
-      return () => clearTimeout(tid)
-    }
-  }, [open])
+
+  const createInviteMutation = useMutation({
+    mutationFn: async (serviceId: string) => {
+      const data = await unwrapClient(client.POST("/api/services/{service_id}/generate-viewer-key", {
+        params: { path: { service_id: serviceId } },
+      }))
+      return data as AnalystInvite
+    },
+    onSuccess: (invite, serviceId) => {
+      recentInvites.set(serviceId, { invite, issuedAt: Date.now() })
+      setResult(invite)
+    },
+  })
 
   if (!service) return null
 
+  const step: Step = result ? 'result' : createInviteMutation.isPending ? 'creating' : 'confirm'
+  const error = createInviteMutation.error
+    ? (createInviteMutation.error instanceof Error && createInviteMutation.error.message
+        ? createInviteMutation.error.message
+        : 'Failed to create analyst key')
+    : ''
 
-  const handleCreate = async () => {
-    setError('')
-    setStep('creating')
-    try {
-      const data = await unwrapClient(client.POST("/api/services/{service_id}/generate-viewer-key", {
-        params: { path: { service_id: service.service_id } },
-      }))
-      const invite = data as AnalystInvite
-      recentInvites.set(service.service_id, { invite, issuedAt: Date.now() })
-      setResult(invite)
-      setStep('result')
-    } catch (e) {
-      setError(e instanceof Error && e.message ? e.message : 'Failed to create analyst key')
-      setStep('confirm')
-    }
+  const handleCreate = () => {
+    createInviteMutation.mutate(service.service_id)
   }
 
   const handleRevealCached = () => {
     const cachedInvite = getRecentInvite(service.service_id)
     if (!cachedInvite) return
     setResult(cachedInvite)
-    setStep('result')
   }
 
   const handleCopyJson = () => {

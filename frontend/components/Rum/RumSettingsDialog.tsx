@@ -19,7 +19,7 @@ import { ArrowRight, Settings2, Sparkles } from 'lucide-react'
 import { RumVersionPicker } from '@/components/ProvisionWizard/RumVersionPicker'
 import { useSSE, type SSELine } from '@/hooks/useSSE'
 import { useDerivedState } from '@/hooks/useDerivedState'
-import { SSEProgressView } from '@/components/SSEModal'
+import { SSEDialogFooter, SSEExecutionSection } from '@/components/SSEModal'
 import { cn } from '@/lib/utils'
 import { adminFetch } from '@/lib/api'
 import {
@@ -144,18 +144,7 @@ function RumSettingsDialogBody({
     }
   }, [statusData, serviceId])
 
-  const { lines: sseLines, status: sseStatus, error: sseError, start: sseStart, stop: sseStop, reset: sseReset } = useSSE()
-
-  // Clean up state on close
-  useEffect(() => {
-    if (!open) {
-      const id = setTimeout(() => {
-        setIsExecuting(false)
-        sseReset()
-      }, 300)
-      return () => clearTimeout(id)
-    }
-  }, [open, sseReset])
+  const { lines: sseLines, status: sseStatus, error: sseError, start: sseStart, stop: sseStop } = useSSE()
 
   // Invalidate queries when done
   useEffect(() => {
@@ -271,27 +260,20 @@ function RumSettingsDialogBody({
 
         <div className="flex-1 overflow-y-auto min-h-0">
           {isExecuting ? (
-            <div className="p-8 space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-              <div className="text-center space-y-2">
-                <h3 className="text-lg font-semibold tracking-tight">Applying RUM Settings</h3>
-                <p className="text-sm text-muted-foreground">
-                  Configuring capture options and publishing the revised tracking wrapper to Object Storage...
-                </p>
-              </div>
-
-              <SSEProgressView
-                lines={displayedLines}
-                status={currentStatus}
-                error={currentError}
-                className="h-[300px]"
-                progressLabel="Task Log"
-                doneMessage={
-                  selectedVersion !== currentVersion
-                    ? `Faro Web SDK upgraded to v${selectedVersion} and RUM capture settings updated successfully!`
-                    : "RUM capture settings and tracker JS wrapper updated successfully!"
-                }
-              />
-            </div>
+            <SSEExecutionSection
+              title="Applying RUM Settings"
+              subtitle="Configuring capture options and publishing the revised tracking wrapper to Object Storage..."
+              lines={displayedLines}
+              status={currentStatus}
+              error={currentError}
+              heightClassName="h-[300px]"
+              progressLabel="Task Log"
+              doneMessage={
+                selectedVersion !== currentVersion
+                  ? `Faro Web SDK upgraded to v${selectedVersion} and RUM capture settings updated successfully!`
+                  : "RUM capture settings and tracker JS wrapper updated successfully!"
+              }
+            />
           ) : (
             <div className="p-8 space-y-6">
               <Alert className="border-blue-300 bg-blue-50/60 dark:bg-blue-950/20 text-blue-900 dark:text-blue-300">
@@ -431,18 +413,14 @@ function RumSettingsDialogBody({
               </Button>
             </>
           ) : (
-            <>
-              {currentStatus !== 'streaming' && (
-                <Button variant="outline" onClick={() => handleClose(false)} className="h-10 px-6">
-                  Close
-                </Button>
-              )}
-              {currentStatus === 'streaming' && (
-                <Button variant="outline" onClick={selectedVersion !== currentVersion ? sseStop : undefined} disabled={selectedVersion === currentVersion} className="h-10 px-6">
-                  Stop
-                </Button>
-              )}
-            </>
+            <SSEDialogFooter
+              status={currentStatus}
+              onClose={() => handleClose(false)}
+              onStop={selectedVersion !== currentVersion ? sseStop : undefined}
+              stopDisabled={selectedVersion === currentVersion}
+              doneLabel="Close"
+              idleOrErrorLabel="Close"
+            />
           )}
         </DialogFooter>
       </DialogContent>

@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+
+import { setupNextHeadersMock, withTestHttpServer } from '../helpers/ssr'
 
 // origin.ts is the SECOND POST caller of the shared ./_transport helper (after
 // insights.ts). These tests pin (1) the security contract — the Caddy-marker
@@ -8,29 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // computes on first paint, so the SSR seed key byte-matches the client
 // first-paint key. A mismatch would double-fetch (worse than no SSR).
 
-const mockCookies = vi.fn()
-const mockHeaders = vi.fn()
-vi.mock('next/headers', () => ({
-  cookies: () => mockCookies(),
-  headers: () => mockHeaders(),
-}))
-
-beforeEach(() => {
-  mockCookies.mockReturnValue({ toString: () => '', get: () => undefined })
-  mockHeaders.mockReturnValue({ get: () => null })
-})
-
-afterEach(() => {
-  mockCookies.mockReset()
-  mockHeaders.mockReset()
-  delete process.env.API_PROXY_URL
-})
-
-function headerGetter(entries: Record<string, string>) {
-  return {
-    get: (k: string) => entries[k.toLowerCase()] ?? null,
-  }
-}
+const { setHeaders } = setupNextHeadersMock()
 
 describe('resolveOriginDefaultKey (key-match contract)', () => {
   it('cold load → rangeToken "24h", anchor floored to the 60s grid', async () => {
@@ -86,10 +66,6 @@ describe('SSR-seed key ↔ client first-paint key byte-match', () => {
     ]
 
     // ── Client first-paint key (mirrors OriginReportContent) ──
-    // Cold-load first-paint values: filterPayload = {} (no filters), bucket =
-    // intervalMap['1 hour'] = 60 (default 24h span → "1 hour"), originMetric =
-    // 'ttfb', originPercentile = 'p95', the constant ORIGIN_SECTIONS, and the
-    // same (rangeToken, anchor) OriginClient pins.
     const clientFilterPayload = {} // buildFiltersPayload([]) on a cold load
     const clientBucketMinutes = 60 // intervalMap['1 hour'] at the 24h default span
     const clientMetric = 'ttfb'
@@ -128,125 +104,96 @@ describe('fetchOriginServerSide (origin SSR)', () => {
   })
 
   it('fail-closed: no Caddy marker + non-loopback Host → null, never forwarded', async () => {
-    const http = await import('node:http')
-    let hit = false
-    const server = http.createServer((_req, res) => {
-      hit = true
-      res.statusCode = 200
-      res.end('{"summary":{}}')
-    })
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as { port: number }).port
-    process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    mockHeaders.mockReturnValue(headerGetter({ host: 'fastly-log-analytics.global.ssl.fastly.net' }))
+    setHeaders({ host: 'fastly-log-analytics.global.ssl.fastly.net' })
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    try {
-      const { fetchOriginServerSide } = await import('@/lib/ssr/origin')
-      const out = await fetchOriginServerSide('svc-1')
-      expect(out).toBeNull()
-      expect(hit).toBe(false)
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('non-loopback/absent Host'))
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()))
-    }
+    await withTestHttpServer(
+      (_req, res) => {
+        res.statusCode = 200
+        res.end('{"summary":{}}')
+      },
+      async (srv) => {
+        const { fetchOriginServerSide } = await import('@/lib/ssr/origin')
+        const out = await fetchOriginServerSide('svc-1')
+        expect(out).toBeNull()
+        expect(srv.requests).toHaveLength(0)
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('non-loopback/absent Host'))
+      },
+    )
   })
 
   it('admin SSH-tunnel (loopback Host, no marker): POSTs default keyed body as admin with service id', async () => {
-    const http = await import('node:http')
-    let captured: Record<string, string | string[] | undefined> = {}
-    let capturedMethod = ''
-    let capturedBody = ''
-    const server = http.createServer((req, res) => {
-      captured = req.headers
-      capturedMethod = req.method ?? ''
-      const chunks: Buffer[] = []
-      req.on('data', (c: Buffer) => chunks.push(c))
-      req.on('end', () => {
-        capturedBody = Buffer.concat(chunks).toString('utf8')
+    setHeaders({ host: 'localhost:3001' })
+    await withTestHttpServer(
+      (_req, res) => {
         res.statusCode = 200
         res.setHeader('Content-Type', 'application/json')
         res.end('{"summary":{"has_data":true}}')
-      })
-    })
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as { port: number }).port
-    process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    mockHeaders.mockReturnValue(headerGetter({ host: 'localhost:3001' }))
-    try {
-      const { fetchOriginServerSide, ORIGIN_SSR_DEFAULTS, ORIGIN_SSR_SECTIONS } = await import(
-        '@/lib/ssr/origin'
-      )
-      const now = new Date('2026-06-29T12:00:30Z')
-      const out = await fetchOriginServerSide('svc-1', now)
+      },
+      async (srv) => {
+        const { fetchOriginServerSide, ORIGIN_SSR_DEFAULTS, ORIGIN_SSR_SECTIONS } = await import(
+          '@/lib/ssr/origin'
+        )
+        const now = new Date('2026-06-29T12:00:30Z')
+        const out = await fetchOriginServerSide('svc-1', now)
 
-      expect(out).not.toBeNull()
-      expect(out!.data).toEqual({ summary: { has_data: true } })
-      expect(out!.rangeToken).toBe('24h')
-      expect(out!.anchor).toBe('2026-06-29T12:00:00Z')
+        expect(out).not.toBeNull()
+        expect(out!.data).toEqual({ summary: { has_data: true } })
+        expect(out!.rangeToken).toBe('24h')
+        expect(out!.anchor).toBe('2026-06-29T12:00:00Z')
 
-      // POST with the exact client keyed body shape. start_time/end_time MUST be
-      // absent (the keyed path resolves the window from range_token + anchor).
-      expect(capturedMethod).toBe('POST')
-      expect(captured['content-type']).toContain('application/json')
-      const body = JSON.parse(capturedBody)
-      expect(body).toEqual({
-        filters: {},
-        bucket_minutes: ORIGIN_SSR_DEFAULTS.bucketMinutes,
-        split_by_leg: false,
-        timeseries_metric: ORIGIN_SSR_DEFAULTS.metric,
-        timeseries_percentile: ORIGIN_SSR_DEFAULTS.percentile,
-        slow_urls_limit: ORIGIN_SSR_DEFAULTS.slowUrlsLimit,
-        slow_urls_min_requests: ORIGIN_SSR_DEFAULTS.slowUrlsMinRequests,
-        pop_latency_limit: ORIGIN_SSR_DEFAULTS.popLatencyLimit,
-        ip_health_limit: ORIGIN_SSR_DEFAULTS.ipHealthLimit,
-        sections: [...ORIGIN_SSR_SECTIONS],
-        range_token: '24h',
-        anchor: '2026-06-29T12:00:00Z',
-      })
-      expect(body.start_time).toBeUndefined()
-      expect(body.end_time).toBeUndefined()
+        const req = srv.lastRequest!
+        // POST with the exact client keyed body shape. start_time/end_time MUST be
+        // absent (the keyed path resolves the window from range_token + anchor).
+        expect(req.method).toBe('POST')
+        expect(req.headers['content-type']).toContain('application/json')
+        const body = JSON.parse(req.body)
+        expect(body).toEqual({
+          filters: {},
+          bucket_minutes: ORIGIN_SSR_DEFAULTS.bucketMinutes,
+          split_by_leg: false,
+          timeseries_metric: ORIGIN_SSR_DEFAULTS.metric,
+          timeseries_percentile: ORIGIN_SSR_DEFAULTS.percentile,
+          slow_urls_limit: ORIGIN_SSR_DEFAULTS.slowUrlsLimit,
+          slow_urls_min_requests: ORIGIN_SSR_DEFAULTS.slowUrlsMinRequests,
+          pop_latency_limit: ORIGIN_SSR_DEFAULTS.popLatencyLimit,
+          ip_health_limit: ORIGIN_SSR_DEFAULTS.ipHealthLimit,
+          sections: [...ORIGIN_SSR_SECTIONS],
+          range_token: '24h',
+          anchor: '2026-06-29T12:00:00Z',
+        })
+        expect(body.start_time).toBeUndefined()
+        expect(body.end_time).toBeUndefined()
 
-      // Admin trust path: no analyst header, service id passed.
-      expect(captured['x-remote-analyst']).toBeUndefined()
-      expect(captured['x-service-id']).toBe('svc-1')
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()))
-    }
+        // Admin trust path: no analyst header, service id passed.
+        expect(req.headers['x-remote-analyst']).toBeUndefined()
+        expect(req.headers['x-service-id']).toBe('svc-1')
+      },
+    )
   })
 
   it('analyst (Caddy marker): POSTs as remote-analyst', async () => {
-    const http = await import('node:http')
-    let captured: Record<string, string | string[] | undefined> = {}
-    let capturedMethod = ''
-    const server = http.createServer((req, res) => {
-      captured = req.headers
-      capturedMethod = req.method ?? ''
-      const chunks: Buffer[] = []
-      req.on('data', (c: Buffer) => chunks.push(c))
-      req.on('end', () => {
+    setHeaders({
+      'x-proxied-by-caddy': 'true',
+      host: 'fastly-log-analytics.global.ssl.fastly.net',
+    })
+    await withTestHttpServer(
+      (_req, res) => {
         res.statusCode = 200
         res.setHeader('Content-Type', 'application/json')
         res.end('{"summary":{"has_data":true}}')
-      })
-    })
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as { port: number }).port
-    process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    mockHeaders.mockReturnValue(
-      headerGetter({ 'x-proxied-by-caddy': 'true', host: 'fastly-log-analytics.global.ssl.fastly.net' }),
+      },
+      async (srv) => {
+        const { fetchOriginServerSide } = await import('@/lib/ssr/origin')
+        const out = await fetchOriginServerSide('svc-1')
+        expect(out).not.toBeNull()
+        expect(out!.data).toEqual({ summary: { has_data: true } })
+        const req = srv.lastRequest!
+        expect(req.method).toBe('POST')
+        // Analyst trust path: remote-analyst stamped.
+        expect(req.headers['x-remote-analyst']).toBe('1')
+        expect(req.headers['host']).toBe('fastly-log-analytics.global.ssl.fastly.net')
+        expect(req.headers['x-service-id']).toBe('svc-1')
+      },
     )
-    try {
-      const { fetchOriginServerSide } = await import('@/lib/ssr/origin')
-      const out = await fetchOriginServerSide('svc-1')
-      expect(out).not.toBeNull()
-      expect(out!.data).toEqual({ summary: { has_data: true } })
-      expect(capturedMethod).toBe('POST')
-      // Analyst trust path: remote-analyst stamped.
-      expect(captured['x-remote-analyst']).toBe('1')
-      expect(captured['host']).toBe('fastly-log-analytics.global.ssl.fastly.net')
-      expect(captured['x-service-id']).toBe('svc-1')
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()))
-    }
   })
 })

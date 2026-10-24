@@ -39,17 +39,6 @@ def register_source(service_id: str, name: str, config_json: str, table_name: st
     con.commit()
 
 
-def get_source_by_name(service_id: str, name: str) -> dict | None:
-    con = get_con(service_id)
-    row = con.execute(
-        "SELECT name, config, table_name FROM sources WHERE name = ?",
-        (name,),
-    ).fetchone()
-    if not row:
-        return None
-    return {"name": row["name"], "config": row["config"], "table_name": row["table_name"]}
-
-
 # ── usage_log ─────────────────────────────────────────────────────────────────
 
 

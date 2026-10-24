@@ -95,15 +95,3 @@ class BoundedTTLCache:
     def keys(self) -> list[Any]:
         with self.lock:
             return list(self._cache.keys())
-
-    def reap(self) -> int:
-        """Drop all currently-expired entries.
-
-        ``cachetools.TTLCache`` already evicts on every access, so most
-        operations don't see expired entries in the first place. This
-        method is kept for callers that want an explicit sweep.
-        """
-        with self.lock:
-            before = len(self._cache)
-            self._cache.expire()
-            return max(0, before - len(self._cache))

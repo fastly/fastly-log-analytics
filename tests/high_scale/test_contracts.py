@@ -1,36 +1,13 @@
 import pytest
 
 from backend.core.high_scale_contracts import (
-    ARCHIVE_STATES,
-    HIGH_SCALE_MODE,
-    HIGH_SCALE_OWNERSHIP,
     ArchiveManifest,
     ArchiveState,
     validate_archive_transition,
 )
 
 
-def test_high_scale_ownership_has_one_owner_per_boundary() -> None:
-    assert HIGH_SCALE_MODE == "high_scale"
-    assert HIGH_SCALE_OWNERSHIP == {
-        "source_discovery": "high_scale_ledger",
-        "durable_events": "fos_archive",
-        "serving": "clickhouse",
-        "source_deletion": "archive_deletion_controller",
-        "rum": "high_scale_rum_pipeline",
-        "cmcd": "request_event_projection",
-    }
-
-
 def test_archive_states_are_monotonic_and_manifest_fields_are_required() -> None:
-    assert ARCHIVE_STATES == (
-        ArchiveState.ARTIFACT_UPLOADING,
-        ArchiveState.ARTIFACT_VERIFIED,
-        ArchiveState.MANIFEST_PREPARED,
-        ArchiveState.MANIFEST_COMMITTED,
-        ArchiveState.DELETION_ELIGIBLE,
-        ArchiveState.SOURCE_DELETED,
-    )
     validate_archive_transition(ArchiveState.ARTIFACT_UPLOADING, ArchiveState.ARTIFACT_VERIFIED)
     with pytest.raises(ValueError, match="monotonic"):
         validate_archive_transition(ArchiveState.MANIFEST_COMMITTED, ArchiveState.MANIFEST_PREPARED)

@@ -3418,35 +3418,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/admin/ducklake/migrate": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Ducklake Migrate Endpoint
-         * @description Adopt this service's legacy pyiceberg-era parquet into DuckLake.
-         *
-         *     The backend already runs this automatically on first boot under v3;
-         *     this endpoint is the explicit "run it now" button (and the retry path
-         *     after a failed sweep), so it bypasses the once-ever guard. Returns
-         *     202 Accepted — the adoption runs in a background thread (registering
-         *     thousands of files can take a while). Idempotent: files already
-         *     tracked by the DuckLake catalog are skipped, so re-running after a
-         *     partial failure is safe. The outcome lands as a ``ducklake_adopt``
-         *     row in ``cron_runs`` (visible in the Cron UI) as well as in the logs.
-         */
-        post: operations["ducklake_migrate_endpoint_api_admin_ducklake_migrate_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/admin/reset-logs": {
         parameters: {
             query?: never;
@@ -9879,20 +9850,6 @@ export interface components {
             pools?: unknown;
             /** Retired Pools */
             retired_pools?: unknown;
-        } & {
-            [key: string]: unknown;
-        };
-        /**
-         * DucklakeMigrateResponse
-         * @description ``POST /admin/ducklake/migrate`` (202).
-         */
-        DucklakeMigrateResponse: {
-            /** Ok */
-            ok: boolean;
-            /** Message */
-            message: string;
-            /** Service Id */
-            service_id: string;
         } & {
             [key: string]: unknown;
         };
@@ -41021,113 +40978,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SyncStartResponse"];
-                };
-            };
-            /** @description Bad request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Unauthenticated */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Validation failed */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Rate limited */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Internal error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Upstream error */
-            502: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Service unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-        };
-    };
-    ducklake_migrate_endpoint_api_admin_ducklake_migrate_post: {
-        parameters: {
-            query?: {
-                service?: string | null;
-                service_id?: string | null;
-            };
-            header?: {
-                "x-fastly-service-id"?: string | null;
-                "x-service-id"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["DucklakeMigrateResponse"];
                 };
             };
             /** @description Bad request */

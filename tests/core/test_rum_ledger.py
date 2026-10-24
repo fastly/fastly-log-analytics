@@ -12,17 +12,22 @@ import json
 import time
 from unittest.mock import MagicMock, patch
 
-import duckdb
-
 from backend.core.ingest import (
     LEDGER_RECLAIM_AFTER_S,
     _parse_rum_beacon_file,
-    convert_rum_object,
+    convert_batch_rum_objects,
     discover_rum_prefix,
     sweep_rum_ledger_once,
 )
 from backend.core.metadata.base import get_con
-from tests._helpers.ledger import clear_ledger as _clear_ledger
+from tests._helpers.ledger import (
+    DuckLakeLedgerEnv,
+    download_stub,
+    lake_reader,
+)
+from tests._helpers.ledger import (
+    clear_ledger as _clear_ledger,
+)
 
 
 def _empty_list_fos(*args, **kwargs):
@@ -35,7 +40,7 @@ def _empty_list_fos(*args, **kwargs):
 
 def test_discover_rum_prefix_defaults_to_rum_raw_and_inserts_ledger_rows():
     """discover_rum_prefix must LIST raw/rum/ (never plain raw/request/) and dispatch
-    convert_batch_rum_files — not convert — for every newly discovered file."""
+    convert_batch_rum_files for every newly discovered file."""
     service_id = "test-celery-rum-svc"
     object_key = "raw/rum/year=2026/month=08/day=27/hour=10/minute=05/beacons.json.gz"
 
@@ -201,48 +206,24 @@ def test_parse_rum_beacon_file_skips_rows_for_other_services():
 # ── convert: DuckLake writes ────────────────────────────────────────────────
 
 
-def _fake_attach_factory(lake_file: str):
-    def _fake_attach(con_arg, src_arg, read_only=False):
-        try:
-            con_arg.execute("DETACH lake")
-        except duckdb.Error:
-            pass
-        con_arg.execute(f"ATTACH '{lake_file}' AS lake")
-        return True
-
-    return _fake_attach
-
-
 def _write_gz_beacon(path, lines: list[str]) -> None:
     with gzip.open(path, "wt", encoding="utf-8") as f:
         for line in lines:
             f.write(line + "\n")
 
 
-def _run_convert_rum(service_id, object_key, local_file, lake_file):
-    """Shared patch scaffold for convert_rum_object, mirroring the pattern
-    in tests/core/test_step4_sweeper.py's
-    test_convert_object_excludes_null_timestamp_rows_from_lake."""
-    src = {"service_id": service_id, "name": service_id, "bucket": "test-bucket", "prefix": ""}
-    _real_duckdb_connect = duckdb.connect
-
-    def _fake_download(fos_client, s3_paths, tmpdir):
-        return {s3_paths[0]: str(local_file)}, {}
-
-    with patch("backend.core.duckdb.get_source_for_service", return_value=src):
-        with patch("backend.core.ingest._get_fos_client", return_value=MagicMock()):
-            with patch("backend.core.ingest._download_chunk_to_local", side_effect=_fake_download):
-                with patch("duckdb.connect", side_effect=lambda *a, **kw: _real_duckdb_connect(*a, **kw)):
-                    with patch(
-                        "backend.core.iceberg._ducklake._ducklake_attach",
-                        side_effect=_fake_attach_factory(lake_file),
-                    ):
-                        with patch("backend.core.ingest._configure_fos"):
-                            with patch(
-                                "backend.core.iceberg._ducklake.ducklake_table_name",
-                                side_effect=lambda src, table_name="logs": table_name,
-                            ):
-                                return convert_rum_object(service_id, object_key, "test-worker")
+def _run_convert_rum(service_id, object_key, local_file, tmp_path):
+    """Shared patch scaffold for convert_batch_rum_objects using DuckLakeLedgerEnv."""
+    s3_path = f"s3://test-bucket/{object_key}"
+    with DuckLakeLedgerEnv(
+        service_id,
+        tmp_path,
+        download_stub({s3_path: str(local_file)}),
+        bucket="test-bucket",
+        table_name=None,
+    ) as attach:
+        summary = convert_batch_rum_objects(service_id, [object_key], "test-worker")
+    return summary, attach
 
 
 def test_convert_rum_object_splits_into_both_tables_and_commits(tmp_path):
@@ -263,14 +244,12 @@ def test_convert_rum_object_splits_into_both_tables_and_commits(tmp_path):
     raw_file = tmp_path / "beacons.json"
     _write_gz_beacon(raw_file, [vitals_line, error_line])
 
-    lake_file = str(tmp_path / "lake.db")
-    status = _run_convert_rum(service_id, object_key, raw_file, lake_file)
+    summary, attach = _run_convert_rum(service_id, object_key, raw_file, tmp_path)
 
-    assert status == "committed"
+    assert summary["committed"] == 1
 
-    check_con = duckdb.connect(":memory:")
+    check_con = lake_reader(attach)
     try:
-        check_con.execute(f"ATTACH '{lake_file}' AS lake (READ_ONLY)")
         vitals_count = check_con.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0]
         errors_count = check_con.execute("SELECT count(*) FROM lake.client_errors").fetchone()[0]
         assert vitals_count == 1
@@ -279,10 +258,6 @@ def test_convert_rum_object_splits_into_both_tables_and_commits(tmp_path):
         src_file = check_con.execute("SELECT _source_file FROM lake.client_vitals").fetchone()[0]
         assert src_file == f"s3://test-bucket/{object_key}"
     finally:
-        try:
-            check_con.execute("DETACH lake")
-        except duckdb.Error:
-            pass
         check_con.close()
 
     row = con.execute(
@@ -304,8 +279,8 @@ def test_convert_rum_object_idempotent_under_redelivery(tmp_path):
     error_line = json.dumps({"timestamp": "2026-08-27T10:06:01Z", "rum_error_message": "kaboom"})
     raw_file = tmp_path / "redeliver.json"
     _write_gz_beacon(raw_file, [vitals_line, error_line])
-    lake_file = str(tmp_path / "lake.db")
 
+    attach = None
     for _ in range(2):
         con.execute(
             "INSERT INTO ingest_ledger (service_id, object_key, status, discovered_at) "
@@ -313,19 +288,14 @@ def test_convert_rum_object_idempotent_under_redelivery(tmp_path):
             (service_id, object_key, time.time()),
         )
         con.commit()
-        status = _run_convert_rum(service_id, object_key, raw_file, lake_file)
-        assert status == "committed"
+        summary, attach = _run_convert_rum(service_id, object_key, raw_file, tmp_path)
+        assert summary["committed"] == 1
 
-    check_con = duckdb.connect(":memory:")
+    check_con = lake_reader(attach)
     try:
-        check_con.execute(f"ATTACH '{lake_file}' AS lake (READ_ONLY)")
         assert check_con.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0] == 1
         assert check_con.execute("SELECT count(*) FROM lake.client_errors").fetchone()[0] == 1
     finally:
-        try:
-            check_con.execute("DETACH lake")
-        except duckdb.Error:
-            pass
         check_con.close()
 
 
@@ -343,49 +313,36 @@ def test_convert_rum_object_quarantines_malformed_line_and_still_commits_valid_r
     bad_line = '{"timestamp": "2026-08-27T10:07:01Z", "rum_metric_name": "broken"'  # truncated
     raw_file = tmp_path / "mixed.json"
     _write_gz_beacon(raw_file, [vitals_line, bad_line])
-    lake_file = str(tmp_path / "lake.db")
 
-    src = {"service_id": service_id, "name": service_id, "bucket": "test-bucket", "prefix": ""}
-    _real_duckdb_connect = duckdb.connect
     fos_mock = MagicMock()
+    s3_path = f"s3://test-bucket/{object_key}"
 
-    def _fake_download(fos_client, s3_paths, tmpdir):
-        return {s3_paths[0]: str(raw_file)}, {}
+    with (
+        DuckLakeLedgerEnv(
+            service_id,
+            tmp_path,
+            download_stub({s3_path: str(raw_file)}),
+            bucket="test-bucket",
+            fos=fos_mock,
+            table_name=None,
+        ) as attach,
+        patch(
+            "backend.core.quarantine.capture_evidence",
+            return_value={
+                "id": 1,
+                "cap_evictions": 0,
+                "quarantine_capture_failures": 0,
+            },
+        ) as capture,
+    ):
+        summary = convert_batch_rum_objects(service_id, [object_key], "test-worker")
 
-    with patch("backend.core.duckdb.get_source_for_service", return_value=src):
-        with patch("backend.core.ingest._get_fos_client", return_value=fos_mock):
-            with patch("backend.core.ingest._download_chunk_to_local", side_effect=_fake_download):
-                with patch("duckdb.connect", side_effect=lambda *a, **kw: _real_duckdb_connect(*a, **kw)):
-                    with patch(
-                        "backend.core.iceberg._ducklake._ducklake_attach",
-                        side_effect=_fake_attach_factory(lake_file),
-                    ):
-                        with patch("backend.core.ingest._configure_fos"):
-                            with patch(
-                                "backend.core.iceberg._ducklake.ducklake_table_name",
-                                side_effect=lambda src, table_name="logs": table_name,
-                            ):
-                                with patch(
-                                    "backend.core.quarantine.capture_evidence",
-                                    return_value={
-                                        "id": 1,
-                                        "cap_evictions": 0,
-                                        "quarantine_capture_failures": 0,
-                                    },
-                                ) as capture:
-                                    status = convert_rum_object(service_id, object_key, "test-worker")
+    assert summary["committed"] == 1
 
-    assert status == "committed"
-
-    check_con = duckdb.connect(":memory:")
+    check_con = lake_reader(attach)
     try:
-        check_con.execute(f"ATTACH '{lake_file}' AS lake (READ_ONLY)")
         assert check_con.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0] == 1
     finally:
-        try:
-            check_con.execute("DETACH lake")
-        except duckdb.Error:
-            pass
         check_con.close()
 
     fos_mock.put_object.assert_not_called()
@@ -420,9 +377,6 @@ def test_convert_rum_object_partial_write_failure_does_not_mark_committed(tmp_pa
     con.commit()
 
     vitals_line = json.dumps({"timestamp": "2026-08-27T10:08:00Z", "rum_metric_name": "TTFB", "rum_metric_value": "50"})
-    # rum_error_line overflows int32 (CLIENT_ERRORS_ARROW_SCHEMA's error_line
-    # column) — pa.Table.from_pylist raises ArrowInvalid building the
-    # errors table, AFTER the vitals table has already been written.
     broken_error_line = json.dumps(
         {"timestamp": "2026-08-27T10:08:01Z", "rum_error_message": "boom", "rum_error_line": "99999999999999"}
     )
@@ -431,11 +385,10 @@ def test_convert_rum_object_partial_write_failure_does_not_mark_committed(tmp_pa
     )
     raw_file = tmp_path / "partial.json"
     _write_gz_beacon(raw_file, [vitals_line, broken_error_line])
-    lake_file = str(tmp_path / "lake.db")
 
-    status = _run_convert_rum(service_id, object_key, raw_file, lake_file)
+    summary, attach = _run_convert_rum(service_id, object_key, raw_file, tmp_path)
 
-    assert status == "discovered"  # requeued, not committed
+    assert summary["failed"] == 1
 
     row = con.execute(
         "SELECT status, committed_at, attempts FROM ingest_ledger WHERE service_id=? AND object_key=?",
@@ -445,19 +398,10 @@ def test_convert_rum_object_partial_write_failure_does_not_mark_committed(tmp_pa
     assert row["committed_at"] is None
     assert row["attempts"] == 1
 
-    # The vitals table's write DID go through (its own transaction committed
-    # before the errors table blew up) — a real DuckLake table now exists
-    # with the one vitals row, even though the ledger never reached
-    # 'committed'. A retry after fixing the input must not duplicate it.
-    check_con = duckdb.connect(":memory:")
+    check_con = lake_reader(attach)
     try:
-        check_con.execute(f"ATTACH '{lake_file}' AS lake (READ_ONLY)")
         assert check_con.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0] == 1
     finally:
-        try:
-            check_con.execute("DETACH lake")
-        except duckdb.Error:
-            pass
         check_con.close()
 
     # Retry (the bad input is now "fixed") converges: vitals row isn't
@@ -468,19 +412,14 @@ def test_convert_rum_object_partial_write_failure_does_not_mark_committed(tmp_pa
         (service_id, object_key),
     )
     con.commit()
-    status2 = _run_convert_rum(service_id, object_key, raw_file, lake_file)
-    assert status2 == "committed"
+    summary2, attach = _run_convert_rum(service_id, object_key, raw_file, tmp_path)
+    assert summary2["committed"] == 1
 
-    check_con = duckdb.connect(":memory:")
+    check_con = lake_reader(attach)
     try:
-        check_con.execute(f"ATTACH '{lake_file}' AS lake (READ_ONLY)")
         assert check_con.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0] == 1
         assert check_con.execute("SELECT count(*) FROM lake.client_errors").fetchone()[0] == 1
     finally:
-        try:
-            check_con.execute("DETACH lake")
-        except duckdb.Error:
-            pass
         check_con.close()
 
 
@@ -507,12 +446,10 @@ def test_sweep_rum_ledger_reclaims_stale_claim_and_redispatches_convert_rum():
                 with (
                     patch("backend.celery_status.celery_queue_depths", return_value=({"q.ingest": 0}, True)),
                     patch("backend.core.ingest.convert_batch_rum_files.delay") as mock_convert_rum_delay,
-                    patch("backend.core.ingest.convert.delay") as mock_convert_delay,
                     patch("backend.core.ingest.convert_batch_files.delay") as mock_convert_batch_delay,
                 ):
                     summary = sweep_rum_ledger_once(service_id)
                     mock_convert_rum_delay.assert_called_once_with(service_id, [object_key])
-                    mock_convert_delay.assert_not_called()
                     mock_convert_batch_delay.assert_not_called()
 
     assert summary["reclaimed"] == 1

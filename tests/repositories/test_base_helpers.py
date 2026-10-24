@@ -24,7 +24,6 @@ from backend.repositories._base import (
     _safe_table,
     attach_ngwaf_cache,
     empty_schema_response,
-    error_rate_expr,
     get_source_extent,
     optional_col,
     percentile_ms_expr,
@@ -189,39 +188,6 @@ def test_percentile_ms_expr_approx_supports_filter():
     out = percentile_ms_expr("ttfb", 0.99, filter_expr="WHERE edge = true", approx=True)
     assert "approx_quantile(ttfb, 0.99)" in out
     assert "FILTER (WHERE edge = true)" in out
-
-
-# ── error_rate_expr ──────────────────────────────────────────────────────
-
-
-def test_error_rate_expr_default_5xx_threshold():
-    """Default threshold is 500 (5xx errors). Pinned because the
-    dashboard's "error rate" card keys on this default."""
-    out = error_rate_expr()
-    assert ">= 500" in out
-    assert "100.0" in out  # percentage
-    assert "NULLIF(count(*)" in out  # zero-guard
-
-
-def test_error_rate_expr_custom_threshold():
-    """``threshold=400`` → 4xx+ error rate (used by the URL latency
-    panel)."""
-    out = error_rate_expr(threshold=400)
-    assert ">= 400" in out
-
-
-def test_error_rate_expr_custom_status_col():
-    """``status_col='ost'`` for origin-status rate calculations."""
-    out = error_rate_expr(status_col="ost")
-    assert "ost >= 500" in out
-
-
-def test_error_rate_expr_includes_filter_for_both_sum_and_count():
-    """The FILTER clause must apply to BOTH the sum AND the count —
-    otherwise the resulting rate is denominator-mismatched."""
-    out = error_rate_expr(filter_expr="WHERE edge = true")
-    # The filter appears twice
-    assert out.count("FILTER (WHERE edge = true)") == 2
 
 
 # ── empty_schema_response ────────────────────────────────────────────────

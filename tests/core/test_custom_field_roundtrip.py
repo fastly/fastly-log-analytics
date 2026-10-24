@@ -38,7 +38,6 @@ def _install_pipeline_mocks(monkeypatch, tmp_path, source, log_dir):
     See test_integration_custom_fields._S3RewritingConn for the rewrite rationale —
     DuckDBPyConnection.execute is C-level read-only so we wrap, not patch."""
     import backend.core.duckdb as my_duckdb
-    import backend.core.iceberg as iceberg
     import backend.core.ingest as ingest
     from backend import config
 
@@ -47,7 +46,6 @@ def _install_pipeline_mocks(monkeypatch, tmp_path, source, log_dir):
     monkeypatch.setattr(my_duckdb, "_cache_dir", lambda s: str(tmp_path / "cache" / s.get("name", "unknown")))
     monkeypatch.setattr(my_duckdb, "_configure_fos", lambda *a: None)
     monkeypatch.setattr(ingest, "_configure_fos", lambda *a: None)
-    monkeypatch.setattr(iceberg, "_get_catalog", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no catalog")))
     monkeypatch.setattr(my_duckdb, "get_source_for_service", lambda x: None)
     monkeypatch.setattr(os, "remove", lambda *a: None)
 
@@ -94,13 +92,11 @@ def _ingest_once(monkeypatch, source, log_dir, key, payload):
             return {}
 
     monkeypatch.setattr(ingest, "_get_fos_client", lambda *a: _Fos())
-    for cache in (iceberg._view_cache, iceberg._snapshot_files_cache, iceberg._table_object_cache):
-        cache.clear()
+    iceberg._view_cache.clear()
     my_duckdb._clear_schema_cache()
     my_duckdb._initialized_paths.clear()
     list(ingest.ingest(source=source))
-    for cache in (iceberg._view_cache, iceberg._snapshot_files_cache, iceberg._table_object_cache):
-        cache.clear()
+    iceberg._view_cache.clear()
     my_duckdb._clear_schema_cache()
     my_duckdb._initialized_paths.clear()
 
@@ -111,7 +107,7 @@ def _open_view(source):
 
     con = my_duckdb.get_connection(source=source, skip_view_update=False)
     iceberg._view_cache.clear()
-    iceberg.update_iceberg_view(con, my_duckdb.get_source_by_name(con, source["name"]) or source)
+    iceberg.update_iceberg_view(con, source)
     return con
 
 

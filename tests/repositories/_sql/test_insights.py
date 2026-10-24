@@ -415,17 +415,6 @@ def test_coalesced_asn_and_scalar_aggregates_render_and_pin_placeholders():
         ["table_name", "ploss_sel", "rtt_var_sel", "retrans_sel", "p_type_sel"]
     )
 
-    scalar_rendered = SQL.COALESCED_SCALAR_AGGREGATES.format(
-        table_name="t_logs",
-        transport_sel='"transport"',
-        cache_sel='"cache"',
-    )
-    assert "FROM t_logs" in scalar_rendered
-    assert "w_quic" in scalar_rendered
-    assert "w_cacheable" in scalar_rendered
-    assert scalar_rendered.count("?") == 2
-    assert _placeholders(SQL.COALESCED_SCALAR_AGGREGATES) == sorted(["table_name", "transport_sel", "cache_sel"])
-
 
 # ── NEW_PROBE_REGEX sanity ────────────────────────────────────────────────────
 

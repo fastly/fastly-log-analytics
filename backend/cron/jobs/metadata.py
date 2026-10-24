@@ -365,21 +365,6 @@ def dispatch_post_commit_metadata_sync(service_id: str) -> None:
             raise
 
 
-# _run_metadata_sync can't take @cron_task (it doubles as a bootstrap helper
-# with extra kwargs). The wrapper supplies independent telemetry and usage
-# flushing for the post-commit background dispatch.
-from backend.celery_app import app as _celery_app  # noqa: E402
-
-
-@_celery_app.task(name=f"{_run_metadata_sync.__module__}._run_metadata_sync_celery", bind=True)
-def _run_metadata_sync_celery(self, service_id: str, *args, **kwargs):
-    return _run_metadata_sync(service_id, *args, **kwargs)
-
-
-_run_metadata_sync.celery_task = _run_metadata_sync_celery  # type: ignore[attr-defined]
-_run_metadata_sync.delay = _run_metadata_sync_celery.delay  # type: ignore[attr-defined]
-
-
 # ── _run_ngwaf_bot_sync ──────────────────────────────────────────────────────
 
 

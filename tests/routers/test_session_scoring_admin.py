@@ -88,7 +88,7 @@ def _enabled_cfg(**scoring_overrides: Any) -> dict[str, Any]:
 class TestSessionScoringStatusAndComposites:
     """Status, config composite, and dashboard composite contract tests."""
 
-    @pytest.mark.parametrize("prefix", ["scoring", "session-scoring"])
+    @pytest.mark.parametrize("prefix", ["scoring"])
     def test_status_returns_enabled_state_and_strips_secrets(self, prefix: str):
         cfg = _enabled_cfg()
         client = TestClient(_make_app(analyst=False))
@@ -114,7 +114,7 @@ class TestSessionScoringStatusAndComposites:
         assert "request_secret" not in body
         assert "do-not-leak-secret" not in res.text
 
-    @pytest.mark.parametrize("prefix", ["scoring", "session-scoring"])
+    @pytest.mark.parametrize("prefix", ["scoring"])
     def test_config_composite_returns_bundled_controls(self, prefix: str):
         cfg = _enabled_cfg()
         client = TestClient(_make_app(analyst=False))
@@ -138,7 +138,7 @@ class TestSessionScoringStatusAndComposites:
         assert body["enforce_status_code"]["effective"] == 429
         assert body["exclude_regex"]["is_default"] is True
 
-    @pytest.mark.parametrize("prefix", ["scoring", "session-scoring"])
+    @pytest.mark.parametrize("prefix", ["scoring"])
     def test_dashboard_composite_returns_disabled_fast_path(self, prefix: str):
         cfg = {"service_id": SVC, "scoring": {"enabled": False}}
         client = TestClient(_make_app(analyst=False))
@@ -165,7 +165,7 @@ class TestSessionScoringStatusAndComposites:
 class TestSessionScoringThresholdAndEnforcement:
     """Operator threshold, enforce-threshold, L2 enforcement, exclude-regex, and enforce-status-code tests."""
 
-    @pytest.mark.parametrize("prefix", ["scoring", "session-scoring"])
+    @pytest.mark.parametrize("prefix", ["scoring"])
     def test_operator_threshold_get_and_put(self, prefix: str):
         cfg = _enabled_cfg(operator_threshold=70)
         client = TestClient(_make_app(analyst=False))
@@ -185,7 +185,7 @@ class TestSessionScoringThresholdAndEnforcement:
             mock_save.assert_called_once()
             mock_audit.assert_called_once()
 
-    @pytest.mark.parametrize("prefix", ["scoring", "session-scoring"])
+    @pytest.mark.parametrize("prefix", ["scoring"])
     def test_enforce_threshold_requires_confirm_and_updates_config_store(self, prefix: str):
         cfg = _enabled_cfg()
         client = TestClient(_make_app(analyst=False))
@@ -211,7 +211,7 @@ class TestSessionScoringThresholdAndEnforcement:
             mock_fastly.assert_called_once()
             mock_audit.assert_called_once()
 
-    @pytest.mark.parametrize("prefix", ["scoring", "session-scoring"])
+    @pytest.mark.parametrize("prefix", ["scoring"])
     def test_l2_enforce_requires_confirm_and_updates_config_store(self, prefix: str):
         cfg = _enabled_cfg()
         client = TestClient(_make_app(analyst=False))
@@ -233,7 +233,7 @@ class TestSessionScoringThresholdAndEnforcement:
             assert body["enabled"] is True
             mock_audit.assert_called_once()
 
-    @pytest.mark.parametrize("prefix", ["scoring", "session-scoring"])
+    @pytest.mark.parametrize("prefix", ["scoring"])
     def test_exclude_regex_get_validate_and_put(self, prefix: str):
         cfg = _enabled_cfg()
         client = TestClient(_make_app(analyst=False))
@@ -272,7 +272,7 @@ class TestSessionScoringThresholdAndEnforcement:
                 assert put_res.json()["is_default"] is False
                 mock_audit.assert_called_once()
 
-    @pytest.mark.parametrize("prefix", ["scoring", "session-scoring"])
+    @pytest.mark.parametrize("prefix", ["scoring"])
     def test_enforce_status_code_get_and_put(self, prefix: str):
         cfg = _enabled_cfg()
         client = TestClient(_make_app(analyst=False))
@@ -312,7 +312,7 @@ class TestSessionScoringThresholdAndEnforcement:
 class TestSessionScoringMatrixAuditAndOperations:
     """Matrix versions, restore, rotate-key, audit log, and labels tests."""
 
-    @pytest.mark.parametrize("prefix", ["scoring", "session-scoring"])
+    @pytest.mark.parametrize("prefix", ["scoring"])
     def test_matrix_versions_list_and_restore(self, prefix: str):
         cfg = _enabled_cfg()
         client = TestClient(_make_app(analyst=False))
@@ -346,7 +346,7 @@ class TestSessionScoringMatrixAuditAndOperations:
             assert body["matrix_kv_written"] is True
             mock_audit.assert_called_once()
 
-    @pytest.mark.parametrize("prefix", ["scoring", "session-scoring"])
+    @pytest.mark.parametrize("prefix", ["scoring"])
     def test_rotate_key_and_audit_list(self, prefix: str):
         cfg = _enabled_cfg()
         client = TestClient(_make_app(analyst=False))
@@ -391,7 +391,7 @@ class TestSessionScoringMatrixAuditAndOperations:
 class TestSessionScoringAdminRbacEnforcement:
     """Analyst Path B sessions must receive 403 {"error": "admin_only"} on all session-scoring admin/mutation endpoints."""
 
-    @pytest.mark.parametrize("prefix", ["scoring", "session-scoring"])
+    @pytest.mark.parametrize("prefix", ["scoring"])
     @pytest.mark.parametrize(
         ("method", "suffix", "payload"),
         [

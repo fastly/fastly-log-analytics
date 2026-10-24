@@ -37,6 +37,7 @@ def test_partial_page_failure_holds_cursor_and_does_not_reingest_successes() -> 
     control.advance_source_cursor = MagicMock()
 
     controller = MagicMock()
+    controller.ingest_batch.side_effect = lambda **kw: MagicMock(sources_count=len(kw["sources_payloads"]))
     ledger = MagicMock()
 
     coordinator = HighScaleWorkerCoordinator(

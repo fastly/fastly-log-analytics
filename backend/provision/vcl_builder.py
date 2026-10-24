@@ -32,27 +32,14 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from backend.utils.vcl_safety import validate_quoted_literal
-
 _INDENT_UNIT = "  "
 
 
 class VclBuilder:
-    """Accumulate VCL lines/sections, then render deterministically.
-
-    Two accumulation modes, usable independently on one instance:
-
-      * line mode — ``raw`` / ``line`` / ``lines`` / ``blank`` build up a
-        single block rendered by :meth:`build` (``"\\n"``-joined).
-      * section mode — :meth:`section` registers independently-rendered
-        blocks joined by :meth:`build_sections` (``"\\n\\n"``-joined,
-        blank/whitespace-only sections dropped — matching the historical
-        ``"\\n\\n".join(s for s in sections if s.strip())`` idiom).
-    """
+    """Accumulate VCL lines, then render deterministically."""
 
     def __init__(self, *, indent_unit: str = _INDENT_UNIT) -> None:
         self._lines: list[str] = []
-        self._sections: list[str] = []
         self._indent_unit = indent_unit
 
     # ── line mode ────────────────────────────────────────────────────────
@@ -80,33 +67,6 @@ class VclBuilder:
     def build(self) -> str:
         """Render accumulated lines, ``"\\n"``-joined."""
         return "\n".join(self._lines)
-
-    # ── section mode ─────────────────────────────────────────────────────
-    def section(self, text: str) -> VclBuilder:
-        """Register a section for :meth:`build_sections`.
-
-        Empty / whitespace-only sections are kept in the list but dropped
-        at render time, matching the legacy filter semantics.
-        """
-        self._sections.append(text)
-        return self
-
-    def build_sections(self) -> str:
-        """Render registered sections ``"\\n\\n"``-joined, dropping blanks."""
-        return "\n\n".join(s for s in self._sections if s.strip())
-
-    # ── escaping boundary ────────────────────────────────────────────────
-    def quoted(self, value: str, *, allow_backslash: bool = False, field: str = "value") -> str:
-        """Return ``value`` wrapped in a VCL double-quoted literal.
-
-        The value is run through the unified safety policy first (see
-        :func:`backend.utils.vcl_safety.validate_quoted_literal`) so a
-        char that would break out of the ``"..."`` can't be emitted.
-
-        NOT for regex match RHS — see the Trap #14 note in the module
-        docstring.
-        """
-        return f'"{validate_quoted_literal(value, allow_backslash=allow_backslash, field=field)}"'
 
     # ── static helpers ───────────────────────────────────────────────────
     @staticmethod

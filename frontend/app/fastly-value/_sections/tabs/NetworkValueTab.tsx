@@ -5,6 +5,7 @@ import { Network, Globe, Lock, Wifi } from 'lucide-react'
 import { StatCard } from '@/components/ui/stat-card'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
+import { formatPctValue } from '@/lib/format'
 import type { components } from '@/types/api.generated'
 import { CHART_COLORS } from '@/lib/chart-colors'
 
@@ -46,33 +47,31 @@ export default function NetworkValueTab({ data }: { data?: NetworkData | null })
     return <p className="text-muted-foreground py-8 text-center">No network protocol data available for this service.</p>
   }
 
-  const fmtPct = (v: number | null | undefined) => v != null ? `${v}%` : '—'
-
   return (
     <div className="space-y-6 pt-4">
       <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
         <StatCard
           title="HTTP/3"
           icon={Wifi}
-          value={fmtPct(data.http3_pct)}
+          value={formatPctValue(data.http3_pct)}
           sub="of requests using QUIC"
         />
         <StatCard
           title="TLS"
           icon={Lock}
-          value={fmtPct(data.tls_pct)}
+          value={formatPctValue(data.tls_pct)}
           sub="encrypted connections"
         />
         <StatCard
           title="IPv6"
           icon={Globe}
-          value={fmtPct(data.ipv6_pct)}
+          value={formatPctValue(data.ipv6_pct)}
           sub="of requests over IPv6"
         />
         <StatCard
           title="HTTP/2"
           icon={Network}
-          value={fmtPct(data.h2_pct)}
+          value={formatPctValue(data.h2_pct)}
           sub="multiplexed connections"
         />
       </div>

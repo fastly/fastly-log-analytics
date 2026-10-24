@@ -1438,14 +1438,11 @@ def test_run_log_discovery_cron_full_cascade_real_ingest_against_moto_s3(
     from backend.core import metadata as metadata_db
     from backend.cron.jobs import sync as sync_mod
 
-    # ── Sandbox cache + warehouse onto the tmpfs ─────────────────────────
+    # ── Sandbox cache onto the tmpfs ─────────────────────────────────────
     cache_path = str(tmp_path / "cache")
-    warehouse_path = str(tmp_path / "warehouse")
     os.makedirs(cache_path, exist_ok=True)
-    os.makedirs(warehouse_path, exist_ok=True)
 
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: cache_path)
-    monkeypatch.setattr("backend.core.iceberg._warehouse_uri", lambda _src: f"file://{warehouse_path}")
     monkeypatch.setattr("backend.core.duckdb._configure_fos", lambda *a, **kw: None)
     monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid})
     # Sandbox the DuckDB file path. Without this the test inherits the
@@ -1477,11 +1474,8 @@ def test_run_log_discovery_cron_full_cascade_real_ingest_against_moto_s3(
 
     monkeypatch.setattr("backend.core.ingest._get_fos_client", lambda _src: _CallerHintShim(s3_mock))
 
-    # Clear iceberg module-level caches so a prior test's snapshot/view
+    # Clear iceberg module-level view cache so a prior test's view
     # state can't leak in (the autouse fixture clears these too).
-    ice._catalog_cache.clear()
-    ice._snapshot_files_cache.clear()
-    ice._table_object_cache.clear()
     if hasattr(ice, "_view_cache"):
         ice._view_cache.clear()
 

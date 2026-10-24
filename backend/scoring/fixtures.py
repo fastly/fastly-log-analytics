@@ -29,13 +29,11 @@ Output schema (one JSONL line per session):
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import IO, Any
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -261,23 +259,3 @@ def extract_traces(
     logger.info("[scoring.fixtures] fetched %d rows, sessionizing …", len(rows))
 
     yield from sessionize(rows_to_events(rows), gap_seconds=gap_seconds)
-
-
-def write_jsonl(sessions: Iterable[Session], out: IO[str]) -> int:
-    """Write sessions as JSONL to an open text file handle. Returns count.
-
-    The text mode wrapping (vs. binary + manual encode) is deliberate — the
-    output is canonical JSON UTF-8, the file is typically small enough that
-    OS buffering is fine, and text mode keeps line termination portable.
-    """
-    n = 0
-    for s in sessions:
-        out.write(json.dumps(s.to_jsonl_dict(), separators=(",", ":")) + "\n")
-        n += 1
-    return n
-
-
-def write_jsonl_path(sessions: Iterable[Session], path: Path) -> int:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as f:
-        return write_jsonl(sessions, f)

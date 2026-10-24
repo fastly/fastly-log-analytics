@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-
 from backend.provision.vcl_builder import VclBuilder
-from backend.utils.vcl_safety import VclSafetyError
 
 
 class TestLineMode:
@@ -34,16 +31,6 @@ class TestLineMode:
 
 
 class TestSectionMode:
-    def test_sections_joined_with_blank_line(self) -> None:
-        b = VclBuilder()
-        b.section("block1").section("block2")
-        assert b.build_sections() == "block1\n\nblock2"
-
-    def test_empty_sections_dropped(self) -> None:
-        b = VclBuilder()
-        b.section("block1").section("").section("   ").section("block2")
-        assert b.build_sections() == "block1\n\nblock2"
-
     def test_join_sections_static_matches_legacy_idiom(self) -> None:
         sections = ["a", "", "  ", "b"]
         assert VclBuilder.join_sections(sections) == "\n\n".join(s for s in sections if s.strip())
@@ -58,20 +45,3 @@ class TestIndentStatic:
 
     def test_levels(self) -> None:
         assert VclBuilder.indent("x", levels=2) == "    x"
-
-
-class TestQuotedEscapingBoundary:
-    def test_quotes_plain_value(self) -> None:
-        assert VclBuilder().quoted("true") == '"true"'
-
-    def test_routes_through_safety_policy(self) -> None:
-        # a quote that would break out of the literal is rejected
-        with pytest.raises(VclSafetyError):
-            VclBuilder().quoted('a"b')
-
-    def test_rejects_control_char(self) -> None:
-        with pytest.raises(VclSafetyError):
-            VclBuilder().quoted("tab\there")
-
-    def test_allow_backslash_passthrough(self) -> None:
-        assert VclBuilder().quoted(r"\.js", allow_backslash=True) == r'"\.js"'

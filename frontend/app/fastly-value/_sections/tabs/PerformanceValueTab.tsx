@@ -5,6 +5,7 @@ import { Zap, Timer, Gauge, TrendingDown } from 'lucide-react'
 import { StatCard } from '@/components/ui/stat-card'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
+import { formatMs } from '@/lib/format'
 import type { components } from '@/types/api.generated'
 import { CHART_COLORS } from '@/lib/chart-colors'
 
@@ -42,8 +43,6 @@ export default function PerformanceValueTab({ data }: { data?: PerformanceData |
     return <p className="text-muted-foreground py-8 text-center">No performance data available for this service.</p>
   }
 
-  const fmtMs = (v: number | null | undefined) => v != null ? `${v.toFixed(1)} ms` : '—'
-
   return (
     <div className="space-y-6 pt-4">
       <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
@@ -57,19 +56,19 @@ export default function PerformanceValueTab({ data }: { data?: PerformanceData |
         <StatCard
           title="Avg Hit Latency"
           icon={Timer}
-          value={fmtMs(data.avg_hit_latency_ms)}
+          value={formatMs(data.avg_hit_latency_ms)}
           sub="cached response time"
         />
         <StatCard
           title="Avg Miss Latency"
           icon={TrendingDown}
-          value={fmtMs(data.avg_miss_latency_ms)}
+          value={formatMs(data.avg_miss_latency_ms)}
           sub="origin fetch time"
         />
         <StatCard
           title="P99 Latency"
           icon={Gauge}
-          value={fmtMs(data.p99_latency_ms)}
+          value={formatMs(data.p99_latency_ms)}
           sub="99th percentile"
         />
       </div>

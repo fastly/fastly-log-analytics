@@ -4,7 +4,7 @@ repository layer — not just that the WHERE clause SQL is generated correctly.
 """
 
 from backend.models.common import FilterSpec
-from backend.repositories._base import _safe_table, clear_schema_cols_cache
+from backend.repositories._base import _safe_table, _schema_cols_cache
 from backend.repositories.dashboard import get_aggregates
 from tests.conftest import MOCK_SERVICE_ID
 from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
@@ -110,7 +110,7 @@ class TestFilterViaHttpEndpoint:
 
 class TestTunnelRequestsFilter:
     def test_tunnel_requests_include_exclude(self, in_memory_duckdb, test_service_source):
-        clear_schema_cols_cache()
+        _schema_cols_cache.clear()
         from backend.core.duckdb import _clear_schema_cache
 
         _clear_schema_cache()
@@ -212,7 +212,7 @@ class TestBotNameIpFilter:
 
 class TestEmptyIpExclusion:
     def test_excludes_null_and_empty_ip_records(self, in_memory_duckdb, test_service_source):
-        clear_schema_cols_cache()
+        _schema_cols_cache.clear()
         from backend.core.duckdb import _clear_schema_cache
 
         _clear_schema_cache()

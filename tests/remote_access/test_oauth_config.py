@@ -84,7 +84,6 @@ def test_oauth_disabled_by_default(monkeypatch):
     monkeypatch.delenv("OAUTH_PROVIDERS_CONFIG_PATH", raising=False)
     registry.reset_cache_for_tests()
     assert registry.feature_on() is False
-    assert registry.oauth_enabled() is False
     assert registry.get_all_providers() == []
 
 
@@ -98,7 +97,6 @@ def test_provider_configured_from_json_plus_env(tmp_path, monkeypatch):
     assert p.client_id == "test-client-id"
     assert p.client_secret == "test-client-secret"
     assert p.scopes == "openid email"
-    assert registry.oauth_enabled() is True
 
 
 def test_provider_without_env_creds_is_invisible(tmp_path, monkeypatch):
@@ -106,7 +104,6 @@ def test_provider_without_env_creds_is_invisible(tmp_path, monkeypatch):
     assert registry.get_all_providers() == []
     # Feature switch is on (secret set), but no fully-configured provider.
     assert registry.feature_on() is True
-    assert registry.oauth_enabled() is False
 
 
 def test_providers_hidden_when_feature_switch_off(tmp_path, monkeypatch):

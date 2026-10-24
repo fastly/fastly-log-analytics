@@ -85,13 +85,6 @@ SCORING_ENFORCE_NAME = "Session Scoring - Enforce"
 # else" slot used by most user snippets on this service.
 SCORING_SNIPPET_PRIORITY = 100
 
-# vcl_fetch needs a low priority specifically — when the backend is
-# the scorer, we want `return(deliver)` to fire IMMEDIATELY, before
-# any other fetch-stage snippet (group-L timing, custom origin field
-# captures, etc.) gets a chance to run against the scorer's response.
-# Priority 1 puts us first in the fetch subroutine.
-SCORING_FETCH_PRIORITY = 1
-
 
 # Default asset-extension regex: requests whose URL matches this regex
 # bypass the scorer entirely. Static assets carry no session signal and

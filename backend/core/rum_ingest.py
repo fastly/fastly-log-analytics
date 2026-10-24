@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Generator
-from datetime import UTC, datetime, timedelta
 
 import pyarrow as pa
 
@@ -26,11 +25,9 @@ from backend.core.rollups.rum import (
     backfill_missing_rum_aggregates,
     recompute_rum_aggregates,
 )
-from backend.utils.date_utils import ensure_utc
 
 __all__ = [
     "backfill_missing_rum_aggregates",
-    "cleanup_old_rum_logs",
     "recompute_rum_aggregates",
 ]
 from backend.utils.log_throttle import log_once_per
@@ -54,111 +51,6 @@ def safe_float(val, default: float | None = None) -> float | None:
         return float(val)
     except Exception:
         return default
-
-
-def cleanup_old_rum_logs(service_id: str) -> tuple[int, int]:
-    """Delete RUM beacon logs from FOS older than rum.delete_after days.
-
-    Stands down unconditionally when
-    ``provisioning.cron_sync.high_scale_shared_source`` is set — a high-scale
-    consumer owns raw-deletion authority for this service's stream, RUM
-    included. See ``backend.config.resolve_raw_delete_after``.
-
-    Returns (files_deleted, bytes_freed).
-    """
-    from backend import config as svcconfig
-
-    cfg = svcconfig.load_config(service_id) or {}
-    if svcconfig.high_scale_shared_source_enabled(cfg):
-        return 0, 0
-    rum_cfg = cfg.get("rum", {})
-
-    # Only cleanup if delete_after is explicitly enabled
-    if not rum_cfg.get("delete_after", False):
-        return 0, 0
-
-    # Default retention matches the regular log retention
-    raw_delete_after = rum_cfg.get("delete_after", True)
-    if isinstance(raw_delete_after, bool) or raw_delete_after is None:
-        delete_after_days = int(cfg.get("log_retention_days", 90)) if raw_delete_after is not False else 0
-    else:
-        delete_after_days = int(raw_delete_after)
-
-    src = get_source_for_service(service_id)
-    if not src or not src.get("bucket"):
-        return 0, 0
-
-    try:
-        s3 = _get_fos_client(src)
-        bucket = src["bucket"]
-        prefix = src.get("prefix", "").strip("/")
-        rum_prefix = f"{prefix}/raw/rum/" if prefix else "raw/rum/"
-
-        cutoff_time = datetime.now(UTC) - timedelta(days=delete_after_days)
-        files_deleted = 0
-        bytes_freed = 0
-
-        paginator = s3.get_paginator("list_objects_v2")
-        eligible: list[tuple[str, int]] = []
-        for page in paginator.paginate(Bucket=bucket, Prefix=rum_prefix):
-            for obj in page.get("Contents", []):
-                key = obj["Key"]
-                # Skip directory markers
-                if key.endswith("/"):
-                    continue
-
-                # Get file mtime from LastModified
-                last_modified = obj.get("LastModified")
-                if not last_modified:
-                    continue
-
-                # Convert to aware datetime for comparison
-                last_modified = ensure_utc(last_modified)
-
-                # Only delete if older than retention period and not actively being written
-                if last_modified < cutoff_time:
-                    eligible.append((key, obj.get("Size", 0)))
-
-        # Batch delete in chunks of 1000 (S3 DeleteObjects limit). If a test
-        # patched s3.delete_object directly on a real/moto client, fall back to
-        # per-object delete_object so per-key side_effects are honored.
-        delete_obj_patched = not hasattr(s3, "_mock_name") and hasattr(getattr(s3, "delete_object", None), "_mock_name")
-        for i in range(0, len(eligible), 1000):
-            batch = eligible[i : i + 1000]
-            if not delete_obj_patched and hasattr(s3, "delete_objects"):
-                try:
-                    resp = s3.delete_objects(
-                        Bucket=bucket,
-                        Delete={"Objects": [{"Key": k} for k, _ in batch], "Quiet": True},
-                    )
-                    failed_keys = {
-                        err.get("Key")
-                        for err in (resp or {}).get("Errors", [])
-                        if isinstance(err, dict) and err.get("Key")
-                    }
-                    for key, size in batch:
-                        if key not in failed_keys:
-                            files_deleted += 1
-                            bytes_freed += size
-                    continue
-                except Exception as batch_err:
-                    logger.debug(f"RUM cleanup: batch delete failed under {rum_prefix} ({batch_err}); falling back")
-            for key, size in batch:
-                try:
-                    s3.delete_object(Bucket=bucket, Key=key)
-                    files_deleted += 1
-                    bytes_freed += size
-                    logger.info(f"RUM cleanup: deleted {key} ({size} bytes)")
-                except Exception as e:
-                    logger.warning(f"RUM cleanup: failed to delete {key}: {e}")
-
-        logger.info(
-            f"RUM cleanup for {service_id}: deleted {files_deleted} files, freed {bytes_freed / (1024 * 1024):.2f} MB"
-        )
-        return files_deleted, bytes_freed
-    except Exception as e:
-        logger.error(f"RUM cleanup failed for {service_id}: {e}")
-        return 0, 0
 
 
 def extract_metrics_from_faro_payload(payload: dict, log_data: dict) -> list[dict]:
@@ -646,11 +538,6 @@ def ingest_rum_logs(
                 except Exception as rec_err:
                     delete_failed_paths.update(f"s3://{bucket}/{k}" for k in stranded_keys)
                     logger.error("RUM sync: failed to reclaim stranded raw files: %s", rec_err)
-
-        # Clean up old RUM logs according to retention policy
-        cleanup_files, cleanup_bytes = cleanup_old_rum_logs(service_id)
-        if cleanup_files > 0:
-            yield ("cleanup_done", cleanup_files, cleanup_bytes)
 
         yield ("done", total_vitals_rows + total_errors_rows)
         duration_s = time.time() - start_time

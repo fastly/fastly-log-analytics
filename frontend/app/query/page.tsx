@@ -27,7 +27,6 @@ import { downloadAsCsv } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { FiltersPayload } from '@/types/filters'
 import { buildStructuredSql, type QueryMode } from './_sql_builder'
-import { parseJsonAsync } from '@/lib/workers/parseJson'
 import { ModeToggle } from './_sections/ModeToggle'
 import { StructuredMode } from './_sections/StructuredMode'
 import { RawSqlMode } from './_sections/RawSqlMode'
@@ -321,7 +320,7 @@ function QueryPageInner() {
       }
       if (!data) throw new Error('No data')
       if (typeof data !== 'string') return data as QueryResponse
-      return await parseJsonAsync<QueryResponse>(data)
+      return JSON.parse(data) as QueryResponse
     },
   })
 

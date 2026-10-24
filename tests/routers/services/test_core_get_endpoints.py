@@ -979,17 +979,12 @@ def test_import_custom_fields_422s_on_locked_type_change(client, tmp_path, monke
         },
     )
 
-    fake_table = MagicMock()
-    fake_field = MagicMock()
-    fake_field.name = "locked_field"
-    fake_table.schema.return_value.fields = [fake_field]
-    fake_catalog = MagicMock()
-    fake_catalog.load_table.return_value = fake_table
-
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc"}),
-        patch("backend.core.iceberg._get_catalog", return_value=fake_catalog),
-        patch("backend.core.iceberg._table_identifier", return_value=("default", "logs")),
+        patch(
+            "backend.routers.services.core._committed_duckdb_field_types",
+            return_value={"locked_field": "VARCHAR"},
+        ),
         patch("backend.provision.validate_log_format", return_value=[]),
     ):
         resp = client.post(
@@ -1338,17 +1333,12 @@ def test_update_custom_field_422s_on_type_change_when_field_in_iceberg_schema(cl
         },
     )
 
-    fake_table = MagicMock()
-    fake_field = MagicMock()
-    fake_field.name = "locked_field"
-    fake_table.schema.return_value.fields = [fake_field]
-    fake_catalog = MagicMock()
-    fake_catalog.load_table.return_value = fake_table
-
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc"}),
-        patch("backend.core.iceberg._get_catalog", return_value=fake_catalog),
-        patch("backend.core.iceberg._table_identifier", return_value=("default", "logs")),
+        patch(
+            "backend.routers.services.core._committed_duckdb_field_types",
+            return_value={"locked_field": "VARCHAR"},
+        ),
     ):
         resp = client.patch(
             f"/api/services/{MOCK_SERVICE_ID}/custom-fields/locked_field",
@@ -1362,31 +1352,6 @@ def test_update_custom_field_422s_on_type_change_when_field_in_iceberg_schema(cl
 
 
 # ── GET /cron-schedule cache busting ──────────────────────────────────────
-
-
-def test_clear_cron_schedule_cache_service_specific():
-    """clear_cron_schedule_cache with a service_id pops only that key."""
-    from backend.routers.services.core import _cron_schedule_cache, clear_cron_schedule_cache
-
-    _cron_schedule_cache["svc-1"] = (123.45, {"data": "foo"})
-    _cron_schedule_cache["svc-2"] = (678.90, {"data": "bar"})
-
-    clear_cron_schedule_cache("svc-1")
-
-    assert "svc-1" not in _cron_schedule_cache
-    assert "svc-2" in _cron_schedule_cache
-
-
-def test_clear_cron_schedule_cache_all():
-    """clear_cron_schedule_cache without a service_id clears all keys."""
-    from backend.routers.services.core import _cron_schedule_cache, clear_cron_schedule_cache
-
-    _cron_schedule_cache["svc-1"] = (123.45, {"data": "foo"})
-    _cron_schedule_cache["svc-2"] = (678.90, {"data": "bar"})
-
-    clear_cron_schedule_cache()
-
-    assert len(_cron_schedule_cache) == 0
 
 
 def test_cron_log_hooks_bust_cache(monkeypatch):

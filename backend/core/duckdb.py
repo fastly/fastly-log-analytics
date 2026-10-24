@@ -13,8 +13,6 @@ import socket
 import threading
 import time
 import weakref
-from contextlib import contextmanager
-from datetime import datetime
 from typing import Any
 
 import boto3
@@ -127,10 +125,6 @@ def _build_default_source() -> dict:
 _DEFAULT_SOURCE = _build_default_source()
 # Sync module-level globals with the first configured service on import
 DUCKDB_PATH = _DEFAULT_SOURCE.get("duckdb_path") or DUCKDB_PATH
-
-# Set by main.py lifespan on startup so start_cron_run can treat rows from
-# previous processes as orphans without a blocking pre-scheduler cleanup loop.
-_PROCESS_START_UTC: "datetime | None" = None
 STORAGE_MODE = _DEFAULT_SOURCE.get("storage_mode") or STORAGE_MODE
 ACCESS_LEVEL = _DEFAULT_SOURCE.get("access_level") or ACCESS_LEVEL
 
@@ -174,20 +168,6 @@ def _safe_table_name(name: str) -> str:
     return f"logs_{clean}" if clean != "default" else "logs"
 
 
-def _fos_glob(source: dict) -> str:
-    """Return the FOS glob pattern for a source's log files.
-
-    Now uses the partitioned 'raw/' directory for Fastly logs to avoid
-    scanning millions of processed parquet files during discovery.
-    """
-    prefix = source["prefix"].strip().strip("/")
-    bucket = source["bucket"]
-    if prefix:
-        return f"s3://{bucket}/{prefix}/raw/request/**/*.gz"
-    return f"s3://{bucket}/raw/request/**/*.gz"
-
-
-_httpfs_installed = False
 _httpfs_lock = threading.Lock()
 
 # Process-wide lock for ``CREATE OR REPLACE SECRET fos_proxy``.
@@ -213,16 +193,13 @@ def _load_httpfs(con: duckdb.DuckDBPyConnection):
     INSTALL and LOAD eliminates that race. Prefer LOAD so runtime pods do not
     need network access when the extension was baked into the image.
     """
-    global _httpfs_installed
     with _httpfs_lock:
         try:
             con.execute("LOAD httpfs;")
-            _httpfs_installed = True
         except duckdb.Error:
             try:
                 con.execute("INSTALL httpfs;")
                 con.execute("LOAD httpfs;")
-                _httpfs_installed = True
             except duckdb.InvalidInputException as e:
                 if "already registered secret type" not in str(e):
                     raise
@@ -677,17 +654,6 @@ def _lock_context(source: dict, db_path: str, read_only: bool) -> dict[str, obje
     }
 
 
-# ── Lock-contention observability (TESTING_PLAN_3 item 13) ───────────────────
-#
-# Every lock retry inside ``get_connection`` increments this counter.
-# Exposed via ``get_lock_retry_count`` for tests and operational dashboards
-# so contention becomes visible (the contract from TESTING_PLAN_3 §7).
-#
-# Thread-safe: ``threading.Lock`` is cheap and guards against the +=
-# read-modify-write race that would otherwise drop increments under load.
-_lock_retry_count = 0
-_lock_retry_count_lock = threading.Lock()
-
 # Exponential-backoff parameters for transient connection-lock retries.
 # Initial 50 ms (matches the pre-refactor constant) doubles up to a cap.
 # Capping individual sleeps keeps us responsive under heavy contention
@@ -699,27 +665,8 @@ _LOCK_RETRY_MAX_DELAY = 0.5
 _LOCK_RETRY_MULTIPLIER = 2.0
 
 
-def get_lock_retry_count() -> int:
-    """Return the process-lifetime count of DuckDB connection-lock retries.
-
-    Useful for tests that want to assert the retry path was exercised and
-    for operational dashboards that want a rough contention signal.
-    """
-    with _lock_retry_count_lock:
-        return _lock_retry_count
-
-
-def _reset_lock_retry_count() -> None:
-    """Test-only helper. Production code never needs to zero the counter."""
-    global _lock_retry_count
-    with _lock_retry_count_lock:
-        _lock_retry_count = 0
-
-
 def _record_lock_retry() -> None:
-    global _lock_retry_count
-    with _lock_retry_count_lock:
-        _lock_retry_count += 1
+    pass
 
 
 # ── DuckDB instance-recycle support ──────────────────────────────────────────
@@ -892,73 +839,6 @@ _CORRUPTION_MARKERS = (
     "serialization error",
     "field id mismatch",
 )
-
-
-def _is_corruption_error(err: Exception) -> bool:
-    """True if the exception text looks like on-disk corruption.
-
-    Conservative on purpose: only IOException or SerializationException messages
-    that name file-level damage. User-query errors (BinderException, ParserException,
-    InvalidInputException) must NOT trigger file deletion.
-    """
-    if not isinstance(err, (duckdb.IOException, duckdb.SerializationException)):
-        return False
-    msg = str(err).lower()
-    return any(marker in msg for marker in _CORRUPTION_MARKERS)
-
-
-@contextmanager
-def get_safe_duckdb_connection(db_path: str, read_only: bool = False):
-    """Open a DuckDB file; on corruption, delete and reopen empty.
-
-    Recovers from file-level corruption (truncated WAL, garbage bytes,
-    checksum mismatch) by removing the offending file plus its sidecars
-    (``.wal``, ``.tmp``) and reopening a fresh database. Use this when
-    the caller can tolerate losing the local DuckDB cache and rebuilding
-    state from the source of truth (Iceberg on FOS, SQLite metadata).
-
-    Only ``duckdb.IOException`` messages matching ``_CORRUPTION_MARKERS``
-    trigger the recovery path. Query-time errors raised inside the
-    ``with`` block propagate normally — this is not a generic error
-    suppressor.
-
-    Read-only callers do not get recovery; they raise on corruption so
-    the writer side can repair, and so concurrent dashboard requests
-    don't race to delete the file out from under each other.
-    """
-    _abs_path = os.path.abspath(db_path)
-    conn = None
-    _barrier_wait(_abs_path)
-    try:
-        conn = _duckdb_connect(db_path, read_only=read_only)
-        _register_live_connection(conn, _abs_path)
-    except Exception as e:
-        if read_only or not _is_corruption_error(e):
-            raise
-        logger.warning(
-            "duckdb_recovering_corrupt_file path=%s err=%s",
-            db_path,
-            str(e).splitlines()[0] if str(e) else "",
-        )
-        for sidecar in (db_path, db_path + ".wal", db_path + ".tmp"):
-            try:
-                os.remove(sidecar)
-            except FileNotFoundError:
-                pass
-            except OSError as rm_err:
-                logger.error("duckdb_cleanup_failed path=%s err=%s", sidecar, rm_err)
-        clear_initialization_state(db_path)
-        _barrier_wait(_abs_path)
-        conn = _duckdb_connect(db_path, read_only=False)
-        _register_live_connection(conn, _abs_path)
-
-    try:
-        yield conn
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            logger.debug("get_safe_duckdb_connection: conn.close failed (ignored)", exc_info=True)
 
 
 def _duckdb_connect(database: str, **kwargs: Any) -> duckdb.DuckDBPyConnection:
@@ -1279,30 +1159,6 @@ def get_connection(
     return con
 
 
-def _source_row_to_dict(name: str, config_json: str, table_name: str) -> dict:
-    cfg = json.loads(config_json)
-    return {
-        "name": name,
-        "table_name": table_name,
-        "endpoint": cfg.get("endpoint", ""),
-        "bucket": cfg.get("bucket", ""),
-        "prefix": cfg.get("prefix", ""),
-        "region": cfg.get("region", ""),
-        "cdn_url": cfg.get("cdn_url", ""),
-        "cdn_secret": cfg.get("cdn_secret", ""),
-    }
-
-
-def get_source_by_name(con: duckdb.DuckDBPyConnection | None, name: str) -> dict | None:
-    """Return a single source dict by name, or None if not found."""
-    from backend.core import metadata as metadata_db
-
-    row = metadata_db.get_source_by_name(name, name)
-    if not row:
-        return None
-    return _source_row_to_dict(row["name"], row["config"], row["table_name"])
-
-
 def _ensure_source_registered(source: dict) -> str:
     """Register a source in the per-service metadata SQLite. Returns the table name."""
     from backend.core import metadata as metadata_db
@@ -1511,7 +1367,6 @@ from backend.core._duckdb_status import (  # noqa: E402, F401
     _schema_cache,
     backfill_fastly_edge_writes,
     clear_ducklake_stats_cache,
-    delete_ingested_files,
     enrich_asn_labels,
     format_asn_label,
     get_asn_names,
@@ -1637,35 +1492,3 @@ def get_or_generate_cid_salt(service_id: str) -> str:
         # Config vanished between read and lock; nothing to persist into.
         return get_or_generate_cid_salt(service_id)
     return saved["rum"]["cid_salt"]
-
-
-def rotate_cid_salt(service_id: str, *, actor: str = "admin") -> str:
-    """Replace a service's cid salt. Every pseudonymous cid hash changes from this point on.
-
-    ``save_config`` deliberately re-adopts the persisted salt, so rotation must go through this explicit,
-    audited path. Not exposed as a route. Returns the new salt (callers must not log it).
-    """
-    import secrets
-
-    from backend.config import mutate_config
-    from backend.core import metadata as metadata_db
-    from backend.utils.error_redaction import register_salt
-
-    new_salt = secrets.token_hex(32)
-    old: dict[str, str | None] = {"salt": None}
-
-    def _set(c: dict) -> None:
-        existing = c.get("rum")
-        rum: dict = existing if isinstance(existing, dict) else {}
-        old["salt"] = rum.get("cid_salt")
-        rum["cid_salt"] = new_salt
-        c["rum"] = rum
-
-    saved = mutate_config(service_id, _set, allow_cid_salt_change=True)
-    if saved is None:
-        raise LookupError(f"no config for service {service_id}")
-    register_salt(old["salt"])
-    register_salt(new_salt)
-    metadata_db.record_audit(service_id, "cid_salt_rotated", {"had_previous_salt": bool(old["salt"])}, actor=actor)
-    logger.warning("cid_salt_rotated service_id=%s actor=%s", service_id, actor)
-    return new_salt

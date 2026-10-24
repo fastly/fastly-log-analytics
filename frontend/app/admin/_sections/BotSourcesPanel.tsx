@@ -14,20 +14,12 @@ import { DataTableReadonly } from '@/components/DataTable/DataTableReadonly'
 
 type BotSourceList = components['schemas']['BotSourcesResponse']
 type BotSource = components['schemas']['BotSourceMeta']
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter,
-} from '@/components/ui/dialog'
+import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import {
   Bot,
   RefreshCw,
   Wifi,
   Download,
-  Loader2,
   ExternalLink,
   CloudDownload,
 } from 'lucide-react'
@@ -57,27 +49,21 @@ function RebuildLocalViewButton() {
         <CloudDownload className="h-3 w-3 mr-1.5" />
         Rebuild Local View
       </Button>
-      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Rebuild local view from cloud?</DialogTitle>
-            <DialogDescription>
-              Clears local Iceberg caches and re-pulls metadata + parquet from FOS via CDN.
-              Un-committed buffer data is preserved. This can take a minute on large tables.
-            </DialogDescription>
-          </DialogHeader>
-          {error && <div className="text-xs text-red-500">{error}</div>}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmOpen(false)} disabled={busy}>
-              Cancel
-            </Button>
-            <Button onClick={rebuild} disabled={busy}>
-              {busy ? <Loader2 className="h-3 w-3 mr-1.5 animate-spin" /> : <CloudDownload className="h-3 w-3 mr-1.5" />}
-              {busy ? 'Starting…' : 'Rebuild'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        title="Rebuild local view from cloud?"
+        description={
+          <>
+            Clears local Iceberg caches and re-pulls metadata + parquet from FOS via CDN.
+            Un-committed buffer data is preserved. This can take a minute on large tables.
+            {error && <span className="block mt-2 text-xs text-red-500">{error}</span>}
+          </>
+        }
+        confirmLabel="Rebuild"
+        isPending={busy}
+        onConfirm={rebuild}
+      />
     </>
   )
 }

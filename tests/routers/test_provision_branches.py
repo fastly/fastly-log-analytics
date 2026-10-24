@@ -15,8 +15,8 @@ from fastapi.testclient import TestClient
 from backend.main import app
 from backend.routers.provision import (
     _check_domain_available,
-    _require_json_content_type,
 )
+from backend.utils.router_utils import require_json_content_type as _require_json_content_type
 
 
 def _client() -> TestClient:

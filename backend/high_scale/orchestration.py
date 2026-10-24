@@ -8,7 +8,6 @@ SQLite stores remain useful for local operation and tests.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
@@ -77,13 +76,6 @@ class PageRun:
     missing: int = 0
 
 
-@dataclass(frozen=True)
-class SweepResult:
-    retried: int
-    replayed: int
-    skipped: int
-
-
 def _owner_fields(owner: Any) -> tuple[str, int, str | None]:
     return owner.current_owner, int(owner.owner_epoch), getattr(owner, "source_cursor", None)
 
@@ -150,13 +142,7 @@ class HighScaleWorkerCoordinator:
         if len(objects) > self._page_size:
             raise ValueError("source object listing exceeded page_size")
 
-        recovered, recovery_failed, recovery_missing = self._recover_expired_claims(
-            service_id,
-            domain,
-            current_owner=current_owner,
-            expected_epoch=epoch,
-            now=now,
-        )
+        expired_sources = self._expired_claim_descriptors(service_id, domain)
         discovered_by_key: dict[str, Any] = {}
         batch_discover_fn = (
             getattr(self._control, "discover_sources_batch", None) if self._control is not None else None
@@ -195,38 +181,16 @@ class HighScaleWorkerCoordinator:
             elif listing_cursor and listing_cursor.startswith(TERMINAL_SOURCE_CURSOR_PREFIX):
                 next_cursor = listing_cursor
 
-        use_batch = (
-            getattr(self._controller, "batch_capable", None) is True
-            or getattr(self._controller, "batch_enabled", None) is True
-        )
-
-        if not use_batch:
-            processed = recovered
-            duplicates = 0
-            failed = recovery_failed
-            missing = recovery_missing
-            for outcome in self._process_sources(
-                service_id, domain, objects, expected_owner=current_owner, expected_epoch=epoch, now=now
-            ):
-                if outcome == "processed":
-                    processed += 1
-                elif outcome == "duplicate":
-                    duplicates += 1
-                elif outcome == "missing":
-                    missing += 1
-                else:
-                    failed += 1
-            if failed == 0:
-                self._advance_cursor(service_id, domain, next_cursor, current_owner, epoch)
-            return PageRun(listing_cursor, next_cursor, len(objects), processed, duplicates, failed, missing)
-
-        processed = recovered
+        processed = 0
         duplicates = 0
-        failed = recovery_failed
-        missing = recovery_missing
+        failed = 0
+        missing = 0
 
-        active_sources: list[SourceObjectDescriptor] = []
+        active_sources: list[SourceObjectDescriptor] = list(expired_sources)
+        active_keys = {s.object_key for s in active_sources}
         for s in objects:
+            if s.object_key in active_keys:
+                continue
             rec = discovered_by_key.get(s.object_key)
             rec_status = getattr(rec, "status", None)
             if isinstance(rec_status, str):
@@ -237,11 +201,18 @@ class HighScaleWorkerCoordinator:
                 duplicates += 1
             else:
                 active_sources.append(s)
+                active_keys.add(s.object_key)
 
         if active_sources:
-            if self._control is not None and hasattr(self._control, "claim_sources_batch"):
+            unclaimable_keys: set[str] = set()
+            if self._control is not None and (
+                getattr(type(self._control), "claim_sources_batch", None) is not None
+                or "claim_sources_batch" in vars(self._control)
+                or "claim_sources_batch" in getattr(self._control, "_mock_children", {})
+            ):
                 keys = tuple(s.object_key for s in active_sources)
-                claims = self._control.claim_sources_batch(
+                claim_batch_fn = getattr(self._control, "claim_sources_batch")
+                claims = claim_batch_fn(
                     service_id,
                     keys,
                     self._worker_id,
@@ -251,6 +222,25 @@ class HighScaleWorkerCoordinator:
                     now=now,
                 )
                 claimed_keys = {c.object_key for c in claims}
+            elif self._control is not None:
+                claimed_keys = set()
+                for s in active_sources:
+                    try:
+                        c = self._control.claim_source(
+                            service_id,
+                            s.object_key,
+                            self._worker_id,
+                            expected_owner=current_owner,
+                            expected_owner_epoch=epoch,
+                            lease_seconds=self._lease_seconds,
+                            now=now,
+                        )
+                        if c.claimed:
+                            claimed_keys.add(s.object_key)
+                    except ValueError:
+                        if not self._already_terminal(service_id, s.object_key):
+                            failed += 1
+                            unclaimable_keys.add(s.object_key)
             else:
                 claimed_keys = set()
                 for s in active_sources:
@@ -262,7 +252,7 @@ class HighScaleWorkerCoordinator:
             for s in active_sources:
                 if s.object_key in claimed_keys:
                     to_read.append(s)
-                else:
+                elif s.object_key not in unclaimable_keys:
                     duplicates += 1
 
             if to_read:
@@ -322,166 +312,40 @@ class HighScaleWorkerCoordinator:
                             now=now,
                         )
                         processed += batch_res.sources_count
-                    except Exception:
+                    except Exception as exc:
                         logger.exception(
                             "high-scale batch ingest failed",
                             extra={"service_id": service_id, "domain": domain, "count": len(valid_payloads)},
                         )
+                        if self._control is None and hasattr(self._ledger, "mark_failed"):
+                            for src, _ in valid_payloads:
+                                cur = self._ledger.source(service_id, src.object_key)
+                                if cur is not None:
+                                    self._ledger.mark_failed(service_id, src.object_key, cur.lease_generation, str(exc))
                         failed += len(valid_payloads)
 
         if failed == 0:
             self._advance_cursor(service_id, domain, next_cursor, current_owner, epoch)
         return PageRun(listing_cursor, next_cursor, len(objects), processed, duplicates, failed, missing)
 
-    def _recover_expired_claims(
+    def _expired_claim_descriptors(
         self,
         service_id: str,
         domain: str,
-        *,
-        current_owner: str,
-        expected_epoch: int,
-        now: datetime | None,
-    ) -> tuple[int, int, int]:
+    ) -> list[SourceObjectDescriptor]:
         source_store = self._control if self._control is not None else self._ledger
         expired_claims = getattr(source_store, "expired_claims", None)
         if expired_claims is None:
-            return 0, 0, 0
-        processed = failed = missing = 0
-        for source in expired_claims(service_id, domain, limit=self._page_size):
-            descriptor = SourceObjectDescriptor(
+            return []
+        return [
+            SourceObjectDescriptor(
                 object_key=source.object_key,
                 checksum=source.checksum,
                 size_bytes=source.size_bytes,
                 version=source.version,
             )
-            outcome = self._process_source(
-                service_id,
-                domain,
-                descriptor,
-                expected_owner=current_owner,
-                expected_epoch=expected_epoch,
-                now=now,
-            )
-            if outcome == "processed":
-                processed += 1
-            elif outcome == "missing":
-                missing += 1
-            elif outcome != "duplicate":
-                failed += 1
-        return processed, failed, missing
-
-    def _process_sources(
-        self,
-        service_id: str,
-        domain: str,
-        sources: tuple[SourceObjectDescriptor, ...],
-        *,
-        expected_owner: str,
-        expected_epoch: int,
-        now: datetime | None,
-    ) -> list[str]:
-        def process(source: SourceObjectDescriptor) -> str:
-            return self._process_source(
-                service_id,
-                domain,
-                source,
-                expected_owner=expected_owner,
-                expected_epoch=expected_epoch,
-                now=now,
-            )
-
-        # Per-object work is round-trip bound (FOS GET/PUT plus ~15 Postgres
-        # and ~7 ClickHouse calls for a 1-3 row object), so a serial page
-        # cannot keep up with arrival rates. Only the pool-backed Postgres
-        # control plane is safe to share across threads; the SQLite ledger
-        # stays serial.
-        workers = min(self._object_concurrency, len(sources))
-        if self._control is None or workers <= 1:
-            return [process(source) for source in sources]
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="high-scale-object") as pool:
-            return list(pool.map(process, sources))
-
-    def process_source(
-        self,
-        *,
-        service_id: str,
-        domain: str,
-        source: SourceObjectDescriptor,
-        now: datetime | None = None,
-    ) -> str:
-        owner = self._owner(service_id)
-        current_owner, epoch, _ = _owner_fields(owner)
-        self._require_high_scale(current_owner, service_id)
-        return self._process_source(
-            service_id,
-            domain,
-            source,
-            expected_owner=current_owner,
-            expected_epoch=epoch,
-            now=now,
-        )
-
-    def _process_source(
-        self,
-        service_id: str,
-        domain: str,
-        source: SourceObjectDescriptor,
-        *,
-        expected_owner: str,
-        expected_epoch: int,
-        now: datetime | None,
-    ) -> str:
-        if self._already_terminal(service_id, source.object_key):
-            return "duplicate"
-        try:
-            if self._control is not None:
-                # Every worker replica lists the same page, so losing a claim
-                # to a sibling is normal and must not block the cursor: a live
-                # lease is the sibling's work, and an expired one is picked up
-                # by _recover_expired_claims regardless of cursor position.
-                try:
-                    claim = self._control.claim_source(
-                        service_id,
-                        source.object_key,
-                        self._worker_id,
-                        expected_owner=expected_owner,
-                        expected_owner_epoch=expected_epoch,
-                        lease_seconds=self._lease_seconds,
-                        now=now,
-                    )
-                except ValueError:
-                    if self._already_terminal(service_id, source.object_key):
-                        return "duplicate"
-                    raise
-                if not claim.claimed:
-                    return "duplicate"
-            self._controller.ingest(
-                service_id=service_id,
-                domain=domain,
-                object_key=source.object_key,
-                checksum=source.checksum,
-                payload=self._reader.read_source_object(service_id, domain, source.object_key),
-                size_bytes=source.size_bytes,
-                version=source.version,
-                now=now,
-            )
-        except SourceObjectMissingError as exc:
-            self._mark_missing(
-                service_id,
-                object_key=source.object_key,
-                expected_owner=expected_owner,
-                expected_epoch=expected_epoch,
-                error=str(exc),
-                now=now,
-            )
-            return "missing"
-        except Exception:
-            logger.exception(
-                "high-scale source processing failed",
-                extra={"service_id": service_id, "domain": domain, "object_key": source.object_key},
-            )
-            return "failed"
-        return "processed"
+            for source in expired_claims(service_id, domain, limit=self._page_size)
+        ]
 
     def _mark_missing(
         self,
@@ -586,61 +450,4 @@ _TERMINAL_SOURCE_STATES = frozenset(
 )
 
 
-class HighScaleLeaseSweeper:
-    """Retries expired work and replays archived work after lost acknowledgements."""
-
-    def __init__(
-        self,
-        *,
-        ownership: Any,
-        ledger: Any,
-        worker: HighScaleWorkerCoordinator,
-        replay: Callable[[Any], Any] | None = None,
-        replay_leases: Any | None = None,
-    ) -> None:
-        self._ownership = ownership
-        self._ledger = ledger
-        self._worker = worker
-        self._replay = replay
-        self._replay_leases = replay_leases
-
-    def sweep(
-        self,
-        *,
-        service_id: str,
-        domain: str,
-        objects: Iterable[SourceObjectDescriptor],
-        now: datetime | None = None,
-    ) -> SweepResult:
-        owner = self._ownership.get(service_id)
-        self._worker._require_high_scale(owner.current_owner, service_id)
-        retried = replayed = skipped = 0
-        for source in objects:
-            record = self._ledger.source(service_id, source.object_key) if hasattr(self._ledger, "source") else None
-            status = getattr(record, "status", None)
-            if status in {"acknowledged", "source_deleted"}:
-                skipped += 1
-                continue
-            manifest_id = getattr(record, "archive_manifest_id", None)
-            if status == "archived" and manifest_id and self._replay is not None:
-                if self._replay_leases is not None and self._replay_leases.active(manifest_id):
-                    skipped += 1
-                    continue
-                self._replay(manifest_id)
-                if hasattr(self._ledger, "acknowledge"):
-                    self._ledger.acknowledge(service_id, source.object_key, manifest_id)
-                replayed += 1
-                continue
-            try:
-                outcome = self._worker.process_source(service_id=service_id, domain=domain, source=source, now=now)
-                if outcome == "processed":
-                    retried += 1
-                else:
-                    skipped += 1
-            except (KeyError, RuntimeError):
-                skipped += 1
-        return SweepResult(retried, replayed, skipped)
-
-
 HighScaleWorker = HighScaleWorkerCoordinator
-HighScaleSweeper = HighScaleLeaseSweeper

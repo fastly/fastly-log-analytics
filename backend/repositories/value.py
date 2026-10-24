@@ -304,11 +304,6 @@ def _build_io_per_request_metrics(
 # ── Overview rollup reader ──────────────────────────────────────────────
 
 
-from backend.repositories._rollup_planner import (
-    collapse_hourly_to_daily_bundle_paths as _collapse_hourly_to_daily_bundle_paths,
-)
-
-
 def _try_overview_from_rollup(
     runner: QueryRunner,
     *,
@@ -357,12 +352,6 @@ def _try_overview_from_rollup(
 
     if not rollup_paths and not crosses_active:
         return None
-
-    rollup_paths = _collapse_hourly_to_daily_bundle_paths(
-        runner.src,
-        rollup_paths,
-        OVERVIEW_BUNDLE_FILENAME,
-    )
 
     interval = safe_interval(chart_interval, "1 day")
     _HIT_STATES = HIT_STATES
@@ -576,12 +565,6 @@ def _try_network_from_rollup(
 
     if not rollup_paths and not crosses_active:
         return None
-
-    rollup_paths = _collapse_hourly_to_daily_bundle_paths(
-        runner.src,
-        rollup_paths,
-        NETWORK_SUMMARY_BUNDLE_FILENAME,
-    )
 
     interval = safe_interval(chart_interval, "1 day")
     has_protocol = "protocol" in actual_cols

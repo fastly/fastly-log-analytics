@@ -21,22 +21,26 @@ import time
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
-import duckdb
 import pytest
 
 from backend.core.ingest import convert_batch_objects
-from tests._helpers.ledger import clear_ledger as _clear_ledger
+from tests._helpers.ledger import (
+    DuckLakeLedgerEnv,
+)
+from tests._helpers.ledger import (
+    clear_ledger as _clear_ledger,
+)
+from tests._helpers.ledger import (
+    download_stub as _download_stub,
+)
+from tests._helpers.ledger import (
+    lake_reader as _lake_reader,
+)
+from tests._helpers.ledger import (
+    seed_discovered as _seed_discovered,
+)
 
 BUCKET = "test-bucket"
-
-
-def _seed_discovered(con, cur, service_id: str, object_keys: list[str]) -> None:
-    for object_key in object_keys:
-        cur.execute(
-            "INSERT INTO ingest_ledger (service_id, object_key, status, discovered_at) VALUES (?, ?, 'discovered', ?)",
-            (service_id, object_key, time.time()),
-        )
-    con.commit()
 
 
 def _write_files(tmp_path, names: list[str], lines_per_file: int = 1) -> tuple[list[str], dict[str, str]]:
@@ -58,60 +62,15 @@ def _write_files(tmp_path, names: list[str], lines_per_file: int = 1) -> tuple[l
     return keys, s3_to_local
 
 
-def _download_stub(s3_to_local: dict[str, str], requested: list[list[str]] | None = None):
-    def _download(fos_client, s3_paths, tmpdir):
-        if requested is not None:
-            requested.append(list(s3_paths))
-        # A path absent from the map is a download failure — exactly what
-        # _download_chunk_to_local does for a missing object.
-        got = {p: s3_to_local[p] for p in s3_paths if p in s3_to_local}
-        return got, {v: k for k, v in got.items()}
-
-    return _download
-
-
-def _attacher(catalog: str, data_path: str, read_only_override: bool = False):
-    def _attach(con_arg, src_arg, read_only=False):
-        con_arg.execute("INSTALL ducklake; LOAD ducklake;")
-        ro = ", READ_ONLY" if (read_only or read_only_override) else ""
-        for attempt in range(40):
-            try:
-                con_arg.execute(f"ATTACH 'ducklake:{catalog}' AS lake (DATA_PATH '{data_path}'{ro})")
-                break
-            except duckdb.Error as exc:
-                if "already exists" in str(exc).lower():
-                    break
-                if attempt == 39:
-                    raise
-                time.sleep(0.05)
-        return True
-
-    return _attach
-
-
-@contextmanager
 def _batch_env(service_id: str, tmp_path, download, fos=None, read_only_override: bool = False):
-    src = {"service_id": service_id, "name": service_id, "bucket": BUCKET, "prefix": ""}
-    catalog = str(tmp_path / "cat.ducklake")
-    data_path = str(tmp_path / "lakedata")
-    with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.core.ingest._get_fos_client", return_value=fos if fos is not None else MagicMock()),
-        patch("backend.core.ingest._download_chunk_to_local", side_effect=download),
-        patch(
-            "backend.core.iceberg._ducklake._ducklake_attach",
-            side_effect=_attacher(catalog, data_path, read_only_override),
-        ),
-        patch("backend.core.ingest._configure_fos"),
-        patch("backend.core.iceberg._ducklake.ducklake_table_name", return_value="logs"),
-    ):
-        yield _attacher(catalog, data_path)
-
-
-def _lake_reader(attach):
-    con = duckdb.connect()
-    attach(con, None, read_only=False)
-    return con
+    return DuckLakeLedgerEnv(
+        service_id,
+        tmp_path,
+        download=download,
+        fos=fos,
+        bucket=BUCKET,
+        read_only_override=read_only_override,
+    )
 
 
 def _snapshots(con) -> int:

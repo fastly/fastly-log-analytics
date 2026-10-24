@@ -17,50 +17,16 @@ Design notes:
 from __future__ import annotations
 
 import logging
-import sys
-from types import ModuleType
 from typing import Any
 
-from backend import celery_queue as _celery_queue
 from backend.celery_queue import (
     KNOWN_QUEUES as KNOWN_QUEUES,
-)
-from backend.celery_queue import (
-    _get_redis as _get_redis,
-)
-from backend.celery_queue import (
-    _redis_client as _redis_client,
-)
-from backend.celery_queue import (
-    _redis_lock as _redis_lock,
 )
 from backend.celery_queue import (
     celery_queue_depths as celery_queue_depths,
 )
 
 logger = logging.getLogger(__name__)
-
-
-class _ShimModule(ModuleType):
-    """Mirror monkeypatches of queue/Redis helpers onto ``backend.celery_queue``."""
-
-    _MIRRORED_TO_QUEUE = frozenset(
-        {
-            "KNOWN_QUEUES",
-            "_get_redis",
-            "_redis_client",
-            "_redis_lock",
-            "celery_queue_depths",
-        }
-    )
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        if name in self._MIRRORED_TO_QUEUE:
-            setattr(_celery_queue, name, value)
-        super().__setattr__(name, value)
-
-
-sys.modules[__name__].__class__ = _ShimModule
 
 
 def ingest_ledger_summary() -> dict[str, int]:

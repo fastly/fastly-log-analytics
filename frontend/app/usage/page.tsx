@@ -24,7 +24,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils';
-import { formatAbbreviatedCount, formatBytes, formatCount, formatCountMaybe } from '@/lib/format'
+import { formatAbbreviatedCount, formatBytes, formatCount, formatCountMaybe, formatUSD } from '@/lib/format'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ReportLayout } from '@/components/ReportLayout'
 const FosOperationsHelp = ({ note }: { note?: string }) => (
@@ -297,7 +297,7 @@ function UsagePageContent({
   const roughStorage = ((storage?.total_billed_gb_hours ?? 0) / 720) * rateStorage
   const roughBandwidth = totalBwGB * rateEgress
   const roughTotal = roughCostA + roughCostB + roughStorage + roughBandwidth
-  const fmtUSD = (n: number) => n >= 1000 ? '$' + n.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',') : '$' + n.toFixed(2)
+  const fmtUSD = (n: number) => formatUSD(n, { subDollarDigits: 2 })
 
   // ── Cost chart ──────────────────────────────────────────────────────────────
   const costOpsY = opsClassA.map((a: number, i: number) => ((a ?? 0) / 1000) * rateA + ((opsClassB[i] ?? 0) / 1000) * rateB)

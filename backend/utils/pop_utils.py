@@ -1,6 +1,5 @@
 import json
 import logging
-import math
 import os
 import re
 import threading
@@ -139,15 +138,6 @@ def get_pop_location_map() -> dict[str, dict]:
     with _loc_cache_lock:
         _loc_cache = (mtime_ns, result)
     return result
-
-
-def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Great-circle distance in kilometers between two (lat, lon) points."""
-    r_km = 6371.0
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
-    return 2.0 * r_km * math.asin(math.sqrt(a))
 
 
 def _effective_pop_lat_lon_map() -> dict[str, tuple[float, float]]:

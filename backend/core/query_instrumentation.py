@@ -70,10 +70,6 @@ _TERMINAL_METHODS: tuple[str, ...] = (
     "close",
 )
 
-# Connection methods that issue a SQL statement. ``execute`` is the primary;
-# the relational-API methods (``sql``, ``query``) also accept SQL text.
-_EXEC_METHODS: tuple[str, ...] = ("execute", "executemany", "sql", "query")
-
 
 class InstrumentedDuckDBConnection:
     """Thin proxy around a raw ``duckdb.DuckDBPyConnection``.

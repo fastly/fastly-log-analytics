@@ -35,9 +35,7 @@ def require_json_content_type(req: Request) -> None:
     "simple"; application/json is not), blocking the silent-invocation
     vector. Runs as a ``Depends()`` so it fires before FastAPI's body
     parser — otherwise a malformed text/plain body returns 422 from the
-    parser and the explicit 415 never executes. Mirrors
-    ``routers.provision._require_json_content_type`` (kept separate there
-    to avoid a cross-router import; this copy is for other routers)."""
+    parser and the explicit 415 never executes."""
     if not (req.headers.get("content-type") or "").startswith("application/json"):
         raise HTTPException(
             status_code=415,

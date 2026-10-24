@@ -556,8 +556,6 @@ def get_groups_for_api() -> list:
 # Custom field support
 
 _BUILTIN_FIELD_NAMES = frozenset(f["id"] for f in LOG_FIELD_CATALOG)
-# Iceberg partition columns that must not be used as field names
-_RESERVED_PARTITION_COLS = frozenset({"dt", "timestamp_hour"})
 
 
 def validate_custom_field(field: dict, existing_names: list[str]) -> list[str]:

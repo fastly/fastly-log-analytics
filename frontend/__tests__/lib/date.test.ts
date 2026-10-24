@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { toUTCDate, formatCompactRelative, formatTimeAgo, formatLocalDateTime } from '@/lib/date'
+import { toUTCDate, formatTimeAgo, formatLocalDateTime } from '@/lib/date'
 
 describe('toUTCDate', () => {
   it('parses ISO strings', () => {
@@ -23,20 +23,6 @@ describe('relative time formatting', () => {
 
   afterEach(() => {
     vi.useRealTimers()
-  })
-
-  describe('formatCompactRelative', () => {
-    it('formats seconds', () => {
-      expect(formatCompactRelative(new Date(now.getTime() - 30000))).toBe('(30s)')
-    })
-
-    it('formats minutes', () => {
-      expect(formatCompactRelative(new Date(now.getTime() - 120000))).toBe('(2m)')
-    })
-
-    it('formats hours', () => {
-      expect(formatCompactRelative(new Date(now.getTime() - 3600000 * 5))).toBe('(5h)')
-    })
   })
 
   describe('formatTimeAgo', () => {

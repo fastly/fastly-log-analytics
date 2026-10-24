@@ -1,6 +1,7 @@
 'use client'
 
 import * as React from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Loader2 } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
@@ -78,72 +79,75 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
     since: '',
     until: '',
   })
-  const [filteredLogs, setFilteredLogs] = React.useState<AuditLog[] | null>(null)
-  const [loading, setLoading] = React.useState(false)
+  const [appliedFilters, setAppliedFilters] = React.useState<AuditFilters | null>(() =>
+    initialEmailFilter
+      ? { event_type: 'ALL', email: initialEmailFilter, since: '', until: '' }
+      : null,
+  )
 
   // The email filter follows the upstream `initialEmailFilter` (adjusted during render when it
-  // changes); the fetch for a provided filter runs in the effect below.
+  // changes); the query runs automatically when `appliedFilters` is non-null.
   const [seenInitialEmail, setSeenInitialEmail] = React.useState(initialEmailFilter)
   if (initialEmailFilter !== seenInitialEmail) {
     setSeenInitialEmail(initialEmailFilter)
     setFilters((f) => ({ ...f, email: initialEmailFilter || '' }))
-    if (!initialEmailFilter) setFilteredLogs(null)
+    setAppliedFilters(
+      initialEmailFilter
+        ? { event_type: 'ALL', email: initialEmailFilter, since: '', until: '' }
+        : null,
+    )
   }
 
-  React.useEffect(() => {
-    if (!initialEmailFilter) return
-    const autoApply = async () => {
-      setLoading(true)
+  const auditQuery = useQuery({
+    queryKey: ['share-audit-logs', appliedFilters],
+    enabled: appliedFilters !== null,
+    retry: false,
+    queryFn: async () => {
       onError('')
       try {
-        const params: Record<string, string | number> = { limit: 200, email: initialEmailFilter }
+        const params: Record<string, string | number> = { limit: 200 }
+        if (appliedFilters?.event_type && appliedFilters.event_type !== 'ALL') {
+          params.event_type = appliedFilters.event_type
+        }
+        if (appliedFilters?.email) params.email = appliedFilters.email
+        if (appliedFilters?.since) params.since = appliedFilters.since
+        if (appliedFilters?.until) params.until = appliedFilters.until
         const data = await unwrapClient(
           client.GET('/api/admin/share/audit-logs', {
             params: { query: params },
           }),
         )
-        setFilteredLogs(data?.audit_logs || [])
+        return data?.audit_logs || []
       } catch (e) {
         onError(extractApiError(e))
-      } finally {
-        setLoading(false)
+        throw e
       }
-    }
-    autoApply()
-  }, [initialEmailFilter, onError])
+    },
+  })
 
-  const applyFilters = async () => {
-    setLoading(true)
-    onError('')
-    try {
-      const params: Record<string, string | number> = { limit: 200 }
-      if (filters.event_type && filters.event_type !== 'ALL') {
-        params.event_type = filters.event_type
-      }
-      if (filters.email) params.email = filters.email
-      if (filters.since) params.since = filters.since
-      if (filters.until) params.until = filters.until
-      const data = await unwrapClient(
-        client.GET('/api/admin/share/audit-logs', {
-          params: { query: params },
-        }),
-      )
-      setFilteredLogs(data?.audit_logs || [])
-    } catch (e) {
-      onError(extractApiError(e))
-    } finally {
-      setLoading(false)
+  const applyFilters = () => {
+    setAppliedFilters({ ...filters })
+    if (
+      appliedFilters &&
+      appliedFilters.event_type === filters.event_type &&
+      appliedFilters.email === filters.email &&
+      appliedFilters.since === filters.since &&
+      appliedFilters.until === filters.until
+    ) {
+      auditQuery.refetch()
     }
   }
 
   const handleClear = () => {
     setFilters({ event_type: 'ALL', email: '', since: '', until: '' })
-    setFilteredLogs(null)
+    setAppliedFilters(null)
     if (onClearInitialFilter) {
       onClearInitialFilter()
     }
   }
 
+  const filteredLogs = appliedFilters !== null ? (auditQuery.data ?? null) : null
+  const loading = auditQuery.isFetching
   const rows = filteredLogs ?? status?.audit_logs ?? []
 
   const auditAccessors = React.useMemo<SortAccessors<AuditLog>>(

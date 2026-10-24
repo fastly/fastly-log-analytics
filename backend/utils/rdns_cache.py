@@ -27,7 +27,6 @@ import socket
 import sys
 import threading
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiodns
@@ -39,8 +38,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Backward compatibility shim for test suites and scripts inspecting historical paths
-_DB_PATH = Path("data/cache/rdns_cache.db")
 _write_lock = threading.Lock()
 _last_enrichment_at: str | None = None
 
@@ -107,32 +104,7 @@ def _read_con():
     return get_pg_readonly_connection()
 
 
-def _init() -> None:
-    pass
-
-
 # ── Public API ────────────────────────────────────────────────────────────────
-
-
-def get_hostname(ip: str) -> tuple[str | None, str, bool]:
-    """Return (hostname, status, fcrdns_verified) for an IP.
-
-    If the IP is not in the cache, it is enqueued as 'pending' and
-    (None, 'pending', False) is returned immediately.
-    """
-    con = _read_con()
-    if con is None:
-        enqueue([ip])
-        return None, "pending", False
-    try:
-        row = con.execute("SELECT hostname, status, fcrdns_verified FROM rdns WHERE ip = ?", (ip,)).fetchone()
-    finally:
-        con.close()
-
-    if row is None:
-        enqueue([ip])
-        return None, "pending", False
-    return row["hostname"], row["status"], bool(row["fcrdns_verified"])
 
 
 def get_hostnames(ips: list[str]) -> dict[str, tuple[str | None, str, bool]]:

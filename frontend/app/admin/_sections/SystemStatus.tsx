@@ -13,15 +13,8 @@ import {
 } from "@/components/ui/tooltip"
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { useMounted } from '@/hooks/useMounted'
-import { useNowMs } from '@/hooks/useNowSeconds'
-import { formatCompactDuration, toUTCDate } from '@/lib/date'
+import { NextRunCountdown } from '@/components/LiveElapsed'
 import type { components } from '@/types/api.generated'
-
-function NextRunCountdown({ when }: { when: string | null | undefined }) {
-  const nowMs = useNowMs()
-  if (!when) return <>Disabled</>
-  return <>{formatCompactDuration(Math.floor((toUTCDate(when).getTime() - nowMs) / 1000))}</>
-}
 
 function SystemJobBox({ job }: { job: components['schemas']['SystemJobStatus'] }) {
   const { timeAgo, full, abbr } = useDateFormat()

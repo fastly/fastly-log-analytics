@@ -225,11 +225,6 @@ def get_provider(key: str) -> OAuthProvider | None:
     return None
 
 
-def oauth_enabled() -> bool:
-    """True iff the feature switch is on AND at least one provider is configured."""
-    return feature_on() and bool(get_all_providers())
-
-
 def passcode_login_enabled() -> bool:
     """Whether passcode login is offered. Default ON (passcode flow unchanged).
 

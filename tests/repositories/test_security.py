@@ -219,7 +219,7 @@ def test_security_aggregates_wellknown_bots_uses_regex_prefilter_when_pattern_av
     with (
         patch("backend.utils.bot_sources.get_bot_regex_pattern", return_value="(?i)bot|crawler"),
         patch("backend.utils.bot_sources.build_matcher", return_value=fake_match),
-        patch("backend.utils.rdns_cache.get_hostname", return_value=(None, "pending", False)),
+        patch("backend.utils.rdns_cache.get_hostnames", return_value={}),
         patch("backend.utils.rdns_cache.classify", return_value="unverified_pending"),
         patch("backend.utils.rdns_cache.enqueue"),
     ):
@@ -252,7 +252,7 @@ def test_security_aggregates_wellknown_bots_falls_back_when_no_pattern_available
     with (
         patch("backend.utils.bot_sources.get_bot_regex_pattern", return_value=""),
         patch("backend.utils.bot_sources.build_matcher", return_value=lambda ua: []),
-        patch("backend.utils.rdns_cache.get_hostname", return_value=(None, "pending", False)),
+        patch("backend.utils.rdns_cache.get_hostnames", return_value={}),
         patch("backend.utils.rdns_cache.classify", return_value="unverified_pending"),
         patch("backend.utils.rdns_cache.enqueue"),
     ):
@@ -1595,9 +1595,9 @@ def test_get_security_proxies_mapping():
 
     from backend.core.duckdb import _clear_schema_cache
     from backend.repositories import security as repo
-    from backend.repositories._base import clear_schema_cols_cache
+    from backend.repositories._base import _schema_cols_cache
 
-    clear_schema_cols_cache()
+    _schema_cols_cache.clear()
     _clear_schema_cache()
 
     con = duckdb.connect(":memory:")

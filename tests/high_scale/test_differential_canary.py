@@ -17,13 +17,11 @@ from typing import Any
 from backend.high_scale.aggregate_writer import compute_dimension_counts
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.ingest_controller import (
+    BatchIngestResult,
     HighScaleIngestController,
-    IngestResult,
 )
-from backend.high_scale.ledger import HighScaleLedger
 from backend.high_scale.network_projection import build_network_projection_rows
 from backend.high_scale.origin_projection import build_origin_projection_rows
-from backend.high_scale.ownership import OwnershipStore
 from backend.high_scale.performance_projection import build_performance_projection_rows
 from backend.high_scale.publication import (
     ClickHousePublication,
@@ -34,6 +32,7 @@ from backend.high_scale.publication import (
 )
 from backend.high_scale.security_projection import build_security_projection_rows
 from backend.high_scale.source_discovery import SourceObjectDescriptor
+from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
 
 
 class _MockClickHouse:
@@ -129,19 +128,20 @@ def test_differential_canary_row_counts_and_events_match() -> None:
     sources = _generate_synthetic_log_sources(service_id, source_count=6, rows_per_source=8)
     expected_total_rows = 6 * 8
 
-    # --- Path A: Existing Unbatched Path ---
+    # --- Path A: Single-Source Batch Path ---
     ch_unbatched = _MockClickHouse()
-    ctrl_unbatched, _, _ = _build_controller(service_id, "worker-unbatched", ch_unbatched)
+    ctrl_unbatched, ledger_unbatched, _ = _build_controller(service_id, "worker-unbatched", ch_unbatched)
 
-    unbatched_results: list[IngestResult] = []
+    unbatched_results: list[BatchIngestResult] = []
     for desc, payload, _ in sources:
-        res = ctrl_unbatched.ingest(
+        ledger_unbatched.discover(
+            service_id, "request", desc.object_key, desc.checksum, size_bytes=len(payload), version=desc.version
+        )
+        ledger_unbatched.claim(service_id, desc.object_key, "worker-unbatched")
+        res = ctrl_unbatched.ingest_batch(
             service_id=service_id,
             domain="request",
-            object_key=desc.object_key,
-            checksum=desc.checksum,
-            payload=payload,
-            version=desc.version,
+            sources_payloads=[(desc, payload)],
         )
         unbatched_results.append(res)
 
@@ -211,15 +211,16 @@ def test_differential_canary_aggregates_and_projections_match() -> None:
 
     # Decode events for both paths
     ch_u = _MockClickHouse()
-    ctrl_u, _, _ = _build_controller(service_id, "worker-u", ch_u)
+    ctrl_u, ledger_u, _ = _build_controller(service_id, "worker-u", ch_u)
     for desc, payload, _ in sources:
-        ctrl_u.ingest(
+        ledger_u.discover(
+            service_id, "request", desc.object_key, desc.checksum, size_bytes=len(payload), version=desc.version
+        )
+        ledger_u.claim(service_id, desc.object_key, "worker-u")
+        ctrl_u.ingest_batch(
             service_id=service_id,
             domain="request",
-            object_key=desc.object_key,
-            checksum=desc.checksum,
-            payload=payload,
-            version=desc.version,
+            sources_payloads=[(desc, payload)],
         )
 
     ch_b = _MockClickHouse()
@@ -312,15 +313,16 @@ def test_differential_canary_per_service_flag_and_rollback() -> None:
             else:
                 total = 0
                 for d, p, _ in batch_sources:
-                    r = self.controller.ingest(
+                    self.ledger.discover(
+                        service_id, "request", d.object_key, d.checksum, size_bytes=len(p), version=d.version
+                    )
+                    self.ledger.claim(service_id, d.object_key, self.worker_id)
+                    r = self.controller.ingest_batch(
                         service_id=service_id,
                         domain="request",
-                        object_key=d.object_key,
-                        checksum=d.checksum,
-                        payload=p,
-                        version=d.version,
+                        sources_payloads=[(d, p)],
                     )
-                    total += r.decoded.accepted_rows
+                    total += r.total_events
                 return total
 
     runner = CanaryRunner(ctrl, ledger, "worker-canary")

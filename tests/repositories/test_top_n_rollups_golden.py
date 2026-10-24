@@ -469,7 +469,7 @@ def _run(case: Case, tmp: Path, probe: _Probe) -> tuple[dict, dict[str, str]]:
         runner._partial_hour_adjusted_live_start = fake_partial  # type: ignore[method-assign]
         runner.release_active_direct_temp = released.append  # type: ignore[method-assign]
 
-        rollup_coverage.clear_listdir_cache()
+        rollup_coverage._listdir_cache.clear()
         rr.reset_rollup_coverage_ready()
         _base._EMPTY_ROLLUP_WARN_TS.clear()
         _base._MISSING_HOUR_HEAL_WARN_TS.clear()

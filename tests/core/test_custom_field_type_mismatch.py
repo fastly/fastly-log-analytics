@@ -80,9 +80,6 @@ def custom_field_env(s3_mock, fos_source, monkeypatch, tmp_path):
     # Reset view caches (autouse fixture does this too)
     from backend.core import iceberg as ice
 
-    ice._catalog_cache.clear()
-    ice._snapshot_files_cache.clear()
-    ice._table_object_cache.clear()
     if hasattr(ice, "_view_cache"):
         ice._view_cache.clear()
 

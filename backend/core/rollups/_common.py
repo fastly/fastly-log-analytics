@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
-import json
 import logging
 import os
 import shutil
@@ -18,7 +17,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from backend.core.sql_ident import SAFE_IDENT_RE, is_safe_ident
+from backend.core.sql_ident import is_safe_ident
 from backend.utils.date_utils import parse_hour_key, parse_hour_key_strict
 from backend.utils.sql_validator import escape_sql_literal
 
@@ -57,7 +56,6 @@ IP_SAMPLE_CAP = 5000
 # independently. Mirrors the per-day shape under
 # ``rollups/day_ip_spread``.
 IP_SPREAD_DIR_NAME = "hour_ip_spread"
-IP_SPREAD_DAY_DIR_NAME = "day_ip_spread"
 
 # Sibling filename in hour_bundled / day_bundled for the bundled
 # IP-spread parquet (one file per bundle dir, containing rows for
@@ -74,7 +72,6 @@ IP_SPREAD_BUNDLE_FILENAME = "all_fields_ip.parquet"
 # fields are derived from admin-controlled custom_field entries).
 # Defense in depth: this module reject anything not matching the
 # pattern with a logged warning.
-_SAFE_IDENT_RE = SAFE_IDENT_RE
 _is_safe_ident = is_safe_ident
 
 
@@ -164,41 +161,6 @@ def _day_rollups_root(source: dict) -> str:
     from backend.core.duckdb import _cache_dir
 
     return os.path.join(_cache_dir(source), "rollups", "day")
-
-
-def _markers_path(source: dict) -> str:
-    """JSON file tracking which fields have been backfilled.
-
-    Replaces the prior single ``.backfill_done`` marker which couldn't
-    distinguish "fully backfilled" from "backfilled before a new custom
-    field was added". Shape: ``{"field": "ISO timestamp", ...}``.
-    """
-    from backend.core.duckdb import _cache_dir
-
-    return os.path.join(_cache_dir(source), "rollups", "backfill_markers.json")
-
-
-def _load_markers(source: dict) -> dict[str, str]:
-    path = _markers_path(source)
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError) as e:
-        logger.warning("[rollups] could not read markers at %s: %s", path, e)
-        return {}
-
-
-def _save_markers(source: dict, markers: dict[str, str]) -> None:
-    from backend.utils.atomic_write import atomic_write_json
-
-    path = _markers_path(source)
-    try:
-        atomic_write_json(path, markers, indent=None)
-    except OSError as e:
-        logger.warning("[rollups] could not write markers to %s: %s", path, e)
 
 
 def publish_temp_parquet(

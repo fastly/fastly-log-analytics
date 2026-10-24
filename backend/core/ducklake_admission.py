@@ -13,7 +13,6 @@ from contextlib import contextmanager
 logger = logging.getLogger(__name__)
 
 DUCKLAKE_WRITE_ADMISSION_TIMEOUT_S = float(os.getenv("DUCKLAKE_WRITE_ADMISSION_TIMEOUT_S", "30"))
-_POLL_S = 0.1
 
 
 class DuckLakeAdmissionTimeout(TimeoutError):

@@ -782,8 +782,6 @@ def ingest(
     start_time: str | None = None,
     end_time: str | None = None,
     incremental_only: bool = False,
-    queue_only: bool = False,
-    specific_files: list[str] | None = None,
 ):
     """Ingest new raw log files from FOS into the local Iceberg buffer.
 
@@ -1668,15 +1666,6 @@ LEDGER_CONVERT_BATCH_SIZE = int(os.getenv("LEDGER_CONVERT_BATCH_SIZE", "50"))
 _LEDGER_KEY_SLICE = 400
 
 
-def _drain_generator(gen):
-    """Exhaust a generator, returning its StopIteration ``return`` value."""
-    while True:
-        try:
-            next(gen)
-        except StopIteration as e:
-            return e.value
-
-
 def _celery_ingest_scope(kind: str, service_id: str):
     """Telemetry envelope for ledger tasks: process-context tagging + FOS
     call tracking + usage-log flush — the same accounting the ``@cron_task``
@@ -1720,7 +1709,12 @@ def _discover_prefix_common(
     if src is None:
         return 0
 
-    fos_result = _drain_generator(list_fos_files(src, **list_kwargs))
+    list_gen = list_fos_files(src, **list_kwargs)
+    try:
+        while True:
+            next(list_gen)
+    except StopIteration as e:
+        fos_result = e.value
     if not fos_result:
         logger.warning("[ledger] %s: %sFOS LIST returned nothing (prefix=%s)", service_id, log_label, prefix_subpath)
         return 0
@@ -1866,22 +1860,10 @@ def _ledger_record_failure(
     return status
 
 
-def _ledger_mark_committed(con, service_id: str, object_key: str, expected_generation: int) -> str:
-    """Fence the terminal success transition to the worker's lease generation."""
-    cur = con.cursor()
-    cur.execute(
-        "UPDATE ingest_ledger SET status='committed', committed_at=? "
-        "WHERE service_id=? AND object_key=? AND status='claimed' AND lease_generation=?",
-        (time.time(), service_id, object_key, expected_generation),
-    )
-    con.commit()
-    return "committed" if cur.rowcount else "stale"
-
-
 def _ledger_mark_committed_batch(
     con, service_id: str, object_keys: list[str], claimed_generations: dict[str, int]
 ) -> set[str]:
-    """Batched counterpart of ``_ledger_mark_committed`` grouped by lease generation."""
+    """Mark claimed ledger rows as committed grouped by lease generation."""
     if not object_keys:
         return set()
     cur = con.cursor()
@@ -1930,223 +1912,6 @@ def _ledger_mark_dead_letter_missing(
     )
     con_meta.commit()
     return int(cur.rowcount or 0)
-
-
-def convert_object(service_id: str, object_key: str, worker_id: str) -> str:
-    """Claim one ledger row, download the file, and insert its rows into the
-    per-service DuckLake table. Returns the terminal ledger status.
-
-    Idempotent: rows for this file are DELETEd (keyed on ``_source_file``)
-    inside the same DuckLake transaction as the INSERT, so redelivery or a
-    sweeper reclaim after a crash-between-insert-and-ack cannot duplicate data.
-    """
-
-    from backend import config as svcconfig
-    from backend.core.duckdb import get_source_for_service
-    from backend.core.ducklake_admission import ducklake_write_admission
-    from backend.core.iceberg._ducklake import _ducklake_attach, _ducklake_detach, ducklake_table_name
-    from backend.core.metadata.base import get_con
-
-    con_meta = get_con(service_id)
-    cur = con_meta.cursor()
-
-    cur.execute(
-        "UPDATE ingest_ledger SET status='claimed', claimed_by=?, claimed_at=?, next_attempt_at=NULL, "
-        "lease_generation=lease_generation + 1 "
-        "WHERE service_id=? AND object_key=? AND status='discovered' "
-        "RETURNING lease_generation",
-        (worker_id, time.time(), service_id, object_key),
-    )
-    claim_row = cur.fetchone()
-    claimed = claim_row is not None
-    lease_generation = int(claim_row[0]) if claim_row is not None else None
-    con_meta.commit()
-    if not claimed:
-        return "not_claimed"
-
-    outcome = _new_object_outcome()
-    src = get_source_for_service(service_id)
-    if src is None:
-        _ledger_record_failure(con_meta, service_id, object_key, "no source registered for service", lease_generation)
-        _mark_object_failed(outcome)
-        _record_ledger_object_outcome(service_id, object_key, outcome)
-        return "error"
-
-    bucket = src.get("bucket", "")
-    s3_path = f"s3://{bucket}/{object_key}"
-    safe_source_file = escape_sql_literal(s3_path)
-
-    duckdb_con = None
-    admission_cm = ducklake_write_admission(service_id)
-    admission_entered = False
-    try:
-        fos = boto3_client_hot() if svcconfig.HOT_S3_ENDPOINT else _get_fos_client(src)
-        # Workers must NOT open the per-service .duckdb FILE: DuckDB is
-        # single-writer-per-file across processes, so a convert holding it
-        # starves the backend's dashboard readers ("Database is locked by
-        # another process" 503s). An in-memory connection with FOS creds +
-        # the transactional DuckLake catalog is all a convert needs.
-        from backend.core.duckdb import get_memory_connection
-
-        duckdb_con = get_memory_connection(src)
-        table = ducklake_table_name(src)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            s3_to_local, _ = _download_chunk_to_local(fos, [s3_path], tmpdir)
-            local_file = s3_to_local.get(s3_path)
-            if not local_file:
-                # Distinguish "object is gone" (terminal — e.g. a ledger row
-                # resurrected for a raw file the old pipeline already ingested
-                # and deleted) from a transient download failure (retryable).
-                # Without this, every dead key burns LEDGER_MAX_ATTEMPTS GETs.
-                if _is_permanent_s3_missing(fos, bucket, object_key):
-                    _ledger_mark_dead_letter_missing(con_meta, service_id, object_key, lease_generation)
-                    logger.info("[ledger] %s: %s gone from FOS — dead_letter", service_id, object_key)
-                    _mark_object_failed(outcome)
-                    _record_ledger_object_outcome(service_id, object_key, outcome)
-                    return "dead_letter"
-                raise RuntimeError("download failed (object still exists — transient)")
-
-            # Acquire the per-service write lock only now — for the DuckLake
-            # attach + INSERT below, never across the FOS download above
-            # (which touches no catalog state).
-            admission_cm.__enter__()
-            admission_entered = True
-            if not _ducklake_attach(duckdb_con, src, read_only=False):
-                raise RuntimeError("DuckLake read-write attach failed")
-
-            log_fields_config = (svcconfig.load_config(service_id) or {}).get("log_fields")
-            columns_sql = get_ingest_columns_sql(log_fields_config)
-            safe_local = escape_sql_literal(local_file)
-            read_expr = (
-                f"read_json_auto('{safe_local}', format='newline_delimited', "
-                f"records='auto', columns={columns_sql}, ignore_errors=true)"
-            )
-            # ignore_errors=true does NOT drop a malformed line — it inserts
-            # it with every field NULL (verified empirically: a truncated
-            # JSON object comes back as a row of NULLs, not a skipped row).
-            # Without this filter that garbage row lands straight in the
-            # queryable lake table. WHERE timestamp IS NOT NULL is the same
-            # invariant the sync path enforces before writing its buffer
-            # (ingest.py's `_ingest_staging` reads, e.g. the one behind
-            # `_fetched = ... WHERE timestamp IS NOT NULL`).
-            clean_read_expr = (
-                f"(SELECT {', '.join(_build_column_select_exprs(src, log_fields_config))} "
-                f"FROM {read_expr} WHERE timestamp IS NOT NULL)"
-            )
-
-            table_exists = bool(
-                duckdb_con.execute(
-                    "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1",
-                    (table,),
-                ).fetchone()
-            )
-
-            needs_insert = True
-            if not table_exists:
-                try:
-                    duckdb_con.execute(
-                        f"CREATE TABLE lake.{table} AS "
-                        f"SELECT *, '{safe_source_file}' AS _source_file FROM {clean_read_expr}"
-                    )
-                    needs_insert = False  # created + inserted in one step
-                except Exception as e:
-                    if "already exists" not in str(e):
-                        raise
-                    # Lost a create race — fall through to the insert path.
-
-            if needs_insert:
-                # Widen the table for any new (custom-field) columns first.
-                try:
-                    existing_cols = {r[0] for r in duckdb_con.execute(f"DESCRIBE lake.{table}").fetchall()}
-                    for p_col, p_type, *_ in duckdb_con.execute(
-                        f"DESCRIBE SELECT * FROM {read_expr} LIMIT 0"
-                    ).fetchall():
-                        if p_col not in existing_cols:
-                            safe_col = p_col.replace('"', '""')
-                            duckdb_con.execute(f'ALTER TABLE lake.{table} ADD COLUMN "{safe_col}" {p_type}')
-                except Exception as e:
-                    logger.warning("[ledger] %s: schema sync failed for %s: %s", service_id, object_key, e)
-
-                duckdb_con.execute("BEGIN TRANSACTION")
-                try:
-                    duckdb_con.execute(f"DELETE FROM lake.{table} WHERE _source_file = '{safe_source_file}'")
-                    duckdb_con.execute(
-                        f"INSERT INTO lake.{table} BY NAME "
-                        f"SELECT *, '{safe_source_file}' AS _source_file FROM {clean_read_expr}"
-                    )
-                    duckdb_con.execute("COMMIT")
-                except Exception:
-                    try:
-                        duckdb_con.execute("ROLLBACK")
-                    except Exception:
-                        logger.debug("convert_object: duckdb_con.execute failed (ignored)", exc_info=True)
-                    raise
-
-            # A NULL-timestamp row (see clean_read_expr above) is what
-            # ignore_errors=true produces for a malformed line — check for
-            # that now rather than let it disappear with zero trace once
-            # excluded from the insert. Best-effort: a failure here must
-            # never fail the convert itself (the valid rows are already
-            # durably committed).
-            try:
-                quarantine_result = _quarantine_convert_corrupt_lines(
-                    duckdb_con, fos, src, read_expr, local_file, object_key
-                )
-            except Exception as qe:
-                logger.exception("[ledger] %s: request quarantine processing failed for %s", service_id, object_key)
-                valid_count_row = duckdb_con.execute(f"SELECT count(*) FROM {clean_read_expr}").fetchone()
-                quarantine_result = {
-                    "valid_records": int(valid_count_row[0]) if valid_count_row else 0,
-                    "malformed_records": 0,
-                    "cap_evictions": 0,
-                    "quarantine_capture_failures": 1,
-                }
-            outcome.update(quarantine_result)
-            if outcome["quarantine_capture_failures"]:
-                _mark_object_failed(outcome)
-            elif outcome["malformed_records"] or outcome["corrupt_containers"]:
-                outcome["objects_partial"] = 1
-            else:
-                outcome["objects_successful"] = 1
-
-            # Mirror the sync path's ingested_files bookkeeping so every
-            # existing reader (Usage Log / log-line-accounting
-            # reconciliation, the admin ingested-files list, the historical
-            # dedup path) keeps working unchanged for celery-mode services
-            # instead of silently reading zero. Best-effort: never fails
-            # the convert — the ledger remains the authoritative record.
-            try:
-                count_row = duckdb_con.execute(
-                    f"SELECT count(*) FROM {read_expr} WHERE timestamp IS NOT NULL"
-                ).fetchone()
-                row_count = count_row[0] if count_row else 0
-                metadata_db.insert_ingested_files(service_id, [(object_key, row_count, os.path.getsize(local_file))])
-            except Exception as ie:
-                logger.warning("[ledger] %s: ingested_files bookkeeping failed for %s: %s", service_id, object_key, ie)
-            _record_ledger_object_outcome(service_id, object_key, outcome)
-    except Exception as e:
-        local_file = locals().get("local_file")
-        failed_gzip = _corrupt_gzip_error(local_file) if local_file else None
-        if failed_gzip is not None and local_file:
-            outcome = _capture_corrupt_container(service_id, "request", object_key, local_file, failed_gzip)
-        _mark_object_failed(outcome)
-        failure_status = _ledger_record_failure(con_meta, service_id, object_key, str(e), lease_generation)
-        _record_ledger_object_outcome(service_id, object_key, outcome)
-        return failure_status
-    finally:
-        if admission_entered:
-            admission_cm.__exit__(None, None, None)
-        if duckdb_con is not None:
-            try:
-                _ducklake_detach(duckdb_con, service_id=service_id)
-            except Exception:
-                logger.debug("convert_object: _ducklake_detach failed (ignored)", exc_info=True)
-            duckdb_con.close()
-
-    if lease_generation is None:
-        raise RuntimeError("lease_generation is unexpectedly None")
-    return _ledger_mark_committed(con_meta, service_id, object_key, lease_generation)
 
 
 def _ledger_claim_batch(con, service_id: str, object_keys: list[str], worker_id: str) -> dict[str, int]:
@@ -2667,9 +2432,16 @@ def _redispatch_pending(
     pending_batches = math.ceil(pending / LEDGER_CONVERT_BATCH_SIZE)
     broker_ok = False
     try:
-        from backend.celery_queue import celery_queue_depths
+        import sys as _sys
 
-        depth_fn = queue_depths_fn if queue_depths_fn is not None else celery_queue_depths
+        from backend import celery_queue as _cq
+
+        if queue_depths_fn is not None:
+            depth_fn = queue_depths_fn
+        else:
+            cs_mod = _sys.modules.get("backend.celery_status")
+            cs_fn = getattr(cs_mod, "celery_queue_depths", None) if cs_mod is not None else None
+            depth_fn = cs_fn if cs_fn is not None and cs_fn is not _cq.celery_queue_depths else _cq.celery_queue_depths
         queues, broker_ok = depth_fn()
         queue_depth = queues.get("q.ingest", 0) if broker_ok else 0
     except Exception:
@@ -3177,192 +2949,6 @@ def _write_rum_arrow_table_batch(
         duckdb_con.unregister("_rum_stage")
 
 
-def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
-    """RUM counterpart of ``convert_object``: claim one ``raw/rum/`` ledger
-    row, parse the beacon file, and insert its rows into BOTH per-service
-    DuckLake tables (``client_vitals``, ``client_errors``) — one raw file
-    produces rows for both. Returns the terminal ledger status.
-
-    Dual-table commit atomicity: each table is written in its own
-    DELETE-by-``_source_file``-then-INSERT transaction (idempotent under
-    redelivery, mirroring ``convert_object``'s single-table version of the
-    same pattern). The ledger row is only flipped to ``committed`` after
-    BOTH tables have been written without raising — if the second table's
-    write fails after the first succeeded, the exception propagates to
-    ``_ledger_record_failure`` and the row stays retryable (``discovered``
-    or, after LEDGER_MAX_ATTEMPTS, ``quarantined``); it is never marked
-    committed on a partial write. A retry re-runs both DELETE+INSERTs,
-    which is a no-op for the table that already succeeded (same source
-    file, same rows) and completes the table that didn't.
-    """
-
-    from backend import config as svcconfig
-    from backend.core.duckdb import get_source_for_service
-    from backend.core.ducklake_admission import ducklake_write_admission
-    from backend.core.iceberg._ducklake import _ducklake_attach, _ducklake_detach, ducklake_table_name
-
-    # Schema catalog only — CLIENT_VITALS_ARROW_SCHEMA/CLIENT_ERRORS_ARROW_SCHEMA
-    # are plain, static pa.Schema definitions (no iceberg pipeline logic), the
-    # same shared source of truth v2's commit_buffer aligns buffer files to
-    # (backend/core/iceberg/buffer.py's get_arrow_schema). Using the same
-    # schema here — rather than letting pyarrow infer types from the parsed
-    # dicts — is what keeps this path and v2's physically type-compatible on
-    # the SAME DuckLake table (ducklake_table_name is shared naming), so
-    # whichever writer creates the table first, the other's inserts don't
-    # hit a type mismatch.
-    from backend.core.iceberg.rum_schema import CLIENT_ERRORS_ARROW_SCHEMA, CLIENT_VITALS_ARROW_SCHEMA
-    from backend.core.metadata.base import get_con
-
-    con_meta = get_con(service_id)
-    cur = con_meta.cursor()
-
-    cur.execute(
-        "UPDATE ingest_ledger SET status='claimed', claimed_by=?, claimed_at=?, next_attempt_at=NULL, "
-        "lease_generation=lease_generation + 1 "
-        "WHERE service_id=? AND object_key=? AND status='discovered' "
-        "RETURNING lease_generation",
-        (worker_id, time.time(), service_id, object_key),
-    )
-    claim_row = cur.fetchone()
-    claimed = claim_row is not None
-    lease_generation = int(claim_row[0]) if claim_row is not None else None
-    con_meta.commit()
-    if not claimed:
-        return "not_claimed"
-
-    src = get_source_for_service(service_id)
-    if src is None:
-        _ledger_record_failure(con_meta, service_id, object_key, "no source registered for service", lease_generation)
-        return "error"
-
-    bucket = src.get("bucket", "")
-    s3_path = f"s3://{bucket}/{object_key}"
-    safe_source_file = escape_sql_literal(s3_path)
-
-    duckdb_con = None
-    admission_cm = ducklake_write_admission(service_id)
-    admission_entered = False
-    try:
-        fos = boto3_client_hot() if svcconfig.HOT_S3_ENDPOINT else _get_fos_client(src)
-        # Same single-writer-file rationale as convert_object: an in-memory
-        # connection with FOS creds + the transactional DuckLake catalog,
-        # never the per-service .duckdb file.
-        from backend.core.duckdb import get_memory_connection
-
-        duckdb_con = get_memory_connection(src)
-
-        vitals_table = ducklake_table_name(src, table_name="client_vitals")
-        errors_table = ducklake_table_name(src, table_name="client_errors")
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            s3_to_local, _ = _download_chunk_to_local(fos, [s3_path], tmpdir)
-            local_file = s3_to_local.get(s3_path)
-            if not local_file:
-                # Same dead-vs-transient split as convert_object: distinguish
-                # "object is gone" (terminal) from a transient download blip.
-                if _is_permanent_s3_missing(fos, bucket, object_key):
-                    _ledger_mark_dead_letter_missing(con_meta, service_id, object_key, lease_generation)
-                    logger.info("[ledger] %s: RUM %s gone from FOS — dead_letter", service_id, object_key)
-                    return "dead_letter"
-                raise RuntimeError("download failed (object still exists — transient)")
-
-            vitals_rows, errors_rows, corrupt_lines = _parse_rum_beacon_file(local_file, service_id)
-
-            outcome = _new_object_outcome()
-            outcome["valid_records"] = len(vitals_rows) + len(errors_rows)
-            if corrupt_lines:
-                try:
-                    quarantine_result = _quarantine_rum_corrupt_lines(
-                        fos,
-                        src,
-                        object_key,
-                        corrupt_lines,
-                        len(vitals_rows) + len(errors_rows),
-                        local_file=local_file,
-                    )
-                    outcome.update(quarantine_result)
-                except Exception:
-                    logger.exception("[ledger] %s: RUM evidence processing failed for %s", service_id, object_key)
-                    outcome["malformed_records"] = len(corrupt_lines)
-                    outcome["quarantine_capture_failures"] = len(corrupt_lines)
-
-            # Acquire the per-service write lock only now — for the DuckLake
-            # attach + writes below, never across the FOS download + Python
-            # beacon parse above (neither touches catalog state).
-            admission_cm.__enter__()
-            admission_entered = True
-            if not _ducklake_attach(duckdb_con, src, read_only=False):
-                raise RuntimeError("DuckLake read-write attach failed")
-
-            single_source_sql = f"'{safe_source_file}'"
-            _write_rum_arrow_table_batch(
-                duckdb_con,
-                vitals_table,
-                vitals_rows,
-                [s3_path] * len(vitals_rows),
-                single_source_sql,
-                CLIENT_VITALS_ARROW_SCHEMA,
-            )
-            _write_rum_arrow_table_batch(
-                duckdb_con,
-                errors_table,
-                errors_rows,
-                [s3_path] * len(errors_rows),
-                single_source_sql,
-                CLIENT_ERRORS_ARROW_SCHEMA,
-            )
-
-            # Mirror convert_object's ingested_files bookkeeping so existing
-            # readers (Usage Log, admin ingested-files list) keep working.
-            # Best-effort: never fails the convert — the ledger is
-            # authoritative.
-            try:
-                metadata_db.insert_ingested_files(
-                    service_id,
-                    [(object_key, len(vitals_rows), os.path.getsize(local_file))],
-                    table_name="client_vitals",
-                )
-                metadata_db.insert_ingested_files(
-                    service_id,
-                    [(object_key, len(errors_rows), os.path.getsize(local_file))],
-                    table_name="client_errors",
-                )
-            except Exception as ie:
-                logger.warning(
-                    "[ledger] %s: RUM ingested_files bookkeeping failed for %s: %s", service_id, object_key, ie
-                )
-            if outcome["quarantine_capture_failures"]:
-                _mark_object_failed(outcome)
-            elif outcome["malformed_records"] or outcome["corrupt_containers"]:
-                outcome["objects_partial"] = 1
-            else:
-                outcome["objects_successful"] = 1
-            _record_ledger_object_outcome(service_id, object_key, outcome)
-    except Exception as e:
-        local_file = locals().get("local_file")
-        failed_gzip = _corrupt_gzip_error(local_file) if local_file else None
-        if failed_gzip is not None and local_file:
-            outcome = _capture_corrupt_container(service_id, "rum", object_key, local_file, failed_gzip)
-        outcome = locals().get("outcome", _new_object_outcome())
-        _mark_object_failed(outcome)
-        failure_status = _ledger_record_failure(con_meta, service_id, object_key, str(e), lease_generation)
-        _record_ledger_object_outcome(service_id, object_key, outcome)
-        return failure_status
-    finally:
-        if admission_entered:
-            admission_cm.__exit__(None, None, None)
-        if duckdb_con is not None:
-            try:
-                _ducklake_detach(duckdb_con, service_id=service_id)
-            except Exception:
-                logger.debug("convert_rum_object: _ducklake_detach failed (ignored)", exc_info=True)
-            duckdb_con.close()
-
-    if lease_generation is None:
-        raise RuntimeError("lease_generation is unexpectedly None")
-    return _ledger_mark_committed(con_meta, service_id, object_key, lease_generation)
-
-
 def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id: str) -> dict:
     """Batched sibling of ``convert_rum_object``: claim N ledger rows,
     download them all, and land every row in ONE DuckLake transaction per
@@ -3666,55 +3252,17 @@ def sweep_rum_ledger_once(service_id: str, lookback_hours: int = 4, run_id: int 
 # ── Celery task wrappers ──────────────────────────────────────────────────────
 
 
-@app.task(name="backend.core.ingest.dispatch_minute", bind=True)
-def dispatch_minute(self, service_id: str, minute_prefix: str):
-    with _celery_ingest_scope("ledger_discover", service_id):
-        return discover_prefix(service_id, prefix_subpath=minute_prefix)
-
-
-@app.task(name="backend.core.ingest.convert", bind=True)
-def convert(self, service_id: str, object_key: str):
-    with _celery_ingest_scope("ledger_convert", service_id):
-        return convert_object(service_id, object_key, self.request.id or "sync-worker")
-
-
 @app.task(name="backend.core.ingest.convert_batch_files", bind=True)
 def convert_batch_files(self, service_id: str, object_keys: list[str]):
-    """Batched convert — one DuckLake catalog commit for the whole batch.
-    The per-key ``convert`` task above stays: the sweeper's dead-key retries
-    and any single-key message still in flight across a deploy need it."""
+    """Batched convert — one DuckLake catalog commit for the whole batch."""
     with _celery_ingest_scope("ledger_convert_batch", service_id):
         return convert_batch_objects(service_id, object_keys, self.request.id or "sync-worker")
-
-
-@app.task(name="backend.core.ingest.sweep_ledger", bind=True)
-def sweep_ledger(self, service_id: str, lookback_hours: int = 4):
-    with _celery_ingest_scope("ledger_sweep", service_id):
-        return sweep_ledger_once(service_id, lookback_hours=lookback_hours)
-
-
-@app.task(name="backend.core.ingest.dispatch_rum_minute", bind=True)
-def dispatch_rum_minute(self, service_id: str, minute_prefix: str):
-    with _celery_ingest_scope("ledger_rum_discover", service_id):
-        return discover_rum_prefix(service_id, prefix_subpath=minute_prefix)
-
-
-@app.task(name="backend.core.ingest.convert_rum", bind=True)
-def convert_rum(self, service_id: str, object_key: str):
-    with _celery_ingest_scope("ledger_rum_convert", service_id):
-        return convert_rum_object(service_id, object_key, self.request.id or "rum-worker")
 
 
 @app.task(name="backend.core.ingest.convert_batch_rum_files", bind=True)
 def convert_batch_rum_files(self, service_id: str, object_keys: list[str]):
     with _celery_ingest_scope("ledger_rum_convert_batch", service_id):
         return convert_batch_rum_objects(service_id, object_keys, self.request.id or "rum-worker")
-
-
-@app.task(name="backend.core.ingest.sweep_rum_ledger", bind=True)
-def sweep_rum_ledger(self, service_id: str, lookback_hours: int = 4):
-    with _celery_ingest_scope("ledger_rum_sweep", service_id):
-        return sweep_rum_ledger_once(service_id, lookback_hours=lookback_hours)
 
 
 # Only delete a raw file once its rows have been durably committed for this
@@ -3899,9 +3447,3 @@ def merge_lake_files(service_id: str) -> None:
             _mark_ledger_published(service_id)
     finally:
         con.close()
-
-
-@app.task(name="backend.core.ingest.commit_batch", bind=True)
-def commit_batch(self, service_id: str):
-    with _celery_ingest_scope("ledger_merge", service_id):
-        merge_lake_files(service_id)

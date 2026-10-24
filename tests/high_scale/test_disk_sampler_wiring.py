@@ -34,7 +34,7 @@ def _reset_sampler():
 
 
 def _history(metric: str):
-    return metric_snapshots.get_history(metric, since=datetime.now(UTC) - timedelta(hours=1))
+    return metric_snapshots.get_batch(since=datetime.now(UTC) - timedelta(hours=1)).get(metric, [])
 
 
 def test_sampler_reads_real_volume_stats_and_evaluates_mode() -> None:

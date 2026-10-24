@@ -86,26 +86,15 @@ def pipeline_env(monkeypatch):
     monkeypatch.setattr("backend.config.DUCKLAKE_CATALOG", os.path.join(tmpdir, "e2e.ducklake"))
     monkeypatch.setattr("backend.config.DUCKLAKE_DATA_PATH", os.path.join(tmpdir, "ducklake_data/"))
 
-    # Override _warehouse_uri to point at our local-FS warehouse so
-    # PyIceberg writes parquet files to local disk instead of S3.
-    monkeypatch.setattr("backend.core.iceberg._warehouse_uri", lambda src: f"file://{warehouse_path}")
-
-    # Reset module-level caches so the catalog/snapshot caches don't
-    # carry across tests.
+    # Reset module-level caches so the view cache doesn't carry across tests.
     from backend.core import iceberg as _ice
 
-    _ice._catalog_cache.clear()
-    _ice._snapshot_files_cache.clear()
-    _ice._table_object_cache.clear()
     if hasattr(_ice, "_view_cache"):
         _ice._view_cache.clear()
 
     yield {"src": source, "tmpdir": tmpdir, "warehouse": warehouse_path, "cache": cache_path}
 
     shutil.rmtree(tmpdir, ignore_errors=True)
-    _ice._catalog_cache.clear()
-    _ice._snapshot_files_cache.clear()
-    _ice._table_object_cache.clear()
     if hasattr(_ice, "_view_cache"):
         _ice._view_cache.clear()
 
@@ -441,7 +430,6 @@ def test_full_pipeline_including_raw_gzip_ingest(s3_mock, fos_source, monkeypatc
     # in the test sandbox instead of the real ``data/`` directory.
     fos_source["duckdb_path"] = os.path.join(tmp_path, "e2e.duckdb")
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: cache_path)
-    monkeypatch.setattr("backend.core.iceberg._warehouse_uri", lambda _src: f"file://{warehouse_path}")
 
     # Skip the FOS proxy SECRET setup — ingest's first DuckDB query would
     # otherwise try to load httpfs + start the telemetry proxy. We patch
@@ -481,9 +469,6 @@ def test_full_pipeline_including_raw_gzip_ingest(s3_mock, fos_source, monkeypatc
     # Reset module-level iceberg caches so a prior test's snapshot/view
     # state can't leak into this one (the autouse `_reset_module_caches`
     # fixture does this too, but be explicit).
-    ice._catalog_cache.clear()
-    ice._snapshot_files_cache.clear()
-    ice._table_object_cache.clear()
     if hasattr(ice, "_view_cache"):
         ice._view_cache.clear()
 
@@ -745,7 +730,6 @@ def test_e2e_readonly_dashboard_cold_cache_path(pipeline_env, monkeypatch):
     # cold path the cron tick keeps warm in production.
     source_key = src["name"]
     ice._view_cache.pop(source_key, None)
-    ice._snapshot_files_cache.pop(source_key, None)
 
     ro = duckdb.connect(db_path, read_only=True)
     try:

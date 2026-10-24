@@ -131,16 +131,6 @@ def list_ingested_files(service_id: str, limit: int = 10000) -> list[dict]:
     ]
 
 
-def list_ingested_files_for_status(service_id: str) -> list[tuple[str, str, int | None, int | None]]:
-    """Tuple-form variant used by refresh_config_status — avoids dict overhead in hot path."""
-    con = get_con(service_id)
-    rows = con.execute(
-        "SELECT file_name, ingested_at, row_count, file_size_bytes FROM ingested_files WHERE source_name = ?",
-        (service_id,),
-    ).fetchall()
-    return [(r["file_name"], r["ingested_at"], r["row_count"], r["file_size_bytes"]) for r in rows]
-
-
 def _bootstrap_ingested_files_summary(con: Any, service_id: str) -> dict:
     """One-time SQL aggregate to seed ``ingested_files_summary`` from existing rows.
 
@@ -792,67 +782,6 @@ def list_in_flight(service_id: str, table_name: str = "logs") -> list[tuple[str,
             tuples = []
         out.append((r["buffer_filename"], tuples))
     return out
-
-
-def filter_uncommitted_buffers(service_id: str, basenames: list[str]) -> set[str]:
-    """Return the subset of ``basenames`` that have NOT been recorded as
-    committed in ``committed_buffers``. Used at the start of every
-    ``commit_buffer`` tick to skip buffer files whose Iceberg append
-    succeeded on a prior run but whose tombstone step never ran (process
-    died in the ``table.append`` → ``tombstone_buffer_files`` window).
-
-    Empty list → empty set (no SQL round-trip).
-    """
-    if not basenames:
-        return set()
-    con = get_con(service_id)
-    placeholders = ", ".join("?" for _ in basenames)
-    rows = con.execute(
-        f"SELECT buffer_filename FROM committed_buffers WHERE buffer_filename IN ({placeholders})",
-        basenames,
-    ).fetchall()
-    committed = {r["buffer_filename"] for r in rows}
-    return {b for b in basenames if b not in committed}
-
-
-def list_committed_basenames(service_id: str, basenames: list[str]) -> set[str]:
-    """Inverse of ``filter_uncommitted_buffers`` — return the basenames
-    that ARE in ``committed_buffers``. Useful for the tombstone-rescue
-    path: ``commit_buffer`` finds these in its candidate set, knows
-    Iceberg already has the rows, tombstones the buffer files to close
-    the loop, and skips re-append."""
-    if not basenames:
-        return set()
-    con = get_con(service_id)
-    placeholders = ", ".join("?" for _ in basenames)
-    rows = con.execute(
-        f"SELECT buffer_filename FROM committed_buffers WHERE buffer_filename IN ({placeholders})",
-        basenames,
-    ).fetchall()
-    return {r["buffer_filename"] for r in rows}
-
-
-def mark_buffers_committed(service_id: str, basenames: list[str]) -> None:
-    """Record that ``basenames`` were successfully appended to Iceberg.
-
-    Called AFTER ``table.append`` returns and BEFORE
-    ``tombstone_buffer_files``. The order matters: a crash between
-    ``table.append`` and this call leaves the system in the legacy state
-    (next tick re-appends, compaction-dedup heals); a crash between THIS
-    call and the tombstone step is the case this fix is for — next tick
-    sees the committed row, skips the re-append, and tombstones.
-
-    Idempotent (``INSERT OR IGNORE``) so a partial batch that gets
-    re-attempted doesn't error on the rows that already landed.
-    """
-    if not basenames:
-        return
-    con = get_con(service_id)
-    con.executemany(
-        "INSERT OR IGNORE INTO committed_buffers (buffer_filename) VALUES (?)",
-        [(b,) for b in basenames],
-    )
-    con.commit()
 
 
 def purge_committed_buffer_rows(service_id: str, basenames: list[str]) -> int:

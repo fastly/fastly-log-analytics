@@ -8,30 +8,11 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import { useNowMs } from '@/hooks/useNowSeconds'
 import { useDateFormat } from '@/hooks/useDateFormat'
-import { LiveElapsed } from '@/components/LiveElapsed'
+import { LiveElapsed, NextRunCountdown } from '@/components/LiveElapsed'
 import { TimeAgo } from '@/components/TimeAgo'
-import { formatCompactDuration, toUTCDate } from '@/lib/date'
 import type { WithRequired, components } from '@/types/api'
 import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES } from './CronExplanations'
-
-export function LiveTimer({ startedAt }: { startedAt: string }) {
-  return <LiveElapsed startedAt={startedAt} className="font-mono text-blue-700 dark:text-blue-300 tabular-nums text-xs font-medium" />
-}
-
-// Tile-sized variant: inline-styled for the cron schedule pill so the
-// 9px tile typography isn't blown out by LiveTimer's text-xs (12px).
-// Same tabular-nums so widths stay stable across digit counts.
-function TileLiveTimer({ startedAt }: { startedAt: string }) {
-  return <LiveElapsed startedAt={startedAt} className="font-mono text-blue-700 dark:text-blue-300 tabular-nums text-[9px] font-medium" />
-}
-
-function NextRunCountdown({ when }: { when: string | null | undefined }) {
-  const nowMs = useNowMs()
-  if (!when) return <>Disabled</>
-  return <>{formatCompactDuration(Math.floor((toUTCDate(when).getTime() - nowMs) / 1000))}</>
-}
 
 type CronSchedule = Pick<
   WithRequired<components['schemas']['CronScheduleEntry'], 'task'>,
@@ -112,7 +93,12 @@ export function CronScheduleBox({
           >
             <span className="flex items-center gap-1 min-w-0">
               <Loader2 className="h-2.5 w-2.5 animate-spin shrink-0 text-blue-700 dark:text-blue-300" aria-hidden="true" />
-              {activeJob.started_at && <TileLiveTimer startedAt={activeJob.started_at} />}
+              {activeJob.started_at && (
+                <LiveElapsed
+                  startedAt={activeJob.started_at}
+                  className="font-mono text-blue-700 dark:text-blue-300 tabular-nums text-[9px] font-medium"
+                />
+              )}
             </span>
             <span className="text-[8px] bg-blue-500/20 px-1 py-0.2 rounded border border-blue-500/20 shrink-0 ml-1">LOGS</span>
           </button>

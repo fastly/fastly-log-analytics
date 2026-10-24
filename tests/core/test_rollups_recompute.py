@@ -8,7 +8,6 @@ sequence + per-field skip rules are all covered.
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
@@ -861,69 +860,6 @@ def test_recompute_touched_hours_swallows_downstream_bundle_errors():
             writer.assert_called_once()
 
 
-# ── backfill_rollups + markers ──────────────────────
-
-
-def test_backfill_rollups_stamps_markers_for_all_fields(tmp_path):
-    """``backfill_rollups`` records an ISO timestamp per field in the
-    markers JSON. Subsequent backfill_rollups calls with the same field
-    set should see no missing fields."""
-    from backend.core.rollups import recompute
-
-    cache_root = tmp_path / "cache"
-    cache_root.mkdir()
-    src = {"name": "svc-mark"}
-
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups.recompute._safe_table_for", return_value="logs_x"),
-        patch("backend.core.rollups.recompute._run_per_field_copy"),
-        patch("backend.core.rollups.recompute._run_ip_spread_per_field"),
-    ):
-        recompute.backfill_rollups("svc-mark", src, fields=["ip", "country"])
-
-    markers_path = cache_root / "rollups" / "backfill_markers.json"
-    assert markers_path.exists()
-    data = json.loads(markers_path.read_text())
-    assert "ip" in data and "country" in data
-    # Each value is an ISO timestamp.
-    datetime.fromisoformat(data["ip"])
-
-
-def test_backfill_rollups_no_safe_table_returns(tmp_path):
-    from backend.core.rollups import recompute
-
-    cache_root = tmp_path / "cache"
-    cache_root.mkdir()
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups.recompute._safe_table_for", return_value=None),
-        patch(
-            "backend.core.rollups.recompute._run_per_field_copy",
-            side_effect=AssertionError("must not be invoked"),
-        ),
-    ):
-        recompute.backfill_rollups("svc", {"name": "svc"})
-
-
-def test_backfill_rollups_empty_field_list_returns(tmp_path):
-    from backend.core.rollups import recompute
-
-    cache_root = tmp_path / "cache"
-    cache_root.mkdir()
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups.recompute._safe_table_for", return_value="logs_x"),
-        patch("backend.core.rollups.recompute._get_fields", return_value=[]),
-        patch(
-            "backend.core.rollups.recompute._run_per_field_copy",
-            side_effect=AssertionError("must not be invoked"),
-        ),
-    ):
-        # No fields configured at all → return without invoking the COPY.
-        recompute.backfill_rollups("svc", {"name": "svc"})
-
-
 # ── cleanup_old_rollups ─────────────────────────────────────────────────────
 
 
@@ -1056,66 +992,6 @@ def test_cleanup_old_rollups_skips_non_field_entries(tmp_path):
 
     # Strays preserved.
     assert (rollup_root / "stray.tmp").exists()
-
-
-# ── markers _load_markers + _save_markers (atomic write) ─────────────────────
-
-
-def test_save_markers_writes_atomic_then_replace(tmp_path):
-    """_save_markers writes to a tmp path then os.replace — a partial
-    file from a crash mid-write must not be visible to readers."""
-    from backend.core.rollups._common import _load_markers, _save_markers
-
-    cache_root = tmp_path / "cache"
-    cache_root.mkdir()
-    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-        _save_markers({"name": "svc"}, {"ip": "2026-06-12T10:00:00+00:00"})
-
-    # No tmp leftovers in the rollups dir.
-    tmp_leftovers = list((cache_root / "rollups").glob("backfill_markers.json.tmp.*"))
-    assert tmp_leftovers == []
-
-    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-        loaded = _load_markers({"name": "svc"})
-    assert loaded == {"ip": "2026-06-12T10:00:00+00:00"}
-
-
-def test_load_markers_handles_missing_file(tmp_path):
-    from backend.core.rollups._common import _load_markers
-
-    cache_root = tmp_path / "cache"
-    cache_root.mkdir()
-    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-        assert _load_markers({"name": "svc"}) == {}
-
-
-def test_load_markers_handles_corrupt_json(tmp_path):
-    """Corrupt markers file → empty dict + warning (never raise)."""
-    from backend.core.rollups._common import _load_markers
-
-    cache_root = tmp_path / "cache"
-    cache_root.mkdir()
-    rd = cache_root / "rollups"
-    rd.mkdir()
-    (rd / "backfill_markers.json").write_text("{not valid json")
-
-    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-        assert _load_markers({"name": "svc"}) == {}
-
-
-def test_load_markers_non_dict_payload_returns_empty(tmp_path):
-    """A markers file with a non-dict top-level (list, scalar) must not
-    poison the caller — return {} instead."""
-    from backend.core.rollups._common import _load_markers
-
-    cache_root = tmp_path / "cache"
-    cache_root.mkdir()
-    rd = cache_root / "rollups"
-    rd.mkdir()
-    (rd / "backfill_markers.json").write_text(json.dumps(["not", "a", "dict"]))
-
-    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-        assert _load_markers({"name": "svc"}) == {}
 
 
 # ── _publish_field_partitions ───────────────────────────────────────────────

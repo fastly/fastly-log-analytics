@@ -1,6 +1,7 @@
 'use client'
 
 import * as React from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
@@ -73,7 +74,6 @@ export function ShareLoginForm() {
   const { ref: emailFieldRef, ...emailField } = register('email')
   const [reveal, setReveal] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
-  const [claimedInvite, setClaimedInvite] = React.useState<ClaimResponse | null>(null)
   // Seed the banner from ?oauth_error via the fixed allowlist (never the raw
   // param). A passcode-login error later overwrites this.
   const [error, setError] = React.useState<string | null>(() =>
@@ -81,66 +81,58 @@ export function ShareLoginForm() {
   )
   const [retryAfter, setRetryAfter] = React.useState<number | null>(null)
   const [redirecting, setRedirecting] = React.useState<string | null>(null)
-  // Auth-config drives graceful degradation. 'loading' → render contextual
-  // zero-CLS skeleton; 'failed' → fail OPEN to the passcode form.
-  const [config, setConfig] = React.useState<AuthConfig | null>(null)
-  const [configState, setConfigState] = React.useState<'loading' | 'loaded' | 'failed'>('loading')
   const emailInputRef = React.useRef<HTMLInputElement>(null)
   // Ref (not `busy`) so two submits in the same tick can't both pass the guard.
   const inFlightRef = React.useRef(false)
   const errorAlertRef = React.useRef<HTMLDivElement>(null)
 
   // Fetch the unauthenticated auth-config on mount to learn which modes to show.
-  React.useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      try {
-        const res = await analystFetch('/api/share/auth-config')
-        if (!res.ok) throw new Error(`status ${res.status}`)
-        const data = (await res.json()) as AuthConfig
-        if (!cancelled) {
-          setConfig(data)
-          setConfigState('loaded')
-        }
-      } catch {
-        if (!cancelled) setConfigState('failed') // fail-open to passcode
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  // 'loading' → render contextual zero-CLS skeleton; 'failed' → fail OPEN to the passcode form.
+  const authConfigQuery = useQuery<AuthConfig>({
+    queryKey: ['share-auth-config'],
+    retry: false,
+    queryFn: async () => {
+      const res = await analystFetch('/api/share/auth-config')
+      if (!res.ok) throw new Error(`status ${res.status}`)
+      return (await res.json()) as AuthConfig
+    },
+  })
+  const config = authConfigQuery.data ?? null
+  const configState: 'loading' | 'loaded' | 'failed' = authConfigQuery.isLoading
+    ? 'loading'
+    : authConfigQuery.isError
+      ? 'failed'
+      : 'loaded'
 
   // Validate optional ?token= or ?invite= query parameter via /api/share/claim/{token}
-  React.useEffect(() => {
-    if (!inviteToken) return
-    let cancelled = false
-    ;(async () => {
-      try {
-        const res = await analystFetch(`/api/share/claim/${encodeURIComponent(inviteToken)}`, {
-          method: 'POST',
-        })
-        if (cancelled) return
-        if (res.status === 404 || res.status === 410) {
-          setError('This invitation link has expired or is no longer valid.')
-          return
-        }
-        if (!res.ok) return
-        const data = (await res.json()) as ClaimResponse
-        if (cancelled) return
-        setClaimedInvite(data)
-        const claimedEmail = data.email
-        if (claimedEmail) {
-          setValue('email', getValues('email') || claimedEmail)
-        }
-      } catch {
-        // Non-fatal: user can still enter email + passcode manually
+  const claimQuery = useQuery<{ expired: boolean; data: ClaimResponse | null }>({
+    queryKey: ['share-invite-claim', inviteToken],
+    enabled: Boolean(inviteToken),
+    retry: false,
+    queryFn: async () => {
+      const res = await analystFetch(`/api/share/claim/${encodeURIComponent(inviteToken!)}`, {
+        method: 'POST',
+      })
+      if (res.status === 404 || res.status === 410) {
+        return { expired: true, data: null }
       }
-    })()
-    return () => {
-      cancelled = true
+      if (!res.ok) return { expired: false, data: null }
+      const data = (await res.json()) as ClaimResponse
+      return { expired: false, data }
+    },
+  })
+  const claimedInvite = claimQuery.data?.data ?? null
+
+  React.useEffect(() => {
+    if (claimQuery.data?.expired) {
+      setError('This invitation link has expired or is no longer valid.')
+      return
     }
-  }, [inviteToken, getValues, setValue])
+    const claimedEmail = claimQuery.data?.data?.email
+    if (claimedEmail) {
+      setValue('email', getValues('email') || claimedEmail)
+    }
+  }, [claimQuery.data, getValues, setValue])
 
   const providers = config?.providers ?? []
   // Fail-open: on a config fetch failure, offer the passcode form.

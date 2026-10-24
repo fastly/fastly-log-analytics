@@ -10,6 +10,7 @@ vi.mock('@/lib/api', () => ({
 }))
 
 import { InviteAnalystDialog } from '@/components/InviteAnalystDialog/InviteAnalystDialog'
+import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
 import type { ServiceConfig } from '@/types/api'
 
 const service = { service_id: 'svc-copy', name: 'Copy Svc' } as unknown as ServiceConfig
@@ -27,7 +28,9 @@ const invite = {
 
 const openResult = async () => {
   mockPost.mockResolvedValue({ data: invite })
-  render(<InviteAnalystDialog service={service} open onOpenChange={vi.fn()} />)
+  render(<InviteAnalystDialog service={service} open onOpenChange={vi.fn()} />, {
+    wrapper: makeQueryWrapper(createTestQueryClient()),
+  })
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: /generate invite/i }))
   })

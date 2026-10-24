@@ -131,8 +131,3 @@ class QueryMonitorConfigResponse(BaseModel):
     """Nav-gating flag for the Live Query Monitor tab."""
 
     enabled: bool
-
-
-# Explicit aliases for callers referencing the spec schema names
-QueryDetailResponse = ActiveQueryRow
-SlowQueriesListResponse = SlowQueriesResponse

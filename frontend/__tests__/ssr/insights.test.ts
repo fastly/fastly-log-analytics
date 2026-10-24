@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+
+import { setupNextHeadersMock, withTestHttpServer } from '../helpers/ssr'
 
 // insights.ts is the FIRST POST caller of the shared ./_transport helper.
 // These tests pin (1) the security contract — the Caddy-marker trust gate must
@@ -8,29 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // computes from the same earliest_log_at, so the SSR seed key byte-matches the
 // client first-paint key. A mismatch would double-fetch (worse than no SSR).
 
-const mockCookies = vi.fn()
-const mockHeaders = vi.fn()
-vi.mock('next/headers', () => ({
-  cookies: () => mockCookies(),
-  headers: () => mockHeaders(),
-}))
-
-beforeEach(() => {
-  mockCookies.mockReturnValue({ toString: () => '', get: () => undefined })
-  mockHeaders.mockReturnValue({ get: () => null })
-})
-
-afterEach(() => {
-  mockCookies.mockReset()
-  mockHeaders.mockReset()
-  delete process.env.API_PROXY_URL
-})
-
-function headerGetter(entries: Record<string, string>) {
-  return {
-    get: (k: string) => entries[k.toLowerCase()] ?? null,
-  }
-}
+const { setHeaders } = setupNextHeadersMock()
 
 describe('resolveInsightsDefault (key-match contract)', () => {
   it('mirrors useInsightsDefaults: pickInsightsDefault over earliest_log_at', async () => {
@@ -71,111 +51,82 @@ describe('fetchInsightsServerSide (insights SSR)', () => {
   })
 
   it('fail-closed: no Caddy marker + non-loopback Host → null, never forwarded', async () => {
-    const http = await import('node:http')
-    let hit = false
-    const server = http.createServer((_req, res) => {
-      hit = true
-      res.statusCode = 200
-      res.end('{"insights":[]}')
-    })
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as { port: number }).port
-    process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    mockHeaders.mockReturnValue(headerGetter({ host: 'fastly-log-analytics.global.ssl.fastly.net' }))
+    setHeaders({ host: 'fastly-log-analytics.global.ssl.fastly.net' })
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    try {
-      const { fetchInsightsServerSide } = await import('@/lib/ssr/insights')
-      const out = await fetchInsightsServerSide('svc-1', null)
-      expect(out).toBeNull()
-      expect(hit).toBe(false)
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('non-loopback/absent Host'))
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()))
-    }
+    await withTestHttpServer(
+      (_req, res) => {
+        res.statusCode = 200
+        res.end('{"insights":[]}')
+      },
+      async (srv) => {
+        const { fetchInsightsServerSide } = await import('@/lib/ssr/insights')
+        const out = await fetchInsightsServerSide('svc-1', null)
+        expect(out).toBeNull()
+        expect(srv.requests).toHaveLength(0)
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('non-loopback/absent Host'))
+      },
+    )
   })
 
   it('admin SSH-tunnel (loopback Host, no marker): POSTs default body as admin with service id', async () => {
-    const http = await import('node:http')
-    let captured: Record<string, string | string[] | undefined> = {}
-    let capturedMethod = ''
-    let capturedBody = ''
-    const server = http.createServer((req, res) => {
-      captured = req.headers
-      capturedMethod = req.method ?? ''
-      const chunks: Buffer[] = []
-      req.on('data', (c: Buffer) => chunks.push(c))
-      req.on('end', () => {
-        capturedBody = Buffer.concat(chunks).toString('utf8')
+    setHeaders({ host: 'localhost:3001' })
+    await withTestHttpServer(
+      (_req, res) => {
         res.statusCode = 200
         res.setHeader('Content-Type', 'application/json')
         res.end('{"insights":[1,2,3]}')
-      })
-    })
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as { port: number }).port
-    process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    mockHeaders.mockReturnValue(headerGetter({ host: 'localhost:3001' }))
-    try {
-      const { fetchInsightsServerSide } = await import('@/lib/ssr/insights')
-      // ~10 days of history → default tokens window '24' / baseline '168'.
-      const earliest = new Date(Date.now() - 10 * 24 * 3600 * 1000).toISOString()
-      const out = await fetchInsightsServerSide('svc-1', { earliest_log_at: earliest })
+      },
+      async (srv) => {
+        const { fetchInsightsServerSide } = await import('@/lib/ssr/insights')
+        // ~10 days of history → default tokens window '24' / baseline '168'.
+        const earliest = new Date(Date.now() - 10 * 24 * 3600 * 1000).toISOString()
+        const out = await fetchInsightsServerSide('svc-1', { earliest_log_at: earliest })
 
-      expect(out).not.toBeNull()
-      expect(out!.data).toEqual({ insights: [1, 2, 3] })
-      expect(out!.windowHours).toBe('24')
-      expect(out!.baselineHours).toBe('168')
+        expect(out).not.toBeNull()
+        expect(out!.data).toEqual({ insights: [1, 2, 3] })
+        expect(out!.windowHours).toBe('24')
+        expect(out!.baselineHours).toBe('168')
 
-      // POST with the exact client body shape.
-      expect(capturedMethod).toBe('POST')
-      expect(captured['content-type']).toContain('application/json')
-      expect(JSON.parse(capturedBody)).toEqual({
-        window_size_hrs: 24,
-        baseline_hours: 168,
-        filters: {},
-      })
+        const req = srv.lastRequest!
+        // POST with the exact client body shape.
+        expect(req.method).toBe('POST')
+        expect(req.headers['content-type']).toContain('application/json')
+        expect(JSON.parse(req.body)).toEqual({
+          window_size_hrs: 24,
+          baseline_hours: 168,
+          filters: {},
+        })
 
-      // Admin trust path: no analyst header, service id passed.
-      expect(captured['x-remote-analyst']).toBeUndefined()
-      expect(captured['x-service-id']).toBe('svc-1')
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()))
-    }
+        // Admin trust path: no analyst header, service id passed.
+        expect(req.headers['x-remote-analyst']).toBeUndefined()
+        expect(req.headers['x-service-id']).toBe('svc-1')
+      },
+    )
   })
 
   it('analyst (Caddy marker): POSTs as remote-analyst', async () => {
-    const http = await import('node:http')
-    let captured: Record<string, string | string[] | undefined> = {}
-    let capturedMethod = ''
-    const server = http.createServer((req, res) => {
-      captured = req.headers
-      capturedMethod = req.method ?? ''
-      const chunks: Buffer[] = []
-      req.on('data', (c: Buffer) => chunks.push(c))
-      req.on('end', () => {
+    setHeaders({
+      'x-proxied-by-caddy': 'true',
+      host: 'fastly-log-analytics.global.ssl.fastly.net',
+    })
+    await withTestHttpServer(
+      (_req, res) => {
         res.statusCode = 200
         res.setHeader('Content-Type', 'application/json')
         res.end('{"insights":[1]}')
-      })
-    })
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as { port: number }).port
-    process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    mockHeaders.mockReturnValue(
-      headerGetter({ 'x-proxied-by-caddy': 'true', host: 'fastly-log-analytics.global.ssl.fastly.net' }),
+      },
+      async (srv) => {
+        const { fetchInsightsServerSide } = await import('@/lib/ssr/insights')
+        const out = await fetchInsightsServerSide('svc-1', null)
+        expect(out).not.toBeNull()
+        expect(out!.data).toEqual({ insights: [1] })
+        const req = srv.lastRequest!
+        expect(req.method).toBe('POST')
+        // Analyst trust path: remote-analyst stamped.
+        expect(req.headers['x-remote-analyst']).toBe('1')
+        expect(req.headers['host']).toBe('fastly-log-analytics.global.ssl.fastly.net')
+        expect(req.headers['x-service-id']).toBe('svc-1')
+      },
     )
-    try {
-      const { fetchInsightsServerSide } = await import('@/lib/ssr/insights')
-      const out = await fetchInsightsServerSide('svc-1', null)
-      expect(out).not.toBeNull()
-      expect(out!.data).toEqual({ insights: [1] })
-      expect(capturedMethod).toBe('POST')
-      // Analyst trust path: remote-analyst stamped.
-      expect(captured['x-remote-analyst']).toBe('1')
-      expect(captured['host']).toBe('fastly-log-analytics.global.ssl.fastly.net')
-      expect(captured['x-service-id']).toBe('svc-1')
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()))
-    }
   })
 })

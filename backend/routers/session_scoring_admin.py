@@ -89,7 +89,6 @@ _fetch_session_events = _ss._fetch_session_events  # type: ignore[has-type]
 _scoring_time_window = _ss._scoring_time_window  # type: ignore[has-type]
 _reconstruct_labeled_sessions = _ss._reconstruct_labeled_sessions  # type: ignore[has-type]
 _resolve_token = _ss._resolve_token  # type: ignore[has-type]
-_query_logs = _ss._query_logs  # type: ignore[has-type]
 _finalize_cached = _ss._finalize_cached  # type: ignore[has-type]
 _SECRET_KEYS = _ss._SECRET_KEYS  # type: ignore[has-type]
 _MIN_LABELS_PER_CLASS = _ss._MIN_LABELS_PER_CLASS  # type: ignore[has-type]
@@ -282,13 +281,6 @@ def l2_enforce_readiness_block(service_id: str) -> dict:
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
 )
-@router.post(
-    "/{service_id}/session-scoring/retrain",
-    response_model=ScoringRetrainResponse,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
-)
 def scoring_retrain(
     service_id: ServiceId,
     since_days: int = Query(default=7, ge=1, le=90, description="Window of DuckDB traffic to train on"),
@@ -480,12 +472,6 @@ def scoring_retrain(
     response_model=ScoringSessionEventsResponse,
     response_model_exclude_unset=True,
 )
-@router.get(
-    "/{service_id}/session-scoring/sessions/{sid}/events",
-    response_model=ScoringSessionEventsResponse,
-    response_model_exclude_unset=True,
-    include_in_schema=False,
-)
 def scoring_session_events(
     request: Request,
     service_id: ServiceId,
@@ -521,18 +507,48 @@ def scoring_session_events(
     }
 
 
+def _require_scoring_config_store(service_id: str, token: str = "") -> tuple[dict, str, str]:
+    """Resolve ``(cfg, config_store_id, resolved_token)`` or raise HTTP 400."""
+    from backend import config as svcconfig
+
+    cfg = svcconfig.load_config(service_id) or {}
+    scoring = cfg.get("scoring") or {}
+    config_store_id = scoring.get("scoring_config_store_id")
+    if not config_store_id:
+        raise HTTPException(status_code=400, detail={"error": "Scoring not enabled or config store missing"})
+
+    resolved_token = _resolve_token(service_id, token)
+    if not resolved_token:
+        raise HTTPException(status_code=400, detail={"error": "Fastly API token required"})
+
+    return cfg, config_store_id, resolved_token
+
+
+def _upsert_config_store_item(api_token: str, store_id: str, key: str, value: str) -> None:
+    """Upsert a ConfigStore item via PATCH, falling back to POST on first write."""
+    from backend.core.fastly.client import fastly
+
+    try:
+        fastly(
+            "PATCH",
+            f"/resources/stores/config/{store_id}/item/{key}",
+            {"item_value": value},
+            token=api_token,
+        )
+    except Exception:
+        fastly(
+            "POST",
+            f"/resources/stores/config/{store_id}/item",
+            {"item_key": key, "item_value": value},
+            token=api_token,
+        )
+
+
 @router.get(
     "/{service_id}/scoring/enforce-threshold",
     response_model=ScoringEnforceThresholdResponse,
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
-)
-@router.get(
-    "/{service_id}/session-scoring/enforce-threshold",
-    response_model=ScoringEnforceThresholdResponse,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
 )
 def scoring_enforce_threshold_get(
     service_id: ServiceId,
@@ -545,23 +561,14 @@ def scoring_enforce_threshold_get(
     request's score >= threshold, it emits X-Edge-Score-Enforce: 1,
     which the SCORING_ENFORCE_NAME VCL snippet turns into a 429.
     """
-    from backend import config as svcconfig
     from backend.core.fastly.client import fastly
 
-    cfg = svcconfig.load_config(service_id) or {}
-    scoring = cfg.get("scoring") or {}
-    config_store_id = scoring.get("scoring_config_store_id")
-    if not config_store_id:
-        raise HTTPException(status_code=400, detail={"error": "Scoring not enabled or config store missing"})
+    _cfg, config_store_id, resolved_token = _require_scoring_config_store(service_id, token)
 
     cache_key = (service_id, config_store_id)
     cached = _enforce_threshold_cache.get(cache_key)
     if cached is not None:
         return {**cached, "_is_cached": True}
-
-    resolved_token = _resolve_token(service_id, token)
-    if not resolved_token:
-        raise HTTPException(status_code=400, detail={"error": "Fastly API token required"})
 
     try:
         item = fastly(
@@ -594,13 +601,6 @@ def scoring_enforce_threshold_get(
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
 )
-@router.put(
-    "/{service_id}/session-scoring/enforce-threshold",
-    response_model=ScoringEnforceThresholdPutResponse,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
-)
 def scoring_enforce_threshold_put(
     body: ScoringThresholdBody,
     service_id: ServiceId,
@@ -622,42 +622,19 @@ def scoring_enforce_threshold_put(
             detail={"error": "Pass ?confirm=true to actually change enforcement. This affects live edge blocking."},
         )
 
-    from backend import config as svcconfig
     from backend.core import metadata as metadata_db
-    from backend.core.fastly.client import fastly
 
-    cfg = svcconfig.load_config(service_id) or {}
-    scoring = cfg.get("scoring") or {}
-    config_store_id = scoring.get("scoring_config_store_id")
-    if not config_store_id:
-        raise HTTPException(status_code=400, detail={"error": "Scoring not enabled or config store missing"})
+    _cfg, config_store_id, resolved_token = _require_scoring_config_store(service_id, token)
 
     threshold = body.threshold
     if threshold is not None and not 0 <= threshold <= 100:
         raise HTTPException(status_code=400, detail={"error": "threshold must be 0-100"})
 
-    resolved_token = _resolve_token(service_id, token)
-    if not resolved_token:
-        raise HTTPException(status_code=400, detail={"error": "Fastly API token required"})
-
     # Upsert: PATCH the item, falling back to POST if it doesn't exist
     # yet (first time enforcement is set for this service).
     value = str(threshold) if threshold is not None else ""
     try:
-        try:
-            fastly(
-                "PATCH",
-                f"/resources/stores/config/{config_store_id}/item/{_ENFORCE_THRESHOLD_KEY}",
-                {"item_value": value},
-                token=resolved_token,
-            )
-        except Exception:
-            fastly(
-                "POST",
-                f"/resources/stores/config/{config_store_id}/item",
-                {"item_key": _ENFORCE_THRESHOLD_KEY, "item_value": value},
-                token=resolved_token,
-            )
+        _upsert_config_store_item(resolved_token, config_store_id, _ENFORCE_THRESHOLD_KEY, value)
     except Exception as e:
         raise_internal(logger, e, code="scoring_enforce_threshold_put_failed")
 
@@ -693,13 +670,6 @@ def scoring_enforce_threshold_put(
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
 )
-@router.get(
-    "/{service_id}/session-scoring/l2-enforce",
-    response_model=ScoringL2EnforceState,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
-)
 def scoring_l2_enforce_get(
     service_id: ServiceId,
     token: str = Header(default=""),
@@ -716,17 +686,7 @@ def scoring_l2_enforce_get(
 
     Read+cache pattern mirrors /scoring/enforce-threshold (300s TTL, busted by the
     PUT). 502 on a non-404 ConfigStore error rather than masking it as off."""
-    from backend import config as svcconfig
-
-    cfg = svcconfig.load_config(service_id) or {}
-    scoring = cfg.get("scoring") or {}
-    config_store_id = scoring.get("scoring_config_store_id")
-    if not config_store_id:
-        raise HTTPException(status_code=400, detail={"error": "Scoring not enabled or config store missing"})
-
-    resolved_token = _resolve_token(service_id, token)
-    if not resolved_token:
-        raise HTTPException(status_code=400, detail={"error": "Fastly API token required"})
+    _cfg, config_store_id, resolved_token = _require_scoring_config_store(service_id, token)
 
     try:
         return _read_l2_enforce_state(service_id, config_store_id, resolved_token)
@@ -739,13 +699,6 @@ def scoring_l2_enforce_get(
     response_model=ScoringL2EnforcePutResponse,
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
-)
-@router.put(
-    "/{service_id}/session-scoring/l2-enforce",
-    response_model=ScoringL2EnforcePutResponse,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
 )
 def scoring_l2_enforce_put(
     body: ScoringL2EnforceBody,
@@ -774,38 +727,11 @@ def scoring_l2_enforce_put(
 
     import datetime as _dt
 
-    from backend import config as svcconfig
     from backend.core import metadata as metadata_db
-    from backend.core.fastly.client import fastly
 
-    cfg = svcconfig.load_config(service_id) or {}
-    scoring = cfg.get("scoring") or {}
-    config_store_id = scoring.get("scoring_config_store_id")
-    if not config_store_id:
-        raise HTTPException(status_code=400, detail={"error": "Scoring not enabled or config store missing"})
-
-    resolved_token = _resolve_token(service_id, token)
-    if not resolved_token:
-        raise HTTPException(status_code=400, detail={"error": "Fastly API token required"})
+    _cfg, config_store_id, resolved_token = _require_scoring_config_store(service_id, token)
 
     enabled = bool(body.enabled)
-
-    def _upsert(key: str, value: str) -> None:
-        # PATCH the item, falling back to POST the first time the key is written.
-        try:
-            fastly(
-                "PATCH",
-                f"/resources/stores/config/{config_store_id}/item/{key}",
-                {"item_value": value},
-                token=resolved_token,
-            )
-        except Exception:
-            fastly(
-                "POST",
-                f"/resources/stores/config/{config_store_id}/item",
-                {"item_key": key, "item_value": value},
-                token=resolved_token,
-            )
 
     try:
         l2_enabled_at: int | None
@@ -815,14 +741,14 @@ def scoring_l2_enforce_put(
             # service. Read both current values first.
             currently_on = _l2_get_item(config_store_id, _L2_ENFORCE_ENABLED_KEY, resolved_token).strip() == "1"
             existing_anchor = _l2_parse_epoch(_l2_get_item(config_store_id, _L2_ENABLED_AT_KEY, resolved_token))
-            _upsert(_L2_ENFORCE_ENABLED_KEY, "1")
+            _upsert_config_store_item(resolved_token, config_store_id, _L2_ENFORCE_ENABLED_KEY, "1")
             if (not currently_on) or (existing_anchor is None):
                 l2_enabled_at = int(_dt.datetime.now(_dt.UTC).timestamp())
-                _upsert(_L2_ENABLED_AT_KEY, str(l2_enabled_at))
+                _upsert_config_store_item(resolved_token, config_store_id, _L2_ENABLED_AT_KEY, str(l2_enabled_at))
             else:
                 l2_enabled_at = existing_anchor
         else:
-            _upsert(_L2_ENFORCE_ENABLED_KEY, "0")
+            _upsert_config_store_item(resolved_token, config_store_id, _L2_ENFORCE_ENABLED_KEY, "0")
             # Leave l2_enabled_at as-is; a later off→on re-enable overwrites it.
             l2_enabled_at = _l2_parse_epoch(_l2_get_item(config_store_id, _L2_ENABLED_AT_KEY, resolved_token))
     except Exception as e:
@@ -861,13 +787,6 @@ def scoring_l2_enforce_put(
     response_model=ScoringExcludeRegexState,
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
-)
-@router.get(
-    "/{service_id}/session-scoring/exclude-regex",
-    response_model=ScoringExcludeRegexState,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
 )
 def scoring_exclude_regex_get(service_id: ServiceId) -> dict:
     """Return the operator-configured URL-exclusion regex for the recv snippet.
@@ -915,13 +834,6 @@ def scoring_exclude_regex_get(service_id: ServiceId) -> dict:
     response_model=ScoringExcludeRegexPutResponse,
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
-)
-@router.put(
-    "/{service_id}/session-scoring/exclude-regex",
-    response_model=ScoringExcludeRegexPutResponse,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
 )
 def scoring_exclude_regex_put(
     body: ScoringExcludeRegexBody,
@@ -1038,13 +950,6 @@ def scoring_exclude_regex_put(
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
 )
-@router.post(
-    "/{service_id}/session-scoring/exclude-regex/validate",
-    response_model=ScoringExcludeRegexValidateResponse,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
-)
 def scoring_exclude_regex_validate(
     body: ScoringExcludeRegexBody,
     service_id: ServiceId,
@@ -1106,13 +1011,6 @@ def scoring_exclude_regex_validate(
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
 )
-@router.get(
-    "/{service_id}/session-scoring/enforce-status-code",
-    response_model=ScoringEnforceStatusCodeState,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
-)
 def scoring_enforce_status_code_get(service_id: ServiceId) -> dict:
     """Return the operator-configured HTTP status code that the enforce
     snippet returns when the scorer flags a request.
@@ -1157,13 +1055,6 @@ def scoring_enforce_status_code_get(service_id: ServiceId) -> dict:
     response_model=ScoringEnforceStatusCodePutResponse,
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
-)
-@router.put(
-    "/{service_id}/session-scoring/enforce-status-code",
-    response_model=ScoringEnforceStatusCodePutResponse,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
 )
 def scoring_enforce_status_code_put(
     body: ScoringEnforceStatusCodeBody,
@@ -1260,13 +1151,6 @@ def scoring_enforce_status_code_put(
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
 )
-@router.get(
-    "/{service_id}/session-scoring/matrix-versions",
-    response_model=ScoringMatrixVersionsResponse,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
-)
 def scoring_matrix_versions_list(service_id: ServiceId) -> dict:
     """List historical scoring matrices archived in FOS.
 
@@ -1290,13 +1174,6 @@ def scoring_matrix_versions_list(service_id: ServiceId) -> dict:
     response_model=ScoringMatrixRestoreResponse,
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
-)
-@router.post(
-    "/{service_id}/session-scoring/matrix-versions/{version}/restore",
-    response_model=ScoringMatrixRestoreResponse,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
 )
 def scoring_matrix_versions_restore(
     service_id: ServiceId,
@@ -1401,13 +1278,6 @@ def scoring_matrix_versions_restore(
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
 )
-@router.post(
-    "/{service_id}/session-scoring/rotate-key",
-    response_model=ScoringRotateKeyResponse,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
-)
 def scoring_rotate_key(
     service_id: ServiceId,
     token: str = Header(default=""),
@@ -1485,13 +1355,6 @@ def scoring_rotate_key(
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
 )
-@router.get(
-    "/{service_id}/session-scoring/audit",
-    response_model=ScoringAuditListResponse,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
-)
 def scoring_audit_list(
     service_id: ServiceId,
     limit: int = Query(default=100, ge=1, le=1000),
@@ -1530,13 +1393,6 @@ def scoring_audit_list(
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
 )
-@router.get(
-    "/{service_id}/session-scoring/threshold",
-    response_model=ScoringThresholdState,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
-)
 def scoring_threshold_get(service_id: ServiceId) -> dict:
     """Return the operator's chosen score threshold.
 
@@ -1563,13 +1419,6 @@ def scoring_threshold_get(service_id: ServiceId) -> dict:
     response_model=ScoringThresholdState,
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
-)
-@router.put(
-    "/{service_id}/session-scoring/threshold",
-    response_model=ScoringThresholdState,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
 )
 def scoring_threshold_put(
     body: ScoringThresholdBody,
@@ -1631,13 +1480,6 @@ def scoring_threshold_put(
     response_model=ScoringPerReasonResponse,
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
-)
-@router.get(
-    "/{service_id}/session-scoring/evaluation/per-reason",
-    response_model=ScoringPerReasonResponse,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
 )
 def scoring_evaluation_per_reason(
     service_id: ServiceId,
@@ -1701,13 +1543,6 @@ def scoring_evaluation_per_reason(
     response_model=ScoringDashboardResponse,
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
-)
-@router.get(
-    "/{service_id}/session-scoring/dashboard",
-    response_model=ScoringDashboardResponse,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-    include_in_schema=False,
 )
 def scoring_dashboard(
     request: Request,

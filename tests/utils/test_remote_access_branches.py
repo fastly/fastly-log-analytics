@@ -652,7 +652,7 @@ def test_static_limiter_evicts_stale_keys_over_cap(monkeypatch):
         lim.check(f"ip-{i}", 100)
     monkeypatch.setattr(time, "time", lambda: real_now)
     assert lim.check("ip-new", 50) is True
-    assert lim.tracked_keys() == 1
+    assert len(lim._events) == 1
 
 
 def test_static_limiter_cardinality_bomb_is_lru_bounded(monkeypatch):
@@ -662,9 +662,9 @@ def test_static_limiter_cardinality_bomb_is_lru_bounded(monkeypatch):
     monkeypatch.setattr(lim, "MAX_TRACKED_IPS", 2)
     for i in range(5):
         lim.check(f"ip-{i}", 10)
-    assert lim.tracked_keys() == 2
+    assert len(lim._events) == 2
     lim.check("ip-trigger", 0)
-    assert lim.tracked_keys() == 2
+    assert len(lim._events) == 2
 
 
 # ── TimeBounds.clamp + get_analyst_time_bounds ────────────────────────────

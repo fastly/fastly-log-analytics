@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import {
   Dialog,
   DialogContent,
@@ -12,7 +12,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { ShieldCheck, AlertCircle } from 'lucide-react'
 import { useSSE } from '@/hooks/useSSE'
-import { SSEProgressView } from '@/components/SSEModal'
+import { SSEDialogFooter, SSEExecutionSection } from '@/components/SSEModal'
 import { cn } from '@/lib/utils'
 import {
   panelDialogContent,
@@ -29,21 +29,21 @@ interface EnableRumDialogProps {
   onComplete?: () => void
 }
 
-export function EnableRumDialog({ service, open, onOpenChange, onComplete }: EnableRumDialogProps) {
+export function EnableRumDialog(props: EnableRumDialogProps) {
+  const { service, open } = props
+  const [generation, setGeneration] = useState(0)
+  const [wasOpen, setWasOpen] = useState(open)
+  if (open !== wasOpen) {
+    setWasOpen(open)
+    if (open) setGeneration((g) => g + 1)
+  }
+  return <EnableRumDialogBody key={`${service?.service_id ?? ''}|${generation}`} {...props} />
+}
+
+function EnableRumDialogBody({ service, open, onOpenChange, onComplete }: EnableRumDialogProps) {
   const [isExecuting, setIsExecuting] = useState(false)
 
-  const { lines, status, error: sseError, start, stop, reset } = useSSE()
-
-  // Reset state when dialog closes
-  useEffect(() => {
-    if (!open) {
-      const id = setTimeout(() => {
-        setIsExecuting(false)
-        reset()
-      }, 300)
-      return () => clearTimeout(id)
-    }
-  }, [open, reset])
+  const { lines, status, error: sseError, start, stop } = useSSE()
 
   if (!service) return null
 
@@ -74,21 +74,16 @@ export function EnableRumDialog({ service, open, onOpenChange, onComplete }: Ena
 
         <div className="flex-1 overflow-y-auto min-h-0">
           {isExecuting ? (
-            <div className="p-8 space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-               <div className="text-center space-y-2">
-                  <h3 className="text-lg font-semibold tracking-tight">Enabling Real User Monitoring</h3>
-                  <p className="text-sm text-muted-foreground">Adding VCL snippets and custom fields to your Fastly service configuration...</p>
-               </div>
-
-               <SSEProgressView
-                 lines={lines}
-                 status={status}
-                 error={sseError}
-                 className="h-[300px]"
-                 progressLabel="Progress"
-                 doneMessage="Real User Monitoring enabled successfully!"
-               />
-            </div>
+            <SSEExecutionSection
+              title="Enabling Real User Monitoring"
+              subtitle="Adding VCL snippets and custom fields to your Fastly service configuration..."
+              lines={lines}
+              status={status}
+              error={sseError}
+              heightClassName="h-[300px]"
+              progressLabel="Progress"
+              doneMessage="Real User Monitoring enabled successfully!"
+            />
           ) : (
             <div className="p-8 space-y-6">
               <Alert className="border-blue-300 bg-blue-50/60 dark:bg-blue-950/20 text-blue-900 dark:text-blue-300">
@@ -132,16 +127,13 @@ export function EnableRumDialog({ service, open, onOpenChange, onComplete }: Ena
               </Button>
             </>
           ) : (
-            <>
-              {status !== 'streaming' && (
-                 <Button variant="outline" onClick={() => handleClose(false)} className="h-10 px-6">
-                   {status === 'done' ? 'Close & Reload' : 'Cancel'}
-                 </Button>
-              )}
-              {status === 'streaming' && (
-                <Button variant="outline" onClick={stop} className="h-10 px-6">Stop</Button>
-              )}
-            </>
+            <SSEDialogFooter
+              status={status}
+              onClose={() => handleClose(false)}
+              onStop={stop}
+              doneLabel="Close & Reload"
+              idleOrErrorLabel="Cancel"
+            />
           )}
         </DialogFooter>
       </DialogContent>

@@ -118,22 +118,6 @@ class Group(StrEnum):
             return cls.CORE
         return cls(raw)
 
-    def to_legacy(self) -> str | None:
-        """Inverse of `from_legacy`. Lets API serializers keep the wire shape."""
-        return None if self is Group.CORE else self.value
-
-
-# ---------------------------------------------------------------------------
-# Group dependencies (mirrors `GROUP_DEPENDENCIES` from log_fields.py)
-# ---------------------------------------------------------------------------
-
-_GROUP_REQS: Mapping[Group, Group] = MappingProxyType(
-    {
-        Group.E: Group.D,  # Precision geo requires basic geo
-        Group.G: Group.F,  # Deep network requires core network
-    }
-)
-
 
 # ---------------------------------------------------------------------------
 # Type-driven derivation: aggregations + filter ops + security hook detection
@@ -307,34 +291,6 @@ class LogField:
         """Filter operators allowed in queries (derived from `duck_type`)."""
         return _ops_for(self.duck_type)
 
-    # ---- Behaviour: render VCL with runtime overrides ----------------------
-
-    def render_vcl(self, limits: Mapping[str, int] | None = None) -> str | None:
-        """Return the VCL fragment with the runtime substr cap injected.
-
-        Replaces the `if field["id"] == "url": vcl = vcl.replace(...)` ladder
-        in `generate_log_format()`. For fields without a `substr_cap`, the
-        VCL is returned unchanged. For derived fields, returns None.
-
-        The cap-substitution is intentionally minimal: it does NOT regenerate
-        the URL/UA/Referer VCL from scratch (the legacy code does, for ua and
-        referer, because the substr cap there is also baked into the
-        json.escape boundary). When the caller migration lands, the
-        ua/referer renderers will be expressed as small helper methods on
-        the LogField subclasses for those specific codes — but that's a
-        Phase 8 concern, not scaffolding.
-        """
-        if self.vcl is None:
-            return None
-        if self.substr_cap is None or limits is None:
-            return self.vcl
-        override = limits.get(self.code)
-        if override is None or override == self.substr_cap:
-            return self.vcl
-        # Replace the literal cap. The replace is targeted at `, 0, {cap})`
-        # which only appears inside the substr() boundary in the catalog.
-        return self.vcl.replace(f", 0, {self.substr_cap})", f", 0, {override})")
-
 
 # ---------------------------------------------------------------------------
 # Legacy-dict → LogField construction
@@ -447,28 +403,6 @@ BY_GROUP: Mapping[Group, tuple[LogField, ...]] = _group_index()
 """Group → ordered tuple of fields. Read-only view."""
 
 
-WIRE_ORDER: tuple[str, ...] = tuple(f.code for f in REGISTRY if f.vcl is not None)
-"""Codes that emit a token in the VCL log line, in emission order.
-
-This is the byte-pinned contract with the Rust scorer in `compute/`. Any
-diff to this tuple needs a coordinated scorer-side change. The test
-`test_registry_codes_match_log_fields` is the boot-time gate.
-"""
-
-
-SECURITY_HOOK_CODES: frozenset[str] = frozenset(f.code for f in REGISTRY if f.has_security_hook)
-"""Codes whose VCL expressions go through a security guard (json.escape /
-digit regex). Read by `test_no_trace_leakage_sweep.py`-style audits to
-confirm new fields don't bypass the convention."""
-
-
-DEFAULT_OFF_CODES: frozenset[str] = frozenset(f.code for f in REGISTRY if f.default_off)
-"""Codes flagged opt-in (``default_off``): excluded from
-``resolve_enabled_fields`` when their group is enabled, emitted only on an
-explicit ``field_overrides`` opt-in. Mirrors ``log_fields.DEFAULT_OFF_FIELD_IDS``
-(the two views must agree — parity guarded by the registry tests)."""
-
-
 # ---------------------------------------------------------------------------
 # Lookup helpers (the public API the migration will route callers through)
 # ---------------------------------------------------------------------------
@@ -496,24 +430,6 @@ def in_group(group: Group) -> tuple[LogField, ...]:
 def derived() -> tuple[LogField, ...]:
     """Return all derived fields (`vcl is None` — metrics, virtual, internal)."""
     return tuple(f for f in REGISTRY if f.is_derived)
-
-
-def loggable() -> tuple[LogField, ...]:
-    """Return all fields that emit a VCL log token (`vcl is not None`)."""
-    return tuple(f for f in REGISTRY if f.vcl is not None)
-
-
-def with_aggregation(agg: Agg) -> tuple[LogField, ...]:
-    """Return all fields that support a given aggregation."""
-    return tuple(f for f in REGISTRY if agg in f.valid_aggs)
-
-
-def all_codes() -> frozenset[str]:
-    """Return every known field code as a frozenset. Cheap; cached at import."""
-    return _ALL_CODES
-
-
-_ALL_CODES: frozenset[str] = frozenset(f.code for f in REGISTRY)
 
 
 # ---------------------------------------------------------------------------
@@ -584,7 +500,6 @@ __all__ = (
     "Agg",
     "BY_CODE",
     "BY_GROUP",
-    "DEFAULT_OFF_CODES",
     "DuckType",
     "FilterOp",
     "GROUP_INFO",
@@ -594,10 +509,7 @@ __all__ = (
     "LogField",
     "PRESETS",
     "REGISTRY",
-    "SECURITY_HOOK_CODES",
     "VALID_NAME_RE",
-    "WIRE_ORDER",
-    "all_codes",
     "check_log_line_budget",
     "derived",
     "estimate_log_line_bytes",
@@ -609,9 +521,7 @@ __all__ = (
     "get_lf_config",
     "get_required_edge_headers",
     "in_group",
-    "loggable",
     "resolve_enabled_fields",
     "try_get",
     "validate_custom_field",
-    "with_aggregation",
 )

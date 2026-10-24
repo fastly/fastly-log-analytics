@@ -36,63 +36,6 @@ Output (one row):
 """
 
 
-COUNT_REQUESTS_IN_WINDOW = (
-    "SELECT count(*) FROM {table} WHERE timestamp >= {window_start_expr} AND timestamp <= {window_end_expr}"
-)
-"""Total request count inside the alert's evaluation window.
-
-Used to gate non-absolute alerts (``relative_increase`` /
-``relative_decrease``) on a minimum-traffic floor before computing a
-percent change — see ``evaluate_alert``.
-
-Inputs (all trusted-identifier / pre-validated substitutions):
-- ``{table}`` — trusted table identifier.
-- ``{window_start_expr}`` — SQL expression for the window's lower bound;
-  callers pass the result of ``WINDOW_OFFSET_EXPR.format(...)``.
-- ``{window_end_expr}`` — SQL expression for the window's upper bound;
-  callers pass the result of ``MAX_TIMESTAMP_SUBQUERY_EXPR.format(...)``.
-
-Output (one row):
-- column 0: ``BIGINT`` — request count (``0`` when the window is empty).
-"""
-
-
-# ── Window-bound subquery expressions ────────────────────────────────────────
-
-MAX_TIMESTAMP_SUBQUERY_EXPR = "(SELECT max(timestamp) FROM {table})"
-"""Parenthesised ``max(timestamp)`` subquery — embedded inside larger
-queries (the count + the metric query) as the anchor for both the
-current window's upper bound and the offsets below.
-
-Inputs:
-- ``{table}`` — trusted table identifier.
-
-Renders to: ``(SELECT max(timestamp) FROM "<table>")`` — a scalar
-expression suitable for arithmetic with ``INTERVAL`` literals.
-"""
-
-
-WINDOW_OFFSET_EXPR = "(SELECT max(timestamp) FROM {table}) - INTERVAL '{minutes_ago} minutes'"
-"""Window-bound expression: ``max_ts - INTERVAL 'N minutes'``.
-
-Used four times by ``evaluate_alert``:
-- current-window start: ``minutes_ago = window``
-- historic-window start: ``minutes_ago = comp_period + window``
-- historic-window end: ``minutes_ago = comp_period``
-(The current-window END is just ``MAX_TIMESTAMP_SUBQUERY_EXPR`` — no
-offset.)
-
-Inputs (both trusted):
-- ``{table}`` — trusted table identifier.
-- ``{minutes_ago}`` — non-negative integer derived from the validated
-  alert row (``window_min`` / ``comparison_period_min``); never raw
-  user input.
-
-Renders to a scalar ``TIMESTAMPTZ`` expression suitable for
-embedding inside a ``WHERE timestamp >= ...`` clause.
-"""
-
-
 # ── Preview (POST /api/alerts/preview) ───────────────────────────────────────
 # Placeholders are trusted: ``{table}`` is a ``_safe_table_name`` identifier, ``{group_sql}`` /
 # ``{agg_sql}`` / ``{scope_filter}`` come from fixed code branches and the metric catalog, and
@@ -137,9 +80,6 @@ PREVIEW_HISTORY = """
 
 __all__ = [
     "MAX_TIMESTAMP",
-    "COUNT_REQUESTS_IN_WINDOW",
-    "MAX_TIMESTAMP_SUBQUERY_EXPR",
-    "WINDOW_OFFSET_EXPR",
     "PREVIEW_SERIES",
     "PREVIEW_ANY_ROW",
     "PREVIEW_MAX_TS",

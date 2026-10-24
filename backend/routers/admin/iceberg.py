@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Literal
 
 from fastapi import Depends, HTTPException
 
 from backend.deps import get_source, require_admin
 from backend.models.admin import IcebergTableInfoResponse, ResetLogsRequest, SyncStartResponse
-from backend.models.admin_actions import DucklakeMigrateResponse, IcebergCalendarResponse
+from backend.models.admin_actions import IcebergCalendarResponse
 from backend.utils.router_utils import (
     make_error,
     query_errors,
-    raise_internal,
     require_json_content_type,
 )
 
@@ -110,23 +108,13 @@ def rebuild_local_view_endpoint(source: dict = Depends(get_source)):
     import threading
 
     from backend.core import iceberg as db_iceberg
-    from backend.core.duckdb import _cache_dir, start_cron_run
+    from backend.core.duckdb import start_cron_run
     from backend.cron.jobs.metadata import _run_metadata_sync
     from backend.cron_progress import start_progress
 
     service_id = source["name"]
 
     db_iceberg.clear_source_caches(service_id)
-    # The persistent cache file lives at cache/{bucket}/snapshot_files_cache.json
-    # — deleting it forces sync_data to call tbl.scan().plan_files() against
-    # the freshly-loaded catalog instead of trusting the previous snapshot's
-    # cached file list.
-    persistent_cache = os.path.join(_cache_dir(source), "snapshot_files_cache.json")
-    if os.path.exists(persistent_cache):
-        try:
-            os.remove(persistent_cache)
-        except OSError as e:
-            raise_internal(logger, e, code="snapshot_cache_remove_failed", status=500)
 
     try:
         # Deliberate divergence from router_utils.start_or_resume_cron: this
@@ -146,41 +134,6 @@ def rebuild_local_view_endpoint(source: dict = Depends(get_source)):
     t = threading.Thread(target=_run_metadata_sync, args=(service_id,), kwargs={"run_id": run_id}, daemon=True)
     t.start()
     return {"ok": True, "message": "Local view rebuild started.", "run_id": run_id}
-
-
-@router.post(
-    "/admin/ducklake/migrate",
-    status_code=202,
-    response_model=DucklakeMigrateResponse,
-    response_model_exclude_unset=True,
-)
-def ducklake_migrate_endpoint(source: dict = Depends(get_source)):
-    """Adopt this service's legacy pyiceberg-era parquet into DuckLake.
-
-    The backend already runs this automatically on first boot under v3;
-    this endpoint is the explicit "run it now" button (and the retry path
-    after a failed sweep), so it bypasses the once-ever guard. Returns
-    202 Accepted — the adoption runs in a background thread (registering
-    thousands of files can take a while). Idempotent: files already
-    tracked by the DuckLake catalog are skipped, so re-running after a
-    partial failure is safe. The outcome lands as a ``ducklake_adopt``
-    row in ``cron_runs`` (visible in the Cron UI) as well as in the logs.
-    """
-    import threading
-
-    from backend.core.iceberg._ducklake_migration import run_legacy_adoption_once
-
-    service_id = source["name"]
-
-    def worker():
-        try:
-            result = run_legacy_adoption_once(service_id, force=True)
-            logger.info("ducklake migrate %s finished: %s", service_id, result)
-        except Exception:
-            logger.exception("ducklake migrate %s failed", service_id)
-
-    threading.Thread(target=worker, daemon=True, name=f"ducklake-migrate-{service_id}").start()
-    return {"ok": True, "message": "DuckLake adoption started.", "service_id": service_id}
 
 
 # response_model intentionally omitted: SSE progress stream (EventSourceResponse),

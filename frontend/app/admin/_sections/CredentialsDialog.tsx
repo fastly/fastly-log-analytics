@@ -14,6 +14,8 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog'
+import { panelDialogContent, panelDialogHeaderSolid, panelDialogFooter } from '@/lib/panel-dialog'
+import { cn } from '@/lib/utils'
 import type { ServiceConfig } from '@/types/api'
 
 
@@ -55,8 +57,8 @@ function CredentialsDialogBody({ service, onClose, initialMode }: Props) {
 
   return (
     <Dialog open={!!service} onOpenChange={(open) => { if (!open) handleClose() }}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
+      <DialogContent className={cn("sm:max-w-md", panelDialogContent)}>
+        <DialogHeader className={panelDialogHeaderSolid}>
           <DialogTitle>Rotate FOS Credentials</DialogTitle>
           <DialogDescription>
             Replace the Fastly Object Storage access key for <strong>{service?.name}</strong>.
@@ -66,7 +68,7 @@ function CredentialsDialogBody({ service, onClose, initialMode }: Props) {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-2">
+        <div className="px-6 py-4 space-y-4 overflow-y-auto flex-1">
           {/* Mode toggle — admins only */}
           {service?.access_level === 'read_write' && (
             <div className="flex rounded-md border overflow-hidden text-xs font-semibold">
@@ -139,7 +141,7 @@ function CredentialsDialogBody({ service, onClose, initialMode }: Props) {
           )}
         </div>
 
-        <DialogFooter>
+        <DialogFooter className={panelDialogFooter}>
           <Button variant="outline" onClick={handleClose}>Cancel</Button>
           <Button
             disabled={

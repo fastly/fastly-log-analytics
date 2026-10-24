@@ -189,21 +189,6 @@ def _schema_cols_cache_key(src: dict) -> tuple[str, str] | None:
     return (sid, fmt)
 
 
-def clear_schema_cols_cache(service_id: str | None = None) -> None:
-    """Drop cached schema columns.
-
-    With ``service_id=None``, clears everything. With a specific id,
-    drops entries for that service across all format_hashes (useful in
-    tests). Production code shouldn't need to call this — the
-    format_hash-keyed cache invalidates itself on log_format changes.
-    """
-    global _schema_cols_cache
-    if service_id is None:
-        _schema_cols_cache.clear()
-    else:
-        _schema_cols_cache = {k: v for k, v in _schema_cols_cache.items() if k[0] != service_id}
-
-
 def _compact_sql_for_debug(sql: str) -> str:
     """Replace explicit ``read_parquet([...long file list...])`` literals
     with ``read_parquet([N files])`` for transport in the debug-panel
@@ -461,12 +446,6 @@ def percentile_ms_expr(col: str, p: float = 0.95, filter_expr: str = "", *, appr
         # approx_quantile accepts FILTER the same way as other aggregates.
         return f"approx_quantile({col}, {p}){filter_clause} / 1000.0"
     return f"PERCENTILE_CONT({p}) WITHIN GROUP (ORDER BY {col}){filter_clause} / 1000.0"
-
-
-def error_rate_expr(status_col: str = "status", threshold: int = 500, filter_expr: str = "") -> str:
-    """Return percentage of rows where status_col >= threshold."""
-    filter_clause = f" FILTER ({filter_expr})" if filter_expr else ""
-    return f"ROUND(SUM(CASE WHEN {status_col} >= {threshold} THEN 1 ELSE 0 END){filter_clause} * 100.0 / NULLIF(count(*){filter_clause}, 0), 2)"
 
 
 def origin_latency_us_expr(actual_cols: set[str] | list[str]) -> str:

@@ -39,59 +39,11 @@ import logging as _logging
 _logging.raiseExceptions = False
 
 
-# Same daemon-thread root cause as the logging block above: the
-# ``_write_table_summary_async`` thread opens a pyiceberg SqlCatalog, whose
-# sqlite3 connection GCs *unclosed* after the spawning test finishes (the pool's
-# close_all() deliberately leaves live foreign-thread handles alone — closing a
-# sqlite handle from another live thread segfaults; see
-# backend/core/sqlite_pool.py::ThreadLocalPool.close_all). pyproject's
-# ``filterwarnings`` already ignores this ResourceWarning, but that filter is
-# only active INSIDE a test's warning-filter context; pytest's
-# ``unraisableexception`` plugin runs ``gc.collect()`` BETWEEN tests, outside
-# that context, so the "unclosed database" warning leaks to the console. Install
-# the same ignore at the process level so it also covers the inter-test gc path.
-# Benign: production holds its connections for the whole process lifetime.
-import warnings as _warnings
-
-_warnings.filterwarnings("ignore", message="unclosed database", category=ResourceWarning)
-
-
 # NOTE: the historical ``backend.scheduler`` compat shim (and the
 # session-start pre-import that defended its binding order under
 # pytest-randomly) was retired 2026-07-06 — every caller and test patch
 # now targets the real homes under ``backend.cron.*`` directly, so the
 # shim-binding pollution class no longer exists.
-
-
-def pytest_configure(config):
-    """Stop pytest 9's ``unraisableexception`` plugin from FORCE-running
-    ``gc.collect()`` at session end (per xdist worker).
-
-    That forced collection is the *only* thing that surfaces the benign
-    "unclosed database" ResourceWarning from pyiceberg's cached ``SqlCatalog``:
-    a catalog evicted from ``_catalog_cache`` becomes cyclic garbage, and the
-    plugin's ``gc_collect_harder`` reaps it from inside a
-    ``catch_warnings(record=True)`` context whose ``simplefilter("always")``
-    overrides Python's *default* ``ignore::ResourceWarning`` — at a point where
-    the pyproject / line-53 "unclosed database" filters are no longer applied.
-    Every surfaced warning is sourced to ``unraisableexception.py:33
-    gc.collect()`` precisely because of this forced pass.
-
-    Left to natural collection (a later auto-gc inside a test's filter context,
-    or interpreter shutdown), those connections are reaped under filters where
-    ResourceWarning is ignored — silent. ``sys.unraisablehook`` stays installed,
-    so genuine unraisable exceptions are still caught when they occur; we only
-    skip the *extra forced* gc passes. ``gc_collect_iterations`` is a documented,
-    overridable stash key (pytest marks it "not a simple constant ... to allow
-    pytester to override it"). Guarded so a future pytest that renames/removes
-    the key degrades to the line-53 filter rather than failing collection.
-    """
-    try:
-        from _pytest.unraisableexception import gc_collect_iterations_key
-
-        config.stash[gc_collect_iterations_key] = 0
-    except Exception:
-        pass
 
 
 def _cassette_recorded_at(path) -> float | None:
@@ -487,30 +439,12 @@ def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
 
     monkeypatch.setattr(_usage_log_db, "_DATA_DIR", str(sandbox_services))
 
-    # Sandbox share_db connection pool and directory
+    # Sandbox share_db directory
     from backend.core.share_db import connection as _share_db_connection
 
     monkeypatch.setattr(_share_db_connection, "_DATA_DIR", str(sandbox_system))
-    monkeypatch.setattr(_share_db_connection, "_initialized", set())
-    monkeypatch.setattr(_share_db_connection, "_local", __import__("threading").local())
 
-    # system_metrics.db (operational-vital snapshots) lives in
-    # ``data/system/system_metrics.db``. Redirect to the sandbox so tests
-    # can't leak rows into the real-disk file across runs.
     from backend.core import metric_snapshots as _metric_snapshots
-
-    monkeypatch.setattr(_metric_snapshots, "_DATA_DIR", str(sandbox_system))
-    monkeypatch.setattr(_metric_snapshots, "_initialized", False)
-    monkeypatch.setattr(_metric_snapshots, "_local", __import__("threading").local())
-
-    # rdns_cache hardcodes a RELATIVE _DB_PATH (data/cache/rdns_cache.db)
-    # decoupled from svcconfig.CACHE_DATA_DIR, so redirect it explicitly to
-    # the per-test sandbox. Otherwise every xdist worker process shares the
-    # one real-disk file → cross-process WAL contention ("database is
-    # locked") and leaked rows in the repo tree.
-    from backend.utils import rdns_cache as _rdns_cache
-
-    monkeypatch.setattr(_rdns_cache, "_DB_PATH", Path(sandbox_cache) / "rdns_cache.db")
 
     monkeypatch.setattr(svcconfig, "DATA_DIR", sandbox_data)
     monkeypatch.setattr(svcconfig, "SERVICES_DATA_DIR", sandbox_services)
@@ -570,8 +504,6 @@ def _reset_module_caches():
     ``test_dashboard.py``) used to clear these inline. Clearing once here
     means they no longer have to.
     """
-    from backend.core import iceberg as _ic
-
     # A-3: drain every cache registered via
     # backend.utils.cache_registry.CacheRegistry. The iceberg, duckdb,
     # dashboard, and network modules all register their caches at
@@ -582,10 +514,6 @@ def _reset_module_caches():
 
     CacheRegistry.clear_all()
 
-    # Non-cache module globals the registry can't help with: a counter
-    # and a class-reference that need explicit reset between tests.
-    _ic._sql_load_table_real_calls["n"] = 0
-    _ic._FOS_CATALOG_CLASS = None
     # All previously hand-cleared module caches (_logging_settings_cache,
     # _enforce_threshold_cache, active_requests._active_count via the
     # _ActiveRequestsResetAdapter) now register with CacheRegistry from

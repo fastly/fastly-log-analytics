@@ -188,10 +188,6 @@ class SecurityTopBotsResponse(BaseResponse):
     ngwaf_bots: list[SecurityBotRow] = []
 
 
-class SecurityProxiesRequest(RangeKeyedRequest):
-    pass
-
-
 class SecurityProxiesResponse(_SecurityProxiesFieldsMixin, BaseResponse):
     pass
 

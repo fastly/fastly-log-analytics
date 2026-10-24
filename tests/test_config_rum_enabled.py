@@ -80,46 +80,6 @@ def test_terraform_generation_uses_the_shared_resolution(extra, expected, monkey
     assert seen[0]["rum_enabled"] is expected
 
 
-@pytest.mark.parametrize("extra,expected", _CASES)
-def test_ensure_logging_endpoint_rum_beacon_exclusion_follows_the_shared_resolution(extra, expected):
-    from unittest.mock import patch
-
-    from backend.provision import fastly_api
-
-    conditions: list[str] = []
-
-    def fake_fastly(method, path, body=None, **kwargs):
-        if path.endswith("/clone"):
-            return {"number": 11}
-        if path.endswith("/validate"):
-            return {"status": "ok"}
-        return {}
-
-    cfg = {
-        "logging_service_id": "svc",
-        "provisioning": {"endpoint_name": "E"},
-        "fos_region": "us-east-1",
-        "fos_bucket_name": "b",
-        "log_period": 60,
-        **extra,
-    }
-    with (
-        patch("backend.provision.fastly_api.get_active_version", return_value=10),
-        patch("backend.provision.fastly_api.list_s3_endpoints", return_value=[]),
-        patch(
-            "backend.provision.fastly_api.ensure_condition",
-            side_effect=lambda n, stmt, *a, **k: conditions.append(stmt),
-        ),
-        patch("backend.provision.fastly_api.ensure_vcl_snippet"),
-        patch("backend.provision.fastly_api.install_capture_snippets"),
-        patch("backend.provision.fastly_api.load_log_format", return_value="f"),
-        patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly),
-    ):
-        fastly_api.ensure_logging_endpoint(cfg, "AK", "SK", "tok")
-
-    assert ('req.url.path != "/rum-beacon"' in conditions[0]) is expected
-
-
 @pytest.mark.parametrize(
     ("final_cfg", "expected"),
     [

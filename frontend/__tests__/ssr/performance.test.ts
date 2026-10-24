@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+
+import { setupNextHeadersMock, withTestHttpServer } from '../helpers/ssr'
 
 // performance.ts fetches the unified /api/performance/aggregates selection per cold
 // load, sharing one (rangeToken, anchor) pair. These tests pin (1) the
@@ -9,29 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // the key, so the SSR seed byte-matches. A mismatch would double-fetch
 // (worse than no SSR).
 
-const mockCookies = vi.fn()
-const mockHeaders = vi.fn()
-vi.mock('next/headers', () => ({
-  cookies: () => mockCookies(),
-  headers: () => mockHeaders(),
-}))
-
-beforeEach(() => {
-  mockCookies.mockReturnValue({ toString: () => '', get: () => undefined })
-  mockHeaders.mockReturnValue({ get: () => null })
-})
-
-afterEach(() => {
-  mockCookies.mockReset()
-  mockHeaders.mockReset()
-  delete process.env.API_PROXY_URL
-})
-
-function headerGetter(entries: Record<string, string>) {
-  return {
-    get: (k: string) => entries[k.toLowerCase()] ?? null,
-  }
-}
+const { setHeaders } = setupNextHeadersMock()
 
 describe('resolvePerformanceDefaultKey (key-match contract)', () => {
   it('cold load → rangeToken "24h", anchor floored to the 60s grid', async () => {
@@ -68,97 +48,78 @@ describe('fetchPerformanceServerSide (performance SSR)', () => {
   })
 
   it('fail-closed: no Caddy marker + non-loopback Host → null, never forwarded', async () => {
-    const http = await import('node:http')
-    let hit = false
-    const server = http.createServer((_req, res) => {
-      hit = true
-      res.statusCode = 200
-      res.end('{}')
-    })
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as { port: number }).port
-    process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    mockHeaders.mockReturnValue(headerGetter({ host: 'fastly-log-analytics.global.ssl.fastly.net' }))
+    setHeaders({ host: 'fastly-log-analytics.global.ssl.fastly.net' })
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    try {
-      const { fetchPerformanceServerSide } = await import('@/lib/ssr/performance')
-      const out = await fetchPerformanceServerSide('svc-1')
-      expect(out).toBeNull()
-      expect(hit).toBe(false)
-      expect(warn).toHaveBeenCalled()
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()))
-    }
+    await withTestHttpServer(
+      (_req, res) => {
+        res.statusCode = 200
+        res.end('{}')
+      },
+      async (srv) => {
+        const { fetchPerformanceServerSide } = await import('@/lib/ssr/performance')
+        const out = await fetchPerformanceServerSide('svc-1')
+        expect(out).toBeNull()
+        expect(srv.requests).toHaveLength(0)
+        expect(warn).toHaveBeenCalled()
+      },
+    )
   })
 
   it('admin SSH-tunnel: POSTs unified aggregates as admin with service id', async () => {
-    const http = await import('node:http')
-    const capturedBodies: string[] = []
-    const capturedHeaders: Array<Record<string, string | string[] | undefined>> = []
-    const server = http.createServer((req, res) => {
-      capturedHeaders.push(req.headers)
-      const chunks: Buffer[] = []
-      req.on('data', (c: Buffer) => chunks.push(c))
-      req.on('end', () => {
-        capturedBodies.push(Buffer.concat(chunks).toString('utf8'))
+    setHeaders({ host: 'localhost:3001' })
+    await withTestHttpServer(
+      (_req, res) => {
         res.statusCode = 200
         res.setHeader('Content-Type', 'application/json')
         res.end('{"ok":true}')
-      })
-    })
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as { port: number }).port
-    process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    mockHeaders.mockReturnValue(headerGetter({ host: 'localhost:3001' }))
-    try {
-      const {
-        fetchPerformanceServerSide,
-        PERFORMANCE_SSR_DEFAULTS,
-      } = await import('@/lib/ssr/performance')
-      const now = new Date('2026-06-29T12:00:30Z')
-      const out = await fetchPerformanceServerSide('svc-1', now)
+      },
+      async (srv) => {
+        const {
+          fetchPerformanceServerSide,
+          PERFORMANCE_SSR_DEFAULTS,
+        } = await import('@/lib/ssr/performance')
+        const now = new Date('2026-06-29T12:00:30Z')
+        const out = await fetchPerformanceServerSide('svc-1', now)
 
-      expect(out).not.toBeNull()
-      expect(out!.performanceData).toEqual({ ok: true })
-      expect(out!.rangeToken).toBe('24h')
-      expect(out!.anchor).toBe('2026-06-29T12:00:00Z')
+        expect(out).not.toBeNull()
+        expect(out!.performanceData).toEqual({ ok: true })
+        expect(out!.rangeToken).toBe('24h')
+        expect(out!.anchor).toBe('2026-06-29T12:00:00Z')
 
-      expect(capturedBodies).toHaveLength(1)
-      const body = JSON.parse(capturedBodies[0])
-      expect(body).toEqual({
-        filters: {},
-        sort_by: PERFORMANCE_SSR_DEFAULTS.sortBy,
-        range_token: '24h',
-        anchor: '2026-06-29T12:00:00Z',
-      })
+        expect(srv.requests).toHaveLength(1)
+        const body = JSON.parse(srv.requests[0].body)
+        expect(body).toEqual({
+          filters: {},
+          sort_by: PERFORMANCE_SSR_DEFAULTS.sortBy,
+          range_token: '24h',
+          anchor: '2026-06-29T12:00:00Z',
+        })
 
-      for (const h of capturedHeaders) {
-        expect(h['x-remote-analyst']).toBeUndefined()
-        expect(h['x-service-id']).toBe('svc-1')
-      }
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()))
-    }
+        for (const req of srv.requests) {
+          expect(req.headers['x-remote-analyst']).toBeUndefined()
+          expect(req.headers['x-service-id']).toBe('svc-1')
+        }
+      },
+    )
   })
 
   it('fails safely: if fetch fails, returns null', async () => {
-    const http = await import('node:http')
-    const server = http.createServer((req, res) => {
-      res.statusCode = 500
-      res.end('boom')
-    })
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as { port: number }).port
-    process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    mockHeaders.mockReturnValue(headerGetter({ host: 'localhost:3001' }))
+    setHeaders({ host: 'localhost:3001' })
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
-      const { fetchPerformanceServerSide } = await import('@/lib/ssr/performance')
-      const out = await fetchPerformanceServerSide('svc-1')
-      expect(out).toBeNull()
+      await withTestHttpServer(
+        (_req, res) => {
+          res.statusCode = 500
+          res.end('boom')
+        },
+        async () => {
+          const { fetchPerformanceServerSide } = await import('@/lib/ssr/performance')
+          const out = await fetchPerformanceServerSide('svc-1')
+          expect(out).toBeNull()
+        },
+      )
     } finally {
       warn.mockRestore()
-      await new Promise<void>((resolve) => server.close(() => resolve()))
     }
   })
 })

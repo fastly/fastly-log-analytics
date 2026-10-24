@@ -23,6 +23,8 @@ from tests._helpers.dates import three_days_ago_iso as _three_days_ago_iso
 from tests._helpers.dates import two_days_ago_iso as _two_days_ago_iso
 from tests._helpers.dates import yesterday_iso as _yesterday_iso
 from tests._helpers.locks import noop_lock as _noop_lock
+from tests._helpers.rollups import make_stub_runner as _stub_runner
+from tests._helpers.rollups import write_hour_all_fields as _write_hour_all_fields
 
 pytestmark = pytest.mark.usefixtures("frozen_clock")
 
@@ -46,15 +48,6 @@ def _write_hour_perf(cache_root: str, hour: str, rows: list[dict], filename: str
     p = os.path.join(d, filename)
     pq.write_table(table, p)
     return p
-
-
-def _write_hour_all_fields(cache_root: str, hour: str) -> None:
-    d = os.path.join(cache_root, "rollups", "hour_bundled", f"hour={hour}")
-    os.makedirs(d, exist_ok=True)
-    pq.write_table(
-        pa.table({"field": pa.array(["x"]), "value": pa.array(["y"]), "count": pa.array([1], type=pa.int64())}),
-        os.path.join(d, "all_fields.parquet"),
-    )
 
 
 def _row(value: str, requests: int, p50: float, p95: float, p99: float, avg_us: float = 1000.0) -> dict:
@@ -95,25 +88,6 @@ def test_backfill_skips_built_hours(tmp_path):
 
     assert n == 1
     assert captured == [[f"{yday}-10"]]
-
-
-def _stub_runner(src: dict, captured_sql: list[str], stub_rows: list[tuple]):
-    from backend.repositories._base import QueryRunner
-
-    class _Result:
-        def fetchall(self):
-            return stub_rows
-
-    class _Conn:
-        def execute(self, sql, params=None):
-            captured_sql.append(sql)
-            return _Result()
-
-    runner = QueryRunner.__new__(QueryRunner)
-    runner.src = src
-    runner._table = "logs_svc_pl_reader"
-    runner.execute = _Conn().execute  # type: ignore[method-assign]
-    return runner
 
 
 def test_reader_returns_none_when_filtered(tmp_path):

@@ -29,13 +29,11 @@ already-trained matrix."""
 
 from __future__ import annotations
 
-import json
 import logging
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import IO, Any
+from typing import Any
 
 from backend.scoring.normalize import Route, normalize
 
@@ -98,15 +96,6 @@ class TransitionMatrix:
         }
 
 
-def _read_jsonl(path: Path) -> Iterator[dict]:
-    with path.open() as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            yield json.loads(line)
-
-
 def _session_mean_dwell_seconds(events: list[dict]) -> float:
     """Mean of inter-event time deltas, in seconds.
 
@@ -163,10 +152,6 @@ def build_matrix(
     stats.transitions = matrix.transition_count
     stats.routes_seen = len(matrix.vocab)
     return matrix, stats
-
-
-def build_matrix_from_jsonl(path: Path, **kwargs) -> tuple[TransitionMatrix, MatrixStats]:
-    return build_matrix(_read_jsonl(path), **kwargs)
 
 
 # ── FSM1 binary encoding (KV-store payload) ──────────────────────────────────
@@ -276,20 +261,6 @@ def serialize_kv(matrix: dict[str, Any]) -> bytes:
     out += pair_bytes
 
     return bytes(out)
-
-
-def write_matrix(matrix: TransitionMatrix, version: str, out: IO[str]) -> None:
-    """Serialize the matrix as canonical JSON. Use sort_keys so two runs
-    on the same input produce byte-identical output — important for
-    diffing matrix versions in CI and for the ``fastly compute deploy``
-    package hash."""
-    json.dump(matrix.to_json_dict(version), out, sort_keys=True, separators=(",", ":"))
-
-
-def write_matrix_path(matrix: TransitionMatrix, version: str, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as f:
-        write_matrix(matrix, version, f)
 
 
 def default_version() -> str:

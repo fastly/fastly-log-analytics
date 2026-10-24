@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/hooks/useSyncStatus', () => ({
   useSyncStatus: () => mocks.status(),
+}))
+vi.mock('@/hooks/useIsAnalyst', () => ({
   useIsAnalyst: () => mocks.analyst(),
 }))
 vi.mock('@/hooks/useBootstrap', () => ({ useBootstrap: () => mocks.bootstrap() }))

@@ -53,11 +53,6 @@ type HealthSnapshot = Omit<components['schemas']['HealthSnapshotResponse'], 'poo
 // reading".
 type Tone = 'default' | 'warn' | 'crit' | 'unknown'
 
-/** Compact "time ago" for an age in seconds: 45s / 12m / 3.4h / 6.2d. */
-function fmtAgeS(seconds: number): string {
-  return formatElapsed(seconds, ELAPSED_AGE_COMPACT)
-}
-
 function Stat({ label, value, sub, tone = 'default', trend, trendDomain, formatTrendValue }: {
   label: string
   value: React.ReactNode
@@ -349,7 +344,7 @@ export function SystemHealthCard() {
         />
         <Stat
           label="Scheduler"
-          value={tickAge == null ? '–' : `${fmtAgeS(tickAge)} ago`}
+          value={tickAge == null ? '–' : `${formatElapsed(tickAge, ELAPSED_AGE_COMPACT)} ago`}
           sub={tickAge == null
             ? 'no ticks yet'
             : tickTone === 'default' ? 'cron loop alive' : 'last metric tick — overdue?'}
@@ -357,7 +352,7 @@ export function SystemHealthCard() {
         />
         <Stat
           label="Config backup"
-          value={backup == null || backupAgeS == null ? 'never' : `${fmtAgeS(backupAgeS)} ago`}
+          value={backup == null || backupAgeS == null ? 'never' : `${formatElapsed(backupAgeS, ELAPSED_AGE_COMPACT)} ago`}
           sub={backup == null || backupAgeS == null
             ? 'no off-VM backup recorded'
             : (backup.last_backup_at ?? 'unknown')}

@@ -51,10 +51,8 @@ sys.addaudithook(audit)
 launcher = runpy.run_path({str(LAUNCHER)!r})
 launcher["_maybe_redirect_config_paths"]()
 from backend import config
-from backend.core import metric_snapshots
 from backend.core.metadata import base, usage_log_db
 from backend.core.share_db import connection as share
-from backend.utils import rdns_cache, ngwaf_bot_cache
 paths = {{
     "cwd": Path.cwd(),
     "configs": config.CONFIGS_DIR,
@@ -62,9 +60,6 @@ paths = {{
     "duckdb": config.duckdb_path("sandbox-service"),
     "metadata": base.db_path("sandbox-service"),
     "usage_db": usage_log_db.db_path("sandbox-service"),
-    "metrics": Path(metric_snapshots._DATA_DIR) / metric_snapshots._DB_NAME,
-    "rdns": rdns_cache._DB_PATH,
-    "ngwaf": ngwaf_bot_cache._db_path(),
     "share": share.db_path(),
     "usage_config": config._USAGE_LOGGING_CONFIG_PATH,
     "buffer_cache": Path("cache"),
@@ -82,9 +77,6 @@ print(json.dumps({{key: str(Path(value).resolve()) for key, value in paths.items
         "duckdb": str(data / "services/sandbox-service.duckdb"),
         "metadata": str(data / "services/sandbox-service.metadata.db"),
         "usage_db": str(data / "services/sandbox-service.usage_log.db"),
-        "metrics": str(data / "system/system_metrics.db"),
-        "rdns": str(data / "cache/rdns_cache.db"),
-        "ngwaf": str(data / "ngwaf_bot_cache.db"),
         "share": str(data / "system/remote_share.db"),
         "usage_config": str(data / "system/usage_logging.json"),
         "buffer_cache": str(sandbox / "cache"),

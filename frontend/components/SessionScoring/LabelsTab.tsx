@@ -22,10 +22,10 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { useScoringLabels, type LabelRow, type LabelValue } from '@/hooks/useScoringLabels'
+import { useDeferredDeleteWithUndo } from '@/hooks/useDeferredDeleteWithUndo'
 import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 import { queryKeys } from '@/lib/query-keys'
-import { showToast, showToastWithAction } from '@/lib/toast'
 
 import { SessionEventsDialog } from './SessionEventsDialog'
 
@@ -128,17 +128,7 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
   const qc = useQueryClient()
   const [error, setError] = React.useState('')
   const [pendingDelete, setPendingDelete] = React.useState<LabelRow | null>(null)
-  // IDs hidden from the table while the post-confirm undo window is open.
-  // The DELETE fires after the toast duration unless Undo cancels the timer.
-  const [pendingDeleteIds, setPendingDeleteIds] = React.useState<Set<string>>(() => new Set())
-  const pendingTimersRef = React.useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
-  React.useEffect(() => {
-    const timers = pendingTimersRef.current
-    return () => {
-      for (const [, t] of timers) clearTimeout(t)
-      timers.clear()
-    }
-  }, [])
+  const { pendingDeleteIds, scheduleDelete } = useDeferredDeleteWithUndo()
 
   const labels = useScoringLabels(serviceId)
 
@@ -170,45 +160,18 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
     setError('')
     setPendingDelete(null)
     const id = row.id
-    setPendingDeleteIds((prev) => {
-      const next = new Set(prev)
-      next.add(id)
-      return next
-    })
-    const timer = setTimeout(async () => {
-      pendingTimersRef.current.delete(id)
-      try {
+    scheduleDelete({
+      id,
+      toastMessage: `Deleted label for ${row.sid}`,
+      performDelete: async () => {
         await unwrapClient(
           client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}', {
             params: { path: { service_id: serviceId, label_id: id } },
           }),
         )
         qc.invalidateQueries({ queryKey: queryKeys.scoringLabels(serviceId) })
-      } catch (e) {
-        setPendingDeleteIds((prev) => {
-          const next = new Set(prev)
-          next.delete(id)
-          return next
-        })
-        showToast(extractApiError(e) || 'Failed to delete label', 'error')
-      }
-    }, 5500)
-    pendingTimersRef.current.set(id, timer)
-    showToastWithAction(`Deleted label for ${row.sid}`, {
-      actionLabel: 'Undo',
-      onAction: () => {
-        const t = pendingTimersRef.current.get(id)
-        if (t) {
-          clearTimeout(t)
-          pendingTimersRef.current.delete(id)
-        }
-        setPendingDeleteIds((prev) => {
-          const next = new Set(prev)
-          next.delete(id)
-          return next
-        })
       },
-      durationMs: 5500,
+      errorMessage: (e) => extractApiError(e) || 'Failed to delete label',
     })
   }
 

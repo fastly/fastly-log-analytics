@@ -52,9 +52,7 @@ from backend.core.metadata.asn_cache import (
 from backend.core.metadata.base import (
     _DATA_DIR,
     _FILE_DATE_RE,
-    _ORPHAN_THRESHOLD_MINS,
     _SCHEMA,
-    _TASK_ORPHAN_THRESHOLD_MINS,
     _clear_ingested_filenames_cache,
     _ingested_filenames_cache,
     _ingested_filenames_cache_lock,
@@ -70,7 +68,6 @@ from backend.core.metadata.base import (
 from backend.core.metadata.cron_log import (
     adaptive_stale_minutes,
     cron_busy,
-    cron_summary_for_tasks,
     delete_cron_run,
     finalize_cron_run_if_running,
     get_cron_run_result,
@@ -79,7 +76,6 @@ from backend.core.metadata.cron_log import (
     latest_cron_per_task,
     list_scoring_audit,
     log_cron_run,
-    prune_scoring_audit,
     purge_cron_runs,
     reap_running_cron_runs,
     record_scoring_audit,
@@ -91,7 +87,6 @@ from backend.core.metadata.cron_log import (
 from backend.core.metadata.ingest_log import (
     _bootstrap_ingested_files_summary,
     clear_in_flight,
-    filter_uncommitted_buffers,
     get_ingested_filenames,
     get_ingested_files_status_summary,
     get_latest_ingest_ts,
@@ -105,12 +100,9 @@ from backend.core.metadata.ingest_log import (
     get_rum_beacons_by_date,
     get_storage_stats_window,
     insert_ingested_files,
-    list_committed_basenames,
     list_in_flight,
     list_ingested_files,
-    list_ingested_files_for_status,
     list_unbackfilled_fastly_edge_files,
-    mark_buffers_committed,
     purge_committed_buffer_rows,
     recompute_ingested_files_summary,
     record_in_flight,
@@ -119,13 +111,7 @@ from backend.core.metadata.ingest_log import (
 
 # Quarantined-file tracking (corrupt/invalid ingest files copied to errors/).
 from backend.core.metadata.quarantine import (
-    delete_quarantined_rows,
-    get_expired_quarantined_files,
     get_quarantine_storage_total,
-    get_quarantine_summary,
-    get_quarantined_file_by_id,
-    insert_quarantined_file,
-    list_quarantined_files,
 )
 
 # Metadata cleanup + storage stats.
@@ -146,8 +132,6 @@ from backend.core.metadata.slow_queries import (
     flush_slow_query_buffer,
     insert_slow_query,
     list_slow_queries,
-    purge_old_slow_queries,
-    slow_queries_storage_stats,
 )
 
 # Audit log + applied data migration tracking.
@@ -165,7 +149,6 @@ from backend.core.metadata.usage_log import (
     DEFAULT_METADATA_RETENTION,
     _query_usage_log_aggregate_rollup,
     clear_usage_log,
-    get_source_by_name,
     get_usage_logs,
     iter_usage_logs_chunks,
     log_synthetic_usage,
@@ -203,8 +186,6 @@ class _ShimModule(ModuleType):
             "_ingested_filenames_cache",
             "_ingested_filenames_cache_lock",
             "_FILE_DATE_RE",
-            "_ORPHAN_THRESHOLD_MINS",
-            "_TASK_ORPHAN_THRESHOLD_MINS",
             "_parse_file_date",
         }
     )
@@ -250,7 +231,6 @@ __all__ = [
     "get_ingested_filenames",
     "get_reclaimable_strand_filenames",
     "list_ingested_files",
-    "list_ingested_files_for_status",
     "get_ingested_files_status_summary",
     "get_log_accounting_counts",
     "get_storage_stats_window",
@@ -263,9 +243,6 @@ __all__ = [
     "record_in_flight",
     "clear_in_flight",
     "list_in_flight",
-    "filter_uncommitted_buffers",
-    "list_committed_basenames",
-    "mark_buffers_committed",
     "purge_committed_buffer_rows",
     "get_log_activity",
     "get_node_count_avg",
@@ -277,8 +254,6 @@ __all__ = [
     "insert_slow_query",
     "list_slow_queries",
     "count_slow_queries",
-    "purge_old_slow_queries",
-    "slow_queries_storage_stats",
     # Cron runs
     "start_cron_run",
     "log_cron_run",
@@ -288,14 +263,12 @@ __all__ = [
     "purge_cron_runs",
     "record_scoring_audit",
     "list_scoring_audit",
-    "prune_scoring_audit",
     "get_cron_run_result",
     "get_cron_run_status",
     "get_cron_runs",
     "latest_cron_per_task",
     "reap_running_cron_runs",
     "cron_busy",
-    "cron_summary_for_tasks",
     "adaptive_stale_minutes",
     # ASN cache
     "lookup_asn_names",
@@ -303,7 +276,6 @@ __all__ = [
     "asn_ints_for_search",
     # Sources
     "register_source",
-    "get_source_by_name",
     # Usage log
     "log_usage_calls",
     "log_synthetic_usage",
@@ -325,19 +297,11 @@ __all__ = [
     "_ingested_filenames_cache_lock",
     "_parse_file_date",
     "_FILE_DATE_RE",
-    "_ORPHAN_THRESHOLD_MINS",
-    "_TASK_ORPHAN_THRESHOLD_MINS",
     "_bootstrap_ingested_files_summary",
     "recompute_ingested_files_summary",
     "_query_usage_log_aggregate_rollup",
     "_STATS_TABLES",
     "_CLEANUP_TABLES",
     # Quarantine
-    "insert_quarantined_file",
-    "list_quarantined_files",
-    "get_quarantine_summary",
-    "get_quarantined_file_by_id",
-    "get_expired_quarantined_files",
     "get_quarantine_storage_total",
-    "delete_quarantined_rows",
 ]

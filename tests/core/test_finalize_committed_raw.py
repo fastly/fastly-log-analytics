@@ -24,6 +24,7 @@ import duckdb
 import pytest
 
 from backend.core.ingest import RAW_DELETE_GRACE_S, finalize_committed_raw, merge_lake_files
+from tests._helpers.ledger import attacher as _attacher
 from tests._helpers.ledger import clear_ledger
 
 SERVICE_ID = "test-finalize-raw"
@@ -32,11 +33,7 @@ SRC = {"service_id": SERVICE_ID, "name": SERVICE_ID, "bucket": BUCKET, "prefix":
 
 
 def _seed_committed(con, keys: list[str], *, age_s: float, raw_deleted_at: float | None = None) -> None:
-    """Seed committed ledger rows whose commit is ``age_s`` seconds old.
-
-    ``committed_at`` is an epoch float because that is what the PRODUCER
-    writes (``committed_at=?`` bound to ``time.time()`` in convert_object).
-    """
+    """Seed committed ledger rows whose commit is ``age_s`` seconds old."""
     now = time.time()
     cur = con.cursor()
     for key in keys:
@@ -373,19 +370,6 @@ def test_finalize_honors_batch_size_so_one_tick_cannot_run_away():
 
 
 # ── merge_lake_files ──────────────────────────────────────────────────────
-
-
-def _attacher(catalog: str, data_path: str):
-    def _attach(con_arg, src_arg, read_only=False):
-        con_arg.execute("INSTALL ducklake; LOAD ducklake;")
-        ro = ", READ_ONLY" if read_only else ""
-        try:
-            con_arg.execute(f"ATTACH 'ducklake:{catalog}' AS lake (DATA_PATH '{data_path}'{ro})")
-        except duckdb.Error:
-            pass
-        return True
-
-    return _attach
 
 
 def test_merge_lake_files_flushes_and_compacts_without_losing_rows(tmp_path):

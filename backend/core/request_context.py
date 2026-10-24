@@ -44,6 +44,8 @@ from backend.core.request_telemetry import RequestTelemetry
 from backend.deps import _ConnectionHolder, _resolve_source_or_400, get_service_id
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import duckdb
 
     from backend.high_scale.registry import HighScaleService
@@ -94,6 +96,21 @@ class RequestContext:
                 return self._holder.__enter__()
             return self._holder.con
         raise RuntimeError("RequestContext has no connection")
+
+    @property
+    def has_eager_con(self) -> bool:
+        """True when a connection override or an already-opened pool connection is present."""
+        return self._con_override is not None or (self._holder is not None and self._holder.con is not None)
+
+    def con_factory(self) -> Callable[[], duckdb.DuckDBPyConnection]:
+        """Return a zero-arg callable that lazily acquires ``self.con``."""
+        return lambda: self.con
+
+    def con_or_factory(
+        self, *, force_eager: bool = False
+    ) -> duckdb.DuckDBPyConnection | Callable[[], duckdb.DuckDBPyConnection]:
+        """Return ``self.con`` when already open or ``force_eager`` is True, else ``self.con_factory()``."""
+        return self.con if (self.has_eager_con or force_eager) else self.con_factory()
 
     async def prewarm_con(self) -> None:
         """Acquire ``self.con`` in a worker thread so the loop never blocks.

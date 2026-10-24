@@ -1,7 +1,7 @@
 'use client'
 
 import React from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -157,9 +157,6 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
   const [channels, setChannels] = React.useState<AlertChannel[]>(initialAlert?.channels || [])
   const [newChannelType, setNewChannelType] = React.useState<ChannelType>('slack')
   const [newChannelUrl, setNewChannelUrl] = React.useState('')
-  const [isSaving, setIsSaving] = React.useState(false)
-  const [previewData, setPreviewData] = React.useState<AlertPreviewData | null>(null)
-  const [isPreviewLoading, setIsPreviewLoading] = React.useState(false)
   const [lookbackHours, setLookbackHours] = React.useState(24)
 
   const nameError = errors.name?.message ?? null
@@ -174,51 +171,80 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
     setChannels(channels.filter((c) => c !== channel))
   }
 
-  // Fetch preview data on change
+  const previewParams = React.useMemo(
+    () => ({
+      activeServiceId,
+      metric,
+      category,
+      evalType,
+      evalScope,
+      operator,
+      windowMin,
+      compPeriodMin,
+      statusCodesStr,
+      threshold,
+      zscoreThreshold,
+      baselinePeriodDays,
+      lookbackHours,
+    }),
+    [
+      activeServiceId,
+      metric,
+      category,
+      evalType,
+      evalScope,
+      operator,
+      windowMin,
+      compPeriodMin,
+      statusCodesStr,
+      threshold,
+      zscoreThreshold,
+      baselinePeriodDays,
+      lookbackHours,
+    ],
+  )
+  const [debouncedPreviewParams, setDebouncedPreviewParams] = React.useState(previewParams)
   React.useEffect(() => {
-    if (!activeServiceId) return
-    if (isAnalyst) return
-
-    const fetchPreview = async () => {
-      setIsPreviewLoading(true)
-      try {
-        let parsedCodes: number[] | undefined = undefined
-        if ((metric === 'specific_status' || metric === 'specific_status_rate') && statusCodesStr) {
-          parsedCodes = statusCodesStr.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n))
-        }
-
-        const data = await unwrapClient(client.POST("/api/alerts/preview", {
-          params: { query: { lookback_hours: lookbackHours } },
-          body: {
-            service_id: activeServiceId,
-            name: 'Preview',
-            category,
-            metric,
-            evaluation_type: evalType,
-            evaluation_scope: evalScope,
-            operator: evalType === 'anomaly_zscore' ? '>' : operator,
-            threshold: evalType === 'anomaly_zscore' ? (parseFloat(zscoreThreshold) || 3.0) : (parseFloat(threshold) || 0),
-            window_min: parseFloat(windowMin),
-            comparison_period_min: (evalType !== 'absolute' && evalType !== 'anomaly_zscore') ? parseFloat(compPeriodMin) : undefined,
-            status_codes: parsedCodes,
-            enabled: true,
-            zscore_threshold: evalType === 'anomaly_zscore' ? (parseFloat(zscoreThreshold) || 3.0) : undefined,
-            baseline_period_days: evalType === 'anomaly_zscore' ? (parseInt(baselinePeriodDays) || 7) : undefined,
-          },
-        }))
-        if (data) {
-          setPreviewData(data.data ?? null)
-        }
-      } catch (err) {
-        console.error('Preview fetch failed', err)
-      } finally {
-        setIsPreviewLoading(false)
-      }
-    }
-
-    const timer = setTimeout(fetchPreview, 500)
+    const timer = setTimeout(() => setDebouncedPreviewParams(previewParams), 500)
     return () => clearTimeout(timer)
-  }, [activeServiceId, isAnalyst, metric, category, evalType, evalScope, windowMin, compPeriodMin, statusCodesStr, threshold, zscoreThreshold, baselinePeriodDays, lookbackHours])
+  }, [previewParams])
+
+  const previewQuery = useQuery<AlertPreviewData | null>({
+    queryKey: ['alert-preview', debouncedPreviewParams],
+    enabled: Boolean(debouncedPreviewParams.activeServiceId) && !isAnalyst,
+    retry: false,
+    queryFn: async () => {
+      const p = debouncedPreviewParams
+      if (!p.activeServiceId) return null
+      let parsedCodes: number[] | undefined = undefined
+      if ((p.metric === 'specific_status' || p.metric === 'specific_status_rate') && p.statusCodesStr) {
+        parsedCodes = p.statusCodesStr.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n))
+      }
+
+      const data = await unwrapClient(client.POST("/api/alerts/preview", {
+        params: { query: { lookback_hours: p.lookbackHours } },
+        body: {
+          service_id: p.activeServiceId,
+          name: 'Preview',
+          category: p.category,
+          metric: p.metric,
+          evaluation_type: p.evalType,
+          evaluation_scope: p.evalScope,
+          operator: p.evalType === 'anomaly_zscore' ? '>' : p.operator,
+          threshold: p.evalType === 'anomaly_zscore' ? (parseFloat(p.zscoreThreshold) || 3.0) : (parseFloat(p.threshold) || 0),
+          window_min: parseFloat(p.windowMin),
+          comparison_period_min: (p.evalType !== 'absolute' && p.evalType !== 'anomaly_zscore') ? parseFloat(p.compPeriodMin) : undefined,
+          status_codes: parsedCodes,
+          enabled: true,
+          zscore_threshold: p.evalType === 'anomaly_zscore' ? (parseFloat(p.zscoreThreshold) || 3.0) : undefined,
+          baseline_period_days: p.evalType === 'anomaly_zscore' ? (parseInt(p.baselinePeriodDays) || 7) : undefined,
+        },
+      }))
+      return data?.data ?? null
+    },
+  })
+  const previewData = previewQuery.data ?? null
+  const isPreviewLoading = previewQuery.isFetching
 
   // Handle category change -> reset metric
   const handleCategoryChange = (val: string | null) => {
@@ -240,37 +266,8 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
     }
   }
 
-  const handleSave = handleSubmit(async () => {
-    // Invalid submits never get here: handleSubmit surfaces the inline errors.
-    if (!activeServiceId) return
-
-    let parsedCodes: number[] | undefined = undefined
-    if ((metric === 'specific_status' || metric === 'specific_status_rate') && statusCodesStr) {
-      parsedCodes = statusCodesStr.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n))
-    }
-
-    setIsSaving(true)
-    try {
-      const payload: Alert = {
-        id: initialAlert?.id,
-        service_id: activeServiceId,
-        name,
-        category,
-        metric,
-        evaluation_type: evalType,
-        evaluation_scope: evalScope,
-        operator: evalType === 'anomaly_zscore' ? '>' : operator,
-        threshold: evalType === 'anomaly_zscore' ? parseFloat(zscoreThreshold) : parseFloat(threshold),
-        window_min: parseFloat(windowMin),
-        comparison_period_min: (evalType !== 'absolute' && evalType !== 'anomaly_zscore') ? parseFloat(compPeriodMin) : undefined,
-        status_codes: parsedCodes,
-        webhook_url: webhookUrl || undefined,
-        channels: channels,
-        zscore_threshold: evalType === 'anomaly_zscore' ? parseFloat(zscoreThreshold) : undefined,
-        baseline_period_days: evalType === 'anomaly_zscore' ? parseInt(baselinePeriodDays) : undefined,
-        enabled: initialAlert ? initialAlert.enabled : true
-      }
-
+  const saveMutation = useMutation({
+    mutationFn: async (payload: Alert) => {
       if (initialAlert?.id) {
         await unwrapClient(client.PUT("/api/alerts/{alert_id}", {
           params: { path: { alert_id: initialAlert.id } },
@@ -281,17 +278,51 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
           body: payload,
         }))
       }
+    },
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['alerts'] })
       onSuccess()
-    } catch (error) {
+    },
+    onError: (error) => {
       // U-4 (audit): POST mutations bypass the middleware's generic mutation
       // toast (POST is reserved for analytics queries there); surface failure
       // explicitly so the modal closing isn't the only signal the analyst sees.
       console.error('Failed to create alert', error)
       showToast(extractApiError(error) || 'Failed to save alert', 'error')
-    } finally {
-      setIsSaving(false)
+    },
+  })
+  const isSaving = saveMutation.isPending
+
+  const handleSave = handleSubmit(async () => {
+    // Invalid submits never get here: handleSubmit surfaces the inline errors.
+    if (!activeServiceId) return
+
+    let parsedCodes: number[] | undefined = undefined
+    if ((metric === 'specific_status' || metric === 'specific_status_rate') && statusCodesStr) {
+      parsedCodes = statusCodesStr.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n))
     }
+
+    const payload: Alert = {
+      id: initialAlert?.id,
+      service_id: activeServiceId,
+      name,
+      category,
+      metric,
+      evaluation_type: evalType,
+      evaluation_scope: evalScope,
+      operator: evalType === 'anomaly_zscore' ? '>' : operator,
+      threshold: evalType === 'anomaly_zscore' ? parseFloat(zscoreThreshold) : parseFloat(threshold),
+      window_min: parseFloat(windowMin),
+      comparison_period_min: (evalType !== 'absolute' && evalType !== 'anomaly_zscore') ? parseFloat(compPeriodMin) : undefined,
+      status_codes: parsedCodes,
+      webhook_url: webhookUrl || undefined,
+      channels: channels,
+      zscore_threshold: evalType === 'anomaly_zscore' ? parseFloat(zscoreThreshold) : undefined,
+      baseline_period_days: evalType === 'anomaly_zscore' ? parseInt(baselinePeriodDays) : undefined,
+      enabled: initialAlert ? initialAlert.enabled : true
+    }
+
+    await saveMutation.mutateAsync(payload).catch(() => {})
   })
 
   return (

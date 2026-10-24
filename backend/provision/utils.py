@@ -59,14 +59,6 @@ def _c(color, text):
     return f"{color}{text}{RST}"
 
 
-def _mask(s: str, visible: int = 8) -> str:
-    if not s:
-        return ""
-    if len(s) <= visible:
-        return s
-    return f"{s[:visible]}..."
-
-
 def _highlight(msg):
     # Short-circuit when the caller has already injected ANSI escapes —
     # double-wrapping would corrupt the RST sequencing.

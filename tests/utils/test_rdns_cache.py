@@ -149,27 +149,18 @@ def test_classify_non_matching_domain_is_impersonator():
 # ── Public cache API ──────────────────────────────────────────────────────────
 
 
-def test_get_hostname_returns_pending_for_unknown_ip():
-    rdns_cache._init()  # ensure schema present after the isolated_db swap
-    hostname, status, verified = rdns_cache.get_hostname("9.9.9.9")
-    assert hostname is None
-    assert status == "pending"
-    assert verified is False
-
-
 def test_enqueue_inserts_pending_rows():
-    rdns_cache._init()
     n = rdns_cache.enqueue(["1.1.1.1", "8.8.8.8"])
     assert n == 2
     # Both visible as pending
+    res = rdns_cache.get_hostnames(["1.1.1.1", "8.8.8.8"])
     for ip in ("1.1.1.1", "8.8.8.8"):
-        h, st, _ = rdns_cache.get_hostname(ip)
+        h, st, _ = res[ip]
         assert h is None
         assert st == "pending"
 
 
 def test_enqueue_dedups_against_existing_rows():
-    rdns_cache._init()
     rdns_cache.enqueue(["1.1.1.1"])
     n = rdns_cache.enqueue(["1.1.1.1", "2.2.2.2"])
     assert n == 1  # only the new one
@@ -185,7 +176,6 @@ def test_enqueue_drops_new_ips_once_pending_backlog_at_cap(monkeypatch):
     many source IPs (or spoofing a bot User-Agent to hit the
     classification enqueue path) can grow the pending backlog without
     bound. Once at cap, new IPs are dropped rather than inserted."""
-    rdns_cache._init()
     monkeypatch.setattr(rdns_cache, "_MAX_PENDING_BACKLOG", 2)
     assert rdns_cache.enqueue(["1.1.1.1", "2.2.2.2"]) == 2
     # At cap now — the next enqueue must be a no-op, not a partial insert.
@@ -200,7 +190,6 @@ def test_enqueue_resumes_once_backlog_drains_below_cap(monkeypatch):
     """Once pending IPs get resolved (backlog drains), enqueue must accept
     new IPs again — the cap gates the instantaneous backlog, not a
     lifetime total."""
-    rdns_cache._init()
     monkeypatch.setattr(rdns_cache, "_MAX_PENDING_BACKLOG", 1)
     rdns_cache.enqueue(["1.1.1.1"])
     assert rdns_cache.enqueue(["2.2.2.2"]) == 0  # at cap
@@ -219,7 +208,6 @@ def test_get_hostnames_batch_returns_cached_and_enqueues_missing():
     """``get_hostnames`` should fold N per-IP SELECTs into one call: rows
     already in the cache come back via the dict, IPs we've never seen are
     omitted from the result *and* batch-enqueued as 'pending'."""
-    rdns_cache._init()
     # Seed one IP into the cache so we have something to find.
     con = rdns_cache._write_con()
     try:
@@ -234,7 +222,7 @@ def test_get_hostnames_batch_returns_cached_and_enqueues_missing():
     result = rdns_cache.get_hostnames(["66.249.66.1", "9.9.9.9", "9.9.9.9", ""])
     assert result == {"66.249.66.1": ("crawl-66-249-66-1.googlebot.com", "found", True)}
     # The previously-unknown IP must now exist as 'pending' in the cache.
-    h, st, _ = rdns_cache.get_hostname("9.9.9.9")
+    h, st, _ = rdns_cache.get_hostnames(["9.9.9.9"])["9.9.9.9"]
     assert h is None and st == "pending"
 
 
@@ -245,14 +233,12 @@ def test_get_hostnames_batch_empty_input_is_noop():
 
 def test_get_stats_returns_zero_when_db_missing():
     """If the DB file doesn't exist, stats should not raise."""
-    # Don't call _init — leave file missing
     stats = rdns_cache.get_stats()
     assert stats["total"] == 0
     assert stats["pending"] == 0
 
 
 def test_get_stats_counts_total_and_pending():
-    rdns_cache._init()
     rdns_cache.enqueue(["1.1.1.1", "2.2.2.2", "3.3.3.3"])
     stats = rdns_cache.get_stats()
     assert stats["total"] == 3
@@ -432,7 +418,6 @@ def test_enrich_batch_no_op_when_nothing_pending():
 
 
 def test_reap_deletes_stale_nxdomain_rows_past_retention(monkeypatch):
-    rdns_cache._init()
     monkeypatch.setattr(rdns_cache, "_STALE_ROW_RETENTION_DAYS", 30)
     con = rdns_cache._write_con()
     try:
@@ -459,7 +444,6 @@ def test_reap_never_deletes_pending_rows_regardless_of_age():
     """A row can only be pending if enrich_batch hasn't gotten to it yet —
     reaping it would silently drop a real, unresolved backlog entry
     instead of just bounding disk growth."""
-    rdns_cache._init()
     con = rdns_cache._write_con()
     try:
         con.execute("INSERT INTO rdns (ip, status, fcrdns_verified) VALUES ('1.1.1.1', 'pending', 0)")
@@ -476,7 +460,6 @@ def test_reap_never_deletes_pending_rows_regardless_of_age():
 def test_reap_trims_oldest_non_pending_rows_once_over_total_cap(monkeypatch):
     """Audit finding 008: even resolved rows must not accumulate forever —
     once past the hard cap, the oldest-looked-up rows go first."""
-    rdns_cache._init()
     monkeypatch.setattr(rdns_cache, "_MAX_TOTAL_ROWS", 2)
     con = rdns_cache._write_con()
     try:
@@ -500,7 +483,6 @@ def test_reap_trims_oldest_non_pending_rows_once_over_total_cap(monkeypatch):
 
 
 def test_maybe_reap_is_gated_to_run_at_most_once_per_interval(monkeypatch):
-    rdns_cache._init()
     calls = []
     monkeypatch.setattr(
         rdns_cache, "_reap_stale_rows", lambda: calls.append(1) or {"stale_deleted": 0, "overflow_deleted": 0}
@@ -516,7 +498,6 @@ def test_maybe_reap_is_gated_to_run_at_most_once_per_interval(monkeypatch):
 def test_maybe_reap_swallows_exceptions():
     """A reap failure must never take down the every-5-min enrichment
     cron — same swallow-and-log posture as the discovery pass."""
-    rdns_cache._init()
     rdns_cache._last_reap_monotonic = None
     with patch("backend.utils.rdns_cache._reap_stale_rows", side_effect=RuntimeError("db locked")):
         rdns_cache._maybe_reap_stale_rows()  # must not raise
@@ -562,12 +543,12 @@ def test_discover_new_ips_swallows_config_load_failure():
     assert out == 0
 
 
-# ── get_hostname: cache hit (after enrichment) ────────────────────────────
+# ── get_hostnames: cache hit (after enrichment) ───────────────────────────
 
 
-def test_get_hostname_returns_cached_resolution_after_enrichment():
+def test_get_hostnames_returns_cached_resolution_after_enrichment():
     """After ``enrich_batch`` resolves a pending IP, subsequent
-    ``get_hostname`` calls return the cached hostname WITHOUT
+    ``get_hostnames`` calls return the cached hostname WITHOUT
     re-enqueueing or hitting the network."""
     rdns_cache.enqueue(["1.1.1.1"])
 
@@ -582,7 +563,7 @@ def test_get_hostname_returns_cached_resolution_after_enrichment():
 
     # Now query — should NOT trigger another lookup
     with patch("backend.utils.rdns_cache._do_lookup") as mock_lookup:
-        host, status, fcrdns = rdns_cache.get_hostname("1.1.1.1")
+        host, status, fcrdns = rdns_cache.get_hostnames(["1.1.1.1"])["1.1.1.1"]
 
     assert host == "known.example.com"
     assert status == "resolved"
@@ -590,21 +571,15 @@ def test_get_hostname_returns_cached_resolution_after_enrichment():
     mock_lookup.assert_not_called()
 
 
-# ── get_hostname when DB unreachable (read connection returns None) ───────
+# ── get_hostnames when DB unreachable (read connection returns None) ──────
 
 
-def test_get_hostname_enqueues_and_returns_pending_when_read_con_unavailable():
+def test_get_hostnames_enqueues_and_returns_empty_when_read_con_unavailable():
     """If ``_read_con`` returns None (DB file missing or unreadable),
-    the helper still enqueues the IP as pending and returns the
-    pending sentinel — pinned because this is the fail-soft path
-    that prevents the rDNS feature from breaking the entire admin
-    UI when the cache DB is briefly unavailable (e.g. during
-    teardown / file relocation)."""
+    the helper still enqueues the IP as pending and returns an empty dict."""
     with patch("backend.utils.rdns_cache._read_con", return_value=None):
-        host, status, fcrdns = rdns_cache.get_hostname("9.9.9.9")
-    assert host is None
-    assert status == "pending"
-    assert fcrdns is False
+        res = rdns_cache.get_hostnames(["9.9.9.9"])
+    assert res == {}
 
 
 # ── enrich_batch: stale-refresh pass ──────────────────────────────────────
@@ -642,7 +617,7 @@ def test_enrich_batch_refreshes_stale_entries():
     # The stale entry was re-looked-up
     assert "8.8.4.4" in calls
     # And the cache reflects the refresh
-    host, status, _ = rdns_cache.get_hostname("8.8.4.4")
+    host, status, _ = rdns_cache.get_hostnames(["8.8.4.4"])["8.8.4.4"]
     assert host == "refreshed.example.com"
 
 

@@ -1,4 +1,4 @@
-"""RUM ledger failure/edge paths — ``convert_rum_object``,
+"""RUM ledger failure/edge paths — ``convert_batch_rum_objects``,
 ``_quarantine_rum_corrupt_lines``, ``discover_rum_prefix`` and
 ``sweep_rum_ledger_once``.
 
@@ -33,33 +33,37 @@ from backend.core.ingest import (
     LEDGER_RECLAIM_AFTER_S,
     _quarantine_rum_corrupt_lines,
     convert_batch_rum_objects,
-    convert_rum_object,
     discover_rum_prefix,
     sweep_rum_ledger_once,
 )
 from backend.core.metadata.quarantine import list_quarantine_evidence
 from backend.core.quarantine import read_evidence
-from tests._helpers.ledger import clear_ledger
+from tests._helpers.ledger import (
+    DuckLakeLedgerEnv,
+    clear_ledger,
+    ledger_row,
+    seed_discovered,
+)
+from tests._helpers.ledger import (
+    attacher as _attacher,
+)
+from tests._helpers.ledger import (
+    download_stub as _download_stub,
+)
+from tests._helpers.ledger import (
+    lake_reader as _lake_reader,
+)
 
 SERVICE_ID = "test-rum-ledger-edges"
 BUCKET = "test-bucket"
 
 
 def _seed_discovered(con, object_key: str) -> None:
-    con.execute(
-        "INSERT INTO ingest_ledger (service_id, object_key, status, discovered_at) "
-        "VALUES (?, ?, 'discovered', ?) ON CONFLICT (service_id, object_key) DO UPDATE SET "
-        "status='discovered', attempts=0, last_error=NULL, committed_at=NULL",
-        (SERVICE_ID, object_key, time.time()),
-    )
-    con.commit()
+    seed_discovered(con, con.cursor(), SERVICE_ID, [object_key])
 
 
 def _ledger_row(con, object_key: str):
-    return con.execute(
-        "SELECT status, attempts, last_error, committed_at FROM ingest_ledger WHERE service_id=? AND object_key=?",
-        (SERVICE_ID, object_key),
-    ).fetchone()
+    return ledger_row(con, SERVICE_ID, object_key)
 
 
 def _write_gz(path, lines: list[str]) -> None:
@@ -68,62 +72,19 @@ def _write_gz(path, lines: list[str]) -> None:
             f.write(line + "\n")
 
 
-def _attacher(catalog: str, data_path: str):
-    """Real DuckLake attach against a file-backed catalog — a ``:memory:``
-    catalog would not survive convert_rum_object closing its connection."""
-
-    def _attach(con_arg, src_arg, read_only=False):
-        con_arg.execute("INSTALL ducklake; LOAD ducklake;")
-        ro = ", READ_ONLY" if read_only else ""
-        try:
-            con_arg.execute(f"ATTACH 'ducklake:{catalog}' AS lake (DATA_PATH '{data_path}'{ro})")
-        except duckdb.Error:
-            pass  # already attached on this connection
-        return True
-
-    return _attach
-
-
 @contextmanager
 def _rum_env(tmp_path, download, fos=None, attach=None):
-    """Patch scaffold for convert_rum_object with a real DuckLake attach.
-
-    Yields the attacher so a test can open its own read-only reader on the
-    same catalog after the convert has closed its connection.
-    """
-    src = {"service_id": SERVICE_ID, "name": SERVICE_ID, "bucket": BUCKET, "prefix": ""}
-    catalog = str(tmp_path / "cat.ducklake")
-    data_path = str(tmp_path / "lakedata")
-    real_attach = _attacher(catalog, data_path)
-    with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.core.ingest._get_fos_client", return_value=fos if fos is not None else MagicMock()),
-        patch("backend.core.ingest._download_chunk_to_local", side_effect=download),
-        patch(
-            "backend.core.iceberg._ducklake._ducklake_attach",
-            side_effect=attach if attach is not None else real_attach,
-        ),
-        patch("backend.core.ingest._configure_fos"),
-        patch(
-            "backend.core.iceberg._ducklake.ducklake_table_name",
-            side_effect=lambda src, table_name="logs": table_name,
-        ),
-    ):
+    """Patch scaffold for convert_batch_rum_objects with a real DuckLake attach."""
+    with DuckLakeLedgerEnv(
+        SERVICE_ID,
+        tmp_path,
+        download,
+        bucket=BUCKET,
+        fos=fos,
+        attach=attach,
+        table_name=None,
+    ) as real_attach:
         yield real_attach
-
-
-def _download_stub(mapping: dict[str, str]):
-    def _download(fos_client, s3_paths, tmpdir):
-        got = {p: mapping[p] for p in s3_paths if p in mapping}
-        return got, {v: k for k, v in got.items()}
-
-    return _download
-
-
-def _lake_reader(attach):
-    con = duckdb.connect()
-    attach(con, None, read_only=True)
-    return con
 
 
 def _table_exists(con, name: str) -> bool:
@@ -157,7 +118,9 @@ def test_convert_rum_object_returns_not_claimed_when_no_discovered_row_exists(tm
     raw = tmp_path / "gone.json"
     _write_gz(raw, [VITALS_LINE])
     with _rum_env(tmp_path, _download_stub({f"s3://{BUCKET}/{object_key}": str(raw)})) as attach:
-        assert convert_rum_object(SERVICE_ID, object_key, "w1") == "not_claimed"
+        summary = convert_batch_rum_objects(SERVICE_ID, [object_key], "w1")
+        assert summary["not_claimed"] == 1
+        assert summary["committed"] == 0
 
     # Untouched: still committed, no attempt burned, and nothing written.
     row = _ledger_row(con, object_key)
@@ -168,48 +131,8 @@ def test_convert_rum_object_returns_not_claimed_when_no_discovered_row_exists(tm
     reader.close()
 
 
-def test_convert_rum_object_with_no_registered_source_stays_retryable(tmp_path):
-    """A service whose source has not been registered yet (worker started
-    before config load) must leave the row retryable — not committed and not
-    dead-lettered."""
-    object_key = "raw/rum/2026/08/27/11/01/nosrc.json.gz"
-    con, _ = clear_ledger(SERVICE_ID)
-    _seed_discovered(con, object_key)
-
-    with patch("backend.core.duckdb.get_source_for_service", return_value=None):
-        assert convert_rum_object(SERVICE_ID, object_key, "w1") == "error"
-
-    row = _ledger_row(con, object_key)
-    assert row["status"] == "discovered"
-    assert row["attempts"] == 1
-    assert "no source registered" in row["last_error"]
-    assert row["committed_at"] is None
-
-
-def test_convert_rum_object_with_failed_lake_attach_stays_retryable(tmp_path):
-    """A DuckLake attach failure (catalog unreachable) is transient — the
-    ledger row must be requeued with the reason recorded."""
-    object_key = "raw/rum/2026/08/27/11/02/noattach.json.gz"
-    con, _ = clear_ledger(SERVICE_ID)
-    _seed_discovered(con, object_key)
-
-    raw = tmp_path / "noattach.json"
-    _write_gz(raw, [VITALS_LINE])
-    with _rum_env(
-        tmp_path,
-        _download_stub({f"s3://{BUCKET}/{object_key}": str(raw)}),
-        attach=lambda *a, **kw: False,
-    ):
-        assert convert_rum_object(SERVICE_ID, object_key, "w1") == "discovered"
-
-    row = _ledger_row(con, object_key)
-    assert row["status"] == "discovered"
-    assert row["attempts"] == 1
-    assert "attach failed" in row["last_error"]
-
-
 def test_convert_rum_object_uses_ducklake_detach_in_finally(tmp_path):
-    """Trap #35: convert_rum_object must call _ducklake_detach in finally,
+    """Trap #35: convert_batch_rum_objects must call _ducklake_detach in finally,
     never raw duckdb_con.execute('DETACH lake')."""
     object_key = "raw/rum/2026/08/27/11/02/detach_test.json.gz"
     con, _ = clear_ledger(SERVICE_ID)
@@ -221,9 +144,9 @@ def test_convert_rum_object_uses_ducklake_detach_in_finally(tmp_path):
         _rum_env(tmp_path, _download_stub({f"s3://{BUCKET}/{object_key}": str(raw)})),
         patch("backend.core.iceberg._ducklake._ducklake_detach") as mock_detach,
     ):
-        status = convert_rum_object(SERVICE_ID, object_key, "w1")
-        assert status == "committed"
-        assert mock_detach.called, "convert_rum_object must call _ducklake_detach in finally"
+        summary = convert_batch_rum_objects(SERVICE_ID, [object_key], "w1")
+        assert summary["committed"] == 1
+        assert mock_detach.called, "convert_batch_rum_objects must call _ducklake_detach in finally"
 
 
 # ── download failures: dead key vs transient ──────────────────────────────
@@ -240,7 +163,8 @@ def test_convert_rum_object_dead_letters_a_key_whose_object_is_gone(tmp_path):
     fos = MagicMock()
     fos.head_object.side_effect = Exception("An error occurred (404) when calling the HeadObject operation: Not Found")
     with _rum_env(tmp_path, _download_stub({}), fos=fos):
-        assert convert_rum_object(SERVICE_ID, object_key, "w1") == "dead_letter"
+        summary = convert_batch_rum_objects(SERVICE_ID, [object_key], "w1")
+        assert summary["dead_letter"] == 1
 
     row = _ledger_row(con, object_key)
     assert row["status"] == "dead_letter"
@@ -261,7 +185,8 @@ def test_convert_rum_object_treats_download_failure_on_a_live_object_as_transien
     fos = MagicMock()
     fos.head_object.return_value = {"ContentLength": 123}
     with _rum_env(tmp_path, _download_stub({}), fos=fos):
-        assert convert_rum_object(SERVICE_ID, object_key, "w1") == "discovered"
+        summary = convert_batch_rum_objects(SERVICE_ID, [object_key], "w1")
+        assert summary["failed"] == 1
 
     row = _ledger_row(con, object_key)
     assert row["status"] == "discovered"
@@ -291,7 +216,8 @@ def test_convert_rum_object_commits_valid_rows_even_when_quarantine_upload_fails
             "backend.core.quarantine.capture_evidence",
             return_value={"id": 0, "cap_evictions": 0, "quarantine_capture_failures": 1},
         ):
-            assert convert_rum_object(SERVICE_ID, object_key, "w1") == "committed"
+            summary = convert_batch_rum_objects(SERVICE_ID, [object_key], "w1")
+            assert summary["committed"] == 1
 
     assert _ledger_row(con, object_key)["status"] == "committed"
     reader = _lake_reader(attach)
@@ -324,7 +250,8 @@ def test_convert_rum_object_commits_when_ingested_files_bookkeeping_fails(tmp_pa
             "backend.core.ingest.metadata_db.insert_ingested_files",
             side_effect=Exception("metadata db locked"),
         ):
-            assert convert_rum_object(SERVICE_ID, object_key, "w1") == "committed"
+            summary = convert_batch_rum_objects(SERVICE_ID, [object_key], "w1")
+            assert summary["committed"] == 1
 
     assert _ledger_row(con, object_key)["status"] == "committed"
     reader = _lake_reader(attach)
@@ -366,22 +293,9 @@ def test_convert_rum_object_backfills_source_file_column_on_a_v2_created_table(t
 
     raw = tmp_path / "widen.json"
     _write_gz(raw, [VITALS_LINE])
-    src = {"service_id": SERVICE_ID, "name": SERVICE_ID, "bucket": BUCKET, "prefix": ""}
-    with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.core.ingest._get_fos_client", return_value=MagicMock()),
-        patch(
-            "backend.core.ingest._download_chunk_to_local",
-            side_effect=_download_stub({f"s3://{BUCKET}/{object_key}": str(raw)}),
-        ),
-        patch("backend.core.iceberg._ducklake._ducklake_attach", side_effect=attach),
-        patch("backend.core.ingest._configure_fos"),
-        patch(
-            "backend.core.iceberg._ducklake.ducklake_table_name",
-            side_effect=lambda src, table_name="logs": table_name,
-        ),
-    ):
-        assert convert_rum_object(SERVICE_ID, object_key, "w1") == "committed"
+    with _rum_env(tmp_path, _download_stub({f"s3://{BUCKET}/{object_key}": str(raw)}), attach=attach):
+        summary = convert_batch_rum_objects(SERVICE_ID, [object_key], "w1")
+        assert summary["committed"] == 1
 
     reader = _lake_reader(attach)
     rows = reader.execute("SELECT metric_name, _source_file FROM lake.client_vitals ORDER BY metric_name").fetchall()
@@ -415,22 +329,9 @@ def test_convert_rum_object_rolls_back_and_stays_retryable_on_a_schema_drifted_t
 
     raw = tmp_path / "drift.json"
     _write_gz(raw, [VITALS_LINE, ERROR_LINE])
-    src = {"service_id": SERVICE_ID, "name": SERVICE_ID, "bucket": BUCKET, "prefix": ""}
-    with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.core.ingest._get_fos_client", return_value=MagicMock()),
-        patch(
-            "backend.core.ingest._download_chunk_to_local",
-            side_effect=_download_stub({f"s3://{BUCKET}/{object_key}": str(raw)}),
-        ),
-        patch("backend.core.iceberg._ducklake._ducklake_attach", side_effect=attach),
-        patch("backend.core.ingest._configure_fos"),
-        patch(
-            "backend.core.iceberg._ducklake.ducklake_table_name",
-            side_effect=lambda src, table_name="logs": table_name,
-        ),
-    ):
-        assert convert_rum_object(SERVICE_ID, object_key, "w1") == "discovered"
+    with _rum_env(tmp_path, _download_stub({f"s3://{BUCKET}/{object_key}": str(raw)}), attach=attach):
+        summary = convert_batch_rum_objects(SERVICE_ID, [object_key], "w1")
+        assert summary["failed"] == 1
 
     row = _ledger_row(con, object_key)
     assert row["status"] == "discovered"
@@ -445,7 +346,7 @@ def test_convert_rum_object_rolls_back_and_stays_retryable_on_a_schema_drifted_t
     reader.close()
 
 
-# ── _quarantine_rum_corrupt_lines directly ────────────────────────────────
+# ── convert_batch_rum_objects & _quarantine_rum_corrupt_lines ─────────────
 
 
 def test_convert_batch_rum_objects_commits_rows_from_each_claimed_object(tmp_path):
@@ -453,7 +354,7 @@ def test_convert_batch_rum_objects_commits_rows_from_each_claimed_object(tmp_pat
         "raw/rum/2026/08/27/11/00/batch-a.json.gz",
         "raw/rum/2026/08/27/11/01/batch-b.json.gz",
     ]
-    con, _ = clear_ledger(SERVICE_ID)
+    con, _ = clear_ledger(SERVICE_ID, quarantine=True)
     local_files = {}
     for index, object_key in enumerate(object_keys):
         _seed_discovered(con, object_key)
@@ -482,11 +383,7 @@ def test_convert_batch_rum_objects_commits_rows_from_each_claimed_object(tmp_pat
         local_files[f"s3://{BUCKET}/{object_key}"] = str(local_file)
 
     with _rum_env(tmp_path, _download_stub(local_files)) as attach:
-        with (
-            patch("backend.core.duckdb.get_memory_connection", side_effect=lambda _src: duckdb.connect()),
-            patch("backend.config.HOT_S3_ENDPOINT", False),
-        ):
-            summary = convert_batch_rum_objects(SERVICE_ID, object_keys, "worker-batch-rum")
+        summary = convert_batch_rum_objects(SERVICE_ID, object_keys, "worker-batch-rum")
 
     assert summary == {
         "requested": 2,
@@ -528,11 +425,7 @@ def test_convert_batch_rum_objects_commits_rows_from_each_claimed_object(tmp_pat
     )
     con.commit()
     with _rum_env(tmp_path, _download_stub(local_files)):
-        with (
-            patch("backend.core.duckdb.get_memory_connection", side_effect=lambda _src: duckdb.connect()),
-            patch("backend.config.HOT_S3_ENDPOINT", False),
-        ):
-            assert convert_batch_rum_objects(SERVICE_ID, object_keys, "worker-rum-redelivery")["committed"] == 2
+        assert convert_batch_rum_objects(SERVICE_ID, object_keys, "worker-rum-redelivery")["committed"] == 2
     reader = _lake_reader(attach)
     try:
         assert reader.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0] == 2
@@ -576,6 +469,7 @@ def test_convert_batch_rum_objects_keeps_claim_retryable_without_source():
     assert row["status"] == "discovered"
     assert row["attempts"] == 1
     assert "no source registered" in row["last_error"]
+    assert row["committed_at"] is None
 
 
 def test_convert_batch_rum_objects_separates_deleted_and_transient_downloads(tmp_path):
@@ -601,11 +495,7 @@ def test_convert_batch_rum_objects_separates_deleted_and_transient_downloads(tmp
         fos=fos,
         attach=lambda *_args, **_kwargs: True,
     ):
-        with (
-            patch("backend.core.duckdb.get_memory_connection", side_effect=lambda _src: duckdb.connect()),
-            patch("backend.config.HOT_S3_ENDPOINT", False),
-        ):
-            summary = convert_batch_rum_objects(SERVICE_ID, object_keys, "worker-download-failures")
+        summary = convert_batch_rum_objects(SERVICE_ID, object_keys, "worker-download-failures")
 
     assert summary["dead_letter"] == 1
     assert summary["failed"] == 1
@@ -628,11 +518,7 @@ def test_convert_batch_rum_objects_keeps_batch_retryable_when_attach_fails(tmp_p
         _download_stub({f"s3://{BUCKET}/{object_key}": str(raw)}),
         attach=lambda *_args, **_kwargs: False,
     ):
-        with (
-            patch("backend.core.duckdb.get_memory_connection", side_effect=lambda _src: duckdb.connect()),
-            patch("backend.config.HOT_S3_ENDPOINT", False),
-        ):
-            summary = convert_batch_rum_objects(SERVICE_ID, [object_key], "worker-attach-failure")
+        summary = convert_batch_rum_objects(SERVICE_ID, [object_key], "worker-attach-failure")
 
     assert summary["failed"] == 1
     row = _ledger_row(con, object_key)
@@ -662,11 +548,7 @@ def test_convert_batch_rum_objects_commits_valid_rows_when_evidence_capture_rais
     s3_path = f"s3://{BUCKET}/{object_key}"
 
     with _rum_env(tmp_path, _download_stub({s3_path: str(local_file)})):
-        with (
-            patch("backend.core.duckdb.get_memory_connection", side_effect=lambda _src: duckdb.connect()),
-            patch("backend.config.HOT_S3_ENDPOINT", False),
-            patch("backend.core.ingest._quarantine_rum_corrupt_lines", side_effect=OSError("evidence disk full")),
-        ):
+        with patch("backend.core.ingest._quarantine_rum_corrupt_lines", side_effect=OSError("evidence disk full")):
             summary = convert_batch_rum_objects(SERVICE_ID, [object_key], "worker-capture-failure")
 
     assert summary["committed"] == 1

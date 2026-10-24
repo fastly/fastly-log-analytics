@@ -2,13 +2,6 @@ import { TIME_HOVER_LAYOUT, makeTimeXAxis } from '@/lib/chart-helpers'
 import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
 import type { DashboardAggregates, DashboardCatalog } from './types'
 
-// densifyBarSeries now lives in lib/chart-helpers (shared with the scoring
-// charts). Re-exported so existing importers (and chartHelpers.test.ts) keep
-// resolving it from here. The traffic-trace builder lives in lib/traffic-chart
-// (it also runs in a Web Worker, which must not depend on app/).
-export { densifyBarSeries } from '@/lib/chart-helpers'
-export { buildTrafficData, getIntervalSeconds, type BuildTrafficDataParams } from '@/lib/traffic-chart'
-
 export interface BuildChartLayoutParams {
   trafficData: PlotlyTrace[]
   aggregates: Pick<DashboardAggregates, 'metric'> | null | undefined

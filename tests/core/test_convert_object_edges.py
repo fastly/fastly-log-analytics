@@ -1,26 +1,12 @@
-"""``convert_object`` failure/edge paths and
+"""``convert_batch_objects`` failure/edge paths and
 ``_quarantine_convert_corrupt_lines``.
 
-``convert_object`` is the single-key convert the sweeper falls back to for
-dead-key retries and for any pre-deploy message still in flight, so its
-failure classification is what decides whether a key is retried forever,
-retried once, or given up on:
-
-* a ``committed`` row means ``finalize_committed_raw`` may delete the raw
-  ``.gz``, so nothing may reach ``committed`` unless the rows are actually in
-  the lake;
-* a key whose object is genuinely gone must go ``dead_letter``, or every
-  sweep burns LEDGER_MAX_ATTEMPTS GETs on it forever;
-* a key whose object is still there must stay retryable — dead-lettering it
-  drops a file that is sitting in the bucket.
-
 Companion to tests/core/test_step4_sweeper.py (sweeper + happy-path convert)
-and tests/core/test_convert_batch.py (the batched twin). Real file-backed
-``ducklake:`` attach, real SQLite ledger; only the FOS/S3 client is mocked.
+and tests/core/test_convert_batch.py. Real file-backed ``ducklake:`` attach,
+real SQLite ledger; only the FOS/S3 client is mocked.
 """
 
 import json
-import time
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
@@ -28,12 +14,26 @@ import duckdb
 
 from backend.core.ingest import (
     _quarantine_convert_corrupt_lines,
-    convert_object,
+    convert_batch_objects,
     discover_prefix,
     get_ingest_columns_sql,
 )
 from backend.core.metadata.base import get_con
-from tests._helpers.ledger import clear_ledger
+from tests._helpers.ledger import (
+    DuckLakeLedgerEnv,
+    clear_ledger,
+    ledger_row,
+    seed_discovered,
+)
+from tests._helpers.ledger import (
+    attacher as _attacher,
+)
+from tests._helpers.ledger import (
+    download_stub as _download_stub,
+)
+from tests._helpers.ledger import (
+    lake_reader as _lake_reader,
+)
 
 SERVICE_ID = "test-convert-object-edges"
 BUCKET = "test-bucket"
@@ -41,72 +41,30 @@ SRC = {"service_id": SERVICE_ID, "name": SERVICE_ID, "bucket": BUCKET, "prefix":
 
 
 def _seed_discovered(con, object_key: str) -> None:
-    con.execute(
-        "INSERT INTO ingest_ledger (service_id, object_key, status, discovered_at) "
-        "VALUES (?, ?, 'discovered', ?) ON CONFLICT (service_id, object_key) DO UPDATE SET "
-        "status='discovered', attempts=0, last_error=NULL, committed_at=NULL",
-        (SERVICE_ID, object_key, time.time()),
-    )
-    con.commit()
+    seed_discovered(con, con.cursor(), SERVICE_ID, [object_key])
 
 
 def _ledger_row(con, object_key: str):
-    return con.execute(
-        "SELECT status, attempts, last_error, committed_at FROM ingest_ledger WHERE service_id=? AND object_key=?",
-        (SERVICE_ID, object_key),
-    ).fetchone()
-
-
-def _attacher(catalog: str, data_path: str):
-    def _attach(con_arg, src_arg, read_only=False):
-        con_arg.execute("INSTALL ducklake; LOAD ducklake;")
-        ro = ", READ_ONLY" if read_only else ""
-        try:
-            con_arg.execute(f"ATTACH 'ducklake:{catalog}' AS lake (DATA_PATH '{data_path}'{ro})")
-        except duckdb.Error:
-            pass  # already attached on this connection
-        return True
-
-    return _attach
-
-
-def _download_stub(mapping: dict[str, str]):
-    def _download(fos_client, s3_paths, tmpdir):
-        got = {p: mapping[p] for p in s3_paths if p in mapping}
-        return got, {v: k for k, v in got.items()}
-
-    return _download
+    return ledger_row(con, SERVICE_ID, object_key)
 
 
 @contextmanager
 def _convert_env(tmp_path, download, fos=None, attach=None):
-    catalog = str(tmp_path / "cat.ducklake")
-    data_path = str(tmp_path / "lakedata")
-    real_attach = _attacher(catalog, data_path)
-    with (
-        patch("backend.config.load_config", return_value={"service_id": SERVICE_ID}),
-        patch("backend.core.duckdb.get_source_for_service", return_value=SRC),
-        patch("backend.core.ingest._get_fos_client", return_value=fos if fos is not None else MagicMock()),
-        patch("backend.core.ingest._download_chunk_to_local", side_effect=download),
-        patch(
-            "backend.core.iceberg._ducklake._ducklake_attach",
-            side_effect=attach if attach is not None else real_attach,
-        ),
-        patch("backend.core.ingest._configure_fos"),
-        patch("backend.core.iceberg._ducklake.ducklake_table_name", return_value="logs"),
-    ):
+    with DuckLakeLedgerEnv(
+        SERVICE_ID,
+        tmp_path,
+        download,
+        bucket=BUCKET,
+        fos=fos,
+        attach=attach,
+        table_name="logs",
+    ) as real_attach:
         yield real_attach
 
 
 def _write_ndjson(path, records: list[dict]) -> str:
     path.write_text("".join(json.dumps(r) + "\n" for r in records))
     return str(path)
-
-
-def _lake_reader(attach):
-    con = duckdb.connect()
-    attach(con, None, read_only=True)
-    return con
 
 
 # ── precondition failures ─────────────────────────────────────────────────
@@ -118,7 +76,8 @@ def test_convert_object_with_no_registered_source_stays_retryable():
     _seed_discovered(con, object_key)
 
     with patch("backend.core.duckdb.get_source_for_service", return_value=None):
-        assert convert_object(SERVICE_ID, object_key, "w1") == "error"
+        summary = convert_batch_objects(SERVICE_ID, [object_key], "w1")
+        assert summary["failed"] == 1
 
     row = _ledger_row(con, object_key)
     assert row["status"] == "discovered"
@@ -138,7 +97,8 @@ def test_convert_object_with_failed_lake_attach_stays_retryable(tmp_path):
         _download_stub({f"s3://{BUCKET}/{object_key}": local}),
         attach=lambda *a, **kw: False,
     ):
-        assert convert_object(SERVICE_ID, object_key, "w1") == "discovered"
+        summary = convert_batch_objects(SERVICE_ID, [object_key], "w1")
+        assert summary["failed"] == 1
 
     row = _ledger_row(con, object_key)
     assert row["status"] == "discovered"
@@ -159,7 +119,8 @@ def test_convert_object_dead_letters_a_key_whose_object_is_gone(tmp_path):
     fos = MagicMock()
     fos.head_object.side_effect = Exception("An error occurred (NoSuchKey) when calling the HeadObject operation")
     with _convert_env(tmp_path, _download_stub({}), fos=fos):
-        assert convert_object(SERVICE_ID, object_key, "w1") == "dead_letter"
+        summary = convert_batch_objects(SERVICE_ID, [object_key], "w1")
+        assert summary["dead_letter"] == 1
 
     row = _ledger_row(con, object_key)
     assert row["status"] == "dead_letter"
@@ -176,7 +137,8 @@ def test_convert_object_treats_download_failure_on_a_live_object_as_transient(tm
     fos = MagicMock()
     fos.head_object.return_value = {"ContentLength": 42}
     with _convert_env(tmp_path, _download_stub({}), fos=fos):
-        assert convert_object(SERVICE_ID, object_key, "w1") == "discovered"
+        summary = convert_batch_objects(SERVICE_ID, [object_key], "w1")
+        assert summary["failed"] == 1
 
     row = _ledger_row(con, object_key)
     assert row["status"] == "discovered"
@@ -209,19 +171,13 @@ def test_convert_object_widens_the_lake_table_for_a_new_custom_field(tmp_path):
         tmp_path / "widen.json",
         [{"timestamp": "2026-08-27T15:04:00Z", "url": "/new", "status": 200}],
     )
-    with (
-        patch("backend.config.load_config", return_value={"service_id": SERVICE_ID}),
-        patch("backend.core.duckdb.get_source_for_service", return_value=SRC),
-        patch("backend.core.ingest._get_fos_client", return_value=MagicMock()),
-        patch(
-            "backend.core.ingest._download_chunk_to_local",
-            side_effect=_download_stub({f"s3://{BUCKET}/{object_key}": local}),
-        ),
-        patch("backend.core.iceberg._ducklake._ducklake_attach", side_effect=attach),
-        patch("backend.core.ingest._configure_fos"),
-        patch("backend.core.iceberg._ducklake.ducklake_table_name", return_value="logs"),
+    with _convert_env(
+        tmp_path,
+        _download_stub({f"s3://{BUCKET}/{object_key}": local}),
+        attach=attach,
     ):
-        assert convert_object(SERVICE_ID, object_key, "w1") == "committed"
+        summary = convert_batch_objects(SERVICE_ID, [object_key], "w1")
+        assert summary["committed"] == 1
 
     assert _ledger_row(con, object_key)["status"] == "committed"
     counters = json.loads(
@@ -234,7 +190,7 @@ def test_convert_object_widens_the_lake_table_for_a_new_custom_field(tmp_path):
     assert counters["objects_processed"] == 1
     assert counters["objects_successful"] == 1
     assert counters["objects_failed"] == 0
-    reader = _lake_reader(attach)
+    reader = _lake_reader(attach, read_only=True)
     cols = {r[0] for r in reader.execute("DESCRIBE lake.logs").fetchall()}
     assert "status" in cols, "the new field must have been added to the table"
     rows = reader.execute("SELECT url, _source_file FROM lake.logs ORDER BY url").fetchall()
@@ -262,26 +218,20 @@ def test_convert_object_rolls_back_and_stays_retryable_when_the_insert_cannot_la
     setup.close()
 
     local = _write_ndjson(tmp_path / "drift.json", [{"timestamp": "2026-08-27T15:05:00Z", "url": "/a/b"}])
-    with (
-        patch("backend.config.load_config", return_value={"service_id": SERVICE_ID}),
-        patch("backend.core.duckdb.get_source_for_service", return_value=SRC),
-        patch("backend.core.ingest._get_fos_client", return_value=MagicMock()),
-        patch(
-            "backend.core.ingest._download_chunk_to_local",
-            side_effect=_download_stub({f"s3://{BUCKET}/{object_key}": local}),
-        ),
-        patch("backend.core.iceberg._ducklake._ducklake_attach", side_effect=attach),
-        patch("backend.core.ingest._configure_fos"),
-        patch("backend.core.iceberg._ducklake.ducklake_table_name", return_value="logs"),
+    with _convert_env(
+        tmp_path,
+        _download_stub({f"s3://{BUCKET}/{object_key}": local}),
+        attach=attach,
     ):
-        assert convert_object(SERVICE_ID, object_key, "w1") == "discovered"
+        summary = convert_batch_objects(SERVICE_ID, [object_key], "w1")
+        assert summary["failed"] == 1
 
     row = _ledger_row(con, object_key)
     assert row["status"] == "discovered"
     assert row["committed_at"] is None
     assert row["attempts"] == 1
 
-    reader = _lake_reader(attach)
+    reader = _lake_reader(attach, read_only=True)
     assert reader.execute("SELECT count(*) FROM lake.logs").fetchone()[0] == 0
     reader.close()
 
@@ -302,7 +252,8 @@ def test_convert_object_commits_even_when_the_quarantine_check_blows_up(tmp_path
             return_value={"id": 0, "cap_evictions": 0, "quarantine_capture_failures": 1},
         ):
             local_path.write_text('{"timestamp":"2026-08-27T15:06:00Z","url":"/a"}\n{"url":"/bad"}\n')
-            assert convert_object(SERVICE_ID, object_key, "w1") == "committed"
+            summary = convert_batch_objects(SERVICE_ID, [object_key], "w1")
+            assert summary["committed"] == 1
 
     assert _ledger_row(con, object_key)["status"] == "committed"
     counters = json.loads(
@@ -315,7 +266,7 @@ def test_convert_object_commits_even_when_the_quarantine_check_blows_up(tmp_path
     assert counters["malformed_records"] == 1
     assert counters["quarantine_capture_failures"] == 1
     assert counters["objects_failed"] == 1
-    reader = _lake_reader(attach)
+    reader = _lake_reader(attach, read_only=True)
     assert reader.execute("SELECT count(*) FROM lake.logs").fetchone()[0] == 1
     reader.close()
 
@@ -331,10 +282,11 @@ def test_convert_object_commits_even_when_ingested_files_bookkeeping_fails(tmp_p
             "backend.core.ingest.metadata_db.insert_ingested_files",
             side_effect=Exception("metadata db locked"),
         ):
-            assert convert_object(SERVICE_ID, object_key, "w1") == "committed"
+            summary = convert_batch_objects(SERVICE_ID, [object_key], "w1")
+            assert summary["committed"] == 1
 
     assert _ledger_row(con, object_key)["status"] == "committed"
-    reader = _lake_reader(attach)
+    reader = _lake_reader(attach, read_only=True)
     assert reader.execute("SELECT count(*) FROM lake.logs").fetchone()[0] == 1
     reader.close()
 

@@ -84,16 +84,6 @@ def test_duckdb_recycle_skipped_and_recycled_match_producer(client):
     }
 
 
-def test_ducklake_migrate_matches_producer(client, test_service_source):
-    with patch("backend.core.iceberg._ducklake_migration.run_legacy_adoption_once", return_value={}):
-        resp = client.post("/api/admin/ducklake/migrate")
-    assert _body(resp, status=202) == {
-        "ok": True,
-        "message": "DuckLake adoption started.",
-        "service_id": test_service_source["name"],
-    }
-
-
 def test_ngwaf_sync_matches_producer(client):
     stats = {"total_cached_bots": 2, "workspaces": {"w": None}, "top_bots": {"bot": 2}}
     with (

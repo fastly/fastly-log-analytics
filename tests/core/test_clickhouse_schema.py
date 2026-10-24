@@ -15,7 +15,6 @@ def test_fact_schema_and_deduplication_key():
     assert "PARTITION BY (service_id, generation)" in ddl
     assert "ORDER BY (service_id, generation, batch_id, row_ordinal)" in ddl
     assert "DateTime64(6, 'UTC')" in ddl
-    assert schema.clickhouse_fact_columns() == CLICKHOUSE_FACT_COLUMNS
     assert all(f"    {column} " in ddl for column in CLICKHOUSE_FACT_COLUMNS)
     assert "TTL" not in ddl
 

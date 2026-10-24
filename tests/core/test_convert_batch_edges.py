@@ -19,26 +19,30 @@ real SQLite ledger; only the FOS/S3 client is mocked.
 """
 
 import json
-import time
-from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import duckdb
 
 from backend.core.ingest import convert_batch_objects
 from backend.core.metadata.quarantine import list_quarantine_evidence
-from tests._helpers.ledger import clear_ledger
+from tests._helpers.ledger import (
+    DuckLakeLedgerEnv,
+    clear_ledger,
+)
+from tests._helpers.ledger import (
+    attacher as _attacher,
+)
+from tests._helpers.ledger import (
+    download_stub as _download_stub,
+)
+from tests._helpers.ledger import (
+    lake_reader as _lake_reader,
+)
+from tests._helpers.ledger import (
+    seed_discovered as _seed,
+)
 
 BUCKET = "test-bucket"
-
-
-def _seed(con, cur, service_id: str, keys: list[str], status: str = "discovered") -> None:
-    for key in keys:
-        cur.execute(
-            "INSERT INTO ingest_ledger (service_id, object_key, status, discovered_at) VALUES (?, ?, ?, ?)",
-            (service_id, key, status, time.time()),
-        )
-    con.commit()
 
 
 def _rows(con, service_id: str) -> dict[str, tuple]:
@@ -65,51 +69,16 @@ def _write_files(tmp_path, names: list[str], extra: dict | None = None) -> tuple
     return keys, s3_to_local
 
 
-def _download_stub(mapping: dict[str, str]):
-    def _download(fos_client, s3_paths, tmpdir):
-        got = {p: mapping[p] for p in s3_paths if p in mapping}
-        return got, {v: k for k, v in got.items()}
-
-    return _download
-
-
-def _attacher(catalog: str, data_path: str):
-    def _attach(con_arg, src_arg, read_only=False):
-        con_arg.execute("INSTALL ducklake; LOAD ducklake;")
-        ro = ", READ_ONLY" if read_only else ""
-        try:
-            con_arg.execute(f"ATTACH 'ducklake:{catalog}' AS lake (DATA_PATH '{data_path}'{ro})")
-        except duckdb.Error:
-            pass
-        return True
-
-    return _attach
-
-
-@contextmanager
 def _batch_env(service_id: str, tmp_path, download, fos=None, attach=None, cfg=None):
-    src = {"service_id": service_id, "name": service_id, "bucket": BUCKET, "prefix": ""}
-    real_attach = _attacher(str(tmp_path / "cat.ducklake"), str(tmp_path / "lakedata"))
-    with (
-        patch("backend.config.load_config", return_value=cfg or {"service_id": service_id}),
-        patch("backend.config.SERVICES_DATA_DIR", tmp_path / "services"),
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.core.ingest._get_fos_client", return_value=fos if fos is not None else MagicMock()),
-        patch("backend.core.ingest._download_chunk_to_local", side_effect=download),
-        patch(
-            "backend.core.iceberg._ducklake._ducklake_attach",
-            side_effect=attach if attach is not None else real_attach,
-        ),
-        patch("backend.core.ingest._configure_fos"),
-        patch("backend.core.iceberg._ducklake.ducklake_table_name", return_value="logs"),
-    ):
-        yield real_attach
-
-
-def _lake_reader(attach):
-    con = duckdb.connect()
-    attach(con, None, read_only=True)
-    return con
+    return DuckLakeLedgerEnv(
+        service_id,
+        tmp_path,
+        download=download,
+        fos=fos,
+        attach=attach,
+        cfg=cfg,
+        bucket=BUCKET,
+    )
 
 
 # ── nothing to do ─────────────────────────────────────────────────────────

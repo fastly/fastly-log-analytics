@@ -1,5 +1,4 @@
 import type { components } from '@/types/api.generated'
-import { formatCount } from '@/lib/format'
 
 /** The backend UsageLogEntry omits service_id on the wire (it's hoisted
  *  to the parent UsageLogResponse to save bytes), but the table renderer
@@ -26,11 +25,4 @@ export function fmtCost(n: number): string {
   if (n === 0) return '$0.000000'
   if (n < 0.000001) return `$${n.toExponential(2)}`
   return `$${n.toFixed(6)}`
-}
-
-export function fmtOps(n: number): string {
-  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B'
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K'
-  return formatCount(n)
 }

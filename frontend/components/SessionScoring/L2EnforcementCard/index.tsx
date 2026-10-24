@@ -12,6 +12,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
+import { formatPctValue } from '@/lib/format'
 
 import { useScoringQuery } from '../useScoringQuery'
 import { scoringAnalyticsCompositeKey, scoringConfigCompositeKey } from '@/lib/queries/scoring'
@@ -41,7 +42,6 @@ const DESCRIPTION =
   'Decide when edge Layer-2 (route-transition anomaly) joins the enforced score. L2 is always logged; this only gates blocking.'
 
 const fmtDays = (n: number | null | undefined) => (n == null ? '—' : n.toFixed(1))
-const fmtPct = (n: number | null | undefined) => (n == null ? '—' : `${n.toFixed(1)}%`)
 
 export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementCardProps) {
   const queryClient = useQueryClient()
@@ -162,7 +162,7 @@ export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementC
             <AlertTitle className="text-green-900 dark:text-green-300">Ready to enable</AlertTitle>
             <AlertDescription className="text-green-800 dark:text-green-400">
               {fmtDays(ageDays)} days of observed L2 data (≥{readinessDays} recommended).
-              {l2HighPct != null && <> About {fmtPct(l2HighPct)} of recent sessions would be flagged by L2.</>}
+              {l2HighPct != null && <> About {formatPctValue(l2HighPct, 1)} of recent sessions would be flagged by L2.</>}
             </AlertDescription>
           </Alert>
         ) : (
@@ -173,7 +173,7 @@ export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementC
               Only {fmtDays(ageDays)} days of observed L2 data so far (≥{readinessDays} recommended).
               Enabling blocking now is risky — you haven&apos;t seen enough of how L2 scores real
               traffic.
-              {l2HighPct != null && <> It would currently flag ~{fmtPct(l2HighPct)} of sessions.</>}
+              {l2HighPct != null && <> It would currently flag ~{formatPctValue(l2HighPct, 1)} of sessions.</>}
             </AlertDescription>
           </Alert>
         )}
@@ -221,7 +221,7 @@ export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementC
               <>
                 L2 will join the enforced score, fading in over {rampDays} days from now (starting at
                 0% weight, so no instant block).
-                {l2HighPct != null && <> About {fmtPct(l2HighPct)} of recent sessions would be flagged by L2.</>}{' '}
+                {l2HighPct != null && <> About {formatPctValue(l2HighPct, 1)} of recent sessions would be flagged by L2.</>}{' '}
                 Effective at the edge within seconds.
               </>
             )

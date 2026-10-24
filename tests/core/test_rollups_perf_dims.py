@@ -30,6 +30,18 @@ from tests._helpers.dates import past_hour as _past_hour
 from tests._helpers.dates import three_days_ago_iso as _three_days_ago_iso
 from tests._helpers.dates import two_days_ago_iso as _two_days_ago_iso
 from tests._helpers.locks import noop_lock as _noop_lock
+from tests._helpers.rollups import (
+    build_writer_patches as _build_patches,
+)
+from tests._helpers.rollups import (
+    make_stub_runner as _stub_runner,
+)
+from tests._helpers.rollups import (
+    write_hour_all_fields as _write_hour_all_fields,
+)
+from tests._helpers.rollups import (
+    write_hour_bundle as _write_hour_bundle,
+)
 
 pytestmark = pytest.mark.usefixtures("frozen_clock")
 
@@ -42,23 +54,6 @@ def _seed_logs(con: duckdb.DuckDBPyConnection, table: str, rows: list[dict]) -> 
     con.execute(f"CREATE TABLE {table} (timestamp TIMESTAMPTZ, ttl BIGINT)")
     for r in rows:
         con.execute(f"INSERT INTO {table} VALUES (?, ?)", [r["timestamp"], r.get("ttl")])
-
-
-def _build_patches(cache_root, table: str, con_factory):
-    """The common writer-side patch stack — _cache_dir, the resolved view
-    table, the read-only connection, the iceberg lock, and the stale-view
-    retry shim. ``con_factory`` returns a FRESH connection each call (the
-    shared driver runs once per bundle and closes the conn it's given)."""
-    return (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value=table),
-        patch("backend.core.duckdb.get_connection", side_effect=lambda *a, **k: con_factory()),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
-            side_effect=lambda c, _src, fn: fn(c),
-        ),
-    )
 
 
 def _write_hour_ttl(cache_root: str, hour: str, rows: list[dict]) -> str:
@@ -74,15 +69,6 @@ def _write_hour_ttl(cache_root: str, hour: str, rows: list[dict]) -> str:
     p = os.path.join(d, "perf_ttl_dist.parquet")
     pq.write_table(table, p)
     return p
-
-
-def _write_hour_all_fields(cache_root: str, hour: str) -> None:
-    d = os.path.join(cache_root, "rollups", "hour_bundled", f"hour={hour}")
-    os.makedirs(d, exist_ok=True)
-    pq.write_table(
-        pa.table({"field": pa.array(["x"]), "value": pa.array(["y"]), "count": pa.array([1], type=pa.int64())}),
-        os.path.join(d, "all_fields.parquet"),
-    )
 
 
 # ── Writer: happy path + schema + exact aggregates ───────────────────────────
@@ -216,18 +202,6 @@ def test_backfill_perf_dims_skips_built_hours(tmp_path):
 # ── Day-compaction merge ─────────────────────────────────────────────────────
 
 
-def _write_hour_bundle(hour_dir: str, filename: str, select_sql_values: str, schema_cols: str) -> None:
-    os.makedirs(hour_dir, exist_ok=True)
-    wcon = duckdb.connect()
-    try:
-        wcon.execute(
-            f"COPY (SELECT * FROM (VALUES {select_sql_values}) AS t({schema_cols})) "
-            f"TO '{hour_dir}/{filename}' (FORMAT PARQUET)"
-        )
-    finally:
-        wcon.close()
-
-
 def test_compact_perf_dims_day_merge(tmp_path):
     """Day-compaction over a full closed UTC day: SUM counts + MIN-of-MIN per
     bucket into one day file."""
@@ -287,24 +261,6 @@ def test_compact_perf_dims_skips_active_day(tmp_path):
 
 
 # ── Reader ───────────────────────────────────────────────────────────────────
-
-
-def _stub_runner(src: dict, captured_sql: list[str], stub_rows: list[tuple]):
-    from backend.repositories._base import QueryRunner
-
-    class _Result:
-        def fetchall(self):
-            return stub_rows
-
-    class _Conn:
-        def execute(self, sql, params=None):
-            captured_sql.append(sql)
-            return _Result()
-
-    runner = QueryRunner.__new__(QueryRunner)
-    runner.src = src
-    runner.execute = _Conn().execute  # type: ignore[method-assign]
-    return runner
 
 
 def test_reader_returns_none_when_filtered(tmp_path):

@@ -52,14 +52,6 @@ _CRON_SCHEDULE_TTL = 5.0
 _cron_schedule_cache: dict[str, tuple[float, dict]] = {}
 
 
-def clear_cron_schedule_cache(service_id: str | None = None) -> None:
-    """Bust the /api/cron-schedule cache for a service (or all services)."""
-    if service_id:
-        _cron_schedule_cache.pop(service_id, None)
-    else:
-        _cron_schedule_cache.clear()
-
-
 # N-2: fields safe to surface to a remote analyst on ``GET /api/services``.
 # The full enriched dict contains operator infra strings (cdn_url,
 # cdn_service_id, fos_bucket, fos_region, ngwaf_workspace_id) plus DuckDB
@@ -1106,64 +1098,32 @@ def _check_iceberg_type_lock(
     from fastapi import HTTPException
 
     from backend.core import duckdb as _db
+    from backend.core import iceberg as _iceberg
 
     src = _db.get_source_for_service(service_id)
     if not src:
         return
-    # Only Iceberg/DuckLake-backed services have a committed schema to lock against;
-    # explicitly-local services don't, so there is nothing to verify. Treat a
-    # missing storage_mode as the default ("cloud") so the lock still applies.
     if src.get("storage_mode", "cloud") == "local":
         return
     try:
-        from pyiceberg.exceptions import NoSuchTableError
-
-        from backend.core import iceberg as _iceberg
-
-        duckdb_to_iceberg = getattr(_iceberg, "_DUCKDB_TO_ICEBERG")
-        get_catalog = getattr(_iceberg, "_get_catalog")
-        table_identifier = getattr(_iceberg, "_table_identifier")
-
-        catalog = get_catalog(src)
-        identifier = table_identifier(src)
-        try:
-            table = catalog.load_table(identifier)
-        except NoSuchTableError:
-            committed_types = _committed_duckdb_field_types(src)
-            existing_duckdb_type = committed_types.get(field_name)
-            if existing_duckdb_type and new_duckdb_type:
-                current_mapped = duckdb_to_iceberg.get(existing_duckdb_type.upper(), existing_duckdb_type.upper())
-                target_mapped = duckdb_to_iceberg.get(new_duckdb_type.upper(), new_duckdb_type.upper())
-                if current_mapped != target_mapped:
-                    raise HTTPException(
-                        status_code=422,
-                        detail={
-                            "errors": [
-                                f"Cannot change data type for '{field_name}' (currently {current_mapped}) after it has been created in the database. Please create a new field instead."
-                            ]
-                        },
-                    )
-            return
-        schema = table.schema()
-        field = schema.find_field(field_name) if field_name in {f.name for f in schema.fields} else None
-        if field and new_duckdb_type:
-            target_iceberg_type = duckdb_to_iceberg.get(new_duckdb_type)
-            if target_iceberg_type and field.field_type != target_iceberg_type:
+        duckdb_to_arrow = getattr(_iceberg, "_DUCKDB_TO_ARROW", {})
+        committed_types = _committed_duckdb_field_types(src)
+        existing_duckdb_type = committed_types.get(field_name)
+        if existing_duckdb_type and new_duckdb_type:
+            current_mapped = duckdb_to_arrow.get(existing_duckdb_type.upper(), existing_duckdb_type.upper())
+            target_mapped = duckdb_to_arrow.get(new_duckdb_type.upper(), new_duckdb_type.upper())
+            if current_mapped != target_mapped:
                 raise HTTPException(
                     status_code=422,
                     detail={
                         "errors": [
-                            f"Cannot change data type for '{field_name}' (currently {field.field_type}) after it has been created in the database. Please create a new field instead."
+                            f"Cannot change data type for '{field_name}' (currently {current_mapped}) after it has been created in the database. Please create a new field instead."
                         ]
                     },
                 )
     except HTTPException:
         raise
     except Exception as e:
-        # We could NOT verify the field's committed type (catalog/connection
-        # blip, etc.). Fail CLOSED: refuse the mutation rather than silently
-        # letting a possibly type-incompatible change write a mismatched value
-        # into the committed Iceberg schema. The caller can retry.
         raise HTTPException(
             status_code=503,
             detail={
@@ -1176,33 +1136,17 @@ def _check_iceberg_type_lock(
 
 
 def _locked_iceberg_field_names(src: dict | None, *, error_lead: str, error_tail: str) -> set[str]:
-    """Return the committed Iceberg/DuckLake-schema field names for ``src``.
+    """Return the committed DuckLake/DuckDB-schema field names for ``src``.
 
     Empty set for local services or when no table is committed yet. Fails
     CLOSED with a 503 (``{error_lead} ({ExcType}); {error_tail}``) on any
     catalog/connection error so a type change can't slip past an empty lock
-    set and corrupt the committed schema. The two callers (update / import)
-    pass their own lead/tail so their existing 503 detail strings are
-    reproduced verbatim. (``_check_iceberg_type_lock`` keeps its own
-    per-field type comparison rather than building on this name-set.)
+    set and corrupt the committed schema.
     """
     if not src or src.get("storage_mode", "cloud") == "local":
         return set()
     try:
-        from pyiceberg.exceptions import NoSuchTableError
-
-        from backend.core import iceberg as _iceberg
-
-        get_catalog = getattr(_iceberg, "_get_catalog")
-        table_identifier = getattr(_iceberg, "_table_identifier")
-
-        catalog = get_catalog(src)
-        try:
-            table = catalog.load_table(table_identifier(src))
-        except NoSuchTableError:
-            # Fall back to DuckDB/DuckLake schema if a DB exists; otherwise empty set.
-            return set(_committed_duckdb_field_types(src).keys())
-        return {f.name for f in table.schema().fields}
+        return set(_committed_duckdb_field_types(src).keys())
     except Exception as e:
         raise HTTPException(
             status_code=503,

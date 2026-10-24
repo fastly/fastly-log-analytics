@@ -16,6 +16,81 @@ import { useSSE, SSELine, SSEStatus } from '@/hooks/useSSE'
 import { SSEProgressView } from './SSEProgressView'
 import { panelDialogHeaderSolid } from '@/lib/panel-dialog'
 
+export interface SSEExecutionSectionProps {
+  title: string
+  subtitle: string
+  lines: SSELine[]
+  status: SSEStatus
+  error: string | null
+  heightClassName?: string
+  progressLabel?: string
+  doneMessage?: string
+}
+
+export function SSEExecutionSection({
+  title,
+  subtitle,
+  lines,
+  status,
+  error,
+  heightClassName = 'h-[300px]',
+  progressLabel = 'Progress',
+  doneMessage,
+}: SSEExecutionSectionProps) {
+  return (
+    <div className="p-8 space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+      <div className="text-center space-y-2">
+        <h3 className="text-lg font-semibold tracking-tight">{title}</h3>
+        <p className="text-sm text-muted-foreground">{subtitle}</p>
+      </div>
+
+      <SSEProgressView
+        lines={lines}
+        status={status}
+        error={error}
+        className={heightClassName}
+        progressLabel={progressLabel}
+        doneMessage={doneMessage}
+      />
+    </div>
+  )
+}
+
+export interface SSEDialogFooterProps {
+  status: SSEStatus
+  onClose: () => void
+  onStop?: () => void
+  stopDisabled?: boolean
+  doneLabel?: string
+  idleOrErrorLabel?: string
+  buttonClassName?: string
+}
+
+export function SSEDialogFooter({
+  status,
+  onClose,
+  onStop,
+  stopDisabled = false,
+  doneLabel = 'Close',
+  idleOrErrorLabel = 'Cancel',
+  buttonClassName = 'h-10 px-6',
+}: SSEDialogFooterProps) {
+  return (
+    <>
+      {status !== 'streaming' && (
+        <Button variant="outline" onClick={onClose} className={buttonClassName}>
+          {status === 'done' ? doneLabel : idleOrErrorLabel}
+        </Button>
+      )}
+      {status === 'streaming' && (
+        <Button variant="outline" onClick={onStop} disabled={stopDisabled} className={buttonClassName}>
+          Stop
+        </Button>
+      )}
+    </>
+  )
+}
+
 export interface ControlledSSEModalProps {
   isSSEModalOpen: boolean
   setIsSSEModalOpen: (open: boolean) => void

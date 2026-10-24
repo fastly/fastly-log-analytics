@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 
-import { formatCount } from '@/lib/format'
+import { formatCount, formatPercent } from '@/lib/format'
 interface ThresholdPreviewStatsProps {
   precision: number | null
   recall: number | null
@@ -25,12 +25,12 @@ export function ThresholdPreviewStats({
       <div className="grid grid-cols-2 gap-3 text-xs">
         <Stat
           label="Precision"
-          value={precision != null ? `${(precision * 100).toFixed(1)}%` : '—'}
+          value={precision != null ? formatPercent(precision, { decimals: 1 }) : '—'}
           hint="of labeled flagged sessions, how many are bad"
         />
         <Stat
           label="Recall"
-          value={recall != null ? `${(recall * 100).toFixed(1)}%` : '—'}
+          value={recall != null ? formatPercent(recall, { decimals: 1 }) : '—'}
           hint="of all labeled-bad sessions, how many got flagged"
         />
       </div>

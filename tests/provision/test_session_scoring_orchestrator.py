@@ -45,17 +45,13 @@ def _no_local_config_writes():
 
 
 def _scoring_meta(*, with_secret: bool = True) -> dict:
-    meta = {
-        "scoring_service_id": SCORE_SVC,
-        "scoring_service_name": f"Session Scoring Service for {LOG_SVC}",
-        "scoring_domain": f"fos-{LOG_SVC.lower()}-session-scorer.edgecompute.app",
-        "scoring_keys_store_id": KEYS_STORE,
-        "scoring_config_store_id": CFG_STORE,
-        "aes_key_hex": "ab" * 32,
-    }
-    if with_secret:
-        meta["request_secret"] = "secret_" + "y" * 56
-    return meta
+    return make_scoring_meta(
+        log_svc=LOG_SVC,
+        score_svc=SCORE_SVC,
+        keys_store=KEYS_STORE,
+        cfg_store=CFG_STORE,
+        with_secret=with_secret,
+    )
 
 
 # ── _remove_scoring_backend / _remove_scoring_snippets: 404 tolerance ─────
@@ -717,61 +713,20 @@ def test_update_recv_exclusion_regex_raises_when_no_active_version():
             sso.update_recv_exclusion_regex(LOG_SVC, TOKEN, new_regex="^/$")
 
 
+from tests._helpers.scoring_orchestrator import (
+    make_happy_path_fastly_mock,
+    make_happy_path_fastly_mock_with_post_secret,
+    make_scoring_meta,
+)
+
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 
 def _happy_path_fastly_mock():
-    """Same shape as the sibling-file helper but defined locally so the
-    two suites don't have to share private fixture imports."""
-    versions = [{"number": 100, "active": True}]
-    s3_endpoints = [{"name": "Fastly Object Storage Logs"}]
-    snippets = []
-    backends = []
-
-    def side_effect(method, path, body=None, token=None, **kwargs):
-        if (method, path) == ("GET", f"/service/{LOG_SVC}/version"):
-            return versions
-        if (method, path) == ("PUT", f"/service/{LOG_SVC}/version/100/clone"):
-            return {"number": 101}
-        if (method, path) == ("PUT", f"/service/{LOG_SVC}/version/101"):
-            return {}
-        if (method, path) == ("GET", f"/service/{LOG_SVC}/version/101/backend"):
-            return backends
-        if (method, path) == ("POST", f"/service/{LOG_SVC}/version/101/backend"):
-            backends.append({"name": body["name"]})
-            return {"name": body["name"]}
-        if (method, path) == ("GET", f"/service/{LOG_SVC}/version/101/snippet"):
-            return snippets
-        if (method, path) == ("POST", f"/service/{LOG_SVC}/version/101/snippet"):
-            snippets.append({"name": body["name"]})
-            return snippets[-1]
-        if (method, path) == ("GET", f"/service/{LOG_SVC}/version/101/logging/s3"):
-            return s3_endpoints
-        if method == "PUT" and "/logging/s3/" in path:
-            return {}
-        if (method, path) == ("GET", f"/service/{LOG_SVC}/version/101/validate"):
-            return {"status": "ok"}
-        if (method, path) == ("PUT", f"/service/{LOG_SVC}/version/101/activate"):
-            return {}
-        return {}
-
-    return MagicMock(side_effect=side_effect)
+    return make_happy_path_fastly_mock(log_svc=LOG_SVC)
 
 
 def _happy_path_fastly_mock_with_post_secret(*, post_secret_409: bool = False):
-    """Variant that also handles the request_secret heal POST/PATCH on
-    the keys ConfigStore."""
-    base_mock = _happy_path_fastly_mock()
-    base_side_effect = base_mock.side_effect
-
-    def side_effect(method, path, body=None, token=None, **kwargs):
-        # Secret heal endpoints.
-        if (method, path) == ("POST", f"/resources/stores/config/{KEYS_STORE}/item"):
-            if post_secret_409:
-                raise RuntimeError("409 Conflict — item already exists")
-            return {"item_key": body["item_key"]}
-        if method == "PATCH" and path == f"/resources/stores/config/{KEYS_STORE}/item/request_secret":
-            return {"ok": True}
-        return base_side_effect(method, path, body, token=token, **kwargs)
-
-    return MagicMock(side_effect=side_effect)
+    return make_happy_path_fastly_mock_with_post_secret(
+        log_svc=LOG_SVC, keys_store=KEYS_STORE, post_secret_409=post_secret_409
+    )

@@ -8,8 +8,6 @@ from pydantic import BaseModel, Field
 
 from backend.models._base import SchemaColumn, WireSafeModel
 
-SchemaColumnRow = SchemaColumn
-
 
 class CmcdEnableBody(BaseModel):
     token: str = ""

@@ -93,7 +93,7 @@ def test_quota_memory_is_bounded_under_key_flood(clock):
     lim = ra._StaticAssetLimiter(max_tracked_ips=50)
     for i in range(5000):
         lim.check(f"10.0.{i // 256}.{i % 256}", 10)
-    assert lim.tracked_keys() <= 50
+    assert len(lim._events) <= 50
 
 
 def test_quota_stale_keys_are_evicted_not_kept(clock):
@@ -103,7 +103,7 @@ def test_quota_stale_keys_are_evicted_not_kept(clock):
     clock.now += 120
     for i in range(3):
         lim.check(f"new-{i}", 1)
-    assert lim.tracked_keys() <= 5
+    assert len(lim._events) <= 5
     assert all(lim.check(f"new-{i}", 1) for i in range(3))
 
 
@@ -250,4 +250,4 @@ def test_concurrent_distinct_keys_stay_within_cap():
         t.start()
     for t in threads:
         t.join()
-    assert lim.tracked_keys() <= 100
+    assert len(lim._events) <= 100

@@ -25,12 +25,12 @@ def sync_service(
     _admin: None = Depends(require_admin),
     source: dict = Depends(get_source),
 ) -> SyncStartResponse:
-    from backend.cron.jobs.sync import _run_log_discovery_cron as _run_service_cron
+    from backend.cron.jobs.sync import _run_log_discovery_cron
 
     return run_admin_cron_trigger(
         source,
         "log_discovery",
-        _run_service_cron,
+        _run_log_discovery_cron,
         target_kwargs={"force": force, "start_time": start_time, "end_time": end_time},
         success_msg="Ingestion started.",
         in_progress_msg="Ingestion already running.",
@@ -212,7 +212,7 @@ def ingest_endpoint(
     source: dict = Depends(get_source),
 ) -> dict:
     from backend.cron.jobs.metadata import _run_metadata_sync
-    from backend.cron.jobs.sync import _run_log_discovery_cron as _run_service_cron
+    from backend.cron.jobs.sync import _run_log_discovery_cron
     from backend.repositories.dashboard import invalidate_service
     from backend.utils.router_utils import start_or_resume_cron
 
@@ -230,7 +230,7 @@ def ingest_endpoint(
     return start_or_resume_cron(
         src,
         "log_discovery",
-        _run_service_cron,
+        _run_log_discovery_cron,
         target_kwargs={"force": True, "start_time": start_time, "end_time": end_time},
         success_msg="Ingestion started.",
         in_progress_msg="Ingestion already running.",

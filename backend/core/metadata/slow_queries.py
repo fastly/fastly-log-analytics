@@ -260,20 +260,6 @@ def count_slow_queries(
     return int(row["n"] or 0)
 
 
-def purge_old_slow_queries(service_id: str, *, older_than_utc: float) -> int:
-    """Delete rows whose ``started_at_utc`` is below the cutoff. Called
-    from ``cleanup_metadata`` on the retention cadence. Returns the
-    number of rows removed."""
-    _flush_all(only_service=service_id)
-    con = get_con(service_id)
-    cur = con.execute(
-        "DELETE FROM slow_queries WHERE service_id = ? AND started_at_utc < ?",
-        (service_id, older_than_utc),
-    )
-    con.commit()
-    return cur.rowcount or 0
-
-
 def clear_slow_queries(service_id: str) -> int:
     """Delete all persisted slow-query rows for *service_id*.
 
@@ -288,19 +274,3 @@ def clear_slow_queries(service_id: str) -> int:
     )
     con.commit()
     return int(cur.rowcount or 0)
-
-
-def slow_queries_storage_stats(service_id: str) -> dict[str, Any]:
-    """Cheap row-count + oldest/newest timestamps for the storage
-    inspection page. ``None`` timestamps mean the table is empty."""
-    _flush_all(only_service=service_id)
-    con = get_con(service_id)
-    row = con.execute(
-        "SELECT COUNT(*) AS n, MIN(started_at_utc) AS oldest, MAX(started_at_utc) AS newest FROM slow_queries WHERE service_id = ?",
-        (service_id,),
-    ).fetchone()
-    return {
-        "row_count": int(row["n"] or 0),
-        "oldest_utc": row["oldest"],
-        "newest_utc": row["newest"],
-    }

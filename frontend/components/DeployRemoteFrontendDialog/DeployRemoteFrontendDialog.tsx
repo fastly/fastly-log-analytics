@@ -1,6 +1,7 @@
 'use client'
 
 import * as React from 'react'
+import { useMutation } from '@tanstack/react-query'
 import {
   Globe,
   Server,
@@ -46,7 +47,6 @@ export function DeployRemoteFrontendDialog() {
   // Step 1: Domain Selection State
   const [isCustom, setIsCustom] = React.useState(false)
   const [prefix, setPrefix] = React.useState('')
-  const [checkingDomain, setCheckingDomain] = React.useState(false)
   const [domainCheckResult, setDomainCheckResult] = React.useState<Schema<'ProvisionCheckDomainResponse'> | null>(null)
 
   // Step 2: Origin Configuration State
@@ -61,7 +61,6 @@ export function DeployRemoteFrontendDialog() {
   const [serviceNameDraft, setServiceName] = React.useState('')
   const [isServiceNameEdited, setIsServiceNameEdited] = React.useState(false)
   const [tokenOverride, setTokenOverride] = React.useState('')
-  const [deploying, setDeploying] = React.useState(false)
   const [deployError, setDeployError] = React.useState('')
   const [deployResult, setDeployResult] = React.useState<Schema<'SharingDeployResponse'> | null>(null)
 
@@ -103,11 +102,8 @@ export function DeployRemoteFrontendDialog() {
       : ''
 
   // Handle Domain Verification
-  const handleCheckDomain = async () => {
-    if (!prefix || prefix.length < 3) return
-    setCheckingDomain(true)
-    setDomainCheckResult(null)
-    try {
+  const checkDomainMutation = useMutation({
+    mutationFn: async () => {
       const { data, error } = await client.GET('/api/provision/check-domain', {
         params: {
           query: {
@@ -121,27 +117,35 @@ export function DeployRemoteFrontendDialog() {
         throw new Error(extractApiError(error))
       }
 
-      setDomainCheckResult({
+      return {
         available: !!data?.available,
         reason: data?.reason || null,
         note: data?.note || null,
-      })
-    } catch (err) {
+      }
+    },
+    onMutate: () => {
+      setDomainCheckResult(null)
+    },
+    onSuccess: (result) => {
+      setDomainCheckResult(result)
+    },
+    onError: (err) => {
       const errorMsg = err instanceof Error ? err.message : String(err)
       setDomainCheckResult({
         available: false,
         reason: errorMsg || 'Failed to verify domain status. Please try again.',
       })
-    } finally {
-      setCheckingDomain(false)
-    }
+    },
+  })
+  const checkingDomain = checkDomainMutation.isPending
+  const handleCheckDomain = () => {
+    if (!prefix || prefix.length < 3) return
+    checkDomainMutation.mutate()
   }
 
   // Handle Deploy Service Submit
-  const handleDeploy = async () => {
-    setDeploying(true)
-    setDeployError('')
-    try {
+  const deployMutation = useMutation({
+    mutationFn: async () => {
       const { data, error } = await client.POST('/api/sharing/deploy-frontend', {
         body: {
           service_name: serviceName,
@@ -159,13 +163,22 @@ export function DeployRemoteFrontendDialog() {
         throw new Error(extractApiError(error))
       }
 
-      setDeployResult(data)
+      return data
+    },
+    onMutate: () => {
+      setDeployError('')
+    },
+    onSuccess: (data) => {
+      setDeployResult(data ?? null)
       setStep('success')
-    } catch (err) {
+    },
+    onError: (err) => {
       setDeployError(extractApiError(err))
-    } finally {
-      setDeploying(false)
-    }
+    },
+  })
+  const deploying = deployMutation.isPending
+  const handleDeploy = () => {
+    deployMutation.mutate()
   }
 
   // Validation Rules

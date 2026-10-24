@@ -79,91 +79,27 @@ def test_remove_custom_fields_handles_missing_log_fields():
     assert cfg == {}
 
 
+from tests._helpers.scoring_orchestrator import (
+    make_happy_path_fastly_mock,
+    make_happy_path_fastly_mock_with_post_secret,
+    make_scoring_meta,
+)
+
 # ── enable_scoring: happy path ────────────────────────────────────────────────
 
 
 def _ensure_scoring_meta() -> dict:
-    return {
-        "scoring_service_id": SCORE_SVC,
-        "scoring_service_name": f"Session Scoring Service for {LOG_SVC}",
-        "scoring_domain": f"fos-{LOG_SVC.lower()}-session-scorer.edgecompute.app",
-        "scoring_keys_store_id": "KEYS_STORE",
-        "scoring_config_store_id": "CFG_STORE",
-        "scoring_matrix_store_id": "MATRIX_STORE",
-        "aes_key_hex": "00" * 32,
-        "request_secret": "fake_request_secret_for_tests_" + "x" * 32,
-    }
+    return make_scoring_meta(log_svc=LOG_SVC, score_svc=SCORE_SVC)
 
 
 def _happy_path_fastly_mock():
-    """Returns sensible defaults for every Fastly API call enable_scoring
-    makes after Stage 1 (ensure_scoring_service). The actual calls are
-    asserted on the returned mock."""
-    versions = [{"number": 100, "active": True}]
-    s3_endpoints = [{"name": "Fastly Object Storage Logs"}]
-    snippets = []
-    backends = []
-
-    def side_effect(method, path, body=None, token=None, **kwargs):
-        # Active-version probe
-        if (method, path) == ("GET", f"/service/{LOG_SVC}/version"):
-            return versions
-        # Clone v100 → v101
-        if (method, path) == ("PUT", f"/service/{LOG_SVC}/version/100/clone"):
-            return {"number": 101}
-        # Comment update
-        if (method, path) == ("PUT", f"/service/{LOG_SVC}/version/101"):
-            return {}
-        # Backend probe (no scoring backend yet)
-        if (method, path) == ("GET", f"/service/{LOG_SVC}/version/101/backend"):
-            return backends
-        # Add backend
-        if (method, path) == ("POST", f"/service/{LOG_SVC}/version/101/backend"):
-            backends.append({"name": body["name"]})
-            return {"name": body["name"]}
-        # Snippet GET (idempotency probes from ensure_vcl_snippet)
-        if (method, path) == ("GET", f"/service/{LOG_SVC}/version/101/snippet"):
-            return snippets
-        # Snippet POST (create)
-        if (method, path) == ("POST", f"/service/{LOG_SVC}/version/101/snippet"):
-            snippets.append(
-                {"name": body["name"], "type": body["type"], "content": body["content"], "priority": body["priority"]}
-            )
-            return snippets[-1]
-        # s3 logging list
-        if (method, path) == ("GET", f"/service/{LOG_SVC}/version/101/logging/s3"):
-            return s3_endpoints
-        # s3 logging endpoint update (format)
-        if method == "PUT" and "/logging/s3/" in path:
-            return {}
-        # Validate
-        if (method, path) == ("GET", f"/service/{LOG_SVC}/version/101/validate"):
-            return {"status": "ok"}
-        # Activate
-        if (method, path) == ("PUT", f"/service/{LOG_SVC}/version/101/activate"):
-            return {}
-        return {}
-
-    return MagicMock(side_effect=side_effect)
+    return make_happy_path_fastly_mock(log_svc=LOG_SVC)
 
 
 def _happy_path_fastly_mock_with_post_secret(*, post_secret_409: bool = False):
-    """Variant that also handles the request_secret heal POST/PATCH on
-    the keys ConfigStore."""
-    base_mock = _happy_path_fastly_mock()
-    base_side_effect = base_mock.side_effect
-
-    def side_effect(method, path, body=None, token=None, **kwargs):
-        # Secret heal endpoints.
-        if (method, path) == ("POST", "/resources/stores/config/KEYS_STORE/item"):
-            if post_secret_409:
-                raise RuntimeError("409 Conflict — item already exists")
-            return {"item_key": body["item_key"]}
-        if method == "PATCH" and path == "/resources/stores/config/KEYS_STORE/item/request_secret":
-            return {"ok": True}
-        return base_side_effect(method, path, body, token=token, **kwargs)
-
-    return MagicMock(side_effect=side_effect)
+    return make_happy_path_fastly_mock_with_post_secret(
+        log_svc=LOG_SVC, keys_store="KEYS_STORE", post_secret_409=post_secret_409
+    )
 
 
 def test_enable_scoring_happy_path_runs_all_stages(monkeypatch, tmp_path):

@@ -8,7 +8,7 @@ import { useServiceStore } from '@/stores/serviceStore'
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 import { queryKeys } from '@/lib/query-keys'
-import { useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { usePathname } from 'next/navigation'
 
 import { Button } from '@/components/ui/button'
@@ -27,7 +27,6 @@ import { Label } from '@/components/ui/label'
 export function SaveViewDialog() {
   const [open, setOpen] = React.useState(false)
   const [name, setName] = React.useState('')
-  const [isSaving, setIsSaving] = React.useState(false)
 
   // Capture the FULL store snapshot so restored views match the original
   // intent — previously edgeOnly / compareMode / relativeRange were silent
@@ -48,10 +47,9 @@ export function SaveViewDialog() {
   const pathname = usePathname()
   const queryClient = useQueryClient()
 
-  const handleSave = async () => {
-    if (!name || !activeServiceId) return
-    setIsSaving(true)
-    try {
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      if (!name || !activeServiceId) return
       // The backend stores filters_json as an opaque string; bundle the
       // extra controls into the same blob under a `_view_extras` key the
       // restore-handler reads back. Older saved views (no _view_extras)
@@ -76,17 +74,25 @@ export function SaveViewDialog() {
           page: pathname || "/dashboard"
         }
       }))
+    },
+    onSuccess: () => {
+      if (!activeServiceId) return
       queryClient.invalidateQueries({ queryKey: queryKeys.views(activeServiceId) })
       // Bootstrap response also carries seeded views; invalidate so the
       // next bootstrap refetch reflects the new view.
       queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })
       setOpen(false)
       setName('')
-    } catch (error) {
+    },
+    onError: (error) => {
       console.error('Failed to save view', error)
-    } finally {
-      setIsSaving(false)
-    }
+    },
+  })
+  const isSaving = saveMutation.isPending
+
+  const handleSave = () => {
+    if (!name || !activeServiceId) return
+    saveMutation.mutate()
   }
 
   return (

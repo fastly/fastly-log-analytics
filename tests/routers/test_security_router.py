@@ -19,14 +19,14 @@ from unittest.mock import patch
 
 from backend.core.request_context import build_request_context
 from backend.main import app
-from backend.repositories._base import _safe_table, clear_schema_cols_cache
+from backend.repositories._base import _safe_table, _schema_cols_cache
 from backend.utils.remote_access import TimeBounds
 from tests.conftest import MOCK_SERVICE_ID, override_request_context
 from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
 
 
 def _seed_security_table(con, src) -> None:
-    clear_schema_cols_cache()
+    _schema_cols_cache.clear()
     from backend.core.duckdb import _clear_schema_cache
 
     _clear_schema_cache()

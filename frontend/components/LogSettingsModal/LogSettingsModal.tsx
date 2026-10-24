@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect, useMemo } from 'react'
+import React, { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
@@ -17,7 +17,7 @@ import { Loader2, Settings2, AlertTriangle, ChevronRight, FileJson } from 'lucid
 import { cn } from '@/lib/utils';
 import { formatBytes } from '@/lib/format'
 import { useSSE } from '@/hooks/useSSE'
-import { SSEProgressView } from '@/components/SSEModal'
+import { SSEDialogFooter, SSEExecutionSection } from '@/components/SSEModal'
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
 import {
   panelDialogContent,
@@ -47,7 +47,18 @@ interface LogSettingsModalProps {
   onOpenChange: (open: boolean) => void
 }
 
-export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsModalProps) {
+export function LogSettingsModal(props: LogSettingsModalProps) {
+  const { service, open } = props
+  const [generation, setGeneration] = useState(0)
+  const [wasOpen, setWasOpen] = useState(open)
+  if (open !== wasOpen) {
+    setWasOpen(open)
+    if (open) setGeneration((g) => g + 1)
+  }
+  return <LogSettingsModalBody key={`${service?.service_id ?? ''}|${generation}`} {...props} />
+}
+
+function LogSettingsModalBody({ service, open, onOpenChange }: LogSettingsModalProps) {
   const queryClient = useQueryClient()
 
   const [config, setConfig] = useState<LogFieldsConfig>({ groups: [], field_overrides: {} })
@@ -86,7 +97,7 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
     retry: false,
   })
 
-  const { lines, status, isDone, error, start, stop, reset } = useSSE()
+  const { lines, status, error, start, stop } = useSSE()
 
   const fieldsMutation = useMutation({
     mutationFn: async (config: LogFieldsConfig) =>
@@ -138,14 +149,6 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
       }
     }
   }
-
-  // Reset state only when opening the modal freshly
-  useEffect(() => {
-    if (open) {
-      fieldsMutation.reset()
-      reset()
-    }
-  }, [open])
 
   const toggleGroup = (groupId: string, checked: boolean) => {
     setConfig(prev => toggleLogFieldGroup(prev, catalog, groupId, checked))
@@ -220,21 +223,16 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
 
         <div className="flex-1 overflow-y-auto min-h-0">
           {isSuccess ? (
-            <div className="p-8 space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-               <div className="text-center space-y-2">
-                  <h3 className="text-lg font-semibold tracking-tight">Updating Log Configuration</h3>
-                  <p className="text-sm text-muted-foreground">Deploying new configuration to Fastly network...</p>
-               </div>
-
-               <SSEProgressView
-                 lines={fieldsMutation.isPending ? [{ type: 'info', message: 'Saving configuration locally...' }] : lines}
-                 status={fieldsMutation.isPending ? 'streaming' : status}
-                 error={error}
-                 className="h-[400px]"
-                 progressLabel="Step"
-                 doneMessage="Log configuration updated successfully! You may now close this window."
-               />
-            </div>
+            <SSEExecutionSection
+              title="Updating Log Configuration"
+              subtitle="Deploying new configuration to Fastly network..."
+              lines={fieldsMutation.isPending ? [{ type: 'info', message: 'Saving configuration locally...' }] : lines}
+              status={fieldsMutation.isPending ? 'streaming' : status}
+              error={error}
+              heightClassName="h-[400px]"
+              progressLabel="Step"
+              doneMessage="Log configuration updated successfully! You may now close this window."
+            />
           ) : (
             <div className="p-6">
               {isLoading ? (
@@ -346,12 +344,12 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
           ) : (
             <div className="flex flex-col items-end w-full">
               <div className="flex gap-2">
-                {status !== 'streaming' && (
-                  <Button variant="outline" onClick={() => onOpenChange(false)} className="h-10 px-6">Close</Button>
-                )}
-                {status === 'streaming' && (
-                  <Button variant="outline" onClick={stop} className="h-10 px-6">Stop</Button>
-                )}
+                <SSEDialogFooter
+                  status={fieldsMutation.isPending ? 'streaming' : status}
+                  onClose={() => onOpenChange(false)}
+                  onStop={stop}
+                  idleOrErrorLabel="Close"
+                />
               </div>
             </div>
           )}

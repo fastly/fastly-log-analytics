@@ -208,7 +208,7 @@ def _run(case: Case, tmp: Path, probe: _Probe) -> tuple[dict, dict[str, str]]:
             return _Rows({"normal": ROWS_NORMAL, "dirty": ROWS_DIRTY, "empty": []}[case.rows])
 
         runner.execute = fake_execute  # type: ignore[method-assign]
-        rollup_coverage.clear_listdir_cache()
+        rollup_coverage._listdir_cache.clear()
         rr.reset_rollup_coverage_ready()
         probe.counts = {}
         patches = []

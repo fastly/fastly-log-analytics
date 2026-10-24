@@ -10,7 +10,6 @@ from typing import Any, Protocol
 from backend.core.high_scale_contracts import ArchiveState
 from backend.high_scale.archive_models import ArchiveManifest
 from backend.high_scale.archive_publication import ArchivePublication, ObjectStore
-from backend.high_scale.ledger import HighScaleLedger
 
 
 class ReplayLeaseChecker(Protocol):
@@ -50,7 +49,7 @@ class DeletionController:
         self,
         store: ObjectStore,
         publication: ArchivePublication,
-        ledger: DeletionLedger | HighScaleLedger,
+        ledger: DeletionLedger,
         replay_leases: ReplayLeaseChecker | None = None,
         ownership: OwnershipChecker | None = None,
     ) -> None:
@@ -80,7 +79,7 @@ class DeletionController:
     ) -> None:
         observed = (now or datetime.now(UTC)).astimezone(UTC)
         manifest.validate()
-        target_key = object_key or manifest.source.object_key
+        target_key = object_key or (manifest.source.object_key if manifest.source else manifest.sources[0].key)
         service_id = manifest.service_id or (manifest.source.service_id if manifest.source else "")
         if self._ownership is not None:
             owner = self._ownership.get(service_id)

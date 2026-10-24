@@ -42,34 +42,6 @@ from backend.utils.tunnel import compute_fingerprint, get_tunnel_manager
 logger = logging.getLogger(__name__)
 
 # Response envelope fields that carry server-internal telemetry. Stripped
-# unconditionally from analyst-bound JSON bodies after call_next so that
-# routes which build responses as plain dicts (bypassing BaseResponse's
-# DEBUG_RESPONSES gate) cannot leak operator-side data — concrete examples
-# the QA pass surfaced: raw DuckDB SQL via _debug_queries, Fastly KV store
-# paths via _debug_calls, server cache state via _is_cached.
-#
-# Bare-name forms (``debug_queries``, ``debug_calls``) without the leading
-# underscore are also stripped. Plain-dict responses in /api/query and
-# /api/dashboard/bundle emit those forms and would otherwise leak the full
-# DuckDB Iceberg view-resolution SQL to analysts.
-#
-# ``_section_timings`` (and the bare ``section_timings``) carries internal
-# phase names (``summary``, ``timeseries``, ``temp_table_create``, …) without
-# any data / SQL / infra identifiers — it's pure observability that's a
-# force-multiplier for the next perf audit on the analyst path. Kept in the
-# response in both forms.
-_ANALYST_STRIPPED_ENVELOPE_KEYS = (
-    "_debug_queries",
-    "_debug_calls",
-    "_debug_sqlite",
-    "_debug_postgres",
-    "_is_cached",
-    "debug_queries",
-    "debug_calls",
-    "debug_sqlite",
-    "debug_postgres",
-)
-
 # Cap on how many bytes of a POST body the middleware will buffer to
 # extract service_id/service for the scope check. Comfortably above the
 # largest legitimate analytics payload (filter + query envelopes top out at
@@ -588,9 +560,7 @@ def _is_blocked_path(path: str) -> bool:
     for sp in _ANALYST_BLOCKED_SUBPATHS:
         if normalized == sp or normalized.startswith(sp + "/") or normalized.startswith(sp + "?"):
             return True
-    if ("/scoring/" in normalized or "/session-scoring/" in normalized) and normalized.endswith(
-        _ANALYST_BLOCKED_SCORING_SUFFIXES
-    ):
+    if "/scoring/" in normalized and normalized.endswith(_ANALYST_BLOCKED_SCORING_SUFFIXES):
         return True
     if "/rum/" in normalized and normalized.endswith(_ANALYST_BLOCKED_RUM_SUFFIXES):
         return True

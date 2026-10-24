@@ -52,7 +52,6 @@ def performance_aggregates(
 
         return hs_performance(high_scale_service, req, start_time, end_time, sections=sections)
     _is_real_repo = getattr(repo.get_performance_aggregates, "__module__", "") == "backend.repositories.performance"
-    _has_eager_con = ctx._con_override is not None or (ctx._holder is not None and ctx._holder.con is not None)
     if _is_real_repo:
         cached = repo.peek_performance_aggregates(
             src=ctx.source,
@@ -65,7 +64,7 @@ def performance_aggregates(
         if cached is not None:
             return PerformanceAggregatesResponse.with_telemetry(**cached)
     res = repo.get_performance_aggregates(
-        con=ctx.con if (_has_eager_con or not _is_real_repo) else (lambda: ctx.con),
+        con=ctx.con_or_factory(force_eager=not _is_real_repo),
         src=ctx.source,
         start_time=start_time,
         end_time=end_time,

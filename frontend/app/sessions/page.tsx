@@ -10,7 +10,7 @@ import { unwrapClient } from '@/lib/api-client'
 import { queryKeys } from '@/lib/query-keys'
 import { useIsDataReady } from '@/hooks/useIsDataReady'
 import { useScoringLabels } from '@/hooks/useScoringLabels'
-import { useActiveServiceCmcdEnabled } from '@/hooks/useActiveService'
+import { useServiceStore } from '@/stores/serviceStore'
 import { useServiceSwitchReset } from '@/hooks/useServiceSwitchReset'
 import { ReportLayout } from '@/components/ReportLayout'
 import { UpdatingBadge } from '@/components/UpdatingBadge'
@@ -18,7 +18,27 @@ import type { components } from '@/types/api.generated'
 
 import { ScoringControls } from './_sections/ScoringControls'
 import { SessionsTable } from './_sections/SessionsTable'
-import type { SessionsResponse } from '@/types/api'
+import type { BootstrapResponse, SessionsResponse } from '@/types/api'
+
+function useActiveServiceCmcdEnabled(activeServiceId: string | null): boolean {
+  const isInitialized = useServiceStore(s => s.isInitialized)
+  const services = useServiceStore(s => s.services)
+  const queryClient = useQueryClient()
+
+  if (isInitialized) {
+    const activeService = services.find(s => s.id === activeServiceId)
+    return activeService?.cmcdEnabled ?? false
+  }
+
+  const bootstrap = queryClient.getQueryData<BootstrapResponse>(queryKeys.bootstrap())
+  const bootstrapServices = bootstrap?.services
+  if (Array.isArray(bootstrapServices)) {
+    const activeService = bootstrapServices.find((s) => s.service_id === activeServiceId)
+    return !!activeService?.cmcd_enabled
+  }
+
+  return false
+}
 
 // SessionDetail is only rendered after a row click. Lazy-loading it
 // (with the DataTable + 7 sub-components it pulls in) keeps the

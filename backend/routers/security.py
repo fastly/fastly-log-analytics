@@ -75,7 +75,6 @@ def security_aggregates(
         return hs_aggregates(high_scale_service, req, start_time, end_time, sections=sections, mask_ips=mask_ips)
 
     _is_real_repo = getattr(repo.get_security_aggregates, "__module__", "") == "backend.repositories.security"
-    _has_eager_con = ctx._con_override is not None or (ctx._holder is not None and ctx._holder.con is not None)
     if _is_real_repo:
         cached = repo.peek_security_aggregates(
             src=ctx.source,
@@ -91,7 +90,7 @@ def security_aggregates(
             return SecurityAggregatesResponse.with_telemetry(**cached)
 
     res = repo.get_security_aggregates(
-        con=ctx.con if (_has_eager_con or not _is_real_repo) else (lambda: ctx.con),
+        con=ctx.con_or_factory(force_eager=not _is_real_repo),
         src=ctx.source,
         start_time=start_time,
         end_time=end_time,

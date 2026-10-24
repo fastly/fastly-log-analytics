@@ -44,11 +44,6 @@ def test_ingest_and_query_custom_fields(tmp_path, monkeypatch):
     monkeypatch.setattr(my_duckdb, "_configure_fos", lambda *a: None)
     monkeypatch.setattr(ingest, "_configure_fos", lambda *a: None)
 
-    def mock_get_catalog(*args, **kwargs):
-        raise RuntimeError("No catalog in integration tests")
-
-    monkeypatch.setattr(iceberg, "_get_catalog", mock_get_catalog)
-
     cfg = {"service_id": svc_id, "status": {}}
     cfg["log_fields"] = {"schema_version": 2, "groups": ["A"], "custom_fields": []}
     config.save_config(svc_id, cfg)
@@ -138,22 +133,18 @@ def test_ingest_and_query_custom_fields(tmp_path, monkeypatch):
     monkeypatch.setattr(ingest, "get_memory_connection", _wrap_mem, raising=False)
 
     iceberg._view_cache.clear()
-    iceberg._snapshot_files_cache.clear()
-    iceberg._table_object_cache.clear()
     my_duckdb._clear_schema_cache()
     my_duckdb._initialized_paths.clear()
 
     list(ingest.ingest(source=test_service_source))
 
     iceberg._view_cache.clear()
-    iceberg._snapshot_files_cache.clear()
-    iceberg._table_object_cache.clear()
     my_duckdb._clear_schema_cache()
     my_duckdb._initialized_paths.clear()
 
     con = my_duckdb.get_connection(source=test_service_source, skip_view_update=False)
     iceberg._view_cache.clear()
-    iceberg.update_iceberg_view(con, my_duckdb.get_source_by_name(con, svc_id) or test_service_source)
+    iceberg.update_iceberg_view(con, test_service_source)
 
     res = con.execute(f"SELECT my_custom_domain FROM {my_duckdb._safe_table_name(svc_id)}").fetchall()
 
@@ -184,11 +175,6 @@ def test_ingest_and_query_numeric_custom_fields(tmp_path, monkeypatch):
     monkeypatch.setattr(my_duckdb, "_cache_dir", lambda s: str(tmp_path / "cache" / s.get("name", "unknown")))
     monkeypatch.setattr(my_duckdb, "_configure_fos", lambda *a: None)
     monkeypatch.setattr(ingest, "_configure_fos", lambda *a: None)
-
-    def mock_get_catalog(*args, **kwargs):
-        raise RuntimeError("No catalog in integration tests")
-
-    monkeypatch.setattr(iceberg, "_get_catalog", mock_get_catalog)
 
     cfg = {
         "service_id": svc_id,
@@ -284,8 +270,6 @@ def test_ingest_and_query_numeric_custom_fields(tmp_path, monkeypatch):
     monkeypatch.setattr(my_duckdb, "get_memory_connection", _wrap_mem)
 
     iceberg._view_cache.clear()
-    iceberg._snapshot_files_cache.clear()
-    iceberg._table_object_cache.clear()
     my_duckdb._clear_schema_cache()
     my_duckdb._initialized_paths.clear()
 

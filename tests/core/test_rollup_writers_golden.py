@@ -374,7 +374,15 @@ def _run_pipeline(tmp_path: Path) -> tuple[dict[str, Any], dict[str, str]]:
         patch("backend.utils.bot_sources.get_pattern_set_version", return_value=_BOT_VERSION),
         patch("backend.utils.bot_sources.get_bot_regex_pattern", return_value=_BOT_PATTERN),
     ):
-        phase("per_field_copy", lambda: rollups.backfill_rollups(SERVICE, source, _FIELDS))
+        phase(
+            "per_field_copy",
+            lambda: (
+                rollups._run_per_field_copy(SERVICE, source, rollups._safe_table_for(source), "1=1", _FIELDS),
+                rollups.recompute._run_ip_spread_per_field(
+                    SERVICE, source, rollups._safe_table_for(source), "1=1", _FIELDS
+                ),
+            )[1],
+        )
         phase("bundle_hours", lambda: hour_bundles.bundle_hours(SERVICE, source, hours))
         phase("compact_closed_days", lambda: rollups.compact_closed_days_to_daily(SERVICE, source))
         phase("bundle_days", lambda: day_bundles.bundle_days(SERVICE, source, ["2026-06-13", "2026-06-14"]))

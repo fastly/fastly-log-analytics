@@ -85,25 +85,12 @@ def validate_quoted_literal(value: str, *, allow_backslash: bool = False, field:
     return value
 
 
-def validate_expression(expr: str, *, field: str = "expression") -> str:
-    """Validate a bare (unquoted) VCL expression fragment.
-
-    Rejects the structural tokens that would let a value break out of the
-    expression context into statement/comment structure: the statement
-    terminator ``;`` and the comment openers ``/*`` and ``//``.
-
-    Returns ``expr`` unchanged on success.
-    """
-    if ";" in expr or "/*" in expr or "//" in expr:
-        raise VclSafetyError(f"{field} contains invalid characters (;, /*, //)")
-    return expr
-
-
 def validate_log_format_macro(macro: str) -> str:
     """Validate the inline-VCL payload of a Fastly ``%{...}V`` log macro.
 
-    This is :func:`validate_expression` plus a ban on UNESCAPED braces
-    (a ``{`` / ``}`` not preceded by a backslash). Those are the building
+    Rejects structural tokens that would let a value break out of the
+    expression context into statement/comment structure (``;``, ``/*``,
+    ``//``) plus a ban on UNESCAPED braces (a ``{`` / ``}`` not preceded by a backslash). Those are the building
     blocks of the VCL-injection attack from audit finding 008: ``;``
     terminates the surrounding log statement, ``}`` closes the ``vcl_log``
     block, then ``{`` opens an attacker-controlled subroutine. Legitimate

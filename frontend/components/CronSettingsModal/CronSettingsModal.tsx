@@ -13,6 +13,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Loader2, Clock } from 'lucide-react'
 import { useSSE } from '@/hooks/useSSE'
+import { SSEDialogFooter, SSEExecutionSection } from '@/components/SSEModal'
 import { cn } from '@/lib/utils'
 import {
   panelDialogContent,
@@ -21,7 +22,6 @@ import {
 } from '@/lib/panel-dialog'
 import { AnalystSchedulePanel, LogSyncSection } from './Schedule'
 import { NgwafSection, IcebergOptimizationSection } from './Triggers'
-import { Preview } from './Preview'
 import type { ServiceConfig } from '@/types/api'
 
 
@@ -202,7 +202,16 @@ function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModa
 
         <div className="flex-1 overflow-y-auto min-h-0">
           {isSuccess ? (
-            <Preview lines={lines} status={status} error={error} />
+            <SSEExecutionSection
+              title="Updating Cron Settings"
+              subtitle="Applying new background sync configuration..."
+              lines={lines}
+              status={status}
+              error={error}
+              heightClassName="h-[300px]"
+              progressLabel="Step"
+              doneMessage="Settings applied! You may now close this window."
+            />
           ) : isAnalyst ? (
             <AnalystSchedulePanel
               syncEnabled={syncEnabled}
@@ -282,14 +291,12 @@ function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModa
               </Button>
             </>
           ) : (
-            <>
-              {status !== 'streaming' && (
-                <Button variant="outline" onClick={() => onOpenChange(false)} className="h-10 px-6">Close</Button>
-              )}
-              {status === 'streaming' && (
-                <Button variant="outline" onClick={stop} className="h-10 px-6">Stop</Button>
-              )}
-            </>
+            <SSEDialogFooter
+              status={status}
+              onClose={() => onOpenChange(false)}
+              onStop={stop}
+              idleOrErrorLabel="Close"
+            />
           )}
         </DialogFooter>
       </DialogContent>

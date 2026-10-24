@@ -9,14 +9,14 @@ from backend.core.high_scale_contracts import ArchiveState
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.deletion import DeletionController
 from backend.high_scale.ingest_controller import HighScaleIngestController
-from backend.high_scale.ledger import HighScaleLedger
-from backend.high_scale.ownership import OwnershipStore
 from backend.high_scale.publication import (
     ClickHousePublication,
     InMemoryBatchManifestStore,
     InsertReceipt,
 )
 from backend.high_scale.replay import replay_manifest
+from backend.high_scale.source_discovery import SourceObjectDescriptor
+from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
 
 
 class _ClickHouse:
@@ -37,26 +37,6 @@ class _PostgresControl:
     def owner(self, service_id: str):
         return self.owner_record
 
-    def discover_source(self, service_id: str, domain: str, object_key: str, checksum: str, **kwargs: object):
-        self.calls.append("discover")
-        return type(
-            "Source",
-            (),
-            {
-                "object_id": "object-1",
-                "service_id": service_id,
-                "domain": domain,
-                "object_key": object_key,
-                "checksum": checksum,
-                "size_bytes": 16,
-                "version": "v1",
-            },
-        )()
-
-    def claim_source(self, service_id: str, object_key: str, worker_id: str, **kwargs: object):
-        self.calls.append("claim")
-        return type("Claim", (), {"claimed": True, "lease_generation": 1})()
-
     def record_source_counts(self, service_id: str, object_key: str, **kwargs: object) -> None:
         self.calls.append("counts")
 
@@ -73,14 +53,30 @@ class _PostgresControl:
         self.archive_state.state = kwargs["next_state"]
         return self.archive_state
 
-    def mark_source_appended(self, service_id: str, object_key: str, **kwargs: object) -> None:
-        self.calls.append("appended")
-
-    def mark_source_archived(self, service_id: str, object_key: str, **kwargs: object) -> None:
-        self.calls.append("archived")
-
-    def acknowledge_source(self, service_id: str, object_key: str, *, manifest_id: str) -> None:
+    def acknowledge_sources_batch(self, service_id: str, object_keys, *, manifest_id: str, **kwargs: object) -> None:
         self.calls.append("acknowledged")
+
+
+def _ingest_one(
+    controller: HighScaleIngestController,
+    *,
+    service_id: str,
+    domain: str,
+    object_key: str,
+    checksum: str,
+    payload: bytes,
+    version: str = "",
+    now: datetime | None = None,
+    max_dead_letter_ratio: float = 0.05,
+):
+    desc = SourceObjectDescriptor(object_key, checksum, len(payload), version)
+    return controller.ingest_batch(
+        service_id=service_id,
+        domain=domain,
+        sources_payloads=[(desc, payload)],
+        now=now,
+        max_dead_letter_ratio=max_dead_letter_ratio,
+    )
 
 
 def test_source_flows_through_fenced_archive_and_visible_serving() -> None:
@@ -99,7 +95,8 @@ def test_source_flows_through_fenced_archive_and_visible_serving() -> None:
     )
     payload = gzip.compress(b'{"timestamp":"2026-09-11T20:00:00Z","url":"/ok"}\nnot-json\n')
 
-    result = controller.ingest(
+    result = _ingest_one(
+        controller,
         service_id="svc",
         domain="request",
         object_key="raw/request/one.gz",
@@ -107,11 +104,12 @@ def test_source_flows_through_fenced_archive_and_visible_serving() -> None:
         payload=payload,
         version="v1",
         now=datetime(2026, 9, 11, 20, 0, tzinfo=UTC),
+        max_dead_letter_ratio=1.0,
     )
 
     assert owner.owner_epoch == 1
-    assert result.decoded.accepted_rows == 1
-    assert result.decoded.quarantined_rows == 1
+    assert result.total_events == 1
+    assert result.quarantined_events == 1
     assert result.publication.rows_visible == 1
     assert objects.exists(f"archive/manifests/{result.manifest.manifest_id}.commit")
     assert ledger.count() == 1
@@ -122,7 +120,8 @@ def test_source_flows_through_fenced_archive_and_visible_serving() -> None:
     assert len(archived_rows) == 2
     assert any(row.get("_record_kind") == "dead_letter" for row in archived_rows)
 
-    replay = controller.ingest(
+    replay = _ingest_one(
+        controller,
         service_id="svc",
         domain="request",
         object_key="raw/request/one.gz",
@@ -130,6 +129,7 @@ def test_source_flows_through_fenced_archive_and_visible_serving() -> None:
         payload=payload,
         version="v1",
         now=datetime(2026, 9, 11, 20, 0, tzinfo=UTC),
+        max_dead_letter_ratio=1.0,
     )
     assert replay.publication.duplicate is True
     assert len(clickhouse.batches) == 1
@@ -173,7 +173,8 @@ def test_ingest_writes_dimension_aggregates_alongside_facts() -> None:
         b'{"timestamp":"2026-09-11T20:00:00Z","url":"/ok","country":"US","ottfb":1200,"ost":503,"obytes":64}\n'
     )
 
-    controller.ingest(
+    _ingest_one(
+        controller,
         service_id="svc",
         domain="request",
         object_key="raw/request/one.gz",
@@ -198,10 +199,6 @@ def test_ingest_writes_dimension_aggregates_alongside_facts() -> None:
 
 
 def test_ingest_tolerates_aggregate_publish_failure_without_failing_the_ingest() -> None:
-    """Aggregates are a best-effort triage feature layered on top of the
-    durability-critical facts path — a failure writing them must never
-    fail (or duplicate-retry) the source object's ingest."""
-
     class _BoomAggregates:
         def publish(self, batch):
             raise RuntimeError("aggregate table unavailable")
@@ -222,7 +219,8 @@ def test_ingest_tolerates_aggregate_publish_failure_without_failing_the_ingest()
     )
     payload = gzip.compress(b'{"timestamp":"2026-09-11T20:00:00Z","url":"/ok"}\n')
 
-    result = controller.ingest(
+    result = _ingest_one(
+        controller,
         service_id="svc",
         domain="request",
         object_key="raw/request/one.gz",
@@ -236,23 +234,11 @@ def test_ingest_tolerates_aggregate_publish_failure_without_failing_the_ingest()
 
 
 def test_ingest_uses_the_ledgers_domain_not_the_callers_when_they_diverge() -> None:
-    """Regression test: rum_vitals and rum_errors both list the FOS prefix
-    raw/rum/, so the same not-yet-terminal object can legitimately be
-    re-attempted under a sibling domain's page before the first domain
-    finishes it. discover_source/ledger.discover keep the first domain's
-    attribution rather than erroring (a real checksum/version change is
-    still rejected). ingest() must decode/archive/publish using that
-    persisted attribution, not whichever domain happened to call it this
-    time — using the caller's domain instead made every such retry fail
-    downstream with "source identity does not match archive batch",
-    observed live during RUM qualification."""
     ownership = OwnershipStore()
     ledger = HighScaleLedger()
     objects = InMemoryObjectStore()
     clickhouse = _ClickHouse()
     ownership.initialize("svc", owner="high_scale", source_cursor="cursor-0")
-    # Simulates rum_vitals' page having discovered (and, in a live crash,
-    # started but not finished claiming/ingesting) this object first.
     ledger.discover("svc", "rum_vitals", "raw/rum/one.gz", "sha256:source", size_bytes=16, version="v1")
     controller = HighScaleIngestController(
         ownership=ownership,
@@ -262,10 +248,8 @@ def test_ingest_uses_the_ledgers_domain_not_the_callers_when_they_diverge() -> N
         worker_id="worker-1",
     )
 
-    # rum_errors' page retries the same object this tick. Shaped as a real
-    # rum_vitals row (metric_value) since it must actually be attributed to
-    # and published under rum_vitals — the domain this test pins.
-    result = controller.ingest(
+    result = _ingest_one(
+        controller,
         service_id="svc",
         domain="rum_errors",
         object_key="raw/rum/one.gz",
@@ -274,21 +258,11 @@ def test_ingest_uses_the_ledgers_domain_not_the_callers_when_they_diverge() -> N
         version="v1",
     )
 
-    assert result.source.domain == "rum_vitals"
-    assert result.manifest.source.domain == "rum_vitals"
+    assert result.manifest.domain == "rum_vitals"
     assert clickhouse.batches[0].domain == "rum_vitals"
 
 
 def test_ingest_filters_out_sibling_domain_rows_before_publishing() -> None:
-    """A raw raw/rum/ object mixes vitals and error beacon lines from the
-    same log period (both come from the same /rum-beacon logging
-    condition), but the ledger attributes the WHOLE object to one domain.
-    A live incident during RUM qualification: an object claimed by
-    rum_vitals also contained an error-beacon line (no metric_value), and
-    force-fitting it into a vitals row crashed the whole batch insert with
-    "metric_value must be finite" — losing the real vitals row in the same
-    batch too. The error-shaped row must be filtered out before the serving
-    batch is built, not force-fit or allowed to crash the batch."""
     ownership = OwnershipStore()
     ledger = HighScaleLedger()
     objects = InMemoryObjectStore()
@@ -306,7 +280,8 @@ def test_ingest_filters_out_sibling_domain_rows_before_publishing() -> None:
         b'{"event_id":"error-1","timestamp":"2026-09-14T20:00:01Z","error_message":"boom"}\n'
     )
 
-    result = controller.ingest(
+    result = _ingest_one(
+        controller,
         service_id="svc",
         domain="rum_vitals",
         object_key="raw/rum/mixed.gz",
@@ -315,7 +290,7 @@ def test_ingest_filters_out_sibling_domain_rows_before_publishing() -> None:
         version="v1",
     )
 
-    assert result.decoded.accepted_rows == 2
+    assert result.total_events == 2
     assert len(clickhouse.batches) == 1
     assert len(clickhouse.batches[0].rows) == 1
     assert clickhouse.batches[0].rows[0]["metric_name"] == "LCP"
@@ -323,9 +298,6 @@ def test_ingest_filters_out_sibling_domain_rows_before_publishing() -> None:
 
 
 def test_ingest_publishes_nothing_when_every_row_belongs_to_a_sibling_domain() -> None:
-    """The inverse: an object claimed by rum_vitals whose every decoded row
-    is actually error-shaped must archive cleanly and publish zero rows,
-    not crash trying to build/insert an empty serving batch."""
     ownership = OwnershipStore()
     ledger = HighScaleLedger()
     objects = InMemoryObjectStore()
@@ -340,7 +312,8 @@ def test_ingest_publishes_nothing_when_every_row_belongs_to_a_sibling_domain() -
     )
     payload = gzip.compress(b'{"event_id":"error-1","timestamp":"2026-09-14T20:00:01Z","error_message":"boom"}\n')
 
-    result = controller.ingest(
+    result = _ingest_one(
+        controller,
         service_id="svc",
         domain="rum_vitals",
         object_key="raw/rum/all-errors.gz",
@@ -349,7 +322,7 @@ def test_ingest_publishes_nothing_when_every_row_belongs_to_a_sibling_domain() -
         version="v1",
     )
 
-    assert result.decoded.accepted_rows == 1
+    assert result.total_events == 1
     assert len(clickhouse.batches) == 0
     assert result.publication.rows_visible == 0
 
@@ -368,16 +341,18 @@ def test_all_malformed_source_is_archived_without_serving_rows() -> None:
         worker_id="worker-1",
     )
 
-    result = controller.ingest(
+    result = _ingest_one(
+        controller,
         service_id="svc",
         domain="request",
         object_key="raw/request/malformed.gz",
         checksum="sha256:malformed",
         payload=gzip.compress(b"not-json\n"),
+        max_dead_letter_ratio=1.0,
     )
 
-    assert result.decoded.accepted_rows == 0
-    assert result.decoded.quarantined_rows == 1
+    assert result.total_events == 0
+    assert result.quarantined_events == 1
     assert result.publication.rows_visible == 0
     archived_rows = pq.read_table(
         pa.BufferReader(ArchivePublication(objects).read_artifact(result.manifest))
@@ -402,8 +377,9 @@ def test_controller_refuses_sources_owned_by_another_data_plane() -> None:
         worker_id="worker-1",
     )
 
-    with pytest.raises(RuntimeError, match="not the owner"):
-        controller.ingest(
+    with pytest.raises(RuntimeError, match="owner is standard"):
+        _ingest_one(
+            controller,
             service_id="svc",
             domain="request",
             object_key="raw/request/one.gz",
@@ -413,12 +389,6 @@ def test_controller_refuses_sources_owned_by_another_data_plane() -> None:
 
 
 class _ManifestIdentityCheckingControl(_PostgresControl):
-    """Mirrors real PostgresControlPlane's ``register_archive_manifest``: the
-    first registration for a manifest_id wins (``ON CONFLICT DO NOTHING``),
-    and a later call with byte-different content for the SAME manifest_id
-    raises — exactly the check that caught ingest() rebuilding a fresh
-    manifest (different coverage_start/end) on every retry."""
-
     def __init__(self) -> None:
         super().__init__()
         self._stored: dict[str, object] = {}
@@ -439,19 +409,10 @@ class _ManifestIdentityCheckingControl(_PostgresControl):
 
 
 def test_ingest_reuses_the_registered_manifest_on_retry_instead_of_rebuilding() -> None:
-    """Regression test: manifest_id is content-addressed from (service_id,
-    domain, object_key, checksum, artifact_checksum) — stable across
-    retries — but coverage_start/coverage_end come from wall-clock `now`,
-    which is not. Before this fix, a retry (e.g. after a crash between
-    archive publish and acknowledgement) rebuilt a fresh manifest with the
-    SAME manifest_id but a different coverage window, and
-    register_archive_manifest correctly rejected it as a changed identity —
-    observed live as a real object retrying forever. ingest() must reuse
-    the already-registered manifest's content on retry, not rebuild one."""
     control = _ManifestIdentityCheckingControl()
     clickhouse = _ClickHouse()
     controller = HighScaleIngestController(
-        ownership=control,  # type: ignore[arg-type]
+        ownership=control,
         ledger=HighScaleLedger(),
         control_plane=control,  # type: ignore[arg-type]
         archive=ArchivePublication(InMemoryObjectStore()),
@@ -460,7 +421,8 @@ def test_ingest_reuses_the_registered_manifest_on_retry_instead_of_rebuilding() 
     )
     payload = gzip.compress(b'{"timestamp":"2026-09-11T20:00:00Z","url":"/ok"}\n')
 
-    first = controller.ingest(
+    first = _ingest_one(
+        controller,
         service_id="svc",
         domain="request",
         object_key="raw/request/one.gz",
@@ -470,9 +432,8 @@ def test_ingest_reuses_the_registered_manifest_on_retry_instead_of_rebuilding() 
         now=datetime(2026, 9, 11, 20, 0, tzinfo=UTC),
     )
 
-    # A retry at a LATER wall-clock time must not raise, and must reuse the
-    # original manifest's coverage window rather than a fresh one.
-    second = controller.ingest(
+    second = _ingest_one(
+        controller,
         service_id="svc",
         domain="request",
         object_key="raw/request/one.gz",
@@ -491,7 +452,7 @@ def test_controller_can_use_postgres_control_plane_for_durable_state() -> None:
     control = _PostgresControl()
     clickhouse = _ClickHouse()
     controller = HighScaleIngestController(
-        ownership=control,  # type: ignore[arg-type]
+        ownership=control,
         ledger=HighScaleLedger(),
         control_plane=control,  # type: ignore[arg-type]
         archive=ArchivePublication(InMemoryObjectStore()),
@@ -499,7 +460,8 @@ def test_controller_can_use_postgres_control_plane_for_durable_state() -> None:
         worker_id="worker-1",
     )
 
-    result = controller.ingest(
+    result = _ingest_one(
+        controller,
         service_id="svc",
         domain="request",
         object_key="raw/request/one.gz",
@@ -509,18 +471,14 @@ def test_controller_can_use_postgres_control_plane_for_durable_state() -> None:
         now=datetime(2026, 9, 11, 20, 0, tzinfo=UTC),
     )
 
-    assert result.source.object_id == "object-1"
+    assert result.sources_count == 1
     assert control.calls == [
-        "discover",
-        "claim",
         "counts",
         "archive_manifest_lookup",
         "register_manifest",
         "transition_manifest",
         "transition_manifest",
         "transition_manifest",
-        "appended",
-        "archived",
         "acknowledged",
     ]
 
@@ -543,7 +501,8 @@ def test_ingest_publishes_performance_waterfall_and_scatter_projections() -> Non
         b'"ttfb":0.1,"ottfb":40000,"ottlb":90000}\n'
     )
 
-    controller.ingest(
+    _ingest_one(
+        controller,
         service_id="svc",
         domain="request",
         object_key="raw/request/perf.gz",

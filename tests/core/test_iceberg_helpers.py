@@ -43,38 +43,6 @@ def test_buffer_dir_is_under_cache_dir(tmp_path):
     assert out == str(tmp_path / "buffer")
 
 
-def test_catalog_db_path_creates_cache_dir_if_missing(tmp_path):
-    """The cache dir is mkdir'd before returning the catalog path
-    (so PyIceberg's SQLite open() doesn't fail with ENOENT). Pinned
-    because the first call after fresh provisioning hits this code
-    path."""
-    from backend.core.iceberg import _catalog_db_path
-
-    target = tmp_path / "fresh-cache-dir"
-    # Note: directory does NOT exist yet
-    assert not target.exists()
-    with patch("backend.core.duckdb._cache_dir", return_value=str(target)):
-        out = _catalog_db_path({"name": "svc"})
-    # The dir was created
-    assert target.exists()
-    # And the catalog path is inside
-    assert out == str(target / "iceberg_catalog.db")
-
-
-def test_get_cache_file_creates_cache_dir_and_returns_full_path(tmp_path):
-    """`_get_cache_file` ensures the cache dir exists then returns the
-    joined path. Pinned because callers do
-    `with open(_get_cache_file(src, "x.json"), "w")` — a missing
-    parent dir would crash."""
-    from backend.core.iceberg import _get_cache_file
-
-    target = tmp_path / "scratch"
-    with patch("backend.core.duckdb._cache_dir", return_value=str(target)):
-        out = _get_cache_file({"name": "svc"}, "my-cache.json")
-    assert target.exists()
-    assert out == str(target / "my-cache.json")
-
-
 # ── Tombstone scheme: race-safe buffer file consumption ───────────────────
 
 
@@ -405,20 +373,16 @@ def test_get_arrow_schema_omits_disabled_custom_fields():
 
 
 def test_clear_source_caches_removes_view_and_snapshot_entries():
-    """Clears both `_view_cache` and `_snapshot_files_cache` for a
-    given source key. Pinned because teardown must purge in-memory
-    state to prevent the next service-with-same-name from seeing
-    stale schema/files."""
+    """Clears `_view_cache` for a given source key. Pinned because teardown
+    must purge in-memory state to prevent the next service-with-same-name
+    from seeing stale schema/files."""
     import backend.core.iceberg as iceberg_mod
 
-    # Seed both caches
     iceberg_mod._view_cache["test-svc"] = ("loc", set(), (), "sql", 1.0, True)
-    iceberg_mod._snapshot_files_cache["test-svc"] = ("loc", 1, "iloc", [])
 
     iceberg_mod.clear_source_caches("test-svc")
 
     assert "test-svc" not in iceberg_mod._view_cache
-    assert "test-svc" not in iceberg_mod._snapshot_files_cache
 
 
 def test_clear_source_caches_is_noop_for_unknown_source():
@@ -432,37 +396,18 @@ def test_clear_source_caches_is_noop_for_unknown_source():
 
 
 def test_invalidate_service_caches_clears_every_cache():
-    """``invalidate_service_caches`` must purge EVERY per-service cache, not just
-    the view/snapshot ones ``clear_source_caches`` handles. Regression: a stale
-    ``_table_object_cache`` entry survived teardown (which also called the old
-    clearer with the service_id instead of the source name), so a same-process
-    re-provision of the same bucket returned the cached Table and ``init_iceberg_table``
-    SKIPPED creation — the table never landed in the fresh bucket."""
+    """``invalidate_service_caches`` must purge per-service caches."""
     import backend.core.iceberg as iceberg_mod
     from backend.core.iceberg import _core
 
     src = {"name": "inv-test-svc", "bucket": "inv-test-bucket", "prefix": ""}
-    ident = _core._table_identifier(src)
     name = src["name"]
 
-    # Seed every per-service cache.
-    _core._catalog_cache[name] = object()
-    _core._snapshot_files_cache[name] = ("loc", 1, "iloc", [])
     _core._view_cache[name] = ("loc", set(), (), "sql", 1.0, True)
-
-    class _T:
-        metadata_location = "meta-x"
-
-    _core._set_cached_table(src, ident, _T())
-    _core._pointer_cache[_core._pointer_cache_key(src, ident)] = (1.0, "meta-x")
 
     iceberg_mod.invalidate_service_caches(src)
 
-    assert name not in _core._catalog_cache
-    assert name not in _core._snapshot_files_cache
     assert name not in _core._view_cache
-    assert _core._get_cached_table(src, ident, "meta-x") is None
-    assert _core._pointer_cache_key(src, ident) not in _core._pointer_cache
 
 
 def test_invalidate_service_caches_is_noop_for_unknown_source():
@@ -493,66 +438,6 @@ def test_get_service_lock_returns_distinct_locks_for_different_sources():
     lock_a = _get_service_lock("svc-A")
     lock_b = _get_service_lock("svc-B")
     assert lock_a is not lock_b
-
-
-# ── _save_persistent_cache ───────────────────────────────────────────────
-
-
-def test_save_persistent_cache_writes_json(tmp_path):
-    """`_save_persistent_cache` serializes the snapshot files cache entry to
-    on-disk JSON."""
-    import backend.core.iceberg as iceberg_mod
-
-    src = {"name": "test-svc"}
-    iceberg_mod._snapshot_files_cache["test-svc"] = (
-        "s3://b/meta.json",
-        42,
-        "s3://b/iceberg/",
-        ["f1.parquet", "f2.parquet"],
-    )
-
-    with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
-        iceberg_mod._save_persistent_cache(src)
-        cache_file = tmp_path / "snapshot_files_cache.json"
-        assert cache_file.exists()
-        data = json.loads(cache_file.read_text())
-        assert data["metadata_loc"] == "s3://b/meta.json"
-        assert data["snapshot_id"] == 42
-        assert data["local_iceberg_files"] == ["f1.parquet", "f2.parquet"]
-
-
-def test_save_persistent_cache_skips_when_no_in_memory_entry(tmp_path):
-    """Saving when nothing's in `_snapshot_files_cache` for the
-    source → no-op (don't write an empty file). Pinned because
-    saving an empty entry would mask the "no snapshot yet" state
-    on next process restart."""
-    import backend.core.iceberg as iceberg_mod
-
-    src = {"name": "test-svc-empty"}
-    iceberg_mod._snapshot_files_cache.pop("test-svc-empty", None)
-
-    with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
-        iceberg_mod._save_persistent_cache(src)
-
-    # No file was written
-    assert not (tmp_path / "snapshot_files_cache.json").exists()
-
-
-def test_save_persistent_cache_swallows_io_error(tmp_path):
-    """A read-only cache dir → silent no-op (don't crash the
-    snapshot pipeline). Pinned because losing this would break
-    every snapshot commit on a Docker volume mounted read-only."""
-    import backend.core.iceberg as iceberg_mod
-
-    src = {"name": "test-svc-readonly"}
-    iceberg_mod._snapshot_files_cache["test-svc-readonly"] = ("x", 1, "i", [])
-
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)),
-        patch("builtins.open", side_effect=OSError("Read-only filesystem")),
-    ):
-        # Should NOT raise
-        iceberg_mod._save_persistent_cache(src)
 
 
 # ── get_last_view_stats / inject_view_debug ──────────────────────────────
@@ -645,36 +530,6 @@ def test_inject_view_debug_is_noop_when_no_cached_stats():
     # Unchanged
     assert len(debug_list) == 1
     assert debug_list[0]["sql"] == "user query"
-
-
-# ── table_location ──────────────────────────────────────────────────────
-
-
-def test_table_location_returns_none_when_catalog_load_fails():
-    """If `_get_catalog().load_table()` raises (table not initialised
-    yet), return None. Pinned because callers do `if loc:` to
-    distinguish a missing table from an empty location."""
-    from backend.core.iceberg import table_location
-
-    with patch("backend.core.iceberg._get_catalog", side_effect=RuntimeError("no catalog")):
-        assert table_location({"name": "svc", "bucket": "b", "prefix": ""}) is None
-
-
-def test_table_location_returns_s3_uri_from_loaded_table():
-    """When the catalog + table load succeed, return the table's
-    .location(). Pinned because the dashboard's "table location"
-    indicator renders this URI verbatim."""
-    from backend.core.iceberg import table_location
-
-    fake_table = MagicMock()
-    fake_table.location.return_value = "s3://my-bucket/iceberg/default/logs"
-    fake_catalog = MagicMock()
-    fake_catalog.load_table.return_value = fake_table
-
-    with patch("backend.core.iceberg._get_catalog", return_value=fake_catalog):
-        out = table_location({"name": "svc", "bucket": "b", "prefix": ""})
-
-    assert out == "s3://my-bucket/iceberg/default/logs"
 
 
 # ── buffer_files ────────────────────────────────────────────────────────
@@ -1017,318 +872,6 @@ def test_commit_buffer_chunks_commits_when_files_exceed_chunk_size(tmp_path, mon
     )
 
 
-# ── _read_metadata_pointer error swallow paths ─────────────────────────
-
-
-def test_read_metadata_pointer_returns_none_on_s3_failure():
-    """Failures from S3 GET → None. Pinned because the caller does
-    `if loc:` to fall back to scanning manifests — None signals
-    "use the slow path"."""
-    from backend.core.iceberg import _read_metadata_pointer
-
-    fake_s3 = MagicMock()
-    fake_s3.get_object.side_effect = RuntimeError("Connection refused")
-
-    with patch("backend.core.duckdb._get_fos_client", return_value=fake_s3):
-        out = _read_metadata_pointer(
-            {"name": "svc", "bucket": "b", "prefix": ""},
-            ("default", "logs"),
-        )
-
-    assert out is None
-
-
-# ── _load_table_cached (Stream G — post-commit metadata.json GET avoidance) ──
-
-
-def test_load_table_cached_returns_cached_when_metadata_location_matches():
-    """Cache hit: pointer matches cached table's metadata_location → return
-    cached object, never touch the catalog. Pinned because this is the
-    sole code path that eliminates the ~865 KB metadata.json refetch
-    inside metadata_sync's init_iceberg_table after every commit."""
-    import backend.core.iceberg as iceberg_mod
-
-    src = {"bucket": "b", "prefix": "", "name": "svc-cache-hit"}
-    identifier = ("default", "logs")
-
-    cached = MagicMock()
-    cached.metadata_location = "s3://b/iceberg/default/logs/metadata/01.metadata.json"
-    iceberg_mod._set_cached_table(src, identifier, cached)
-
-    fake_catalog = MagicMock()
-    fake_catalog.load_table.side_effect = AssertionError("must not call catalog.load_table on cache hit")
-
-    try:
-        with (
-            patch("backend.core.iceberg._read_metadata_pointer", return_value=cached.metadata_location),
-            patch("backend.core.iceberg._get_catalog", return_value=fake_catalog),
-        ):
-            result = iceberg_mod._load_table_cached(src, identifier)
-
-        assert result is cached
-        fake_catalog.load_table.assert_not_called()
-    finally:
-        iceberg_mod._invalidate_cached_table(src, identifier)
-
-
-def test_load_table_cached_calls_catalog_when_pointer_mismatches():
-    """Cache miss by mismatch: pointer advanced (another writer committed)
-    → fall through to catalog.load_table and replace the cache entry.
-    Pinned to keep the cross-process freshness invariant."""
-    import backend.core.iceberg as iceberg_mod
-
-    src = {"bucket": "b", "prefix": "", "name": "svc-cache-miss"}
-    identifier = ("default", "logs")
-
-    stale = MagicMock()
-    stale.metadata_location = "s3://b/iceberg/default/logs/metadata/01.metadata.json"
-    iceberg_mod._set_cached_table(src, identifier, stale)
-
-    fresh = MagicMock()
-    fresh.metadata_location = "s3://b/iceberg/default/logs/metadata/02.metadata.json"
-    fake_catalog = MagicMock()
-    fake_catalog.load_table.return_value = fresh
-
-    try:
-        with (
-            patch("backend.core.iceberg._read_metadata_pointer", return_value=fresh.metadata_location),
-            patch("backend.core.iceberg._get_catalog", return_value=fake_catalog),
-        ):
-            result = iceberg_mod._load_table_cached(src, identifier)
-
-        assert result is fresh
-        fake_catalog.load_table.assert_called_once_with(identifier)
-        # Cache now reflects the fresh table
-        assert iceberg_mod._get_cached_table(src, identifier, fresh.metadata_location) is fresh
-        assert iceberg_mod._get_cached_table(src, identifier, stale.metadata_location) is None
-    finally:
-        iceberg_mod._invalidate_cached_table(src, identifier)
-
-
-def test_load_table_cached_calls_catalog_when_cache_empty():
-    """Cold cache: must call catalog.load_table once and store the result.
-    Pinned to confirm the fast path is opt-in via prior population, not
-    eager."""
-    import backend.core.iceberg as iceberg_mod
-
-    src = {"bucket": "b", "prefix": "", "name": "svc-cache-empty"}
-    identifier = ("default", "logs")
-    iceberg_mod._invalidate_cached_table(src, identifier)
-
-    loaded = MagicMock()
-    loaded.metadata_location = "s3://b/iceberg/default/logs/metadata/01.metadata.json"
-    fake_catalog = MagicMock()
-    fake_catalog.load_table.return_value = loaded
-
-    try:
-        with (
-            patch("backend.core.iceberg._read_metadata_pointer", return_value=loaded.metadata_location),
-            patch("backend.core.iceberg._get_catalog", return_value=fake_catalog),
-        ):
-            result = iceberg_mod._load_table_cached(src, identifier)
-
-        assert result is loaded
-        fake_catalog.load_table.assert_called_once_with(identifier)
-        assert iceberg_mod._get_cached_table(src, identifier, loaded.metadata_location) is loaded
-    finally:
-        iceberg_mod._invalidate_cached_table(src, identifier)
-
-
-def test_load_table_cached_falls_through_when_pointer_returns_none():
-    """Pointer read fails (None): cannot validate cache freshness, so call
-    catalog.load_table. Pinned because the pointer is the integrity check
-    — without it we must trust the catalog, not stale local state."""
-    import backend.core.iceberg as iceberg_mod
-
-    src = {"bucket": "b", "prefix": "", "name": "svc-no-pointer"}
-    identifier = ("default", "logs")
-
-    # Even with something in cache, no pointer means we cannot prove freshness
-    stale = MagicMock()
-    stale.metadata_location = "s3://b/iceberg/default/logs/metadata/01.metadata.json"
-    iceberg_mod._set_cached_table(src, identifier, stale)
-
-    fresh = MagicMock()
-    fresh.metadata_location = "s3://b/iceberg/default/logs/metadata/02.metadata.json"
-    fake_catalog = MagicMock()
-    fake_catalog.load_table.return_value = fresh
-
-    try:
-        with (
-            patch("backend.core.iceberg._read_metadata_pointer", return_value=None),
-            patch("backend.core.iceberg._get_catalog", return_value=fake_catalog),
-        ):
-            result = iceberg_mod._load_table_cached(src, identifier)
-
-        assert result is fresh
-        fake_catalog.load_table.assert_called_once_with(identifier)
-    finally:
-        iceberg_mod._invalidate_cached_table(src, identifier)
-
-
-# ── _reconcile_snapshot_cache_after_sync ────────────────────────────────
-
-
-def test_reconcile_snapshot_cache_flips_uris_to_local_paths(tmp_path):
-    """After sync_data downloads a file referenced by s3:// URI in the
-    cache, the next view build should see the local path instead.
-    Pinned because without this, the union-builder's local-vs-S3
-    selection rule would keep falling through to iceberg_scan even
-    after the file is on disk."""
-    import backend.core.iceberg as iceberg_mod
-
-    # Create the local file that sync_data would have downloaded
-    part_dir = tmp_path / "data" / "timestamp_hour=2026-05-20-02"
-    part_dir.mkdir(parents=True)
-    downloaded = part_dir / "f.parquet"
-    downloaded.write_bytes(b"")
-
-    src = {"name": "test-rec-svc"}
-    iceberg_mod._snapshot_files_cache["test-rec-svc"] = (
-        "md",
-        100,
-        "loc",
-        [
-            "s3://b/iceberg/data/timestamp_hour=2026-05-20-02/f.parquet",  # just downloaded
-            "s3://b/iceberg/data/timestamp_hour=2026-05-20-02/missing.parquet",  # still missing
-            str(tmp_path / "data" / "already_local.parquet"),  # already-local entry
-        ],
-    )
-
-    try:
-        with (
-            patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)),
-            patch.object(iceberg_mod, "_save_persistent_cache"),
-        ):
-            iceberg_mod._reconcile_snapshot_cache_after_sync(src)
-
-        cached = iceberg_mod._snapshot_files_cache["test-rec-svc"]
-        assert cached[3][0] == str(downloaded)  # flipped to local
-        assert cached[3][1].startswith("s3://")  # still URI
-        assert cached[3][2] == str(tmp_path / "data" / "already_local.parquet")  # unchanged
-    finally:
-        iceberg_mod._snapshot_files_cache.pop("test-rec-svc", None)
-
-
-def test_reconcile_snapshot_cache_noop_when_cache_missing(tmp_path):
-    """No cache entry for the source → silent no-op (don't raise).
-    Pinned because sync_data's slow-path branch builds the cache from
-    scratch; calling reconcile in that case shouldn't blow up if the
-    cache wasn't seeded yet."""
-    import backend.core.iceberg as iceberg_mod
-
-    src = {"name": "never-cached"}
-    iceberg_mod._snapshot_files_cache.pop("never-cached", None)
-
-    with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
-        iceberg_mod._reconcile_snapshot_cache_after_sync(src)  # must not raise
-
-    assert "never-cached" not in iceberg_mod._snapshot_files_cache
-
-
-# ── Stream I: _ImmutableWriteCacheTee (write-time bytes cache seed) ───────
-
-
-class _FakeWriteHandle:
-    """Minimal file-like stand-in for an s3fs.S3File write handle.
-
-    Mirrors only the surface the tee actually touches: write(b), close(),
-    and optional context-manager protocol. Tests inject a configurable
-    close-fail to verify cache-poisoning protection.
-    """
-
-    def __init__(self, fail_on_close: bool = False):
-        self.buf = bytearray()
-        self.closed = False
-        self.fail_on_close = fail_on_close
-
-    def write(self, data):
-        self.buf.extend(data if isinstance(data, (bytes, bytearray, memoryview)) else bytes(data))
-        return len(data)
-
-    def close(self):
-        if self.fail_on_close:
-            raise OSError("upload failed")
-        self.closed = True
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        self.close()
-
-
-def _clear_manifest_cache():
-    import backend.core.iceberg as iceberg_mod
-
-    iceberg_mod._manifest_bytes_cache.clear()
-    # _manifest_cache_size is a module-level int; reset for test isolation.
-    # The cache_put accounting reads/writes it via `global`, so reaching in
-    # is the standard way to reset bookkeeping between tests.
-    iceberg_mod._manifest_cache_size = 0
-
-
-def test_immutable_write_cache_tee_seeds_cache_on_clean_close():
-    """Writing through the tee to a successful close populates
-    _manifest_bytes_cache under the canonical key — exactly what the
-    subsequent _update_snapshot_cache_from_delta GET will look for."""
-    import backend.core.iceberg as iceberg_mod
-
-    _clear_manifest_cache()
-    handle = _FakeWriteHandle()
-    path = "s3://bucket/iceberg/default/logs/metadata/snap-12345.avro"
-    payload = b"avro-bytes-payload-x" * 64
-
-    tee = iceberg_mod._ImmutableWriteCacheTee(handle, path)
-    tee.write(payload)
-    tee.close()
-
-    assert handle.closed, "tee.close() must invoke the underlying handle.close()"
-    cached = iceberg_mod._cache_get(path)
-    assert cached == payload, "cache should contain the just-written bytes under the canonical key"
-
-
-def test_immutable_write_cache_tee_does_not_seed_on_close_failure():
-    """If the underlying upload (handle.close) fails, the LRU must NOT
-    be poisoned with bytes that never landed in FOS — a subsequent GET
-    would otherwise return stale local bytes for a file that the cloud
-    never received."""
-    import backend.core.iceberg as iceberg_mod
-
-    _clear_manifest_cache()
-    handle = _FakeWriteHandle(fail_on_close=True)
-    path = "s3://bucket/iceberg/default/logs/metadata/snap-doomed.avro"
-
-    tee = iceberg_mod._ImmutableWriteCacheTee(handle, path)
-    tee.write(b"will-not-land-in-fos")
-    with pytest.raises(OSError):
-        tee.close()
-
-    assert iceberg_mod._cache_get(path) is None, "cache must stay empty when the underlying upload fails"
-
-
-def test_immutable_write_cache_tee_canonicalizes_key_for_round_trip():
-    """The reader looks up by canonical key (scheme + leading-slash
-    stripped). The tee must seed under the same canonical form so a
-    write at ``s3://b/...`` hits a read at ``b/...`` and vice versa.
-    """
-    import backend.core.iceberg as iceberg_mod
-
-    _clear_manifest_cache()
-    handle = _FakeWriteHandle()
-    write_path = "s3://bucket/iceberg/default/logs/metadata/snap-roundtrip.avro"
-    read_path = "bucket/iceberg/default/logs/metadata/snap-roundtrip.avro"
-    payload = b"round-trip-bytes" * 32
-
-    tee = iceberg_mod._ImmutableWriteCacheTee(handle, write_path)
-    tee.write(payload)
-    tee.close()
-
-    assert iceberg_mod._cache_get(read_path) == payload, (
-        "scheme-prefixed write should be visible to scheme-stripped read via _canonical_cache_key"
-    )
-
-
 def test_buffer_backlog_stats_empty_buffer(tmp_path):
     from backend.core import iceberg as ice
 
@@ -1363,6 +906,38 @@ def test_buffer_backlog_stats_reports_count_bytes_age(tmp_path):
     assert stats["total_bytes"] == 300
     assert stats["oldest_age_seconds"] >= 590  # within 10s of the 600s backdate
     assert stats["oldest_path"] == str(f1)
+
+
+def test_buffer_files_respects_table_name_for_recursive_glob(tmp_path, monkeypatch):
+    """Non-'logs' table_name triggers recursive glob under buffer/<table_name>/."""
+    from backend.core.iceberg import buffer as buf_mod
+
+    buf = tmp_path / "buffer" / "rum_events" / "sub"
+    buf.mkdir(parents=True)
+    target = buf / "ev1.parquet"
+    target.write_bytes(b"x")
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: str(tmp_path))
+
+    out = buf_mod.buffer_files({"name": "svc"}, table_name="rum_events")
+    assert str(target) in out
+
+
+def test_sweep_respects_table_name_for_recursive_glob(tmp_path, monkeypatch):
+    """Non-'logs' table_name triggers recursive tombstone sweep under buffer/<table_name>/."""
+    from backend.core.iceberg import buffer as buf_mod
+
+    buf = tmp_path / "buffer" / "rum_events" / "sub"
+    buf.mkdir(parents=True)
+    pq_file = buf / "ev.parquet"
+    pq_file.write_bytes(b"x")
+    marker = buf / "ev.parquet.consumed-100"
+    marker.write_text("")
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: str(tmp_path))
+
+    swept = buf_mod.sweep_tombstoned_buffer_files({"name": "svc"}, grace_seconds=10, now=500, table_name="rum_events")
+    assert swept == 1
+    assert not pq_file.exists()
+    assert not marker.exists()
 
 
 # Silence ruff unused-imports

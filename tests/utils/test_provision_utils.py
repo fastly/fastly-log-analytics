@@ -20,29 +20,6 @@ import pytest
 
 from backend.provision import utils as pu
 
-# ── _mask: secret-friendly truncation ────────────────────────────────────────
-
-
-def test_mask_empty_returns_empty():
-    assert pu._mask("") == ""
-
-
-def test_mask_short_string_unchanged():
-    """Strings shorter than ``visible`` are returned as-is — there's no
-    secret to hide if the whole value would fit."""
-    assert pu._mask("short", visible=8) == "short"
-    # Exactly at the boundary: still unchanged
-    assert pu._mask("12345678", visible=8) == "12345678"
-
-
-def test_mask_long_string_truncated_with_ellipsis():
-    assert pu._mask("supersecretvalue", visible=8) == "supersec..."
-
-
-def test_mask_respects_custom_visible():
-    assert pu._mask("supersecretvalue", visible=4) == "supe..."
-
-
 # ── _highlight: regex-driven quote highlighting ──────────────────────────────
 
 

@@ -31,9 +31,6 @@ from backend.repositories._sql.insights import (
     COALESCED_URL_EXTENDED_AGGREGATES,
     REPEATED_BOT_UA_REGEX,
 )
-from backend.repositories._sql.insights import (
-    COALESCED_SCALAR_AGGREGATES as COALESCED_SCALAR_AGGREGATES,
-)
 from backend.utils.telemetry import record_telemetry_query
 
 from .registry import registry

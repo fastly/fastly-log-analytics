@@ -102,7 +102,7 @@ def test_compact_time_series_closed_days_and_30d_rollup_read(tmp_path: Path, mon
     for h in range(now.hour):
         _write_time_series_hour(con, hour_root, f"{today_str}-{h:02d}", reqs=30)
 
-    rollup_coverage.clear_listdir_cache()
+    rollup_coverage._listdir_cache.clear()
     runner = repo_base.QueryRunner(con, src)
 
     total = runner.try_count_from_rollup(
@@ -260,7 +260,7 @@ def test_rolling_window_uses_daily_time_series_bundle_when_day0_partial(
     compacted = compact_time_series_closed_days_to_daily(service, src, lookback_days=10)
     assert compacted == 7
 
-    rollup_coverage.clear_listdir_cache()
+    rollup_coverage._listdir_cache.clear()
     # Rolling 6.5-day window starting mid-day on days[0] (12:00Z -> 12 hours on day 0 + 6*24 hours on days 1..6 = 156 hours)
     runner = repo_base.QueryRunner(con, src)
     ts = runner.try_time_series_from_rollup(

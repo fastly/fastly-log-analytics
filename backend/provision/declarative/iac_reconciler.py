@@ -154,59 +154,6 @@ def discover_current_state(logging_service_id: str, token: str) -> dict[str, Any
     }
 
 
-def print_speculative_execution_plan(desired: UnifiedDesiredState, current: dict[str, Any]) -> None:
-    """Print a highly detailed, developer-friendly execution diff plan."""
-    print("\n" + "=" * 55)
-    print("=== DECLARATIVE IaC SPECULATIVE EXECUTION PLAN ===")
-    print("=" * 55)
-    print(f"Logging Service ID: {desired.service_id}")
-    print()
-
-    print("Phase 1: Storage Layer (KV Stores)")
-    for name, store_def in desired.kv_stores.items():
-        if name not in current["kv_stores"]:
-            print(f"  + [CREATE] KV Store: '{name}'")
-            for k in store_def.keys:
-                print(f"    + [SYNC] Write Key: '{k}' (binary payload)")
-        else:
-            print(f"  ~ [REUSE] KV Store: '{name}'")
-            for k in store_def.keys:
-                print(f"    ~ [SYNC] Rewrite/Sync Key: '{k}'")
-
-    for name in current["kv_stores"]:
-        if name not in desired.kv_stores:
-            print(f"  - [DELETE] KV Store: '{name}'")
-
-    print()
-    print("Phase 2: Compute Layer (Serverless Scorer)")
-    if desired.compute_scorer:
-        if not current["compute_scorer"]:
-            print(f"  + [CREATE] Compute Service: '{desired.compute_scorer.name}'")
-            print(f"    + [DOMAIN] Route: '{desired.compute_scorer.domains[0]}'")
-            print(f"    + [PACKAGE] Deploy prebuilt WASM from '{desired.compute_scorer.package_path}'")
-            print(f"    + [LINK] Associate resource: '{desired.compute_scorer.linked_kv_stores[0]}'")
-        else:
-            print(
-                f"  ~ [REUSE] Compute Service: '{desired.compute_scorer.name}' (ID: {current['compute_scorer'].get('id')})"
-            )
-            print("    ~ [PACKAGE] Verify and deploy newer WASM package version if needed")
-    elif current["compute_scorer"]:
-        print(
-            f"  - [DELETE] Compute Service: '{current['compute_scorer'].get('name')}' (ID: {current['compute_scorer'].get('id')})"
-        )
-
-    print()
-    print("Phase 2.5: DNS & Readiness Probe Guard")
-    if desired.compute_scorer:
-        print(f"  * [PROBE] Check readiness of domain 'https://{desired.compute_scorer.domains[0]}/health'")
-
-    print()
-    print("Phase 3: VCL Edge Routing Layer")
-    print("  ~ [RECONCILE] Generate snippets, custom fields, and backends dynamically")
-    print("  ~ [ACTIVATE] Commit configuration to VCL edge and trigger version activation")
-    print("=" * 55 + "\n")
-
-
 def verify_compute_scorer_readiness(
     compute_def: DeclarativeComputeService,
     token: str,
@@ -265,7 +212,6 @@ def reconcile_infrastructure(
 
     # 2. Speculative Execution Diff Plan
     if dry_run:
-        print_speculative_execution_plan(desired, current)
         return
 
     # Transactional rollback: remember the keys this flow owns (the ``scoring`` block and the scoring

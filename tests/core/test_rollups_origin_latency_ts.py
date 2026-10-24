@@ -33,6 +33,7 @@ from tests._helpers.dates import three_days_ago_iso as _three_days_ago_iso
 from tests._helpers.dates import two_days_ago_iso as _two_days_ago_iso
 from tests._helpers.dates import yesterday_iso as _yesterday_iso
 from tests._helpers.locks import noop_lock as _noop_lock
+from tests._helpers.rollups import build_writer_patches as _build_patches
 
 pytestmark = pytest.mark.usefixtures("frozen_clock")
 
@@ -56,23 +57,6 @@ def _seed_logs(con: duckdb.DuckDBPyConnection, table: str, rows: list[dict], *, 
             f"INSERT INTO {table} VALUES ({placeholders})",
             [r.get(c) for c in colnames],
         )
-
-
-def _build_patches(cache_root, table: str, con_factory):
-    """The common writer-side patch stack — _cache_dir, the resolved view
-    table, the read-only connection, the iceberg lock, and the stale-view
-    retry shim. ``con_factory`` hands each driver pass its OWN connection
-    (build_per_hour_bundles closes it in its finally)."""
-    return (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value=table),
-        patch("backend.core.duckdb.get_connection", side_effect=lambda *a, **k: con_factory()),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
-            side_effect=lambda c, _src, fn: fn(c),
-        ),
-    )
 
 
 def _write_hour_olts(cache_root: str, hour: str, rows: list[dict]) -> str:

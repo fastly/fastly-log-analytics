@@ -19,6 +19,7 @@ import {
 
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
+import { formatElapsed } from '@/lib/format'
 import { queryKeys } from '@/lib/query-keys'
 import { useServiceStore } from '@/stores/serviceStore'
 import type { components } from '@/types/api.generated'
@@ -51,11 +52,7 @@ async function fetchClickHouseStatus(
 }
 
 function formatAgeSeconds(seconds: number | null | undefined): string {
-  if (seconds == null || Number.isNaN(seconds)) return '—'
-  if (seconds < 60) return `${seconds.toFixed(1)}s`
-  if (seconds < 3600) return `${(seconds / 60).toFixed(1)}m`
-  if (seconds < 86400) return `${(seconds / 3600).toFixed(1)}h`
-  return `${(seconds / 86400).toFixed(1)}d`
+  return formatElapsed(seconds, { fractionDigits: { seconds: 1, minutes: 1, hours: 1, days: 1 }, fallback: '—' })
 }
 
 function formatTimestamp(iso: string | null | undefined): string {

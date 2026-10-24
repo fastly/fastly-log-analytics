@@ -7,6 +7,7 @@ import os
 import random
 import time
 from argparse import ArgumentParser
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from threading import Event, Thread
@@ -23,7 +24,6 @@ from backend.high_scale.deletion import (
     HighScaleDeletionSweeper,
     PostgresDeletionLedger,
 )
-from backend.high_scale.fairness import FairScheduler, WorkItem
 from backend.high_scale.ingest_controller import HighScaleIngestController
 from backend.high_scale.orchestration import HighScaleWorkerCoordinator, PageRun
 from backend.high_scale.postgres_control import PostgresControlPlane
@@ -42,7 +42,7 @@ class WorkerPageResult:
 
 
 class FairPageSelector:
-    """Chooses which (service, domain) pages run each tick through ``FairScheduler``.
+    """Chooses which (service, domain) pages run each tick with weighted fairness.
 
     Without a capacity every page runs every tick, in the original service and
     domain order, so behavior matches a plain nested loop. With a capacity,
@@ -66,18 +66,43 @@ class FairPageSelector:
         self._pairs = pairs
         self._order = {pair: index for index, pair in enumerate(pairs)}
         self._capacity = capacity or None
-        self._scheduler = FairScheduler()
-        for service_id in sorted(services):
-            self._scheduler.register(service_id, weight=(weights or {}).get(service_id, 1))
+        self._services = tuple(sorted(services))
+        self._weights: dict[str, int] = {}
+        for service_id in self._services:
+            w = (weights or {}).get(service_id, 1)
+            if w <= 0:
+                raise ValueError("service weight must be positive")
+            self._weights[service_id] = w
+        self._queues: dict[str, deque[str]] = {service_id: deque() for service_id in self._services}
+        self._deficits: dict[str, int] = {service_id: 0 for service_id in self._services}
         self._queued: set[tuple[str, str]] = set()
 
     def select(self) -> list[tuple[str, str]]:
         for pair in self._pairs:
             if pair not in self._queued:
                 self._queued.add(pair)
-                self._scheduler.enqueue(WorkItem(service_id=pair[0], cost=1, payload=pair[1]))
+                self._queues[pair[0]].append(pair[1])
         capacity = self._capacity if self._capacity is not None else len(self._pairs)
-        selected = [(item.service_id, str(item.payload)) for item in self._scheduler.dispatch(capacity)]
+        selected: list[tuple[str, str]] = []
+        for service_id in self._services:
+            if len(selected) >= capacity:
+                break
+            queue = self._queues[service_id]
+            if queue:
+                selected.append((service_id, queue.popleft()))
+                self._deficits[service_id] += self._weights[service_id] - 1
+        while len(selected) < capacity and any(self._queues.values()):
+            progressed = False
+            for service_id in self._services:
+                queue = self._queues[service_id]
+                while queue and self._deficits[service_id] >= 1 and len(selected) < capacity:
+                    selected.append((service_id, queue.popleft()))
+                    self._deficits[service_id] -= 1
+                    progressed = True
+            if not progressed:
+                for service_id, queue in self._queues.items():
+                    if queue:
+                        self._deficits[service_id] += self._weights[service_id]
         self._queued.difference_update(selected)
         selected.sort(key=self._order.__getitem__)
         if self._queued:

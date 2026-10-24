@@ -76,12 +76,6 @@ def test_iceberg_caches_are_registered_at_import():
     names = set(CacheRegistry.names())
     for required in (
         "iceberg._view_cache",
-        "iceberg._snapshot_files_cache",
-        "iceberg._catalog_cache",
-        "iceberg._table_object_cache",
-        "iceberg._pointer_cache",
-        "iceberg._manifest_metadata_cache",
-        "iceberg._ui_metadata_cache",
         "dashboard._dashboard_cache",
         "network._response_cache",
         "duckdb._fos_client_cache",

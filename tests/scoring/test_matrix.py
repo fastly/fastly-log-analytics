@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -11,7 +10,6 @@ from backend.scoring.matrix import (
     build_matrix,
     default_version,
     serialize_kv,
-    write_matrix,
 )
 from backend.scoring.normalize import normalize
 
@@ -145,55 +143,11 @@ def test_build_matrix_empty_input_returns_empty_matrix():
     assert len(m.vocab) == 0
 
 
-# ── write_matrix: serialization ──────────────────────────────────────────────
-
-
-def test_write_matrix_is_canonical_json():
-    """Output must be deterministic across runs on the same input —
-    needed for matrix-version diffs and Wasm-package hash stability."""
-    m = TransitionMatrix()
-    m.add_transition(normalize("/home"), normalize("/products"))
-    m.session_count = 1
-
-    buf1, buf2 = io.StringIO(), io.StringIO()
-    write_matrix(m, "test-v1", buf1)
-    write_matrix(m, "test-v1", buf2)
-
-    # built_at differs across calls — strip it to compare the rest.
-    j1 = json.loads(buf1.getvalue())
-    j2 = json.loads(buf2.getvalue())
-    j1.pop("built_at")
-    j2.pop("built_at")
-    assert j1 == j2
-
-
-def test_write_matrix_includes_all_required_keys():
-    m = TransitionMatrix()
-    m.add_transition(normalize("/home"), normalize("/products"))
-    buf = io.StringIO()
-    write_matrix(m, "test-v1", buf)
-    j = json.loads(buf.getvalue())
-    expected_keys = {
-        "version",
-        "built_at",
-        "vocab_size",
-        "session_count",
-        "transition_count",
-        "counts",
-        "row_totals",
-        "categories",
-        "anchors",
-    }
-    assert set(j.keys()) == expected_keys
-    assert j["version"] == "test-v1"
-    assert j["vocab_size"] == 2
-
-
 # ── End-to-end: built matrix is usable by the scorer ─────────────────────────
 
 
 def test_built_matrix_round_trips_through_scorer():
-    """The schema written by ``write_matrix`` is exactly what the L2 scorer
+    """The schema returned by ``to_json_dict`` is exactly what the L2 scorer
     expects — verify the contract end-to-end."""
     from backend.scoring.normalize import normalize as norm
     from backend.scoring.scorer import score_layer2
@@ -204,9 +158,7 @@ def test_built_matrix_round_trips_through_scorer():
     common = [_session(["/home", "/products"]) for _ in range(100)]
     rare = [_session(["/home", "/about"])]
     matrix, _ = build_matrix(common + rare)
-    buf = io.StringIO()
-    write_matrix(matrix, "test", buf)
-    loaded = json.loads(buf.getvalue())
+    loaded = matrix.to_json_dict("test")
 
     # Common transition (100/101) → ~no penalty.
     score_common, _, p_common = score_layer2(loaded, norm("/home"), None, norm("/products"))

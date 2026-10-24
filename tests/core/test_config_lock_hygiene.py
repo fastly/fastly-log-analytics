@@ -187,34 +187,3 @@ def test_save_config_cannot_rotate_the_salt():
     before = _salt()
     svcconfig.save_config(SID, {"service_id": SID, "rum": {"cid_salt": "attacker-chosen-salt-value"}})
     assert _salt() == before
-
-
-def test_rotate_cid_salt_changes_the_salt_and_is_audited(monkeypatch):
-    from backend.core import duckdb as ddb
-    from backend.core import metadata as metadata_db
-
-    audits = []
-    monkeypatch.setattr(metadata_db, "record_audit", lambda *a, **k: audits.append((a, k)))
-    before = _salt()
-    new = ddb.rotate_cid_salt(SID, actor="tester")
-    assert new != before and _salt() == new and len(new) == 64
-    assert ddb.get_or_generate_cid_salt(SID) == new
-    ((args, kwargs),) = audits
-    assert args[1] == "cid_salt_rotated" and kwargs["actor"] == "tester"
-    assert before not in json.dumps(args) and new not in json.dumps(args)
-    # and a later ordinary save keeps the rotated salt
-    svcconfig.update_status(SID, {"z": 1})
-    assert _salt() == new
-
-
-def test_rotate_cid_salt_unknown_service_raises():
-    from backend.core import duckdb as ddb
-
-    with pytest.raises(LookupError):
-        ddb.rotate_cid_salt("does-not-exist")
-
-
-def test_rotate_cid_salt_is_not_a_route():
-    from backend.main import app
-
-    assert not [r for r in app.routes if "rotate" in getattr(r, "path", "") and "salt" in getattr(r, "path", "")]

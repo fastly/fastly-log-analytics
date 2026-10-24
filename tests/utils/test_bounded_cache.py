@@ -97,19 +97,6 @@ def test_clear_drops_everything():
         assert f"k{i}" not in cache
 
 
-def test_reap_drops_expired_entries():
-    """After reap(), expired entries are gone and fresh ones remain."""
-    cache = BoundedTTLCache(maxsize=10, ttl_seconds=0.05)
-    cache["a"] = 1
-    cache["b"] = 2
-    time.sleep(0.10)
-    cache["c"] = 3  # fresh entry shouldn't be reaped
-    cache.reap()
-    assert "a" not in cache
-    assert "b" not in cache
-    assert cache["c"] == 3
-
-
 def test_lazy_reap_fires_after_n_writes():
     """The cache should automatically sweep expired entries every Nth
     write so cardinality stays bounded under heavy churn."""

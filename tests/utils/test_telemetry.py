@@ -297,3 +297,142 @@ def test_query_iothread_calls_does_not_synchronously_flush_proxy(monkeypatch):
         f"_query_iothread_calls_from_usage_log must NOT block on the proxy "
         f"flusher (M5 regression). Got flush calls with timeouts: {flush_calls}"
     )
+
+
+# ── Merged from test_telemetry_unit.py ──────────────────────────────────────
+
+import time
+
+import pytest
+
+from backend.utils import telemetry as _t
+
+
+@pytest.fixture(autouse=True)
+def _isolate_telemetry_state():
+    """Each test starts and ends with a clean process_context + tracked-calls list."""
+    prior_ctx = _t.get_process_context()
+    _t.start_call_tracking()
+    try:
+        yield
+    finally:
+        _t._set_process_context_for_tests(prior_ctx)
+        _t.start_call_tracking()
+
+
+def test_query_iothread_calls_returns_empty_when_no_context():
+    _t._set_process_context_for_tests(None)
+    assert _t._query_iothread_calls_from_usage_log() == []
+
+
+def test_query_iothread_calls_returns_empty_when_debug_off(monkeypatch):
+    monkeypatch.setattr("backend.models.common._debug_responses_enabled", lambda: False)
+    assert _t._query_iothread_calls_from_usage_log() == []
+
+
+def test_query_iothread_calls_returns_empty_when_no_start_ts(monkeypatch):
+    monkeypatch.setattr("backend.models.common._debug_responses_enabled", lambda: True)
+    _t._REQUEST_START_TS.set(None)
+    assert _t._query_iothread_calls_from_usage_log() == []
+
+
+def test_query_iothread_calls_returns_empty_for_non_api_context(monkeypatch):
+    monkeypatch.setattr("backend.models.common._debug_responses_enabled", lambda: True)
+    _t._REQUEST_START_TS.set(time.time())
+    _t._set_process_context_for_tests("cron:sync")
+    assert _t._query_iothread_calls_from_usage_log() == []
+
+
+def test_record_call_swallows_otel_failure(monkeypatch):
+    _t.start_call_tracking()
+    import sys
+    import types
+
+    fake = types.ModuleType("opentelemetry.trace")
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("otel sabotage")
+
+    fake.get_current_span = _boom  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "opentelemetry.trace", fake)
+    _t.record_call(
+        method="GET",
+        path="/x",
+        time_ms=5.0,
+        service="CDN",
+        status=200,
+        caller="tests.unit",
+    )
+    calls = _t.get_tracked_calls()
+    assert any(c.get("path") == "/x" for c in calls)
+
+
+def test_is_full_miss_chain_variants():
+    assert _t.is_full_miss("HIT, HIT") is False
+    assert _t.is_full_miss("MISS, HIT") is False
+    assert _t.is_full_miss("MISS, MISS") is True
+    assert _t.is_full_miss("PASS") is True
+    assert _t.is_full_miss(None) is False
+    assert _t.is_full_miss("") is False
+
+
+def test_process_context_scope_pops_on_exit():
+    _t._set_process_context_for_tests("outer")
+    try:
+        with _t.process_context_scope("inner"):
+            assert _t.get_process_context() == "inner"
+            raise ValueError("boom")
+    except ValueError:
+        pass
+    assert _t.get_process_context() == "outer"
+
+
+def test_get_process_context_with_fallback_returns_contextvar_value():
+    _t._set_process_context_for_tests("ctx-direct")
+    assert _t.get_process_context_with_fallback() == "ctx-direct"
+
+
+def test_query_iothread_calls_returns_shaped_rows(monkeypatch):
+    monkeypatch.setattr("backend.models.common._debug_responses_enabled", lambda: True)
+    monkeypatch.setattr("backend.config.is_usage_logging_enabled", lambda: True)
+    monkeypatch.setattr("backend.config.get_active_service_id", lambda: "svc-x")
+    _t._REQUEST_START_TS.set(time.time() - 1)
+    _t._set_process_context_for_tests("api:/foo")
+
+    class _Cur:
+        def fetchall(self):
+            return [
+                ("GET", "/object/a", 200, 12.3, "fastly.client", 1024, "B"),
+                ("GET", "/object/b", 200, 4.5, "fastly.cdn", 512, "CDN"),
+            ]
+
+    class _Con:
+        def execute(self, *_a, **_kw):
+            return _Cur()
+
+        def close(self):
+            pass
+
+    class _FakeDB:
+        @staticmethod
+        def open_readonly(_sid):
+            return _Con()
+
+    monkeypatch.setattr("backend.core.metadata.usage_log_db", _FakeDB, raising=False)
+    import sys
+
+    monkeypatch.setitem(sys.modules, "backend.core.metadata.usage_log_db", _FakeDB)
+
+    rows = _t._query_iothread_calls_from_usage_log()
+    assert len(rows) == 2
+    services = {r["service"] for r in rows}
+    assert services == {"FOS", "CDN"}
+    assert rows[0]["method"] == "GET"
+    assert rows[0]["details"] == "iothread (via usage_log)"
+
+
+def test_get_process_context_with_fallback_falls_back_to_stack():
+    _t._set_process_context_for_tests(None)
+    with _t.process_context_scope("ctx-via-mirror"):
+        _t._PROCESS_CONTEXT.set(None)
+        assert _t.get_process_context_with_fallback() == "ctx-via-mirror"

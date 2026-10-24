@@ -29,8 +29,6 @@ from backend.core.field_registry import (
     BY_CODE,
     BY_GROUP,
     REGISTRY,
-    SECURITY_HOOK_CODES,
-    WIRE_ORDER,
     Agg,
     DuckType,
     FilterOp,
@@ -39,7 +37,6 @@ from backend.core.field_registry import (
 )
 from backend.core.log_fields import (
     _BUILTIN_FIELD_NAMES,
-    GROUP_DEPENDENCIES,
     LOG_FIELD_CATALOG,
 )
 
@@ -109,7 +106,7 @@ def test_registry_codes_match_log_fields() -> None:
     while both views are live, they must agree on the set of codes.
     """
     legacy = {entry["id"] for entry in LOG_FIELD_CATALOG}
-    new = fr.all_codes()
+    new = set(BY_CODE)
     missing_from_new = legacy - new
     missing_from_legacy = new - legacy
     assert not missing_from_new, f"registry is missing legacy codes: {missing_from_new}"
@@ -124,53 +121,43 @@ def test_registry_codes_match_builtin_set() -> None:
     shadows a built-in one — exactly the failure that `validate_custom_field`
     is supposed to catch.
     """
-    assert fr.all_codes() == set(_BUILTIN_FIELD_NAMES)
+    assert set(BY_CODE) == set(_BUILTIN_FIELD_NAMES)
 
 
 @pytest.mark.security_regression
 def test_wire_order_matches_legacy_emission_order() -> None:
-    """WIRE_ORDER is byte-identical to the legacy catalog's VCL emission order.
+    """Emission order in REGISTRY is byte-identical to the legacy catalog's VCL emission order.
 
     The Rust scorer reads positional JSON keys; reordering REGISTRY rows
     without coordinating with `compute/` silently breaks scorer parity.
     This test is the boot-time gate that fails loudly in CI.
     """
     legacy_emission_order = tuple(entry["id"] for entry in LOG_FIELD_CATALOG if entry["vcl"] is not None)
-    assert WIRE_ORDER == legacy_emission_order
+    assert tuple(f.code for f in REGISTRY if not f.is_derived) == legacy_emission_order
 
 
 def test_default_off_codes_match_legacy_catalog() -> None:
-    """The registry's ``DEFAULT_OFF_CODES`` covers exactly the catalog entries
-    flagged ``default_off`` — and agrees with ``log_fields.DEFAULT_OFF_FIELD_IDS``.
-
-    ``default_off`` fields are opt-in (excluded from ``resolve_enabled_fields``
-    unless explicitly enabled); a divergence between the two views would let a
-    field be opt-in in one resolution path and auto-on in another.
-    """
+    """The registry's ``default_off`` flags match ``log_fields.DEFAULT_OFF_FIELD_IDS``."""
     from backend.core.log_fields import DEFAULT_OFF_FIELD_IDS
 
     legacy = {entry["id"] for entry in LOG_FIELD_CATALOG if entry.get("default_off")}
-    assert fr.DEFAULT_OFF_CODES == legacy
-    assert fr.DEFAULT_OFF_CODES == DEFAULT_OFF_FIELD_IDS
-    assert "cookie_session" in fr.DEFAULT_OFF_CODES
+    default_off_codes = {f.code for f in REGISTRY if f.default_off}
+    assert default_off_codes == legacy
+    assert default_off_codes == DEFAULT_OFF_FIELD_IDS
+    assert "cookie_session" in default_off_codes
 
 
 @pytest.mark.security_regression
 def test_security_hook_codes_match_legacy_hooks() -> None:
     """Every field the registry tags as security-hooked has a `json.escape`
     or digit-regex guard in its legacy VCL string.
-
-    This guards against a new field landing without a hook: if anyone adds
-    a VCL expression that interpolates an attacker-influenced value and
-    forgets json.escape, the SECURITY_HOOK_CODES set will be smaller than
-    expected and the security regression sweep will catch the omission.
     """
     legacy_hooks = {
         entry["id"]
         for entry in LOG_FIELD_CATALOG
         if entry.get("vcl") is not None and _LEGACY_SEC_HOOK.search(entry["vcl"]) is not None
     }
-    assert SECURITY_HOOK_CODES == legacy_hooks
+    assert {f.code for f in REGISTRY if f.has_security_hook} == legacy_hooks
 
 
 # ---------------------------------------------------------------------------
@@ -186,14 +173,7 @@ def test_by_group_partitions_registry() -> None:
             assert f.group is group
             assert f.code not in seen, f"{f.code} appears in multiple group buckets"
             seen.add(f.code)
-    assert seen == fr.all_codes()
-
-
-def test_group_dependencies_match_legacy() -> None:
-    """The dataclass-side `_GROUP_REQS` agrees with legacy GROUP_DEPENDENCIES."""
-    # Translate legacy (string-keyed) to the enum-keyed registry view.
-    legacy_translated = {Group.from_legacy(g): Group.from_legacy(req) for g, req in GROUP_DEPENDENCIES.items()}
-    assert legacy_translated == dict(fr._GROUP_REQS)
+    assert seen == set(BY_CODE)
 
 
 def test_core_group_fields_are_always_on() -> None:
@@ -211,35 +191,6 @@ def test_derived_fields_have_no_vcl() -> None:
     """`is_derived` is exactly the `vcl is None` predicate."""
     for f in REGISTRY:
         assert f.is_derived is (f.vcl is None)
-
-
-def test_loggable_fields_emit_vcl() -> None:
-    """`loggable()` returns fields whose `render_vcl()` is non-None."""
-    for f in fr.loggable():
-        assert f.render_vcl() is not None
-    for f in fr.derived():
-        assert f.render_vcl() is None
-
-
-def test_render_vcl_no_limits_returns_baseline() -> None:
-    """`render_vcl()` without overrides matches the raw catalog VCL byte-for-byte."""
-    for f in REGISTRY:
-        baseline = f.render_vcl()
-        assert baseline == f.vcl
-
-
-def test_render_vcl_substr_cap_override() -> None:
-    """`render_vcl({code: N})` substitutes the cap inside the substr literal."""
-    url = BY_CODE["url"]
-    assert url.substr_cap == 2000
-    rendered = url.render_vcl({"url": 500})
-    assert rendered is not None
-    assert "substr(req.url, 0, 500)" in rendered
-    assert "substr(req.url, 0, 2000)" not in rendered
-
-    # Override matching the default is a no-op (no string change).
-    same = url.render_vcl({"url": 2000})
-    assert same == url.vcl
 
 
 # ---------------------------------------------------------------------------
@@ -298,24 +249,6 @@ def test_hypothesis_every_code_lookup_succeeds(code: str) -> None:
     _ = f.has_security_hook
     _ = f.is_derived
     _ = f.is_always_on
-    _ = f.render_vcl()
-
-
-@given(
-    code=st.sampled_from(sorted(f.code for f in REGISTRY)),
-    cap=st.integers(min_value=1, max_value=10_000),
-)
-def test_hypothesis_render_vcl_never_raises(code: str, cap: int) -> None:
-    """`render_vcl({code: cap})` returns either None or a non-empty string,
-    never raises, for any combination of known code and reasonable cap.
-    """
-    f = fr.get(code)
-    out = f.render_vcl({code: cap})
-    if f.vcl is None:
-        assert out is None
-    else:
-        assert isinstance(out, str)
-        assert len(out) > 0
 
 
 @given(op_value=st.sampled_from([op.value for op in FilterOp]))

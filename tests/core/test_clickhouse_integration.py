@@ -18,7 +18,7 @@ from uuid import uuid4
 import duckdb
 
 from backend.core.clickhouse_client import CLICKHOUSE_FACT_COLUMNS, ClickHouseClient, get_clickhouse_client
-from backend.core.clickhouse_export import FosArtifacts, export_reader
+from backend.core.clickhouse_export import FosArtifacts
 from backend.core.clickhouse_manifest import Artifact, Dataset, PgManifest
 from backend.core.clickhouse_publication import (
     DurableBatch,
@@ -28,7 +28,7 @@ from backend.core.clickhouse_publication import (
     readiness,
     replay_unpublished,
 )
-from backend.core.clickhouse_rows import build_batch_id, digest_rows
+from backend.core.clickhouse_rows import build_batch_id, canonical_row, digest_rows
 from backend.core.clickhouse_schema import create_clickhouse_schema, target_identity
 from backend.repositories.clickhouse_dashboard import query_slice
 from tests.core.clickhouse_fos_fixture import TinyFos
@@ -401,11 +401,21 @@ class PublicationIntegration(unittest.TestCase):
         objects = FosArtifacts({"service_id": self.service, "bucket": "test-bucket"}, client=TinyFos())
         dataset = replace(self.dataset, dataset_id=uuid4().hex)
         with duckdb.connect() as con:
-            reader = con.execute(
-                "SELECT 'source' AS source_identity, TIMESTAMP '2026-09-01' AS timestamp, "
-                "NULL::VARCHAR AS country, '192.0.2.1' AS ip, '/' AS url, 1::BIGINT AS conn_requests FROM range(5)"
-            ).fetch_record_batch(2)
-            exported = export_reader(reader, dataset=dataset, objects=objects, store=self.store, batch_rows=2)
+            raw_rows = (
+                con.execute(
+                    "SELECT 'source' AS source_identity, TIMESTAMP '2026-09-01' AS timestamp, "
+                    "NULL::VARCHAR AS country, '192.0.2.1' AS ip, '/' AS url, 1::BIGINT AS conn_requests FROM range(5)"
+                )
+                .fetch_arrow_table()
+                .to_pylist()
+            )
+        rows = []
+        for idx, row in enumerate(raw_rows):
+            row["row_ordinal"] = idx
+            rows.append(canonical_row(row))
+        artifacts = [objects.put(dataset, tuple(rows[i : i + 2])) for i in range(0, len(rows), 2)]
+        exported = replace(dataset, expected_rows=len(rows), canonical_digest=digest_rows(tuple(rows)))
+        self.store.seal(exported, artifacts)
         self.assertEqual(exported.expected_rows, 5)
         partial = full_rebuild(
             self.service, exported.dataset_id, loader=objects.load, limit=1, store=self.store, client=self.client

@@ -10,12 +10,9 @@ from backend.core.rollups._common import parse_hour_token
 from backend.utils.date_utils import (
     _parse_dt,
     ensure_utc,
-    floor_to_day,
-    floor_to_hour,
     iso_z,
     iso_z_now,
     parse_date_window,
-    parse_day_key,
     parse_day_key_strict,
     parse_hour_key,
     parse_hour_key_strict,
@@ -190,24 +187,13 @@ def test_parse_hour_key_malformed(key):
 @pytest.mark.parametrize("key", ["2026-10-19", "2024-02-29", "2026-1-5"])
 def test_parse_day_key_matches_raw_strptime(key):
     raw = datetime.strptime(key, "%Y-%m-%d").replace(tzinfo=UTC)
-    assert parse_day_key(key) == raw
     assert parse_day_key_strict(key) == raw
 
 
 @pytest.mark.parametrize("key", ["", "2026-02-30", "2026-10-19-05", "x"])
 def test_parse_day_key_malformed(key):
-    assert parse_day_key(key) is None
     with pytest.raises(ValueError):
         parse_day_key_strict(key)
-
-
-def test_floor_helpers():
-    dt = datetime(2026, 10, 19, 13, 45, 12, 999, tzinfo=UTC)
-    assert floor_to_hour(dt) == datetime(2026, 10, 19, 13, tzinfo=UTC)
-    assert floor_to_day(dt) == datetime(2026, 10, 19, tzinfo=UTC)
-    naive = datetime(2026, 10, 19, 13, 45)
-    assert floor_to_hour(naive) == datetime(2026, 10, 19, 13)
-    assert floor_to_hour(naive).tzinfo is None
 
 
 def test_ensure_utc_naive_is_labelled_utc():

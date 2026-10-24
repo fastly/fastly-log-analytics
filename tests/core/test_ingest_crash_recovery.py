@@ -77,8 +77,6 @@ def ingest_env(s3_mock, fos_source, tmp_path, monkeypatch):
 
     monkeypatch.setattr("backend.core.ingest._get_fos_client", lambda _src: _Shim(s3_mock))
 
-    for cache in (ice._catalog_cache, ice._snapshot_files_cache, ice._table_object_cache):
-        cache.clear()
     if hasattr(ice, "_view_cache"):
         ice._view_cache.clear()
 

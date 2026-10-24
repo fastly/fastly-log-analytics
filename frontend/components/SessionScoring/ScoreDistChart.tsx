@@ -1,9 +1,6 @@
 'use client'
 
-import { AlertCircle } from 'lucide-react'
-
-import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { CardErrorState } from '@/components/CardErrorState'
+import { type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ScoreDistHelp } from '@/components/SessionScoring/help-content'
 
 import { StackedHourlyBarChart } from './StackedHourlyBarChart'
@@ -30,30 +27,11 @@ const BUCKET_COLORS: Record<(typeof BUCKETS)[number], string> = {
 }
 
 export function ScoreDistChart({ serviceId, sinceHours = 24 }: ScoreDistChartProps) {
-  const { data, isLoading, isFetching, isError, error, refetch } = useScoringQuery(['scoring-score-dist', serviceId, sinceHours], () =>
+  const { data, isLoading, isFetching, isError, error } = useScoringQuery(['scoring-score-dist', serviceId, sinceHours], () =>
     client.GET('/api/services/{service_id}/scoring/score-distribution', {
       params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } },
     }),
   )
-
-  if (isError) {
-    return (
-      <AnalyticsCard
-        title={`Score distribution — last ${sinceHours}h`}
-        description="Hourly counts of scored requests, bucketed by edge_score. Heavy red is the alarming bucket — sessions VCL would block under a strict policy."
-        helpContent={<ScoreDistHelp />}
-        helpTitle="About Score Distribution"
-      >
-        <CardErrorState
-          variant="stacked"
-          icon={<AlertCircle className="h-4 w-4" />}
-          title="Failed to load score distribution"
-          message={(error as Error)?.message ?? 'unknown error'}
-          onRetry={() => refetch()}
-        />
-      </AnalyticsCard>
-    )
-  }
 
   return (
     <StackedHourlyBarChart<DistRow>
@@ -64,6 +42,7 @@ export function ScoreDistChart({ serviceId, sinceHours = 24 }: ScoreDistChartPro
       isLoading={isLoading}
       isFetching={isFetching}
       isEmpty={(data?.rows?.length ?? 0) === 0}
+      error={isError ? (error as AnalyticsCardError) : null}
       rows={data?.rows ?? []}
       categoryKey="bucket"
       colors={BUCKET_COLORS}

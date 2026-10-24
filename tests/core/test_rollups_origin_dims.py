@@ -26,7 +26,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from tests._helpers.dates import past_hour as _past_hour
-from tests._helpers.locks import noop_lock as _noop_lock
+from tests._helpers.rollups import build_writer_patches as _build_patches
 
 pytestmark = pytest.mark.usefixtures("frozen_clock")
 
@@ -53,30 +53,6 @@ def _seed_logs(con: duckdb.DuckDBPyConnection, table: str, rows: list[dict]) -> 
                 r.get("ttfb"),
             ],
         )
-
-
-def _build_patches(cache_root, table: str, con_factory):
-    """The common writer-side patch stack — _cache_dir, the resolved view
-    table, the read-only connection, the iceberg lock, and the stale-view
-    retry shim.
-
-    ``con_factory`` is a zero-arg callable returning a FRESH connection each
-    time. In production ``get_connection`` opens a new connection per call and
-    the shared driver closes it in its ``finally``; origin_dims drives the
-    shared driver once PER bundle (3×), so a single reused connection would be
-    closed after the first bundle. The factory hands each driver pass its own
-    connection — matching the prod semantics.
-    """
-    return (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value=table),
-        patch("backend.core.duckdb.get_connection", side_effect=lambda *a, **k: con_factory()),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
-            side_effect=lambda c, _src, fn: fn(c),
-        ),
-    )
 
 
 # ── Writer: happy path / top-K ──────────────────────────────────────────────

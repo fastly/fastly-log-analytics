@@ -47,24 +47,6 @@ def parse_day_key_strict(s: str) -> datetime:
     return datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=UTC)
 
 
-def parse_day_key(s: str) -> datetime | None:
-    """Like :func:`parse_day_key_strict` but returns ``None`` when malformed."""
-    try:
-        return parse_day_key_strict(s)
-    except ValueError:
-        return None
-
-
-def floor_to_hour(dt: datetime) -> datetime:
-    """Truncate to the top of the hour, preserving tzinfo."""
-    return dt.replace(minute=0, second=0, microsecond=0)
-
-
-def floor_to_day(dt: datetime) -> datetime:
-    """Truncate to midnight, preserving tzinfo."""
-    return dt.replace(hour=0, minute=0, second=0, microsecond=0)
-
-
 def ensure_utc(dt: datetime) -> datetime:
     """Return ``dt`` as an aware UTC datetime.
 

@@ -4,9 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from backend.high_scale.ledger import HighScaleLedger
 from backend.high_scale.orchestration import HighScaleWorkerCoordinator
-from backend.high_scale.ownership import OwnershipStore
 from backend.high_scale.source_discovery import (
     INITIAL_SOURCE_CURSOR,
     TERMINAL_SOURCE_CURSOR_PREFIX,
@@ -14,6 +12,7 @@ from backend.high_scale.source_discovery import (
     SourceObjectMissingError,
     SourceObjectPage,
 )
+from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
 
 
 @dataclass
@@ -52,10 +51,6 @@ class _Reader:
 
 @dataclass
 class _MissingObjectReader:
-    """Raises ``SourceObjectMissingError`` for one key, as if the raw object
-    had already been deleted from storage (e.g. by a legacy raw-deletion
-    path racing high-scale ownership)."""
-
     missing_key: str
 
     def read_source_object(self, service_id: str, domain: str, object_key: str) -> bytes:
@@ -70,25 +65,25 @@ class _Controller:
         self.fail_once = fail_once
         self.calls = 0
 
-    def ingest(self, **kwargs: object) -> None:
-        self.calls += 1
-        key = str(kwargs["object_key"])
+    def ingest_batch(self, **kwargs: object):
+        sources_payloads = list(kwargs.get("sources_payloads") or ())  # type: ignore[arg-type]
+        self.calls += len(sources_payloads)
         if self.fail_once:
             self.fail_once = False
             raise RuntimeError("lost acknowledgement")
-        claim = self.ledger.claim("svc", key, "worker")
-        self.ledger.mark_appended("svc", key, claim.lease_generation)
-        self.ledger.mark_archived("svc", key, claim.lease_generation, "manifest-1", 1)
-        self.ledger.acknowledge("svc", key, "manifest-1")
+        for desc, _ in sources_payloads:
+            key = desc.object_key
+            cur = self.ledger.source("svc", key)
+            gen = cur.lease_generation if cur is not None else 1
+            self.ledger.mark_appended("svc", key, gen)
+            self.ledger.mark_archived("svc", key, gen, "manifest-1", 1)
+            self.ledger.acknowledge("svc", key, "manifest-1")
+        return type("BatchResult", (), {"sources_count": len(sources_payloads)})()
 
 
 def _coordinator(*, owner: str = "high_scale", fail_once: bool = False):
     ownership = OwnershipStore()
     ownership.initialize("svc", owner=owner, source_cursor="cursor-0")
-    # source_cursor_for no longer falls back to the owner-level cursor for a
-    # domain that hasn't advanced yet (see test_ownership.py for why) — seed
-    # the "request" domain's own cursor explicitly instead of relying on
-    # that removed fallback.
     if owner == "high_scale":
         ownership.advance_cursor("svc", "cursor-0", expected_owner=owner, expected_epoch=1, domain="request")
     ledger = HighScaleLedger()
@@ -155,11 +150,6 @@ def test_failed_acknowledgement_can_be_retried_after_lease_recovery() -> None:
 
 
 def test_missing_source_is_recorded_durably_and_does_not_block_the_cursor() -> None:
-    """The regression this exists for: a claimed source whose raw object was
-    already deleted (e.g. by legacy cleanup racing high-scale ownership)
-    must not be silently skipped, and must not retry forever blocking every
-    later object in the stream behind it. It gets recorded as a durable
-    ``source_missing`` failure and the cursor still advances."""
     ownership = OwnershipStore()
     ownership.initialize("svc", owner="high_scale", source_cursor="cursor-0")
     ledger = HighScaleLedger()
@@ -190,12 +180,8 @@ def test_missing_source_is_recorded_durably_and_does_not_block_the_cursor() -> N
     assert source is not None
     assert source.status == "source_missing"
     assert "raw/gone.gz" in (source.last_error or "")
-    # Cursor advances despite the missing object — the data is unrecoverable
-    # regardless of retries, so blocking discovery behind it is strictly worse.
     assert ownership.source_cursor_for("svc", "request") == "cursor-1"
 
-    # A later page must treat it as terminal (skipped as a duplicate), not
-    # re-attempt it forever.
     lister.page = SourceObjectPage((SourceObjectDescriptor("raw/gone.gz", "sha256:gone", 4, "v1"),), "cursor-1")
     second = coordinator.run_page(service_id="svc", domain="request", cursor="cursor-1")
     assert second.duplicates == 1
@@ -223,9 +209,6 @@ def test_final_page_persists_terminal_cursor_for_new_objects_only() -> None:
     ownership = OwnershipStore()
     ownership.initialize("svc", owner="high_scale", source_cursor="cursor-0")
     ledger = HighScaleLedger()
-    # The "request" domain has no per-domain cursor yet, so it resolves to
-    # its own initial cursor — never the owner-level "cursor-0" seed above
-    # (see test_ownership.py for why that fallback was removed).
     lister = _TerminalAwareLister(
         {
             INITIAL_SOURCE_CURSOR: SourceObjectPage(
@@ -260,10 +243,6 @@ def test_domains_keep_independent_source_cursors() -> None:
     ownership = OwnershipStore()
     ownership.initialize("svc", owner="high_scale", source_cursor="initial")
     ledger = HighScaleLedger()
-    # Neither domain has its own cursor yet, so both resolve to the shared
-    # INITIAL_SOURCE_CURSOR constant — never the owner-level "initial" seed
-    # above (see test_ownership.py for why that fallback was removed). The
-    # point of this test is that they then advance independently.
     lister = _DomainLister(
         {
             ("request", INITIAL_SOURCE_CURSOR): SourceObjectPage(
@@ -296,9 +275,6 @@ def test_domains_keep_independent_source_cursors() -> None:
 
 
 class _ThreadSafeControl:
-    """Minimal pool-backed-control-plane stand-in: every method is safe to call
-    from the coordinator's object worker threads."""
-
     def __init__(self) -> None:
         import threading
 
@@ -336,17 +312,18 @@ class _ThreadSafeControl:
             self.cursor = cursor
 
 
-class _BarrierController:
-    """Each ingest blocks until ``parties`` ingests are in flight at once, so a
-    serial coordinator breaks the barrier (timeout) and reports failures."""
+class _BarrierReader:
+    """Each read blocks until ``parties`` reads are in flight at once, so a
+    serial reader breaks the barrier (timeout) and reports failures."""
 
     def __init__(self, parties: int) -> None:
         import threading
 
         self.barrier = threading.Barrier(parties, timeout=5)
 
-    def ingest(self, **kwargs: object) -> None:
+    def read_source_object(self, service_id: str, domain: str, object_key: str) -> bytes:
         self.barrier.wait()
+        return b"payload"
 
 
 @dataclass
@@ -358,16 +335,12 @@ class _AnyPageLister:
 
 
 def test_page_objects_are_processed_concurrently_with_pool_backed_control_plane() -> None:
-    """Per-object ingest is round-trip bound (~3 s of FOS/Postgres/ClickHouse
-    calls for a 1-3 row object), so a serial page could not keep up with
-    seeded arrival rates — the high-scale request lag regression. Objects in
-    one page must overlap when the control plane is pool-backed."""
     objects = tuple(SourceObjectDescriptor(f"raw/{i}.gz", f"sha256:{i}", 4, "v1") for i in range(4))
     control = _ThreadSafeControl()
     coordinator = HighScaleWorkerCoordinator(
         lister=_AnyPageLister(SourceObjectPage(objects, "cursor-1")),
-        reader=_Reader(),
-        controller=_BarrierController(4),  # type: ignore[arg-type]
+        reader=_BarrierReader(4),
+        controller=_CountingController(),  # type: ignore[arg-type]
         ownership=None,
         ledger=None,
         worker_id="worker",
@@ -384,11 +357,6 @@ def test_page_objects_are_processed_concurrently_with_pool_backed_control_plane(
 
 
 class _ContendedControl(_ThreadSafeControl):
-    """Every high-scale worker replica runs the same (service, domain) page,
-    so a sibling replica can hold the lease (claim returns claimed=False) or
-    finish the object between our terminal check and our claim (claim raises
-    "not claimable" because the row is now acknowledged)."""
-
     def __init__(self, *, held: set[str], finished: set[str]) -> None:
         super().__init__()
         self.held = held
@@ -421,14 +389,14 @@ class _CountingController:
     def __init__(self) -> None:
         self.keys: list[str] = []
 
-    def ingest(self, **kwargs: object) -> None:
-        self.keys.append(str(kwargs["object_key"]))
+    def ingest_batch(self, **kwargs: object):
+        sources_payloads = list(kwargs.get("sources_payloads") or ())  # type: ignore[arg-type]
+        for desc, _ in sources_payloads:
+            self.keys.append(str(desc.object_key))
+        return type("BatchResult", (), {"sources_count": len(sources_payloads)})()
 
 
 def test_claims_lost_to_sibling_replicas_do_not_block_the_cursor() -> None:
-    """Regression: every replica lists the same page, so a page almost always
-    contains an object a sibling holds or just finished. Counting those as
-    "failed" froze the cursor and left high-scale ingest minutes behind."""
     objects = (
         SourceObjectDescriptor("raw/held.gz", "sha256:a", 4, "v1"),
         SourceObjectDescriptor("raw/finished.gz", "sha256:b", 4, "v1"),
@@ -457,8 +425,6 @@ def test_claims_lost_to_sibling_replicas_do_not_block_the_cursor() -> None:
 
 
 def test_unexpected_unclaimable_source_still_blocks_the_cursor() -> None:
-    """A "not claimable" error whose row is NOT terminal is a real failure."""
-
     class _BrokenControl(_ThreadSafeControl):
         def claim_source(self, *args: object, **kwargs: object):
             raise ValueError("source object is not claimable: raw/x.gz")
@@ -486,7 +452,7 @@ def test_object_concurrency_rejects_non_positive_values() -> None:
         HighScaleWorkerCoordinator(
             lister=_AnyPageLister(SourceObjectPage((), None)),
             reader=_Reader(),
-            controller=_BarrierController(1),  # type: ignore[arg-type]
+            controller=_CountingController(),  # type: ignore[arg-type]
             ownership=None,
             ledger=None,
             worker_id="worker",

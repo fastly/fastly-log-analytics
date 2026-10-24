@@ -69,15 +69,6 @@ function getTimeDiff(date: string | Date) {
   return { diffSec, absSec: Math.abs(diffSec) }
 }
 
-export function formatCompactRelative(date: string | Date) {
-  const diff = getTimeDiff(date)
-  if (!diff) return ''
-  const { absSec } = diff
-
-  if (absSec <= 1) return '(any second)'
-  return `(${formatElapsed(absSec)})`
-}
-
 export function formatTimeAgo(date: string | Date) {
   const diff = getTimeDiff(date)
   if (!diff) return ''

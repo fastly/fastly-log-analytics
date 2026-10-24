@@ -1,6 +1,6 @@
 'use client'
 import React, { useState } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 import { queryKeys } from '@/lib/query-keys'
@@ -22,6 +22,8 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog'
+import { panelDialogContent, panelDialogHeaderSolid, panelDialogFooter } from '@/lib/panel-dialog'
+import { cn } from '@/lib/utils'
 import { Bot } from 'lucide-react'
 import type { ServiceConfig } from '@/types/api'
 
@@ -41,8 +43,6 @@ function NgwafDialogBody({ service, onClose }: Props) {
   const [ngwafWorkspaceId, setNgwafWorkspaceId] = useState(service?.ngwaf_workspace_id || '')
   const [ngwafWorkspaces, setNgwafWorkspaces] = useState<{ id: string; name: string }[]>([])
   const [ngwafFetchError, setNgwafFetchError] = useState('')
-  const [ngwafFetching, setNgwafFetching] = useState(false)
-  const [ngwafSaving, setNgwafSaving] = useState(false)
   const [ngwafSaved, setNgwafSaved] = useState(false)
   // Security: backend now requires a caller-supplied Fastly token for
   // the PATCH that rebinds the workspace. The admin enters the same token
@@ -51,10 +51,50 @@ function NgwafDialogBody({ service, onClose }: Props) {
   // requiring them to remember it from somewhere else.
   const [ngwafApiToken, setNgwafApiToken] = useState('')
 
+  const fetchWorkspacesMutation = useMutation({
+    mutationFn: async ({ serviceId, token }: { serviceId: string; token: string }) => {
+      const data = await unwrapClient(client.GET("/api/provision/ngwaf-workspaces", {
+        params: { query: { service_id: serviceId } },
+        headers: { Authorization: `Bearer ${token}` },
+      }))
+      return (data?.workspaces || []).flatMap((w) => (w.id && w.name ? [{ id: w.id, name: w.name }] : []))
+    },
+    onMutate: () => {
+      setNgwafWorkspaces([])
+      setNgwafFetchError('')
+    },
+    onSuccess: (workspaces) => {
+      setNgwafWorkspaces(workspaces)
+    },
+    onError: (e) => {
+      setNgwafFetchError(extractApiError(e) || 'Could not load workspaces')
+    },
+  })
+
+  const saveWorkspaceMutation = useMutation({
+    mutationFn: async ({ serviceId, token, workspaceId }: { serviceId: string; token: string; workspaceId: string | null }) => {
+      return unwrapClient(client.PATCH("/api/provision/services/{service_id}/ngwaf-workspace", {
+        params: { path: { service_id: serviceId } },
+        headers: { Authorization: `Bearer ${token}` },
+        body: { ngwaf_workspace_id: workspaceId },
+      }))
+    },
+    onSuccess: () => {
+      setNgwafSaved(true)
+      queryClient.invalidateQueries({ queryKey: queryKeys.services() })
+    },
+    onError: (e) => {
+      setNgwafFetchError(extractApiError(e) || 'Failed to save')
+    },
+  })
+
+  const ngwafFetching = fetchWorkspacesMutation.isPending
+  const ngwafSaving = saveWorkspaceMutation.isPending
+
   return (
     <Dialog open={!!service} onOpenChange={(open) => { if (!open) onClose() }}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
+      <DialogContent className={cn("sm:max-w-md", panelDialogContent)}>
+        <DialogHeader className={panelDialogHeaderSolid}>
           <DialogTitle className="flex items-center gap-2">
             <Bot className="h-5 w-5 text-primary" />
             NGWAF Bot Enrichment
@@ -64,7 +104,7 @@ function NgwafDialogBody({ service, onClose }: Props) {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-2">
+        <div className="px-6 py-4 space-y-4 overflow-y-auto flex-1">
           {/* Security: token must be supplied before workspace fetch
               AND before workspace save. Single input drives both. */}
           {service && !ngwafSaved && (
@@ -89,22 +129,9 @@ function NgwafDialogBody({ service, onClose }: Props) {
                   size="sm"
                   variant="outline"
                   disabled={!ngwafApiToken.trim() || ngwafFetching}
-                  onClick={async () => {
+                  onClick={() => {
                     if (!service) return
-                    setNgwafWorkspaces([])
-                    setNgwafFetchError('')
-                    setNgwafFetching(true)
-                    try {
-                      const data = await unwrapClient(client.GET("/api/provision/ngwaf-workspaces", {
-                        params: { query: { service_id: service.service_id } },
-                        headers: { Authorization: `Bearer ${ngwafApiToken}` }
-                      }))
-                      setNgwafWorkspaces((data?.workspaces || []).flatMap((w) => (w.id && w.name ? [{ id: w.id, name: w.name }] : [])))
-                    } catch (e) {
-                      setNgwafFetchError(extractApiError(e) || 'Could not load workspaces')
-                    } finally {
-                      setNgwafFetching(false)
-                    }
+                    fetchWorkspacesMutation.mutate({ serviceId: service.service_id, token: ngwafApiToken })
                   }}
                   className="h-8 text-xs"
                 >
@@ -141,7 +168,7 @@ function NgwafDialogBody({ service, onClose }: Props) {
           )}
         </div>
 
-        <DialogFooter>
+        <DialogFooter className={panelDialogFooter}>
           {ngwafSaved ? (
             <Button size="sm" onClick={onClose}>Close</Button>
           ) : (
@@ -151,29 +178,13 @@ function NgwafDialogBody({ service, onClose }: Props) {
                 size="sm"
                 disabled={ngwafSaving || !ngwafApiToken.trim()}
                 title={!ngwafApiToken.trim() ? 'Enter your Fastly API token to save' : undefined}
-                onClick={async () => {
+                onClick={() => {
                   if (!service) return
-                  setNgwafSaving(true)
-                  try {
-                    // Security: backend requires a Fastly token bound
-                    // to this service. We pass whatever token the admin
-                    // entered above; backend accepts either the stored key
-                    // (constant-time match) or a token with the 'global'
-                    // scope on this service.
-                    await unwrapClient(client.PATCH("/api/provision/services/{service_id}/ngwaf-workspace", {
-                      params: {
-                        path: { service_id: service.service_id },
-                      },
-                      headers: { Authorization: `Bearer ${ngwafApiToken}` },
-                      body: { ngwaf_workspace_id: ngwafWorkspaceId.trim() || null },
-                    }))
-                    setNgwafSaved(true)
-                    queryClient.invalidateQueries({ queryKey: queryKeys.services() })
-                  } catch (e) {
-                    setNgwafFetchError(extractApiError(e) || 'Failed to save')
-                  } finally {
-                    setNgwafSaving(false)
-                  }
+                  saveWorkspaceMutation.mutate({
+                    serviceId: service.service_id,
+                    token: ngwafApiToken,
+                    workspaceId: ngwafWorkspaceId.trim() || null,
+                  })
                 }}
               >
                 {ngwafSaving ? 'Saving…' : 'Save'}

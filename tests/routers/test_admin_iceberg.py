@@ -67,9 +67,6 @@ def test_iceberg_commit_endpoint(client, override_source):
 def test_rebuild_local_view_endpoint_success(client, override_source):
     with (
         patch("backend.core.iceberg.clear_source_caches") as mock_clear,
-        patch("backend.core.duckdb._cache_dir", return_value="/tmp"),
-        patch("os.path.exists", return_value=True),
-        patch("os.remove") as mock_remove,
         patch("backend.core.duckdb.start_cron_run", return_value="run-123") as mock_start_cron,
         patch("backend.cron_progress.start_progress") as mock_prog,
         patch("threading.Thread") as mock_thread,
@@ -78,21 +75,9 @@ def test_rebuild_local_view_endpoint_success(client, override_source):
         assert response.status_code == 202
         assert response.json()["run_id"] == "run-123"
         mock_clear.assert_called_once_with("service123")
-        mock_remove.assert_called_once_with("/tmp/snapshot_files_cache.json")
         mock_start_cron.assert_called_once_with(override_source, "metadata_sync")
         mock_prog.assert_called_once_with("run-123", service_id="service123", task="metadata_sync")
         mock_thread.assert_called_once()
-
-
-def test_rebuild_local_view_endpoint_os_remove_fails(client, override_source):
-    with (
-        patch("backend.core.iceberg.clear_source_caches"),
-        patch("backend.core.duckdb._cache_dir", return_value="/tmp"),
-        patch("os.path.exists", return_value=True),
-        patch("os.remove", side_effect=OSError("denied")),
-    ):
-        response = client.post("/api/admin/rebuild-local-view")
-        assert response.status_code == 500
 
 
 def test_rebuild_local_view_endpoint_busy(client, override_source):

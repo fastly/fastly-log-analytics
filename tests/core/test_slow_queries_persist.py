@@ -110,20 +110,6 @@ def test_list_sort_by_duration_flips_order(svc_id):
     assert [r["query_id"] for r in rows] == [1, 2]
 
 
-def test_purge_old_uses_epoch_cutoff(svc_id):
-    """``started_at_utc`` is a unix-epoch REAL, not an ISO string. The
-    cleanup pass MUST compare to an epoch value — using ``datetime(
-    'now', '-Nd')`` (the path used by the other tables) silently
-    matches nothing on this table."""
-    now = time.time()
-    _meta.insert_slow_query(svc_id, _row(qid=1, duration_ms=200, started=now - 86400 * 8))  # 8d old
-    _meta.insert_slow_query(svc_id, _row(qid=2, duration_ms=200, started=now - 3600))  # 1h old
-    n = _meta.purge_old_slow_queries(svc_id, older_than_utc=now - 86400 * 7)
-    assert n == 1
-    rows = _meta.list_slow_queries(svc_id, since_utc=now - 86400 * 30)
-    assert [r["query_id"] for r in rows] == [2]
-
-
 def test_count_matches_list_length(svc_id):
     """count_slow_queries is the cheap row count for the overview card.
     It must agree with list_slow_queries under the same filters."""

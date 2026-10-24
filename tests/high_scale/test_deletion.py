@@ -19,8 +19,7 @@ from backend.high_scale.deletion import (
     HighScaleDeletionSweeper,
     PostgresDeletionLedger,
 )
-from backend.high_scale.ledger import HighScaleLedger
-from backend.high_scale.ownership import OwnershipStore
+from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
 
 
 def test_source_deletion_requires_archive_and_owner_fence() -> None:

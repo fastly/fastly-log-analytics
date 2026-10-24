@@ -81,12 +81,6 @@ def cached_listdir(path: str) -> list[str]:
     return entries
 
 
-def clear_listdir_cache() -> None:
-    """Drop the cached rollup listdir entries. Used by tests + the sync
-    writer's commit hook when fresh files have been written."""
-    _listdir_cache.clear()
-
-
 def rc_service_id(src: dict) -> str:
     """Service key used by the durable-serving readiness flag.
 
@@ -229,13 +223,6 @@ def _empty_parquet(path: str) -> bool:
         return pq.read_metadata(path).num_rows == 0
     except Exception:
         return False
-
-
-def is_empty_bundle(path: str) -> bool:
-    """Return whether a parquet bundle is the verified-empty sentinel."""
-    if not os.path.isfile(path):
-        return False
-    return _empty_parquet(path)
 
 
 class BundleProbe:

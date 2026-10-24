@@ -19,8 +19,6 @@ Public surface
 from __future__ import annotations
 
 import logging
-import os
-import threading
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 
@@ -28,19 +26,7 @@ from backend.utils.date_utils import iso_z, iso_z_now, parse_relative_time_windo
 
 logger = logging.getLogger(__name__)
 
-_DATA_DIR = os.path.join("data", "system")
-_DB_NAME = "system_metrics.db"
 _EMPTY = ""
-
-# Module-level state retained for compatibility with test fixtures.
-_local = threading.local()
-_init_lock = threading.Lock()
-_initialized = False
-
-
-def _use_postgres() -> bool:
-    """Always True in Postgres-only mode."""
-    return True
 
 
 def _pg_connection():
@@ -53,10 +39,6 @@ def _pg_write_connection():
     from backend.core.metadata.pg_connection import get_pg_thread_connection
 
     return get_pg_thread_connection()
-
-
-def _db_path() -> str:
-    return os.path.join(_DATA_DIR, _DB_NAME)
 
 
 # ── Write path ───────────────────────────────────────────────────────────────
@@ -90,36 +72,6 @@ def record_snapshot(
 
 
 # ── Read path ────────────────────────────────────────────────────────────────
-
-
-def get_history(
-    metric: str,
-    *,
-    since: datetime | str,
-    service_id: str | None = None,
-    task: str | None = None,
-) -> list[dict]:
-    """Return rows newer than ``since`` sorted oldest→newest.
-
-    Each row: ``{"ts": "...", "value": 12.3}``. Service / task are baked
-    into the query when provided so the caller doesn't have to filter.
-    """
-    if isinstance(since, str):
-        since = parse_relative_time_window(since)
-    try:
-        with closing(_pg_connection()) as con:
-            rows = con.execute(
-                """
-                SELECT ts, value FROM metric_snapshots
-                WHERE metric = %s AND service_id = %s AND task = %s AND ts >= %s
-                ORDER BY ts ASC
-                """,
-                (metric, service_id or _EMPTY, task or _EMPTY, iso_z(since)),
-            ).fetchall()
-        return [{"ts": r["ts"], "value": r["value"]} for r in rows]
-    except Exception as e:
-        logger.warning("[metric_snapshots] Postgres history read failed: %s", e)
-        return []
 
 
 def get_batch(*, since: datetime | str) -> dict:

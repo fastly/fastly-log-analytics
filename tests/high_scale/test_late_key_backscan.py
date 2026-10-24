@@ -42,12 +42,16 @@ def test_late_key_backscan_ingests_late_key_without_duplication() -> None:
         return obj_key in terminal_keys
 
     controller = MagicMock()
+    ingested_keys: list[str] = []
 
-    def mock_ingest(**kwargs):
-        terminal_keys.add(kwargs["object_key"])
-        return MagicMock()
+    def mock_ingest_batch(**kwargs):
+        sources_payloads = kwargs["sources_payloads"]
+        for src, _ in sources_payloads:
+            terminal_keys.add(src.object_key)
+            ingested_keys.append(src.object_key)
+        return MagicMock(sources_count=len(sources_payloads))
 
-    controller.ingest.side_effect = mock_ingest
+    controller.ingest_batch.side_effect = mock_ingest_batch
 
     # Claim source returns claimed=True if not in terminal_keys
     def mock_claim(service_id, obj_key, worker_id, **kwargs):
@@ -97,5 +101,5 @@ def test_late_key_backscan_ingests_late_key_without_duplication() -> None:
     assert run2.failed == 0
     assert key_c_late in terminal_keys
 
-    # Total controller ingest calls must be exactly 3 (A, B, C) - no double counting of A
-    assert controller.ingest.call_count == 3
+    # Total ingested objects across batches must be exactly 3 (A, B, C) - no double counting of A
+    assert ingested_keys == [key_a, key_b, key_c_late]

@@ -579,8 +579,6 @@ def test_generate_analyst_invite_returns_payload_with_credentials():
     with (
         patch("backend.config.load_config", return_value=fake_cfg),
         patch("backend.provision.orchestrator.fastly", return_value=fake_key),
-        # Iceberg lookup may raise — verified separately
-        patch("backend.core.iceberg._get_catalog", side_effect=RuntimeError("no catalog")),
     ):
         out = orchestrator.generate_analyst_invite("svc")
 
@@ -610,7 +608,6 @@ def test_generate_analyst_invite_sends_correct_fastly_payload():
             return_value={"access_level": "read_write", "fastly_api_key": "tok", "fos_bucket": "b"},
         ),
         patch("backend.provision.orchestrator.fastly", side_effect=fake_fastly),
-        patch("backend.core.iceberg._get_catalog", side_effect=Exception("skip")),
     ):
         orchestrator.generate_analyst_invite("svc")
 

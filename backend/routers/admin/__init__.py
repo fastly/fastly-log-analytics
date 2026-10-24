@@ -62,7 +62,7 @@ from . import (  # noqa: F401
 # Re-exports for the external import surface listed above. These run
 # AFTER the side-effect imports so the sub-modules are loaded and the
 # helper names are guaranteed to exist on the package.
-from ._dir_size import _DIR_SIZE_CACHE, _get_dir_size, _scan_dir_size  # noqa: F401
+from ._dir_size import _DIR_SIZE_CACHE, _get_dir_size  # noqa: F401
 from ._helpers import (  # noqa: F401
     ClientDisconnected,
     _AbortableQueue,

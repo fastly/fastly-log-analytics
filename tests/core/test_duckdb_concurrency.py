@@ -19,8 +19,6 @@ HTTP layer except in the long-tail latency histogram + the counter.
 
 from __future__ import annotations
 
-import subprocess
-import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -74,33 +72,6 @@ def _src(db_path: str) -> dict:
 
 
 # ── Unit: counter + backoff behavior via monkeypatched duckdb.connect ──────
-
-
-def test_process_wide_retry_counter_records_every_thread_and_resets():
-    # A fresh interpreter excludes other tests' delayed background retries
-    # while exercising the real process-global counter, lock, and public getter.
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            """
-from concurrent.futures import ThreadPoolExecutor
-from backend.core.duckdb import _record_lock_retry, _reset_lock_retry_count, get_lock_retry_count
-
-_reset_lock_retry_count()
-assert get_lock_retry_count() == 0
-with ThreadPoolExecutor(max_workers=4) as executor:
-    list(executor.map(lambda _: _record_lock_retry(), range(800)))
-assert get_lock_retry_count() == 800
-_reset_lock_retry_count()
-assert get_lock_retry_count() == 0
-""",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert result.returncode == 0, result.stderr
 
 
 def _make_failing_connect(fail_count: int, real_connect, target_path: str):

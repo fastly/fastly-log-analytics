@@ -31,12 +31,10 @@ def test_load_httpfs_prefers_cached_extension_without_installing():
     import backend.core.duckdb as db_mod
 
     con = MagicMock()
-    db_mod._httpfs_installed = False
 
     db_mod._load_httpfs(con)
 
     con.execute.assert_called_once_with("LOAD httpfs;")
-    assert db_mod._httpfs_installed is True
 
 
 def test_load_httpfs_installs_when_cached_extension_is_missing():
@@ -46,7 +44,6 @@ def test_load_httpfs_installs_when_cached_extension_is_missing():
 
     con = MagicMock()
     con.execute.side_effect = [duckdb.IOException("missing extension"), None, None]
-    db_mod._httpfs_installed = False
 
     db_mod._load_httpfs(con)
 
@@ -55,7 +52,6 @@ def test_load_httpfs_installs_when_cached_extension_is_missing():
         "INSTALL httpfs;",
         "LOAD httpfs;",
     ]
-    assert db_mod._httpfs_installed is True
 
 
 # ── _safe_iso (datetime → ISO-Z) ─────────────────────────────────────────
@@ -216,37 +212,6 @@ def test_safe_table_name_strips_leading_trailing_underscores():
     from backend.core.duckdb import _safe_table_name
 
     assert _safe_table_name("---test---") == "logs_test"
-
-
-# ── _fos_glob (S3 glob pattern) ─────────────────────────────────────────
-
-
-def test_fos_glob_with_prefix_includes_prefix_path():
-    """Source with prefix → ``s3://bucket/prefix/raw/**/*.gz``.
-    Pinned because losing the prefix would scan the wrong bucket
-    subtree."""
-    from backend.core.duckdb import _fos_glob
-
-    src = {"bucket": "b", "prefix": "my-org"}
-    assert _fos_glob(src) == "s3://b/my-org/raw/request/**/*.gz"
-
-
-def test_fos_glob_without_prefix_drops_to_bucket_root():
-    """Empty prefix → ``s3://bucket/raw/**/*.gz``. Pinned because
-    most installs don't set a prefix; losing this fallback would
-    double the trailing slash."""
-    from backend.core.duckdb import _fos_glob
-
-    assert _fos_glob({"bucket": "b", "prefix": ""}) == "s3://b/raw/request/**/*.gz"
-
-
-def test_fos_glob_strips_leading_and_trailing_slashes_in_prefix():
-    """``"/my-prefix/"`` → ``my-prefix``. Pinned because users
-    sometimes paste prefixes with surrounding slashes; losing the
-    strip would render ``s3://b//my-prefix//raw/...``."""
-    from backend.core.duckdb import _fos_glob
-
-    assert _fos_glob({"bucket": "b", "prefix": "/my-prefix/"}) == "s3://b/my-prefix/raw/request/**/*.gz"
 
 
 # ── _cache_dir (local cache for source) ─────────────────────────────────
@@ -728,49 +693,6 @@ def test_dbbusy_error_is_an_exception_subclass():
     # Instantiable + carries message
     err = DBBusyError("locked")
     assert str(err) == "locked"
-
-
-# ── get_source_by_name (metadata_db wrapper) ────────────────────────────
-
-
-def test_get_source_by_name_returns_none_for_unknown_name():
-    """Unknown source name → None (not a half-built dict). Pinned
-    because callers check `if source:` to distinguish missing from
-    misconfigured."""
-    from backend.core.duckdb import get_source_by_name
-
-    with patch("backend.core.metadata.get_source_by_name", return_value=None):
-        assert get_source_by_name(None, "ghost") is None
-
-
-def test_get_source_by_name_builds_source_dict_from_metadata_row():
-    """Known name → fully-built source dict with endpoint+bucket+
-    prefix+region+cdn fields."""
-    import json as _json
-
-    from backend.core.duckdb import get_source_by_name
-
-    fake_row = {
-        "name": "svc-1",
-        "config": _json.dumps(
-            {
-                "endpoint": "ep",
-                "bucket": "b",
-                "prefix": "p",
-                "region": "us-east-1",
-                "cdn_url": "https://cdn",
-                "cdn_secret": "shh",
-            }
-        ),
-        "table_name": "logs_svc_1",
-    }
-    with patch("backend.core.metadata.get_source_by_name", return_value=fake_row):
-        src = get_source_by_name(None, "svc-1")
-
-    assert src is not None
-    assert src["bucket"] == "b"
-    assert src["cdn_url"] == "https://cdn"
-    assert src["cdn_secret"] == "shh"
 
 
 # ── log_cron_run (success/error/skip persistence) ──────────────────────
@@ -1639,41 +1561,31 @@ def test_get_sync_status_trusts_view_count_when_smaller_than_ingested():
     assert out["latest_log_at"] == "2026-05-25T22:04:29Z"
 
 
-def test_clear_source_caches_keep_snapshot_cache_preserves_path_cache():
+def test_clear_source_caches_keep_snapshot_cache_wipes_view_cache():
     """The retry path in get_sync_status uses ``keep_snapshot_cache=True``
-    to wipe ONLY the view-SQL cache (forcing regeneration of the SELECT)
-    while preserving the snapshot/path cache. Without this, a transient
-    catalog-load failure downgrades the view to "WHERE false" and the UI
-    silently shows 0 logs."""
+    to wipe the view-SQL cache (forcing regeneration of the SELECT)."""
     from backend.core import iceberg as _ice
 
     _ice._view_cache["svc"] = ("loc", set(), tuple(), "SELECT * FROM existing_view", 1.0, False)
-    _ice._snapshot_files_cache["svc"] = ("loc", 1, "s3://b/x", ["/cache/a.parquet"])
 
     _ice.clear_source_caches("svc", keep_snapshot_cache=True)
 
     # View cache wiped (forces SELECT regeneration on next call)
     assert "svc" not in _ice._view_cache
-    # Snapshot/path cache PRESERVED (fallback when catalog re-fetch fails)
-    assert "svc" in _ice._snapshot_files_cache
-
-    # Cleanup so other tests start fresh
-    _ice._snapshot_files_cache.pop("svc", None)
 
 
 def test_clear_source_caches_default_wipes_everything():
-    """Default behavior (teardown use-case) wipes both caches AND the
-    per-service lock. Pinned so the keep_snapshot_cache change doesn't
-    accidentally weaken the teardown path."""
+    """Default behavior (teardown use-case) wipes view caches AND the
+    per-service lock."""
     from backend.core import iceberg as _ice
 
     _ice._view_cache["teardown-svc"] = ("loc", set(), tuple(), "SELECT 1", 1.0, False)
-    _ice._snapshot_files_cache["teardown-svc"] = ("loc", 1, "s3://b/x", [])
+    _ice._view_cache["teardown-svc::client_vitals"] = ("loc", set(), tuple(), "SELECT 1", 1.0, False)
 
     _ice.clear_source_caches("teardown-svc")  # no flag → full wipe
 
     assert "teardown-svc" not in _ice._view_cache
-    assert "teardown-svc" not in _ice._snapshot_files_cache
+    assert "teardown-svc::client_vitals" not in _ice._view_cache
 
 
 def test_refresh_config_status_opens_read_only_connection():

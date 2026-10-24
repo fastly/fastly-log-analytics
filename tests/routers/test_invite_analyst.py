@@ -28,7 +28,6 @@ def test_generate_viewer_key_returns_raw_credentials():
         patch("backend.config.load_config", return_value=_FAKE_CFG),
         patch("backend.provision.orchestrator.fastly", return_value=_FAKE_KEY),
         patch("backend.config.config_to_source", return_value={**_FAKE_CFG}),
-        patch("backend.core.iceberg._get_catalog", side_effect=Exception("no catalog")),
     ):
         client = TestClient(app)
         response = client.post("/api/services/svc123/generate-viewer-key")

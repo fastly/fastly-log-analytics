@@ -56,17 +56,6 @@ def test_priority_constant():
     assert SCORING_SNIPPET_PRIORITY == 100
 
 
-def test_fetch_priority_runs_first():
-    """SCORING_FETCH gets a much lower priority so its `return(deliver)`
-    fires before any other fetch-stage snippet (group-L timing capture,
-    custom origin field captures, etc.) gets a chance to run against
-    the scorer's response."""
-    from backend.provision.session_scoring_vcl import SCORING_FETCH_PRIORITY
-
-    assert SCORING_FETCH_PRIORITY < SCORING_SNIPPET_PRIORITY
-    assert SCORING_FETCH_PRIORITY <= 1
-
-
 def test_backend_name_constant():
     """Fastly's API auto-prefixes user backend names with "F_" inside VCL,
     so the API-side name ("session_scorer") maps to the VCL-side name

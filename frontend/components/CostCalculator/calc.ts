@@ -1,6 +1,6 @@
 import type { components } from '@/types/api.generated'
 
-import { formatAbbreviatedCount, formatCount } from '@/lib/format'
+import { formatAbbreviatedCount, formatCount, formatUSD } from '@/lib/format'
 export type PrefillResponse = components["schemas"]["PrefillResponse"]
 
 // ─── Billing Zones ────────────────────────────────────────────────────────────
@@ -332,8 +332,4 @@ export function calculate(s: CalcState): CalcResults {
 
 export const fmtN = (n: number): string => formatAbbreviatedCount(n, 2)
 
-export function fmtUSD(n: number): string {
-  if (n >= 1000) return '$' + n.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
-  if (n >= 1) return '$' + n.toFixed(2)
-  return '$' + n.toFixed(4)
-}
+export { formatUSD as fmtUSD }

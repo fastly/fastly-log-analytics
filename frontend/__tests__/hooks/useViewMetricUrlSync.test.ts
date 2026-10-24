@@ -52,8 +52,11 @@ vi.mock('@tanstack/react-query', () => ({
   useQueryClient: vi.fn(() => mockQueryClient),
 }))
 
-vi.mock('@/hooks/useActiveService', () => ({
-  useActiveService: vi.fn(() => ({ activeServiceId: 'test-service-id', services: [] })),
+const mockServiceStore = { activeServiceId: 'test-service-id', services: [] }
+vi.mock('@/stores/serviceStore', () => ({
+  useServiceStore: vi.fn((selector?: (s: typeof mockServiceStore) => unknown) =>
+    typeof selector === 'function' ? selector(mockServiceStore) : mockServiceStore
+  ),
 }))
 
 vi.mock('@/lib/api', () => ({

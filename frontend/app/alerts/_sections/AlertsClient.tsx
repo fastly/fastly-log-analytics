@@ -2,11 +2,12 @@
 
 import React from 'react'
 import { useSearchParams } from 'next/navigation'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useIsDataReady'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
+import { useDeferredDeleteWithUndo } from '@/hooks/useDeferredDeleteWithUndo'
 import { ReportShell } from '@/components/ReportShell'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -35,7 +36,7 @@ import {
 } from '@/components/ui/dialog'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
-import { showToastWithAction, showToast } from '@/lib/toast'
+import { showToast } from '@/lib/toast'
 import { ColumnVisibilityDropdown } from '@/components/DataTable'
 import { VisibilityState } from '@tanstack/react-table'
 import type { components } from '@/types/api.generated'
@@ -62,7 +63,6 @@ export default function AlertsClient() {
   const [isFormOpen, setIsFormOpen] = React.useState(false)
   const [editingAlert, setEditingAlert] = React.useState<Alert | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<string | null>(null)
-  const [isEvaluating, setIsEvaluating] = React.useState(false)
 
   const initialStatusParam = (searchParams?.get('status') || 'all').toLowerCase() as AlertStatusFilter
   const [statusFilter, setStatusFilter] = React.useState<AlertStatusFilter>(
@@ -79,11 +79,7 @@ export default function AlertsClient() {
     }
   }
 
-  // IDs hidden from the list while the post-confirm undo window is open.
-  // The DELETE fires after the toast duration unless the user hits Undo,
-  // which removes the id and cancels the per-id timer.
-  const [pendingDeleteIds, setPendingDeleteIds] = React.useState<Set<string>>(() => new Set())
-  const pendingTimersRef = React.useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  const { pendingDeleteIds, scheduleDelete } = useDeferredDeleteWithUndo()
   const [columnVisibility, setColumnVisibility] = React.useState<VisibilityState>({})
   const { full } = useDateFormat()
 
@@ -206,64 +202,23 @@ export default function AlertsClient() {
 
   const lastCheckedLabel = alertsRes?.evaluated_at ? full(alertsRes.evaluated_at) : 'Just now'
 
-  // Clear pending timers on unmount so the DELETE doesn't fire against a
-  // stale closure after the page is gone. Side effect: navigating away
-  // mid-window cancels the delete — acceptable since the operator never
-  // saw the change commit; they can re-delete on the next visit.
-  React.useEffect(() => {
-    const timers = pendingTimersRef.current
-    return () => {
-      for (const [, t] of timers) clearTimeout(t)
-      timers.clear()
-    }
-  }, [])
-
   const confirmDelete = React.useCallback(() => {
     if (!deleteTarget) return
     const alertId = deleteTarget
     const alertName = allAlerts.find((a) => a.id === alertId)?.name ?? 'Alert'
     setDeleteTarget(null)
-    setPendingDeleteIds((prev) => {
-      const next = new Set(prev)
-      next.add(alertId)
-      return next
-    })
-    const timer = setTimeout(async () => {
-      pendingTimersRef.current.delete(alertId)
-      try {
+    scheduleDelete({
+      id: alertId,
+      toastMessage: `Deleted "${alertName}"`,
+      performDelete: async () => {
         await unwrapClient(client.DELETE("/api/alerts/{alert_id}", {
           params: { path: { alert_id: alertId } }
         }))
         queryClient.invalidateQueries({ queryKey: ['alerts'] })
-      } catch {
-        // Restore the row on failure so the operator can retry; the global
-        // mutation-error toast (U-4) surfaces the failure separately.
-        setPendingDeleteIds((prev) => {
-          const next = new Set(prev)
-          next.delete(alertId)
-          return next
-        })
-        showToast(`Failed to delete "${alertName}"`, 'error')
-      }
-    }, 5500)
-    pendingTimersRef.current.set(alertId, timer)
-    showToastWithAction(`Deleted "${alertName}"`, {
-      actionLabel: 'Undo',
-      onAction: () => {
-        const t = pendingTimersRef.current.get(alertId)
-        if (t) {
-          clearTimeout(t)
-          pendingTimersRef.current.delete(alertId)
-        }
-        setPendingDeleteIds((prev) => {
-          const next = new Set(prev)
-          next.delete(alertId)
-          return next
-        })
       },
-      durationMs: 5500,
+      errorMessage: `Failed to delete "${alertName}"`,
     })
-  }, [deleteTarget, allAlerts, queryClient])
+  }, [deleteTarget, allAlerts, queryClient, scheduleDelete])
 
   const handleEdit = React.useCallback((alert: Alert) => {
     if (isAnalyst) return
@@ -277,23 +232,28 @@ export default function AlertsClient() {
     setIsFormOpen(true)
   }, [isAnalyst])
 
-  const handleEvaluateNow = React.useCallback(async () => {
-    if (isAnalyst || !activeServiceId) return
-    setIsEvaluating(true)
-    try {
-      const data = await unwrapClient(client.POST("/api/alerts/evaluate", {
-        body: { service_id: activeServiceId }
+  const evaluateMutation = useMutation({
+    mutationFn: async (serviceId: string) => {
+      return unwrapClient(client.POST("/api/alerts/evaluate", {
+        body: { service_id: serviceId }
       }))
+    },
+    onSuccess: async (data) => {
       const evaluated = data?.data?.evaluated ?? 0
       const triggered = data?.data?.triggered ?? 0
       showToast(`Evaluated ${evaluated} rule(s); ${triggered} triggered.`, 'success')
       await queryClient.invalidateQueries({ queryKey: ['alerts'] })
-    } catch (error) {
+    },
+    onError: (error) => {
       showToast(extractApiError(error) || 'Failed to evaluate alerts', 'error')
-    } finally {
-      setIsEvaluating(false)
-    }
-  }, [isAnalyst, activeServiceId, queryClient])
+    },
+  })
+  const isEvaluating = evaluateMutation.isPending
+
+  const handleEvaluateNow = React.useCallback(() => {
+    if (isAnalyst || !activeServiceId) return
+    evaluateMutation.mutate(activeServiceId)
+  }, [isAnalyst, activeServiceId, evaluateMutation])
 
   return (
     <ReportShell

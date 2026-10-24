@@ -1,9 +1,18 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import type { ReactElement } from 'react'
+import { render as rtlRender, screen, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { http, HttpResponse } from 'msw'
 import { server } from '@/__tests__/helpers/msw/server'
 import ShareLoginPage from '@/app/share-login/page'
+
+function render(ui: ReactElement) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  return rtlRender(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>)
+}
 
 const pushSpy = vi.fn()
 const locationAssignSpy = vi.fn()

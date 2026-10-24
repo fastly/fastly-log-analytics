@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+
+import { setupNextHeadersMock, withTestHttpServer } from '../helpers/ssr'
 
 // security.ts mirrors lib/ssr/origin.ts (the proven template) — a POST caller
 // of the shared ./_transport helper. These tests pin (1) the security
@@ -9,29 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // SSR seed key byte-matches the client first-paint key. A mismatch would
 // double-fetch (worse than no SSR).
 
-const mockCookies = vi.fn()
-const mockHeaders = vi.fn()
-vi.mock('next/headers', () => ({
-  cookies: () => mockCookies(),
-  headers: () => mockHeaders(),
-}))
-
-beforeEach(() => {
-  mockCookies.mockReturnValue({ toString: () => '', get: () => undefined })
-  mockHeaders.mockReturnValue({ get: () => null })
-})
-
-afterEach(() => {
-  mockCookies.mockReset()
-  mockHeaders.mockReset()
-  delete process.env.API_PROXY_URL
-})
-
-function headerGetter(entries: Record<string, string>) {
-  return {
-    get: (k: string) => entries[k.toLowerCase()] ?? null,
-  }
-}
+const { setHeaders } = setupNextHeadersMock()
 
 describe('resolveSecurityDefaultKey (key-match contract)', () => {
   it('cold load → rangeToken "24h", anchor floored to the 60s grid', async () => {
@@ -96,112 +76,83 @@ describe('fetchSecurityServerSide (security SSR)', () => {
   })
 
   it('fail-closed: no Caddy marker + non-loopback Host → null, never forwarded', async () => {
-    const http = await import('node:http')
-    let hit = false
-    const server = http.createServer((_req, res) => {
-      hit = true
-      res.statusCode = 200
-      res.end('{}')
-    })
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as { port: number }).port
-    process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    mockHeaders.mockReturnValue(headerGetter({ host: 'fastly-log-analytics.global.ssl.fastly.net' }))
+    setHeaders({ host: 'fastly-log-analytics.global.ssl.fastly.net' })
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    try {
-      const { fetchSecurityServerSide } = await import('@/lib/ssr/security')
-      const out = await fetchSecurityServerSide('svc-1')
-      expect(out).toBeNull()
-      expect(hit).toBe(false)
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('non-loopback/absent Host'))
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()))
-    }
+    await withTestHttpServer(
+      (_req, res) => {
+        res.statusCode = 200
+        res.end('{}')
+      },
+      async (srv) => {
+        const { fetchSecurityServerSide } = await import('@/lib/ssr/security')
+        const out = await fetchSecurityServerSide('svc-1')
+        expect(out).toBeNull()
+        expect(srv.requests).toHaveLength(0)
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('non-loopback/absent Host'))
+      },
+    )
   })
 
   it('admin SSH-tunnel (loopback Host, no marker): POSTs default keyed body as admin with service id', async () => {
-    const http = await import('node:http')
-    let captured: Record<string, string | string[] | undefined> = {}
-    let capturedMethod = ''
-    let capturedBody = ''
-    const server = http.createServer((req, res) => {
-      captured = req.headers
-      capturedMethod = req.method ?? ''
-      const chunks: Buffer[] = []
-      req.on('data', (c: Buffer) => chunks.push(c))
-      req.on('end', () => {
-        capturedBody = Buffer.concat(chunks).toString('utf8')
+    setHeaders({ host: 'localhost:3001' })
+    await withTestHttpServer(
+      (_req, res) => {
         res.statusCode = 200
         res.setHeader('Content-Type', 'application/json')
         res.end('{"ngwaf_verified_bots":{"rows":[]}}')
-      })
-    })
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as { port: number }).port
-    process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    mockHeaders.mockReturnValue(headerGetter({ host: 'localhost:3001' }))
-    try {
-      const { fetchSecurityServerSide, SECURITY_SSR_DEFAULTS, SECURITY_SSR_SECTIONS } = await import(
-        '@/lib/ssr/security'
-      )
-      const now = new Date('2026-06-29T12:00:30Z')
-      const out = await fetchSecurityServerSide('svc-1', now)
+      },
+      async (srv) => {
+        const { fetchSecurityServerSide, SECURITY_SSR_DEFAULTS, SECURITY_SSR_SECTIONS } = await import(
+          '@/lib/ssr/security'
+        )
+        const now = new Date('2026-06-29T12:00:30Z')
+        const out = await fetchSecurityServerSide('svc-1', now)
 
-      expect(out).not.toBeNull()
-      expect(out!.data).toEqual({ ngwaf_verified_bots: { rows: [] } })
-      expect(out!.rangeToken).toBe('24h')
-      expect(out!.anchor).toBe('2026-06-29T12:00:00Z')
+        expect(out).not.toBeNull()
+        expect(out!.data).toEqual({ ngwaf_verified_bots: { rows: [] } })
+        expect(out!.rangeToken).toBe('24h')
+        expect(out!.anchor).toBe('2026-06-29T12:00:00Z')
 
-      expect(capturedMethod).toBe('POST')
-      expect(captured['content-type']).toContain('application/json')
-      const body = JSON.parse(capturedBody)
-      expect(body).toEqual({
-        filters: {},
-        bucket_seconds: SECURITY_SSR_DEFAULTS.bucketSeconds,
-        sections: [...SECURITY_SSR_SECTIONS],
-        range_token: '24h',
-        anchor: '2026-06-29T12:00:00Z',
-      })
-      expect(body.start_time).toBeUndefined()
-      expect(body.end_time).toBeUndefined()
+        const req = srv.lastRequest!
+        expect(req.method).toBe('POST')
+        expect(req.headers['content-type']).toContain('application/json')
+        const body = JSON.parse(req.body)
+        expect(body).toEqual({
+          filters: {},
+          bucket_seconds: SECURITY_SSR_DEFAULTS.bucketSeconds,
+          sections: [...SECURITY_SSR_SECTIONS],
+          range_token: '24h',
+          anchor: '2026-06-29T12:00:00Z',
+        })
+        expect(body.start_time).toBeUndefined()
+        expect(body.end_time).toBeUndefined()
 
-      expect(captured['x-remote-analyst']).toBeUndefined()
-      expect(captured['x-service-id']).toBe('svc-1')
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()))
-    }
+        expect(req.headers['x-remote-analyst']).toBeUndefined()
+        expect(req.headers['x-service-id']).toBe('svc-1')
+      },
+    )
   })
 
   it('analyst (Caddy marker): POSTs as remote-analyst', async () => {
-    const http = await import('node:http')
-    let captured: Record<string, string | string[] | undefined> = {}
-    let capturedMethod = ''
-    const server = http.createServer((req, res) => {
-      captured = req.headers
-      capturedMethod = req.method ?? ''
-      const chunks: Buffer[] = []
-      req.on('data', (c: Buffer) => chunks.push(c))
-      req.on('end', () => {
+    setHeaders({
+      'x-proxied-by-caddy': 'true',
+      host: 'fastly-log-analytics.global.ssl.fastly.net',
+    })
+    await withTestHttpServer(
+      (_req, res) => {
         res.statusCode = 200
         res.setHeader('Content-Type', 'application/json')
         res.end('{"ngwaf_verified_bots":{"rows":[]}}')
-      })
-    })
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as { port: number }).port
-    process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
-    mockHeaders.mockReturnValue(
-      headerGetter({ 'x-proxied-by-caddy': 'true', host: 'fastly-log-analytics.global.ssl.fastly.net' }),
+      },
+      async (srv) => {
+        const { fetchSecurityServerSide } = await import('@/lib/ssr/security')
+        const out = await fetchSecurityServerSide('svc-1')
+        expect(out).not.toBeNull()
+        const req = srv.lastRequest!
+        expect(req.method).toBe('POST')
+        expect(req.headers['x-remote-analyst']).toBe('1')
+        expect(req.headers['x-service-id']).toBe('svc-1')
+      },
     )
-    try {
-      const { fetchSecurityServerSide } = await import('@/lib/ssr/security')
-      const out = await fetchSecurityServerSide('svc-1')
-      expect(out).not.toBeNull()
-      expect(capturedMethod).toBe('POST')
-      expect(captured['x-remote-analyst']).toBe('1')
-      expect(captured['x-service-id']).toBe('svc-1')
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()))
-    }
   })
 })
