@@ -7,7 +7,6 @@ and pure-function branches that the existing happy-path tests don't exercise.
 
 from __future__ import annotations
 
-import sqlite3
 from unittest.mock import MagicMock, patch
 
 import duckdb
@@ -16,7 +15,6 @@ import pytest
 from backend.repositories import _base, rollup_coverage
 from backend.repositories._base import (
     QueryRunner,
-    _attach_sqlite,
     clear_schema_cols_cache,
     empty_schema_response,
     error_rate_expr,
@@ -139,60 +137,6 @@ def test_empty_schema_response_merges_extra_fields():
     assert out["total"] == 0
     assert out["rows"] == []
     assert out["series"] == []
-
-
-# ── _attach_sqlite: missing file + DETACH failure swallowed ─────────────────
-
-
-def test_attach_sqlite_yields_false_when_path_missing(tmp_path):
-    """A nonexistent SQLite path yields False (the bridge isn't
-    available) — caller falls back to a Python-side query."""
-    con = duckdb.connect(":memory:")
-    try:
-        with _attach_sqlite(con, str(tmp_path / "missing.db"), "alias") as attached:
-            assert attached is False
-    finally:
-        con.close()
-
-
-def test_attach_sqlite_swallows_detach_exception(tmp_path):
-    """On exit, if DETACH raises (e.g. extension state corruption), the
-    exception is swallowed so the context exit doesn't mask the user's
-    code result."""
-    # Make a real SQLite file so ATTACH succeeds.
-    sqlite_path = tmp_path / "real.db"
-    raw = sqlite3.connect(str(sqlite_path))
-    raw.execute("CREATE TABLE t (id INTEGER)")
-    raw.commit()
-    raw.close()
-
-    con = duckdb.connect(":memory:")
-    con.execute("INSTALL sqlite_scanner; LOAD sqlite_scanner")
-    real_execute = con.execute
-    detach_called = {"n": 0}
-
-    def _patched(sql, *a, **kw):
-        if sql.startswith("DETACH"):
-            detach_called["n"] += 1
-            raise RuntimeError("simulated detach failure")
-        return real_execute(sql, *a, **kw)
-
-    try:
-        # Wrap con.execute via a wrapper class because duckdb conn.execute is read-only.
-        class _ConWrap:
-            def execute(self, sql, *a, **kw):
-                return _patched(sql, *a, **kw)
-
-            def __getattr__(self, name):
-                return getattr(con, name)
-
-        wrap = _ConWrap()
-        with _attach_sqlite(wrap, str(sqlite_path), "alias") as attached:
-            assert attached is True
-        # No exception bubbled — the detach error was swallowed.
-        assert detach_called["n"] == 1
-    finally:
-        con.close()
 
 
 # ── get_source_extent: cached / live / both-fail paths ─────────────────────

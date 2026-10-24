@@ -10,15 +10,12 @@ import { useEffectiveServiceId } from '@/hooks/useIsDataReady'
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
 import { useSyncStatus } from '@/hooks/useSyncStatus'
 import { useSSE } from '@/hooks/useSSE'
-import type { WithRequired, components } from '@/types/api'
+import type { components } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
+import { showToastWithAction } from '@/lib/toast'
+import { formatCount } from '@/lib/format'
 
 export type CronRun = components['schemas']['CronRunEntry']
-
-export type BackgroundCronToast = Pick<
-  WithRequired<components['schemas']['CronRunEntry'], 'id' | 'task' | 'status' | 'started_at'>,
-  'id' | 'task' | 'status' | 'started_at' | 'duration_s' | 'rows_ingested'
-> | null
 
 /**
  * Accumulate running and completed jobs, pruning older runs of the same task type to prevent
@@ -116,17 +113,31 @@ export function useLogsPageState(initialTab?: string) {
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [selectedConsoleJobId, setSelectedConsoleJobId] = useState<number | string | null>(null)
 
-  // Background cron toast notification state. Scoped to the service it was raised for, so
-  // switching services drops it without an effect (the stored toast simply stops matching).
-  const [toastState, setToastState] = useState<{ serviceId: string | null; toast: BackgroundCronToast }>({
-    serviceId: activeServiceId,
-    toast: null,
-  })
-  const storedToast = toastState.serviceId === activeServiceId ? toastState.toast : null
-  const setBackgroundCronToast = useCallback(
-    (toast: BackgroundCronToast) => setToastState({ serviceId: activeServiceId, toast }),
-    [activeServiceId],
-  )
+  const notifyCronRun = useCallback((run: CronRun) => {
+    const taskName = run.task === 'metadata_sync' ? 'sync' : run.task
+    const label =
+      run.status === 'running'
+        ? 'Background Sync Started'
+        : run.status === 'error'
+          ? 'Background Sync Failed'
+          : 'Background Sync Completed'
+    const details = [
+      taskName,
+      run.status !== 'running' && run.rows_ingested != null ? `${formatCount(run.rows_ingested)} rows` : null,
+      run.status !== 'running' && run.duration_s != null ? `${run.duration_s.toFixed(1)}s` : null,
+    ]
+      .filter(Boolean)
+      .join(' · ')
+    showToastWithAction(`${label} (${details})`, {
+      actionLabel: 'View Console Logs',
+      kind: run.status === 'error' ? 'error' : run.status === 'running' ? 'info' : 'success',
+      durationMs: 8000,
+      onAction: () => {
+        setSelectedConsoleJobId(run.id)
+        setConsoleOpen(true)
+      },
+    })
+  }, [])
 
   // Multi-tenant safe run ID tracker to prevent alerting old runs or cross-tenant leaks
   const maxSeenIdRef = React.useRef<number | null>(null)
@@ -253,14 +264,7 @@ export function useLogsPageState(initialTab?: string) {
           if (prev.some((j) => j.id === run.id)) return prev
           return [...prev, { ...run, status: run.status }]
         })
-        setBackgroundCronToast({
-          id: run.id,
-          task: run.task,
-          status: run.status ?? 'unknown',
-          started_at: run.started_at,
-          duration_s: run.duration_s,
-          rows_ingested: run.rows_ingested
-        })
+        notifyCronRun(run)
       })
       return
     }
@@ -279,47 +283,10 @@ export function useLogsPageState(initialTab?: string) {
           if (prev.some((j) => j.id === run.id)) return prev
           return [...prev, { ...run, status: run.status }]
         })
-
-        // Pop up the premium floating notification toast!
-        setBackgroundCronToast({
-          id: run.id,
-          task: run.task,
-          status: run.status ?? 'unknown',
-          started_at: run.started_at,
-          duration_s: run.duration_s,
-          rows_ingested: run.rows_ingested
-        })
+        notifyCronRun(run)
       })
     }
-  }, [recentCrons?.entries])
-
-  // An active running toast flips to its completed form as soon as the poll shows that run
-  // finished — derived from the stored toast + the latest poll rather than written back.
-  const recentEntries = recentCrons?.entries
-  const backgroundCronToast = React.useMemo<BackgroundCronToast>(() => {
-    if (!storedToast || storedToast.status !== 'running' || !recentEntries) return storedToast
-    const updatedRun = recentEntries.find((e) => e.id === storedToast.id)
-    if (!updatedRun || updatedRun.status === 'running') return storedToast
-    return {
-      id: updatedRun.id,
-      task: updatedRun.task,
-      status: updatedRun.status ?? 'unknown',
-      started_at: updatedRun.started_at,
-      duration_s: updatedRun.duration_s,
-      rows_ingested: updatedRun.rows_ingested,
-    }
-  }, [storedToast, recentEntries])
-
-  // Effect to auto-dismiss non-running notifications after 8 seconds of inactivity
-  useEffect(() => {
-    if (!backgroundCronToast) return
-    if (backgroundCronToast.status !== 'running') {
-      const timer = setTimeout(() => {
-        setBackgroundCronToast(null)
-      }, 8000)
-      return () => clearTimeout(timer)
-    }
-  }, [backgroundCronToast])
+  }, [recentCrons?.entries, notifyCronRun])
 
   // Auto-focus the floating console on the most relevant active job. Adjusted during render
   // from `displayedJobs` (the input), never synced through an effect.
@@ -527,8 +494,6 @@ export function useLogsPageState(initialTab?: string) {
     setConsoleOpen,
     selectedConsoleJobId,
     setSelectedConsoleJobId,
-    backgroundCronToast,
-    setBackgroundCronToast,
     displayedJobs,
     setDisplayedJobs,
     removeDisplayedJob,

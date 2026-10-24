@@ -91,15 +91,6 @@ export const ELAPSED_FRESHNESS: ElapsedOptions = {
   fractionDigits: { hours: 1 },
 }
 
-/**
- * Resolve an ISO-3166 alpha-2 country code to its English display name.
- *
- * Intl.DisplayNames is constructed PER CALL (not memoised at module scope)
- * on purpose: format.test.ts swaps the constructor with a throwing stub at
- * test time and expects the catch-fallback to fire — a module-scope instance
- * would be built before the swap and defeat that test. Non-2-char codes,
- * missing Intl, and ICU failures all fall through to the raw code unchanged.
- */
 export function resolveCountryName(code: string): string {
   if (!code || code.length !== 2 || typeof Intl === 'undefined') return code
   try {
@@ -110,22 +101,12 @@ export function resolveCountryName(code: string): string {
   }
 }
 
-/**
- * Compact count with a k/M suffix, trailing ".0" stripped (e.g. 1_000_000 →
- * "1M", 1_500 → "1.5k", 999 → "999").
- */
 export function formatCompactCount(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M'
   if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, '') + 'k'
   return String(n)
 }
 
-/**
- * Abbreviated count with a K/M/B suffix (``1_500`` -> "1.5K", ``2_345_678`` ->
- * "2.3M" at the default one decimal). ``millionDecimals`` sets the precision
- * of the M and B forms; K is always one decimal. Below 1000 it falls through to
- * ``formatCount``.
- */
 export function formatAbbreviatedCount(n: number, millionDecimals = 1): string {
   if (n >= 1e9) return (n / 1e9).toFixed(millionDecimals) + 'B'
   if (n >= 1e6) return (n / 1e6).toFixed(millionDecimals) + 'M'
@@ -136,15 +117,6 @@ export function formatAbbreviatedCount(n: number, millionDecimals = 1): string {
 const _defaultNumberFormat = new Intl.NumberFormat(undefined)
 const _optionsNumberFormatCache = new Map<string, Intl.NumberFormat>()
 
-/**
- * Locale-grouped number (e.g. 1234567 → "1,234,567"). Thin wrapper over
- * ``Intl.NumberFormat`` — byte-identical to ``n.toLocaleString()`` with the
- * same options, but centralized so analytics UI can't drift back into inline
- * ``.toLocaleString()`` calls (enforced by the ESLint ban in analytics dirs).
- *
- * Pass ``Intl.NumberFormatOptions`` for precision control, e.g.
- * ``formatCount(n, { maximumFractionDigits: 1 })``.
- */
 export function formatCount(n: number, options?: Intl.NumberFormatOptions): string {
   if (!options) {
     return _defaultNumberFormat.format(n)
@@ -158,11 +130,6 @@ export function formatCount(n: number, options?: Intl.NumberFormatOptions): stri
   return fmt.format(n)
 }
 
-/**
- * ``formatCount`` for possibly-missing values — the drop-in for
- * ``n?.toLocaleString()``: ``undefined`` in, ``undefined`` out, so callers keep
- * their ``?? '—'`` fallbacks.
- */
 export function formatCountMaybe(n: number | null | undefined, options?: Intl.NumberFormatOptions): string | undefined {
   return n == null ? undefined : formatCount(n, options)
 }

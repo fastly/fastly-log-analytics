@@ -288,20 +288,6 @@ def _collect_hourly(fn: str, allow_all: bool) -> Callable[[QueryRunner, W, Layou
     return call
 
 
-def _missing_hours(cap: int | None, coverage: str | None) -> Callable[[QueryRunner, W, Layout], Any]:
-    def call(runner: QueryRunner, w: W, lay: Layout) -> Any:
-        if w.st_dt is None or w.et_dt is None:
-            return "invalid_window"
-        kwargs: dict[str, Any] = {}
-        if cap is not None:
-            kwargs["cap"] = cap
-        if coverage is not None:
-            kwargs["coverage_bundle_filename"] = coverage
-        return rollup_coverage.find_missing_bundle_hours(w.st_dt, w.et_dt, str(lay.hour_root), TS, **kwargs)
-
-    return call
-
-
 def _day_prefer(fn: str, skip_partial_start: bool) -> Callable[[QueryRunner, W, Layout], Any]:
     def call(runner: QueryRunner, w: W, lay: Layout) -> Any:
         if w.st_dt is None or w.et_dt is None:
@@ -590,9 +576,6 @@ READERS: tuple[Reader, ...] = (
         recording=False,
     ),
     _r("prim:sessions_paths", "sessions.parquet", _sessions_paths, takes_filters=False, recording=False),
-    _r("prim:missing_hours[default]", TS, _missing_hours(None, None), takes_filters=False, recording=False),
-    _r("prim:missing_hours[coverage]", TS, _missing_hours(None, ALL_FIELDS), takes_filters=False, recording=False),
-    _r("prim:missing_hours[cap6]", TS, _missing_hours(6, ALL_FIELDS), takes_filters=False, recording=False),
     _r(
         "prim:day_prefer[hour_file]",
         "origin_pop.parquet",

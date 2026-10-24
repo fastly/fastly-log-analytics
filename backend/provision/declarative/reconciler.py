@@ -130,32 +130,32 @@ def acquire_vcl_lock(service_id: str, timeout_sec: int = 300) -> FileLock:
     lock_path = Path(f"data/services/{service_id}.vcl.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
+    from contextlib import suppress
+
+    from tenacity import Retrying, retry_if_exception_type, wait_exponential
+
     start = time.time()
-    backoff = 0.1
-
-    while True:
-        try:
-            # Try to create lock exclusively (atomic operation)
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            os.write(fd, f"{os.getpid()} {int(time.time())}".encode())
-            os.close(fd)
-            return FileLock(lock_path)
-        except FileExistsError:
-            elapsed = time.time() - start
-            if elapsed > timeout_sec:
-                raise LockAcquisitionTimeout(service_id, elapsed)
-
-            # Check if lock is stale (>5m old)
+    for attempt in Retrying(
+        wait=wait_exponential(multiplier=0.1, exp_base=1.5, min=0.1, max=1.0),
+        retry=retry_if_exception_type(FileExistsError),
+        sleep=time.sleep,
+        reraise=True,
+    ):
+        with attempt:
             try:
-                lock_mtime = lock_path.stat().st_mtime
-                if time.time() - lock_mtime > 300:
-                    lock_path.unlink(missing_ok=True)
-                    continue
-            except FileNotFoundError:
-                continue
-
-            time.sleep(min(backoff, 1.0))
-            backoff *= 1.5
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                os.write(fd, f"{os.getpid()} {int(time.time())}".encode())
+                os.close(fd)
+                return FileLock(lock_path)
+            except FileExistsError:
+                elapsed = time.time() - start
+                if elapsed > timeout_sec:
+                    raise LockAcquisitionTimeout(service_id, elapsed)
+                with suppress(FileNotFoundError):
+                    if time.time() - lock_path.stat().st_mtime > 300:
+                        lock_path.unlink(missing_ok=True)
+                raise
+    raise LockAcquisitionTimeout(service_id, time.time() - start)
 
 
 # ============================================================================

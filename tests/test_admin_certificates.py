@@ -63,56 +63,40 @@ def pki(certificate_temp):
     wrong = temp / "wrong"
     cli("client-request", "--out", wrong, "--name", "rogue")
     cli("sign-client", "--out", wrong, "--state", rogue, "--password-file", password, "--csr", wrong / "rogue.csr")
-    # Deliberately expired leaf: test helper only, production CLI rejects
-    # nonpositive lifetimes.
-    (temp / "index").write_text("")
-    (temp / "serial").write_text("1000\n")
-    ca_config = temp / "expired-ca.conf"
-    ca_config.write_text(
-        f"[ca]\ndefault_ca=local\n[local]\ndatabase={temp}/index\n"
-        f"new_certs_dir={temp}\ncertificate={state}/client-ca.crt\n"
-        f"private_key={state}/client-ca.key\nserial={temp}/serial\n"
-        "default_md=sha256\npolicy=subject\n[subject]\ncommonName=supplied\n"
+    # Deliberately expired and wrong-purpose leaves: test helpers only,
+    # production CLI rejects nonpositive lifetimes and enforces purpose.
+    from datetime import UTC, datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.x509.oid import ExtendedKeyUsageOID
+
+    from scripts.admin_certificates import _cert_builder
+
+    ca_cert = x509.load_pem_x509_certificate((state / "client-ca.crt").read_bytes())
+    ca_key = serialization.load_pem_private_key(
+        (state / "client-ca.key").read_bytes(), password=b"temporary-test-password"
     )
-    openssl(
-        "ca",
-        "-batch",
-        "-config",
-        ca_config,
-        "-in",
-        client / "operator.csr",
-        "-passin",
-        f"file:{password}",
-        "-startdate",
-        "20200101000000Z",
-        "-enddate",
-        "20210101000000Z",
-        "-notext",
-        "-out",
-        client / "expired.crt",
+    csr_obj = x509.load_pem_x509_csr((client / "operator.csr").read_bytes())
+    expired = (
+        _cert_builder(
+            csr_obj.subject,
+            ca_cert.subject,
+            csr_obj.public_key(),
+            ca_key.public_key(),
+            365,
+            start=datetime(2020, 1, 1, tzinfo=UTC),
+        )
+        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False)
+        .sign(ca_key, hashes.SHA256())
     )
-    ext = temp / "server-only.ext"
-    ext.write_text("basicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\nkeyUsage=digitalSignature\n")
-    openssl(
-        "x509",
-        "-req",
-        "-in",
-        client / "operator.csr",
-        "-CA",
-        state / "client-ca.crt",
-        "-CAkey",
-        state / "client-ca.key",
-        "-passin",
-        f"file:{password}",
-        "-set_serial",
-        "101",
-        "-days",
-        "1",
-        "-extfile",
-        ext,
-        "-out",
-        client / "wrong-purpose.crt",
+    (client / "expired.crt").write_bytes(expired.public_bytes(serialization.Encoding.PEM))
+    wrong_purpose = (
+        _cert_builder(csr_obj.subject, ca_cert.subject, csr_obj.public_key(), ca_key.public_key(), 1)
+        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+        .sign(ca_key, hashes.SHA256())
     )
+    (client / "wrong-purpose.crt").write_bytes(wrong_purpose.public_bytes(serialization.Encoding.PEM))
     bundle = temp / "bundle"
     cli(
         "bundle",
@@ -420,6 +404,13 @@ def test_mtls_overwrites_credentials_and_removes_analyst_markers(pki, gateway, p
     assert "x-proxied-by-caddy" not in headers
     assert echoed["path"] == path
     assert b"forged" not in response
+
+
+def test_caddyfile_keeps_mtls_and_share_sites_isolated():
+    share_caddyfile = (ROOT / "Caddyfile").read_text()
+    assert "8443" not in share_caddyfile
+    assert ":80 {" in share_caddyfile
+    assert "https://:{$ADMIN_GATEWAY_PORT:8443}" in CONFIG.read_text()
 
 
 def test_runtime_config_does_not_embed_gateway_credential(pki, gateway):

@@ -149,14 +149,12 @@ export interface WizardDraft {
 }
 
 import {
-  PERIOD_LABELS,
   REGION_LABELS,
   SHIELD_LABELS,
   SHIELD_MAP,
 } from "@/lib/service-config-constants";
 
 export {
-  PERIOD_LABELS,
   REGION_LABELS,
   SHIELD_LABELS,
   SHIELD_MAP,

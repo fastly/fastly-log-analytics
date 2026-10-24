@@ -493,7 +493,6 @@ class TunnelManager:
         with self._lock:
             self._state.public_endpoint = public_endpoint
             self._state.forward_port = forward_port
-            self._state.direct_socket_addr = "0.0.0.0"
             self._state.started_at = iso_z_now()
             # Persist so a backend restart re-arms automatically.
             persist_direct_state(self._state)

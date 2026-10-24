@@ -283,18 +283,3 @@ class HyperLogLog:
 
     def __repr__(self) -> str:  # pragma: no cover - cosmetic only
         return f"HyperLogLog(p={self._p}, estimate≈{self.count()})"
-
-
-def merge_sketches(sketches: Iterable[HyperLogLog]) -> HyperLogLog | None:
-    """Fold an iterable of sketches into a single merged sketch.
-
-    Returns ``None`` if the iterable is empty (the rollup reader uses
-    this as the "no rollup data for this (field, value) at all"
-    signal). All input sketches must share the same precision —
-    raised by :meth:`HyperLogLog.merge`."""
-    merged: HyperLogLog | None = None
-    for sketch in sketches:
-        if merged is None:
-            merged = HyperLogLog(precision=sketch.precision)
-        merged.merge(sketch)
-    return merged

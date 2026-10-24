@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Operator-initiated admin PKI lifecycle. Uses OpenSSL; never modifies trust stores.
+"""Operator-initiated admin PKI lifecycle. Uses cryptography.x509; never modifies trust stores.
 
 All output lives outside this checkout, with directories 0700 and files 0600.
 Client CSRs can be signed without moving the client's private key to the CA host.
@@ -10,24 +10,21 @@ import ipaddress
 import os
 import re
 import secrets
-import shutil
-import subprocess
 import sys
-import tempfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import pkcs12
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 REPO = Path(__file__).resolve().parents[1]
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 HOST = re.compile(
     r"(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
 )
-
-
-def run(*args: str) -> str:
-    result = subprocess.run(["openssl", *args], stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
-    if result.returncode:
-        raise ValueError(f"OpenSSL {args[0]} failed: {result.stderr.strip()}")
-    return result.stdout
 
 
 def private_file(path: Path) -> Path:
@@ -37,12 +34,12 @@ def private_file(path: Path) -> Path:
     return path
 
 
-def password_file(path: Path) -> Path:
+def password_file(path: Path) -> bytes:
     path = private_file(path)
     lines = path.read_bytes().splitlines()
     if not lines or not lines[0].strip():
         raise ValueError("CA/export password file must not be empty")
-    return path
+    return lines[0]
 
 
 def output_dir(path: Path) -> Path:
@@ -61,77 +58,80 @@ def reserve(path: Path) -> None:
     os.close(fd)
 
 
-def key(path: Path, password: Path | None = None) -> None:
+def key(path: Path, password: bytes | None = None) -> ec.EllipticCurvePrivateKey:
     reserve(path)
-    args = ["genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out", str(path)]
-    if password:
-        args += ["-aes-256-cbc", "-pass", f"file:{password}"]
-    run(*args)
+    priv = ec.generate_private_key(ec.SECP256R1())
+    enc = serialization.BestAvailableEncryption(password) if password else serialization.NoEncryption()
+    path.write_bytes(priv.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, enc))
+    return priv
 
 
-def ca(directory: Path, name: str, password: Path, days: int) -> None:
-    key_path, cert_path = directory / f"{name}.key", directory / f"{name}.crt"
-    key(key_path, password)
-    reserve(cert_path)
-    run(
-        "req",
-        "-new",
-        "-x509",
-        "-sha256",
-        "-key",
-        str(key_path),
-        "-passin",
-        f"file:{password}",
-        "-out",
-        str(cert_path),
-        "-days",
-        str(days),
-        "-subj",
-        f"/CN=Log Analytics {name}",
-        "-addext",
-        "basicConstraints=critical,CA:TRUE,pathlen:0",
-        "-addext",
-        "keyUsage=critical,keyCertSign,cRLSign",
+def _cert_builder(
+    subject: x509.Name,
+    issuer: x509.Name,
+    pub_key: ec.EllipticCurvePublicKey,
+    issuer_pub_key: ec.EllipticCurvePublicKey,
+    days: int,
+    *,
+    is_ca: bool = False,
+    start: datetime | None = None,
+) -> x509.CertificateBuilder:
+    now = start or datetime.now(UTC)
+    return (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(pub_key)
+        .serial_number(secrets.randbits(159) or 1)
+        .not_valid_before(now)
+        .not_valid_after(now + timedelta(days=days))
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(pub_key), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(issuer_pub_key), critical=False)
+        .add_extension(x509.BasicConstraints(ca=is_ca, path_length=0 if is_ca else None), critical=True)
+        .add_extension(
+            x509.KeyUsage(not is_ca, False, False, False, False, is_ca, is_ca, False, False),
+            critical=True,
+        )
     )
 
 
-def sign(csr: Path, cert: Path, state: Path, password: Path, purpose: str, days: int, host: str = "") -> None:
-    run("req", "-in", str(csr), "-verify", "-noout")
+def ca(directory: Path, name: str, password: bytes, days: int) -> None:
+    key_path, cert_path = directory / f"{name}.key", directory / f"{name}.crt"
+    priv = key(key_path, password)
+    reserve(cert_path)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"Log Analytics {name}")])
+    cert = _cert_builder(subject, subject, priv.public_key(), priv.public_key(), days, is_ca=True).sign(
+        priv, hashes.SHA256()
+    )
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+
+
+def sign(csr: Path, cert: Path, state: Path, password: bytes, purpose: str, days: int, host: str = "") -> None:
+    csr_obj = x509.load_pem_x509_csr(csr.read_bytes())
+    if not csr_obj.is_signature_valid:
+        raise ValueError("CSR signature verification failed")
     ca_name = "client-ca" if purpose == "clientAuth" else "server-ca"
-    # Refuse signing leaves beyond the remaining CA lifetime.
-    run("x509", "-in", str(state / f"{ca_name}.crt"), "-checkend", str(days * 86400), "-noout")
-    ext = f"basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage={purpose}\n"
+    ca_cert = x509.load_pem_x509_certificate((state / f"{ca_name}.crt").read_bytes())
+    if ca_cert.not_valid_after_utc < datetime.now(UTC) + timedelta(days=days):
+        raise ValueError("CA certificate expires before requested leaf lifetime")
+    ca_key = serialization.load_pem_private_key(private_file(state / f"{ca_name}.key").read_bytes(), password=password)
+    if not isinstance(ca_key, ec.EllipticCurvePrivateKey):
+        raise ValueError("CA private key must be an EC key")
+    csr_pub = csr_obj.public_key()
+    if not isinstance(csr_pub, ec.EllipticCurvePublicKey):
+        raise ValueError("CSR public key must be an EC key")
+    eku = ExtendedKeyUsageOID.CLIENT_AUTH if purpose == "clientAuth" else ExtendedKeyUsageOID.SERVER_AUTH
+    builder = _cert_builder(csr_obj.subject, ca_cert.subject, csr_pub, ca_key.public_key(), days).add_extension(
+        x509.ExtendedKeyUsage([eku]), critical=False
+    )
     if host:
         try:
-            ipaddress.ip_address(host)
-            ext += f"subjectAltName=IP:{host}\n"
+            san: x509.GeneralName = x509.IPAddress(ipaddress.ip_address(host))
         except ValueError:
-            ext += f"subjectAltName=DNS:{host}\n"
+            san = x509.DNSName(host)
+        builder = builder.add_extension(x509.SubjectAlternativeName([san]), critical=False)
     reserve(cert)
-    with tempfile.TemporaryDirectory() as temp:
-        extension_file = Path(temp) / "extensions"
-        extension_file.write_text(ext)
-        run(
-            "x509",
-            "-req",
-            "-sha256",
-            "-in",
-            str(csr),
-            "-CA",
-            str(state / f"{ca_name}.crt"),
-            "-CAkey",
-            str(private_file(state / f"{ca_name}.key")),
-            "-passin",
-            f"file:{password}",
-            "-set_serial",
-            str(secrets.randbits(159) or 1),
-            "-days",
-            str(days),
-            "-extfile",
-            str(extension_file),
-            "-out",
-            str(cert),
-        )
+    cert.write_bytes(builder.sign(ca_key, hashes.SHA256()).public_bytes(serialization.Encoding.PEM))
 
 
 def execute(args: argparse.Namespace) -> None:
@@ -159,13 +159,16 @@ def execute(args: argparse.Namespace) -> None:
         else:
             password = password_file(args.password_file) if args.password_file else None
         key_path, csr = directory / f"{name}.key", directory / f"{name}.csr"
-        key(key_path, password if args.command == "client-request" else None)
+        priv = key(key_path, password if args.command == "client-request" else None)
         reserve(csr)
-        req = ["req", "-new", "-key", str(key_path), "-out", str(csr), "-subj", f"/CN={name}"]
-        if args.command == "client-request" and password:
-            req += ["-passin", f"file:{password}"]
-        run(*req)
+        csr_obj = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)]))
+            .sign(priv, hashes.SHA256())
+        )
+        csr.write_bytes(csr_obj.public_bytes(serialization.Encoding.PEM))
         if args.command == "server":
+            assert password is not None
             sign(csr, directory / "server.crt", state, password, "serverAuth", args.days, args.host)
     elif args.command == "sign-client":
         directory = output_dir(args.out)
@@ -179,39 +182,35 @@ def execute(args: argparse.Namespace) -> None:
         )
     elif args.command == "export-client":
         directory = output_dir(args.out)
+        key_pw = password_file(args.key_password_file) if args.key_password_file else None
+        priv_key = serialization.load_pem_private_key(private_file(args.key).read_bytes(), password=key_pw)
+        if not isinstance(priv_key, ec.EllipticCurvePrivateKey):
+            raise ValueError("client private key must be an EC key")
+        client_cert = x509.load_pem_x509_certificate(args.cert.read_bytes())
+        ca_cert = x509.load_pem_x509_certificate(args.ca.read_bytes())
+        p12_bytes = pkcs12.serialize_key_and_certificates(
+            name=None,
+            key=priv_key,
+            cert=client_cert,
+            cas=[ca_cert],
+            encryption_algorithm=serialization.BestAvailableEncryption(password_file(args.password_file)),
+        )
         reserve(directory / "client.p12")
-        pkcs = [
-            "pkcs12",
-            "-export",
-            "-inkey",
-            str(private_file(args.key)),
-            "-in",
-            str(args.cert),
-            "-certfile",
-            str(args.ca),
-            "-out",
-            str(directory / "client.p12"),
-            "-passout",
-            f"file:{password_file(args.password_file)}",
-        ]
-        if args.key_password_file:
-            pkcs += ["-passin", f"file:{password_file(args.key_password_file)}"]
-        else:
-            # Prevent an accidentally encrypted input key from prompting.
-            pkcs += ["-passin", "pass:"]
-        run(*pkcs)
+        (directory / "client.p12").write_bytes(p12_bytes)
     elif args.command == "bundle":
         directory = output_dir(args.out)
         state = args.state.resolve(strict=True)
         credential = private_file(state / "gateway-secret").read_text().strip()
         if len(credential) < 32 or not re.fullmatch(r"[A-Za-z0-9_-]+", credential):
             raise ValueError("gateway-secret must contain at least 32 URL-safe characters")
-        public = run("x509", "-in", str(args.server_cert), "-pubkey", "-noout")
-        actual = run("pkey", "-in", str(private_file(args.server_key)), "-passin", "pass:", "-pubout")
-        if public != actual:
+        server_cert = x509.load_pem_x509_certificate(args.server_cert.read_bytes())
+        server_key = serialization.load_pem_private_key(private_file(args.server_key).read_bytes(), password=None)
+        if server_cert.public_key() != server_key.public_key():
             raise ValueError("server certificate and private key do not match")
-        run("x509", "-in", str(args.server_cert), "-checkend", "0", "-noout")
-        run("x509", "-in", str(state / "client-ca.crt"), "-checkend", "0", "-noout")
+        client_ca = x509.load_pem_x509_certificate((state / "client-ca.crt").read_bytes())
+        now = datetime.now(UTC)
+        if server_cert.not_valid_after_utc <= now or client_ca.not_valid_after_utc <= now:
+            raise ValueError("bundle certificate has expired")
         for name, source in (
             ("server.crt", args.server_cert),
             ("server.key", args.server_key),
@@ -221,8 +220,22 @@ def execute(args: argparse.Namespace) -> None:
             reserve(directory / name)
             (directory / name).write_bytes(source.read_bytes())
     elif args.command == "check":
-        run("verify", "-CAfile", str(args.ca), "-purpose", args.purpose, str(args.cert))
-        run("x509", "-in", str(args.cert), "-checkend", str(args.days * 86400), "-noout")
+        ca_cert = x509.load_pem_x509_certificate(args.ca.read_bytes())
+        cert = x509.load_pem_x509_certificate(args.cert.read_bytes())
+        try:
+            cert.verify_directly_issued_by(ca_cert)
+            bc = cert.extensions.get_extension_for_class(x509.BasicConstraints).value
+            eku = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+        except Exception as exc:
+            raise ValueError(f"Certificate verification failed: {exc}") from exc
+        expected_oid = (
+            ExtendedKeyUsageOID.CLIENT_AUTH if args.purpose == "sslclient" else ExtendedKeyUsageOID.SERVER_AUTH
+        )
+        if bc.ca or expected_oid not in eku:
+            raise ValueError("Certificate verification failed: invalid constraints or extended key usage")
+        now = datetime.now(UTC)
+        if cert.not_valid_before_utc > now or cert.not_valid_after_utc < now + timedelta(days=args.days):
+            raise ValueError("Certificate verification failed: certificate expired or expires too soon")
         print(f"Certificate verified; valid for at least {args.days} more days")
 
 
@@ -259,8 +272,6 @@ def main() -> int:
         if command == "check":
             sub.add_argument("--purpose", choices=["sslclient", "sslserver"], default="sslclient")
     args = parser.parse_args()
-    if not shutil.which("openssl"):
-        parser.error("Missing required tool: openssl; install it explicitly before running this CLI")
     if hasattr(args, "days") and not 1 <= args.days <= 3650:
         parser.error("--days must be between 1 and 3650")
     os.umask(0o077)

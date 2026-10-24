@@ -730,66 +730,7 @@ def test_dbbusy_error_is_an_exception_subclass():
     assert str(err) == "locked"
 
 
-# ── get_sources / get_source_by_name (metadata_db wrappers) ─────────────
-
-
-def test_get_sources_returns_empty_when_no_services_configured():
-    """No configured services → empty list. Pinned because the
-    bootstrap endpoint calls this on first render — None would
-    crash the JSON serialization."""
-    from backend.core.duckdb import get_sources
-
-    with patch("backend.config.list_configs", return_value=[]):
-        assert get_sources() == []
-
-
-def test_get_sources_merges_metadata_db_rows_for_each_service():
-    """For each configured service, look up its row in metadata_db
-    and build a source dict from the stored JSON. Pinned because
-    the sources list is what the admin /api/sources endpoint
-    returns."""
-    import json as _json
-
-    from backend.core.duckdb import get_sources
-
-    fake_configs = [{"service_id": "svc-1"}, {"service_id": "svc-2"}]
-    fake_row_a = {
-        "name": "svc-1",
-        "config": _json.dumps({"endpoint": "ep1", "bucket": "b1", "prefix": "", "region": "us-east-1"}),
-        "table_name": "logs_svc_1",
-    }
-    fake_row_b = {
-        "name": "svc-2",
-        "config": _json.dumps({"endpoint": "ep2", "bucket": "b2", "prefix": "", "region": "us-west-2"}),
-        "table_name": "logs_svc_2",
-    }
-    with (
-        patch("backend.config.list_configs", return_value=fake_configs),
-        patch("backend.core.metadata.get_source_by_name", side_effect=[fake_row_a, fake_row_b]),
-    ):
-        out = get_sources()
-
-    assert len(out) == 2
-    assert out[0]["name"] == "svc-1"
-    assert out[0]["bucket"] == "b1"
-    assert out[1]["name"] == "svc-2"
-    assert out[1]["region"] == "us-west-2"
-
-
-def test_get_sources_skips_services_with_no_metadata_db_row():
-    """Services where `metadata_db.get_source_by_name` returns None
-    are silently skipped. Pinned because half-provisioned services
-    might have a config file but no metadata row — they shouldn't
-    crash the sources list."""
-    from backend.core.duckdb import get_sources
-
-    fake_configs = [{"service_id": "svc-1"}]
-    with (
-        patch("backend.config.list_configs", return_value=fake_configs),
-        patch("backend.core.metadata.get_source_by_name", return_value=None),
-    ):
-        out = get_sources()
-    assert out == []
+# ── get_source_by_name (metadata_db wrapper) ────────────────────────────
 
 
 def test_get_source_by_name_returns_none_for_unknown_name():

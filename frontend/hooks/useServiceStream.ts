@@ -21,36 +21,14 @@ export type { SSEConnectionState }
 
 interface UseServiceStreamOpts {
   /** Pass ``cache: 'no-store'`` for endpoints whose response must not
-   *  be cached by the browser fetch layer. Note: do NOT add a
-   *  ``Cache-Control: no-cache`` request header — FastAPI's
-   *  CORSMiddleware uses ``allow_headers=["*"]`` with
-   *  ``allow_credentials=true`` which browsers reject per the CORS
-   *  spec, silently failing the preflight and the hook will hot-retry
-   *  forever without ever delivering an event. ``cache: 'no-store'``
-   *  bypasses caching without crossing the CORS line. */
+   *  be cached by the browser fetch layer. */
   cache?: RequestCache
-  /** When ``false``, the stream is NOT service-scoped: the hook neither
-   *  gates on ``activeServiceId`` nor sends the ``x-service-id`` header,
-   *  and service switches don't reconnect it. Used by global-admin
-   *  channels (e.g. the share dashboard) that own no service. Default
-   *  ``true`` — every service-scoped endpoint needs the header + a service. */
-  requireService?: boolean
   /** "Soft" service scoping for bundles that carry BOTH global and
    *  service-scoped slices (e.g. the admin system-metrics stream): connect
    *  even when no service is selected — so the global slices stream on a
    *  fresh install — but still send ``x-service-id`` and reconnect on switch
    *  when one IS selected, so the service-scoped slices stay correctly
-   *  scoped. Unlike ``requireService: false`` (which NEVER sends the header),
-   *  this only drops the header while serviceless. Overrides
-   *  ``requireService``. Default ``false``.
-   *
-   *  Callers should gate ``enabled`` on ``useBootstrapSettled()`` (see
-   *  useAdminEventStream): an optionalService stream connects before a
-   *  service is chosen, so without it the stream opens on the pre-bootstrap
-   *  serviceId and aborts + reconnects once bootstrap
-   *  seeds it — the per-load "context canceled" the reverse proxy warns
-   *  about. The hydration gate below covers the persisted-store restore but
-   *  not the bootstrap-fetch settle. */
+   *  scoped. Default ``false``. */
   optionalService?: boolean
 }
 
@@ -119,34 +97,14 @@ export function useServiceStream(
 ): { state: SSEConnectionState } {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
   const storeHydrated = useServiceStoreHydrated()
-  const { cache, requireService = true, optionalService = false } = opts
-  // optionalService: connect even when no service is selected (so the bundle's
-  // GLOBAL slices stream on a fresh install), but still send x-service-id +
-  // reconnect on switch when one IS selected so any service-scoped slices in
-  // the same bundle stay correctly scoped. NOT the same as requireService:false,
-  // which never sends the header at all.
-  const gateOnService = requireService && !optionalService
-  // Non-service-scoped streams (requireService:false) collapse the id to null
-  // so switches never reconnect them and no header is sent. requireService and
-  // optionalService both keep the id so the header is sent when present and a
-  // switch reconnects.
-  const serviceId = requireService || optionalService ? activeServiceId : null
-  // optionalService opens before a service is chosen. Without waiting for the
-  // persisted store to rehydrate, it would connect on the null serviceId and
-  // immediately abort + reconnect once <StoreHydrator> restores activeServiceId
-  // — a wasted upstream the reverse proxy logs as "context canceled" on every
-  // load. Hold the first connect until hydration settles so it opens once,
-  // already carrying the right x-service-id (or correctly serviceless on a fresh
-  // install). Streams that gate on serviceId don't need this: they don't connect
-  // until serviceId is truthy, which is itself post-hydration.
+  const { cache, optionalService = false } = opts
   const awaitingHydration = optionalService && !storeHydrated
-
-  const effectiveEnabled = enabled && !(gateOnService && !serviceId) && !awaitingHydration
+  const effectiveEnabled = enabled && (optionalService || !!activeServiceId) && !awaitingHydration
 
   // Build the request lazily — the adapter owns url/header construction, the
   // primitive owns the fetch/read/reconnect loop.
   const request: EventStreamRequest | null = effectiveEnabled
-    ? buildStreamRequest({ path, serviceId, cache })
+    ? buildStreamRequest({ path, serviceId: activeServiceId, cache })
     : null
 
   return useEventStream(effectiveEnabled, request, onEvent)

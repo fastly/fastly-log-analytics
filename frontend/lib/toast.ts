@@ -1,20 +1,19 @@
 /**
- * Dependency-free toast helper.
- *
- * The app didn't pull in a toast library (no sonner/react-hot-toast) and the
- * one "Background Sync Completed" toast on /logs is hand-rolled per-page.
- * The 2026-06-10 audit surfaced two analyst-facing actions that silently
- * fail without any UI signal (M-1 Alerts modal, N-6 Save View modal); both
- * needed a global toast. Rather than add a 5-KB dep for one call-site, this
- * helper appends a styled div to ``document.body`` and removes it after a
- * timeout. Call ``showToast`` from anywhere — including non-React code such
- * as the openapi-fetch response middleware.
+ * Dependency-free DOM toast helper. Appends a styled live-region toast to
+ * `document.body` and auto-removes it after a timeout. Safe to call from
+ * non-React code (e.g., openapi-fetch middleware).
  */
 
 export type ToastKind = 'info' | 'success' | 'error' | 'warn'
 
 interface ToastOptions {
   durationMs?: number
+}
+
+interface ToastActionOptions extends ToastOptions {
+  actionLabel: string
+  onAction: () => void
+  kind?: ToastKind
 }
 
 const PALETTE: Record<ToastKind, { bg: string; border: string; fg: string }> = {
@@ -34,28 +33,21 @@ function ensureContainer(): HTMLDivElement | null {
   const el = document.createElement('div')
   el.setAttribute('role', 'region')
   el.setAttribute('aria-label', 'Notifications')
-  el.style.cssText = [
-    'position:fixed',
-    'top:16px',
-    'right:16px',
-    'z-index:2147483647',
-    'display:flex',
-    'flex-direction:column',
-    'gap:8px',
-    'pointer-events:none',
-    'max-width:380px',
-  ].join(';')
+  el.style.cssText =
+    'position:fixed;top:16px;right:16px;z-index:2147483647;display:flex;flex-direction:column;gap:8px;pointer-events:none;max-width:380px'
   document.body.appendChild(el)
   stackContainer = el
   return el
 }
 
-function createToastNode(
+function mountToastNode(
   kind: ToastKind,
+  durationMs: number,
   extraCss: string[] = [],
-): { root: HTMLDivElement; node: HTMLDivElement; dismiss: () => boolean } | null {
+  setup?: (node: HTMLDivElement, dismiss: () => boolean) => void,
+): void {
   const root = ensureContainer()
-  if (!root) return null
+  if (!root) return
   const palette = PALETTE[kind]
   const node = document.createElement('div')
   node.setAttribute('role', kind === 'error' || kind === 'warn' ? 'alert' : 'status')
@@ -82,7 +74,7 @@ function createToastNode(
     node.style.opacity = '0'
     node.style.transform = 'translateY(-4px)'
     setTimeout(() => {
-      if (node.parentNode) node.parentNode.removeChild(node)
+      node.remove()
       if (root.childElementCount === 0 && stackContainer) {
         stackContainer.remove()
         stackContainer = null
@@ -91,114 +83,65 @@ function createToastNode(
     return true
   }
 
-  return { root, node, dismiss }
+  setup?.(node, dismiss)
+  root.appendChild(node)
+  requestAnimationFrame(() => {
+    node.style.opacity = '1'
+    node.style.transform = 'translateY(0)'
+  })
+  setTimeout(dismiss, durationMs)
 }
 
 export function showToast(message: string, kind: ToastKind = 'info', opts: ToastOptions = {}): void {
   if (typeof document === 'undefined') return
-  // Dedupe rapid repeats — the API middleware may fire on multiple parallel
-  // 403s for the same action; a single toast per second is enough.
   const now = Date.now()
-  const last = recentMessages.get(message) || 0
-  if (now - last < RECENT_DEDUP_MS) return
+  if (now - (recentMessages.get(message) || 0) < RECENT_DEDUP_MS) return
   recentMessages.set(message, now)
-  // Trim stale dedup entries opportunistically.
   if (recentMessages.size > 32) {
     for (const [k, t] of recentMessages) {
       if (now - t > RECENT_DEDUP_MS * 4) recentMessages.delete(k)
     }
   }
 
-  const created = createToastNode(kind)
-  if (!created) return
-  const { root, node, dismiss } = created
-  node.textContent = message
-  root.appendChild(node)
-  requestAnimationFrame(() => {
-    node.style.opacity = '1'
-    node.style.transform = 'translateY(0)'
-  })
   const duration = opts.durationMs ?? (kind === 'error' ? 5500 : 3500)
-  setTimeout(dismiss, duration)
-  node.addEventListener('click', dismiss)
+  mountToastNode(kind, duration, [], (node, dismiss) => {
+    node.textContent = message
+    node.addEventListener('click', dismiss)
+  })
 }
 
-/** Convenience shorthand for the read-only analyst case. */
 export function showReadOnlyToast(): void {
-  showToast(
-    'Read-only access — that action is unavailable for shared sessions.',
-    'warn',
-  )
+  showToast('Read-only access — that action is unavailable for shared sessions.', 'warn')
 }
 
-/**
- * E-5 (audit): backend returns 503 with detail.busy = true when the DuckDB
- * pool is saturated (DBBusyError / _PoolBusy). The middleware fires this on
- * every such response; the global dedup window collapses parallel 503s from
- * a single dashboard tick into one user-visible notification. Short duration
- * because React Query will be silently retrying behind the scenes.
- */
 export function showBusyToast(): void {
   showToast('Server busy, retrying…', 'info', { durationMs: 2500 })
 }
 
-interface ToastActionOptions {
-  actionLabel: string
-  onAction: () => void
-  kind?: ToastKind
-  durationMs?: number
-}
-
-/**
- * Toast with a clickable action button (U-5: undo for destructive actions).
- *
- * Mirrors showToast's dependency-free vanilla-DOM pattern but appends a
- * styled button. Clicking the button fires onAction once and dismisses the
- * toast; if the duration expires first, the button becomes a no-op and the
- * toast fades out normally. Bypasses the showToast dedup map so a rapid
- * delete/delete/delete sequence each gets its own undo affordance.
- */
 export function showToastWithAction(message: string, opts: ToastActionOptions): void {
   if (typeof document === 'undefined') return
   const kind: ToastKind = opts.kind ?? 'info'
-  const created = createToastNode(kind, ['display:flex', 'align-items:center', 'gap:12px'])
-  if (!created) return
-  const { root, node, dismiss } = created
   const palette = PALETTE[kind]
 
-  const label = document.createElement('span')
-  label.textContent = message
-  label.style.cssText = 'flex:1;min-width:0'
-  node.appendChild(label)
+  mountToastNode(
+    kind,
+    opts.durationMs ?? 5500,
+    ['display:flex', 'align-items:center', 'gap:12px'],
+    (node, dismiss) => {
+      const label = document.createElement('span')
+      label.textContent = message
+      label.style.cssText = 'flex:1;min-width:0'
+      node.appendChild(label)
 
-  const button = document.createElement('button')
-  button.type = 'button'
-  button.textContent = opts.actionLabel
-  button.style.cssText = [
-    'background:transparent',
-    `color:${palette.fg}`,
-    `border:1px solid ${palette.fg}`,
-    'border-radius:6px',
-    'padding:4px 10px',
-    'font:600 12px/1 inherit',
-    'cursor:pointer',
-    'flex-shrink:0',
-    'opacity:.9',
-  ].join(';')
-  node.appendChild(button)
-
-  root.appendChild(node)
-  requestAnimationFrame(() => {
-    node.style.opacity = '1'
-    node.style.transform = 'translateY(0)'
-  })
-
-  button.addEventListener('click', (e) => {
-    e.stopPropagation()
-    if (!dismiss()) return
-    opts.onAction()
-  })
-
-  const duration = opts.durationMs ?? 5500
-  setTimeout(dismiss, duration)
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.textContent = opts.actionLabel
+      button.style.cssText = `background:transparent;color:${palette.fg};border:1px solid ${palette.fg};border-radius:6px;padding:4px 10px;font:600 12px/1 inherit;cursor:pointer;flex-shrink:0;opacity:.9`
+      button.addEventListener('click', (e) => {
+        e.stopPropagation()
+        if (dismiss()) opts.onAction()
+      })
+      node.appendChild(button)
+    },
+  )
 }

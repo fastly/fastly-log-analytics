@@ -1293,26 +1293,6 @@ def _source_row_to_dict(name: str, config_json: str, table_name: str) -> dict:
     }
 
 
-def get_sources(con: duckdb.DuckDBPyConnection | None = None) -> list[dict]:
-    """Return all registered sources across all configured services.
-
-    The ``con`` argument is kept for signature compatibility but unused — sources
-    now live in per-service SQLite metadata.
-    """
-    from backend import config as svcconfig
-    from backend.core import metadata as metadata_db
-
-    out: list[dict] = []
-    for cfg in svcconfig.list_configs():
-        sid = cfg.get("service_id")
-        if not sid:
-            continue
-        for cfg_row in [metadata_db.get_source_by_name(sid, sid)]:
-            if cfg_row is not None:
-                out.append(_source_row_to_dict(cfg_row["name"], cfg_row["config"], cfg_row["table_name"]))
-    return out
-
-
 def get_source_by_name(con: duckdb.DuckDBPyConnection | None, name: str) -> dict | None:
     """Return a single source dict by name, or None if not found."""
     from backend.core import metadata as metadata_db

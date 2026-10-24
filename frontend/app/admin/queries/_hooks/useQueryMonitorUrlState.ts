@@ -33,7 +33,7 @@ const parseAsNoGroupFlag = createParser<boolean>({
   serialize: () => '1',
 })
 
-export const queryMonitorUrlParsers = (defaultSlowMs: number) => ({
+const queryMonitorUrlParsers = (defaultSlowMs: number) => ({
   q: parseAsString.withDefault('').withOptions({ clearOnDefault: true }),
   kind: parseAsStringLiteral(KINDS).withDefault('all').withOptions({ clearOnDefault: true }),
   view: parseAsStringLiteral(VIEWS).withDefault('all').withOptions({ clearOnDefault: true }),

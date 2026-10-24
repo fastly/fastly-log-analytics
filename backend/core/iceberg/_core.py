@@ -544,86 +544,6 @@ def _get_fos_catalog_class() -> type:
 # ---------------------------------------------------------------------------
 
 
-_table_summary_hash_cache: dict[tuple[str, str, str], str] = {}
-_table_summary_hash_lock = threading.Lock()
-
-
-def _write_table_summary_async(source: dict, table=None) -> None:
-    """Generate and write a table_summary.json to FOS in the background.
-
-    This provides analysts with instant access to the table's range and calendar
-    without needing to download and parse large Iceberg manifests.
-
-    ``table`` is accepted for caller backward-compatibility only (some
-    callers still pass the just-committed pyiceberg ``Table``, e.g. the
-    legacy retention/expire path in ``buffer.py``) and is otherwise
-    ignored: ``get_table_info``/``get_snapshot_calendar`` are DuckLake-
-    native (v3 write-path cutover) and read ``lake.*`` state directly, so
-    there's nothing left for a pyiceberg table object to short-circuit.
-
-    Skips the PUT when the serialized payload matches the last write in this
-    process — defensive against commits that don't shift the summary (schema-
-    only, expire-snapshot, etc.). In steady-state ingest the snapshot count
-    advances each commit so the cache rarely hits.
-    """
-    import hashlib
-    import json
-    import threading
-
-    def _run():
-        try:
-            identifier = _table_identifier(source)
-            # `get_table_info`/`get_snapshot_calendar` are DuckLake-native
-            # (v3 write-path cutover) and read `lake.*` state themselves —
-            # a pyiceberg `Table` object no longer carries anything they
-            # consult, so there's no longer a `catalog.load_table()`
-            # round-trip to skip by passing one in.
-            info = get_table_info(source)
-            calendar = get_snapshot_calendar(source)
-
-            summary = {
-                "info": info,
-                "calendar": calendar,
-                "range": {"start": info.get("min_timestamp"), "end": info.get("max_timestamp")},
-            }
-
-            from backend.core.duckdb import _get_fos_client
-
-            s3 = _get_fos_client(source)
-            bucket = source["bucket"]
-            base_prefix = source.get("prefix", "").strip("/")
-            namespace, table_name = identifier
-
-            iceberg_root = f"{base_prefix}/iceberg" if base_prefix else "iceberg"
-            summary_key = f"{iceberg_root}/{namespace}/{table_name}/table_summary.json"
-
-            body = json.dumps(summary, sort_keys=True).encode("utf-8")
-            body_hash = hashlib.sha256(body).hexdigest()
-            cache_key = (bucket, namespace, table_name)
-            with _table_summary_hash_lock:
-                if _table_summary_hash_cache.get(cache_key) == body_hash:
-                    logger.debug("[iceberg] table_summary unchanged for %s, skipping PUT", summary_key)
-                    return
-
-            s3.put_object(
-                Bucket=bucket,
-                Key=summary_key,
-                Body=body,
-                ContentType="application/json",
-                CacheControl="max-age=10",
-            )
-            with _table_summary_hash_lock:
-                _table_summary_hash_cache[cache_key] = body_hash
-            logger.debug("[iceberg] Wrote table summary to %s", summary_key)
-
-            # Also purge CDN if configured
-            _purge_surrogate_key(source, "iceberg-table-summary")
-        except Exception as e:
-            logger.warning("[iceberg] Failed to write async table summary: %s", e)
-
-    threading.Thread(target=_run, daemon=True).start()
-
-
 # Process-local cache for metadata-pointer reads. A single cron_compact run
 # triggers _read_metadata_pointer up to 4× in the same second (init_table,
 # sync_data, get_table_info, get_snapshot_calendar), each costing ~200ms via
@@ -758,35 +678,6 @@ def _load_table_cached(source: dict, identifier: tuple, catalog=None):
         raise
 
 
-def _purge_surrogate_key(source: dict, key: str) -> None:
-    """Fire-and-forget CDN surrogate-key purge against the service's
-    Fastly. No-op when no ``cdn_service_id`` is configured or no API
-    key is available. Logs at debug on success and at warning on
-    failure; never raises (CDN unreachability must not block the
-    writer that called us)."""
-    cdn_service_id = source.get("cdn_service_id", "")
-    if not cdn_service_id:
-        return
-    try:
-        from backend import config as _cfg
-
-        sid = source.get("service_id") or source.get("name", "")
-        api_key = source.get("fastly_api_key") or _cfg.get_fastly_api_key(sid)
-        if not api_key:
-            return
-        from backend.core.fastly.client import fastly as _fastly
-
-        _fastly(
-            "POST",
-            f"/service/{cdn_service_id}/purge/{key}",
-            token=api_key,
-            expect_empty=True,
-        )
-        logger.debug("[iceberg] Purged CDN surrogate key %s", key)
-    except Exception as e:
-        logger.warning("[iceberg] CDN purge failed for surrogate key %s (non-fatal): %s", key, e)
-
-
 def _iceberg_root_prefix(source: dict) -> str:
     """Return the FOS-root iceberg prefix for ``source`` (e.g.
     ``"prefix/iceberg"`` or ``"iceberg"``).
@@ -876,108 +767,6 @@ def _newest_metadata_key(keys: list[str]) -> str | None:
     if not keys:
         return None
     return max(keys, key=lambda k: (metadata_version(k), k))
-
-
-def _sync_metadata_pointer_from_discovery(source: dict, table_name: str = "logs") -> None:
-    """Discover the latest metadata.json on FOS and write the pointer to S3.
-
-    Trap #28: a pointer written from a discovery listing MUST refuse to
-    regress. The listing here is paginated and version-ordered (defenses
-    1 and 2), and before writing we compare against the currently-known
-    pointer and reject anything older (defense 3 — the backstop that
-    would have prevented the 2026-08 41-day rollback on its own).
-    """
-    if _is_local_only_source(source):
-        return
-    try:
-        from backend.core.duckdb import _get_fos_client
-
-        s3 = _get_fos_client(source)
-        bucket = source["bucket"]
-        namespace, t_name = _table_identifier(source, table_name)
-        search_prefixes = _metadata_search_prefixes(source, namespace, t_name)
-        for search_prefix in search_prefixes:
-            metadata_files = _list_metadata_json_keys(s3, bucket, search_prefix)
-            latest_key = _newest_metadata_key(metadata_files)
-            if latest_key:
-                new_loc = f"s3://{bucket}/{latest_key}"
-                current_loc = None
-                try:
-                    current_loc = _read_metadata_pointer(source, (namespace, t_name))
-                except Exception as read_err:
-                    logger.warning(
-                        "[iceberg] could not read current metadata pointer before discovery sync: %s", read_err
-                    )
-                if current_loc and metadata_version(new_loc) < metadata_version(current_loc):
-                    logger.error(
-                        "[iceberg] REFUSING to regress metadata pointer for %s/%s: discovered %s (v%d) "
-                        "is older than known-good %s (v%d)",
-                        namespace,
-                        t_name,
-                        new_loc,
-                        metadata_version(new_loc),
-                        current_loc,
-                        metadata_version(current_loc),
-                    )
-                    return
-                _write_metadata_pointer(source, new_loc)
-                break
-    except Exception as e:
-        logger.error("[iceberg] Failed to sync metadata pointer from discovery: %s", e)
-
-
-def _write_metadata_pointer(source: dict, location: str, table=None) -> None:
-    """Write a pointer to the latest metadata.json to FOS.
-
-    This allows Analyst (read-only) users to discover the latest snapshot
-    without requiring ListBucket permissions.
-
-    Pass `table` so the async table-summary writer can reuse the
-    just-committed in-memory metadata instead of re-downloading it.
-    """
-    if _is_local_only_source(source):
-        # Local-only warehouse: SQLite catalog already tracks metadata_location;
-        # no separate FOS pointer to maintain. No-op.
-        return
-    try:
-        from backend.core.duckdb import _get_fos_client
-
-        s3 = _get_fos_client(source)
-        bucket = source["bucket"]
-        namespace, table_name = _table_identifier(source)
-        if table is not None:
-            tbl_identifier = table.name()
-            if isinstance(tbl_identifier, tuple) and len(tbl_identifier) >= 2:
-                table_name = tbl_identifier[-1]
-            elif isinstance(tbl_identifier, str):
-                table_name = tbl_identifier.split(".")[-1]
-
-        # Write to e.g. iceberg/default/logs/metadata_location.txt — the
-        # canonical slash-namespace variant. Readers try both this and the
-        # dot-namespace fallback (see ``_metadata_pointer_candidates``) so
-        # historic dot-form files keep resolving until they get rewritten.
-        pointer_key = _metadata_pointer_candidates(source, namespace, table_name)[0]
-
-        s3.put_object(
-            Bucket=bucket,
-            Key=pointer_key,
-            Body=location.encode("utf-8"),
-            ContentType="text/plain",
-            CacheControl="max-age=10",
-        )
-        # Bust the local cache so the next reader in this process sees the
-        # value we just wrote, not a stale pre-commit pointer.
-        _pointer_cache_invalidate(source, (namespace, table_name))
-        logger.debug("[iceberg] Wrote metadata pointer to %s", pointer_key)
-
-        # Trigger async summary update — pass the just-committed table so
-        # the worker doesn't re-GET the same metadata.json we just wrote.
-        _write_table_summary_async(source, table=table)
-
-        # Purge the CDN surrogate key so the next read always gets the new pointer.
-        _purge_surrogate_key(source, "iceberg-metadata-pointer")
-    except Exception as e:
-        logger.warning("[iceberg] Failed to write metadata pointer: %s", e)
 
 
 def _read_metadata_pointer(source: dict, identifier: tuple) -> str | None:
@@ -1294,15 +1083,11 @@ from backend.core.iceberg.manifest import (  # noqa: F401, E402
     _align_to_schema,
     _arrow_to_duckdb,
     _get_all_table_stats,
-    _get_cached_or_scan_metadata,
-    _get_scan_lock,
-    _load_manifest_metadata_cache,
     _manifest_metadata_cache,
     _manifest_metadata_cache_lock,
     _manifest_metadata_loaded,
     _manifest_metadata_loaded_lock,
     _prune_empty_dirs,
-    _save_manifest_metadata_cache,
     ducklake_session,
     ducklake_table_exists,
     get_all_table_stats,
@@ -1326,7 +1111,6 @@ from backend.core.iceberg.sync import (  # noqa: F401, E402
 from backend.core.iceberg.view import (  # noqa: F401, E402
     _get_cache_file,
     _get_service_lock,
-    _load_persistent_cache,
     _persistent_view_exists,
     _rebuild_locked,
     _rebuild_signals,
@@ -1338,7 +1122,6 @@ from backend.core.iceberg.view import (  # noqa: F401, E402
     _snapshot_files_cache,
     _try_fast_path_view,
     _update_iceberg_view_locked,
-    _update_snapshot_cache_from_delta,
     _view_cache,
     clear_source_caches,
     configure_duckdb_s3,
@@ -1360,7 +1143,6 @@ _CacheRegistry.register("iceberg._view_cache", _view_cache)
 _CacheRegistry.register("iceberg._snapshot_files_cache", _snapshot_files_cache)
 _CacheRegistry.register("iceberg._catalog_cache", _catalog_cache)
 _CacheRegistry.register("iceberg._table_object_cache", _table_object_cache)
-_CacheRegistry.register("iceberg._table_summary_hash_cache", _table_summary_hash_cache)
 _CacheRegistry.register("iceberg._pointer_cache", _pointer_cache)
 _CacheRegistry.register("iceberg._manifest_metadata_cache", _manifest_metadata_cache)
 _CacheRegistry.register("iceberg._manifest_metadata_loaded", _manifest_metadata_loaded)

@@ -40,8 +40,6 @@ vi.mock('@/app/logs/_state', () => ({
     orderedSchedules: [],
     isLoadingSchedule: false,
     schemaData: { tables: [] },
-    backgroundCronToast: null,
-    setBackgroundCronToast: vi.fn(),
     consoleOpen: false,
     setConsoleOpen: vi.fn(),
     displayedJobs: [],

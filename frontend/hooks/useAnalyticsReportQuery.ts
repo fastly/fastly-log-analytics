@@ -11,7 +11,7 @@ import { resolveRangeWire, type RangeWireArgs, type RangeWire } from '@/lib/rang
  * openapi-fetch body/response typing) while this hook owns the range-wire
  * resolution, the query-key shape, and the useServiceQuery wiring.
  */
-export interface AnalyticsReportQueryContext {
+interface AnalyticsReportQueryContext {
   /** Body fragment to spread into the POST (token or absolute mode). */
   rangeBody: RangeWire['rangeBody']
   /** The resolved wire token, or null in absolute mode. */

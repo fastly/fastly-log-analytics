@@ -2,7 +2,6 @@
 
 import os
 import threading
-import time
 from typing import Any
 
 from backend import config as svcconfig
@@ -17,102 +16,34 @@ from backend.utils.dir_size import (
     _dir_size_lock as _shared_dir_size_lock,
 )
 from backend.utils.dir_size import (
+    get_dir_stats_swr,
+)
+from backend.utils.dir_size import (
     walk_dir_stats as _walk_dir_stats,
 )
 
 # Cache dirs hold thousands of small parquet files; recursively stat'ing
 # them on every /api/bootstrap, /api/services, and admin tile render was a
-# big chunk of the page-navigation lag (200-1500ms per call). The dir
-# contents change on cron tick (every 2 min for most services), so a
-# 5-minute TTL is comfortably below the freshness floor users notice in
-# the "Local Cache" column while eliminating the per-request walk.
-#
-# Fully async, including the very first access: a missing cache entry
-# (process just started, or TTL expired) returns the best available
-# value IMMEDIATELY — the stale value if one exists, else (0, 0) — and
-# kicks off a background walk to populate/refresh the cache, coalesced
-# via `_dir_stats_refresh_in_flight` so concurrent readers on the same
-# path never trigger more than one walk. `_get_dir_stats` must NEVER
-# block its caller on the syscall storm: an earlier version walked
-# synchronously on the cold (no-entry) path, "only" the first caller
-# after each process start paying that cost — fine for a few thousand
-# files, but a service with 100k+ small cache files turned that one
-# request into minutes, and since /api/bootstrap and /api/services both
-# call in on every restart, it single-handedly made /admin
-# unreachable.
+# big chunk of the page-navigation lag (200-1500ms per call).
 _DIR_STATS_TTL_SEC = 300.0
 _dir_stats_cache: dict[str, tuple[float, int, int]] = _shared_dir_stats_cache
 _dir_stats_lock = _shared_dir_size_lock
 _dir_stats_refresh_in_flight: set[str] = set()
 
 
-def _refresh_dir_stats_background(path: str) -> None:
-    """Run the walk off-thread and write the result back into the cache.
-    Guarded by _dir_stats_refresh_in_flight so concurrent expired reads
-    on the same path coalesce to a single background walk."""
-    try:
-        total_size, file_count = _walk_dir_stats(path)
-        ts = time.monotonic()
-        with _dir_stats_lock:
-            _dir_stats_cache[path] = (ts, total_size, file_count)
-            if _dir_stats_cache is _shared_dir_stats_cache:
-                _shared_dir_size_cache[path] = (ts, total_size)
-    finally:
-        with _dir_stats_lock:
-            _dir_stats_refresh_in_flight.discard(path)
-
-
 def _get_dir_stats(path: str) -> tuple[int, int]:
-    """Return ``(total_size_bytes, file_count)`` for ``path`` recursively.
-
-    Uses os.scandir + DirEntry.stat so each file costs ~1 syscall instead
-    of the os.walk+islink+getsize trio (3+ per file). Cache dirs with
-    thousands of small parquet files were the main motivator.
-
-    Stale-while-revalidate semantics, including on first-ever access:
-      - Fresh entry (age < TTL): return cached value, no work.
-      - Stale OR missing entry: return the best available value
-        immediately — the stale value if one exists, else ``(0, 0)`` —
-        and kick off a background walk to populate/refresh the cache,
-        coalesced via the in-flight set so concurrent readers on the
-        same path never trigger more than one walk. This function
-        never blocks its caller on the syscall storm, not even the
-        very first call for a path.
-
-    The cache stores the result even when the path doesn't exist, so
-    nonexistent paths only stat once per TTL window.
-    """
-    now = time.monotonic()
-    with _dir_stats_lock:
-        entry = _dir_stats_cache.get(path)
-        if entry is not None and (now - entry[0]) < _DIR_STATS_TTL_SEC:
-            return (entry[1], entry[2])
-        # Either expired or never cached — serve the best available value
-        # (stale, or the (0, 0) cold-start placeholder) and schedule a
-        # background refresh, coalesced via the in-flight set. Start the
-        # thread AFTER releasing the lock so Thread().start()'s
-        # allocation cost doesn't block other readers under load.
-        best_effort = (entry[1], entry[2]) if entry is not None else (0, 0)
-        schedule_refresh = path not in _dir_stats_refresh_in_flight
-        if schedule_refresh:
-            _dir_stats_refresh_in_flight.add(path)
-
-    if schedule_refresh:
-        try:
-            threading.Thread(
-                target=_refresh_dir_stats_background,
-                args=(path,),
-                name=f"dir-stats-refresh:{os.path.basename(path)}",
-                daemon=True,
-            ).start()
-        except Exception:
-            # Resource exhaustion (RuntimeError 'can't start new thread',
-            # MemoryError). The cache must NOT be permanently stuck —
-            # release the in-flight marker so the next reader can try
-            # again. Serve the best-effort value this round.
-            with _dir_stats_lock:
-                _dir_stats_refresh_in_flight.discard(path)
-    return best_effort
+    """Return ``(total_size_bytes, file_count)`` for ``path`` recursively via shared SWR cache."""
+    return get_dir_stats_swr(
+        path,
+        stats_cache=_dir_stats_cache,
+        size_cache=_shared_dir_size_cache,
+        shared_stats_cache=_shared_dir_stats_cache,
+        in_flight=_dir_stats_refresh_in_flight,
+        lock=_dir_stats_lock,
+        ttl=_DIR_STATS_TTL_SEC,
+        walk_fn=_walk_dir_stats,
+        thread_cls=threading.Thread,
+    )
 
 
 def get_enriched_services(active_service_id: str | None = None) -> list[dict[str, Any]]:

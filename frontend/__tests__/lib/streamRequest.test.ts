@@ -3,18 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 const apiBase = vi.hoisted(() => ({ value: 'http://api.test' }))
 vi.mock('@/lib/api', () => ({ getApiBase: () => apiBase.value }))
 
-import { buildAdminHeaders } from '@/lib/adminHeaders'
 import { buildStreamRequest } from '@/lib/streamRequest'
-
-describe('buildAdminHeaders', () => {
-  it('sets x-service-id only when present', () => {
-    expect(buildAdminHeaders({ serviceId: 'svc' })).toEqual({
-      'x-service-id': 'svc',
-    })
-    expect(buildAdminHeaders({ serviceId: null })).toEqual({})
-    expect(buildAdminHeaders()).toEqual({})
-  })
-})
 
 describe('buildStreamRequest', () => {
   afterEach(() => {

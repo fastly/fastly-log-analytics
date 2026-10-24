@@ -24,8 +24,10 @@ import json
 import logging
 import os
 import threading
-import time
 from collections.abc import AsyncIterator
+
+from backend.utils.log_throttle import _last as _last_error_log  # noqa: F401
+from backend.utils.log_throttle import log_once_per
 
 logger = logging.getLogger(__name__)
 
@@ -37,13 +39,10 @@ PUBLISH_STATS: dict[str, int] = {
 }
 
 _LOG_EVERY_S = 60.0
-_last_error_log: dict[str, float] = {}
 
 
 def _log_rate_limited(key: str, msg: str, *args) -> None:
-    now = time.monotonic()
-    if now - _last_error_log.get(key, 0.0) >= _LOG_EVERY_S:
-        _last_error_log[key] = now
+    if log_once_per(key, _LOG_EVERY_S):
         logger.warning(msg, *args)
 
 

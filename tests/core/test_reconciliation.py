@@ -79,10 +79,8 @@ def test_storage_stats_returns_zero_rows_on_fresh_db():
     for table in ("usage_log", "ingested_files", "cron_runs"):
         assert table in stats["tables"]
         assert stats["tables"][table]["rows"] == 0
-    # db_bytes is non-None whenever dbstat works (it ships with Python 3.13's
-    # built-in sqlite3 on macOS/Linux).
-    assert stats["db_bytes"] is None or stats["db_bytes"] >= 0
-    assert stats["db_path"].endswith(f"{sid}.metadata.db")
+    assert stats["db_bytes"] is None
+    assert stats["db_path"] is None
 
 
 def test_storage_stats_counts_seeded_rows():
@@ -383,8 +381,6 @@ def test_cleanup_non_int_retention_falls_back_to_disabled():
 def test_postgres_retention_casts_text_timestamps():
     assert reconciliation._retention_timestamp_expr("ingested_at") == "CAST(ingested_at AS TIMESTAMPTZ)"
     assert reconciliation._retention_timestamp_expr("started_at") == "CAST(started_at AS TIMESTAMPTZ)"
-    assert reconciliation._table_uses_postgres("cron_runs") is True
-    assert reconciliation._table_uses_postgres("usage_log") is True
 
 
 def test_cleanup_rollups_skipped_when_rollups_days_zero():

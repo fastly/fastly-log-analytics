@@ -7,9 +7,9 @@ import { useSessionRoleStore } from "@/stores/sessionRoleStore";
 import { showReadOnlyToast, showBusyToast, showToast } from "@/lib/toast";
 import { isUserActive } from "@/lib/userActivity";
 import { getPageLoadId, rotatePageLoadId } from "@/lib/pageLoadId";
-import { extractApiError, unwrapClient } from "@/lib/api-client";
+import { extractApiError } from "@/lib/api-client";
 
-export { getPageLoadId, rotatePageLoadId, extractApiError, unwrapClient };
+export { getPageLoadId, rotatePageLoadId, extractApiError };
 
 export function getApiBase() {
   if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
@@ -40,14 +40,12 @@ export const client = createClient<paths>({
   baseUrl: getApiBase(),
 });
 
-export { buildAdminHeaders } from "@/lib/adminHeaders";
-
 /**
  * Shared client-context header stamper used by both `adminFetch` and the
  * `openapi-fetch` request middleware so `X-Page-Load-ID`,
  * `x-service-id`, and `x-debug-responses` are injected in a single place.
  */
-export function stampClientContextHeaders(headers: Headers): string | null {
+function stampClientContextHeaders(headers: Headers): string | null {
   const currentPageLoadId = getPageLoadId();
   if (currentPageLoadId && !headers.has("X-Page-Load-ID")) {
     headers.set("X-Page-Load-ID", currentPageLoadId);

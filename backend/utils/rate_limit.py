@@ -37,6 +37,18 @@ class SlidingWindowLimiter:
         # key -> lockout expiry, insertion-ordered
         self._locks: OrderedDict[str, float] = OrderedDict()
 
+    @property
+    def WINDOW_S(self) -> int:
+        return int(self.window_s)
+
+    @property
+    def MAX_TRACKED_IPS(self) -> int:
+        return self.max_keys
+
+    @MAX_TRACKED_IPS.setter
+    def MAX_TRACKED_IPS(self, value: int) -> None:
+        self.max_keys = value
+
     def _now(self) -> float:
         return self._clock() if self._clock is not None else time.time()
 
@@ -134,8 +146,3 @@ class SlidingWindowLimiter:
     def tracked_keys(self) -> int:
         with self._lock:
             return len(self._events)
-
-    def clear(self) -> None:
-        with self._lock:
-            self._events.clear()
-            self._locks.clear()

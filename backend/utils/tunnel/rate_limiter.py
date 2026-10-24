@@ -19,32 +19,23 @@ LOGIN_LOCKOUT_S = 5 * 60
 MAX_TRACKED_IPS = 10000
 
 
-class _LoginRateLimiter:
-    """Per-client-IP failure tracker with lockout (facade over ``SlidingWindowLimiter``)."""
+class _LoginRateLimiter(SlidingWindowLimiter):
+    """Per-client-IP failure tracker with lockout."""
 
     def __init__(self) -> None:
-        self._limiter = SlidingWindowLimiter(window_s=LOGIN_FAILURE_WINDOW_S, max_keys=MAX_TRACKED_IPS)
+        super().__init__(window_s=LOGIN_FAILURE_WINDOW_S, max_keys=MAX_TRACKED_IPS)
 
     @property
     def _failures(self):
-        return self._limiter._events
+        return self._events
 
     @property
     def _lockouts(self):
-        return self._limiter._locks
+        return self._locks
 
-    def is_locked(self, ip: str) -> tuple[bool, int]:
-        """Returns ``(locked, remaining_seconds)``."""
-        return self._limiter.is_locked(ip)
-
-    def snapshot(self) -> dict:
-        """Best-effort snapshot of recent failure activity for the admin UI.
-
-        Returns ``{"failures": [...], "lockouts": [...]}`` — each list element
-        carries the IP, count/remaining, and a window in seconds. Self-prunes
-        expired lockouts on the way out so the snapshot reflects current state.
-        """
-        counts, locks = self._limiter.snapshot()
+    def snapshot(self) -> dict:  # type: ignore[override]
+        """Best-effort snapshot of recent failure activity for the admin UI."""
+        counts, locks = super().snapshot()
         return {
             "failures": [{"ip": ip, "count": n, "window_s": LOGIN_FAILURE_WINDOW_S} for ip, n in counts.items()],
             "lockouts": [{"ip": ip, "remaining_s": rem} for ip, rem in locks.items()],
@@ -52,4 +43,4 @@ class _LoginRateLimiter:
 
     def record_failure(self, ip: str) -> bool:
         """Record a failure and return True if a NEW lockout was triggered."""
-        return self._limiter.strike(ip, threshold=LOGIN_FAILURE_THRESHOLD, lockout_s=LOGIN_LOCKOUT_S)
+        return self.strike(ip, threshold=LOGIN_FAILURE_THRESHOLD, lockout_s=LOGIN_LOCKOUT_S)

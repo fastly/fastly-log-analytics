@@ -15,9 +15,6 @@ export type Invite = WithRequired<InviteWire, 'id' | 'name' | 'email'>
 
 export type ShareSession = components['schemas']['ShareSessionRecord']
 export type AuditLog = components['schemas']['ShareAuditLogRow']
-export type RateLimitFailure = components['schemas']['ShareRateLimitFailure']
-export type RateLimitLockout = components['schemas']['ShareRateLimitLockout']
-export type TunnelHistoryEntry = components['schemas']['ShareTunnelUptimeEntry']
 
 export type ShareStatus = Simplify<
   Omit<

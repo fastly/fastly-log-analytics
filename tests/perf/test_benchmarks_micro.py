@@ -44,7 +44,7 @@ from __future__ import annotations
 import pytest
 
 from backend.core.duckdb import _safe_table_name
-from backend.utils.hll import HyperLogLog, merge_sketches
+from backend.utils.hll import HyperLogLog
 from backend.utils.sql_validator import escape_sql_literal
 
 pytestmark = pytest.mark.benchmark
@@ -103,7 +103,10 @@ def test_bench_hll_merge_24_hours(benchmark):
         sketches.append(s)
 
     def _go():
-        return merge_sketches(sketches)
+        merged = HyperLogLog()
+        for s in sketches:
+            merged.merge(s)
+        return merged
 
     merged = benchmark(_go)
     assert merged is not None

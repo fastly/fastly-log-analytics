@@ -34,7 +34,7 @@ def test_tunnel_state_default_values():
     s = TunnelState()
     assert s.public_endpoint is None
     assert s.forward_port == 3000
-    assert s.direct_socket_addr is None
+    assert not hasattr(s, "direct_socket_addr")
 
 
 def test_persist_then_restore_round_trip(state_file: Path):
@@ -53,7 +53,6 @@ def test_persist_then_restore_round_trip(state_file: Path):
     assert ok is True
     assert restored.public_endpoint == "share.example.com"
     assert restored.forward_port == 8080
-    assert restored.direct_socket_addr == "0.0.0.0"
     # started_at is a recent ISO timestamp string.
     assert isinstance(restored.started_at, str)
     assert restored.started_at  # non-empty

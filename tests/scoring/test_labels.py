@@ -30,7 +30,7 @@ def test_save_label_basic_round_trip():
     assert saved["sample_ip"] == "1.2.3.4"
     assert saved["created_at"]
 
-    fetched = _labels.get_label(SVC, "abc123def456")
+    fetched = _labels.get_label_by_id(SVC, saved["id"])
     assert fetched is not None
     assert fetched["id"] == saved["id"]
     assert fetched["label"] == "bad"
@@ -73,10 +73,6 @@ def test_list_labels_most_recent_first():
     assert {r["sid"] for r in rows[:3]} == {"aaa", "bbb", "ccc"}
 
 
-def test_get_label_returns_none_when_missing():
-    assert _labels.get_label(SVC, "never-labeled") is None
-
-
 def test_update_label_patch_semantics():
     saved = _labels.save_label(SVC, sid="u1", label="bad", notes="initial")
 
@@ -113,7 +109,7 @@ def test_delete_label_is_idempotent():
     r2 = _labels.delete_label(SVC, saved["id"])
     assert r2["status"] == "success"  # second delete no-ops cleanly
 
-    assert _labels.get_label(SVC, "d1") is None
+    assert _labels.get_label_by_id(SVC, saved["id"]) is None
 
 
 def test_counts_by_label_always_returns_three_keys():
@@ -129,11 +125,11 @@ def test_counts_by_label_always_returns_three_keys():
 
 
 def test_labels_isolated_per_service():
-    _labels.save_label("svcA", sid="shared", label="good")
-    _labels.save_label("svcB", sid="shared", label="bad")
+    saved_a = _labels.save_label("svcA", sid="shared", label="good")
+    saved_b = _labels.save_label("svcB", sid="shared", label="bad")
     # Same sid in two services → two independent labels.
-    a = _labels.get_label("svcA", "shared")
-    b = _labels.get_label("svcB", "shared")
+    a = _labels.get_label_by_id("svcA", saved_a["id"])
+    b = _labels.get_label_by_id("svcB", saved_b["id"])
     assert a["label"] == "good"
     assert b["label"] == "bad"
     assert a["id"] != b["id"]

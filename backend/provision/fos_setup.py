@@ -346,25 +346,36 @@ def delete_fos_bucket(
         if status_cb:
             status_cb(f"⏳ Deleting bucket '{name}'...")
 
+        from tenacity import Retrying, retry_if_exception, stop_after_attempt
+
         max_attempts = 15
-        for attempt in range(max_attempts):
-            try:
-                s3.delete_bucket(Bucket=name)
-                ok("FOS bucket deleted")
-                if status_cb:
-                    status_cb("✅ Bucket deleted.")
-                return
-            except ClientError as exc:
-                if exc.response["Error"]["Code"] == "BucketNotEmpty" and attempt < max_attempts - 1:
-                    wait_time = 2 if attempt <= 5 else 5
+
+        def _is_bucket_not_empty(exc: BaseException) -> bool:
+            return isinstance(exc, ClientError) and exc.response.get("Error", {}).get("Code") == "BucketNotEmpty"
+
+        def _before_sleep(retry_state) -> None:
+            attempt = retry_state.attempt_number
+            wait_time = 2 if attempt <= 6 else 5
+            if status_cb:
+                status_cb(f"⏳ Bucket not empty (attempt {attempt}/{max_attempts}), retrying in {wait_time}s...")
+            time.sleep(wait_time)
+            empty_bucket()
+
+        try:
+            for attempt in Retrying(
+                stop=stop_after_attempt(max_attempts),
+                retry=retry_if_exception(_is_bucket_not_empty),
+                before_sleep=_before_sleep,
+                reraise=True,
+            ):
+                with attempt:
+                    s3.delete_bucket(Bucket=name)
+                    ok("FOS bucket deleted")
                     if status_cb:
-                        status_cb(
-                            f"⏳ Bucket not empty (attempt {attempt + 1}/{max_attempts}), retrying in {wait_time}s..."
-                        )
-                    time.sleep(wait_time)
-                    empty_bucket()
-                    continue
-                raise RuntimeError(f"Could not delete FOS bucket after {max_attempts} attempts: {exc}")
+                        status_cb("✅ Bucket deleted.")
+                    return
+        except ClientError as exc:
+            raise RuntimeError(f"Could not delete FOS bucket after {max_attempts} attempts: {exc}") from exc
     finally:
         if isinstance(s3, _ProvisioningTracker):
             s3.flush()

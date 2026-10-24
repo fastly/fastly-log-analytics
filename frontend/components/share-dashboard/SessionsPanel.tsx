@@ -18,8 +18,6 @@ import { client } from '@/lib/api'
 import { SortableHead, useTableSort, type SortAccessors } from './sortable'
 import { useShareMutation } from './useShareMutation'
 import {
-  type RateLimitFailure,
-  type RateLimitLockout,
   type ShareSession,
   type ShareStatus,
 } from './utils'
@@ -34,17 +32,15 @@ interface SessionsPanelProps {
 export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps) {
   const { busy, run } = useShareMutation(onError, onRefresh)
 
-  const lockoutsByIp = React.useMemo(() => {
-    const map = new Map<string, RateLimitLockout>()
-    for (const l of status?.rate_limits?.lockouts || []) map.set(l.ip, l)
-    return map
-  }, [status?.rate_limits?.lockouts])
+  const lockoutsByIp = React.useMemo(
+    () => new Map((status?.rate_limits?.lockouts || []).map((l) => [l.ip, l])),
+    [status?.rate_limits?.lockouts],
+  )
 
-  const failuresByIp = React.useMemo(() => {
-    const map = new Map<string, RateLimitFailure>()
-    for (const f of status?.rate_limits?.failures || []) map.set(f.ip, f)
-    return map
-  }, [status?.rate_limits?.failures])
+  const failuresByIp = React.useMemo(
+    () => new Map((status?.rate_limits?.failures || []).map((f) => [f.ip, f])),
+    [status?.rate_limits?.failures],
+  )
 
   const handleBootSession = (sid: string) =>
     run(() =>

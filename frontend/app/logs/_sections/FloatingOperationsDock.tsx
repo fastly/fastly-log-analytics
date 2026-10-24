@@ -4,18 +4,14 @@ import React from 'react'
 import {
   Database,
   RefreshCw,
-  Check,
   ChevronDown,
   X,
-  Terminal,
 } from 'lucide-react'
-import { Button } from "@/components/ui/button"
 import { CronLiveLog } from '@/components/CronLiveLog'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { cn } from '@/lib/utils'
-import type { BackgroundCronToast, CronRun } from '../_state'
+import type { CronRun } from '../_state'
 
-import { formatCount } from '@/lib/format'
 export function FloatingOperationsDock({
   displayedJobs,
   setDisplayedJobs,
@@ -24,8 +20,6 @@ export function FloatingOperationsDock({
   selectedJobId,
   setSelectedJobId,
   onDismiss,
-  backgroundCronToast,
-  setBackgroundCronToast
 }: {
   displayedJobs: CronRun[];
   setDisplayedJobs: React.Dispatch<React.SetStateAction<CronRun[]>>;
@@ -34,12 +28,10 @@ export function FloatingOperationsDock({
   selectedJobId: number | string | null;
   setSelectedJobId: (id: number | string | null) => void;
   onDismiss: (id: number) => void;
-  backgroundCronToast: BackgroundCronToast;
-  setBackgroundCronToast: (toast: BackgroundCronToast) => void;
 }) {
   const { full, abbr } = useDateFormat()
 
-  if (displayedJobs.length === 0 && !backgroundCronToast) return null
+  if (displayedJobs.length === 0) return null
 
   const activeJob = displayedJobs.find(j => j.id === selectedJobId) || displayedJobs[0]
   const runningJobs = displayedJobs.filter(j => j.status === 'running')
@@ -47,87 +39,6 @@ export function FloatingOperationsDock({
 
   return (
     <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-2 pointer-events-auto">
-      {/* Integrated cool, premium, bottom-right notification toast stacked above minimized button */}
-      {!isOpen && backgroundCronToast && (
-        // a11y: status toasts that appear without user action need aria-live.
-        // role="alert" + aria-live="assertive" on failure so SRs interrupt;
-        // role="status" + polite for normal start/complete events.
-        <div
-          role={backgroundCronToast.status === 'error' ? 'alert' : 'status'}
-          aria-live={backgroundCronToast.status === 'error' ? 'assertive' : 'polite'}
-          aria-atomic="true"
-          className="w-80 sm:w-96 bg-zinc-950/90 backdrop-blur-md text-zinc-100 border border-zinc-800 rounded-lg shadow-2xl overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-300 pointer-events-auto"
-        >
-          <div className="p-3.5 flex gap-3">
-            {/* Live Indicator or Check/Error Icon */}
-            <div className="shrink-0 pt-0.5">
-              {backgroundCronToast.status === 'running' ? (
-                <div className="relative flex h-3 w-3 mt-0.5">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
-                </div>
-              ) : backgroundCronToast.status === 'error' ? (
-                <div className="h-3.5 w-3.5 rounded-full bg-red-950/40 border border-red-500/30 flex items-center justify-center text-red-500">
-                  <X className="h-2 w-2" />
-                </div>
-              ) : (
-                <div className="h-3.5 w-3.5 rounded-full bg-emerald-900/40 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-                  <Check className="h-2 w-2" />
-                </div>
-              )}
-            </div>
-
-            {/* Content Details */}
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-xs font-semibold text-zinc-200">
-                  {backgroundCronToast.status === 'running' ? 'Background Sync Started' :
-                   backgroundCronToast.status === 'error' ? 'Background Sync Failed' : 'Background Sync Completed'}
-                </p>
-                <button
-                  onClick={() => setBackgroundCronToast(null)}
-                  className="text-zinc-500 hover:text-zinc-300 p-0.5 hover:bg-zinc-900 rounded transition-all cursor-pointer"
-                  title="Close notification"
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              </div>
-              <p className="text-[10px] text-zinc-400 mt-1 font-mono uppercase tracking-wider">
-                Task: {backgroundCronToast.task === 'metadata_sync' ? 'sync' : backgroundCronToast.task}
-              </p>
-
-              {/* Optional completed job statistics */}
-              {backgroundCronToast.status !== 'running' && (
-                <div className="mt-2 pt-2 border-t border-zinc-900 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-zinc-400 font-mono">
-                  {backgroundCronToast.rows_ingested != null && (
-                    <span>Ingested: <strong className="text-zinc-300">{formatCount(backgroundCronToast.rows_ingested)} rows</strong></span>
-                  )}
-                  {backgroundCronToast.duration_s != null && (
-                    <span>Duration: <strong className="text-zinc-300">{backgroundCronToast.duration_s.toFixed(1)}s</strong></span>
-                  )}
-                </div>
-              )}
-
-              {/* Action Trigger Button */}
-              <div className="mt-2.5 flex justify-end">
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  className="h-6.5 text-[9px] font-medium bg-zinc-900 hover:bg-zinc-850 text-zinc-300 border border-zinc-800 cursor-pointer px-2"
-                  onClick={() => {
-                    setSelectedJobId(backgroundCronToast.id)
-                    setIsOpen(true)
-                    setBackgroundCronToast(null)
-                  }}
-                >
-                  <Terminal className="h-2.5 w-2.5 mr-1" /> View Console Logs
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
       {!isOpen ? (
         <button
           onClick={() => setIsOpen(true)}

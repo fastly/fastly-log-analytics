@@ -192,17 +192,33 @@ def _load_markers(source: dict) -> dict[str, str]:
 
 
 def _save_markers(source: dict, markers: dict[str, str]) -> None:
+    from backend.utils.atomic_write import atomic_write_json
+
     path = _markers_path(source)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    # Atomic write so a crash mid-write doesn't truncate the file.
-    tmp_path = f"{path}.tmp.{uuid.uuid4().hex[:8]}"
     try:
-        with open(tmp_path, "w") as f:
-            json.dump(markers, f)
-        os.replace(tmp_path, path)
+        atomic_write_json(path, markers, indent=None)
     except OSError as e:
         logger.warning("[rollups] could not write markers to %s: %s", path, e)
+
+
+def publish_temp_parquet(
+    tmp_path: str,
+    dst_path: str,
+    lock_key: str,
+    *,
+    after_replace_under_lock: Callable[[], None] | None = None,
+) -> None:
+    """Atomically replace ``tmp_path`` onto ``dst_path`` under the service iceberg lock."""
+    from backend.core.iceberg.view import _get_service_lock
+
+    try:
+        with _get_service_lock(lock_key):
+            os.replace(tmp_path, dst_path)
+            if after_replace_under_lock is not None:
+                after_replace_under_lock()
+    except BaseException:
         unlink_quiet(tmp_path)
+        raise
 
 
 def _publish_field_partitions(tmp_field_dir: str, dst_root: str, field: str) -> int:
@@ -883,8 +899,6 @@ def compact_closed_days(
     """
     import duckdb
 
-    from backend.core.iceberg.view import _get_service_lock
-
     hour_root = _hour_bundled_root(source)
     day_root = _day_bundled_root(source)
     if not os.path.isdir(hour_root):
@@ -957,19 +971,17 @@ def compact_closed_days(
                     unlink_quiet(tmp_file)
                     continue
 
-                with _get_service_lock(lock_key):
-                    try:
-                        os.replace(tmp_file, day_file)
-                        rebuilt += 1
-                    except OSError as e:
-                        logger.warning(
-                            "[rollups] %s: %s day rename to %s failed: %s",
-                            service_id,
-                            bundle_filename,
-                            day_file,
-                            e,
-                        )
-                        unlink_quiet(tmp_file)
+                try:
+                    publish_temp_parquet(tmp_file, day_file, lock_key)
+                    rebuilt += 1
+                except OSError as e:
+                    logger.warning(
+                        "[rollups] %s: %s day rename to %s failed: %s",
+                        service_id,
+                        bundle_filename,
+                        day_file,
+                        e,
+                    )
     finally:
         con.close()
 
@@ -1020,8 +1032,6 @@ def build_per_hour_bundles(
         return 0
 
     import duckdb
-
-    from backend.core.iceberg.view import _get_service_lock
 
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
     target_hours: list[str] = []
@@ -1083,8 +1093,7 @@ def build_per_hour_bundles(
                 continue
 
             try:
-                with _get_service_lock(lock_key):
-                    os.replace(tmp_path, bundle_path)
+                publish_temp_parquet(tmp_path, bundle_path, lock_key)
                 rebuilt += 1
             except OSError as e:
                 logger.warning(
@@ -1094,7 +1103,6 @@ def build_per_hour_bundles(
                     hour,
                     e,
                 )
-                unlink_quiet(tmp_path)
 
         return rebuilt
     finally:

@@ -269,8 +269,6 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
         selectedJobId={s.selectedConsoleJobId}
         setSelectedJobId={s.setSelectedConsoleJobId}
         onDismiss={s.removeDisplayedJob}
-        backgroundCronToast={s.backgroundCronToast}
-        setBackgroundCronToast={s.setBackgroundCronToast}
       />
     </div>
   )

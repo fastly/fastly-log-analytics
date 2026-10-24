@@ -101,61 +101,6 @@ _SCHEMA = [
         PRIMARY KEY (service_id, hour, operation_class, operation_type)
     )""",
     "CREATE INDEX IF NOT EXISTS idx_usage_hourly_svc_hour ON usage_log_hourly_summary(service_id, hour)",
-    """CREATE TRIGGER IF NOT EXISTS trg_usage_log_summary_insert
-    AFTER INSERT ON usage_log
-    WHEN NEW.timestamp IS NOT NULL AND length(NEW.timestamp) >= 13 AND NEW.service_id IS NOT NULL
-    BEGIN
-        INSERT INTO usage_log_hourly_summary
-            (service_id, hour, operation_class, operation_type, count, bytes, last_updated)
-        VALUES (NEW.service_id, substr(NEW.timestamp, 1, 13),
-                COALESCE(NEW.operation_class, ''), COALESCE(NEW.operation_type, ''),
-                COALESCE(NEW.count, 1), COALESCE(NEW.bytes, 0), datetime('now'))
-        ON CONFLICT(service_id, hour, operation_class, operation_type)
-        DO UPDATE SET count = count + excluded.count,
-                      bytes = bytes + excluded.bytes,
-                      last_updated = excluded.last_updated;
-    END""",
-    """CREATE TRIGGER IF NOT EXISTS trg_usage_log_summary_delete
-    AFTER DELETE ON usage_log
-    WHEN OLD.timestamp IS NOT NULL AND length(OLD.timestamp) >= 13 AND OLD.service_id IS NOT NULL
-      AND OLD.function_name = 'fastly.reconciliation'
-    BEGIN
-        UPDATE usage_log_hourly_summary
-        SET count = count - COALESCE(OLD.count, 1),
-            bytes = bytes - COALESCE(OLD.bytes, 0),
-            last_updated = datetime('now')
-        WHERE service_id = OLD.service_id
-          AND hour = substr(OLD.timestamp, 1, 13)
-          AND operation_class = COALESCE(OLD.operation_class, '')
-          AND operation_type = COALESCE(OLD.operation_type, '');
-    END""",
-    """CREATE TRIGGER IF NOT EXISTS trg_usage_log_summary_update
-    AFTER UPDATE ON usage_log
-    WHEN NEW.timestamp IS NOT NULL AND length(NEW.timestamp) >= 13 AND NEW.service_id IS NOT NULL
-      AND (OLD.count IS NOT NEW.count OR OLD.bytes IS NOT NEW.bytes
-           OR OLD.timestamp IS NOT NEW.timestamp
-           OR OLD.operation_class IS NOT NEW.operation_class
-           OR OLD.operation_type IS NOT NEW.operation_type
-           OR OLD.service_id IS NOT NEW.service_id)
-    BEGIN
-        UPDATE usage_log_hourly_summary
-        SET count = count - COALESCE(OLD.count, 1),
-            bytes = bytes - COALESCE(OLD.bytes, 0),
-            last_updated = datetime('now')
-        WHERE service_id = OLD.service_id
-          AND hour = substr(OLD.timestamp, 1, 13)
-          AND operation_class = COALESCE(OLD.operation_class, '')
-          AND operation_type = COALESCE(OLD.operation_type, '');
-        INSERT INTO usage_log_hourly_summary
-            (service_id, hour, operation_class, operation_type, count, bytes, last_updated)
-        VALUES (NEW.service_id, substr(NEW.timestamp, 1, 13),
-                COALESCE(NEW.operation_class, ''), COALESCE(NEW.operation_type, ''),
-                COALESCE(NEW.count, 1), COALESCE(NEW.bytes, 0), datetime('now'))
-        ON CONFLICT(service_id, hour, operation_class, operation_type)
-        DO UPDATE SET count = count + excluded.count,
-                      bytes = bytes + excluded.bytes,
-                      last_updated = excluded.last_updated;
-    END""",
     """CREATE TABLE IF NOT EXISTS telemetry_queries (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TEXT NOT NULL,

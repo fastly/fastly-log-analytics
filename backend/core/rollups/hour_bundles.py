@@ -23,6 +23,7 @@ from ._common import (
     cleanup_per_field_after_bundle,
     parquet_zstd_target,
     parse_hour_token,
+    publish_temp_parquet,
     quote_path_list,
     unlink_quiet,
 )
@@ -46,8 +47,6 @@ def _bundle_per_field_hours_impl(
         return 0
 
     import duckdb
-
-    from backend.core.iceberg.view import _get_service_lock
 
     bundled_root = _hour_bundled_root(source)
     os.makedirs(bundled_root, exist_ok=True)
@@ -154,9 +153,12 @@ def _bundle_per_field_hours_impl(
                     unlink_quiet(tmp_path)
                     continue
 
-            with _get_service_lock(lock_key):
-                os.replace(tmp_path, bundle_path)
-                cleanup_fn(per_field_root, hour, bundle_path, service_id)
+            publish_temp_parquet(
+                tmp_path,
+                bundle_path,
+                lock_key,
+                after_replace_under_lock=lambda: cleanup_fn(per_field_root, hour, bundle_path, service_id),
+            )
             rebuilt += 1
     finally:
         con.close()
@@ -223,8 +225,6 @@ def stamp_empty_hour_sentinels(service_id: str, source: dict, hours: list[str]) 
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    from backend.core.iceberg.view import _get_service_lock
-
     bundled_root = _hour_bundled_root(source)
     os.makedirs(bundled_root, exist_ok=True)
     lock_key = source.get("name", "default")
@@ -249,8 +249,7 @@ def stamp_empty_hour_sentinels(service_id: str, source: dict, hours: list[str]) 
         tmp_path = os.path.join(bundle_dir, f".tmp_{uuid.uuid4().hex[:12]}.parquet")
         try:
             pq.write_table(empty_table, tmp_path)
-            with _get_service_lock(lock_key):
-                os.replace(tmp_path, bundle_path)
+            publish_temp_parquet(tmp_path, bundle_path, lock_key)
             stamped += 1
         except OSError as e:
             logger.warning("[rollups] %s: empty-hour sentinel write failed for hour=%s: %s", service_id, hour, e)

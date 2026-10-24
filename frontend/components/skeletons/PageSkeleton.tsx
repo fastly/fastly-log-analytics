@@ -69,8 +69,6 @@ export function DashboardSkeleton({ title, description }: PageSkeletonHeaderProp
   )
 }
 
-export const GenericPageSkeleton = DashboardSkeleton
-
 /** Tall table with header row + N body rows — matches /logs, /sessions, /alerts. */
 export function TableSkeleton({ rows = 12, title, description }: PageSkeletonHeaderProps & { rows?: number } = {}) {
   return (

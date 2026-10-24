@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import tempfile
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -20,6 +19,7 @@ from backend.core.metadata.quarantine import (
     insert_quarantine_evidence,
     list_quarantine_evidence,
 )
+from backend.utils.atomic_write import atomic_write_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -136,17 +136,10 @@ def _capture_evidence_locked(
     error_category: str,
     error_text: str,
 ) -> dict[str, int | str]:
-    temp_path: Path | None = None
     item_id: int | None = None
     final_path: Path | None = None
     try:
         evidence_dir = _evidence_dir(service_id)
-        with tempfile.NamedTemporaryFile(dir=evidence_dir, prefix=".capture-", delete=False) as evidence_file:
-            temp_path = Path(evidence_file.name)
-            evidence_file.write(payload)
-            evidence_file.flush()
-            os.fsync(evidence_file.fileno())
-
         item_id = insert_quarantine_evidence(
             service_id,
             source_type,
@@ -159,8 +152,7 @@ def _capture_evidence_locked(
             sha256=hashlib.sha256(payload).hexdigest(),
         )
         final_path = evidence_dir / f"{item_id}.dat"
-        os.replace(temp_path, final_path)
-        temp_path = None
+        atomic_write_bytes(final_path, payload, prefix=".capture-", fsync=True)
 
         rows = list_quarantine_evidence(service_id, limit=QUARANTINE_ITEM_CAP + 1, oldest_first=True)
         evicted = rows[: max(0, len(rows) - QUARANTINE_ITEM_CAP)]
@@ -178,11 +170,6 @@ def _capture_evidence_locked(
             "quarantine.evidence.capture_failed",
             extra={"service_id": service_id, "source_type": source_type, "original_key": original_key},
         )
-        if temp_path is not None:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError:
-                logger.exception("quarantine.evidence.temp_cleanup_failed", extra={"service_id": service_id})
         if item_id is not None:
             try:
                 delete_quarantine_evidence(service_id, [item_id])

@@ -22,7 +22,6 @@ class TunnelState:
     public_endpoint: str | None = None
     started_at: str | None = None
     forward_port: int = 3000
-    direct_socket_addr: str | None = None  # for direct-expose mode
 
 
 def _state_file_path() -> str:
@@ -79,7 +78,6 @@ def restore_direct_state(state: TunnelState) -> bool:
                         domain = rf["domain_name"].strip()
                         state.public_endpoint = f"https://{domain}"
                         state.forward_port = 3000
-                        state.direct_socket_addr = "0.0.0.0"
                         state.started_at = iso_z_now()
                         logger.info(
                             "[tunnel] restored direct-mode share state from remote_frontend config for %s",
@@ -96,7 +94,6 @@ def restore_direct_state(state: TunnelState) -> bool:
             return False
         state.public_endpoint = endpoint
         state.forward_port = data.get("forward_port", 3000)
-        state.direct_socket_addr = "0.0.0.0"
         state.started_at = iso_z_now()
         logger.info("[tunnel] restored direct-mode share state for %s", endpoint)
         return True

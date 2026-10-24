@@ -717,35 +717,52 @@ def apply_response_hardening(response: Response) -> Response:
     return response
 
 
-async def _strip_analyst_envelope(response: Response, analyst_session: object | None = None) -> Response:
+_QUERY_DEBUG_KEYS: tuple[str, ...] = (
+    "_debug_queries",
+    "debug_queries",
+    "_debug_sqlite",
+    "debug_sqlite",
+    "_debug_postgres",
+    "debug_postgres",
+)
+_API_DEBUG_KEYS: tuple[str, ...] = ("_debug_calls", "debug_calls")
+
+
+def analyst_debug_visibility(request: Request | None = None) -> tuple[bool, bool]:
+    """Return ``(query_debug_enabled, api_call_debug_enabled)`` for remote analysts."""
+    if request is not None:
+        cached = getattr(request.state, "_analyst_debug_vis", None)
+        if cached is not None:
+            return cached
+    try:
+        from backend.core.share_db.settings import get_setting
+
+        q_vis = get_setting("query_debug_visibility", "disabled")
+        a_vis = get_setting("api_call_debug_visibility", "disabled")
+        res = (q_vis in ("analysts", "both"), a_vis in ("analysts", "both"))
+    except Exception:
+        res = (False, False)
+    if request is not None:
+        request.state._analyst_debug_vis = res
+    return res
+
+
+async def _strip_analyst_envelope(
+    response: Response,
+    analyst_session: object | None = None,
+    request: Request | None = None,
+) -> Response:
     """Remove server-internal telemetry keys from analyst-bound JSON bodies
     and apply per-invite PII masking (mask_ips) when configured.
 
     Catches both ``BaseResponse``-built payloads and ad-hoc dict responses
-    (e.g. ``return {**result, "_debug_calls": get_tracked_calls()}`` in
-    admin routers) that escape ``DEBUG_RESPONSES`` gating in
-    ``backend/models/common.py``. The strip is keyed on the four envelope
-    fields listed in ``_ANALYST_STRIPPED_ENVELOPE_KEYS``; non-JSON
-    responses and bodies that fail to parse pass through unchanged.
-
-    When ``analyst_session`` carries ``pii_policy.mask_ips=True`` the body
-    is walked recursively and every ``ip`` / ``ip_address`` / ``client_ip``
-    / ``remote_addr`` field is masked via ``apply_pii_policy`` (last-octet
-    ``xxx`` for IPv4, last-80-bit zero for IPv6 — see
-    ``backend/core/share_db/validation.py``). Streaming CSV responses
-    (``/api/dashboard/raw/csv``) bypass this helper — they're not JSON —
-    and must mask in the handler.
-
-    Operators (loopback / TestClient) never reach this helper — the
-    middleware only invokes it on the ``is_remote`` branch — so the
-    debug panel on the admin UI keeps working.
+    that escape ``DEBUG_RESPONSES`` gating in ``backend/models/common.py``.
+    Non-JSON responses and bodies that fail to parse pass through unchanged.
     """
     ct = response.headers.get("content-type", "")
     if "application/json" not in ct:
         return response
 
-    # Resolve PII policy upfront so we know whether to re-walk the body
-    # even when no envelope keys are present.
     pii_policy: dict | None = None
     if analyst_session is not None:
         raw_policy = getattr(analyst_session, "pii_policy", None)
@@ -753,8 +770,6 @@ async def _strip_analyst_envelope(response: Response, analyst_session: object | 
             pii_policy = raw_policy
 
     body = b""
-    # `body_iterator` only exists on StreamingResponse; the caller wraps a
-    # plain Response in a StreamingResponse before calling this helper.
     async for chunk in response.body_iterator:  # type: ignore[attr-defined]
         body += chunk
     try:
@@ -768,31 +783,14 @@ async def _strip_analyst_envelope(response: Response, analyst_session: object | 
         )
     changed = False
     if isinstance(data, dict):
-        try:
-            from backend.core.share_db.settings import get_setting
-
-            q_vis = get_setting("query_debug_visibility", "disabled")
-            a_vis = get_setting("api_call_debug_visibility", "disabled")
-            analyst_query_enabled = q_vis in ("analysts", "both")
-            analyst_api_enabled = a_vis in ("analysts", "both")
-        except Exception:
-            analyst_query_enabled = False
-            analyst_api_enabled = False
-
+        if request is not None and "_debug_queries" in data and "_debug_calls" in data:
+            request.state._analyst_envelope_complete = True
+        analyst_query_enabled, analyst_api_enabled = analyst_debug_visibility(request)
         to_strip: list[str] = []
         if not analyst_query_enabled:
-            to_strip.extend(
-                (
-                    "_debug_queries",
-                    "debug_queries",
-                    "_debug_sqlite",
-                    "debug_sqlite",
-                    "_debug_postgres",
-                    "debug_postgres",
-                )
-            )
+            to_strip.extend(_QUERY_DEBUG_KEYS)
         if not analyst_api_enabled:
-            to_strip.extend(("_debug_calls", "debug_calls"))
+            to_strip.extend(_API_DEBUG_KEYS)
         if not (analyst_query_enabled or analyst_api_enabled):
             to_strip.append("_is_cached")
 
@@ -1007,19 +1005,8 @@ async def _body_field_param(request: Request) -> str | None:
 # ── Sliding-window static-asset rate limiter (per IP) ───────────────────────
 
 
-class _StaticAssetLimiter:
-    """Per-IP sliding-window limiter: ``req_limit`` requests/min OR
-    ``byte_limit`` bytes/min. Two instances exist — the static-asset budget
-    (``/_next/`` + ``/static/``) and the analyst-API budget (L6) — each with
-    its own counters so they don't share a bucket. (Name kept for the
-    importing tests; it's a facade over the shared ``SlidingWindowLimiter``.)
-
-    Security: the tracked-IP map is bounded (``max_tracked_ips``, LRU) so a
-    high-cardinality source attack cannot inflate memory without limit. Sized
-    to comfortably accommodate thousands of analyst sessions on NAT'd corporate
-    egress IPs while capping a runaway-cardinality DoS in single-digit-MB
-    territory.
-    """
+class _StaticAssetLimiter(SlidingWindowLimiter):
+    """Per-IP sliding-window limiter: ``req_limit`` requests/min OR ``byte_limit`` bytes/min."""
 
     def __init__(
         self,
@@ -1029,38 +1016,21 @@ class _StaticAssetLimiter:
         window_s: int = 60,
         max_tracked_ips: int = 10_000,
     ) -> None:
+        super().__init__(window_s=window_s, max_keys=max_tracked_ips)
         self.REQ_LIMIT = req_limit
         self.BYTE_LIMIT = byte_limit
-        self._limiter = SlidingWindowLimiter(window_s=window_s, max_keys=max_tracked_ips)
-
-    @property
-    def WINDOW_S(self) -> int:
-        return int(self._limiter.window_s)
-
-    @property
-    def MAX_TRACKED_IPS(self) -> int:
-        return self._limiter.max_keys
-
-    @MAX_TRACKED_IPS.setter
-    def MAX_TRACKED_IPS(self, value: int) -> None:
-        self._limiter.max_keys = value
 
     def check(self, ip: str, content_length: int) -> bool:
-        return self._limiter.try_acquire(ip, content_length, max_events=self.REQ_LIMIT, max_weight=self.BYTE_LIMIT)
-
-    def tracked_keys(self) -> int:
-        return self._limiter.tracked_keys()
+        return self.try_acquire(ip, content_length, max_events=self.REQ_LIMIT, max_weight=self.BYTE_LIMIT)
 
     def clear(self) -> None:
-        self._limiter.clear()
+        with self._lock:
+            self._events.clear()
+            self._locks.clear()
 
 
 _static_limiter = _StaticAssetLimiter()
-# L6: separate per-IP budget for analyst API calls. The static limiter only
-# covered /_next/ + /static/, so a single source could hammer /api/query or
-# /api/insights (both compute-heavy) unbounded. Own bucket so API and static
-# traffic don't share a budget; same generous 600/min ceiling (NAT'd offices
-# share an egress IP) — it caps single-source floods, not normal use.
+# L6: separate per-IP budget for analyst API calls.
 _analyst_api_limiter = _StaticAssetLimiter()
 
 
@@ -1228,7 +1198,7 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
             if path == "/api/bootstrap":
                 sid_boot = request.cookies.get("analyst_session_id")
                 boot_session = mgr.validate_session(sid_boot) if sid_boot else None
-                response = await _strip_analyst_envelope(response, analyst_session=boot_session)
+                response = await _strip_analyst_envelope(response, analyst_session=boot_session, request=request)
             return apply_response_hardening(response)
 
         # All other analyst paths require a valid session.
@@ -1474,7 +1444,7 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         # short-circuit JSONResponse error bodies, so we do a final pass
         # here on the buffered body. SSE responses (text/event-stream) are
         # passed through unchanged inside the helper.
-        response = await _strip_analyst_envelope(response, analyst_session=session)
+        response = await _strip_analyst_envelope(response, analyst_session=session, request=request)
 
         # SSE-safe: don't add hardening headers to SSE streams in a way that
         # interferes; the keep-alive headers go on the route itself.

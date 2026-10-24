@@ -214,29 +214,34 @@ def verify_compute_scorer_readiness(
 ) -> None:
     """Probes the Compute Scorer domain to guarantee DNS and Edge Routing are active."""
     import httpx
+    from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
     domain = compute_def.domains[0]
     url = f"https://{domain}/health"
     max_retries = 10
-    backoff = 1.0
 
-    for i in range(max_retries):
-        if status_cb:
-            status_cb(f"🔍 Issuing HTTP probe to {url} (attempt {i + 1}/{max_retries})...")
-        try:
-            # We pass a sentinel auth header to signify a probe roundtrip.
-            response = httpx.get(url, headers={"X-Edge-Scorer-Auth": "probe-sentinel"}, timeout=2.0)
-            # Accept any standard status code (e.g. 200, 401, 404) as routing confirmation from Wasm
+    for attempt in Retrying(
+        stop=stop_after_attempt(max_retries),
+        wait=wait_exponential(multiplier=1.0, exp_base=1.5, min=1.0, max=5.0),
+        retry=retry_if_exception_type(Exception),
+        sleep=time.sleep,
+        reraise=False,
+    ):
+        with attempt:
+            idx = attempt.retry_state.attempt_number
+            if status_cb:
+                status_cb(f"🔍 Issuing HTTP probe to {url} (attempt {idx}/{max_retries})...")
+            try:
+                response = httpx.get(url, headers={"X-Edge-Scorer-Auth": "probe-sentinel"}, timeout=2.0)
+            except Exception as e:
+                if status_cb:
+                    status_cb(f"⚠️ Probe {idx} failed: {type(e).__name__}. Retrying...")
+                raise
             if response.status_code in (200, 401, 404):
                 if status_cb:
                     status_cb(f"✅ Compute Scorer is hot (status {response.status_code}).")
                 return
-        except Exception as e:
-            if status_cb:
-                status_cb(f"⚠️ Probe {i + 1} failed: {type(e).__name__}. Retrying in {backoff:.1f}s...")
-
-        time.sleep(backoff)
-        backoff = min(5.0, backoff * 1.5)
+            raise RuntimeError(f"Unexpected status {response.status_code}")
 
     raise RuntimeError(f"Readiness probe failed: Scorer service at {url} did not respond within timeout window.")
 

@@ -29,21 +29,72 @@ _dir_size_cold_locks: dict[str, threading.Lock] = {}
 _dir_size_cold_locks_meta_lock = threading.Lock()
 
 
+def _schedule_dir_walk(
+    path: str,
+    target,
+    thread_name_prefix: str,
+    in_flight: set[str],
+    lock: threading.Lock,
+    thread_cls=threading.Thread,
+) -> None:
+    try:
+        thread_cls(
+            target=target,
+            args=(path,),
+            name=f"{thread_name_prefix}:{os.path.basename(path)}",
+            daemon=True,
+        ).start()
+    except Exception:
+        with lock:
+            in_flight.discard(path)
+
+
+def get_dir_stats_swr(
+    path: str,
+    *,
+    stats_cache: dict[str, tuple[float, int, int]],
+    size_cache: dict[str, tuple[float, int]],
+    shared_stats_cache: dict[str, tuple[float, int, int]],
+    in_flight: set[str],
+    lock: threading.Lock,
+    ttl: float,
+    walk_fn=None,
+    thread_cls=threading.Thread,
+) -> tuple[int, int]:
+    """Return ``(total_size_bytes, file_count)`` with stale-while-revalidate semantics."""
+    walker = walk_fn or walk_dir_stats
+    now = time.monotonic()
+    with lock:
+        entry = stats_cache.get(path)
+        if entry is not None and (now - entry[0]) < ttl:
+            return (entry[1], entry[2])
+        best_effort = (entry[1], entry[2]) if entry is not None else (0, 0)
+        schedule_refresh = path not in in_flight
+        if schedule_refresh:
+            in_flight.add(path)
+
+    if schedule_refresh:
+
+        def _refresh(p: str) -> None:
+            try:
+                total_size, file_count = walker(p)
+                ts = time.monotonic()
+                with lock:
+                    stats_cache[p] = (ts, total_size, file_count)
+                    if stats_cache is shared_stats_cache:
+                        size_cache[p] = (ts, total_size)
+            finally:
+                with lock:
+                    in_flight.discard(p)
+
+        _schedule_dir_walk(path, _refresh, "dir-stats-refresh", in_flight, lock, thread_cls)
+    return best_effort
+
+
 def _get_dir_size(path: str) -> int:
-    # Cache results per-path with a 30s TTL. The cache walk is O(files-in-tree)
-    # and the per-service cache grew from ~300 files to ~19k after the rollups
-    # backfill (one parquet per field × hour). Files only grow incrementally
-    # (ingest + rollup-recompute) so a 30s staleness window means the
-    # dashboard's reported disk usage can lag by at most that window — worth it
-    # vs measuring exact-to-the-millisecond size on a poll endpoint.
-    #
-    # Coalescing semantics (mirror service_manager._get_dir_stats):
-    #   - Fresh entry (age < TTL): return cached value, no work.
-    #   - Stale entry (age >= TTL): return stale immediately AND kick off a
-    #     single background refresh (coalesced via the in-flight set), so the
-    #     walk never blocks a request after the first load.
-    #   - No entry (first-ever): walk synchronously under a per-path cold lock
-    #     so N concurrent first arrivals produce one walk, not N.
+    # Coalescing semantics: fresh entry returns cached value; stale entry returns
+    # stale immediately and schedules one background refresh; cold entry walks
+    # synchronously under a per-path cold lock.
     now = time.monotonic()
     schedule_refresh = False
     with _dir_size_lock:
@@ -62,23 +113,15 @@ def _get_dir_size(path: str) -> int:
 
     if cached is not None:
         if schedule_refresh:
-            try:
-                threading.Thread(
-                    target=_refresh_dir_size_background,
-                    args=(path,),
-                    name=f"dir-size-refresh:{os.path.basename(path)}",
-                    daemon=True,
-                ).start()
-            except Exception:
-                # Resource exhaustion — release the marker so the next reader
-                # retries; serve stale this round.
-                with _dir_size_lock:
-                    _dir_size_refresh_in_flight.discard(path)
+            _schedule_dir_walk(
+                path,
+                _refresh_dir_size_background,
+                "dir-size-refresh",
+                _dir_size_refresh_in_flight,
+                _dir_size_lock,
+            )
         return stale_value
 
-    # First-ever request for this path: coalesce concurrent cold arrivals via
-    # a per-path lock. The first arrival walks + populates the cache;
-    # subsequent arrivals wait, then see the populated entry and return.
     with _dir_size_cold_locks_meta_lock:
         cold_lock = _dir_size_cold_locks.setdefault(path, threading.Lock())
     try:
@@ -87,27 +130,21 @@ def _get_dir_size(path: str) -> int:
                 cached = _DIR_SIZE_CACHE.get(path)
                 if cached is not None:
                     return cached[1]
-            total, file_count = walk_dir_stats(path)
-            ts = time.monotonic()
-            with _dir_size_lock:
-                _DIR_SIZE_CACHE[path] = (ts, total)
-                _DIR_STATS_CACHE[path] = (ts, total, file_count)
-            return total
+            return _refresh_dir_size_background(path)
     finally:
         with _dir_size_cold_locks_meta_lock:
             _dir_size_cold_locks.pop(path, None)
 
 
-def _refresh_dir_size_background(path: str) -> None:
-    """Run the walk off-thread and write the result back into the cache.
-    Guarded by _dir_size_refresh_in_flight so concurrent expired reads on the
-    same path coalesce to a single background walk."""
+def _refresh_dir_size_background(path: str) -> int:
+    """Run the walk and write the result back into the shared size/stats caches."""
     try:
         total, file_count = walk_dir_stats(path)
         ts = time.monotonic()
         with _dir_size_lock:
             _DIR_SIZE_CACHE[path] = (ts, total)
             _DIR_STATS_CACHE[path] = (ts, total, file_count)
+        return total
     finally:
         with _dir_size_lock:
             _dir_size_refresh_in_flight.discard(path)

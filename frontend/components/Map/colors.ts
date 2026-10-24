@@ -13,10 +13,10 @@
  * MapLibre's paint props take raw color strings.
  */
 
-export const COUNTRY_FILL_DARK = '#27272a'
-export const COUNTRY_FILL_LIGHT = '#e4e4e7'
-export const COUNTRY_OUTLINE_DARK = '#3f3f46'
-export const COUNTRY_OUTLINE_LIGHT = '#d4d4d8'
+const COUNTRY_FILL_DARK = '#27272a'
+const COUNTRY_FILL_LIGHT = '#e4e4e7'
+const COUNTRY_OUTLINE_DARK = '#3f3f46'
+const COUNTRY_OUTLINE_LIGHT = '#d4d4d8'
 
 export function countryFill(isDark: boolean): string {
   return isDark ? COUNTRY_FILL_DARK : COUNTRY_FILL_LIGHT

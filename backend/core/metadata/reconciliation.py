@@ -11,13 +11,12 @@ under ``<cache>/rollups/...``.
 from __future__ import annotations
 
 import logging
-import os
 import time as _t
 from collections.abc import Callable
 from typing import Any
 
 from backend.core.metadata import usage_log_db as _usage_log_db
-from backend.core.metadata.base import db_path, get_con, get_con_readonly
+from backend.core.metadata.base import get_con, get_con_readonly
 from backend.core.metadata.ingest_log import recompute_ingested_files_summary
 from backend.core.metadata.usage_log import DEFAULT_METADATA_RETENTION
 from backend.utils.bounded_cache import BoundedTTLCache
@@ -112,11 +111,6 @@ def _stats_table_count_query(sql_table: str, service_id: str) -> tuple[str, tupl
             (service_id,),
         )
     return f"SELECT count(*) FROM {sql_table}", ()
-
-
-def _table_uses_postgres(table: str) -> bool:
-    """Return whether retention SQL should use the native Postgres dialect."""
-    return True
 
 
 def _tenant_where_clause(table: str, service_id: str) -> tuple[str, tuple[Any, ...]]:
@@ -220,16 +214,10 @@ def get_metadata_storage_stats(service_id: str, *, force: bool = False) -> dict:
                     bytes_ = None
                 out[out_key] = {"rows": int(rows or 0), "bytes": bytes_}
 
-    db_bytes: int | None
-    try:
-        db_bytes = os.path.getsize(db_path(service_id))
-    except OSError:
-        db_bytes = None
-
     result = {
         "tables": out,
-        "db_bytes": db_bytes,
-        "db_path": db_path(service_id),
+        "db_bytes": None,
+        "db_path": None,
     }
     _storage_stats_cache[service_id] = result
     return result
@@ -324,9 +312,6 @@ def cleanup_metadata(
     con = get_con(service_id)
     t0 = _t.time()
 
-    def _con_for(table: str) -> Any:
-        return con
-
     # Steps: 3 deletes + 1 vacuum + 1 post-count = 5. Set up the progress
     # framing so the modal can render a determinate bar.
     total_steps = len(_CLEANUP_TABLES) + 2
@@ -337,7 +322,7 @@ def cleanup_metadata(
         try:
             t_where, t_params = _tenant_where_clause(table, service_id)
             before[table] = int(
-                _con_for(table).execute(f"SELECT count(*) FROM {table} WHERE {t_where}", t_params).fetchone()[0] or 0
+                con.execute(f"SELECT count(*) FROM {table} WHERE {t_where}", t_params).fetchone()[0] or 0
             )
         except Exception:
             before[table] = 0
@@ -361,14 +346,8 @@ def cleanup_metadata(
             )
             continue
         _emit({"type": "status", "message": f"Trimming {table} (older than {days_int}d)…"})
-        table_con = _con_for(table)
-        # Batch DELETE in 5k-row chunks so the SQLite write lock is released
-        # between commits. A single DELETE of 700k+ rows holds the lock for
-        # 30–35s, blocking concurrent cron starts (``start_cron_run`` →
-        # ``purge_cron_runs``). Each batch takes ~10-50ms; other writers interleave
-        # between commits instead of queuing for the full duration.
+        # Batch DELETE in 5k-row chunks so locks are released between commits.
         _BATCH = 5_000
-        table_postgres = _table_uses_postgres(table)
         t_where, t_params = _tenant_where_clause(table, service_id)
         try:
             total_n = 0
@@ -377,18 +356,11 @@ def cleanup_metadata(
                     # Unix-epoch REAL cutoff for slow_queries — see
                     # ``_SLOW_QUERIES_TABLE`` comment above.
                     cutoff_epoch = _t.time() - days_int * 86400
-                    if table_postgres:
-                        cur = table_con.execute(
-                            f"DELETE FROM {table} WHERE ctid IN "
-                            f"(SELECT ctid FROM {table} WHERE {t_where} AND {ts_col} < ? LIMIT ?)",
-                            (*t_params, cutoff_epoch, _BATCH),
-                        )
-                    else:
-                        cur = table_con.execute(
-                            f"DELETE FROM {table} WHERE rowid IN "
-                            f"(SELECT rowid FROM {table} WHERE {t_where} AND {ts_col} < ? LIMIT ?)",
-                            (*t_params, cutoff_epoch, _BATCH),
-                        )
+                    cur = con.execute(
+                        f"DELETE FROM {table} WHERE ctid IN "
+                        f"(SELECT ctid FROM {table} WHERE {t_where} AND {ts_col} < ? LIMIT ?)",
+                        (*t_params, cutoff_epoch, _BATCH),
+                    )
                 elif table == "ingested_files":
                     from backend import config as svcconfig
 
@@ -396,42 +368,25 @@ def cleanup_metadata(
                     raw_retention_days = int(cfg_svc.get("log_retention_days", 90))
                     rum_days_int = max(days_int, raw_retention_days + 1)
                     timestamp_expr = _retention_timestamp_expr(ts_col)
-                    if table_postgres:
-                        cur = table_con.execute(
-                            f"DELETE FROM {table} WHERE ctid IN "
-                            f"(SELECT ctid FROM {table} WHERE {t_where} AND ("
-                            f"(table_name NOT IN ('client_vitals', 'client_errors') AND {timestamp_expr} < CURRENT_TIMESTAMP - (? * INTERVAL '1 day')) "
-                            f"OR (table_name IN ('client_vitals', 'client_errors') AND {timestamp_expr} < CURRENT_TIMESTAMP - (? * INTERVAL '1 day'))"
-                            f") LIMIT ?)",
-                            (*t_params, days_int, rum_days_int, _BATCH),
-                        )
-                    else:
-                        cur = table_con.execute(
-                            f"DELETE FROM {table} WHERE rowid IN "
-                            f"(SELECT rowid FROM {table} WHERE {t_where} AND ("
-                            f"(table_name NOT IN ('client_vitals', 'client_errors') AND {ts_col} < datetime('now', ?)) "
-                            f"OR (table_name IN ('client_vitals', 'client_errors') AND {ts_col} < datetime('now', ?))"
-                            f") LIMIT ?)",
-                            (*t_params, f"-{days_int} days", f"-{rum_days_int} days", _BATCH),
-                        )
+                    cur = con.execute(
+                        f"DELETE FROM {table} WHERE ctid IN "
+                        f"(SELECT ctid FROM {table} WHERE {t_where} AND ("
+                        f"(table_name NOT IN ('client_vitals', 'client_errors') AND {timestamp_expr} < CURRENT_TIMESTAMP - (? * INTERVAL '1 day')) "
+                        f"OR (table_name IN ('client_vitals', 'client_errors') AND {timestamp_expr} < CURRENT_TIMESTAMP - (? * INTERVAL '1 day'))"
+                        f") LIMIT ?)",
+                        (*t_params, days_int, rum_days_int, _BATCH),
+                    )
                 else:
                     timestamp_expr = _retention_timestamp_expr(ts_col)
-                    if table_postgres:
-                        cur = table_con.execute(
-                            f"DELETE FROM {table} WHERE ctid IN "
-                            f"(SELECT ctid FROM {table} "
-                            f"WHERE {t_where} AND {timestamp_expr} < CURRENT_TIMESTAMP - (? * INTERVAL '1 day') LIMIT ?)",
-                            (*t_params, days_int, _BATCH),
-                        )
-                    else:
-                        cur = table_con.execute(
-                            f"DELETE FROM {table} WHERE rowid IN "
-                            f"(SELECT rowid FROM {table} WHERE {t_where} AND {ts_col} < datetime('now', ?) LIMIT ?)",
-                            (*t_params, f"-{days_int} days", _BATCH),
-                        )
+                    cur = con.execute(
+                        f"DELETE FROM {table} WHERE ctid IN "
+                        f"(SELECT ctid FROM {table} "
+                        f"WHERE {t_where} AND {timestamp_expr} < CURRENT_TIMESTAMP - (? * INTERVAL '1 day') LIMIT ?)",
+                        (*t_params, days_int, _BATCH),
+                    )
                 n = int(cur.rowcount or 0)
                 total_n += n
-                table_con.commit()
+                con.commit()
                 if n < _BATCH:
                     break
             deleted[table] = total_n
@@ -489,7 +444,7 @@ def cleanup_metadata(
         try:
             t_where, t_params = _tenant_where_clause(table, service_id)
             after[table] = int(
-                _con_for(table).execute(f"SELECT count(*) FROM {table} WHERE {t_where}", t_params).fetchone()[0] or 0
+                con.execute(f"SELECT count(*) FROM {table} WHERE {t_where}", t_params).fetchone()[0] or 0
             )
         except Exception:
             after[table] = 0

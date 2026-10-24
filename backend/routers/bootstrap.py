@@ -40,15 +40,17 @@ router = APIRouter(prefix="/api", tags=["bootstrap"], responses=DEFAULT_ERROR_RE
 # admin-only section, so they're already cheap and must not share an
 # admin-shaped body. Keyed by active service_id — the loopback admin is a
 # single identity.
+from cachetools import TTLCache  # noqa: E402
+
 _BOOTSTRAP_CACHE_TTL_S = 3.0
-_bootstrap_cache: dict[str, tuple[float, BootstrapResponse]] = {}
+_bootstrap_cache: TTLCache = TTLCache(maxsize=128, ttl=_BOOTSTRAP_CACHE_TTL_S)
 _bootstrap_inflight: dict[str, asyncio.Future] = {}
 
 # SRE-X: Service-level cache for the expensive real-time DuckDB/SQLite queries
 # inside header_badge_and_extents. Caps the query overhead on cold page loads
 # and remote analyst requests (which don't hit the short-TTL _bootstrap_cache).
 _HEADER_BADGE_CACHE_TTL_S = 30.0
-_header_badge_cache: dict[str, tuple[float, dict | None, dict | None, dict]] = {}
+_header_badge_cache: TTLCache = TTLCache(maxsize=256, ttl=_HEADER_BADGE_CACHE_TTL_S)
 _ANALYST_PATH_A_UNSUPPORTED_REASON = (
     "Independent analyst access is unavailable for high-scale services. "
     "Use live shared-instance analyst access (Path B)."
@@ -119,10 +121,9 @@ async def bootstrap(
     # critical section below contains NO await, so it runs atomically on the
     # single-threaded event loop — race-free without a lock.
     key = service_id or ""
-    now = time.monotonic()
     cached = _bootstrap_cache.get(key)
-    if cached is not None and (now - cached[0]) < _BOOTSTRAP_CACHE_TTL_S:
-        return cached[1]
+    if cached is not None:
+        return cached[1] if isinstance(cached, tuple) else cached
     inflight = _bootstrap_inflight.get(key)
     if inflight is None:
         inflight = asyncio.ensure_future(_bootstrap_compute_and_cache(request, service_id, key))
@@ -133,7 +134,7 @@ async def bootstrap(
 async def _bootstrap_compute_and_cache(request: Request, service_id: str | None, key: str) -> BootstrapResponse:
     try:
         result = await run_in_threadpool(_bootstrap_sync, request, service_id)
-        _bootstrap_cache[key] = (time.monotonic(), result)
+        _bootstrap_cache[key] = result
         return result
     finally:
         # Always release the in-flight slot. Errors propagate to every
@@ -425,14 +426,12 @@ def _bootstrap_sync(
             key: cached_status.get(key) for key in ("request", "rum", "local_rows", "earliest_log_at", "latest_log_at")
         }
         cached = _header_badge_cache.get(valid_active_id)
-        if (
-            request_payload is None
-            and cached is not None
-            and time.monotonic() < cached[0]
-            and cached[3] == metric_inputs
-        ):
-            header_badge_payload, log_extents_payload = cached[1], cached[2]
-            return
+        if request_payload is None and cached is not None:
+            hb_cached, le_cached, inputs_cached = cached[-3:]
+            not_expired = len(cached) == 3 or time.monotonic() < cached[0]
+            if not_expired and inputs_cached == metric_inputs:
+                header_badge_payload, log_extents_payload = hb_cached, le_cached
+                return
 
         if request_payload is not None:
             rum_payload = rum_payload or {}
@@ -560,7 +559,6 @@ def _bootstrap_sync(
 
         # Store in service-level cache
         _header_badge_cache[valid_active_id] = (
-            time.monotonic() + _HEADER_BADGE_CACHE_TTL_S,
             header_badge_payload,
             log_extents_payload,
             metric_inputs,

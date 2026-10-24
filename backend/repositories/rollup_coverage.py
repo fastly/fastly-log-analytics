@@ -339,29 +339,6 @@ def collect_hourly_bundle_paths(
     return paths, index.crosses_active
 
 
-def find_missing_bundle_hours(
-    st: datetime,
-    et: datetime,
-    bundled_root: str,
-    bundle_filename: str,
-    cap: int = MISSING_HOUR_HEAL_CAP,
-    coverage_bundle_filename: str | None = None,
-) -> list[str]:
-    """Closed hours in ``[st, et)`` with no ``bundle_filename`` — a
-    writer-coverage gap the caller should live-heal, not treat as zero.
-
-    When ``coverage_bundle_filename`` is given, an hour whose coverage file is
-    the verified-empty sentinel counts as covered. Bounded by ``cap``: the
-    walk starts no earlier than ``cap`` hours before the active hour, so a
-    near-366-day window never stats more than ``cap`` hours.
-    """
-    now = datetime.now(UTC)
-    active_dt = now.replace(minute=0, second=0, microsecond=0)
-    floor = max(st, active_dt - timedelta(hours=cap))
-    index = CoverageIndex.build(floor, et, now=now)
-    return _missing_hours(index, BundleProbe(bundled_root), bundle_filename, coverage_bundle_filename)
-
-
 def _missing_hours(
     index: CoverageIndex,
     probe: BundleProbe,

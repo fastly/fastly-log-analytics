@@ -13,17 +13,6 @@ vi.mock('@/lib/api', () => ({
   getApiBase: () => 'http://test',
 }))
 
-// useHeaderBadgeStream now subscribes to bootstrap to detect analyst
-// status reactively. Mock useBootstrap so every test can control
-// is_remote_analyst. Each test that wants the hook to fire must set
-// mockBootstrap = { settings: { is_remote_analyst: true } }.
-const mockBootstrap: { data: Record<string, unknown> } = {
-  data: { settings: { is_remote_analyst: true }, header_badge: {} },
-}
-vi.mock('@/hooks/useBootstrap', () => ({
-  useBootstrap: () => mockBootstrap,
-}))
-
 let mockState: {
   activeServiceId: string | null
   services: Array<{ id: string; name: string; accessLevel: 'read_write' | 'read_only' }>

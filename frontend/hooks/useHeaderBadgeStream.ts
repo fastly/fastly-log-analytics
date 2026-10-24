@@ -1,7 +1,6 @@
 'use client'
 
 import { useQueryClient } from '@tanstack/react-query'
-import { useBootstrap } from '@/hooks/useBootstrap'
 import { useServiceStream } from '@/hooks/useServiceStream'
 import { queryKeys } from '@/lib/query-keys'
 import type { Schema } from '@/types/api'
@@ -31,24 +30,9 @@ type BadgeStreamEvent = Schema<'ShareHeaderBadgeResponse'>
 
 export function useHeaderBadgeStream(enabled: boolean) {
   const queryClient = useQueryClient()
-  // Reactive subscription to bootstrap. Required because the caller's
-  // ``enabled`` value typically derives from ``useIsAnalyst()``, which
-  // is a non-reactive synchronous read of ``queryClient.getQueryData(['bootstrap'])``.
-  // Without this hook subscribing to bootstrap directly, the badge
-  // component's first render sees ``isAnalyst === false`` (bootstrap
-  // hasn't resolved yet), this hook gets ``enabled === false``, the
-  // useEffect bails, and when bootstrap eventually arrives the dep
-  // never flips because nothing in the chain forced a re-render with
-  // the now-correct value. Observed 2026-06-16 on the Fastly URL:
-  // backend SSE worked end-to-end via direct fetch, hook never fired
-  // (zero setQueryData writes in 75s of waiting). Subscribing here
-  // forces a re-render the moment bootstrap data lands.
-  const { data: bootstrap } = useBootstrap()
-  const isRemoteAnalyst = bootstrap?.settings?.is_remote_analyst === true
-  const effectiveEnabled = enabled && isRemoteAnalyst
 
   return useServiceStream(
-    effectiveEnabled,
+    enabled,
     '/api/log-extents/stream',
     (raw) => {
       try {

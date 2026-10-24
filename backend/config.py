@@ -35,13 +35,19 @@ import math
 import os
 import re
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from ipaddress import ip_address
 from pathlib import Path
+
+from cachetools import TTLCache
+from filelock import FileLock
+from filelock import Timeout as _FileLockTimeout
+from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_fixed
+
+from backend.utils.atomic_write import atomic_write_json
 
 try:
     import fcntl
@@ -179,11 +185,11 @@ def load_clickhouse_provisioner_config() -> ClickHouseConfig | None:
 
 
 # Cache for Fastly service names: {service_id: {"name": str, "fetched_at": float}}
-_name_cache: dict = {}
+_NAME_CACHE_TTL = 300  # 5 minutes
+_name_cache: TTLCache = TTLCache(maxsize=256, ttl=_NAME_CACHE_TTL)
 _name_cache_lock = threading.Lock()
 _name_refresh_in_flight: set[str] = set()
 _name_refresh_lock = threading.Lock()
-_NAME_CACHE_TTL = 300  # 5 minutes
 
 # Cache for parsed configs: {service_id: (mtime_ns, parsed_dict)}.
 # Revalidated by stat() on each load_config call AND explicitly invalidated
@@ -323,24 +329,19 @@ def load_config(service_id: str | None) -> dict | None:
             return copy.deepcopy(cached[1])
 
     # Robust VirtioFS mid-write desynchronization retry loop
-    import time
-
     parsed = None
-    last_exc = None
-    for attempt in range(5):
-        try:
-            with open(path, "rb") as f:
-                raw = f.read()
-            parsed = json.loads(raw)
-            break
-        except (json.JSONDecodeError, PermissionError, OSError) as e:
-            last_exc = e
-            time.sleep(0.05)
+    for attempt in Retrying(
+        stop=stop_after_attempt(5),
+        wait=wait_fixed(0.05),
+        retry=retry_if_exception_type((json.JSONDecodeError, PermissionError, OSError)),
+        sleep=time.sleep,
+        reraise=True,
+    ):
+        with attempt:
+            parsed = json.loads(path.read_bytes())
 
     if parsed is None:
-        if last_exc is None:
-            raise ValueError(f"Config file must contain a JSON object: {path}")
-        raise last_exc
+        raise ValueError(f"Config file must contain a JSON object: {path}")
 
     with _config_cache_lock:
         _config_cache[service_id] = (mtime_ns, parsed)
@@ -348,39 +349,8 @@ def load_config(service_id: str | None) -> dict | None:
 
 
 def _atomic_write_json(path, data: dict) -> None:
-    """Write ``data`` to ``path`` atomically (unique tmp file + os.replace).
-
-    Shared by :func:`save_config` and :func:`save_usage_logging_config`,
-    which used to paste identical mkstemp / fdopen / json.dump / os.replace
-    blocks. Uses a UNIQUE tmp file (per-call random suffix) so concurrent
-    callers cannot clobber each other's tmp file mid-write. The shared-tmp
-    variant produced corrupted JSON (a stray ``}`` appended to the rendered
-    file) and bricked the backend on next read; we hit it twice in one
-    debugging session before fixing.
-    """
-    fd, tmp_path = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
-        try:
-            os.replace(tmp_path, path)
-        except OSError as e:
-            # Fallback to direct truncate-and-write if the bind-mount filesystem is busy/locked
-            if getattr(e, "errno", None) in {16, 13} or "busy" in str(e).lower() or "permission" in str(e).lower():
-                with open(path, "w") as f:
-                    json.dump(data, f, indent=2)
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-            else:
-                raise
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+    """Write ``data`` to ``path`` atomically (unique tmp file + os.replace)."""
+    atomic_write_json(path, data, indent=2, fallback_in_place_errnos={13, 16})
 
 
 class ConfigLockTimeout(TimeoutError):
@@ -419,35 +389,9 @@ def _mark_lock_degraded(service_id: str, err: BaseException) -> None:
         )
 
 
-def _acquire_flock(fd: int, service_id: str) -> None:
-    deadline = time.monotonic() + _LOCK_TIMEOUT_S
-    delay = _LOCK_BACKOFF_START_S
-    while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[union-attr]
-            return
-        except BlockingIOError:
-            if time.monotonic() >= deadline:
-                raise ConfigLockTimeout(
-                    f"timed out after {_LOCK_TIMEOUT_S:.0f}s waiting for the config lock of service {service_id}"
-                ) from None
-            time.sleep(delay)
-            delay = min(delay * 2, _LOCK_BACKOFF_MAX_S)
-
-
 @contextlib.contextmanager
 def config_lock(service_id: str):
-    """Cross-process exclusive lock for read-modify-write of one service config.
-
-    ``flock`` on a sidecar file works across uvicorn workers, celery workers and
-    separate pods sharing the configs volume; a threading lock only covers one
-    process. Acquisition is non-blocking with bounded backoff (``ConfigLockTimeout`` after 5s).
-    Re-entrant per thread: a nested acquire for the same service reuses the held lock
-    (a second ``flock`` on a new fd in the same process would otherwise self-deadlock).
-    Where the lock file cannot be opened (read-only FS) or ``fcntl`` is unavailable it
-    degrades to unlocked, logs at error level once per process and sets the
-    ``config_lock_degraded`` health flag.
-    """
+    """Cross-process exclusive lock for read-modify-write of one service config."""
     _ensure_dirs()
     sid = _validate_service_id(service_id)
     held: dict[str, int] = _lock_state.__dict__.setdefault("held", {})
@@ -460,32 +404,27 @@ def config_lock(service_id: str):
         return
 
     lock_path = CONFIGS_DIR / f".{sid}.lock"
-    fd = None
+    flock = FileLock(str(lock_path), thread_local=False)
+    acquired = False
     if fcntl is None:
         _mark_lock_degraded(service_id, RuntimeError("fcntl unavailable"))
     else:
         try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-            _acquire_flock(fd, service_id)
-        except ConfigLockTimeout:
-            if fd is not None:
-                os.close(fd)
-            raise
+            flock.acquire(timeout=_LOCK_TIMEOUT_S, poll_interval=_LOCK_BACKOFF_START_S)
+            acquired = True
+        except _FileLockTimeout:
+            raise ConfigLockTimeout(
+                f"timed out after {_LOCK_TIMEOUT_S:.0f}s waiting for the config lock of service {service_id}"
+            ) from None
         except OSError as e:
             _mark_lock_degraded(service_id, e)
-            if fd is not None:
-                os.close(fd)
-                fd = None
     held[sid] = 1
     try:
         yield
     finally:
         held.pop(sid, None)
-        if fd is not None:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_UN)  # type: ignore[union-attr]
-            finally:
-                os.close(fd)
+        if acquired:
+            flock.release()
 
 
 def _read_config_fresh(service_id: str) -> dict | None:
@@ -863,6 +802,7 @@ def refresh_all_service_names(configs: list[dict], _sync: bool = False) -> dict[
             if entry and (now - entry["fetched_at"]) < _NAME_CACHE_TTL:
                 name_map[sid] = entry["name"]
             else:
+                name_map[sid] = entry["name"] if entry else (cfg.get("name") or sid)
                 misses.append(cfg)
 
     if not misses:
@@ -890,14 +830,6 @@ def refresh_all_service_names(configs: list[dict], _sync: bool = False) -> dict[
     with _name_refresh_lock:
         for cfg in misses:
             sid = cfg.get("service_id", "")
-            entry = _name_cache.get(sid)
-            best_effort = sid
-            if entry:
-                best_effort = entry["name"]
-            elif cfg.get("name"):
-                best_effort = cfg["name"]
-            name_map[sid] = best_effort
-
             if sid not in _name_refresh_in_flight:
                 _name_refresh_in_flight.add(sid)
                 to_schedule.append((sid, cfg.get("fastly_api_key")))

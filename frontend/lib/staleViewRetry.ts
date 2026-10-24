@@ -47,8 +47,6 @@ export function isStaleDashboardViewError(err: unknown): err is StaleDashboardVi
 
 import { parseExtentMs } from '@/lib/date'
 
-export { parseExtentMs }
-
 /** Queried time window for an aggregates request (ISO strings). */
 export interface AggregatesWindow {
   startTime?: string | null

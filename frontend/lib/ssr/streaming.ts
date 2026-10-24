@@ -8,7 +8,7 @@ import {
   type SsrRangeSeed,
 } from './upstream'
 
-export const STREAMING_SSR_DEFAULTS = {
+const STREAMING_SSR_DEFAULTS = {
   bucketSeconds: 300,
   topN: 30,
 } as const

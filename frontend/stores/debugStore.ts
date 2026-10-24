@@ -1,8 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
-export type { DebugQuery, DebugCall } from '@/types/api'
-
 interface DebugState {
   enabled: boolean
   setEnabled: (val: boolean) => void

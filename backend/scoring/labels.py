@@ -173,21 +173,6 @@ def list_labels(service_id: str, limit: int = 500) -> list[dict]:
     return result
 
 
-def get_label(service_id: str, sid: str) -> dict | None:
-    """Look up the label for a single sid. None if not labeled.
-
-    Test-only convenience: production callers use list_labels (bulk fetch
-    for the admin UI) or get_label_by_id (after a save/update returns the
-    id). Kept because the labels test suite uses it for round-trip
-    verification."""
-    con = get_con(service_id)
-    row = con.execute(
-        "SELECT * FROM scoring_labels WHERE service_id = ? AND sid = ?",
-        (service_id, sid),
-    ).fetchone()
-    return _row_to_dict(row) if row else None
-
-
 def get_label_by_id(service_id: str, label_id: str) -> dict | None:
     con = get_con(service_id)
     row = con.execute(

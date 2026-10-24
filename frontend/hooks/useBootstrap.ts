@@ -2,8 +2,6 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 import { queryKeys, seedBootstrapDependentCaches } from '@/lib/query-keys'
-
-export { seedBootstrapDependentCaches }
 import { useSessionRoleStore } from '@/stores/sessionRoleStore'
 import { useServiceStore } from '@/stores/serviceStore'
 import { usePopGeoStore } from '@/stores/popGeoStore'

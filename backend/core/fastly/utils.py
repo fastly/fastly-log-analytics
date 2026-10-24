@@ -1,4 +1,3 @@
-import argparse
 import re
 import secrets
 
@@ -34,21 +33,6 @@ def parse_period(s: str) -> int:
         val = int(m.group(1))
         return val * 60 if m.group(2) else val
     raise ValueError(f"Cannot parse period: {s!r}  (try '60' or '5 minutes')")
-
-
-def int_range(mini, maxi):
-    """Return a type checker for argparse to enforce numeric ranges."""
-
-    def checker(arg):
-        try:
-            val = int(arg)
-        except ValueError:
-            raise argparse.ArgumentTypeError("Must be an integer")
-        if val < mini or val > maxi:
-            raise argparse.ArgumentTypeError(f"Must be between {mini} and {maxi}")
-        return val
-
-    return checker
 
 
 def render_vcl_sigv4_signing_block(

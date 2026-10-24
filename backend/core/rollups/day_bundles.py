@@ -53,6 +53,7 @@ from ._common import (
     cleanup_per_field_after_bundle,
     compact_closed_days,
     parquet_zstd_target,
+    publish_temp_parquet,
     quote_path_list,
     unlink_quiet,
     wavg,
@@ -108,8 +109,6 @@ def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
         return 0
 
     import duckdb
-
-    from backend.core.iceberg.view import _get_service_lock
 
     day_per_field_root = _day_rollups_root(source)
     bundled_root = _day_bundled_root(source)
@@ -256,10 +255,20 @@ def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
                     unlink_quiet(tmp_path)
                     continue
 
-            with _get_service_lock(lock_key):
-                os.replace(tmp_path, bundle_path)
-                _link_day_bundle_alias(bundle_path, alias_dir_path)
-                _link_day_bundle_alias(bundle_path, alias_root_path)
+            def _link_aliases(
+                _bp: str = bundle_path,
+                _ad: str = alias_dir_path,
+                _ar: str = alias_root_path,
+            ) -> None:
+                _link_day_bundle_alias(_bp, _ad)
+                _link_day_bundle_alias(_bp, _ar)
+
+            publish_temp_parquet(
+                tmp_path,
+                bundle_path,
+                lock_key,
+                after_replace_under_lock=_link_aliases,
+            )
             _cleanup_per_field_day_after_bundle(day_per_field_root, day, bundle_path, service_id)
             rebuilt += 1
     finally:
@@ -384,8 +393,6 @@ def compact_closed_days_to_daily(
     files per the local audit).
     """
     import duckdb
-
-    from backend.core.iceberg.view import _get_service_lock
 
     hour_root = _rollups_root(source)
     day_root = _day_rollups_root(source)
@@ -579,13 +586,11 @@ def compact_closed_days_to_daily(
                     unlink_quiet(tmp_file)
                     continue
 
-                with _get_service_lock(lock_key):
-                    try:
-                        os.replace(tmp_file, day_file)
-                        rebuilt += 1
-                    except OSError as e:
-                        logger.warning("[rollups] %s: rename to %s failed: %s", service_id, day_file, e)
-                        unlink_quiet(tmp_file)
+                try:
+                    publish_temp_parquet(tmp_file, day_file, lock_key)
+                    rebuilt += 1
+                except OSError as e:
+                    logger.warning("[rollups] %s: rename to %s failed: %s", service_id, day_file, e)
     finally:
         con.close()
 

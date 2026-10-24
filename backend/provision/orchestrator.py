@@ -688,27 +688,30 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                 # hiccup shouldn't surface during provisioning. Only I/O errors
                 # (OSError: FOS 5xx / timeout / reset) are retried; a config or
                 # programming error falls straight through to the fallback.
+                from tenacity import Retrying, retry_if_exception_type, stop_after_attempt
+
                 _ICE_INIT_ATTEMPTS = 3
                 ice_exc: Exception | None = None
-                for _attempt in range(_ICE_INIT_ATTEMPTS):
-                    try:
-                        db_iceberg.init_iceberg_table(src)
-                        ice_exc = None
-                        break
-                    except OSError as e:
-                        ice_exc = e
-                        if _attempt < _ICE_INIT_ATTEMPTS - 1:
-                            yield {
-                                "type": "status",
-                                "message": (
-                                    f"… Object Storage not ready yet "
-                                    f"(attempt {_attempt + 1}/{_ICE_INIT_ATTEMPTS}); retrying…"
-                                ),
-                            }
-                            time.sleep(1.5 * (_attempt + 1))
-                    except Exception as e:
-                        ice_exc = e
-                        break
+                try:
+                    for attempt in Retrying(
+                        stop=stop_after_attempt(_ICE_INIT_ATTEMPTS),
+                        retry=retry_if_exception_type(OSError),
+                        reraise=True,
+                    ):
+                        with attempt:
+                            idx = attempt.retry_state.attempt_number
+                            if idx > 1:
+                                yield {
+                                    "type": "status",
+                                    "message": (
+                                        f"… Object Storage not ready yet "
+                                        f"(attempt {idx - 1}/{_ICE_INIT_ATTEMPTS}); retrying…"
+                                    ),
+                                }
+                                time.sleep(1.5 * (idx - 1))
+                            db_iceberg.init_iceberg_table(src)
+                except Exception as e:
+                    ice_exc = e
                 if ice_exc is None:
                     ok("Iceberg table ready")
                     yield {"type": "status", "message": "✓ Iceberg table ready."}

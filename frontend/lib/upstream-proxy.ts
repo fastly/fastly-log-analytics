@@ -14,7 +14,7 @@ const HOP_BY_HOP_HEADERS = new Set([
 
 const IDEMPOTENT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 
-export function apiProxyTarget(): string {
+function apiProxyTarget(): string {
   return (
     process.env.API_PROXY_URL ||
     process.env.NEXT_PUBLIC_API_PROXY_URL ||

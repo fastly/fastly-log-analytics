@@ -3,7 +3,7 @@
 // out, so a malformed body degrades to the caller's fallback instead of
 // throwing deep inside render.
 
-export function isRecord(v: unknown): v is Record<string, unknown> {
+function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
 }
 

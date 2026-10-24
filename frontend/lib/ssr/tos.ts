@@ -8,7 +8,7 @@ import type { components } from '@/types/api.generated'
 
 import { parseSsrJson, ssrUpstreamGet } from './_transport'
 
-export type TosPayload = components['schemas']['TosDocument']
+type TosPayload = components['schemas']['TosDocument']
 export type TosResult = TosPayload | 'unauthenticated' | null
 
 export async function fetchTosServerSide(): Promise<TosResult> {

@@ -1,5 +1,4 @@
 import { getApiBase } from '@/lib/api'
-import { buildAdminHeaders } from '@/lib/adminHeaders'
 import type { EventStreamRequest } from '@/hooks/useEventStream'
 
 export interface BuildStreamRequestOptions {
@@ -32,7 +31,7 @@ export function buildStreamRequest({
     ...(body !== undefined ? { body } : {}),
     headers: {
       Accept: 'text/event-stream',
-      ...buildAdminHeaders({ serviceId }),
+      ...(serviceId ? { 'x-service-id': serviceId } : {}),
       ...extraHeaders,
     },
     ...(cache ? { cache } : {}),

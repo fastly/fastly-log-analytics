@@ -1,10 +1,8 @@
 """Tests for backend.core.fastly.utils."""
 
-import argparse
-
 import pytest
 
-from backend.core.fastly.utils import int_range, load_vcl, parse_period, region_endpoint
+from backend.core.fastly.utils import load_vcl, parse_period, region_endpoint
 
 
 def test_load_vcl_orders_auth_before_native_request_handling():
@@ -135,42 +133,6 @@ def test_parse_period_valid_inputs(raw, expected):
 def test_parse_period_invalid_format_raises(raw):
     with pytest.raises(ValueError, match="Cannot parse period"):
         parse_period(raw)
-
-
-# ── int_range: argparse type checker ───────────────────────────────────────────
-
-
-def test_int_range_returns_callable():
-    assert callable(int_range(0, 10))
-
-
-@pytest.mark.parametrize("value", ["10", "15", "20"])
-def test_int_range_accepts_values_in_bounds(value):
-    checker = int_range(10, 20)
-    out = checker(value)
-    assert out == int(value)
-    assert isinstance(out, int)
-
-
-@pytest.mark.parametrize("value", ["abc", "1.5", ""])
-def test_int_range_rejects_non_integer(value):
-    checker = int_range(0, 100)
-    with pytest.raises(argparse.ArgumentTypeError, match="Must be an integer"):
-        checker(value)
-
-
-@pytest.mark.parametrize("value", ["5", "9"])
-def test_int_range_rejects_below_minimum(value):
-    checker = int_range(10, 20)
-    with pytest.raises(argparse.ArgumentTypeError, match="Must be between 10 and 20"):
-        checker(value)
-
-
-@pytest.mark.parametrize("value", ["21", "1000"])
-def test_int_range_rejects_above_maximum(value):
-    checker = int_range(10, 20)
-    with pytest.raises(argparse.ArgumentTypeError, match="Must be between 10 and 20"):
-        checker(value)
 
 
 # ── load_vcl: rate_limiting=False strips the rate-limit blocks ─────────────────

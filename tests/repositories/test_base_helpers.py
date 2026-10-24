@@ -19,11 +19,9 @@ from backend.repositories._base import (
     CANONICAL_METRICS,
     VALID_CHART_INTERVALS,
     QueryRunner,
-    _attach_sqlite,
     _is_stale_view_error,
     _latest_log_in_window,
     _safe_table,
-    attach_metadata_db,
     attach_ngwaf_cache,
     empty_schema_response,
     error_rate_expr,
@@ -338,74 +336,6 @@ def test_is_stale_view_error_returns_false_for_unrelated_errors():
     assert _is_stale_view_error(Exception("Permission denied")) is False
 
 
-# ── _attach_sqlite: context-manager ATTACH semantics ──────────────────────
-
-
-def test_attach_sqlite_yields_false_when_path_missing(tmp_path):
-    """Missing SQLite file → yield False without attempting ATTACH.
-    Pinned because attempting ATTACH on a missing file is what
-    causes the SQLite extension to load (slow) and then fail."""
-    con = duckdb.connect(":memory:")
-    try:
-        missing = str(tmp_path / "does-not-exist.db")
-        with _attach_sqlite(con, missing, "alias_x") as attached:
-            assert attached is False
-    finally:
-        con.close()
-
-
-def test_attach_sqlite_attaches_and_detaches_on_exit(tmp_path):
-    """Happy path: file exists → ATTACH on enter, DETACH on exit.
-    Pinned because forgetting the DETACH leaks an attachment slot
-    per request and DuckDB caps the total."""
-    import sqlite3
-
-    db_path = tmp_path / "real.db"
-    sqlite3.connect(str(db_path)).close()  # touch the file
-
-    con = duckdb.connect(":memory:")
-    try:
-        con.execute("INSTALL sqlite; LOAD sqlite;")
-        with _attach_sqlite(con, str(db_path), "myalias") as attached:
-            assert attached is True
-            # The attachment is queryable
-            con.execute("SELECT * FROM duckdb_databases() WHERE database_name = 'myalias'").fetchone()
-        # After exit, the attachment is gone
-        attached_after = con.execute(
-            "SELECT count(*) FROM duckdb_databases() WHERE database_name = 'myalias'"
-        ).fetchone()[0]
-        assert attached_after == 0
-    finally:
-        con.close()
-
-
-def test_attach_sqlite_swallows_attach_failure(tmp_path):
-    """An ATTACH that raises (sqlite extension unavailable, lock
-    contention, permission denied) is caught and yields ``False`` —
-    pinned because raising here would cascade into a 500 for routes
-    that only need the attachment optionally.
-
-    DuckDB lazily validates SQLite files, so writing garbage bytes
-    doesn't fail at ATTACH time. Force the failure by stubbing
-    ``con.execute`` to raise for the ATTACH statement specifically;
-    that exercises the same except-and-yield-False path real callers
-    would hit when an attach raises."""
-    real_path = tmp_path / "exists.db"
-    real_path.write_text("placeholder")  # passes the os.path.exists() guard
-
-    class _FailingConn:
-        def execute(self, sql: str):
-            if sql.startswith("ATTACH "):
-                raise RuntimeError("simulated ATTACH failure")
-            raise AssertionError(f"unexpected SQL: {sql!r}")
-
-    con = _FailingConn()
-    with _attach_sqlite(con, str(real_path), "broken") as attached:
-        assert attached is False
-    # If attached had leaked through as True, the context manager would
-    # have attempted a DETACH on exit, hitting the AssertionError above.
-
-
 # ── attach_ngwaf_cache: schema-gated cross-engine ATTACH ──────────────────
 
 
@@ -513,22 +443,6 @@ def test_attach_ngwaf_cache_materializes_without_sqlite_scan_or_attach(monkeypat
             ).fetchone()
             assert row == ("GoogleBot", "SEARCH-ENGINE")
 
-    finally:
-        con.close()
-
-
-# ── attach_metadata_db ────────────────────────────────────────────────────
-
-
-def test_attach_metadata_db_yields_false_when_file_missing(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        "backend.core.metadata.db_path",
-        lambda sid: str(tmp_path / f"{sid}.metadata.db"),
-    )
-    con = duckdb.connect(":memory:")
-    try:
-        with attach_metadata_db(con, "svc-missing", alias="m") as attached:
-            assert attached is False
     finally:
         con.close()
 

@@ -39,7 +39,6 @@ from backend.core.share_db.connection import (
     close_all_connections,
     db_path,
     get_global_share_con,
-    get_safe_share_db_connection,
     reset_for_tests,
 )
 from backend.core.share_db.invites import (
@@ -76,10 +75,6 @@ from backend.core.share_db.passcode import (
 from backend.core.share_db.schema import (
     _SCHEMA,
     LATEST_VERSION,
-    MIGRATIONS,
-    _init_db,
-    apply_pending,
-    get_current_version,
 )
 from backend.core.share_db.sessions import (
     delete_session,
@@ -119,16 +114,11 @@ __all__ = [
     # Connection layer.
     "db_path",
     "get_global_share_con",
-    "get_safe_share_db_connection",
     "close_all_connections",
     "reset_for_tests",
     # Schema + migrations.
     "_SCHEMA",
-    "_init_db",
-    "MIGRATIONS",
     "LATEST_VERSION",
-    "apply_pending",
-    "get_current_version",
     # Passcode.
     "hash_passcode",
     "verify_passcode",

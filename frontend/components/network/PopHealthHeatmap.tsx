@@ -21,7 +21,7 @@ import {
 
 const SKELETON_IDS = Array.from({ length: 16 }, (_, i) => `pop-skeleton-${i}`)
 
-export const POP_HEALTH_THRESHOLDS = {
+const POP_HEALTH_THRESHOLDS = {
   degradedErrorPct: 2.0,
   criticalErrorPct: 5.0,
   degradedTtfbMs: 400,

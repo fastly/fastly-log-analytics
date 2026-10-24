@@ -1,5 +1,6 @@
 import { formatDistanceToNow, parseISO } from 'date-fns'
 import { formatInTimeZone, toDate } from 'date-fns-tz'
+import { formatElapsed } from '@/lib/format'
 
 export function toUTCDate(date: string | Date): Date {
   if (date instanceof Date) return date
@@ -68,25 +69,13 @@ function getTimeDiff(date: string | Date) {
   return { diffSec, absSec: Math.abs(diffSec) }
 }
 
-/**
- * Shared >=60s unit ladder for the compact formatters: <60→s, <3600→m,
- * <86400→h, else→d, each with Math.floor. Callers handle their own
- * zero/parens branches around this.
- */
-function compactUnit(s: number): string {
-  if (s < 60) return `${s}s`
-  if (s < 3600) return `${Math.floor(s / 60)}m`
-  if (s < 86400) return `${Math.floor(s / 3600)}h`
-  return `${Math.floor(s / 86400)}d`
-}
-
 export function formatCompactRelative(date: string | Date) {
   const diff = getTimeDiff(date)
   if (!diff) return ''
   const { absSec } = diff
 
   if (absSec <= 1) return '(any second)'
-  return `(${compactUnit(absSec)})`
+  return `(${formatElapsed(absSec)})`
 }
 
 export function formatTimeAgo(date: string | Date) {
@@ -118,15 +107,6 @@ export function getTimezoneAbbr(date: Date, tz: string) {
   return formatInTimeZone(date, tz, 'zzz')
 }
 
-/**
- * Locale date-time string in the viewer's local timezone — byte-identical to
- * ``new Date(value).toLocaleString()`` (and to ``value.toLocaleString()`` for
- * a ``Date``), including the "Invalid Date" output for unparseable input.
- *
- * Centralized so analytics UI can't drift back into inline
- * ``.toLocaleString()`` on dates (enforced by the ESLint ban in analytics
- * dirs). Pass ``Intl.DateTimeFormatOptions`` to control the rendered parts.
- */
 export function formatLocalDateTime(
   value: string | number | Date,
   options?: Intl.DateTimeFormatOptions,
@@ -135,21 +115,11 @@ export function formatLocalDateTime(
   return d.toLocaleString(undefined, options)
 }
 
-/**
- * Format a duration in seconds as the largest single unit (e.g. "5s",
- * "10m", "5h", "3d"). Negative or zero values return
- * "any second" — used by countdown timers (next-run badges) that hit
- * zero before the next interval fires.
- */
 export function formatCompactDuration(seconds: number): string {
   if (seconds <= 0) return 'any second'
-  return compactUnit(seconds)
+  return formatElapsed(seconds)
 }
 
-/**
- * Format a duration in seconds into a human-readable string with dynamic detail
- * (e.g. "45s", "12m 30s", "3h 15m", "5d 6h").
- */
 export function formatDuration(seconds: number | null | undefined, options?: { round?: boolean }): string {
   if (seconds == null || seconds < 0) return '—'
   const round = options?.round ?? true

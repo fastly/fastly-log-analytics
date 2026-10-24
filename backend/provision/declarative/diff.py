@@ -6,11 +6,11 @@ to bring the current state into sync with the desired state.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
-@dataclass
+@dataclass(unsafe_hash=True)
 class VCLSnippet:
     """A single VCL snippet (name, priority, body, subroutine)."""
 
@@ -20,25 +20,7 @@ class VCLSnippet:
     subroutine: str
 
     def to_dict(self) -> dict:
-        return {
-            "name": self.name,
-            "priority": self.priority,
-            "body": self.body,
-            "subroutine": self.subroutine,
-        }
-
-    def __hash__(self) -> int:
-        return hash((self.name, self.priority, self.body, self.subroutine))
-
-    def __eq__(self, other: Any) -> bool:
-        if not isinstance(other, VCLSnippet):
-            return NotImplemented
-        return (
-            self.name == other.name
-            and self.priority == other.priority
-            and self.body == other.body
-            and self.subroutine == other.subroutine
-        )
+        return asdict(self)
 
 
 @dataclass
@@ -69,20 +51,6 @@ class LoggingEndpoint:
     def __hash__(self) -> int:
         return hash((self.name, self.endpoint_type, self.path, self.period))
 
-    def __eq__(self, other: Any) -> bool:
-        if not isinstance(other, LoggingEndpoint):
-            return NotImplemented
-        return (
-            self.name == other.name
-            and self.endpoint_type == other.endpoint_type
-            and self.path == other.path
-            and self.period == other.period
-            and self.response_condition == other.response_condition
-            and self.format_string == other.format_string
-            and self.placement == other.placement
-            and self.response_object_name == other.response_object_name
-        )
-
 
 @dataclass
 class Backend:
@@ -103,43 +71,10 @@ class Backend:
     request_condition: str = ""
 
     def to_dict(self) -> dict:
-        return {
-            "name": self.name,
-            "address": self.address,
-            "port": self.port,
-            "ssl_check_cert": self.ssl_check_cert,
-            "ssl_hostname": self.ssl_hostname,
-            "connect_timeout": self.connect_timeout,
-            "first_byte_timeout": self.first_byte_timeout,
-            "between_bytes_timeout": self.between_bytes_timeout,
-            "auto_loadbalance": self.auto_loadbalance,
-            "use_ssl": self.use_ssl,
-            "override_host": self.override_host,
-            "shield": self.shield,
-            "request_condition": self.request_condition,
-        }
+        return asdict(self)
 
     def __hash__(self) -> int:
         return hash((self.name, self.address, self.port))
-
-    def __eq__(self, other: Any) -> bool:
-        if not isinstance(other, Backend):
-            return NotImplemented
-        return (
-            self.name == other.name
-            and self.address == other.address
-            and self.port == other.port
-            and self.ssl_check_cert == other.ssl_check_cert
-            and self.ssl_hostname == other.ssl_hostname
-            and self.connect_timeout == other.connect_timeout
-            and self.first_byte_timeout == other.first_byte_timeout
-            and self.between_bytes_timeout == other.between_bytes_timeout
-            and self.auto_loadbalance == other.auto_loadbalance
-            and self.use_ssl == other.use_ssl
-            and self.override_host == other.override_host
-            and self.shield == other.shield
-            and self.request_condition == other.request_condition
-        )
 
 
 @dataclass
@@ -147,16 +82,11 @@ class ServiceDictionary:
     """A single Fastly service dictionary (ConfigStore)."""
 
     name: str
-    write_only: bool = False
+    write_only: bool = field(default=False, compare=False)
     items: dict[str, str] = field(default_factory=dict)
 
     def __hash__(self) -> int:
         return hash((self.name, tuple(sorted(self.items.items()))))
-
-    def __eq__(self, other: Any) -> bool:
-        if not isinstance(other, ServiceDictionary):
-            return NotImplemented
-        return self.name == other.name and self.items == other.items
 
 
 @dataclass

@@ -6,8 +6,6 @@ from backend.core.high_scale_contracts import (
     HIGH_SCALE_OWNERSHIP,
     ArchiveManifest,
     ArchiveState,
-    MigrationFence,
-    RecoveryBudget,
     validate_archive_transition,
 )
 
@@ -101,56 +99,3 @@ def test_archive_deletion_requires_committed_manifest_and_matching_epoch() -> No
         current_archive_epoch=7,
         replay_lease_active=True,
     )
-
-
-def test_recovery_budget_covers_live_reservation_and_replay_rate() -> None:
-    budget = RecoveryBudget(
-        events_per_second=2_000_000,
-        recovery_window_seconds=900,
-        archive_read_events_per_second=300_000_000,
-        decode_events_per_second=300_000_000,
-        clickhouse_insert_events_per_second=300_000_000,
-        replication_factor=3,
-        live_ingest_reservation=0.25,
-    )
-    assert budget.replay_events_per_second == pytest.approx(192_000_000)
-    assert budget.required_replay_events_per_second == pytest.approx(256_000_000)
-    assert budget.can_recover is True
-
-    with pytest.raises(ValueError, match="replication"):
-        RecoveryBudget(
-            events_per_second=1,
-            recovery_window_seconds=1,
-            archive_read_events_per_second=1,
-            decode_events_per_second=1,
-            clickhouse_insert_events_per_second=1,
-            replication_factor=0,
-            live_ingest_reservation=0.1,
-        )
-
-
-def test_migration_fence_requires_drain_before_cutover_and_rollback() -> None:
-    fence = MigrationFence(
-        service_id="service",
-        owner_epoch=7,
-        current_owner="standard",
-        next_owner="high_scale",
-        source_cursor="raw/request/file.gz#42",
-        drain_complete=True,
-        cutover_committed=True,
-        rollback_allowed=True,
-    )
-    assert fence.can_cut_over() is True
-    assert fence.can_roll_back() is True
-
-    undrained = MigrationFence(
-        service_id="service",
-        owner_epoch=7,
-        current_owner="standard",
-        next_owner="high_scale",
-        source_cursor="raw/request/file.gz#42",
-        cutover_committed=True,
-        rollback_allowed=True,
-    )
-    assert undrained.can_cut_over() is False
-    assert undrained.can_roll_back() is False

@@ -5,7 +5,7 @@ export type LogFieldsCatalogLike =
   | null
   | undefined;
 
-export function applyGroupDependencies<T extends string | null>(
+function applyGroupDependencies<T extends string | null>(
   groups: Set<T>,
   catalog: LogFieldsCatalogLike,
 ): void {

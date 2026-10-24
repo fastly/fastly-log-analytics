@@ -7,14 +7,13 @@ import hashlib
 import ipaddress
 import json
 import logging
-import os
 import re
-import tempfile
 import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from backend.utils.atomic_write import atomic_write_json
 from backend.utils.date_utils import iso_z_now
 from backend.utils.http import http_get_text
 from backend.utils.ip_ranges import collapse_network_objects, ip_int_in_intervals, parse_ip_int_version
@@ -199,26 +198,7 @@ def fetch_external_cidrs(source_config: dict) -> list[str]:
 
 def _atomic_write_cache(source_id: str, envelope: dict) -> None:
     """Atomically write the source cache envelope to disk using a temp file."""
-    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    target = _cache_path(source_id)
-    tmp_fd, tmp_path = tempfile.mkstemp(
-        prefix=f".{target.name}.",
-        suffix=".tmp",
-        dir=str(_CACHE_DIR),
-    )
-    payload = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
-    try:
-        with os.fdopen(tmp_fd, "wb") as f:
-            f.write(payload)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, target)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+    atomic_write_json(_cache_path(source_id), envelope, indent=None, separators=(",", ":"), fsync=True)
 
 
 def fetch_and_cache_source(source_id: str) -> dict:

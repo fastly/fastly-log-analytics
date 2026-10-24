@@ -228,33 +228,6 @@ def _compact_sql_for_debug(sql: str) -> str:
     return _PARQUET_LIST_RE.sub(_replace, sql)
 
 
-@contextlib.contextmanager
-def _attach_sqlite(con: duckdb.DuckDBPyConnection, sqlite_path: str, alias: str):
-    """Context manager that ATTACHes a SQLite file to a DuckDB connection read-only.
-
-    Yields True if the ATTACH succeeded, False otherwise (file missing, SQLite
-    extension unavailable, etc.). DETACHes on exit. Callers should treat a False
-    yield as "the bridge isn't available — fall back to a Python-side query".
-    """
-
-    attached = False
-    if sqlite_path and os.path.exists(sqlite_path):
-        try:
-            escaped = escape_sql_literal(sqlite_path)
-            con.execute(f"ATTACH '{escaped}' AS {alias} (TYPE SQLITE, READ_ONLY)")
-            attached = True
-        except Exception:
-            _logger.debug("_attach_sqlite: step failed (ignored)", exc_info=True)
-    try:
-        yield attached
-    finally:
-        if attached:
-            try:
-                con.execute(f"DETACH {alias}")
-            except Exception:
-                _logger.debug("_attach_sqlite: con.execute failed (ignored)", exc_info=True)
-
-
 def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -> bool:
     """Ensure ``{alias}.ngwaf_bots`` is queryable on ``con``, materialized
     from the NGWAF bot-cache SQLite file via plain ``sqlite3`` — NOT via
@@ -361,20 +334,6 @@ def attach_ngwaf_cache(con: duckdb.DuckDBPyConnection, schema_cols: list[str], a
         yield False
         return
     yield ensure_ngwaf_bots_materialized(con, alias)
-
-
-@contextlib.contextmanager
-def attach_metadata_db(con: duckdb.DuckDBPyConnection, service_id: str, alias: str = "meta"):
-    """Attach the per-service metadata SQLite file (alerts, views, asn_names, …).
-
-    Use ``meta.<table_name>`` to reference rows from inside a DuckDB query
-    (e.g. JOINing the log table against `meta.asn_names`). Yields False if the
-    file doesn't exist yet — callers should fall back gracefully.
-    """
-    from backend.core import metadata as metadata_db
-
-    with _attach_sqlite(con, metadata_db.db_path(service_id), alias) as attached:
-        yield attached
 
 
 def _safe_table(name: str) -> str:

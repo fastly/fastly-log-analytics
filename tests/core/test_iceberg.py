@@ -437,49 +437,6 @@ def test_read_metadata_pointer_cache_expires_after_ttl(s3_mock, fos_source, monk
         assert spy.call_count == 2, "TTL=0 must defeat the cache entirely"
 
 
-def test_write_metadata_pointer_invalidates_cache(s3_mock, fos_source):
-    """Same-process write must bust the cache so the next reader sees the
-    fresh value instead of returning the stale pre-commit pointer. The
-    cron_compact workflow reads the pointer before commit, writes the new
-    pointer at commit time, then reads again as part of the post-commit
-    refresh — without invalidation the post-commit read would return the
-    stale pre-commit value for up to _POINTER_CACHE_TTL_SEC."""
-    _reset_pointer_cache()
-    # Unique prefix → uncollidable cache key (see test_read_metadata_pointer_s3_fallback).
-    prefix = "ptrcache-invalidate"
-    source = {**fos_source, "prefix": prefix}
-    identifier = ("default", "logs")
-    pointer_key = f"{prefix}/iceberg/default/logs/metadata_location.txt"
-    s3_mock.put_object(
-        Bucket="test-bucket",
-        Key=pointer_key,
-        Body=f"s3://test-bucket/{prefix}/iceberg/default/logs/metadata/v1.metadata.json".encode(),
-    )
-
-    # _write_metadata_pointer fires _write_table_summary_async in a daemon
-    # thread; this test only cares about pointer write + cache invalidation,
-    # not the async summary, so stub it to avoid spawning a thread that
-    # outlives the test and scans metadata on the shared moto client.
-    with (
-        patch("backend.core.iceberg._core._write_table_summary_async"),
-        patch.object(s3_mock, "get_object", wraps=s3_mock.get_object) as spy,
-    ):
-        loc1 = iceberg._read_metadata_pointer(source, identifier)
-        assert loc1.endswith("v1.metadata.json")
-        assert spy.call_count == 1
-
-        # Write a new pointer — invalidates cache. _write_metadata_pointer
-        # writes to S3 itself via the same moto client, so the next read
-        # naturally sees v2 from real storage.
-        iceberg._write_metadata_pointer(
-            source, f"s3://test-bucket/{prefix}/iceberg/default/logs/metadata/v2.metadata.json"
-        )
-
-        loc2 = iceberg._read_metadata_pointer(source, identifier)
-        assert loc2.endswith("v2.metadata.json")
-        assert spy.call_count == 2, "Write must invalidate; otherwise reader would return stale v1 until TTL elapses"
-
-
 # ── post-sync cache update: rate-limit retry ────────────────────────────────
 
 
@@ -1004,7 +961,6 @@ def test_update_iceberg_view_locked_does_not_downgrade_when_ingested_files_exist
     monkeypatch.setattr(_ice, "_get_catalog", lambda src: fake_catalog)
     monkeypatch.setattr(_ice, "buffer_files", lambda src: [])
     monkeypatch.setattr(_ice, "_read_metadata_pointer", lambda src, ident: None)
-    monkeypatch.setattr(_ice, "_load_persistent_cache", lambda src: None)
     monkeypatch.setattr(_ice, "configure_duckdb_s3", lambda con: None)
     monkeypatch.setattr("os.path.exists", lambda p: False)
 
@@ -1254,9 +1210,8 @@ def _setup_cold_load_view_test(monkeypatch, tmp_path, source_key, *, plan_files_
     monkeypatch.setattr(_core_mod, "_get_catalog", lambda src: fake_catalog)
     monkeypatch.setattr(_core_mod, "_load_table_cached", lambda src, ident, cat: fake_table)
     monkeypatch.setattr(_core_mod, "buffer_files", lambda src: [])
-    # view.py defines these two itself (not in _core), so they must be
+    # view.py defines configure_duckdb_s3 itself (not in _core), so it must be
     # patched on view_mod directly.
-    monkeypatch.setattr(view_mod, "_load_persistent_cache", lambda src: None)
     monkeypatch.setattr(view_mod, "configure_duckdb_s3", lambda con: None)
 
     from backend.core import metadata as _meta
@@ -2195,50 +2150,3 @@ def test_source_variant_fp_changes_when_access_or_time_range_changes():
     assert _source_variant_fp(cron_disabled) != _source_variant_fp(base), (
         "the same WHERE-clause branch fires when cron is disabled — fingerprint must capture it"
     )
-
-
-# ── _sync_metadata_pointer_from_discovery (Trap #28 refuse-to-regress) ────────
-
-
-def test_sync_pointer_from_discovery_refuses_to_regress(s3_mock, fos_source):
-    """A discovery-resolved pointer OLDER than the known-good location must
-    never be written (Trap #28 defense 3 — the backstop that would have
-    prevented the 2026-08 41-day metadata rollback on its own)."""
-    _reset_pointer_cache()
-    # Unique prefix → uncollidable pointer-cache key (see
-    # test_read_metadata_pointer_s3_fallback).
-    prefix = "ptrsync-regress"
-    source = {**fos_source, "prefix": prefix}
-    pointer_key = f"{prefix}/iceberg/default/logs/metadata_location.txt"
-    good = f"s3://test-bucket/{prefix}/iceberg/default/logs/metadata/09000-good.metadata.json"
-    s3_mock.put_object(Bucket="test-bucket", Key=pointer_key, Body=good.encode())
-    # Discovery listing only finds an ancient version.
-    s3_mock.put_object(
-        Bucket="test-bucket",
-        Key=f"{prefix}/iceberg/default/logs/metadata/00952-old.metadata.json",
-        Body=b"{}",
-    )
-
-    iceberg._sync_metadata_pointer_from_discovery(source)
-
-    body = s3_mock.get_object(Bucket="test-bucket", Key=pointer_key)["Body"].read().decode()
-    assert body == good, "discovery sync must not regress the pointer to an older version"
-
-
-def test_sync_pointer_from_discovery_advances_to_newer(s3_mock, fos_source):
-    _reset_pointer_cache()
-    prefix = "ptrsync-advance"
-    source = {**fos_source, "prefix": prefix}
-    pointer_key = f"{prefix}/iceberg/default/logs/metadata_location.txt"
-    old = f"s3://test-bucket/{prefix}/iceberg/default/logs/metadata/00001-old.metadata.json"
-    s3_mock.put_object(Bucket="test-bucket", Key=pointer_key, Body=old.encode())
-    for key in (
-        f"{prefix}/iceberg/default/logs/metadata/00001-old.metadata.json",
-        f"{prefix}/iceberg/default/logs/metadata/00002-new.metadata.json",
-    ):
-        s3_mock.put_object(Bucket="test-bucket", Key=key, Body=b"{}")
-
-    iceberg._sync_metadata_pointer_from_discovery(source)
-
-    body = s3_mock.get_object(Bucket="test-bucket", Key=pointer_key)["Body"].read().decode()
-    assert body == f"s3://test-bucket/{prefix}/iceberg/default/logs/metadata/00002-new.metadata.json"

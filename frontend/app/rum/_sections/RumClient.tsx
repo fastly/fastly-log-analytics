@@ -7,7 +7,7 @@ import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery';
 import { AnalyticsCard } from '@/components/AnalyticsCard';
 import { RumStatusPanel } from '@/components/Rum/RumStatusPanel';
 
-import { GenericPageSkeleton } from '@/components/skeletons/PageSkeleton';
+import { DashboardSkeleton } from '@/components/skeletons/PageSkeleton';
 import { PlotlyChart } from '@/components/PlotlyChart';
 import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart';
 import { useTimezone } from '@/hooks/useTimezone';
@@ -554,7 +554,7 @@ export function RumClient({
   });
 
   if (isStatusLoading || isLoading) {
-    return <GenericPageSkeleton />;
+    return <DashboardSkeleton />;
   }
 
   if (!status?.enabled) {
@@ -562,7 +562,7 @@ export function RumClient({
   }
 
   if (!analytics) {
-    return <GenericPageSkeleton />;
+    return <DashboardSkeleton />;
   }
 
   if (analytics.no_data) {

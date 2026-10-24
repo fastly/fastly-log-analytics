@@ -42,16 +42,6 @@ def test_init_creates_all_tables_and_seeds_settings(fresh_share_con):
     assert tos and tos["version"] == "v1"
 
 
-def test_user_version_advances_to_latest(fresh_share_con):
-    assert share_db.get_current_version(fresh_share_con) == share_db.LATEST_VERSION
-
-
-def test_apply_pending_is_idempotent(fresh_share_con):
-    """Calling apply_pending again is a no-op once we're at LATEST_VERSION."""
-    n = share_db.apply_pending(fresh_share_con)
-    assert n == 0  # nothing applied second time
-
-
 def test_publish_tos_version_appends_and_is_idempotent(fresh_share_con):
     share_db.publish_tos_version("v2", "Updated terms.", con=fresh_share_con)
     tos = share_db.get_latest_tos(con=fresh_share_con)
@@ -395,38 +385,6 @@ def test_set_invite_concurrent_sessions_toggles():
     assert share_db.set_invite_concurrent_sessions("does-not-exist", True) is False
 
 
-def test_migration_003_adds_allow_concurrent_sessions_column():
-    """A pre-migration remote_invites table (without the column) gains it,
-    defaulting to 0, and the migration is idempotent."""
-    import sqlite3
-
-    from backend.core.share_db import schema
-
-    con = sqlite3.connect(":memory:")
-    con.row_factory = sqlite3.Row
-    con.execute(
-        """CREATE TABLE remote_invites (
-            id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL,
-            passcode TEXT NOT NULL, created_at TEXT NOT NULL,
-            revoked INTEGER NOT NULL DEFAULT 0
-        )"""
-    )
-    con.execute(
-        "INSERT INTO remote_invites(id, name, email, passcode, created_at) "
-        "VALUES ('i1', 'n', 'e', 'p', '2020-01-01T00:00:00Z')"
-    )
-    con.commit()
-
-    schema._migration_003_add_allow_concurrent_sessions(con)
-    cols = {r[1] for r in con.execute("PRAGMA table_info(remote_invites)").fetchall()}
-    assert "allow_concurrent_sessions" in cols
-    existing = con.execute("SELECT allow_concurrent_sessions FROM remote_invites WHERE id='i1'").fetchone()
-    assert existing["allow_concurrent_sessions"] == 0
-
-    # Idempotent: the _has_column guard makes a second run a no-op.
-    schema._migration_003_add_allow_concurrent_sessions(con)
-
-
 def test_create_invite_weak_passcode_raises():
     with pytest.raises(share_db.WeakPasscodeError):
         share_db.create_remote_invite(
@@ -508,40 +466,6 @@ def test_update_invite_services_replaces_set():
 
 
 # ── OAuth invites (migration 004: auth_method / oauth_provider / oauth_subject) ─
-
-
-def test_migration_004_adds_oauth_columns():
-    """A pre-migration remote_invites table gains the OAuth columns, existing
-    rows backfill to auth_method='passcode', and the migration is idempotent."""
-    import sqlite3
-
-    from backend.core.share_db import schema
-
-    con = sqlite3.connect(":memory:")
-    con.row_factory = sqlite3.Row
-    con.execute(
-        """CREATE TABLE remote_invites (
-            id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL,
-            passcode TEXT NOT NULL, created_at TEXT NOT NULL,
-            revoked INTEGER NOT NULL DEFAULT 0
-        )"""
-    )
-    con.execute(
-        "INSERT INTO remote_invites(id, name, email, passcode, created_at) "
-        "VALUES ('i1', 'n', 'e', 'p', '2020-01-01T00:00:00Z')"
-    )
-    con.commit()
-
-    schema._migration_004_add_oauth_columns(con)
-    cols = {r[1] for r in con.execute("PRAGMA table_info(remote_invites)").fetchall()}
-    assert {"auth_method", "oauth_provider", "oauth_subject"}.issubset(cols)
-    row = con.execute("SELECT auth_method, oauth_provider, oauth_subject FROM remote_invites WHERE id='i1'").fetchone()
-    assert row["auth_method"] == "passcode"  # backfilled via DEFAULT
-    assert row["oauth_provider"] is None
-    assert row["oauth_subject"] is None
-
-    # Idempotent: the _has_column guard makes a second run a no-op.
-    schema._migration_004_add_oauth_columns(con)
 
 
 def test_fresh_db_has_oauth_columns(fresh_share_con):

@@ -22,7 +22,3 @@ export function downloadAsCsv(rows: Record<string, unknown>[], columns: string[]
   ].join('\n')
   downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), filename)
 }
-
-export function downloadText(content: string, filename: string, mimeType = 'text/plain;charset=utf-8;') {
-  downloadBlob(new Blob([content], { type: mimeType }), filename)
-}

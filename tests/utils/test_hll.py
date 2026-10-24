@@ -29,7 +29,6 @@ from backend.utils.hll import (
     DEFAULT_PRECISION,
     SERIALIZATION_VERSION,
     HyperLogLog,
-    merge_sketches,
 )
 
 # ── Construction + invariants ────────────────────────────────────────────────
@@ -186,31 +185,6 @@ def test_merge_rejects_precision_mismatch():
     hll_p10 = HyperLogLog(precision=10)
     with pytest.raises(ValueError, match="merge precision mismatch"):
         hll_p8.merge(hll_p10)
-
-
-def test_merge_sketches_returns_none_on_empty_iterable():
-    """``merge_sketches([])`` is the reader's "no rollup data for this
-    (field, value)" signal — it must return None, not raise or build
-    a zero sketch (which would render as a valid-looking 0)."""
-    assert merge_sketches([]) is None
-
-
-def test_merge_sketches_chains_correctly():
-    """``merge_sketches([a, b, c])`` matches manual a.merge(b).merge(c)."""
-    sketches = []
-    for i in range(3):
-        s = HyperLogLog()
-        s.update(f"item-{i}-{j}" for j in range(100))
-        sketches.append(s)
-
-    merged_helper = merge_sketches(sketches)
-    assert merged_helper is not None
-
-    merged_manual = HyperLogLog()
-    for s in sketches:
-        merged_manual.merge(s)
-
-    assert merged_helper.to_bytes() == merged_manual.to_bytes()
 
 
 # ── Serialization round-trip ────────────────────────────────────────────────

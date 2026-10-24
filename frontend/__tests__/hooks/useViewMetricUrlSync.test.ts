@@ -56,10 +56,6 @@ vi.mock('@/hooks/useActiveService', () => ({
   useActiveService: vi.fn(() => ({ activeServiceId: 'test-service-id', services: [] })),
 }))
 
-vi.mock('@/hooks/useReportConfig', () => ({
-  useReportConfig: vi.fn(() => ({ setMetric: mockSetMetric })),
-}))
-
 vi.mock('@/lib/api', () => ({
   client: { GET: mockClientGet },
 }))
@@ -81,21 +77,21 @@ describe('useViewMetricUrlSync', () => {
 
   it('does nothing when there are no URL params', async () => {
     const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
-    renderHook(() => useViewMetricUrlSync(), adapter())
+    renderHook(() => useViewMetricUrlSync({ setMetric: mockSetMetric }), adapter())
     expect(mockAddFilter).not.toHaveBeenCalled()
     expect(mockSetRange).not.toHaveBeenCalled()
     expect(mockSetMetric).not.toHaveBeenCalled()
   })
 
   it('parses metric param and calls setMetric', async () => {
-        const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
-    renderHook(() => useViewMetricUrlSync(), adapter('?metric=bandwidth'))
+    const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
+    renderHook(() => useViewMetricUrlSync({ setMetric: mockSetMetric }), adapter('?metric=bandwidth'))
     expect(mockSetMetric).toHaveBeenCalledWith('bandwidth')
   })
 
   it('strips metric param from URL after processing while leaving unrelated params untouched', async () => {
-        const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
-    renderHook(() => useViewMetricUrlSync(), adapter('?metric=requests&other=keep'))
+    const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
+    renderHook(() => useViewMetricUrlSync({ setMetric: mockSetMetric }), adapter('?metric=requests&other=keep'))
     await waitFor(() => expect(onUrlUpdate).toHaveBeenCalled())
     const remaining = onUrlUpdate.mock.calls.at(-1)![0].searchParams
     expect(remaining.get('metric')).toBeNull()

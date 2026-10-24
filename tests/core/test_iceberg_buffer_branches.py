@@ -14,7 +14,6 @@ from unittest.mock import patch
 import pytest
 
 from backend.core.iceberg.buffer import (
-    _buffer_basename_marker,
     _is_tombstone_marker,
     _quarantine_buffer_file,
     _tombstone_marker_path,
@@ -24,30 +23,6 @@ from backend.core.iceberg.buffer import (
     sweep_tombstoned_buffer_files,
     tombstone_buffer_files,
 )
-
-# ── _buffer_basename_marker: deterministic 12-hex hash ───────────────────
-
-
-def test_buffer_basename_marker_is_12_hex_chars():
-    """Pinned because the marker lands in Iceberg snapshot summary
-    metadata.json and the on-disk size is load-bearing for catalog
-    perf at scale."""
-    marker = _buffer_basename_marker("batch_abc.parquet")
-    assert len(marker) == 12
-    assert all(c in "0123456789abcdef" for c in marker)
-
-
-def test_buffer_basename_marker_is_deterministic():
-    """Same basename → same marker, every time. Recovery on restart
-    matches snapshot markers against buffer basenames and relies on
-    determinism."""
-    assert _buffer_basename_marker("x.parquet") == _buffer_basename_marker("x.parquet")
-
-
-def test_buffer_basename_marker_differs_for_distinct_basenames():
-    """Different basenames → different markers (the whole point)."""
-    assert _buffer_basename_marker("a.parquet") != _buffer_basename_marker("b.parquet")
-
 
 # ── _is_tombstone_marker: substring matcher precision ───────────────────
 

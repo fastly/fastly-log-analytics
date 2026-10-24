@@ -23,7 +23,6 @@ flow through.
 from __future__ import annotations
 
 import glob as _glob
-import hashlib
 import logging
 import os
 import time
@@ -62,67 +61,6 @@ def __getattr__(name: str):
 
 _TOMBSTONE_SUFFIX = ".consumed-"  # Followed by an integer Unix-epoch seconds value.
 _TOMBSTONE_GRACE_SECONDS = 300  # See tombstone_buffer_files docstring for the rationale.
-
-# Snapshot-summary property namespace for the buffer-commit marker. Each
-# successful ``table.append`` tags its snapshot with one of these per
-# buffer file in the chunk. On retry, the commit-recovery sweep scans
-# recent snapshots for these markers and treats any matching buffer as
-# already-committed — durable proof of append that survives even the
-# SQLite committed_buffers checkpoint being lost (disk full, DB locked
-# at the wrong moment, etc). Without this, the only durable record of
-# "I appended this batch" is the SQLite write, which has a millisecond
-# gap after table.append where a crash produces duplicate rows.
-#
-# Window: scan only snapshots from the last ``_COMMIT_MARKER_LOOKBACK_S``
-# seconds so this stays cheap on long-lived tables with thousands of
-# snapshots.
-_COMMIT_MARKER_PREFIX = "app.buffer_commit_marker."
-_COMMIT_MARKER_LOOKBACK_S = 3600  # 1 hour — far exceeds any plausible retry window
-
-
-def _buffer_basename_marker(basename: str) -> str:
-    """Deterministic short marker for a buffer file basename.
-
-    Iceberg snapshot summary keys land in metadata.json so we want them
-    short (12 hex chars = 48 bits, collision-free per chunk size).
-    """
-    return hashlib.sha256(basename.encode("utf-8")).hexdigest()[:12]
-
-
-def _recent_snapshot_markers(table: Any, since_ms: int) -> set[str]:
-    """Return the set of buffer-commit markers attached to snapshots
-    since ``since_ms`` (unix epoch ms). The complementary half of
-    ``_buffer_basename_marker``: post-restart, if a basename's marker
-    appears here, ``table.append`` succeeded for that buffer regardless
-    of whether the SQLite checkpoint landed.
-
-    Defensive — any exception (transient catalog read failure, metadata
-    incompatibility on an older table) returns an empty set so the
-    caller falls back to the SQLite-only recovery path.
-    """
-    out: set[str] = set()
-    try:
-        for snap in table.snapshots():
-            ts = getattr(snap, "timestamp_ms", 0) or 0
-            if ts < since_ms:
-                continue
-            summary = getattr(snap, "summary", None)
-            if summary is None:
-                continue
-            # snap.summary may expose either ``additional_properties``
-            # (dict) or behave dict-like — handle both.
-            props = getattr(summary, "additional_properties", None) or {}
-            if not props and hasattr(summary, "__iter__"):
-                try:
-                    props = dict(summary)
-                except Exception:
-                    props = {}
-            for k in props.keys():
-                if isinstance(k, str) and k.startswith(_COMMIT_MARKER_PREFIX):
-                    out.add(k[len(_COMMIT_MARKER_PREFIX) :])
-    except Exception as e:
-        logger.warning("%s _recent_snapshot_markers raised (continuing): %s", _core_mod._ICE, e)
-    return out
 
 
 def _tombstone_marker_path(parquet_path: str, ts: int) -> str:

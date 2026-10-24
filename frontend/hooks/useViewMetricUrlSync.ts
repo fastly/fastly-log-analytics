@@ -2,7 +2,6 @@ import { useEffect } from 'react'
 import { parseAsString, useQueryStates } from 'nuqs'
 import { useFilterStore } from '@/stores/filterStore'
 import { useActiveService } from './useActiveService'
-import { useReportConfig } from './useReportConfig'
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 import { queryKeys } from '@/lib/query-keys'
@@ -42,9 +41,8 @@ export function useViewMetricUrlSync(options?: { setMetric?: (m: string) => void
   const currentEdgeOnly = useFilterStore(s => s.edgeOnly)
   const currentCompareMode = useFilterStore(s => s.compareMode)
   const { activeServiceId } = useActiveService()
-  const { setMetric: fallbackSetMetric } = useReportConfig({ defaultMetric: 'requests', defaultInterval: '1 minute', defaultTrend: 'off' })
   const queryClient = useQueryClient()
-  const setMetric = options?.setMetric ?? fallbackSetMetric
+  const setMetric = options?.setMetric
 
   useEffect(() => {
     if (!activeServiceId) return

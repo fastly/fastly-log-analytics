@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useEffectEvent, useRef } from 'react'
 import { useServiceStore } from '@/stores/serviceStore'
 
 /**
@@ -16,16 +16,12 @@ export function useServiceSwitchReset(
   const resolvedServiceId =
     activeServiceId === undefined ? storeActiveServiceId : activeServiceId
   const prevServiceRef = useRef<string | null>(resolvedServiceId)
-  const callbackRef = useRef(callback)
-
-  useEffect(() => {
-    callbackRef.current = callback
-  })
+  const onReset = useEffectEvent(callback)
 
   useEffect(() => {
     const prev = prevServiceRef.current
     if (prev && prev !== resolvedServiceId) {
-      callbackRef.current(prev, resolvedServiceId)
+      onReset(prev, resolvedServiceId)
     }
     prevServiceRef.current = resolvedServiceId
   }, [resolvedServiceId])

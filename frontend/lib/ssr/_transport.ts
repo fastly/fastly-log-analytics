@@ -39,9 +39,9 @@ import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
 // we'd rather fall through to client fetch and let the page paint with
 // a loading skeleton than block SSR indefinitely. The shorter SSR
 // endpoints (tos, alerts) inherit the same ceiling for consistency.
-export const TIMEOUT_MS = 5000
+const TIMEOUT_MS = 5000
 
-export function isLoopbackHost(host: string): boolean {
+function isLoopbackHost(host: string): boolean {
   // Strip port for comparison. IPv6 loopback "[::1]:port" wraps the
   // literal in brackets per RFC 3986; bare-IPv4 / hostname forms split
   // on the first colon.

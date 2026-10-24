@@ -25,20 +25,13 @@ _DB_FILENAME = "remote_share.db"
 
 # Module-level state retained for compatibility with monkeypatching fixtures.
 _local = threading.local()
-_init_lock = threading.Lock()
 _initialized: set[str] = set()
-_recovery_marker: dict[int, str] = {}
 
 
 def db_path(_key: str | None = None) -> str:
     """Absolute path to the legacy global share DB file (compatibility helper)."""
     base = os.environ.get("REMOTE_SHARE_DB_DIR") or _DATA_DIR
     return os.path.join(base, _DB_FILENAME)
-
-
-def get_safe_share_db_connection(path: str | None = None) -> Any:
-    """Legacy helper — under Postgres returns the thread-local Postgres connection."""
-    return get_global_share_con()
 
 
 def get_global_share_con() -> Any:

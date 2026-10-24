@@ -265,9 +265,6 @@ def pg_schema_statements() -> list[str]:
         for statement in statements
         if not any(f"CREATE INDEX IF NOT EXISTS {name}" in statement for name in _INGEST_LEDGER_INDEX_NAMES)
     ]
-    # SQLite triggers (usage_log rollup maintenance) don't translate to PG
-    # and the PG write path maintains the rollup itself.
-    statements = [s for s in statements if not s.strip().startswith("CREATE TRIGGER")]
     statements.append(_SLOW_QUERIES_DDL)
     statements.extend(_SLOW_QUERIES_INDEX_DDL)
     statements.append(_COMMITTED_BUFFERS_DDL)

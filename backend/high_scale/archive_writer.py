@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import tempfile
 from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
@@ -21,6 +19,7 @@ from backend.high_scale.archive_models import (
     ArchiveSourceEntry,
     ArchiveSourceObject,
 )
+from backend.utils.atomic_write import atomic_temp_path, atomic_write_json
 
 
 def _sha256(path: Path) -> str:
@@ -111,14 +110,8 @@ def write_batch_archive_checkpoint(
 
     artifact_name = f"{service_id}-{domain}-{source_token}.parquet"
     artifact_path = output_root / artifact_name
-    with tempfile.NamedTemporaryFile(dir=output_root, suffix=".parquet", delete=False) as temp:
-        temp_path = Path(temp.name)
-    try:
-        table = pa.Table.from_pylist(canonical_events)
-        pq.write_table(table, temp_path)
-        os.replace(temp_path, artifact_path)
-    finally:
-        temp_path.unlink(missing_ok=True)
+    with atomic_temp_path(artifact_path, suffix=".parquet") as temp_path:
+        pq.write_table(pa.Table.from_pylist(canonical_events), temp_path)
 
     artifact_checksum = _sha256(artifact_path)
     artifact = ArchiveArtifact(
@@ -170,9 +163,7 @@ def write_batch_archive_checkpoint(
     )
     manifest.validate()
     manifest_path = output_root / f"{manifest_id}.manifest.json"
-    temp_manifest = manifest_path.with_suffix(".tmp")
-    temp_manifest.write_text(json.dumps(asdict(manifest), default=_json_default, sort_keys=True, indent=2))
-    os.replace(temp_manifest, manifest_path)
+    atomic_write_json(manifest_path, asdict(manifest), default=_json_default, sort_keys=True, indent=2)
     return manifest
 
 
