@@ -197,6 +197,9 @@ def test_expired_claims_are_recovered_behind_the_listing_cursor() -> None:
         (0, "svc", "raw/old.gz"),
     )
     ledger._con.commit()
+    ledger.expired_claims = lambda service_id, domain, limit=None: [  # type: ignore[attr-defined]
+        s for s in (ledger.source(service_id, "raw/old.gz"),) if s and s.status == "claimed"
+    ]
 
     result = coordinator.run_page(service_id="svc", domain="request")
 

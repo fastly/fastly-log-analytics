@@ -18,7 +18,6 @@ import { SERIES_LAYOUT, WINDOWS, type TrendWindow } from './trends-config'
 
 type TrendPoint = components['schemas']['MetricHistoryPoint']
 type TrendBatch = components['schemas']['MetricHistoryBatchResponse']
-export type { TrendWindow }
 
 function maxAcrossServicesPerTs(series: Record<string, TrendPoint[]>, metric: string): TrendPoint[] {
   const keys = Object.keys(series).filter((k) => k.startsWith(`${metric}|`))

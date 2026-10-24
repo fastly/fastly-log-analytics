@@ -3,15 +3,13 @@ import {
   type SsrRangeSeed,
 } from './upstream'
 
-export type AssetsSsrSeed = SsrRangeSeed
-
 /**
  * SSR-prefetch the default assets aggregates selection for the active service.
  */
 export async function fetchAssetsServerSide(
   serviceId: string | undefined,
   now: Date = new Date(),
-): Promise<AssetsSsrSeed | null> {
+): Promise<SsrRangeSeed | null> {
   return fetchSsrRangePost({
     serviceId,
     path: '/api/assets/aggregates',

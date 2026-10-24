@@ -15,11 +15,8 @@ import type { components } from '@/types/api.generated'
 // reproduces exactly what the backend already computed. ``minRequests <= 0``
 // means "no floor": nothing is low-sample and every eligible route is flagged.
 
-/** One edge→shield route as served by the API. */
-export type ShieldingRow = components['schemas']['ShieldingRow']
-
 /** A route as the map and table consume it: derived flags may be absent until adjusted. */
-export type ShieldingRowInput = Partial<ShieldingRow>
+export type ShieldingRowInput = Partial<components['schemas']['ShieldingRow']>
 
 export function adjustShieldingRows(
   rows: readonly ShieldingRowInput[] | null | undefined,

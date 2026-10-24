@@ -381,25 +381,13 @@ def _table_columns(service_id: str) -> set[str]:
     return cols
 
 
-# Synthesize-missing-scoring-columns helpers live in the repository (the
+# Synthesize-missing-scoring-columns helper lives in the repository (the
 # canonical home, since this module imports the repo and not vice-versa) so
 # the per-endpoint queries here and the per-sid event hydration in
 # fetch_session_events share ONE definition of the column contract. Aliased
 # back into this module's namespace so the call sites below (and the tests)
-# read as local helpers. See repo docstring for the why.
-_SCORING_COLUMN_TYPES = _scoring_repo._SCORING_COLUMN_TYPES
+# read as a local helper. See repo docstring for the why.
 _scoring_source = _scoring_repo.scoring_source
-
-
-def _fetch_session_events(
-    service_id: str,
-    sids: list[str],
-    since_days: int = 30,
-    limit_per_sid: int = 500,
-    *,
-    ts_predicate: str | None = None,
-) -> dict[str, list[dict]]:
-    return _scoring_repo.fetch_session_events(service_id, sids, since_days, limit_per_sid, ts_predicate=ts_predicate)
 
 
 _RECONSTRUCT_CACHE_TTL = 5.0

@@ -23,8 +23,23 @@ from __future__ import annotations
 import logging
 import os
 
-from backend.core.metadata import pg_connection
-from backend.core.metadata.base import _DATA_DIR, _validate_service_id_or_raise
+from backend.core.metadata.base import (
+    _DATA_DIR,
+    _validate_service_id_or_raise,
+    close_all_connections,
+    get_con,
+)
+from backend.core.metadata.base import (
+    get_con_readonly as open_readonly,
+)
+
+__all__ = [
+    "_SCHEMA",
+    "close_all_connections",
+    "db_path",
+    "get_con",
+    "open_readonly",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -33,27 +48,6 @@ def db_path(service_id: str) -> str:
     """Absolute path to the per-service usage_log SQLite file (legacy helper)."""
     _validate_service_id_or_raise(service_id)
     return os.path.join(_DATA_DIR, f"{service_id}.usage_log.db")
-
-
-def get_con(service_id: str) -> pg_connection.PgConnectionWrapper:
-    """Read-write thread-local connection to the metadata Postgres database."""
-    _validate_service_id_or_raise(service_id)
-    wrapper = pg_connection.get_pg_thread_connection()
-    wrapper._service_id = service_id
-    return wrapper
-
-
-def open_readonly(service_id: str) -> pg_connection.PgConnectionWrapper:
-    """Open a short-lived read-only connection to the metadata Postgres database."""
-    _validate_service_id_or_raise(service_id)
-    wrapper = pg_connection.get_pg_readonly_connection()
-    wrapper._service_id = service_id
-    return wrapper
-
-
-def close_all_connections() -> None:
-    """Close all open Postgres connections in the pool."""
-    pg_connection.close_all_pg_connections()
 
 
 # ── Schema ────────────────────────────────────────────────────────────────────

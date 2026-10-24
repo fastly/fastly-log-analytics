@@ -13,7 +13,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from tests._helpers.dates import past_hour as _past_hour
-from tests._helpers.locks import noop_lock as _noop_lock
+from tests._helpers.rollups import writer_patches
 
 pytestmark = pytest.mark.usefixtures("frozen_clock")
 
@@ -83,16 +83,7 @@ def test_build_time_series_writes_per_minute_buckets(tmp_path):
         ],
     )
 
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value="logs_ts"),
-        patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
-            side_effect=lambda c, _src, fn: fn(c),
-        ),
-    ):
+    with writer_patches(cache_root, "logs_ts", con):
         n = time_series.build_time_series_bundles("svc-ts", src, [hour_token])
 
     assert n == 1
@@ -234,16 +225,7 @@ def test_build_time_series_columns_absent_use_constant_zero(tmp_path):
     con.execute("CREATE TABLE logs_bare (timestamp TIMESTAMPTZ)")
     con.execute("INSERT INTO logs_bare VALUES (?)", [hour_dt + timedelta(minutes=1)])
 
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value="logs_bare"),
-        patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
-            side_effect=lambda c, _src, fn: fn(c),
-        ),
-    ):
+    with writer_patches(cache_root, "logs_bare", con):
         n = time_series.build_time_series_bundles("svc-bare", src, [hour_token])
 
     assert n == 1

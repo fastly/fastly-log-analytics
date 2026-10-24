@@ -13,7 +13,6 @@ from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.security import (
     SecurityAggregatesRequest,
     SecurityAggregatesResponse,
-    SecurityBundleResponse,
     SecuritySectionName,
     ThreatIntelItem,
     ThreatIntelListResponse,
@@ -54,7 +53,7 @@ _expand_sections = make_section_expander(
 
 
 @router.post("/aggregates", response_model=SecurityAggregatesResponse)
-@router.post("/bundle", response_model=SecurityBundleResponse)
+@router.post("/bundle", response_model=SecurityAggregatesResponse)
 @query_errors()
 def security_aggregates(
     req: SecurityAggregatesRequest,
@@ -107,7 +106,7 @@ def security_aggregates(
     return SecurityAggregatesResponse.with_telemetry(**res)
 
 
-@router.get("/bundle", response_model=SecurityBundleResponse)
+@router.get("/bundle", response_model=SecurityAggregatesResponse)
 @query_errors()
 def security_bundle_get(
     response: Response,

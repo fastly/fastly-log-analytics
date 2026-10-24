@@ -29,9 +29,7 @@ vi.mock('@/components/charts/TimeSeriesChart', () => ({
 // PlotlyChart is only transitively imported via TimeSeriesChart, but
 // other parents in the same test process may pick up the un-mocked
 // module — stub it to be safe.
-vi.mock('@/components/PlotlyChart/PlotlyChart', () => ({
-  PlotlyChart: () => <div data-testid="plotly-chart" />,
-}))
+vi.mock('@/components/PlotlyChart/PlotlyChart', async () => (await import('@/__tests__/helpers/page-smoke')).plotlyChartModuleMock())
 
 // useActiveLogFields chains useBootstrap + useLogFieldsCatalog (both react-query),
 // which would need a QueryClientProvider. Mock it instead — TrafficChart's

@@ -9,7 +9,7 @@ import type { components } from '@/types/api.generated'
 import { parseSsrJson, ssrUpstreamGet } from './_transport'
 
 type TosPayload = components['schemas']['TosDocument']
-export type TosResult = TosPayload | 'unauthenticated' | null
+type TosResult = TosPayload | 'unauthenticated' | null
 
 export async function fetchTosServerSide(): Promise<TosResult> {
   // /api/share/tos doubles as an auth gate: 401 means the analyst session

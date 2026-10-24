@@ -8,7 +8,7 @@ export interface TimeseriesDataPoint {
   ts?: string | null
 }
 
-export interface TraceConfig {
+interface TraceConfig {
   key: string
   name: string
   color: string

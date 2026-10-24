@@ -9,14 +9,11 @@ from __future__ import annotations
 import hashlib
 from urllib.parse import urlsplit
 
-import psycopg
 import pyarrow as pa
 import pyarrow.parquet as pq
 import structlog
 from botocore.exceptions import ClientError
-from psycopg.conninfo import conninfo_to_dict
 
-from backend import config
 from backend.core.clickhouse_manifest import Artifact, Dataset
 from backend.core.clickhouse_publication import DurableBatch
 from backend.core.clickhouse_rows import (
@@ -24,7 +21,6 @@ from backend.core.clickhouse_rows import (
     MAX_BATCH_ROWS,
     PAYLOAD_COLUMNS,
     build_batch_id,
-    canonical_bytes,
     canonical_row,
     digest_rows,
     utc,
@@ -137,27 +133,3 @@ class FosArtifacts:
             raise ValueError("artifact canonical hash mismatch")
         logger.info("clickhouse.artifact", operation="get", rows=len(rows), bytes=artifact.byte_size)
         return DurableBatch(artifact, rows)
-
-
-def source_catalog_identity() -> str:
-    """Credential-free location + database/catalog-object identities, hashed.
-
-    Recreating the catalog tables or database changes its identity even when
-    the connection hostname is unchanged. Credentials are never persisted.
-    """
-    dsn = config.DUCKLAKE_CATALOG
-    if dsn.startswith("postgres:postgres"):
-        dsn = dsn.removeprefix("postgres:")
-    if not dsn.startswith(("postgres://", "postgresql://")):
-        raise ValueError("prototype export requires Postgres DuckLake catalog")
-    info = conninfo_to_dict(dsn)
-    with psycopg.connect(dsn, connect_timeout=5, autocommit=True) as con:
-        row = con.execute(
-            "SELECT (SELECT oid FROM pg_database WHERE datname=current_database()), "
-            "to_regclass('ducklake_snapshot')::oid"
-        ).fetchone()
-    if row is None or row[1] is None:
-        raise ValueError("source catalog identity unavailable")
-    return hashlib.sha256(
-        canonical_bytes((info.get("host"), info.get("port", "5432"), info.get("dbname"), *row))
-    ).hexdigest()

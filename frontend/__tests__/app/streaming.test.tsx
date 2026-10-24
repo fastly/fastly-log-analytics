@@ -20,9 +20,7 @@ vi.mock('@/lib/api', () => ({
   getApiBase: vi.fn(() => 'http://test'),
 }))
 
-vi.mock('@/components/PlotlyChart', () => ({
-  PlotlyChart: () => <div data-testid="plotly-chart" />,
-}))
+vi.mock('@/components/PlotlyChart', async () => (await import('../helpers/page-smoke')).plotlyChartModuleMock())
 
 vi.mock('@/components/ReportLayout', async () =>
   (await import('../helpers/page-smoke')).reportLayoutModuleMock({

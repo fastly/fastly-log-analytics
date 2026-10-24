@@ -65,8 +65,3 @@ def percentiles(values: list[float], qs: tuple[float, ...]) -> list[float | None
         else:
             out.append(ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower))
     return out
-
-
-def percentile(values: list[float], percentile: float) -> float | None:
-    """Linear-interpolated percentile (``percentile`` in [0, 1]) of ``values``."""
-    return percentiles(values, (percentile,))[0]

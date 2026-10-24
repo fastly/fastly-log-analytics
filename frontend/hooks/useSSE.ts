@@ -21,7 +21,7 @@ export interface SSELine {
   [key: string]: unknown
 }
 
-export interface UseSSEOptions {
+interface UseSSEOptions {
   /**
    * Keep only the newest N frames. Unset = unbounded (finite wizard/log
    * streams). Set it for permanent streams (Control Room) so memory and

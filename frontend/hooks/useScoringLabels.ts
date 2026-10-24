@@ -14,7 +14,7 @@ export type LabelValue = LabelRowWire['label']
 
 export type LabelRow = LabelRowWire
 
-export interface ScoringLabelsResult {
+interface ScoringLabelsResult {
   labels: LabelRow[]
   counts: Record<LabelValue, number>
   labelBySid: Map<string, LabelValue>

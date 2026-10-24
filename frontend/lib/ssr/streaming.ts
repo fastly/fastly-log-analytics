@@ -13,12 +13,10 @@ const STREAMING_SSR_DEFAULTS = {
   topN: 30,
 } as const
 
-export type StreamingSsrSeed = SsrRangeSeed
-
 export async function fetchStreamingServerSide(
   serviceId: string | undefined,
   now: Date = new Date(),
-): Promise<StreamingSsrSeed | null> {
+): Promise<SsrRangeSeed | null> {
   return fetchSsrRangePost({
     serviceId,
     path: '/api/cmcd/aggregates',

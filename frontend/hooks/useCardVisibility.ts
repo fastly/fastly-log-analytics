@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo } from 'react'
 import { useMounted } from '@/hooks/useMounted'
 
-export interface CardVisibilityMigration {
+interface CardVisibilityMigration {
   /** Bump when the set of IDs to retire or surface changes. Stored under `<storageKey>_mv`. */
   version: number
   /** IDs to strip from the saved set on first load after a version bump. */

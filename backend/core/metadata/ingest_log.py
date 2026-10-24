@@ -131,33 +131,37 @@ def list_ingested_files(service_id: str, limit: int = 10000) -> list[dict]:
     ]
 
 
-def _bootstrap_ingested_files_summary(con: Any, service_id: str) -> dict:
-    """One-time SQL aggregate to seed ``ingested_files_summary`` from existing rows.
-
-    Pays the full ~4 s scan ONCE per service per app lifetime so subsequent
-    ``get_ingested_files_status_summary`` calls are O(1) lookups against the
-    rollup row. Called from the summary getter when the rollup is missing.
-    """
+def _query_ingested_files_aggregate(
+    con: Any,
+    service_id: str,
+    table_name: str | None = None,
+) -> dict[str, Any]:
+    """Run the aggregate + latest-filename queries against ``ingested_files``."""
+    where_sql = "WHERE source_name = ?"
+    params: tuple[Any, ...] = (service_id,)
+    if table_name is not None:
+        where_sql += " AND table_name = ?"
+        params = (service_id, table_name)
     agg = con.execute(
-        """
+        f"""
         SELECT
-            COUNT(*)               AS file_count,
+            COUNT(*)                           AS file_count,
             COALESCE(SUM(row_count), 0)        AS total_rows,
             COALESCE(SUM(file_size_bytes), 0)  AS total_bytes,
-            COUNT(file_size_bytes) AS count_with_bytes,
-            MAX(ingested_at)       AS last_ingested
+            COUNT(file_size_bytes)             AS count_with_bytes,
+            MAX(ingested_at)                   AS last_ingested
         FROM ingested_files
-        WHERE source_name = ?
+        {where_sql}
         """,
-        (service_id,),
+        params,
     ).fetchone()
     # Order chronologically by extracting the timestamp following '.gz' in the filename
     latest_fn_row = con.execute(
-        "SELECT file_name FROM ingested_files WHERE source_name = ? "
+        f"SELECT file_name FROM ingested_files {where_sql} "
         "ORDER BY substr(file_name, instr(file_name, '.gz') + 3, 19) DESC, file_name DESC LIMIT 1",
-        (service_id,),
+        params,
     ).fetchone()
-    summary = {
+    return {
         "file_count": (agg["file_count"] if agg else 0) or 0,
         "total_rows": (agg["total_rows"] if agg else 0) or 0,
         "total_bytes": (agg["total_bytes"] if agg else 0) or 0,
@@ -165,6 +169,16 @@ def _bootstrap_ingested_files_summary(con: Any, service_id: str) -> dict:
         "last_ingested": (agg["last_ingested"] if agg else None),
         "latest_file_name": (latest_fn_row["file_name"] if latest_fn_row else None),
     }
+
+
+def _bootstrap_ingested_files_summary(con: Any, service_id: str) -> dict:
+    """One-time SQL aggregate to seed ``ingested_files_summary`` from existing rows.
+
+    Pays the full ~4 s scan ONCE per service per app lifetime so subsequent
+    ``get_ingested_files_status_summary`` calls are O(1) lookups against the
+    rollup row. Called from the summary getter when the rollup is missing.
+    """
+    summary = _query_ingested_files_aggregate(con, service_id)
     con.execute(
         """INSERT INTO ingested_files_summary AS summary
                (source_name, file_count, total_rows, total_bytes,
@@ -222,29 +236,7 @@ def get_ingested_files_status_summary(service_id: str, table_name: str = "logs")
     """
     con = get_con(service_id)
     if table_name != "logs":
-        agg = con.execute(
-            """SELECT COUNT(*) AS file_count,
-                      COALESCE(SUM(row_count), 0) AS total_rows,
-                      COALESCE(SUM(file_size_bytes), 0) AS total_bytes,
-                      COUNT(file_size_bytes) AS count_with_bytes,
-                      MAX(ingested_at) AS last_ingested
-               FROM ingested_files
-               WHERE source_name = ? AND table_name = ?""",
-            (service_id, table_name),
-        ).fetchone()
-        latest_fn_row = con.execute(
-            "SELECT file_name FROM ingested_files WHERE source_name = ? AND table_name = ? "
-            "ORDER BY substr(file_name, instr(file_name, '.gz') + 3, 19) DESC, file_name DESC LIMIT 1",
-            (service_id, table_name),
-        ).fetchone()
-        return {
-            "file_count": (agg["file_count"] if agg else 0) or 0,
-            "total_rows": (agg["total_rows"] if agg else 0) or 0,
-            "total_bytes": (agg["total_bytes"] if agg else 0) or 0,
-            "count_with_bytes": (agg["count_with_bytes"] if agg else 0) or 0,
-            "last_ingested": (agg["last_ingested"] if agg else None),
-            "latest_file_name": (latest_fn_row["file_name"] if latest_fn_row else None),
-        }
+        return _query_ingested_files_aggregate(con, service_id, table_name=table_name)
 
     row = con.execute(
         "SELECT file_count, total_rows, total_bytes, count_with_bytes, "

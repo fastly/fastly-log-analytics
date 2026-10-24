@@ -75,7 +75,7 @@ async function PerformancePageContent({
       {},
       PERFORMANCE_SSR_DEFAULTS.sortBy,
     ]
-    dehydratedState = seedDehydratedState(queryKey, seed.performanceData)
+    dehydratedState = seedDehydratedState(queryKey, seed.data)
   }
 
   return (

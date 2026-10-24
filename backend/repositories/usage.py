@@ -9,25 +9,15 @@ import duckdb
 
 from backend import config as svcconfig
 from backend.core.metric_expressions import coalesce
-from backend.repositories._base import QueryRunner, _compact_sql_for_debug, _safe_table
+from backend.repositories._base import QueryRunner, _compact_sql_for_debug, _safe_table, record_duckdb_query
 from backend.repositories._sql import usage as SQL
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
-from backend.utils.telemetry import get_queries, record_telemetry_query
 
 logger = logging.getLogger(__name__)
 
 _LOG_ACTIVITY_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=30.0)
 _CacheRegistry.register("repositories.usage._LOG_ACTIVITY_CACHE", _LOG_ACTIVITY_CACHE)
-
-
-def _record_duckdb_query(sql_str: str, elapsed_ms: float, service_id: str | None = None) -> None:
-    try:
-        q_list = get_queries()
-        q_list.append({"sql": sql_str, "time_ms": elapsed_ms, "engine": "DuckDB"})
-        record_telemetry_query("duckdb", sql_str, elapsed_ms, service_id=service_id)
-    except Exception:
-        logger.debug("usage._record_duckdb_query failed", exc_info=True)
 
 
 def get_edge_ratio(con: duckdb.DuckDBPyConnection, src: dict) -> tuple[float | None, list]:
@@ -118,7 +108,7 @@ def get_log_activity(
     cached_res = _LOG_ACTIVITY_CACHE.get(cache_key)
     if cached_res is not None:
         for dq in cached_res.get("_debug_queries", []):
-            _record_duckdb_query(dq.get("sql", ""), float(dq.get("time_ms", 0.0)), service_id=svc_id)
+            record_duckdb_query(dq.get("sql", ""), float(dq.get("time_ms", 0.0)), service_id=svc_id)
         return {
             **cached_res,
             "data": [dict(p) for p in cached_res.get("data", [])],
@@ -178,7 +168,7 @@ def get_log_activity(
         return _log_activity_fallback(src, start_str, end_str, by)
     elapsed_ms = round((_time.perf_counter() - t0) * 1000, 2)
     compact_sql = _compact_sql_for_debug(sql)
-    _record_duckdb_query(compact_sql, elapsed_ms, service_id=svc_id)
+    record_duckdb_query(compact_sql, elapsed_ms, service_id=svc_id)
 
     points: list[dict] = []
     total_rows = 0
@@ -241,7 +231,7 @@ def _log_activity_durable(
         con.close()
     elapsed_ms = round((_time.perf_counter() - t0) * 1000, 2)
     compact_sql = _compact_sql_for_debug(sql)
-    _record_duckdb_query(compact_sql, elapsed_ms, service_id=svc_id)
+    record_duckdb_query(compact_sql, elapsed_ms, service_id=svc_id)
 
     fmt = {
         "second": "%Y-%m-%dT%H:%M:%S",

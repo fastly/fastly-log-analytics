@@ -18,7 +18,9 @@ export interface LatencyRow {
   p99?: number | null
 }
 
-const numberValue = (v: unknown): number | null | undefined => (typeof v === 'number' ? v : null)
+export const textValue = (v: unknown): string => (typeof v === 'string' ? v : '')
+export const numberValue = (v: unknown): number | null | undefined => (typeof v === 'number' ? v : null)
+export const msCell = (value: unknown) => <span>{numberValue(value)?.toFixed(1)}ms</span>
 
 /**
  * Creates standard performance/latency columns with a filter-value drill-down

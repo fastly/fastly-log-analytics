@@ -9,21 +9,12 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, test, vi } from 'vitest'
 import { TeardownDialog } from '@/components/TeardownDialog/TeardownDialog'
+import { createUseSSEMock } from '../helpers/sse-mock'
 import type { ServiceConfig } from '@/types/api'
 import React from 'react'
 
-const mockStart = vi.fn()
-vi.mock('@/hooks/useSSE', () => ({
-  useSSE: () => ({
-    lines: [],
-    status: 'idle',
-    isDone: false,
-    error: null,
-    start: mockStart,
-    stop: vi.fn(),
-    reset: vi.fn()
-  })
-}))
+const { state: sseState, start: mockStart } = createUseSSEMock()
+vi.mock('@/hooks/useSSE', () => ({ useSSE: () => sseState }))
 
 test('TeardownDialog starts the SSE stream when the user enters a token and clicks Execute Teardown', async () => {
   const user = userEvent.setup()

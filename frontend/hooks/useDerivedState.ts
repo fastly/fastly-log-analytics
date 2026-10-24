@@ -15,3 +15,17 @@ export function useDerivedState<T>(source: T): [T, Dispatch<SetStateAction<T>>] 
   }
   return [state, setState]
 }
+
+/**
+ * Increments a counter each time `open` transitions to `true`, so a dialog wrapper can pass
+ * `key={generation}` (or `key={`${id}|${generation}`}`) to remount its body with fresh state.
+ */
+export function useOpenGeneration(open: boolean): number {
+  const [generation, setGeneration] = useState(0)
+  const [wasOpen, setWasOpen] = useState(open)
+  if (open !== wasOpen) {
+    setWasOpen(open)
+    if (open) setGeneration((g) => g + 1)
+  }
+  return generation
+}

@@ -79,6 +79,15 @@ def _lock_cron_run(con: Any, service_id: str, run_id: int) -> None:
     )
 
 
+def _clear_cron_schedule_cache() -> None:
+    try:
+        from backend.utils.cache_registry import CacheRegistry
+
+        CacheRegistry.clear("services.core._cron_schedule_cache")
+    except Exception:
+        logger.debug("cron_log: CacheRegistry.clear failed (ignored)", exc_info=True)
+
+
 def _publish_cron_run_change(
     service_id: str,
     run_id: int,
@@ -87,6 +96,7 @@ def _publish_cron_run_change(
     *,
     started_at: str | None = None,
     duration_s: float | None = None,
+    ts: str | None = None,
 ) -> None:
     try:
         from backend.cron_runs_publisher import publisher
@@ -96,7 +106,7 @@ def _publish_cron_run_change(
             "run_id": run_id,
             "task": task,
             "status": status,
-            "ts": iso_z_now(),
+            "ts": ts if ts is not None else iso_z_now(),
         }
         if started_at is not None:
             payload["started_at"] = started_at
@@ -179,34 +189,21 @@ def start_cron_run(service_id: str, task: str) -> int:
     # can't crash the tick.
     new_id = _write()
 
-    try:
-        from backend.utils.cache_registry import CacheRegistry
-
-        CacheRegistry.clear("services.core._cron_schedule_cache")
-    except Exception:
-        logger.debug("start_cron_run: CacheRegistry.clear failed (ignored)", exc_info=True)
+    _clear_cron_schedule_cache()
 
     # Tickle any connected /api/cron-runs/stream subscribers that a run
     # just started. Same defensive contract as the sync-status publish
     # hook (backend/cron/jobs/sync.py): broad except so a publish
     # failure never blocks cron bookkeeping.
-    try:
-        from backend.cron_runs_publisher import publisher as _cron_runs_publisher
-
-        _cron_runs_publisher.publish(
-            service_id,
-            {
-                "event": "cron_run_changed",
-                "run_id": new_id,
-                "task": task,
-                "status": "running",
-                "started_at": started_at,
-                "duration_s": 0.0,
-                "ts": started_at,
-            },
-        )
-    except Exception:
-        logger.exception("[cron_log] cron-runs SSE publish (start) failed for %s/%s", service_id, task)
+    _publish_cron_run_change(
+        service_id,
+        new_id,
+        task,
+        "running",
+        started_at=started_at,
+        duration_s=0.0,
+        ts=started_at,
+    )
 
     return new_id
 
@@ -350,12 +347,7 @@ def log_cron_run(
     # incident).
     _write()
 
-    try:
-        from backend.utils.cache_registry import CacheRegistry
-
-        CacheRegistry.clear("services.core._cron_schedule_cache")
-    except Exception:
-        logger.debug("log_cron_run: CacheRegistry.clear failed (ignored)", exc_info=True)
+    _clear_cron_schedule_cache()
 
     # Tickle subscribers that this run reached a terminal status.
     # Broad except so an SSE-channel failure never breaks cron
@@ -371,6 +363,63 @@ def log_cron_run(
         )
 
 
+def _apply_cron_run_outcome_deltas(
+    con: Any,
+    service_id: str,
+    run_id: int,
+    expected_task: str | None,
+    deltas: dict[str, int],
+) -> tuple[str | None, str | None]:
+    """Lock ``cron_runs`` row ``run_id``, apply ``deltas`` to ``outcome_counters``,
+    and return ``(prev_run_status, new_run_status)``.
+    """
+    _lock_cron_run(con, service_id, run_id)
+    run_row = con.execute(
+        "SELECT task, status, outcome_counters FROM cron_runs WHERE id = ? AND service_id = ? FOR UPDATE",
+        (run_id, service_id),
+    ).fetchone()
+    if run_row is None:
+        raise RuntimeError(f"originating cron run {run_id} is missing for ledger object")
+    if expected_task != run_row["task"]:
+        raise RuntimeError(f"ledger origin task does not match cron run {run_id}")
+    prev_run_status = str(run_row["status"]) if run_row["status"] is not None else None
+
+    totals = _decode_outcome_counters(run_row["outcome_counters"])
+    for key in OUTCOME_COUNTER_KEYS:
+        totals[key] += deltas[key]
+        if totals[key] < 0:
+            raise RuntimeError(f"outcome counter {key!r} would become negative")
+    has_failure = any(
+        totals[key]
+        for key in (
+            "malformed_records",
+            "corrupt_containers",
+            "quarantine_capture_failures",
+            "source_delete_failures",
+            "objects_partial",
+            "objects_failed",
+        )
+    )
+    new_run_status = "error" if has_failure or run_row["status"] == "error" else run_row["status"]
+    con.execute(
+        "UPDATE cron_runs SET outcome_counters = ?, status = ?, "
+        "rows_ingested = ?, corrupt_rows = ?, "
+        "error_message = CASE WHEN ? = 'error' "
+        "THEN COALESCE(error_message, 'One or more ingestion objects had failures') "
+        "ELSE error_message END WHERE id = ? AND service_id = ?",
+        (
+            json.dumps(totals),
+            new_run_status,
+            totals["valid_records"],
+            totals["malformed_records"] + totals["corrupt_containers"],
+            new_run_status,
+            run_id,
+            service_id,
+        ),
+    )
+    return prev_run_status, new_run_status
+
+
 def _record_ingest_object_outcome_inner(
     service_id: str,
     object_key: str,
@@ -382,10 +431,9 @@ def _record_ingest_object_outcome_inner(
     con = get_con(service_id)
     _begin_metadata_write(con)
     try:
-        lock_clause = " FOR UPDATE"
         ledger_row = con.execute(
             "SELECT originating_task, originating_run_id, outcome_counters "
-            "FROM ingest_ledger WHERE service_id = ? AND object_key = ?" + lock_clause,
+            "FROM ingest_ledger WHERE service_id = ? AND object_key = ? FOR UPDATE",
             (service_id, object_key),
         ).fetchone()
         if ledger_row is None:
@@ -399,50 +447,8 @@ def _record_ingest_object_outcome_inner(
         new_run_status: str | None = None
         if run_id is not None:
             run_id = int(run_id)
-            _lock_cron_run(con, service_id, run_id)
-            run_row = con.execute(
-                "SELECT task, status, outcome_counters FROM cron_runs WHERE id = ? AND service_id = ?" + lock_clause,
-                (run_id, service_id),
-            ).fetchone()
-            if run_row is None:
-                raise RuntimeError(f"originating cron run {run_id} is missing for ledger object")
-            if task != run_row["task"]:
-                raise RuntimeError(f"ledger origin task does not match cron run {run_id}")
-            prev_run_status = str(run_row["status"]) if run_row["status"] is not None else None
-
-            totals = _decode_outcome_counters(run_row["outcome_counters"])
-            for key in OUTCOME_COUNTER_KEYS:
-                totals[key] += new_counters[key] - previous[key]
-                if totals[key] < 0:
-                    raise RuntimeError(f"outcome counter {key!r} would become negative")
-            has_failure = any(
-                totals[key]
-                for key in (
-                    "malformed_records",
-                    "corrupt_containers",
-                    "quarantine_capture_failures",
-                    "source_delete_failures",
-                    "objects_partial",
-                    "objects_failed",
-                )
-            )
-            new_run_status = "error" if has_failure or run_row["status"] == "error" else run_row["status"]
-            con.execute(
-                "UPDATE cron_runs SET outcome_counters = ?, status = ?, "
-                "rows_ingested = ?, corrupt_rows = ?, "
-                "error_message = CASE WHEN ? = 'error' "
-                "THEN COALESCE(error_message, 'One or more ingestion objects had failures') "
-                "ELSE error_message END WHERE id = ? AND service_id = ?",
-                (
-                    json.dumps(totals),
-                    new_run_status,
-                    totals["valid_records"],
-                    totals["malformed_records"] + totals["corrupt_containers"],
-                    new_run_status,
-                    run_id,
-                    service_id,
-                ),
-            )
+            deltas = {key: new_counters[key] - previous[key] for key in OUTCOME_COUNTER_KEYS}
+            prev_run_status, new_run_status = _apply_cron_run_outcome_deltas(con, service_id, run_id, task, deltas)
 
         con.execute(
             "UPDATE ingest_ledger SET outcome_counters = ? WHERE service_id = ? AND object_key = ?",
@@ -538,50 +544,7 @@ def record_ingest_batch_outcomes(
 
         for run_id_int in sorted(deltas_by_run):
             task, deltas = deltas_by_run[run_id_int]
-            _lock_cron_run(con, service_id, run_id_int)
-            run_row = con.execute(
-                "SELECT task, status, outcome_counters FROM cron_runs WHERE id = ? AND service_id = ? FOR UPDATE",
-                (run_id_int, service_id),
-            ).fetchone()
-            if run_row is None:
-                raise RuntimeError(f"originating cron run {run_id_int} is missing for ledger object")
-            if task != run_row["task"]:
-                raise RuntimeError(f"ledger origin task does not match cron run {run_id_int}")
-            prev_run_status = str(run_row["status"]) if run_row["status"] is not None else None
-
-            totals = _decode_outcome_counters(run_row["outcome_counters"])
-            for key in OUTCOME_COUNTER_KEYS:
-                totals[key] += deltas[key]
-                if totals[key] < 0:
-                    raise RuntimeError(f"outcome counter {key!r} would become negative")
-            has_failure = any(
-                totals[key]
-                for key in (
-                    "malformed_records",
-                    "corrupt_containers",
-                    "quarantine_capture_failures",
-                    "source_delete_failures",
-                    "objects_partial",
-                    "objects_failed",
-                )
-            )
-            new_run_status = "error" if has_failure or run_row["status"] == "error" else run_row["status"]
-            con.execute(
-                "UPDATE cron_runs SET outcome_counters = ?, status = ?, "
-                "rows_ingested = ?, corrupt_rows = ?, "
-                "error_message = CASE WHEN ? = 'error' "
-                "THEN COALESCE(error_message, 'One or more ingestion objects had failures') "
-                "ELSE error_message END WHERE id = ? AND service_id = ?",
-                (
-                    json.dumps(totals),
-                    new_run_status,
-                    totals["valid_records"],
-                    totals["malformed_records"] + totals["corrupt_containers"],
-                    new_run_status,
-                    run_id_int,
-                    service_id,
-                ),
-            )
+            prev_run_status, new_run_status = _apply_cron_run_outcome_deltas(con, service_id, run_id_int, task, deltas)
             if task is not None and new_run_status is not None and new_run_status != prev_run_status:
                 pending_publishes[(run_id_int, task)] = new_run_status
 
@@ -655,30 +618,11 @@ def finalize_cron_run_if_running(
     if not _write():
         return False
 
-    try:
-        from backend.utils.cache_registry import CacheRegistry
-
-        CacheRegistry.clear("services.core._cron_schedule_cache")
-    except Exception:
-        logger.debug("finalize_cron_run_if_running: CacheRegistry.clear failed (ignored)", exc_info=True)
+    _clear_cron_schedule_cache()
 
     # Tickle subscribers that this run reached a terminal status — same
     # contract (and broad except) as log_cron_run's publish hook.
-    try:
-        from backend.cron_runs_publisher import publisher as _cron_runs_publisher
-
-        _cron_runs_publisher.publish(
-            service_id,
-            {
-                "event": "cron_run_changed",
-                "run_id": run_id,
-                "task": task,
-                "status": "error",
-                "ts": iso_z_now(),
-            },
-        )
-    except Exception:
-        logger.exception("[cron_log] cron-runs SSE publish (finalize) failed for %s/%s", service_id, task)
+    _publish_cron_run_change(service_id, run_id, task, "error")
     return True
 
 

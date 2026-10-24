@@ -137,78 +137,6 @@ _NUMERIC: frozenset[DuckType] = frozenset(
 )
 
 
-def _aggs_for(t: DuckType) -> frozenset[Agg]:
-    """Aggregations allowed on a column of this DuckDB type.
-
-    Single rule for the whole catalog: numeric columns add sum/avg/min/max;
-    timestamps add min/max; booleans + varchars only support count and
-    grouping. This is the legacy `valid_aggregations` list, derived rather
-    than hand-maintained.
-    """
-    base = {Agg.COUNT, Agg.COUNT_DISTINCT, Agg.GROUP_BY}
-    if t in _NUMERIC:
-        base |= {Agg.SUM, Agg.AVG, Agg.MIN, Agg.MAX}
-    elif t is DuckType.TIMESTAMP:
-        base |= {Agg.MIN, Agg.MAX}
-    return frozenset(base)
-
-
-def _ops_for(t: DuckType) -> frozenset[FilterOp]:
-    """Filter operators allowed on a column of this DuckDB type."""
-    if t is DuckType.BOOLEAN:
-        return frozenset({FilterOp.EQ, FilterOp.NEQ})
-    if t is DuckType.TIMESTAMP:
-        return frozenset(
-            {
-                FilterOp.EQ,
-                FilterOp.NEQ,
-                FilterOp.GT,
-                FilterOp.GTE,
-                FilterOp.LT,
-                FilterOp.LTE,
-            }
-        )
-    if t in _NUMERIC:
-        return frozenset(
-            {
-                FilterOp.EQ,
-                FilterOp.NEQ,
-                FilterOp.GT,
-                FilterOp.GTE,
-                FilterOp.LT,
-                FilterOp.LTE,
-                FilterOp.IN,
-                FilterOp.NOT_IN,
-            }
-        )
-    # VARCHAR / unknown: full string ops
-    return frozenset(
-        {
-            FilterOp.EQ,
-            FilterOp.NEQ,
-            FilterOp.CONTAINS,
-            FilterOp.STARTS_WITH,
-            FilterOp.IN,
-            FilterOp.NOT_IN,
-        }
-    )
-
-
-# Two patterns mark a field's VCL expression as "interpolates an
-# attacker-influenced value": `json.escape(...)` for string-typed values, or a
-# digits-only regex `~ "^...$"` for numeric values that would otherwise
-# break out of the JSON log line. Detecting these here means the security
-# regression sweep can ask "did anyone add a new field without a hook?"
-# without re-implementing the rule per call site.
-_SECURITY_HOOK_RE = re.compile(r"json\.escape\(|~\s*\"\^")
-
-
-def _has_security_hook(vcl: str | None) -> bool:
-    if vcl is None:
-        return False
-    return bool(_SECURITY_HOOK_RE.search(vcl))
-
-
 # ---------------------------------------------------------------------------
 # LogField dataclass — the row type
 # ---------------------------------------------------------------------------
@@ -265,31 +193,6 @@ class LogField:
     def is_derived(self) -> bool:
         """True for metrics/virtual/internal fields (`vcl is None`)."""
         return self.vcl is None
-
-    @property
-    def is_always_on(self) -> bool:
-        """True for fields in the locked CORE group."""
-        return self.group is Group.CORE
-
-    @property
-    def has_security_hook(self) -> bool:
-        """True if the field's VCL interpolates an attacker-influenced value
-        through `json.escape(...)` or a digit regex guard.
-
-        Replaces the implicit "every group L field has `~ \"^[0-9]+$\"`" rule
-        with an explicit test the security regression sweep can read.
-        """
-        return _has_security_hook(self.vcl)
-
-    @property
-    def valid_aggs(self) -> frozenset[Agg]:
-        """Aggregations allowed in queries (derived from `duck_type`)."""
-        return _aggs_for(self.duck_type)
-
-    @property
-    def valid_ops(self) -> frozenset[FilterOp]:
-        """Filter operators allowed in queries (derived from `duck_type`)."""
-        return _ops_for(self.duck_type)
 
 
 # ---------------------------------------------------------------------------

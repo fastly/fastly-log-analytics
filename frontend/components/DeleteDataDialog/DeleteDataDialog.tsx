@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useOpenGeneration } from '@/hooks/useDerivedState'
 import {
   Dialog,
   DialogContent,
@@ -38,12 +39,7 @@ interface DeleteDataDialogProps {
 
 export function DeleteDataDialog(props: DeleteDataDialogProps) {
   const { service, open } = props
-  const [generation, setGeneration] = useState(0)
-  const [wasOpen, setWasOpen] = useState(open)
-  if (open !== wasOpen) {
-    setWasOpen(open)
-    if (open) setGeneration((g) => g + 1)
-  }
+  const generation = useOpenGeneration(open)
   return <DeleteDataDialogBody key={`${service?.service_id ?? ''}|${generation}`} {...props} />
 }
 

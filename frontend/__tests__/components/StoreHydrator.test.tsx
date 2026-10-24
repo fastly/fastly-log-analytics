@@ -21,10 +21,6 @@ import { useServiceStore } from '@/stores/serviceStore'
 import { useTimezoneStore } from '@/stores/timezoneStore'
 import { useDebugStore } from '@/stores/debugStore'
 
-function mockSystemTimezone(timeZone: string) {
-  stubSystemTimeZone(timeZone)
-}
-
 beforeEach(() => {
   window.localStorage.clear()
   useServiceStore.setState({
@@ -81,7 +77,7 @@ describe('StoreHydrator', () => {
   })
 
   it('resolves the live system zone on mount when no zone was ever persisted (default mode: system)', async () => {
-    mockSystemTimezone('Asia/Tokyo')
+    stubSystemTimeZone('Asia/Tokyo')
 
     render(<StoreHydrator />)
 
@@ -96,7 +92,7 @@ describe('StoreHydrator', () => {
       'timezone-storage',
       JSON.stringify({ state: { timezone: 'UTC', mode: 'system' }, version: 1 }),
     )
-    mockSystemTimezone('Europe/Berlin')
+    stubSystemTimeZone('Europe/Berlin')
 
     render(<StoreHydrator />)
 
@@ -110,7 +106,7 @@ describe('StoreHydrator', () => {
       'timezone-storage',
       JSON.stringify({ state: { timezone: 'America/New_York', mode: 'manual' }, version: 1 }),
     )
-    mockSystemTimezone('Asia/Tokyo')
+    stubSystemTimeZone('Asia/Tokyo')
 
     render(<StoreHydrator />)
 
@@ -128,7 +124,7 @@ describe('StoreHydrator', () => {
       'timezone-storage',
       JSON.stringify({ state: { timezone: 'America/New_York' }, version: 0 }),
     )
-    mockSystemTimezone('Asia/Tokyo')
+    stubSystemTimeZone('Asia/Tokyo')
 
     render(<StoreHydrator />)
 

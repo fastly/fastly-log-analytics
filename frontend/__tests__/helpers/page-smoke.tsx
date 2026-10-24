@@ -42,23 +42,6 @@ export type ReportLayoutChildArgs = {
   filterPayload?: Record<string, unknown>
 }
 
-export const REPORT_LAYOUT_DEFAULT_ARGS: Required<ReportLayoutChildArgs> = {
-  data: undefined,
-  isLoading: false,
-  isFetching: false,
-  config: {},
-  setChartInterval: () => {},
-  trend: 'flat',
-  setTrend: () => {},
-  intervalButtons: null,
-  bucketSeconds: 3600,
-  startTime: '2026-01-01T00:00:00Z',
-  endTime: '2026-01-01T01:00:00Z',
-  timezone: 'UTC',
-  activeServiceId: 'test-svc',
-  filterPayload: {},
-}
-
 /**
  * Drop-in spy on console.error. Returns the spy so the calling test can
  * `expect(spy).not.toHaveBeenCalled()` after render. Auto-restore via the
@@ -132,9 +115,18 @@ export function plotlyChartModuleMock() {
  */
 export function reportLayoutModuleMock(childArgs: ReportLayoutChildArgs) {
   return {
-    ReportLayout: ({ children, title }: { children: (a: ReportLayoutChildArgs) => React.ReactNode; title: string }) => (
+    ReportLayout: ({
+      children,
+      title,
+      headerActions,
+    }: {
+      children: (a: ReportLayoutChildArgs) => React.ReactNode
+      title: React.ReactNode
+      headerActions?: React.ReactNode
+    }) => (
       <div>
         <h1>{title}</h1>
+        <div data-testid="header-actions">{headerActions}</div>
         {children(childArgs)}
       </div>
     ),

@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from backend.repositories.session_scoring import _SCORING_COLUMN_TYPES
 from tests._helpers.config_fakes import mutate_via_save
 
 LOG_SVC = "TestScoringRouterSvc"
@@ -2966,7 +2967,7 @@ def test_session_events_admin_full_window(monkeypatch):
 def test_scoring_source_passthrough_when_all_present():
     from backend.routers import session_scoring as _ss
 
-    cols = set(_ss._SCORING_COLUMN_TYPES) | {"edge", "timestamp"}
+    cols = set(_SCORING_COLUMN_TYPES) | {"edge", "timestamp"}
     assert _ss._scoring_source("logs_x", cols) == "logs_x"
 
 
@@ -2984,7 +2985,7 @@ def test_scoring_source_synthesizes_missing_core_columns():
     # Base-only schema: has `edge` but none of the scoring columns.
     src = _ss._scoring_source("logs_x", {"edge", "timestamp", "ip"})
     assert src.startswith("(SELECT *, ") and src.endswith(" FROM logs_x)")
-    for col, typ in _ss._SCORING_COLUMN_TYPES.items():
+    for col, typ in _SCORING_COLUMN_TYPES.items():
         assert f"CAST(NULL AS {typ}) AS {col}" in src
     # Latency cols are handled separately and must NOT be synthesized here.
     assert "edge_score_rtt_us" not in src

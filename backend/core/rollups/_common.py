@@ -826,6 +826,92 @@ def backfill_missing_bundles(
     return builder(service_id, source, hours_to_build)
 
 
+def _closed_day_window(lookback_days: int | None = None) -> tuple[str, str | None]:
+    """Return ``(active_day, cutoff_day)`` in ``YYYY-MM-DD`` UTC format."""
+    now = datetime.now(UTC)
+    active_day = now.strftime("%Y-%m-%d")
+    cutoff_day: str | None = None
+    if lookback_days is not None:
+        from datetime import timedelta
+
+        cutoff_day = (now - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    return active_day, cutoff_day
+
+
+def collect_per_field_partition_parquets(
+    per_field_root: str,
+    partition_subdir: str,
+) -> tuple[list[str], set[str], float] | None:
+    """Scan ``field=*`` under ``per_field_root`` for ``<partition_subdir>/*.parquet``.
+
+    Returns ``(per_field_paths, updated_fields, max_src_mtime)`` or ``None`` if
+    listing ``per_field_root`` raises ``OSError``.
+    """
+    per_field_paths: list[str] = []
+    updated_fields: set[str] = set()
+    max_src_mtime = 0.0
+    try:
+        for field_entry in os.listdir(per_field_root):
+            if not field_entry.startswith("field="):
+                continue
+            field_name = field_entry[len("field=") :]
+            if not _is_safe_ident(field_name):
+                continue
+            part_dir = os.path.join(per_field_root, field_entry, partition_subdir)
+            if not os.path.isdir(part_dir):
+                continue
+            field_has_files = False
+            for fname in os.listdir(part_dir):
+                if not fname.endswith(".parquet") or fname.startswith(".tmp_"):
+                    continue
+                p = os.path.join(part_dir, fname)
+                per_field_paths.append(p)
+                field_has_files = True
+                try:
+                    mt = os.path.getmtime(p)
+                    if mt > max_src_mtime:
+                        max_src_mtime = mt
+                except OSError:
+                    pass
+            if field_has_files:
+                updated_fields.add(field_name)
+    except OSError:
+        return None
+    return per_field_paths, updated_fields, max_src_mtime
+
+
+def _sum_count_copy_sql(group_cols: str) -> Callable[[str, str], str]:
+    """Build a ``COPY (SELECT <group_cols>, CAST(SUM(count) AS BIGINT) AS count ...)`` callback."""
+
+    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
+        return (
+            f"COPY ("
+            f"  SELECT {group_cols}, CAST(SUM(count) AS BIGINT) AS count "
+            f"  FROM read_parquet([{paths_sql}]) "
+            f"  GROUP BY {group_cols}"
+            f") {parquet_zstd_target(tmp_file)}"
+        )
+
+    return _copy_sql
+
+
+def _bucket_min_copy_sql(min_col: str) -> Callable[[str, str], str]:
+    """Build a ``COPY (SELECT bucket, SUM(count), MIN(<min_col>) ... GROUP BY bucket)`` callback."""
+
+    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
+        return (
+            f"COPY ("
+            f"  SELECT bucket, "
+            f"    CAST(SUM(count) AS BIGINT) AS count, "
+            f"    CAST(MIN({min_col}) AS BIGINT) AS {min_col} "
+            f"  FROM read_parquet([{paths_sql}]) "
+            f"  GROUP BY bucket"
+            f") {parquet_zstd_target(tmp_file)}"
+        )
+
+    return _copy_sql
+
+
 def compact_closed_days(
     service_id: str,
     source: dict,
@@ -866,12 +952,7 @@ def compact_closed_days(
     if not os.path.isdir(hour_root):
         return 0
 
-    active_day = datetime.now(UTC).strftime("%Y-%m-%d")
-    cutoff_day: str | None = None
-    if lookback_days is not None:
-        from datetime import timedelta
-
-        cutoff_day = (datetime.now(UTC) - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    active_day, cutoff_day = _closed_day_window(lookback_days)
 
     lock_key = source.get("name", "default")
 

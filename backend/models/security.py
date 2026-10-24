@@ -219,7 +219,3 @@ class ThreatIntelItem(WireSafeModel):
 
 class ThreatIntelListResponse(BaseResponse):
     data: list[ThreatIntelItem]
-
-
-# Alias for bundle endpoint contract
-SecurityBundleResponse = SecurityAggregatesResponse

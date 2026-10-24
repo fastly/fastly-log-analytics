@@ -18,9 +18,9 @@ from ._common import (
     IP_SPREAD_BUNDLE_FILENAME,
     _hour_bundled_root,
     _ip_spread_root,
-    _is_safe_ident,
     _rollups_root,
     cleanup_per_field_after_bundle,
+    collect_per_field_partition_parquets,
     parquet_zstd_target,
     parse_hour_token,
     publish_temp_parquet,
@@ -67,36 +67,10 @@ def _bundle_per_field_hours_impl(
             if parse_hour_token(hour) is None:
                 continue
 
-            per_field_paths: list[str] = []
-            updated_fields: set[str] = set()
-            max_src_mtime = 0.0
-            try:
-                for field_entry in os.listdir(per_field_root):
-                    if not field_entry.startswith("field="):
-                        continue
-                    field_name = field_entry[len("field=") :]
-                    if not _is_safe_ident(field_name):
-                        continue
-                    hour_dir = os.path.join(per_field_root, field_entry, f"hour={hour}")
-                    if not os.path.isdir(hour_dir):
-                        continue
-                    field_has_files = False
-                    for fname in os.listdir(hour_dir):
-                        if not fname.endswith(".parquet") or fname.startswith(".tmp_"):
-                            continue
-                        p = os.path.join(hour_dir, fname)
-                        per_field_paths.append(p)
-                        field_has_files = True
-                        try:
-                            mt = os.path.getmtime(p)
-                            if mt > max_src_mtime:
-                                max_src_mtime = mt
-                        except OSError:
-                            pass
-                    if field_has_files:
-                        updated_fields.add(field_name)
-            except OSError:
+            collected = collect_per_field_partition_parquets(per_field_root, f"hour={hour}")
+            if collected is None:
                 continue
+            per_field_paths, updated_fields, max_src_mtime = collected
 
             if not per_field_paths:
                 continue

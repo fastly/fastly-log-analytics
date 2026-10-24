@@ -1,7 +1,7 @@
 import { getApiBase } from '@/lib/api'
 import type { EventStreamRequest } from '@/hooks/useEventStream'
 
-export interface BuildStreamRequestOptions {
+interface BuildStreamRequestOptions {
   /** Path (with any query string) appended to `getApiBase()`. */
   path: string
   serviceId?: string | null

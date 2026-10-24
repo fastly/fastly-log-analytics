@@ -8,7 +8,7 @@ import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCa
 import { ApproxBadge } from './ApproxBadge'
 import { cn } from '@/lib/utils';
 import { formatBytes, formatCount } from '@/lib/format'
-import { columnHeader } from '@/lib/table-utils'
+import { columnHeader, msCell } from '@/lib/table-utils'
 import { Server, MapPin, Globe } from 'lucide-react'
 import { useActiveLogFields } from '@/hooks/useActiveLogFields'
 import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
@@ -28,8 +28,6 @@ import type {
 // url/pop/ip variants. Factor them out so the three column sets compose
 // from one definition each (rendered output is unchanged).
 type LatencyRow = { p50_ms?: number | null; p95_ms?: number | null; requests: number }
-
-const msCell = (value: number | null | undefined) => <span>{value?.toFixed(1)}ms</span>
 
 const requestsCol = <TRow extends LatencyRow>(): ColumnDef<TRow> => ({
   accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: columnHeader('Reqs'),

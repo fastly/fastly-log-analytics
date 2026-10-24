@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import Depends, HTTPException
 
@@ -136,6 +136,42 @@ def rebuild_local_view_endpoint(source: dict = Depends(get_source)):
     return {"ok": True, "message": "Local view rebuild started.", "run_id": run_id}
 
 
+def _stream_reset_sse(
+    body: ResetLogsRequest,
+    source: dict,
+    reset_fn: Any,
+    label: str,
+    **extra_kwargs: Any,
+):
+    from backend.utils.sse import stream_sse_from_worker
+
+    service_id = source["name"]
+    if source.get("access_level") != "read_write":
+        raise HTTPException(status_code=403, detail=make_error("read_only", "This service is read-only."))
+    if body.confirm != service_id:
+        raise HTTPException(
+            status_code=400,
+            detail=make_error("confirm_mismatch", "`confirm` must equal the service id being deleted."),
+        )
+
+    def worker(events):
+        from backend.cron.scheduler import get_scheduler
+
+        try:
+            for event in reset_fn(
+                service_id,
+                delete_raw_logs=body.delete_raw_logs,
+                reload_scheduler=lambda: get_scheduler().reload(),
+                **extra_kwargs,
+            ):
+                events.put(event)
+        except Exception as e:
+            logger.exception("reset_%s_endpoint(%s) failed", label.lower(), service_id)
+            events.put({"type": "error", "message": f"{label} deletion failed: {e}"})
+
+    return stream_sse_from_worker(worker)
+
+
 # response_model intentionally omitted: SSE progress stream (EventSourceResponse),
 # not a JSON body — event shapes are documented in reset_service_logs's docstring.
 @router.post("/admin/reset-logs", dependencies=[Depends(require_json_content_type)])
@@ -154,34 +190,14 @@ def reset_logs_endpoint(body: ResetLogsRequest, source: dict = Depends(get_sourc
     match the resolved service id.
     """
     from backend.core.reset import reset_service_logs
-    from backend.utils.sse import stream_sse_from_worker
 
-    service_id = source["name"]
-
-    if source.get("access_level") != "read_write":
-        raise HTTPException(status_code=403, detail=make_error("read_only", "This service is read-only."))
-    if body.confirm != service_id:
-        raise HTTPException(
-            status_code=400,
-            detail=make_error("confirm_mismatch", "`confirm` must equal the service id being deleted."),
-        )
-
-    def worker(events):
-        from backend.cron.scheduler import get_scheduler
-
-        try:
-            for event in reset_service_logs(
-                service_id,
-                delete_raw_logs=body.delete_raw_logs,
-                preserve_usage_history=body.preserve_usage_history,
-                reload_scheduler=lambda: get_scheduler().reload(),
-            ):
-                events.put(event)
-        except Exception as e:
-            logger.exception("reset_logs_endpoint(%s) failed", service_id)
-            events.put({"type": "error", "message": f"Log deletion failed: {e}"})
-
-    return stream_sse_from_worker(worker)
+    return _stream_reset_sse(
+        body,
+        source,
+        reset_service_logs,
+        "Log",
+        preserve_usage_history=body.preserve_usage_history,
+    )
 
 
 @router.post("/admin/reset-rum", dependencies=[Depends(require_json_content_type)])
@@ -192,30 +208,5 @@ def reset_rum_endpoint(body: ResetLogsRequest, source: dict = Depends(get_source
     while leaving logs data completely untouched.
     """
     from backend.core.reset import reset_service_rum
-    from backend.utils.sse import stream_sse_from_worker
 
-    service_id = source["name"]
-
-    if source.get("access_level") != "read_write":
-        raise HTTPException(status_code=403, detail=make_error("read_only", "This service is read-only."))
-    if body.confirm != service_id:
-        raise HTTPException(
-            status_code=400,
-            detail=make_error("confirm_mismatch", "`confirm` must equal the service id being deleted."),
-        )
-
-    def worker(events):
-        from backend.cron.scheduler import get_scheduler
-
-        try:
-            for event in reset_service_rum(
-                service_id,
-                delete_raw_logs=body.delete_raw_logs,
-                reload_scheduler=lambda: get_scheduler().reload(),
-            ):
-                events.put(event)
-        except Exception as e:
-            logger.exception("reset_rum_endpoint(%s) failed", service_id)
-            events.put({"type": "error", "message": f"RUM deletion failed: {e}"})
-
-    return stream_sse_from_worker(worker)
+    return _stream_reset_sse(body, source, reset_service_rum, "RUM")

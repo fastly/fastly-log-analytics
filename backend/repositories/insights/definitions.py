@@ -1540,12 +1540,6 @@ def http3_fallback_processor(row: tuple, definition: InsightDefinition, context:
     }
 
 
-def http3_fallback_severity(items: list[dict]) -> str:
-    if not items:
-        return "clean"
-    return "critical" if any(i.get("severity") == "critical" for i in items) else "warning"
-
-
 registry.register(
     InsightDefinition(
         id="http3_fallback",
@@ -1555,7 +1549,6 @@ registry.register(
         sql_template=SQL.HTTP3_FALLBACK,
         required_fields=["transport", "timestamp"],
         row_processor=http3_fallback_processor,
-        severity_logic=http3_fallback_severity,
     )
 )
 
@@ -1582,12 +1575,6 @@ def cache_hit_cliff_processor(row: tuple, definition: InsightDefinition, context
     }
 
 
-def cache_hit_cliff_severity(items: list[dict]) -> str:
-    if not items:
-        return "clean"
-    return "critical" if any(i.get("severity") == "critical" for i in items) else "warning"
-
-
 registry.register(
     InsightDefinition(
         id="cache_hit_cliff",
@@ -1597,7 +1584,6 @@ registry.register(
         sql_template=SQL.CACHE_HIT_CLIFF,
         required_fields=["cache", "timestamp"],
         row_processor=cache_hit_cliff_processor,
-        severity_logic=cache_hit_cliff_severity,
     )
 )
 
@@ -1713,12 +1699,6 @@ def timeout_split_processor(row: tuple, definition: InsightDefinition, context: 
     }
 
 
-def timeout_split_severity(items: list[dict]) -> str:
-    if not items:
-        return "clean"
-    return "critical" if any(i.get("severity") == "critical" for i in items) else "warning"
-
-
 registry.register(
     InsightDefinition(
         id="timeout_split",
@@ -1728,7 +1708,6 @@ registry.register(
         sql_template=SQL.TIMEOUT_SPLIT,
         required_fields=["oconnect_ms", "ottfb"],
         row_processor=timeout_split_processor,
-        severity_logic=timeout_split_severity,
     )
 )
 

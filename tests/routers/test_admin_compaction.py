@@ -101,7 +101,7 @@ def test_compaction_stats_returns_local_compaction_snapshot(client):
 # ── PATCH /api/admin/metadata-retention ────────────────────────────────────
 
 
-from tests.helpers import fake_mutate_config as _fake_mutate
+from tests._helpers.config_fakes import fake_mutate_config as _fake_mutate
 
 
 def test_metadata_retention_patch_writes_config_and_audit(client):
@@ -114,9 +114,10 @@ def test_metadata_retention_patch_writes_config_and_audit(client):
     def _record(**kwargs):
         audit.append(kwargs)
 
+    base = {"name": "svc", "service_id": "svc"}
     with (
-        patch("backend.config.load_config", return_value={"name": "svc", "service_id": "svc"}),
-        patch("backend.config.mutate_config", side_effect=_fake_mutate(saved)),
+        patch("backend.config.load_config", return_value=base),
+        patch("backend.config.mutate_config", side_effect=_fake_mutate(base, saved=saved)),
         patch("backend.core.metadata.is_ingested_files_dedup_active", return_value=True),
         patch("backend.core.metadata.record_audit", side_effect=_record),
     ):
@@ -131,7 +132,7 @@ def test_metadata_retention_patch_writes_config_and_audit(client):
     assert body["retention"]["ingested_files_days"] == 30
     assert body["retention"]["cron_runs_days"] == 7
 
-    assert saved["cfg"]["metadata_retention"] == {
+    assert saved["metadata_retention"] == {
         "usage_log_days": 14,
         "ingested_files_days": 30,
         "cron_runs_days": 7,
@@ -147,14 +148,14 @@ def test_metadata_retention_patch_merges_onto_freshly_read_retention(client):
 
     with (
         patch("backend.config.load_config", return_value={"name": "svc", "service_id": "svc"}),
-        patch("backend.config.mutate_config", side_effect=_fake_mutate(saved, base)),
+        patch("backend.config.mutate_config", side_effect=_fake_mutate(base, saved=saved)),
         patch("backend.core.metadata.is_ingested_files_dedup_active", return_value=True),
         patch("backend.core.metadata.record_audit"),
     ):
         resp = client.patch("/api/admin/metadata-retention", json={"ingested_files_days": 30})
 
     assert resp.status_code == 200
-    assert saved["cfg"]["metadata_retention"] == {"usage_log_days": 21, "cron_runs_days": 9, "ingested_files_days": 30}
+    assert saved["metadata_retention"] == {"usage_log_days": 21, "cron_runs_days": 9, "ingested_files_days": 30}
 
 
 def test_metadata_retention_patch_404_when_service_missing(client):
@@ -170,10 +171,11 @@ def test_metadata_retention_clamps_negative_to_zero(client):
     (disables cleanup for that table). Pinned so a -1 in the JSON body
     doesn't end up as a negative day-count in cleanup_metadata."""
     saved: dict = {}
+    base = {"name": "svc", "service_id": "svc"}
 
     with (
-        patch("backend.config.load_config", return_value={"name": "svc", "service_id": "svc"}),
-        patch("backend.config.mutate_config", side_effect=_fake_mutate(saved)),
+        patch("backend.config.load_config", return_value=base),
+        patch("backend.config.mutate_config", side_effect=_fake_mutate(base, saved=saved)),
         patch("backend.core.metadata.is_ingested_files_dedup_active", return_value=True),
         patch("backend.core.metadata.record_audit"),
     ):
@@ -183,8 +185,8 @@ def test_metadata_retention_clamps_negative_to_zero(client):
         )
 
     assert resp.status_code == 200
-    assert saved["cfg"]["metadata_retention"]["usage_log_days"] == 0
-    assert saved["cfg"]["metadata_retention"]["cron_runs_days"] == 0
+    assert saved["metadata_retention"]["usage_log_days"] == 0
+    assert saved["metadata_retention"]["cron_runs_days"] == 0
 
 
 def test_metadata_retention_force_disables_ingested_files_days_when_dedup_inactive(client):
@@ -193,24 +195,26 @@ def test_metadata_retention_force_disables_ingested_files_days_when_dedup_inacti
     forces ingested_files_days back to 0 — preventing operator
     misconfiguration."""
     saved: dict = {}
+    base = {"name": "svc", "service_id": "svc"}
     with (
-        patch("backend.config.load_config", return_value={"name": "svc", "service_id": "svc"}),
-        patch("backend.config.mutate_config", side_effect=_fake_mutate(saved)),
+        patch("backend.config.load_config", return_value=base),
+        patch("backend.config.mutate_config", side_effect=_fake_mutate(base, saved=saved)),
         patch("backend.core.metadata.is_ingested_files_dedup_active", return_value=False),
         patch("backend.core.metadata.record_audit"),
     ):
         resp = client.patch("/api/admin/metadata-retention", json={"ingested_files_days": 30})
 
     assert resp.status_code == 200
-    assert saved["cfg"]["metadata_retention"]["ingested_files_days"] == 0
+    assert saved["metadata_retention"]["ingested_files_days"] == 0
 
 
 def test_metadata_retention_audit_failure_does_not_break_patch(client):
     """audit failure is swallowed — the save already happened, returning
     500 here would mislead the FE into thinking the write failed."""
+    base = {"name": "svc", "service_id": "svc"}
     with (
-        patch("backend.config.load_config", return_value={"name": "svc", "service_id": "svc"}),
-        patch("backend.config.mutate_config", side_effect=_fake_mutate({})),
+        patch("backend.config.load_config", return_value=base),
+        patch("backend.config.mutate_config", side_effect=_fake_mutate(base)),
         patch("backend.core.metadata.is_ingested_files_dedup_active", return_value=True),
         patch("backend.core.metadata.record_audit", side_effect=RuntimeError("audit-boom")),
     ):

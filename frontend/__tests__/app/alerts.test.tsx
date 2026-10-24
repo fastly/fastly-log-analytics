@@ -25,24 +25,9 @@ import { useFilterStore } from '@/stores/filterStore'
 import { server } from '@/__tests__/helpers/msw/server'
 
 // Mock the heavy plotly child — irrelevant to the assertion here.
-vi.mock('@/components/PlotlyChart', () => ({
-  PlotlyChart: () => <div data-testid="plotly-chart">PlotlyChart</div>,
-}))
+vi.mock('@/components/PlotlyChart', async () => (await import('../helpers/page-smoke')).plotlyChartModuleMock())
 
-vi.mock('@tanstack/react-virtual', () => ({
-  useVirtualizer: (options: { count?: number }) => ({
-    getVirtualItems: () => {
-      const count = options.count || 0
-      return Array.from({ length: count }).map((_, i) => ({
-        index: i,
-        start: i * 40,
-        end: (i + 1) * 40,
-        size: 40,
-      }))
-    },
-    getTotalSize: () => (options.count || 0) * 40,
-  }),
-}))
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
 
 const mockReplace = vi.fn()
 const mockPush = vi.fn()

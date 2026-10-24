@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { showToast, showToastWithAction } from '@/lib/toast'
 
-export interface DeferredDeleteOptions {
+interface DeferredDeleteOptions {
   /** Unique item ID to hide while the undo window is open. */
   id: string
   /** Toast message shown when the undo window starts (e.g. `Deleted "${name}"`). */

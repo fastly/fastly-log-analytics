@@ -8,35 +8,15 @@ import * as apiLib from '@/lib/api'
 import type { ServiceConfig } from '@/types/api'
 import React from 'react'
 import { getOk } from '@/__tests__/helpers/api-result'
+import { stubMatchMedia } from '@/__tests__/helpers/jsdom-shims'
+import { createUseSSEMock } from '@/__tests__/helpers/sse-mock'
 import { createTestQueryClient } from '../helpers/query'
 
-Object.defineProperty(window, 'matchMedia', {
-  writable: true,
-  value: vi.fn().mockImplementation(query => ({
-    matches: false,
-    media: query,
-    onchange: null,
-    addListener: vi.fn(),
-    removeListener: vi.fn(),
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
-    dispatchEvent: vi.fn(),
-  })),
-})
-
+stubMatchMedia()
 window.HTMLElement.prototype.scrollIntoView = vi.fn()
 
-vi.mock('@/hooks/useSSE', () => ({
-  useSSE: () => ({
-    lines: [],
-    status: 'idle',
-    isDone: false,
-    error: null,
-    start: vi.fn(),
-    stop: vi.fn(),
-    reset: vi.fn()
-  })
-}))
+const { state: sseState } = createUseSSEMock()
+vi.mock('@/hooks/useSSE', () => ({ useSSE: () => sseState }))
 
 afterEach(() => {
   vi.useRealTimers()

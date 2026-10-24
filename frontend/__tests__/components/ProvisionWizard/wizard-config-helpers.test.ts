@@ -1,29 +1,55 @@
 /**
  * @vitest-environment jsdom
  *
- * Tests for the pure-transformation helpers at
- * [components/ProvisionWizard/wizard-config-helpers.ts](../../../components/ProvisionWizard/wizard-config-helpers.ts).
- *
- * The wizard's log-fields step is the part most likely to silently drop
- * data on a refactor — the dependency-chain expansion in `buildToggleGroup`
- * and the preset toggle in `buildTogglePreset` both have non-trivial
- * iterative logic. The 4 helpers in this file own all the state mutation
- * for that step; the rest of the wizard just dispatches into them.
- *
- * Coverage of these helpers is also the next cheap win on the §10.14
- * frontend-coverage path (file was 1.8% covered pre-test) — pure
- * functions, no React, no MSW.
+ * Tests for the pure log-field config transformation helpers at
+ * [lib/log-field-config-ops.ts](../../../lib/log-field-config-ops.ts).
  */
 import { without } from '@/__tests__/helpers/partial'
 import { describe, it, expect } from 'vitest'
 
 import {
-  applyToggleField,
-  applyUpdateFieldLimit,
-  buildToggleGroup,
-  buildTogglePreset,
-} from '@/components/ProvisionWizard/wizard-config-helpers'
+  toggleLogFieldGroup,
+  toggleLogFieldOverride,
+  toggleLogFieldPreset,
+  updateLogFieldLimit,
+} from '@/lib/log-field-config-ops'
 import { INITIAL_CONFIG, type LogFieldsCatalog } from '@/components/ProvisionWizard/types'
+
+const buildToggleGroup = (catalog: LogFieldsCatalog | null | undefined) => (
+  prev: typeof INITIAL_CONFIG,
+  groupId: string,
+  checked: boolean,
+) => ({
+  ...prev,
+  log_fields: toggleLogFieldGroup(prev.log_fields, catalog, groupId, checked),
+})
+
+const applyToggleField = (
+  prev: typeof INITIAL_CONFIG,
+  fieldId: string,
+  checked: boolean,
+  defaultEnabledByGroup: boolean,
+) => ({
+  ...prev,
+  log_fields: toggleLogFieldOverride(prev.log_fields, fieldId, checked, defaultEnabledByGroup),
+})
+
+const applyUpdateFieldLimit = (
+  prev: typeof INITIAL_CONFIG,
+  fieldId: string,
+  limit?: number,
+) => ({
+  ...prev,
+  log_fields: updateLogFieldLimit(prev.log_fields, fieldId, limit),
+})
+
+const buildTogglePreset = (
+  catalog: LogFieldsCatalog | null | undefined,
+  isPresetActive: (groups: string[]) => boolean,
+) => (prev: typeof INITIAL_CONFIG, presetGroups: string[]) => ({
+  ...prev,
+  log_fields: toggleLogFieldPreset(prev.log_fields, catalog, presetGroups, isPresetActive),
+})
 
 // Catalog fixture mirroring the shape the API returns. `requires` is the
 // dependency edge the toggleGroup helper auto-expands.

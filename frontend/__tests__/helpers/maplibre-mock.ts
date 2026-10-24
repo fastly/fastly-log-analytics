@@ -60,6 +60,7 @@ export interface MockMapInstance {
   queryRenderedFeatures: () => unknown[]
   getCanvas: () => { style: Record<string, string> }
   remove: () => void
+  resize: () => void
   removed: boolean
   project: () => { x: number; y: number }
   fitBounds: () => void
@@ -155,6 +156,7 @@ export function maplibreMockFactory(opts?: { strictSources?: boolean }) {
     remove() {
       this.removed = true
     }
+    resize() {}
     project() {
       return { x: 0, y: 0 }
     }
@@ -170,18 +172,24 @@ export function maplibreMockFactory(opts?: { strictSources?: boolean }) {
     }
   }
 
+  class MockLngLatBounds {
+    extend() {
+      return this
+    }
+  }
+
   // maplibre-gl ships both a default export (used in app code as
   // `import maplibregl from 'maplibre-gl'`) and named exports. Provide both.
   return {
     default: {
       Map: MockMap,
-      LngLatBounds: class {},
+      LngLatBounds: MockLngLatBounds,
       NavigationControl: class {},
       GlobeControl: class {},
       setWorkerUrl: () => {},
     },
     Map: MockMap,
-    LngLatBounds: class {},
+    LngLatBounds: MockLngLatBounds,
     NavigationControl: class {},
     GlobeControl: class {},
     setWorkerUrl: () => {},

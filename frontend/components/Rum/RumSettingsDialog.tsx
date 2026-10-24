@@ -18,7 +18,7 @@ import { Input } from '@/components/ui/input'
 import { ArrowRight, Settings2, Sparkles } from 'lucide-react'
 import { RumVersionPicker } from '@/components/ProvisionWizard/RumVersionPicker'
 import { useSSE, type SSELine } from '@/hooks/useSSE'
-import { useDerivedState } from '@/hooks/useDerivedState'
+import { useDerivedState, useOpenGeneration } from '@/hooks/useDerivedState'
 import { SSEDialogFooter, SSEExecutionSection } from '@/components/SSEModal'
 import { cn } from '@/lib/utils'
 import { adminFetch } from '@/lib/api'
@@ -66,12 +66,7 @@ interface RumSettingsDialogProps {
  */
 export function RumSettingsDialog(props: RumSettingsDialogProps) {
   const { open } = props
-  const [generation, setGeneration] = useState(0)
-  const [wasOpen, setWasOpen] = useState(open)
-  if (open !== wasOpen) {
-    setWasOpen(open)
-    if (open) setGeneration((g) => g + 1)
-  }
+  const generation = useOpenGeneration(open)
   return <RumSettingsDialogBody key={generation} {...props} />
 }
 

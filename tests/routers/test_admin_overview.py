@@ -15,6 +15,7 @@ Covers:
 
 from __future__ import annotations
 
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -25,7 +26,9 @@ from fastapi.testclient import TestClient
 from backend.deps import get_source, require_admin
 from backend.main import app
 from backend.utils.remote_access import _is_blocked_path
-from tests.helpers import make_source as _make_source
+from tests._helpers.sources import make_source
+
+_make_source = partial(make_source, "svc-admin-test", kind="cloud")
 
 
 @pytest.fixture

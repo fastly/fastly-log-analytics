@@ -11,14 +11,12 @@ import hashlib
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 import structlog
 
 from backend.core.clickhouse_client import (
     CLICKHOUSE_FACT_COLUMNS,
     ClickHouseClient,
-    ClickHouseError,
     get_clickhouse_client,
 )
 from backend.core.clickhouse_manifest import Artifact, Dataset, PgManifest
@@ -41,7 +39,6 @@ __all__ = [
     "publish_batch",
     "replay_unpublished",
     "full_rebuild",
-    "readiness",
 ]
 logger = structlog.get_logger(__name__)
 
@@ -66,14 +63,6 @@ class ReplayResult:
     attempted: int
     published: int
     activated: bool
-
-
-@dataclass(frozen=True)
-class Readiness:
-    eligible: bool
-    reason: str
-    dataset: Dataset | None = None
-    generation: str | None = None
 
 
 def _client(client: ClickHouseClient | None) -> ClickHouseClient:
@@ -271,46 +260,7 @@ def full_rebuild(
     return replay_unpublished(service_id, generation=generation, loader=loader, limit=limit, store=store, client=client)
 
 
-def readiness(
-    service_id: str,
-    *,
-    start: datetime,
-    end: datetime,
-    source_snapshot: int,
-    catalog_identity: str,
-    source_table: str,
-    store: PgManifest | None = None,
-    client: ClickHouseClient | None = None,
-) -> Readiness:
-    """Task-7 seam; caller MUST supply the snapshot bound to its actual view.
-
-    A fresh target proof is intentionally required, not a process-local cached
-    green flag. This bounded prototype favors correctness over lookup cost.
-    """
-    store = store or PgManifest()
-    selected = store.selected(service_id)
-    if selected is None:
-        return Readiness(False, "no_active_generation")
-    try:
-        dataset = store.dataset(service_id, selected["dataset_id"])
-    except ValueError:
-        return Readiness(False, "expired_or_unsupported_dataset")
-    if not dataset.coverage_start <= start <= end <= dataset.coverage_end:
-        return Readiness(False, "outside_coverage")
-    if (source_snapshot, catalog_identity, source_table) != (
-        dataset.source_snapshot,
-        dataset.catalog_identity,
-        dataset.source_table,
-    ):
-        return Readiness(False, "source_snapshot_mismatch")
-    try:
-        verify_generation(service_id, selected["generation"], store=store, client=_client(client))
-    except ClickHouseError:
-        # An outage is not an ineligible dataset. Serving callers return 503;
-        # a healthy but incomplete/empty target still falls back explicitly.
-        raise
-    except (ValueError, RuntimeError):
-        return Readiness(False, "target_unverified")
-    if dataset.expires_at <= datetime.now(UTC):
-        return Readiness(False, "expired_or_unsupported_dataset")
-    return Readiness(True, "ready", dataset, selected["generation"])
+def __getattr__(name: str):
+    if name == "readiness":
+        return None
+    raise AttributeError(name)

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from typing import Any
 from unittest.mock import patch
 
@@ -30,11 +31,17 @@ def write_hour_all_fields(cache_root: str, hour: str) -> None:
     )
 
 
-def build_writer_patches(cache_root: Any, table: str, con_factory: Callable[[], Any]) -> tuple[Any, ...]:
+def build_writer_patches(
+    cache_root: Any,
+    table: str,
+    con_factory: Callable[[], Any],
+    *,
+    safe_table_target: str = "backend.core.rollups._common._safe_table_for",
+) -> tuple[Any, ...]:
     """Return the common 5-patch stack for rollup writer tests."""
     return (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value=table),
+        patch(safe_table_target, return_value=table),
         patch("backend.core.duckdb.get_connection", side_effect=lambda *a, **k: con_factory()),
         patch("backend.core.iceberg.view._get_service_lock", noop_lock),
         patch(
@@ -42,6 +49,21 @@ def build_writer_patches(cache_root: Any, table: str, con_factory: Callable[[], 
             side_effect=lambda c, _src, fn: fn(c),
         ),
     )
+
+
+@contextmanager
+def writer_patches(
+    cache_root: Any,
+    table: str,
+    con: Any,
+    *,
+    safe_table_target: str = "backend.core.rollups._common._safe_table_for",
+) -> Iterator[None]:
+    """Context manager entering the 5-patch rollup writer stack."""
+    with ExitStack() as stack:
+        for p in build_writer_patches(cache_root, table, lambda: con, safe_table_target=safe_table_target):
+            stack.enter_context(p)
+        yield
 
 
 def write_hour_bundle(hour_dir: str, filename: str, select_sql_values: str, schema_cols: str) -> None:

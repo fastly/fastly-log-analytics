@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -5,7 +7,18 @@ from unittest.mock import MagicMock, patch
 import duckdb
 import pytest
 
-from backend.core.duckdb_pool import _Pool, _set_conn_state
+from backend.core import duckdb_pool
+from backend.core import duckdb_pool as _pool
+from backend.core.duckdb_pool import (
+    _Pool,
+    _pool_heavy_cap,
+    _PoolBusy,
+    _set_conn_state,
+    checkout_connection,
+    is_heavy_route,
+)
+
+# ── From test_duckdb_pool.py ──
 
 
 def test_pool_does_not_deadlock_on_checkout_exception():
@@ -56,9 +69,6 @@ def test_pool_does_not_deadlock_on_checkout_exception():
     assert pool._in_use == 0
     assert pool._discarded_total == 1
     assert pool._idle.empty()
-
-
-# ── warm_idle ────────────────────────────────────────────────────────────────
 
 
 def test_warm_idle_binds_every_idle_connection():
@@ -137,9 +147,6 @@ def test_warm_pool_for_service_noop_when_no_pool():
     warm_pool_for_service("nonexistent_service", {"name": "nonexistent_service"})
 
 
-# ── saturation + wait-stats telemetry ────────────────────────────────────────
-
-
 def test_pool_saturation_raises_poolbusy_after_max_wait():
     """When every slot is in use, acquire() must time out at max_wait and
     raise _PoolBusy rather than waiting forever. Pinned because losing the
@@ -198,9 +205,6 @@ def test_wait_stats_percentiles_track_ring_contents():
     assert stats["p95_ms"] == 100.0
     # p50 of 5 samples → index 2 → 3.0
     assert stats["p50_ms"] == 3.0
-
-
-# ── rebind-wait telemetry + short API lock timeout ───────────────────────────
 
 
 def _checkout_idle_conn_with_rebind(pool: _Pool, mock_conn: MagicMock) -> dict:
@@ -304,9 +308,6 @@ def test_rebind_wait_sample_failure_still_records_sample():
     assert stats["rebind_wait"]["count"] == 1
 
 
-# ── env-var helpers ──────────────────────────────────────────────────────────
-
-
 def test_pool_enabled_default_and_override(monkeypatch):
     """_pool_enabled defaults to True and respects falsy env values."""
     from backend.core.duckdb_pool import _pool_enabled
@@ -397,9 +398,6 @@ def test_pool_api_rebind_lock_timeout_default_and_invalid(monkeypatch):
     assert _pool_api_rebind_lock_timeout_s() == 0.0  # clamped to >= 0
 
 
-# ── _conn_state register / lookup / forget ───────────────────────────────────
-
-
 def test_conn_state_register_lookup_forget():
     """_set_conn_state stores key/values, _get_conn_state retrieves with
     default fallback, _forget_conn clears the entry."""
@@ -434,9 +432,6 @@ def test_safe_buffer_mtime_happy_path(tmp_path):
     with patch("backend.core.iceberg._core._buffer_dir", return_value=str(p)):
         mt = _safe_buffer_mtime({"name": "x"})
     assert isinstance(mt, float)
-
-
-# ── _prepare_checkout cache-hit fast path ───────────────────────────────────
 
 
 def test_prepare_checkout_cache_hit_skips_rebind():
@@ -562,9 +557,6 @@ def test_checkout_connection_passes_skip_view_update_through(monkeypatch):
         _pools.pop(key, None)
 
 
-# ── fresh-build path: mem_limit + threads applied ───────────────────────────
-
-
 def test_fresh_build_applies_memory_limit(monkeypatch):
     """When the idle queue is empty and capacity is available, acquire()
     builds via get_connection and applies the optional SET memory_limit."""
@@ -615,9 +607,6 @@ def test_fresh_build_failure_decrements_in_use():
             pool.acquire(src={"name": "test_fresh_fail"}, max_wait=0.1)
 
     assert pool._in_use == 0  # released the optimistically-incremented slot
-
-
-# ── release path: happy, errored, full queue ────────────────────────────────
 
 
 def test_release_happy_path_returns_to_idle():
@@ -698,9 +687,6 @@ def test_release_sweep_failure_does_not_block(monkeypatch):
     assert pool._idle.qsize() == 1
 
 
-# ── _discard close-error path ───────────────────────────────────────────────
-
-
 def test_discard_swallows_close_exception():
     """_discard must tolerate con.close() raising — the slot still frees."""
     pool = _Pool(service_key="test_discard_close", max_size=2)
@@ -711,9 +697,6 @@ def test_discard_swallows_close_exception():
     pool._discard(mock_conn)
     assert pool._in_use == 0
     assert pool._discarded_total == 1
-
-
-# ── _get_pool registers a service lazily ───────────────────────────────────
 
 
 def test_get_pool_lazy_creation_and_reuse(monkeypatch):
@@ -742,9 +725,6 @@ def test_get_pool_lazy_creation_and_reuse(monkeypatch):
     with _pools_lock:
         _pools.pop(key, None)
         _pools.pop(key2, None)
-
-
-# ── checkout_connection context manager ────────────────────────────────────
 
 
 def test_checkout_connection_disabled_falls_back_to_legacy(monkeypatch):
@@ -872,9 +852,6 @@ def test_checkout_connection_interrupt_discards_connection(monkeypatch):
         _pools.pop(key, None)
 
 
-# ── _instrument wrapping + fallback ────────────────────────────────────────
-
-
 def test_instrument_returns_wrapper_on_success():
     """_instrument wraps the raw conn in InstrumentedDuckDBConnection."""
     from backend.core.duckdb_pool import _instrument
@@ -897,9 +874,6 @@ def test_instrument_falls_back_to_raw_on_error():
     ):
         result = _instrument(raw, service_key="svc")
     assert result is raw
-
-
-# ── module-level helpers: warm_pool_for_service / get_all_stats / shutdown_all
 
 
 def test_warm_pool_for_service_calls_warm_idle_when_pool_exists():
@@ -1065,9 +1039,6 @@ def test_shutdown_all_closes_idle_conns_and_clears_registry():
         assert key not in _pools
 
 
-# ── stamp_fingerprint exception swallow ────────────────────────────────────
-
-
 def test_stamp_fingerprint_swallows_exception():
     """If iceberg view import or lookup fails, _stamp_fingerprint sets None
     sentinels rather than propagating — must never break a checkout."""
@@ -1085,9 +1056,6 @@ def test_stamp_fingerprint_swallows_exception():
     # State was written with None sentinels
     assert _get_conn_state(mock_conn, "view_fingerprint", default="NOT_SET") is None
     assert _get_conn_state(mock_conn, "buffer_mtime", default="NOT_SET") is None
-
-
-# ── concurrency: pool exhaustion under real threads ────────────────────────
 
 
 def test_pool_exhaustion_one_waiter_raises_poolbusy():
@@ -1122,9 +1090,6 @@ def test_pool_exhaustion_one_waiter_raises_poolbusy():
     # All three should have timed out as _PoolBusy since the slot is permanently held
     assert errors.count("busy") == 3
     assert results == []
-
-
-# ── _percentile_summary edge cases ─────────────────────────────────────────
 
 
 def test_release_sweep_swallows_individual_drop_failures(monkeypatch):
@@ -1200,9 +1165,6 @@ def test_percentile_summary_single_sample():
     assert summary["mean_ms"] == 42.5
 
 
-# ── post-discard recovery (audit follow-up) ─────────────────────────────────
-
-
 def test_pool_recovers_after_forced_discard():
     """After ``_prepare_checkout`` fails and ``_discard`` runs, a follow-up
     ``acquire`` with a working rebind must succeed against a freshly-built
@@ -1249,9 +1211,6 @@ def test_pool_recovers_after_forced_discard():
     assert pool._in_use == 1
     # discarded counter still 1 — fresh acquire is not itself a discard.
     assert pool._discarded_total == 1
-
-
-# ── _prepare_checkout: stale view-fingerprint triggers rebind ─────────────
 
 
 def test_prepare_checkout_rebinds_on_stale_view_fingerprint():
@@ -1327,3 +1286,492 @@ def test_prepare_checkout_rebinds_on_stale_buffer_mtime():
 
     assert got is mock_conn
     mock_uiv.assert_called_once()
+
+
+# ── From test_duckdb_pool_drain.py ──
+
+
+def _mock_conn():
+    return MagicMock(spec=duckdb.DuckDBPyConnection)
+
+
+def test_begin_drain_closes_idle_and_zeroes_in_use():
+    pool = _Pool(service_key="drain_idle", max_size=3)
+    conns = [_mock_conn() for _ in range(3)]
+    for c in conns:
+        pool._idle.put_nowait(c)
+    pool._in_use = 3
+
+    pool.begin_drain()
+
+    assert pool._draining is True
+    assert pool._in_use == 0
+    assert pool._idle.empty()
+    for c in conns:
+        c.close.assert_called_once()
+
+
+def test_acquire_rejected_while_draining():
+    pool = _Pool(service_key="drain_reject", max_size=2)
+    pool.begin_drain()
+    with pytest.raises(_PoolBusy):
+        pool.acquire(src={"name": "drain_reject", "bucket": "b"}, max_wait=0.1)
+
+
+def test_release_closes_when_draining():
+    """A checked-out conn returned during drain is closed, not idled."""
+    pool = _Pool(service_key="drain_release", max_size=2)
+    pool._in_use = 1  # simulate one checked out, none idle
+    pool.begin_drain()  # no idle to close; _in_use stays 1
+    assert pool._in_use == 1
+
+    con = _mock_conn()
+    pool.release(con)  # should discard (close), not idle
+
+    con.close.assert_called_once()
+    assert pool._in_use == 0
+    assert pool._idle.empty()
+
+
+def test_wait_drained_reaches_zero_when_conn_returned():
+    pool = _Pool(service_key="drain_wait", max_size=2)
+    pool._in_use = 1
+    pool.begin_drain()
+
+    def returner():
+        time.sleep(0.1)
+        pool.release(_mock_conn())
+
+    th = threading.Thread(target=returner)
+    th.start()
+    ok = pool.wait_drained(timeout=2.0)
+    th.join(timeout=2.0)
+
+    assert ok is True
+    assert pool._in_use == 0
+
+
+def test_wait_drained_times_out_without_deadlock():
+    pool = _Pool(service_key="drain_timeout", max_size=2)
+    pool._in_use = 1  # never released
+    pool.begin_drain()
+
+    result = {}
+
+    def waiter():
+        result["ok"] = pool.wait_drained(timeout=0.2)
+
+    th = threading.Thread(target=waiter)
+    th.start()
+    th.join(timeout=2.0)
+
+    assert not th.is_alive(), "wait_drained deadlocked"
+    assert result["ok"] is False
+
+
+def test_acquire_queues_during_drain_then_resumes_after_end_drain():
+    """Near-zero-downtime contract: an acquire arriving during a recycle drain
+    QUEUES (it must NOT 503) and resumes against a fresh build once end_drain
+    runs. Pre-fix this raised _PoolBusy immediately, which is what turned every
+    recycle into user-visible 503s and (with the too-short barrier cap) let opens
+    leak back in so the instance never reached zero live connections."""
+    from unittest.mock import patch
+
+    pool = _Pool(service_key="drain_queue", max_size=1)
+    pool.begin_drain()  # draining → a fresh acquire must queue, not reject
+
+    outcome = {}
+    fake = _mock_conn()
+
+    def queued():
+        with patch("backend.core.duckdb.get_connection", return_value=fake):
+            try:
+                outcome["got"] = pool.acquire(src={"name": "drain_queue", "bucket": "b"}, max_wait=5.0)
+            except _PoolBusy:
+                outcome["got"] = "poolbusy"
+
+    th = threading.Thread(target=queued)
+    th.start()
+    time.sleep(0.2)  # let it park in the draining wait
+    assert th.is_alive(), "acquire should QUEUE during drain, not return or reject"
+
+    pool.end_drain()  # clears _draining + notify_all → waiter resumes, builds fresh
+    th.join(timeout=2.0)
+
+    assert not th.is_alive()
+    assert outcome["got"] is fake
+
+
+def test_acquire_during_drain_times_out_to_poolbusy_as_failsafe():
+    """If a recycle overruns the caller's max_wait, a queued acquire falls back
+    to _PoolBusy rather than blocking forever — fail-safe for a hung recycle."""
+    pool = _Pool(service_key="drain_failsafe", max_size=2)
+    pool.begin_drain()  # never ended → the queued acquire must time out
+    with pytest.raises(_PoolBusy):
+        pool.acquire(src={"name": "drain_failsafe", "bucket": "b"}, max_wait=0.1)
+
+
+def test_end_drain_resumes_acquire():
+    pool = _Pool(service_key="drain_resume", max_size=1)
+    pool.begin_drain()
+    pool.end_drain()
+    assert pool._draining is False
+    # A fresh acquire now proceeds to the build path (which we don't exercise
+    # here) rather than raising _PoolBusy. Verify the gate is lifted by checking
+    # the flag is clear and a build attempt would be made: patch get_connection.
+    from unittest.mock import patch
+
+    fake = _mock_conn()
+    with patch("backend.core.duckdb.get_connection", return_value=fake):
+        got = pool.acquire(src={"name": "drain_resume", "bucket": "b"}, max_wait=0.5)
+        assert got is fake
+
+
+def test_warm_idle_is_noop_while_draining():
+    pool = _Pool(service_key="drain_warm", max_size=2)
+    conns = [_mock_conn() for _ in range(2)]
+    for c in conns:
+        pool._idle.put_nowait(c)
+    pool._in_use = 2
+    pool._draining = True
+
+    pool.warm_idle(src={"name": "drain_warm", "bucket": "b"})
+
+    # Idle queue untouched, no conn closed by warm_idle.
+    assert pool._idle.qsize() == 2
+    for c in conns:
+        c.close.assert_not_called()
+
+
+def test_module_drain_helpers_only_touch_existing_pools(monkeypatch):
+    """begin/wait/end_drain_pools resolve only existing pools (never create)."""
+    import backend.core.duckdb_pool as pool_mod
+
+    pool = _Pool(service_key="grp_a", max_size=1)
+    pool._in_use = 0
+    monkeypatch.setitem(pool_mod._pools, "grp_a", pool)
+
+    pool_mod.begin_drain_pools(["grp_a", "does_not_exist"])
+    assert pool._draining is True
+    assert pool_mod.wait_pools_drained(["grp_a", "does_not_exist"], timeout=1.0) is True
+    pool_mod.end_drain_pools(["grp_a", "does_not_exist"])
+    assert pool._draining is False
+
+
+# ── From test_duckdb_pool_heavy.py ──
+
+
+def test_heavy_cap_leaves_one_connection_for_light_requests(monkeypatch):
+    monkeypatch.delenv("DUCKDB_POOL_HEAVY_MAX", raising=False)
+    assert _pool_heavy_cap(4) == 3
+    assert _pool_heavy_cap(12) == 11
+    assert _pool_heavy_cap(2) == 1
+    assert _pool_heavy_cap(1) == 1  # nothing to reserve in a pool of one
+
+
+def test_heavy_cap_env_override_is_clamped(monkeypatch):
+    monkeypatch.setenv("DUCKDB_POOL_HEAVY_MAX", "2")
+    assert _pool_heavy_cap(4) == 2
+    monkeypatch.setenv("DUCKDB_POOL_HEAVY_MAX", "99")
+    assert _pool_heavy_cap(4) == 4
+    monkeypatch.setenv("DUCKDB_POOL_HEAVY_MAX", "0")
+    assert _pool_heavy_cap(4) == 1
+    monkeypatch.setenv("DUCKDB_POOL_HEAVY_MAX", "not-a-number")
+    assert _pool_heavy_cap(4) == 3
+
+
+@pytest.mark.parametrize(
+    "route, expected",
+    [
+        ("/api/cmcd/aggregates", True),
+        ("/api/security/aggregates", True),
+        ("/api/network/bundle", True),
+        ("/api/network-health", True),
+        ("/api/insights", True),
+        ("/api/origin/slow-urls", True),
+        ("/api/cron-runs", False),
+        ("/api/admin/share/banner", False),
+        ("/api/web-vitals", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_is_heavy_route(route, expected, monkeypatch):
+    monkeypatch.delenv("DUCKDB_POOL_HEAVY_ROUTES", raising=False)
+    assert is_heavy_route(route) is expected
+
+
+def test_heavy_routes_env_override(monkeypatch):
+    monkeypatch.setenv("DUCKDB_POOL_HEAVY_ROUTES", "/custom, /other")
+    assert is_heavy_route("/api/x/custom") is True
+    assert is_heavy_route("/api/cmcd/aggregates") is False
+
+
+def test_heavy_slots_cap_concurrency_and_release_wakes_a_waiter():
+    pool = _Pool("heavy-cap", max_size=4)  # cap 3
+    for _ in range(3):
+        pool.acquire_heavy_slot(max_wait=1.0)
+
+    got_slot = threading.Event()
+
+    def fourth():
+        pool.acquire_heavy_slot(max_wait=5.0)
+        got_slot.set()
+
+    t = threading.Thread(target=fourth)
+    t.start()
+    assert not got_slot.wait(0.2), "a 4th heavy request must wait while 3 hold slots"
+
+    pool.release_heavy_slot()
+    assert got_slot.wait(2.0), "releasing a slot must let the waiter in"
+    t.join(2.0)
+    assert pool.stats()["heavy"]["in_use"] == 3
+
+
+def test_heavy_slot_timeout_raises_pool_busy_and_counts_a_reject():
+    pool = _Pool("heavy-timeout", max_size=2)  # cap 1
+    pool.acquire_heavy_slot(max_wait=1.0)
+    with pytest.raises(_PoolBusy, match="heavy-request slots exhausted"):
+        pool.acquire_heavy_slot(max_wait=0.05)
+    assert pool.stats()["saturated_rejects_total"] == 1
+
+
+def _pool_with_fake_connections(max_size: int) -> _Pool:
+    pool = _Pool("heavy-checkout", max_size=max_size)
+    pool.acquire = MagicMock(side_effect=lambda *a, **k: MagicMock())  # type: ignore[method-assign]
+    pool.release = MagicMock()  # type: ignore[method-assign]
+    return pool
+
+
+def test_light_checkout_is_not_blocked_by_saturated_heavy_requests():
+    pool = _pool_with_fake_connections(4)  # cap 3
+    release_heavy = threading.Event()
+    inside = threading.Barrier(4)  # 3 holders + this test thread
+
+    def hold_heavy():
+        with checkout_connection({"name": "heavy-checkout"}, max_wait=5.0, heavy=True):
+            inside.wait(2.0)
+            release_heavy.wait(5.0)
+
+    fourth_done = threading.Event()
+
+    def fourth_heavy():
+        with checkout_connection({"name": "heavy-checkout"}, max_wait=5.0, heavy=True):
+            fourth_done.set()
+
+    with (
+        patch.object(duckdb_pool, "_get_pool", return_value=pool),
+        patch.object(duckdb_pool, "_instrument", side_effect=lambda con, **_: con),
+    ):
+        holders = [threading.Thread(target=hold_heavy) for _ in range(3)]
+        for h in holders:
+            h.start()
+        inside.wait(2.0)  # all three heavy slots are held
+
+        extra = threading.Thread(target=fourth_heavy)
+        extra.start()
+        assert not fourth_done.wait(0.2), "the 4th heavy request must queue"
+
+        with checkout_connection({"name": "heavy-checkout"}, max_wait=0.5):  # light: must not wait
+            pass
+
+        release_heavy.set()
+        assert fourth_done.wait(2.0)
+        for t in (*holders, extra):
+            t.join(2.0)
+
+    assert pool.stats()["heavy"]["in_use"] == 0
+
+
+def test_heavy_slot_is_released_when_the_connection_acquire_fails_or_the_body_raises():
+    pool = _pool_with_fake_connections(2)  # cap 1
+    with (
+        patch.object(duckdb_pool, "_get_pool", return_value=pool),
+        patch.object(duckdb_pool, "_instrument", side_effect=lambda con, **_: con),
+    ):
+        pool.acquire = MagicMock(side_effect=_PoolBusy("saturated"))  # type: ignore[method-assign]
+        with pytest.raises(_PoolBusy):
+            with checkout_connection({"name": "heavy-checkout"}, max_wait=0.2, heavy=True):
+                pass
+        assert pool.stats()["heavy"]["in_use"] == 0
+
+        pool.acquire = MagicMock(side_effect=lambda *a, **k: MagicMock())  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError):
+            with checkout_connection({"name": "heavy-checkout"}, max_wait=0.2, heavy=True):
+                raise RuntimeError("query failed")
+        assert pool.stats()["heavy"]["in_use"] == 0
+        pool.release.assert_called_once()
+        assert pool.release.call_args.kwargs["errored"] is True
+
+        # the single heavy slot is free again
+        with checkout_connection({"name": "heavy-checkout"}, max_wait=0.2, heavy=True):
+            pass
+
+
+def test_stats_report_the_heavy_section():
+    pool = _Pool("heavy-stats", max_size=4)
+    pool.acquire_heavy_slot(max_wait=1.0)
+    heavy = pool.stats()["heavy"]
+    assert heavy["cap"] == 3
+    assert heavy["in_use"] == 1
+    assert heavy["wait"]["count"] == 1
+
+
+def test_slow_checkout_is_logged_with_the_route_and_where_it_waited(caplog, monkeypatch):
+    monkeypatch.setenv("DUCKDB_POOL_SLOW_CHECKOUT_MS", "50")
+    pool = _pool_with_fake_connections(4)
+
+    def slow_acquire(*_a, **_k):
+        time.sleep(0.12)
+        return MagicMock()
+
+    pool.acquire = MagicMock(side_effect=slow_acquire)  # type: ignore[method-assign]
+    with (
+        patch.object(duckdb_pool, "_get_pool", return_value=pool),
+        patch.object(duckdb_pool, "_instrument", side_effect=lambda con, **_: con),
+        caplog.at_level("WARNING", logger="backend.core.duckdb_pool"),
+    ):
+        with checkout_connection({"name": "heavy-checkout"}, max_wait=2.0, heavy=True, label="/api/cmcd/aggregates"):
+            pass
+
+    messages = [r.getMessage() for r in caplog.records if "slow checkout" in r.getMessage()]
+    assert len(messages) == 1
+    assert "route=/api/cmcd/aggregates" in messages[0]
+    assert "heavy=True" in messages[0]
+    assert "slot_wait_ms=0" in messages[0]
+    assert "pool_wait_ms=1" in messages[0]  # 120 ms in acquire
+
+
+def test_fast_checkout_is_not_logged(caplog, monkeypatch):
+    monkeypatch.setenv("DUCKDB_POOL_SLOW_CHECKOUT_MS", "500")
+    pool = _pool_with_fake_connections(4)
+    with (
+        patch.object(duckdb_pool, "_get_pool", return_value=pool),
+        patch.object(duckdb_pool, "_instrument", side_effect=lambda con, **_: con),
+        caplog.at_level("WARNING", logger="backend.core.duckdb_pool"),
+    ):
+        with checkout_connection({"name": "heavy-checkout"}, max_wait=2.0, label="/api/cron-runs"):
+            pass
+    assert not [r for r in caplog.records if "slow checkout" in r.getMessage()]
+
+
+def test_slow_checkout_logging_can_be_disabled(caplog, monkeypatch):
+    monkeypatch.setenv("DUCKDB_POOL_SLOW_CHECKOUT_MS", "0")
+    pool = _pool_with_fake_connections(4)
+    pool.acquire = MagicMock(side_effect=lambda *a, **k: (time.sleep(0.05), MagicMock())[1])  # type: ignore[method-assign]
+    with (
+        patch.object(duckdb_pool, "_get_pool", return_value=pool),
+        patch.object(duckdb_pool, "_instrument", side_effect=lambda con, **_: con),
+        caplog.at_level("WARNING", logger="backend.core.duckdb_pool"),
+    ):
+        with checkout_connection({"name": "heavy-checkout"}, max_wait=2.0):
+            pass
+    assert not [r for r in caplog.records if "slow checkout" in r.getMessage()]
+
+
+# ── From test_duckdb_pool_reset.py ──
+
+
+def test_discard_idle_closes_idle_and_zeroes_in_use():
+    pool = _Pool(service_key="discard_idle", max_size=3)
+    conns = [_mock_conn() for _ in range(3)]
+    for c in conns:
+        pool._idle.put_nowait(c)
+    pool._in_use = 3
+
+    closed = pool.discard_idle()
+
+    assert closed == 3
+    assert pool._in_use == 0
+    assert pool._idle.empty()
+    for c in conns:
+        c.close.assert_called_once()
+    # Unlike begin_drain, discard_idle must NOT enter draining mode — new
+    # acquires keep flowing and build fresh conns with the new credentials.
+    assert pool._draining is False
+
+
+def test_discard_idle_leaves_checked_out_conns():
+    """In-flight (checked-out) conns aren't touched — only idle ones close.
+    One checked out (in_use=1, none idle) → nothing closed, in_use unchanged."""
+    pool = _Pool(service_key="discard_inflight", max_size=2)
+    pool._in_use = 1
+    assert pool.discard_idle() == 0
+    assert pool._in_use == 1
+
+
+def test_reset_pool_for_service_noop_without_pool():
+    assert _pool.reset_pool_for_service("never-queried-service-xyz") == 0
+
+
+def test_reset_pool_for_service_closes_idle():
+    pool = _pool._get_pool("reset-svc-xyz", max_size=2)
+    conns = [_mock_conn() for _ in range(2)]
+    for c in conns:
+        pool._idle.put_nowait(c)
+    pool._in_use = 2
+    try:
+        closed = _pool.reset_pool_for_service("reset-svc-xyz")
+        assert closed == 2
+        assert pool._idle.empty()
+        for c in conns:
+            c.close.assert_called_once()
+    finally:
+        # Don't leak the test pool into the module-global registry.
+        with _pool._pools_lock:
+            _pool._pools.pop("reset-svc-xyz", None)
+
+
+# ── From test_duckdb_pool_reuse_only.py ──
+
+
+def test_reuse_only_rejects_when_no_idle_even_with_free_capacity():
+    """idle empty + capacity available ⇒ reuse_only must reject, not build.
+
+    This is the exact wedge condition: ``_in_use < max_size`` so the normal
+    path would build fresh, but a reuse_only acquire must raise ``_PoolBusy``
+    immediately without entering the build path or touching ``_in_use`` /
+    ``_created_total``.
+    """
+    pool = _Pool(service_key="reuse_only_cap", max_size=4)
+    assert pool._idle.empty()
+    assert pool._in_use == 0
+
+    with pytest.raises(_PoolBusy):
+        pool.acquire(
+            src={"name": "reuse_only_cap", "bucket": "b"},
+            max_wait=0.2,
+            reuse_only=True,
+        )
+
+    # Never built: counters untouched, no slot leaked.
+    assert pool._in_use == 0
+    assert pool._created_total == 0
+    assert pool._idle.empty()
+
+
+def test_reuse_only_rejects_immediately_without_blocking():
+    """A saturated pool + reuse_only must not wait out ``max_wait``."""
+    pool = _Pool(service_key="reuse_only_sat", max_size=1)
+    pool._in_use = 1  # fully checked out, nothing idle
+
+    done = threading.Event()
+
+    def _try():
+        with pytest.raises(_PoolBusy):
+            # Large max_wait: if reuse_only honored, this returns at once;
+            # if it fell through to the saturated wait it would block ~2s.
+            pool.acquire(
+                src={"name": "reuse_only_sat", "bucket": "b"},
+                max_wait=2.0,
+                reuse_only=True,
+            )
+        done.set()
+
+    t = threading.Thread(target=_try)
+    t.start()
+    t.join(timeout=0.5)
+    assert done.is_set(), "reuse_only acquire blocked instead of rejecting fast"
+    # Reuse-only rejections are best-effort skips, not real saturation — they
+    # must not inflate the saturated-reject counter the operator watches.
+    assert pool._saturated_rejects_total == 0

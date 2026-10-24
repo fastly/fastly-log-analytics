@@ -59,8 +59,6 @@ export const SECURITY_SSR_DEFAULTS = {
   bucketSeconds: 3600,
 } as const
 
-export type SecuritySsrSeed = SsrRangeSeed
-
 /**
  * SSR-prefetch the default security aggregates selection for the active service.
  *
@@ -71,7 +69,7 @@ export type SecuritySsrSeed = SsrRangeSeed
 export async function fetchSecurityServerSide(
   serviceId: string | undefined,
   now: Date = new Date(),
-): Promise<SecuritySsrSeed | null> {
+): Promise<SsrRangeSeed | null> {
   return fetchSsrRangePost({
     serviceId,
     path: '/api/security/aggregates',

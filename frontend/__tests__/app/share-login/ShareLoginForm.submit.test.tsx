@@ -4,16 +4,13 @@
  * form never submits, that the email field is auto-focused, and that a
  * second click while a login is in flight does not double-submit.
  */
-import { render as rtlRender, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { http, HttpResponse } from 'msw'
 import { server } from '@/__tests__/helpers/msw/server'
-import { createTestQueryClient, makeQueryWrapper } from '@/__tests__/helpers/query'
+import { renderWithQuery as render } from '@/__tests__/helpers/renderWithQuery'
 import ShareLoginPage from '@/app/share-login/page'
-
-const render = (ui: React.ReactElement) =>
-  rtlRender(ui, { wrapper: makeQueryWrapper(createTestQueryClient()) })
 
 const locationAssignSpy = vi.fn()
 

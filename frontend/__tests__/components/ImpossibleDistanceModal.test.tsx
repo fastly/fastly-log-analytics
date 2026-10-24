@@ -1,58 +1,12 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
-import { expect, test, vi, beforeAll } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import React from 'react'
+import { installMaplibreSideEffects, maplibreMockFactory } from '../helpers/maplibre-mock'
 import { ImpossibleDistanceModal } from '@/components/Insights/ImpossibleDistanceModal'
 import { InsightHelpModal } from '@/components/Insights/InsightHelpModal'
 
-// maplibre-gl touches WebGL / browser globals — stub it out.
-// Note: the production code calls these as constructors (``new Map(...)``),
-// so we use ``function`` expressions rather than arrow functions — vitest 4
-// warns about ``vi.fn().mockImplementation(arrow)`` for constructor mocks.
-vi.mock('maplibre-gl', () => ({
-  default: {
-    Map: function MapMock() {
-      return {
-        on: vi.fn(),
-        remove: vi.fn(),
-        resize: vi.fn(),
-        isStyleLoaded: vi.fn(() => false),
-        getLayer: vi.fn(() => null),
-        getSource: vi.fn(() => null),
-        setPaintProperty: vi.fn(),
-        fitBounds: vi.fn(),
-      }
-    },
-    LngLatBounds: function LngLatBoundsMock() {
-      return { extend: vi.fn() }
-    },
-    setWorkerUrl: vi.fn(),
-  },
-  Map: function MapMock() {
-    return {
-      on: vi.fn(),
-      remove: vi.fn(),
-      resize: vi.fn(),
-      isStyleLoaded: vi.fn(() => false),
-      getLayer: vi.fn(() => null),
-      getSource: vi.fn(() => null),
-      setPaintProperty: vi.fn(),
-      fitBounds: vi.fn(),
-    }
-  },
-  LngLatBounds: function LngLatBoundsMock() {
-    return { extend: vi.fn() }
-  },
-  setWorkerUrl: vi.fn(),
-}))
-
-// ResizeObserver is not available in jsdom
-beforeAll(() => {
-  global.ResizeObserver = class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  }
-})
+vi.mock('maplibre-gl', () => maplibreMockFactory())
+installMaplibreSideEffects()
 
 const VALID_DATA = {
   label: '1.2.3.4',

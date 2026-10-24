@@ -69,23 +69,17 @@ def test_partial_insert_never_becomes_visible() -> None:
     with pytest.raises(PartialInsert):
         publication.publish(_batch())
 
-    assert publication.is_visible("batch-1") is False
     assert store.get("batch-1").status is PublicationStatus.PENDING
 
 
-class _DurableManifestControl:
-    def __init__(self) -> None:
-        self.manifests = {}
-
-    def get_batch_manifest(self, batch_id: str):
-        return self.manifests.get(batch_id)
-
-    def put_batch_manifest(self, manifest) -> None:
-        self.manifests[manifest.batch_id] = manifest
-
-
 def test_postgres_manifest_store_survives_store_recreation() -> None:
-    control = _DurableManifestControl()
+    from types import SimpleNamespace
+
+    manifests: dict[str, BatchManifest] = {}
+    control = SimpleNamespace(
+        get_batch_manifest=manifests.get,
+        put_batch_manifest=lambda m: manifests.__setitem__(m.batch_id, m),
+    )
     first_store = PostgresBatchManifestStore(control)
     first_store.put(
         BatchManifest(

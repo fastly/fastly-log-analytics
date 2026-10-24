@@ -12,16 +12,10 @@ import { useServiceStore } from '@/stores/serviceStore'
 import { useDebounce } from '@/hooks/useDebounce'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
 import { Button } from '@/components/ui/button'
-import { Info, Loader2 } from 'lucide-react'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip"
+import { Loader2 } from 'lucide-react'
 import { DialogFooter } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
+import { LabelWithInfo } from '@/components/ui/label-with-info'
 import {
   Select,
   SelectContent,
@@ -100,24 +94,6 @@ const alertFormSchema = z
   })
 
 type AlertFormValues = z.infer<typeof alertFormSchema>
-
-function LabelWithInfo({ htmlFor, children, tooltip }: { htmlFor?: string; children: React.ReactNode; tooltip: React.ReactNode }) {
-  return (
-    <div className="flex items-center gap-1.5">
-      <Label htmlFor={htmlFor}>{children}</Label>
-      <TooltipProvider>
-        <Tooltip>
-          <TooltipTrigger type="button" tabIndex={-1} className="text-muted-foreground hover:text-foreground">
-            <Info className="h-3.5 w-3.5" />
-          </TooltipTrigger>
-          <TooltipContent className="max-w-[300px] text-xs">
-            {tooltip}
-          </TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
-    </div>
-  )
-}
 
 export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Alert | null, onSuccess: () => void }) {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
@@ -326,9 +302,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
         {/* Left Column: Form Fields */}
         <div className="space-y-4 pr-2">
           <div className="grid gap-2">
-            <LabelWithInfo htmlFor="alert-name" tooltip="A descriptive name for your alert, which will appear in notifications and the dashboard.">
-              Alert Name
-            </LabelWithInfo>
+            <LabelWithInfo htmlFor="alert-name" label="Alert Name" info="A descriptive name for your alert, which will appear in notifications and the dashboard." />
             <Input
               id="alert-name"
               placeholder="e.g. High 5xx Error Rate"
@@ -346,9 +320,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
 
           <div className="grid grid-cols-2 gap-4">
             <div className="grid gap-2">
-              <LabelWithInfo tooltip="Groups alerts logically. Does not affect evaluation logic.">
-                Category
-              </LabelWithInfo>
+              <LabelWithInfo label="Category" info="Groups alerts logically. Does not affect evaluation logic." />
               <Select value={category} onValueChange={handleCategoryChange}>
                 <SelectTrigger>
                   <SelectValue />
@@ -362,9 +334,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
               </Select>
             </div>
             <div className="grid gap-2">
-              <LabelWithInfo tooltip="The specific data point to measure. Rate metrics represent a percentage of total traffic.">
-                Metric
-              </LabelWithInfo>
+              <LabelWithInfo label="Metric" info="The specific data point to measure. Rate metrics represent a percentage of total traffic." />
               <Select value={metric} onValueChange={(v) => { const m = v ? oneOf(ALL_METRICS, v) : undefined; if (m) setValue('metric', m) }}>
                 <SelectTrigger>
                   <SelectValue />
@@ -380,9 +350,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
 
           {(metric === 'specific_status' || metric === 'specific_status_rate') && (
             <div className="grid gap-2 p-3 bg-muted/30 rounded-md border border-border/50">
-               <LabelWithInfo htmlFor="status-codes" tooltip="Enter one or more HTTP status codes (e.g., 503, 504) to match exactly against the log status field.">
-                 HTTP Status Codes
-               </LabelWithInfo>
+               <LabelWithInfo htmlFor="status-codes" label="HTTP Status Codes" info="Enter one or more HTTP status codes (e.g., 503, 504) to match exactly against the log status field." />
                <Input
                  id="status-codes"
                  placeholder="e.g. 503, 504"
@@ -395,9 +363,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
 
           <div className="grid grid-cols-2 gap-4">
             <div className="grid gap-2">
-              <LabelWithInfo tooltip="Restricts the alert to a specific traffic scope. 'Edge Only' filters for edge responses. 'Origin Only' filters for requests that went to your origin.">
-                Evaluation Scope
-              </LabelWithInfo>
+              <LabelWithInfo label="Evaluation Scope" info="Restricts the alert to a specific traffic scope. 'Edge Only' filters for edge responses. 'Origin Only' filters for requests that went to your origin." />
               <Select value={evalScope} onValueChange={(v) => { const sc = v ? oneOf(EVAL_SCOPES, v) : undefined; if (sc) setValue('evalScope', sc) }}>
                 <SelectTrigger>
                   <SelectValue />
@@ -410,9 +376,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
               </Select>
             </div>
             <div className="grid gap-2">
-              <LabelWithInfo tooltip={<><b>Absolute</b> triggers if the value crosses a hard limit.<br/><br/><b>Relative</b> compares the current window to the <i>exact same duration</i> in the past (the baseline).</>}>
-                Evaluation Type
-              </LabelWithInfo>
+              <LabelWithInfo label="Evaluation Type" info={<><b>Absolute</b> triggers if the value crosses a hard limit.<br/><br/><b>Relative</b> compares the current window to the <i>exact same duration</i> in the past (the baseline).</>} />
               <Select value={evalType} onValueChange={handleEvalTypeChange}>
                 <SelectTrigger>
                   <SelectValue />
@@ -429,9 +393,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
 
           {(evalType !== 'absolute' && evalType !== 'anomaly_zscore') && (
             <div className="grid gap-2 p-3 bg-muted/30 rounded-md border border-border/50">
-              <LabelWithInfo tooltip="How far back to look for the baseline. If comparing the last 5m to 1 hour ago, it measures against the 5-minute window that ended 60 minutes ago.">
-                Baseline Comparison Period
-              </LabelWithInfo>
+              <LabelWithInfo label="Baseline Comparison Period" info="How far back to look for the baseline. If comparing the last 5m to 1 hour ago, it measures against the 5-minute window that ended 60 minutes ago." />
               <Select value={compPeriodMin} onValueChange={v => v && setValue('compPeriodMin', v)}>
                  <SelectTrigger>
                    <SelectValue />
@@ -450,9 +412,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
           {evalType === 'anomaly_zscore' ? (
             <div className="grid grid-cols-2 gap-4 border-t pt-4">
               <div className="grid gap-2">
-                <LabelWithInfo htmlFor="zscore-threshold" tooltip="How many standard deviations above the rolling hourly baseline the current window must be to trigger. Standard value is 3.0.">
-                  Z-Score Threshold
-                </LabelWithInfo>
+                <LabelWithInfo htmlFor="zscore-threshold" label="Z-Score Threshold" info="How many standard deviations above the rolling hourly baseline the current window must be to trigger. Standard value is 3.0." />
                 <Input
                   id="zscore-threshold"
                   type="number"
@@ -464,9 +424,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
                 />
               </div>
               <div className="grid gap-2">
-                <LabelWithInfo tooltip="The length of the rolling historical baseline period to compute standard deviation and mean over.">
-                  Baseline Period (Days)
-                </LabelWithInfo>
+                <LabelWithInfo label="Baseline Period (Days)" info="The length of the rolling historical baseline period to compute standard deviation and mean over." />
                 <Select value={baselinePeriodDays} onValueChange={v => v && setValue('baselinePeriodDays', v)}>
                   <SelectTrigger>
                     <SelectValue />
@@ -482,9 +440,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
           ) : (
             <div className="grid grid-cols-2 gap-4 border-t pt-4">
               <div className="grid gap-2">
-                <LabelWithInfo tooltip="The mathematical condition to trigger the alert.">
-                  Operator
-                </LabelWithInfo>
+                <LabelWithInfo label="Operator" info="The mathematical condition to trigger the alert." />
                 <Select value={operator} onValueChange={(v) => { const op = v ? oneOf(OPERATORS, v) : undefined; if (op) setValue('operator', op) }}>
                   <SelectTrigger>
                     <SelectValue />
@@ -498,9 +454,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
                 </Select>
               </div>
               <div className="grid gap-2">
-                <LabelWithInfo htmlFor="threshold" tooltip="The numeric value to breach. For rate/relative metrics, this is a percentage.">
-                  Threshold {evalType !== 'absolute' || metric.endsWith('_rate') ? '(%)' : ''}
-                </LabelWithInfo>
+                <LabelWithInfo htmlFor="threshold" label={`Threshold ${evalType !== 'absolute' || metric.endsWith('_rate') ? '(%)' : ''}`} info="The numeric value to breach. For rate/relative metrics, this is a percentage." />
                 <Input
                   id="threshold"
                   type="number"
@@ -521,9 +475,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
           )}
 
           <div className="grid gap-2">
-            <LabelWithInfo htmlFor="window" tooltip="The length of time to aggregate data over before evaluating the threshold. A longer window prevents flapping on brief spikes.">
-              Evaluation Window
-            </LabelWithInfo>
+            <LabelWithInfo htmlFor="window" label="Evaluation Window" info="The length of time to aggregate data over before evaluating the threshold. A longer window prevents flapping on brief spikes." />
             <Select value={windowMin} onValueChange={(v) => v && setValue('windowMin', v)}>
               <SelectTrigger id="window">
                 <SelectValue />
@@ -539,9 +491,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
           </div>
 
           <div className="grid gap-4 border-t pt-4">
-            <LabelWithInfo tooltip="Configure one or more alert delivery channels (e.g. Slack, PagerDuty, generic Webhooks) for this alert.">
-              Alert Notification Channels
-            </LabelWithInfo>
+            <LabelWithInfo label="Alert Notification Channels" info="Configure one or more alert delivery channels (e.g. Slack, PagerDuty, generic Webhooks) for this alert." />
 
             {channels.length > 0 ? (
               <div className="space-y-2 max-h-[150px] overflow-y-auto pr-1">
@@ -606,9 +556,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
           </div>
 
           <div className="grid gap-2 border-t pt-4">
-            <LabelWithInfo htmlFor="webhook" tooltip="Legacy single-destination webhook URL. Use Alert Notification Channels above instead for flexible multi-destination routing.">
-              Legacy Webhook URL (Optional / Prefer Channels)
-            </LabelWithInfo>
+            <LabelWithInfo htmlFor="webhook" label="Legacy Webhook URL (Optional / Prefer Channels)" info="Legacy single-destination webhook URL. Use Alert Notification Channels above instead for flexible multi-destination routing." />
             <Input
               id="webhook"
               placeholder="https://hooks.slack.com/services/..."

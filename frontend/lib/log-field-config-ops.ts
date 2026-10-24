@@ -1,6 +1,6 @@
 import type { components, LogFieldsConfig } from "@/types/api";
 
-export type LogFieldsCatalogLike =
+type LogFieldsCatalogLike =
   | components["schemas"]["LogFieldsCatalogResponse"]
   | null
   | undefined;

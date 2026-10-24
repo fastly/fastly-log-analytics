@@ -1,4 +1,3 @@
-import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -10,6 +9,7 @@ from backend.high_scale.archive_publication import (
     InMemoryObjectStore,
     PublicationState,
 )
+from tests.high_scale.conftest import sha256_checksum as _checksum
 
 
 def _manifest() -> ArchiveManifest:
@@ -102,7 +102,3 @@ def test_commit_marker_digest_mismatch_is_not_replayable() -> None:
     store.put("archive/manifests/manifest-1.commit", b"tampered")
 
     assert publication.is_replayable(manifest.manifest_id) is False
-
-
-def _checksum(value: bytes) -> str:
-    return f"sha256:{hashlib.sha256(value).hexdigest()}"

@@ -16,8 +16,6 @@ import { getTrafficContent } from './sections/traffic'
 import { getPerformanceContent } from './sections/performance'
 import { getOptimizationContent, getDefaultContent } from './sections/optimization'
 
-export type { InsightHelpModalProps } from './types'
-
 function getContent(id: string): InsightContent {
   return (
     getSecurityContent(id) ||

@@ -456,10 +456,6 @@ class QueryRegistry:
         _metric_safe(lambda: _metric_cancelled_total.add(1, {"db": target_db, "kind": target_kind}))
         return "cancelled"
 
-    def is_key_cancelled(self, cancel_key: str | None) -> bool:
-        """Return True if ``cancel_key`` was cancelled via :meth:`cancel_for_key`."""
-        return bool(cancel_key and cancel_key in self._cancelled_keys)
-
     def is_query_cancelled(self, qid: int) -> bool:
         """Return True if active query ``qid`` has been marked cancelled."""
         if qid < 0:

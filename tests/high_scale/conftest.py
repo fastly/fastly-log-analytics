@@ -8,8 +8,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-DATA_PLANE_MODES = ("standard", "high_scale")
-
 LEDGER_STATUSES = (
     "discovered",
     "claimed",
@@ -296,29 +294,6 @@ class HighScaleLedger:
         self._con.commit()
         return self._require(object_id)
 
-    def expired_claims(
-        self,
-        service_id: str | None = None,
-        domain: str | None = None,
-        *,
-        limit: int | None = None,
-        now: datetime | None = None,
-    ) -> list[SourceObject]:
-        now_epoch = int(_utc(now).timestamp())
-        clauses = ["status = 'claimed'", "lease_until IS NOT NULL", "lease_until <= ?"]
-        params: list[object] = [now_epoch]
-        if service_id is not None:
-            clauses.append("service_id = ?")
-            params.append(service_id)
-        if domain is not None:
-            clauses.append("domain = ?")
-            params.append(domain)
-        sql = f"SELECT * FROM source_objects WHERE {' AND '.join(clauses)} ORDER BY object_key"
-        if limit is not None:
-            sql += f" LIMIT {int(limit)}"
-        rows = self._con.execute(sql, tuple(params)).fetchall()
-        return [self._row_to_source(row) for row in rows]
-
     def count(self) -> int:
         row = self._con.execute("SELECT COUNT(*) FROM source_objects").fetchone()
         return int(row[0]) if row else 0
@@ -450,34 +425,6 @@ class OwnershipStore:
         self._con.commit()
         return self._require(service_id)
 
-    def fence_cutover(
-        self,
-        service_id: str,
-        new_owner: str,
-        *,
-        expected_epoch: int,
-        source_cursor: str,
-        rollback_ready: bool = True,
-    ) -> OwnershipRecord:
-        _validate_owner(new_owner)
-        now = _now_iso()
-        cur = self._con.execute(
-            """
-            UPDATE service_ownership
-            SET current_owner = ?,
-                owner_epoch = owner_epoch + 1,
-                source_cursor = ?,
-                rollback_ready = ?,
-                updated_at = ?
-            WHERE service_id = ? AND owner_epoch = ?
-            """,
-            (new_owner, source_cursor, int(rollback_ready), now, service_id, expected_epoch),
-        )
-        self._con.commit()
-        if cur.rowcount != 1:
-            raise ValueError(f"ownership epoch fence failed for {service_id}")
-        return self._require(service_id)
-
     def advance_cursor(
         self,
         service_id: str,
@@ -558,7 +505,7 @@ def _utc(value: datetime | None) -> datetime:
 
 
 def _validate_owner(owner: str) -> None:
-    if owner not in DATA_PLANE_MODES:
+    if owner not in ("standard", "high_scale"):
         raise ValueError(f"unknown data plane owner: {owner}")
 
 
@@ -616,3 +563,107 @@ def wait_for_clickhouse_ready(base_url: str, timeout_s: float = 90.0) -> None:
             pass
         time.sleep(1)
     raise RuntimeError("clickhouse-server did not become ready")
+
+
+# ---------------------------------------------------------------------------
+# Shared Archive & Replay Test Doubles
+# ---------------------------------------------------------------------------
+
+
+def make_archive_parquet_bytes(rows: tuple[dict, ...]) -> bytes:
+    """Serialize a tuple of row dicts into Parquet bytes."""
+    from io import BytesIO
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    output = BytesIO()
+    pq.write_table(pa.Table.from_pylist(list(rows)), output)
+    return output.getvalue()
+
+
+def sha256_checksum(value: bytes) -> str:
+    """Return ``sha256:<hex>`` for ``value``."""
+    return f"sha256:{hashlib.sha256(value).hexdigest()}"
+
+
+def event_digest(rows: tuple[dict, ...]) -> str:
+    """Compute canonical JSONL sha256 digest over ``rows``."""
+    import json
+
+    digest = hashlib.sha256()
+    for row in rows:
+        digest.update((json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode())
+    return f"sha256:{digest.hexdigest()}"
+
+
+def make_test_archive_manifest(
+    manifest_id: str,
+    coverage_start: datetime,
+    coverage_end: datetime,
+    rows: tuple[dict, ...],
+    *,
+    service_id: str = "svc",
+    domain: str = "request",
+    retention_deadline: datetime | None = None,
+    deletion_deadline: datetime | None = None,
+    archive_epoch: int = 1,
+):
+    """Build an ``(ArchiveManifest, artifact_bytes)`` pair for ``rows``."""
+    from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
+
+    artifact_bytes = make_archive_parquet_bytes(rows)
+    source = ArchiveSourceObject(service_id, domain, f"raw/{domain}/{manifest_id}.gz", "sha256:source", 4, "v1")
+    manifest = ArchiveManifest(
+        manifest_id,
+        source,
+        ArchiveArtifact(
+            f"s3://archive/artifacts/{manifest_id}.parquet",
+            sha256_checksum(artifact_bytes),
+            len(artifact_bytes),
+            len(rows),
+            len(artifact_bytes),
+            event_digest(rows),
+            f"{domain}.v1",
+            "normalize.v1",
+        ),
+        coverage_start,
+        coverage_end,
+        retention_deadline or datetime(2026, 9, 4, tzinfo=UTC),
+        deletion_deadline or datetime(2026, 9, 5, tzinfo=UTC),
+        archive_epoch,
+    )
+    return manifest, artifact_bytes
+
+
+class InMemoryManifestCatalog:
+    """In-memory ``manifests_covering`` double for recovery and raw_query tests."""
+
+    def __init__(self, manifests: tuple, *, filter_source: bool = True) -> None:
+        self._manifests = manifests
+        self._filter_source = filter_source
+
+    def manifests_covering(self, service_id: str, domain: str, start: datetime, end: datetime) -> tuple:
+        return tuple(
+            m
+            for m in self._manifests
+            if (not self._filter_source or (m.source.service_id == service_id and m.source.domain == domain))
+            and m.coverage_end > start
+            and m.coverage_start < end
+        )
+
+
+class ReplayClickHouseClient:
+    """In-memory ClickHouse insert double with optional ``fail_on`` substrings."""
+
+    def __init__(self, *, fail_on: set[str] | None = None) -> None:
+        self._fail_on = fail_on or set()
+        self.insert_calls: list[str] = []
+
+    def insert(self, batch):
+        from backend.high_scale.publication import InsertReceipt
+
+        if any(needle in batch.batch_id for needle in self._fail_on):
+            raise RuntimeError(f"simulated insert failure for {batch.batch_id}")
+        self.insert_calls.append(batch.batch_id)
+        return InsertReceipt(batch.batch_id, len(batch.rows), batch.digest)

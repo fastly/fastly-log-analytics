@@ -29,10 +29,6 @@ import { TimezoneSwitcher } from '@/components/TimezoneSwitcher/TimezoneSwitcher
 import { useTimezoneStore } from '@/stores/timezoneStore'
 import { getTimezoneAbbr } from '@/lib/date'
 
-function mockSystemTimezone(timeZone: string) {
-  stubSystemTimeZone(timeZone)
-}
-
 beforeEach(() => {
   window.localStorage.clear()
   useTimezoneStore.setState({ mode: 'system', timezone: 'UTC' })
@@ -96,7 +92,7 @@ describe('TimezoneSwitcher', () => {
 
   it('picking "System Time" resolves the live browser zone immediately', async () => {
     useTimezoneStore.setState({ mode: 'manual', timezone: 'Europe/London' })
-    mockSystemTimezone('Australia/Sydney')
+    stubSystemTimeZone('Australia/Sydney')
     const user = userEvent.setup()
     render(<TimezoneSwitcher />)
 

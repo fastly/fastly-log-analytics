@@ -1,9 +1,8 @@
 import { HydrationBoundary } from '@tanstack/react-query'
 
-import { fetchBootstrapServerSide } from '@/lib/ssr/bootstrap'
 import { fetchUsageLogServerSide } from '@/lib/ssr/usage_log'
-import { firstParam, seedDehydratedState } from '@/lib/ssr/seed'
-import { resolveServerServiceId } from '@/lib/ssr/service'
+import { seedDehydratedState } from '@/lib/ssr/seed'
+import { resolvePageServiceId } from '@/lib/ssr/service'
 import { toQueryDate } from './_sections/shared'
 import UsageLogClient from './_sections/UsageLogClient'
 
@@ -36,9 +35,7 @@ export default async function UsageLogPage({
   searchParams: Promise<{ service?: string | string[] }>
 }) {
   const params = await searchParams
-  const urlServiceId = firstParam(params.service)
-  const bootstrap = urlServiceId ? null : await fetchBootstrapServerSide()
-  const serviceId = resolveServerServiceId(params, bootstrap, {
+  const serviceId = await resolvePageServiceId(params, {
     fallbackFirstService: true,
   })
   const nowMs = new Date().getTime()

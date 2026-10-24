@@ -15,6 +15,7 @@ import {
 import { afterEach, beforeEach, vi, describe, it, expect } from "vitest";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createTestQueryClient } from "../helpers/query";
+import { createUseSSEMock } from "../helpers/sse-mock";
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -32,15 +33,8 @@ vi.mock("@/stores/timezoneStore", () => ({
   }),
 }));
 
-vi.mock("@/hooks/useSSE", () => ({
-  useSSE: () => ({
-    progress: [],
-    error: null,
-    isComplete: false,
-    start: vi.fn(),
-    reset: vi.fn(),
-  }),
-}));
+const { state: sseState } = createUseSSEMock();
+vi.mock("@/hooks/useSSE", () => ({ useSSE: () => sseState }));
 
 // Lucide icons often cause issues in Vitest if they use SVG primitives that
 // jsdom doesn't fully support or if they are imported as ES modules.

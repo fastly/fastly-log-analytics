@@ -4,6 +4,7 @@ import { http, HttpResponse } from 'msw'
 import { expect, test, vi, beforeEach } from 'vitest'
 import { DeleteDataDialog } from '@/components/DeleteDataDialog/DeleteDataDialog'
 import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
+import { createUseSSEMock } from '../helpers/sse-mock'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { server } from '@/__tests__/helpers/msw/server'
@@ -20,25 +21,8 @@ beforeEach(() => {
   useServiceStore.setState({ activeServiceId: 'some-other-active-service', isInitialized: true })
 })
 
-const mockStart = vi.fn()
-const mockStop = vi.fn()
-// Mutable so the "streaming" test below can flip status without a second
-// vi.mock factory — vi.mock is hoisted and can't read per-test state.
-const sseState: { status: 'idle' | 'streaming' | 'done' | 'error' } = { status: 'idle' }
-
-vi.mock('@/hooks/useSSE', () => ({
-  useSSE: () => ({
-    lines: [],
-    get status() {
-      return sseState.status
-    },
-    isDone: false,
-    error: null,
-    start: mockStart,
-    stop: mockStop,
-    reset: vi.fn()
-  })
-}))
+const { state: sseState, start: mockStart, stop: mockStop } = createUseSSEMock()
+vi.mock('@/hooks/useSSE', () => ({ useSSE: () => sseState }))
 
 function renderDialog(props: Partial<React.ComponentProps<typeof DeleteDataDialog>> = {}) {
   const qc = createTestQueryClient()

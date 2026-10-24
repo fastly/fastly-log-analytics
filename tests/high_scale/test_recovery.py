@@ -1,16 +1,11 @@
-import hashlib
-import json
 from datetime import UTC, datetime, timedelta
-from io import BytesIO
+from functools import partial
 from types import SimpleNamespace
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
-from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
-from backend.high_scale.publication import ClickHousePublication, InMemoryBatchManifestStore, InsertReceipt
+from backend.high_scale.publication import ClickHousePublication, InMemoryBatchManifestStore
 from backend.high_scale.recovery import (
     rebuild_cmcd_projections_from_fos,
     rebuild_origin_projections_from_fos,
@@ -19,70 +14,21 @@ from backend.high_scale.recovery import (
     rebuild_serving_state_from_fos,
 )
 from backend.high_scale.replay import replay_performance_projections
+from tests.high_scale.conftest import (
+    InMemoryManifestCatalog,
+    make_test_archive_manifest,
+)
+from tests.high_scale.conftest import (
+    ReplayClickHouseClient as ReplayClient,
+)
 
 NOW = datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
-
-
-class ReplayClient:
-    def __init__(self, *, fail_on: set[str] | None = None) -> None:
-        self._fail_on = fail_on or set()
-        self.insert_calls: list[str] = []
-
-    def insert(self, batch):
-        if any(needle in batch.batch_id for needle in self._fail_on):
-            raise RuntimeError(f"simulated insert failure for {batch.batch_id}")
-        self.insert_calls.append(batch.batch_id)
-        return InsertReceipt(batch.batch_id, len(batch.rows), batch.digest)
-
-
-def _parquet(rows: tuple[dict, ...]) -> bytes:
-    output = BytesIO()
-    pq.write_table(pa.Table.from_pylist(list(rows)), output)
-    return output.getvalue()
-
-
-def _checksum(value: bytes) -> str:
-    return f"sha256:{hashlib.sha256(value).hexdigest()}"
-
-
-def _event_digest(rows: tuple[dict, ...]) -> str:
-    digest = hashlib.sha256()
-    for row in rows:
-        digest.update((json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode())
-    return f"sha256:{digest.hexdigest()}"
-
-
-def _manifest(manifest_id: str, coverage_start: datetime, coverage_end: datetime, rows: tuple[dict, ...]):
-    artifact_bytes = _parquet(rows)
-    source = ArchiveSourceObject("svc", "request", f"raw/request/{manifest_id}.gz", "sha256:source", 4, "v1")
-    manifest = ArchiveManifest(
-        manifest_id,
-        source,
-        ArchiveArtifact(
-            f"s3://archive/artifacts/{manifest_id}.parquet",
-            _checksum(artifact_bytes),
-            len(artifact_bytes),
-            len(rows),
-            len(artifact_bytes),
-            _event_digest(rows),
-            "request.v1",
-            "normalize.v1",
-        ),
-        coverage_start,
-        coverage_end,
-        NOW + timedelta(days=1),
-        NOW + timedelta(days=2),
-        1,
-    )
-    return manifest, artifact_bytes
-
-
-class _Catalog:
-    def __init__(self, manifests: tuple[ArchiveManifest, ...]) -> None:
-        self._manifests = manifests
-
-    def manifests_covering(self, service_id, domain, start, end):
-        return tuple(m for m in self._manifests if m.coverage_end > start and m.coverage_start < end)
+_manifest = partial(
+    make_test_archive_manifest,
+    retention_deadline=NOW + timedelta(days=1),
+    deletion_deadline=NOW + timedelta(days=2),
+)
+_Catalog = partial(InMemoryManifestCatalog, filter_source=False)
 
 
 def test_recovery_prioritizes_recent_history_and_reports_full_completion() -> None:

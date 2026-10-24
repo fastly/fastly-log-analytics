@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
+import { useOpenGeneration } from '@/hooks/useDerivedState'
 import {
   Dialog,
   DialogContent,
@@ -134,12 +135,7 @@ function CachedInviteBanner({ serviceId, onReveal }: { serviceId: string; onReve
 
 export function InviteAnalystDialog(props: InviteAnalystDialogProps) {
   const { service, open } = props
-  const [generation, setGeneration] = useState(0)
-  const [wasOpen, setWasOpen] = useState(open)
-  if (open !== wasOpen) {
-    setWasOpen(open)
-    if (open) setGeneration((g) => g + 1)
-  }
+  const generation = useOpenGeneration(open)
   return <InviteAnalystDialogBody key={`${service?.service_id ?? ''}|${generation}`} {...props} />
 }
 

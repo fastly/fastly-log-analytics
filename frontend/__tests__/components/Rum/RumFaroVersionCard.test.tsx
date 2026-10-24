@@ -21,6 +21,7 @@ import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 
 import { createTestQueryClient, makeQueryWrapper } from '../../helpers/query'
+import { createUseSSEMock } from '../../helpers/sse-mock'
 import { server } from '@/__tests__/helpers/msw/server'
 import { getApiBase } from '@/lib/api'
 import { RumFaroVersionCard } from '@/components/Rum/RumFaroVersionCard'
@@ -38,25 +39,8 @@ beforeAll(() => {
 const API_BASE = getApiBase()
 const SVC = 'svc-faro-card'
 
-// Mutable so the "completes and invalidates" test can flip status without a
-// second vi.mock factory — vi.mock is hoisted and can't read per-test state
-// (same pattern as DeleteDataDialog.test.tsx / TeardownDialog.test.tsx).
-const mockStart = vi.fn()
-const sseState: { status: 'idle' | 'streaming' | 'done' | 'error' } = { status: 'idle' }
-
-vi.mock('@/hooks/useSSE', () => ({
-  useSSE: () => ({
-    lines: [],
-    get status() {
-      return sseState.status
-    },
-    isDone: false,
-    error: null,
-    start: mockStart,
-    stop: vi.fn(),
-    reset: vi.fn(),
-  }),
-}))
+const { state: sseState, start: mockStart } = createUseSSEMock()
+vi.mock('@/hooks/useSSE', () => ({ useSSE: () => sseState }))
 
 function renderCard(rumEnabled = true) {
   const qc = createTestQueryClient()

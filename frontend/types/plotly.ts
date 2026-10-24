@@ -102,9 +102,6 @@ export interface PlotlyTrace {
 /** `plotly_relayout` payload: flat dotted keys (`xaxis.range[0]`) or a nested `xaxis.range`. */
 export type PlotlyRelayoutEvent = Record<string, unknown>
 
-/** Event payload for callbacks whose shape this app never inspects. */
-export type PlotlyEvent = unknown
-
 export interface PlotlyFigure {
   data: readonly unknown[]
   layout: unknown

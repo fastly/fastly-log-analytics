@@ -98,25 +98,6 @@ class HighScaleControlPlane(Protocol):
         expected_owner_epoch: int,
     ) -> Any: ...
 
-    def mark_source_appended(
-        self,
-        service_id: str,
-        object_key: str,
-        *,
-        lease_generation: int,
-        expected_owner_epoch: int,
-    ) -> None: ...
-
-    def mark_source_archived(
-        self,
-        service_id: str,
-        object_key: str,
-        *,
-        lease_generation: int,
-        manifest_id: str,
-        owner_epoch: int,
-    ) -> None: ...
-
     def acknowledge_source(self, service_id: str, object_key: str, *, manifest_id: str) -> None: ...
 
     def claim_sources_batch(

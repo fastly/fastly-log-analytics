@@ -86,7 +86,7 @@ export function classifySsrRequest(headerBag: Pick<Headers, 'get'>): {
   return { admin: !refusal && !proxiedByCaddy, gatewayAuthenticated, refusal }
 }
 
-export interface SSRUpstreamResponse {
+interface SSRUpstreamResponse {
   statusCode: number
   body: string
 }

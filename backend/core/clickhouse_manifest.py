@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import time
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import uuid4
 
@@ -13,7 +13,6 @@ import structlog
 from psycopg import Connection
 from psycopg_pool import ConnectionPool
 
-from backend.core.clickhouse_rows import MAX_ARTIFACT_BYTES, MAX_BATCH_ROWS, MAX_DATASET_ROWS, build_batch_id
 from backend.core.clickhouse_schema import CLICKHOUSE_SCHEMA_VERSION, require_postgres
 from backend.core.metadata.pg_connection import get_pg_pool
 
@@ -218,47 +217,6 @@ class PgManifest:
         if row is None:
             raise RuntimeError("row is unexpectedly None")
         return max(0.0, float(row["lag_seconds"])) if row["lag_seconds"] is not None else 0.0
-
-    def seal(self, dataset: Dataset, artifacts: list[Artifact]) -> None:
-        """Insert complete immutable membership atomically; failed exports never appear."""
-        now = datetime.now(UTC)
-        if (
-            not 0 <= dataset.expected_rows <= MAX_DATASET_ROWS
-            or not dataset.coverage_start <= dataset.coverage_end
-            or not now < dataset.expires_at <= now + timedelta(days=1)
-            or dataset.schema_version != CLICKHOUSE_SCHEMA_VERSION
-        ):
-            raise ValueError("invalid bounded dataset")
-        end = 0
-        for artifact in artifacts:
-            if (
-                artifact.service_id != dataset.service_id
-                or artifact.dataset_id != dataset.dataset_id
-                or artifact.ordinal_start != end
-                or not 1 <= artifact.row_count <= MAX_BATCH_ROWS
-                or not 1 <= artifact.byte_size <= MAX_ARTIFACT_BYTES
-                or artifact.batch_id != build_batch_id(dataset.service_id, dataset.dataset_id, artifact.content_hash)
-            ):
-                raise ValueError("artifact membership is not exact")
-            end += artifact.row_count
-        if end != dataset.expected_rows:
-            raise ValueError("artifact coverage is not exact")
-        with self.transaction() as con:
-            con.execute(
-                "INSERT INTO clickhouse_datasets(service_id,dataset_id,catalog_identity,source_table,"
-                "source_snapshot,coverage_start,coverage_end,expires_at,expected_rows,canonical_digest,schema_version)"
-                " VALUES (%(service_id)s,%(dataset_id)s,%(catalog_identity)s,%(source_table)s,%(source_snapshot)s,"
-                "%(coverage_start)s,%(coverage_end)s,%(expires_at)s,%(expected_rows)s,%(canonical_digest)s,%(schema_version)s)",
-                asdict(dataset),
-            )
-            for artifact in artifacts:
-                con.execute(
-                    "INSERT INTO clickhouse_artifacts(service_id,dataset_id,batch_id,artifact_uri,content_hash,"
-                    "canonical_digest,byte_size,ordinal_start,row_count) VALUES (%(service_id)s,%(dataset_id)s,"
-                    "%(batch_id)s,%(artifact_uri)s,%(content_hash)s,%(canonical_digest)s,%(byte_size)s,"
-                    "%(ordinal_start)s,%(row_count)s)",
-                    asdict(artifact),
-                )
 
     def dataset(self, service_id: str, dataset_id: str) -> Dataset:
         with self.transaction() as con:

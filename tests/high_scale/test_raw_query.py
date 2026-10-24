@@ -1,71 +1,13 @@
-import hashlib
-import json
 from datetime import UTC, datetime
-from io import BytesIO
 
-import pyarrow as pa
-import pyarrow.parquet as pq
-
-from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.raw_query import raw_query_producer
-
-
-class _Catalog:
-    def __init__(self, manifests: tuple[ArchiveManifest, ...]) -> None:
-        self._manifests = manifests
-
-    def manifests_covering(self, service_id, domain, start, end):
-        return tuple(
-            m
-            for m in self._manifests
-            if m.source.service_id == service_id
-            and m.source.domain == domain
-            and m.coverage_end > start
-            and m.coverage_start < end
-        )
-
-
-def _parquet(rows: tuple[dict, ...]) -> bytes:
-    output = BytesIO()
-    pq.write_table(pa.Table.from_pylist(list(rows)), output)
-    return output.getvalue()
-
-
-def _checksum(value: bytes) -> str:
-    return f"sha256:{hashlib.sha256(value).hexdigest()}"
-
-
-def _event_digest(rows: tuple[dict, ...]) -> str:
-    digest = hashlib.sha256()
-    for row in rows:
-        digest.update((json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode())
-    return f"sha256:{digest.hexdigest()}"
-
-
-def _manifest(manifest_id: str, coverage_start: datetime, coverage_end: datetime, rows: tuple[dict, ...]) -> tuple:
-    artifact_bytes = _parquet(rows)
-    source = ArchiveSourceObject("svc", "request", f"raw/request/{manifest_id}.gz", "sha256:source", 4, "v1")
-    manifest = ArchiveManifest(
-        manifest_id,
-        source,
-        ArchiveArtifact(
-            f"s3://archive/artifacts/{manifest_id}.parquet",
-            _checksum(artifact_bytes),
-            len(artifact_bytes),
-            len(rows),
-            len(artifact_bytes),
-            _event_digest(rows),
-            "request.v1",
-            "normalize.v1",
-        ),
-        coverage_start,
-        coverage_end,
-        datetime(2026, 9, 4, tzinfo=UTC),
-        datetime(2026, 9, 5, tzinfo=UTC),
-        1,
-    )
-    return manifest, artifact_bytes
+from tests.high_scale.conftest import (
+    InMemoryManifestCatalog as _Catalog,
+)
+from tests.high_scale.conftest import (
+    make_test_archive_manifest as _manifest,
+)
 
 
 def test_producer_yields_rows_from_all_manifests_covering_the_window() -> None:

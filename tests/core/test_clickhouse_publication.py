@@ -5,14 +5,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from backend.core.clickhouse_client import ClickHouseError
 from backend.core.clickhouse_manifest import Artifact, Dataset, PgManifest
 from backend.core.clickhouse_publication import (
     DurableBatch,
     build_batch_id,
     full_rebuild,
     publish_batch,
-    readiness,
     replay_unpublished,
     verify_generation,
 )
@@ -119,58 +117,6 @@ def test_insert_failure_records_sanitized_failure_and_raises(monkeypatch):
     assert store.finish.call_args.kwargs["digest"] is None
 
 
-def test_expiry_during_target_verification_is_ineligible(monkeypatch):
-    dataset, _, _ = fixture_manifest()
-    store = MagicMock()
-    store.selected.return_value = {"dataset_id": dataset.dataset_id, "generation": "g"}
-    store.dataset.return_value = dataset
-
-    class Clock:
-        @staticmethod
-        def now(tz):
-            return dataset.expires_at + timedelta(seconds=1)
-
-    def slow_verification(*args, **kwargs):
-        monkeypatch.setattr("backend.core.clickhouse_publication.datetime", Clock)
-        return dataset
-
-    monkeypatch.setattr("backend.core.clickhouse_publication.verify_generation", slow_verification)
-    result = readiness(
-        dataset.service_id,
-        start=dataset.coverage_start,
-        end=dataset.coverage_end,
-        source_snapshot=dataset.source_snapshot,
-        catalog_identity=dataset.catalog_identity,
-        source_table=dataset.source_table,
-        store=store,
-        client=MagicMock(),
-    )
-    assert not result.eligible
-    assert result.reason == "expired_or_unsupported_dataset"
-
-
-def test_readiness_outage_is_not_ineligible_data(monkeypatch):
-    dataset, _, _ = fixture_manifest()
-    store = MagicMock()
-    store.selected.return_value = {"dataset_id": dataset.dataset_id, "generation": "g"}
-    store.dataset.return_value = dataset
-    monkeypatch.setattr(
-        "backend.core.clickhouse_publication.verify_generation",
-        MagicMock(side_effect=ClickHouseError("timeout", query_id="test")),
-    )
-    with pytest.raises(ClickHouseError):
-        readiness(
-            dataset.service_id,
-            start=dataset.coverage_start,
-            end=dataset.coverage_end,
-            source_snapshot=dataset.source_snapshot,
-            catalog_identity=dataset.catalog_identity,
-            source_table=dataset.source_table,
-            store=store,
-            client=MagicMock(),
-        )
-
-
 @pytest.fixture
 def published_fixture(monkeypatch):
     dataset, artifact, batch = fixture_manifest()
@@ -271,28 +217,3 @@ def test_full_rebuild_and_resume_keep_distinct_generation(published_fixture):
         full_rebuild(
             dataset.service_id, dataset.dataset_id, loader=lambda artifact: batch, limit=0, store=store, client=client
         )
-
-
-def test_readiness_checks_all_eligibility_dimensions(published_fixture):
-    dataset, _, _, store, client = published_fixture
-    kwargs = dict(
-        start=dataset.coverage_start,
-        end=dataset.coverage_end,
-        source_snapshot=dataset.source_snapshot,
-        catalog_identity=dataset.catalog_identity,
-        source_table=dataset.source_table,
-        store=store,
-        client=client,
-    )
-    assert readiness(dataset.service_id, **kwargs).eligible
-    assert readiness(dataset.service_id, **{**kwargs, "source_snapshot": 99}).reason == "source_snapshot_mismatch"
-    assert (
-        readiness(dataset.service_id, **{**kwargs, "start": dataset.coverage_start - timedelta(days=1)}).reason
-        == "outside_coverage"
-    )
-    client.execute.side_effect = RuntimeError("target unavailable")
-    assert readiness(dataset.service_id, **kwargs).reason == "target_unverified"
-    store.dataset.side_effect = ValueError("expired")
-    assert readiness(dataset.service_id, **kwargs).reason == "expired_or_unsupported_dataset"
-    store.selected.return_value = None
-    assert readiness(dataset.service_id, **kwargs).reason == "no_active_generation"

@@ -155,22 +155,6 @@ def test_publication_lag_is_bounded_actionable_metadata_only(manifest):
         store.publication_lag_seconds()
 
 
-def test_seal_uses_one_real_transaction_and_parameterized_membership(manifest):
-    store, con = manifest
-    dataset, artifact, _ = fixture_manifest()
-    store.seal(dataset, [artifact])
-    con.transaction.assert_called_once_with()
-    assert con.execute.call_count == 2
-    assert con.execute.call_args_list[0].args[1] == asdict(dataset)
-    assert con.execute.call_args_list[1].args[1] == asdict(artifact)
-    with pytest.raises(ValueError, match="membership"):
-        store.seal(dataset, [replace(artifact, service_id="other")])
-    with pytest.raises(ValueError, match="coverage"):
-        store.seal(dataset, [])
-    with pytest.raises(ValueError, match="bounded dataset"):
-        store.seal(replace(dataset, expected_rows=1000001), [artifact])
-
-
 def test_dataset_expiry_version_and_missing_are_explicit(manifest):
     store, con = manifest
     dataset, _, _ = fixture_manifest()

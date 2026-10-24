@@ -9,19 +9,6 @@ from unittest.mock import MagicMock
 import pytest
 
 
-class _NoopCtx:
-    """No-op context manager stub."""
-
-    def __init__(self, value: Any = None) -> None:
-        self.value = value
-
-    def __enter__(self) -> Any:
-        return self.value
-
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
-        return False
-
-
 class _StubSource(dict):
     """Minimal dict-subclass representing a configured service source."""
 
@@ -34,32 +21,6 @@ class _StubSource(dict):
         }
         base.update(overrides)
         super().__init__(base)
-
-
-class CronRecorder:
-    """Captures ``start_cron_run`` and ``log_cron_run`` calls for assertions."""
-
-    def __init__(self, run_id: int = 101) -> None:
-        self.run_id = run_id
-        self.starts: list[tuple[Any, ...]] = []
-        self.logs: list[dict[str, Any]] = []
-        self.start_mock = MagicMock(side_effect=self._on_start)
-        self.log_mock = MagicMock(side_effect=self._on_log)
-
-    def _on_start(self, *args: Any, **kwargs: Any) -> int:
-        self.starts.append((args, kwargs))
-        return self.run_id
-
-    def _on_log(self, source: Any, task: str, duration_s: float, status: str, **kwargs: Any) -> None:
-        self.logs.append(
-            {
-                "source": source,
-                "task": task,
-                "duration_s": duration_s,
-                "status": status,
-                **kwargs,
-            }
-        )
 
 
 def make_cron_source(tmp_path: Path, service_id: str = "svc-expire-contract", **overrides: Any) -> dict[str, Any]:
@@ -84,16 +45,6 @@ def patch_maintenance_config(monkeypatch: pytest.MonkeyPatch, **cron_sync: Any) 
 
 
 @pytest.fixture
-def cron_source(tmp_path: Path):
-    """Factory fixture returning :func:`make_cron_source` bound to ``tmp_path``."""
-
-    def _factory(service_id: str = "svc-cron-contract", **overrides: Any) -> dict[str, Any]:
-        return make_cron_source(tmp_path, service_id=service_id, **overrides)
-
-    return _factory
-
-
-@pytest.fixture
 def fake_source():
     """Factory fixture returning a ``_StubSource`` dict."""
 
@@ -101,15 +52,6 @@ def fake_source():
         return _StubSource(service_id=service_id, access_level=access_level, **overrides)
 
     return _factory
-
-
-@pytest.fixture
-def cron_Recorder(monkeypatch: pytest.MonkeyPatch) -> CronRecorder:
-    """Patch ``start_cron_run`` and ``log_cron_run`` with a :class:`CronRecorder`."""
-    rec = CronRecorder()
-    monkeypatch.setattr("backend.core.duckdb.start_cron_run", rec.start_mock)
-    monkeypatch.setattr("backend.core.duckdb.log_cron_run", rec.log_mock)
-    return rec
 
 
 @pytest.fixture

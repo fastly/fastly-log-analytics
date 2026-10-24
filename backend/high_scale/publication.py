@@ -517,10 +517,6 @@ class ClickHousePublication:
         )
         return PublicationResult(batch.batch_id, PublicationStatus.VISIBLE, receipt.rows_inserted, False)
 
-    def is_visible(self, batch_id: str) -> bool:
-        manifest = self._manifests.get(batch_id)
-        return manifest is not None and manifest.status is PublicationStatus.VISIBLE
-
     @staticmethod
     def _validate_existing(manifest: BatchManifest, batch: HighScaleBatch) -> None:
         if (

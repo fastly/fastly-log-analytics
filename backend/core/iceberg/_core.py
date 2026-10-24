@@ -247,18 +247,6 @@ def _buffer_dir(source: dict, table_name: str = "logs") -> str:
     return base
 
 
-def _is_local_only_source(source: dict) -> bool:
-    """True when this source is configured to use local files instead of FOS/S3.
-
-    Triggered by ``fos_local_warehouse: true`` in the source config, OR by
-    the conventional ``fos_endpoint: "http://localhost:0"`` scrub marker.
-    """
-    if source.get("fos_local_warehouse") is True:
-        return True
-    endpoint = source.get("fos_endpoint") or source.get("endpoint") or ""
-    return endpoint in ("http://localhost:0", "http://127.0.0.1:0")
-
-
 def invalidate_service_caches(source: dict) -> dict[str, int]:
     """Drop process-local view/DuckLake caches for one service."""
     name = source.get("name", "default")

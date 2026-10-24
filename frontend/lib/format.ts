@@ -36,7 +36,7 @@ export function formatBytesTiered(
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
 }
 
-export interface ElapsedOptions {
+interface ElapsedOptions {
   /** Seconds at which the minute / hour / day units take over. */
   minutesFrom?: number
   hoursFrom?: number

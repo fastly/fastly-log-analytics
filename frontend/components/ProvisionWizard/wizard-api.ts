@@ -14,7 +14,7 @@ type ValidateResponse = components["schemas"]["ProvisionValidateResponse"];
 type LakeInfo = components["schemas"]["ProvisionLakeInfoResponse"];
 
 // ── validate mutation factory ──
-export interface ValidateMutationDeps {
+interface ValidateMutationDeps {
   token: string;
   setTokenInfo: (info: {
     id: string;
@@ -66,7 +66,7 @@ export function buildValidateOnSuccess(deps: ValidateMutationDeps) {
 }
 
 // ── handleCheckConfig ──
-export interface CheckConfigArgs {
+interface CheckConfigArgs {
   token: string;
   selectedService: ProvisionService | null;
   selectedCdnService: ProvisionService | null;
@@ -111,7 +111,7 @@ export async function runCheckConfig(args: CheckConfigArgs) {
 }
 
 // ── handleCheckFos ──
-export interface CheckFosArgs {
+interface CheckFosArgs {
   vals?: {
     bucket?: string;
     region?: string;
@@ -151,7 +151,7 @@ export async function runCheckFos(args: CheckFosArgs) {
 }
 
 // ── checkDomain ──
-export interface CheckDomainArgs {
+interface CheckDomainArgs {
   prefix: string;
   setDomainStatus: (
     s: "idle" | "checking" | "available" | "taken" | "error",
@@ -182,7 +182,7 @@ export async function runCheckDomain(args: CheckDomainArgs) {
 }
 
 // ── handleAnalyzeLake ──
-export interface AnalyzeLakeArgs {
+interface AnalyzeLakeArgs {
   config: ProvisionConfig;
   icebergMetadataLocation: string;
   setIsAnalyzing: (b: boolean) => void;

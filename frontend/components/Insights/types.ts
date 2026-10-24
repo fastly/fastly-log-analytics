@@ -5,27 +5,23 @@ type CardOf<Id extends InsightCardData['id']> = Extract<InsightCardData, { id: I
 export type ImpossibleDistanceItem = CardOf<'impossible_distance'>['items'][number]
 export type RepeatedPatternsItem = CardOf<'repeated_patterns'>['items'][number]
 export type RepeatedPatternsFpItem = CardOf<'repeated_patterns_fp'>['items'][number]
-export type CrawlerDisparityItem = CardOf<'crawler_disparity'>['items'][number]
-export type StaleBrowserVersionItem = CardOf<'stale_browser_version'>['items'][number]
-export type OrphanedDeepCrawlItem = CardOf<'orphaned_deep_crawl'>['items'][number]
-export type ResidentialFingerprintDispersionItem = CardOf<'residential_fingerprint_dispersion'>['items'][number]
 
 export type BotFindingModalData =
   | {
       insightId: 'crawler_disparity'
-      item: CrawlerDisparityItem
+      item: CardOf<'crawler_disparity'>['items'][number]
     }
   | {
       insightId: 'stale_browser_version'
-      item: StaleBrowserVersionItem
+      item: CardOf<'stale_browser_version'>['items'][number]
     }
   | {
       insightId: 'orphaned_deep_crawl'
-      item: OrphanedDeepCrawlItem
+      item: CardOf<'orphaned_deep_crawl'>['items'][number]
     }
   | {
       insightId: 'residential_fingerprint_dispersion'
-      item: ResidentialFingerprintDispersionItem
+      item: CardOf<'residential_fingerprint_dispersion'>['items'][number]
     }
 
 export interface ImpossibleDistanceData {

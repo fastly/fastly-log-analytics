@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { useOpenGeneration } from '@/hooks/useDerivedState'
 import { queryKeys } from '@/lib/query-keys'
 import {
   Dialog,
@@ -69,12 +70,7 @@ function initialSettings(service: ServiceConfig | null) {
  */
 export function CronSettingsModal(props: CronSettingsModalProps) {
   const { service, open } = props
-  const [generation, setGeneration] = useState(0)
-  const [wasOpen, setWasOpen] = useState(open)
-  if (open !== wasOpen) {
-    setWasOpen(open)
-    if (open) setGeneration((g) => g + 1)
-  }
+  const generation = useOpenGeneration(open)
   return <CronSettingsModalBody key={`${service?.service_id ?? ''}|${generation}`} {...props} />
 }
 

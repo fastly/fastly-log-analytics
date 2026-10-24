@@ -7,22 +7,10 @@ import time
 from datetime import datetime
 from typing import Any
 
+from backend.repositories._base import record_duckdb_query
 from backend.repositories._sql import control_room as sql
 
 logger = logging.getLogger(__name__)
-
-
-def _record_duckdb_query(sql_str: str, elapsed_ms: float, service_id: str | None = None) -> None:
-    try:
-        from backend.utils.telemetry import _QUERIES, record_telemetry_query
-
-        compact = " ".join(sql_str.strip().split())
-        q_list = _QUERIES.get()
-        if q_list is not None:
-            q_list.append({"sql": compact, "time_ms": elapsed_ms, "engine": "DuckDB"})
-        record_telemetry_query("duckdb", compact, elapsed_ms, service_id=service_id)
-    except Exception:
-        logger.debug("control_room._record_duckdb_query failed", exc_info=True)
 
 
 def recent_standard_error_events(con, view_name: str, *, service_id: str | None = None) -> list[dict]:
@@ -30,7 +18,7 @@ def recent_standard_error_events(con, view_name: str, *, service_id: str | None 
     q = sql.RECENT_STANDARD_ERRORS.format(view=view_name)
     t0 = time.perf_counter()
     rows = con.execute(q).fetchall()
-    _record_duckdb_query(q, round((time.perf_counter() - t0) * 1000, 2), service_id=service_id)
+    record_duckdb_query(q, round((time.perf_counter() - t0) * 1000, 2), service_id=service_id)
     return [
         {
             "event_id": str(row[0]),
@@ -73,16 +61,16 @@ def correlate_top_values(
     q_top = sql.CORRELATE_TOP_VALUES.format(col=col, view=view_name)
     t0 = time.perf_counter()
     rows = con.execute(q_top, [since, limit]).fetchall()
-    _record_duckdb_query(q_top, round((time.perf_counter() - t0) * 1000, 2), service_id=service_id)
+    record_duckdb_query(q_top, round((time.perf_counter() - t0) * 1000, 2), service_id=service_id)
 
     q_fresh = sql.LATEST_TIMESTAMP_WINDOWED.format(view=view_name)
     t1 = time.perf_counter()
     freshness_row = con.execute(q_fresh, [since]).fetchone()
-    _record_duckdb_query(q_fresh, round((time.perf_counter() - t1) * 1000, 2), service_id=service_id)
+    record_duckdb_query(q_fresh, round((time.perf_counter() - t1) * 1000, 2), service_id=service_id)
 
     if (not freshness_row or freshness_row[0] is None) and not rows:
         q_fallback = sql.LATEST_TIMESTAMP.format(view=view_name)
         t2 = time.perf_counter()
         freshness_row = con.execute(q_fallback).fetchone()
-        _record_duckdb_query(q_fallback, round((time.perf_counter() - t2) * 1000, 2), service_id=service_id)
+        record_duckdb_query(q_fallback, round((time.perf_counter() - t2) * 1000, 2), service_id=service_id)
     return rows, freshness_row

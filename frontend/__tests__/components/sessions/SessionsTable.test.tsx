@@ -26,17 +26,7 @@ import type { SessionsResponse } from '@/types/api'
 
 type SessionRow = components['schemas']['Session']
 
-vi.mock('@tanstack/react-virtual', () => ({
-  useVirtualizer: (options: { count: number }) => ({
-    getVirtualItems: () =>
-      Array.from({ length: options.count }).map((_, i) => ({
-        index: i,
-        start: i * 40,
-        end: (i + 1) * 40,
-      })),
-    getTotalSize: () => options.count * 40,
-  }),
-}))
+vi.mock('@tanstack/react-virtual', async () => (await import('@/__tests__/helpers/virtual-mock')).reactVirtualModuleMock())
 
 // FlagSessionPopover ultimately POSTs to the labels endpoint; stub it so
 // the table doesn't try to set up popover state for each row. We

@@ -24,22 +24,11 @@
 import React from 'react'
 import { render, screen, cleanup } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createUseSSEMock } from '../helpers/sse-mock'
 
 // Mock useSSE — the component just consumes { lines, status, start, stop }.
 // Tests mutate this object between renders to simulate transitions.
-const sseState: {
-  lines: Array<Record<string, unknown>>
-  status: 'idle' | 'streaming' | 'done' | 'error'
-  error: string | null
-  start: ReturnType<typeof vi.fn>
-  stop: ReturnType<typeof vi.fn>
-} = {
-  lines: [],
-  status: 'idle',
-  error: null,
-  start: vi.fn(),
-  stop: vi.fn(),
-}
+const { state: sseState, resetState: resetSSE } = createUseSSEMock()
 
 vi.mock('@/hooks/useSSE', () => ({
   useSSE: () => sseState,
@@ -54,14 +43,6 @@ vi.mock('@/hooks/useDateFormat', () => ({
 }))
 
 import { CronLiveLog } from '@/components/CronLiveLog'
-
-function resetSSE() {
-  sseState.lines = []
-  sseState.status = 'idle'
-  sseState.error = null
-  sseState.start = vi.fn()
-  sseState.stop = vi.fn()
-}
 
 beforeEach(() => {
   resetSSE()

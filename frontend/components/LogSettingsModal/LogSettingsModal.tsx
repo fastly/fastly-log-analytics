@@ -2,6 +2,7 @@
 
 import React, { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useOpenGeneration } from '@/hooks/useDerivedState'
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 import { queryKeys } from '@/lib/query-keys'
@@ -49,12 +50,7 @@ interface LogSettingsModalProps {
 
 export function LogSettingsModal(props: LogSettingsModalProps) {
   const { service, open } = props
-  const [generation, setGeneration] = useState(0)
-  const [wasOpen, setWasOpen] = useState(open)
-  if (open !== wasOpen) {
-    setWasOpen(open)
-    if (open) setGeneration((g) => g + 1)
-  }
+  const generation = useOpenGeneration(open)
   return <LogSettingsModalBody key={`${service?.service_id ?? ''}|${generation}`} {...props} />
 }
 

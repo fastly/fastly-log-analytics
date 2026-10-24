@@ -31,19 +31,7 @@ import { getApiBase } from '@/lib/api'
 
 const API_BASE = getApiBase()
 
-vi.mock('@tanstack/react-virtual', () => ({
-  useVirtualizer: (options: { count?: number }) => ({
-    getVirtualItems: () => {
-      const count = options.count || 0
-      return Array.from({ length: count }).map((_, i) => ({
-        index: i,
-        start: i * 40,
-        size: 40,
-      }))
-    },
-    getTotalSize: () => (options.count || 0) * 40,
-  }),
-}))
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
 
 beforeEach(() => {
   vi.clearAllMocks()

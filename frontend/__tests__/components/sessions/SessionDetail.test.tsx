@@ -46,17 +46,7 @@ vi.mock('@/hooks/useFieldLabel', () => ({
 }))
 
 // Virtualizer needs to enumerate every row for jsdom layout-free tests.
-vi.mock('@tanstack/react-virtual', () => ({
-  useVirtualizer: (options: { count: number }) => ({
-    getVirtualItems: () =>
-      Array.from({ length: options.count }).map((_, i) => ({
-        index: i,
-        start: i * 40,
-        end: (i + 1) * 40,
-      })),
-    getTotalSize: () => options.count * 40,
-  }),
-}))
+vi.mock('@tanstack/react-virtual', async () => (await import('@/__tests__/helpers/virtual-mock')).reactVirtualModuleMock())
 
 vi.mock('@/components/SessionScoring/FlagSessionPopover', () => ({
   FlagSessionPopover: () => <span data-testid="flag-popover" />,

@@ -80,8 +80,6 @@ export const ORIGIN_SSR_DEFAULTS = {
   ipHealthLimit: 30,
 } as const
 
-export type OriginSsrSeed = SsrRangeSeed
-
 /**
  * SSR-prefetch the default origin aggregates selection for the active service.
  *
@@ -93,7 +91,7 @@ export type OriginSsrSeed = SsrRangeSeed
 export async function fetchOriginServerSide(
   serviceId: string | undefined,
   now: Date = new Date(),
-): Promise<OriginSsrSeed | null> {
+): Promise<SsrRangeSeed | null> {
   return fetchSsrRangePost({
     serviceId,
     path: '/api/origin/aggregates',

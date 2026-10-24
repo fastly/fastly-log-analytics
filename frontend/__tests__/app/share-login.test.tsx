@@ -1,17 +1,14 @@
-import { render as rtlRender, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { http, HttpResponse } from 'msw'
 import { server } from '@/__tests__/helpers/msw/server'
-import { createTestQueryClient, makeQueryWrapper } from '@/__tests__/helpers/query'
+import { renderWithQuery as render } from '@/__tests__/helpers/renderWithQuery'
 import ShareLoginPage from '@/app/share-login/page'
 import ShareLoginLoading from '@/app/share-login/loading'
 import { safeReturnTarget } from '@/app/share-login/ShareLoginForm'
 import { AcknowledgeButton } from '@/app/share-login/acknowledge/AcknowledgeButton'
 import { AcknowledgeFallback } from '@/app/share-login/acknowledge/AcknowledgeFallback'
-
-const render = (ui: React.ReactElement) =>
-  rtlRender(ui, { wrapper: makeQueryWrapper(createTestQueryClient()) })
 
 const pushSpy = vi.fn()
 const replaceSpy = vi.fn()

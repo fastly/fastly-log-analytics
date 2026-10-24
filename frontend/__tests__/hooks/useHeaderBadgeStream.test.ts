@@ -7,6 +7,7 @@
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { QueryClient } from '@tanstack/react-query'
 import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
+import { makeStreamResponse, makeNeverClosingStreamResponse } from '../helpers/sse-mock'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
 vi.mock('@/lib/api', () => ({
@@ -28,22 +29,6 @@ vi.mock('@/stores/serviceStore', () => {
   )
   return { useServiceStore }
 })
-
-function makeStreamResponse(messages: string[]): Response {
-  const enc = new TextEncoder()
-  let i = 0
-  const stream = new ReadableStream({
-    pull(controller) {
-      if (i >= messages.length) {
-        controller.close()
-        return
-      }
-      controller.enqueue(enc.encode(messages[i]))
-      i += 1
-    },
-  })
-  return new Response(stream, { status: 200 })
-}
 
 function makeQueryClient(seedBootstrap?: Record<string, unknown>) {
   const qc = createTestQueryClient({ queries: { gcTime: 60_000, staleTime: 0 } })
@@ -201,8 +186,7 @@ describe('useHeaderBadgeStream', () => {
     let abortSignal: AbortSignal | undefined
     vi.mocked(fetch).mockImplementation(async (_url: RequestInfo | URL, init?: RequestInit) => {
       abortSignal = init?.signal ?? undefined
-      const stream = new ReadableStream<Uint8Array>({ start() { /* never closes */ } })
-      return new Response(stream, { status: 200 })
+      return makeNeverClosingStreamResponse()
     })
 
     const qc = makeQueryClient({})

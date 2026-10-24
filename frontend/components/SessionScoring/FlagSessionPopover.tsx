@@ -12,8 +12,6 @@ import { unwrapClient } from '@/lib/api-client'
 
 import type { LabelValue } from '@/hooks/useScoringLabels'
 
-export type { LabelValue }
-
 interface FlagSessionPopoverProps {
   serviceId: string
   // ``null`` for a cookieless request — the popover renders disabled.

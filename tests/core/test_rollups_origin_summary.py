@@ -16,6 +16,7 @@ import pytest
 
 from tests._helpers.dates import past_hour as _past_hour
 from tests._helpers.locks import noop_lock as _noop_lock
+from tests._helpers.rollups import write_hour_bundle, writer_patches
 
 pytestmark = pytest.mark.usefixtures("frozen_clock")
 
@@ -71,16 +72,7 @@ def test_build_origin_summary_writes_expected_columns(tmp_path):
     con = duckdb.connect(":memory:")
     _seed_logs(con, "logs_os", rows)
 
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value="logs_os"),
-        patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
-            side_effect=lambda c, _src, fn: fn(c),
-        ),
-    ):
+    with writer_patches(cache_root, "logs_os", con):
         n = origin_summary.build_origin_summary_bundles("svc-os", src, [hour_token])
 
     assert n == 1
@@ -139,16 +131,7 @@ def test_build_origin_summary_handles_unsigned_latency_columns(tmp_path):
         [hour_dt, 100.0, 0.1, 294429, 119641, 200, 1000, "MISS"],
     )
 
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value="logs_os"),
-        patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
-            side_effect=lambda c, _src, fn: fn(c),
-        ),
-    ):
+    with writer_patches(cache_root, "logs_os", con):
         assert origin_summary.build_origin_summary_bundles("svc-os", src, [hour_token]) == 1
 
     bundle = cache_root / "rollups" / "hour_bundled" / f"hour={hour_token}" / "origin_summary.parquet"
@@ -276,28 +259,16 @@ def test_try_origin_summary_from_rollup_aggregates_across_hours(tmp_path):
         # lat_us_count=1000, ottfb_p50_us=50000 (50 ms), ottfb_p95_us=200000,
         # ottlb_count=900, ottlb_p50_us=80000, cdn_ovh_count=850,
         # cdn_ovh_p50_us=12000, obytes_count=1000, obytes_p50=2048
-        sql_path = f"{hour_dir}/origin_summary.parquet"
-        wcon = duckdb.connect()
-        try:
-            wcon.execute(
-                f"COPY (SELECT * FROM (VALUES ("
-                f"CAST(1000 AS BIGINT), CAST(500 AS BIGINT), CAST(200 AS BIGINT),"
-                f"CAST(1000 AS BIGINT),"
-                f"50000.0, 100000.0, 200000.0, 500000.0,"
-                f"CAST(900 AS BIGINT), 80000.0, 250000.0,"
-                f"CAST(850 AS BIGINT), 12000.0,"
-                f"CAST(10 AS BIGINT), CAST(1000 AS BIGINT),"
-                f"CAST(1000 AS BIGINT), 2048.0"
-                f")) AS t(requests, total_misses, total_passes, lat_us_count,"
-                f"ottfb_p50_us, ottfb_p75_us, ottfb_p95_us, ottfb_p99_us,"
-                f"ottlb_count, ottlb_p50_us, ottlb_p95_us,"
-                f"cdn_ovh_count, cdn_ovh_p50_us,"
-                f"ost_5xx_count, ost_total_count,"
-                f"obytes_count, obytes_p50)) "
-                f"TO '{sql_path}' (FORMAT PARQUET)"
-            )
-        finally:
-            wcon.close()
+        write_hour_bundle(
+            hour_dir,
+            "origin_summary.parquet",
+            "(CAST(1000 AS BIGINT), CAST(500 AS BIGINT), CAST(200 AS BIGINT), CAST(1000 AS BIGINT), "
+            "50000.0, 100000.0, 200000.0, 500000.0, CAST(900 AS BIGINT), 80000.0, 250000.0, "
+            "CAST(850 AS BIGINT), 12000.0, CAST(10 AS BIGINT), CAST(1000 AS BIGINT), CAST(1000 AS BIGINT), 2048.0)",
+            "requests, total_misses, total_passes, lat_us_count, ottfb_p50_us, ottfb_p75_us, ottfb_p95_us, "
+            "ottfb_p99_us, ottlb_count, ottlb_p50_us, ottlb_p95_us, cdn_ovh_count, cdn_ovh_p50_us, "
+            "ost_5xx_count, ost_total_count, obytes_count, obytes_p50",
+        )
 
     con = duckdb.connect(":memory:")
     runner = QueryRunner(con, src)
@@ -362,12 +333,7 @@ def test_build_origin_summary_skips_malformed_hour_tokens(tmp_path, caplog):
     con = duckdb.connect(":memory:")
     _seed_logs(con, "logs_os", rows)
 
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value="logs_os"),
-        patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-    ):
+    with writer_patches(cache_root, "logs_os", con):
         import logging as _logging
 
         with caplog.at_level(_logging.WARNING, logger="backend.core.rollups.origin_summary"):
@@ -455,12 +421,7 @@ def test_build_origin_summary_ottfb_only_schema(tmp_path):
         [{"timestamp": dt + timedelta(minutes=i), "ottfb": 100_000.0 + i * 1000} for i in range(5)],
     )
 
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value="logs_os"),
-        patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-    ):
+    with writer_patches(cache_root, "logs_os", con):
         n = origin_summary.build_origin_summary_bundles("svc-os", src, [token])
     assert n == 1
     bundle = cache_root / "rollups" / "hour_bundled" / f"hour={token}" / "origin_summary.parquet"
@@ -490,12 +451,7 @@ def test_build_origin_summary_ttfb_only_schema(tmp_path):
         con, "logs_os", ["ttfb"], [{"timestamp": dt + timedelta(minutes=i), "ttfb": 0.05 + i * 0.001} for i in range(5)]
     )
 
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value="logs_os"),
-        patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-    ):
+    with writer_patches(cache_root, "logs_os", con):
         n = origin_summary.build_origin_summary_bundles("svc-os", src, [token])
     assert n == 1
     bundle = cache_root / "rollups" / "hour_bundled" / f"hour={token}" / "origin_summary.parquet"
@@ -584,12 +540,7 @@ def test_build_origin_summary_logs_and_skips_on_copy_failure(tmp_path, caplog):
     _seed_logs(real, "logs_os", rows)
     con = _FailingFirstCopyCon(real)
 
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value="logs_os"),
-        patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-    ):
+    with writer_patches(cache_root, "logs_os", con):
         import logging as _logging
 
         with caplog.at_level(_logging.WARNING, logger="backend.core.rollups.origin_summary"):

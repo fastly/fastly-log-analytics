@@ -15,3 +15,21 @@ export function stubPointerCaptureAndScroll() {
 export function stubGetAnimations() {
   define(window.Element.prototype, 'getAnimations', vi.fn(() => []))
 }
+
+/** jsdom lacks window.matchMedia; Drawer/Dialog/Select primitives probe it. */
+export function stubMatchMedia() {
+  define(
+    window,
+    'matchMedia',
+    vi.fn().mockImplementation((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  )
+}

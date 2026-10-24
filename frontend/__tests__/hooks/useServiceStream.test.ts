@@ -13,6 +13,7 @@
  */
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { makeStreamResponse, makeNeverClosingStreamResponse } from '../helpers/sse-mock'
 
 vi.mock('@/lib/api', () => ({
   getApiBase: () => 'http://test',
@@ -42,22 +43,6 @@ vi.mock('@/stores/serviceStore', () => {
   )
   return { useServiceStore }
 })
-
-function makeStreamResponse(messages: string[]): Response {
-  const enc = new TextEncoder()
-  let i = 0
-  const stream = new ReadableStream({
-    pull(controller) {
-      if (i >= messages.length) {
-        controller.close()
-        return
-      }
-      controller.enqueue(enc.encode(messages[i]))
-      i += 1
-    },
-  })
-  return new Response(stream, { status: 200 })
-}
 
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn())
@@ -113,8 +98,7 @@ describe('useServiceStream', () => {
     let signal: AbortSignal | undefined
     vi.mocked(fetch).mockImplementation(async (_url, init) => {
       signal = init?.signal as AbortSignal
-      const stream = new ReadableStream<Uint8Array>({ start() { /* never closes */ } })
-      return new Response(stream, { status: 200 })
+      return makeNeverClosingStreamResponse()
     })
     const { useServiceStream } = await import('@/hooks/useServiceStream')
     const { unmount } = renderHook(() => useServiceStream(true, '/api/x', () => {}))
@@ -132,8 +116,7 @@ describe('useServiceStream', () => {
       const ri = init ?? {}
       signals.push(ri.signal as AbortSignal)
       ids.push((ri.headers as Record<string, string>)['x-service-id'])
-      const stream = new ReadableStream<Uint8Array>({ start() { /* never closes */ } })
-      return new Response(stream, { status: 200 })
+      return makeNeverClosingStreamResponse()
     })
     const { useServiceStream } = await import('@/hooks/useServiceStream')
     const { rerender } = renderHook(() => useServiceStream(true, '/api/x', () => {}))
@@ -208,8 +191,7 @@ describe('useServiceStream', () => {
       let headers: Record<string, string> | undefined
       vi.mocked(fetch).mockImplementation(async (_url, init) => {
         headers = init?.headers as Record<string, string>
-        const stream = new ReadableStream<Uint8Array>({ start() { /* never closes */ } })
-        return new Response(stream, { status: 200 })
+        return makeNeverClosingStreamResponse()
       })
       const { useServiceStream } = await import('@/hooks/useServiceStream')
       renderHook(() => useServiceStream(true, '/api/x', () => {}, { optionalService: true }))
@@ -223,8 +205,7 @@ describe('useServiceStream', () => {
       let headers: Record<string, string> | undefined
       vi.mocked(fetch).mockImplementation(async (_url, init) => {
         headers = init?.headers as Record<string, string>
-        const stream = new ReadableStream<Uint8Array>({ start() { /* never closes */ } })
-        return new Response(stream, { status: 200 })
+        return makeNeverClosingStreamResponse()
       })
       const { useServiceStream } = await import('@/hooks/useServiceStream')
       renderHook(() => useServiceStream(true, '/api/x', () => {}, { optionalService: true }))
@@ -241,8 +222,7 @@ describe('useServiceStream', () => {
         const ri = init ?? {}
         signals.push(ri.signal as AbortSignal)
         ids.push((ri.headers as Record<string, string>)['x-service-id'])
-        const stream = new ReadableStream<Uint8Array>({ start() { /* never closes */ } })
-        return new Response(stream, { status: 200 })
+        return makeNeverClosingStreamResponse()
       })
       const { useServiceStream } = await import('@/hooks/useServiceStream')
       const { rerender } = renderHook(() =>
@@ -273,8 +253,7 @@ describe('useServiceStream', () => {
       vi.mocked(fetch).mockImplementation(async (_url, init) => {
         const ri = init ?? {}
         ids.push((ri.headers as Record<string, string>)['x-service-id'])
-        const stream = new ReadableStream<Uint8Array>({ start() { /* never closes */ } })
-        return new Response(stream, { status: 200 })
+        return makeNeverClosingStreamResponse()
       })
       const { useServiceStream } = await import('@/hooks/useServiceStream')
       renderHook(() => useServiceStream(true, '/api/x', () => {}, { optionalService: true }))

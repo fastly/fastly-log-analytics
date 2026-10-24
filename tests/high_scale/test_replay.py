@@ -1,20 +1,21 @@
-import hashlib
-import json
 from datetime import UTC, datetime
-from io import BytesIO
-
-import pyarrow as pa
-import pyarrow.parquet as pq
 
 from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.publication import ClickHousePublication, InMemoryBatchManifestStore, InsertReceipt
 from backend.high_scale.replay import replay_manifest
-
-
-class ReplayClient:
-    def insert(self, batch):
-        return InsertReceipt(batch.batch_id, len(batch.rows), batch.digest)
+from tests.high_scale.conftest import (
+    ReplayClickHouseClient as ReplayClient,
+)
+from tests.high_scale.conftest import (
+    event_digest as _event_digest,
+)
+from tests.high_scale.conftest import (
+    make_archive_parquet_bytes as _parquet,
+)
+from tests.high_scale.conftest import (
+    sha256_checksum as _checksum,
+)
 
 
 def test_replay_rebuilds_visibility_from_archive_only() -> None:
@@ -165,20 +166,3 @@ def test_replay_manifest_filters_mixed_rum_rows_by_serving_domain() -> None:
     assert result.rows_read == 0
     assert result.publication.rows_visible == 0
     assert inserted == []
-
-
-def _parquet(rows: tuple[dict[str, object], ...]) -> bytes:
-    output = BytesIO()
-    pq.write_table(pa.Table.from_pylist(list(rows)), output)
-    return output.getvalue()
-
-
-def _checksum(value: bytes) -> str:
-    return f"sha256:{hashlib.sha256(value).hexdigest()}"
-
-
-def _event_digest(rows: tuple[dict[str, object], ...]) -> str:
-    digest = hashlib.sha256()
-    for row in rows:
-        digest.update((json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode())
-    return f"sha256:{digest.hexdigest()}"

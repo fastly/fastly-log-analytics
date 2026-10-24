@@ -6,7 +6,7 @@ import { client, extractApiError } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { SHIELD_MAP, type FosStatus, type JoinPhase, type ProvisionConfig, type ProvisionService, type Step, type WizardDraft, type WizardMode } from "./types";
 
-export interface WizardEffectsArgs {
+interface WizardEffectsArgs {
   open: boolean;
   step: Step;
   config: ProvisionConfig;
@@ -205,7 +205,7 @@ export function useWizardEffects(args: WizardEffectsArgs) {
 }
 
 // Effect specifically for the join SSE completion watcher
-export interface JoinCompletionEffectArgs {
+interface JoinCompletionEffectArgs {
   joinPhase: JoinPhase;
   status: string;
   config: ProvisionConfig;

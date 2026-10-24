@@ -9,6 +9,7 @@ import logging
 import os
 import shutil
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -45,12 +46,16 @@ from ._common import (
     SECURITY_TOPIPS_BUNDLE_TOP_K,
     TIME_SERIES_BUNDLE_FILENAME,
     VERIFIED_BOTS_TS_BUNDLE_FILENAME,
+    _bucket_min_copy_sql,
+    _closed_day_window,
     _day_bundled_root,
     _day_rollups_root,
     _hour_bundled_root,
     _is_safe_ident,
     _rollups_root,
+    _sum_count_copy_sql,
     cleanup_per_field_after_bundle,
+    collect_per_field_partition_parquets,
     compact_closed_days,
     parquet_zstd_target,
     publish_temp_parquet,
@@ -134,36 +139,10 @@ def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
             except ValueError:
                 continue
 
-            per_field_paths: list[str] = []
-            updated_fields: set[str] = set()
-            max_src_mtime = 0.0
-            try:
-                for field_entry in os.listdir(day_per_field_root):
-                    if not field_entry.startswith("field="):
-                        continue
-                    field_name = field_entry[len("field=") :]
-                    if not _is_safe_ident(field_name):
-                        continue
-                    day_dir = os.path.join(day_per_field_root, field_entry, f"day={day}")
-                    if not os.path.isdir(day_dir):
-                        continue
-                    field_has_files = False
-                    for fname in os.listdir(day_dir):
-                        if not fname.endswith(".parquet") or fname.startswith(".tmp_"):
-                            continue
-                        p = os.path.join(day_dir, fname)
-                        per_field_paths.append(p)
-                        field_has_files = True
-                        try:
-                            mt = os.path.getmtime(p)
-                            if mt > max_src_mtime:
-                                max_src_mtime = mt
-                        except OSError:
-                            pass
-                    if field_has_files:
-                        updated_fields.add(field_name)
-            except OSError:
+            collected = collect_per_field_partition_parquets(day_per_field_root, f"day={day}")
+            if collected is None:
                 continue
+            per_field_paths, updated_fields, max_src_mtime = collected
 
             if not per_field_paths:
                 continue
@@ -296,12 +275,7 @@ def backfill_day_bundles(
     if not os.path.isdir(day_per_field_root):
         return 0
 
-    active_day = datetime.now(UTC).strftime("%Y-%m-%d")
-    cutoff_day: str | None = None
-    if lookback_days is not None:
-        from datetime import timedelta
-
-        cutoff_day = (datetime.now(UTC) - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    active_day, cutoff_day = _closed_day_window(lookback_days)
 
     all_days: set[str] = set()
     try:
@@ -402,12 +376,7 @@ def compact_closed_days_to_daily(
     if not os.path.isdir(hour_root) and not os.path.isdir(_hour_bundled_root(source)):
         return 0
 
-    active_day = datetime.now(UTC).strftime("%Y-%m-%d")
-    cutoff_day: str | None = None
-    if lookback_days is not None:
-        from datetime import timedelta
-
-        cutoff_day = (datetime.now(UTC) - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    active_day, cutoff_day = _closed_day_window(lookback_days)
 
     lock_key = source.get("name", "default")
     rebuilt = 0
@@ -740,20 +709,10 @@ def compact_network_speed_closed_days_to_daily(
     no weighted-average step because the math is exact for integer
     counts.
     """
-
-    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT asn, c_speed, CAST(SUM(count) AS BIGINT) AS count "
-            f"  FROM read_parquet([{paths_sql}]) "
-            f"  GROUP BY asn, c_speed"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
-
     return compact_closed_days(
         service_id,
         source,
-        jobs=[(NETWORK_SPEED_BUNDLE_FILENAME, ".tmp_ns_", _copy_sql)],
+        jobs=[(NETWORK_SPEED_BUNDLE_FILENAME, ".tmp_ns_", _sum_count_copy_sql("asn, c_speed"))],
         lookback_days=lookback_days,
         logger=logger,
     )
@@ -775,21 +734,16 @@ def compact_ngwaf_bots_closed_days_to_daily(
     from .ngwaf_bots import _purge_stale_ngwaf_bots_parquets
 
     _purge_stale_ngwaf_bots_parquets(source)
-
-    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT bot_name, wellknown_bot_name, category, "
-            f"         CAST(SUM(count) AS BIGINT) AS count "
-            f"  FROM read_parquet([{paths_sql}]) "
-            f"  GROUP BY bot_name, wellknown_bot_name, category"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
-
     return compact_closed_days(
         service_id,
         source,
-        jobs=[(NGWAF_BOTS_BUNDLE_FILENAME, ".tmp_nb_", _copy_sql)],
+        jobs=[
+            (
+                NGWAF_BOTS_BUNDLE_FILENAME,
+                ".tmp_nb_",
+                _sum_count_copy_sql("bot_name, wellknown_bot_name, category"),
+            )
+        ],
         lookback_days=lookback_days,
         logger=logger,
     )
@@ -806,20 +760,10 @@ def compact_ngwaf_bots_ts_closed_days_to_daily(
     Preserves minute granularity (``bucket_ts``) so the reader can re-bucket
     across any window — same shape as :func:`compact_verified_bots_ts_closed_days_to_daily`.
     """
-
-    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT bucket_ts, bot_name, CAST(SUM(count) AS BIGINT) AS count "
-            f"  FROM read_parquet([{paths_sql}]) "
-            f"  GROUP BY bucket_ts, bot_name"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
-
     return compact_closed_days(
         service_id,
         source,
-        jobs=[(NGWAF_BOTS_TS_BUNDLE_FILENAME, ".tmp_nbts_", _copy_sql)],
+        jobs=[(NGWAF_BOTS_TS_BUNDLE_FILENAME, ".tmp_nbts_", _sum_count_copy_sql("bucket_ts, bot_name"))],
         lookback_days=lookback_days,
         logger=logger,
     )
@@ -847,23 +791,10 @@ def compact_verified_bots_ts_closed_days_to_daily(
     Same ``:memory:`` DuckDB + mtime-gated + active-day-skip posture as
     the other rollup day-compactors (per the 2026-06-06 incident lesson).
     """
-
-    # Preserve the minute (bucket_ts) dimension — this is a time series, not
-    # a leaderboard. GROUP BY (bucket_ts, bot_type) is a no-op merge (a minute
-    # lives in exactly one source hour file).
-    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT bucket_ts, bot_type, CAST(SUM(count) AS BIGINT) AS count "
-            f"  FROM read_parquet([{paths_sql}]) "
-            f"  GROUP BY bucket_ts, bot_type"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
-
     return compact_closed_days(
         service_id,
         source,
-        jobs=[(VERIFIED_BOTS_TS_BUNDLE_FILENAME, ".tmp_vbts_", _copy_sql)],
+        jobs=[(VERIFIED_BOTS_TS_BUNDLE_FILENAME, ".tmp_vbts_", _sum_count_copy_sql("bucket_ts, bot_type"))],
         lookback_days=lookback_days,
         logger=logger,
     )
@@ -1104,16 +1035,7 @@ def compact_security_dims_closed_days_to_daily(
     """
 
     # req_size / conn_reuse: GROUP BY bucket, SUM(count), MIN(min_val).
-    def _bucket_copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT bucket, "
-            f"    CAST(SUM(count) AS BIGINT) AS count, "
-            f"    CAST(MIN(min_val) AS BIGINT) AS min_val "
-            f"  FROM read_parquet([{paths_sql}]) "
-            f"  GROUP BY bucket"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
+    _bucket_copy_sql = _bucket_min_copy_sql("min_val")
 
     # topips: GROUP BY ip, MAX(max_header) (MAX-of-MAX), re-cap top-K by max.
     def _topips_copy_sql(paths_sql: str, tmp_file: str) -> str:
@@ -1177,14 +1099,7 @@ def compact_security_proxies_closed_days_to_daily(
     Same ``:memory:`` DuckDB + mtime-gated + active-day-skip posture as the other
     rollup day-compactors. Returns the number of day files rebuilt.
     """
-
-    def _quality_copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT type, CAST(SUM(count) AS BIGINT) AS count "
-            f"  FROM read_parquet([{paths_sql}]) GROUP BY type"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
+    _quality_copy_sql = _sum_count_copy_sql("type")
 
     def _flagged_copy_sql(paths_sql: str, tmp_file: str) -> str:
         return (
@@ -1243,22 +1158,10 @@ def compact_perf_dims_closed_days_to_daily(
     only, no per-service catalog state). Returns the number of (closed-day) files
     rebuilt.
     """
-
-    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
-        return (
-            f"COPY ("
-            f"  SELECT bucket, "
-            f"    CAST(SUM(count) AS BIGINT) AS count, "
-            f"    CAST(MIN(min_ttl) AS BIGINT) AS min_ttl "
-            f"  FROM read_parquet([{paths_sql}]) "
-            f"  GROUP BY bucket"
-            f") {parquet_zstd_target(tmp_file)}"
-        )
-
     return compact_closed_days(
         service_id,
         source,
-        jobs=[(PERF_TTL_DIST_BUNDLE_FILENAME, ".tmp_pd_", _copy_sql)],
+        jobs=[(PERF_TTL_DIST_BUNDLE_FILENAME, ".tmp_pd_", _bucket_min_copy_sql("min_ttl"))],
         lookback_days=lookback_days,
         logger=logger,
     )
@@ -1378,9 +1281,6 @@ def compact_pop_health_closed_days_to_daily(
     )
 
 
-import typing
-
-
 def compact_network_quality_closed_days_to_daily(
     service_id: str,
     source: dict,
@@ -1393,7 +1293,7 @@ def compact_network_quality_closed_days_to_daily(
         NETWORK_QUALITY_REGION_FILENAME,
     )
 
-    def _build_sql(dim_col: str, include_country: bool) -> typing.Callable[[str, str], str]:
+    def _build_sql(dim_col: str, include_country: bool) -> Callable[[str, str], str]:
         country_select = ", country" if include_country else ""
         return lambda paths_sql, tmp_file: (
             f"COPY ("
@@ -1450,12 +1350,7 @@ def retire_compacted_hour_bundles(
     if not os.path.isdir(bundled_root) or not os.path.isdir(hour_bundled_root):
         return 0, 0
 
-    active_day = datetime.now(UTC).strftime("%Y-%m-%d")
-    cutoff_day: str | None = None
-    if lookback_days is not None:
-        from datetime import timedelta
-
-        cutoff_day = (datetime.now(UTC) - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    active_day, cutoff_day = _closed_day_window(lookback_days)
 
     retired_files = 0
     retired_bytes = 0

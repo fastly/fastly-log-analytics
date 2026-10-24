@@ -23,8 +23,7 @@ from backend.high_scale.recovery_capacity import RecoveryCapacityMeasurement
 from backend.high_scale.replay import (
     ProjectionReplayResult,
     _batch_from_rows,
-    _manifest_domain,
-    _read_manifest_rows,
+    _load_manifest_request_events,
 )
 from backend.high_scale.security_projection import build_security_projection_rows
 
@@ -36,10 +35,7 @@ def replay_security_projections(
     *,
     rebuild_id: str,
 ) -> ProjectionReplayResult:
-    if _manifest_domain(manifest) != "request":
-        raise ValueError("Security projections can only be rebuilt from request manifests")
-    rows = _read_manifest_rows(manifest, archive)
-    serving_rows = tuple(row for row in rows if row.get("_record_kind", "event") == "event")
+    serving_rows = _load_manifest_request_events(manifest, archive, projection_label="Security")
     _enrich_high_scale_ngwaf_bots(serving_rows)
     projection = build_security_projection_rows(serving_rows)
     published = 0

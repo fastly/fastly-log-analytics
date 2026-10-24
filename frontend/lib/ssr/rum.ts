@@ -8,7 +8,7 @@ import type { Schema } from '@/types/api'
 
 import { parseSsrJson, ssrUpstreamGet } from './_transport'
 
-export type RumStatusResponse = Schema<'RumStatusResponse'>
+type RumStatusResponse = Schema<'RumStatusResponse'>
 
 export async function fetchRumStatusServerSide(
   serviceId: string | undefined,

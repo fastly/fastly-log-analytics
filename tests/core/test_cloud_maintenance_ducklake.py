@@ -93,11 +93,6 @@ def _read(src: dict, table_name: str = "logs", cols: str = "ip"):
         con.close()
 
 
-def _catalog_path(src: dict) -> str:
-    """The per-service DuckLake catalog file ``_ducklake_attach`` derives."""
-    return str(svcconfig.SERVICES_DATA_DIR / f"{src['service_id']}.ducklake")
-
-
 def _age_catalog(src: dict, days: int, *, schedule_too: bool = False) -> None:
     """Backdate the catalog's snapshot log so ``older_than`` has work to do.
 

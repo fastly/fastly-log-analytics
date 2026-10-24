@@ -563,23 +563,6 @@ class PostgresControlPlane:
             )
             return self._owner(connection, service_id)
 
-    def mark_drained(self, service_id: str, *, expected_epoch: int, source_cursor: str) -> OwnerEpochRecord:
-        _require_text(source_cursor, "source_cursor")
-        with self.transaction() as connection:
-            current = self._locked_owner(connection, service_id)
-            _check_epoch(current, expected_epoch)
-            if current.cutover_committed:
-                raise ValueError("owner epoch does not match drain fence")
-            connection.execute(
-                """
-                UPDATE high_scale_ownership
-                SET drain_complete=TRUE, source_cursor=%s, updated_at=clock_timestamp()
-                WHERE service_id=%s
-                """,
-                (source_cursor, service_id),
-            )
-            return self._owner(connection, service_id)
-
     def commit_cutover(self, service_id: str, *, expected_epoch: int, next_owner: str) -> OwnerEpochRecord:
         _require_text(next_owner, "next_owner")
         with self.transaction() as connection:
@@ -985,51 +968,6 @@ class PostgresControlPlane:
                 generation,
                 True,
                 "claimed",
-            )
-
-    def complete_batch(
-        self,
-        batch_id: str,
-        *,
-        worker_id: str,
-        expected_owner_epoch: int,
-    ) -> BatchClaim:
-        with self.transaction() as connection:
-            row = connection.execute(
-                """
-                SELECT batch_id, service_id, domain, worker_id, owner_epoch,
-                       lease_until, lease_generation, state
-                FROM high_scale_batch_claims
-                WHERE batch_id=%s
-                FOR UPDATE
-                """,
-                (batch_id,),
-            ).fetchone()
-            if row is None:
-                raise KeyError(batch_id)
-            claim = _batch_claim_from_row(row)
-            if claim.worker_id != worker_id or claim.owner_epoch != expected_owner_epoch:
-                raise ValueError("batch completion fence does not match claim")
-            if claim.state == "completed":
-                return claim
-            connection.execute(
-                """
-                UPDATE high_scale_batch_claims
-                SET state='completed', updated_at=clock_timestamp()
-                WHERE batch_id=%s AND worker_id=%s AND owner_epoch=%s
-                """,
-                (batch_id, worker_id, expected_owner_epoch),
-            )
-            return BatchClaim(
-                claim.batch_id,
-                claim.service_id,
-                claim.domain,
-                claim.worker_id,
-                claim.owner_epoch,
-                claim.lease_until,
-                claim.lease_generation,
-                True,
-                "completed",
             )
 
     def get_batch_manifest(self, batch_id: str) -> Any | None:

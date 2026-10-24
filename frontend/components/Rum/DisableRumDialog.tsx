@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useState } from 'react'
+import { useOpenGeneration } from '@/hooks/useDerivedState'
 import {
   Dialog,
   DialogContent,
@@ -33,12 +34,7 @@ interface DisableRumDialogProps {
 
 export function DisableRumDialog(props: DisableRumDialogProps) {
   const { service, open } = props
-  const [generation, setGeneration] = useState(0)
-  const [wasOpen, setWasOpen] = useState(open)
-  if (open !== wasOpen) {
-    setWasOpen(open)
-    if (open) setGeneration((g) => g + 1)
-  }
+  const generation = useOpenGeneration(open)
   return <DisableRumDialogBody key={`${service?.service_id ?? ''}|${generation}`} {...props} />
 }
 

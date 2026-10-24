@@ -15,7 +15,7 @@ const SEED_KEYS = [queryKeys.lastSync] as const
 
 // status: 'running' | 'success' | 'error' | 'partial_success' | null
 type CronRunEntry = components['schemas']['CronRunEntry']
-export type LastSyncInfo = { [K in 'started_at' | 'status' | 'duration_s']: CronRunEntry[K] | null }
+type LastSyncInfo = { [K in 'started_at' | 'status' | 'duration_s']: CronRunEntry[K] | null }
 
 /**
  * Fetches the most recent ``sync``-task row from ``/api/cron-runs``,

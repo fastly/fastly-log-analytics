@@ -18,7 +18,7 @@ import type {
 import { clearDraft } from "./wizard-draft";
 
 // ── fetchTerraformPreview ──
-export interface FetchTerraformPreviewArgs {
+interface FetchTerraformPreviewArgs {
   token: string;
   selectedService: ProvisionService | null;
   config: ProvisionConfig;
@@ -85,7 +85,7 @@ export async function runFetchTerraformPreview(
 }
 
 // ── handleExportTerraform ──
-export interface ExportTerraformArgs {
+interface ExportTerraformArgs {
   token: string;
   selectedService: ProvisionService | null;
   config: ProvisionConfig;
@@ -134,7 +134,7 @@ export async function runExportTerraform(args: ExportTerraformArgs) {
 }
 
 // ── buildHandleModalClose ──
-export interface ModalCloseDeps {
+interface ModalCloseDeps {
   status: string;
   isDone: boolean;
   onOpenChange: (open: boolean) => void;
@@ -196,7 +196,7 @@ export function buildHandleModalClose(deps: ModalCloseDeps) {
 }
 
 // ── runDeploy (SSE-streamed provisioning) ──
-export interface DeployArgs {
+interface DeployArgs {
   token: string;
   selectedService: ProvisionService | null;
   config: ProvisionConfig;
@@ -245,7 +245,7 @@ export function runDeploy(args: DeployArgs) {
 }
 
 // ── runJoin (kicks off analyst join SSE) ──
-export interface JoinArgs {
+interface JoinArgs {
   config: ProvisionConfig;
   analystPathASupported: boolean;
   syncIntervalMins: string;
@@ -317,7 +317,7 @@ export function runJoin(args: JoinArgs) {
 }
 
 // ── handleAdminIngest ──
-export interface AdminIngestArgs {
+interface AdminIngestArgs {
   token: string;
   selectedService: ProvisionService | null;
   selectedCdnService: ProvisionService | null;

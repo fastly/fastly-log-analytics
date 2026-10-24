@@ -69,7 +69,7 @@ def _install_pipeline_mocks(monkeypatch, tmp_path, source, log_dir):
     monkeypatch.setattr(ingest, "get_memory_connection", lambda s: _Rewriter(_orig(s)), raising=False)
 
 
-def _ingest_once(monkeypatch, source, log_dir, key, payload):
+def _ingest_once(monkeypatch, source, log_dir, key, payload, *, include_commit: bool = False):
     """Seed one gzipped JSON log line + wire mock FOS + run ingest + clear caches."""
     import backend.core.duckdb as my_duckdb
     import backend.core.iceberg as iceberg
@@ -96,6 +96,8 @@ def _ingest_once(monkeypatch, source, log_dir, key, payload):
     my_duckdb._clear_schema_cache()
     my_duckdb._initialized_paths.clear()
     list(ingest.ingest(source=source))
+    if include_commit:
+        iceberg.commit_buffer(source)
     iceberg._view_cache.clear()
     my_duckdb._clear_schema_cache()
     my_duckdb._initialized_paths.clear()
@@ -238,3 +240,140 @@ def test_custom_field_full_roundtrip_after_disable_enable_cycle(tmp_path, monkey
     table_name = my_duckdb._safe_table_name(svc_id)
     values = [r[0] for r in con.execute(f"SELECT cycle_field FROM {table_name} ORDER BY timestamp").fetchall()]
     assert values == ["v1", "v2"], f"Expected both v1 and v2 readable after disable/re-enable, got {values}"
+
+
+def test_ingest_and_query_custom_fields(tmp_path, monkeypatch):
+    """Test full lifecycle of a custom field: Config -> Ingest -> DuckLake Commit -> Query."""
+    import backend.core.duckdb as my_duckdb
+    from backend import config
+
+    svc_id = "custom_test_svc"
+    source = _build_source(tmp_path, svc_id)
+    log_dir = tmp_path / "mock_logs_int"
+
+    _install_pipeline_mocks(monkeypatch, tmp_path, source, log_dir)
+    config.save_config(
+        svc_id,
+        {
+            "service_id": svc_id,
+            "status": {},
+            "log_fields": {
+                "schema_version": 2,
+                "groups": ["A"],
+                "custom_fields": [
+                    {
+                        "name": "x_custom_id",
+                        "label": "Custom ID",
+                        "vcl_log_expression": "%{req.http.X-Custom-ID}V",
+                        "duckdb_type": "VARCHAR",
+                        "value_type": "string",
+                        "bytes_estimate": 36,
+                        "enabled": True,
+                    }
+                ],
+            },
+        },
+    )
+    my_duckdb._ensure_source_registered(source)
+
+    _ingest_once(
+        monkeypatch,
+        source,
+        log_dir,
+        "raw/2026-05-01/00/2026-05-01T00-00-00.000-test.log.gz",
+        {
+            "timestamp": "2026-05-01T00:00:00Z",
+            "ip": "1.2.3.4",
+            "status": 200,
+            "url": "/test",
+            "method": "GET",
+            "cache": "HIT",
+            "resp_bytes": 100,
+            "elapsed": 5000,
+            "x_custom_id": "abc-123-xyz",
+        },
+        include_commit=True,
+    )
+
+    con = _open_view(source)
+    schema = my_duckdb.get_schema(con, source)
+    col_names = [c["name"] for c in schema]
+    assert "x_custom_id" in col_names, f"Custom field missing from schema: {col_names}"
+
+    table_name = my_duckdb._safe_table_name(svc_id)
+    res = con.execute(f"SELECT x_custom_id FROM {table_name}").fetchall()
+    assert res == [("abc-123-xyz",)]
+
+
+def test_ingest_and_query_numeric_custom_fields(tmp_path, monkeypatch):
+    """Test full lifecycle of numeric custom fields (BIGINT and DOUBLE)."""
+    import backend.core.duckdb as my_duckdb
+    from backend import config
+
+    svc_id = "numeric_custom_svc"
+    source = _build_source(tmp_path, svc_id)
+    log_dir = tmp_path / "mock_logs_num"
+
+    _install_pipeline_mocks(monkeypatch, tmp_path, source, log_dir)
+    config.save_config(
+        svc_id,
+        {
+            "service_id": svc_id,
+            "status": {},
+            "log_fields": {
+                "schema_version": 2,
+                "groups": ["A"],
+                "custom_fields": [
+                    {
+                        "name": "custom_int",
+                        "label": "Custom Int",
+                        "vcl_log_expression": "%{req.http.X-Int}V",
+                        "duckdb_type": "BIGINT",
+                        "value_type": "integer",
+                        "bytes_estimate": 8,
+                        "enabled": True,
+                    },
+                    {
+                        "name": "custom_float",
+                        "label": "Custom Float",
+                        "vcl_log_expression": "%{req.http.X-Float}V",
+                        "duckdb_type": "DOUBLE",
+                        "value_type": "float",
+                        "bytes_estimate": 10,
+                        "enabled": True,
+                    },
+                ],
+            },
+        },
+    )
+    my_duckdb._ensure_source_registered(source)
+
+    _ingest_once(
+        monkeypatch,
+        source,
+        log_dir,
+        "raw/2026-05-01/00/2026-05-01T00-00-00.000-num.log.gz",
+        {
+            "timestamp": "2026-05-01T00:00:00Z",
+            "ip": "1.2.3.4",
+            "status": 200,
+            "url": "/test",
+            "method": "GET",
+            "cache": "HIT",
+            "resp_bytes": 100,
+            "elapsed": 5000,
+            "custom_int": 42,
+            "custom_float": 3.14159,
+        },
+        include_commit=True,
+    )
+
+    con = _open_view(source)
+    schema = my_duckdb.get_schema(con, source)
+    schema_dict = {c["name"]: c["type"] for c in schema}
+    assert schema_dict.get("custom_int") == "BIGINT"
+    assert schema_dict.get("custom_float") == "DOUBLE"
+
+    table_name = my_duckdb._safe_table_name(svc_id)
+    res = con.execute(f"SELECT custom_int * 2, ROUND(custom_float, 2) FROM {table_name}").fetchall()
+    assert res == [(84, 3.14)]

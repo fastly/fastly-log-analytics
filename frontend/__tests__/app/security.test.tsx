@@ -14,58 +14,17 @@ import React from 'react'
 // NetworkSection) are exercised by their own component tests + the
 // Playwright journey in Phase 3.
 
-vi.mock('@/stores/serviceStore', () => {
-  const state = {
-    activeServiceId: 'test-svc',
-    isInitialized: true,
-    services: [{ id: 'test-svc', name: 'Test Service' }],
-    setServices: vi.fn(),
-    setInitialized: vi.fn(),
-    setActiveServiceId: vi.fn(),
-  }
-  const useServiceStore = Object.assign(
-    vi.fn((selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state)),
-    { getState: () => state },
-  )
-  return { useServiceStore }
-})
+vi.mock('@/stores/serviceStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())
 
-vi.mock('@/stores/filterStore', () => ({
-  useFilterStore: vi.fn((selector) => {
-    const state = {
-      startTime: '2026-01-01T00:00:00Z',
-      endTime: '2026-01-01T01:00:00Z',
-      filters: [],
-      isAutoRange: false,
-      compareMode: false,
-      setRange: vi.fn(),
-      clearFilters: vi.fn(),
-    }
-    return selector ? selector(state) : state
-  }),
-}))
+vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke')).filterStoreModuleMock())
 
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/security'))
 
 // Mock heavy chart/section components so jsdom doesn't choke on plotly /
 // d3-driven layout. The smoke test only cares that the page assembles
 // — the chart bodies are tested in their own specs.
-vi.mock('@/components/PlotlyChart', () => ({
-  PlotlyChart: () => <div data-testid="plotly-chart" />,
-}))
-vi.mock('@tanstack/react-virtual', () => ({
-  useVirtualizer: ({ count }: { count: number }) => ({
-    getVirtualItems: () =>
-      Array.from({ length: count }, (_, index) => ({
-        index,
-        key: index,
-        start: index * 40,
-        end: (index + 1) * 40,
-        size: 40,
-      })),
-    getTotalSize: () => count * 40,
-  }),
-}))
+vi.mock('@/components/PlotlyChart', async () => (await import('../helpers/page-smoke')).plotlyChartModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
 vi.mock('@/app/security/_sections/BotsSection', () => ({
   BotsSection: () => <div data-testid="bots-section">Bots</div>,
 }))
@@ -76,20 +35,15 @@ vi.mock('@/app/security/_sections/NetworkSection', () => ({
   NetworkSection: () => <div data-testid="network-section">Network</div>,
 }))
 
-vi.mock('@/components/ReportLayout', () => ({
-  ReportLayout: ({ children, title }: { children: (args: Record<string, unknown>) => React.ReactNode; title: string }) => (
-    <div>
-      <h1>{title}</h1>
-      {children({
-        data: { security_signals: [], top_bots: [], ngwaf_bots: [] },
-        isLoading: false,
-        isFetching: false,
-        intervalButtons: null,
-        bucketSeconds: 3600,
-      })}
-    </div>
-  ),
-}))
+vi.mock('@/components/ReportLayout', async () =>
+  (await import('../helpers/page-smoke')).reportLayoutModuleMock({
+    data: { security_signals: [], top_bots: [], ngwaf_bots: [] },
+    isLoading: false,
+    isFetching: false,
+    intervalButtons: null,
+    bucketSeconds: 3600,
+  }),
+)
 
 const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
 

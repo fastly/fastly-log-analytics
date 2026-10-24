@@ -49,7 +49,7 @@ import type { components } from '@/types/api.generated'
  */
 export type DashboardSection = NonNullable<components['schemas']['AggregatesRequest']['sections']>[number]
 
-export interface DashboardBundleArgs {
+interface DashboardBundleArgs {
   // startTime/endTime drive the stale-view extents heuristic + the chart's
   // x-axis display range, AND (in custom-range mode) the scan window itself.
   startTime: string | null

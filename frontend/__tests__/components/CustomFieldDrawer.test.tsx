@@ -27,6 +27,7 @@ import { CustomFieldDrawer } from '@/components/CustomFields/CustomFieldDrawer'
 import { QueryClientProvider } from '@tanstack/react-query'
 import * as customFieldsApi from '@/lib/api/custom-fields'
 import { createTestQueryClient } from '../helpers/query'
+import { stubMatchMedia, stubPointerCaptureAndScroll } from '../helpers/jsdom-shims'
 
 // monaco-editor breaks under jsdom; replace with a plain textarea.
 vi.mock('@monaco-editor/react', () => ({
@@ -40,22 +41,8 @@ vi.mock('@monaco-editor/react', () => ({
 }))
 
 // jsdom shims required by the Drawer's underlying primitives.
-Object.defineProperty(window, 'matchMedia', {
-  writable: true,
-  value: vi.fn().mockImplementation((query) => ({
-    matches: false,
-    media: query,
-    onchange: null,
-    addListener: vi.fn(),
-    removeListener: vi.fn(),
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
-    dispatchEvent: vi.fn(),
-  })),
-})
-window.HTMLElement.prototype.scrollIntoView = vi.fn()
-window.HTMLElement.prototype.hasPointerCapture = vi.fn()
-window.HTMLElement.prototype.releasePointerCapture = vi.fn()
+stubMatchMedia()
+stubPointerCaptureAndScroll()
 
 const queryClient = createTestQueryClient()
 

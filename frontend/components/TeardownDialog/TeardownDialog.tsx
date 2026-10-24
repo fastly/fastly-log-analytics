@@ -1,6 +1,6 @@
 'use client'
 
-import { useDerivedState } from '@/hooks/useDerivedState'
+import { useDerivedState, useOpenGeneration } from '@/hooks/useDerivedState'
 import React, { useState } from 'react'
 import {
   Dialog,
@@ -43,12 +43,7 @@ function isAnalyst(service: ServiceConfig | null) {
 
 export function TeardownDialog(props: TeardownDialogProps) {
   const { service, open } = props
-  const [generation, setGeneration] = useState(0)
-  const [wasOpen, setWasOpen] = useState(open)
-  if (open !== wasOpen) {
-    setWasOpen(open)
-    if (open) setGeneration((g) => g + 1)
-  }
+  const generation = useOpenGeneration(open)
   return <TeardownDialogBody key={`${service?.service_id ?? ''}|${generation}`} {...props} />
 }
 

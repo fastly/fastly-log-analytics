@@ -83,7 +83,7 @@ describe('fetchPerformanceServerSide (performance SSR)', () => {
         const out = await fetchPerformanceServerSide('svc-1', now)
 
         expect(out).not.toBeNull()
-        expect(out!.performanceData).toEqual({ ok: true })
+        expect(out!.data).toEqual({ ok: true })
         expect(out!.rangeToken).toBe('24h')
         expect(out!.anchor).toBe('2026-06-29T12:00:00Z')
 

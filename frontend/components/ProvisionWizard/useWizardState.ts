@@ -54,14 +54,12 @@ import {
   runJoin,
 } from "./wizard-deploy";
 import {
-  applyToggleField,
-  applyUpdateFieldLimit,
-  buildToggleGroup,
-  buildTogglePreset,
-} from "./wizard-config-helpers";
-import {
   estimateLogFieldBytesPerLine,
   isLogFieldPresetActive,
+  toggleLogFieldGroup,
+  toggleLogFieldOverride,
+  toggleLogFieldPreset,
+  updateLogFieldLimit,
 } from "@/lib/log-field-config-ops";
 
 // Re-export so consumers (step components) can import WizardState from this hook module
@@ -236,9 +234,12 @@ export function useWizardState(
     enabled: step === "fields",
   });
 
-  // ── Field handlers (built from pure transforms in wizard-config-helpers) ──
+  // ── Field handlers ──
   const toggleGroup = (groupId: string, checked: boolean) => {
-    setConfig((prev) => buildToggleGroup(catalog)(prev, groupId, checked));
+    setConfig((prev) => ({
+      ...prev,
+      log_fields: toggleLogFieldGroup(prev.log_fields, catalog, groupId, checked),
+    }));
   };
 
   const toggleField = (
@@ -246,22 +247,37 @@ export function useWizardState(
     checked: boolean,
     defaultEnabledByGroup: boolean,
   ) => {
-    setConfig((prev) =>
-      applyToggleField(prev, fieldId, checked, defaultEnabledByGroup),
-    );
+    setConfig((prev) => ({
+      ...prev,
+      log_fields: toggleLogFieldOverride(
+        prev.log_fields,
+        fieldId,
+        checked,
+        defaultEnabledByGroup,
+      ),
+    }));
   };
 
   const updateFieldLimit = (fieldId: string, limit?: number) => {
-    setConfig((prev) => applyUpdateFieldLimit(prev, fieldId, limit));
+    setConfig((prev) => ({
+      ...prev,
+      log_fields: updateLogFieldLimit(prev.log_fields, fieldId, limit),
+    }));
   };
 
   const isPresetActive = (groups: string[]) =>
     isLogFieldPresetActive(config.log_fields, groups);
 
   const togglePreset = (presetGroups: string[]) => {
-    setConfig((prev) =>
-      buildTogglePreset(catalog, isPresetActive)(prev, presetGroups),
-    );
+    setConfig((prev) => ({
+      ...prev,
+      log_fields: toggleLogFieldPreset(
+        prev.log_fields,
+        catalog,
+        presetGroups,
+        isPresetActive,
+      ),
+    }));
   };
 
   const estimatedBytes = React.useMemo(

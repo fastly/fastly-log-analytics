@@ -9,7 +9,7 @@
 
 import { parseSsrJson, ssrUpstreamGet } from './_transport'
 
-export interface UsageLogSsrArgs {
+interface UsageLogSsrArgs {
   serviceId: string | undefined
   start: string
   end: string

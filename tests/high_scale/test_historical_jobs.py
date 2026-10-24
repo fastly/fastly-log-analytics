@@ -116,7 +116,6 @@ def test_expiry_is_observed_during_iteration() -> None:
     job_id = manager.submit(cold_plan(max_rows=10), rows, now=clock[0])
     assert started.wait(1)
     clock[0] += timedelta(seconds=2)
-    manager.expire(now=clock[0])
     release.set()
     job = wait_for(manager, job_id, HistoricalJobState.EXPIRED)
 
@@ -142,9 +141,8 @@ def test_terminal_jobs_are_purged_after_grace_ttl() -> None:
 
     completed = manager.get(job_id)
     assert completed is not None and completed.terminal_at is not None
-    manager.purge(now=completed.terminal_at + timedelta(seconds=2))
 
-    assert manager.get(job_id) is None
+    assert manager.get(job_id, now=completed.terminal_at + timedelta(seconds=2)) is None
     manager.shutdown()
 
 

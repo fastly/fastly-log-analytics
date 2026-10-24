@@ -1,20 +1,11 @@
-"""Tests for ``backend.repositories._base`` — shared repo helpers.
-
-Every analytical endpoint goes through these helpers: SQL expression
-builders (``percentile_ms_expr``, ``error_rate_expr``, ``time_bucket_select``),
-the cross-engine ATTACH helpers (``_attach_sqlite``, ``attach_ngwaf_cache``,
-``attach_metadata_db``), the QueryRunner (which centralises debug
-tracking + stale-view retry), and the canonical-metrics SQL templates
-used across dashboard / origin / performance / security panels.
-
-A regression in any of these ripples through every chart in the product.
-"""
-
 from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
 
 import duckdb
 import pytest
 
+from backend.repositories import _base, rollup_coverage
 from backend.repositories._base import (
     CANONICAL_METRICS,
     VALID_CHART_INTERVALS,
@@ -26,6 +17,7 @@ from backend.repositories._base import (
     empty_schema_response,
     get_source_extent,
     optional_col,
+    origin_latency_us_expr,
     percentile_ms_expr,
     safe_interval,
     safe_iso,
@@ -33,7 +25,19 @@ from backend.repositories._base import (
     time_bucket_select,
 )
 
-# ── safe_iso: datetime / string / None handling ────────────────────────────
+# ── From test_base_helpers.py ──
+
+"""Tests for ``backend.repositories._base`` — shared repo helpers.
+
+Every analytical endpoint goes through these helpers: SQL expression
+builders (``percentile_ms_expr``, ``error_rate_expr``, ``time_bucket_select``),
+the cross-engine ATTACH helpers (``_attach_sqlite``, ``attach_ngwaf_cache``,
+``attach_metadata_db``), the QueryRunner (which centralises debug
+tracking + stale-view retry), and the canonical-metrics SQL templates
+used across dashboard / origin / performance / security panels.
+
+A regression in any of these ripples through every chart in the product.
+"""
 
 
 def test_safe_iso_none_returns_none():
@@ -72,9 +76,6 @@ def test_safe_iso_falls_back_to_str_for_non_datetime():
     assert safe_iso(42) == "42"
 
 
-# ── optional_col: SQL column reference with fallback ──────────────────────
-
-
 def test_optional_col_returns_quoted_column_when_present():
     assert optional_col("country", ["country", "city"]) == '"country"'
 
@@ -90,9 +91,6 @@ def test_optional_col_custom_default():
     """Caller-provided default — used when NULL doesn't fit the
     surrounding expression (e.g. wrapping in COALESCE)."""
     assert optional_col("region", ["country"], default="''") == "''"
-
-
-# ── safe_interval: validate chart interval against allow-list ──────────────
 
 
 @pytest.mark.parametrize("good", ["1 second", "1 minute", "1 hour", "1 day"])
@@ -121,9 +119,6 @@ def test_valid_chart_intervals_is_immutable_set():
     assert VALID_CHART_INTERVALS == {"1 second", "1 minute", "1 hour", "1 day"}
 
 
-# ── time_bucket_select: SQL fragment ───────────────────────────────────────
-
-
 def test_time_bucket_select_produces_canonical_form():
     """``time_bucket(INTERVAL '<v>', <col>) AS bucket``. Pinned
     because the ``AS bucket`` alias is what downstream GROUP BYs
@@ -145,9 +140,6 @@ def test_time_bucket_select_sanitises_unsafe_interval():
 def test_time_bucket_select_accepts_custom_ts_col():
     out = time_bucket_select("1 minute", ts_col="event_time")
     assert "event_time" in out
-
-
-# ── percentile_ms_expr ────────────────────────────────────────────────────
 
 
 def test_percentile_ms_expr_divides_by_1000_for_microseconds():
@@ -190,9 +182,6 @@ def test_percentile_ms_expr_approx_supports_filter():
     assert "FILTER (WHERE edge = true)" in out
 
 
-# ── empty_schema_response ────────────────────────────────────────────────
-
-
 def test_empty_schema_response_default_shape():
     """Empty schema → ``{has_data: False, total: 0}`` plus any
     caller-supplied extras."""
@@ -209,16 +198,10 @@ def test_empty_schema_response_merges_extras():
     assert out["extra"] == {"k": "v"}
 
 
-# ── _safe_table: re-exports core.duckdb._safe_table_name ───────────────────
-
-
 def test_safe_table_delegates_to_core_safe_table_name():
     assert _safe_table("my_service") == "logs_my_service"
     # The "default" service maps to bare "logs" (no prefix)
     assert _safe_table("default") == "logs"
-
-
-# ── CANONICAL_METRICS template registry ──────────────────────────────────
 
 
 def test_canonical_metrics_includes_all_dashboard_metrics():
@@ -262,9 +245,6 @@ def test_canonical_metric_throughput_uses_template_placeholder():
     assert "{resp_bytes_col}" in tpl
 
 
-# ── _is_stale_view_error: error-message heuristic ─────────────────────────
-
-
 @pytest.mark.parametrize(
     "msg,exc_cls",
     [
@@ -300,9 +280,6 @@ def test_is_stale_view_error_recognises_known_messages(msg, exc_cls):
 def test_is_stale_view_error_returns_false_for_unrelated_errors():
     assert _is_stale_view_error(Exception("Syntax error at line 1")) is False
     assert _is_stale_view_error(Exception("Permission denied")) is False
-
-
-# ── attach_ngwaf_cache: schema-gated cross-engine ATTACH ──────────────────
 
 
 def test_attach_ngwaf_cache_yields_false_when_waf_req_id_absent():
@@ -411,9 +388,6 @@ def test_attach_ngwaf_cache_materializes_without_sqlite_scan_or_attach(monkeypat
 
     finally:
         con.close()
-
-
-# ── QueryRunner: debug tracking + stale-view retry ────────────────────────
 
 
 def test_queryrunner_execute_tracks_sql_in_debug_queries():
@@ -542,9 +516,6 @@ def test_queryrunner_execute_clears_view_cache_before_force_rebuild(monkeypatch)
         con.close()
 
 
-# ── get_source_extent: status-cache fallback ──────────────────────────────
-
-
 def test_get_source_extent_uses_cached_status_when_available(monkeypatch):
     """The status cache is preferred to the live count query —
     avoids hitting DuckDB just to render the row count in the header."""
@@ -580,15 +551,6 @@ def test_get_source_extent_falls_back_to_zero_on_total_failure(monkeypatch):
         assert (total, earliest, latest) == (0, None, None)
     finally:
         con.close()
-
-
-# ── view-lag self-heal trigger logic ────────────────────────────────────────
-#
-# ``should_self_heal_stale_view`` decides whether a zero-row window means
-# "the cached Iceberg view is stale" (force a rebuild) vs "this window is
-# legitimately empty" (do nothing). The trigger is the only thing keeping a
-# rebuild from firing on every low-traffic gap window in prod, so its
-# boundaries are pinned here.
 
 
 def test_latest_log_in_window_open_bounds_returns_true():
@@ -694,3 +656,183 @@ def test_should_self_heal_skips_when_no_data_at_all():
         )
         is False
     )
+
+
+# ── From test_base_branches.py ──
+
+
+def test_cached_listdir_returns_empty_on_oserror(tmp_path):
+    """A missing or unreadable path returns [] instead of raising —
+    callers treat empty and missing identically when walking rollups."""
+    rollup_coverage._listdir_cache.clear()
+    nonexistent = str(tmp_path / "does_not_exist")
+    out = rollup_coverage.cached_listdir(nonexistent)
+    assert out == []
+
+
+def test_cached_listdir_flushes_cache_when_full(tmp_path):
+    """When the cache reaches the max-entries cap, it's flat-cleared
+    before the new entry is added. Pinned to prevent unbounded growth
+    on a service with high (hour, field) churn."""
+    rollup_coverage._listdir_cache.clear()
+    # Fill the cache to the cap.
+    cap = rollup_coverage.LISTDIR_CACHE_MAX_ENTRIES
+    for i in range(cap):
+        rollup_coverage._listdir_cache[f"/fake/path/{i}"] = (0.0, [])
+    assert len(rollup_coverage._listdir_cache) == cap
+
+    # Adding one more triggers the flat-clear branch.
+    p = str(tmp_path)
+    out = rollup_coverage.cached_listdir(p)
+    assert isinstance(out, list)
+    # Cache was cleared then re-populated with just the new entry.
+    assert len(rollup_coverage._listdir_cache) == 1
+    assert p in rollup_coverage._listdir_cache
+    rollup_coverage._listdir_cache.clear()
+
+
+def test_origin_latency_us_expr_both_columns_coalesces():
+    """The COALESCE form is preferred when both columns exist — ottfb's
+    microsecond value wins; ttfb is the scaled fallback."""
+    expr = origin_latency_us_expr({"ottfb", "ttfb"})
+    assert expr == 'COALESCE("ottfb", "ttfb" * 1000000.0)'
+
+
+def test_origin_latency_us_expr_ottfb_only_returns_bare_column():
+    expr = origin_latency_us_expr({"ottfb"})
+    assert expr == '"ottfb"'
+
+
+def test_origin_latency_us_expr_ttfb_only_scales_to_microseconds():
+    """ttfb is stored in seconds; the * 1e6 scale aligns it with ottfb's
+    microsecond unit so downstream histograms compare apples-to-apples."""
+    expr = origin_latency_us_expr({"ttfb"})
+    assert expr == '"ttfb" * 1000000.0'
+
+
+def test_origin_latency_us_expr_no_columns_returns_null_literal():
+    """A schema with neither latency column → 'NULL' literal so the
+    aggregate doesn't BinderException; the caller renders an empty
+    chart."""
+    assert origin_latency_us_expr(set()) == "NULL"
+
+
+def test_empty_schema_response_merges_extra_fields():
+    out = empty_schema_response(rows=[], series=[])
+    assert out["has_data"] is False
+    assert out["total"] == 0
+    assert out["rows"] == []
+    assert out["series"] == []
+
+
+def test_get_source_extent_returns_cached_status_when_available():
+    """When svcconfig.get_status returns a cached entry, we use it
+    verbatim and skip the live COUNT query."""
+    runner = MagicMock(spec=QueryRunner)
+    cached = {
+        "local_rows": 12345,
+        "earliest_log_at": "2026-05-01T00:00:00Z",
+        "latest_log_at": "2026-05-02T00:00:00Z",
+    }
+    with patch("backend.config.get_status", return_value=cached):
+        out = get_source_extent(runner, {"name": "svc"}, "log_svc")
+    assert out == (12345, "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z")
+    runner.execute.assert_not_called()
+
+
+def test_get_source_extent_returns_zeros_when_both_queries_fail():
+    """When the cache misses AND the COUNT-with-min/max raises AND the
+    fallback COUNT-only also raises, return the safe (0, None, None)
+    triple rather than 500ing."""
+    runner = MagicMock(spec=QueryRunner)
+    runner.execute.side_effect = RuntimeError("table missing")
+    with patch("backend.config.get_status", return_value=None):
+        out = get_source_extent(runner, {"name": "svc"}, "log_svc")
+    assert out == (0, None, None)
+
+
+def _stale_view_error() -> Exception:
+    """Build an exception that _is_stale_view_error recognises."""
+    return duckdb.IOException("No files found: batch_x.parquet")
+
+
+def test_execute_with_retry_returns_none_when_retry_also_fails():
+    """When the original query AND the post-refresh retry both fail with
+    stale-view-shaped errors, execute_with_retry returns None so the
+    caller can fall back. Non-stale errors re-raise on the first try."""
+    runner = QueryRunner(duckdb.connect(":memory:"), {"name": "svc"})
+    runner.con = MagicMock()
+    runner.con.execute.side_effect = _stale_view_error()
+
+    with patch("backend.core.iceberg.update_iceberg_view"):
+        out = runner.execute_with_retry("SELECT 1")
+    assert out is None
+
+
+def test_create_temp_table_returns_false_when_retry_also_fails():
+    """A stale-view error on the original CREATE TEMP TABLE → refresh
+    → retry → still fails → return False so the caller branches on the
+    bool (vs catching an exception)."""
+    runner = QueryRunner(duckdb.connect(":memory:"), {"name": "svc"})
+    runner.con = MagicMock()
+    runner.con.execute.side_effect = _stale_view_error()
+
+    with patch("backend.core.iceberg.update_iceberg_view"):
+        out = runner.create_temp_table("CREATE TEMP TABLE t AS SELECT 1")
+    assert out is False
+
+
+def test_create_temp_table_reraises_on_non_stale_error():
+    """A non-stale exception escapes the wrapper unchanged — the caller
+    decides what to do with a real SQL error."""
+    runner = QueryRunner(duckdb.connect(":memory:"), {"name": "svc"})
+    runner.con = MagicMock()
+    runner.con.execute.side_effect = RuntimeError("syntax error")
+
+    with pytest.raises(RuntimeError, match="syntax error"):
+        runner.create_temp_table("BAD SQL")
+
+
+def test_get_schema_cols_cache_hit_skips_summarize():
+    """When the format_hash-keyed cache has an entry, get_schema_cols
+    returns it verbatim and does NOT call _get_schema (the expensive
+    SUMMARIZE-over-view path)."""
+    src = {"name": "svc-cache", "service_id": "svc-cache", "log_fields": {"format_hash": "hash-abc"}}
+    runner = QueryRunner(duckdb.connect(":memory:"), src)
+    _base._schema_cols_cache[("svc-cache", "hash-abc")] = ["timestamp", "status", "url"]
+
+    with patch("backend.repositories._base._get_schema") as mock_get_schema:
+        out = runner.get_schema_cols()
+
+    assert out == ["timestamp", "status", "url"]
+    mock_get_schema.assert_not_called()
+    # Side effect: actual_cols is also populated for subsequent code paths.
+    assert runner.actual_cols == {"timestamp", "status", "url"}
+    _base._schema_cols_cache.clear()
+
+
+# ── From test_base_metrics.py ──
+
+
+def test_canonical_metrics_exist():
+    assert "hit_rate" in CANONICAL_METRICS
+    assert "requests" in CANONICAL_METRICS
+    assert "avg_ttfb" in CANONICAL_METRICS
+    assert "p95_ttfb" in CANONICAL_METRICS
+    assert "throughput" in CANONICAL_METRICS
+    assert "req_size" in CANONICAL_METRICS
+    assert "ttfb_ms" in CANONICAL_METRICS
+
+    # Verify SQL snippets for units and rounding
+    assert "AVG(ttfb) * 1000.0" in CANONICAL_METRICS["avg_ttfb"]
+    assert "PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY ttfb) * 1000.0" in CANONICAL_METRICS["p95_ttfb"]
+    assert "ROUND(" in CANONICAL_METRICS["avg_ttfb"]
+    assert "ROUND(" in CANONICAL_METRICS["p95_ttfb"]
+    assert "ROUND(" in CANONICAL_METRICS["throughput"]
+    assert "ROUND(" in CANONICAL_METRICS["req_size"]
+    assert "ROUND(" in CANONICAL_METRICS["ttfb_ms"]
+
+    # Verify throughput components
+    assert "resp_bytes_col" in CANONICAL_METRICS["throughput"]
+    assert "elapsed_col" in CANONICAL_METRICS["throughput"]
+    assert "* 1e6" in CANONICAL_METRICS["throughput"]

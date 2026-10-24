@@ -1,3 +1,16 @@
+from __future__ import annotations
+
+import datetime as dt
+import json
+from collections import namedtuple
+from unittest.mock import patch
+
+from fastapi.encoders import jsonable_encoder
+
+from tests.conftest import MOCK_SERVICE_ID
+
+# ── From test_typed_response_admin_actions.py ──
+
 """Admin action / probe / beacon routes keep their pre-typing wire payloads.
 
 Each test drives the real handler with its producer patched and asserts the response body equals the
@@ -5,26 +18,11 @@ producer's dict byte-for-byte after JSON round-tripping (underscore envelope key
 ``response_model`` added to the route can't drop, rename or re-encode a field.
 """
 
-from __future__ import annotations
-
-import json
-from collections import namedtuple
-from unittest.mock import patch
-
-from fastapi.encoders import jsonable_encoder
-
 
 def _body(resp, *, status=200):
     assert resp.status_code == status, resp.text
     data = resp.json()
     return {k: v for k, v in data.items() if not k.startswith("_")} if isinstance(data, dict) else data
-
-
-def _expected(payload):
-    return json.loads(json.dumps(jsonable_encoder(payload)))
-
-
-# ── bot sources / rDNS ────────────────────────────────────────────────────────
 
 
 def test_refresh_single_bot_source_matches_producer(client):
@@ -48,9 +46,6 @@ def test_rdns_enrich_matches_producer(client):
         resp = client.post("/api/admin/rdns/enrich?limit=100")
     enrich.assert_called_once_with(limit=100)
     assert _body(resp) == {"ok": True, "summary": summary}
-
-
-# ── duckdb / ducklake / ngwaf / share ─────────────────────────────────────────
 
 
 def test_duckdb_recycle_skipped_and_recycled_match_producer(client):
@@ -108,9 +103,6 @@ def test_share_purge_matches_producer(client):
     with patch("backend.core.share_db.purge_all_share_records", return_value=stats):
         resp = client.post("/api/admin/share/purge")
     assert _body(resp) == {"ok": True, **stats}
-
-
-# ── reads / probes ────────────────────────────────────────────────────────────
 
 
 def test_iceberg_calendar_matches_producer(client):
@@ -196,9 +188,6 @@ def test_backfill_window_matches_producer(client):
     assert _body(resp) == failure
 
 
-# ── cron starters (start_or_resume_cron envelope) ─────────────────────────────
-
-
 def test_cron_starters_match_producer(client):
     started = {"ok": True, "message": "started", "run_id": 41}
     with patch("backend.utils.router_utils.start_or_resume_cron", return_value=started):
@@ -217,9 +206,6 @@ def test_rebuild_local_view_matches_producer(client):
     assert _body(resp, status=202) == {"ok": True, "message": "Local view rebuild started.", "run_id": 77}
 
 
-# ── sharing + beacons ─────────────────────────────────────────────────────────
-
-
 def test_teardown_frontend_matches_producer(client):
     cfg = {"service_id": "svc-t", "remote_frontend": {"service_id": "remote-1"}}
     with (
@@ -236,3 +222,113 @@ def test_beacon_acks_match_producer(client):
     assert _body(ux) == {"ok": True}
     wv = client.post("/api/web-vitals", json={"id": "v1", "name": "LCP", "value": 1.2, "rating": "good"})
     assert _body(wv) == {"ok": True}
+
+
+# ── From test_typed_response_admin_status.py ──
+
+
+def _expected(payload):
+    return json.loads(json.dumps(jsonable_encoder(payload)))
+
+
+def test_celery_status_matches_producer(client, monkeypatch):
+    payload = {
+        "broker_reachable": True,
+        "workers": {
+            "active_tasks": {"w1": [{"id": "t1", "name": "n", "args": [1], "time_start": 2.5, "worker_pid": 7}]},
+            "stats": {"w1": {"started": dt.datetime(2026, 1, 1, tzinfo=dt.UTC)}},
+            "registered": {"w1": ["a.b"]},
+            "scheduled": {},
+            "count": 1,
+        },
+        "queues": {"q.ingest": 3},
+        "inprocess_schedules": [{"name": "job", "trigger": "interval[0:01:00]", "next_run_at": 1700000000.0}],
+        "ledger": {"committed": 5},
+    }
+    monkeypatch.setattr("backend.routers.admin.celery_status.get_celery_status", lambda: payload)
+    resp = client.get("/api/admin/celery/status")
+    assert resp.status_code == 200
+    assert _body(resp) == _expected(payload)
+
+
+def test_celery_status_workers_error_branch(client, monkeypatch):
+    payload = {
+        "broker_reachable": False,
+        "workers": {"active_tasks": {}, "stats": {}, "registered": {}, "scheduled": {}, "count": 0, "error": "down"},
+        "queues": {},
+        "inprocess_schedules": [],
+        "ledger": {},
+    }
+    monkeypatch.setattr("backend.routers.admin.celery_status.get_celery_status", lambda: payload)
+    assert _body(client.get("/api/admin/celery/status")) == payload
+
+
+def test_duckdb_status_matches_producer_keys(client):
+    resp = client.get("/api/admin/duckdb/status")
+    assert resp.status_code == 200
+    body = _body(resp)
+    assert set(body) == {"ok", "memory", "barrier", "pools", "retired_pools"}
+    assert body["ok"] is True
+    assert set(body["memory"]) == {"current_rss_mb", "recycle_threshold_mb", "recycle_interval_min"}
+    assert set(body["barrier"]) == {"is_active", "active_paths"}
+
+
+def test_ngwaf_status_and_rdns_stats(client, monkeypatch):
+    stats = {"total_cached_bots": 2, "workspaces": {"w": None, "x": "2026-01-01"}, "top_bots": {"bot": 2}}
+    monkeypatch.setattr("backend.utils.ngwaf_bot_cache.get_cache_stats", lambda: dict(stats))
+    resp = client.get("/api/admin/ngwaf/status")
+    assert resp.status_code == 200
+    assert _body(resp) == {"ok": True, **stats}
+
+    monkeypatch.setattr("backend.utils.rdns_cache.get_stats", lambda: {"entries": 4, "hit_rate": 0.5})
+    rd = client.get("/api/admin/rdns/stats")
+    assert rd.status_code == 200
+    assert _body(rd) == {"ok": True, "stats": {"entries": 4, "hit_rate": 0.5}}
+
+
+# ── From test_typed_response_control_room.py ──
+
+
+def test_control_room_tabs_match_stub_payloads(client):
+    from backend.routers.control_room import TAB_STUBS
+
+    for tab, stub in TAB_STUBS.items():
+        resp = client.get(f"/api/services/{MOCK_SERVICE_ID}/control-room/{tab}")
+        assert resp.status_code == 200, tab
+        assert _body(resp) == stub, tab
+
+
+def test_control_room_models_roundtrip_producer_shapes():
+    from backend.models.control_room import (
+        CorrelateResponse,
+        LogFieldAuditResponse,
+        RealtimeSeedResponse,
+        WizardStateResponse,
+        WizardStepResponse,
+    )
+
+    cases = [
+        (RealtimeSeedResponse, {"ticks": [{"ts": 1, "rps": 2.5, "nested": {"a": [1]}}]}),
+        (
+            LogFieldAuditResponse,
+            {
+                "service_id": "svc",
+                "enabled_fields": ["ip", "url"],
+                "features": [
+                    {"name": "Insights", "required_fields": ["ip"], "status": "ok", "missing_fields": []},
+                ],
+            },
+        ),
+        (
+            CorrelateResponse,
+            {
+                "dimension": "country",
+                "top": [{"value": "US", "count": 3}],
+                "freshness": {"latest_log_at": None, "lag_seconds": 0},
+            },
+        ),
+        (WizardStateResponse, {"service_id": "svc", "completed_steps": ["a"], "is_complete": False}),
+        (WizardStepResponse, {"recorded": True, "step": "a"}),
+    ]
+    for model, payload in cases:
+        assert model.model_validate(payload).model_dump(mode="json") == payload, model.__name__

@@ -16,7 +16,7 @@ from typing import Any
 
 import duckdb
 
-from backend.repositories._base import QueryRunner, _compact_sql_for_debug, _safe_table
+from backend.repositories._base import QueryRunner, _compact_sql_for_debug, _safe_table, record_duckdb_query
 from backend.repositories._sql import insights as _insights_sql
 from backend.repositories._sql.insights import (
     COALESCED_ASN_AGGREGATES,
@@ -31,7 +31,6 @@ from backend.repositories._sql.insights import (
     COALESCED_URL_EXTENDED_AGGREGATES,
     REPEATED_BOT_UA_REGEX,
 )
-from backend.utils.telemetry import record_telemetry_query
 
 from . import definitions as _definitions  # noqa: F401  side-effect import: registers insight defs with the registry
 from .registry import registry
@@ -77,7 +76,7 @@ def _execute_on_cursor(
     res = cur.execute(sql, params or [])
     elapsed_ms = round((time.time() - t0) * 1000, 2)
     compact_sql = _compact_sql_for_debug(sql)
-    record_telemetry_query("duckdb", compact_sql, elapsed_ms)
+    record_duckdb_query(compact_sql, elapsed_ms)
     with debug_lock:
         runner.debug_queries.append({"sql": compact_sql, "time_ms": elapsed_ms, "engine": "DuckDB"})
     return res
@@ -1687,12 +1686,9 @@ def get_insights(
         except Exception:
             defs_map = {}
 
-        def _def(insight_id: str) -> dict:
-            return defs_map.get(insight_id, {})
-
         def check_baseline(insight_id: str) -> dict | None:
             if available_history_hours < baseline_hours:
-                d = _def(insight_id)
+                d = defs_map.get(insight_id, {})
                 reg = registry.get(insight_id)
                 avail = max(0.1, round(available_history_hours, 1))
                 return {
@@ -1717,13 +1713,6 @@ def get_insights(
                 if val is not None:
                     p.append((f"filter_{col}", str(val)))
             return "/dashboard?" + urllib.parse.urlencode(p)
-
-        def _sev(items: list, crit_key: bool = False) -> str:
-            if not items:
-                return "clean"
-            if crit_key and any(i.get("severity") == "critical" for i in items):
-                return "critical"
-            return "warning"
 
         tasks: list[Callable[[], dict | None]] = []
 
@@ -2128,7 +2117,7 @@ def get_insights(
                         if d.severity_logic:
                             severity = d.severity_logic(items)
                         else:
-                            severity = _sev(items, crit_key=True)
+                            severity = "critical" if any(i.get("severity") == "critical" for i in items) else "warning"
 
                     summary = ""
                     if items:

@@ -5,21 +5,10 @@ import React from 'react'
 
 import { InvitationsPanel } from '@/components/share-dashboard/InvitationsPanel'
 import type { ShareStatus } from '@/components/share-dashboard/utils'
+import { stubMatchMedia } from '@/__tests__/helpers/jsdom-shims'
 
 // Radix primitives (Popover/Checkbox) need these in jsdom.
-Object.defineProperty(window, 'matchMedia', {
-  writable: true,
-  value: vi.fn().mockImplementation((query) => ({
-    matches: false,
-    media: query,
-    onchange: null,
-    addListener: vi.fn(),
-    removeListener: vi.fn(),
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
-    dispatchEvent: vi.fn(),
-  })),
-})
+stubMatchMedia()
 window.HTMLElement.prototype.scrollIntoView = vi.fn()
 
 const status = {

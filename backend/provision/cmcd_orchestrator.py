@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES
 
-CMCD_CUSTOM_FIELD_NAMES = _CMCD_FIELD_NAMES
-
 
 def _remove_cmcd_custom_fields(cfg: dict) -> None:
     lf = cfg.get("log_fields") or {}

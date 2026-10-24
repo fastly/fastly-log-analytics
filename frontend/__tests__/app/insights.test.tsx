@@ -14,23 +14,14 @@ vi.mock('@/components/Insights/InsightCard', () => ({
   InsightCard: ({ insight }: { insight: { name?: string; title?: string } }) => <div data-testid="insight-card">{insight.name || insight.title}</div>,
   SEVERITY_BADGE_CLASS: { clean: '', info: '', warning: '', critical: '', error: '' },
 }))
-vi.mock('@/components/ReportLayout', () => ({
-  ReportLayout: ({
-    children,
-    title,
-    headerActions,
-  }: {
-    children: (ctx: Record<string, unknown>) => ReactNode
-    title: ReactNode
-    headerActions?: ReactNode
-  }) => (
-    <div>
-      <h1>{title}</h1>
-      <div data-testid="header-actions">{headerActions}</div>
-      {children({ activeServiceId: 'test-svc', startTime: null, endTime: null, filterPayload: {} })}
-    </div>
-  ),
-}))
+vi.mock('@/components/ReportLayout', async () =>
+  (await import('../helpers/page-smoke')).reportLayoutModuleMock({
+    activeServiceId: 'test-svc',
+    startTime: null,
+    endTime: null,
+    filterPayload: {},
+  }),
+)
 
 type ApiResult = { data: unknown }
 type PostOpts = { body?: { window_size_hrs?: number; baseline_hours?: number; force_refresh?: boolean } }

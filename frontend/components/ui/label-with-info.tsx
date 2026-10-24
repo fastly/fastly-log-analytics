@@ -14,7 +14,7 @@ import {
 
 interface LabelWithInfoProps {
   label: string
-  info: string
+  info: React.ReactNode
   className?: string
   labelClassName?: string
   htmlFor?: string

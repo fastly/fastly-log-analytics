@@ -33,86 +33,9 @@ Closes TESTING_PLAN_3 item 5.
 
 from __future__ import annotations
 
-import gzip
-import io
-import json
-import os
-import uuid
 from datetime import UTC, datetime, timedelta
 
-import pytest
-
 # ── Integration: end-to-end ingest → hard-delete → ingest → query ────────────
-
-
-@pytest.fixture
-def hard_delete_env(s3_mock, fos_source, monkeypatch, tmp_path):
-    """Reuse the environment from test_custom_field_type_mismatch but
-    expose a mutable cfg so the test can hard-delete fields between
-    ingest cycles."""
-    # Per-test service_id: DuckLake tables persist in the shared per-worker
-    # Postgres catalog, and a reused table name resolves a data dir that was
-    # never created under this test's tmp root.
-    fos_source["service_id"] = f"hd{uuid.uuid4().hex[:10]}"
-    fos_source["duckdb_path"] = str(tmp_path / "e2e.duckdb")
-    cache_path = str(tmp_path / "cache")
-    os.makedirs(cache_path, exist_ok=True)
-
-    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: cache_path)
-    monkeypatch.setattr("backend.core.duckdb._configure_fos", lambda *a, **kw: None)
-
-    class _CallerHintShim:
-        def __init__(self, client):
-            self._client = client
-
-        def get_paginator(self, op, caller_hint=None):
-            return self._client.get_paginator(op)
-
-        def __getattr__(self, name):
-            return getattr(self._client, name)
-
-    shim = _CallerHintShim(s3_mock)
-    monkeypatch.setattr("backend.core.ingest._get_fos_client", lambda _src: shim)
-
-    from backend.core import iceberg as ice
-
-    if hasattr(ice, "_view_cache"):
-        ice._view_cache.clear()
-
-    # Mutable cfg holder so tests can rewrite it mid-flight.
-    state = {
-        "cfg": {
-            "service_id": fos_source["service_id"],
-            "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": []},
-        }
-    }
-
-    def _load_config(_sid):
-        return state["cfg"]
-
-    monkeypatch.setattr("backend.config.load_config", _load_config)
-
-    def _set_custom_fields(custom_fields: list[dict]):
-        state["cfg"]["log_fields"]["custom_fields"] = custom_fields
-
-    def _seed_gz(key: str, rows: list[dict]) -> None:
-        body = io.BytesIO()
-        with gzip.GzipFile(fileobj=body, mode="wb") as gz:
-            gz.write(("\n".join(json.dumps(r) for r in rows) + "\n").encode())
-        s3_mock.put_object(Bucket=fos_source["bucket"], Key=key, Body=body.getvalue())
-
-    def _drain_ingest():
-        from backend.core import ingest as ing
-
-        return list(ing.ingest(source=fos_source))
-
-    return {
-        "fos_source": fos_source,
-        "cache": cache_path,
-        "set_custom_fields": _set_custom_fields,
-        "seed_gz": _seed_gz,
-        "drain_ingest": _drain_ingest,
-    }
 
 
 def _well_typed_row(ts: datetime, idx: int, **extras):
@@ -144,7 +67,7 @@ def _query_all(env, columns: str) -> list:
         con.close()
 
 
-def test_hard_delete_preserves_old_data_and_allows_new_ingest(hard_delete_env):
+def test_hard_delete_preserves_old_data_and_allows_new_ingest(custom_field_env):
     """End-to-end contract: ingest with field 'doomed' → commit → hard
     delete 'doomed' from config → ingest fresh rows → query.
 
@@ -159,7 +82,7 @@ def test_hard_delete_preserves_old_data_and_allows_new_ingest(hard_delete_env):
     """
     from backend.core import iceberg as ice
 
-    env = hard_delete_env
+    env = custom_field_env
 
     # ── Phase 1: ingest with 'doomed' enabled ────────────────────────────
     env["set_custom_fields"]([{"name": "doomed", "duckdb_type": "VARCHAR", "enabled": True, "vcl": '"doomed":""'}])
@@ -217,7 +140,7 @@ def test_hard_delete_preserves_old_data_and_allows_new_ingest(hard_delete_env):
     )
 
 
-def test_hard_delete_does_not_corrupt_remaining_field_values(hard_delete_env):
+def test_hard_delete_does_not_corrupt_remaining_field_values(custom_field_env):
     """Two custom fields ('alpha' alphabetically first, 'beta' second).
     Ingest with both, commit, hard-delete 'alpha' (the field whose
     deletion would, by the unit test above, SHIFT 'beta's in-memory ID),
@@ -229,7 +152,7 @@ def test_hard_delete_does_not_corrupt_remaining_field_values(hard_delete_env):
     """
     from backend.core import iceberg as ice
 
-    env = hard_delete_env
+    env = custom_field_env
     env["set_custom_fields"](
         [
             {"name": "alpha", "duckdb_type": "VARCHAR", "enabled": True, "vcl": '"alpha":""'},

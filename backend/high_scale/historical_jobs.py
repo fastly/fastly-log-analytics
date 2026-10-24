@@ -149,28 +149,6 @@ class HistoricalJobManager:
                 self._finish_locked(record, HistoricalJobState.CANCELLED, observed)
             return True
 
-    def expire(self, *, now: datetime | None = None) -> int:
-        """Mark all jobs past their TTL as expired and request worker stops."""
-
-        observed = self._utc(now or self._clock())
-        with self._lock:
-            expired = 0
-            for record in self._jobs.values():
-                if record.state in _ACTIVE_STATES and observed >= record.expires_at:
-                    self._expire_record_locked(record, observed)
-                    expired += 1
-            self._purge_locked(observed)
-            return expired
-
-    def purge(self, *, now: datetime | None = None) -> int:
-        """Drop terminal records after their grace period."""
-
-        observed = self._utc(now or self._clock())
-        with self._lock:
-            before = len(self._jobs)
-            self._purge_locked(observed)
-            return before - len(self._jobs)
-
     def shutdown(self, *, wait: bool = True) -> None:
         self._executor.shutdown(wait=wait, cancel_futures=True)
 

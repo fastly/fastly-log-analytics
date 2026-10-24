@@ -181,7 +181,5 @@ def _resolve_source(source_name: str) -> dict:
         return _DEFAULT_SOURCE
     cfg = svcconfig.load_config(source_name)
     if cfg:
-        from backend import config as _sc
-
-        return {**_DEFAULT_SOURCE, **_sc.config_to_source(cfg)}
+        return {**_DEFAULT_SOURCE, **svcconfig.config_to_source(cfg)}
     return _DEFAULT_SOURCE

@@ -9,14 +9,19 @@
  */
 export function reactVirtualModuleMock(rowHeight = 40) {
   return {
-    useVirtualizer: (options: { count: number }) => ({
-      getVirtualItems: () =>
-        Array.from({ length: options.count }).map((_, i) => ({
-          index: i,
-          start: i * rowHeight,
-          end: (i + 1) * rowHeight,
-        })),
-      getTotalSize: () => options.count * rowHeight,
-    }),
+    useVirtualizer: (options: { count?: number }) => {
+      const count = options.count ?? 0
+      return {
+        getVirtualItems: () =>
+          Array.from({ length: count }).map((_, i) => ({
+            index: i,
+            key: i,
+            start: i * rowHeight,
+            end: (i + 1) * rowHeight,
+            size: rowHeight,
+          })),
+        getTotalSize: () => count * rowHeight,
+      }
+    },
   }
 }

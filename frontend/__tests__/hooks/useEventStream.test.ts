@@ -20,22 +20,7 @@ import {
   EventStreamHttpError,
   type EventStreamRequest,
 } from '@/hooks/useEventStream'
-
-function makeStreamResponse(messages: string[], status = 200): Response {
-  const enc = new TextEncoder()
-  let i = 0
-  const stream = new ReadableStream({
-    pull(controller) {
-      if (i >= messages.length) {
-        controller.close()
-        return
-      }
-      controller.enqueue(enc.encode(messages[i]))
-      i += 1
-    },
-  })
-  return new Response(stream, { status })
-}
+import { makeStreamResponse, makeNeverClosingStreamResponse } from '../helpers/sse-mock'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -157,15 +142,7 @@ describe('useEventStream', () => {
   })
 
   it('reaches open state on a successful connect', async () => {
-    // Stream that stays open (never closes) so state settles on 'open'.
-    const enc = new TextEncoder()
-    const stream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(enc.encode('data: x\r\n\r\n'))
-        // deliberately never close
-      },
-    })
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(stream, { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(makeNeverClosingStreamResponse(['data: x\r\n\r\n'])))
     const { result } = renderHook(() => useEventStream(true, req, () => {}))
     await waitFor(() => expect(result.current.state).toBe('open'))
   })

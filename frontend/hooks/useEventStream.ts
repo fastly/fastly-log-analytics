@@ -46,7 +46,7 @@ export class EventStreamHttpError extends Error {
   }
 }
 
-export interface RunEventStreamOptions {
+interface RunEventStreamOptions {
   /** Fully-built absolute URL (caller owns URL + query-param construction). */
   url: string
   method?: 'GET' | 'POST'
@@ -175,7 +175,7 @@ function requestKey(req: EventStreamRequest | null): string {
   ].join('\u0000')
 }
 
-export interface UseEventStreamOptions {
+interface UseEventStreamOptions {
   /** Notified on every connection-state transition. */
   onStateChange?: (state: SSEConnectionState) => void
 }

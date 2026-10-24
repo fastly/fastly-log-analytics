@@ -157,12 +157,6 @@ class ArchiveManifest:
                 f"total source row count {total_source_rows} exceeds artifact row_count {self.artifact.row_count}"
             )
 
-    def get_source_slice(self, object_key: str) -> tuple[int, int]:
-        for s in self.sources:
-            if s.key == object_key:
-                return (s.row_start, s.row_start + s.row_count)
-        raise KeyError(f"source key {object_key} not found in manifest")
-
     def is_source_eligible_for_deletion(self, object_key: str, now: datetime | None = None) -> bool:
         if now is None:
             now = datetime.now(self.deletion_authorization_deadline.tzinfo)

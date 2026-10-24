@@ -2,7 +2,7 @@
  * StatusPanel contract for Session Scoring prerequisite pragmas.
  */
 import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
-import { stubPointerCaptureAndScroll } from '@/__tests__/helpers/jsdom-shims'
+import { stubGetAnimations, stubPointerCaptureAndScroll } from '@/__tests__/helpers/jsdom-shims'
 import * as React from 'react'
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest'
 import { act, render, screen, waitFor } from '@testing-library/react'
@@ -19,9 +19,7 @@ import { StatusPanel } from '@/components/SessionScoring/StatusPanel'
 beforeAll(() => {
   stubResizeObserver()
   stubPointerCaptureAndScroll()
-  if (!Element.prototype.getAnimations) {
-    Element.prototype.getAnimations = () => []
-  }
+  stubGetAnimations()
 })
 
 const API_BASE = getApiBase()

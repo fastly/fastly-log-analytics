@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from backend.high_scale._projection_utils import bucket, finite_float, percentile, range_value, text
+from backend.high_scale._projection_utils import bucket, finite_float, percentiles, range_value, text
 
 
 def test_range_value_keeps_naive_for_date_only_and_tz_for_z():
@@ -36,20 +36,8 @@ def test_text_and_finite_float():
     "values,q,expected",
     [([], 0.5, None), ([4.0], 0.99, 4.0), ([1.0, 2.0, 3.0, 4.0], 0.5, 2.5), ([10.0, 0.0], 0.95, pytest.approx(9.5))],
 )
-def test_percentile_linear_interpolation(values, q, expected):
-    assert percentile(values, q) == expected
-
-
-def test_percentiles_matches_percentile_for_random_lists():
-    import random
-
-    from backend.high_scale._projection_utils import percentiles
-
-    rng = random.Random(1234)
-    qs = (0.0, 0.5, 0.75, 0.95, 0.99, 1.0)
-    for size in (0, 1, 2, 3, 17, 200):
-        values = [rng.uniform(-50, 5000) for _ in range(size)]
-        assert percentiles(values, qs) == [percentile(values, q) for q in qs]
+def test_percentiles_linear_interpolation(values, q, expected):
+    assert percentiles(values, (q,)) == [expected]
 
 
 def test_percentiles_sorts_once(monkeypatch):

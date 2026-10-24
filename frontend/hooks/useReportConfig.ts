@@ -7,7 +7,7 @@ import { type ChartInterval, INTERVAL_SECONDS, INTERVALS } from '@/lib/constants
 
 export type { ChartInterval }
 
-export interface ReportConfigOptions {
+interface ReportConfigOptions {
   defaultMetric?: string
   defaultInterval?: ChartInterval
   defaultTrend?: string

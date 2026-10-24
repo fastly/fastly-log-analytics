@@ -98,46 +98,6 @@ def test_batch_manifest_rejects_row_overflow() -> None:
         manifest.validate()
 
 
-def test_per_source_replay_finds_row_range() -> None:
-    now = datetime.now(UTC)
-    sources = (
-        ArchiveSourceEntry(
-            key="raw/request/file1.gz",
-            checksum="sha256:chk1",
-            size_bytes=500,
-            row_start=0,
-            row_count=40,
-            deletion_deadline=now + timedelta(days=7),
-        ),
-        ArchiveSourceEntry(
-            key="raw/request/file2.gz",
-            checksum="sha256:chk2",
-            size_bytes=600,
-            row_start=40,
-            row_count=60,
-            deletion_deadline=now + timedelta(days=7),
-        ),
-    )
-    manifest = ArchiveManifest(
-        manifest_id="manifest-batch-003",
-        service_id="svc_test",
-        domain="request",
-        sources=sources,
-        artifact=_base_artifact(row_count=100),
-        coverage_start=now - timedelta(minutes=5),
-        coverage_end=now,
-        retention_deadline=now + timedelta(days=30),
-        deletion_authorization_deadline=now + timedelta(days=30),
-        archive_epoch=1,
-    )
-
-    # Replay slice lookup helper on manifest
-    slice1 = manifest.get_source_slice("raw/request/file1.gz")
-    assert slice1 == (0, 40)
-    slice2 = manifest.get_source_slice("raw/request/file2.gz")
-    assert slice2 == (40, 100)
-
-
 def test_independent_per_source_deletion_deadlines() -> None:
     now = datetime.now(UTC)
     s1 = ArchiveSourceEntry(

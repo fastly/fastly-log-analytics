@@ -99,6 +99,18 @@ def replay_manifest(
     return ReplayResult(manifest.manifest_id, len(serving_rows), result)
 
 
+def _load_manifest_request_events(
+    manifest: ArchiveManifest,
+    archive: ArchivePublication,
+    *,
+    projection_label: str,
+) -> tuple[dict[str, Any], ...]:
+    if _manifest_domain(manifest) != "request":
+        raise ValueError(f"{projection_label} projections can only be rebuilt from request manifests")
+    rows = _read_manifest_rows(manifest, archive)
+    return tuple(row for row in rows if row.get("_record_kind", "event") == "event")
+
+
 def replay_origin_projections(
     manifest: ArchiveManifest,
     archive: ArchivePublication,
@@ -106,10 +118,7 @@ def replay_origin_projections(
     *,
     rebuild_id: str,
 ) -> ProjectionReplayResult:
-    if _manifest_domain(manifest) != "request":
-        raise ValueError("Origin projections can only be rebuilt from request manifests")
-    rows = _read_manifest_rows(manifest, archive)
-    serving_rows = tuple(row for row in rows if row.get("_record_kind", "event") == "event")
+    serving_rows = _load_manifest_request_events(manifest, archive, projection_label="Origin")
     projection = build_origin_projection_rows(serving_rows)
     published = 0
     for suffix, domain, projected_rows in (
@@ -143,10 +152,7 @@ def replay_performance_projections(
     and are deliberately not republished: re-adding them would double-count. ASN
     rows never existed before the integer-ASN fix, so they are safe to backfill.
     """
-    if _manifest_domain(manifest) != "request":
-        raise ValueError("Performance projections can only be rebuilt from request manifests")
-    rows = _read_manifest_rows(manifest, archive)
-    serving_rows = tuple(row for row in rows if row.get("_record_kind", "event") == "event")
+    serving_rows = _load_manifest_request_events(manifest, archive, projection_label="Performance")
     projection = build_performance_projection_rows(serving_rows)
     published = 0
     for suffix, domain, projected_rows in (
@@ -180,10 +186,7 @@ def replay_cmcd_projections(
     rebuild_id: str,
 ) -> ProjectionReplayResult:
     """Rebuild one request manifest's ``cmcd_projection_facts`` rows from the archive."""
-    if _manifest_domain(manifest) != "request":
-        raise ValueError("CMCD projections can only be rebuilt from request manifests")
-    rows = _read_manifest_rows(manifest, archive)
-    serving_rows = tuple(row for row in rows if row.get("_record_kind", "event") == "event")
+    serving_rows = _load_manifest_request_events(manifest, archive, projection_label="CMCD")
     projected: list[dict[str, Any]] = []
     for row in serving_rows:
         # Parquet unifies the CMCD struct across rows, so absent keys come back as None.

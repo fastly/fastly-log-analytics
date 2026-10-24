@@ -7,22 +7,11 @@ import * as customFieldsApi from '@/lib/api/custom-fields'
 import type { components } from '@/types/api.generated'
 import React from 'react'
 import { createTestQueryClient } from '../helpers/query'
+import { stubMatchMedia } from '../helpers/jsdom-shims'
 
 vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
 
-Object.defineProperty(window, 'matchMedia', {
-  writable: true,
-  value: vi.fn().mockImplementation(query => ({
-    matches: false,
-    media: query,
-    onchange: null,
-    addListener: vi.fn(),
-    removeListener: vi.fn(),
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
-    dispatchEvent: vi.fn(),
-  })),
-})
+stubMatchMedia()
 
 const queryClient = createTestQueryClient()
 

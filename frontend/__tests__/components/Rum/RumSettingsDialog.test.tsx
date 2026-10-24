@@ -6,6 +6,7 @@
  */
 import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
 import { stubPointerCaptureAndScroll, stubGetAnimations } from '@/__tests__/helpers/jsdom-shims'
+import { createUseSSEMock } from '../../helpers/sse-mock'
 import * as React from 'react'
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
@@ -18,28 +19,8 @@ beforeAll(() => {
   stubGetAnimations()
 })
 
-const mockStart = vi.fn()
-const mockStop = vi.fn()
-const sseState: { status: 'idle' | 'streaming' | 'done' | 'error'; error: string | null } = {
-  status: 'idle',
-  error: null,
-}
-
-vi.mock('@/hooks/useSSE', () => ({
-  useSSE: () => ({
-    lines: [],
-    get status() {
-      return sseState.status
-    },
-    get error() {
-      return sseState.error
-    },
-    isDone: false,
-    start: mockStart,
-    stop: mockStop,
-    reset: vi.fn(),
-  }),
-}))
+const { state: sseState, start: mockStart, resetState } = createUseSSEMock()
+vi.mock('@/hooks/useSSE', () => ({ useSSE: () => sseState }))
 
 const mockAdminFetch = vi.fn()
 
@@ -85,10 +66,7 @@ function renderDialog(props: Partial<React.ComponentProps<typeof RumSettingsDial
 }
 
 beforeEach(() => {
-  sseState.status = 'idle'
-  sseState.error = null
-  mockStart.mockClear()
-  mockStop.mockClear()
+  resetState()
   mockAdminFetch.mockClear()
   mockAdminFetch.mockResolvedValue({
     ok: true,

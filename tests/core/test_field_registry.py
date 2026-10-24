@@ -18,8 +18,6 @@ to preserve:
 
 from __future__ import annotations
 
-import re
-
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -30,22 +28,13 @@ from backend.core.field_registry import (
     BY_GROUP,
     REGISTRY,
     Agg,
-    DuckType,
     FilterOp,
-    Group,
     LogField,
 )
 from backend.core.log_fields import (
     _BUILTIN_FIELD_NAMES,
     LOG_FIELD_CATALOG,
 )
-
-# A regex matching the legacy security-hook convention. Kept here so the
-# tests below don't import the private regex from the production module
-# (the production module's regex is the canonical source; this duplicate
-# is the audit copy).
-_LEGACY_SEC_HOOK = re.compile(r"json\.escape\(|~\s*\"\^")
-
 
 # ---------------------------------------------------------------------------
 # 1. Smoke
@@ -147,19 +136,6 @@ def test_default_off_codes_match_legacy_catalog() -> None:
     assert "cookie_session" in default_off_codes
 
 
-@pytest.mark.security_regression
-def test_security_hook_codes_match_legacy_hooks() -> None:
-    """Every field the registry tags as security-hooked has a `json.escape`
-    or digit-regex guard in its legacy VCL string.
-    """
-    legacy_hooks = {
-        entry["id"]
-        for entry in LOG_FIELD_CATALOG
-        if entry.get("vcl") is not None and _LEGACY_SEC_HOOK.search(entry["vcl"]) is not None
-    }
-    assert {f.code for f in REGISTRY if f.has_security_hook} == legacy_hooks
-
-
 # ---------------------------------------------------------------------------
 # 4. Group invariants
 # ---------------------------------------------------------------------------
@@ -176,12 +152,6 @@ def test_by_group_partitions_registry() -> None:
     assert seen == set(BY_CODE)
 
 
-def test_core_group_fields_are_always_on() -> None:
-    """`is_always_on` is True for CORE group, False for everything else."""
-    for f in REGISTRY:
-        assert f.is_always_on is (f.group is Group.CORE)
-
-
 # ---------------------------------------------------------------------------
 # 5. Derivation invariants (vcl=None → derived; derived → no aggs missing)
 # ---------------------------------------------------------------------------
@@ -191,46 +161,6 @@ def test_derived_fields_have_no_vcl() -> None:
     """`is_derived` is exactly the `vcl is None` predicate."""
     for f in REGISTRY:
         assert f.is_derived is (f.vcl is None)
-
-
-# ---------------------------------------------------------------------------
-# 6. Type-driven aggregation/operator derivation
-# ---------------------------------------------------------------------------
-
-
-def test_numeric_fields_support_sum_avg() -> None:
-    """Every numeric column supports SUM and AVG."""
-    for f in REGISTRY:
-        if f.duck_type in fr._NUMERIC:
-            assert Agg.SUM in f.valid_aggs
-            assert Agg.AVG in f.valid_aggs
-            assert FilterOp.GT in f.valid_ops
-
-
-def test_boolean_fields_reject_string_ops() -> None:
-    """Boolean columns get only eq/neq filter operators."""
-    for f in REGISTRY:
-        if f.duck_type is DuckType.BOOLEAN:
-            assert f.valid_ops == frozenset({FilterOp.EQ, FilterOp.NEQ})
-            assert Agg.SUM not in f.valid_aggs
-
-
-def test_varchar_fields_support_contains() -> None:
-    """VARCHAR columns support CONTAINS but not arithmetic ops."""
-    for f in REGISTRY:
-        if f.duck_type is DuckType.VARCHAR:
-            assert FilterOp.CONTAINS in f.valid_ops
-            assert FilterOp.STARTS_WITH in f.valid_ops
-            assert Agg.SUM not in f.valid_aggs
-
-
-def test_timestamp_fields_support_only_range_ops() -> None:
-    """TIMESTAMP columns support range comparisons but not CONTAINS / IN."""
-    for f in REGISTRY:
-        if f.duck_type is DuckType.TIMESTAMP:
-            assert FilterOp.GT in f.valid_ops
-            assert FilterOp.CONTAINS not in f.valid_ops
-            assert FilterOp.IN not in f.valid_ops
 
 
 # ---------------------------------------------------------------------------
@@ -244,11 +174,7 @@ def test_hypothesis_every_code_lookup_succeeds(code: str) -> None:
     f = fr.get(code)
     assert f.code == code
     # Derived properties never raise for any known field.
-    _ = f.valid_aggs
-    _ = f.valid_ops
-    _ = f.has_security_hook
     _ = f.is_derived
-    _ = f.is_always_on
 
 
 @given(op_value=st.sampled_from([op.value for op in FilterOp]))

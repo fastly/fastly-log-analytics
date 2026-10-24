@@ -4,7 +4,7 @@ import { FilterValueCell } from "@/components/FilterValueCell";
 import { PopLabel } from "@/components/PopLabel";
 import { cn } from "@/lib/utils";
 import { formatCount } from "@/lib/format";
-import { columnHeader } from "@/lib/table-utils";
+import { columnHeader, msCell, numberValue, textValue } from "@/lib/table-utils";
 import type { ColumnDef } from "@tanstack/react-table";
 import type { ShieldingRowInput } from "./shielding-rows";
 import { Activity, AlertCircle, Globe, Zap, Network as NetworkIcon } from "lucide-react";
@@ -211,11 +211,6 @@ export function HealthBadge({ score }: { score: number | null }) {
     </Badge>
   )
 }
-
-// Cells read their own column through `getValue()` (typed `unknown` for a heterogeneous column set).
-const textValue = (v: unknown): string => (typeof v === 'string' ? v : '')
-const numberValue = (v: unknown): number | null => (typeof v === 'number' ? v : null)
-const msCell = (value: unknown) => <span>{numberValue(value)?.toFixed(1)}ms</span>
 
 export const SHIELDING_COLUMNS: ColumnDef<ShieldingRowInput>[] = [
   {

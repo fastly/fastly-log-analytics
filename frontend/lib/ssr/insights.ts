@@ -33,7 +33,7 @@ import type { Schema } from '@/types/api'
 
 import { parseSsrJson, ssrUpstreamGet } from './_transport'
 
-export interface InsightsSsrSeed {
+interface InsightsSsrSeed {
   /** The /api/insights response body to seed into the cache, or null. */
   data: unknown
   /** Window token (string, e.g. '1') — must equal the client first-paint key element. */

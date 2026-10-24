@@ -11,26 +11,11 @@
  */
 import { renderHook, act } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { makeStreamResponse } from '../helpers/sse-mock'
 
 vi.mock('@/lib/api', () => ({
   getApiBase: () => 'http://test',
 }))
-
-function makeStreamResponse(messages: string[]): Response {
-  const enc = new TextEncoder()
-  let i = 0
-  const stream = new ReadableStream({
-    pull(controller) {
-      if (i >= messages.length) {
-        controller.close()
-        return
-      }
-      controller.enqueue(enc.encode(messages[i]))
-      i += 1
-    },
-  })
-  return new Response(stream, { status: 200 })
-}
 
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn())

@@ -19,7 +19,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from tests._helpers.dates import past_hour as _past_hour
-from tests._helpers.locks import noop_lock as _noop_lock
+from tests._helpers.rollups import writer_patches
 
 pytestmark = pytest.mark.usefixtures("frozen_clock")
 
@@ -109,16 +109,7 @@ def test_build_sessions_writes_aggregates_for_closed_hour(tmp_path):
         ],
     )
 
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value="logs_svc_sess"),
-        patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
-            side_effect=lambda c, _src, fn: fn(c),
-        ),
-    ):
+    with writer_patches(cache_root, "logs_svc_sess", con):
         n = sessions.build_session_bundles("svc-sess", src, [hour_token])
 
     assert n == 1, f"expected 1 bundle written; got {n}"
@@ -290,16 +281,7 @@ def test_build_sessions_ja4_absent_writes_null(tmp_path):
     con.execute("CREATE TABLE logs_x (timestamp TIMESTAMPTZ, ip VARCHAR)")
     con.execute("INSERT INTO logs_x VALUES (?, ?)", [hour_dt + timedelta(minutes=3), "9.9.9.9"])
 
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value="logs_x"),
-        patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
-            side_effect=lambda c, _src, fn: fn(c),
-        ),
-    ):
+    with writer_patches(cache_root, "logs_x", con):
         n = sessions.build_session_bundles("svc-no-ja4", src, [hour_token])
 
     assert n == 1

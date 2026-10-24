@@ -232,7 +232,7 @@ def _compute_cmcd_aggregates(
             if row:
                 results["overview"] = {
                     "active_sessions": row[0] or 0,
-                    "rebuffer_rate": _round_pct(row[1]),
+                    "rebuffer_rate": _round_val(row[1]),
                     "avg_bitrate": _round_val(row[2]),
                     "avg_buffer_length": _round_val(row[3]),
                     "median_throughput": _round_val(row[4]),
@@ -314,7 +314,7 @@ def _compute_cmcd_aggregates(
                     sessions_ts_dict = {
                         str(r[col_idx["bucket"]]): {
                             "concurrent_sessions": r[col_idx["concurrent_sessions"]] or 0,
-                            "rebuffer_session_pct": _round_pct(r[col_idx["rebuffer_session_pct"]]),
+                            "rebuffer_session_pct": _round_val(r[col_idx["rebuffer_session_pct"]]),
                             "new_sessions": new_sess_map.get(str(r[col_idx["bucket"]]), 0),
                         }
                         for r in rows
@@ -331,7 +331,7 @@ def _compute_cmcd_aggregates(
                         str(r[col_idx["bucket"]]): {
                             "p50_buffer": _round_val(r[col_idx["p50_buffer"]]),
                             "p95_buffer": _round_val(r[col_idx["p95_buffer"]]),
-                            "starvation_rate": _round_pct(r[col_idx["starvation_rate"]]),
+                            "starvation_rate": _round_val(r[col_idx["starvation_rate"]]),
                         }
                         for r in rows
                     }
@@ -376,7 +376,7 @@ def _compute_cmcd_aggregates(
                 if want_ts["startup_ts"]:
                     startup_dict = {
                         str(r[col_idx["bucket"]]): {
-                            "startup_ratio": _round_pct(r[col_idx["startup_ratio"]]),
+                            "startup_ratio": _round_val(r[col_idx["startup_ratio"]]),
                         }
                         for r in rows
                     }
@@ -419,7 +419,7 @@ def _compute_cmcd_aggregates(
                 {
                     "content_id": r[0],
                     "session_count": r[1],
-                    "rebuffer_rate": _round_pct(r[2]),
+                    "rebuffer_rate": _round_val(r[2]),
                     "avg_bitrate": _round_val(r[3]),
                     "avg_buffer_length": _round_val(r[4]),
                 }
@@ -443,7 +443,7 @@ def _compute_cmcd_aggregates(
             results["rebuffer_by_country"] = [
                 {
                     "country": r[0],
-                    "rebuffer_rate": _round_pct(r[1]),
+                    "rebuffer_rate": _round_val(r[1]),
                     "session_count": r[2],
                     "median_throughput": _round_val(r[3]),
                 }
@@ -474,7 +474,7 @@ def _compute_cmcd_aggregates(
                     "label": _db.format_asn_label(int(r[0]), asn_names.get(int(r[0]), ""))
                     if str(r[0]).isdigit()
                     else str(r[0]),
-                    "rebuffer_rate": _round_pct(r[1]),
+                    "rebuffer_rate": _round_val(r[1]),
                     "session_count": r[2],
                     "avg_bitrate": _round_val(r[3]),
                     "avg_buffer_length": _round_val(r[4]),
@@ -538,12 +538,6 @@ def _rebuffer_rate_expr(has_bs: bool) -> str:
 
 
 def _round_val(v: Any) -> Any:
-    if v is None:
-        return None
-    return round(float(v), 2)
-
-
-def _round_pct(v: Any) -> Any:
     if v is None:
         return None
     return round(float(v), 2)

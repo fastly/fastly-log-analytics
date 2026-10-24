@@ -34,8 +34,6 @@ from typing import Final
 from backend.core.oauth import registry
 from backend.core.session_token import seal_aes_gcm, unseal_aes_gcm
 
-NONCE_BYTES: Final[int] = 12
-GCM_TAG_BYTES: Final[int] = 16
 _AAD: Final[bytes] = b"oauth_flow_state"
 
 # Cookie contract (design §2.1.4): SameSite=Lax is REQUIRED so the browser sends

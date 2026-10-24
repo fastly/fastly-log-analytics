@@ -20,7 +20,7 @@ interface AnalyticsReportQueryContext {
   signal: AbortSignal | undefined
 }
 
-export interface AnalyticsReportQueryArgs<TData> {
+interface AnalyticsReportQueryArgs<TData> {
   /**
    * Query-key namespace prefix, e.g. `['origin', 'aggregates']`. The full key
    * is `[...namespace, serviceId, rangeKey, anchor, filterPayload, ...keyParts]`

@@ -15,11 +15,6 @@ export const PERFORMANCE_SSR_DEFAULTS = {
   sortBy: 'p99' as const,
 } as const
 
-export interface PerformanceSsrSeed extends SsrRangeSeed {
-  /** /api/performance/aggregates response for all sections. */
-  performanceData: unknown
-}
-
 /**
  * SSR-prefetch unified performance selection for the active service.
  * Returns null when serviceId is absent OR the fetch fails — the page
@@ -30,8 +25,8 @@ export interface PerformanceSsrSeed extends SsrRangeSeed {
 export async function fetchPerformanceServerSide(
   serviceId: string | undefined,
   now: Date = new Date(),
-): Promise<PerformanceSsrSeed | null> {
-  const seed = await fetchSsrRangePost({
+): Promise<SsrRangeSeed | null> {
+  return fetchSsrRangePost({
     serviceId,
     path: '/api/performance/aggregates',
     logPrefix: 'ssr/performance',
@@ -41,6 +36,4 @@ export async function fetchPerformanceServerSide(
       sections: undefined,
     },
   })
-  if (!seed) return null
-  return { ...seed, performanceData: seed.data }
 }

@@ -4,7 +4,7 @@ import UsagePage from '@/app/usage/page'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { createTestQueryClient } from '../helpers/query'
 import React from 'react'
-import { spyOnConsoleError, type ReportLayoutChildArgs } from '../helpers/page-smoke'
+import { spyOnConsoleError } from '../helpers/page-smoke'
 
 // R-6: render-smoke for the usage analytics page.
 
@@ -37,23 +37,18 @@ vi.mock('@/components/CostCalculator/CostCalculator', () => ({
   CostCalculator: () => <div data-testid="cost-calculator" />,
 }))
 
-vi.mock('@/components/ReportLayout', () => ({
-  ReportLayout: ({ children, title }: { children: (a: ReportLayoutChildArgs) => React.ReactNode; title: string }) => (
-    <div>
-      <h1>{title}</h1>
-      {children({
-        startTime: '2026-01-01T00:00:00Z',
-        endTime: '2026-01-01T01:00:00Z',
-        activeServiceId: 'test-svc',
-        filterPayload: {},
-        intervalButtons: null,
-        bucketSeconds: 3600,
-        config: { effectiveInterval: '1 hour', interval: '1 hour' },
-        setChartInterval: vi.fn(),
-      })}
-    </div>
-  ),
-}))
+vi.mock('@/components/ReportLayout', async () =>
+  (await import('../helpers/page-smoke')).reportLayoutModuleMock({
+    startTime: '2026-01-01T00:00:00Z',
+    endTime: '2026-01-01T01:00:00Z',
+    activeServiceId: 'test-svc',
+    filterPayload: {},
+    intervalButtons: null,
+    bucketSeconds: 3600,
+    config: { effectiveInterval: '1 hour', interval: '1 hour' },
+    setChartInterval: vi.fn(),
+  }),
+)
 
 const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
 

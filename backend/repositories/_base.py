@@ -213,6 +213,18 @@ def _compact_sql_for_debug(sql: str) -> str:
     return _PARQUET_LIST_RE.sub(_replace, sql)
 
 
+def record_duckdb_query(sql_str: str, elapsed_ms: float, service_id: str | None = None) -> None:
+    """Record a DuckDB query into request-scoped debug queries and telemetry."""
+    try:
+        from backend.utils.telemetry import get_queries, record_telemetry_query
+
+        compact = _compact_sql_for_debug(" ".join(sql_str.strip().split()))
+        get_queries().append({"sql": compact, "time_ms": elapsed_ms, "engine": "DuckDB"})
+        record_telemetry_query("duckdb", compact, elapsed_ms, service_id=service_id)
+    except Exception:
+        _logger.debug("record_duckdb_query failed", exc_info=True)
+
+
 def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -> bool:
     """Ensure ``{alias}.ngwaf_bots`` is queryable on ``con``, materialized
     from the NGWAF bot-cache SQLite file via plain ``sqlite3`` — NOT via

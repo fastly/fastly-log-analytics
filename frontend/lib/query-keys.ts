@@ -125,7 +125,7 @@ export const queryKeys = {
   ) => [domain, endpoint, serviceId, startTime, endTime, filters, ...extras] as const,
 }
 
-export interface BootstrapCacheSeedSource {
+interface BootstrapCacheSeedSource {
   active_service_id?: string | null
   views?: unknown
   log_fields_catalog?: unknown

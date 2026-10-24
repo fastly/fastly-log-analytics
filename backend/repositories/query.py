@@ -10,7 +10,7 @@ from typing import Any
 import duckdb
 
 from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS, mask_ip_values
-from backend.repositories._base import SectionTimer, _compact_sql_for_debug, _safe_table
+from backend.repositories._base import SectionTimer, _compact_sql_for_debug, _safe_table, record_duckdb_query
 from backend.repositories._sql import query as SQL
 from backend.utils.date_utils import parse_iso_utc
 from backend.utils.log_throttle import log_once_per
@@ -372,13 +372,9 @@ def _run_validated_query(
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
     compact_exec_sql = _compact_sql_for_debug(exec_sql.strip())
     _debug_queries.append({"sql": compact_exec_sql, "time_ms": elapsed_ms, "engine": "DuckDB"})
-    from backend.utils.telemetry import get_queries, record_telemetry_query
-
     svc_id = (src.get("name") or src.get("service_id")) if src else None
-    q_list = get_queries()
     for dq in _debug_queries:
-        q_list.append(dq)
-        record_telemetry_query("duckdb", dq.get("sql", ""), float(dq.get("time_ms", 0.0)), service_id=svc_id)
+        record_duckdb_query(dq.get("sql", ""), float(dq.get("time_ms", 0.0)), service_id=svc_id)
 
     fetched_rows = arrow_table.num_rows
     if is_simple_select:

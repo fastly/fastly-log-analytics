@@ -11,7 +11,7 @@ const DEFAULT_PAGE_SIZE = 100
 type RequestFactsResponse = components['schemas']['HighScaleRequestFactResponse']
 type RequestFactsRequest = components['schemas']['HighScaleRequestFactRequest']
 
-export interface HighScaleRequestFactsOptions {
+interface HighScaleRequestFactsOptions {
   serviceId: string | null | undefined
   startTime: string | null | undefined
   endTime: string | null | undefined

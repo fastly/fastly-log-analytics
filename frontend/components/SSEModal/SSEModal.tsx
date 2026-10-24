@@ -16,7 +16,7 @@ import { useSSE, SSELine, SSEStatus } from '@/hooks/useSSE'
 import { SSEProgressView } from './SSEProgressView'
 import { panelDialogHeaderSolid } from '@/lib/panel-dialog'
 
-export interface SSEExecutionSectionProps {
+interface SSEExecutionSectionProps {
   title: string
   subtitle: string
   lines: SSELine[]
@@ -56,7 +56,7 @@ export function SSEExecutionSection({
   )
 }
 
-export interface SSEDialogFooterProps {
+interface SSEDialogFooterProps {
   status: SSEStatus
   onClose: () => void
   onStop?: () => void
@@ -89,7 +89,7 @@ export function SSEDialogFooter({
   )
 }
 
-export interface ControlledSSEModalProps {
+interface ControlledSSEModalProps {
   isSSEModalOpen: boolean
   setIsSSEModalOpen: (open: boolean) => void
   sseStatus: SSEStatus
@@ -135,18 +135,15 @@ export function ControlledSSEModal({
         />
 
         <DialogFooter className="px-6 py-4 bg-muted/10 border-t shrink-0">
-          {sseStatus !== 'streaming' && (
-            <Button variant="outline" onClick={() => {
+          <SSEDialogFooter
+            status={sseStatus}
+            onClose={() => {
               setIsSSEModalOpen(false)
               stop()
               cronCacheBust(queryClient)
-            }}>
-              {sseStatus === 'done' ? 'Close' : 'Cancel'}
-            </Button>
-          )}
-          {sseStatus === 'streaming' && (
-            <Button variant="outline" onClick={stop}>Stop</Button>
-          )}
+            }}
+            onStop={stop}
+          />
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -214,14 +211,11 @@ export function SSEModal({ trigger, title, description, endpoint, body, renderLi
           {status === 'idle' && !description && (
             <Button onClick={handleStart}>Start</Button>
           )}
-          {status !== 'streaming' && (
-            <Button variant="outline" onClick={() => handleOpenChange(false)}>
-              {status === 'done' ? 'Close' : 'Cancel'}
-            </Button>
-          )}
-          {status === 'streaming' && (
-            <Button variant="outline" onClick={stop}>Stop</Button>
-          )}
+          <SSEDialogFooter
+            status={status}
+            onClose={() => handleOpenChange(false)}
+            onStop={stop}
+          />
         </DialogFooter>
       </DialogContent>
     </Dialog>

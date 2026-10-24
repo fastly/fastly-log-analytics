@@ -12,36 +12,9 @@ import * as apiLib from '@/lib/api'
 import { getOk, postOk } from '@/__tests__/helpers/api-result'
 import React from 'react'
 
-vi.mock('@/stores/serviceStore', () => {
-  const state = {
-    activeServiceId: 'test-svc',
-    isInitialized: true,
-    services: [{ id: 'test-svc', name: 'Test Service' }],
-    setServices: vi.fn(),
-    setInitialized: vi.fn(),
-    setActiveServiceId: vi.fn()
-  }
-  const useServiceStore = Object.assign(
-    vi.fn((selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state)),
-    { getState: () => state },
-  )
-  return { useServiceStore }
-})
+vi.mock('@/stores/serviceStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())
 
-vi.mock('@/stores/filterStore', () => ({
-  useFilterStore: vi.fn((selector) => {
-    const state = {
-      startTime: '2026-01-01T00:00:00Z',
-      endTime: '2026-01-01T01:00:00Z',
-      filters: [],
-      isAutoRange: false,
-      compareMode: false,
-      setRange: vi.fn(),
-      clearFilters: vi.fn()
-    }
-    return selector ? selector(state) : state
-  })
-}))
+vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke')).filterStoreModuleMock())
 
 vi.mock('@/lib/api', () => ({
   client: {
@@ -55,7 +28,7 @@ vi.mock('@/lib/api', () => ({
 
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/dashboard'))
 
-vi.mock('@/components/PlotlyChart', () => ({ PlotlyChart: () => <div data-testid="plotly-chart">PlotlyChart</div> }))
+vi.mock('@/components/PlotlyChart', async () => (await import('../helpers/page-smoke')).plotlyChartModuleMock())
 vi.mock('@/components/charts/TimeSeriesChart', () => ({ TimeSeriesChart: () => <div data-testid="timeseries-chart">TimeSeriesChart</div> }))
 vi.mock('@/components/Map/ChoroplethMap', () => ({ ChoroplethMap: () => <div data-testid="choropleth-map">ChoroplethMap</div> }))
 
