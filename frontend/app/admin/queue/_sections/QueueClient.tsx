@@ -264,117 +264,73 @@ export function QueueClient() {
     await Promise.all([refetch(), refetchLedger()])
   }, [queryClient, refetch, refetchLedger])
 
-  const handleRetryItem = React.useCallback(
-    async (entry: LedgerEntry) => {
-      const busyId = `retry:${entry.service_id}:${entry.object_key}`
-      setActionBusyKey(busyId)
+  const runLedgerAction = React.useCallback(
+    async (busyKey: string, errorPrefix: string, action: () => Promise<string>) => {
+      setActionBusyKey(busyKey)
       setActionNotice(null)
       try {
-        const res = await unwrapClient(
-          client.POST('/api/admin/celery/ledger/retry', {
-            body: {
-              items: [{ service_id: entry.service_id, object_key: entry.object_key }],
-            },
-          }),
-        )
-        setActionNotice({
-          kind: 'success',
-          message: `Requeued ${res.affected ?? 1} file for ingest retry${res.dispatched ? ` (dispatched ${res.dispatched} to Celery)` : ''}.`,
-        })
+        const message = await action()
+        setActionNotice({ kind: 'success', message })
         await refreshLedgerAfterAction()
       } catch (err) {
-        setActionNotice({
-          kind: 'error',
-          message: `Retry failed: ${(err as Error).message}`,
-        })
+        setActionNotice({ kind: 'error', message: `${errorPrefix}: ${(err as Error).message}` })
       } finally {
         setActionBusyKey(null)
       }
     },
     [refreshLedgerAfterAction],
+  )
+
+  const handleRetryItem = React.useCallback(
+    (entry: LedgerEntry) =>
+      runLedgerAction(`retry:${entry.service_id}:${entry.object_key}`, 'Retry failed', async () => {
+        const res = await unwrapClient(
+          client.POST('/api/admin/celery/ledger/retry', {
+            body: { items: [{ service_id: entry.service_id, object_key: entry.object_key }] },
+          }),
+        )
+        return `Requeued ${res.affected ?? 1} file for ingest retry${res.dispatched ? ` (dispatched ${res.dispatched} to Celery)` : ''}.`
+      }),
+    [runLedgerAction],
   )
 
   const handlePurgeItem = React.useCallback(
-    async (entry: LedgerEntry) => {
-      const busyId = `purge:${entry.service_id}:${entry.object_key}`
-      setActionBusyKey(busyId)
-      setActionNotice(null)
-      try {
+    (entry: LedgerEntry) =>
+      runLedgerAction(`purge:${entry.service_id}:${entry.object_key}`, 'Dismiss failed', async () => {
         const res = await unwrapClient(
           client.POST('/api/admin/celery/ledger/purge', {
-            body: {
-              items: [{ service_id: entry.service_id, object_key: entry.object_key }],
-            },
+            body: { items: [{ service_id: entry.service_id, object_key: entry.object_key }] },
           }),
         )
-        setActionNotice({
-          kind: 'success',
-          message: `Dismissed ${res.affected ?? 1} ledger entry.`,
-        })
-        await refreshLedgerAfterAction()
-      } catch (err) {
-        setActionNotice({
-          kind: 'error',
-          message: `Dismiss failed: ${(err as Error).message}`,
-        })
-      } finally {
-        setActionBusyKey(null)
-      }
-    },
-    [refreshLedgerAfterAction],
+        return `Dismissed ${res.affected ?? 1} ledger entry.`
+      }),
+    [runLedgerAction],
   )
 
-  const handleBulkRetry = React.useCallback(async () => {
-    const targetStatus: 'dead_letter' | 'quarantined' | 'problem' =
-      ledgerFilter === 'dead_letter' || ledgerFilter === 'quarantined' ? ledgerFilter : 'problem'
-    setActionBusyKey('bulk-retry')
-    setActionNotice(null)
-    try {
-      const res = await unwrapClient(
-        client.POST('/api/admin/celery/ledger/retry', {
-          body: { status: targetStatus },
-        }),
-      )
-      setActionNotice({
-        kind: 'success',
-        message: `Requeued ${res.affected ?? 0} file(s) for retry${res.dispatched ? ` (dispatched ${res.dispatched} to Celery)` : ''}.`,
-      })
-      await refreshLedgerAfterAction()
-    } catch (err) {
-      setActionNotice({
-        kind: 'error',
-        message: `Bulk retry failed: ${(err as Error).message}`,
-      })
-    } finally {
-      setActionBusyKey(null)
-    }
-  }, [ledgerFilter, refreshLedgerAfterAction])
+  const bulkTargetStatus: 'dead_letter' | 'quarantined' | 'problem' =
+    ledgerFilter === 'dead_letter' || ledgerFilter === 'quarantined' ? ledgerFilter : 'problem'
 
-  const handleBulkPurge = React.useCallback(async () => {
-    const targetStatus: 'dead_letter' | 'quarantined' | 'problem' =
-      ledgerFilter === 'dead_letter' || ledgerFilter === 'quarantined' ? ledgerFilter : 'problem'
-    setActionBusyKey('bulk-purge')
-    setActionNotice(null)
-    try {
-      const res = await unwrapClient(
-        client.POST('/api/admin/celery/ledger/purge', {
-          body: { status: targetStatus },
-        }),
-      )
-      setActionNotice({
-        kind: 'success',
-        message: `Dismissed ${res.affected ?? 0} dead-letter/quarantined ledger entry(s).`,
-      })
-      await refreshLedgerAfterAction()
-    } catch (err) {
-      setActionNotice({
-        kind: 'error',
-        message: `Bulk dismiss failed: ${(err as Error).message}`,
-      })
-    } finally {
-      setActionBusyKey(null)
-    }
-  }, [ledgerFilter, refreshLedgerAfterAction])
+  const handleBulkRetry = React.useCallback(
+    () =>
+      runLedgerAction('bulk-retry', 'Bulk retry failed', async () => {
+        const res = await unwrapClient(
+          client.POST('/api/admin/celery/ledger/retry', { body: { status: bulkTargetStatus } }),
+        )
+        return `Requeued ${res.affected ?? 0} file(s) for retry${res.dispatched ? ` (dispatched ${res.dispatched} to Celery)` : ''}.`
+      }),
+    [bulkTargetStatus, runLedgerAction],
+  )
+
+  const handleBulkPurge = React.useCallback(
+    () =>
+      runLedgerAction('bulk-purge', 'Bulk dismiss failed', async () => {
+        const res = await unwrapClient(
+          client.POST('/api/admin/celery/ledger/purge', { body: { status: bulkTargetStatus } }),
+        )
+        return `Dismissed ${res.affected ?? 0} dead-letter/quarantined ledger entry(s).`
+      }),
+    [bulkTargetStatus, runLedgerAction],
+  )
 
   const isStandardMode = data?.deployment_mode === 'standard' && !data?.broker_reachable
   const queues = data?.queues ? Object.entries(data.queues).sort((a, b) => a[0].localeCompare(b[0])) : []

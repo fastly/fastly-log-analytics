@@ -78,7 +78,7 @@ _WEEKLY_TIER_AGE_DAYS = int(os.environ.get("LOCAL_COMPACT_WEEKLY_TIER_DAYS", "30
 _DAILY_DIR = "daily"
 _WEEKLY_DIR = "weekly"
 
-from backend.core.iceberg.rum_schema import RUM_NATURAL_KEYS
+from backend.core.iceberg._core import RUM_NATURAL_KEYS
 
 _HOUR_PART_RE = re.compile(r"^timestamp_hour=(\d{4}-\d{2}-\d{2})-(\d{2})$")
 # Daily file naming from _compact_daily_tier: daily_YYYY-MM-DD_<hex>.parquet

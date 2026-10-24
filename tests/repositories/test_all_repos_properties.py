@@ -371,3 +371,160 @@ def test_origin_get_shielding_analysis_never_raises(seeded_con, filters, start, 
     assert isinstance(result, dict)
     assert "has_data" in result
     _assert_all_finite(result)
+
+
+# ── Dashboard & Origin timeseries property tests (merged from test_aggregates_timeseries_properties.py) ──
+
+from backend.repositories.dashboard import get_aggregates  # noqa: E402
+
+_chart_interval_strategy = st.sampled_from(["1 minute", "5 minutes", "15 minutes", "1 hour"])
+_chart_metric_strategy = st.sampled_from(["requests", "5xx", "4xx", "hit_rate", "p95_latency"])
+
+_EXPECTED_AGG_KEYS = {"data", "time_series", "where_clause", "interval", "metric", "total_rows", "total_rows_total"}
+
+
+@given(
+    filters=_filters_strategy,
+    start=_iso_time_strategy,
+    end=_iso_time_strategy,
+    interval=_chart_interval_strategy,
+    metric=_chart_metric_strategy,
+)
+@settings(
+    max_examples=15,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture],
+)
+def test_get_aggregates_returns_stable_shape_for_any_input(seeded_con, filters, start, end, interval, metric):
+    result = get_aggregates(
+        con=seeded_con,
+        src=_src,
+        start_time=start,
+        end_time=end,
+        filters=filters,
+        chart_interval=interval,
+        chart_metric=metric,
+    )
+    missing = _EXPECTED_AGG_KEYS - set(result.keys())
+    assert not missing, f"Aggregates response missing keys {missing}; got {sorted(result.keys())}"
+
+
+@given(
+    filters=_filters_strategy,
+    interval=_chart_interval_strategy,
+    metric=_chart_metric_strategy,
+)
+@settings(
+    max_examples=10,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture],
+)
+def test_get_aggregates_numeric_fields_are_finite(seeded_con, filters, interval, metric):
+    result = get_aggregates(
+        con=seeded_con,
+        src=_src,
+        start_time=None,
+        end_time=None,
+        filters=filters,
+        chart_interval=interval,
+        chart_metric=metric,
+    )
+    assert isinstance(result["total_rows"], int)
+    assert isinstance(result["total_rows_total"], int)
+    for point in result.get("time_series", []):
+        v = point.get("value")
+        if isinstance(v, float):
+            assert math.isfinite(v), f"non-finite time_series value: {v} in {point!r}"
+
+
+@given(
+    filters=_filters_strategy,
+    interval=_chart_interval_strategy,
+)
+@settings(
+    max_examples=10,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture],
+)
+def test_get_aggregates_data_field_keys_are_well_formed(seeded_con, filters, interval):
+    result = get_aggregates(
+        con=seeded_con,
+        src=_src,
+        start_time=None,
+        end_time=None,
+        filters=filters,
+        chart_interval=interval,
+        chart_metric="requests",
+    )
+    for field_name, entry in result["data"].items():
+        assert "top" in entry, f"Field {field_name!r} missing 'top'"
+        assert "total" in entry, f"Field {field_name!r} missing 'total'"
+        assert isinstance(entry["top"], list)
+
+
+_metric_strategy = st.sampled_from(["ttfb", "ottfb", "ttlb"])
+_percentile_strategy = st.sampled_from(["p50", "p95", "p99"])
+_bucket_minutes_strategy = st.floats(
+    min_value=1.0 / 60.0,
+    max_value=60.0,
+    allow_nan=False,
+    allow_infinity=False,
+)
+
+
+@given(
+    filters=_filters_strategy,
+    metric=_metric_strategy,
+    percentile=_percentile_strategy,
+    bucket_minutes=_bucket_minutes_strategy,
+    split_by_leg=st.booleans(),
+)
+@settings(
+    max_examples=15,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture],
+)
+def test_get_timeseries_returns_stable_shape(seeded_con, filters, metric, percentile, bucket_minutes, split_by_leg):
+    from backend.repositories.origin import get_timeseries
+
+    result = get_timeseries(
+        con=seeded_con,
+        src=_src,
+        start_time=None,
+        end_time=None,
+        filters=filters,
+        bucket_minutes=bucket_minutes,
+        split_by_leg=split_by_leg,
+        metric=metric,
+        percentile=percentile,
+    )
+    assert "has_data" in result
+    assert "series" in result or result.get("has_data") is False
+
+
+@given(
+    bucket_minutes=_bucket_minutes_strategy,
+)
+@settings(
+    max_examples=10,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture],
+)
+def test_get_timeseries_sub_minute_bucket_produces_finite_values(seeded_con, bucket_minutes):
+    from backend.repositories.origin import get_timeseries
+
+    result = get_timeseries(
+        con=seeded_con,
+        src=_src,
+        start_time=None,
+        end_time=None,
+        filters={},
+        bucket_minutes=bucket_minutes,
+        split_by_leg=False,
+        metric="ttfb",
+        percentile="p95",
+    )
+    for series in result.get("series", []):
+        for v in series.get("values", []):
+            if isinstance(v, float):
+                assert math.isfinite(v), f"non-finite timeseries value: {v}"

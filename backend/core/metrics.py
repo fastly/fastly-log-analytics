@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from backend.models.metrics import MetricType
+from backend.models._base import MetricType
 
 METRIC_DEFINITIONS = {
     MetricType.REQUESTS.value: {"sql": "count(*)", "label": "Requests"},

@@ -32,7 +32,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from backend.core import metadata as _meta_mod
 from backend.core.query_registry import query_registry
 from backend.deps import get_service_id, require_admin
-from backend.models.admin_queries import (
+from backend.models.admin_actions import (
     ActiveQueryRow,
     CancelResponse,
     QueryMonitorConfigResponse,

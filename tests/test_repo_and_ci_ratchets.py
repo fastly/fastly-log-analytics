@@ -258,7 +258,7 @@ COALESCE = "check_no_inline_metric_coalesce.sh"
 
 def _repo(tmp_path: Path, files: dict[str, str]) -> Path:
     (tmp_path / "scripts" / "lib").mkdir(parents=True)
-    for name in (RETRY, COALESCE, "check_no_handrolled_retry.py", "lib/ratchet_common.sh"):
+    for name in (RETRY, COALESCE, "lib/ratchet_common.sh"):
         shutil.copy(SCRIPTS / name, tmp_path / "scripts" / name)
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     for rel, body in files.items():

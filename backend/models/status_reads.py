@@ -59,3 +59,28 @@ class CmcdStatusResponse(WireSafeModel):
     mode: str | None = None
     version: int | None = None
     enabled_at: str | None = None
+
+
+class SqliteProfilerEntry(BaseModel):
+    seq: int
+    ts: str
+    sql: str
+    params_kind: str
+    time_ms: float
+    rows: int
+    op: Literal["execute", "executemany", "executescript"]
+
+
+class RecentSqliteResponse(BaseModel):
+    queries: list[SqliteProfilerEntry]
+    buffer_size: int
+    buffer_cap: int
+    dropped: int
+    last_seq: int
+
+
+class ClearSqliteResponse(BaseModel):
+    ok: bool = True
+    buffer_size: int
+    buffer_cap: int
+    dropped: int

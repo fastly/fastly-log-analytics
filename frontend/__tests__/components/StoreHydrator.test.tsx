@@ -1,28 +1,22 @@
 /**
  * @vitest-environment jsdom
  *
- * StoreHydrator — triggers Zustand persist rehydration post-mount so
- * SSR-rendered defaults don't diverge from localStorage values (React #418).
- *
- * Verifies:
- *   1. Stores start with SSR-safe defaults before mount
- *   2. After mount, persisted values are rehydrated from localStorage
- *   3. Timezone resolves to the live system zone on mount whenever mode is
- *      'system' (default, a persisted system blob, or a migrated pre-v1
- *      blob), and is left untouched once mode is 'manual'
+ * Consolidated StoreHydrator and ReloadLoopGuard tests.
  */
 import { stubSystemTimeZone } from '@/__tests__/helpers/browser-stubs'
-import { render, waitFor } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, test, vi } from 'vitest'
 import React from 'react'
 
 import { StoreHydrator } from '@/components/StoreHydrator'
+import { ReloadLoopGuard } from '@/components/ReloadLoopGuard'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useTimezoneStore } from '@/stores/timezoneStore'
 import { useDebugStore } from '@/stores/debugStore'
 
 beforeEach(() => {
   window.localStorage.clear()
+  sessionStorage.clear()
   useServiceStore.setState({
     activeServiceId: null,
     services: [],
@@ -110,8 +104,6 @@ describe('StoreHydrator', () => {
 
     render(<StoreHydrator />)
 
-    // Give the mount effect a tick to run (it rehydrates serviceStore too),
-    // then assert the timezone resolver left manual mode alone.
     await waitFor(() => {
       expect(useServiceStore.getState().isInitialized).toBe(false)
     })
@@ -132,5 +124,73 @@ describe('StoreHydrator', () => {
       expect(useTimezoneStore.getState().mode).toBe('manual')
     })
     expect(useTimezoneStore.getState().timezone).toBe('America/New_York')
+  })
+})
+
+const CHILD = 'app-subtree-rendered'
+
+function loadGuard() {
+  return render(
+    <ReloadLoopGuard>
+      <div>{CHILD}</div>
+    </ReloadLoopGuard>,
+  )
+}
+
+describe('ReloadLoopGuard', () => {
+  test('renders the app subtree under the reload threshold', () => {
+    for (let i = 0; i < 5; i++) {
+      const { unmount } = loadGuard()
+      expect(screen.getByText(CHILD)).toBeInTheDocument()
+      unmount()
+    }
+  })
+
+  test('trips after 6 same-path loads in the window — shows recovery prompt, hides app', () => {
+    let last: ReturnType<typeof loadGuard> | null = null
+    for (let i = 0; i < 6; i++) {
+      last?.unmount()
+      last = loadGuard()
+    }
+    expect(screen.queryByText(CHILD)).not.toBeInTheDocument()
+    expect(screen.getByText(/kept reloading/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /refresh now/i })).toBeInTheDocument()
+  })
+
+  test('"Continue anyway" dismisses the prompt and renders the app', () => {
+    let last: ReturnType<typeof loadGuard> | null = null
+    for (let i = 0; i < 6; i++) {
+      last?.unmount()
+      last = loadGuard()
+    }
+    expect(screen.getByText(/kept reloading/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /continue anyway/i }))
+    expect(screen.getByText(CHILD)).toBeInTheDocument()
+    expect(sessionStorage.getItem('__reload_loop_history')).toBeNull()
+  })
+
+  test('"Refresh now" clears history and reloads', () => {
+    const reloadSpy = vi.spyOn(window.location, 'reload').mockImplementation(() => {})
+    let last: ReturnType<typeof loadGuard> | null = null
+    for (let i = 0; i < 6; i++) {
+      last?.unmount()
+      last = loadGuard()
+    }
+    fireEvent.click(screen.getByRole('button', { name: /refresh now/i }))
+    expect(sessionStorage.getItem('__reload_loop_history')).toBeNull()
+    expect(reloadSpy).toHaveBeenCalledTimes(1)
+    reloadSpy.mockRestore()
+  })
+
+  test('does not trip when loads are spread across different paths', () => {
+    const spy = vi.spyOn(window.location, 'pathname', 'get')
+    let last: ReturnType<typeof loadGuard> | null = null
+    for (let i = 0; i < 8; i++) {
+      spy.mockReturnValue(`/page-${i}`)
+      last?.unmount()
+      last = loadGuard()
+      expect(screen.getByText(CHILD)).toBeInTheDocument()
+    }
+    spy.mockRestore()
   })
 })

@@ -13,8 +13,7 @@
 
 import { expect, test } from '@playwright/test'
 import type { DebugQuery } from '../../types/api'
-import { installClsObserver, measureWarmPaintAndCls } from '../cls-observer'
-import { getFirstServiceId } from './helpers'
+import { getFirstServiceId, installClsObserver, measureWarmPaintAndCls } from '../helpers'
 
 test.describe('Alerts & Notifications Page Contract (/alerts)', () => {
   test('1. Route accessibility & environment indicator', async ({ page }) => {

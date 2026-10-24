@@ -34,8 +34,7 @@ from backend.high_scale.insight_queries import (
 )
 from backend.high_scale.registry import HighScaleService
 from backend.models.insights import CacheCollapseDetailResponse, InsightsResponse
-from backend.repositories.insights import definitions as _definitions  # noqa: F401  (registers the detections)
-from backend.repositories.insights.registry import InsightDefinition, registry
+from backend.repositories.insights import InsightDefinition, registry  # noqa: F401  (registers the detections)
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
 from backend.utils.date_utils import parse_iso_utc

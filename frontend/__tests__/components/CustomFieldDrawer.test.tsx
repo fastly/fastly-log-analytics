@@ -1,32 +1,19 @@
 /**
- * Migration (TESTING_PLAN_3 item 10): swap fireEvent → userEvent and
- * placeholder-text → role/label selectors.
- *
- * Why this matters: ``fireEvent.change(input, { target: { value }})``
- * sets the DOM value directly and skips every step a real user makes
- * (focus, keystrokes, the controlled-component's onChange chain). It
- * also blasts through ``disabled``. userEvent.type / userEvent.click
- * model real interactions, so tests fail when the UI is genuinely
- * broken — not just when the assertion is wrong.
- *
- * ``getByRole``/``getByLabelText`` describe the form the way users (and
- * screen readers) see it. ``getByPlaceholderText`` couples tests to
- * marketing copy.
- *
- * One exception kept here: the Field Name input is ``disabled`` (it's
- * auto-derived from Label). userEvent refuses to type into disabled
- * inputs, which is correct for real users. The test still needs to
- * inject an invalid name to exercise the API-error path, so that one
- * step uses fireEvent.change as a documented escape hatch.
+ * Consolidated CustomFields tests: CustomFieldDrawer and CustomFieldsManager.
  */
 import { screen, fireEvent, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, expect, test, vi } from 'vitest'
 import { axe } from 'vitest-axe'
+import React from 'react'
 import { CustomFieldDrawer } from '@/components/CustomFields/CustomFieldDrawer'
+import { CustomFieldsManager } from '@/components/CustomFields/CustomFieldsManager'
 import * as customFieldsApi from '@/lib/api/custom-fields'
+import type { components } from '@/types/api.generated'
 import { renderWithQuery } from '../helpers/query'
 import { stubMatchMedia, stubPointerCaptureAndScroll } from '../helpers/browser-stubs'
+
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
 
 // monaco-editor breaks under jsdom; replace with a plain textarea.
 vi.mock('@monaco-editor/react', () => ({
@@ -49,14 +36,6 @@ afterEach(() => {
 })
 
 test('submits valid custom field and displays validation errors when invalid', async () => {
-  // Radix Dialog's FocusScope schedules focus-management state updates on
-  // timers. Under this test's fake timers (required for the 500ms lint
-  // debounce) those updates flush *between* userEvent's act() wrappers, so
-  // React 19 logs benign "not wrapped in act(...)" warnings for
-  // DialogRoot/FocusScope/DialogInteractions. The component is correct —
-  // every assertion below passes and the key transitions are awaited via
-  // waitFor. Filter ONLY that specific React message so this one test stays
-  // quiet while any genuine console.error still surfaces.
   const realError = console.error
   const actFilter = vi
     .spyOn(console, 'error')
@@ -66,12 +45,7 @@ test('submits valid custom field and displays validation errors when invalid', a
     })
   const restoreActFilter = () => actFilter.mockRestore()
 
-  // Fake timers must be installed BEFORE render so the drawer's two
-  // ``useDebounce`` hooks (vcl_log_expression + collection_stage)
-  // schedule their setTimeouts under fake time. shouldAdvanceTime lets
-  // userEvent's internal setTimeout polling keep working.
   vi.useFakeTimers({ shouldAdvanceTime: true })
-  // userEvent v14 needs to be told about the fake-timer setup.
   const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
 
   const onSave = vi.fn()
@@ -100,26 +74,14 @@ test('submits valid custom field and displays validation errors when invalid', a
 
   await waitFor(() => expect(screen.getByText('Basic Information')).toBeDefined())
 
-  // Selectors now describe the form the way users see it.
   const labelInput = screen.getByLabelText(/^Label/i)
   const nameInput = screen.getByLabelText(/^Field Name/i)
   const vclInput = screen.getByLabelText('VCL Log Expression')
 
-  // Real typing. userEvent fires focus / keydown / input / change /
-  // keyup per character — so any onChange-controlled-input bug shows up.
   await user.type(labelInput, 'My Bad Field!')
-
-  // Field Name is disabled in normal use (auto-derived from Label).
-  // userEvent correctly refuses to type into a disabled input; use
-  // fireEvent here to force the controlled state for this one assertion
-  // path. Removing this escape hatch would mean adding a backdoor in
-  // the component, which is worse.
   fireEvent.change(nameInput, { target: { value: 'BAD_NAME_!@#' } })
-
   await user.type(vclInput, 'req.http.Host')
 
-  // Drive the 500 ms lint debounce + drain microtasks so
-  // validateCustomVcl resolves and the React state update lands.
   await act(async () => {
     await vi.advanceTimersByTimeAsync(500)
   })
@@ -137,7 +99,6 @@ test('submits valid custom field and displays validation errors when invalid', a
     ).toBeDefined()
   })
 
-  // Repair: same escape hatch — controlled-and-disabled input.
   fireEvent.change(nameInput, { target: { value: 'valid_name' } })
 
   vi.spyOn(customFieldsApi.customFieldsApi, 'createCustomField').mockResolvedValueOnce(
@@ -173,10 +134,6 @@ test('submits valid custom field and displays validation errors when invalid', a
   restoreActFilter()
 })
 
-// TESTING_PLAN_3 item 19. The drawer has many form inputs that screen-
-// reader users rely on labels for; this pins that contract. Disabling
-// color-contrast (jsdom can't compute it) and region (Drawer renders into
-// a portal that lives outside <main> by design, not an accessibility bug).
 test('CustomFieldDrawer has no axe-detectable a11y violations', async () => {
   vi.spyOn(customFieldsApi.customFieldsApi, 'validateCustomVcl').mockResolvedValue({
     valid: true,
@@ -194,8 +151,6 @@ test('CustomFieldDrawer has no axe-detectable a11y violations', async () => {
       field={null}
     />,
   )
-  // Field Name input is the most stable anchor — present as soon as the
-  // drawer's basic-info section renders.
   await waitFor(() => expect(screen.getByLabelText(/^Field Name/i)).toBeDefined())
 
   const results = await axe(container, {
@@ -205,4 +160,46 @@ test('CustomFieldDrawer has no axe-detectable a11y violations', async () => {
     },
   })
   expect(results).toHaveNoViolations()
+})
+
+test('renders custom fields and handles deletion', async () => {
+  const user = userEvent.setup()
+  vi.spyOn(customFieldsApi.customFieldsApi, 'listCustomFields').mockResolvedValue({
+    _is_cached: false,
+    fields: [
+      {
+        name: 'test_field_1',
+        label: 'Test Field One',
+        description: 'A test field',
+        vcl_log_expression: 'req.http.Host',
+        collection_stage: 'edge',
+        origin_log_frequency: 'all',
+        duckdb_type: 'VARCHAR',
+        value_type: 'string',
+        bytes_estimate: 20,
+        nullable: true,
+        enabled: true,
+        show_in_dashboard: true,
+        show_in_logs: true,
+        filterable: true,
+      },
+    ],
+  })
+
+  const deleteSpy = vi
+    .spyOn(customFieldsApi.customFieldsApi, 'deleteCustomField')
+    .mockResolvedValue({} as components['schemas']['CustomFieldResponse'])
+
+  renderWithQuery(<CustomFieldsManager serviceId="test-svc" />)
+
+  await waitFor(() => expect(screen.getByText('Test Field One')).toBeDefined())
+  expect(screen.getByText('test_field_1')).toBeDefined()
+  expect(screen.getByText('VARCHAR')).toBeDefined()
+
+  vi.spyOn(window, 'confirm').mockImplementation(() => true)
+
+  const deleteBtn = screen.getByTitle('Delete')
+  await user.click(deleteBtn)
+
+  await waitFor(() => expect(deleteSpy).toHaveBeenCalledWith('test-svc', 'test_field_1'))
 })

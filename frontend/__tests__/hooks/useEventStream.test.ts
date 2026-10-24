@@ -1,19 +1,11 @@
 /**
  * @vitest-environment jsdom
  *
- * useEventStream — the single fetch-based SSE transport primitive that
- * useSSE / useServiceStream / useAdminEventStream are thin adapters over.
- *
- * These tests pin the invariants the three consumers depend on:
- *   - CRLF (\r\n\r\n) framing (sse-starlette emits CRLF; a naive \n\n parser
- *     returns zero frames — AGENTS.md trap),
- *   - the HTTP-error class + status surface,
- *   - the isActive liveness gate and AbortSignal cancellation,
- *   - reconnect-with-exponential-backoff and backoff-reset-on-connect,
- *   - terminal 401/403 (no reconnect).
+ * useEventStream & useAdminEventStream tests.
  */
 import { renderHook, act, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { QueryClient } from '@tanstack/react-query'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   runEventStream,
   useEventStream,
@@ -21,6 +13,50 @@ import {
   type EventStreamRequest,
 } from '@/hooks/useEventStream'
 import { makeStreamResponse, makeNeverClosingStreamResponse } from '../helpers/sse-mock'
+import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
+
+// Capture what useAdminEventStream registers with useServiceStream.
+let capturedOnEvent: ((raw: string) => void) | null = null
+let lastEnabled: boolean | undefined
+let lastPath: string | undefined
+let lastOpts: Record<string, unknown> | undefined
+
+vi.mock('@/hooks/useServiceStream', () => ({
+  useServiceStream: vi.fn(
+    (enabled: boolean, path: string, onEvent: (raw: string) => void, opts?: Record<string, unknown>) => {
+      lastEnabled = enabled
+      lastPath = path
+      capturedOnEvent = onEvent
+      lastOpts = opts
+      return { state: 'open' }
+    },
+  ),
+}))
+
+let bootstrapSettled = true
+vi.mock('@/hooks/useIsDataReady', () => ({
+  useBootstrapSettled: () => bootstrapSettled,
+}))
+
+const mockState = { activeServiceId: 'svc-1' as string | null }
+vi.mock('@/stores/serviceStore', () => {
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: (s: typeof mockState) => unknown) => (selector ? selector(mockState) : mockState)),
+    { getState: () => mockState },
+  )
+  return { useServiceStore }
+})
+
+const cronApply = vi.fn()
+const cronCleanup = vi.fn()
+vi.mock('@/lib/admin-stream-apply', () => ({
+  applyShare: vi.fn(),
+  applySyncStatus: vi.fn(),
+  applySystemMetrics: vi.fn(),
+  makeCronRunsApplier: vi.fn(() => ({ apply: cronApply, cleanup: cronCleanup })),
+}))
+
+import { applyShare, applySyncStatus, applySystemMetrics } from '@/lib/admin-stream-apply'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -98,7 +134,7 @@ describe('runEventStream', () => {
       signal: new AbortController().signal,
       onFrame: (f) => {
         frames.push(f)
-        live = false // deactivate after the first frame batch
+        live = false
       },
       isActive: () => live,
       fetchImpl: fetchImpl,
@@ -151,27 +187,21 @@ describe('useEventStream', () => {
     const f = vi.fn().mockResolvedValue(new Response(null, { status: 403 }))
     vi.stubGlobal('fetch', f)
     renderHook(() => useEventStream(true, req, () => {}))
-    // Allow any synchronous retry to have happened.
     await new Promise((r) => setTimeout(r, 50))
     expect(f).toHaveBeenCalledTimes(1)
   })
 
   it('reconnects with exponential backoff after a dropped connection', async () => {
     vi.useFakeTimers()
-    // 500 fails BEFORE onOpen, so the backoff counter actually grows (a
-    // successful connect would reset it to 0). 500 is non-terminal (unlike
-    // 401/403), so it retries.
     const f = vi.fn().mockImplementation(() => Promise.resolve(new Response(null, { status: 500 })))
     vi.stubGlobal('fetch', f)
     renderHook(() => useEventStream(true, req, () => {}))
 
     await vi.waitFor(() => expect(f).toHaveBeenCalledTimes(1))
-    // First backoff is 1000ms (2**0 * 1000).
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1000)
     })
     await vi.waitFor(() => expect(f).toHaveBeenCalledTimes(2))
-    // Second backoff is 2000ms (2**1 * 1000) — 1000ms alone must not fire it.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1000)
     })
@@ -195,5 +225,90 @@ describe('useEventStream', () => {
     await waitFor(() => expect(capturedSignal).toBeDefined())
     unmount()
     expect(capturedSignal?.aborted).toBe(true)
+  })
+})
+
+function wrapper(qc: QueryClient) {
+  return makeQueryWrapper(qc)
+}
+
+function makeQc() {
+  return createTestQueryClient({ queries: { gcTime: 60_000, staleTime: 0 } })
+}
+
+describe('useAdminEventStream', () => {
+  beforeEach(() => {
+    capturedOnEvent = null
+    lastEnabled = undefined
+    lastPath = undefined
+    lastOpts = undefined
+    bootstrapSettled = true
+    mockState.activeServiceId = 'svc-1'
+    vi.clearAllMocks()
+  })
+
+  it('connects to /api/admin/events/stream with sorted channels + optionalService opts', async () => {
+    const { useAdminEventStream } = await import('@/hooks/useAdminEventStream')
+    renderHook(() => useAdminEventStream(true, ['sync-status', 'cron-runs', 'system-metrics']), {
+      wrapper: wrapper(makeQc()),
+    })
+    expect(lastEnabled).toBe(true)
+    expect(lastPath).toBe('/api/admin/events/stream?channels=cron-runs,sync-status,system-metrics')
+    expect(lastOpts).toMatchObject({ optionalService: true, cache: 'no-store' })
+  })
+
+  it('holds the stream disabled until bootstrap settles', async () => {
+    bootstrapSettled = false
+    const { useAdminEventStream } = await import('@/hooks/useAdminEventStream')
+    renderHook(() => useAdminEventStream(true, ['sync-status']), { wrapper: wrapper(makeQc()) })
+    expect(lastEnabled).toBe(false)
+  })
+
+  it('forwards enabled=false', async () => {
+    const { useAdminEventStream } = await import('@/hooks/useAdminEventStream')
+    renderHook(() => useAdminEventStream(false, ['sync-status']), { wrapper: wrapper(makeQc()) })
+    expect(lastEnabled).toBe(false)
+  })
+
+  it('demuxes sync-status envelope to applySyncStatus(qc, serviceId, data)', async () => {
+    const { useAdminEventStream } = await import('@/hooks/useAdminEventStream')
+    renderHook(() => useAdminEventStream(true, ['sync-status']), { wrapper: wrapper(makeQc()) })
+    const data = { local_rows: 5 }
+    act(() => capturedOnEvent!(JSON.stringify({ channel: 'sync-status', data })))
+    expect(applySyncStatus).toHaveBeenCalledWith(expect.anything(), 'svc-1', data)
+  })
+
+  it('demuxes system-metrics envelope to applySystemMetrics(qc, serviceId, data)', async () => {
+    const { useAdminEventStream } = await import('@/hooks/useAdminEventStream')
+    renderHook(() => useAdminEventStream(true, ['system-metrics']), { wrapper: wrapper(makeQc()) })
+    const data = { health_snapshot: { status: 'ok' } }
+    act(() => capturedOnEvent!(JSON.stringify({ channel: 'system-metrics', data })))
+    expect(applySystemMetrics).toHaveBeenCalledWith(expect.anything(), 'svc-1', data)
+  })
+
+  it('demuxes cron-runs envelope to the cron applier', async () => {
+    const { useAdminEventStream } = await import('@/hooks/useAdminEventStream')
+    renderHook(() => useAdminEventStream(true, ['cron-runs']), { wrapper: wrapper(makeQc()) })
+    const data = { task: 'sync', status: 'success' }
+    act(() => capturedOnEvent!(JSON.stringify({ channel: 'cron-runs', data })))
+    expect(cronApply).toHaveBeenCalledWith(data)
+  })
+
+  it('demuxes share envelope to applyShare(qc, data)', async () => {
+    const { useAdminEventStream } = await import('@/hooks/useAdminEventStream')
+    renderHook(() => useAdminEventStream(true, ['share']), { wrapper: wrapper(makeQc()) })
+    const data = { sharing_active: true, active_session_count: 1 }
+    act(() => capturedOnEvent!(JSON.stringify({ channel: 'share', data })))
+    expect(applyShare).toHaveBeenCalledWith(expect.anything(), data)
+  })
+
+  it('ignores malformed envelopes and unknown channels without throwing', async () => {
+    const { useAdminEventStream } = await import('@/hooks/useAdminEventStream')
+    renderHook(() => useAdminEventStream(true, ['sync-status']), { wrapper: wrapper(makeQc()) })
+    expect(() => act(() => capturedOnEvent!('not-json'))).not.toThrow()
+    expect(() => act(() => capturedOnEvent!(JSON.stringify({ channel: 'mystery', data: {} })))).not.toThrow()
+    expect(applySyncStatus).not.toHaveBeenCalled()
+    expect(applySystemMetrics).not.toHaveBeenCalled()
+    expect(cronApply).not.toHaveBeenCalled()
   })
 })

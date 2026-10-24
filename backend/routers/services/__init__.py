@@ -1,9 +1,10 @@
 from fastapi import APIRouter
 
-from .audit import router as audit_router
+from . import core as audit  # noqa: F401
+from . import core as cron  # noqa: F401
 from .core import *  # noqa: F403  # Export functions for tests that import from backend.routers.services directly
+from .core import audit_router, cron_router
 from .core import router as core_router
-from .cron import router as cron_router
 
 # Combine the sub-routers
 router = APIRouter()

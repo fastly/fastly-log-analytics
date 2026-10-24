@@ -25,7 +25,7 @@ from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.repositories import dashboard as repo
 from backend.repositories.utils.response_cache import cache_result
 from backend.utils.auth import mask_ips_for
-from backend.utils.router_utils import make_section_expander, query_errors
+from backend.utils.router_utils import make_section_expander, query_errors, run_cached_repo_endpoint
 from backend.utils.telemetry import get_sqlite_queries
 
 logger = logging.getLogger(__name__)
@@ -79,36 +79,23 @@ def dashboard_aggregates(
 
     sections = _expand_sections(req.sections)
     its, icr, imd, itn = _resolve_aggregate_flags(req, sections)
-    _is_real_repo = getattr(repo.get_aggregates, "__module__", "") == "backend.repositories.dashboard"
-    if _is_real_repo:
-        cached = repo.peek_aggregates(
-            src=ctx.source,
-            start_time=start_time,
-            end_time=end_time,
-            filters=req.filters,
-            chart_interval=req.chart_interval,
-            chart_metric=req.chart_metric,
-            fields_filter=req.fields,
-            include_time_series=its,
-            include_conn_requests=icr,
-            include_map_data=imd,
-            include_top_n=itn,
-        )
-        if cached is not None:
-            return cached
-    return repo.get_aggregates(
-        con=ctx.con_or_factory(force_eager=not _is_real_repo),
-        src=ctx.source,
-        start_time=start_time,
-        end_time=end_time,
-        filters=req.filters,
-        chart_interval=req.chart_interval,
-        chart_metric=req.chart_metric,
-        fields_filter=req.fields,
-        include_time_series=its,
-        include_conn_requests=icr,
-        include_map_data=imd,
-        include_top_n=itn,
+    return run_cached_repo_endpoint(
+        ctx,
+        repo_module="backend.repositories.dashboard",
+        get_fn=repo.get_aggregates,
+        peek_fn=repo.peek_aggregates,
+        kwargs={
+            "start_time": start_time,
+            "end_time": end_time,
+            "filters": req.filters,
+            "chart_interval": req.chart_interval,
+            "chart_metric": req.chart_metric,
+            "fields_filter": req.fields,
+            "include_time_series": its,
+            "include_conn_requests": icr,
+            "include_map_data": imd,
+            "include_top_n": itn,
+        },
     )
 
 

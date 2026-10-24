@@ -4,7 +4,7 @@ import React from 'react'
 import dynamic from 'next/dynamic'
 import { cn } from '@/lib/utils'
 import { useActiveLogFields } from '@/hooks/useLogFieldsCatalog'
-import type { DashboardAggregates, DashboardCatalog } from './types'
+import type { DashboardAggregates, DashboardCatalog } from './categories'
 
 // ChoroplethMap pulls in d3-geo and the world-110m topojson. Static-import
 // blocked the dashboard's initial JS parse/eval; dynamic-import slices it

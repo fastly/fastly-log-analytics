@@ -5,7 +5,7 @@ import { DashboardTableData } from '@/types/api'
 import { FieldSearchDialog } from './FieldSearchDialog'
 import { Copy, Check, EyeOff, TrendingUp, TrendingDown } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { cn } from '@/lib/utils'
+import { cn, isIpFamilyField } from '@/lib/utils'
 import { formatValue, calculateDelta, formatCount } from '@/lib/format'
 import { PopLabel } from '@/components/PopLabel'
 import {
@@ -15,7 +15,6 @@ import {
 } from "@/components/ui/tooltip"
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
 import { useMaskIps } from '@/hooks/useIsAnalyst'
-import { isIpFamilyField } from '@/lib/pii'
 import { useCopyToClipboard } from '@/hooks/useAutoFlash'
 
 interface TopTenTableProps {

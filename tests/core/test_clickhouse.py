@@ -24,8 +24,8 @@ import pytest
 
 from backend import config
 from backend.core import clickhouse_client as ch
-from backend.core import clickhouse_metrics
-from backend.core import clickhouse_metrics as metrics
+from backend.core import clickhouse_observer as clickhouse_metrics
+from backend.core import clickhouse_observer as metrics
 from backend.core import clickhouse_observer as observer
 from backend.core import clickhouse_schema as schema
 from backend.core.clickhouse_client import (

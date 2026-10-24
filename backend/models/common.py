@@ -7,9 +7,69 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, AliasChoices, BaseModel, Field, field_validator, model_serializer
 
-from backend.models._base import WireSafeModel  # noqa: F401 (re-exported)
-from backend.models.log_fields_catalog import LogFieldsCatalogResponse
-from backend.models.query_observation import ClickHouseQueryObservation
+from backend.models._base import ClickHouseQueryObservation, WireSafeModel  # noqa: F401 (re-exported)
+
+
+class LogFieldCatalogEntry(WireSafeModel):
+    id: str
+    # ``None`` for the base-group built-ins; ``"custom"`` for custom fields.
+    group: str | None
+    label: str
+    description: str
+    duckdb_type: str
+    # Built-in entries only.
+    typical_bytes: int | None = None
+    required_by: list[str] | None = None
+    formatter: str | None = None
+    unit: str | None = None
+    precision: int | None = None
+    individually_toggleable: bool | None = None
+    default_off: bool | None = None
+    note: str | None = None
+    limit: int | None = None
+    has_limit: bool | None = None
+    # Custom-field entries only.
+    show_in_dashboard: bool | None = None
+    show_in_logs: bool | None = None
+    filterable: bool | None = None
+    value_type: str | None = None
+    is_custom: bool | None = None
+
+
+class LogFieldCatalogGroup(WireSafeModel):
+    # ``get_groups_for_api`` emits every key for every group; the base group's id is ``None``.
+    id: str | None
+    label: str
+    description: str
+    locked: bool
+    requires: str | None
+    note: str | None
+    recommended_with: list[str] | None
+    total_bytes: int
+    fields: list[str]
+
+
+class LogFieldInsightDefinition(WireSafeModel):
+    id: str
+    category: str
+    title: str
+    description: str
+    required_fields: list[str]
+    required_groups: list[str]
+
+
+class LogFieldPreset(WireSafeModel):
+    label: str
+    description: str
+    groups: list[str]
+
+
+class LogFieldsCatalogResponse(WireSafeModel):
+    groups: list[LogFieldCatalogGroup] | None = None
+    fields: list[LogFieldCatalogEntry] | None = None
+    insights: list[LogFieldInsightDefinition] | None = None
+    presets: dict[str, LogFieldPreset] | None = None
+
 
 # ── Annotated clamping types (replaces repeated @field_validator boilerplate) ──
 
@@ -360,7 +420,7 @@ from backend.models.admin import (  # noqa: E402
     ShareHeaderBadgeResponse,
     SyncStatusResponse,
 )
-from backend.models.admin_queries import (  # noqa: E402
+from backend.models.admin_actions import (  # noqa: E402
     SlowQueriesCountResponse,
     SummaryResponse,
 )

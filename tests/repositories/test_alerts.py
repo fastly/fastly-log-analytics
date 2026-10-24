@@ -559,3 +559,420 @@ def test_update_last_triggered_with_none_uses_now():
     # Either a timestamp string OR None — implementation-defined; pinning
     # that the function doesn't raise when called with None.
     assert row is not None
+
+
+# ── Views repository tests (merged from test_views.py) ────────────────────
+
+from unittest.mock import MagicMock  # noqa: E402
+
+from backend.models.views import SavedView  # noqa: E402
+from backend.repositories.cron import delete_cron_log, get_cron_logs, purge_cron_logs  # noqa: E402
+from backend.repositories.views import delete_view, get_views, save_view  # noqa: E402
+
+
+def _make_view(service_id: str, name: str = "My View") -> SavedView:
+    return SavedView(service_id=service_id, name=name, filters_json='{"status":[500]}', page="dashboard")
+
+
+def test_save_and_list_views():
+    sid = "svc-views-1"
+    saved = save_view(_make_view(sid, "alpha"))
+    assert saved["id"]
+    assert saved["status"] == "success"
+
+    rows = get_views(sid)
+    names = [v["name"] for v in rows]
+    assert "alpha" in names
+
+
+def test_get_views_empty_when_unseeded():
+    assert get_views("svc-views-empty") == []
+
+
+def test_delete_view_scoped_to_service():
+    sid = "svc-views-2"
+    view = save_view(_make_view(sid, "to-delete"))
+    res = delete_view(view["id"], service_id=sid)
+    assert res["status"] in ("success", "deleted")
+    assert res["service_id"] == sid
+    assert all(v["id"] != view["id"] for v in get_views(sid))
+
+
+def test_delete_view_unknown_id_returns_not_found():
+    res = delete_view("does-not-exist", service_id="svc-views-3")
+    assert "status" in res
+
+
+def test_get_view_by_id_returns_view_with_service_id_stamped():
+    from backend.repositories.views import get_view_by_id
+
+    sid = "svc-views-get-by-id"
+    view = save_view(_make_view(sid, "by-id"))
+    row = get_view_by_id(view["id"], sid)
+    assert row is not None
+    assert row["id"] == view["id"]
+    assert row["service_id"] == sid
+
+
+def test_get_view_by_id_returns_none_when_view_does_not_exist():
+    from backend.repositories.views import get_view_by_id
+
+    assert get_view_by_id("nonexistent-id", "svc-no-views") is None
+
+
+def test_metadata_save_view_uses_service_id_parameter_not_payload_value():
+    from backend.core.metadata.views import list_views as md_list_views
+    from backend.core.metadata.views import save_view as md_save_view
+
+    trusted_sid = "svc-views-016-trusted"
+    untrusted_sid = "svc-views-016-attacker"
+
+    view = SavedView(
+        service_id=untrusted_sid,
+        name="cross-tenant attempt",
+        filters_json='{"status":[500]}',
+        page="dashboard",
+    )
+    res = md_save_view(trusted_sid, view)
+    assert res["status"] == "success"
+
+    trusted_rows = md_list_views(trusted_sid)
+    assert any(r["id"] == res["id"] for r in trusted_rows), "view must be persisted in the trusted tenant"
+    for r in trusted_rows:
+        if r["id"] == res["id"]:
+            assert r["service_id"] == trusted_sid, "stored service_id must be the trusted parameter, not the payload"
+
+    attacker_rows = md_list_views(untrusted_sid)
+    assert not any(r["id"] == res["id"] for r in attacker_rows), "view must NOT leak into the payload-claimed tenant"
+
+
+# ── Cron repository tests (merged from test_cron.py) ──────────────────────
+
+
+def _seed_runs(service_id: str, runs: list[dict]) -> list[int]:
+    con = metadata_db.get_con(service_id)
+    ids: list[int] = []
+    for r in runs:
+        cur = con.execute(
+            "INSERT INTO cron_runs (service_id, task, started_at, duration_s, status, parquet_keys, summary) "
+            "VALUES (?, ?, ?, ?, ?, '[]', ?)",
+            (
+                service_id,
+                r.get("task", "sync"),
+                r.get("started_at", "2026-05-15T00:00:00Z"),
+                r.get("duration_s", 1.0),
+                r.get("status", "success"),
+                r.get("summary", "ok"),
+            ),
+        )
+        ids.append(int(cur.lastrowid or 0))
+    con.commit()
+    return ids
+
+
+def test_get_cron_logs_returns_total_and_entries():
+    sid = "svc-cron-1"
+    _seed_runs(sid, [{"task": "sync"}, {"task": "commit"}, {"task": "sync"}])
+    total, entries = get_cron_logs(sid)
+    assert total == 3
+    assert len(entries) == 3
+
+
+def test_get_cron_logs_filters_by_task_and_status():
+    sid = "svc-cron-2"
+    _seed_runs(
+        sid,
+        [
+            {"task": "sync", "status": "success"},
+            {"task": "sync", "status": "error"},
+            {"task": "commit", "status": "success"},
+        ],
+    )
+    total_sync, _ = get_cron_logs(sid, task="sync")
+    assert total_sync == 2
+    total_err, _ = get_cron_logs(sid, status="error")
+    assert total_err == 1
+
+
+def test_get_cron_logs_pagination():
+    sid = "svc-cron-3"
+    _seed_runs(sid, [{"task": "sync"} for _ in range(8)])
+    total, entries = get_cron_logs(sid, page=2, per_page=3)
+    assert total == 8
+    assert len(entries) == 3
+
+
+def test_delete_cron_log_removes_only_target():
+    sid = "svc-cron-4"
+    [a, b] = _seed_runs(sid, [{"task": "sync"}, {"task": "sync"}])
+    delete_cron_log(sid, b)
+    con = metadata_db.get_con(sid)
+    remaining = [row[0] for row in con.execute("SELECT id FROM cron_runs").fetchall()]
+    assert remaining == [a]
+
+
+def test_delete_cron_log_unknown_id_is_noop():
+    sid = "svc-cron-5"
+    _seed_runs(sid, [{"task": "sync"}])
+    delete_cron_log(sid, 99999999)  # must not raise
+    con = metadata_db.get_con(sid)
+    assert con.execute("SELECT count(*) FROM cron_runs").fetchone()[0] == 1
+
+
+def test_purge_cron_logs_no_filter_clears_all():
+    sid = "svc-cron-6"
+    _seed_runs(sid, [{"task": "sync"}, {"task": "commit"}])
+    purge_cron_logs(sid)
+    con = metadata_db.get_con(sid)
+    assert con.execute("SELECT count(*) FROM cron_runs").fetchone()[0] == 0
+
+
+def test_purge_cron_logs_by_task():
+    sid = "svc-cron-7"
+    _seed_runs(sid, [{"task": "sync"}, {"task": "sync"}, {"task": "commit"}])
+    purge_cron_logs(sid, task="sync")
+    con = metadata_db.get_con(sid)
+    tasks = [row[0] for row in con.execute("SELECT task FROM cron_runs").fetchall()]
+    assert tasks == ["commit"]
+
+
+def test_get_cron_logs_since_id_returns_only_newer_rows():
+    sid = "svc-cron-since-1"
+    ids = _seed_runs(
+        sid,
+        [
+            {"task": "sync", "status": "success"},
+            {"task": "commit", "status": "success"},
+            {"task": "sync", "status": "success"},
+        ],
+    )
+    total, entries = get_cron_logs(sid, since_id=ids[1])
+    assert total == 1, "only the third row (id > since_id) should match"
+    assert {e["id"] for e in entries} == {ids[2]}
+
+
+def test_get_cron_logs_since_id_keeps_running_rows_even_if_id_below_cutoff():
+    sid = "svc-cron-since-2"
+    ids = _seed_runs(
+        sid,
+        [
+            {"task": "sync", "status": "running"},
+            {"task": "commit", "status": "success"},
+            {"task": "sync", "status": "success"},
+        ],
+    )
+    total, entries = get_cron_logs(sid, since_id=ids[2])
+    returned_ids = {e["id"] for e in entries}
+    assert ids[0] in returned_ids, (
+        "running row must remain in the response even when id <= since_id, "
+        "so the toast-completion-detection effect on /logs keeps working"
+    )
+    assert total == len(returned_ids)
+
+
+def test_get_cron_logs_since_id_none_returns_all_rows():
+    sid = "svc-cron-since-3"
+    ids = _seed_runs(
+        sid,
+        [
+            {"task": "sync", "status": "success"},
+            {"task": "sync", "status": "success"},
+        ],
+    )
+    total, entries = get_cron_logs(sid)
+    assert total == 2
+    assert {e["id"] for e in entries} == set(ids)
+
+
+def test_get_cron_logs_since_id_combines_with_task_filter():
+    sid = "svc-cron-since-4"
+    ids = _seed_runs(
+        sid,
+        [
+            {"task": "sync", "status": "success"},
+            {"task": "commit", "status": "success"},
+            {"task": "sync", "status": "success"},
+            {"task": "sync", "status": "running"},
+        ],
+    )
+    total, entries = get_cron_logs(sid, task="sync", since_id=ids[2])
+    returned_ids = {e["id"] for e in entries}
+    assert returned_ids == {ids[3]}
+    assert total == 1
+
+
+def test_get_cron_logs_rum_sync_matches_rum_discovery():
+    sid = "svc-cron-rum"
+    _seed_runs(
+        sid,
+        [
+            {"task": "rum_sync", "status": "success"},
+            {"task": "rum_discovery", "status": "success"},
+            {"task": "log_discovery", "status": "success"},
+        ],
+    )
+    total, entries = get_cron_logs(sid, task="rum_sync")
+    assert total == 2
+    tasks = {e["task"] for e in entries}
+    assert tasks == {"rum_sync", "rum_discovery"}
+
+
+def test_get_cron_logs_comma_separated_tasks():
+    sid = "svc-cron-multi"
+    _seed_runs(
+        sid,
+        [
+            {"task": "log_discovery", "status": "success"},
+            {"task": "commit", "status": "success"},
+            {"task": "optimize", "status": "success"},
+        ],
+    )
+    total, entries = get_cron_logs(sid, task="log_discovery,commit")
+    assert total == 2
+    tasks = {e["task"] for e in entries}
+    assert tasks == {"log_discovery", "commit"}
+
+
+# ── Usage storage stats tests (merged from test_usage_storage_stats.py) ───
+
+
+def test_get_storage_stats_returns_filtered_files_and_bytes():
+    from backend.repositories.usage import get_storage_stats
+
+    metadata_db.get_con("test_svc").execute("DELETE FROM ingested_files")
+
+    metadata_db.get_con("test_svc").execute(
+        "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, ingested_at) VALUES "
+        "('file1.gz', 'test_svc', 100, 1024, '2024-05-10T10:00:00Z'),"
+        "('file2.gz', 'test_svc', 200, 2048, '2024-05-15T12:00:00Z'),"
+        "('file3.gz', 'test_svc', 300, 4096, '2024-05-20T14:00:00Z')"
+    )
+
+    src = {"name": "test_svc"}
+    mock_con = MagicMock()
+
+    stats = get_storage_stats(mock_con, src, "2024-05-10T00:00:00Z", "2024-05-16T00:00:00Z")
+
+    assert stats["total_files"] == 2
+    assert stats["total_bytes"] == 3072
+
+
+def test_get_storage_stats_safe_from_sql_injection():
+    from backend.core.metadata.base import InvalidServiceIdError
+
+    evil_name = "test' OR 1=1; DROP TABLE ingested_files; --"
+    with pytest.raises(InvalidServiceIdError):
+        metadata_db.get_con(evil_name)
+
+
+def _schema(*cols: str) -> list[dict]:
+    return [{"name": c} for c in cols]
+
+
+def test_get_edge_ratio_returns_none_when_edge_column_missing():
+    from backend.repositories.usage import get_edge_ratio
+
+    src = {"name": "svc_no_edge"}
+    con = MagicMock()
+    with patch("backend.core.duckdb.get_schema", return_value=_schema("timestamp", "status")):
+        ratio, debug = get_edge_ratio(con, src)
+    assert ratio is None
+    assert debug == []
+
+
+def test_get_edge_ratio_returns_none_when_query_yields_no_result():
+    from backend.repositories.usage import get_edge_ratio
+
+    src = {"name": "svc1"}
+    con = MagicMock()
+    with (
+        patch("backend.core.duckdb.get_schema", return_value=_schema("timestamp", "edge")),
+        patch("backend.repositories._base.QueryRunner.execute_with_retry", return_value=None),
+    ):
+        ratio, _debug = get_edge_ratio(con, src)
+    assert ratio is None
+
+
+def test_get_edge_ratio_returns_rounded_value_for_valid_row():
+    from backend.repositories.usage import get_edge_ratio
+
+    src = {"name": "svc1"}
+    con = MagicMock()
+    result = MagicMock()
+    result.fetchone.return_value = [42.6789]
+    with (
+        patch("backend.core.duckdb.get_schema", return_value=_schema("timestamp", "edge")),
+        patch("backend.repositories._base.QueryRunner.execute_with_retry", return_value=result),
+    ):
+        ratio, _debug = get_edge_ratio(con, src)
+    assert ratio == 42.7
+
+
+def test_get_edge_ratio_returns_none_for_empty_table():
+    from backend.repositories.usage import get_edge_ratio
+
+    src = {"name": "svc1"}
+    con = MagicMock()
+    result = MagicMock()
+    result.fetchone.return_value = [None]
+    with (
+        patch("backend.core.duckdb.get_schema", return_value=_schema("timestamp", "edge")),
+        patch("backend.repositories._base.QueryRunner.execute_with_retry", return_value=result),
+    ):
+        ratio, _debug = get_edge_ratio(con, src)
+    assert ratio is None
+
+
+def test_get_edge_ratio_returns_none_when_no_row_at_all():
+    from backend.repositories.usage import get_edge_ratio
+
+    src = {"name": "svc1"}
+    con = MagicMock()
+    result = MagicMock()
+    result.fetchone.return_value = None
+    with (
+        patch("backend.core.duckdb.get_schema", return_value=_schema("timestamp", "edge")),
+        patch("backend.repositories._base.QueryRunner.execute_with_retry", return_value=result),
+    ):
+        ratio, _debug = get_edge_ratio(con, src)
+    assert ratio is None
+
+
+def test_get_log_activity_uses_service_name_and_bucketing():
+    from backend.repositories.usage import get_log_activity
+
+    metadata_db.get_con("act_svc").execute("DELETE FROM ingested_files")
+    metadata_db.get_con("act_svc").execute(
+        "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, ingested_at, file_date) VALUES "
+        "('f1.gz', 'act_svc', 100, 1024, '2024-05-10T10:00:00Z', '2024-05-10'),"
+        "('f2.gz', 'act_svc', 200, 2048, '2024-05-10T11:00:00Z', '2024-05-10'),"
+        "('f3.gz', 'act_svc', 300, 4096, '2024-05-11T12:00:00Z', '2024-05-11')"
+    )
+
+    out = get_log_activity(
+        {"name": "act_svc"},
+        "2024-05-10T00:00:00Z",
+        "2024-05-12T00:00:00Z",
+        "day",
+    )
+
+    assert out["_debug_queries"] == []
+    assert out["_debug_calls"] == []
+    assert any(k in out for k in ("buckets", "rows", "series", "data"))
+
+
+def test_get_log_activity_falls_back_to_service_id_when_name_missing():
+    from backend.repositories.usage import get_log_activity
+
+    metadata_db.get_con("id_only_svc").execute("DELETE FROM ingested_files")
+
+    with patch.object(metadata_db, "get_log_activity", return_value={"buckets": []}) as mock_get:
+        get_log_activity(
+            {"service_id": "id_only_svc"},
+            "2024-05-10T00:00:00Z",
+            "2024-05-12T00:00:00Z",
+            "hour",
+        )
+
+    assert mock_get.call_args.args[0] == "id_only_svc"
+    assert mock_get.call_args.args[3] == "hour"

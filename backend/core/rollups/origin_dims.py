@@ -78,6 +78,7 @@ convention as :mod:`.slow_urls`.
 from __future__ import annotations
 
 import logging
+import sys
 
 from .. import metric_expressions
 from ._common import (
@@ -86,7 +87,9 @@ from ._common import (
     ORIGIN_IP_MIN_REQUESTS_PER_HOUR,
     ORIGIN_PATH_BUNDLE_FILENAME,
     ORIGIN_POP_BUNDLE_FILENAME,
+    ORIGIN_SUMMARY_BUNDLE_FILENAME,
     MultiBundleSpec,
+    backfill_missing_bundles,
     backfill_multi_spec_bundles,
     build_multi_spec_bundles,
     build_per_hour_bundles,
@@ -233,3 +236,133 @@ def backfill_origin_dims_bundles(service_id: str, source: dict) -> int:
         context_fn=_origin_context,
         driver=build_per_hour_bundles if build_per_hour_bundles is not _common_build_per_hour_bundles else None,
     )
+
+
+def build_origin_summary_bundles(service_id: str, source: dict, hours: list[str]) -> int:
+    """Write an origin-summary rollup for each closed hour in ``hours``."""
+
+    def eligibility(cols, table_ident):
+        lat_us_expr = metric_expressions.origin_latency_us(cols, absent=None)
+        if lat_us_expr is None:
+            return None
+
+        miss_expr = (
+            "CAST(COUNT(*) FILTER (WHERE \"cache\" ILIKE 'MISS%') AS BIGINT)"
+            if "cache" in cols
+            else "CAST(0 AS BIGINT)"
+        )
+        pass_expr = (
+            "CAST(COUNT(*) FILTER (WHERE \"cache\" ILIKE 'PASS%') AS BIGINT)"
+            if "cache" in cols
+            else "CAST(0 AS BIGINT)"
+        )
+        ottlb_count_expr = (
+            'CAST(COUNT(*) FILTER (WHERE "ottlb" IS NOT NULL) AS BIGINT)' if "ottlb" in cols else "CAST(0 AS BIGINT)"
+        )
+        ottlb_p50_expr = 'CAST(MEDIAN("ottlb") AS DOUBLE)' if "ottlb" in cols else "CAST(NULL AS DOUBLE)"
+        ottlb_p95_expr = 'CAST(APPROX_QUANTILE("ottlb", 0.95) AS DOUBLE)' if "ottlb" in cols else "CAST(NULL AS DOUBLE)"
+        if "elapsed" in cols and "ottlb" in cols:
+            cdn_ovh_count_expr = 'CAST(COUNT(*) FILTER (WHERE "elapsed" IS NOT NULL AND "ottlb" IS NOT NULL) AS BIGINT)'
+            cdn_ovh_p50_expr = 'CAST(MEDIAN(CAST("elapsed" AS DOUBLE) - CAST("ottlb" AS DOUBLE)) AS DOUBLE)'
+        else:
+            cdn_ovh_count_expr = "CAST(0 AS BIGINT)"
+            cdn_ovh_p50_expr = "CAST(NULL AS DOUBLE)"
+        if "ost" in cols:
+            ost_5xx_expr = 'CAST(COUNT(*) FILTER (WHERE "ost" BETWEEN 500 AND 599) AS BIGINT)'
+            ost_total_expr = 'CAST(COUNT(*) FILTER (WHERE "ost" IS NOT NULL) AS BIGINT)'
+        else:
+            ost_5xx_expr = "CAST(0 AS BIGINT)"
+            ost_total_expr = "CAST(0 AS BIGINT)"
+        if "obytes" in cols:
+            obytes_count_expr = 'CAST(COUNT(*) FILTER (WHERE "obytes" IS NOT NULL) AS BIGINT)'
+            obytes_p50_expr = 'CAST(MEDIAN("obytes") AS DOUBLE)'
+        else:
+            obytes_count_expr = "CAST(0 AS BIGINT)"
+            obytes_p50_expr = "CAST(NULL AS DOUBLE)"
+
+        return {
+            "lat_us_expr": lat_us_expr,
+            "miss_expr": miss_expr,
+            "pass_expr": pass_expr,
+            "ottlb_count_expr": ottlb_count_expr,
+            "ottlb_p50_expr": ottlb_p50_expr,
+            "ottlb_p95_expr": ottlb_p95_expr,
+            "cdn_ovh_count_expr": cdn_ovh_count_expr,
+            "cdn_ovh_p50_expr": cdn_ovh_p50_expr,
+            "ost_5xx_expr": ost_5xx_expr,
+            "ost_total_expr": ost_total_expr,
+            "obytes_count_expr": obytes_count_expr,
+            "obytes_p50_expr": obytes_p50_expr,
+        }
+
+    def build_copy_sql(ctx, table_ident, start_iso, end_iso, tmp_path):
+        lat_us_expr = ctx["lat_us_expr"]
+        miss_expr = ctx["miss_expr"]
+        pass_expr = ctx["pass_expr"]
+        ottlb_count_expr = ctx["ottlb_count_expr"]
+        ottlb_p50_expr = ctx["ottlb_p50_expr"]
+        ottlb_p95_expr = ctx["ottlb_p95_expr"]
+        cdn_ovh_count_expr = ctx["cdn_ovh_count_expr"]
+        cdn_ovh_p50_expr = ctx["cdn_ovh_p50_expr"]
+        ost_5xx_expr = ctx["ost_5xx_expr"]
+        ost_total_expr = ctx["ost_total_expr"]
+        obytes_count_expr = ctx["obytes_count_expr"]
+        obytes_p50_expr = ctx["obytes_p50_expr"]
+        return (
+            f"COPY ("
+            f"  SELECT "
+            f"    CAST(COUNT(*) AS BIGINT) AS requests, "
+            f"    {miss_expr} AS total_misses, "
+            f"    {pass_expr} AS total_passes, "
+            f"    CAST(COUNT(*) FILTER (WHERE lat_us IS NOT NULL) AS BIGINT) AS lat_us_count, "
+            f"    CAST(MEDIAN(lat_us) AS DOUBLE) AS ottfb_p50_us, "
+            f"    CAST(APPROX_QUANTILE(lat_us, 0.75) AS DOUBLE) AS ottfb_p75_us, "
+            f"    CAST(APPROX_QUANTILE(lat_us, 0.95) AS DOUBLE) AS ottfb_p95_us, "
+            f"    CAST(APPROX_QUANTILE(lat_us, 0.99) AS DOUBLE) AS ottfb_p99_us, "
+            f"    {ottlb_count_expr} AS ottlb_count, "
+            f"    {ottlb_p50_expr} AS ottlb_p50_us, "
+            f"    {ottlb_p95_expr} AS ottlb_p95_us, "
+            f"    {cdn_ovh_count_expr} AS cdn_ovh_count, "
+            f"    {cdn_ovh_p50_expr} AS cdn_ovh_p50_us, "
+            f"    {ost_5xx_expr} AS ost_5xx_count, "
+            f"    {ost_total_expr} AS ost_total_count, "
+            f"    {obytes_count_expr} AS obytes_count, "
+            f"    {obytes_p50_expr} AS obytes_p50 "
+            f"  FROM ("
+            f"    SELECT *, {lat_us_expr} AS lat_us "
+            f"    FROM {table_ident} "
+            f"    WHERE timestamp >= TIMESTAMPTZ '{start_iso}' "
+            f"      AND timestamp <  TIMESTAMPTZ '{end_iso}'"
+            f"  )"
+            f") {parquet_zstd_target(tmp_path)}"
+        )
+
+    return build_per_hour_bundles(
+        service_id,
+        source,
+        hours,
+        bundle_filename=ORIGIN_SUMMARY_BUNDLE_FILENAME,
+        tmp_prefix=".tmp_os_",
+        label="origin_summary",
+        eligibility=eligibility,
+        build_copy_sql=build_copy_sql,
+        logger=logger,
+    )
+
+
+def backfill_origin_summary_bundles(service_id: str, source: dict) -> int:
+    """Self-heal pass: build origin_summary.parquet for every closed
+    hour that already has ``all_fields.parquet`` but no
+    ``origin_summary.parquet`` yet.
+    """
+    return backfill_missing_bundles(
+        service_id,
+        source,
+        bundle_filename=ORIGIN_SUMMARY_BUNDLE_FILENAME,
+        label="origin_summary",
+        builder=build_origin_summary_bundles,
+        logger=logger,
+    )
+
+
+sys.modules["backend.core.rollups.origin_summary"] = sys.modules[__name__]

@@ -35,8 +35,11 @@ vi.mock('@/components/SessionScoring/StackedHourlyBarChart', () => ({
   ComplianceChart: () => null,
   StackedHourlyBarChart: () => null,
 }))
-vi.mock('@/components/SessionScoring/ScorerLatencyChart', () => ({ ScorerLatencyChart: () => null }))
-vi.mock('@/components/SessionScoring/ScorerErrorsChart', () => ({ ScorerErrorsChart: () => null }))
+vi.mock('@/components/SessionScoring/ScorerSeriesCard', () => ({
+  ScorerLatencyChart: () => null,
+  ScorerErrorsChart: () => null,
+  ScorerSeriesCard: () => null,
+}))
 vi.mock('@/components/SessionScoring/ScorerFailOpenBreakdownCard', () => ({
   ScorerFailOpenBreakdownCard: () => null,
 }))

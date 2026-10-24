@@ -1,20 +1,31 @@
-"""Performance router — latency analysis, origin vs edge breakdown."""
+"""Performance, Assets & Shield, and CMCD streaming QoE router."""
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends
 
+from backend.core.iceberg import execute_with_stale_view_retry
 from backend.core.request_context import RequestContext, build_request_context
+from backend.models.assets import AssetsAggregatesResponse, AssetsRequest
+from backend.models.cmcd import CmcdAggregatesResponse, CmcdRequest, CmcdSectionName
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.performance import (
     PerformanceAggregatesResponse,
     PerformanceRequest,
     PerformanceSectionName,
 )
+from backend.repositories import assets as assets_repo
+from backend.repositories import cmcd as cmcd_repo
 from backend.repositories import performance as repo
-from backend.utils.router_utils import make_section_expander, query_errors
+from backend.utils.auth import mask_ips_for
+from backend.utils.router_utils import make_section_expander, query_errors, run_cached_repo_endpoint
+from backend.utils.telemetry import process_context_scope
 
-router = APIRouter(prefix="/api/performance", tags=["performance"], responses=DEFAULT_ERROR_RESPONSES)
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api", responses=DEFAULT_ERROR_RESPONSES)
 
 # top_urls + top_asns share a 2-pass CTE shape against the same per-request
 # temp table (commit 8fc53e1). They run sequentially on the same scan and the
@@ -29,9 +40,10 @@ _TOP_N_PAIR: frozenset[str] = frozenset({"top_urls", "top_asns"})
 _WATERFALL_SCATTER_PAIR: frozenset[str] = frozenset({"waterfall", "scatter"})
 
 _expand_sections = make_section_expander(PerformanceSectionName, union_groups=(_TOP_N_PAIR, _WATERFALL_SCATTER_PAIR))
+_expand_cmcd_sections = make_section_expander(CmcdSectionName)
 
 
-@router.post("/aggregates", response_model=PerformanceAggregatesResponse)
+@router.post("/performance/aggregates", tags=["performance"], response_model=PerformanceAggregatesResponse)
 @query_errors()
 def performance_aggregates(
     req: PerformanceRequest,
@@ -47,25 +59,126 @@ def performance_aggregates(
         from backend.high_scale.performance import performance_aggregates as hs_performance
 
         return hs_performance(high_scale_service, req, start_time, end_time, sections=sections)
-    _is_real_repo = getattr(repo.get_performance_aggregates, "__module__", "") == "backend.repositories.performance"
-    if _is_real_repo:
-        cached = repo.peek_performance_aggregates(
-            src=ctx.source,
-            start_time=start_time,
-            end_time=end_time,
-            filters=req.filters,
-            sort_by=req.sort_by,
-            sections=sections,
-        )
+    return run_cached_repo_endpoint(
+        ctx,
+        repo_module="backend.repositories.performance",
+        get_fn=repo.get_performance_aggregates,
+        peek_fn=repo.peek_performance_aggregates,
+        kwargs={
+            "start_time": start_time,
+            "end_time": end_time,
+            "filters": req.filters,
+            "sort_by": req.sort_by,
+            "sections": sections,
+        },
+        wrap=lambda r: PerformanceAggregatesResponse.with_telemetry(**r),
+    )
+
+
+def _assets_aggregates_impl(
+    req: AssetsRequest,
+    ctx: RequestContext,
+) -> AssetsAggregatesResponse:
+    with process_context_scope("assets:aggregates"):
+        start_time, end_time = ctx.resolve_window(req)
+        high_scale_service = ctx.high_scale
+        if high_scale_service is not None:
+            from backend.high_scale.assets import assets_aggregates as hs_assets_aggregates
+
+            return hs_assets_aggregates(high_scale_service, req, start_time, end_time)
+
+        cached = assets_repo.check_assets_cache(ctx.source, start_time, end_time, req.filters)
         if cached is not None:
-            return PerformanceAggregatesResponse.with_telemetry(**cached)
-    res = repo.get_performance_aggregates(
-        con=ctx.con_or_factory(force_eager=not _is_real_repo),
+            return AssetsAggregatesResponse.with_telemetry(**cached)
+
+        def _run(con):
+            return assets_repo.get_assets_aggregates(
+                con=con,
+                src=ctx.source,
+                start_time=start_time,
+                end_time=end_time,
+                filters=req.filters,
+            )
+
+        res = execute_with_stale_view_retry(ctx.con, ctx.source, _run)
+        return AssetsAggregatesResponse.with_telemetry(**res)
+
+
+@router.post("/assets/aggregates", tags=["assets"], response_model=AssetsAggregatesResponse)
+@query_errors()
+def assets_aggregates(
+    req: AssetsRequest,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    return _assets_aggregates_impl(req, ctx)
+
+
+@router.get("/assets/aggregates", tags=["assets"], response_model=AssetsAggregatesResponse)
+@query_errors()
+def assets_aggregates_get(
+    start_time: str | None = None,
+    end_time: str | None = None,
+    range_token: str | None = None,
+    anchor: str | None = None,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    req = AssetsRequest(
+        start_time=start_time,
+        end_time=end_time,
+        range_token=range_token,
+        anchor=anchor,
+    )
+    return _assets_aggregates_impl(req, ctx)
+
+
+@router.post("/cmcd/aggregates", tags=["cmcd"], response_model=CmcdAggregatesResponse)
+@query_errors()
+def cmcd_aggregates(
+    req: CmcdRequest,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    start_time, end_time = ctx.resolve_window(req)
+
+    sections = _expand_cmcd_sections(req.sections)
+    mask_ips = mask_ips_for(ctx.analyst_session)
+
+    high_scale_service = ctx.high_scale
+    if high_scale_service is not None:
+        from backend.high_scale.cmcd import cmcd_aggregates as hs_cmcd
+
+        res = hs_cmcd(high_scale_service, req, start_time, end_time, sections, mask_ips)
+        return CmcdAggregatesResponse.with_telemetry(**res)
+
+    # Time spent before and around the repository call (dependency setup, pool
+    # wait for the connection) is invisible to the repository's own section
+    # timer, so record it as leading entries of `_section_timings`.
+    t_entered = ctx.telemetry.elapsed_ms()
+    acquire_ms = 0.0
+
+    def _acquire_con():
+        nonlocal acquire_ms
+        t0 = ctx.telemetry.elapsed_ms()
+        c = ctx.con
+        acquire_ms = ctx.telemetry.elapsed_ms() - t0
+        return c
+
+    _is_real_repo = getattr(cmcd_repo.get_cmcd_aggregates, "__module__", "") == "backend.repositories.cmcd"
+    con_arg = _acquire_con() if (ctx.has_eager_con or not _is_real_repo) else _acquire_con
+
+    res = cmcd_repo.get_cmcd_aggregates(
+        con=con_arg,
         src=ctx.source,
         start_time=start_time,
         end_time=end_time,
         filters=req.filters,
-        sort_by=req.sort_by,
+        bucket_seconds=req.bucket_seconds,
+        top_n=req.top_n,
         sections=sections,
+        mask_ips=mask_ips,
     )
-    return PerformanceAggregatesResponse.with_telemetry(**res)
+    res["section_timings"] = [
+        {"section": "request_setup", "time_ms": round(t_entered, 2)},
+        {"section": "connection_acquire", "time_ms": round(acquire_ms, 2)},
+        *res.get("section_timings", []),
+    ]
+    return CmcdAggregatesResponse.with_telemetry(**res)

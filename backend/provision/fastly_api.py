@@ -12,8 +12,7 @@ from backend.core.fastly.service import (
     list_s3_endpoints,
 )
 from backend.provision.draft_version import draft_version
-from backend.provision.utils import BOLD, _c, fail, info, ok, warn
-from backend.provision.vcl_builder import VclBuilder
+from backend.provision.utils import BOLD, VclBuilder, _c, fail, info, ok, warn
 from backend.utils import field_codes as fc
 from backend.utils import vcl_utils
 
@@ -311,7 +310,7 @@ def generate_capture_vcl(
     # That silent ordering inversion is the 2026-08 CMCD-collection outage; it
     # survived a month because nothing errors and the columns exist.
     if cmcd_enabled:
-        from backend.provision.cmcd_vcl import generate_cmcd_vcl
+        from backend.provision.cmcd_fields import generate_cmcd_vcl
 
         cmcd_vcl_dict = generate_cmcd_vcl(mode=cmcd_mode, version=cmcd_version)
         cmcd_body = next(iter(cmcd_vcl_dict.values()))
@@ -1002,7 +1001,7 @@ def remove_logging_endpoint(
     remove_rum: bool = True,
 ):
     """Safely remove the logging endpoint + all analytics-owned VCL from the active version."""
-    from backend.provision.cmcd_vcl import cmcd_snippet_names
+    from backend.provision.cmcd_fields import cmcd_snippet_names
     from backend.provision.session_scoring_vcl import scoring_snippet_names
 
     info(f"Checking active version of service {_c(BOLD, service_id)}…")
@@ -1224,7 +1223,7 @@ def update_logging_endpoint(cfg: dict, token: str):
     yield {"type": "progress", "current": 0, "total": total_steps}
 
     from backend import config as _svcconfig
-    from backend.provision.system_fields import reconcile_cfg_system_custom_fields
+    from backend.provision.cmcd_fields import reconcile_cfg_system_custom_fields
 
     try:
         service_cfg = _svcconfig.load_config(service_id)
@@ -1246,8 +1245,10 @@ def update_logging_endpoint(cfg: dict, token: str):
         if cmcd_enabled_req is not None:
             import datetime as _dt
 
-            from backend.provision.cmcd_fields import reconcile_cmcd_custom_fields
-            from backend.provision.cmcd_orchestrator import _remove_cmcd_custom_fields
+            from backend.provision.cmcd_fields import (
+                _remove_cmcd_custom_fields,
+                reconcile_cmcd_custom_fields,
+            )
 
             want_enabled = bool(cmcd_enabled_req)
             new_mode = cmcd_mode_req or old_cmcd.get("mode", "query_string")

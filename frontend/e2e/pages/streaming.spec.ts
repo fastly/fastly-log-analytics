@@ -15,7 +15,7 @@
 
 import AxeBuilder from '@axe-core/playwright'
 import { expect, test, type Page } from '@playwright/test'
-import { installClsObserver, readClsScore } from '../cls-observer'
+import { installClsObserver, readClsScore } from '../helpers'
 
 function bucket(minutesAgo: number): string {
   return new Date(Date.now() - minutesAgo * 60_000).toISOString()

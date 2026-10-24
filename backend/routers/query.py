@@ -11,7 +11,7 @@ from backend.deps import ServiceId, get_service_id
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.query import PresetQuery, QueryRequest, QueryResponse, QuerySchemaResponse
 from backend.repositories import query as repo
-from backend.repositories._presets_cache import get_cached_presets, set_cached_presets
+from backend.repositories.query import get_cached_presets, set_cached_presets
 from backend.utils.auth import mask_ips_for
 from backend.utils.error_redaction import redact_error_text
 from backend.utils.router_utils import make_error

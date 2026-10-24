@@ -1646,7 +1646,7 @@ def test_iceberg_fallback_returns_table_info(tmp_path):
     assert _commit_buffer_impl(src)["rows_committed"] == 2
 
     with patch("backend.core.duckdb._get_fos_client", side_effect=RuntimeError("no s3")):
-        from backend.core.iceberg.lake_info import fetch_lake_info
+        from backend.core.iceberg._core import fetch_lake_info
 
         out = fetch_lake_info(src)
 
@@ -1665,7 +1665,7 @@ def test_iceberg_fallback_returns_table_does_not_exist_when_none(tmp_path):
     src = _make_source(tmp_path, f"lk{uuid.uuid4().hex[:8]}")
 
     with patch("backend.core.duckdb._get_fos_client", side_effect=RuntimeError("no s3")):
-        from backend.core.iceberg.lake_info import fetch_lake_info
+        from backend.core.iceberg._core import fetch_lake_info
 
         out = fetch_lake_info(src)
 
@@ -1685,7 +1685,7 @@ def test_iceberg_fallback_surfaces_unexpected_errors(tmp_path):
         patch("backend.core.duckdb._get_fos_client", side_effect=RuntimeError("no s3")),
         patch("backend.core.iceberg._ducklake._ducklake_attach", side_effect=_boom),
     ):
-        from backend.core.iceberg.lake_info import fetch_lake_info
+        from backend.core.iceberg._core import fetch_lake_info
 
         out = fetch_lake_info(src)
 
@@ -1709,7 +1709,7 @@ def test_temp_cache_path_clears_source_caches_on_exit(tmp_path):
         patch("backend.core.duckdb._get_fos_client", side_effect=RuntimeError("no s3")),
         patch("backend.core.iceberg.clear_source_caches") as mock_clear,
     ):
-        from backend.core.iceberg.lake_info import fetch_lake_info
+        from backend.core.iceberg._core import fetch_lake_info
 
         out = fetch_lake_info(src, use_temp_cache=True)
 
@@ -1727,7 +1727,7 @@ def test_temp_cache_path_returns_empty_lake_when_table_missing(tmp_path):
         patch("backend.core.duckdb._get_fos_client", side_effect=RuntimeError("no s3")),
         patch("backend.core.iceberg.clear_source_caches"),
     ):
-        from backend.core.iceberg.lake_info import fetch_lake_info
+        from backend.core.iceberg._core import fetch_lake_info
 
         out = fetch_lake_info(src, use_temp_cache=True)
 
@@ -1747,7 +1747,7 @@ def test_temp_cache_path_surfaces_unexpected_errors(tmp_path):
         patch("backend.core.iceberg._ducklake._ducklake_attach", side_effect=_boom),
         patch("backend.core.iceberg.clear_source_caches"),
     ):
-        from backend.core.iceberg.lake_info import fetch_lake_info
+        from backend.core.iceberg._core import fetch_lake_info
 
         out = fetch_lake_info(src, use_temp_cache=True)
 

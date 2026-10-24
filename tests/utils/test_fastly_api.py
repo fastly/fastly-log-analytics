@@ -1500,7 +1500,7 @@ def test_service_has_scoring_pragmas_requires_both_pragmas():
 
 import pytest
 
-from backend.provision.cmcd_vcl import cmcd_snippet_names
+from backend.provision.cmcd_fields import cmcd_snippet_names
 from backend.provision.session_scoring_vcl import scoring_snippet_names
 
 # What a real service looks like: ours, plus customer snippets that must survive.

@@ -1,17 +1,54 @@
 /**
- * Tests for useNowMs, useColumnVisibility, useDebounce, useRumStatus, and useStreamAggregates.
+ * Tests for useNowMs, useColumnVisibility, useDebounce, useRumStatus, useStreamAggregates,
+ * useTimeseriesToTraces, and useViewMetricUrlSync.
  *
  * @vitest-environment jsdom
  */
+import React from 'react'
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
+import { withNuqsTestingAdapter, type OnUrlUpdateFunction } from 'nuqs/adapters/testing'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { useColumnVisibility } from '@/hooks/useColumnVisibility'
+import { useColumnVisibility } from '@/hooks/useDerivedState'
 import { useDebounce } from '@/hooks/useDebounce'
 import { useRumStatus } from '@/hooks/useServiceQuery'
 import { useStreamAggregates } from '@/app/sessions/stream/_sections/useStreamAggregates'
+import { useTimeseriesToTraces, type TimeseriesDataPoint } from '@/hooks/useTimeseriesToTraces'
 import { server } from '@/__tests__/helpers/msw/server'
 import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
+
+const mockAddFilter = vi.fn()
+const mockClearFilters = vi.fn()
+const mockSetRange = vi.fn()
+const mockSetMetric = vi.fn()
+
+const mockStore = {
+  addFilter: mockAddFilter,
+  clearFilters: mockClearFilters,
+  setRange: mockSetRange,
+  setRelativeRange: vi.fn(),
+  toggleEdgeOnly: vi.fn(),
+  toggleCompareMode: vi.fn(),
+  setCompareRange: vi.fn(),
+  edgeOnly: false,
+  compareMode: false,
+}
+vi.mock('@/stores/filterStore', () => ({
+  useFilterStore: Object.assign(
+    (selector?: (s: typeof mockStore) => unknown) =>
+      typeof selector === 'function' ? selector(mockStore) : mockStore,
+    { getState: () => mockStore },
+  ),
+}))
+
+const mockServiceStore = { activeServiceId: 'test-service-id', services: [] }
+vi.mock('@/stores/serviceStore', () => ({
+  useServiceStore: Object.assign(
+    (selector?: (s: typeof mockServiceStore) => unknown) =>
+      typeof selector === 'function' ? selector(mockServiceStore) : mockServiceStore,
+    { getState: () => mockServiceStore },
+  ),
+}))
 
 describe('useRumStatus', () => {
   it('maps 403 to an unauthorized-disabled status', async () => {
@@ -55,7 +92,6 @@ describe('useNowMs', () => {
 
   afterEach(() => {
     vi.useRealTimers()
-    vi.restoreAllMocks()
   })
 
   it('returns a value close to Date.now() on first render', async () => {
@@ -293,5 +329,187 @@ describe('useStreamAggregates', () => {
     expect(agg.summary.topBitrate).toBe(2500)
     expect(agg.summary.bufferHealthPct).toBe(100)
     expect(agg.timeline).toHaveLength(1)
+  })
+})
+
+const SAMPLE_DATA = [
+  { time: '2026-05-18T20:00:00Z', p50: 30, p95: 80 },
+  { time: '2026-05-18T20:01:00Z', p50: 28, p95: 78 },
+]
+
+describe('useTimeseriesToTraces', () => {
+  it('omits stackgroup property entirely when not supplied (no explicit undefined)', () => {
+    const { result } = renderHook(() =>
+      useTimeseriesToTraces(SAMPLE_DATA, [
+        { key: 'p50', name: 'P50', color: '#000' },
+      ])
+    )
+
+    const trace = result.current[0] as Record<string, unknown>
+    expect('stackgroup' in trace).toBe(false)
+  })
+
+  it('omits marker property for non-bar traces (no explicit undefined)', () => {
+    const { result } = renderHook(() =>
+      useTimeseriesToTraces(SAMPLE_DATA, [
+        { key: 'p50', name: 'P50', color: '#000', type: 'scatter' },
+      ])
+    )
+
+    const trace = result.current[0] as Record<string, unknown>
+    expect('marker' in trace).toBe(false)
+  })
+
+  it('includes marker when type=bar (the only case it should ever be set)', () => {
+    const { result } = renderHook(() =>
+      useTimeseriesToTraces(SAMPLE_DATA, [
+        { key: 'p50', name: 'P50', color: '#abc', type: 'bar' },
+      ])
+    )
+
+    const trace = result.current[0] as Record<string, unknown>
+    expect(trace.marker).toEqual({ color: '#abc' })
+  })
+
+  it('includes stackgroup ONLY when supplied (presence-based, not undefined)', () => {
+    const { result } = renderHook(() =>
+      useTimeseriesToTraces(SAMPLE_DATA, [
+        { key: 'p50', name: 'P50', color: '#000', stackgroup: 'a' },
+      ])
+    )
+
+    const trace = result.current[0] as Record<string, unknown>
+    expect(trace.stackgroup).toBe('a')
+  })
+
+  it('produces no trace properties with the literal value undefined', () => {
+    const { result } = renderHook(() =>
+      useTimeseriesToTraces(SAMPLE_DATA, [
+        { key: 'p50', name: 'P50', color: '#000' },
+        { key: 'p95', name: 'P95', color: '#f00', stackgroup: 'errors' },
+      ])
+    )
+
+    for (const trace of result.current) {
+      const tr = trace as Record<string, unknown>
+      for (const [k, v] of Object.entries(tr)) {
+        expect(v, `trace property "${k}" was undefined`).not.toBeUndefined()
+      }
+    }
+  })
+
+  it('returns empty array when data is undefined or empty', () => {
+    const { result: r1 } = renderHook(() =>
+      useTimeseriesToTraces(undefined, [{ key: 'p50', name: 'P50', color: '#000' }])
+    )
+    expect(r1.current).toEqual([])
+
+    const { result: r2 } = renderHook(() =>
+      useTimeseriesToTraces([], [{ key: 'p50', name: 'P50', color: '#000' }])
+    )
+    expect(r2.current).toEqual([])
+  })
+
+  it('handles ts alias (some endpoints emit ts instead of time)', () => {
+    const dataWithTs: Array<TimeseriesDataPoint & { p50: number }> = [
+      { ts: '2026-05-18T20:00:00Z', p50: 30 },
+      { ts: '2026-05-18T20:01:00Z', p50: 28 },
+    ]
+    const { result } = renderHook(() =>
+      useTimeseriesToTraces(dataWithTs, [{ key: 'p50', name: 'P50', color: '#000' }])
+    )
+    expect(result.current[0]).toBeDefined()
+    expect((result.current[0] as { y: number[] }).y).toEqual([30, 28])
+  })
+
+  it('coerces missing/null y values to 0 (no NaN in Plotly y array)', () => {
+    const sparse = [
+      { time: '2026-05-18T20:00:00Z', p50: 30 },
+      { time: '2026-05-18T20:01:00Z' },
+      { time: '2026-05-18T20:02:00Z', p50: null },
+    ]
+    const { result } = renderHook(() =>
+      useTimeseriesToTraces(sparse, [{ key: 'p50', name: 'P50', color: '#000' }])
+    )
+
+    const y = (result.current[0] as { y: number[] }).y
+    expect(y).toEqual([30, 0, 0])
+    expect(y.every(v => Number.isFinite(v))).toBe(true)
+  })
+})
+
+const onUrlUpdate = vi.fn<OnUrlUpdateFunction>()
+function viewMetricAdapter(search = '') {
+  const QueryWrapper = makeQueryWrapper(createTestQueryClient())
+  const NuqsWrapper = withNuqsTestingAdapter({
+    searchParams: search,
+    hasMemory: true,
+    onUrlUpdate,
+    resetUrlUpdateQueueOnMount: false,
+  })
+  return {
+    wrapper: ({ children }: { children: React.ReactNode }) => (
+      <QueryWrapper>
+        <NuqsWrapper>{children}</NuqsWrapper>
+      </QueryWrapper>
+    ),
+  }
+}
+
+describe('useViewMetricUrlSync', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    window.history.pushState({}, '', '/')
+  })
+
+  afterEach(() => {
+    window.history.pushState({}, '', '/')
+  })
+
+  it('does nothing when there are no URL params', async () => {
+    const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
+    renderHook(() => useViewMetricUrlSync({ setMetric: mockSetMetric }), viewMetricAdapter())
+    expect(mockAddFilter).not.toHaveBeenCalled()
+    expect(mockSetRange).not.toHaveBeenCalled()
+    expect(mockSetMetric).not.toHaveBeenCalled()
+  })
+
+  it('parses metric param and calls setMetric', async () => {
+    const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
+    renderHook(() => useViewMetricUrlSync({ setMetric: mockSetMetric }), viewMetricAdapter('?metric=bandwidth'))
+    expect(mockSetMetric).toHaveBeenCalledWith('bandwidth')
+  })
+
+  it('strips metric param from URL after processing while leaving unrelated params untouched', async () => {
+    const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
+    renderHook(() => useViewMetricUrlSync({ setMetric: mockSetMetric }), viewMetricAdapter('?metric=requests&other=keep'))
+    await waitFor(() => expect(onUrlUpdate).toHaveBeenCalled())
+    const remaining = onUrlUpdate.mock.calls.at(-1)![0].searchParams
+    expect(remaining.get('metric')).toBeNull()
+    expect(remaining.get('other')).toBe('keep')
+  })
+
+  it('loads a saved view by id and clears URL view param', async () => {
+    let viewsRequested = false
+    server.use(
+      http.get('*/api/views/test-service-id', () => {
+        viewsRequested = true
+        return HttpResponse.json([
+          {
+            id: 'view-123',
+            start_time: '2026-01-01T00:00:00Z',
+            end_time: '2026-01-02T00:00:00Z',
+            filters_json: JSON.stringify([{ column: 'status', value: '404', mode: 'include' }]),
+          },
+        ])
+      }),
+    )
+    const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
+    renderHook(() => useViewMetricUrlSync(), viewMetricAdapter('?view=view-123'))
+    await waitFor(() => expect(viewsRequested).toBe(true))
+    await waitFor(() => expect(mockSetRange).toHaveBeenCalledWith('2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z'))
+    expect(mockAddFilter).toHaveBeenCalledWith('status', '404', 'include')
+    await waitFor(() => expect(onUrlUpdate).toHaveBeenCalled())
+    expect(onUrlUpdate.mock.calls.at(-1)![0].searchParams.get('view')).toBeNull()
   })
 })

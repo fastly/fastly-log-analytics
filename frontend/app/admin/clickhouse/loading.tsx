@@ -4,7 +4,7 @@ import { PageHeader } from '@/components/ui/page-header'
 import { Activity } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
-import { ClickHouseStatusNotice } from './_sections/ClickHouseStatusNotice'
+import { ClickHouseStatusNotice } from './_sections/ClickHouseAdminClient'
 
 export function ClickHousePanelFallback() {
   return (

@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException
 
-from backend.routers import _state_sync
 from backend.utils import router_utils
 from backend.utils.router_utils import require_fastly_token, resolve_fastly_token, stored_fastly_token
 
@@ -73,8 +72,8 @@ def test_sync_admin_state_skips_when_service_id_is_none():
     with the optional ``service_id_hint`` which may be None for
     cross-service alert mutations."""
     # Should not raise and should not even attempt to import state_sync.
-    _state_sync.sync_admin_state(None)
-    _state_sync.sync_admin_state("")  # empty string also skips
+    router_utils.sync_admin_state(None)
+    router_utils.sync_admin_state("")  # empty string also skips
 
 
 def test_sync_admin_state_calls_export_admin_state(monkeypatch):
@@ -88,7 +87,7 @@ def test_sync_admin_state_calls_export_admin_state(monkeypatch):
 
     monkeypatch.setattr(ss, "export_admin_state", fake_export)
 
-    _state_sync.sync_admin_state("svc-1")
+    router_utils.sync_admin_state("svc-1")
     assert calls == ["svc-1"]
 
 
@@ -104,7 +103,7 @@ def test_sync_admin_state_swallows_all_exceptions(monkeypatch):
     monkeypatch.setattr(ss, "export_admin_state", boom)
 
     # Must not raise
-    _state_sync.sync_admin_state("svc-1")
+    router_utils.sync_admin_state("svc-1")
 
 
 # ── query_errors decorator: exception → HTTPException mapping ───────────────

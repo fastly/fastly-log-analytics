@@ -41,9 +41,9 @@ from urllib.parse import urlsplit
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.lib.admin_tls import admin_origin, is_admin_url, validate_admin_tls_config  # noqa: E402
-from scripts.lib.cli import add_common_args  # noqa: E402
 from scripts.lib.environments import (  # noqa: E402
     ENVIRONMENT_SPECS,
+    add_common_args,
     load_dotenv,
     load_persisted_deploy_env,
     parse_iso_utc,

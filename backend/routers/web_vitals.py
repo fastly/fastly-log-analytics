@@ -29,16 +29,17 @@ import logging
 from fastapi import APIRouter, Request
 
 from backend.core import web_vitals_store
-from backend.models.common import OkResponse, WebVitalsPayload
+from backend.models.common import OkResponse, UxEventPayload, WebVitalsPayload
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.utils.date_utils import iso_z_now
 
 logger = logging.getLogger("backend.web_vitals")
+ux_logger = logging.getLogger("backend.ux_events")
 
-router = APIRouter(prefix="/api/web-vitals", tags=["web-vitals"], responses=DEFAULT_ERROR_RESPONSES)
+router = APIRouter(prefix="/api", responses=DEFAULT_ERROR_RESPONSES)
 
 
-@router.post("", response_model=OkResponse, response_model_exclude_unset=True)
+@router.post("/web-vitals", tags=["web-vitals"], response_model=OkResponse, response_model_exclude_unset=True)
 def report_web_vitals(payload: WebVitalsPayload, request: Request) -> dict:
     """Record one Web Vitals metric event. Returns ``{"ok": true}``.
 
@@ -82,5 +83,27 @@ def report_web_vitals(payload: WebVitalsPayload, request: Request) -> dict:
             "delta": payload.delta,
             "cohort": cohort,
         }
+    )
+    return {"ok": True}
+
+
+@router.post("/ux-events", tags=["ux-events"], response_model=OkResponse, response_model_exclude_unset=True)
+def report_ux_event(payload: UxEventPayload, request: Request) -> dict:
+    """Log one UX event. Returns ``{"ok": true}``.
+
+    Same structlog-extra shape as web_vitals so log slicing patterns
+    transfer (filter by cohort / pathname / event)."""
+    analyst_session = getattr(request.state, "analyst_session", None)
+    cohort = "analyst" if analyst_session is not None else "admin"
+
+    ux_logger.info(
+        "ux_event",
+        extra={
+            "ux_event": payload.event,
+            "ux_pathname": payload.pathname,
+            "ux_component_id": payload.component_id,
+            "ux_details": payload.details,
+            "ux_cohort": cohort,
+        },
     )
     return {"ok": True}

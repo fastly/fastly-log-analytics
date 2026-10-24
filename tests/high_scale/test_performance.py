@@ -447,7 +447,7 @@ from backend.high_scale.recovery import RecoveryReport
 
 @pytest.fixture
 def script(monkeypatch: pytest.MonkeyPatch):
-    from scripts import backfill_high_scale_performance as module
+    from scripts import backfill_high_scale as module
 
     service = SimpleNamespace(manifest_catalog=object(), archive=object(), client=MagicMock())
     registry = MagicMock()
@@ -472,7 +472,7 @@ def _run_backfill_script(script, monkeypatch, argv: list[str], *, complete: bool
 
     monkeypatch.setattr(script, "rebuild_performance_projections_from_fos", fake_rebuild)
     monkeypatch.setattr("sys.argv", ["backfill", *argv])
-    return script.main(), seen
+    return script.main_performance(), seen
 
 
 def test_until_caps_the_window_at_the_worker_deploy_time(script, monkeypatch, capsys) -> None:

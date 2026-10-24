@@ -5,23 +5,23 @@ import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { FilterValueCell } from '@/components/FilterValueCell'
 import { PopLabel } from '@/components/PopLabel'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
-import { ApproxBadge } from './ApproxBadge'
+import {
+  ApproxBadge,
+  type OriginIpHealth,
+  type OriginIpHealthRow,
+  type OriginPopLatency,
+  type OriginPopLatencyRow,
+  type OriginSlowUrlRow,
+  type OriginSlowUrls,
+  type OriginSummary,
+  type SectionQuery,
+} from './Aggregates'
 import { cn } from '@/lib/utils';
 import { formatBytes, formatCount } from '@/lib/format'
 import { columnHeader, msCell } from '@/lib/table-utils'
 import { Server, MapPin, Globe } from 'lucide-react'
 import { useActiveLogFields } from '@/hooks/useLogFieldsCatalog'
 import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
-import type {
-  OriginIpHealth,
-  OriginIpHealthRow,
-  OriginPopLatency,
-  OriginPopLatencyRow,
-  OriginSlowUrlRow,
-  OriginSlowUrls,
-  OriginSummary,
-  SectionQuery,
-} from './types'
 
 // Shared column scaffolding — every column header is the same dense
 // uppercase span, and requests/p50/p95 are byte-identical across the

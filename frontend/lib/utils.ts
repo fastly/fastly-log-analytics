@@ -64,3 +64,47 @@ export function keyByOccurrence<T>(items: readonly T[], label: (item: T) => stri
     return { key: n === 0 ? base : `${base}#${n}`, item }
   })
 }
+
+// Runtime guards for admin payloads whose generated schema is a free dict.
+// Callers narrow to a local shape only after the top-level container checks
+// out, so a malformed body degrades to the caller's fallback instead of
+// throwing deep inside render.
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v)
+}
+
+export function recordOrNull<T extends object>(v: T | null | undefined): T | null {
+  return isRecord(v) ? (v as T) : null
+}
+
+export function arrayOrEmpty<T>(v: readonly T[] | null | undefined): T[] {
+  return Array.isArray(v) ? [...v] : []
+}
+
+/** Narrow a plain string (e.g. a Select's value) to one member of a generated string-enum union. */
+export function oneOf<T extends string>(allowed: readonly T[], value: string | null | undefined): T | undefined {
+  return allowed.find((a) => a === value)
+}
+
+/**
+ * Client-IP-family filter columns.
+ *
+ * When PII masking is enabled for an analyst (invite `pii_policy.mask_ips`),
+ * these columns are non-filterable: display masking is response-side only, so
+ * letting an analyst filter by an exact IP would be a presence oracle (and a
+ * dead-end on the masked value anyway). The frontend hides the drill-down
+ * affordances for these; the real guarantee is the server-side lock in
+ * `backend/utils/remote_access.py` (`_PII_FORBIDDEN_FILTER_COLS`), which 403s
+ * any such filter. Keep this list in sync with that set.
+ *
+ * `oip` (origin / CDN shield IP) is intentionally NOT here — it's operator
+ * infra, not end-user PII, and the Origin IP-Health card depends on filtering
+ * by it.
+ */
+export const IP_FAMILY_FIELDS = ['ip', 'client_ip', 'ip_address', 'remote_addr'] as const
+
+/** True when `column` is a client-IP-family field that masking analysts may not filter on. */
+export function isIpFamilyField(column: string): boolean {
+  return (IP_FAMILY_FIELDS as readonly string[]).includes(column)
+}

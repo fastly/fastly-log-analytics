@@ -36,6 +36,9 @@ class _IcebergPackageProxy(_types.ModuleType):
             "__builtins__",
             "__all__",
             "_core",
+            "lake_info",
+            "rum_schema",
+            "sync",
         }
     )
 
@@ -86,6 +89,12 @@ from backend.core.iceberg._ducklake import (
 _proxy.__dict__["_ducklake_attach"] = _ducklake_attach
 _proxy.__dict__["ducklake_current_snapshot_id"] = ducklake_current_snapshot_id
 _proxy.__dict__["ducklake_table_name"] = ducklake_table_name
+_proxy.__dict__["lake_info"] = _proxy
+_proxy.__dict__["rum_schema"] = _proxy
+_proxy.__dict__["sync"] = _proxy
 _sys.modules[__name__] = _proxy
+_sys.modules[f"{__name__}.lake_info"] = _proxy
+_sys.modules[f"{__name__}.rum_schema"] = _proxy
+_sys.modules[f"{__name__}.sync"] = _proxy
 
 del _self, _proxy

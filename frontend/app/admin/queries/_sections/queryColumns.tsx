@@ -22,12 +22,16 @@ import { ChevronDown, ChevronRight, X } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { DataTableReadonly as DataTable } from '@/components/DataTable'
 
-import { durationColor, formatDurationMs, formatMemoryMb, kindBadgeVariant } from '../_helpers'
-import type {
-  ActiveOrPromotedRow,
-  ActiveRow,
-  GroupedCompletedRow,
+import {
+  durationColor,
+  formatDurationMs,
+  formatMemoryMb,
+  kindBadgeVariant,
+  type ActiveOrPromotedRow,
+  type ActiveRow,
+  type GroupedCompletedRow,
 } from '../_types'
 
 // ── Shared cell renderers ─────────────────────────────────────────────────
@@ -375,4 +379,83 @@ export function buildCompletedColumns(opts: {
     ),
   })
   return cols
+}
+
+export function ActiveTable({
+  rows,
+  onRowClick,
+  onKill,
+  cancellingQid,
+  onToggleGroup,
+}: {
+  rows: ActiveOrPromotedRow[]
+  onRowClick: (row: ActiveOrPromotedRow) => void
+  onKill: (row: ActiveRow) => void
+  cancellingQid: number | null
+  onToggleGroup: (runId: string) => void
+}) {
+  const showService = rows.some((r) => r.service_id !== null && r.service_id !== undefined)
+  const showPool = rows.some((r) => r.attribution.pool_slot !== null && r.attribution.pool_slot !== undefined)
+  const columns = React.useMemo(
+    () => buildActiveColumns({ onKill, cancellingQid, showService, showPool, onToggleGroup }),
+    [onKill, cancellingQid, showService, showPool, onToggleGroup],
+  )
+  return (
+    <DataTable<ActiveOrPromotedRow, unknown>
+      columns={columns}
+      data={rows}
+      onRowClick={onRowClick}
+      getRowClassName={activeRowClassName}
+      hideToolbar
+      showPagination={false}
+      emptyMessage="No active queries. Long-running queries will appear here in real time."
+      tableCaption="Active and just-finished queries"
+    />
+  )
+}
+
+function activeRowClassName(row: ActiveOrPromotedRow): string {
+  if (row._expandedChild) return 'bg-muted/30 border-l-2 border-l-muted-foreground/30'
+  if (row._completed) return 'opacity-60'
+  if (row.cancelled_at !== null) return 'opacity-50'
+  return 'bg-primary/5 border-l-2 border-l-primary/60'
+}
+
+export function CompletedTable({
+  rows,
+  onRowClick,
+  emptyMessage = 'No completed queries yet.',
+  initialSorting,
+  onToggleGroup,
+}: {
+  rows: GroupedCompletedRow[]
+  onRowClick: (row: GroupedCompletedRow) => void
+  emptyMessage?: string
+  initialSorting?: { id: string; desc: boolean }[]
+  onToggleGroup: (runId: string) => void
+}) {
+  const showMemory = rows.some((r) => r.peak_memory_mb !== null && r.peak_memory_mb !== undefined)
+  const showService = rows.some((r) => r.service_id !== null && r.service_id !== undefined)
+  const columns = React.useMemo(
+    () => buildCompletedColumns({ showMemory, showService, onToggleGroup }),
+    [showMemory, showService, onToggleGroup],
+  )
+  return (
+    <DataTable<GroupedCompletedRow, unknown>
+      columns={columns}
+      data={rows}
+      onRowClick={onRowClick}
+      getRowClassName={completedRowClassName}
+      hideToolbar
+      showPagination={rows.length > 50}
+      emptyMessage={emptyMessage}
+      initialSorting={initialSorting ?? [{ id: 'duration_ms', desc: true }]}
+      tableCaption="Completed queries"
+    />
+  )
+}
+
+function completedRowClassName(row: GroupedCompletedRow): string {
+  if (row._expandedChild) return 'bg-muted/30 border-l-2 border-l-muted-foreground/30'
+  return ''
 }

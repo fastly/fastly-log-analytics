@@ -13,7 +13,7 @@ import {
 import { StatCard } from '@/components/ui/stat-card'
 import { formatBytes, formatCompactCount, formatPctValue } from '@/lib/format'
 import type { components } from '@/types/api.generated'
-import { OffloadAndCacheCharts } from './OffloadAndCacheCharts'
+import { OffloadAndCacheCharts } from './CachingValueTab'
 
 type ValueData = components['schemas']['ValueSummaryResponse']
 

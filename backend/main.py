@@ -372,7 +372,7 @@ def _migrate_config_on_startup() -> None:
     import json
     from pathlib import Path
 
-    from backend.provision.declarative.config_migration import config_changed, migrate_config
+    from backend.provision.declarative.state import config_changed, migrate_config
 
     config_dir = Path(svcconfig.CONFIGS_DIR)
     if not config_dir.exists():
@@ -1042,8 +1042,6 @@ assert_middleware_order(app)
 from backend.models.errors import DEFAULT_ERROR_RESPONSES  # noqa: E402
 from backend.routers import (
     alerts,
-    assets,
-    cmcd,
     control_room,
     dashboard,
     high_scale,
@@ -1072,10 +1070,8 @@ app.include_router(alerts.router)
 app.include_router(origin.router)
 app.include_router(control_room.router)
 app.include_router(value.router)
-app.include_router(cmcd.router)
 app.include_router(rum.router)
 app.include_router(rum.asset_router)
-app.include_router(assets.router)
 
 from backend.routers import (
     admin,
@@ -1091,7 +1087,6 @@ from backend.routers import (
     share_oauth,
     sharing_domain,
     usage,
-    ux_events,
     web_vitals,
 )
 
@@ -1118,7 +1113,6 @@ from backend.routers import mock_idp  # noqa: E402
 if mock_idp.mock_idp_enabled():
     app.include_router(mock_idp.router)
 app.include_router(web_vitals.router)
-app.include_router(ux_events.router)
 
 
 # ── Health check ──────────────────────────────────────────────────────────────

@@ -14,7 +14,7 @@ from backend.core.clickhouse_manifest import PgManifest
 from backend.core.clickhouse_publication import full_rebuild, replay_unpublished
 from backend.core.clickhouse_schema import CLICKHOUSE_SCHEMA_VERSION, target_identity
 from backend.deps import require_admin
-from backend.models.admin_clickhouse import (
+from backend.models.admin_status import (
     ClickHouseReplayErrorResponse,
     ClickHouseReplayRequest,
     ClickHouseReplayResponse,

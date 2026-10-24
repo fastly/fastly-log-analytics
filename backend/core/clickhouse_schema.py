@@ -11,7 +11,7 @@ import logging
 
 from backend.core.clickhouse_client import ClickHouseClient, get_clickhouse_client
 from backend.core.metadata import pg_connection
-from backend.core.metadata.clickhouse_ddl import CLICKHOUSE_CONTROL_DDL
+from backend.core.metadata.pg_schema import CLICKHOUSE_CONTROL_DDL
 
 CLICKHOUSE_SCHEMA_VERSION = 2
 FACT_TYPES = (

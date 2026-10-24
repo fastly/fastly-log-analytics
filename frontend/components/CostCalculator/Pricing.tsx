@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { useServiceStore } from '@/stores/serviceStore'
 import { buildServiceHref } from '@/lib/navigation'
-import { Row, ReadOnlyValue } from './parts'
+import { Row, ReadOnlyValue } from './CostCalculator'
 import {
   type CalcState,
   type BillingZone,

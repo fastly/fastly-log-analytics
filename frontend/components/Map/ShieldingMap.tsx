@@ -18,7 +18,7 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog'
 import { CHART_COLORS } from '@/lib/chart-builders'
-import type { ShieldingRowInput } from '@/app/network/shielding-rows'
+import type { ShieldingRowInput } from '@/app/network/help-content'
 
 import { formatCount, formatCountMaybe } from '@/lib/format'
 import { keyByOccurrence } from '@/lib/utils'

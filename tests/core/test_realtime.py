@@ -307,8 +307,8 @@ def test_poller_fetch_without_credentials_skips_network(monkeypatch):
 @pytest.mark.asyncio
 async def test_poller_starts_and_suspends(monkeypatch):
     """Poller starts on ensure_polling, suspends after 2 idle cycles."""
+    from backend.core.realtime import RealtimeMetricsPublisher
     from backend.core.realtime import poller as poller_mod
-    from backend.core.realtime.publisher import RealtimeMetricsPublisher
 
     test_publisher = RealtimeMetricsPublisher()
     test_publisher.bind_loop(asyncio.get_running_loop())
@@ -352,8 +352,8 @@ async def test_cursor_advances(monkeypatch):
     """Cursor from RT response is used in subsequent polls."""
     import threading
 
+    from backend.core.realtime import RealtimeMetricsPublisher
     from backend.core.realtime import poller as poller_mod
-    from backend.core.realtime.publisher import RealtimeMetricsPublisher
 
     test_publisher = RealtimeMetricsPublisher()
     test_publisher.bind_loop(asyncio.get_running_loop())

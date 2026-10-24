@@ -9,8 +9,7 @@ import { cn } from "@/lib/utils";
 import { panelDialogContent } from "@/lib/panel-dialog";
 import type { ProvisionWizardProps } from "./types";
 import { useWizardState } from "./useWizardState";
-import { WizardHeader } from "./WizardHeader";
-import { WizardFooter } from "./WizardFooter";
+import { WizardHeader, WizardFooter, ResumeBanner } from "./WizardFooter";
 import { ModeStep } from "./steps/ModeStep";
 import { TokenStep } from "./steps/TokenStep";
 import { ServiceStep } from "./steps/ServiceStep";
@@ -24,7 +23,6 @@ import { NgwafStep } from "./steps/NgwafStep";
 import { FieldsStep } from "./steps/FieldsStep";
 import { ExecuteStep } from "./steps/ExecuteStep";
 import { TerraformStep } from "./steps/TerraformStep";
-import { ResumeBanner } from "./ResumeBanner";
 
 export function ProvisionWizard({ open, onOpenChange }: ProvisionWizardProps) {
   const s = useWizardState(open, onOpenChange);

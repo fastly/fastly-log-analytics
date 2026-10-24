@@ -8,9 +8,8 @@ from backend.deps import get_service_id
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.views import SavedView, SavedViewRecord, ViewSaveResponse
 from backend.repositories import views as repo
-from backend.routers._state_sync import sync_admin_state
 from backend.utils.auth import require_owned_row, require_service_in_scope
-from backend.utils.router_utils import require_service_id
+from backend.utils.router_utils import require_service_id, sync_admin_state
 
 router = APIRouter(prefix="/api/views", tags=["views"], responses=DEFAULT_ERROR_RESPONSES)
 

@@ -91,13 +91,7 @@ else
 fi
 
 # ── Refuse if backend is running ────────────────────────────────────────────
-RUNNING_PIDS="$(pgrep -f "$REPO_ROOT.*uvicorn" 2>/dev/null || true)"
-if [ -n "$RUNNING_PIDS" ]; then
-  fail "a local backend is running from this project (PIDs: $RUNNING_PIDS)"
-  echo "      stop it first so the restore is atomic:" >&2
-  echo "        ./run.sh --kill" >&2
-  exit 1
-fi
+require_local_backend_stopped "$REPO_ROOT" "the restore is atomic"
 
 # ── Confirm ─────────────────────────────────────────────────────────────────
 echo

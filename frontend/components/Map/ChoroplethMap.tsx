@@ -10,6 +10,7 @@ import countryCodes from '@/lib/country-codes.json'
 import { countryFill, NORMALIZE_COUNTRY, useMapResize } from '@/components/Map/shared'
 import { addCountryBaseLayer, createBaseMap, removeMapTabStops, updateCountryBaseLayerTheme } from '@/components/Map/baseLayers'
 import { formatCompactCount, resolveCountryName, formatCount } from '@/lib/format'
+export { MapPrewarm } from '@/components/PlotlyChart/PlotlyPrewarm'
 const alpha3ToAlpha2: Record<string, string> = {}
 Object.entries(countryCodes as Record<string, string>).forEach(([a2, a3]) => {
   alpha3ToAlpha2[a3.toUpperCase()] = a2.toUpperCase()

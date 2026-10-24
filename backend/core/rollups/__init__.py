@@ -41,6 +41,8 @@ symbol on the right-hand side of an existing
 
 from __future__ import annotations
 
+from . import network, origin_dims, perf_latency, security_dims
+
 # Re-exports — pull every public symbol up so callers continue to use
 # the flat ``backend.core.rollups.X`` path. Order doesn't matter; no
 # side-effect imports here.
@@ -110,25 +112,42 @@ from .hour_bundles import (
     _cleanup_per_field_after_bundle,
     bundle_hours,
 )
-from .network_health_geo import backfill_network_geo_bundles, build_network_geo_bundles
-from .network_health_heatmap import backfill_network_heatmap_bundles, build_network_heatmap_bundles
-from .network_quality import backfill_network_quality_bundles, build_network_quality_bundles
-from .network_rtt import backfill_network_rtt_bundles, build_network_rtt_bundles
-from .network_speed import backfill_network_speed_bundles, build_network_speed_bundles
-from .network_summary import backfill_network_summary_bundles, build_network_summary_bundles
+from .network import (
+    backfill_network_geo_bundles,
+    backfill_network_heatmap_bundles,
+    backfill_network_quality_bundles,
+    backfill_network_rtt_bundles,
+    backfill_network_speed_bundles,
+    backfill_network_summary_bundles,
+    backfill_pop_health_bundles,
+    build_network_geo_bundles,
+    build_network_heatmap_bundles,
+    build_network_quality_bundles,
+    build_network_rtt_bundles,
+    build_network_speed_bundles,
+    build_network_summary_bundles,
+    build_pop_health_bundles,
+)
 from .ngwaf_bots import (
     backfill_ngwaf_bots_bundles,
     backfill_ngwaf_bots_ts_bundles,
     build_ngwaf_bots_bundles,
     build_ngwaf_bots_ts_bundles,
 )
-from .origin_dims import backfill_origin_dims_bundles, build_origin_dims_bundles
+from .origin_dims import (
+    backfill_origin_dims_bundles,
+    backfill_origin_summary_bundles,
+    build_origin_dims_bundles,
+    build_origin_summary_bundles,
+)
 from .origin_latency_ts import backfill_origin_latency_ts_bundles, build_origin_latency_ts_bundles
-from .origin_summary import backfill_origin_summary_bundles, build_origin_summary_bundles
 from .overview import backfill_overview_bundles, build_overview_bundles
-from .perf_dims import backfill_perf_dims_bundles, build_perf_dims_bundles
-from .perf_latency import backfill_perf_latency_bundles, build_perf_latency_bundles
-from .pop_health import backfill_pop_health_bundles, build_pop_health_bundles
+from .perf_latency import (
+    backfill_perf_dims_bundles,
+    backfill_perf_latency_bundles,
+    build_perf_dims_bundles,
+    build_perf_latency_bundles,
+)
 from .recompute import (
     _run_per_field_copy,
     backfill_missing_hour_bundles,
@@ -137,17 +156,35 @@ from .recompute import (
     recompute_touched_hours,
 )
 from .rum import backfill_missing_rum_aggregates, recompute_rum_aggregates
-from .security_dims import backfill_security_dims_bundles, build_security_dims_bundles
-from .security_proxies import backfill_security_proxies_bundles, build_security_proxies_bundles
+from .security_dims import (
+    backfill_security_dims_bundles,
+    backfill_security_proxies_bundles,
+    backfill_verified_bots_ts_bundles,
+    build_security_dims_bundles,
+    build_security_proxies_bundles,
+    build_verified_bots_ts_bundles,
+)
 from .sessions import build_session_bundles
 from .slow_urls import backfill_slow_urls_bundles, build_slow_urls_bundles
 from .time_series import build_time_series_bundles
-from .verified_bots_ts import backfill_verified_bots_ts_bundles, build_verified_bots_ts_bundles
 from .wellknown_bots import (
     backfill_wellknown_bots_rollup,
     read_wellknown_bots_rollup,
     recompute_wellknown_bots_rollup,
 )
+
+# Back-compat submodule attribute aliases on the rollups package
+network_health_geo = network
+network_health_heatmap = network
+network_quality = network
+network_rtt = network
+network_speed = network
+network_summary = network
+pop_health = network
+origin_summary = origin_dims
+perf_dims = perf_latency
+security_proxies = security_dims
+verified_bots_ts = security_dims
 
 __all__ = [
     # Public writers

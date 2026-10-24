@@ -353,6 +353,25 @@ from backend.utils.date_utils import (  # noqa: E402
 )
 
 
+def _us_to_ms(val: Any, ndigits: int | None = None) -> float | None:
+    """Convert a microsecond value to milliseconds, or return None."""
+    if val is None:
+        return None
+    ms = float(val) / 1000.0
+    return round(ms, ndigits) if ndigits is not None else ms
+
+
+def _drop_temp_table(executor: Any, temp_table: str | None, label: str = "temp_cleanup") -> None:
+    """Drop a temporary DuckDB table, throttling any cleanup error logs."""
+    if not temp_table:
+        return
+    try:
+        executor.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
+    except Exception:
+        if log_once_per(f"{label}: DROP TABLE failed (ignored)", 60):
+            _logger.debug("%s: DROP TABLE failed (ignored)", label, exc_info=True)
+
+
 def _is_stale_view_error(e: Exception) -> bool:
     """Return True when the error indicates an Iceberg view that references
     a deleted buffer file.
@@ -713,11 +732,7 @@ class QueryRunner:
         self._shared_active_seed_fields = ()
         temps, self._shared_active_temps = self._shared_active_temps, None
         for _cols, _ws, _we, name in temps or []:
-            try:
-                self.execute(f'DROP TABLE IF EXISTS "{name}"')
-            except Exception:
-                if log_once_per("end_shared_active_hour_temps: DROP TABLE failed (ignored)", 60):
-                    _logger.debug("end_shared_active_hour_temps: DROP TABLE failed (ignored)", exc_info=True)
+            _drop_temp_table(self, name, "end_shared_active_hour_temps")
 
     def release_active_direct_temp(self, name: str) -> None:
         """Drop a direct active-hour temp unless the shared scope owns it.
@@ -727,11 +742,7 @@ class QueryRunner:
         """
         if self._shared_active_temps is not None and any(n == name for _c, _s, _e, n in self._shared_active_temps):
             return
-        try:
-            self.execute(f'DROP TABLE IF EXISTS "{name}"')
-        except Exception:
-            if log_once_per("release_active_direct_temp: DROP TABLE failed (ignored)", 60):
-                _logger.debug("release_active_direct_temp: DROP TABLE failed (ignored)", exc_info=True)
+        _drop_temp_table(self, name, "release_active_direct_temp")
 
     @property
     def debug_calls(self) -> list[dict]:
@@ -1200,22 +1211,14 @@ class QueryRunner:
         except duckdb.InterruptException:
             raise
         except Exception:
-            try:
-                self.con.execute(f'DROP TABLE IF EXISTS "{temp_name}"')
-            except Exception:
-                if log_once_per("_create_active_hour_temp_direct: DROP TABLE failed (ignored)", 60):
-                    _logger.debug("_create_active_hour_temp_direct: DROP TABLE failed (ignored)", exc_info=True)
+            _drop_temp_table(self.con, temp_name, "_create_active_hour_temp_direct")
             try:
                 self.con.execute(f"CREATE TEMP TABLE {temp_name} AS " + _create_sql("true"))
             except duckdb.InterruptException:
                 raise
             except Exception:
                 # Missing column, unreadable file, etc. Caller falls back.
-                try:
-                    self.con.execute(f'DROP TABLE IF EXISTS "{temp_name}"')
-                except Exception:
-                    if log_once_per("_create_active_hour_temp_direct: DROP TABLE failed (ignored)", 60):
-                        _logger.debug("_create_active_hour_temp_direct: DROP TABLE failed (ignored)", exc_info=True)
+                _drop_temp_table(self.con, temp_name, "_create_active_hour_temp_direct")
                 return None
         if self._shared_active_temps is not None:
             self._shared_active_temps.append((projected_set, live_start, live_end, temp_name))
@@ -1331,12 +1334,7 @@ class QueryRunner:
         try:
             yield name
         finally:
-            if name is not None:
-                try:
-                    self.execute(f'DROP TABLE IF EXISTS "{name}"')
-                except Exception:
-                    if log_once_per("temp_table: DROP TABLE failed (ignored)", 60):
-                        _logger.debug("temp_table: DROP TABLE failed (ignored)", exc_info=True)
+            _drop_temp_table(self, name, "temp_table")
 
     def execute_top_n_rollups(
         self,
@@ -2362,18 +2360,16 @@ class QueryRunner:
         if rows is None:
             return None
 
-        out_rows = []
-        for r in rows:
-            url, requests, p50_us, p95_us, p99_us = r[0], r[1], r[2], r[3], r[4]
-            out_rows.append(
-                {
-                    "url": url,
-                    "requests": int(requests or 0),
-                    "p50_ms": (float(p50_us) / 1000.0) if p50_us is not None else None,
-                    "p95_ms": (float(p95_us) / 1000.0) if p95_us is not None else None,
-                    "p99_ms": (float(p99_us) / 1000.0) if p99_us is not None else None,
-                }
-            )
+        out_rows = [
+            {
+                "url": r[0],
+                "requests": int(r[1] or 0),
+                "p50_ms": _us_to_ms(r[2]),
+                "p95_ms": _us_to_ms(r[3]),
+                "p99_ms": _us_to_ms(r[4]),
+            }
+            for r in rows
+        ]
         return {"has_data": len(out_rows) > 0, "rows": out_rows, "_approx": True}
 
     def _collect_rollup_paths(
@@ -2546,38 +2542,22 @@ class QueryRunner:
         # source schema lacks ottlb/obytes/etc., return NULL there so
         # the response shape matches the live path for this service.
         cols_set = set(actual_cols)
-        ottfb_p50_us = row[4]
-        if ottfb_p50_us is None:
+        if row[4] is None:
             return None
-        ottlb_p50_ms = (float(row[8]) / 1000.0) if (row[8] is not None and "ottlb" in cols_set) else None
-        ottlb_p95_ms = (float(row[9]) / 1000.0) if (row[9] is not None and "ottlb" in cols_set) else None
-        cdn_ovh_p50_ms = (
-            (float(row[10]) / 1000.0)
-            if (row[10] is not None and "elapsed" in cols_set and "ottlb" in cols_set)
-            else None
-        )
-        origin_error_rate = float(row[11]) if (row[11] is not None and "ost" in cols_set) else None
-        obytes_p50 = float(row[12]) if (row[12] is not None and "obytes" in cols_set) else None
-
-        # Match the dict shape :func:`backend.repositories.origin._shape_summary`
-        # returns on the has_data=True path — the FE consumers (Origin
-        # Aggregates card) read these keys verbatim and adding/dropping
-        # one would silently break the panel. ``requests`` is computed
-        # for ranking purposes but intentionally NOT in the response
-        # (the live path doesn't expose it either).
+        has_ottlb = "ottlb" in cols_set
         return {
             "has_data": True,
             "total_misses": int(row[1]) if row[1] is not None else None,
             "total_passes": int(row[2]) if row[2] is not None else None,
-            "ottfb_p50_ms": float(row[4]) / 1000.0,
-            "ottfb_p75_ms": (float(row[5]) / 1000.0) if row[5] is not None else None,
-            "ottfb_p95_ms": (float(row[6]) / 1000.0) if row[6] is not None else None,
-            "ottfb_p99_ms": (float(row[7]) / 1000.0) if row[7] is not None else None,
-            "ottlb_p50_ms": ottlb_p50_ms,
-            "ottlb_p95_ms": ottlb_p95_ms,
-            "cdn_overhead_p50_ms": cdn_ovh_p50_ms,
-            "origin_error_rate": origin_error_rate,
-            "obytes_p50": obytes_p50,
+            "ottfb_p50_ms": _us_to_ms(row[4]),
+            "ottfb_p75_ms": _us_to_ms(row[5]),
+            "ottfb_p95_ms": _us_to_ms(row[6]),
+            "ottfb_p99_ms": _us_to_ms(row[7]),
+            "ottlb_p50_ms": _us_to_ms(row[8]) if has_ottlb else None,
+            "ottlb_p95_ms": _us_to_ms(row[9]) if has_ottlb else None,
+            "cdn_overhead_p50_ms": _us_to_ms(row[10]) if (has_ottlb and "elapsed" in cols_set) else None,
+            "origin_error_rate": float(row[11]) if (row[11] is not None and "ost" in cols_set) else None,
+            "obytes_p50": float(row[12]) if (row[12] is not None and "obytes" in cols_set) else None,
             "_approx": True,
         }
 
@@ -2624,20 +2604,16 @@ class QueryRunner:
         if not rows:
             return None
 
-        # median_p95_ms + elevated flag computed exactly as the live/TEMP path
-        # (origin._origin_pop_latency_from_temp): p95 values are us here, so
-        # convert to ms first to keep the threshold math identical.
-        p95_ms_list = [(float(r[3]) / 1000.0) for r in rows if r[3] is not None]
-        valid_p95s = sorted(p95_ms_list)
+        valid_p95s = sorted(_us_to_ms(r[3]) for r in rows if r[3] is not None)  # type: ignore[type-var]
         median_p95 = valid_p95s[len(valid_p95s) // 2] if valid_p95s else 0
         out_rows = []
         for r in rows:
-            p95_ms = (float(r[3]) / 1000.0) if r[3] is not None else None
+            p95_ms = _us_to_ms(r[3])
             out_rows.append(
                 {
                     "pop": r[0],
                     "requests": int(r[1] or 0),
-                    "p50_ms": (float(r[2]) / 1000.0) if r[2] is not None else None,
+                    "p50_ms": _us_to_ms(r[2]),
                     "p95_ms": p95_ms,
                     "elevated": p95_ms is not None and median_p95 is not None and p95_ms > median_p95 * 2,
                 }
@@ -2700,8 +2676,8 @@ class QueryRunner:
             {
                 "oip": r[0],
                 "requests": int(r[1] or 0),
-                "p50_ms": (float(r[2]) / 1000.0) if r[2] is not None else None,
-                "p95_ms": (float(r[3]) / 1000.0) if r[3] is not None else None,
+                "p50_ms": _us_to_ms(r[2]),
+                "p95_ms": _us_to_ms(r[3]),
                 "error_pct": float(r[4]) if r[4] is not None else None,
             }
             for r in rows
@@ -2751,8 +2727,8 @@ class QueryRunner:
             {
                 "edge": r[0],
                 "requests": int(r[1] or 0),
-                "p50_ms": (float(r[2]) / 1000.0) if r[2] is not None else None,
-                "p95_ms": (float(r[3]) / 1000.0) if r[3] is not None else None,
+                "p50_ms": _us_to_ms(r[2]),
+                "p95_ms": _us_to_ms(r[3]),
             }
             for r in rows
         ]
@@ -3609,17 +3585,14 @@ class QueryRunner:
         if rows is None:
             return None
 
-        def _ms(v: Any) -> float | None:
-            return (float(v) / 1000.0) if v is not None else None
-
         out_rows = [
             {
                 "value": r[0],
                 "requests": int(r[1] or 0),
-                "avg_ms": _ms(r[2]),
-                "p50_ms": _ms(r[3]),
-                "p95_ms": _ms(r[4]),
-                "p99_ms": _ms(r[5]),
+                "avg_ms": _us_to_ms(r[2]),
+                "p50_ms": _us_to_ms(r[3]),
+                "p95_ms": _us_to_ms(r[4]),
+                "p99_ms": _us_to_ms(r[5]),
             }
             for r in rows
         ]

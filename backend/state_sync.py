@@ -266,7 +266,7 @@ def _cdn_get(source: dict, key: str) -> bytes:
     import urllib.parse
     import urllib.request
 
-    from backend.core.iceberg.lake_info import _safe_cdn_url
+    from backend.core.iceberg._core import _safe_cdn_url
     from backend.utils.telemetry import record_cdn_call
 
     # SSRF guard: ``cdn_url`` is user-supplied at provision time. Reject
@@ -368,7 +368,7 @@ def import_admin_state(service_id: str):
         # the source of truth, not whatever happens to be in FOS.
         if "custom_fields" in state:
             from backend.core import field_registry as _lf
-            from backend.provision.system_fields import (
+            from backend.provision.cmcd_fields import (
                 reconcile_system_custom_fields,
                 system_feature_flags,
             )

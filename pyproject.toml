@@ -464,10 +464,6 @@ ignore_imports = [
     # and bootstrap surfaces an admin helper via the bootstrap route.
     "backend.routers.admin_usage -> backend.routers.admin",
     "backend.routers.bootstrap -> backend.routers.admin",
-    # Saved-views ↔ alerts both rely on _state_sync (cross-tenant
-    # propagation helper; deliberately not a router).
-    "backend.routers.alerts -> backend.routers._state_sync",
-    "backend.routers.views -> backend.routers._state_sync",
     # Session scoring's admin variant + user variant share helpers.
     "backend.routers.session_scoring -> backend.routers.session_scoring_admin",
     "backend.routers.session_scoring_admin -> backend.routers.session_scoring",

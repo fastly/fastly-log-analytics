@@ -29,8 +29,7 @@ import { useAuditColumns } from './AuditColumns'
 import { FloatingOperationsDock } from './FloatingOperationsDock'
 import { QuickActionsBar } from './QuickActionsBar'
 import { CronTab } from './CronTab'
-import { ServiceHistoryTab } from './ServiceHistoryTab'
-import { IngestionTab } from './IngestionTab'
+import { ServiceHistoryTab, IngestionTab } from './SchemaTab'
 import { ControlledSSEModal as SSEModal } from '@/components/SSEModal'
 
 // Lazy-mount the heavy tab content. Cron + ServiceHistory + Ingestion

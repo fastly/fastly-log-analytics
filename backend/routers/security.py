@@ -19,7 +19,7 @@ from backend.models.security import (
 )
 from backend.repositories import security as repo
 from backend.utils.auth import mask_ips_for
-from backend.utils.router_utils import make_section_expander, query_errors
+from backend.utils.router_utils import make_section_expander, query_errors, run_cached_repo_endpoint
 
 router = APIRouter(prefix="/api/security", tags=["security"], responses=DEFAULT_ERROR_RESPONSES)
 
@@ -67,37 +67,25 @@ def security_aggregates(
 
         return hs_aggregates(high_scale_service, req, start_time, end_time, sections=sections, mask_ips=mask_ips)
 
-    _is_real_repo = getattr(repo.get_security_aggregates, "__module__", "") == "backend.repositories.security"
-    if _is_real_repo:
-        cached = repo.peek_security_aggregates(
-            src=ctx.source,
-            start_time=start_time,
-            end_time=end_time,
-            filters=req.filters,
-            bucket_seconds=req.bucket_seconds,
-            sections=sections,
-            mask_ips=mask_ips,
-        )
-        if cached is not None:
-            response.headers["Cache-Control"] = "private, max-age=30, stale-while-revalidate=120"
-            return SecurityAggregatesResponse.with_telemetry(**cached)
+    def _set_cache_header() -> None:
+        response.headers["Cache-Control"] = "private, max-age=30, stale-while-revalidate=120"
 
-    res = repo.get_security_aggregates(
-        con=ctx.con_or_factory(force_eager=not _is_real_repo),
-        src=ctx.source,
-        start_time=start_time,
-        end_time=end_time,
-        filters=req.filters,
-        bucket_seconds=req.bucket_seconds,
-        sections=sections,
-        mask_ips=mask_ips,
+    return run_cached_repo_endpoint(
+        ctx,
+        repo_module="backend.repositories.security",
+        get_fn=repo.get_security_aggregates,
+        peek_fn=repo.peek_security_aggregates,
+        kwargs={
+            "start_time": start_time,
+            "end_time": end_time,
+            "filters": req.filters,
+            "bucket_seconds": req.bucket_seconds,
+            "sections": sections,
+            "mask_ips": mask_ips,
+        },
+        wrap=lambda r: SecurityAggregatesResponse.with_telemetry(**r),
+        on_response=_set_cache_header,
     )
-    # 30-s edge cache + 120-s stale-while-revalidate. Aggregates are
-    # hourly-bucketed at minimum, so 30 s staleness is well inside
-    # what the UI already expects from the React Query layer. Range-
-    # tweak round-trips collapse from 3-14 s to near-zero.
-    response.headers["Cache-Control"] = "private, max-age=30, stale-while-revalidate=120"
-    return SecurityAggregatesResponse.with_telemetry(**res)
 
 
 @router.get("/bundle", response_model=SecurityAggregatesResponse)

@@ -10,22 +10,21 @@ from typing import Any
 import duckdb
 
 from backend.core.metric_expressions import sum_or_zero
-from backend.utils.log_throttle import log_once_per
 
 logger = logging.getLogger(__name__)
 
 from backend.core import duckdb as _db
 from backend.models.common import FiltersDict
-from backend.repositories._base import QueryRunner, SectionTimer, _safe_table
+from backend.repositories._base import QueryRunner, SectionTimer, _drop_temp_table, _safe_table
 from backend.repositories._sql import network as SQL
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
     bucket_time_to_minute,
+    coalesce,
     digest_cache_key,
     serialize_filters_for_key,
 )
-from backend.repositories.utils.single_flight import coalesce
 from backend.utils.countries import format_city_label
 
 
@@ -827,17 +826,12 @@ def get_health(
                 err = float(r[8]) if r[8] is not None else None
                 reqs = int(r[9])
                 hs = _health_score(None, None, pkt, None, err)
-
-                metro_code: int | None = None
-                if metro_raw is not None:
-                    try:
-                        metro_code = int(float(metro_raw))
-                    except (ValueError, TypeError):
-                        pass
-
-                display_city = city.title() if city else ""
-                if metro_code is not None and str(metro_code) in dma_map:
-                    display_city = dma_map[str(metro_code)]
+                metro_code = _parse_metro_code(metro_raw)
+                display_city = (
+                    dma_map[str(metro_code)]
+                    if metro_code is not None and str(metro_code) in dma_map
+                    else (city.title() if city else "")
+                )
 
                 map_by_bucket.setdefault(bucket, []).append(
                     {
@@ -873,19 +867,11 @@ def get_health(
                 pkt = float(r[5]) if r[5] is not None else None
                 err = float(r[6]) if r[6] is not None else None
                 hs = _health_score(None, None, pkt, None, err)
-
-                metro_code = None
-                if metro_raw is not None:
-                    try:
-                        metro_code = int(float(metro_raw))
-                    except (ValueError, TypeError):
-                        pass
-
-                if metro_code is not None and str(metro_code) in dma_map:
-                    city_name = dma_map[str(metro_code)]
-                    display = format_city_label(city_name, ctry, region)
-                else:
-                    display = format_city_label(city, ctry, region)
+                metro_code = _parse_metro_code(metro_raw)
+                city_for_label = (
+                    dma_map[str(metro_code)] if metro_code is not None and str(metro_code) in dma_map else city
+                )
+                display = format_city_label(city_for_label, ctry, region)
 
                 metro_leaderboard.append(
                     {
@@ -1085,11 +1071,30 @@ def get_health(
 
     finally:
         if temp_table is not None:
-            try:
-                get_runner().execute(f'DROP TABLE IF EXISTS "{temp_table}"')
-            except Exception:
-                if log_once_per("get_health: DROP TABLE failed (ignored)", 60):
-                    logger.debug("get_health: DROP TABLE failed (ignored)", exc_info=True)
+            _drop_temp_table(get_runner(), temp_table, "get_health")
+
+
+def _parse_metro_code(metro_raw: Any) -> int | None:
+    if metro_raw is None:
+        return None
+    try:
+        return int(float(metro_raw))
+    except (ValueError, TypeError):
+        return None
+
+
+def _empty_quality_payload(region_country: str, runner: QueryRunner) -> dict[str, Any]:
+    return {
+        "available": False,
+        "by_country": [],
+        "by_asn": [],
+        "by_region": [],
+        "region_country": region_country,
+        "by_pop": [],
+        "scatter": [],
+        "countries": [],
+        **runner.telemetry(),
+    }
 
 
 def get_quality(
@@ -1137,34 +1142,14 @@ def get_quality(
     timer.mark("get_schema_cols", _t)
 
     if not actual_cols or "tcp_rtt" not in actual_cols:
-        return {
-            "available": False,
-            "by_country": [],
-            "by_asn": [],
-            "by_region": [],
-            "region_country": region_country,
-            "by_pop": [],
-            "scatter": [],
-            "countries": [],
-            **get_runner().telemetry(),
-        }
+        return _empty_quality_payload(region_country, get_runner())
 
     params, where_clause = build_where_clause(start_time, end_time, filters, list(actual_cols), inline_params=True)
 
     try:
         get_runner().execute(f"SELECT 1 FROM {table_name} LIMIT 1")
     except duckdb.CatalogException:
-        return {
-            "available": False,
-            "by_country": [],
-            "by_asn": [],
-            "by_region": [],
-            "region_country": region_country,
-            "by_pop": [],
-            "scatter": [],
-            "countries": [],
-            **get_runner().telemetry(),
-        }
+        return _empty_quality_payload(region_country, get_runner())
 
     # ── Temp table optimization ──────────────────────────────────────────
     # Build a temp table containing only the required quality columns for
@@ -1271,11 +1256,7 @@ def get_quality(
 
     finally:
         if temp_table is not None:
-            try:
-                get_runner().execute(f'DROP TABLE IF EXISTS "{temp_table}"')
-            except Exception:
-                if log_once_per("get_quality: DROP TABLE failed (ignored)", 60):
-                    logger.debug("get_quality: DROP TABLE failed (ignored)", exc_info=True)
+            _drop_temp_table(get_runner(), temp_table, "get_quality")
 
 
 def get_transport_metrics(
@@ -1391,6 +1372,17 @@ def get_transport_metrics(
         logger.warning("Failed to query transport aggregates: %s", e)
         return default_resp
 
+    def _shape_proto_rows(proto_rows: list[tuple]) -> list[dict[str, Any]]:
+        sum_proto_reqs = sum(r[1] for r in proto_rows) or total_requests or 1
+        return [
+            {
+                "protocol": str(r[0]),
+                "requests": int(r[1]),
+                "share_pct": round(int(r[1]) * 100.0 / sum_proto_reqs, 2),
+            }
+            for r in proto_rows
+        ]
+
     protocol_distribution = []
     proto_col = "protocol" if "protocol" in actual_cols else ("proto" if "proto" in actual_cols else None)
     if proto_col:
@@ -1413,18 +1405,7 @@ def get_transport_metrics(
         try:
             proto_rows = get_runner().execute(proto_sql, params).fetchall()
             timer.mark("protocol_distribution", _t1)
-            sum_proto_reqs = sum(r[1] for r in proto_rows) or total_requests or 1
-            for r in proto_rows:
-                p_name = str(r[0])
-                p_cnt = int(r[1])
-                p_pct = round(p_cnt * 100.0 / sum_proto_reqs, 2)
-                protocol_distribution.append(
-                    {
-                        "protocol": p_name,
-                        "requests": p_cnt,
-                        "share_pct": p_pct,
-                    }
-                )
+            protocol_distribution = _shape_proto_rows(proto_rows)
         except Exception as e:
             logger.warning("Failed to query protocol distribution: %s", e)
     elif "transport" in actual_cols:
@@ -1441,15 +1422,7 @@ def get_transport_metrics(
         try:
             proto_rows = get_runner().execute(proto_sql, params).fetchall()
             timer.mark("protocol_distribution", _t1)
-            sum_proto_reqs = sum(r[1] for r in proto_rows) or total_requests or 1
-            for r in proto_rows:
-                protocol_distribution.append(
-                    {
-                        "protocol": str(r[0]),
-                        "requests": int(r[1]),
-                        "share_pct": round(int(r[1]) * 100.0 / sum_proto_reqs, 2),
-                    }
-                )
+            protocol_distribution = _shape_proto_rows(proto_rows)
         except Exception:
             logger.debug("get_transport_metrics: step failed (ignored)", exc_info=True)
 

@@ -590,7 +590,7 @@ class TestRollupsPerfDims:
             calls.append(set(hours))
             return len(hours)
 
-        with patch("backend.core.rollups.perf_dims.build_per_hour_bundles", side_effect=_spy_bphb):
+        with patch("backend.core.rollups.perf_latency.build_per_hour_bundles", side_effect=_spy_bphb):
             with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
                 n = perf_dims.backfill_perf_dims_bundles("svc-pd-bf", src)
 

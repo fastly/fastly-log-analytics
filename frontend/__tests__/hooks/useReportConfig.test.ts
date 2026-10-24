@@ -4,8 +4,9 @@
 import { renderHook, act } from '@testing-library/react'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useReportConfig } from '@/hooks/useReportConfig'
+import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
+import { useInsightsDefaults } from '@/hooks/useInsightsDefaults'
 
-// Mock state we can manipulate
 let mockState = {
   startTime: '',
   endTime: '',
@@ -17,6 +18,10 @@ vi.mock('@/stores/filterStore', () => {
   }
 })
 
+vi.mock('@/lib/api', () => ({
+  client: { GET: vi.fn(async () => ({ data: undefined })) },
+}))
+
 describe('useReportConfig', () => {
   beforeEach(() => {
     mockState = { startTime: '', endTime: '' }
@@ -25,7 +30,6 @@ describe('useReportConfig', () => {
   it('provides default configuration', () => {
     const { result } = renderHook(() => useReportConfig())
     expect(result.current.metric).toBe('requests')
-    // When dates are empty, span is 0, so 1 minute is invalid and it falls back to 1 second
     expect(result.current.chartInterval).toBe('1 second')
     expect(result.current.trend).toBe('off')
   })
@@ -39,7 +43,6 @@ describe('useReportConfig', () => {
 
     const { result } = renderHook(() => useReportConfig({ defaultInterval: '1 day' }))
 
-    // '1 day' is too large for a 12 hour window, fallback finds '1 minute'
     expect(result.current.config.validIntervals.has('1 day')).toBe(false)
     expect(result.current.chartInterval).toBe('1 minute')
   })
@@ -53,7 +56,6 @@ describe('useReportConfig', () => {
 
     const { result } = renderHook(() => useReportConfig({ defaultInterval: '1 hour' }))
 
-    // 30 min window falls back to '1 minute' because span <= 6 hours
     expect(result.current.config.validIntervals.has('1 hour')).toBe(false)
     expect(result.current.chartInterval).toBe('1 minute')
   })
@@ -68,8 +70,6 @@ describe('useReportConfig', () => {
     const { result } = renderHook(() => useReportConfig({ defaultInterval: '1 day' }))
 
     expect(result.current.config.validIntervals.has('1 day')).toBe(true)
-    // We should actually manually set it to see if it allows it, because auto-fallback might
-    // select something else since manualInterval is null initially.
     act(() => {
       result.current.setChartInterval('1 day')
     })
@@ -77,9 +77,6 @@ describe('useReportConfig', () => {
   })
 
   it('defaults to "1 hour" granularity for a 7-day window', () => {
-    // 7d view at 1d granularity = 7 bars, which is unreadable. The
-    // perf limit removes 1h only past 30d (spanHours > 720), so 7d
-    // through 30d all default to 1h.
     const now = new Date()
     const start = new Date(now.getTime() - 7 * 24 * 3600 * 1000).toISOString()
     const end = now.toISOString()
@@ -105,10 +102,6 @@ describe('useReportConfig', () => {
   })
 
   it('defaults to "1 hour" granularity for an exactly-24h window', () => {
-    // The usage/cost page sets defaultInterval="1 hour" — a 24h window
-    // with 1-minute bars is 1440 buckets, which is both visually noisy
-    // and expensive to render. The auto-pick must honor the page's
-    // intent at the 24h boundary, not fall through to '1 minute'.
     const now = new Date()
     const start = new Date(now.getTime() - 24 * 3600 * 1000).toISOString()
     const end = now.toISOString()
@@ -136,7 +129,6 @@ describe('useReportConfig', () => {
 
     expect(result.current.chartInterval).toBe('1 day')
 
-    // Shrink window to 6 hours
     const start6 = new Date(now.getTime() - 6 * 3600 * 1000).toISOString()
     act(() => {
       mockState = { startTime: start6, endTime: end }
@@ -144,7 +136,67 @@ describe('useReportConfig', () => {
     rerender()
 
     expect(result.current.config.validIntervals.has('1 day')).toBe(false)
-    // 6 hours exactly triggers the fallback to 1 minute
     expect(result.current.chartInterval).toBe('1 minute')
+  })
+})
+
+function hoursAgoIso(h: number): string {
+  return new Date(Date.now() - h * 3_600_000).toISOString()
+}
+
+function seedExtents(qc: ReturnType<typeof createTestQueryClient>, sid: string, earliestHoursAgo: number) {
+  qc.setQueryData(['log-extents', sid], {
+    earliest_log_at: hoursAgoIso(earliestHoursAgo),
+    latest_log_at: hoursAgoIso(0),
+  })
+}
+
+describe('useInsightsDefaults', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('adapts to ~2h of history → this hour vs the previous hour', () => {
+    const qc = createTestQueryClient({ queries: { gcTime: 0 } })
+    seedExtents(qc, 'svc-a', 2)
+    const { result } = renderHook(() => useInsightsDefaults('svc-a'), {
+      wrapper: makeQueryWrapper(qc),
+    })
+    expect(result.current.windowHours).toBe('1')
+    expect(result.current.baselineHours).toBe('1')
+  })
+
+  it('falls back to the static default when no service is active', () => {
+    const qc = createTestQueryClient({ queries: { gcTime: 0 } })
+    const { result } = renderHook(() => useInsightsDefaults(null), {
+      wrapper: makeQueryWrapper(qc),
+    })
+    expect(result.current.windowHours).toBe('24')
+    expect(result.current.baselineHours).toBe('168')
+  })
+
+  it('keeps an explicit user pick even when extents would suggest otherwise', () => {
+    const qc = createTestQueryClient({ queries: { gcTime: 0 } })
+    seedExtents(qc, 'svc-a', 2)
+    const { result } = renderHook(() => useInsightsDefaults('svc-a'), {
+      wrapper: makeQueryWrapper(qc),
+    })
+    act(() => result.current.setBaselineHours('720'))
+    expect(result.current.baselineHours).toBe('720')
+    expect(result.current.windowHours).toBe('1')
+  })
+
+  it('drops the override when the active service changes', () => {
+    const qc = createTestQueryClient({ queries: { gcTime: 0 } })
+    seedExtents(qc, 'svc-a', 2)
+    seedExtents(qc, 'svc-b', 240)
+    const { result, rerender } = renderHook(({ sid }) => useInsightsDefaults(sid), {
+      wrapper: makeQueryWrapper(qc),
+      initialProps: { sid: 'svc-a' },
+    })
+    act(() => result.current.setBaselineHours('720'))
+    expect(result.current.baselineHours).toBe('720')
+
+    rerender({ sid: 'svc-b' })
+    expect(result.current.windowHours).toBe('24')
+    expect(result.current.baselineHours).toBe('168')
   })
 })

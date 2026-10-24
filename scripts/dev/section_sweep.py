@@ -30,13 +30,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.lib.cache_sampling import sample_cache_pair
 from scripts.lib.section_measurements import (
     BUDGETS,
     active_filter_count,
     describe_response,
     distribution,
     rank_sections,
+    sample_cache_pair,
     visible_results_budget_ms,
 )
 
@@ -173,8 +173,7 @@ def _post(
     *,
     page_load_id: str,
 ) -> tuple[Any, float]:
-    from scripts.lib.admin_http import async_admin_json
-    from scripts.lib.admin_tls import is_admin_url
+    from scripts.lib.admin_tls import async_admin_json, is_admin_url
 
     if not is_admin_url(origin):
         raise ValueError("No exact-origin administrator TLS identity configured")

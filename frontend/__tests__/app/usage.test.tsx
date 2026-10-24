@@ -1,11 +1,14 @@
 import { screen, waitFor } from '@testing-library/react'
 import { expect, test, vi, beforeEach, afterEach } from 'vitest'
 import UsagePage from '@/app/usage/page'
+import SessionsPage from '@/app/sessions/page'
+import StreamingClient from '@/app/streaming/_sections/StreamingClient'
 import { createTestQueryClient, renderWithQuery } from '../helpers/query'
 import React from 'react'
 import { spyOnConsoleError } from '../helpers/page-smoke'
+import { CMCD_FIXTURE } from '../helpers/msw/handlers'
 
-// R-6: render-smoke for the usage analytics page.
+// Consolidated render-smoke + contract tests for the Usage, Sessions, and Streaming pages.
 
 vi.mock('@/stores/serviceStore', async () =>
   (await import('../helpers/page-smoke')).serviceStoreModuleMock({ accessLevel: 'read_write' }),
@@ -24,16 +27,28 @@ vi.mock('@/hooks/useIsDataReady', () => ({
 }))
 
 const mockGet = vi.fn()
+const mockPost = vi.fn()
 
 vi.mock('@/lib/api', () => ({
-  client: { GET: (path: string) => mockGet(path), POST: vi.fn().mockResolvedValue({ data: {} }), use: vi.fn() },
+  client: {
+    GET: (...args: unknown[]) => mockGet(...args),
+    POST: (...args: unknown[]) => mockPost(...args),
+    use: vi.fn(),
+  },
   extractApiError: vi.fn((e) => String(e)),
   getApiBase: vi.fn(() => 'http://test'),
 }))
 
+vi.mock('@/components/PlotlyChart', async () => (await import('../helpers/page-smoke')).plotlyChartModuleMock())
 vi.mock('@/components/PlotlyChart/PlotlyChart', async () => (await import('../helpers/page-smoke')).plotlyChartModuleMock())
 vi.mock('@/components/CostCalculator/CostCalculator', () => ({
   CostCalculator: () => <div data-testid="cost-calculator" />,
+}))
+vi.mock('@/app/sessions/_sections/ScoringControls', () => ({
+  ScoringControls: () => <div data-testid="scoring-controls" />,
+}))
+vi.mock('@/app/sessions/_sections/SessionsTable', () => ({
+  SessionsTable: () => <div data-testid="sessions-table" />,
 }))
 
 vi.mock('@/components/ReportLayout', async () =>
@@ -43,9 +58,13 @@ vi.mock('@/components/ReportLayout', async () =>
     activeServiceId: 'test-svc',
     filterPayload: {},
     intervalButtons: null,
-    bucketSeconds: 3600,
-    config: { effectiveInterval: '1 hour', interval: '1 hour' },
+    bucketSeconds: 300,
+    config: { effectiveInterval: '5 minutes', interval: '5 minutes' },
     setChartInterval: vi.fn(),
+    timezone: 'UTC',
+    data: { rows: [], total: 0 },
+    isLoading: false,
+    isFetching: false,
   }),
 )
 
@@ -56,6 +75,8 @@ let errorSpy: ReturnType<typeof spyOnConsoleError>
 beforeEach(() => {
   queryClient.clear()
   mockGet.mockReset()
+  mockPost.mockReset()
+  mockPost.mockResolvedValue({ data: { rows: [] } })
   errorSpy = spyOnConsoleError()
 })
 
@@ -81,4 +102,47 @@ test('UX-6: storage card shows an error (not "0.00 GB-hrs") and the cost is flag
   })
   expect(screen.queryByText(/GB-hrs/)).toBeNull()
   expect(screen.getByText(/Partial estimate — storage cost excluded\./)).toBeInTheDocument()
+})
+
+test('sessions page mounts and renders title', () => {
+  renderWithQuery(<SessionsPage />, { queryClient })
+  expect(screen.getByText('User Sessions')).toBeInTheDocument()
+  expect(errorSpy).not.toHaveBeenCalled()
+})
+
+test('requests /api/cmcd/aggregates with the page window and renders the headline cards', async () => {
+  mockPost.mockResolvedValue({ data: CMCD_FIXTURE } as never)
+  renderWithQuery(<StreamingClient />, { queryClient })
+
+  expect(await screen.findByText('Total Sessions')).toBeInTheDocument()
+  expect(screen.getByText('Peak Viewers')).toBeInTheDocument()
+  expect(screen.getByText('Rebuffer Rate')).toBeInTheDocument()
+  await waitFor(() => expect(screen.getByText('1,234')).toBeInTheDocument())
+  expect(screen.getByText('4.2%')).toBeInTheDocument()
+
+  expect(mockPost).toHaveBeenCalledWith(
+    '/api/cmcd/aggregates',
+    expect.objectContaining({
+      body: expect.objectContaining({ bucket_seconds: 300, top_n: 30, filters: {} }),
+    }),
+  )
+  expect(errorSpy).not.toHaveBeenCalled()
+})
+
+test('shows the CMCD-not-enabled state when the service has no CMCD data', async () => {
+  mockPost.mockResolvedValue({ data: { available: false, has_data: false } } as never)
+  renderWithQuery(<StreamingClient />, { queryClient })
+
+  expect(await screen.findByText('CMCD data not available')).toBeInTheDocument()
+  expect(screen.getByText(/CMCD collection is not enabled for this service/)).toBeInTheDocument()
+  expect(screen.queryByText('Total Sessions')).not.toBeInTheDocument()
+})
+
+test('a failed query leaves the page up with em-dash values instead of crashing', async () => {
+  mockPost.mockResolvedValue({ error: { detail: 'boom' } } as never)
+  renderWithQuery(<StreamingClient />, { queryClient })
+
+  expect(await screen.findByText('Total Sessions')).toBeInTheDocument()
+  await waitFor(() => expect(mockPost).toHaveBeenCalled())
+  expect(screen.getAllByText('—').length).toBeGreaterThan(0)
 })

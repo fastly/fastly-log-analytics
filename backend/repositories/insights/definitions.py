@@ -4,9 +4,8 @@ from typing import Any
 
 from backend.core.share_db.validation import mask_ip
 from backend.repositories._sql import insights as SQL
+from backend.repositories.insights import InsightCategory, InsightDefinition, registry
 from backend.utils.countries import format_city_label
-
-from .registry import InsightCategory, InsightDefinition, registry
 
 
 def _mask_ip_if_needed(ip: Any, context: dict) -> Any:

@@ -1256,7 +1256,7 @@ class TestTelemetryResponseMiddleware:
         assert response.status_code == 202
         assert response.content == body
         assert response.headers["content-type"] == "application/json"
-        assert response.headers["x-example"] == "kept"
+        assert response.headers["X-Example"] == "kept"
         assert int(response.headers["content-length"]) == len(body)
         assert len(response.headers.get_list("set-cookie")) == 2
 

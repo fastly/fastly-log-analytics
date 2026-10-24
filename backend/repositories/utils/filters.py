@@ -494,3 +494,8 @@ def build_geo_select_clause(actual_cols: list[str]) -> tuple[str, str, str, str]
         label_expr = f"concat({(', ' + _sep + ', ').join(sel_cols)})"
 
     return loc_cols, label_expr, country_sel, region_sel
+
+
+def calc_offset(page: int, limit: int) -> int:
+    """Compute SQL OFFSET from 1-based page number and page size."""
+    return (max(1, page) - 1) * limit

@@ -368,6 +368,25 @@ export function CorrelatorLeaderboard({
 // Overview tab (live data)
 // ---------------------------------------------------------------------------
 
+function makeRates(
+  rollingAvg: (extractor: (d: MetricsData) => number, windowSize: number) => number,
+  fn: (d: MetricsData) => number,
+) {
+  return [
+    { label: '5s', value: rollingAvg(fn, 5) },
+    { label: '30s', value: rollingAvg(fn, 30) },
+    { label: '60s', value: rollingAvg(fn, 60) },
+  ]
+}
+
+function SectionHeading({ children }: { children: React.ReactNode }) {
+  return (
+    <h3 className="text-sm font-semibold tracking-wide uppercase text-muted-foreground border-b pb-2">
+      {children}
+    </h3>
+  )
+}
+
 function OverviewTab({
   tick,
   rtDown,
@@ -387,12 +406,8 @@ function OverviewTab({
   errorsConnected: boolean
   timezone: string
 }) {
-
   const data = tick?.data
-  const rps = (d: MetricsData) => d.requests_per_second
-  const errRate = (d: MetricsData) => d.error_rate * 100
-  const hitRatio = (d: MetricsData) => d.cache_hit_ratio * 100
-  const bw = (d: MetricsData) => d.bandwidth_mbps
+  const rates = (fn: (d: MetricsData) => number) => makeRates(rollingAvg, fn)
 
   return (
     <div className="space-y-6">
@@ -402,7 +417,7 @@ function OverviewTab({
           title="Requests/s"
           value={data?.requests_per_second ?? 0}
           suffix=" req/s"
-          rates={[{ label: '5s', value: rollingAvg(rps, 5) }, { label: '30s', value: rollingAvg(rps, 30) }, { label: '60s', value: rollingAvg(rps, 60) }]}
+          rates={rates((d) => d.requests_per_second)}
           dimmed={rtDown}
           helpText="Total HTTP requests per second across all Fastly edge PoPs. Rolling averages smooth out per-second spikes — the 60s average is most representative of sustained load."
         />
@@ -410,7 +425,7 @@ function OverviewTab({
           title="Error Rate"
           value={Number(((data?.error_rate ?? 0) * 100).toFixed(2))}
           suffix="%"
-          rates={[{ label: '5s', value: rollingAvg(errRate, 5) }, { label: '30s', value: rollingAvg(errRate, 30) }, { label: '60s', value: rollingAvg(errRate, 60) }]}
+          rates={rates((d) => d.error_rate * 100)}
           thresholds={{ warn: 1, critical: 5, direction: 'above' }}
           dimmed={rtDown}
           helpText="Percentage of responses with 4xx or 5xx status codes. Card turns amber above 1% and red above 5%."
@@ -419,7 +434,7 @@ function OverviewTab({
           title="Cache Hit Ratio"
           value={Number(((data?.cache_hit_ratio ?? 0) * 100).toFixed(1))}
           suffix="%"
-          rates={[{ label: '5s', value: rollingAvg(hitRatio, 5) }, { label: '30s', value: rollingAvg(hitRatio, 30) }, { label: '60s', value: rollingAvg(hitRatio, 60) }]}
+          rates={rates((d) => d.cache_hit_ratio * 100)}
           thresholds={{ warn: 90, critical: 50, direction: 'below' }}
           dimmed={rtDown}
           helpText="Percentage of requests served from Fastly's edge cache without reaching your origin. Higher is better — below 90% warns, below 50% is critical. Drops may indicate cache-busting query strings, low TTLs, or new uncacheable content."
@@ -428,7 +443,7 @@ function OverviewTab({
           title="Bandwidth"
           value={Number((data?.bandwidth_mbps ?? 0).toFixed(2))}
           suffix=" Mbps"
-          rates={[{ label: '5s', value: rollingAvg(bw, 5) }, { label: '30s', value: rollingAvg(bw, 30) }, { label: '60s', value: rollingAvg(bw, 60) }]}
+          rates={rates((d) => d.bandwidth_mbps)}
           dimmed={rtDown}
           helpText="Total bandwidth delivered across all PoPs in megabits per second, including both cached and origin-fetched content."
         />
@@ -665,14 +680,7 @@ function PerformanceTab({
   rollingAvg: (extractor: (d: MetricsData) => number, windowSize: number) => number
 }) {
   const data = tick?.data
-  const hitRatio = (d: MetricsData) => d.cache_hit_ratio * 100
-  const originRps = (d: MetricsData) => d.origin_requests_per_second ?? 0
-  const passReq = (d: MetricsData) => d.pass_requests ?? 0
-  const offload = (d: MetricsData) => (d.origin_offload ?? 0) * 100
-  const collapseUsable = (d: MetricsData) => d.request_collapse_usable ?? 0
-  const collapseUnusable = (d: MetricsData) => d.request_collapse_unusable ?? 0
-  const segOrigin = (d: MetricsData) => d.segblock_origin_fetches ?? 0
-  const segShield = (d: MetricsData) => d.segblock_shield_fetches ?? 0
+  const rates = (fn: (d: MetricsData) => number) => makeRates(rollingAvg, fn)
   return (
     <div className="space-y-6">
       {rtDown && <RtDownBanner />}
@@ -681,7 +689,7 @@ function PerformanceTab({
           title="Cache Hit Ratio"
           value={Number(((data?.cache_hit_ratio ?? 0) * 100).toFixed(1))}
           suffix="%"
-          rates={[{ label: '5s', value: rollingAvg(hitRatio, 5) }, { label: '30s', value: rollingAvg(hitRatio, 30) }, { label: '60s', value: rollingAvg(hitRatio, 60) }]}
+          rates={rates((d) => d.cache_hit_ratio * 100)}
           thresholds={{ warn: 90, critical: 50, direction: 'below' }}
           dimmed={rtDown}
           helpText="Percentage of requests served from edge cache. Below 90% warns, below 50% is critical. Drops may indicate cache-busting query strings, low TTLs, or new uncacheable content."
@@ -690,7 +698,7 @@ function PerformanceTab({
           title="Origin Requests/s"
           value={data?.origin_requests_per_second ?? 0}
           suffix=" req/s"
-          rates={[{ label: '5s', value: rollingAvg(originRps, 5) }, { label: '30s', value: rollingAvg(originRps, 30) }, { label: '60s', value: rollingAvg(originRps, 60) }]}
+          rates={rates((d) => d.origin_requests_per_second ?? 0)}
           dimmed={rtDown}
           helpText="Requests that reached your origin server per second. Lower is better — it means more traffic is being served from Fastly's edge cache."
         />
@@ -699,7 +707,7 @@ function PerformanceTab({
           value={Number(((data?.origin_offload ?? 0) * 100).toFixed(1))}
           suffix="%"
           thresholds={{ warn: 80, critical: 50, direction: 'below' }}
-          rates={[{ label: '5s', value: rollingAvg(offload, 5) }, { label: '30s', value: rollingAvg(offload, 30) }, { label: '60s', value: rollingAvg(offload, 60) }]}
+          rates={rates((d) => (d.origin_offload ?? 0) * 100)}
           dimmed={rtDown}
           helpText="Percentage of total bandwidth served from cache vs. origin. Higher means less origin load and lower egress costs."
         />
@@ -707,7 +715,7 @@ function PerformanceTab({
           title="Pass-through"
           value={data?.pass_requests ?? 0}
           suffix=" req"
-          rates={[{ label: '5s', value: rollingAvg(passReq, 5) }, { label: '30s', value: rollingAvg(passReq, 30) }, { label: '60s', value: rollingAvg(passReq, 60) }]}
+          rates={rates((d) => d.pass_requests ?? 0)}
           dimmed={rtDown}
           helpText="Requests that bypassed cache entirely — either uncacheable content types or explicit VCL pass rules. Every pass request hits your origin."
         />
@@ -718,7 +726,7 @@ function PerformanceTab({
           title="Collapse Usable"
           value={data?.request_collapse_usable ?? 0}
           suffix=" req"
-          rates={[{ label: '5s', value: rollingAvg(collapseUsable, 5) }, { label: '30s', value: rollingAvg(collapseUsable, 30) }, { label: '60s', value: rollingAvg(collapseUsable, 60) }]}
+          rates={rates((d) => d.request_collapse_usable ?? 0)}
           dimmed={rtDown}
           helpText="Requests eligible for request collapsing — multiple identical requests are collapsed into a single origin fetch. Higher counts mean more origin load reduction."
         />
@@ -726,7 +734,7 @@ function PerformanceTab({
           title="Collapse Unusable"
           value={data?.request_collapse_unusable ?? 0}
           suffix=" req"
-          rates={[{ label: '5s', value: rollingAvg(collapseUnusable, 5) }, { label: '30s', value: rollingAvg(collapseUnusable, 30) }, { label: '60s', value: rollingAvg(collapseUnusable, 60) }]}
+          rates={rates((d) => d.request_collapse_unusable ?? 0)}
           dimmed={rtDown}
           helpText="Requests that could not be collapsed (e.g., different Vary headers, POST requests). High unusable counts may indicate opportunities to improve cache key design."
         />
@@ -734,7 +742,7 @@ function PerformanceTab({
           title="Segment Origin Fetches"
           value={data?.segblock_origin_fetches ?? 0}
           suffix=" req"
-          rates={[{ label: '5s', value: rollingAvg(segOrigin, 5) }, { label: '30s', value: rollingAvg(segOrigin, 30) }, { label: '60s', value: rollingAvg(segOrigin, 60) }]}
+          rates={rates((d) => d.segblock_origin_fetches ?? 0)}
           dimmed={rtDown}
           helpText="Segment block fetches to origin for large objects. Fastly breaks large files into segments cached independently, enabling range requests and parallel fetching."
         />
@@ -742,7 +750,7 @@ function PerformanceTab({
           title="Segment Shield Fetches"
           value={data?.segblock_shield_fetches ?? 0}
           suffix=" req"
-          rates={[{ label: '5s', value: rollingAvg(segShield, 5) }, { label: '30s', value: rollingAvg(segShield, 30) }, { label: '60s', value: rollingAvg(segShield, 60) }]}
+          rates={rates((d) => d.segblock_shield_fetches ?? 0)}
           dimmed={rtDown}
           helpText="Segment block fetches handled at the shield PoP. When these are high relative to origin fetches, segmented caching is working well."
         />
@@ -840,17 +848,7 @@ function OriginTab({
   rollingAvg: (extractor: (d: MetricsData) => number, windowSize: number) => number
 }) {
   const data = tick?.data
-  const originRps = (d: MetricsData) => d.origin_requests_per_second ?? 0
-  const originBw = (d: MetricsData) => d.origin_bandwidth_mbps ?? 0
-  const shieldReq = (d: MetricsData) => d.shield_requests ?? 0
-  const shieldHit = (d: MetricsData) => (d.shield_hit_ratio ?? 0) * 100
-  const originFetches = (d: MetricsData) => d.origin_fetches ?? 0
-  const originReval = (d: MetricsData) => d.origin_revalidations ?? 0
-  const originCacheFetches = (d: MetricsData) => d.origin_cache_fetches ?? 0
-  const shieldHitReq = (d: MetricsData) => d.shield_hit_requests ?? 0
-  const shieldMissReq = (d: MetricsData) => d.shield_miss_requests ?? 0
-  const shieldReval = (d: MetricsData) => d.shield_revalidations ?? 0
-  const shieldFetchBytes = (d: MetricsData) => (d.shield_fetch_body_bytes ?? 0) / 1_000_000
+  const rates = (fn: (d: MetricsData) => number) => makeRates(rollingAvg, fn)
   return (
     <div className="space-y-6">
       {rtDown && <RtDownBanner />}
@@ -859,7 +857,7 @@ function OriginTab({
           title="Origin Requests/s"
           value={data?.origin_requests_per_second ?? 0}
           suffix=" req/s"
-          rates={[{ label: '5s', value: rollingAvg(originRps, 5) }, { label: '30s', value: rollingAvg(originRps, 30) }, { label: '60s', value: rollingAvg(originRps, 60) }]}
+          rates={rates((d) => d.origin_requests_per_second ?? 0)}
           dimmed={rtDown}
           helpText="Requests per second reaching your origin server. Lower is better — cache and shield should absorb most traffic before it gets here."
         />
@@ -867,7 +865,7 @@ function OriginTab({
           title="Origin Bandwidth"
           value={Number((data?.origin_bandwidth_mbps ?? 0).toFixed(2))}
           suffix=" Mbps"
-          rates={[{ label: '5s', value: rollingAvg(originBw, 5) }, { label: '30s', value: rollingAvg(originBw, 30) }, { label: '60s', value: rollingAvg(originBw, 60) }]}
+          rates={rates((d) => d.origin_bandwidth_mbps ?? 0)}
           dimmed={rtDown}
           helpText="Bandwidth transferred from your origin server to Fastly. This is your origin egress — lower means better cache offload."
         />
@@ -875,7 +873,7 @@ function OriginTab({
           title="Shield Requests"
           value={data?.shield_requests ?? 0}
           suffix=" req"
-          rates={[{ label: '5s', value: rollingAvg(shieldReq, 5) }, { label: '30s', value: rollingAvg(shieldReq, 30) }, { label: '60s', value: rollingAvg(shieldReq, 60) }]}
+          rates={rates((d) => d.shield_requests ?? 0)}
           dimmed={rtDown}
           helpText="Requests routed through the shield PoP — a mid-tier cache between edge PoPs and your origin. The shield absorbs duplicate misses from multiple edge PoPs."
         />
@@ -883,7 +881,7 @@ function OriginTab({
           title="Shield Hit Ratio"
           value={Number(((data?.shield_hit_ratio ?? 0) * 100).toFixed(1))}
           suffix="%"
-          rates={[{ label: '5s', value: rollingAvg(shieldHit, 5) }, { label: '30s', value: rollingAvg(shieldHit, 30) }, { label: '60s', value: rollingAvg(shieldHit, 60) }]}
+          rates={rates((d) => (d.shield_hit_ratio ?? 0) * 100)}
           dimmed={rtDown}
           helpText="Percentage of shield requests served from the shield cache. Higher means fewer requests reach your origin."
         />
@@ -891,7 +889,7 @@ function OriginTab({
           title="Origin Fetches"
           value={data?.origin_fetches ?? 0}
           suffix=" req"
-          rates={[{ label: '5s', value: rollingAvg(originFetches, 5) }, { label: '30s', value: rollingAvg(originFetches, 30) }, { label: '60s', value: rollingAvg(originFetches, 60) }]}
+          rates={rates((d) => d.origin_fetches ?? 0)}
           dimmed={rtDown}
           helpText="Total fetch requests sent from Fastly to your origin. Includes full fetches, revalidations, and cache-eligible fetches. This is the broadest measure of origin load."
         />
@@ -899,7 +897,7 @@ function OriginTab({
           title="Revalidations"
           value={data?.origin_revalidations ?? 0}
           suffix=" req"
-          rates={[{ label: '5s', value: rollingAvg(originReval, 5) }, { label: '30s', value: rollingAvg(originReval, 30) }, { label: '60s', value: rollingAvg(originReval, 60) }]}
+          rates={rates((d) => d.origin_revalidations ?? 0)}
           dimmed={rtDown}
           helpText="Conditional requests (If-Modified-Since/If-None-Match) sent to your origin. When the origin returns 304 Not Modified, Fastly reuses the cached copy — cheaper than a full fetch."
         />
@@ -907,7 +905,7 @@ function OriginTab({
           title="Cache Fetches"
           value={data?.origin_cache_fetches ?? 0}
           suffix=" req"
-          rates={[{ label: '5s', value: rollingAvg(originCacheFetches, 5) }, { label: '30s', value: rollingAvg(originCacheFetches, 30) }, { label: '60s', value: rollingAvg(originCacheFetches, 60) }]}
+          rates={rates((d) => d.origin_cache_fetches ?? 0)}
           dimmed={rtDown}
           helpText="Origin fetches that returned a cacheable response (the response will be stored and served to future requests). A low ratio of cache fetches to total fetches may indicate your origin is sending too many no-cache/private headers."
         />
@@ -934,26 +932,26 @@ function OriginTab({
         ]}
       />
 
-      <h3 className="text-sm font-semibold tracking-wide uppercase text-muted-foreground border-b pb-2">Shield Efficiency</h3>
+      <SectionHeading>Shield Efficiency</SectionHeading>
       <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
         <RealtimeMetricCard
           title="Shield Hits"
           value={data?.shield_hit_requests ?? 0}
-          rates={[{ label: '5s', value: rollingAvg(shieldHitReq, 5) }, { label: '30s', value: rollingAvg(shieldHitReq, 30) }, { label: '60s', value: rollingAvg(shieldHitReq, 60) }]}
+          rates={rates((d) => d.shield_hit_requests ?? 0)}
           dimmed={rtDown}
           helpText="Requests served from the shield PoP's cache, preventing duplicate origin fetches from multiple edge PoPs."
         />
         <RealtimeMetricCard
           title="Shield Misses"
           value={data?.shield_miss_requests ?? 0}
-          rates={[{ label: '5s', value: rollingAvg(shieldMissReq, 5) }, { label: '30s', value: rollingAvg(shieldMissReq, 30) }, { label: '60s', value: rollingAvg(shieldMissReq, 60) }]}
+          rates={rates((d) => d.shield_miss_requests ?? 0)}
           dimmed={rtDown}
           helpText="Requests that missed the shield cache and were forwarded to your origin. Every shield miss becomes an origin fetch."
         />
         <RealtimeMetricCard
           title="Shield Revalidations"
           value={data?.shield_revalidations ?? 0}
-          rates={[{ label: '5s', value: rollingAvg(shieldReval, 5) }, { label: '30s', value: rollingAvg(shieldReval, 30) }, { label: '60s', value: rollingAvg(shieldReval, 60) }]}
+          rates={rates((d) => d.shield_revalidations ?? 0)}
           dimmed={rtDown}
           helpText="Conditional requests at the shield tier — the shield checks with origin whether stale content is still valid. A 304 response avoids transferring the full object."
         />
@@ -961,7 +959,7 @@ function OriginTab({
           title="Shield Fetch Bytes"
           value={Number(((data?.shield_fetch_body_bytes ?? 0) / 1_000_000).toFixed(2))}
           suffix=" MB"
-          rates={[{ label: '5s', value: rollingAvg(shieldFetchBytes, 5) }, { label: '30s', value: rollingAvg(shieldFetchBytes, 30) }, { label: '60s', value: rollingAvg(shieldFetchBytes, 60) }]}
+          rates={rates((d) => (d.shield_fetch_body_bytes ?? 0) / 1_000_000)}
           dimmed={rtDown}
           helpText="Total bytes fetched through the shield tier from origin. This represents the bandwidth your origin actually serves — compare against total edge bandwidth to measure offload efficiency."
         />
@@ -1001,10 +999,7 @@ function SecurityTab({
 }) {
   const data = tick?.data
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
-  const wafBlocked = (d: MetricsData) => d.waf_blocked ?? 0
-  const wafLogged = (d: MetricsData) => d.waf_logged ?? 0
-  const s4xx = (d: MetricsData) => d.status_breakdown?.status_4xx ?? 0
-  const s5xx = (d: MetricsData) => d.status_breakdown?.status_5xx ?? 0
+  const rates = (fn: (d: MetricsData) => number) => makeRates(rollingAvg, fn)
 
   const issued = data?.bot_challenges_issued ?? 0
   const succeeded = data?.bot_challenges_succeeded ?? 0
@@ -1019,7 +1014,7 @@ function SecurityTab({
           title="WAF Blocked"
           value={data?.waf_blocked ?? 0}
           suffix=" req"
-          rates={[{ label: '5s', value: rollingAvg(wafBlocked, 5) }, { label: '30s', value: rollingAvg(wafBlocked, 30) }, { label: '60s', value: rollingAvg(wafBlocked, 60) }]}
+          rates={rates((d) => d.waf_blocked ?? 0)}
           dimmed={rtDown}
           helpText="Requests blocked by the Web Application Firewall. These matched a WAF rule configured to block — the request never reached your origin."
         />
@@ -1027,7 +1022,7 @@ function SecurityTab({
           title="WAF Logged"
           value={data?.waf_logged ?? 0}
           suffix=" req"
-          rates={[{ label: '5s', value: rollingAvg(wafLogged, 5) }, { label: '30s', value: rollingAvg(wafLogged, 30) }, { label: '60s', value: rollingAvg(wafLogged, 60) }]}
+          rates={rates((d) => d.waf_logged ?? 0)}
           dimmed={rtDown}
           helpText="Requests that triggered a WAF rule in logging mode — suspicious but allowed through. Use logged events to tune rules before switching them to block mode."
         />
@@ -1035,7 +1030,7 @@ function SecurityTab({
           title="4xx Responses"
           value={data?.status_breakdown?.status_4xx ?? 0}
           suffix=" req"
-          rates={[{ label: '5s', value: rollingAvg(s4xx, 5) }, { label: '30s', value: rollingAvg(s4xx, 30) }, { label: '60s', value: rollingAvg(s4xx, 60) }]}
+          rates={rates((d) => d.status_breakdown?.status_4xx ?? 0)}
           dimmed={rtDown}
           helpText="Client error responses (400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found, 429 Rate Limited). Spikes may indicate scanning activity, broken links, or auth issues."
         />
@@ -1043,7 +1038,7 @@ function SecurityTab({
           title="5xx Responses"
           value={data?.status_breakdown?.status_5xx ?? 0}
           suffix=" req"
-          rates={[{ label: '5s', value: rollingAvg(s5xx, 5) }, { label: '30s', value: rollingAvg(s5xx, 30) }, { label: '60s', value: rollingAvg(s5xx, 60) }]}
+          rates={rates((d) => d.status_breakdown?.status_5xx ?? 0)}
           thresholds={{ warn: 1, critical: 10, direction: 'above' }}
           dimmed={rtDown}
           helpText="Server error responses. 502/503 typically indicate origin unreachable or overloaded. 500 indicates an application error. Any sustained 5xx traffic warrants immediate investigation."
@@ -1072,7 +1067,7 @@ function SecurityTab({
         />
       </div>
 
-      <h3 className="text-sm font-semibold tracking-wide uppercase text-muted-foreground border-b pb-2">Bot Challenge Funnel</h3>
+      <SectionHeading>Bot Challenge Funnel</SectionHeading>
       <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
         <RealtimeMetricCard title="Challenges Issued" value={issued} suffix=" req" dimmed={rtDown} helpText="Number of bot challenges (CAPTCHAs, JS challenges) issued to suspicious clients. High counts indicate active bot pressure." />
         <RealtimeMetricCard title="Challenges Passed" value={succeeded} suffix=" req" dimmed={rtDown} helpText="Clients that successfully completed the challenge — likely legitimate users or sophisticated bots." />
@@ -1097,7 +1092,7 @@ function SecurityTab({
         ]}
       />
 
-      <h3 className="text-sm font-semibold tracking-wide uppercase text-muted-foreground border-b pb-2">DDoS Protection</h3>
+      <SectionHeading>DDoS Protection</SectionHeading>
       <div className="grid gap-6 md:grid-cols-2">
         <RealtimeMetricCard title="DDoS Detected" value={data?.ddos_detect ?? 0} suffix=" req" dimmed={rtDown} helpText="Requests classified as distributed denial-of-service by Fastly's automatic DDoS protection. Detection is always on — no configuration required." />
         <RealtimeMetricCard title="DDoS Mitigated" value={data?.ddos_mitigate ?? 0} suffix=" req" dimmed={rtDown} helpText="DDoS requests that were actively mitigated (blackholed, tarpitted, closed, or downgraded). The gap between detected and mitigated indicates requests still under analysis." />
@@ -1115,7 +1110,7 @@ function SecurityTab({
         ]}
       />
 
-      <h3 className="text-sm font-semibold tracking-wide uppercase text-muted-foreground border-b pb-2">WAF Signal Classification</h3>
+      <SectionHeading>WAF Signal Classification</SectionHeading>
       <Card>
         <CardContent className="pt-4">
           <CorrelatorLeaderboard dimension="waf_sig" serviceId={activeServiceId} limit={5} />
@@ -1148,9 +1143,7 @@ function NetworkTab({
   const degradedCount = data?.degraded_pops?.length ?? 0
   const popCount = data?.pop_count ?? 0
   const healthyCount = popCount - degradedCount
-  const pops = (d: MetricsData) => d.pop_count ?? 0
-  const healthy = (d: MetricsData) => (d.pop_count ?? 0) - (d.degraded_pops?.length ?? 0)
-  const degraded = (d: MetricsData) => d.degraded_pops?.length ?? 0
+  const rates = (fn: (d: MetricsData) => number) => makeRates(rollingAvg, fn)
   return (
     <div className="space-y-6">
       {rtDown && <RtDownBanner />}
@@ -1158,14 +1151,14 @@ function NetworkTab({
         <RealtimeMetricCard
           title="Active PoPs"
           value={popCount}
-          rates={[{ label: '5s', value: rollingAvg(pops, 5) }, { label: '30s', value: rollingAvg(pops, 30) }, { label: '60s', value: rollingAvg(pops, 60) }]}
+          rates={rates((d) => d.pop_count ?? 0)}
           dimmed={rtDown}
           helpText="Number of Fastly Points of Presence actively serving traffic for this service. Each PoP is a data center location worldwide."
         />
         <RealtimeMetricCard
           title="Healthy PoPs"
           value={healthyCount}
-          rates={[{ label: '5s', value: rollingAvg(healthy, 5) }, { label: '30s', value: rollingAvg(healthy, 30) }, { label: '60s', value: rollingAvg(healthy, 60) }]}
+          rates={rates((d) => (d.pop_count ?? 0) - (d.degraded_pops?.length ?? 0))}
           dimmed={rtDown}
           helpText="PoPs with error rates below the degradation threshold. A sudden drop may indicate a regional issue."
         />
@@ -1173,7 +1166,7 @@ function NetworkTab({
           title="Degraded PoPs"
           value={degradedCount}
           thresholds={{ warn: 1, critical: 3, direction: 'above' }}
-          rates={[{ label: '5s', value: rollingAvg(degraded, 5) }, { label: '30s', value: rollingAvg(degraded, 30) }, { label: '60s', value: rollingAvg(degraded, 60) }]}
+          rates={rates((d) => d.degraded_pops?.length ?? 0)}
           dimmed={rtDown}
           helpText="PoPs with elevated error rates. Low-traffic PoPs may appear degraded during traffic lulls."
         />
@@ -1195,45 +1188,32 @@ function NetworkTab({
         ]}
       />
 
-      <h3 className="text-sm font-semibold tracking-wide uppercase text-muted-foreground border-b pb-2">Traffic Distribution</h3>
+      <SectionHeading>Traffic Distribution</SectionHeading>
       <Card>
         <CardContent className="pt-4">
           <PopTrafficMap allPops={data?.all_pops ?? {}} className="h-[420px]" />
         </CardContent>
       </Card>
 
-      <h3 className="text-sm font-semibold tracking-wide uppercase text-muted-foreground border-b pb-2">Protocol Adoption</h3>
+      <SectionHeading>Protocol Adoption</SectionHeading>
       <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-5">
-        <RealtimeMetricCard
-          title="HTTP/2"
-          value={Number((data?.h2_pct ?? 0).toFixed(1))}
-          suffix="%"
-          dimmed={rtDown}
-        />
-        <RealtimeMetricCard
-          title="HTTP/3"
-          value={Number((data?.h3_pct ?? 0).toFixed(1))}
-          suffix="%"
-          dimmed={rtDown}
-        />
-        <RealtimeMetricCard
-          title="IPv6"
-          value={Number((data?.ipv6_pct ?? 0).toFixed(1))}
-          suffix="%"
-          dimmed={rtDown}
-        />
-        <RealtimeMetricCard
-          title="TLS 1.2"
-          value={Number((data?.tls12_pct ?? 0).toFixed(1))}
-          suffix="%"
-          dimmed={rtDown}
-        />
-        <RealtimeMetricCard
-          title="TLS 1.3"
-          value={Number((data?.tls13_pct ?? 0).toFixed(1))}
-          suffix="%"
-          dimmed={rtDown}
-        />
+        {(
+          [
+            ['HTTP/2', data?.h2_pct],
+            ['HTTP/3', data?.h3_pct],
+            ['IPv6', data?.ipv6_pct],
+            ['TLS 1.2', data?.tls12_pct],
+            ['TLS 1.3', data?.tls13_pct],
+          ] as const
+        ).map(([title, pct]) => (
+          <RealtimeMetricCard
+            key={title}
+            title={title}
+            value={Number((pct ?? 0).toFixed(1))}
+            suffix="%"
+            dimmed={rtDown}
+          />
+        ))}
       </div>
       <RealtimeChart
         title="Protocol Distribution"
@@ -1271,11 +1251,7 @@ function AdminHealthTab({
 }) {
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const data = tick?.data
-  const pops = (d: MetricsData) => d.pop_count ?? 0
-  const degraded = (d: MetricsData) => d.degraded_pops?.length ?? 0
-  const computeExec = (d: MetricsData) => d.compute_exec_time_ms ?? 0
-  const computeReq = (d: MetricsData) => d.compute_req_time_ms ?? 0
-  const restarts = (d: MetricsData) => d.restarts ?? 0
+  const rates = (fn: (d: MetricsData) => number) => makeRates(rollingAvg, fn)
   return (
     <div className="space-y-6">
       {rtDown && <RtDownBanner />}
@@ -1295,26 +1271,26 @@ function AdminHealthTab({
         <RealtimeMetricCard
           title="Active PoPs"
           value={data?.pop_count ?? 0}
-          rates={[{ label: '5s', value: rollingAvg(pops, 5) }, { label: '30s', value: rollingAvg(pops, 30) }, { label: '60s', value: rollingAvg(pops, 60) }]}
+          rates={rates((d) => d.pop_count ?? 0)}
           dimmed={rtDown}
         />
         <RealtimeMetricCard
           title="Degraded PoPs"
           value={data?.degraded_pops?.length ?? 0}
           thresholds={{ warn: 1, critical: 3, direction: 'above' }}
-          rates={[{ label: '5s', value: rollingAvg(degraded, 5) }, { label: '30s', value: rollingAvg(degraded, 30) }, { label: '60s', value: rollingAvg(degraded, 60) }]}
+          rates={rates((d) => d.degraded_pops?.length ?? 0)}
           dimmed={rtDown}
         />
       </div>
 
-      <h3 className="text-sm font-semibold tracking-wide uppercase text-muted-foreground border-b pb-2">Scorer Health (Compute@Edge)</h3>
+      <SectionHeading>Scorer Health (Compute@Edge)</SectionHeading>
       <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
         <RealtimeMetricCard
           title="Execution Time"
           value={Number((data?.compute_exec_time_ms ?? 0).toFixed(1))}
           suffix=" ms"
           thresholds={{ warn: 50, critical: 200, direction: 'above' }}
-          rates={[{ label: '5s', value: rollingAvg(computeExec, 5) }, { label: '30s', value: rollingAvg(computeExec, 30) }, { label: '60s', value: rollingAvg(computeExec, 60) }]}
+          rates={rates((d) => d.compute_exec_time_ms ?? 0)}
           dimmed={rtDown}
           helpText="Compute@Edge Wasm execution time (CPU-only, excludes I/O waits). The scorer is cold on every request — watch for execution time creep after code changes."
         />
@@ -1323,7 +1299,7 @@ function AdminHealthTab({
           value={Number((data?.compute_req_time_ms ?? 0).toFixed(1))}
           suffix=" ms"
           thresholds={{ warn: 100, critical: 500, direction: 'above' }}
-          rates={[{ label: '5s', value: rollingAvg(computeReq, 5) }, { label: '30s', value: rollingAvg(computeReq, 30) }, { label: '60s', value: rollingAvg(computeReq, 60) }]}
+          rates={rates((d) => d.compute_req_time_ms ?? 0)}
           dimmed={rtDown}
           helpText="Total Compute@Edge request time including I/O (backend fetches, KV lookups). The gap between this and execution time is I/O wait."
         />
@@ -1381,9 +1357,9 @@ function AdminHealthTab({
         />
       </div>
 
-      <h3 className="text-sm font-semibold tracking-wide uppercase text-muted-foreground border-b pb-2">VCL Execution</h3>
+      <SectionHeading>VCL Execution</SectionHeading>
       <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-5">
-        <RealtimeMetricCard title="Restarts" value={data?.restarts ?? 0} suffix="/s" rates={[{ label: '5s', value: rollingAvg(restarts, 5) }, { label: '30s', value: rollingAvg(restarts, 30) }, { label: '60s', value: rollingAvg(restarts, 60) }]} thresholds={{ warn: 1, critical: 10, direction: 'above' }} dimmed={rtDown} helpText="VCL restart count per second. Restarts re-enter vcl_recv with modified state — used for routing fallbacks but expensive. High rates indicate a misconfigured restart loop." />
+        <RealtimeMetricCard title="Restarts" value={data?.restarts ?? 0} suffix="/s" rates={rates((d) => d.restarts ?? 0)} thresholds={{ warn: 1, critical: 10, direction: 'above' }} dimmed={rtDown} helpText="VCL restart count per second. Restarts re-enter vcl_recv with modified state — used for routing fallbacks but expensive. High rates indicate a misconfigured restart loop." />
         <RealtimeMetricCard title="vcl_recv" value={Number((data?.vcl_recv_time_ms ?? 0).toFixed(1))} suffix=" ms" dimmed={rtDown} helpText="Time in vcl_recv — request routing, ACL checks, header manipulation. High values may indicate complex routing logic or excessive table lookups." />
         <RealtimeMetricCard title="vcl_fetch" value={Number((data?.vcl_fetch_time_ms ?? 0).toFixed(1))} suffix=" ms" dimmed={rtDown} helpText="Time in vcl_fetch — origin response processing, cache TTL setting, header rewriting. Only runs on cache misses." />
         <RealtimeMetricCard title="vcl_deliver" value={Number((data?.vcl_deliver_time_ms ?? 0).toFixed(1))} suffix=" ms" dimmed={rtDown} helpText="Time in vcl_deliver — final response modification before sending to the client. Runs on every request (hits and misses)." />

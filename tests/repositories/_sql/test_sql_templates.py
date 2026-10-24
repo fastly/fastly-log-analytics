@@ -9,7 +9,7 @@ from backend.repositories._sql import query as query_sql
 from backend.repositories._sql import security as security_sql
 from backend.repositories._sql import sessions as sessions_sql
 from backend.repositories._sql import usage as usage_sql
-from backend.repositories.insights.registry import registry
+from backend.repositories.insights import registry
 
 # ── From test_alerts.py ──
 

@@ -4,8 +4,7 @@ import React, { useRef, useEffect, useState } from 'react'
 import dynamic from 'next/dynamic'
 import { useTheme } from 'next-themes'
 
-import { ChartA11yTable } from './ChartA11yTable'
-import { tracesToTable } from './tracesToTable'
+import { keyByOccurrence } from '@/lib/utils'
 import type {
   PlotlyConfig,
   PlotlyFigure,
@@ -14,6 +13,202 @@ import type {
   PlotlyRelayoutEvent,
   PlotlyTrace,
 } from '@/types/plotly'
+
+// ─── tracesToTable ──────────────────────────────────────────────────────────
+
+export interface TableShape {
+  /** Optional caption text. Falls back to "Chart data". */
+  title: string
+  /** Column headers, length = each row's length. */
+  columns: string[]
+  /** Each row is a flat list of strings/numbers, length === columns.length. */
+  rows: (string | number)[][]
+  /** True when the helper couldn't extract a meaningful table from the
+   * input (unsupported trace mix, empty data, etc.). Caller may choose
+   * to render a "{N} data points" fallback. */
+  empty: boolean
+  /** When the row list was capped for size, the original (pre-cap) row
+   * count; undefined when the table is complete. The renderer surfaces
+   * this so a screen-reader user knows the table is partial. */
+  truncatedFrom?: number
+}
+
+// Backstop cap on the screen-reader companion table. A flat table beyond
+// this many rows is effectively unnavigable by assistive tech and just
+// bloats the (hidden) DOM; ordinary time-series charts sit far below it.
+// Dense 2-D traces (heatmaps) are skipped entirely before this applies.
+const MAX_A11Y_ROWS = 500
+
+function capRows(rows: (string | number)[][]): {
+  rows: (string | number)[][]
+  truncatedFrom?: number
+} {
+  if (rows.length > MAX_A11Y_ROWS) {
+    return { rows: rows.slice(0, MAX_A11Y_ROWS), truncatedFrom: rows.length }
+  }
+  return { rows }
+}
+
+/**
+ * Convert Plotly traces to a flat table.
+ *
+ * Supported shapes:
+ *   - line / bar / scatter: each trace has `{x, y, name?}`. Output is
+ *     a wide table — first column is the shared x value, one column
+ *     per trace named after `trace.name`.
+ *   - pie / donut: single trace has `{labels, values}`. Output is
+ *     two columns: label + value.
+ *   - heatmap / surface / 3d: not supported — returns empty.
+ *
+ * If multiple traces are line/bar/scatter but have DIFFERENT x arrays
+ * (e.g., x-ranges don't line up), we union the x values and put nulls
+ * where a trace didn't have a point.
+ */
+export function tracesToTable(data: unknown, fallbackTitle = 'Chart data'): TableShape {
+  if (!Array.isArray(data) || data.length === 0) {
+    return { title: fallbackTitle, columns: [], rows: [], empty: true }
+  }
+
+  const traces = data as PlotlyTrace[]
+
+  // ── Heatmap / surface / contour / any z-matrix trace ───────────
+  if (
+    traces.some(
+      (t) =>
+        t.type === 'heatmap' ||
+        t.type === 'surface' ||
+        t.type === 'contour' ||
+        Array.isArray(t.z),
+    )
+  ) {
+    return { title: fallbackTitle, columns: [], rows: [], empty: true }
+  }
+
+  // ── Pie / donut ────────────────────────────────────────────────
+  if (
+    traces.length === 1 &&
+    (traces[0].type === 'pie' || traces[0].type === 'donut') &&
+    Array.isArray(traces[0].labels) &&
+    Array.isArray(traces[0].values)
+  ) {
+    const labels = traces[0].labels as Array<string | number>
+    const values = traces[0].values as Array<string | number>
+    const rows: (string | number)[][] = []
+    const n = Math.min(labels.length, values.length)
+    for (let i = 0; i < n; i++) {
+      rows.push([labels[i], values[i]])
+    }
+    const capped = capRows(rows)
+    return {
+      title: traces[0].name || fallbackTitle,
+      columns: ['Label', 'Value'],
+      rows: capped.rows,
+      empty: rows.length === 0,
+      truncatedFrom: capped.truncatedFrom,
+    }
+  }
+
+  // ── Line / bar / scatter (the common case) ─────────────────────
+  const xyTraces = traces.filter(
+    (t) => Array.isArray(t.x) && Array.isArray(t.y),
+  )
+  if (xyTraces.length === 0) {
+    return { title: fallbackTitle, columns: [], rows: [], empty: true }
+  }
+
+  // Union of all x values, preserving first-seen order.
+  const xKeys: (string | number)[] = []
+  const xSeen = new Set<string>()
+  for (const trace of xyTraces) {
+    for (const xv of trace.x as Array<string | number>) {
+      const k = String(xv)
+      if (!xSeen.has(k)) {
+        xSeen.add(k)
+        xKeys.push(xv)
+      }
+    }
+  }
+
+  const columns: string[] = ['x']
+  for (let i = 0; i < xyTraces.length; i++) {
+    columns.push(String(xyTraces[i].name ?? `Series ${i + 1}`))
+  }
+
+  const xIndex: Map<string, number>[] = xyTraces.map((trace) => {
+    const m = new Map<string, number>()
+    const xs = trace.x as Array<string | number>
+    for (let i = 0; i < xs.length; i++) m.set(String(xs[i]), i)
+    return m
+  })
+
+  const rows: (string | number)[][] = []
+  for (const xv of xKeys) {
+    const key = String(xv)
+    const row: (string | number)[] = [xv]
+    for (let t = 0; t < xyTraces.length; t++) {
+      const idx = xIndex[t].get(key)
+      const ys = xyTraces[t].y as Array<string | number | null | undefined>
+      const yv = idx !== undefined ? ys[idx] : undefined
+      row.push(yv === undefined || yv === null ? '' : yv)
+    }
+    rows.push(row)
+  }
+
+  const capped = capRows(rows)
+  return {
+    title: fallbackTitle,
+    columns,
+    rows: capped.rows,
+    empty: rows.length === 0,
+    truncatedFrom: capped.truncatedFrom,
+  }
+}
+
+// ─── ChartA11yTable ─────────────────────────────────────────────────────────
+
+interface ChartA11yTableProps {
+  shape: TableShape
+}
+
+export const ChartA11yTable = React.memo(function ChartA11yTable({ shape }: ChartA11yTableProps) {
+  if (shape.empty) {
+    return (
+      <div className="sr-only" aria-hidden="false">
+        <p>{shape.title}: no readable data points available.</p>
+      </div>
+    )
+  }
+
+  return (
+    <table className="sr-only" aria-hidden="false">
+      <caption>
+        {shape.title}
+        {shape.truncatedFrom != null &&
+          ` — showing first ${shape.rows.length} of ${shape.truncatedFrom} rows`}
+      </caption>
+      <thead>
+        <tr>
+          {keyByOccurrence(shape.columns, String).map(({ key, item: col }) => (
+            <th key={key} scope="col">
+              {col}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {keyByOccurrence(shape.rows, (row) => String(row[0])).map(({ key, item: row }) => (
+          <tr key={key}>
+            {keyByOccurrence(row, String).map(({ key: cellKey, item: cell }) => (
+              <td key={cellKey}>{String(cell)}</td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+})
+
+// ─── PlotlyChart ────────────────────────────────────────────────────────────
 
 // Use the cartesian-only Plotly distribution via react-plotly.js's factory
 // API. The default `import 'react-plotly.js'` pulls full plotly.js (~4.7 MB
@@ -115,33 +310,14 @@ export const PlotlyChart = React.memo(function PlotlyChart({
     })
   }).current
 
-  // Container ref + narrow-viewport flag. Declared above defaultLayout
-  // so the layout block can read `narrow` for the responsive legend
-  // reflow below. The IntersectionObserver `visible` gate stays here
-  // for the same reason — both observers attach to containerRef in
-  // effects further down.
   const containerRef = useRef<HTMLDivElement>(null)
   const [visible, setVisible] = useState(false)
-  // Plotly's `responsive: true` resizes the plot but does NOT reflow
-  // the legend orientation. A many-series chart (e.g. POP breakdown
-  // across 20+ regions on /performance) overflows the chart area on
-  // narrow screens. Switch legend to horizontal-below when the
-  // container itself drops below 720 px (NOT viewport — a chart in a
-  // 6-of-12-column grid on a 1280 px screen sits in ~640 px and
-  // should use the narrow layout).
   const [narrow, setNarrow] = useState(false)
 
-  // Narrow-viewport legend defaults: horizontal orientation pinned to
-  // the bottom of the plot so labels stack horizontally instead of
-  // crowding the right side. Caller's `layout.legend` (if any) gets
-  // merged on top so explicit overrides still win.
   const narrowLegendDefaults = narrow
     ? { orientation: 'h' as const, x: 0, y: -0.2, yanchor: 'top' as const, xanchor: 'left' as const }
     : {}
 
-  // Narrow viewports bump the chart height ~20% so the horizontal-below
-  // legend (see narrowLegendDefaults) doesn't compete with the plot for
-  // pixels — vertical scroll is cheap on phones, cramped plots aren't.
   const effectiveHeight =
     typeof height === 'number' && narrow ? Math.round(height * 1.2) : height
 
@@ -166,8 +342,6 @@ export const PlotlyChart = React.memo(function PlotlyChart({
       namelength: -1
     },
     ...layout,
-    // Spaced after ...layout so caller overrides on individual margin keys (l, r, t, b)
-    // take precedence over the dynamic defaults.
     margin: {
       l: 40,
       r: 20,
@@ -175,9 +349,6 @@ export const PlotlyChart = React.memo(function PlotlyChart({
       b: defaultBottomMargin,
       ...(layout?.margin || {})
     },
-    // After the ...layout spread so callers can override individual
-    // legend fields without losing the narrow-viewport defaults
-    // entirely. Caller's full legend overrides take precedence here.
     legend: { ...narrowLegendDefaults, ...(layout?.legend || {}) },
     xaxis: {
       gridcolor: isDark ? '#27272a' : '#e4e4e7',
@@ -203,23 +374,6 @@ export const PlotlyChart = React.memo(function PlotlyChart({
     ...config
   }
 
-  // Viewport gate: don't trigger the dynamic-import of the 1.4MB
-  // plotly.js-cartesian-dist chunk until this chart is within 600px of
-  // the viewport. `dynamic(...)` only starts fetching when <Plot/> is
-  // actually rendered, so withholding the render = withholding the
-  // chunk fetch.
-  //
-  // Initial state MUST be ``false`` on both server and client to avoid
-  // a hydration mismatch. Earlier this used ``useState(() => typeof
-  // IntersectionObserver === 'undefined')`` so SSR rendered with
-  // visible=true; once PlotlyChart started being rendered at the
-  // AppLayout level (PlotlyPrewarm), that produced a React 418
-  // hydration error on every page load — server emitted ``<div>
-  // <Plot/></div>``, client emitted ``<div></div>``. Now the effect
-  // below promotes to true on mount when no IntersectionObserver
-  // exists, which is the same effective behaviour without the SSR
-  // divergence.
-
   useEffect(() => {
     if (visible || !containerRef.current) return
     if (typeof IntersectionObserver === 'undefined') {
@@ -240,11 +394,6 @@ export const PlotlyChart = React.memo(function PlotlyChart({
     return () => observer.disconnect()
   }, [visible])
 
-  // ResizeObserver tracks the container's actual rendered width — not
-  // viewport. A chart placed in a 6-of-12-column grid on a 1280px
-  // screen sits in ~640 px of real estate and SHOULD use the narrow
-  // legend layout even though the viewport is wide. 720 px matches
-  // the breakpoint shadcn/Tailwind treats as the small/medium hinge.
   useEffect(() => {
     if (!containerRef.current || typeof ResizeObserver === 'undefined') return
     const node = containerRef.current
@@ -256,11 +405,6 @@ export const PlotlyChart = React.memo(function PlotlyChart({
     return () => ro.disconnect()
   }, [])
 
-  // Screen-reader companion. Computed from `data`, NOT from the
-  // rendered Plotly figure, so it's available even before the chart
-  // visibility gate flips and even when Plotly fails to render.
-  // Memoized on the array reference — callers almost always
-  // recompute `data` only on real changes, so the memo is cheap.
   const a11yShape = React.useMemo(() => tracesToTable(data, a11yTitle), [data, a11yTitle])
 
   return (

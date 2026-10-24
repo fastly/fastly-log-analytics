@@ -73,8 +73,7 @@ const DebugPanel = dynamic(
   () => import('@/components/DebugPanel').then(m => ({ default: m.DebugPanel })),
   { ssr: false },
 )
-import { PlotlyPrewarm } from '@/components/PlotlyChart/PlotlyPrewarm'
-import { MapPrewarm } from '@/components/Map/MapPrewarm'
+import { PlotlyPrewarm, MapPrewarm } from '@/components/PlotlyChart/PlotlyPrewarm'
 
 import { useUrlServiceSync } from '@/hooks/useUrlServiceSync'
 import { useBootstrap, useBootstrapSyncEffects } from '@/hooks/useBootstrap'

@@ -4,20 +4,203 @@ import { useDebounce } from '@/hooks/useDebounce'
 import { useDerivedState } from '@/hooks/useDerivedState'
 import * as React from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { SlidersHorizontal } from 'lucide-react'
+import { Check, Loader2, ShieldCheck, ShieldOff, SlidersHorizontal } from 'lucide-react'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { ThresholdSliderHelp } from '@/components/SessionScoring/help-content'
 import { useScoringQuery } from '../useScorerTimeseries'
+import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Slider } from '@/components/ui/slider'
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 import { formatCount, formatPercent } from '@/lib/format'
 import { scoringConfigCompositeKey } from '@/lib/queries/scoring'
-
-import { ThresholdSliderControls } from './Slider'
 import type { Expect, Simplify, WireParity, WithRequired, WithRequiredNullable, components } from '@/types/api'
+
+// ─── ThresholdSliderControls ─────────────────────────────────────────────────
+
+type StatusCodeMeta = components['schemas']['ScoringEnforceStatusCodeState']
+type CommittedThreshold = components['schemas']['ScoringThresholdState']
+type EnforceThreshold = components['schemas']['ScoringEnforceThresholdResponse']
+
+interface ThresholdSliderControlsProps {
+  thresholdRaw: number
+  onThresholdRawChange: (value: number) => void
+  committed: CommittedThreshold | undefined
+  enforce: EnforceThreshold | undefined
+  statusCode: StatusCodeMeta | undefined
+  effectiveStatusCode: number
+  isAlreadyCommitted: boolean
+  isEnforcingThis: boolean
+  commitPending: boolean
+  enforcePending: boolean
+  statusCodePending: boolean
+  codeDraft: string
+  onCodeDraftChange: (value: string) => void
+  codeDraftValid: boolean
+  codeDraftIsDirty: boolean
+  codeDraftNum: number
+  onCommitClick: () => void
+  onEnforceClick: () => void
+  onApplyStatusCode: () => void
+  onResetStatusCode: () => void
+}
+
+export function ThresholdSliderControls({
+  thresholdRaw,
+  onThresholdRawChange,
+  committed,
+  enforce,
+  statusCode,
+  effectiveStatusCode,
+  isAlreadyCommitted,
+  isEnforcingThis,
+  commitPending,
+  enforcePending,
+  statusCodePending,
+  codeDraft,
+  onCodeDraftChange,
+  codeDraftValid,
+  codeDraftIsDirty,
+  codeDraftNum,
+  onCommitClick,
+  onEnforceClick,
+  onApplyStatusCode,
+  onResetStatusCode,
+}: ThresholdSliderControlsProps) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-baseline justify-between">
+        <label className="text-xs font-medium text-muted-foreground">
+          Score threshold
+          {committed?.threshold != null && (
+            <span className="ml-2 text-[10px] text-muted-foreground">
+              · committed: <span className="font-mono">{committed.threshold}</span>
+            </span>
+          )}
+        </label>
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-lg font-semibold tabular-nums">
+            {thresholdRaw}
+          </span>
+          <Button
+            variant={isAlreadyCommitted ? 'outline' : 'default'}
+            size="sm"
+            disabled={commitPending || isAlreadyCommitted}
+            onClick={onCommitClick}
+            className="h-7 text-xs"
+            title="Persist this as your committed threshold (preview only — does NOT push to Compute)"
+          >
+            {commitPending ? (
+              <Loader2 className="h-3 w-3 animate-spin mr-1" />
+            ) : isAlreadyCommitted ? (
+              <Check className="h-3 w-3 mr-1" />
+            ) : null}
+            {isAlreadyCommitted ? 'Committed' : 'Commit'}
+          </Button>
+          <Button
+            variant={isEnforcingThis ? 'outline' : 'destructive'}
+            size="sm"
+            disabled={enforcePending}
+            onClick={onEnforceClick}
+            className="h-7 text-xs"
+            title={
+              isEnforcingThis
+                ? 'Currently ENFORCING this threshold. Click to disable enforcement.'
+                : `Push this threshold to Compute. Live requests with score >= threshold will be blocked (HTTP ${effectiveStatusCode}).`
+            }
+          >
+            {enforcePending ? (
+              <Loader2 className="h-3 w-3 animate-spin mr-1" />
+            ) : isEnforcingThis ? (
+              <ShieldOff className="h-3 w-3 mr-1" />
+            ) : (
+              <ShieldCheck className="h-3 w-3 mr-1" />
+            )}
+            {isEnforcingThis ? 'Disable' : 'Enforce'}
+          </Button>
+        </div>
+      </div>
+      {enforce?.enforced && (
+        <div className="text-[10px] text-destructive">
+          ⚠ LIVE: enforcing at threshold{' '}
+          <span className="font-mono">{enforce.threshold}</span> — requests with score
+          ≥ threshold are returning HTTP{' '}
+          <span className="font-mono">{effectiveStatusCode}</span>.
+        </div>
+      )}
+      <div className="flex items-center gap-2 flex-wrap text-[11px]">
+        <label className="text-muted-foreground" htmlFor="enforce-status-code">
+          Enforce response code:
+        </label>
+        <input
+          id="enforce-status-code"
+          type="number"
+          min={statusCode?.min ?? 400}
+          max={statusCode?.max ?? 599}
+          step={1}
+          value={codeDraft}
+          onChange={(e) => onCodeDraftChange(e.target.value)}
+          disabled={statusCodePending}
+          className="h-6 w-16 rounded border bg-background px-1.5 text-[11px] font-mono"
+          title="Any HTTP 4xx/5xx code (e.g. 403 Forbidden, 429 Too Many Requests, 451 Legal, 503 Service Unavailable). Reason phrase auto-mapped from the HTTP standard."
+          aria-label="Enforce response code"
+        />
+        <Button
+          size="sm"
+          variant={codeDraftIsDirty ? 'default' : 'outline'}
+          className="h-6 text-[11px]"
+          disabled={!codeDraftIsDirty || statusCodePending}
+          onClick={onApplyStatusCode}
+          title={
+            codeDraftIsDirty
+              ? `Re-deploy the enforce snippet so flagged requests return HTTP ${codeDraftNum}`
+              : 'No change to publish'
+          }
+        >
+          Apply
+        </Button>
+        {statusCode && !statusCode.is_default && (
+          <button
+            type="button"
+            disabled={statusCodePending}
+            onClick={onResetStatusCode}
+            className="text-[10px] text-muted-foreground underline hover:text-foreground"
+            title={`Reset to default (${statusCode.default})`}
+          >
+            reset
+          </button>
+        )}
+        {statusCodePending && (
+          <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+        )}
+        {codeDraft !== '' && !codeDraftValid && (
+          <span className="text-[10px] text-destructive">
+            must be {statusCode?.min ?? 400}–{statusCode?.max ?? 599}
+          </span>
+        )}
+      </div>
+      <Slider
+        value={[thresholdRaw]}
+        onValueChange={(v) => onThresholdRawChange(v[0] ?? 75)}
+        min={0}
+        max={100}
+        step={5}
+        className="w-full"
+        aria-label="Score threshold"
+      />
+      <div className="flex justify-between text-[10px] text-muted-foreground tabular-nums">
+        <span>0 (flag everything)</span>
+        <span>50</span>
+        <span>100 (flag nothing)</span>
+      </div>
+    </div>
+  )
+}
+
+// ─── ThresholdSlider ─────────────────────────────────────────────────────────
 
 export type BucketCounts = WithRequired<
   components['schemas']['ScoringThresholdBucket'],
@@ -159,29 +342,11 @@ interface ThresholdSliderProps {
   sinceHours?: number
 }
 
-/**
- * Counterfactual preview of "at threshold X, what gets flagged?"
- *
- * Operator drags the slider; we show:
- *  - How many sessions land in each bucket (flagged vs passed)
- *  - 2x2 split: good / bad / unlabeled within each bucket
- *  - Precision (of flagged-labeled, how many are bad) + Recall
- *    (of all-bad-labeled, how many got flagged)
- *
- * Reporting-only — does not push the threshold to VCL/Compute. Acts as
- * a tuning surface so the operator picks an evidence-backed cutoff
- * before enabling enforcement.
- */
 export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderProps) {
   const queryClient = useQueryClient()
-  // Local state for the slider — debounced into the React Query key so we
-  // don't fire a new request on every drag pixel.
   const [thresholdRaw, setThresholdRaw] = React.useState(75)
   const threshold = useDebounce(thresholdRaw, 150)
 
-  // Controls the confirm dialog (commit / enforce / disable / change-status-code).
-  // `value` is the threshold (0-100) for commit/enforce/disable, or the new
-  // HTTP status code (400-599) for change-status-code. null = closed.
   const [pendingAction, setPendingAction] = React.useState<
     { action: 'commit' | 'enforce' | 'disable'; threshold: number }
     | { action: 'change-status-code'; statusCode: number }
@@ -201,8 +366,6 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
   )
   const data = rawPreviewData as ThresholdPreviewResponse | undefined
 
-  // The operator's previously-committed threshold (persisted in cfg —
-  // NOT enforced by the live scorer; just a remembered preference).
   const { data: committed } = useScoringQuery(
     ['scoring-threshold-committed', serviceId],
     () =>
@@ -212,10 +375,6 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
     { staleTime: 30_000 },
   )
 
-  // One-shot per service: when the committed threshold loads, jump the slider
-  // to it so the operator isn't staring at a misleading default of 75. Guarded
-  // by serviceId so subsequent edits don't get clobbered by query refetches,
-  // while switching services re-syncs to the new service's committed threshold.
   const [syncedServiceId, setSyncedServiceId] = React.useState<string | null>(null)
   if (syncedServiceId !== serviceId && committed?.threshold != null) {
     setSyncedServiceId(serviceId)
@@ -243,7 +402,6 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
 
   const isAlreadyCommitted = committed?.threshold === thresholdRaw
 
-  // Live enforcement (writes to Compute ConfigStore via Fastly API)
   const { data: enforce } = useScoringQuery(
     ['scoring-enforce-threshold', serviceId],
     () =>
@@ -277,8 +435,6 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
 
   const isEnforcingThis = enforce?.threshold === thresholdRaw
 
-  // Operator-overridable HTTP status code returned by the enforce snippet.
-  // Default 429. Reads back cfg.scoring.enforce_status_code via the backend.
   const { data: statusCode } = useScoringQuery(
     ['scoring-enforce-status-code', serviceId],
     () =>
@@ -309,16 +465,8 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
     },
   })
 
-  // Effective code for display + dynamic copy (falls back to 429 before the
-  // query resolves so dialogs read sensibly on first mount).
   const effectiveStatusCode = statusCode?.effective ?? 429
 
-  // Local draft for the free-form status-code input — operator types any
-  // 4xx/5xx code (backend validates 400-599 inclusive), clicks Apply, then
-  // confirms. Local state isolates typing from the committed value so we
-  // don't fire a re-publish on every keystroke. Sync once when the query
-  // resolves, and again whenever the committed value changes from elsewhere
-  // (e.g. after this user clicks Apply → confirm → mutation succeeds).
   const [codeDraft, setCodeDraft] = useDerivedState(String(effectiveStatusCode))
 
   const codeDraftNum = Number(codeDraft)

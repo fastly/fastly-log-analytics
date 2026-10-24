@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from backend.core.fastly.rum_provisioning import RUM_ASSET_FETCH_NAME, generate_rum_asset_fetch_vcl
-from backend.provision import cmcd_orchestrator as orch
+from backend.provision import cmcd_fields as orch
 from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES, reconcile_cmcd_custom_fields
 from backend.provision.declarative.generators import generate_consolidated_snippet
 from backend.provision.declarative.state import FeatureState
@@ -22,7 +22,7 @@ from backend.provision.log_paths import (
     rum_minute_list_prefix,
 )
 from backend.provision.sharing_domain import delete_remote_frontend, deploy_remote_frontend
-from backend.provision.vcl_builder import VclBuilder
+from backend.provision.utils import VclBuilder
 
 
 # ── Merged from tests/provision/test_vcl_builder.py ──

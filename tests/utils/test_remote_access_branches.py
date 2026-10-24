@@ -1655,11 +1655,11 @@ def test_ip_family_set_single_source_of_truth_across_stack():
     assert validation.IP_FAMILY_KEYS <= _PII_FORBIDDEN_FILTER_COLS
     assert validation.SESSION_ID_KEYS <= _PII_FORBIDDEN_FILTER_COLS
 
-    # Frontend: parse the actual IP_FAMILY_FIELDS literal from lib/pii.ts.
+    # Frontend: parse the actual IP_FAMILY_FIELDS literal from lib/utils.ts.
     repo_root = Path(__file__).resolve().parents[2]
-    pii_ts = (repo_root / "frontend" / "lib" / "pii.ts").read_text(encoding="utf-8")
+    pii_ts = (repo_root / "frontend" / "lib" / "utils.ts").read_text(encoding="utf-8")
     m = re.search(r"IP_FAMILY_FIELDS\s*=\s*\[([^\]]*)\]", pii_ts)
-    assert m is not None, "IP_FAMILY_FIELDS literal not found in frontend/lib/pii.ts"
+    assert m is not None, "IP_FAMILY_FIELDS literal not found in frontend/lib/utils.ts"
     fe_fields = set(re.findall(r"""['"]([^'"]+)['"]""", m.group(1)))
 
     assert fe_fields == set(validation.IP_FAMILY_KEYS)

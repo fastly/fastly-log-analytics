@@ -9,6 +9,7 @@ from fastapi import Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from backend.deps import get_source
+from backend.models.admin import TreeResponse
 from backend.utils.path_safety import path_within_dir
 from backend.utils.router_utils import query_errors, raise_internal, require_service_id
 
@@ -16,6 +17,29 @@ from ._helpers import _fetch_file_to_zip, stream_zip
 from ._router import router
 
 logger = logging.getLogger(__name__)
+
+
+@router.get("/admin/raw-tree", response_model=TreeResponse)
+def raw_tree_endpoint(
+    source: dict = Depends(get_source),
+    prefix: str = Query(default=""),
+):
+    from backend.core.duckdb import get_raw_tree_node
+
+    result = get_raw_tree_node(source, prefix, root="raw")
+    return TreeResponse.with_telemetry(nodes=result.get("children", []))
+
+
+@router.get("/admin/iceberg-tree", response_model=TreeResponse)
+def iceberg_tree_endpoint(
+    source: dict = Depends(get_source),
+    prefix: str = Query(default=""),
+):
+    from backend.core.duckdb import get_raw_tree_node
+
+    result = get_raw_tree_node(source, prefix, root="iceberg")
+    return TreeResponse.with_telemetry(nodes=result.get("children", []))
+
 
 # response_model intentionally omitted on all three routes in this module:
 # they stream file/zip bytes (StreamingResponse / FileResponse), not JSON.

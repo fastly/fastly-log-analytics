@@ -6,8 +6,13 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from backend.models.alert_channels import AlertChannel
 from backend.models.common import BaseResponse
+
+
+class AlertChannel(BaseModel):
+    type: Literal["slack", "pagerduty", "webhook"]
+    url: str
+    config: dict | None = None
 
 
 class Alert(BaseModel):

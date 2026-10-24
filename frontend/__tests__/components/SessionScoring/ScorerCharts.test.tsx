@@ -37,8 +37,7 @@ vi.mock('@/components/SessionScoring/useScorerTimeseries', async (orig) => {
   }
 })
 
-import { ScorerLatencyChart } from '@/components/SessionScoring/ScorerLatencyChart'
-import { ScorerErrorsChart } from '@/components/SessionScoring/ScorerErrorsChart'
+import { ScorerLatencyChart, ScorerErrorsChart } from '@/components/SessionScoring/ScorerSeriesCard'
 
 const T0 = '2026-10-01T00:00:00+00:00'
 const T2 = '2026-10-01T02:00:00+00:00'

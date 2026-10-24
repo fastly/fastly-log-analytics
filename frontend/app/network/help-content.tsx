@@ -6,8 +6,37 @@ import { cn } from "@/lib/utils";
 import { formatCount } from "@/lib/format";
 import { columnHeader, msCell, numberValue, textValue } from "@/lib/table-utils";
 import type { ColumnDef } from "@tanstack/react-table";
-import type { ShieldingRowInput } from "./shielding-rows";
+import type { components } from '@/types/api.generated'
 import { Activity, AlertCircle, Globe, Zap, Network as NetworkIcon } from "lucide-react";
+
+/** A route as the map and table consume it: derived flags may be absent until adjusted. */
+export type ShieldingRowInput = Partial<components['schemas']['ShieldingRow']>
+
+export function adjustShieldingRows(
+  rows: readonly ShieldingRowInput[] | null | undefined,
+  minRequests: number,
+): ShieldingRowInput[] {
+  if (!Array.isArray(rows)) return []
+  return rows.map((row) => {
+    const lowSample = minRequests > 0 && (row.requests ?? 0) < minRequests
+    return {
+      ...row,
+      low_sample: lowSample,
+      anomaly_static: Boolean(row.anomaly_eligible) && !lowSample,
+    }
+  })
+}
+
+export const SHIELDING_MIN_REQUESTS_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
+  { value: '0', label: 'No minimum' },
+  { value: '10', label: '10' },
+  { value: '30', label: '30' },
+  { value: '50', label: '50' },
+  { value: '100', label: '100' },
+]
+
+export const SHIELDING_MIN_REQUESTS_DEFAULT = 10
+
 export const GlobalHealthHelp = () => (
   <div className="space-y-4 text-sm text-muted-foreground">
     <p>A composite <strong>0–100 score</strong> aggregated across your top ASNs, weighted by request volume. 100 = perfect conditions, 0 = severe degradation.</p>
@@ -238,8 +267,6 @@ export const SHIELDING_COLUMNS: ColumnDef<ShieldingRowInput>[] = [
   {
     accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: columnHeader('Reqs'),
     cell: (info) => {
-      // Mute the count on low-sample routes so the eye connects "few requests"
-      // with the un-graded (grey) efficiency pill. (low-sample gating)
       const lowSample = info.row.original.low_sample
       return (
         <span
@@ -269,11 +296,6 @@ export const SHIELDING_COLUMNS: ColumnDef<ShieldingRowInput>[] = [
       const ratio = numberValue(info.getValue())
       if (ratio == null) return <span className="text-muted-foreground">—</span>
       const lowSample = info.row.original.low_sample
-      // A negative ratio (transit delta < 0) is meaningless, not "excellent":
-      // render it neutral instead of letting `ratio < 1.5` paint it green. (L5)
-      // Same for low-sample routes: below ~30 requests the median is noise, so
-      // don't colour-grade it red/green — render neutral + explain on hover so
-      // a quiet route can't masquerade as a peering problem. (low-sample gating)
       const cls = lowSample || ratio < 0 ? 'bg-muted text-muted-foreground' : ratio < 1.5 ? 'bg-green-500/10 text-green-600 dark:text-green-400' : ratio < 3 ? 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400' : 'bg-destructive/10 text-destructive'
       return <span title={lowSample ? 'Fewer than 30 requests — too few samples to grade; not flagged' : undefined} className={cn("inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-bold tabular-nums", cls)}>{ratio.toFixed(1)}×</span>
     }

@@ -498,3 +498,458 @@ def test_performance_projection_rebuild_backfills_asn_rows_but_never_republishes
         "rebuild-performance:r1:asn-perf:scatter",
         "rebuild-performance:r1:asn-perf:asn",
     ]
+
+
+# ── Merged from test_replay.py ───────────────────────────────────────
+
+from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
+from backend.high_scale.publication import InsertReceipt
+from backend.high_scale.replay import replay_manifest
+from tests.high_scale.conftest import (
+    ReplayClickHouseClient as ReplayClient,
+)
+from tests.high_scale.conftest import (
+    event_digest as _event_digest,
+)
+from tests.high_scale.conftest import (
+    make_archive_parquet_bytes as _parquet,
+)
+from tests.high_scale.conftest import (
+    sha256_checksum as _checksum,
+)
+
+
+def test_replay_rebuilds_visibility_from_archive_only() -> None:
+    rows = ({"event_id": "event-1", "status": 200}, {"event_id": "event-2", "status": 500})
+    artifact_bytes = _parquet(rows)
+    source = ArchiveSourceObject("svc", "request", "raw/request/a.gz", "sha256:source", 4, "v1")
+    manifest = ArchiveManifest(
+        "manifest-1",
+        source,
+        ArchiveArtifact(
+            "s3://archive/artifacts/manifest-1.parquet",
+            _checksum(artifact_bytes),
+            len(artifact_bytes),
+            len(rows),
+            2,
+            _event_digest(rows),
+            "request.v1",
+            "normalize.v1",
+        ),
+        datetime(2026, 9, 1, tzinfo=UTC),
+        datetime(2026, 9, 1, 0, 1, tzinfo=UTC),
+        datetime(2026, 9, 2, tzinfo=UTC),
+        datetime(2026, 9, 3, tzinfo=UTC),
+        4,
+    )
+    store = InMemoryObjectStore()
+    archive = ArchivePublication(store)
+    archive.publish(manifest, artifact_bytes)
+    publication = ClickHousePublication(InMemoryBatchManifestStore(), ReplayClient())
+
+    result = replay_manifest(manifest, archive, publication)
+
+    assert result.rows_read == 2
+    assert result.publication.rows_visible == 2
+
+
+def test_replay_with_a_custom_batch_id_reinserts_after_a_prior_replay_is_marked_visible() -> None:
+    """A recovery rebuild must not silently skip a manifest just because an
+    EARLIER replay of it (under the default batch id) is still recorded as
+    visible in the manifest store — that bookkeeping can outlive the actual
+    ClickHouse data (e.g. after a real ClickHouse volume loss, or in this
+    test, an explicit wipe), so a rebuild needs a fresh batch id scope."""
+    rows = ({"event_id": "event-1", "status": 200},)
+    artifact_bytes = _parquet(rows)
+    source = ArchiveSourceObject("svc", "request", "raw/request/a.gz", "sha256:source", 4, "v1")
+    manifest = ArchiveManifest(
+        "manifest-1",
+        source,
+        ArchiveArtifact(
+            "s3://archive/artifacts/manifest-1.parquet",
+            _checksum(artifact_bytes),
+            len(artifact_bytes),
+            len(rows),
+            1,
+            _event_digest(rows),
+            "request.v1",
+            "normalize.v1",
+        ),
+        datetime(2026, 9, 1, tzinfo=UTC),
+        datetime(2026, 9, 1, 0, 1, tzinfo=UTC),
+        datetime(2026, 9, 2, tzinfo=UTC),
+        datetime(2026, 9, 3, tzinfo=UTC),
+        4,
+    )
+    store = InMemoryObjectStore()
+    archive = ArchivePublication(store)
+    archive.publish(manifest, artifact_bytes)
+
+    inserted: list[int] = []
+
+    class CountingClient:
+        def insert(self, batch):
+            inserted.append(len(batch.rows))
+            return InsertReceipt(batch.batch_id, len(batch.rows), batch.digest)
+
+    manifests = InMemoryBatchManifestStore()
+    publication = ClickHousePublication(manifests, CountingClient())
+
+    first = replay_manifest(manifest, archive, publication)
+    assert first.publication.duplicate is False
+    assert inserted == [1]
+
+    # Default batch id: already visible per the manifest store, so a second
+    # replay under the SAME id must skip re-inserting (the existing,
+    # intentional idempotency contract for a genuine retry).
+    second = replay_manifest(manifest, archive, publication)
+    assert second.publication.duplicate is True
+    assert inserted == [1]
+
+    # A rebuild-scoped batch id has never been seen before, so it correctly
+    # re-inserts even though the manifest itself was already replayed.
+    third = replay_manifest(manifest, archive, publication, batch_id=f"rebuild:xyz:{manifest.manifest_id}")
+    assert third.publication.duplicate is False
+    assert inserted == [1, 1]
+
+
+def test_replay_manifest_filters_mixed_rum_rows_by_serving_domain() -> None:
+    """Raw RUM objects share raw/rum/ across vitals and errors, so a rum_errors
+    archive manifest may contain only vitals rows (empty error_message) or a mix.
+    replay_manifest must filter with row_matches_serving_domain and skip publishing
+    empty batches."""
+    vitals_only_rows = (
+        {
+            "event_id": "vital-1",
+            "metric_name": "LCP",
+            "metric_value": 1200.0,
+            "error_message": "",
+        },
+    )
+    artifact_bytes = _parquet(vitals_only_rows)
+    source = ArchiveSourceObject("svc", "rum_errors", "raw/rum/a.gz", "sha256:source", 4, "v1")
+    manifest = ArchiveManifest(
+        "manifest-rum-err-empty",
+        source,
+        ArchiveArtifact(
+            "s3://archive/artifacts/manifest-rum-err-empty.parquet",
+            _checksum(artifact_bytes),
+            len(artifact_bytes),
+            len(vitals_only_rows),
+            1,
+            _event_digest(vitals_only_rows),
+            "rum_errors.v1",
+            "normalize.v1",
+        ),
+        datetime(2026, 9, 1, tzinfo=UTC),
+        datetime(2026, 9, 1, 0, 1, tzinfo=UTC),
+        datetime(2026, 9, 2, tzinfo=UTC),
+        datetime(2026, 9, 3, tzinfo=UTC),
+        4,
+    )
+    store = InMemoryObjectStore()
+    archive = ArchivePublication(store)
+    archive.publish(manifest, artifact_bytes)
+
+    inserted: list[int] = []
+
+    class StrictRumErrorClient:
+        def insert(self, batch):
+            for row in batch.rows:
+                if not row.get("error_message"):
+                    raise ValueError("rum_errors batch contained non-error row")
+            inserted.append(len(batch.rows))
+            return InsertReceipt(batch.batch_id, len(batch.rows), batch.digest)
+
+    publication = ClickHousePublication(InMemoryBatchManifestStore(), StrictRumErrorClient())
+    result = replay_manifest(manifest, archive, publication)
+
+    assert result.rows_read == 0
+    assert result.publication.rows_visible == 0
+    assert inserted == []
+
+
+# ── Merged from test_recovery_capacity_wiring.py ─────────────────────
+
+import json
+from unittest.mock import MagicMock
+
+from structlog.testing import capture_logs
+
+from backend.high_scale.recovery import RecoveryCapacityMeasurement
+
+
+def _measurement(**overrides) -> RecoveryCapacityMeasurement:
+    values = {
+        "events_per_second": 2_000_000,
+        "recovery_window_seconds": 15 * 60,
+        "archive_read_events_per_second": 300_000_000,
+        "decode_events_per_second": 300_000_000,
+        "aggregate_events_per_second": 300_000_000,
+        "clickhouse_insert_events_per_second": 750_000_000,
+        "replication_factor": 3,
+        "live_ingest_reservation": 0.2,
+    }
+    values.update(overrides)
+    return RecoveryCapacityMeasurement(**values)
+
+
+def _recovery_env(*, fail_on: set[str] | None = None):
+    recent, recent_bytes = _manifest(
+        "recent", NOW - timedelta(hours=1), NOW - timedelta(minutes=59), ({"event_id": "1"},)
+    )
+    warm, warm_bytes = _manifest(
+        "warm", NOW - timedelta(days=10), NOW - timedelta(days=10) + timedelta(minutes=1), ({"event_id": "2"},)
+    )
+    archive = ArchivePublication(InMemoryObjectStore())
+    archive.publish(recent, recent_bytes)
+    archive.publish(warm, warm_bytes)
+    client = ReplayClient(fail_on=fail_on)
+    publication = ClickHousePublication(InMemoryBatchManifestStore(), client)
+    return _Catalog((recent, warm)), archive, publication, client
+
+
+def _rebuild(env, **kwargs):
+    catalog, archive, publication, _ = env
+    return rebuild_serving_state_from_fos(
+        catalog, archive, publication, service_id="svc", domain="request", now=NOW, **kwargs
+    )
+
+
+def test_feasible_measurement_with_a_complete_rebuild_makes_the_claim_valid() -> None:
+    with capture_logs() as logs:
+        report = _rebuild(_recovery_env(), capacity=_measurement())
+
+    assert report.full_rebuild_complete is True
+    assert report.capacity is not None and report.capacity.feasible is True
+    assert report.recovery_claim_valid is True
+    gate = next(e for e in logs if e["event"] == "high_scale.recovery_capacity_gate")
+    assert gate["feasible"] is True and gate["log_level"] == "info"
+
+
+def test_infeasible_measurement_flags_the_claim_but_never_blocks_recovery() -> None:
+    env = _recovery_env()
+
+    with capture_logs() as logs:
+        report = _rebuild(env, capacity=_measurement(clickhouse_insert_events_per_second=400_000_000))
+
+    assert report.full_rebuild_complete is True
+    assert report.rows_replayed == 2
+    assert len(env[3].insert_calls) == 2
+    assert report.capacity is not None and report.capacity.limiting_stage == "clickhouse_insert"
+    assert report.recovery_claim_valid is False
+    gate = next(e for e in logs if e["event"] == "high_scale.recovery_capacity_gate")
+    assert gate["log_level"] == "warning" and gate["limiting_stage"] == "clickhouse_insert"
+
+
+def test_feasible_capacity_does_not_validate_an_incomplete_rebuild() -> None:
+    report = _rebuild(_recovery_env(fail_on={"warm"}), capacity=_measurement())
+
+    assert report.capacity is not None and report.capacity.feasible is True
+    assert report.full_rebuild_complete is False
+    assert report.recovery_claim_valid is False
+
+
+def test_without_a_measurement_the_report_carries_no_claim() -> None:
+    with capture_logs() as logs:
+        report = _rebuild(_recovery_env())
+
+    assert report.capacity is None
+    assert report.recovery_claim_valid is None
+    assert not [e for e in logs if e["event"] == "high_scale.recovery_capacity_gate"]
+
+
+def test_invalid_measurement_fails_before_any_replay_work() -> None:
+    env = _recovery_env()
+
+    with pytest.raises(ValueError, match="event rate and recovery window must be positive"):
+        _rebuild(env, capacity=_measurement(events_per_second=0))
+
+    assert env[3].insert_calls == []
+
+
+def test_origin_projection_rebuild_evaluates_the_same_gate() -> None:
+    catalog, archive, publication, _ = _recovery_env()
+
+    report = rebuild_origin_projections_from_fos(
+        catalog,
+        archive,
+        publication,
+        service_id="svc",
+        now=NOW,
+        window=timedelta(hours=2),
+        capacity=_measurement(decode_events_per_second=1_000),
+    )
+
+    assert report.capacity is not None and report.capacity.limiting_stage == "decode"
+    assert report.recovery_claim_valid is False
+
+
+# ── CLI: scripts/backfill_high_scale.py --capacity-json ──────────────
+
+
+@pytest.fixture
+def cli(monkeypatch: pytest.MonkeyPatch):
+    from scripts import backfill_high_scale as script
+
+    service = SimpleNamespace(manifest_catalog=object(), archive=object(), client=MagicMock())
+    registry = MagicMock()
+    registry.resolve.return_value = service
+    monkeypatch.setattr(script.app_config, "load_clickhouse_config", lambda: object())
+    monkeypatch.setattr(script, "ClickHouseClient", lambda settings: MagicMock())
+    monkeypatch.setattr(script, "get_high_scale_service_registry", lambda: registry)
+    monkeypatch.setattr(script, "register_high_scale_services_from_environment", lambda *a, **k: None)
+    monkeypatch.setattr(script, "PostgresControlPlane", MagicMock)
+    monkeypatch.setattr(script, "PostgresBatchManifestStore", lambda control: MagicMock())
+    monkeypatch.setattr(script, "AggregateBatchAdapter", lambda client: MagicMock())
+    monkeypatch.setattr(script, "ClickHousePublication", lambda manifests, adapter: MagicMock())
+    return script
+
+
+def _run_cli(cli, monkeypatch, tmp_path, measurement: dict | None, *, complete: bool = True):
+    seen: dict = {}
+
+    def fake_rebuild(*args, **kwargs):
+        seen.update(kwargs)
+        capacity = kwargs.get("capacity")
+        from backend.high_scale.recovery import RecoveryReport, evaluate_recovery_capacity
+
+        report = evaluate_recovery_capacity(capacity) if capacity else None
+        return RecoveryReport(
+            True, complete, True, complete, complete, 1, 1, (), "rb-1",
+            capacity=report,
+            recovery_claim_valid=None if report is None else report.feasible and complete,
+        )  # fmt: skip
+
+    monkeypatch.setattr(cli, "rebuild_origin_projections_from_fos", fake_rebuild)
+    argv = ["backfill", "--service-id", "svc"]
+    if measurement is not None:
+        path = tmp_path / "capacity.json"
+        path.write_text(json.dumps(measurement))
+        argv += ["--capacity-json", str(path)]
+    monkeypatch.setattr("sys.argv", argv)
+    return cli.main(), seen
+
+
+_GOOD = {
+    "events_per_second": 2_000_000,
+    "recovery_window_seconds": 900,
+    "archive_read_events_per_second": 300_000_000,
+    "decode_events_per_second": 300_000_000,
+    "aggregate_events_per_second": 300_000_000,
+    "clickhouse_insert_events_per_second": 750_000_000,
+    "replication_factor": 3,
+    "live_ingest_reservation": 0.2,
+}
+
+
+def test_cli_passes_the_measurement_through_and_exits_zero_when_valid(cli, monkeypatch, tmp_path) -> None:
+    code, seen = _run_cli(cli, monkeypatch, tmp_path, _GOOD)
+
+    assert code == 0
+    assert seen["capacity"] == RecoveryCapacityMeasurement(**_GOOD)
+
+
+def test_cli_exits_three_when_the_rebuild_completes_but_the_claim_is_invalid(cli, monkeypatch, tmp_path) -> None:
+    code, _ = _run_cli(cli, monkeypatch, tmp_path, {**_GOOD, "decode_events_per_second": 1_000})
+
+    assert code == 3
+
+
+def test_cli_without_a_measurement_keeps_the_previous_exit_codes(cli, monkeypatch, tmp_path) -> None:
+    assert _run_cli(cli, monkeypatch, tmp_path, None)[0] == 0
+    assert _run_cli(cli, monkeypatch, tmp_path, None, complete=False)[0] == 1
+
+
+def test_cli_rejects_a_malformed_measurement_file(cli, monkeypatch, tmp_path) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        _run_cli(cli, monkeypatch, tmp_path, {**_GOOD, "events_per_second": 0})
+
+    assert excinfo.value.code == 2
+
+
+def test_cli_replace_existing_purges_origin_rows_before_the_rebuild(cli, monkeypatch, tmp_path) -> None:
+    order: list[str] = []
+    monkeypatch.setattr(
+        cli, "purge_origin_projections", lambda client, **kwargs: order.append(f"purge:{kwargs['service_id']}")
+    )
+
+    def fake_rebuild(*args, **kwargs):
+        order.append("rebuild")
+        from backend.high_scale.recovery import RecoveryReport
+
+        return RecoveryReport(True, True, True, True, True, 1, 1, (), "rb-1")
+
+    monkeypatch.setattr(cli, "rebuild_origin_projections_from_fos", fake_rebuild)
+    monkeypatch.setattr("sys.argv", ["backfill", "--service-id", "svc", "--replace-existing"])
+
+    assert cli.main() == 0
+    assert order == ["purge:svc", "rebuild"]
+
+
+def test_cli_without_replace_existing_never_purges(cli, monkeypatch, tmp_path) -> None:
+    purged: list[str] = []
+    monkeypatch.setattr(cli, "purge_origin_projections", lambda client, **kwargs: purged.append("purge"))
+
+    _run_cli(cli, monkeypatch, tmp_path, None)
+
+    assert purged == []
+
+
+def test_cli_rejects_replace_existing_with_a_resumed_rebuild_id(cli, monkeypatch) -> None:
+    monkeypatch.setattr("sys.argv", ["backfill", "--service-id", "svc", "--replace-existing", "--rebuild-id", "rb-1"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code == 2
+
+
+def test_cli_projection_cmcd_rebuilds_through_the_facts_adapter_and_purges_cmcd_rows(cli, monkeypatch) -> None:
+    calls: list[str] = []
+    adapters: list[str] = []
+    monkeypatch.setattr(cli, "ClickHouseBatchAdapter", lambda client: adapters.append("facts") or MagicMock())
+    monkeypatch.setattr(cli, "AggregateBatchAdapter", lambda client: adapters.append("aggregate") or MagicMock())
+    monkeypatch.setattr(cli, "purge_cmcd_projections", lambda client, **kwargs: calls.append("purge-cmcd"))
+    monkeypatch.setattr(cli, "purge_origin_projections", lambda client, **kwargs: calls.append("purge-origin"))
+
+    def fake_cmcd_rebuild(*args, **kwargs):
+        calls.append("rebuild-cmcd")
+        from backend.high_scale.recovery import RecoveryReport
+
+        return RecoveryReport(True, True, True, True, True, 1, 1, (), "rb-1")
+
+    monkeypatch.setattr(cli, "rebuild_cmcd_projections_from_fos", fake_cmcd_rebuild)
+    monkeypatch.setattr(
+        cli,
+        "rebuild_origin_projections_from_fos",
+        lambda *a, **k: pytest.fail("origin rebuild must not run for --projection cmcd"),
+    )
+    monkeypatch.setattr("sys.argv", ["backfill", "--service-id", "svc", "--projection", "cmcd", "--replace-existing"])
+
+    assert cli.main() == 0
+    assert calls == ["purge-cmcd", "rebuild-cmcd"]
+    assert adapters == ["facts"]
+
+
+def test_cli_projection_rum_replays_the_rum_domain_through_the_facts_adapter(cli, monkeypatch) -> None:
+    seen: dict = {}
+    adapters: list[str] = []
+    monkeypatch.setattr(cli, "ClickHouseBatchAdapter", lambda client: adapters.append("facts") or MagicMock())
+    monkeypatch.setattr(cli, "purge_rum_facts", lambda client, **kwargs: seen.setdefault("purge", kwargs))
+
+    def fake_rum_rebuild(*args, **kwargs):
+        seen["rebuild"] = kwargs
+        from backend.high_scale.recovery import RecoveryReport
+
+        return RecoveryReport(True, True, True, True, True, 1, 1, (), "rb-1")
+
+    monkeypatch.setattr(cli, "rebuild_rum_facts_from_fos", fake_rum_rebuild)
+    monkeypatch.setattr(
+        "sys.argv", ["backfill", "--service-id", "svc", "--projection", "rum_errors", "--replace-existing"]
+    )
+
+    assert cli.main() == 0
+    assert adapters == ["facts"]
+    assert seen["purge"]["domain"] == "rum_errors" and seen["purge"]["service_id"] == "svc"
+    assert seen["rebuild"]["domain"] == "rum_errors" and seen["rebuild"]["service_id"] == "svc"

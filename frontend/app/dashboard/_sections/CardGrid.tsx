@@ -9,7 +9,7 @@ import { cn } from '@/lib/utils'
 import { CARD_CATEGORIES, CATEGORIZED_CARD_IDS, CUSTOM_TINT } from './categories'
 import type { DashboardCard } from '@/hooks/useDashboardCards'
 import type { components } from '@/types/api.generated'
-import type { DashboardAggregates } from './types'
+import type { DashboardAggregates } from './categories'
 
 type TopBots = components['schemas']['SecurityTopBotsResponse']
 

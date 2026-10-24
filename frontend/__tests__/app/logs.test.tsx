@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, test, vi, beforeEach, afterEach } from 'vitest'
 import LogsClient from '@/app/logs/_sections/LogsClient'
 import { QuickActionsBar } from '@/app/logs/_sections/QuickActionsBar'
-import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES, CRON_GROUPS } from '@/app/logs/_sections/CronExplanations'
+import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES, CRON_GROUPS } from '@/app/logs/_sections/CronScheduleBox'
 import { renderWithQuery } from '../helpers/query'
 import React from 'react'
 import { spyOnConsoleError } from '../helpers/page-smoke'
@@ -83,8 +83,11 @@ vi.mock('@/app/logs/_sections/CronColumns', () => ({ useCronColumns: () => [] })
 vi.mock('@/app/logs/_sections/AuditColumns', () => ({ useAuditColumns: () => [] }))
 vi.mock('@/app/logs/_sections/FloatingOperationsDock', () => ({ FloatingOperationsDock: () => null }))
 vi.mock('@/app/logs/_sections/CronTab', () => ({ CronTab: () => <div data-testid="cron-tab" /> }))
-vi.mock('@/app/logs/_sections/ServiceHistoryTab', () => ({ ServiceHistoryTab: () => null }))
-vi.mock('@/app/logs/_sections/IngestionTab', () => ({ IngestionTab: () => null }))
+vi.mock('@/app/logs/_sections/SchemaTab', () => ({
+  SchemaTab: () => null,
+  ServiceHistoryTab: () => null,
+  IngestionTab: () => null,
+}))
 vi.mock('@/components/SSEModal', () => ({
   ControlledSSEModal: () => null,
   SSEModal: () => null,

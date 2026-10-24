@@ -1,8 +1,7 @@
 import { HydrationBoundary } from '@tanstack/react-query'
 
 import { fetchCronRunsServerSide, fetchCronScheduleServerSide } from '@/lib/ssr/admin_gateway'
-import { firstParam, seedDehydratedState } from '@/lib/ssr/seed'
-import { resolvePageServiceId } from '@/lib/ssr/service'
+import { firstParam, resolvePageServiceId, seedDehydratedState } from '@/lib/ssr/seed'
 import LogsClient from './_sections/LogsClient'
 import { queryKeys } from '@/lib/query-keys'
 

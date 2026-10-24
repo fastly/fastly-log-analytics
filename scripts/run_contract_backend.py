@@ -16,11 +16,43 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from uuid import uuid4
 
-if TYPE_CHECKING:
-    from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
+
+_STREAMING_FIXTURE_PATH = "/api/__e2e__/streaming-fixture"
+_STREAMING_FIXTURE_COOKIE = "fla_streaming_fixture"
+
+
+def install_streaming_fixture(app: FastAPI) -> None:
+    fixtures: dict[str, dict] = {}
+
+    @app.middleware("http")
+    async def streaming_fixture(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+        token = request.cookies.get(_STREAMING_FIXTURE_COOKIE, "")
+        fixture = fixtures.get(token)
+        if request.url.path == _STREAMING_FIXTURE_PATH:
+            if request.method == "POST":
+                token = uuid4().hex
+                fixtures[token] = {"payload": await request.json(), "bodies": []}
+                response = JSONResponse({"created": True})
+                response.set_cookie(_STREAMING_FIXTURE_COOKIE, token, httponly=True, samesite="strict")
+                return response
+            if request.method == "GET" and fixture is not None:
+                return JSONResponse({"bodies": fixture["bodies"]})
+            if request.method == "DELETE":
+                fixtures.pop(token, None)
+                response = JSONResponse({"deleted": True})
+                response.delete_cookie(_STREAMING_FIXTURE_COOKIE)
+                return response
+            return JSONResponse({"error": "fixture_not_found"}, status_code=404)
+        if request.url.path == "/api/cmcd/aggregates" and request.method == "POST" and fixture is not None:
+            fixture["bodies"].append(await request.json())
+            return JSONResponse(fixture["payload"])
+        return await call_next(request)
 
 
 def _maybe_redirect_config_paths() -> None:
@@ -79,7 +111,6 @@ def main() -> int:
         if not os.environ.get("CONTRACT_CONFIGS_DIR") or not os.environ.get("CONTRACT_DATA_DIR"):
             raise ValueError("Streaming fixtures require an isolated contract sandbox")
         from backend.main import app as backend_app
-        from scripts.lib.streaming_e2e_fixture import install_streaming_fixture
 
         install_streaming_fixture(backend_app)
         app = backend_app

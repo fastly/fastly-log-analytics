@@ -2,19 +2,59 @@
 
 import React from 'react'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
-import { ApproxBadge } from './ApproxBadge'
-import type { OriginSummary, SectionQuery } from './types'
-
 import { formatCount } from '@/lib/format'
+import type { components } from '@/types/api.generated'
+
+type OriginAggregates = components['schemas']['OriginAggregatesResponse']
+
+export type OriginSummary = OriginAggregates['summary']
+export type OriginTimeseries = OriginAggregates['timeseries']
+export type OriginSlowUrls = OriginAggregates['slow_urls']
+export type OriginStatusCodes = OriginAggregates['status_codes']
+export type OriginPopLatency = OriginAggregates['pop_latency']
+export type OriginIpHealth = OriginAggregates['ip_health']
+
+export type OriginSlowUrlRow = components['schemas']['OriginSlowUrlRow']
+export type OriginPopLatencyRow = components['schemas']['OriginPopLatencyRow']
+export type OriginIpHealthRow = components['schemas']['OriginIpHealthRow']
+
+/** One section of the origin composite plus the bundle query's loading state. */
+export interface SectionQuery<T> {
+  data: T | undefined
+  isLoading: boolean
+  isFetching: boolean
+  error: Error | null
+}
+
+/**
+ * Small "Approximate" pill shown on origin panels whose wide-window
+ * (>= 48h, unfiltered) values are served from per-hour rollups. Across
+ * hours the percentiles are request-weighted averages of per-hour
+ * percentiles rather than an exact cross-window MEDIAN/APPROX_QUANTILE,
+ * so the backend sets ``_approx: true`` on those section payloads. Counts
+ * (request volume, error rate) stay exact. Markup mirrors the original
+ * inline badge on the summary card so every origin panel reads the same.
+ */
+export function ApproxBadge({ message }: { message: string }) {
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger render={<span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-muted text-muted-foreground text-[10px] font-bold uppercase tracking-wider cursor-help" />}>
+          <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/60" />
+          Approximate
+        </TooltipTrigger>
+        <TooltipContent side="left" className="max-w-[260px] text-xs">
+          {message}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
 export function Aggregates({ summary }: { summary: SectionQuery<OriginSummary> }) {
   const error = summary.error as AnalyticsCardError | null
-  // Backend sets ``_approx: true`` on long-window panels (>= 48h) that
-  // are served from the per-hour origin_summary rollup — percentiles are
-  // request-weighted averages of per-hour percentiles rather than an
-  // exact cross-window MEDIAN/APPROX_QUANTILE. Counts (error rate, fetch
-  // volume) are still exact. Surface this so analysts know which numbers
-  // tolerate a small approximation.
   const isApprox = summary.data?._approx === true
   return (
     <div className="mb-6">

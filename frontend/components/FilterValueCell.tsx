@@ -4,10 +4,9 @@ import * as React from 'react'
 import { usePathname } from 'next/navigation'
 import { ChevronDown, ExternalLink, Filter, Copy } from 'lucide-react'
 
-import { cn, copyToClipboard } from '@/lib/utils'
+import { cn, copyToClipboard, isIpFamilyField } from '@/lib/utils'
 import { useFilterStore } from '@/stores/filterStore'
 import { useMaskIps } from '@/hooks/useIsAnalyst'
-import { isIpFamilyField } from '@/lib/pii'
 import {
   DropdownMenu,
   DropdownMenuTrigger,

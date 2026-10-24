@@ -41,7 +41,7 @@ from backend.high_scale.sessions import sessions_endpoint
 from backend.models.cmcd import CmcdRequest
 from backend.models.dashboard import AggregatesRequest, SessionsRequest
 from backend.models.insights import CacheCollapseDetailRequest, InsightsRequest
-from backend.repositories.insights.registry import registry
+from backend.repositories.insights import registry
 
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_HS_READERS_CLICKHOUSE_INTEGRATION") != "1", reason="explicit real ClickHouse readers gate"

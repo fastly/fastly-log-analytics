@@ -391,3 +391,409 @@ def test_high_scale_readers_do_not_hardcode_prod_database_name() -> None:
         "locally, fastly_log_analytics on Elevation). Hardcoding "
         f"'{_FORBIDDEN}' breaks every non-prod-named database. Offenders:\n" + "\n".join(offenders)
     )
+
+
+# ── Merged from test_batch_manifest.py ───────────────────────────────
+
+from datetime import UTC, timedelta
+
+from backend.high_scale.archive_models import ArchiveSourceEntry
+
+
+def _base_artifact(row_count: int = 100, byte_count: int = 5000) -> ArchiveArtifact:
+    return ArchiveArtifact(
+        uri="s3://test-bucket/high-scale/archive/manifest-1.parquet",
+        checksum="sha256:artifact123",
+        size_bytes=4096,
+        row_count=row_count,
+        byte_count=byte_count,
+        canonical_digest="sha256:digest123",
+        schema_version="request.v1",
+        transform_version="normalize.v1",
+    )
+
+
+def test_batch_manifest_supports_n_sources_and_validates() -> None:
+    now = datetime.now(UTC)
+    sources = tuple(
+        ArchiveSourceEntry(
+            key=f"raw/request/2026-10-09/part_{i}.gz",
+            checksum=f"sha256:chk_{i}",
+            size_bytes=1024,
+            version=f"v_{i}",
+            row_start=i * 20,
+            row_count=20,
+            deletion_deadline=now + timedelta(days=7),
+        )
+        for i in range(5)
+    )
+
+    manifest = ArchiveManifest(
+        manifest_id="manifest-batch-001",
+        service_id="svc_test",
+        domain="request",
+        sources=sources,
+        artifact=_base_artifact(row_count=100),
+        coverage_start=now - timedelta(minutes=5),
+        coverage_end=now,
+        retention_deadline=now + timedelta(days=30),
+        deletion_authorization_deadline=now + timedelta(days=30),
+        archive_epoch=1,
+    )
+
+    # Validation should pass
+    manifest.validate()
+    assert len(manifest.sources) == 5
+    assert manifest.sources[0].row_start == 0
+    assert manifest.sources[0].row_count == 20
+    assert manifest.sources[4].row_start == 80
+
+
+def test_batch_manifest_rejects_row_overflow() -> None:
+    now = datetime.now(UTC)
+    sources = (
+        ArchiveSourceEntry(
+            key="raw/request/part_0.gz",
+            checksum="sha256:chk_0",
+            size_bytes=1024,
+            row_start=0,
+            row_count=60,
+            deletion_deadline=now + timedelta(days=7),
+        ),
+        ArchiveSourceEntry(
+            key="raw/request/part_1.gz",
+            checksum="sha256:chk_1",
+            size_bytes=1024,
+            row_start=60,
+            row_count=50,  # 60 + 50 = 110 > artifact row_count 100
+            deletion_deadline=now + timedelta(days=7),
+        ),
+    )
+
+    manifest = ArchiveManifest(
+        manifest_id="manifest-batch-002",
+        service_id="svc_test",
+        domain="request",
+        sources=sources,
+        artifact=_base_artifact(row_count=100),
+        coverage_start=now - timedelta(minutes=5),
+        coverage_end=now,
+        retention_deadline=now + timedelta(days=30),
+        deletion_authorization_deadline=now + timedelta(days=30),
+        archive_epoch=1,
+    )
+
+    with pytest.raises(ValueError, match="exceeds artifact row_count"):
+        manifest.validate()
+
+
+def test_independent_per_source_deletion_deadlines() -> None:
+    now = datetime.now(UTC)
+    s1 = ArchiveSourceEntry(
+        key="raw/request/file1.gz",
+        checksum="sha256:chk1",
+        size_bytes=500,
+        row_start=0,
+        row_count=50,
+        deletion_deadline=now - timedelta(minutes=1),  # Eligible now
+    )
+    s2 = ArchiveSourceEntry(
+        key="raw/request/file2.gz",
+        checksum="sha256:chk2",
+        size_bytes=600,
+        row_start=50,
+        row_count=50,
+        deletion_deadline=now + timedelta(hours=1),  # Not eligible yet
+    )
+    manifest = ArchiveManifest(
+        manifest_id="manifest-batch-004",
+        service_id="svc_test",
+        domain="request",
+        sources=(s1, s2),
+        artifact=_base_artifact(row_count=100),
+        coverage_start=now - timedelta(minutes=5),
+        coverage_end=now,
+        retention_deadline=now + timedelta(days=30),
+        deletion_authorization_deadline=now + timedelta(days=30),
+        archive_epoch=1,
+    )
+
+    assert manifest.is_source_eligible_for_deletion("raw/request/file1.gz", now=now) is True
+    assert manifest.is_source_eligible_for_deletion("raw/request/file2.gz", now=now) is False
+
+
+def test_write_batch_archive_checkpoint_end_to_end(tmp_path) -> None:
+    from backend.high_scale.archive_writer import write_batch_archive_checkpoint
+
+    now = datetime.now(UTC)
+    s1 = ArchiveSourceObject("svc_test", "request", "raw/request/part_0.gz", "sha256:chk0", 1024)
+    s2 = ArchiveSourceObject("svc_test", "request", "raw/request/part_1.gz", "sha256:chk1", 2048)
+
+    events_1 = [{"event_id": f"s1_{i}", "status": 200, "client_ip": "1.1.1.1"} for i in range(15)]
+    events_2 = [{"event_id": f"s2_{i}", "status": 404, "client_ip": "2.2.2.2"} for i in range(25)]
+
+    manifest = write_batch_archive_checkpoint(
+        tmp_path,
+        service_id="svc_test",
+        domain="request",
+        source_batches=[(s1, events_1), (s2, events_2)],
+        archive_epoch=1,
+        schema_version="request.v1",
+        transform_version="normalize.v1",
+        coverage_start=now - timedelta(minutes=1),
+        coverage_end=now,
+    )
+
+    assert len(manifest.sources) == 2
+    assert manifest.sources[0].key == "raw/request/part_0.gz"
+    assert manifest.sources[0].row_start == 0
+    assert manifest.sources[0].row_count == 15
+    assert manifest.sources[1].key == "raw/request/part_1.gz"
+    assert manifest.sources[1].row_start == 15
+    assert manifest.sources[1].row_count == 25
+    assert manifest.artifact.row_count == 40
+
+
+# ── Merged from test_decoder.py ──────────────────────────────────────
+
+import gzip
+
+
+def _source() -> ArchiveSourceObject:
+    return ArchiveSourceObject("svc", "request", "raw/request/a.gz", "sha256:source", 100, "v7")
+
+
+def test_decode_assigns_stable_identity_and_preserves_duplicate_payloads() -> None:
+    payload = gzip.compress(b'{"url":"/same","status":200}\n{"url":"/same","status":200}\n')
+
+    result = decode_source_object(_source(), payload, transform_version="normalize.v1")
+
+    assert result.decoded_rows == 2
+    assert result.accepted_rows == 2
+    assert result.quarantined_rows == 0
+    assert result.events[0]["event_id"] != result.events[1]["event_id"]
+    assert result.events[0]["line_ordinal"] == 0
+    assert result.events[1]["line_ordinal"] == 1
+
+
+def test_decode_replays_with_identical_event_ids() -> None:
+    payload = gzip.compress(b'{"url":"/same","status":200}\n')
+
+    first = decode_source_object(_source(), payload, transform_version="normalize.v1")
+    second = decode_source_object(_source(), payload, transform_version="normalize.v1")
+
+    assert first.events[0]["event_id"] == second.events[0]["event_id"]
+
+
+def test_decode_preserves_request_ip_without_mutating_the_batch_payload() -> None:
+    payload = gzip.compress(b'{"ip":"198.51.100.10","url":"/same","status":200}\n')
+
+    result = decode_source_object(_source(), payload, transform_version="normalize.v1")
+
+    assert result.events[0]["ip"] == "198.51.100.10"
+    assert "client_ip" not in result.events[0]
+
+
+def test_decode_quarantines_malformed_records_losslessly() -> None:
+    malformed = b'{"url":"/ok"}\nnot-json\n["not","an","object"]\n'
+
+    result = decode_source_object(_source(), gzip.compress(malformed), transform_version="normalize.v1")
+
+    assert result.accepted_rows == 1
+    assert result.quarantined_rows == 2
+    assert [item.raw_line for item in result.dead_letters] == [b"not-json", b'["not","an","object"]']
+    assert json.loads(result.events[0]["raw_json"])["url"] == "/ok"
+
+
+def test_decode_normalizes_dedicated_rum_vitals_fields_for_serving() -> None:
+    source = ArchiveSourceObject("svc", "rum_vitals", "raw/rum/vitals.gz", "sha256:source", 100, "v7")
+    payload = gzip.compress(
+        b'{"rum_cid":"cid-1","rum_metric_name":"LCP","rum_metric_value":"123.5",'
+        b'"rum_metric_rating":"good","rum_pathname":"/home"}\n'
+    )
+
+    result = decode_source_object(source, payload, transform_version="normalize.v1")
+
+    assert result.events[0]["client_id"] == "cid-1"
+    assert result.events[0]["metric_name"] == "LCP"
+    assert result.events[0]["metric_value"] == 123.5
+    assert result.events[0]["metric_rating"] == "good"
+    assert result.events[0]["pathname"] == "/home"
+
+
+def test_decode_falls_back_to_querystring_when_flat_rum_vitals_fields_are_empty() -> None:
+    # Mirrors the live Elevation shape: the VCL-extracted flat rum_metric_* log
+    # fields came through empty (edge-snippet ordering/case drift), but the
+    # full beacon querystring is still present in rum_raw_query. Without a
+    # fallback, metric_name/metric_value decode to ""/None for every row.
+    source = ArchiveSourceObject("svc", "rum_vitals", "raw/rum/vitals.gz", "sha256:source", 100, "v7")
+    payload = gzip.compress(
+        b'{"rum_cid":"","rum_metric_name":"","rum_metric_value":"","rum_metric_rating":"","rum_pathname":"",'
+        b'"rum_raw_query":"/beacon?rum_metric_name=LCP&rum_metric_value=123.5&rum_metric_rating=good'
+        b'&cid=cid-1&rum_pathname=%2Fhome"}\n'
+    )
+
+    result = decode_source_object(source, payload, transform_version="normalize.v1")
+
+    assert result.events[0]["client_id"] == "cid-1"
+    assert result.events[0]["metric_name"] == "LCP"
+    assert result.events[0]["metric_value"] == 123.5
+    assert result.events[0]["metric_rating"] == "good"
+    assert result.events[0]["pathname"] == "/home"
+
+
+def test_decode_prefers_flat_rum_vitals_fields_over_querystring_fallback() -> None:
+    source = ArchiveSourceObject("svc", "rum_vitals", "raw/rum/vitals.gz", "sha256:source", 100, "v7")
+    payload = gzip.compress(
+        b'{"rum_metric_name":"CLS","rum_metric_value":"0.02",'
+        b'"rum_raw_query":"/beacon?rum_metric_name=LCP&rum_metric_value=999"}\n'
+    )
+
+    result = decode_source_object(source, payload, transform_version="normalize.v1")
+
+    assert result.events[0]["metric_name"] == "CLS"
+    assert result.events[0]["metric_value"] == 0.02
+
+
+def test_decode_normalizes_dedicated_rum_error_fields_for_serving() -> None:
+    source = ArchiveSourceObject("svc", "rum_errors", "raw/rum/errors.gz", "sha256:source", 100, "v7")
+    payload = gzip.compress(
+        b'{"rum_cid":"cid-2","rum_error_message":"boom","rum_error_file":"app.js","rum_pathname":"/checkout"}\n'
+    )
+
+    result = decode_source_object(source, payload, transform_version="normalize.v1")
+
+    assert result.events[0]["client_id"] == "cid-2"
+    assert result.events[0]["error_message"] == "boom"
+    assert result.events[0]["error_file"] == "app.js"
+    assert result.events[0]["pathname"] == "/checkout"
+
+
+def test_decode_expands_faro_rum_body_matching_standard_mode_parity() -> None:
+    from backend.core.rum_ingest import extract_metrics_from_faro_payload
+
+    faro_payload = {
+        "meta": {
+            "browser": {"name": "Firefox", "mobile": True},
+            "os": {"name": "Android"},
+            "page": {"url": "https://shop.example.test/products/42?tab=reviews"},
+        },
+        "measurements": [
+            {
+                "type": "web-vitals",
+                "values": {"lcp": 1820.5, "cls": 0.04, "delta": 12.0},
+                "context": {"rating": "good"},
+            },
+            {
+                "type": "web-vitals",
+                "values": {"inp": 195.0},
+                "meta": {"rating": "needs-improvement"},
+            },
+        ],
+        "events": [
+            {
+                "name": "faro.performance.navigation",
+                "attributes": {"ttfb": 110.25, "fcp": 640.0},
+            },
+            {
+                "name": "add_to_cart_click",
+            },
+        ],
+        "exceptions": [
+            {
+                "value": "TypeError: Cannot read properties of null",
+                "stacktrace": {
+                    "frames": [{"filename": "https://shop.example.test/static/cart.js", "lineno": 88, "colno": 14}]
+                },
+            },
+            {
+                "message": "ReferenceError: checkoutToken is not defined",
+                "stacktrace": {
+                    "frames": [{"filename": "https://shop.example.test/static/pay.js", "lineno": 19, "colno": 3}]
+                },
+            },
+        ],
+    }
+    raw_record = {
+        "timestamp": "2026-04-20T12:00:00Z",
+        "rum_cid": "cid-faro-99",
+        "fastly_req_id": "req-faro-1",
+        "country": "US",
+        "rum_body": json.dumps(faro_payload),
+    }
+    payload_bytes = gzip.compress((json.dumps(raw_record) + "\n").encode("utf-8"))
+
+    standard_extracted = extract_metrics_from_faro_payload(faro_payload, raw_record)
+    standard_vitals = [
+        m for m in standard_extracted if not ((m.get("metric_name") == "exception") or bool(m.get("error_message")))
+    ]
+    standard_errors = [
+        m for m in standard_extracted if (m.get("metric_name") == "exception") or bool(m.get("error_message"))
+    ]
+    assert len(standard_vitals) == 6
+    assert len(standard_errors) == 2
+
+    vitals_source = ArchiveSourceObject("svc", "rum_vitals", "raw/rum/faro.gz", "sha256:source", 100, "v7")
+    vitals_result = decode_source_object(vitals_source, payload_bytes, transform_version="normalize.v1")
+
+    assert vitals_result.decoded_rows == 1
+    assert vitals_result.accepted_rows == len(standard_vitals)
+    assert vitals_result.quarantined_rows == 0
+    assert len({ev["event_id"] for ev in vitals_result.events}) == len(standard_vitals)
+    for ev, std in zip(vitals_result.events, standard_vitals, strict=True):
+        assert ev["metric_name"] == std["metric_name"]
+        assert ev["metric_value"] == float(std["metric_value"])
+        assert ev["metric_rating"] == std["metric_rating"]
+        assert ev["pathname"] == std["pathname"] == "/products/42"
+        assert ev["client_id"] == std["cid"] == "cid-faro-99"
+        assert ev["browser"] == std["browser"] == "Firefox"
+        assert ev["os"] == std["os"] == "Android"
+        assert ev["device"] == std["device"] == "Mobile"
+        assert ev["line_ordinal"] == 0
+
+    errors_source = ArchiveSourceObject("svc", "rum_errors", "raw/rum/faro.gz", "sha256:source", 100, "v7")
+    errors_result = decode_source_object(errors_source, payload_bytes, transform_version="normalize.v1")
+
+    assert errors_result.decoded_rows == 1
+    assert errors_result.accepted_rows == len(standard_errors)
+    assert errors_result.quarantined_rows == 0
+    assert len({ev["event_id"] for ev in errors_result.events}) == len(standard_errors)
+    for ev, std in zip(errors_result.events, standard_errors, strict=True):
+        assert ev["error_message"] == std["error_message"]
+        assert ev["error_file"] == std["error_file"]
+        assert ev["error_line"] == std["error_line"]
+        assert ev["error_col"] == std["error_col"]
+        assert ev["pathname"] == std["pathname"] == "/products/42"
+        assert ev["client_id"] == std["cid"] == "cid-faro-99"
+        assert ev["browser"] == std["browser"] == "Firefox"
+        assert ev["os"] == std["os"] == "Android"
+        assert ev["device"] == std["device"] == "Mobile"
+        assert ev["line_ordinal"] == 0
+
+    from backend.high_scale.publication import HighScaleBatch, _rows_for_domain, row_matches_serving_domain
+
+    vitals_serving_rows = tuple(e for e in vitals_result.events if row_matches_serving_domain("rum_vitals", e))
+    assert len(vitals_serving_rows) == len(standard_vitals)
+    vitals_batch = HighScaleBatch(
+        batch_id="b-vitals",
+        service_id="svc",
+        domain="rum_vitals",
+        generation="gen-1",
+        rows=vitals_serving_rows,
+    )
+    ch_vitals_tuples = _rows_for_domain(vitals_batch, "00000000-0000-0000-0000-000000000001")
+    assert len(ch_vitals_tuples) == len(standard_vitals)
+    assert len({row[1] for row in ch_vitals_tuples}) == len(standard_vitals)
+
+    errors_serving_rows = tuple(e for e in errors_result.events if row_matches_serving_domain("rum_errors", e))
+    assert len(errors_serving_rows) == len(standard_errors)
+    errors_batch = HighScaleBatch(
+        batch_id="b-errors",
+        service_id="svc",
+        domain="rum_errors",
+        generation="gen-1",
+        rows=errors_serving_rows,
+    )
+    ch_errors_tuples = _rows_for_domain(errors_batch, "00000000-0000-0000-0000-000000000002")
+    assert len(ch_errors_tuples) == len(standard_errors)
+    assert len({row[1] for row in ch_errors_tuples}) == len(standard_errors)

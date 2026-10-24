@@ -1,11 +1,15 @@
 'use client'
 
 import * as React from 'react'
+import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { AlertTriangle, Check, Loader2 } from 'lucide-react'
 import { analystFetch } from '@/lib/analystFetch'
+import type { components } from '@/types/api.generated'
 import { safeReturnTarget } from '../ShareLoginForm'
+
+type TosPayload = components['schemas']['TosDocument']
 
 interface AcknowledgeButtonProps {
   version: string
@@ -17,8 +21,6 @@ export function AcknowledgeButton({ version, returnTo }: AcknowledgeButtonProps)
   const [error, setError] = React.useState<string | null>(null)
   const errorAlertRef = React.useRef<HTMLDivElement>(null)
 
-  // Move focus to the error alert when one appears so SR users hear it
-  // and keyboard users immediately know where they are.
   React.useEffect(() => {
     if (error) errorAlertRef.current?.focus()
   }, [error])
@@ -27,9 +29,6 @@ export function AcknowledgeButton({ version, returnTo }: AcknowledgeButtonProps)
     setBusy(true)
     setError(null)
     try {
-      // Raw fetch: share-* routes use a relative path so the request flows
-      // through the Next.js proxy in remote-analyst mode rather than the
-      // typed client's direct-to-loopback path.
       const res = await analystFetch('/api/share/acknowledge', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -40,12 +39,6 @@ export function AcknowledgeButton({ version, returnTo }: AcknowledgeButtonProps)
         setError(body?.detail?.error || `Acknowledgment failed (${res.status}).`)
         return
       }
-      // Hard reload, not client-side router.replace: AppLayout's bootstrap
-      // query was cached BEFORE the session cookie was set, so it still
-      // says is_remote_analyst=true,needs_login=true. A SPA navigation
-      // re-renders /dashboard with that stale cache → AppLayout bounces
-      // back to /share-login. .assign() forces a fresh document load that
-      // re-fetches bootstrap with the new cookie.
       const search = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null
       const safeTarget = safeReturnTarget(
         returnTo ?? search?.get('return') ?? search?.get('next'),
@@ -79,6 +72,73 @@ export function AcknowledgeButton({ version, returnTo }: AcknowledgeButtonProps)
           I acknowledge
         </Button>
       </div>
+    </div>
+  )
+}
+
+export function AcknowledgeFallback() {
+  const router = useRouter()
+  const [tos, setTos] = React.useState<TosPayload | null>(null)
+  const [error, setError] = React.useState<string | null>(null)
+  const errorAlertRef = React.useRef<HTMLDivElement>(null)
+
+  React.useEffect(() => {
+    if (error) errorAlertRef.current?.focus()
+  }, [error])
+
+  React.useEffect(() => {
+    let cancelled = false
+    analystFetch('/api/share/tos')
+      .then(async (res) => {
+        if (cancelled) return
+        if (res.status === 401) {
+          router.replace('/share-login')
+          return
+        }
+        if (!res.ok) {
+          setError(`Could not load the terms (HTTP ${res.status}).`)
+          return
+        }
+        const body = (await res.json()) as TosPayload
+        setTos({ version: body.version, text: body.text })
+      })
+      .catch(() => {
+        if (!cancelled) setError('Could not reach the server.')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [router])
+
+  return (
+    <div
+      data-testid="share-acknowledge-fallback"
+      className="space-y-4 min-h-[140px] [contain-intrinsic-size:auto_140px] [content-visibility:auto]"
+    >
+      {error && (
+        <Alert variant="destructive" ref={errorAlertRef} tabIndex={-1}>
+          <AlertTriangle className="h-4 w-4" />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+      {tos ? (
+        <>
+          <p className="text-sm leading-relaxed text-muted-foreground">{tos.text}</p>
+          <AcknowledgeButton version={tos.version} />
+        </>
+      ) : (
+        !error && (
+          <div
+            role="status"
+            data-testid="share-acknowledge-loading"
+            className="min-h-[120px] [contain-intrinsic-size:auto_120px] [content-visibility:auto] flex flex-col items-center justify-center gap-2 text-xs text-muted-foreground"
+          >
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            <span>Verifying share session &amp; security policies...</span>
+            <span className="sr-only">Loading the terms…</span>
+          </div>
+        )
+      )}
     </div>
   )
 }

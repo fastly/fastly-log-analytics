@@ -1,12 +1,150 @@
 "use client";
 
 import React from "react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { DialogFooter } from "@/components/ui/dialog";
-import { ChevronLeft, Loader2 } from "lucide-react";
+import {
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { CheckCircle2, ChevronLeft, Loader2, Plus, RotateCcw } from "lucide-react";
+import { ELAPSED_RELATIVE_AGO, formatElapsed } from "@/lib/format";
 import { panelDialogFooter } from "@/lib/panel-dialog";
+import { cn } from "@/lib/utils";
 import type { WizardState } from "./useWizardState";
-import type { Step } from "./types";
+import { getStepsForMode, type Step, type WizardDraft } from "./types";
+
+// ─── ResumeBanner ───────────────────────────────────────────────────────────
+
+function relativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "earlier";
+  return formatElapsed(Math.floor((Date.now() - then) / 1000), ELAPSED_RELATIVE_AGO);
+}
+
+function stepLabelFor(draft: WizardDraft): string {
+  const steps = getStepsForMode(draft.mode, draft.config);
+  const found = steps.find((s) => s.id === draft.currentStep);
+  return found?.label ?? draft.currentStep;
+}
+
+interface ResumeBannerProps {
+  draft: WizardDraft;
+  onResume: () => void;
+  onStartFresh: () => void;
+}
+
+export function ResumeBanner({ draft, onResume, onStartFresh }: ResumeBannerProps) {
+  const label = stepLabelFor(draft);
+  const when = relativeTime(draft.updatedAt);
+  return (
+    <div className="px-6 pt-4">
+      <Alert>
+        <RotateCcw className="h-4 w-4" />
+        <AlertTitle>Resume previous wizard?</AlertTitle>
+        <AlertDescription>
+          You left off on the <span className="font-medium">{label}</span> step
+          {" "}({when}). Fastly API token and storage credentials were cleared
+          for safety and will need to be re-entered.
+        </AlertDescription>
+        <div className="mt-3 flex flex-wrap gap-2 group-has-[>svg]/alert:col-start-2">
+          <Button size="sm" onClick={onResume} data-testid="resume-banner-resume">
+            Resume from {label}
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={onStartFresh}
+            data-testid="resume-banner-start-fresh"
+          >
+            Start fresh
+          </Button>
+        </div>
+      </Alert>
+    </div>
+  );
+}
+
+// ─── WizardHeader ───────────────────────────────────────────────────────────
+
+export function WizardHeader({ s }: { s: WizardState }) {
+  const { step, STEPS } = s;
+  const stepIndex = STEPS.findIndex((x) => x.id === step);
+
+  return (
+    <DialogHeader className="px-6 pt-6 pb-7 border-b">
+      <DialogTitle className="flex items-center gap-2 text-xl font-bold">
+        <Plus className="h-5 w-5 text-primary" />
+        Provision New Service
+      </DialogTitle>
+
+      {/* Premium Stepper Timeline */}
+      <div className="flex items-center justify-center w-full mt-6 px-1 sm:px-4 max-w-2xl mx-auto">
+        {STEPS.map((s2, i) => {
+          const isActive = step === s2.id;
+          const isCompleted = stepIndex > i;
+
+          return (
+            <React.Fragment key={s2.id}>
+              {/* Step Node */}
+              <div className="flex flex-col items-center shrink-0 relative">
+                <div
+                  className={cn(
+                    "w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-all duration-300 border-2",
+                    isActive
+                      ? "bg-primary border-primary text-primary-foreground shadow-md shadow-primary/20 scale-110"
+                      : isCompleted
+                        ? "bg-green-500 border-green-500 text-white"
+                        : "bg-background border-muted text-muted-foreground",
+                  )}
+                  title={s2.label}
+                >
+                  {isCompleted ? (
+                    <CheckCircle2 className="w-4 h-4" />
+                  ) : (
+                    i + 1
+                  )}
+                </div>
+
+                {/* Responsive Label - hidden on small screens unless active to save horizontal space */}
+                <span
+                  className={cn(
+                    "text-[10px] font-semibold mt-1.5 absolute top-7 whitespace-nowrap transition-all duration-300",
+                    isActive
+                      ? "text-foreground font-bold opacity-100 scale-100"
+                      : "text-muted-foreground opacity-60 hidden md:block",
+                  )}
+                >
+                  {s2.label}
+                </span>
+              </div>
+
+              {/* Connecting Line Segment */}
+              {i < STEPS.length - 1 && (
+                <div className="flex-1 min-w-[8px] max-w-[48px] h-[2px] mx-1 sm:mx-2 bg-muted relative">
+                  <div
+                    className={cn(
+                      "absolute inset-0 bg-primary transition-all duration-500 ease-in-out",
+                      stepIndex > i ? "w-full" : "w-0",
+                    )}
+                  />
+                </div>
+              )}
+            </React.Fragment>
+          );
+        })}
+      </div>
+
+      {/* Dynamic step name details line */}
+      <div className="text-center mt-7 text-xs text-muted-foreground font-medium">
+        Step <span className="text-foreground font-semibold">{stepIndex + 1}</span> of {STEPS.length}
+      </div>
+    </DialogHeader>
+  );
+}
+
+// ─── WizardFooter ───────────────────────────────────────────────────────────
 
 export function WizardFooter({ s }: { s: WizardState }) {
   const {
@@ -189,10 +327,6 @@ export function WizardFooter({ s }: { s: WizardState }) {
           )}
 
           {step === "terraform" && (
-            // The Terraform & VCL preview is a read-only side-trip: export the
-            // files (button lives in the step body) and return. Deploy to
-            // Fastly / Complete Setup stay on the Review (execute) step so
-            // there's a single, unambiguous place to commit.
             <Button
               size="lg"
               className="h-9 px-6 font-bold"

@@ -4,16 +4,22 @@ import { ELAPSED_RELATIVE_AGO_JUST_NOW, formatCount, formatElapsed } from '@/lib
 import { useQuery } from '@tanstack/react-query'
 import { adminFetch, client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
+import { queryKeys } from '@/lib/query-keys'
 import { downloadBlob } from '@/lib/utils'
+import { useDateFormat } from '@/hooks/useDateFormat'
 import { useMounted } from '@/hooks/useMounted'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
+import { NextRunCountdown } from '@/components/LiveElapsed'
 import { components } from '@/types/api.generated'
 import type { ColumnDef } from '@tanstack/react-table'
 import { DataTableReadonly } from '@/components/DataTable'
-
-type BotSourceList = components['schemas']['BotSourcesResponse']
-type BotSource = components['schemas']['BotSourceMeta']
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import {
   Bot,
@@ -24,7 +30,89 @@ import {
   CloudDownload,
 } from 'lucide-react'
 
-import { SystemJobsStrip } from './SystemStatus'
+type BotSourceList = components['schemas']['BotSourcesResponse']
+type BotSource = components['schemas']['BotSourceMeta']
+
+function SystemJobBox({ job }: { job: components['schemas']['SystemJobStatus'] }) {
+  const { timeAgo, full, abbr } = useDateFormat()
+
+  const lastRunText = job.last_run_at ? timeAgo(job.last_run_at) : 'Never'
+
+  const isError = job.status === 'error'
+  const borderColor = isError ? 'border-destructive/50' : 'border-muted'
+  const bgColor = isError ? 'bg-destructive/10' : 'bg-muted/20'
+
+  return (
+    <div className={`relative flex flex-col justify-center border rounded-md px-2.5 h-8 shrink-0 ${bgColor} ${borderColor} min-w-[250px] max-w-[320px] flex-1`}>
+      <div className="flex items-center gap-2 w-full">
+        <TooltipProvider delay={200}>
+          <Tooltip>
+            <TooltipTrigger render={<span className={`text-[9px] font-bold uppercase tracking-wider shrink-0 truncate max-w-[120px] ${isError ? 'text-destructive' : 'text-muted-foreground'}`} />}>
+              {job.name}
+            </TooltipTrigger>
+            <TooltipContent side="top" className="max-w-[250px] text-xs">
+              {job.detail || job.name}
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+        <div className="w-px h-4 bg-border shrink-0" />
+        <div className={`flex-1 min-w-0 flex items-center justify-between text-[9px] whitespace-nowrap ${isError ? 'text-destructive/80' : 'text-muted-foreground'}`}>
+          <TooltipProvider delay={200}>
+            <Tooltip>
+              <TooltipTrigger render={<span className="truncate pr-2 " />}>
+                Last: {lastRunText}
+              </TooltipTrigger>
+              <TooltipContent className="text-xs">
+                {job.last_run_at ? `${full(job.last_run_at)} ${abbr()}` : 'Never'}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+          <TooltipProvider delay={200}>
+            <Tooltip>
+              <TooltipTrigger render={<span className="truncate " />}>
+                Next: <NextRunCountdown when={job.next_run_at} />
+              </TooltipTrigger>
+              <TooltipContent className="text-xs">
+                {job.next_run_at ? `${full(job.next_run_at)} ${abbr()}` : 'Disabled'}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export function SystemJobsStrip() {
+  const mounted = useMounted()
+
+  const { data: systemJobsData } = useQuery({
+    queryKey: queryKeys.systemJobs(),
+    queryFn: async ({ signal }) => {
+      return unwrapClient(client.GET("/api/admin/system-jobs", { signal }))
+    },
+    staleTime: 30_000,
+    refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
+  })
+
+  const ready = mounted && systemJobsData
+
+  return (
+    <div className="space-y-3 pt-2">
+      <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Background Jobs</Label>
+      <div className="flex flex-wrap gap-2">
+        {ready ? (
+          systemJobsData.jobs.map((job) => (
+            <SystemJobBox key={job.id} job={job} />
+          ))
+        ) : (
+          <div className="text-xs text-muted-foreground italic px-1 py-1">Loading background jobs...</div>
+        )}
+      </div>
+    </div>
+  )
+}
 
 function RebuildLocalViewButton() {
   const [busy, setBusy] = useState(false)
@@ -195,11 +283,6 @@ export function BotSourcesPanel() {
         Known bot registries used to identify and verify bots in log traffic via UA matching and FCrDNS validation.
       </p>
 
-      {/* Sources table */}
-      {/* M-6 (audit, mobile UX): overflow-x-auto so the bot-sources table
-          scrolls on phones instead of clipping the actions column (the
-          previous overflow-hidden combined with w-full pushed long
-          source names + the trailing action button off the right edge). */}
       <DataTableReadonly
         columns={sourceColumns}
         data={botSourcesData?.sources ?? []}
@@ -211,7 +294,6 @@ export function BotSourcesPanel() {
 
       {enrichError && <div className="text-xs text-red-500" role="alert">{enrichError}</div>}
 
-      {/* rDNS cache stats */}
       <div className="flex items-center justify-between text-sm">
         <div className="flex items-center gap-4 text-muted-foreground text-xs">
           <span className="flex items-center gap-1.5">
@@ -251,7 +333,6 @@ export function BotSourcesPanel() {
 
       </div>
 
-      {/* Maintenance */}
       <div className="space-y-3 pt-2">
         <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Maintenance</Label>
         <div className="flex flex-wrap gap-2">
@@ -262,7 +343,6 @@ export function BotSourcesPanel() {
         </p>
       </div>
 
-      {/* System jobs */}
       <SystemJobsStrip />
     </div>
   )

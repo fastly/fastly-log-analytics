@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import starlette.datastructures
+from backend.core.share_db.settings import get_setting, set_setting
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
@@ -31,7 +32,6 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from backend import config as svcconfig
 from backend.core import share_db
-from backend.core.share_db.settings import get_setting, set_setting
 from backend.main import app
 from backend.routers import alerts as alerts_router
 from backend.routers import share_admin
@@ -1517,7 +1517,7 @@ def test_scoring_enforce_threshold_and_rows_roundtrip():
 
 
 def test_log_fields_catalog_model_matches_real_producer():
-    from backend.models.log_fields_catalog import LogFieldsCatalogResponse
+    from backend.models.common import LogFieldsCatalogResponse
     from backend.routers.bootstrap import _compute_log_fields_catalog
 
     payload = _compute_log_fields_catalog(None)
@@ -1527,7 +1527,7 @@ def test_log_fields_catalog_model_matches_real_producer():
 
 def test_log_fields_catalog_custom_entries_roundtrip():
     from backend.core import log_fields as lf
-    from backend.models.log_fields_catalog import LogFieldCatalogEntry
+    from backend.models.common import LogFieldCatalogEntry
 
     entries = lf.get_custom_fields_catalog_entries(
         {"custom_fields": [{"name": "my_field", "label": "My Field", "enabled": True}]}
@@ -1935,7 +1935,7 @@ def test_log_fields_catalog_route_matches_producer(client):
 
 def test_log_fields_catalog_model_keeps_custom_entry_shape():
     from backend.core import log_fields as lf
-    from backend.models.log_fields_catalog import LogFieldsCatalogResponse
+    from backend.models.common import LogFieldsCatalogResponse
 
     custom = lf.get_custom_fields_catalog_entries(
         {"custom_fields": [{"name": "my_custom", "label": "My", "description": "d"}]}

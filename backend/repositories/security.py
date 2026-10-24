@@ -15,6 +15,7 @@ from backend.models.reader_coverage import ReaderCoverage
 from backend.repositories._base import (
     QueryRunner,
     SectionTimer,
+    _drop_temp_table,
     _safe_table,
     empty_schema_response,
     ensure_ngwaf_bots_materialized,
@@ -32,7 +33,6 @@ from backend.repositories.utils.response_cache import (
 )
 from backend.utils.cache_registry import CacheRegistry
 from backend.utils.date_utils import parse_window
-from backend.utils.log_throttle import log_once_per
 from backend.utils.sql_validator import escape_sql_literal
 
 _logger = logging.getLogger(__name__)
@@ -1218,85 +1218,88 @@ def _build_security_response(
         else:
             _need("fingerprint_coverage", set(coverage_cols))
 
-    # Request Header Size Distribution: per-hour req_header_bytes histogram
-    # rollup (exact SUM of bucket counts); live fallback scans the temp.
-    if _want("req_size_dist"):
-        if "req_header_bytes" in actual_cols:
-            _t = _time.perf_counter()
-            rolled = runner.try_security_req_size_from_rollup(start_time, end_time, has_filters=bool(filters))
-            if rolled is not None:
-                timer.mark("req_size_dist_rollup", _t)
-                results["req_size_dist"] = rolled
-            else:
-                _need("req_size_dist", {"req_header_bytes"})
+    def _try_rollup_or_need(
+        sec_name: str, req_col: str, need_cols: set[str], reader_fn: Callable[[], Any], timer_label: str
+    ) -> None:
+        if not _want(sec_name):
+            return
+        if req_col not in actual_cols:
+            results[sec_name] = []
+            return
+        _t = _time.perf_counter()
+        rolled = reader_fn()
+        if rolled is not None:
+            timer.mark(timer_label, _t)
+            results[sec_name] = rolled
         else:
-            results["req_size_dist"] = []
+            _need(sec_name, need_cols)
 
-    # Top IPs by Max Header Size: per-hour top-K (ip, MAX) rollup (exact
-    # MAX-of-MAX merge); live fallback scans the temp.
-    if _want("top_ips_header"):
-        if "req_header_bytes" in actual_cols:
+    def _try_prechecked_rollup(
+        sec_name: str,
+        req_col: str,
+        use_rollup: bool,
+        need_cols: set[str],
+        reader_fn: Callable[[], Any],
+        timer_label: str,
+        warn_msg: str,
+    ) -> None:
+        if not _want(sec_name):
+            return
+        if req_col not in actual_cols:
+            results[sec_name] = []
+            return
+        if use_rollup:
             _t = _time.perf_counter()
-            rolled = runner.try_security_top_ips_from_rollup(start_time, end_time, has_filters=bool(filters))
-            if rolled is not None:
-                timer.mark("top_ips_by_header_rollup", _t)
-                results["top_ips_header"] = rolled
-            else:
-                _need("top_ips_header", {"ip", "req_header_bytes"})
-        else:
-            results["top_ips_header"] = []
-
-    # Connection Reuse Distribution: per-hour conn_requests histogram rollup
-    # (exact SUM of bucket counts); live fallback scans the temp.
-    if _want("conn_reuse_dist"):
-        if "conn_requests" in actual_cols:
-            _t = _time.perf_counter()
-            rolled = runner.try_security_conn_reuse_from_rollup(start_time, end_time, has_filters=bool(filters))
-            if rolled is not None:
-                timer.mark("conn_reuse_dist_rollup", _t)
-                results["conn_reuse_dist"] = rolled
-            else:
-                _need("conn_reuse_dist", {"conn_requests"})
-        else:
-            results["conn_reuse_dist"] = []
-
-    # IPv6 Adoption: rollup-served (no temp) when the pre-check passed; else
-    # live, which needs {timestamp, is_ipv6}.
-    if _want("ipv6_adoption") and "is_ipv6" in actual_cols:
-        if use_ipv6_rollup:
-            _t = _time.perf_counter()
-            rolled = _ipv6_per_hour_from_rollups(runner, src, start_time, end_time, actual_cols=actual_cols)
-            timer.mark("ipv6_adoption_rollup", _t)
+            rolled = reader_fn()
+            timer.mark(timer_label, _t)
             if rolled is None:
-                _logger.warning(
-                    "[security] ipv6 rollup pre-check passed but per-hour read returned None; rendering empty card"
-                )
-                results["ipv6_adoption"] = []
+                _logger.warning(warn_msg)
+                results[sec_name] = []
             else:
-                results["ipv6_adoption"] = rolled
+                results[sec_name] = rolled
         else:
-            _need("ipv6_adoption", {"timestamp", "is_ipv6"})
-    elif _want("ipv6_adoption"):
-        results["ipv6_adoption"] = []
+            _need(sec_name, need_cols)
 
-    # Proxy/Anonymizer Breakdown: rollup-served (no temp) when the pre-check
-    # passed; else live, which needs {p_type}.
-    if _want("proxy_dist") and "p_type" in actual_cols:
-        if use_proxy_rollup:
-            _t = _time.perf_counter()
-            rolled = _proxy_dist_from_rollups(runner, start_time, end_time, actual_cols=actual_cols)
-            timer.mark("proxy_dist_rollup", _t)
-            if rolled is None:
-                _logger.warning(
-                    "[security] proxy rollup pre-check passed but reader returned None; rendering empty card"
-                )
-                results["proxy_dist"] = []
-            else:
-                results["proxy_dist"] = rolled
-        else:
-            _need("proxy_dist", {"p_type"})
-    elif _want("proxy_dist"):
-        results["proxy_dist"] = []
+    _has_filters = bool(filters)
+    _try_rollup_or_need(
+        "req_size_dist",
+        "req_header_bytes",
+        {"req_header_bytes"},
+        lambda: runner.try_security_req_size_from_rollup(start_time, end_time, has_filters=_has_filters),
+        "req_size_dist_rollup",
+    )
+    _try_rollup_or_need(
+        "top_ips_header",
+        "req_header_bytes",
+        {"ip", "req_header_bytes"},
+        lambda: runner.try_security_top_ips_from_rollup(start_time, end_time, has_filters=_has_filters),
+        "top_ips_by_header_rollup",
+    )
+    _try_rollup_or_need(
+        "conn_reuse_dist",
+        "conn_requests",
+        {"conn_requests"},
+        lambda: runner.try_security_conn_reuse_from_rollup(start_time, end_time, has_filters=_has_filters),
+        "conn_reuse_dist_rollup",
+    )
+    _try_prechecked_rollup(
+        "ipv6_adoption",
+        "is_ipv6",
+        use_ipv6_rollup,
+        {"timestamp", "is_ipv6"},
+        lambda: _ipv6_per_hour_from_rollups(runner, src, start_time, end_time, actual_cols=actual_cols),
+        "ipv6_adoption_rollup",
+        "[security] ipv6 rollup pre-check passed but per-hour read returned None; rendering empty card",
+    )
+    _try_prechecked_rollup(
+        "proxy_dist",
+        "p_type",
+        use_proxy_rollup,
+        {"p_type"},
+        lambda: _proxy_dist_from_rollups(runner, start_time, end_time, actual_cols=actual_cols),
+        "proxy_dist_rollup",
+        "[security] proxy rollup pre-check passed but reader returned None; rendering empty card",
+    )
 
     # Well-Known Bots: pre-materialised (ua, ip, count) rollup (no temp);
     # falls back to a live regex prefilter over the temp ({ua, ip}) on a
@@ -1502,43 +1505,47 @@ def _build_security_response(
         elif _want("fingerprint_coverage") and "fingerprint_coverage" not in results:
             results["fingerprint_coverage"] = {}
 
-        if "req_size_dist" in live_sections and temp_table:
-            q = SQL.REQ_HEADER_SIZE_DIST.format(temp_table=temp_table)
-            _t = _time.perf_counter()
-            res = runner.execute(q).fetchall()
-            timer.mark("req_size_dist", _t)
-            results["req_size_dist"] = [{"bucket": r[0], "count": r[1]} for r in res]
-
-        if "top_ips_header" in live_sections and temp_table:
-            q = SQL.TOP_IPS_BY_MAX_HEADER.format(temp_table=temp_table)
-            _t = _time.perf_counter()
-            res = runner.execute(q).fetchall()
-            timer.mark("top_ips_by_header", _t)
-            results["top_ips_header"] = [{"ip": r[0], "max_header": r[1]} for r in res]
-
-        if "conn_reuse_dist" in live_sections and temp_table:
-            q = SQL.CONN_REUSE_DIST.format(temp_table=temp_table)
-            _t = _time.perf_counter()
-            res = runner.execute(q).fetchall()
-            timer.mark("conn_reuse_dist", _t)
-            results["conn_reuse_dist"] = [{"bucket": r[0], "count": r[1]} for r in res]
-
-        if "ipv6_adoption" in live_sections and temp_table:
-            q = SQL.IPV6_ADOPTION_TS.format(
-                time_bucket_select=time_bucket_select("1 hour"),
-                temp_table=temp_table,
-            )
-            _t = _time.perf_counter()
-            res = runner.execute(q).fetchall()
-            timer.mark("ipv6_adoption", _t)
-            results["ipv6_adoption"] = [{"time": safe_iso(r[0]), "pct": r[1]} for r in res]
-
-        if "proxy_dist" in live_sections and temp_table:
-            q = SQL.PROXY_TYPE_DIST.format(temp_table=temp_table)
-            _t = _time.perf_counter()
-            res = runner.execute(q).fetchall()
-            timer.mark("proxy_dist", _t)
-            results["proxy_dist"] = [{"type": r[0], "count": r[1]} for r in res]
+        if temp_table:
+            for _sec, _sql, _mark, _shape in (
+                (
+                    "req_size_dist",
+                    SQL.REQ_HEADER_SIZE_DIST.format(temp_table=temp_table),
+                    "req_size_dist",
+                    lambda r: {"bucket": r[0], "count": r[1]},
+                ),
+                (
+                    "top_ips_header",
+                    SQL.TOP_IPS_BY_MAX_HEADER.format(temp_table=temp_table),
+                    "top_ips_by_header",
+                    lambda r: {"ip": r[0], "max_header": r[1]},
+                ),
+                (
+                    "conn_reuse_dist",
+                    SQL.CONN_REUSE_DIST.format(temp_table=temp_table),
+                    "conn_reuse_dist",
+                    lambda r: {"bucket": r[0], "count": r[1]},
+                ),
+                (
+                    "ipv6_adoption",
+                    SQL.IPV6_ADOPTION_TS.format(
+                        time_bucket_select=time_bucket_select("1 hour"),
+                        temp_table=temp_table,
+                    ),
+                    "ipv6_adoption",
+                    lambda r: {"time": safe_iso(r[0]), "pct": r[1]},
+                ),
+                (
+                    "proxy_dist",
+                    SQL.PROXY_TYPE_DIST.format(temp_table=temp_table),
+                    "proxy_dist",
+                    lambda r: {"type": r[0], "count": r[1]},
+                ),
+            ):
+                if _sec in live_sections:
+                    _t = _time.perf_counter()
+                    res = runner.execute(_sql).fetchall()
+                    timer.mark(_mark, _t)
+                    results[_sec] = [_shape(r) for r in res]
 
         # Well-Known Bots (UA matching + FCrDNS verification). Rows come from
         # the rollup (hit) or a live temp scan (miss); the Python enrichment
@@ -1627,12 +1634,7 @@ def _build_security_response(
             timer.mark("proxies", _t)
     finally:
         runner.end_shared_active_hour_temps()
-        if temp_table:
-            try:
-                runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
-            except Exception:
-                if log_once_per("_build_security_response: DROP TABLE failed (ignored)", 60):
-                    _logger.debug("_build_security_response: DROP TABLE failed (ignored)", exc_info=True)
+        _drop_temp_table(runner, temp_table, "_build_security_response")
 
     # Any requested section left unset (e.g. the temp build failed) falls
     # back to its empty default so the response stays well-formed. Only
@@ -1647,14 +1649,8 @@ def _build_security_response(
         if "ngwaf_bots" not in results:
             results["ngwaf_bots"] = []
 
-    if _want("proxies"):
-        if "active_proxies_count" not in results:
-            results["active_proxies_count"] = 0
-            results["tunnel_requests_count"] = 0
-            results["distance_mismatches_count"] = 0
-            results["traffic_quality"] = []
-            results["suspicious_isps"] = []
-            results["active_clients"] = []
+    if _want("proxies") and "active_proxies_count" not in results:
+        results.update(_empty_proxies_payload())
 
     if mask_ips and "top_ips_header" in results and results["top_ips_header"]:
         from backend.core.share_db.validation import mask_ip
@@ -1666,6 +1662,26 @@ def _build_security_response(
 
     results["section_timings"] = section_timings
     return results
+
+
+def _empty_proxies_payload() -> dict[str, Any]:
+    return {
+        "active_proxies_count": 0,
+        "tunnel_requests_count": 0,
+        "distance_mismatches_count": 0,
+        "traffic_quality": [],
+        "suspicious_isps": [],
+        "active_clients": [],
+    }
+
+
+def _parse_asn_int(asn_val: Any) -> int | None:
+    if asn_val is None:
+        return None
+    try:
+        return int(asn_val)
+    except (ValueError, TypeError):
+        return None
 
 
 def _finish_proxies(
@@ -1687,62 +1703,36 @@ def _finish_proxies(
                 value = round((item_count / total_count) * 100, 1)
                 traffic_quality.append({"label": label, "value": value})
 
-    # Gather all distinct ASNs to resolve
-    asns_to_resolve = set()
-    for row in raw_isps:
-        asn_val = row.get("asn")
-        if asn_val is not None:
-            try:
-                asns_to_resolve.add(int(asn_val))
-            except (ValueError, TypeError):
-                pass
-    for row in raw_clients:
-        asn_val = row.get("asn")
-        if asn_val is not None:
-            try:
-                asns_to_resolve.add(int(asn_val))
-            except (ValueError, TypeError):
-                pass
+    asns_to_resolve = {
+        asn_int for row in (*raw_isps, *raw_clients) if (asn_int := _parse_asn_int(row.get("asn"))) is not None
+    }
 
-    # Resolve ASN names in batch
     from backend.core.duckdb import get_asn_names
 
     asn_names = get_asn_names(source_name, list(asns_to_resolve))
 
-    # Format suspicious ISPs
-    suspicious_isps = []
-    for row in raw_isps:
-        asn_val = row.get("asn")
-        try:
-            asn_int = int(asn_val) if asn_val is not None else None
-        except (ValueError, TypeError):
-            asn_int = None
-        name = asn_names.get(asn_int) or (f"AS{asn_int}" if asn_int else "Unknown ISP")
-        suspicious_isps.append(
-            {
-                "isp": name,
-                "asn": asn_int,
-                "count": int(row.get("count", 0)),
-            }
-        )
+    def _asn_display(asn_int: int | None) -> str:
+        return asn_names.get(asn_int) or (f"AS{asn_int}" if asn_int else "Unknown ISP")
 
-    # Format active clients
+    suspicious_isps = [
+        {
+            "isp": _asn_display(asn_int := _parse_asn_int(row.get("asn"))),
+            "asn": asn_int,
+            "count": int(row.get("count", 0)),
+        }
+        for row in raw_isps
+    ]
+
     active_clients = []
     for row in raw_clients:
-        asn_val = row.get("asn")
-        try:
-            asn_int = int(asn_val) if asn_val is not None else None
-        except (ValueError, TypeError):
-            asn_int = None
-        name = asn_names.get(asn_int) or (f"AS{asn_int}" if asn_int else "Unknown ISP")
+        asn_int = _parse_asn_int(row.get("asn"))
         client_item = {**row}
         if mask_ips and client_item.get("ip"):
             from backend.core.share_db.validation import mask_ip
 
             client_item["ip"] = mask_ip(str(client_item["ip"]))
-        client_item["asn_name"] = name
-        if "asn" in client_item:
-            del client_item["asn"]
+        client_item["asn_name"] = _asn_display(asn_int)
+        client_item.pop("asn", None)
         active_clients.append(client_item)
     return {
         "active_proxies_count": int(stats.get("active_proxies_count", 0)),
@@ -1775,14 +1765,7 @@ def get_security_proxies(
     actual_cols = runner.get_schema_cols()
     required = ["ip", "pop", "rtt_min", "tcp_rtt", "lat", "lon", "asn"]
     if not actual_cols or not all(col in actual_cols for col in required):
-        return {
-            "active_proxies_count": 0,
-            "tunnel_requests_count": 0,
-            "distance_mismatches_count": 0,
-            "traffic_quality": [],
-            "suspicious_isps": [],
-            "active_clients": [],
-        }
+        return _empty_proxies_payload()
 
     params, where_clause = build_where_clause(start_time, end_time, filters or {}, actual_cols, inline_params=True)
 
@@ -1798,14 +1781,7 @@ def get_security_proxies(
     )
     with ctx as temp_table:
         if temp_table is None:
-            return {
-                "active_proxies_count": 0,
-                "tunnel_requests_count": 0,
-                "distance_mismatches_count": 0,
-                "traffic_quality": [],
-                "suspicious_isps": [],
-                "active_clients": [],
-            }
+            return _empty_proxies_payload()
 
         select_country_city_inner = ""
         if "country" in cols_needed:

@@ -227,7 +227,7 @@ def ingest_rum_logs(
     import tempfile
 
     from backend.config import load_config, resolve_raw_delete_after
-    from backend.core.iceberg.rum_schema import (
+    from backend.core.iceberg._core import (
         CLIENT_ERRORS_ARROW_SCHEMA,
         CLIENT_VITALS_ARROW_SCHEMA,
     )

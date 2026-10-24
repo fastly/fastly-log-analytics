@@ -1,6 +1,21 @@
 'use client'
 
-import { GlobalHealthHelp, AvgRttHelp, WorstAsnHelp, WorstRegionHelp, HeatmapHelp, AsnLeaderboardHelp, MetroLeaderboardHelp, ShieldingHelp, NetworkQualityHelp, SHIELDING_COLUMNS, getShieldingLabels } from "./help-content";
+import {
+  GlobalHealthHelp,
+  AvgRttHelp,
+  WorstAsnHelp,
+  WorstRegionHelp,
+  HeatmapHelp,
+  AsnLeaderboardHelp,
+  MetroLeaderboardHelp,
+  ShieldingHelp,
+  NetworkQualityHelp,
+  SHIELDING_COLUMNS,
+  getShieldingLabels,
+  adjustShieldingRows,
+  SHIELDING_MIN_REQUESTS_OPTIONS,
+  SHIELDING_MIN_REQUESTS_DEFAULT,
+} from "./help-content";
 import React, { useState, type Dispatch, type SetStateAction } from 'react'
 import { PopHealthHeatmap } from '@/components/network/PopHealthHeatmap'
 import { TransportSection } from './_sections/TransportSection'
@@ -11,24 +26,15 @@ import { unwrapClient } from '@/lib/api-client'
 import type { components } from '@/types/api'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
-import { useColumnVisibility } from '@/hooks/useColumnVisibility'
+import { useColumnVisibility } from '@/hooks/useDerivedState'
 import { useActiveLogFields } from '@/hooks/useLogFieldsCatalog'
 import { FilterValueCell } from '@/components/FilterValueCell'
 import { PopLabel } from '@/components/PopLabel'
-import { downloadAsCsv } from '@/lib/utils'
-import { cn } from '@/lib/utils'
+import { downloadAsCsv, cn } from '@/lib/utils'
 import { formatCount } from '@/lib/format'
 import dynamic from 'next/dynamic'
-import { Skeleton } from '@/components/ui/skeleton'
-// PlotlyChart renders conditionally on heatmapData (the RTT heatmap card).
-// Static-importing it dragged the ~1MB plotly chunk into the critical path
-// for every /network cold load even when the heatmap wasn't being rendered.
-// Dynamic-import defers the chunk to when the heatmap card actually mounts.
-// Unified loading idiom: Skeleton blocks for every dynamic-imported heavy
-// visualization, matching the /security page pattern (also Skeleton) and
-// the route-level PageSkeleton family. Replaces the prior bespoke
-// "Loading chart..." / "Loading Map..." plain-text placeholders — the
-// audit flagged the inconsistency across the analyst routes.
+import { Skeleton, SkeletonGrid } from '@/components/ui/skeleton'
+
 const PlotlyChart = dynamic(
   () => import('@/components/PlotlyChart').then(mod => mod.PlotlyChart),
   {
@@ -50,20 +56,14 @@ import type { RangeWireArgs } from '@/lib/range-wire'
 import { LazyMount } from '@/components/LazyMount'
 import { StatCard } from '@/components/ui/stat-card'
 import { Button } from '@/components/ui/button'
-import { SkeletonGrid } from '@/components/ui/skeleton'
 import { Network as NetworkIcon, AlertCircle, Globe, Zap, Activity, Shield, Download, Info } from 'lucide-react'
 import { ReportLayout, type ReportLayoutRenderProps } from '@/components/ReportLayout'
 import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { adjustShieldingRows, SHIELDING_MIN_REQUESTS_OPTIONS, SHIELDING_MIN_REQUESTS_DEFAULT } from './shielding-rows'
 
-// Static — module-level keeps the reference stable across renders without
-// adding a hook call (we can't safely add hooks after the render-prop's
-// early-return at `data.available === false`).
 const HEATMAP_LAYOUT: PlotlyLayout = { xaxis: { tickangle: -45 } }
 
-// RTT-vs-TTFB scatter axis titles. Module-scope for stable PlotlyChart identity.
 const QUALITY_SCATTER_LAYOUT: PlotlyLayout = {
   xaxis: { title: { text: 'TCP RTT (ms)' } },
   yaxis: { title: { text: 'TTFB (ms)' } },
@@ -72,10 +72,6 @@ const QUALITY_SCATTER_LAYOUT: PlotlyLayout = {
 type QualityBarRow = components['schemas']['NetworkQualityBarRow']
 type ColumnVisibilityTuple = ReturnType<typeof useColumnVisibility>
 
-// Horizontal RTT bar list — a lightweight alternative to a Plotly bar trace for
-// the four Network Quality breakdowns (by country / ASN / region / POP). Bars
-// are scaled to the largest RTT in the set. When `filterColumn` is given each
-// row label becomes a click-to-filter cell, matching the ASN leaderboard.
 function RttBarList({ rows, filterColumn }: { rows: readonly QualityBarRow[]; filterColumn?: string }) {
   if (!rows?.length) {
     return <div className="p-6 text-center text-sm text-muted-foreground">No data in this range</div>
@@ -84,10 +80,6 @@ function RttBarList({ rows, filterColumn }: { rows: readonly QualityBarRow[]; fi
   return (
     <div className="space-y-1.5 p-3">
       {rows.map((r) => {
-        // `value` is the raw group key (ASN number / PoP code) used for
-        // click-to-filter; `label` is the display (e.g. "Comcast (7922)" for
-        // ASN). PoP rows render via the shared <PopLabel> so they read
-        // "SJC (San Jose, CA - USA)" consistently with everywhere else.
         const filterVal = r.value ?? r.label
         const display = filterColumn === 'pop' ? <PopLabel code={filterVal} /> : r.label
         return (
@@ -111,15 +103,39 @@ function RttBarList({ rows, filterColumn }: { rows: readonly QualityBarRow[]; fi
   )
 }
 
-// Per-section field lists. The backend (slice 2) gates each section block
-// on `sections is None or 'name' in sections`. Splitting the monolithic
-// /api/network-health into three parallel POSTs lets the slow shielding
-// scan (origin repo) and the heavy map payload paint independently from
-// the small summary + leaderboard cards above the fold.
-//   core      → summary + leaderboard + metro_leaderboard (shared temp)
-//   core      → summary + leaderboard + metro_leaderboard + heatmap/buckets + default (all-ASN) cities/map_buckets
-//   map       → per-ASN cities/map_buckets override when mapAsn !== 'all'
-//   shielding → shielding_analysis (origin path, most-likely-empty card)
+function LeaderboardStatusBody<T>({
+  isLoading,
+  rows,
+  isActiveField,
+  emptyActiveMsg,
+  emptyInactiveMsg,
+  children,
+}: {
+  isLoading: boolean
+  rows: readonly T[] | undefined
+  isActiveField: boolean
+  emptyActiveMsg: string
+  emptyInactiveMsg: string
+  children: (rows: readonly T[]) => React.ReactNode
+}) {
+  if (isLoading) {
+    return (
+      <div className="space-y-2 p-4">
+        <SkeletonGrid count={5} height="48px" className="rounded-md" />
+      </div>
+    )
+  }
+  if (!rows || rows.length === 0) {
+    return (
+      <div className="p-8 text-center text-sm text-muted-foreground">
+        <p className="mb-1">No data available</p>
+        <p className="text-[10px] opacity-70">{isActiveField ? emptyActiveMsg : emptyInactiveMsg}</p>
+      </div>
+    )
+  }
+  return <>{children(rows)}</>
+}
+
 type NetworkSections = NonNullable<components['schemas']['NetworkHealthRequest']['sections']>
 const NETWORK_CORE_SECTIONS: NetworkSections = [
   'summary',
@@ -139,21 +155,8 @@ export default function NetworkPage() {
   const [animBucketSeconds, setAnimBucketSeconds] = useState(3600)
   const [regionCountry, setRegionCountry] = useState('US')
   const [shieldingVisibility, setShieldingVisibility, onShieldingVisChange] = useColumnVisibility()
-  // Min edge→shield requests before a route's transit median is trusted enough
-  // to colour-grade / flag. Recomputed client-side from the backend's
-  // anomaly_eligible verdict — no refetch (see ./shielding-rows).
   const [minRequests, setMinRequests] = useState(SHIELDING_MIN_REQUESTS_DEFAULT)
 
-  // Time-range wire inputs (the network 30d analyst cliff fix + lib/range-wire).
-  // The wire is resolved inside the render-prop body where startTime/endTime are
-  // available. A quick-preset pill / the cold-load default → a server-
-  // reproducible token ("24h"), which the backend keyed path (routers/network.py)
-  // resolves into the scan window and which keeps the response memo — keyed on
-  // (token, quantized_anchor, invite-clamp fingerprint) — STABLE within the 60s
-  // quantum so the ~26s 30d pipeline can serve across rolling-minute reloads. A
-  // custom absolute range (relativeRange null + isAutoRange false) → no token, so
-  // the backend falls back to the absolute start/end we always send, scanning
-  // exactly what the chart x-axis (hard-clamped to startTime/endTime) displays.
   const { relativeRange, isAutoRange, anchor } = useReportRangeAnchor()
 
   return (
@@ -204,8 +207,6 @@ type NetworkBodyProps = ReportLayoutRenderProps &
     setMinRequests: Dispatch<SetStateAction<number>>
   }
 
-// Lifted out of the ReportLayout render-prop so every hook below lives at the top of a
-// STABLE component (rules-of-hooks: the render-prop callback is not a component).
 function NetworkBody({
   startTime,
   endTime,
@@ -228,18 +229,25 @@ function NetworkBody({
   isAutoRange,
   anchor,
 }: NetworkBodyProps) {
-
-  // Distinguish "field group not enabled" from "enabled but no data in this
-  // window yet" so a low-traffic/fresh service doesn't read as misconfigured.
-  // Called above the `data?.available === false` early-return to keep hook
-  // order stable across renders.
   const { isFieldActive } = useActiveLogFields()
-
-  // Token mode → range_token drives the scan (server-reproducible, memo-stable);
-  // custom-absolute mode → rangeToken is null so the backend uses the start/end
-  // bounds the bodies always send. The hook's rangeKey ("abs:<start>|<end>" in
-  // custom mode) gives a custom range its own cache entry.
   const range = { relativeRange, isAutoRange, startTime, endTime, anchor }
+
+  const postNetworkHealth = (sections: NetworkSections, rangeToken: string | null, signal: AbortSignal | undefined, targetAsn = mapAsn) =>
+    unwrapClient(client.POST("/api/network-health", {
+      signal,
+      body: {
+        start_time: startTime!,
+        end_time: endTime!,
+        filters: filterPayload,
+        metric,
+        bucket_seconds: animBucketSeconds,
+        top_n: 30,
+        map_asn: targetAsn,
+        sections,
+        range_token: rangeToken,
+        anchor,
+      }
+    }))
 
   const coreQuery = useAnalyticsReportQuery({
     namespace: ['network', 'health', 'core'],
@@ -247,25 +255,7 @@ function NetworkBody({
     filterPayload,
     range,
     keyParts: [animBucketSeconds, metric],
-    queryFn: async ({ rangeToken, signal }) => {
-      return unwrapClient(client.POST("/api/network-health", { signal,
-        body: {
-          start_time: startTime!,
-          end_time: endTime!,
-          filters: filterPayload,
-          metric,
-          bucket_seconds: animBucketSeconds,
-          top_n: 30,
-          map_asn: 'all',
-          sections: NETWORK_CORE_SECTIONS,
-          // Keyed path: server resolves the scan window from (range_token,
-          // quantized anchor) and ignores the absolute start/end above (kept for
-          // the legacy fallback when an old client omits the token).
-          range_token: rangeToken,
-          anchor,
-        }
-      }))
-    },
+    queryFn: ({ rangeToken, signal }) => postNetworkHealth(NETWORK_CORE_SECTIONS, rangeToken, signal, 'all'),
   })
 
   const mapQuery = useAnalyticsReportQuery({
@@ -277,22 +267,7 @@ function NetworkBody({
     queryOptions: {
       enabled: mapAsn !== 'all',
     },
-    queryFn: async ({ rangeToken, signal }) => {
-      return unwrapClient(client.POST("/api/network-health", { signal,
-        body: {
-          start_time: startTime!,
-          end_time: endTime!,
-          filters: filterPayload,
-          metric,
-          bucket_seconds: animBucketSeconds,
-          top_n: 30,
-          map_asn: mapAsn,
-          sections: NETWORK_MAP_SECTIONS,
-          range_token: rangeToken,
-          anchor,
-        }
-      }))
-    },
+    queryFn: ({ rangeToken, signal }) => postNetworkHealth(NETWORK_MAP_SECTIONS, rangeToken, signal, mapAsn),
   })
 
   const shieldingQuery = useAnalyticsReportQuery({
@@ -300,27 +275,9 @@ function NetworkBody({
     serviceId: activeServiceId,
     filterPayload,
     range,
-    queryFn: async ({ rangeToken, signal }) => {
-      return unwrapClient(client.POST("/api/network-health", { signal,
-        body: {
-          start_time: startTime!,
-          end_time: endTime!,
-          filters: filterPayload,
-          metric,
-          bucket_seconds: animBucketSeconds,
-          top_n: 30,
-          map_asn: mapAsn,
-          sections: NETWORK_SHIELDING_SECTIONS,
-          range_token: rangeToken,
-          anchor,
-        }
-      }))
-    },
+    queryFn: ({ rangeToken, signal }) => postNetworkHealth(NETWORK_SHIELDING_SECTIONS, rangeToken, signal, mapAsn),
   })
 
-  // TCP-RTT quality breakdowns (by country/ASN/region/POP) + RTT-vs-TTFB
-  // scatter. Separate endpoint from /network-health; `region_country` scopes
-  // the by_region bars and is the only param that varies independently.
   const qualityQuery = useServiceQuery(
     ['network', 'quality', activeServiceId, startTime, endTime, filterPayload, regionCountry],
     async ({ signal }) => {
@@ -335,10 +292,6 @@ function NetworkBody({
     },
   )
 
-  // `available`/`has_metro`/`reason` come back on every section response
-  // (the backend sets them on the base get_health result). Use core as
-  // the canonical source for these top-level signals, and fall back to core
-  // for mapData when mapAsn === 'all' so cold load doesn't fire a duplicate POST.
   const data = coreQuery.data
   const mapData = (mapAsn === 'all' ? coreQuery.data : mapQuery.data) ?? coreQuery.data
   const qualityData = qualityQuery.data
@@ -351,8 +304,6 @@ function NetworkBody({
   const isQualityLoadingInitial = qualityQuery.isLoading || (qualityQuery.isFetching && !qualityQuery.data)
 
   const shieldingData = shieldingQuery.data?.shielding_analysis
-  // Apply the user-chosen min-requests floor to greying/flagging without a
-  // refetch. Feeds the map, the table, and the CSV export so all three agree.
   const adjustedShieldingRows = React.useMemo(
     () => adjustShieldingRows(shieldingData?.rows ?? [], minRequests),
     [shieldingData?.rows, minRequests],
@@ -391,9 +342,6 @@ function NetworkBody({
     return { x: xBuckets, y: yLabels, z }
   }, [heatmapRows, heatmapBuckets])
 
-  // Stable ref so PlotlyChart's React.memo treats unrelated parent re-renders
-  // as no-ops. Must live ABOVE the `data.available === false` early-return so
-  // the hook order is identical on every render.
   const heatmapTrace = React.useMemo((): PlotlyTrace[] => (
     heatmapData ? [{
       type: 'heatmap',
@@ -408,24 +356,68 @@ function NetworkBody({
     }] : []
   ), [heatmapData])
 
-        if (data?.available === false) {
-          return (
-            <div className="flex flex-col items-center justify-center h-[50vh] text-center max-w-md mx-auto">
-              <AlertCircle className="h-10 w-10 text-yellow-500 mb-4" />
-              <h2 className="text-xl font-semibold">Network Metrics Unavailable</h2>
-              <p className="text-muted-foreground mt-2">{data.reason || 'Log fields required for network analysis are not enabled.'}</p>
-            </div>
-          )
-        }
+  if (data?.available === false) {
+    return (
+      <div className="flex flex-col items-center justify-center h-[50vh] text-center max-w-md mx-auto">
+        <AlertCircle className="h-10 w-10 text-yellow-500 mb-4" />
+        <h2 className="text-xl font-semibold">Network Metrics Unavailable</h2>
+        <p className="text-muted-foreground mt-2">{data.reason || 'Log fields required for network analysis are not enabled.'}</p>
+      </div>
+    )
+  }
 
-        const summary = data?.summary
+  const summary = data?.summary
 
-  // heatmapTrace + HEATMAP_LAYOUT defined above the early-return / at
-  // module scope — keeps hook order stable and gives PlotlyChart stable
-  // identity for its React.memo shallow-compare.
+  const qualityBreakdowns: Array<{
+    title: string
+    loadingMessage: string
+    rows: readonly QualityBarRow[]
+    filterColumn: string
+    headerAction?: React.ReactNode
+  }> = [
+    {
+      title: 'Avg RTT by Country',
+      loadingMessage: 'Analyzing RTT by country...',
+      rows: qualityData?.by_country ?? [],
+      filterColumn: 'country',
+    },
+    {
+      title: 'Avg RTT by ASN',
+      loadingMessage: 'Analyzing RTT by ASN...',
+      rows: qualityData?.by_asn ?? [],
+      filterColumn: 'asn',
+    },
+    {
+      title: 'Avg RTT by Region',
+      loadingMessage: 'Analyzing RTT by region...',
+      rows: qualityData?.by_region ?? [],
+      filterColumn: 'region',
+      headerAction: (
+        <select
+          aria-label="Region breakdown country"
+          value={regionCountry}
+          onChange={(e) => setRegionCountry(e.target.value)}
+          className="h-7 rounded-md border bg-background px-2 text-xs"
+        >
+          {(qualityData?.countries ?? []).length === 0 && (
+            <option value={regionCountry}>{regionCountry}</option>
+          )}
+          {(qualityData?.countries ?? []).map((c) => (
+            <option key={c} value={c}>{c}</option>
+          ))}
+        </select>
+      ),
+    },
+    {
+      title: 'Avg RTT by POP',
+      loadingMessage: 'Analyzing RTT by POP...',
+      rows: qualityData?.by_pop ?? [],
+      filterColumn: 'pop',
+    },
+  ]
 
-        return (
-          <>
+  return (
+    <>
       {coreQuery.error && !coreQuery.data && (
         <div className="rounded-lg border border-destructive/50 bg-destructive/10 text-destructive p-3 text-sm flex items-start gap-2">
           <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
@@ -538,12 +530,6 @@ function NetworkBody({
             isFetching={shieldingQuery.isFetching}
             error={shieldingQuery.error as AnalyticsCardError | null}
           >
-            {/* ShieldingMap eagerly constructs a MapLibre GL map (WebGL
-                context + tile fetches) on mount. It sits below the fold on
-                /network, so defer the mount until it nears the viewport.
-                minHeight matches the component's own h-[420px] skeleton so
-                the placeholder→map swap introduces no new CLS; the
-                mapContainer ref attaches on the deferred mount pass. */}
             <LazyMount minHeight={420}>
               <ShieldingMap
                 rows={adjustedShieldingRows}
@@ -564,9 +550,6 @@ function NetworkBody({
             error={shieldingQuery.error as AnalyticsCardError | null}
             headerAction={
               <div className="flex items-center gap-2">
-                {/* Min-requests floor: greys + un-flags routes whose median
-                    transit is too small a sample to trust. Recomputed
-                    client-side (./shielding-rows) from anomaly_eligible. */}
                 <div className="flex items-center gap-1.5">
                   <span className="hidden sm:inline text-[11px] uppercase font-semibold tracking-wide text-muted-foreground">
                     Min reqs
@@ -581,9 +564,6 @@ function NetworkBody({
                         }
                       >
                         <Info className="w-3.5 h-3.5 opacity-60" />
-                        {/* Name the trigger via text content, not aria-label:
-                            axe flags aria-prohibited-attr for aria-label on a
-                            roleless <span> (the Base UI render override). */}
                         <span className="sr-only">What does the minimum requests floor do?</span>
                       </TooltipTrigger>
                       <TooltipContent side="top" className="max-w-[260px] text-xs leading-relaxed">
@@ -610,10 +590,6 @@ function NetworkBody({
                     if (!adjustedShieldingRows.length) return
                     downloadAsCsv(
                       adjustedShieldingRows,
-                      // Include distance_km + anomaly_static so the export
-                      // carries the same signals the map/table show (L8), plus
-                      // low_sample so a consumer can tell which rows are below
-                      // the (user-chosen) anomaly-flag floor. (low-sample gating)
                       ['edge_pop', 'shield_pop', 'requests', 'p50_ms', 'p95_ms', 'p99_ms', 'distance_km', 'light_speed_rtt_ms', 'efficiency_ratio', 'anomaly_static', 'low_sample'],
                       'shielding_analysis.csv'
                     )
@@ -642,10 +618,6 @@ function NetworkBody({
                     onColumnVisibilityChange={setShieldingVisibility}
                     tableContainerClassName="max-h-[295px]"
                   />
-                  {/* M1: the backend returns a (top-by-volume ∪ top-by-overhead)
-                      subset when there are more routes than the cap, so a
-                      buried anomaly still surfaces — say so instead of implying
-                      the table is complete. */}
                   {shieldingData?.truncated && (
                     <p className="px-4 py-2 text-[11px] text-muted-foreground border-t bg-muted/20">
                       Showing {formatCount(shieldingData?.rows?.length ?? 0)} of {formatCount(Number(shieldingData.total_routes ?? 0))} routes — top by request volume and by transit overhead.
@@ -655,10 +627,6 @@ function NetworkBody({
               ) : (
                 <div className="flex flex-col items-center justify-center py-12 h-full text-center px-4 gap-1">
                   <Shield className={cn("h-8 w-8 mb-2 opacity-20", shieldingData?.error ? 'text-destructive opacity-30' : 'text-muted-foreground')} />
-                  {/* Only call it "edge-only" when origin/shield logging (Group L)
-                      is genuinely NOT enabled. With full logging on, an empty
-                      shield result just means no shield traffic in this window —
-                      not an edge-only configuration. */}
                   {shieldingData?.error ? (
                     <>
                       <p className="text-sm text-destructive font-medium">Shielding analysis unavailable</p>
@@ -693,22 +661,15 @@ function NetworkBody({
           error={coreQuery.error as AnalyticsCardError | null}
           loadingMessage="Compiling ASN leaderboard..."
         >
-          {isCoreLoadingInitial ? (
-            <div className="space-y-2 p-4">
-              <SkeletonGrid count={5} height="48px" className="rounded-md" />
-            </div>
-          ) : (!data?.leaderboard || data.leaderboard.length === 0) ? (
-            <div className="p-8 text-center text-sm text-muted-foreground">
-              <p className="mb-1">No data available</p>
-              <p className="text-[10px] opacity-70">
-                {isFieldActive('asn')
-                  ? "No ASN data in this time range."
-                  : "Requires Network Quality (Group F) fields to be enabled in Fastly logging."}
-              </p>
-            </div>
-          ) : (
-            <AsnLeaderboardTable rows={data.leaderboard} />
-          )}
+          <LeaderboardStatusBody
+            isLoading={isCoreLoadingInitial}
+            rows={data?.leaderboard}
+            isActiveField={isFieldActive('asn')}
+            emptyActiveMsg="No ASN data in this time range."
+            emptyInactiveMsg="Requires Network Quality (Group F) fields to be enabled in Fastly logging."
+          >
+            {(rows) => <AsnLeaderboardTable rows={[...rows]} />}
+          </LeaderboardStatusBody>
         </AnalyticsCard>
 
         {/* ── Metro Leaderboard ── */}
@@ -723,22 +684,15 @@ function NetworkBody({
             error={coreQuery.error as AnalyticsCardError | null}
             loadingMessage="Compiling Metro leaderboard..."
           >
-            {isCoreLoadingInitial ? (
-              <div className="space-y-2 p-4">
-                <SkeletonGrid count={5} height="48px" className="rounded-md" />
-              </div>
-            ) : (!data?.metro_leaderboard || data.metro_leaderboard.length === 0) ? (
-              <div className="p-8 text-center text-sm text-muted-foreground">
-                <p className="mb-1">No data available</p>
-                <p className="text-[10px] opacity-70">
-                  {isFieldActive('metro')
-                    ? "No metro data in this time range."
-                    : "Requires Geolocation (Group D/E) fields to be enabled in Fastly logging."}
-                </p>
-              </div>
-            ) : (
-              <MetroLeaderboardTable rows={data.metro_leaderboard} />
-            )}
+            <LeaderboardStatusBody
+              isLoading={isCoreLoadingInitial}
+              rows={data?.metro_leaderboard}
+              isActiveField={isFieldActive('metro')}
+              emptyActiveMsg="No metro data in this time range."
+              emptyInactiveMsg="Requires Geolocation (Group D/E) fields to be enabled in Fastly logging."
+            >
+              {(rows) => <MetroLeaderboardTable rows={[...rows]} />}
+            </LeaderboardStatusBody>
           </AnalyticsCard>
         )}
       </div>
@@ -754,72 +708,22 @@ function NetworkBody({
           ) : (
             <>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <AnalyticsCard
-                  title="Avg RTT by Country"
-                  contentClassName="p-0"
-                  helpTitle="Network Quality"
-                  helpContent={<NetworkQualityHelp />}
-                  isFetching={qualityQuery.isFetching}
-                  error={qualityQuery.error as AnalyticsCardError | null}
-                  loadingMessage="Analyzing RTT by country..."
-                  className="[contain-intrinsic-size:240px] [content-visibility:auto]"
-                >
-                  <RttBarList rows={qualityData?.by_country ?? []} filterColumn="country" />
-                </AnalyticsCard>
-
-                <AnalyticsCard
-                  title="Avg RTT by ASN"
-                  contentClassName="p-0"
-                  helpTitle="Network Quality"
-                  helpContent={<NetworkQualityHelp />}
-                  isFetching={qualityQuery.isFetching}
-                  error={qualityQuery.error as AnalyticsCardError | null}
-                  loadingMessage="Analyzing RTT by ASN..."
-                  className="[contain-intrinsic-size:240px] [content-visibility:auto]"
-                >
-                  <RttBarList rows={qualityData?.by_asn ?? []} filterColumn="asn" />
-                </AnalyticsCard>
-
-                <AnalyticsCard
-                  title="Avg RTT by Region"
-                  contentClassName="p-0"
-                  helpTitle="Network Quality"
-                  helpContent={<NetworkQualityHelp />}
-                  isFetching={qualityQuery.isFetching}
-                  error={qualityQuery.error as AnalyticsCardError | null}
-                  loadingMessage="Analyzing RTT by region..."
-                  className="[contain-intrinsic-size:240px] [content-visibility:auto]"
-                  headerAction={
-                    <select
-                      aria-label="Region breakdown country"
-                      value={regionCountry}
-                      onChange={(e) => setRegionCountry(e.target.value)}
-                      className="h-7 rounded-md border bg-background px-2 text-xs"
-                    >
-                      {(qualityData?.countries ?? []).length === 0 && (
-                        <option value={regionCountry}>{regionCountry}</option>
-                      )}
-                      {(qualityData?.countries ?? []).map((c) => (
-                        <option key={c} value={c}>{c}</option>
-                      ))}
-                    </select>
-                  }
-                >
-                  <RttBarList rows={qualityData?.by_region ?? []} filterColumn="region" />
-                </AnalyticsCard>
-
-                <AnalyticsCard
-                  title="Avg RTT by POP"
-                  contentClassName="p-0"
-                  helpTitle="Network Quality"
-                  helpContent={<NetworkQualityHelp />}
-                  isFetching={qualityQuery.isFetching}
-                  error={qualityQuery.error as AnalyticsCardError | null}
-                  loadingMessage="Analyzing RTT by POP..."
-                  className="[contain-intrinsic-size:240px] [content-visibility:auto]"
-                >
-                  <RttBarList rows={qualityData?.by_pop ?? []} filterColumn="pop" />
-                </AnalyticsCard>
+                {qualityBreakdowns.map((b) => (
+                  <AnalyticsCard
+                    key={b.title}
+                    title={b.title}
+                    contentClassName="p-0"
+                    helpTitle="Network Quality"
+                    helpContent={<NetworkQualityHelp />}
+                    isFetching={qualityQuery.isFetching}
+                    error={qualityQuery.error as AnalyticsCardError | null}
+                    loadingMessage={b.loadingMessage}
+                    className="[contain-intrinsic-size:240px] [content-visibility:auto]"
+                    headerAction={b.headerAction}
+                  >
+                    <RttBarList rows={b.rows} filterColumn={b.filterColumn} />
+                  </AnalyticsCard>
+                ))}
               </div>
 
               {qualityScatterTrace.length > 0 && (
@@ -839,6 +743,6 @@ function NetworkBody({
           )}
         </div>
       )}
-      </>
-        )
+    </>
+  )
 }

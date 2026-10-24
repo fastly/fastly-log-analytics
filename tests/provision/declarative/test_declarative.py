@@ -11,7 +11,6 @@ from backend import config as svcconfig
 from backend.core import metadata as metadata_db
 from backend.main import app
 from backend.provision.declarative import reconciler
-from backend.provision.declarative.config_migration import config_changed, migrate_config
 from backend.provision.declarative.diff import (
     Backend,
     DiffResult,
@@ -27,6 +26,7 @@ from backend.provision.declarative.iac_reconciler import (
     verify_compute_scorer_readiness,
 )
 from backend.provision.declarative.reconciler import VclValidationError, _record_reconcile_audit, reconcile_vcl_state
+from backend.provision.declarative.state import config_changed, migrate_config
 from backend.provision.session_scoring_orchestrator import _SCORING_FIELD_NAMES
 
 # ── From test_config_migration.py ──

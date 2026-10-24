@@ -11,7 +11,7 @@ import { axe } from 'vitest-axe'
 import React from 'react'
 import { FilterBar } from '@/components/FilterBar/FilterBar'
 import { ActiveFiltersBanner } from '@/components/FilterBar/ActiveFiltersBanner'
-import { AddFilterDialogContent } from '@/components/FilterBar/AddFilterDialogContent'
+import { AddFilterDialogContent } from '@/components/FilterBar/AddFilterDialog'
 import { Dialog } from '@/components/ui/dialog'
 import { useFilterStore } from '@/stores/filterStore'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -53,9 +53,13 @@ vi.mock('@/components/ui/scroll-area', () => ({
 }))
 vi.mock('@/hooks/useDebounce', () => ({ useDebounce: (v: string) => v }))
 
-vi.mock('@/components/FilterBar/AddFilterDialog', () => ({
-  AddFilterDialog: () => <button data-testid="add-filter-stub">Add Filter</button>,
-}))
+vi.mock('@/components/FilterBar/AddFilterDialog', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/FilterBar/AddFilterDialog')>()
+  return {
+    ...actual,
+    AddFilterDialog: () => <button data-testid="add-filter-stub">Add Filter</button>,
+  }
+})
 vi.mock('@/components/FilterBar/SaveViewDialog', () => ({
   SaveViewDialog: () => <div data-testid="save-view-stub" />,
 }))

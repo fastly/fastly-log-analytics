@@ -25,7 +25,6 @@ import httpx
 import structlog
 
 from backend import config
-from backend.core.clickhouse_metrics import record_operation
 from backend.core.high_scale_sections import current_clickhouse_scope
 from backend.core.query_registry import query_registry
 from backend.utils.telemetry import _QUERIES, get_queries, record_call
@@ -660,3 +659,6 @@ def close_clickhouse_client() -> None:
         client, _client = _client, None
     if client is not None:
         client.close()
+
+
+from backend.core.clickhouse_observer import record_operation  # noqa: E402

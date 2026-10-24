@@ -854,7 +854,7 @@ def test_network_speed_closed_window_exact_counts_agree(tmp_path):
 
     assert (
         _build_rollup(
-            "backend.core.rollups.network_speed",
+            "backend.core.rollups.network",
             "build_network_speed_bundles",
             con,
             src,
@@ -1010,7 +1010,7 @@ def test_network_rtt_closed_window_path_and_ballpark(tmp_path):
 
     assert (
         _build_rollup(
-            "backend.core.rollups.network_rtt",
+            "backend.core.rollups.network",
             "build_network_rtt_bundles",
             con,
             src,

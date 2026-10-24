@@ -1,20 +1,25 @@
 // frontend/app/rum/_sections/RumClient.tsx
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery';
 import { AnalyticsCard } from '@/components/AnalyticsCard';
 import { RumStatusPanel } from '@/components/Rum/RumStatusPanel';
+import { ReportLayout } from '@/components/ReportLayout';
+import { RumFaroVersionCard } from '@/components/Rum/RumFaroVersionCard';
+import { useIsAnalyst } from '@/hooks/useIsAnalyst';
+import { useReportRangeAnchor } from '@/hooks/useReportRangeAnchor';
+import { CopyButton } from '@/components/ui/copy-button';
 
 import { DashboardSkeleton } from '@/components/skeletons/PageSkeleton';
 import { PlotlyChart } from '@/components/PlotlyChart';
 import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart';
 import { useTimezone } from '@/hooks/useDateFormat';
 import { formatDate } from '@/lib/date';
-import { Terminal, Activity, Monitor, ShieldAlert, Cpu, PieChart, TrendingUp, Eye } from 'lucide-react';
+import { Terminal, Activity, Monitor, ShieldAlert, Cpu, PieChart, TrendingUp, Eye, Radio, BookOpen } from 'lucide-react';
 import { adminJsonResult } from '@/lib/api';
-import { arrayOrEmpty, recordOrNull } from '@/lib/narrow';
+import { arrayOrEmpty, recordOrNull } from '@/lib/utils';
 import type { StripIndex, WithRequired, components } from '@/types/api';
 import type { FiltersPayload } from '@/types/filters';
 import type { RangeWireArgs } from '@/lib/range-wire';
@@ -136,43 +141,45 @@ function envName(v: string | { name?: string } | null | undefined): string {
   return v || 'Unknown';
 }
 
-function getLcpColors(p75: number | null | undefined): CwvColors {
+function getThresholdColors(
+  p75: number | null | undefined,
+  goodMax: number,
+  poorMin: number,
+): CwvColors {
   if (p75 == null) {
     return { text: 'text-muted-foreground', bg: 'bg-muted/10', label: 'No Data' };
   }
-  if (p75 <= 2.5) {
+  if (p75 <= goodMax) {
     return { text: 'text-emerald-500', bg: 'bg-emerald-500/10', label: 'Good' };
-  } else if (p75 > 4.0) {
-    return { text: 'text-rose-500', bg: 'bg-rose-500/10', label: 'Poor' };
-  } else {
-    return { text: 'text-amber-500', bg: 'bg-amber-500/10', label: 'Needs Improvement' };
   }
+  if (p75 > poorMin) {
+    return { text: 'text-rose-500', bg: 'bg-rose-500/10', label: 'Poor' };
+  }
+  return { text: 'text-amber-500', bg: 'bg-amber-500/10', label: 'Needs Improvement' };
+}
+
+function getLcpColors(p75: number | null | undefined): CwvColors {
+  return getThresholdColors(p75, 2.5, 4.0);
 }
 
 function getClsColors(p75: number | null | undefined): CwvColors {
-  if (p75 == null) {
-    return { text: 'text-muted-foreground', bg: 'bg-muted/10', label: 'No Data' };
-  }
-  if (p75 <= 0.1) {
-    return { text: 'text-emerald-500', bg: 'bg-emerald-500/10', label: 'Good' };
-  } else if (p75 > 0.25) {
-    return { text: 'text-rose-500', bg: 'bg-rose-500/10', label: 'Poor' };
-  } else {
-    return { text: 'text-amber-500', bg: 'bg-amber-500/10', label: 'Needs Improvement' };
-  }
+  return getThresholdColors(p75, 0.1, 0.25);
 }
 
 function getInpColors(p75: number | null | undefined): CwvColors {
-  if (p75 == null) {
-    return { text: 'text-muted-foreground', bg: 'bg-muted/10', label: 'No Data' };
-  }
-  if (p75 <= 200) {
-    return { text: 'text-emerald-500', bg: 'bg-emerald-500/10', label: 'Good' };
-  } else if (p75 > 500) {
-    return { text: 'text-rose-500', bg: 'bg-rose-500/10', label: 'Poor' };
-  } else {
-    return { text: 'text-amber-500', bg: 'bg-amber-500/10', label: 'Needs Improvement' };
-  }
+  return getThresholdColors(p75, 200, 500);
+}
+
+function buildEnvPieData(envMap: Record<string, number> | undefined) {
+  return [
+    {
+      labels: Object.keys(envMap || {}),
+      values: Object.values(envMap || {}),
+      type: 'pie' as const,
+      hole: 0.4,
+      textinfo: 'label+percent' as const,
+    },
+  ];
 }
 
 export function RumClient({
@@ -455,41 +462,17 @@ export function RumClient({
   );
 
   const browserPieData = React.useMemo(
-    () => [
-      {
-        labels: Object.keys(analytics?.environments?.browsers || {}),
-        values: Object.values(analytics?.environments?.browsers || {}),
-        type: 'pie' as const,
-        hole: 0.4,
-        textinfo: 'label+percent' as const,
-      },
-    ],
+    () => buildEnvPieData(analytics?.environments?.browsers),
     [analytics?.environments?.browsers],
   );
 
   const osPieData = React.useMemo(
-    () => [
-      {
-        labels: Object.keys(analytics?.environments?.os || {}),
-        values: Object.values(analytics?.environments?.os || {}),
-        type: 'pie' as const,
-        hole: 0.4,
-        textinfo: 'label+percent' as const,
-      },
-    ],
+    () => buildEnvPieData(analytics?.environments?.os),
     [analytics?.environments?.os],
   );
 
   const devicePieData = React.useMemo(
-    () => [
-      {
-        labels: Object.keys(analytics?.environments?.devices || {}),
-        values: Object.values(analytics?.environments?.devices || {}),
-        type: 'pie' as const,
-        hole: 0.4,
-        textinfo: 'label+percent' as const,
-      },
-    ],
+    () => buildEnvPieData(analytics?.environments?.devices),
     [analytics?.environments?.devices],
   );
 
@@ -646,102 +629,66 @@ export function RumClient({
 
       {/* Summary KPI Cards Row */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
-          <div className="space-y-1">
-            <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">Total Beacons</p>
-            <p className="text-2xl font-extrabold text-blue-500">{formatCount(analytics.beacon_count ?? 0)}</p>
+        {[
+          { label: 'Total Beacons', value: analytics.beacon_count ?? 0, textClass: 'text-blue-500', bgClass: 'bg-blue-500/10', Icon: Activity },
+          { label: 'Pageviews', value: analytics.pageview_count ?? 0, textClass: 'text-emerald-500', bgClass: 'bg-emerald-500/10', Icon: Eye },
+          { label: 'Interactions', value: analytics.interaction_count ?? 0, textClass: 'text-amber-500', bgClass: 'bg-amber-500/10', Icon: Cpu },
+          { label: 'JavaScript Errors', value: analytics.error_count ?? 0, textClass: 'text-rose-500', bgClass: 'bg-rose-500/10', Icon: ShieldAlert },
+        ].map(({ label, value, textClass, bgClass, Icon }) => (
+          <div key={label} className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">{label}</p>
+              <p className={`text-2xl font-extrabold ${textClass}`}>{formatCount(value)}</p>
+            </div>
+            <div className={`p-2.5 ${bgClass} rounded-lg`}>
+              <Icon className={`h-5 w-5 ${textClass}`} />
+            </div>
           </div>
-          <div className="p-2.5 bg-blue-500/10 rounded-lg">
-            <Activity className="h-5 w-5 text-blue-500" />
-          </div>
-        </div>
-
-        <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
-          <div className="space-y-1">
-            <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">Pageviews</p>
-            <p className="text-2xl font-extrabold text-emerald-500">{formatCount(analytics.pageview_count ?? 0)}</p>
-          </div>
-          <div className="p-2.5 bg-emerald-500/10 rounded-lg">
-            <Eye className="h-5 w-5 text-emerald-500" />
-          </div>
-        </div>
-
-        <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
-          <div className="space-y-1">
-            <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">Interactions</p>
-            <p className="text-2xl font-extrabold text-amber-500">{formatCount(analytics.interaction_count ?? 0)}</p>
-          </div>
-          <div className="p-2.5 bg-amber-500/10 rounded-lg">
-            <Cpu className="h-5 w-5 text-amber-500" />
-          </div>
-        </div>
-
-        <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
-          <div className="space-y-1">
-            <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">JavaScript Errors</p>
-            <p className="text-2xl font-extrabold text-rose-500">{formatCount(analytics.error_count ?? 0)}</p>
-          </div>
-          <div className="p-2.5 bg-rose-500/10 rounded-lg">
-            <ShieldAlert className="h-5 w-5 text-rose-500" />
-          </div>
-        </div>
+        ))}
       </div>
 
       {/* KPI Row */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <AnalyticsCard
-          title={<span className={lcpColors.text}>Largest Contentful Paint (LCP)</span>}
-          icon={<Activity className={lcpColors.text} />}
-          headerAction={
-            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${lcpColors.bg} ${lcpColors.text}`}>
-              {lcpColors.label}
-            </span>
-          }
-        >
-          <div className="space-y-2">
-            <p className={`text-3xl font-extrabold ${lcpColors.text}`}>
-              {analytics.vitals.lcp.p75 != null ? `${analytics.vitals.lcp.p75.toFixed(2)}s` : '—'}
-            </p>
-            <p className={`text-xs ${lcpColors.text} font-semibold uppercase tracking-wider`}>75th Percentile</p>
-            {renderDistributionBar(analytics.vitals.lcp.distribution)}
-          </div>
-        </AnalyticsCard>
-
-        <AnalyticsCard
-          title={<span className={clsColors.text}>Cumulative Layout Shift (CLS)</span>}
-          icon={<Cpu className={clsColors.text} />}
-          headerAction={
-            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${clsColors.bg} ${clsColors.text}`}>
-              {clsColors.label}
-            </span>
-          }
-        >
-          <div className="space-y-2">
-            <p className={`text-3xl font-extrabold ${clsColors.text}`}>
-              {analytics.vitals.cls.p75 != null ? analytics.vitals.cls.p75.toFixed(2) : '—'}
-            </p>
-            <p className={`text-xs ${clsColors.text} font-semibold uppercase tracking-wider`}>75th Percentile</p>
-            {renderDistributionBar(analytics.vitals.cls.distribution)}
-          </div>
-        </AnalyticsCard>
-
-        <AnalyticsCard
-          title={<span className={inpColors.text}>Interaction to Next Paint (INP)</span>}
-          icon={<Monitor className={inpColors.text} />}
-          headerAction={
-            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${inpColors.bg} ${inpColors.text}`}>
-              {inpColors.label}
-            </span>
-          }
-        >
-          <div className="space-y-2">
-            <p className={`text-3xl font-extrabold ${inpColors.text}`}>
-              {analytics.vitals.inp.p75 != null ? `${analytics.vitals.inp.p75.toFixed(2)}ms` : '—'}
-            </p>
-            <p className={`text-xs ${inpColors.text} font-semibold uppercase tracking-wider`}>75th Percentile</p>
-            {renderDistributionBar(analytics.vitals.inp.distribution)}
-          </div>
-        </AnalyticsCard>
+        {[
+          {
+            title: 'Largest Contentful Paint (LCP)',
+            Icon: Activity,
+            colors: lcpColors,
+            formatted: analytics.vitals.lcp.p75 != null ? `${analytics.vitals.lcp.p75.toFixed(2)}s` : '—',
+            distribution: analytics.vitals.lcp.distribution,
+          },
+          {
+            title: 'Cumulative Layout Shift (CLS)',
+            Icon: Cpu,
+            colors: clsColors,
+            formatted: analytics.vitals.cls.p75 != null ? analytics.vitals.cls.p75.toFixed(2) : '—',
+            distribution: analytics.vitals.cls.distribution,
+          },
+          {
+            title: 'Interaction to Next Paint (INP)',
+            Icon: Monitor,
+            colors: inpColors,
+            formatted: analytics.vitals.inp.p75 != null ? `${analytics.vitals.inp.p75.toFixed(2)}ms` : '—',
+            distribution: analytics.vitals.inp.distribution,
+          },
+        ].map(({ title, Icon, colors, formatted, distribution }) => (
+          <AnalyticsCard
+            key={title}
+            title={<span className={colors.text}>{title}</span>}
+            icon={<Icon className={colors.text} />}
+            headerAction={
+              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${colors.bg} ${colors.text}`}>
+                {colors.label}
+              </span>
+            }
+          >
+            <div className="space-y-2">
+              <p className={`text-3xl font-extrabold ${colors.text}`}>{formatted}</p>
+              <p className={`text-xs ${colors.text} font-semibold uppercase tracking-wider`}>75th Percentile</p>
+              {renderDistributionBar(distribution)}
+            </div>
+          </AnalyticsCard>
+        ))}
       </div>
 
       {/* Trends Row */}
@@ -807,29 +754,19 @@ export function RumClient({
 
       {/* Environment Donuts Row */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <AnalyticsCard title="Browser Distribution" icon={<PieChart />}>
-          <PlotlyChart
-            data={browserPieData}
-            layout={donutChartLayout}
-            a11yTitle="Browser Distribution Donut Chart"
-          />
-        </AnalyticsCard>
-
-        <AnalyticsCard title="OS Distribution" icon={<PieChart />}>
-          <PlotlyChart
-            data={osPieData}
-            layout={donutChartLayout}
-            a11yTitle="OS Distribution Donut Chart"
-          />
-        </AnalyticsCard>
-
-        <AnalyticsCard title="Device Distribution" icon={<PieChart />}>
-          <PlotlyChart
-            data={devicePieData}
-            layout={donutChartLayout}
-            a11yTitle="Device Distribution Donut Chart"
-          />
-        </AnalyticsCard>
+        {[
+          { title: 'Browser Distribution', data: browserPieData, a11yTitle: 'Browser Distribution Donut Chart' },
+          { title: 'OS Distribution', data: osPieData, a11yTitle: 'OS Distribution Donut Chart' },
+          { title: 'Device Distribution', data: devicePieData, a11yTitle: 'Device Distribution Donut Chart' },
+        ].map(({ title, data, a11yTitle }) => (
+          <AnalyticsCard key={title} title={title} icon={<PieChart />}>
+            <PlotlyChart
+              data={data}
+              layout={donutChartLayout}
+              a11yTitle={a11yTitle}
+            />
+          </AnalyticsCard>
+        ))}
       </div>
 
       {/* Beacons Over Time Row */}
@@ -954,3 +891,136 @@ export function RumClient({
     </div>
   );
 }
+
+interface RumPageClientProps {
+  initialServiceId?: string;
+}
+
+interface ServiceSyncProps {
+  serviceId: string | null;
+  onSync: (id: string | null) => void;
+}
+
+function ServiceSync({ serviceId, onSync }: ServiceSyncProps) {
+  useEffect(() => {
+    onSync(serviceId);
+  }, [serviceId, onSync]);
+  return null;
+}
+
+export function RumPageClient({ initialServiceId }: RumPageClientProps) {
+  const [showInstructions, setShowInstructions] = useState(false);
+  const [activeServiceId, setActiveServiceId] = useState<string | null>(initialServiceId || null);
+  const isAnalyst = useIsAnalyst();
+  const { relativeRange, isAutoRange, anchor } = useReportRangeAnchor();
+
+  const scriptTag = '<script src="/js/rum.js"></script>';
+
+  return (
+    <>
+      <ReportLayout
+        title="Real User Monitoring"
+        description="Monitor real user performance metrics including Core Web Vitals, JavaScript errors, and session analytics."
+        icon={Radio}
+        serviceId={initialServiceId}
+        headerActions={
+          <div className="flex items-center gap-3">
+            <RumFaroVersionCard serviceId={activeServiceId} />
+            {!isAnalyst && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowInstructions(true)}
+                className="flex items-center gap-2"
+              >
+                <BookOpen className="h-4 w-4" />
+                Installation Instructions
+              </Button>
+            )}
+          </div>
+        }
+      >
+        {({ startTime, endTime, activeServiceId: sid, filterPayload }) => (
+          <>
+            <ServiceSync serviceId={sid} onSync={setActiveServiceId} />
+            <RumClient
+              serviceId={sid}
+              startTime={startTime}
+              endTime={endTime}
+              filterPayload={filterPayload}
+              relativeRange={relativeRange}
+              isAutoRange={isAutoRange}
+              anchor={anchor}
+            />
+          </>
+        )}
+      </ReportLayout>
+
+      {!isAnalyst && (
+        <Dialog open={showInstructions} onOpenChange={setShowInstructions}>
+          <DialogContent className="max-w-2xl">
+            <DialogHeader>
+              <DialogTitle>Installation Instructions</DialogTitle>
+              <DialogDescription>
+                Add Real User Monitoring to your website to start collecting performance data.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4 py-4">
+              <div className="space-y-2">
+                <h4 className="font-semibold text-sm">Step 1: Add the RUM Script</h4>
+                <p className="text-sm text-muted-foreground">
+                  Add this single line to the `&lt;head&gt;` section of your HTML or any template that renders across your entire site. The version hash automatically updates when we release new RUM features:
+                </p>
+                <div className="bg-muted rounded-md overflow-hidden border">
+                  <div className="flex items-center justify-between px-3 py-2 border-b bg-muted/50">
+                    <span className="text-[10px] font-mono text-muted-foreground">installation code</span>
+                    <CopyButton
+                      text={scriptTag}
+                      ariaLabel="Copy script tag"
+                      copiedAriaLabel="Copied script tag"
+                      className="h-6 w-6 hover:bg-muted-foreground/10"
+                    />
+                  </div>
+                  <div className="p-3 font-mono text-xs overflow-x-auto">
+                    <code>{scriptTag}</code>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <h4 className="font-semibold text-sm">Step 2: Works Everywhere</h4>
+                <p className="text-sm text-muted-foreground">
+                  This script works on any website regardless of framework:
+                </p>
+                <ul className="text-sm text-muted-foreground list-disc list-inside space-y-1">
+                  <li>Plain HTML, PHP, Django, Rails, etc.</li>
+                  <li>React, Vue, Svelte, Angular, Next.js</li>
+                  <li>Static sites, dynamic apps, and everything in between</li>
+                </ul>
+              </div>
+
+              <div className="space-y-2">
+                <h4 className="font-semibold text-sm">Step 3: Start Collecting Data</h4>
+                <p className="text-sm text-muted-foreground">
+                  Once deployed, real user beacons will automatically be sent to your analytics dashboard when users visit your site. After collecting 1+ beacons, you&apos;ll see real performance data appear on this page.
+                </p>
+              </div>
+
+              <div className="bg-blue-50 dark:bg-blue-950 p-3 rounded-md space-y-2">
+                <p className="text-sm font-semibold text-blue-900 dark:text-blue-100">💡 Tips:</p>
+                <ul className="text-xs text-blue-800 dark:text-blue-200 space-y-1">
+                  <li>• Beacons capture Web Vitals, JavaScript errors, and session info automatically</li>
+                  <li>• The script is lightweight and asynchronous — no performance impact</li>
+                  <li>• Data is sent securely to your Fastly-backed analytics backend</li>
+                  <li>• The version hash automatically updates when we release RUM improvements — just copy the script tag again from these instructions</li>
+                </ul>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
+    </>
+  );
+}
+
+export default RumPageClient;

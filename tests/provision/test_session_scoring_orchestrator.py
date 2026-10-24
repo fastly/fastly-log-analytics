@@ -20,7 +20,12 @@ import pytest
 from backend import config as svcconfig
 from backend.provision import fastly_api, orchestrator
 from backend.provision import session_scoring_orchestrator as sso
-from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES
+from backend.provision.cmcd_fields import (
+    _CMCD_FIELD_NAMES,
+    reconcile_cfg_system_custom_fields,
+    reconcile_system_custom_fields,
+    system_feature_flags,
+)
 from backend.provision.declarative.reconciler import ReconciliationResult
 from backend.provision.session_scoring_orchestrator import _SCORING_FIELD_NAMES
 from backend.provision.session_scoring_vcl import (
@@ -28,11 +33,6 @@ from backend.provision.session_scoring_vcl import (
     SCORING_FETCH_NAME,
     SCORING_RECV_NAME,
     scoring_snippet_names,
-)
-from backend.provision.system_fields import (
-    reconcile_cfg_system_custom_fields,
-    reconcile_system_custom_fields,
-    system_feature_flags,
 )
 from tests._helpers.config_fakes import config_lock_held as _lock_held
 from tests._helpers.config_fakes import read_persisted_config as _persisted

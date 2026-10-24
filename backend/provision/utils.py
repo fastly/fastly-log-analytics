@@ -27,6 +27,7 @@ on non-TTY) — the Console instances are configured with
 import queue
 import sys
 import threading
+from collections.abc import Iterable
 
 from rich.console import Console
 
@@ -176,3 +177,17 @@ def run_with_events(func, *args, raise_on_error: bool = True, **kwargs):
         yield {"type": "error", "message": str(err[0])}
         return None
     return res[0]
+
+
+class VclBuilder:
+    """Line- and section-joining helpers for VCL generators."""
+
+    @staticmethod
+    def join_lines(items: Iterable[str]) -> str:
+        """``"\\n"``-join an iterable of already-rendered lines."""
+        return "\n".join(items)
+
+    @staticmethod
+    def join_sections(sections: Iterable[str]) -> str:
+        """``"\\n\\n"``-join sections, dropping blank/whitespace-only ones."""
+        return "\n\n".join(s for s in sections if s.strip())

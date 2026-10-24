@@ -522,7 +522,7 @@ def _commit_one_chunk(
                 logger.warning("%s Failed to sync schema for paths: %s", _core_mod._ICE, e)
                 parquet_cols = set()
 
-            from backend.core.iceberg.rum_schema import RUM_NATURAL_KEYS
+            from backend.core.iceberg._core import RUM_NATURAL_KEYS
 
             delete_by_source = "_source_file" in table_cols and "_source_file" in parquet_cols
             nat_keys = RUM_NATURAL_KEYS.get(table_name)

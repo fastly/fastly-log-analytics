@@ -4,8 +4,7 @@ import {
   fetchPerformanceServerSide,
   PERFORMANCE_SSR_DEFAULTS,
 } from '@/lib/ssr/upstream'
-import { seedDehydratedState } from '@/lib/ssr/seed'
-import { resolvePageServiceId } from '@/lib/ssr/service'
+import { resolvePageServiceId, seedDehydratedState } from '@/lib/ssr/seed'
 import PerformanceClient from './_sections/PerformanceClient'
 
 // Per-request RSC shell for /performance. Pre-fetches the unified aggregates

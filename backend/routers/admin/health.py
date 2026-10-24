@@ -4,18 +4,37 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import Query
+from fastapi import Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 
-from backend.models.admin import HealthSnapshotResponse
-from backend.models.admin_actions import VclHealthResponse
-from backend.utils.router_utils import require_service_id
+from backend.core import duckdb as _db
+from backend.core import duckdb_pool as _pool
+from backend.core import duckdb_recycle as _recycle
+from backend.core import metric_snapshots
+from backend.core.share_db.settings import get_setting, set_setting
+from backend.deps import require_admin
+from backend.models.admin import (
+    DebugSettingsResponse,
+    DebugSettingsUpdateBody,
+    HealthSnapshotResponse,
+    MetricHistoryBatchResponse,
+)
+from backend.models.admin_actions import DuckdbRecycleResponse, VclHealthResponse
+from backend.models.admin_status import DuckdbStatusResponse
+from backend.utils.date_utils import parse_relative_time_window
+from backend.utils.router_utils import bad_request, make_error, require_service_id
 
+from ._helpers import attach_debug_db_snapshot
 from ._router import router
 
 logger = logging.getLogger(__name__)
+
+_MAX_LOOKBACK_DAYS = 30
+_VALID_WINDOW_RE = re.compile(r"^[1-9]\d*[mhd]\Z", re.IGNORECASE)
 
 
 @router.get("/admin/system-metrics", response_model=HealthSnapshotResponse)
@@ -390,3 +409,131 @@ def api_vcl_health(service_id: str | None = Query(default=None)) -> dict[str, An
             "error": str(e),
             "is_clean": False,
         }
+
+
+@router.get(
+    "/admin/metric-history/batch",
+    response_model=MetricHistoryBatchResponse,
+    dependencies=[Depends(require_admin)],
+)
+def metric_history_batch(
+    since: str = Query(default="1h", description="Lookback window: 30m, 1h, 6h, 24h, 7d, etc."),
+) -> JSONResponse:
+    """Return every recorded series newer than ``since``.
+
+    Response shape: ``{series: {key: [{ts, value}, ...], ...}}`` where
+    ``key`` is ``"metric"`` for global, ``"metric|service_id"`` for
+    per-service, ``"metric|service_id|task"`` for per-task.
+    """
+    if not since or not _VALID_WINDOW_RE.fullmatch(since.strip()):
+        raise HTTPException(
+            status_code=400,
+            detail=bad_request(
+                f"Invalid lookback window '{since}'. Expected <N>m, <N>h, or <N>d (e.g. 30m, 1h, 6h, 24h, 7d)."
+            ),
+        )
+    cutoff = parse_relative_time_window(since, max_lookback_days=_MAX_LOOKBACK_DAYS)
+    raw = metric_snapshots.get_batch(since=cutoff)
+    return JSONResponse(content=attach_debug_db_snapshot({"series": raw}))
+
+
+@router.get(
+    "/admin/debug-settings",
+    response_model=DebugSettingsResponse,
+)
+def get_debug_settings() -> DebugSettingsResponse:
+    """Return the debug settings for query debugging and API call panels."""
+    query_vis = get_setting("query_debug_visibility") or "disabled"
+    api_vis = get_setting("api_call_debug_visibility") or "disabled"
+    return DebugSettingsResponse(
+        query_debug_visibility=query_vis,
+        api_call_debug_visibility=api_vis,
+    )
+
+
+@router.patch(
+    "/admin/debug-settings",
+    response_model=DebugSettingsResponse,
+)
+def update_debug_settings(body: DebugSettingsUpdateBody) -> DebugSettingsResponse:
+    """Update the debug settings for query debugging and API call panels."""
+    if body.query_debug_visibility is not None:
+        if body.query_debug_visibility not in ("disabled", "admins", "analysts", "both"):
+            raise HTTPException(
+                status_code=400,
+                detail=make_error("invalid_query_debug_visibility", "Invalid query_debug_visibility value"),
+            )
+        set_setting("query_debug_visibility", body.query_debug_visibility)
+
+    if body.api_call_debug_visibility is not None:
+        if body.api_call_debug_visibility not in ("disabled", "admins", "analysts", "both"):
+            raise HTTPException(
+                status_code=400,
+                detail=make_error("invalid_api_call_debug_visibility", "Invalid api_call_debug_visibility value"),
+            )
+        set_setting("api_call_debug_visibility", body.api_call_debug_visibility)
+
+    query_vis = get_setting("query_debug_visibility") or "disabled"
+    api_vis = get_setting("api_call_debug_visibility") or "disabled"
+    return DebugSettingsResponse(
+        query_debug_visibility=query_vis,
+        api_call_debug_visibility=api_vis,
+    )
+
+
+@router.post("/admin/duckdb/recycle", response_model=DuckdbRecycleResponse, response_model_exclude_unset=True)
+def trigger_duckdb_recycle_endpoint(
+    force: bool = Query(False, description="Bypass RSS threshold check and force recycle"),
+) -> dict[str, Any]:
+    """Trigger on-demand recycle of DuckDB instances to free parquet metadata cache."""
+    rss_before = _db.current_rss_bytes()
+    threshold = _recycle._recycle_rss_threshold_bytes()
+
+    if not force and threshold > 0 and rss_before is not None and rss_before < threshold:
+        mb_before = rss_before / (1024 * 1024)
+        mb_thresh = threshold / (1024 * 1024)
+        return {
+            "ok": True,
+            "status": "skipped",
+            "reason": f"RSS {mb_before:.0f}MB < threshold {mb_thresh:.0f}MB",
+            "rss_mb": round(mb_before, 1),
+            "threshold_mb": round(mb_thresh, 1),
+        }
+
+    detail = _recycle.recycle_once(reason="manual_admin")
+    rss_after = _db.current_rss_bytes()
+    freed = (rss_before - rss_after) if (rss_before is not None and rss_after is not None) else None
+
+    return {
+        "ok": True,
+        "status": "recycled",
+        "detail": detail,
+        "rss_before_mb": round(rss_before / (1024 * 1024), 1) if rss_before is not None else None,
+        "rss_after_mb": round(rss_after / (1024 * 1024), 1) if rss_after is not None else None,
+        "freed_mb": round(freed / (1024 * 1024), 1) if freed is not None else None,
+    }
+
+
+@router.get("/admin/duckdb/status", response_model=DuckdbStatusResponse, response_model_exclude_unset=True)
+def get_duckdb_status_endpoint() -> dict[str, Any]:
+    """Return memory metrics, recycle configuration, and active connection pool states."""
+    rss = _db.current_rss_bytes()
+    threshold = _recycle._recycle_rss_threshold_bytes()
+    interval_min = _recycle.recycle_interval_min()
+    barrier_active = _db.is_recycle_barrier_active()
+    pool_stats = _pool.get_pool_status()
+
+    return {
+        "ok": True,
+        "memory": {
+            "current_rss_mb": round(rss / (1024 * 1024), 1) if rss is not None else None,
+            "recycle_threshold_mb": round(threshold / (1024 * 1024), 1) if threshold > 0 else None,
+            "recycle_interval_min": interval_min,
+        },
+        "barrier": {
+            "is_active": bool(barrier_active),
+            "active_paths": list(barrier_active) if isinstance(barrier_active, set) else [],
+        },
+        "pools": pool_stats["pools"],
+        "retired_pools": pool_stats["retired_pools"],
+    }

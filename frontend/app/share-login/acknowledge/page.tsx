@@ -2,8 +2,7 @@ import * as React from 'react'
 import { redirect } from 'next/navigation'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { fetchTosServerSide } from '@/lib/ssr/admin_gateway'
-import { AcknowledgeButton } from './AcknowledgeButton'
-import { AcknowledgeFallback } from './AcknowledgeFallback'
+import { AcknowledgeButton, AcknowledgeFallback } from './AcknowledgeButton'
 
 // Per-request SSR — the TOS payload + auth gate land in initial HTML.
 export const dynamic = 'force-dynamic'

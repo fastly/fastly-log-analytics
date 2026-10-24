@@ -19,6 +19,7 @@ from backend.repositories._base import (
     CANONICAL_METRICS,
     QueryRunner,
     SectionTimer,
+    _drop_temp_table,
     _get_schema,
     _safe_table,
     force_rebuild_view,
@@ -382,11 +383,9 @@ def _compute_dashboard_aggregates(
     runner = QueryRunner(con, src)
     interval = "1 minute"
 
-    actual_cols = timer.call("get_schema_cols", runner.get_schema_cols)
-    if not actual_cols:
-        empty = {f: {"top": [], "total": 0} for f in fields}
+    def _empty_envelope() -> dict[str, Any]:
         return {
-            "data": empty,
+            "data": {f: {"top": [], "total": 0} for f in fields},
             "time_series": [],
             "map_data": [],
             "where_clause": "1=1",
@@ -396,6 +395,10 @@ def _compute_dashboard_aggregates(
             "total_rows_total": 0,
             **runner.telemetry(),
         }
+
+    actual_cols = timer.call("get_schema_cols", runner.get_schema_cols)
+    if not actual_cols:
+        return _empty_envelope()
 
     params, where_clause = timer.call(
         "build_where_clause",
@@ -549,18 +552,7 @@ def _compute_dashboard_aggregates(
     if built is None:
         if _selected_aggregates is not None:
             raise RuntimeError("Pinned DuckLake materialization failed")
-        empty = {f: {"top": [], "total": 0} for f in fields}
-        return {
-            "data": empty,
-            "time_series": [],
-            "map_data": [],
-            "where_clause": "1=1",
-            "interval": interval,
-            "metric": "requests",
-            "total_rows": 0,
-            "total_rows_total": 0,
-            **runner.telemetry(),
-        }
+        return _empty_envelope()
     table_name, where_clause, params, temp_table = built
 
     results: dict[str, Any] = {f: {"top": [], "total": 0} for f in fields}
@@ -1075,102 +1067,48 @@ def _compute_dashboard_aggregates(
             else:
                 _skip_raw_time_series = False
 
-            if _skip_raw_time_series:
-                pass
-            elif chart_metric == "5xx" and "status" in actual_cols:
-                chart_metric_out = "5xx"
-                ts_q = SQL.TIME_SERIES.format(
-                    time_bucket_select=time_bucket_select(interval),
-                    value_expr=CANONICAL_METRICS["5xx_rate"],
-                    table_name=table_name,
-                    extra_where="",
-                    where_clause=where_clause,
-                )
-            elif chart_metric == "4xx" and "status" in actual_cols:
-                chart_metric_out = "4xx"
-                ts_q = SQL.TIME_SERIES.format(
-                    time_bucket_select=time_bucket_select(interval),
-                    value_expr=CANONICAL_METRICS["4xx_rate"],
-                    table_name=table_name,
-                    extra_where="",
-                    where_clause=where_clause,
-                )
-            elif chart_metric == "hit_rate" and ("cache" in actual_cols or "resp_state" in actual_cols):
-                chart_metric_out = "hit_rate"
-                # Fallback to resp_state if cache is missing
-                cache_col = '"cache"' if "cache" in actual_cols else '"resp_state"'
-                hit_rate_expr = CANONICAL_METRICS["hit_rate"].format(cache_col=cache_col)
-                ts_q = SQL.TIME_SERIES.format(
-                    time_bucket_select=time_bucket_select(interval),
-                    value_expr=hit_rate_expr,
-                    table_name=table_name,
-                    extra_where="",
-                    where_clause=where_clause,
-                )
-            elif chart_metric.endswith("_latency") and ("elapsed" in actual_cols or "elapsed_us" in actual_cols):
-                chart_metric_out = chart_metric
-                percentile = 0.95
-                if chart_metric.startswith("p50"):
-                    percentile = 0.50
-                elif chart_metric.startswith("p99"):
-                    percentile = 0.99
-                ts_q = SQL.TIME_SERIES.format(
-                    time_bucket_select=time_bucket_select(interval),
-                    value_expr=percentile_ms_expr(sql_elapsed, percentile),
-                    table_name=table_name,
-                    extra_where=f" AND {sql_elapsed} IS NOT NULL",
-                    where_clause=where_clause,
-                )
-            elif chart_metric == "throughput" and "resp_bytes" in actual_cols and "elapsed" in actual_cols:
-                chart_metric_out = "throughput"
-                sql_resp_bytes = "resp_bytes"
-                # Note: elapsed and elapsed_us both map to the same field in DuckDB (µs)
-                sql_elapsed_val = "elapsed"
-                ts_q = SQL.TIME_SERIES.format(
-                    time_bucket_select=time_bucket_select(interval),
-                    value_expr=CANONICAL_METRICS["throughput"].format(
-                        cache_col=sql_cache,
-                        elapsed_col=sql_elapsed_val,
-                        resp_bytes_col=sql_resp_bytes,
-                    ),
-                    table_name=table_name,
-                    extra_where="",
-                    where_clause=where_clause,
-                )
-            elif chart_metric == "req_size" and any(c in actual_cols for c in ["req_header_bytes", "req_bytes"]):
-                chart_metric_out = "req_size"
-                header_col = '"req_header_bytes"' if "req_header_bytes" in actual_cols else "0"
-                body_col = "req_bytes" if "req_bytes" in actual_cols else "0"
-                ts_q = SQL.TIME_SERIES.format(
-                    time_bucket_select=time_bucket_select(interval),
-                    value_expr=CANONICAL_METRICS["req_size"].format(
-                        header_bytes_col=header_col,
-                        req_bytes_col=body_col,
-                    ),
-                    table_name=table_name,
-                    extra_where="",
-                    where_clause=where_clause,
-                )
-            elif chart_metric == "ttfb" and "ttfb" in actual_cols:
-                chart_metric_out = "ttfb"
-                ts_q = SQL.TIME_SERIES.format(
-                    time_bucket_select=time_bucket_select(interval),
-                    value_expr=CANONICAL_METRICS["ttfb_ms"],
-                    table_name=table_name,
-                    extra_where="",
-                    where_clause=where_clause,
-                )
-            else:
-                chart_metric_out = "requests"
-                ts_q = SQL.TIME_SERIES.format(
-                    time_bucket_select=time_bucket_select(interval),
-                    value_expr=CANONICAL_METRICS["requests"],
-                    table_name=table_name,
-                    extra_where="",
-                    where_clause=where_clause,
-                )
-
             if not _skip_raw_time_series:
+                extra_where = ""
+                if chart_metric in ("5xx", "4xx") and "status" in actual_cols:
+                    chart_metric_out = chart_metric
+                    value_expr = CANONICAL_METRICS[f"{chart_metric}_rate"]
+                elif chart_metric == "hit_rate" and ("cache" in actual_cols or "resp_state" in actual_cols):
+                    chart_metric_out = "hit_rate"
+                    cache_col = '"cache"' if "cache" in actual_cols else '"resp_state"'
+                    value_expr = CANONICAL_METRICS["hit_rate"].format(cache_col=cache_col)
+                elif chart_metric.endswith("_latency") and ("elapsed" in actual_cols or "elapsed_us" in actual_cols):
+                    chart_metric_out = chart_metric
+                    percentile = (
+                        0.50 if chart_metric.startswith("p50") else (0.99 if chart_metric.startswith("p99") else 0.95)
+                    )
+                    value_expr = percentile_ms_expr(sql_elapsed, percentile)
+                    extra_where = f" AND {sql_elapsed} IS NOT NULL"
+                elif chart_metric == "throughput" and "resp_bytes" in actual_cols and "elapsed" in actual_cols:
+                    chart_metric_out = "throughput"
+                    value_expr = CANONICAL_METRICS["throughput"].format(
+                        cache_col=sql_cache,
+                        elapsed_col="elapsed",
+                        resp_bytes_col="resp_bytes",
+                    )
+                elif chart_metric == "req_size" and any(c in actual_cols for c in ["req_header_bytes", "req_bytes"]):
+                    chart_metric_out = "req_size"
+                    value_expr = CANONICAL_METRICS["req_size"].format(
+                        header_bytes_col='"req_header_bytes"' if "req_header_bytes" in actual_cols else "0",
+                        req_bytes_col="req_bytes" if "req_bytes" in actual_cols else "0",
+                    )
+                elif chart_metric == "ttfb" and "ttfb" in actual_cols:
+                    chart_metric_out = "ttfb"
+                    value_expr = CANONICAL_METRICS["ttfb_ms"]
+                else:
+                    chart_metric_out = "requests"
+                    value_expr = CANONICAL_METRICS["requests"]
+                ts_q = SQL.TIME_SERIES.format(
+                    time_bucket_select=time_bucket_select(interval),
+                    value_expr=value_expr,
+                    table_name=table_name,
+                    extra_where=extra_where,
+                    where_clause=where_clause,
+                )
                 ts_res = runner.execute(ts_q, params).fetchall()
                 for r in ts_res:
                     if r[0] is None:
@@ -1236,12 +1174,7 @@ def _compute_dashboard_aggregates(
         runner.end_shared_active_hour_temps()
         # Non-rollup path: drop the wide filtered TEMP TABLE. When TEMP
         # TABLE creation failed and `temp_table` is None, this is a no-op.
-        if temp_table is not None:
-            try:
-                runner.con.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
-            except Exception:
-                if log_once_per("get_aggregates: DROP TABLE failed (ignored)", 60):
-                    logger.debug("get_aggregates: DROP TABLE failed (ignored)", exc_info=True)
+        _drop_temp_table(runner.con, temp_table, "get_aggregates")
 
 
 # ── raw ───────────────────────────────────────────────────────────────────────

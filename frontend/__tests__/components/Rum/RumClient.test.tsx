@@ -21,7 +21,7 @@ import { createTestQueryClient, makeQueryWrapper } from '../../helpers/query'
 import { server } from '@/__tests__/helpers/msw/server'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
-import RumPageClient from '@/app/rum/_sections/RumPageClient'
+import RumPageClient from '@/app/rum/_sections/RumClient'
 
 vi.mock('@/components/PlotlyChart', async () => (await import('../../helpers/page-smoke')).plotlyChartModuleMock())
 vi.mock('@/components/charts/TimeSeriesChart', () => ({ TimeSeriesChart: () => <div data-testid="timeseries-chart" /> }))

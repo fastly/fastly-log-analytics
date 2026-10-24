@@ -710,7 +710,8 @@ from urllib.request import Request
 import httpx
 import pytest
 
-from scripts.lib import admin_http, admin_tls
+from scripts.lib import admin_tls
+from scripts.lib import admin_tls as admin_http
 
 
 def test_total_deadline_cancels_a_stalled_response_body(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -785,7 +786,7 @@ import argparse
 
 import pytest
 
-from scripts.lib.cli import add_common_args
+from scripts.lib.environments import add_common_args
 
 
 def _parser(**kwargs: object) -> argparse.ArgumentParser:
@@ -840,7 +841,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from scripts.lib import prom
+from scripts.lib import environments as prom
 
 
 def test_histogram_quantile_matches_the_legacy_query_text() -> None:
@@ -904,7 +905,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scripts import run_contract_backend
-from scripts.lib.streaming_e2e_fixture import install_streaming_fixture
+from scripts.run_contract_backend import install_streaming_fixture
 
 
 def test_streaming_fixture_requires_an_isolated_contract_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:

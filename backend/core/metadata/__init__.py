@@ -29,6 +29,7 @@ import sys
 from types import ModuleType
 
 from backend.core.metadata import base as _base
+from backend.core.metadata import state as _state
 
 # Alerts CRUD.
 from backend.core.metadata.alerts import (
@@ -39,13 +40,6 @@ from backend.core.metadata.alerts import (
     save_alert,
     toggle_alert,
     update_alert_last_triggered,
-)
-
-# ASN-name cache.
-from backend.core.metadata.asn_cache import (
-    asn_ints_for_search,
-    lookup_asn_names,
-    upsert_asn_names,
 )
 
 # Base: connection management, schema, dedup cache, parse helpers.
@@ -131,14 +125,22 @@ from backend.core.metadata.slow_queries import (
     list_slow_queries,
 )
 
-# Audit log + applied data migration tracking.
+# Audit log, ASN-name cache, and saved-dashboard-view CRUD.
 from backend.core.metadata.state import (
+    asn_ints_for_search,
+    delete_view,
     export_audit,
     get_audit_logs,
     list_audit,
+    list_views,
+    lookup_asn_names,
     merge_audit_for_service,
     record_audit,
     replace_audit_for_service,
+    replace_views_for_service,
+    save_view,
+    upsert_asn_names,
+    upsert_views_for_service,
 )
 
 # Source registry + usage telemetry.
@@ -153,15 +155,6 @@ from backend.core.metadata.usage_log import (
     purge_usage_log,
     reconcile_fastly_stats,
     register_source,
-)
-
-# Saved-dashboard-view CRUD.
-from backend.core.metadata.views import (
-    delete_view,
-    list_views,
-    replace_views_for_service,
-    save_view,
-    upsert_views_for_service,
 )
 
 
@@ -194,6 +187,9 @@ class _ShimModule(ModuleType):
 
 
 sys.modules[__name__].__class__ = _ShimModule
+for _sub in ("asn_cache", "views"):
+    setattr(sys.modules[__name__], _sub, _state)
+    sys.modules[f"{__name__}.{_sub}"] = _state
 
 
 __all__ = [

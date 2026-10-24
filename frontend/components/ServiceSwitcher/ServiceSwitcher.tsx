@@ -21,7 +21,7 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover'
 import { useServiceStore } from '@/stores/serviceStore'
-import { useLocalStorageString } from '@/hooks/useLocalStorageString'
+import { useLocalStorageString } from '@/hooks/useDerivedState'
 
 // localStorage shape: pinned IDs (user-ordered) + MRU IDs (most-recent first).
 // Keyed globally — admin's switch list and analyst's switch list both share

@@ -22,12 +22,10 @@ import {
   GlobalHealthHelp, AvgRttHelp, WorstAsnHelp, WorstRegionHelp, HeatmapHelp,
   AsnLeaderboardHelp, MetroLeaderboardHelp, ShieldingHelp,
   HealthBadge, SHIELDING_COLUMNS, getShieldingLabels,
-} from '@/app/network/help-content'
-import {
   adjustShieldingRows,
   SHIELDING_MIN_REQUESTS_DEFAULT,
   SHIELDING_MIN_REQUESTS_OPTIONS,
-} from '@/app/network/shielding-rows'
+} from '@/app/network/help-content'
 
 describe('HealthBadge', () => {
   test('null → em-dash; ≥80 → green; 50-79 → yellow; <50 → destructive (no color leak)', () => {

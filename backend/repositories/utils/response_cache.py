@@ -14,11 +14,11 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import threading
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
-from backend.repositories.utils import single_flight
 from backend.repositories.utils.filters import filter_spec_attr
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.cache_registry import CacheRegistry
@@ -30,6 +30,78 @@ if TYPE_CHECKING:
 
 _CLIENT_TOKEN_COUNTER = itertools.count(1)
 _MEMO_COUNTER = itertools.count(1)
+
+_registry_lock = threading.Lock()
+_registry: dict[str, _InFlight] = {}
+
+
+class _InFlight[T]:
+    __slots__ = ("event", "result", "error")
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.result: T | None = None
+        self.error: BaseException | None = None
+
+
+def coalesce[T](key: str, build: Callable[[], T]) -> tuple[T, bool]:
+    """Run ``build()`` for ``key``, sharing the result with concurrent callers.
+
+    Returns ``(result, is_leader)``. Exactly one concurrent caller per key
+    becomes the leader (the one that actually invokes ``build``); every other
+    caller blocks until the leader finishes and receives the SAME result
+    object rather than re-running ``build``. If ``build`` raises, every
+    waiter (including the leader) sees the same exception re-raised — no
+    caller silently gets a different, possibly-partial result.
+
+    Callers must design ``build`` so its return value is safe to hand to a
+    caller other than the one that produced it — e.g. plain data, not a
+    connection-scoped resource such as a DuckDB temp table.
+    """
+    with _registry_lock:
+        existing = _registry.get(key)
+        if existing is not None:
+            slot = existing
+            is_leader = False
+        else:
+            slot = _InFlight()
+            _registry[key] = slot
+            is_leader = True
+
+    if not is_leader:
+        slot.event.wait()
+        if slot.error is not None:
+            if type(slot.error).__name__ == "InterruptException":
+                return coalesce(key, build)
+            raise slot.error
+        return slot.result, False  # type: ignore[return-value]
+
+    try:
+        result = build()
+        slot.result = result
+        return result, True
+    except BaseException as e:
+        slot.error = e
+        raise
+    finally:
+        with _registry_lock:
+            if _registry.get(key) is slot:
+                del _registry[key]
+        slot.event.set()
+
+
+class SingleFlightGroup:
+    """Compatibility wrapper around module-level :func:`coalesce`."""
+
+    def coalesce[T](self, key: str, build: Callable[[], T]) -> tuple[T, bool]:
+        return coalesce(key, build)
+
+
+_analytics_compute_group = SingleFlightGroup()
+
+
+def get_analytics_compute_group() -> SingleFlightGroup:
+    return _analytics_compute_group
 
 
 def client_cache_token(client: Any) -> int:
@@ -76,7 +148,7 @@ def coalesced_cache_result(
     key: str, build: Callable[[], dict], *, ttl_seconds: float, prewarmer: bool | None = None
 ) -> dict:
     started = time.perf_counter()
-    payload, leader = single_flight.coalesce(key, build)
+    payload, leader = coalesce(key, build)
     if not leader:
         return cache_result(
             payload,

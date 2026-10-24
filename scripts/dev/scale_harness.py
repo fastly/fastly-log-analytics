@@ -24,7 +24,7 @@ import aiohttp
 # Keep documented `python scripts/dev/scale_harness.py` invocations working.
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from scripts.lib import prom  # noqa: E402
+from scripts.lib import environments as prom  # noqa: E402
 from scripts.lib.admin_tls import admin_urlopen, validate_admin_tls_config  # noqa: E402
 from scripts.lib.log_factory import (  # noqa: E402
     URL_PATHS,

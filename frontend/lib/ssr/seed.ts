@@ -1,10 +1,6 @@
-// Server-safe SSR seeding helpers shared by the per-request RSC page
-// shells (alerts/logs/usage-log/trends). These touch only
-// @tanstack/react-query — no next/headers — so they're importable from
-// any server component.
-
 import { QueryClient, dehydrate } from '@tanstack/react-query'
 import type { DehydratedState, QueryKey } from '@tanstack/react-query'
+import { fetchBootstrapServerSide } from './bootstrap'
 
 /**
  * Build the DehydratedState for a single pre-fetched query entry, or null
@@ -28,3 +24,45 @@ export function seedDehydratedState(key: QueryKey, data: unknown): DehydratedSta
  */
 export const firstParam = (v: string | string[] | undefined): string | undefined =>
   Array.isArray(v) ? v[0] : v
+
+/**
+ * Resolve the active service ID for an RSC page render:
+ * 1. Explicit `?service=` URL searchParam
+ * 2. `bootstrap.active_service_id`
+ * 3. Optionally `bootstrap.services[0].id` when `fallbackFirstService` is set
+ */
+export function resolveServerServiceId(
+  params: { service?: string | string[] },
+  bootstrap:
+    | {
+        active_service_id?: string | null
+        services?: ReadonlyArray<{ id?: unknown; service_id?: unknown }> | null
+      }
+    | null
+    | undefined,
+  options?: { fallbackFirstService?: boolean },
+): string | undefined {
+  const urlServiceId = firstParam(params.service)
+  if (urlServiceId) return urlServiceId
+  if (bootstrap?.active_service_id) return bootstrap.active_service_id
+  if (options?.fallbackFirstService) {
+    const first = bootstrap?.services?.[0]
+    const firstId = first?.id ?? first?.service_id
+    if (typeof firstId === 'string') return firstId
+  }
+  return undefined
+}
+
+/**
+ * Resolve the active service ID for an RSC page render, short-circuiting
+ * `fetchBootstrapServerSide()` when `?service=` is already present in the URL.
+ */
+export async function resolvePageServiceId(
+  params: { service?: string | string[] },
+  options?: { fallbackFirstService?: boolean },
+): Promise<string | undefined> {
+  const urlServiceId = firstParam(params.service)
+  if (urlServiceId) return urlServiceId
+  const bootstrap = await fetchBootstrapServerSide()
+  return resolveServerServiceId(params, bootstrap, options)
+}

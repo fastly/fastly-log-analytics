@@ -16,7 +16,7 @@ import { TRENDS } from '@/lib/constants'
 import { useActiveLogFields } from '@/hooks/useLogFieldsCatalog'
 import type { PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/plotly'
 import type { ReportConfiguration } from '@/hooks/useReportConfig'
-import type { DashboardAggregates, DashboardCatalog } from './types'
+import type { DashboardAggregates, DashboardCatalog } from './categories'
 
 interface TrafficChartProps {
   catalog: DashboardCatalog | undefined

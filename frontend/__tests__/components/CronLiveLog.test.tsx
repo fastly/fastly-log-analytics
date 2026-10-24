@@ -1,40 +1,20 @@
 /**
  * @vitest-environment jsdom
  *
- * CronLiveLog — renders SSE-driven cron output in two display modes
- * (singleLine compact / terminalMode full scroll) and notifies the parent
- * via `onDone` when the stream terminates.
- *
- * Audit finding this test addresses: the component carried two correctness
- * invariants that were never pinned by a test —
- *   1. `onDone` must fire EXACTLY ONCE per stream lifecycle, regardless of
- *      how many terminal events the SSE source emits (the component uses
- *      `doneFired` ref guard at CronLiveLog.tsx:21,38). A regression that
- *      drops the ref guard would silently re-trigger downstream side
- *      effects (refreshes, toast spam, modal re-opens).
- *   2. `singleLine` mode must collapse history to the tail AND truncate
- *      messages over 80 chars (CronLiveLog.tsx:46–47,92). Without coverage,
- *      a refactor could trivially break the marquee-line UI used in the
- *      compact cron-status widget.
- *
- * The underlying SSE transport is covered exhaustively by
- * frontend/__tests__/hooks/useSSE.test.ts, so we mock `useSSE` and drive
- * the component with controlled state transitions via rerender().
+ * Consolidated CronLiveLog and CronSettingsModal (LogSyncSection) tests.
  */
 import React from 'react'
 import { render, screen, cleanup } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import userEvent from '@testing-library/user-event'
+import { afterEach, beforeEach, describe, expect, it, test, vi } from 'vitest'
 import { createUseSSEMock } from '../helpers/sse-mock'
 
-// Mock useSSE — the component just consumes { lines, status, start, stop }.
-// Tests mutate this object between renders to simulate transitions.
 const { state: sseState, resetState: resetSSE } = createUseSSEMock()
 
 vi.mock('@/hooks/useSSE', () => ({
   useSSE: () => sseState,
 }))
 
-// useDateFormat pulls in zustand + date-fns; stub to flat strings.
 vi.mock('@/hooks/useDateFormat', () => ({
   useDateFormat: () => ({
     full: (d: string) => `FULL(${d})`,
@@ -43,6 +23,7 @@ vi.mock('@/hooks/useDateFormat', () => ({
 }))
 
 import { CronLiveLog } from '@/components/CronLiveLog'
+import { LogSyncSection } from '@/components/CronSettingsModal/Schedule'
 
 beforeEach(() => {
   resetSSE()
@@ -100,21 +81,16 @@ describe('CronLiveLog — onDone callback', () => {
     sseState.status = 'streaming'
     const { rerender } = render(<CronLiveLog runId={3} onDone={onDone} />)
 
-    // First terminal event — fires.
     sseState.status = 'done'
     sseState.lines = [{ _id: 1, type: 'done', message: 'first' }]
     rerender(<CronLiveLog runId={3} onDone={onDone} />)
     expect(onDone).toHaveBeenCalledTimes(1)
 
-    // A second terminal event (e.g. late `error` after `done`) must NOT
-    // re-fire — the doneFired ref guards against downstream side-effect
-    // spam (refreshes / toasts / modal re-opens).
     sseState.status = 'error'
     sseState.lines = [...sseState.lines, { _id: 2, type: 'error', message: 'late' }]
     rerender(<CronLiveLog runId={3} onDone={onDone} />)
     expect(onDone).toHaveBeenCalledTimes(1)
 
-    // And a redundant done → done bounce stays guarded.
     sseState.status = 'done'
     rerender(<CronLiveLog runId={3} onDone={onDone} />)
     expect(onDone).toHaveBeenCalledTimes(1)
@@ -140,7 +116,6 @@ describe('CronLiveLog — singleLine mode', () => {
     sseState.status = 'streaming'
     sseState.lines = [{ _id: 1, type: 'status', message: long }]
     render(<CronLiveLog runId={5} singleLine />)
-    // Truncation rule lives at CronLiveLog.tsx:92 — first 80 chars + '...'.
     const expected = 'x'.repeat(80) + '...'
     expect(screen.getByText(expected)).toBeInTheDocument()
     expect(screen.queryByText(long)).toBeNull()
@@ -168,5 +143,91 @@ describe('CronLiveLog — terminalMode', () => {
     expect(
       screen.getByText(/SESSION INITIATED AT: FULL\(2026-06-16T00:00:00Z\) TZ/),
     ).toBeInTheDocument()
+  })
+})
+
+const baseLogSyncProps = {
+  syncEnabled: true,
+  setSyncEnabled: vi.fn(),
+  pollingMode: 'regular' as const,
+  setPollingMode: vi.fn(),
+  deleteAfter: false,
+  setDeleteAfter: vi.fn(),
+  dataRetention: '30',
+  setDataRetention: vi.fn(),
+  cacheRetention: '90',
+  setCacheRetention: vi.fn(),
+  rollupRetention: '12',
+  setRollupRetention: vi.fn(),
+  commitInterval: '5',
+  setCommitInterval: vi.fn(),
+  syncLogEnabled: true,
+  setSyncLogEnabled: vi.fn(),
+  syncRetention: '7',
+  setSyncRetention: vi.fn(),
+  syncFreqLabel: 'every 2 minutes',
+  isAnalyst: false,
+  syncIntervalNum: 120,
+  adminSyncSeconds: 120,
+  rumRetention: '30',
+  setRumRetention: vi.fn(),
+  rumEnabled: false,
+  rumLogPeriod: '300',
+  setRumLogPeriod: vi.fn(),
+  rumDeleteAfter: false,
+  setRumDeleteAfter: vi.fn(),
+}
+
+describe('CronSettingsModal — LogSyncSection', () => {
+  test('polling mode selector exposes Adaptive LIST-cost disclosure and updates the mode', async () => {
+    const user = userEvent.setup()
+    const setPollingMode = vi.fn()
+    render(<LogSyncSection {...baseLogSyncProps} setPollingMode={setPollingMode} />)
+
+    expect(screen.getByText(/Adaptive makes up to two short follow-up discovery passes/)).toBeInTheDocument()
+    await user.click(screen.getByRole('combobox', { name: 'Discovery Polling Mode' }))
+    await user.click(await screen.findByRole('option', { name: 'Adaptive' }))
+
+    expect(setPollingMode).toHaveBeenCalledWith('adaptive')
+  })
+
+  test('displays banner with Configure RUM link when RUM is disabled on edge', () => {
+    render(
+      <LogSyncSection
+        {...baseLogSyncProps}
+        rumEnabled={false}
+        rumSyncEnabled={false}
+        setRumSyncEnabled={vi.fn()}
+        serviceId="test-service-123"
+      />,
+    )
+
+    expect(screen.getByText(/Real User Monitoring is not currently enabled on Fastly edge/)).toBeInTheDocument()
+    const link = screen.getByRole('link', { name: 'Configure RUM' })
+    expect(link).toBeInTheDocument()
+    expect(link).toHaveAttribute('href', '/admin/rum?service=test-service-123')
+  })
+
+  test('renders Enable RUM Beacon Sync switch when RUM is enabled on edge and allows toggling', async () => {
+    const user = userEvent.setup()
+    const setRumSyncEnabled = vi.fn()
+
+    render(
+      <LogSyncSection
+        {...baseLogSyncProps}
+        rumEnabled={true}
+        rumSyncEnabled={false}
+        setRumSyncEnabled={setRumSyncEnabled}
+        serviceId="test-service-123"
+      />,
+    )
+
+    expect(screen.getByText('Enable RUM Beacon Sync')).toBeInTheDocument()
+    const rumSwitch = screen.getByRole('switch', { name: 'Enable RUM Beacon Sync' })
+    expect(rumSwitch).toBeInTheDocument()
+    expect(rumSwitch).toHaveAttribute('aria-checked', 'false')
+
+    await user.click(rumSwitch)
+    expect(setRumSyncEnabled).toHaveBeenCalledWith(true, expect.anything())
   })
 })

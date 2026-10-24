@@ -12,9 +12,8 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from backend.models.admin_actions import PageTelemetryResponse
-from backend.models.debug import ClearSqliteResponse, RecentSqliteResponse
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
-from backend.models.status_reads import DebugStateResponse
+from backend.models.status_reads import ClearSqliteResponse, DebugStateResponse, RecentSqliteResponse
 from backend.utils import sqlite_profiler
 
 router = APIRouter(prefix="/api/debug", tags=["debug"], responses=DEFAULT_ERROR_RESPONSES)
@@ -32,7 +31,7 @@ def recent_sqlite(
     """
     is_remote = getattr(request.state, "is_remote", False)
     if is_remote:
-        from backend.core.share_db.settings import get_setting
+        from backend.core.share_db import get_setting
 
         q_vis = get_setting("query_debug_visibility", "disabled")
         if q_vis not in ("analysts", "both"):

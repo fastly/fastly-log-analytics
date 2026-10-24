@@ -46,27 +46,29 @@ from .hour_bundles import bundle_hours, bundle_hours_ip_spread
 
 # Writers dispatched by name from spec.HOUR_WRITERS (resolved against this
 # module at call time, so each name here is also the test patch point).
-from .network_health_geo import build_network_geo_bundles  # noqa: F401
-from .network_health_heatmap import build_network_heatmap_bundles  # noqa: F401
-from .network_quality import build_network_quality_bundles  # noqa: F401
-from .network_rtt import build_network_rtt_bundles  # noqa: F401
-from .network_speed import build_network_speed_bundles  # noqa: F401
-from .network_summary import build_network_summary_bundles  # noqa: F401
+from .network import (  # noqa: F401
+    build_network_geo_bundles,
+    build_network_heatmap_bundles,
+    build_network_quality_bundles,
+    build_network_rtt_bundles,
+    build_network_speed_bundles,
+    build_network_summary_bundles,
+    build_pop_health_bundles,
+)
 from .ngwaf_bots import build_ngwaf_bots_bundles, build_ngwaf_bots_ts_bundles  # noqa: F401
-from .origin_dims import build_origin_dims_bundles  # noqa: F401
+from .origin_dims import build_origin_dims_bundles, build_origin_summary_bundles  # noqa: F401
 from .origin_latency_ts import build_origin_latency_ts_bundles  # noqa: F401
-from .origin_summary import build_origin_summary_bundles  # noqa: F401
 from .overview import build_overview_bundles  # noqa: F401
-from .perf_dims import build_perf_dims_bundles  # noqa: F401
-from .perf_latency import build_perf_latency_bundles  # noqa: F401
-from .pop_health import build_pop_health_bundles  # noqa: F401
-from .security_dims import build_security_dims_bundles  # noqa: F401
-from .security_proxies import build_security_proxies_bundles  # noqa: F401
+from .perf_latency import build_perf_dims_bundles, build_perf_latency_bundles  # noqa: F401
+from .security_dims import (  # noqa: F401
+    build_security_dims_bundles,
+    build_security_proxies_bundles,
+    build_verified_bots_ts_bundles,
+)
 from .sessions import build_session_bundles  # noqa: F401
 from .slow_urls import build_slow_urls_bundles  # noqa: F401
 from .spec import HOUR_WRITERS
 from .time_series import build_time_series_bundles  # noqa: F401
-from .verified_bots_ts import build_verified_bots_ts_bundles  # noqa: F401
 from .wellknown_bots import recompute_wellknown_bots_rollup  # noqa: F401
 
 logger = logging.getLogger(__name__)

@@ -13,8 +13,11 @@
 
 import { expect, test } from '@playwright/test'
 import type { DebugQuery } from '../../types/api'
-import { installClsObserver, measureWarmPaintAndCls } from '../cls-observer'
-import { getFirstServiceId as resolveActiveServiceId } from './helpers'
+import {
+  getFirstServiceId as resolveActiveServiceId,
+  installClsObserver,
+  measureWarmPaintAndCls,
+} from '../helpers'
 
 type RequestFactsDebugResponse = {
   _debug_queries?: DebugQuery[]

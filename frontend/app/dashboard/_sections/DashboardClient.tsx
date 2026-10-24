@@ -25,13 +25,11 @@ import { useDashboardCards } from '@/hooks/useDashboardCards'
 import { TrafficChart } from './TrafficChart'
 import { GeoMap } from './GeoMap'
 import { CardGrid } from './CardGrid'
-import { buildChartLayout } from './chartHelpers'
+import { buildChartLayout, COLLAPSED_SECTIONS_KEY, type DashboardBodyProps } from './categories'
 import { buildTrafficData } from '@/lib/traffic-chart'
 import { buildTrafficDataAsync } from '@/lib/workers/buildTrafficData'
-import { COLLAPSED_SECTIONS_KEY } from './categories'
-import { useLocalStorageString } from '@/hooks/useLocalStorageString'
+import { useLocalStorageString } from '@/hooks/useDerivedState'
 import type { PlotlyTrace } from '@/types/plotly'
-import type { DashboardBodyProps } from './types'
 
 // P-4 slice 3: mirror the section-selector pattern used by /security and
 // /network. The dashboard page consumes all three sections, so the list

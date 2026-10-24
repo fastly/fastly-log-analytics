@@ -19,8 +19,7 @@
  *      telemetry attribution in High-Scale mode (or 404 route separation in Standard mode).
  */
 import { test, expect, type Page } from '@playwright/test';
-import { clsInitScript, readClsScore } from '../cls-observer';
-import { resolveFirstServiceId, configureExternalAdminOrigin } from '../helpers';
+import { clsInitScript, configureExternalAdminOrigin, readClsScore, resolveFirstServiceId } from '../helpers';
 
 configureExternalAdminOrigin();
 

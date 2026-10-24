@@ -14,7 +14,7 @@ from backend.high_scale import insights as hs_insights
 from backend.high_scale.insight_queries import COLUMNS, DETECTIONS, botnet_grouping
 from backend.high_scale.insights import cache_collapse_detail_endpoint, insights_endpoint
 from backend.models.insights import CacheCollapseDetailRequest, InsightsRequest
-from backend.repositories.insights.registry import registry
+from backend.repositories.insights import registry
 
 FINGERPRINT_DETECTIONS = {"botnet_grouping", "repeated_patterns_fp", "impossible_distance"}
 EVERY_CARD = set(DETECTIONS) | FINGERPRINT_DETECTIONS

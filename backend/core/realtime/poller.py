@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 
 import httpx
 
-from backend.core.realtime.publisher import publisher
+from backend.core.realtime import publisher
 from backend.core.realtime.transform import (
     error_tick_payload,
     gap_tick_payload,

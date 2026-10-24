@@ -12,9 +12,8 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.concurrency import run_in_threadpool
 
 from backend.deps import get_con, get_service_id, get_source
-from backend.models.common import BootstrapResponse
+from backend.models.common import BootstrapResponse, LogFieldsCatalogResponse
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
-from backend.models.log_fields_catalog import LogFieldsCatalogResponse
 from backend.models.status_reads import SchemaResponse
 from backend.repositories import rum as rum_repo
 from backend.repositories import service_stats as service_stats_repo
@@ -573,7 +572,7 @@ def _bootstrap_sync(
 
     def _resolve_debug_state():
         nonlocal debug_state_payload
-        from backend.core.share_db.settings import get_setting
+        from backend.core.share_db import get_setting
         from backend.models.common import _debug_responses_enabled
 
         query_vis = get_setting("query_debug_visibility", "disabled")

@@ -1,24 +1,37 @@
 /**
  * @vitest-environment jsdom
  *
- * Covers the "Why we flagged this" evidence affordance for the
- * Scripted Traffic Patterns (repeated_patterns) insight:
- *   - InsightItemRow renders the trigger ONLY for repeated_patterns and
- *     hands the callback a ScriptedTrafficData object mapped from item.meta.
- *   - ScriptedTrafficModal surfaces the regularity evidence.
+ * Covers:
+ *   1. "Why we flagged this" evidence affordance for the Scripted Traffic Patterns
+ *      (repeated_patterns) insight (InsightItemRow + ScriptedTrafficModal).
+ *   2. CacheCollapseModal "Recent Cache Misses" list through DataTableReadonly.
  */
-import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
+import { stubResizeObserver, stubPointerCaptureAndScroll } from '@/__tests__/helpers/browser-stubs'
 import { render, screen, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest'
+import { http, HttpResponse } from 'msw'
 import React from 'react'
 import { InsightItemRow } from '@/components/Insights/InsightItemRow'
 import { ScriptedTrafficModal } from '@/components/Insights/ScriptedTrafficModal'
+import { CacheCollapseModal } from '@/components/Insights/CacheCollapseModal'
 import type { ScriptedTrafficData } from '@/components/Insights/shared'
 import type { InsightCardData } from '@/types/api'
+import { renderWithQuery } from '../helpers/query'
+import { server } from '@/__tests__/helpers/msw/server'
+import { getApiBase } from '@/lib/api'
+import { useServiceStore } from '@/stores/serviceStore'
+
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
+vi.mock('@/components/charts/TimeSeriesChart', () => ({ TimeSeriesChart: () => <div data-testid="timeseries" /> }))
 
 beforeAll(() => {
   stubResizeObserver()
+  stubPointerCaptureAndScroll()
+})
+
+beforeEach(() => {
+  useServiceStore.setState({ activeServiceId: 'svc-cache', isInitialized: true })
 })
 
 afterEach(() => cleanup())
@@ -127,15 +140,42 @@ describe('ScriptedTrafficModal', () => {
 
   it('surfaces the evidence when open', () => {
     render(<ScriptedTrafficModal isOpen onOpenChange={() => {}} data={DATA} />)
-    // IP in the title
     expect(screen.getByText(/Why we flagged this/i)).toBeTruthy()
-    // Regularity score (appears in verdict + stat card)
     expect(screen.getAllByText(/92\/100/).length).toBeGreaterThan(0)
-    // Modal dominance rendered as a percentage
     expect(screen.getAllByText(/94%/).length).toBeGreaterThan(0)
-    // Coefficient of variation in the breakdown
     expect(screen.getByText(/CV 0\.04/)).toBeTruthy()
-    // Humanized observation span (86400s → 1d)
     expect(screen.getAllByText(/\b1d\b/).length).toBeGreaterThan(0)
+  })
+})
+
+describe('CacheCollapseModal recent misses', () => {
+  it('lists recent misses with cache and status badges', async () => {
+    server.use(
+      http.post(`${getApiBase()}/api/insights/cache-collapse-detail`, () =>
+        HttpResponse.json({
+          timeline: [],
+          recent_misses: [
+            { timestamp: '2026-10-01T10:00:00Z', cache: 'MISS', pop: 'SJC', ip: '203.0.113.9', status: 200 },
+            { timestamp: '2026-10-01T10:01:00Z', cache: 'PASS', pop: null, ip: null, status: 503 },
+          ],
+          baseline_hit_rate: 0.9,
+          window_hit_rate: 0.1,
+          baseline_pass_rate: 0,
+          window_pass_rate: 0,
+        }),
+      ),
+    )
+    renderWithQuery(
+      <CacheCollapseModal isOpen onOpenChange={() => {}} url="/hot" windowHours="1" baselineHours="24" />,
+    )
+    expect(await screen.findByText('SJC')).toBeTruthy()
+    expect(screen.getByRole('columnheader', { name: /^Timestamp \(/ })).toBeTruthy()
+    for (const name of ['Cache Status', 'POP', 'Client IP', 'HTTP Status']) {
+      expect(screen.getByRole('columnheader', { name })).toBeTruthy()
+    }
+    expect(screen.getByText('MISS')).toBeTruthy()
+    expect(screen.getByText('PASS')).toBeTruthy()
+    expect(screen.getByText('503')).toBeTruthy()
+    expect(screen.getByText('203.0.113.9')).toBeTruthy()
   })
 })

@@ -19,9 +19,9 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.lib.cli import add_common_args  # noqa: E402
 from scripts.lib.environments import (  # noqa: E402
     ENVIRONMENT_SPECS,
+    add_common_args,
     load_dotenv,
     remediation_command,
     service_id,

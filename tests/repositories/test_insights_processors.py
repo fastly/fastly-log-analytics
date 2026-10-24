@@ -23,7 +23,7 @@ import pytest
 
 from backend.core.share_db.validation import mask_ip
 from backend.repositories.insights import definitions as defs
-from backend.repositories.insights.registry import registry
+from backend.repositories.insights import registry
 
 # ── Registry contract: every documented insight is registered ───────────────
 

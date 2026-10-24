@@ -1,17 +1,25 @@
 /**
  * @vitest-environment jsdom
  *
- * RumSettingsDialog — version-selection + RUM capture toggles,
- * and optional SSE-streamed upgrade on version change.
+ * Consolidated RumSettingsDialog and RumStatusPanel tests.
  */
-import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
-import { stubPointerCaptureAndScroll, stubGetAnimations } from '@/__tests__/helpers/browser-stubs'
+import {
+  stubResizeObserver,
+  stubPointerCaptureAndScroll,
+  stubGetAnimations,
+} from '@/__tests__/helpers/browser-stubs'
 import { createUseSSEMock } from '../../helpers/sse-mock'
 import * as React from 'react'
-import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { http, HttpResponse } from 'msw'
+import { createTestQueryClient, makeQueryWrapper } from '../../helpers/query'
+import { server } from '@/__tests__/helpers/msw/server'
+import { useServiceStore } from '@/stores/serviceStore'
+import { queryKeys } from '@/lib/query-keys'
 import { RumSettingsDialog } from '@/components/Rum/RumSettingsDialog'
+import { RumStatusPanel } from '@/components/Rum/RumStatusPanel'
 
 beforeAll(() => {
   stubResizeObserver()
@@ -22,26 +30,19 @@ beforeAll(() => {
 const { state: sseState, start: mockStart, resetState } = createUseSSEMock()
 vi.mock('@/hooks/useSSE', () => ({ useSSE: () => sseState }))
 
-const mockAdminFetch = vi.fn()
-
-vi.mock('@/lib/api', () => ({
-  adminFetch: (...args: unknown[]) => mockAdminFetch(...args),
+const { mockAdminFetch, realAdminFetchRef } = vi.hoisted(() => ({
+  mockAdminFetch: vi.fn(),
+  realAdminFetchRef: { current: null as ((...args: unknown[]) => Promise<Response>) | null },
 }))
 
-vi.mock('@tanstack/react-query', () => ({
-  useQuery: () => ({
-    data: {
-      capture_vitals: true,
-      capture_performance: true,
-      capture_errors: true,
-      capture_events: true,
-    },
-    isLoading: false,
-  }),
-  useQueryClient: () => ({
-    invalidateQueries: vi.fn(),
-  }),
-}))
+vi.mock('@/lib/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/api')>()
+  realAdminFetchRef.current = actual.adminFetch as (...args: unknown[]) => Promise<Response>
+  return {
+    ...actual,
+    adminFetch: (...args: unknown[]) => mockAdminFetch(...args),
+  }
+})
 
 const DEFAULT_PROPS = {
   serviceId: 'svc-1',
@@ -54,6 +55,17 @@ const DEFAULT_PROPS = {
 function renderDialog(props: Partial<React.ComponentProps<typeof RumSettingsDialog>> = {}) {
   const onOpenChange = vi.fn()
   const onComplete = vi.fn()
+  const qc = createTestQueryClient({ queries: { staleTime: Infinity } })
+  const svcId = props.serviceId !== undefined ? props.serviceId : DEFAULT_PROPS.serviceId
+  if (svcId) {
+    qc.setQueryData(queryKeys.rumStatus(svcId), {
+      enabled: true,
+      capture_vitals: true,
+      capture_performance: true,
+      capture_errors: true,
+      capture_events: true,
+    })
+  }
   const utils = render(
     <RumSettingsDialog
       {...DEFAULT_PROPS}
@@ -61,20 +73,22 @@ function renderDialog(props: Partial<React.ComponentProps<typeof RumSettingsDial
       onComplete={onComplete}
       {...props}
     />,
+    { wrapper: makeQueryWrapper(qc) },
   )
-  return { ...utils, onOpenChange, onComplete }
+  return { ...utils, onOpenChange, onComplete, qc }
 }
 
-beforeEach(() => {
-  resetState()
-  mockAdminFetch.mockClear()
-  mockAdminFetch.mockResolvedValue({
-    ok: true,
-    json: async () => ({ ok: true, message: 'Settings saved' }),
-  })
-})
-
 describe('RumSettingsDialog', () => {
+  beforeEach(() => {
+    resetState()
+    mockAdminFetch.mockReset()
+    mockAdminFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, message: 'Settings saved' }),
+    })
+  })
+
   it('renders all capture toggle switches and defaults targeted version', () => {
     renderDialog()
     expect(screen.getByText('Core Web Vitals')).toBeInTheDocument()
@@ -102,17 +116,15 @@ describe('RumSettingsDialog', () => {
       }),
     })
 
-    // Should complete immediately without SSE version upgrade
     await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
   })
 
   it('triggers both settings POST and streamed version upgrade when target version changes', async () => {
     const user = userEvent.setup()
-    renderDialog({ currentVersion: null }) // Pinned: null, Target defaults to latest (1.9.0)
+    renderDialog({ currentVersion: null })
 
     await user.click(screen.getByRole('button', { name: /apply settings/i }))
 
-    // First, setting toggles are updated
     expect(mockAdminFetch).toHaveBeenCalledWith('/api/services/svc-1/rum/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -125,7 +137,6 @@ describe('RumSettingsDialog', () => {
       }),
     })
 
-    // Then, the SSE version upgrade starts
     await waitFor(() => {
       expect(mockStart).toHaveBeenCalledWith('/api/services/svc-1/rum/upgrade', {
         version: '1.9.0',
@@ -140,7 +151,6 @@ describe('RumSettingsDialog', () => {
 
     await user.click(screen.getByRole('button', { name: /apply settings/i }))
 
-    // Simulate SSE streaming state
     sseState.status = 'streaming'
     rerender(<RumSettingsDialog {...DEFAULT_PROPS} currentVersion={null} onOpenChange={vi.fn()} />)
 
@@ -153,31 +163,78 @@ describe('RumSettingsDialog', () => {
     const user = userEvent.setup()
     renderDialog()
 
-    // All toggles (vitals, perf, errors, events) default to true from react-query mock
-    // Total fields: 17
-    // Total typical bytes: 2820
-    // Structural: 2 + 17*5 = 87
-    // Total: 2820 + 87 = 2907 bytes (2.84 KB)
     expect(screen.getByText(/2\.84 KB/i)).toBeInTheDocument()
 
-    // Toggle JavaScript Errors off
     await user.click(screen.getByRole('switch', { name: /javascript errors/i }))
-    // Toggle Custom Events off
     await user.click(screen.getByRole('switch', { name: /custom events/i }))
-    // Toggle Performance Timings off
     await user.click(screen.getByRole('switch', { name: /performance timings/i }))
 
-    // Only Core Web Vitals remains:
-    // Active fields for Vitals: rum_cid (12), fastly_req_id (12), rum_pathname (256), rum_connection_speed (10), rum_trace_id (32), rum_span_id (16), rum_metric_name (12), rum_metric_value (8), rum_metric_rating (18).
-    // Total fields: 9.
-    // Field bytes: 12 + 12 + 256 + 10 + 32 + 16 + 12 + 8 + 18 = 376.
-    // Structural: 2 + 9 * 5 = 47.
-    // Total: 376 + 47 = 423 B.
     expect(screen.getByText(/423 B/i)).toBeInTheDocument()
   })
 
   it('returns null without a serviceId', () => {
     const { container } = renderDialog({ serviceId: null })
     expect(container).toBeEmptyDOMElement()
+  })
+})
+
+const SVC = 'svc-rum-panel'
+
+function renderPanel() {
+  const qc = createTestQueryClient()
+  return render(<RumStatusPanel />, { wrapper: makeQueryWrapper(qc) })
+}
+
+function mockRumStatus(enabled: boolean) {
+  server.use(
+    http.get('/api/services/:service_id/rum/status', () =>
+      HttpResponse.json({ enabled, enabled_at: enabled ? '2026-01-01T00:00:00Z' : null }),
+    ),
+    http.get('/api/services', () =>
+      HttpResponse.json({
+        services: [{ service_id: SVC, name: 'Test Service', access_level: 'read_write' }],
+      }),
+    ),
+  )
+}
+
+describe('RumStatusPanel', () => {
+  beforeEach(() => {
+    mockAdminFetch.mockImplementation((...args: unknown[]) => realAdminFetchRef.current!(...args))
+    useServiceStore.setState({ activeServiceId: null, services: [], isInitialized: false })
+  })
+
+  afterEach(() => {
+    server.resetHandlers()
+  })
+
+  it('analyst + RUM not enabled: shows the empty state, not Enable/Disable controls', async () => {
+    useServiceStore.setState({
+      activeServiceId: SVC,
+      services: [{ id: SVC, name: 'Test Service', accessLevel: 'read_only' }],
+      isInitialized: true,
+    })
+    mockRumStatus(false)
+
+    renderPanel()
+
+    expect(await screen.findByText(/rum not enabled/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /enable rum/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /disable rum/i })).not.toBeInTheDocument()
+  })
+
+  it('admin + RUM not enabled: still shows Enable/Disable controls', async () => {
+    useServiceStore.setState({
+      activeServiceId: SVC,
+      services: [{ id: SVC, name: 'Test Service', accessLevel: 'read_write' }],
+      isInitialized: true,
+    })
+    mockRumStatus(false)
+
+    renderPanel()
+
+    expect(await screen.findByRole('button', { name: /enable rum/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /disable rum/i })).toBeInTheDocument()
+    expect(screen.queryByText(/rum not enabled/i)).not.toBeInTheDocument()
   })
 })

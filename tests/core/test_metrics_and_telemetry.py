@@ -52,7 +52,7 @@ from backend.core.query_instrumentation import (
 )
 from backend.core.request_context import RequestContext, _enforce_service_access
 from backend.main import app
-from backend.models.metrics import MetricType
+from backend.models._base import MetricType
 from backend.utils.date_utils import iso_z
 from backend.utils.remote_access import TimeBounds
 from backend.utils.telemetry import get_page_load_id

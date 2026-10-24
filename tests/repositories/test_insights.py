@@ -234,7 +234,7 @@ def test_temp_table_projects_every_registered_required_field(in_memory_duckdb, t
     ``oretries``. Insights whose SQL referenced those columns then
     raised ``Binder Error: Referenced column "X" not found in FROM
     clause`` and returned as ``severity="error"`` entries to the FE."""
-    from backend.repositories.insights.registry import registry
+    from backend.repositories.insights import registry
 
     all_required: set[str] = {"timestamp"}
     for d in registry.get_all():
@@ -276,7 +276,7 @@ def test_error_path_emits_distinct_insight_ids(in_memory_duckdb, test_service_so
     the same key" warning and risked omitted renders."""
     from datetime import timedelta
 
-    from backend.repositories.insights.registry import InsightCategory, InsightDefinition, registry
+    from backend.repositories.insights import InsightCategory, InsightDefinition, registry
 
     table_name = _safe_table(test_service_source["name"])
     in_memory_duckdb.execute(f'CREATE TABLE IF NOT EXISTS {table_name} ("timestamp" TIMESTAMPTZ, "status" INTEGER)')
@@ -497,7 +497,7 @@ def test_get_insights_skips_insight_with_keyerror_during_template_hydration(
     swallowed → return None for that insight. Pinned because losing
     this would crash the entire insights pipeline when a single
     template has a typo'd placeholder."""
-    from backend.repositories.insights.registry import InsightCategory, InsightDefinition, registry
+    from backend.repositories.insights import InsightCategory, InsightDefinition, registry
 
     table_name = _safe_table(test_service_source["name"])
     in_memory_duckdb.execute(f'CREATE TABLE IF NOT EXISTS {table_name} ("timestamp" TIMESTAMPTZ, "status" INTEGER)')
@@ -532,7 +532,7 @@ def test_get_insights_swallows_row_processor_exceptions_per_row(
     """A row_processor that raises must NOT kill the whole insight;
     losing this would let a single malformed row blank the entire
     "Error Spikes" card."""
-    from backend.repositories.insights.registry import InsightCategory, InsightDefinition, registry
+    from backend.repositories.insights import InsightCategory, InsightDefinition, registry
 
     table_name = _safe_table(test_service_source["name"])
     in_memory_duckdb.execute(f'CREATE TABLE IF NOT EXISTS {table_name} ("timestamp" TIMESTAMPTZ, "status" INTEGER)')
@@ -573,7 +573,7 @@ def test_get_insights_error_spikes_summary_renders_url_count(in_memory_duckdb, t
     """When `error_spikes` has items, the summary text is
     "N URLs with elevated server error rates". Pinned because the
     dashboard's anomaly headline keys on that wording."""
-    from backend.repositories.insights.registry import InsightCategory, InsightDefinition, registry
+    from backend.repositories.insights import InsightCategory, InsightDefinition, registry
 
     table_name = _safe_table(test_service_source["name"])
     in_memory_duckdb.execute(f'CREATE TABLE IF NOT EXISTS {table_name} ("timestamp" TIMESTAMPTZ, "status" INTEGER)')
@@ -612,7 +612,7 @@ def test_get_insights_botnet_grouping_summary_renders_fingerprint_count(
     """When `botnet_grouping` has items, the summary text is
     "N fingerprints with suspicious IP spread". Same pinning
     rationale as the `error_spikes` summary test above."""
-    from backend.repositories.insights.registry import InsightCategory, InsightDefinition, registry
+    from backend.repositories.insights import InsightCategory, InsightDefinition, registry
 
     table_name = _safe_table(test_service_source["name"])
     in_memory_duckdb.execute(
@@ -651,7 +651,7 @@ def test_get_insights_severity_logic_callable_overrides_default(in_memory_duckdb
     its return value wins over the default `_sev()`. Pinned because
     custom insights (e.g. proxy_surge → always "warning") rely on
     this hook."""
-    from backend.repositories.insights.registry import InsightCategory, InsightDefinition, registry
+    from backend.repositories.insights import InsightCategory, InsightDefinition, registry
 
     table_name = _safe_table(test_service_source["name"])
     in_memory_duckdb.execute(f'CREATE TABLE IF NOT EXISTS {table_name} ("timestamp" TIMESTAMPTZ, "status" INTEGER)')
@@ -2231,7 +2231,7 @@ def test_coalesced_asn_and_scalar_paths_match_per_insight_scan_output(
 
 # ── Merged from test_insights_registry.py ──
 
-from backend.repositories.insights.registry import InsightCategory, registry
+from backend.repositories.insights import InsightCategory, registry
 
 
 def test_every_insight_has_valid_category():

@@ -23,7 +23,7 @@ from backend.provision.session_scoring_vcl import (
     SCORING_BACKEND_API_NAME,
     generate_scoring_vcl,
 )
-from backend.provision.vcl_builder import VclBuilder
+from backend.provision.utils import VclBuilder
 
 
 def logging_service_snippets(state: FeatureState) -> list[VCLSnippet]:
@@ -193,7 +193,7 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
         # strings — the 2026-08 CMCD outage, silent because the extraction still
         # works (it strips ?CMCD= from the cache key) and the columns exist.
         if state.cmcd.enabled:
-            from backend.provision.cmcd_vcl import generate_cmcd_vcl
+            from backend.provision.cmcd_fields import generate_cmcd_vcl
 
             cmcd_vcl_dict = generate_cmcd_vcl(mode=state.cmcd.mode, version=state.cmcd.version)
             cmcd_body = next(iter(cmcd_vcl_dict.values()))

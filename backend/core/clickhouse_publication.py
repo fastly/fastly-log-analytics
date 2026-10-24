@@ -20,7 +20,7 @@ from backend.core.clickhouse_client import (
     get_clickhouse_client,
 )
 from backend.core.clickhouse_manifest import Artifact, Dataset, PgManifest
-from backend.core.clickhouse_metrics import record_publication
+from backend.core.clickhouse_observer import record_publication
 from backend.core.clickhouse_rows import (
     MAX_BATCH_ROWS,
     PAYLOAD_COLUMNS,

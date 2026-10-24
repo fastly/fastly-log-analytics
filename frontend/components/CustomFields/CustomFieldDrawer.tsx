@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { useDebounce } from '@/hooks/useDebounce'
 import { useOpenGeneration } from '@/hooks/useDerivedState'
-import { oneOf } from '@/lib/narrow'
+import { oneOf } from '@/lib/utils'
 import {
   Dialog,
   DialogContent,

@@ -14,7 +14,7 @@ from fastapi import HTTPException, Query
 from backend import config
 from backend.high_scale.disk_sampler import latest_disk_snapshot
 from backend.high_scale.retention import ServiceProfile, StorageProfile, recommend_retention
-from backend.models.admin_high_scale import HighScaleRetentionRecommendationResponse
+from backend.models.high_scale import HighScaleRetentionRecommendationResponse
 from backend.routers.admin._router import router
 from backend.utils.router_utils import load_service_config_or_503, make_error, require_service_id
 

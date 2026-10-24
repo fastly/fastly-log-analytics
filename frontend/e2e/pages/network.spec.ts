@@ -14,7 +14,7 @@
 
 import { expect, test } from '@playwright/test'
 import type { DebugQuery } from '../../types/api'
-import { installClsObserver, measureWarmPaintAndCls } from '../cls-observer'
+import { installClsObserver, measureWarmPaintAndCls } from '../helpers'
 
 type NetworkDebugResponse = {
   _debug_queries?: DebugQuery[]

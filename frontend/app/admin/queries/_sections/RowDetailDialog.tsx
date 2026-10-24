@@ -16,7 +16,7 @@
 
 import * as React from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { X } from 'lucide-react'
+import { Keyboard, RefreshCw, X } from 'lucide-react'
 import { adminJson } from '@/lib/api'
 
 import { Badge } from '@/components/ui/badge'
@@ -30,9 +30,19 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { HelpDialog } from '@/components/ui/help-dialog'
 
-import { durationColor, formatDurationMs, formatMemoryMb, kindBadgeVariant } from '../_helpers'
-import type { ActiveOrPromotedRow, ActiveRow, CompletedRow } from '../_types'
+import {
+  durationColor,
+  formatDurationMs,
+  formatMemoryMb,
+  kindBadgeVariant,
+  type ActiveOrPromotedRow,
+  type ActiveRow,
+  type CompletedRow,
+  type SnapshotResponse,
+  type SummaryResponse,
+} from '../_types'
 import { queryKeys } from '@/lib/query-keys'
 
 type AnyRow = ActiveOrPromotedRow | CompletedRow
@@ -201,5 +211,140 @@ export function RowDetailDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+export function FilterChipRow<T extends string>({
+  value,
+  onChange,
+  options,
+}: {
+  value: T
+  onChange: (v: T) => void
+  options: { value: T; label: string }[]
+}) {
+  return (
+    <div className="flex items-center gap-1">
+      {options.map((o) => (
+        <Button
+          key={o.value}
+          variant={value === o.value ? 'default' : 'outline'}
+          size="sm"
+          className="h-7 px-2 text-xs capitalize"
+          onClick={() => onChange(o.value)}
+        >
+          {o.label}
+        </Button>
+      ))}
+    </div>
+  )
+}
+
+export function PollingIndicator({
+  visible,
+  isFetching,
+  isError,
+  paused = false,
+}: {
+  visible: boolean
+  isFetching: boolean
+  isError: boolean
+  paused?: boolean
+}) {
+  if (isError) return <span className="text-xs text-red-500 ml-2">Error — retrying</span>
+  if (paused) return <span className="text-xs text-amber-600 ml-2 font-medium">Paused</span>
+  if (!visible) return <span className="text-xs text-muted-foreground ml-2">Paused (tab hidden)</span>
+  return (
+    <span className="flex items-center gap-1 text-xs text-muted-foreground ml-2">
+      <RefreshCw className={`h-3 w-3 ${isFetching ? 'animate-spin' : 'opacity-50'}`} />
+      Live
+    </span>
+  )
+}
+
+export function ShortcutsHelp({
+  open,
+  onOpenChange,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}) {
+  return (
+    <HelpDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="Keyboard shortcuts"
+      icon={<Keyboard className="h-4 w-4" />}
+    >
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm text-foreground">
+        <Kbd>/</Kbd>
+        <dd>Focus the search field</dd>
+
+        <Kbd>.</Kbd>
+        <dd>Pause / resume the snapshot poll (stops rows from shifting under you)</dd>
+
+        <Kbd>Esc</Kbd>
+        <dd>Close the row detail dialog, kill confirm, or this help overlay</dd>
+
+        <Kbd>?</Kbd>
+        <dd>Show this help overlay</dd>
+      </dl>
+      <p className="mt-4 text-xs text-muted-foreground">
+        Shortcuts are disabled while typing in the search box (except <kbd>Esc</kbd>, which always
+        works).
+      </p>
+    </HelpDialog>
+  )
+}
+
+function Kbd({ children }: { children: React.ReactNode }) {
+  return (
+    <dt className="self-center">
+      <kbd className="inline-flex items-center justify-center min-w-[1.5rem] h-6 px-1.5 rounded border border-border bg-muted/50 text-xs font-mono">
+        {children}
+      </kbd>
+    </dt>
+  )
+}
+
+export function SummaryStrip({ snapshot }: { snapshot: SnapshotResponse | undefined }) {
+  const data = React.useMemo<SummaryResponse | null>(() => {
+    if (!snapshot) return null
+    const by_db_type: Record<string, number> = {}
+    let longest_ms = 0
+    for (const row of snapshot.active) {
+      by_db_type[row.db_type] = (by_db_type[row.db_type] ?? 0) + 1
+      if (row.duration_ms > longest_ms) longest_ms = row.duration_ms
+    }
+    return {
+      active_total: snapshot.active.length,
+      by_db_type,
+      longest_ms,
+    }
+  }, [snapshot])
+  const liveLabel = React.useMemo(() => {
+    if (!data) return ''
+    return `${data.active_total} active ${data.active_total === 1 ? 'query' : 'queries'}`
+  }, [data?.active_total])
+  if (!data) return null
+  return (
+    <div className="flex items-center gap-3 text-sm">
+      <Badge variant={data.active_total > 0 ? 'default' : 'outline'} className="gap-1">
+        <span className="font-medium">{data.active_total}</span> active
+      </Badge>
+      {Object.entries(data.by_db_type).map(([db, n]) => (
+        <Badge key={db} variant="outline" className="gap-1">
+          {db} <span className="font-medium">{n}</span>
+        </Badge>
+      ))}
+      {data.longest_ms > 0 && (
+        <span className={`text-xs ${durationColor(data.longest_ms)}`}>
+          longest: {formatDurationMs(data.longest_ms)}
+        </span>
+      )}
+      <div role="status" aria-live="polite" className="sr-only">
+        {liveLabel}
+      </div>
+    </div>
   )
 }

@@ -15,9 +15,13 @@
  */
 
 import { expect, test } from '@playwright/test'
-import { clsInitScript } from '../cls-observer'
-import { loginAsPasscodeAnalyst, revokeAnalystInvite } from '../helpers/analyst-session'
-import { configureExternalAdminOrigin, getFirstServiceId } from './helpers'
+import {
+  clsInitScript,
+  configureExternalAdminOrigin,
+  getFirstServiceId,
+  loginAsPasscodeAnalyst,
+  revokeAnalystInvite,
+} from '../helpers'
 
 configureExternalAdminOrigin()
 

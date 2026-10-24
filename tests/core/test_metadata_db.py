@@ -34,6 +34,7 @@ import pytest
 from backend import config
 from backend.core import metadata as metadata_db
 from backend.core import quarantine
+from backend.core import share_db as share_db_connection
 from backend.core.metadata import base, ingest_log, pg_connection, pg_schema, state, usage_log, usage_log_db
 from backend.core.metadata.base import InvalidServiceIdError, get_con
 from backend.core.metadata.cron_log import start_cron_run
@@ -44,7 +45,6 @@ from backend.core.metadata.quarantine import (
     get_quarantine_storage_total,
     list_quarantine_evidence,
 )
-from backend.core.share_db import connection as share_db_connection
 
 
 # ── Merged from tests/core/test_metadata_db.py ──

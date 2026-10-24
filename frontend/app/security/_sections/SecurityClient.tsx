@@ -3,7 +3,7 @@
 import React from 'react'
 import dynamic from 'next/dynamic'
 import { useTimezone } from '@/hooks/useDateFormat'
-import { useColumnVisibility } from '@/hooks/useColumnVisibility'
+import { useColumnVisibility } from '@/hooks/useDerivedState'
 import { useFieldLabel } from '@/hooks/useLogFieldsCatalog'
 import { useTimeLayout } from '@/lib/chart-helpers'
 import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'

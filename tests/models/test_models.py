@@ -53,8 +53,7 @@ from backend.repositories import origin as origin_mod
 from backend.repositories._base import _safe_table
 from backend.repositories.cmcd import _response_cache, get_cmcd_aggregates
 from backend.repositories.dashboard import get_aggregates as dash_aggs
-from backend.repositories.insights import _insights_cache, get_insights
-from backend.repositories.insights.registry import registry
+from backend.repositories.insights import _insights_cache, get_insights, registry
 from backend.repositories.network import get_health, get_quality
 from backend.repositories.network import get_health as net_health_aggs
 from backend.repositories.network import get_quality as net_qual_aggs

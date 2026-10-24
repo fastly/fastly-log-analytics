@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import logging
 import os
+import urllib.parse
+from typing import Any
 
 import pyarrow as pa
 
@@ -192,6 +194,59 @@ _RESERVED_FIELD_SLOTS: set[str] = set()
 
 _CATALOG_TYPE_MAP = {f["id"]: f["duckdb_type"] for f in LOG_FIELD_CATALOG}
 
+CLIENT_VITALS_ARROW_SCHEMA = pa.schema(
+    [
+        ("timestamp", pa.timestamp("us", tz="UTC")),
+        ("metric_name", pa.string()),
+        ("metric_value", pa.float64()),
+        ("metric_rating", pa.string()),
+        ("pathname", pa.string()),
+        ("browser", pa.string()),
+        ("os", pa.string()),
+        ("device", pa.string()),
+        ("cid", pa.string()),
+        ("req_id", pa.string()),
+        ("city", pa.string()),
+        ("region", pa.string()),
+        ("country", pa.string()),
+        ("pop", pa.string()),
+        ("tls", pa.string()),
+        ("ttfb", pa.float64()),
+    ]
+)
+
+CLIENT_ERRORS_ARROW_SCHEMA = pa.schema(
+    [
+        ("timestamp", pa.timestamp("us", tz="UTC")),
+        ("error_message", pa.string()),
+        ("error_file", pa.string()),
+        ("error_line", pa.int32()),
+        ("error_col", pa.int32()),
+        ("pathname", pa.string()),
+        ("browser", pa.string()),
+        ("os", pa.string()),
+        ("device", pa.string()),
+        ("cid", pa.string()),
+        ("req_id", pa.string()),
+        ("city", pa.string()),
+        ("region", pa.string()),
+        ("country", pa.string()),
+        ("pop", pa.string()),
+        ("tls", pa.string()),
+        ("ttfb", pa.float64()),
+    ]
+)
+
+RUM_TABLE_SCHEMAS = {
+    "client_vitals": CLIENT_VITALS_ARROW_SCHEMA,
+    "client_errors": CLIENT_ERRORS_ARROW_SCHEMA,
+}
+
+RUM_NATURAL_KEYS: dict[str, tuple[str, ...]] = {
+    "client_vitals": ("timestamp", "metric_name", "pathname", "cid", "req_id"),
+    "client_errors": ("timestamp", "error_message", "error_file", "error_line", "pathname", "cid", "req_id"),
+}
+
 
 def _effective_field_types(log_fields_config: dict | None = None) -> list[tuple[str, str]]:
     """Return ordered ``(field_name, duckdb_type)`` pairs for the logs schema."""
@@ -219,8 +274,6 @@ def _effective_field_types(log_fields_config: dict | None = None) -> list[tuple[
 
 def get_arrow_schema(log_fields_config: dict | None = None, table_name: str = "logs") -> pa.Schema:
     if table_name != "logs":
-        from backend.core.iceberg.rum_schema import RUM_TABLE_SCHEMAS
-
         return RUM_TABLE_SCHEMAS[table_name]
     fields = [
         pa.field(
@@ -322,10 +375,112 @@ from backend.core.iceberg.manifest import (  # noqa: F401, E402
     get_table_info,
 )
 
-# ── sync_data (DuckLake no-op shim) ──
-from backend.core.iceberg.sync import (  # noqa: F401, E402
-    sync_data,
+
+# ── sync_data (DuckLake no-op shim) + lake_info helpers ──
+def sync_data(
+    source: dict,
+    progress_callback: Any = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    table_name: str = "logs",
+    **kwargs: Any,
+) -> dict[str, int]:
+    """No-op under DuckLake (files are written locally on commit)."""
+    return {"files_downloaded": 0, "rows_downloaded": 0}
+
+
+_CDN_URL_ALLOWED_HOST_SUFFIXES = (
+    ".fastly.net",
+    ".fastlystorage.app",
 )
+
+
+def _safe_cdn_url(cdn_url: str) -> str | None:
+    """Return ``cdn_url`` only if it's an https:// URL on an allowlisted
+    Fastly hostname, else None.
+    """
+    if not cdn_url:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(cdn_url)
+    except ValueError:
+        return None
+    if parsed.scheme != "https":
+        return None
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        return None
+    for suffix in _CDN_URL_ALLOWED_HOST_SUFFIXES:
+        if hostname.endswith(suffix):
+            return cdn_url
+    return None
+
+
+def fetch_lake_info(source: dict, use_temp_cache: bool = False) -> dict:
+    """Return DuckLake table range and calendar for *source*."""
+    from backend.core import iceberg as db_iceberg
+
+    if use_temp_cache:
+        return _fetch_with_temp_cache(source, db_iceberg)
+    return _fetch_direct(source, db_iceberg)
+
+
+def _fetch_direct(source: dict, db_iceberg) -> dict:
+    """DuckLake-native fallback (v3 write-path cutover)."""
+    try:
+        with db_iceberg.ducklake_session(source):
+            if not db_iceberg.ducklake_table_exists(source):
+                return {"ok": True, "table_exists": False, "message": "DuckLake table not found."}
+
+            info = db_iceberg.get_table_info(source)
+            if "error" in info:
+                return {"ok": False, "error": info["error"]}
+            calendar = db_iceberg.get_snapshot_calendar(source)
+
+            return {
+                "ok": True,
+                "table_exists": True,
+                "info": info,
+                "calendar": calendar,
+                "range": {"start": info.get("min_timestamp"), "end": info.get("max_timestamp")},
+            }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _fetch_with_temp_cache(source: dict, db_iceberg) -> dict:
+    """Same DuckLake-native fallback as :func:`_fetch_direct`, but scoped to
+    a throwaway ``_cache_dir_override`` and cleared via
+    ``clear_source_caches`` afterward."""
+    import tempfile
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src = {**source, "_cache_dir_override": tmp_dir}
+            if "iceberg_metadata_location" in source:
+                src["iceberg_metadata_location"] = source["iceberg_metadata_location"]
+            try:
+                with db_iceberg.ducklake_session(src):
+                    if not db_iceberg.ducklake_table_exists(src):
+                        return {"ok": True, "table_exists": False, "message": "DuckLake table not found."}
+
+                    info = db_iceberg.get_table_info(src)
+                    if "error" in info:
+                        return {"ok": False, "error": info["error"]}
+                    calendar = db_iceberg.get_snapshot_calendar(src)
+
+                    return {
+                        "ok": True,
+                        "table_exists": True,
+                        "info": info,
+                        "calendar": calendar,
+                        "range": {"start": info.get("min_timestamp"), "end": info.get("max_timestamp")},
+                    }
+            finally:
+                db_iceberg.clear_source_caches(src["name"])
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
 
 # ── View binding + stale-view self-heal (carved) ──
 from backend.core.iceberg.view import (  # noqa: F401, E402

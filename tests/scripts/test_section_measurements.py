@@ -67,7 +67,7 @@ def _component(state: str, **extra: object) -> dict:
 
 
 def test_expiry_sampler_keeps_payload_exact_and_requires_miss_then_hit() -> None:
-    from scripts.lib.cache_sampling import sample_cache_pair
+    from scripts.lib.section_measurements import sample_cache_pair
 
     clock = _Clock()
     payload = {"anchor": "2026-10-22T00:00:00Z", "filters": {"status": {"values": ["200"]}}}
@@ -93,7 +93,7 @@ def test_expiry_sampler_keeps_payload_exact_and_requires_miss_then_hit() -> None
     "answer", [_component("unknown"), _component("miss", single_flight="follower"), {"_is_cached": False}]
 )
 def test_unknown_and_shared_results_cannot_establish_a_pair(answer: dict) -> None:
-    from scripts.lib.cache_sampling import sample_cache_pair
+    from scripts.lib.section_measurements import sample_cache_pair
 
     clock = _Clock()
     result = sample_cache_pair(
@@ -105,7 +105,7 @@ def test_unknown_and_shared_results_cannot_establish_a_pair(answer: dict) -> Non
 
 
 def test_repopulation_and_independent_components_do_not_manufacture_a_pair() -> None:
-    from scripts.lib.cache_sampling import sample_cache_pair
+    from scripts.lib.section_measurements import sample_cache_pair
 
     clock = _Clock()
     answers = iter(
@@ -125,7 +125,7 @@ def test_repopulation_and_independent_components_do_not_manufacture_a_pair() -> 
 
 
 def test_bypass_is_not_a_miss_and_failures_are_safe() -> None:
-    from scripts.lib.cache_sampling import sample_cache_pair
+    from scripts.lib.section_measurements import sample_cache_pair
 
     clock = _Clock()
     bypass = sample_cache_pair(
@@ -144,7 +144,7 @@ def test_bypass_is_not_a_miss_and_failures_are_safe() -> None:
 
 
 def test_initial_miss_is_only_a_baseline_until_ttl_expiry() -> None:
-    from scripts.lib.cache_sampling import sample_cache_pair
+    from scripts.lib.section_measurements import sample_cache_pair
 
     clock = _Clock()
     answers = iter([_component("miss"), _component("hit"), _component("miss"), _component("hit")])
@@ -160,7 +160,7 @@ def test_initial_miss_is_only_a_baseline_until_ttl_expiry() -> None:
 
 
 def test_historical_child_hit_cannot_complete_a_current_miss_pair() -> None:
-    from scripts.lib.cache_sampling import sample_cache_pair
+    from scripts.lib.section_measurements import sample_cache_pair
 
     clock = _Clock()
     answers = iter(
@@ -184,7 +184,7 @@ def test_historical_child_hit_cannot_complete_a_current_miss_pair() -> None:
 
 
 def test_expiry_sampler_honors_attempt_and_wall_time_bounds() -> None:
-    from scripts.lib.cache_sampling import sample_cache_pair
+    from scripts.lib.section_measurements import sample_cache_pair
 
     clock = _Clock()
     timeouts = []

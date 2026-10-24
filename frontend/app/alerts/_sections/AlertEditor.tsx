@@ -25,8 +25,7 @@ import {
 } from "@/components/ui/select"
 import type { components } from '@/types/api.generated'
 import { AlertPreview } from './AlertPreview'
-import { oneOf } from '@/lib/narrow'
-import { keyByOccurrence } from '@/lib/utils'
+import { keyByOccurrence, oneOf } from '@/lib/utils'
 
 type Alert = components["schemas"]["Alert"]
 type AlertChannel = components["schemas"]["AlertChannel"]

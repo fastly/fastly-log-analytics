@@ -38,8 +38,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.core.iceberg import get_arrow_schema
 from backend.repositories._base import _safe_table
+from backend.repositories.insights import registry
 from backend.repositories.insights import repository as insights_repo
-from backend.repositories.insights.registry import registry
 from scripts.lib.log_factory import cols_to_arrow_table, generate_columns
 
 

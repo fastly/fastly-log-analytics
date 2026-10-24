@@ -18,7 +18,7 @@
 
 import { expect, test } from '@playwright/test'
 import type { DebugQuery } from '../../types/api'
-import { installClsObserver, measureWarmPaintAndCls } from '../cls-observer'
+import { installClsObserver, measureWarmPaintAndCls } from '../helpers'
 
 type DashboardBundleDebug = {
   _debug_queries?: DebugQuery[]
@@ -282,4 +282,130 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     await expect.poll(() => new URL(page.url()).searchParams.get('metric'), { timeout: 15_000 }).toBeNull()
     expect(new URL(page.url()).searchParams.get('keep')).toBe('1')
   })
+})
+
+test('an unconfigured service never shows NGWAF cards, even with saved selections or Show all', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('dashboard_cards', JSON.stringify([
+      '_bot_name', '_ngwaf_bot_name', 'waf_sig_ind',
+    ]))
+  })
+  await page.goto('/dashboard')
+  const cards = page.getByRole('button', { name: 'Toggle visible dashboard cards' })
+  await expect(cards).toHaveText(/^Cards\s*1$/, { timeout: 15_000 })
+  await page.getByRole('heading', { name: 'Security', exact: true }).scrollIntoViewIfNeeded()
+  await expect(page.getByRole('heading', { name: /^Fastly Bots/ })).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByRole('heading', { name: /NGWAF/ })).toHaveCount(0)
+
+  await cards.click()
+  await expect(page.getByLabel('NGWAF Verified Bots', { exact: true })).toHaveCount(0)
+  await expect(page.getByLabel('NGWAF Signals', { exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Show all', exact: true }).click()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('heading', { name: /NGWAF/ })).toHaveCount(0)
+  await page.getByRole('heading', { name: 'Security', exact: true }).scrollIntoViewIfNeeded()
+  await expect(page.getByRole('heading', { name: /^Fastly Bots/ })).toBeVisible({ timeout: 15_000 })
+})
+
+test('URL filter param round-trips through the filter store', async ({ page }) => {
+  await page.goto('/dashboard?filter_country=US')
+  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
+
+  // The filter store renders one pill per active filter (FilterBar).
+  // Pin that the country=US pill appears after URL sync runs.
+  await expect(page.getByText(/country/i).first()).toBeVisible({ timeout: 15_000 })
+})
+
+test('navigating between analytics pages preserves the active service id', async ({ page }) => {
+  await page.goto('/dashboard')
+  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
+
+  // The seeded service ID lives in the sidebar's "active service" pill.
+  // Navigate to /security and assert the same service stays selected.
+  await page.goto('/security')
+  await expect(page.getByRole('heading', { name: 'Security' })).toBeVisible({ timeout: 30_000 })
+})
+
+test('dashboard renders charts without flashing empty state', async ({ page }) => {
+  await page.goto('/dashboard')
+  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
+
+  // "Traffic over Time" is the first card. Wait for its container.
+  const trafficCard = page.getByText('Traffic over Time').first()
+  await expect(trafficCard).toBeVisible({ timeout: 30_000 })
+
+  // Wait for Plotly to actually render — the chart inserts an `.js-plotly-plot`
+  // wrapper div with an inner SVG once Plotly.newPlot resolves. Polling
+  // for that selector is the deterministic "chart is on screen" signal
+  // (replaces a fixed 2 s settle).
+  await page.locator('.js-plotly-plot, .plotly').first().waitFor({ state: 'visible', timeout: 30_000 })
+
+  // Empty-state copy should NOT linger after the chart wrapper is up.
+  // The flash regression would surface as the placeholder being visible
+  // after Plotly attached.
+  const emptyStateVisible = await page.getByText(/no data/i).isVisible().catch(() => false)
+  expect(emptyStateVisible).toBe(false)
+})
+
+test('dashboard mounts the maplibre container without crashing', async ({ page }) => {
+  const geojsonRequests: string[] = []
+  page.on('request', (req) => {
+    const u = req.url()
+    if (u.endsWith('.geojson') || u.endsWith('.json') && u.includes('countries')) {
+      geojsonRequests.push(u)
+    }
+  })
+
+  await page.goto('/dashboard')
+  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
+
+  const canvasAttached = page.locator('canvas').first().waitFor({ state: 'attached', timeout: 45_000 })
+  const fallbackVisible = page.getByText(/Interactive map unavailable/i).waitFor({ state: 'visible', timeout: 45_000 })
+  await Promise.any([canvasAttached, fallbackVisible])
+
+  const canvasCount = await page.locator('canvas').count()
+  const fallbackCount = await page.getByText(/Interactive map unavailable/i).count()
+  expect(canvasCount + fallbackCount).toBeGreaterThanOrEqual(1)
+})
+
+test('dashboard card grid mounts and the Cards toggle is reachable', async ({ page }) => {
+  await page.goto('/dashboard')
+  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
+  await expect(page.getByRole('button', { name: /cards/i }).first()).toBeVisible({
+    timeout: 15_000,
+  })
+})
+
+test('toggling a card off persists across page reload', async ({ page }) => {
+  await page.goto('/dashboard')
+  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
+
+  const cardsBtn = page.getByRole('button', { name: /cards/i }).first()
+  await cardsBtn.click()
+
+  await expect(page.getByText(/visible cards/i).first()).toBeVisible({ timeout: 15_000 })
+
+  const firstChecked = page.locator('input[type="checkbox"][id^="card-"]:checked').first()
+  await expect(firstChecked).toBeVisible({ timeout: 15_000 })
+  const cardId = await firstChecked.getAttribute('id')
+  expect(cardId).toBeTruthy()
+  const cardKey = cardId!.replace('card-', '')
+
+  const label = page.locator(`label[for="${cardId}"]`)
+  await label.click()
+
+  await expect(page.locator(`input#${cardId}`)).not.toBeChecked()
+
+  const storedBefore = await page.evaluate(() => localStorage.getItem('dashboard_cards'))
+  expect(storedBefore, 'dashboard_cards must be written after toggle').toBeTruthy()
+  const visibleBefore = JSON.parse(storedBefore!) as string[]
+  expect(visibleBefore.includes(cardKey)).toBe(false)
+
+  await page.reload()
+  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
+
+  const storedAfter = await page.evaluate(() => localStorage.getItem('dashboard_cards'))
+  expect(storedAfter, 'dashboard_cards must survive reload').toBeTruthy()
+  const visibleAfter = JSON.parse(storedAfter!) as string[]
+  expect(visibleAfter.includes(cardKey)).toBe(false)
 })

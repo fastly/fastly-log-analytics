@@ -470,9 +470,62 @@ def format_debug_request(
     return "\n".join(lines)
 
 
-# ``sync_admin_state`` moved to ``backend.routers._state_sync`` — its two
-# transitive imports (state_sync, scheduler) sit above ``utils`` in the
-# layering, and the only callers are routers anyway.
+def sync_admin_state(service_id: str | None) -> None:
+    """Fire-and-forget admin state export after alert/view mutations.
+
+    Also nudges the scheduler so that toggling alert count between 0 and >0
+    immediately registers or removes the alerts evaluation cron — otherwise
+    a user who just created their first alert would wait until the next
+    process restart for evaluation to start.
+
+    Swallows all exceptions so a sync failure never breaks the primary request.
+    """
+    if not service_id:
+        return
+    try:
+        from backend.state_sync import export_admin_state
+
+        export_admin_state(service_id)
+    except Exception:
+        logger.warning("sync_admin_state: export_admin_state failed (ignored)", exc_info=True)
+    try:
+        from backend.cron.scheduler import get_scheduler
+
+        get_scheduler().reload()
+    except Exception:
+        logger.warning("sync_admin_state: get_scheduler failed (ignored)", exc_info=True)
+
+
+def run_cached_repo_endpoint(
+    ctx,
+    *,
+    repo_module: str,
+    get_fn,
+    peek_fn,
+    kwargs: dict,
+    wrap=None,
+    on_response=None,
+):
+    """Run a repository aggregate endpoint with peek-before-checkout caching.
+
+    When ``get_fn`` has not been monkeypatched away from ``repo_module``, peeks
+    the cache before checking out a pooled DuckDB connection.
+    """
+    is_real_repo = getattr(get_fn, "__module__", "") == repo_module
+    if is_real_repo:
+        cached = peek_fn(src=ctx.source, **kwargs)
+        if cached is not None:
+            if on_response is not None:
+                on_response()
+            return wrap(cached) if wrap is not None else cached
+    res = get_fn(
+        con=ctx.con_or_factory(force_eager=not is_real_repo),
+        src=ctx.source,
+        **kwargs,
+    )
+    if on_response is not None:
+        on_response()
+    return wrap(res) if wrap is not None else res
 
 
 def _handle_query_error(

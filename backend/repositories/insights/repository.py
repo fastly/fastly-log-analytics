@@ -31,9 +31,9 @@ from backend.repositories._sql.insights import (
     COALESCED_URL_EXTENDED_AGGREGATES,
     REPEATED_BOT_UA_REGEX,
 )
+from backend.repositories.insights import registry
 
 from . import definitions as _definitions  # noqa: F401  side-effect import: registers insight defs with the registry
-from .registry import registry
 
 logger = logging.getLogger(__name__)
 

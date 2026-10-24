@@ -4,7 +4,7 @@ import * as React from 'react'
 import { useBootstrapCacheSelector } from '@/hooks/useBootstrap'
 import { useFilterStore } from '@/stores/filterStore'
 import { useServiceStore } from '@/stores/serviceStore'
-import { isIpFamilyField } from '@/lib/pii'
+import { isIpFamilyField } from '@/lib/utils'
 
 /**
  * Whether the current session is an "analyst" (read-only role).

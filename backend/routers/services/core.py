@@ -661,7 +661,7 @@ def api_service_log_fields_get(service_id: str):
 def api_service_log_fields_set(request: Request, service_id: str, body: LogFieldsUpdateRequest):
 
     from backend.core import field_registry as lf
-    from backend.provision.system_fields import reconcile_system_custom_fields
+    from backend.provision.cmcd_fields import reconcile_system_custom_fields
 
     require_service_in_scope(request, service_id)
 
@@ -708,7 +708,7 @@ def api_service_log_fields_set(request: Request, service_id: str, body: LogField
     new_lf["format_updated_at"] = datetime.now(UTC).isoformat()
     cfg["log_fields"] = new_lf
     mutate_service_config(service_id, lambda c: c.__setitem__("log_fields", new_lf))
-    from backend.repositories._presets_cache import invalidate_presets_cache
+    from backend.repositories.query import invalidate_presets_cache
 
     invalidate_presets_cache(service_id, old_hash)
     try:
@@ -1156,11 +1156,26 @@ def _persist_log_fields(lf: dict, new_custom: list, candidate_lf: dict, now: str
     return out
 
 
+def _validate_log_format_version(candidate_lf: dict) -> None:
+    from backend import provision
+
+    fmt_errors = provision.validate_log_format(candidate_lf)
+    if any("LOG_FORMAT_TOO_LONG" in e for e in fmt_errors):
+        raise HTTPException(status_code=422, detail={"errors": fmt_errors})
+
+
+def _persist_custom_fields_change(
+    service_id: str, cfg: dict, lf: dict, new_custom: list, candidate_lf: dict, now: str, *, full: bool = True
+) -> None:
+    new_lf = _persist_log_fields(lf, new_custom, candidate_lf, now, full=full)
+    cfg["log_fields"] = new_lf
+    mutate_service_config(service_id, lambda c: c.__setitem__("log_fields", new_lf))
+
+
 @router.post("/services/{service_id}/custom-fields", response_model=CustomFieldResponse)
 def api_create_custom_field(request: Request, service_id: str, body: CustomFieldCreate):
     from datetime import UTC
 
-    from backend import provision
     from backend.core import field_registry as lf_module
 
     require_service_in_scope(request, service_id)
@@ -1186,16 +1201,12 @@ def api_create_custom_field(request: Request, service_id: str, body: CustomField
         service_id, field_dict["name"], field_dict.get("duckdb_type"), field_dict.get("value_type")
     )
     candidate_lf = {**lf, "custom_fields": existing + [field_dict]}
-    fmt_errors = provision.validate_log_format(candidate_lf)
-    if any("LOG_FORMAT_TOO_LONG" in e for e in fmt_errors):
-        raise HTTPException(status_code=422, detail={"errors": fmt_errors})
+    _validate_log_format_version(candidate_lf)
     now = datetime.now(UTC).isoformat()
     field_dict["created_at"] = now
     field_dict["updated_at"] = now
     new_custom = existing + [field_dict]
-    new_lf = _persist_log_fields(lf, new_custom, candidate_lf, now)
-    cfg["log_fields"] = new_lf
-    mutate_service_config(service_id, lambda c: c.__setitem__("log_fields", new_lf))
+    _persist_custom_fields_change(service_id, cfg, lf, new_custom, candidate_lf, now)
     warnings = [e for e in errors if e.startswith("WARN:")]
 
     return {"ok": True, "field": field_dict, "warnings": warnings}
@@ -1205,7 +1216,6 @@ def api_create_custom_field(request: Request, service_id: str, body: CustomField
 def api_update_custom_field(request: Request, service_id: str, field_name: str, body: CustomFieldUpdate):
     from datetime import UTC
 
-    from backend import provision
     from backend.core import duckdb as _db
     from backend.core import field_registry as lf_module
 
@@ -1258,13 +1268,9 @@ def api_update_custom_field(request: Request, service_id: str, field_name: str, 
         raise HTTPException(status_code=422, detail={"errors": hard_errors})
     new_custom = existing[:idx] + [updated] + existing[idx + 1 :]
     candidate_lf = {**lf, "custom_fields": new_custom}
-    fmt_errors = provision.validate_log_format(candidate_lf)
-    if any("LOG_FORMAT_TOO_LONG" in e for e in fmt_errors):
-        raise HTTPException(status_code=422, detail={"errors": fmt_errors})
+    _validate_log_format_version(candidate_lf)
     now = datetime.now(UTC).isoformat()
-    new_lf = _persist_log_fields(lf, new_custom, candidate_lf, now)
-    cfg["log_fields"] = new_lf
-    mutate_service_config(service_id, lambda c: c.__setitem__("log_fields", new_lf))
+    _persist_custom_fields_change(service_id, cfg, lf, new_custom, candidate_lf, now)
     warnings = [e for e in errors if e.startswith("WARN:")]
 
     return {"ok": True, "field": updated, "warnings": warnings}
@@ -1292,9 +1298,7 @@ def api_delete_custom_field(request: Request, service_id: str, field_name: str):
         raise HTTPException(status_code=404, detail={"error": f"Custom field '{field_name}' not found"})
     new_custom = [cf for cf in existing if cf["name"] != field_name]
     now = datetime.now(UTC).isoformat()
-    new_lf = _persist_log_fields(lf, new_custom, {**lf, "custom_fields": new_custom}, now)
-    cfg["log_fields"] = new_lf
-    mutate_service_config(service_id, lambda c: c.__setitem__("log_fields", new_lf))
+    _persist_custom_fields_change(service_id, cfg, lf, new_custom, {**lf, "custom_fields": new_custom}, now)
 
     return {"ok": True, "field": field}
 
@@ -1378,7 +1382,6 @@ def api_export_custom_fields(request: Request, service_id: str):
 def api_import_custom_fields(request: Request, service_id: str, body: CustomFieldsImportBody):
     from datetime import UTC
 
-    from backend import provision
     from backend.core import field_registry as lf_module
 
     require_service_in_scope(request, service_id)
@@ -1446,13 +1449,101 @@ def api_import_custom_fields(request: Request, service_id: str, body: CustomFiel
         raise HTTPException(status_code=422, detail={"errors": validation_errors})
     new_custom = list(new_custom_map.values())
     candidate_lf = {**lf, "custom_fields": new_custom}
-    fmt_errors = provision.validate_log_format(candidate_lf)
-    if any("LOG_FORMAT_TOO_LONG" in e for e in fmt_errors):
-        raise HTTPException(status_code=422, detail={"errors": fmt_errors})
-    new_lf = _persist_log_fields(lf, new_custom, candidate_lf, now, full=False)
-    cfg["log_fields"] = new_lf
-    mutate_service_config(service_id, lambda c: c.__setitem__("log_fields", new_lf))
+    _validate_log_format_version(candidate_lf)
+    _persist_custom_fields_change(service_id, cfg, lf, new_custom, candidate_lf, now, full=False)
     return {"ok": True, "imported_count": len(fields_to_import)}
+
+
+# ── Audit logs & Cron runs (folded from audit.py and cron.py) ─────────────────
+
+from fastapi import Response  # noqa: E402
+
+from backend.core import metadata as metadata_db  # noqa: E402
+from backend.models.services import CronRunsResponse  # noqa: E402
+from backend.models.status_reads import AuditLogsResponse  # noqa: E402
+from backend.repositories.cron import delete_cron_log, get_cron_logs, purge_cron_logs  # noqa: E402
+
+audit_router = APIRouter(prefix="/api/audit-logs", tags=["audit-logs"], responses=DEFAULT_ERROR_RESPONSES)
+cron_router = APIRouter(prefix="/api/cron-runs", tags=["cron-runs"], responses=DEFAULT_ERROR_RESPONSES)
+
+
+@audit_router.get("", response_model=AuditLogsResponse, response_model_exclude_unset=True)
+@query_errors(500, code="audit_logs_read_failed", logger_obj=logger)
+def api_audit_logs(
+    source: dict = Depends(get_source),
+    event_type: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=50, le=1000),
+    sort: str = Query(default="timestamp"),
+    dir: str = Query(default="DESC"),
+):
+    from backend.utils.telemetry import debug_envelope
+
+    total, entries = metadata_db.get_audit_logs(
+        source["name"],
+        event_type=event_type,
+        page=page,
+        per_page=per_page,
+        sort_col=sort,
+        sort_dir=dir,
+    )
+
+    return debug_envelope(
+        {"total": total, "page": page, "per_page": per_page, "entries": entries},
+        gated=True,
+        is_cached=None,
+        inject_calls=True,
+    )
+
+
+@cron_router.get("", response_model=CronRunsResponse, response_model_exclude_unset=True)
+@query_errors(500, code="cron_logs_read_failed", logger_obj=logger)
+def api_cron_logs(
+    source: dict = Depends(get_source),
+    task: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=50, le=1000),
+    sort: str = Query(default="started_at"),
+    dir: str = Query(default="DESC"),
+    since_id: int | None = Query(default=None, ge=0),
+    skip_total: bool = Query(default=False),
+):
+    total, entries = get_cron_logs(
+        source["name"],
+        task,
+        status,
+        page,
+        per_page,
+        sort,
+        dir,
+        since_id=since_id,
+        skip_total=skip_total,
+    )
+    return {
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "entries": entries,
+    }
+
+
+@cron_router.delete("/{log_id}", status_code=204)
+@query_errors(500, code="cron_log_delete_failed", logger_obj=logger)
+def api_cron_log_delete(log_id: int, source: dict = Depends(get_source)):
+    delete_cron_log(source["name"], log_id)
+    return Response(status_code=204)
+
+
+@cron_router.delete("", status_code=204)
+@query_errors(500, code="cron_logs_purge_failed", logger_obj=logger)
+def api_cron_logs_purge(
+    source: dict = Depends(get_source),
+    task: str | None = Query(default=None),
+    days: int | None = Query(default=None),
+):
+    purge_cron_logs(source["name"], task, days)
+    return Response(status_code=204)
 
 
 # R-1: register the two module caches so the autouse fixture in

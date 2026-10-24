@@ -13,12 +13,21 @@ with safe placeholders so the tracked tree stays clean for the public repo.
 
 from __future__ import annotations
 
+import argparse
+import json
 import os
 import stat
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.error import URLError
+from urllib.parse import quote
+from urllib.request import Request
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.lib.admin_tls import admin_urlopen  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -220,3 +229,37 @@ def percentile(values: list[float], p: float) -> float:
     f = int(k)
     c = min(f + 1, len(s) - 1)
     return s[f] + (k - f) * (s[c] - s[f])
+
+
+def add_common_args(
+    parser: argparse.ArgumentParser,
+    *,
+    timeout_default: float | None = None,
+    timeout_label: str = "Socket",
+    json_help: str | None = None,
+) -> None:
+    """Add ``--timeout`` (when ``timeout_default`` is given) and ``--json`` (when ``json_help`` is given)."""
+    if timeout_default is not None:
+        parser.add_argument(
+            "--timeout",
+            type=float,
+            default=timeout_default,
+            help=f"{timeout_label} timeout in seconds (default: {timeout_default})",
+        )
+    if json_help is not None:
+        parser.add_argument("--json", action="store_true", help=json_help)
+
+
+def histogram_quantile(quantile: float, bucket_metric: str, window: str = "5m") -> str:
+    return f"histogram_quantile({quantile},sum by (le)(rate({bucket_metric}[{window}])))"
+
+
+def instant(base_url: str, query: str, timeout: float = 10) -> float | None:
+    """First sample of an instant query as a float, or ``None``."""
+    request = Request(f"{base_url.rstrip('/')}/api/v1/query?query={quote(query)}", method="GET")
+    try:
+        with admin_urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read())
+        return float(payload["data"]["result"][0]["value"][1])
+    except (OSError, URLError, TimeoutError, json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError):
+        return None

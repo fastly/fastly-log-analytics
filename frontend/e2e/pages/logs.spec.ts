@@ -1,5 +1,5 @@
 /**
- * E2E Page Contract Test: Data Management (/logs)
+ * E2E Page Contract Test: Data Management (/logs) & Custom Field VCL Validation
  *
  * Implements the verification checklist specified in docs/pages/logs.md:
  * 1. Route accessibility (GET /logs returns 200 for Admin; Analyst Path B receives 403 on /api/cron-runs, /api/cron-schedule, /api/audit-logs) & ServerFooter environment indicator.
@@ -10,9 +10,14 @@
  */
 
 import { expect, test } from '@playwright/test'
-import { installClsObserver, measureWarmPaintAndCls } from '../cls-observer'
-import { loginAsPasscodeAnalyst, revokeAnalystInvite } from '../helpers/analyst-session'
-import { configureExternalAdminOrigin, getFirstServiceId } from './helpers'
+import {
+  configureExternalAdminOrigin,
+  getFirstServiceId,
+  installClsObserver,
+  loginAsPasscodeAnalyst,
+  measureWarmPaintAndCls,
+  revokeAnalystInvite,
+} from '../helpers'
 
 configureExternalAdminOrigin()
 
@@ -186,4 +191,52 @@ test.describe('Data Management Page Contract (/logs)', () => {
 
     await expect.poll(() => capturedPageLoadIds.length, { timeout: 10_000 }).toBeGreaterThan(0)
   })
+})
+
+test('custom-field admin page renders', async ({ page }) => {
+  const r = await page.goto('/admin')
+  expect(r?.status()).toBeLessThan(500)
+})
+
+test('VCL editor debounce → validate-vcl fires after 500 ms in a real browser', async ({
+  page,
+}) => {
+  const validateWaiter = page.waitForRequest(
+    (req) =>
+      req.method() === 'POST' && /\/api\/services\/[^/]+\/custom-fields\/validate-vcl/.test(req.url()),
+    { timeout: 30_000 },
+  )
+
+  await page.goto('/admin')
+
+  const manageBtn = page.getByRole('button', { name: /manage/i }).first()
+  await expect(manageBtn).toBeVisible({ timeout: 30_000 })
+  await manageBtn.click()
+  const logSettingsItem = page.getByRole('menuitem', { name: /log settings/i })
+  await expect(logSettingsItem).toBeVisible({ timeout: 15_000 })
+  await logSettingsItem.click()
+
+  const nextStep = page.getByRole('button', { name: /next step/i })
+  await expect(nextStep).toBeVisible({ timeout: 30_000 })
+  await nextStep.click()
+
+  const addField = page.getByRole('button', { name: /add field/i })
+  await expect(addField).toBeVisible({ timeout: 30_000 })
+  await addField.click()
+
+  const label = page.getByLabel('Label', { exact: false }).first()
+  await label.fill('Pw Vcl Probe')
+
+  const vclInput = page.getByLabel('VCL Log Expression')
+  await expect(vclInput).toBeVisible()
+  await vclInput.fill('req.http.Host')
+
+  const validateReq = await validateWaiter
+  expect(validateReq.url()).toMatch(/\/custom-fields\/validate-vcl/)
+
+  await expect(
+    page
+      .getByText(/VCL Expression is valid|Validation Errors|Validation could not run/i)
+      .first(),
+  ).toBeVisible({ timeout: 30_000 })
 })

@@ -14,8 +14,7 @@ from backend.core.metric_expressions import sum_or_zero
 from backend.models.common import FiltersDict
 from backend.repositories._base import QueryRunner, SectionTimer, _safe_table, empty_schema_response
 from backend.repositories._sql import sessions as SQL
-from backend.repositories.utils.filters import build_where_clause
-from backend.repositories.utils.pagination import calc_offset
+from backend.repositories.utils.filters import build_where_clause, calc_offset
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
     bucket_time_to_minute,

@@ -8,8 +8,7 @@ import { stubWindowLocationAssign } from '@/__tests__/helpers/browser-stubs'
 import ShareLoginPage from '@/app/share-login/page'
 import ShareLoginLoading from '@/app/share-login/loading'
 import { ShareLoginForm, safeReturnTarget } from '@/app/share-login/ShareLoginForm'
-import { AcknowledgeButton } from '@/app/share-login/acknowledge/AcknowledgeButton'
-import { AcknowledgeFallback } from '@/app/share-login/acknowledge/AcknowledgeFallback'
+import { AcknowledgeButton, AcknowledgeFallback } from '@/app/share-login/acknowledge/AcknowledgeButton'
 
 const pushSpy = vi.fn()
 const replaceSpy = vi.fn()

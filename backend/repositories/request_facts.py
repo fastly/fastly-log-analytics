@@ -6,10 +6,13 @@ from datetime import datetime
 from typing import Any
 
 from backend.models.high_scale import HighScaleRequestFactRequest
-from backend.repositories._sql import request_facts as sql
 from backend.repositories.utils.filters import _get_utc_date_str, _get_utc_hour_str
 from backend.utils.date_utils import iso_z
 from backend.utils.telemetry import track_query
+
+DESCRIBE_TABLE = "DESCRIBE {table}"
+EMULATION_PROBE = "SELECT 1 AS duckdb_emulation_probe"
+EXTENTS = "SELECT MIN(timestamp), MAX(timestamp) FROM {table}"
 
 
 def build_partition_filter_clauses(start_iso: str, end_iso: str, col_names: set[str]) -> tuple[list[str], list[str]]:
@@ -49,9 +52,7 @@ def fetch_request_facts_emulation(
     col_names: set[str] = set()
     for cand in candidate_tables:
         try:
-            with track_query(
-                con, sql.DESCRIBE_TABLE.format(table=cand), [], "high_scale.describe_emulation"
-            ) as desc_cur:
+            with track_query(con, DESCRIBE_TABLE.format(table=cand), [], "high_scale.describe_emulation") as desc_cur:
                 col_names = {str(r[0]) for r in desc_cur.fetchall()}
             if col_names:
                 table = cand
@@ -60,7 +61,7 @@ def fetch_request_facts_emulation(
             continue
 
     if "timestamp" not in col_names:
-        with track_query(con, sql.EMULATION_PROBE, [], "high_scale.emulation_probe") as probe_cur:
+        with track_query(con, EMULATION_PROBE, [], "high_scale.emulation_probe") as probe_cur:
             probe_cur.fetchone()
         return [], None, None
 
@@ -150,7 +151,7 @@ def fetch_request_facts_emulation(
             cov_end = None
 
     if not cov_start or not cov_end:
-        ext_sql = sql.EXTENTS.format(table=table)
+        ext_sql = EXTENTS.format(table=table)
         with track_query(con, ext_sql, [], "high_scale.request_facts_extents") as ext_cur:
             ext_row = ext_cur.fetchone()
         cov_start = ext_row[0] if ext_row else None

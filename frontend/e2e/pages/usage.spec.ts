@@ -12,7 +12,7 @@
  */
 
 import { expect, test } from '@playwright/test'
-import { installClsObserver, measureWarmPaintAndCls } from '../cls-observer'
+import { installClsObserver, measureWarmPaintAndCls } from '../helpers'
 
 test.describe('Usage & Cost Estimator Page Contract (/usage)', () => {
 

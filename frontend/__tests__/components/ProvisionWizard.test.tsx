@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ProvisionWizard } from "@/components/ProvisionWizard/ProvisionWizard";
-import { ResumeBanner } from "@/components/ProvisionWizard/ResumeBanner";
+import { ResumeBanner } from "@/components/ProvisionWizard/WizardFooter";
 import {
   WIZARD_DRAFT_KEY,
   saveDraft,

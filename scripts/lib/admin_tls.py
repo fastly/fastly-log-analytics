@@ -11,6 +11,7 @@ remote-high-scale. Never send a gateway token from this client.
 """
 
 import argparse
+import asyncio
 import ipaddress
 import json
 import os
@@ -170,6 +171,24 @@ def admin_request_context(request: Request) -> ssl.SSLContext:
     if any(name.lower() == "x-admin-gateway-token" for name, _ in request.header_items()):
         raise ValueError("Admin client mTLS must not send server gateway credentials")
     return _context(config)
+
+
+async def async_admin_json(request: Request, timeout: float = 5.0) -> object:
+    import httpx
+
+    content = request.data
+    if content is not None and not isinstance(content, bytes):
+        raise ValueError("JSON diagnostic requests require a byte payload")
+    context = admin_request_context(request)
+    async with asyncio.timeout(timeout):
+        async with httpx.AsyncClient(
+            verify=context, trust_env=False, follow_redirects=False, timeout=timeout
+        ) as client:
+            response = await client.request(
+                request.get_method(), request.full_url, content=content, headers=dict(request.header_items())
+            )
+            response.raise_for_status()
+            return response.json()
 
 
 def main() -> int:

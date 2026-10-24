@@ -368,7 +368,7 @@ def _resolve_cli_service_and_token(args, *, require_token: bool = True) -> tuple
 
 def handle_update_logs(args):
     banner("Fastly Log Analysis — Update Logs")
-    from backend.provision.system_fields import (
+    from backend.provision.cmcd_fields import (
         reconcile_system_custom_fields,
         system_feature_flags,
     )

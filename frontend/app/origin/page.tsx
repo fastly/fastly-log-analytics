@@ -5,8 +5,7 @@ import {
   ORIGIN_SSR_DEFAULTS,
   ORIGIN_SSR_SECTIONS,
 } from '@/lib/ssr/upstream'
-import { seedDehydratedState } from '@/lib/ssr/seed'
-import { resolvePageServiceId } from '@/lib/ssr/service'
+import { resolvePageServiceId, seedDehydratedState } from '@/lib/ssr/seed'
 import OriginClient from './_sections/OriginClient'
 
 // Per-request RSC shell for /origin. Pre-fetches the DEFAULT origin aggregates

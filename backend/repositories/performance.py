@@ -13,6 +13,7 @@ from backend.models.common import FiltersDict
 from backend.repositories._base import (
     QueryRunner,
     SectionTimer,
+    _drop_temp_table,
     _safe_table,
 )
 from backend.repositories.utils.filters import build_where_clause
@@ -23,7 +24,6 @@ from backend.repositories.utils.response_cache import (
     serialize_filters_for_key,
 )
 from backend.utils.cache_registry import CacheRegistry
-from backend.utils.log_throttle import log_once_per
 
 logger = logging.getLogger(__name__)
 
@@ -365,12 +365,7 @@ def _compute_performance_aggregates(
                 results["waterfall"] = {"avg": waterfall_avg}
             timer.mark("scatter_waterfall_query", _t)
     finally:
-        if temp_table:
-            try:
-                runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
-            except Exception:
-                if log_once_per("get_performance_aggregates: DROP TABLE failed (ignored)", 60):
-                    logger.debug("get_performance_aggregates: DROP TABLE failed (ignored)", exc_info=True)
+        _drop_temp_table(runner, temp_table, "get_performance_aggregates")
 
     # Backstop: any requested section left unpopulated (temp-create failure, or
     # a live section whose required column was absent) gets its empty default so

@@ -1,10 +1,12 @@
 /**
- * Consolidated Map tests: ChoroplethMap, MapPrewarm, and useMapResize.
+ * Consolidated Map tests: ChoroplethMap, MapPrewarm, useMapResize,
+ * ImpossibleDistanceModal, and InsightHelpModal.
  *
  * @vitest-environment jsdom
  */
-import { render, renderHook, waitFor } from '@testing-library/react'
+import { render, renderHook, screen, fireEvent, waitFor } from '@testing-library/react'
 import { describe, it, test, expect, vi, beforeEach } from 'vitest'
+import React from 'react'
 
 import {
   mapInstances,
@@ -12,9 +14,10 @@ import {
   installMaplibreSideEffects,
 } from '../../helpers/maplibre-mock'
 import { stubResizeObserver } from '../../helpers/browser-stubs'
-import { ChoroplethMap } from '@/components/Map/ChoroplethMap'
-import { MapPrewarm } from '@/components/Map/MapPrewarm'
+import { ChoroplethMap, MapPrewarm } from '@/components/Map/ChoroplethMap'
 import { useMapResize } from '@/components/Map/shared'
+import { ImpossibleDistanceModal } from '@/components/Insights/ImpossibleDistanceModal'
+import { InsightHelpModal } from '@/components/Insights/InsightHelpModal'
 
 const { setWorkerUrl, constructedWithWorker } = vi.hoisted(() => ({
   setWorkerUrl: vi.fn(),
@@ -111,5 +114,82 @@ describe('useMapResize', () => {
     const ro2 = stubResizeObserver()
     renderHook(() => useMapResize({ current: null }, { current: null }))
     expect(ro2.observe).not.toHaveBeenCalled()
+  })
+})
+
+const VALID_DATA = {
+  label: '1.2.3.4',
+  client_lat: 48.8566,
+  client_lon: 2.3522,
+  pop_lat: 37.7749,
+  pop_lon: -122.4194,
+  pop: 'SFO',
+  tcp_rtt: 20000,
+  distance_km: 8960,
+  max_km: 2000,
+  city: 'Paris',
+  country: 'FR',
+}
+
+describe('ImpossibleDistanceModal & InsightHelpModal', () => {
+  test('renders modal with valid data', () => {
+    render(
+      <ImpossibleDistanceModal isOpen data={VALID_DATA} onOpenChange={vi.fn()} />
+    )
+    expect(screen.getByText(/Physics Violation/)).toBeInTheDocument()
+    expect(screen.getAllByText(/8,960/).length).toBeGreaterThan(0)
+  })
+
+  test('shows fallback when coordinates are missing', () => {
+    const bad = { ...VALID_DATA, pop_lat: NaN, pop_lon: NaN }
+    render(
+      <ImpossibleDistanceModal isOpen data={bad} onOpenChange={vi.fn()} />
+    )
+    expect(screen.getByText('Location data unavailable.')).toBeInTheDocument()
+  })
+
+  test('hasCoords guard prevents .toFixed() crash on undefined pop coordinates', () => {
+    expect(Number.isFinite(undefined)).toBe(false)
+    expect(Number.isFinite(null)).toBe(false)
+    expect(Number.isFinite(NaN)).toBe(false)
+    expect(Number.isFinite(37.7749)).toBe(true)
+  })
+
+  test('shows city and country in coordinate overlay when provided', () => {
+    render(
+      <ImpossibleDistanceModal isOpen data={VALID_DATA} onOpenChange={vi.fn()} />
+    )
+    expect(screen.getAllByText(/Paris, FR/).length).toBeGreaterThan(0)
+  })
+
+  test('returns null when data is null', () => {
+    const { container } = render(
+      <ImpossibleDistanceModal isOpen={false} data={null} onOpenChange={vi.fn()} />
+    )
+    expect(container).toBeEmptyDOMElement()
+  })
+
+  test('InsightHelpModal renders impossible_distance content', () => {
+    render(
+      <InsightHelpModal insightId="impossible_distance" isOpen onOpenChange={vi.fn()} />
+    )
+    expect(screen.getByText(/The Physics of/)).toBeInTheDocument()
+    expect(screen.getByText(/Speed of Light Violation Detected/)).toBeInTheDocument()
+  })
+
+  test('InsightHelpModal renders default content for unknown insight', () => {
+    render(
+      <InsightHelpModal insightId="unknown_insight_xyz" isOpen onOpenChange={vi.fn()} />
+    )
+    expect(screen.getByText('Insight Analysis')).toBeInTheDocument()
+  })
+
+  test('InsightHelpModal close button triggers onOpenChange', async () => {
+    const onChange = vi.fn()
+    render(
+      <InsightHelpModal insightId="impossible_distance" isOpen onOpenChange={onChange} />
+    )
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
   })
 })

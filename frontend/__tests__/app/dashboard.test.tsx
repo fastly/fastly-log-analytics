@@ -6,7 +6,7 @@ import { describe, expect, it, test, vi } from 'vitest'
 // component, so the smoke test targets the client component that owns the
 // title + chart/cards.
 import DashboardClient from '@/app/dashboard/_sections/DashboardClient'
-import { buildChartLayout } from '@/app/dashboard/_sections/chartHelpers'
+import { buildChartLayout } from '@/app/dashboard/_sections/categories'
 import { densifyBarSeries } from '@/lib/chart-helpers'
 import { buildTrafficData, getIntervalSeconds } from '@/lib/traffic-chart'
 import { createTestQueryClient, renderWithQuery } from '../helpers/query'

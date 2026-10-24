@@ -1295,7 +1295,7 @@ class TestRollupsOriginSummary:
             written_hours.append(list(hours))
             return len(hours)
 
-        with patch("backend.core.rollups.origin_summary.build_origin_summary_bundles", side_effect=_spy_build):
+        with patch("backend.core.rollups.origin_dims.build_origin_summary_bundles", side_effect=_spy_build):
             with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
                 n = origin_summary.backfill_origin_summary_bundles("svc-os", src)
 
@@ -1438,7 +1438,7 @@ class TestRollupsOriginSummary:
         with writer_patches(cache_root, "logs_os", con):
             import logging as _logging
 
-            with caplog.at_level(_logging.WARNING, logger="backend.core.rollups.origin_summary"):
+            with caplog.at_level(_logging.WARNING, logger="backend.core.rollups.origin_dims"):
                 n = origin_summary.build_origin_summary_bundles("svc-os", src, ["totally-not-an-hour", valid_token])
 
         assert n == 1
@@ -1600,7 +1600,7 @@ class TestRollupsOriginSummary:
         with writer_patches(cache_root, "logs_os", con):
             import logging as _logging
 
-            with caplog.at_level(_logging.WARNING, logger="backend.core.rollups.origin_summary"):
+            with caplog.at_level(_logging.WARNING, logger="backend.core.rollups.origin_dims"):
                 n = origin_summary.build_origin_summary_bundles("svc-os", src, [h1_token, h2_token])
 
         # h1 failed, h2 succeeded.
@@ -1646,7 +1646,7 @@ class TestRollupsOriginSummary:
         ):
             import logging as _logging
 
-            with caplog.at_level(_logging.WARNING, logger="backend.core.rollups.origin_summary"):
+            with caplog.at_level(_logging.WARNING, logger="backend.core.rollups.origin_dims"):
                 n = origin_summary.build_origin_summary_bundles("svc-os", src, [token])
 
         assert n == 0
@@ -1699,7 +1699,7 @@ class TestRollupsOriginSummary:
         with (
             patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
             patch(
-                "backend.core.rollups.origin_summary.build_origin_summary_bundles",
+                "backend.core.rollups.origin_dims.build_origin_summary_bundles",
                 side_effect=_spy_build,
             ),
         ):

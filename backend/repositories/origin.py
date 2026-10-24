@@ -13,6 +13,7 @@ from backend.models.common import FiltersDict
 from backend.repositories._base import (
     QueryRunner,
     SectionTimer,
+    _drop_temp_table,
     _safe_table,
     empty_schema_response,
     origin_latency_us_expr,
@@ -26,7 +27,6 @@ from backend.repositories.utils.response_cache import (
     digest_cache_key,
     serialize_filters_for_key,
 )
-from backend.utils.log_throttle import log_once_per
 
 logger = logging.getLogger(__name__)
 
@@ -444,6 +444,66 @@ def _shape_ip_health_rows(rows: list[tuple]) -> dict:
     }
 
 
+def _resolve_origin_ts_expr(
+    metric: str,
+    actual_cols: set[str] | list[str],
+    *,
+    use_temp_lat_us: bool = False,
+) -> tuple[str, str] | None:
+    metric_col = "ottfb" if metric == "ttfb" else "ottlb"
+    unit_conv = "/ 1000.0"
+    if metric_col not in actual_cols:
+        if metric == "ttfb" and "ttfb" in actual_cols:
+            metric_col = "ttfb"
+            unit_conv = "* 1000.0"
+        else:
+            return None
+    if metric == "ttfb" and "ottfb" in actual_cols and "ttfb" in actual_cols:
+        lat_expr = '"lat_us"' if use_temp_lat_us else (metric_expressions.origin_latency_us(actual_cols) or "NULL")
+        unit_conv = "/ 1000.0"
+    else:
+        lat_expr = f'"{metric_col}"'
+    return lat_expr, unit_conv
+
+
+def _run_origin_card(
+    con: duckdb.DuckDBPyConnection,
+    src: dict,
+    endpoint: str,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict,
+    *,
+    required_cols: tuple[str, ...] = (),
+    empty_extra: dict[str, Any] | None = None,
+    sql_template: str,
+    use_lat_val: bool = True,
+    extra_params: list[Any] | None = None,
+    shaper: Any,
+    **cache_extra: Any,
+) -> dict:
+    runner = QueryRunner(con, src)
+    cache_key, hit = _check_response_cache(endpoint, src, start_time, end_time, filters, runner, **cache_extra)
+    if hit:
+        return hit
+
+    table_name = _safe_table(src["name"])
+    actual_cols = runner.get_schema_cols()
+    if not actual_cols or any(c not in actual_cols for c in required_cols):
+        return empty_schema_response(has_data=False, **(empty_extra or {}), rows=[], **runner.telemetry())
+
+    params, where = build_where_clause(start_time, end_time, filters, actual_cols)
+    fmt_kwargs: dict[str, Any] = {"table": table_name, "where": where}
+    if use_lat_val:
+        fmt_kwargs["lat_val"] = origin_latency_us_expr(actual_cols)
+
+    rows = runner.execute(
+        sql_template.format(**fmt_kwargs),
+        params + (extra_params or []),
+    ).fetchall()
+    return _store_response_cache(cache_key, shaper(rows), runner)
+
+
 def get_timeseries(
     con: duckdb.DuckDBPyConnection,
     src: dict,
@@ -478,25 +538,10 @@ def get_timeseries(
         return empty_schema_response(has_data=False, series=[], **runner.telemetry())
 
     params, where = build_where_clause(start_time, end_time, filters, actual_cols)
-
-    # Resolve metric column
-    metric_col = "ottfb" if metric == "ttfb" else "ottlb"
-    if metric_col not in actual_cols:
-        if metric == "ttfb" and "ttfb" in actual_cols:
-            metric_col = "ttfb"
-            unit_conv = "* 1000.0"  # seconds to ms
-        else:
-            payload = {"has_data": False, "series": []}
-            return _store_response_cache(cache_key, payload, runner)
-    else:
-        unit_conv = "/ 1000.0"  # micros to ms
-
-    # Fallback logic for when metric_col exists but might be null (transition period)
-    if metric == "ttfb" and "ottfb" in actual_cols and "ttfb" in actual_cols:
-        lat_expr = metric_expressions.origin_latency_us(actual_cols) or "NULL"
-        unit_conv = "/ 1000.0"
-    else:
-        lat_expr = f'"{metric_col}"'
+    resolved = _resolve_origin_ts_expr(metric, actual_cols, use_temp_lat_us=False)
+    if resolved is None:
+        return _store_response_cache(cache_key, {"has_data": False, "series": []}, runner)
+    lat_expr, unit_conv = resolved
 
     payload = _run_timeseries_query(
         runner,
@@ -522,28 +567,19 @@ def get_slow_urls(
     limit: int = 20,
     min_requests: int = 10,
 ) -> dict:
-    runner = QueryRunner(con, src)
-    cache_key, hit = _check_response_cache(
-        "slow_urls", src, start_time, end_time, filters, runner, limit=limit, min_requests=min_requests
+    return _run_origin_card(
+        con,
+        src,
+        "slow_urls",
+        start_time,
+        end_time,
+        filters,
+        sql_template=SQL.SLOW_URLS,
+        extra_params=[min_requests, limit],
+        shaper=_shape_slow_url_rows,
+        limit=limit,
+        min_requests=min_requests,
     )
-    if hit:
-        return hit
-
-    table_name = _safe_table(src["name"])
-    actual_cols = runner.get_schema_cols()
-    if not actual_cols:
-        return empty_schema_response(has_data=False, rows=[], **runner.telemetry())
-
-    params, where = build_where_clause(start_time, end_time, filters, actual_cols)
-
-    lat_val = origin_latency_us_expr(actual_cols)
-
-    rows = runner.execute(
-        SQL.SLOW_URLS.format(lat_val=lat_val, table=table_name, where=where),
-        params + [min_requests, limit],
-    ).fetchall()
-
-    return _store_response_cache(cache_key, _shape_slow_url_rows(rows), runner)
 
 
 def get_status_codes(
@@ -553,24 +589,18 @@ def get_status_codes(
     end_time: str | None,
     filters: FiltersDict,
 ) -> dict:
-    runner = QueryRunner(con, src)
-    cache_key, hit = _check_response_cache("status_codes", src, start_time, end_time, filters, runner)
-    if hit:
-        return hit
-
-    table_name = _safe_table(src["name"])
-    actual_cols = runner.get_schema_cols()
-    if not actual_cols or "ost" not in actual_cols:
-        return empty_schema_response(has_data=False, rows=[], **runner.telemetry())
-
-    params, where = build_where_clause(start_time, end_time, filters, actual_cols)
-
-    rows = runner.execute(
-        SQL.STATUS_CODES.format(table=table_name, where=where),
-        params,
-    ).fetchall()
-
-    return _store_response_cache(cache_key, _shape_status_code_rows(rows), runner)
+    return _run_origin_card(
+        con,
+        src,
+        "status_codes",
+        start_time,
+        end_time,
+        filters,
+        required_cols=("ost",),
+        sql_template=SQL.STATUS_CODES,
+        use_lat_val=False,
+        shaper=_shape_status_code_rows,
+    )
 
 
 def get_path_breakdown(
@@ -580,26 +610,18 @@ def get_path_breakdown(
     end_time: str | None,
     filters: FiltersDict,
 ) -> dict:
-    runner = QueryRunner(con, src)
-    cache_key, hit = _check_response_cache("path_breakdown", src, start_time, end_time, filters, runner)
-    if hit:
-        return hit
-
-    table_name = _safe_table(src["name"])
-    actual_cols = runner.get_schema_cols()
-    if not actual_cols or "edge" not in actual_cols:
-        return empty_schema_response(has_data=False, shielding_detected=False, rows=[], **runner.telemetry())
-
-    params, where = build_where_clause(start_time, end_time, filters, actual_cols)
-
-    lat_val = origin_latency_us_expr(actual_cols)
-
-    rows = runner.execute(
-        SQL.PATH_BREAKDOWN.format(lat_val=lat_val, table=table_name, where=where),
-        params,
-    ).fetchall()
-
-    return _store_response_cache(cache_key, _shape_path_breakdown_rows(rows), runner)
+    return _run_origin_card(
+        con,
+        src,
+        "path_breakdown",
+        start_time,
+        end_time,
+        filters,
+        required_cols=("edge",),
+        empty_extra={"shielding_detected": False},
+        sql_template=SQL.PATH_BREAKDOWN,
+        shaper=_shape_path_breakdown_rows,
+    )
 
 
 def get_pop_latency(
@@ -610,26 +632,20 @@ def get_pop_latency(
     filters: FiltersDict,
     limit: int = 30,
 ) -> dict:
-    runner = QueryRunner(con, src)
-    cache_key, hit = _check_response_cache("pop_latency", src, start_time, end_time, filters, runner, limit=limit)
-    if hit:
-        return hit
-
-    table_name = _safe_table(src["name"])
-    actual_cols = runner.get_schema_cols()
-    if not actual_cols or "pop" not in actual_cols:
-        return empty_schema_response(has_data=False, requires_group_c=True, rows=[], **runner.telemetry())
-
-    params, where = build_where_clause(start_time, end_time, filters, actual_cols)
-
-    lat_val = origin_latency_us_expr(actual_cols)
-
-    rows = runner.execute(
-        SQL.POP_LATENCY.format(lat_val=lat_val, table=table_name, where=where),
-        params + [limit],
-    ).fetchall()
-
-    return _store_response_cache(cache_key, _shape_pop_latency_rows(rows), runner)
+    return _run_origin_card(
+        con,
+        src,
+        "pop_latency",
+        start_time,
+        end_time,
+        filters,
+        required_cols=("pop",),
+        empty_extra={"requires_group_c": True},
+        sql_template=SQL.POP_LATENCY,
+        extra_params=[limit],
+        shaper=_shape_pop_latency_rows,
+        limit=limit,
+    )
 
 
 def get_ip_health(
@@ -640,26 +656,19 @@ def get_ip_health(
     filters: FiltersDict,
     limit: int = 30,
 ) -> dict:
-    runner = QueryRunner(con, src)
-    cache_key, hit = _check_response_cache("ip_health", src, start_time, end_time, filters, runner, limit=limit)
-    if hit:
-        return hit
-
-    table_name = _safe_table(src["name"])
-    actual_cols = runner.get_schema_cols()
-    if not actual_cols or "oip" not in actual_cols or "ost" not in actual_cols:
-        return empty_schema_response(has_data=False, rows=[], **runner.telemetry())
-
-    params, where = build_where_clause(start_time, end_time, filters, actual_cols)
-
-    lat_val = origin_latency_us_expr(actual_cols)
-
-    rows = runner.execute(
-        SQL.IP_HEALTH.format(lat_val=lat_val, table=table_name, where=where),
-        params + [limit],
-    ).fetchall()
-
-    return _store_response_cache(cache_key, _shape_ip_health_rows(rows), runner)
+    return _run_origin_card(
+        con,
+        src,
+        "ip_health",
+        start_time,
+        end_time,
+        filters,
+        required_cols=("oip", "ost"),
+        sql_template=SQL.IP_HEALTH,
+        extra_params=[limit],
+        shaper=_shape_ip_health_rows,
+        limit=limit,
+    )
 
 
 _DIM_CANDIDATES: dict[str, list[str]] = {
@@ -895,20 +904,10 @@ def _origin_timeseries_from_temp(
     percentile: str,
 ) -> dict:
     actual_cols_set = set(actual_cols)
-    metric_col = "ottfb" if metric == "ttfb" else "ottlb"
-    unit_conv = "/ 1000.0"
-    if metric_col not in actual_cols_set:
-        if metric == "ttfb" and "ttfb" in actual_cols_set:
-            metric_col = "ttfb"
-            unit_conv = "* 1000.0"
-        else:
-            return {"has_data": False, "series": []}
-
-    if metric == "ttfb" and "ottfb" in actual_cols_set and "ttfb" in actual_cols_set:
-        lat_expr = '"lat_us"'
-        unit_conv = "/ 1000.0"
-    else:
-        lat_expr = f'"{metric_col}"'
+    resolved = _resolve_origin_ts_expr(metric, actual_cols_set, use_temp_lat_us=True)
+    if resolved is None:
+        return {"has_data": False, "series": []}
+    lat_expr, unit_conv = resolved
 
     return _run_timeseries_query(
         runner,
@@ -1313,11 +1312,7 @@ async def get_aggregates(
             **runner.telemetry(),
         }
     finally:
-        try:
-            runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
-        except Exception:
-            if log_once_per("get_aggregates: DROP TABLE failed (ignored)", 60):
-                logger.debug("get_aggregates: DROP TABLE failed (ignored)", exc_info=True)
+        _drop_temp_table(runner, temp_table, "get_aggregates")
 
 
 # R-1: register the response TTL cache so the autouse fixture in

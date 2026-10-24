@@ -8,8 +8,7 @@ import { server } from '@/__tests__/helpers/msw/server'
 import { useServiceStore } from '@/stores/serviceStore'
 import Loading from '@/app/admin/clickhouse/loading'
 import ClickHouseAdminPage from '@/app/admin/clickhouse/page'
-import ClickHouseAdminClient from '@/app/admin/clickhouse/_sections/ClickHouseAdminClient'
-import { ClickHouseStatusNotice } from '@/app/admin/clickhouse/_sections/ClickHouseStatusNotice'
+import ClickHouseAdminClient, { ClickHouseStatusNotice } from '@/app/admin/clickhouse/_sections/ClickHouseAdminClient'
 
 const notFoundMock = vi.fn(() => {
   throw new Error('NEXT_HTTP_ERROR_FALLBACK;404')

@@ -7,9 +7,7 @@ import { act, render, screen } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import React from 'react'
 
-import { PlotlyChart } from '@/components/PlotlyChart/PlotlyChart'
-import { ChartA11yTable } from '@/components/PlotlyChart/ChartA11yTable'
-import { tracesToTable } from '@/components/PlotlyChart/tracesToTable'
+import { PlotlyChart, ChartA11yTable, tracesToTable } from '@/components/PlotlyChart/PlotlyChart'
 import type { PlotlyConfig, PlotlyGraphDiv, PlotlyLayout, PlotlyRelayoutEvent } from '@/types/plotly'
 import { stubResizeObserver } from '../../helpers/browser-stubs'
 

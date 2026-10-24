@@ -1,5 +1,6 @@
 /**
  * E2E Page Contract Test: Analyst Share Login & TOS Gate (/share-login & /share-login/acknowledge)
+ * plus admin-login baseline and analyst OAuth login handshake.
  *
  * Implements the verification checklist specified in docs/pages/share-login.md:
  * 1. Route accessibility, card layout mounting & footer environment mode indicator.
@@ -9,10 +10,20 @@
  * 5. Open-redirect protection on ?return= and ?next= query parameters.
  */
 
+import AxeBuilder from '@axe-core/playwright'
 import { expect, test } from '@playwright/test'
-import { installClsObserver, measureWarmPaintAndCls } from '../cls-observer'
-import { revokeAnalystInvite, seedPasscodeAnalystInvite } from '../helpers/analyst-session'
-import { getFirstServiceId } from './helpers'
+import { E2E_BACKEND_PORT } from '../../playwright.config'
+import {
+  getFirstServiceId,
+  installClsObserver,
+  measureWarmPaintAndCls,
+  revokeAnalystInvite,
+  seedPasscodeAnalystInvite,
+  setCookieValues,
+} from '../helpers'
+
+const MOCK_IDP = `http://127.0.0.1:${E2E_BACKEND_PORT}/mock-idp`
+const E2E_EMAIL = 'e2e-analyst@example.com'
 
 test.describe('Analyst Share Login Page Contract (/share-login)', () => {
   test.beforeEach(async ({ request }) => {
@@ -192,5 +203,106 @@ test.describe('Analyst Share Login Page Contract (/share-login)', () => {
     } finally {
       await revokeAnalystInvite(page.request, inviteId, { logout: true })
     }
+  })
+})
+
+test('admin dashboard loads end-to-end', async ({ page }) => {
+  await page.goto('/dashboard')
+  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
+})
+
+test('admin dashboard has no detectable WCAG 2.1 AA violations on first paint', async ({ page }) => {
+  await page.goto('/dashboard')
+  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
+
+  await page.locator('main').first().waitFor({ state: 'visible', timeout: 30_000 })
+  await page.waitForTimeout(3_000)
+
+  const results = await new AxeBuilder({ page })
+    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
+    .exclude('.recharts-wrapper')
+    .exclude('[data-testid="plotly-host"]')
+    .exclude('[data-empty-placeholder="true"]')
+    .exclude('[data-axe-ignore="true"]')
+    .exclude('.maplibregl-map')
+    .analyze()
+
+  expect(
+    results.violations,
+    `axe found ${results.violations.length} WCAG 2.1 AA violation(s):\n` +
+      results.violations
+        .map(
+          (v) =>
+            `  - [${v.id}] ${v.help} (${v.impact ?? 'unknown'})\n    ${v.helpUrl}\n` +
+            `    nodes: ${v.nodes.length} (first: ${v.nodes[0]?.target?.join(' > ')})`,
+        )
+        .join('\n'),
+  ).toEqual([])
+})
+
+test.describe('analyst OAuth login', () => {
+  test('mock IdP discovery + auth-config expose the configured provider', async ({ request }) => {
+    const disco = await request.get(`${MOCK_IDP}/.well-known/openid-configuration`)
+    expect(disco.ok()).toBeTruthy()
+    expect((await disco.json()).issuer).toBe(MOCK_IDP)
+
+    const cfg = await request.get('/api/share/auth-config')
+    expect(cfg.ok()).toBeTruthy()
+    const body = (await cfg.json()) as { passcode_enabled: boolean; providers: Array<{ id: string; display_name: string }> }
+    expect(body.providers.map((p) => p.id)).toContain('google')
+  })
+
+  test('/authorize seals a flow-state cookie and redirects to the IdP with the OIDC params', async ({ request }) => {
+    const r = await request.get('/api/share/oauth/authorize?provider=google', { maxRedirects: 0 })
+    expect(r.status()).toBe(302)
+    const loc = r.headers()['location']
+    expect(loc).toContain(`${MOCK_IDP}/authorize`)
+    expect(loc).toContain('prompt=select_account')
+    expect(loc).toContain('code_challenge_method=S256')
+    expect(loc).toContain('state=')
+    expect(loc).toContain('nonce=')
+    expect(setCookieValues(r.headersArray(), 'oauth_flow_state')).toBeTruthy()
+  })
+
+  test('full handshake: authorize → mock IdP → callback issues an analyst session', async ({ request }) => {
+    const created = await request.post('/api/admin/share/invites', {
+      data: {
+        name: 'E2E Analyst',
+        email: E2E_EMAIL,
+        auth_method: 'oauth',
+        oauth_provider: 'google',
+        service_ids: ['svc-playwright-e2e'],
+        duration_hours: 24,
+      },
+    })
+    expect(created.ok(), await created.text()).toBeTruthy()
+
+    const auth = await request.get('/api/share/oauth/authorize?provider=google', { maxRedirects: 0 })
+    expect(auth.status()).toBe(302)
+    const flowState = setCookieValues(auth.headersArray(), 'oauth_flow_state')
+    expect(flowState).toBeTruthy()
+    const idpUrl = auth.headers()['location']
+
+    const idp = await request.get(idpUrl, { maxRedirects: 0 })
+    expect(idp.status()).toBe(302)
+    const callbackUrl = idp.headers()['location']
+    expect(callbackUrl).toContain('/api/share/oauth/callback')
+    expect(callbackUrl).toContain('code=')
+
+    const cb = await request.get(callbackUrl, {
+      maxRedirects: 0,
+      headers: { cookie: `oauth_flow_state=${flowState}` },
+    })
+    expect(cb.status()).toBe(302)
+    expect(cb.headers()['location']).toBe('/share-login/acknowledge')
+    expect(cb.headers()['location']).not.toContain('oauth_error')
+    expect(setCookieValues(cb.headersArray(), 'analyst_pending_session_id')).toBeTruthy()
+  })
+
+  test('callback with no flow-state cookie fails closed to the login error banner', async ({ request }) => {
+    const cb = await request.get('/api/share/oauth/callback?code=x&state=y', { maxRedirects: 0 })
+    expect(cb.status()).toBe(302)
+    expect(cb.headers()['location']).toBe('/share-login?oauth_error=auth_failed')
+    expect(setCookieValues(cb.headersArray(), 'analyst_session_id')).toBeNull()
   })
 })

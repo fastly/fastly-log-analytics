@@ -18,8 +18,7 @@
  *      telemetry attribution.
  */
 import { test, expect } from '@playwright/test';
-import { clsInitScript } from '../cls-observer';
-import { configureExternalAdminOrigin } from './helpers';
+import { clsInitScript, configureExternalAdminOrigin } from '../helpers';
 
 configureExternalAdminOrigin();
 
