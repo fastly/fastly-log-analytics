@@ -11,7 +11,7 @@
  * branches (e.g. that an analyst session hides "Usage & Cost"), revisit
  * this file and trim the now-redundant JSDOM coverage.
  */
-import { render, screen, act } from '@testing-library/react'
+import { screen, act } from '@testing-library/react'
 import { expect, test, vi, beforeEach } from 'vitest'
 import { renderWithQueryClient } from '../helpers/query'
 import { AppLayout } from '@/components/AppLayout'

@@ -4,7 +4,6 @@ import InsightsClient from '@/app/insights/_sections/InsightsClient'
 import { createTestQueryClient, renderWithQuery } from '../helpers/query'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useSessionRoleStore } from '@/stores/sessionRoleStore'
-import type { ReactNode } from 'react'
 
 // Mock complicated components. SEVERITY_BADGE_CLASS is a real named export of
 // this module (the section-header severity chips reuse it), so the mock must
