@@ -280,11 +280,12 @@ jobs:
         run: bash scripts/check_no_inline_metric_coalesce.sh
 
       - name: Deploy config validation (compose + helm chart)
-        # Mirrors `make deploy-validate`. Both compose configurations are
+        # Mirrors `make deploy-validate`. All compose configurations are
         # parsed without a daemon; helm lint +
         # template validate deploy/chart/fastly-log-analytics (ubuntu runners
         # ship both docker and helm).
         run: |
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
           docker compose -f docker-compose.multipod.yml config -q
           docker compose -f docker-compose.multipod.yml -f docker-compose.observability.yml config -q
           if command -v helm >/dev/null 2>&1; then

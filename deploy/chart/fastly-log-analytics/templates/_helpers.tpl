@@ -147,20 +147,32 @@ adds its pool/recycle knobs on top; the worker has no connection pool.
 {{- end }}
 
 {{/*
-OTEL exporter selection shared by the backend and the ingest worker: OTLP to
-the in-cluster Prometheus/Tempo when observability is on, else the
-Prometheus-scrape exporter.
+OTEL exporter selection shared by the backend and Celery worker. Explicit
+operator settings override the chart defaults; otherwise OTLP targets the
+in-cluster Prometheus/Tempo when observability is on and Prometheus scraping
+is used when it is off.
 */}}
 {{- define "fastly-log-analytics.otelEnv" -}}
 - name: OTEL_EXPORTER
-{{- if .Values.observability.enabled }}
+{{- if .Values.otel.exporter }}
+  value: {{ .Values.otel.exporter | quote }}
+{{- else if .Values.observability.enabled }}
   value: "otlp"
+{{- else }}
+  value: "prometheus"
+{{- end }}
+{{- if .Values.otel.exporter }}
+{{- if eq .Values.otel.exporter "otlp" }}
+- name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+  value: {{ .Values.otel.metricsEndpoint | quote }}
+- name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+  value: {{ .Values.otel.tracesEndpoint | quote }}
+{{- end }}
+{{- else if .Values.observability.enabled }}
 - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
   value: "http://prometheus:9090/api/v1/otlp/v1/metrics"
 - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
   value: "http://tempo:4318/v1/traces"
-{{- else }}
-  value: "prometheus"
 {{- end }}
 {{- end }}
 

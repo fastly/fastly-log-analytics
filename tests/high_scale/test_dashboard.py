@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 
@@ -248,7 +248,7 @@ def test_high_scale_filtered_aggregates_surfaces_watermark_extents():
     assert response.latest_log_at == "2026-09-16T00:00:00+00:00"
 
 
-def test_high_scale_time_series_queries_through_in_flight_minute():
+def test_high_scale_time_series_excludes_the_end_minute():
     executed_sql: list[str] = []
 
     class CapturingClient(FakeClient):
@@ -282,7 +282,7 @@ def test_high_scale_time_series_queries_through_in_flight_minute():
 
     ts_queries = [s for s in executed_sql if "FROM request_aggregates" in s]
     assert ts_queries, "expected request_aggregates query"
-    assert any("bucket_start <= {end:DateTime64(3)}" in q for q in ts_queries)
+    assert any("bucket_start < {end:DateTime64(3)}" in q for q in ts_queries)
 
 
 @pytest.mark.parametrize(
@@ -400,7 +400,6 @@ def test_unfiltered_subminute_windows_use_scoped_facts(start_time: str, end_time
 
     start = datetime.fromisoformat(start_time)
     end = datetime.fromisoformat(end_time)
-    end_upper = end + timedelta(minutes=1) if end.second == 0 and end.microsecond == 0 else end
     assert client.calls
     for sql, params in client.calls:
         assert "FROM request_facts" in sql
@@ -409,7 +408,7 @@ def test_unfiltered_subminute_windows_use_scoped_facts(start_time: str, end_time
         assert "high_scale_batch_publications FINAL" in sql
         assert params["service_id"] == "svc"
         assert params["start"] == start
-        assert params["end_upper"] == end_upper
+        assert params["end_upper"] == end
     assert all(row["source"] == "fact" for row in response.section_timings if row["activity"] != "overhead")
 
 

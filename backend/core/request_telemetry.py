@@ -15,7 +15,8 @@ Design constraints:
   the process. Set ``OTEL_EXPORTER=console`` to install ConsoleSpan /
   ConsoleMetric exporters (loud; useful for local dev), or
   ``OTEL_EXPORTER=otlp`` to export over OTLP/HTTP — endpoints come from the
-  standard ``OTEL_EXPORTER_OTLP_{METRICS,TRACES}_ENDPOINT`` env vars (see
+  standard ``OTEL_EXPORTER_OTLP_{METRICS,TRACES}_ENDPOINT`` env vars, both of
+  which must be explicit to avoid the SDK's localhost fallback (see
   docker-compose.observability.yml for the local Prometheus + Tempo wiring).
   Console-by-default was the v2.0 ship state and produced a ~1 MB/min
   stdout dump in prod.
@@ -106,12 +107,27 @@ def _setup_sdk() -> None:
     with _init_lock:
         if _initialised:
             return
-        _initialised = True
 
         if not _otel_enabled():
+            _initialised = True
             return
 
         exporter = _otel_exporter()
+        metrics_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "").strip()
+        traces_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "").strip()
+        if exporter == "otlp":
+            missing = [
+                name
+                for name, endpoint in (
+                    ("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", metrics_endpoint),
+                    ("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", traces_endpoint),
+                )
+                if not endpoint
+            ]
+            if missing:
+                raise ValueError(f"OTEL_EXPORTER=otlp requires explicit endpoints: {', '.join(missing)}")
+
+        _initialised = True
         # Concurrent backend/replay processes must not overwrite each other's
         # cumulative counters at the OTLP receiver. One identity per SDK, not
         # per query, batch, or tenant; Prometheus maps it to `instance`.
@@ -150,17 +166,16 @@ def _setup_sdk() -> None:
                 _logging.getLogger(__name__).warning("opentelemetry-exporter-prometheus not installed.")
         elif exporter == "otlp":
             # The OTLP/HTTP exporters resolve their targets from the standard
-            # OTEL_EXPORTER_OTLP_{METRICS,TRACES}_ENDPOINT env vars (falling
-            # back to localhost:4318) — deploy config owns the endpoints, not
-            # code. Import is deferred so the base install doesn't require
-            # the exporter package unless this mode is selected.
+            # OTEL_EXPORTER_OTLP_{METRICS,TRACES}_ENDPOINT env vars. Import is
+            # deferred so the base install doesn't require the exporter
+            # package unless this mode is selected.
             from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
             from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
-            tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+            tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=traces_endpoint)))
             meter_readers.append(
                 PeriodicExportingMetricReader(
-                    OTLPMetricExporter(),
+                    OTLPMetricExporter(endpoint=metrics_endpoint),
                     export_interval_millis=15_000,
                 )
             )

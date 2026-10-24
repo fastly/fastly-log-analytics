@@ -258,11 +258,48 @@ def test_backend_and_worker_share_duckdb_and_otel_env():
             assert env["OTEL_EXPORTER"]["value"] == exporter
             assert ("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT" in env) == (exporter == "otlp")
             assert ("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" in env) == (exporter == "otlp")
+            if exporter == "otlp":
+                assert env["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"]["value"] == (
+                    "http://prometheus:9090/api/v1/otlp/v1/metrics"
+                )
+                assert env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"]["value"] == "http://tempo:4318/v1/traces"
+
+        if exporter == "otlp":
+            service_names = {doc["metadata"]["name"] for doc in docs if doc["kind"] == "Service"}
+            assert {"prometheus", "tempo"} <= service_names
 
     backend = _env(_deployment(_render(*CELERY), "backend"))
     worker = _env(_deployment(_render(*CELERY), "worker"))
     assert "DUCKDB_POOL_MAX_SIZE" in backend
     assert "DUCKDB_POOL_MAX_SIZE" not in worker
+
+
+def test_operator_otlp_endpoints_render_for_high_scale_backend_and_worker():
+    metrics = "metrics-endpoint-from-operator"
+    traces = "traces-endpoint-from-operator"
+    docs = _render(
+        *CELERY,
+        "otel.exporter=otlp",
+        f"otel.metricsEndpoint={metrics}",
+        f"otel.tracesEndpoint={traces}",
+    )
+    for component in ("backend", "worker"):
+        env = _env(_deployment(docs, component))
+        assert env["OTEL_EXPORTER"]["value"] == "otlp"
+        assert env["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"]["value"] == metrics
+        assert env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"]["value"] == traces
+
+
+def test_otlp_exporter_requires_both_operator_destinations():
+    error = _render_error(*CELERY, "otel.exporter=otlp")
+    assert "requires an operator-provided otel.metricsEndpoint" in error
+
+    error = _render_error(
+        *CELERY,
+        "otel.exporter=otlp",
+        "otel.metricsEndpoint=metrics-endpoint-from-operator",
+    )
+    assert "requires an operator-provided otel.tracesEndpoint" in error
 
 
 def test_custom_local_hosts_appends_to_backend_hosts():

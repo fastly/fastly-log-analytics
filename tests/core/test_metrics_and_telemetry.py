@@ -1579,6 +1579,8 @@ def test_setup_sdk_otlp_installs_otlp_exporters(monkeypatch):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setenv("OTEL_ENABLED", "1")
     monkeypatch.setenv("OTEL_EXPORTER", "otlp")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "https://metrics.example.test/v1/metrics")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://traces.example.test/v1/traces")
 
     with (
         patch("opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter") as span_exporter,
@@ -1589,11 +1591,30 @@ def test_setup_sdk_otlp_installs_otlp_exporters(monkeypatch):
     ):
         request_telemetry._setup_sdk()
 
-    span_exporter.assert_called_once_with()
-    metric_exporter.assert_called_once_with()
+    span_exporter.assert_called_once_with(endpoint="https://traces.example.test/v1/traces")
+    metric_exporter.assert_called_once_with(endpoint="https://metrics.example.test/v1/metrics")
     metric_reader.assert_called_once()
     set_tracer.assert_called_once()
     set_meter.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "missing_endpoint",
+    ["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"],
+)
+@pytest.mark.usefixtures("_reset_module")
+def test_setup_sdk_otlp_requires_explicit_endpoints(monkeypatch, missing_endpoint):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("OTEL_ENABLED", "1")
+    monkeypatch.setenv("OTEL_EXPORTER", "otlp")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "https://metrics.example.test/v1/metrics")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://traces.example.test/v1/traces")
+    monkeypatch.delenv(missing_endpoint)
+
+    with pytest.raises(ValueError, match=missing_endpoint):
+        request_telemetry._setup_sdk()
+
+    assert request_telemetry._initialised is False
 
 
 @pytest.mark.usefixtures("_reset_module")

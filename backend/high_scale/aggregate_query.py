@@ -93,7 +93,8 @@ def query_clickhouse_aggregate(
     if request.start is not None and request.end is not None:
         start = request.start.astimezone(UTC)
         end = request.end.astimezone(UTC)
-        clauses.extend(["bucket_start >= {start:DateTime64(3)}", "bucket_start <= {end:DateTime64(3)}"])
+        end_operator = "<" if request.domain == "request" else "<="
+        clauses.extend(["bucket_start >= {start:DateTime64(3)}", f"bucket_start {end_operator} {{end:DateTime64(3)}}"])
         params.update({"start": start, "end": end})
 
     from backend.core.clickhouse_client import ClickHouseError
@@ -186,7 +187,8 @@ def query_clickhouse_aggregates_batch(
     if start is not None and end is not None:
         start_utc = start.astimezone(UTC)
         end_utc = end.astimezone(UTC)
-        clauses.extend(["bucket_start >= {start:DateTime64(3)}", "bucket_start <= {end:DateTime64(3)}"])
+        end_operator = "<" if domain == "request" else "<="
+        clauses.extend(["bucket_start >= {start:DateTime64(3)}", f"bucket_start {end_operator} {{end:DateTime64(3)}}"])
         params.update({"start": start_utc, "end": end_utc})
 
     from backend.core.clickhouse_client import ClickHouseError

@@ -283,7 +283,7 @@ def _time_series(
         clauses.append("bucket_start >= {start:DateTime64(3)}")
         params["start"] = start
     if end is not None:
-        clauses.append("bucket_start <= {end:DateTime64(3)}")
+        clauses.append("bucket_start < {end:DateTime64(3)}")
         params["end"] = end
     rows = service.client.execute(
         "SELECT toStartOfInterval(bucket_start, INTERVAL {bucket_seconds:UInt32} SECOND) AS chart_bucket, "
@@ -386,7 +386,7 @@ def _filtered_aggregates(
     params: dict[str, Any] = {"service_id": service.service_id, **filter_params}
 
     if start is not None and end is not None:
-        end_upper = inclusive_minute_end(end)
+        end_upper = end
         clauses.append("event_timestamp >= {start:DateTime64(3)}")
         clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
         params.update({"start": start, "end_upper": end_upper})
@@ -587,7 +587,7 @@ def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: st
         clauses = list(visible_fact_clauses("request"))
         params: dict[str, Any] = {"service_id": service.service_id}
         if start is not None and end is not None:
-            end_upper = inclusive_minute_end(end)
+            end_upper = end
             clauses.append("event_timestamp >= {start:DateTime64(3)}")
             clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
             params.update({"start": start, "end_upper": end_upper})

@@ -385,10 +385,12 @@ stack-health:
 		|| echo 'API not answering — try: make stack-logs'
 
 # Deploy-surface validation. `docker compose config -q` parses + validates the
-# multipod compose (no daemon needed); helm lint + template validate the chart
-# when helm is installed (GH runners ship it; skipped with a note otherwise).
+# production and multipod compose configurations (no daemon needed); helm lint
+# + template validate the chart when helm is installed (GH runners ship it;
+# skipped with a note otherwise).
 # Mirrors the "Deploy config validation" step in ci.yml.
 deploy-validate:
+	docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
 	docker compose -f docker-compose.multipod.yml config -q
 	docker compose -f docker-compose.multipod.yml -f docker-compose.observability.yml config -q
 	@if command -v helm >/dev/null 2>&1; then \

@@ -25,8 +25,8 @@ from backend.models.admin import (
     RollupHealResponse,
     RollupStatusResponse,
 )
+from backend.utils.service_ids import service_id_from_source
 
-from ._helpers import service_id_from_source
 from ._router import router
 
 logger = logging.getLogger(__name__)

@@ -265,6 +265,18 @@ workers:
 # (files/observability/*.yml) are static, not templated -- so only one
 # release of this chart per namespace can have observability.enabled,
 # matching docker-compose's own one-instance-per-host model.
+
+# Optional operator-provided OTLP/HTTP configuration for the backend and
+# Celery worker. Empty exporter preserves existing chart behavior: Prometheus
+# scraping by default, or the in-chart Prometheus/Tempo endpoints when
+# observability.enabled=true. To use an external OTLP receiver, set
+# exporter=otlp and provide BOTH endpoints; chart validation rejects missing
+# destinations rather than allowing the SDK's localhost fallback.
+otel:
+  exporter: ""
+  metricsEndpoint: ""
+  tracesEndpoint: ""
+
 observability:
   enabled: false
   prometheus:

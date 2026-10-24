@@ -8,6 +8,14 @@ Template-time coherence gates for the deployment topology.
 {{- if not (has $mode (list "standard" "high_scale")) -}}
 {{- fail (printf "config.deploymentMode must be \"standard\" or \"high_scale\"; got %q." $mode) -}}
 {{- end -}}
+{{- $otelExporter := .Values.otel.exporter | default "" -}}
+{{- if and $otelExporter (not (has $otelExporter (list "none" "prometheus" "otlp"))) -}}
+{{- fail "otel.exporter must be empty (chart default), \"none\", \"prometheus\", or \"otlp\"; console export is not allowed in deployment." -}}
+{{- end -}}
+{{- if eq $otelExporter "otlp" -}}
+{{- $metricsEndpoint := required "otel.exporter=otlp requires an operator-provided otel.metricsEndpoint." .Values.otel.metricsEndpoint -}}
+{{- $tracesEndpoint := required "otel.exporter=otlp requires an operator-provided otel.tracesEndpoint." .Values.otel.tracesEndpoint -}}
+{{- end -}}
 {{- if not (has (.Values.config.sseBackplane | default "") (list "local" "valkey")) -}}
 {{- fail (printf "config.sseBackplane must be \"local\" or \"valkey\"; got %q." (.Values.config.sseBackplane | default "")) -}}
 {{- end -}}
