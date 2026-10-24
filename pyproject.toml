@@ -68,6 +68,7 @@ dependencies = [
     "starlette-compress>=1.7",
     "sse-starlette>=2.1",
     "cachetools>=6.2",
+    "filelock>=3.16",
     # v2.0 Phase 1: OpenTelemetry + structlog replace the four fragmented
     # custom telemetry surfaces. Phase
     # ships with the console exporter only; adding Jaeger/Tempo/etc. is a
