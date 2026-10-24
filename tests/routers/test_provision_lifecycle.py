@@ -21,26 +21,11 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from backend import config as svcconfig
 from backend.main import app
 from tests._helpers.sse import parse_sse_events as _parse_sse_events
-
-
-@pytest.fixture
-def isolated_configs_dir(tmp_path, monkeypatch):
-    """Point svcconfig at a tmp dir so create/teardown don't touch real configs/.
-
-    ``CONFIGS_DIR`` is a ``pathlib.Path`` (svcconfig calls ``.mkdir()`` on it),
-    not a ``str``.
-    """
-    cfg_dir = tmp_path / "configs"
-    cfg_dir.mkdir(exist_ok=True)
-    monkeypatch.setattr(svcconfig, "CONFIGS_DIR", cfg_dir)
-    return cfg_dir
-
 
 # ── Teardown ──────────────────────────────────────────────────────────────────
 

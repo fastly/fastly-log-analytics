@@ -16,11 +16,36 @@ class _StubSource(dict):
         base: dict[str, Any] = {
             "name": service_id,
             "service_id": service_id,
+            "service_name": service_id,
+            "logging_service_id": f"log-{service_id}",
             "bucket": "test-fos-bucket",
             "access_level": access_level,
+            "endpoint": "https://s3.example.com",
+            "access_key_id": "test-key",
+            "secret_access_key": "test-secret",
+            "region": "us-east-1",
         }
         base.update(overrides)
         super().__init__(base)
+
+
+@pytest.fixture(autouse=True)
+def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure ``FLA_DEV_NO_CRONS`` is unset across cron suites by default."""
+    monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
+
+
+@pytest.fixture
+def stub_source(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Make ``get_source_for_service`` return a stable dict for any service id."""
+    src: dict[str, Any] = {
+        "name": "fos-test-svc",
+        "service_id": "svc-1",
+        "bucket": "fos-test-bkt",
+        "access_level": "read_write",
+    }
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src)
+    return src
 
 
 def make_cron_source(tmp_path: Path, service_id: str = "svc-expire-contract", **overrides: Any) -> dict[str, Any]:

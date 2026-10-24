@@ -24,18 +24,6 @@ from tests.cron.conftest import make_cron_source as _source
 from tests.cron.conftest import patch_maintenance_config as _maintenance_config
 
 
-@pytest.fixture(autouse=True)
-def clean_env(monkeypatch):
-    monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
-
-
-@pytest.fixture
-def stub_source(monkeypatch) -> dict:
-    src = {"name": "fos-test-svc", "service_id": "svc-1", "bucket": "fos-test-bkt"}
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src)
-    return src
-
-
 @pytest.fixture
 def stub_cron_log(monkeypatch) -> dict[str, MagicMock]:
     """``start_cron_run`` returns a stable run_id; ``log_cron_run`` is

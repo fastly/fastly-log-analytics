@@ -162,3 +162,16 @@ def configure_registry(monkeypatch, tmp_path, *, enabled: bool = True, allowed_h
     monkeypatch.setenv("OAUTH_GOOGLE_CLIENT_ID", CLIENT_ID)
     monkeypatch.setenv("OAUTH_GOOGLE_CLIENT_SECRET", CLIENT_SECRET)
     registry.reset_cache_for_tests()
+
+
+def make_remote_access_app(*routers):
+    """Build a minimal FastAPI app with RemoteAccessMiddleware and the given routers."""
+    from fastapi import FastAPI
+
+    from backend.utils.remote_access import RemoteAccessMiddleware
+
+    app = FastAPI()
+    app.add_middleware(RemoteAccessMiddleware)
+    for r in routers:
+        app.include_router(r)
+    return app

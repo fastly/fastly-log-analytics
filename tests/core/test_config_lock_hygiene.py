@@ -150,19 +150,17 @@ def test_update_status_does_not_clobber_a_concurrent_writer():
     assert final["marker"] == "kept" and final["status"]["y"] == 2
 
 
-def test_delete_config_takes_the_lock(monkeypatch):
+def test_snapshot_config_takes_the_lock(monkeypatch):
     monkeypatch.setattr(svcconfig, "_LOCK_TIMEOUT_S", 0.3)
     holder = os.open(svcconfig.CONFIGS_DIR / f".{SID}.lock", os.O_CREAT | os.O_RDWR)
     fcntl.flock(holder, fcntl.LOCK_EX)
     try:
         with pytest.raises(svcconfig.ConfigLockTimeout):
-            svcconfig.delete_config(SID)
-        assert svcconfig.config_path(SID).exists()
+            svcconfig.snapshot_config(SID)
     finally:
         fcntl.flock(holder, fcntl.LOCK_UN)
         os.close(holder)
-    svcconfig.delete_config(SID)
-    assert not svcconfig.config_path(SID).exists()
+    assert svcconfig.snapshot_config(SID) is not None
 
 
 def test_transient_read_failure_aborts_the_save_instead_of_minting_a_new_salt(monkeypatch):

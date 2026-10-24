@@ -23,17 +23,8 @@ from backend.main import app
 pytestmark = pytest.mark.security_regression
 
 
-@pytest.fixture
-def isolated_configs_dir(tmp_path, monkeypatch):
-    cfg_dir = tmp_path / "configs"
-    cfg_dir.mkdir(exist_ok=True)
-    monkeypatch.setattr(svcconfig, "CONFIGS_DIR", cfg_dir)
-    monkeypatch.setattr(svcconfig, "DATA_DIR", tmp_path / "data")
-    (tmp_path / "data").mkdir(exist_ok=True)
-    return cfg_dir
-
-
 def _seed_cfg(sid: str) -> None:
+
     svcconfig.save_config(
         sid,
         {

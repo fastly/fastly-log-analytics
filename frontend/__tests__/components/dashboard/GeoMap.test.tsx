@@ -43,20 +43,8 @@ vi.mock('next/dynamic', () => ({
   },
 }))
 
-// useActiveLogFields chains useBootstrap + useLogFieldsCatalog (both react-query),
-// which would need a QueryClientProvider. Mock it instead — GeoMap's contract
-// here is "show the catalog/'Requires Geolocation' hint when `country` is NOT in
-// the active log format, and a neutral 'No country data in this time range.' when
-// it IS". Default to no active fields so the existing not-enabled assertions
-// exercise the hint path; the neutral-branch test adds 'country' to `activeFields`.
 const { activeFields } = vi.hoisted(() => ({ activeFields: new Set<string>() }))
-vi.mock('@/hooks/useActiveLogFields', () => ({
-  useActiveLogFields: () => ({
-    ready: true,
-    isFieldActive: (id: string) => activeFields.has(id),
-    isGroupActive: () => false,
-  }),
-}))
+vi.mock('@/hooks/useActiveLogFields', async () => (await import('../../helpers/page-smoke')).activeLogFieldsSetModuleMock(activeFields))
 
 vi.mock('@/components/Map/ChoroplethMap', () => ({
   ChoroplethMap: ({ data, onCountryClick }: { data: Array<{ country?: string; name?: string }>; onCountryClick: (c: string) => void }) => (

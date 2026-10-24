@@ -18,17 +18,6 @@ from backend.cron.jobs import compaction
 
 
 @pytest.fixture
-def stub_source(monkeypatch) -> dict:
-    """Make ``get_source_for_service`` return a stable dict for any service id."""
-    src = {"name": "fos-test-svc", "service_id": "svc-1", "bucket": "fos-test-bkt"}
-    monkeypatch.setattr(
-        "backend.core.duckdb.get_source_for_service",
-        lambda sid: src,
-    )
-    return src
-
-
-@pytest.fixture
 def stub_progress(monkeypatch) -> dict[str, MagicMock]:
     """Replace cron_progress + run-id helpers with mocks the test can inspect."""
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=42))

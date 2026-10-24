@@ -22,7 +22,12 @@ from __future__ import annotations
 
 import re
 
-from backend.core.log_fields import check_log_line_budget, estimate_log_line_bytes, generate_log_format
+from backend.core.log_fields import (
+    check_log_line_budget,
+    estimate_log_line_bytes,
+    generate_log_format,
+    get_catalog_for_api,
+)
 from backend.provision.cmcd_fields import get_cmcd_fields
 from backend.provision.session_scoring_orchestrator import _SCORING_CUSTOM_FIELDS
 
@@ -91,3 +96,21 @@ def test_widened_budgets_stay_inside_the_line_limit():
     """The cap exists so a client-supplied value can't drop the log line."""
     assert check_log_line_budget(_CFG) is None, "widening sid/cid pushed the line over budget"
     assert estimate_log_line_bytes(_CFG) < 16384
+
+
+def test_catalog_enrichment():
+    """Verify that the catalog API output includes UI metadata like formatter and unit."""
+    catalog = get_catalog_for_api()
+
+    resp_bytes = next(f for f in catalog if f["id"] == "resp_bytes")
+    assert resp_bytes.get("formatter") == "bytes"
+
+    country = next(f for f in catalog if f["id"] == "country")
+    assert country.get("formatter") == "country"
+
+    elapsed = next(f for f in catalog if f["id"] == "elapsed")
+    assert elapsed.get("unit") == "µs"
+
+    tls = next(f for f in catalog if f["id"] == "tls")
+    assert tls.get("formatter") == "number"
+    assert tls.get("precision") == 1

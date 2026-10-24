@@ -98,8 +98,6 @@ class HighScaleControlPlane(Protocol):
         expected_owner_epoch: int,
     ) -> Any: ...
 
-    def acknowledge_source(self, service_id: str, object_key: str, *, manifest_id: str) -> None: ...
-
     def claim_sources_batch(
         self,
         service_id: str,

@@ -7,7 +7,6 @@ only survived through the save-time re-adoption guard.
 
 from __future__ import annotations
 
-import json
 from unittest.mock import patch
 
 import pytest
@@ -15,12 +14,10 @@ import pytest
 from backend import config as svcconfig
 from backend.provision import fastly_api
 from backend.provision.declarative.reconciler import ReconciliationResult
+from tests._helpers.config_fakes import config_lock_held as _lock_held
+from tests._helpers.config_fakes import read_persisted_config as _persisted
 
 SID = "logsvc1"
-
-
-def _lock_held() -> bool:
-    return bool(getattr(svcconfig._lock_state, "held", {}).get(SID))
 
 
 def _drain(gen):
@@ -45,11 +42,8 @@ def fastly_stubs():
         yield rl, reconcile
 
 
-def _persisted() -> dict:
-    return json.loads(svcconfig.config_path(SID).read_text())
-
-
 def test_persists_requested_fields_and_keeps_everything_else(stored, fastly_stubs):
+
     salt = stored["rum"]["cid_salt"]
 
     events = _drain(

@@ -29,14 +29,8 @@ def stub_load_config(monkeypatch):
     return {"load": load, "cfg": cfg}
 
 
-@pytest.fixture
-def stub_source(monkeypatch) -> dict:
-    src = {"name": "fos-test-svc", "service_id": "svc-1", "bucket": "fos-test-bkt", "access_level": "read_write"}
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src)
-    return src
-
-
 def test_returns_when_config_missing(monkeypatch):
+
     monkeypatch.setattr("backend.config.load_config", MagicMock(return_value=None))
     get_src = MagicMock()
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", get_src)

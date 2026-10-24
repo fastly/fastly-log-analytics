@@ -15,17 +15,11 @@ from fastapi.testclient import TestClient
 
 from backend.core import share_db
 from backend.core.oauth import registry
+from backend.routers import share_admin, share_auth
 from backend.utils import tunnel
-from backend.utils.remote_access import RemoteAccessMiddleware
+from tests.remote_access import oauth_helpers as H
 
 _REMOTE_HEADERS = {"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"}
-
-
-@pytest.fixture(autouse=True)
-def _reset_registry_cache():
-    registry.reset_cache_for_tests()
-    yield
-    registry.reset_cache_for_tests()
 
 
 def _configure_provider(
@@ -59,21 +53,11 @@ def _configure_provider(
 
 
 def _auth_app() -> FastAPI:
-    from backend.routers import share_auth
-
-    app = FastAPI()
-    app.add_middleware(RemoteAccessMiddleware)
-    app.include_router(share_auth.router)
-    return app
+    return H.make_remote_access_app(share_auth.router)
 
 
 def _admin_app() -> FastAPI:
-    from backend.routers import share_admin
-
-    app = FastAPI()
-    app.add_middleware(RemoteAccessMiddleware)
-    app.include_router(share_admin.router)
-    return app
+    return H.make_remote_access_app(share_admin.router)
 
 
 # ── Registry ────────────────────────────────────────────────────────────────

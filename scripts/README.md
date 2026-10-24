@@ -26,17 +26,13 @@ from env vars or config, never hard-coded infra.
 | Script | Purpose |
 |---|---|
 | `backup_service_configs.sh` | Off-VM backup of service configs to object storage (DR; ADR-13). Writes a freshness marker the admin health card reads. |
-| `backfill_rollups.py` | Rebuild the hourly Top-N rollups for a service (`<service_id>`). |
 | `analyze_web_vitals.py` | Report over the RUM Web Vitals JSONL sink (`--out`, `--purge`). |
-| `cleanup_orphan_raw_logs.py` | Manual janitor — delete raw `.gz` already recorded as ingested. Backstop to the automatic reconcile. |
 | `usage_compare.py` | Sanity check: local usage accounting vs Fastly `/stats` API (flags classifier drift / mid-flight backfill). |
 
 ## Session scoring (`scoring/`)
 
 | Script | Purpose |
 |---|---|
-| `scoring/extract_traces.py` | Extract session traces from local data → training input. |
-| `scoring/train.py` | Train the scoring matrix from traces (+ optional labels) → `matrix.json`. |
 | `scoring/deploy_wasm.sh` | Build + publish the scorer Wasm to the edge (also `make scorer-package`). |
 
 ## Dev & perf harnesses (`dev/` + load tooling)

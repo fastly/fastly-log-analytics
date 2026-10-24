@@ -31,7 +31,6 @@ TASK_MAP = {
     "rum_discovery": "rum_discovery",
     "ledger_rum_sweep": "ledger_rum_sweep",
 }
-_TASK_MAP = TASK_MAP
 
 
 def build_cron_schedule_payload(source: dict) -> dict:
@@ -71,7 +70,7 @@ def build_cron_schedule_payload(source: dict) -> dict:
         if job_id.startswith("initial_sync"):
             continue
         task_name = job_id[: -len(f"_{service_id}")]
-        db_task = _TASK_MAP.get(task_name)
+        db_task = TASK_MAP.get(task_name)
         if db_task is None:
             continue
         from backend.utils.date_utils import iso_z
@@ -80,7 +79,7 @@ def build_cron_schedule_payload(source: dict) -> dict:
         schedules.append({"task": db_task, "next_run_time": next_run, **last_runs.get(db_task, {})})
     existing = {s["task"] for s in schedules}
     for task, info in last_runs.items():
-        if task not in existing and task in _TASK_MAP.values():
+        if task not in existing and task in TASK_MAP.values():
             schedules.append({"task": task, "next_run_time": None, **info})
 
     # Mark the alerts tile as "No alerts configured" when no alerts exist.

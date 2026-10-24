@@ -2,47 +2,81 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from backend.high_scale.postgres_control import PostgresControlPlane
+
+
+def _mock_control(owner_epoch: int = 1) -> tuple[PostgresControlPlane, MagicMock]:
+    pool = MagicMock()
+    connection = MagicMock()
+    pool.connection.return_value.__enter__.return_value = connection
+    connection.transaction.return_value.__enter__.return_value = None
+    connection.execute.return_value.fetchone.return_value = (
+        "svc1",
+        owner_epoch,
+        "high_scale",
+        None,
+        "",
+        False,
+        False,
+        False,
+    )
+    return PostgresControlPlane(pool=pool), connection
 
 
 def test_partitioned_cursors_advance_independently() -> None:
     """Verifies that cursors for different key-range partitions advance independently under one service."""
-    pool = MagicMock()
-    control = PostgresControlPlane(pool=pool)
-
-    # Mock cursor store dictionary to simulate DB state
+    control, connection = _mock_control(owner_epoch=1)
     cursors: dict[tuple[str, str, str], str] = {}
 
-    def mock_get_cursor(service_id: str, domain: str, partition_id: str = "default") -> str:
-        return cursors.get((service_id, domain, partition_id), "")
+    def record_execute(sql: str, params: tuple[object, ...] = ()) -> MagicMock:
+        if "INSERT INTO high_scale_partition_cursors" in sql:
+            svc, dom, part, cur = params  # type: ignore[misc]
+            cursors[(str(svc), str(dom), str(part))] = str(cur)
+        cursor = MagicMock()
+        cursor.fetchone.return_value = ("svc1", 1, "high_scale", None, "", False, False, False)
+        return cursor
 
-    def mock_advance_cursor(
-        service_id: str, domain: str, cursor: str, expected_owner_epoch: int, partition_id: str = "default"
-    ) -> None:
-        if expected_owner_epoch != 1:
-            raise ValueError("stale owner epoch")
-        cursors[(service_id, domain, partition_id)] = cursor
+    connection.execute.side_effect = record_execute
 
-    control.get_partition_source_cursor = mock_get_cursor  # type: ignore[assignment]
-    control.advance_partition_source_cursor = mock_advance_cursor  # type: ignore[assignment]
+    control.acknowledge_sources_batch(
+        "svc1",
+        ["raw/00/a.gz"],
+        manifest_id="m1",
+        expected_owner_epoch=1,
+        next_cursor="cursor_a",
+        domain="request",
+        partition_id="00-09",
+    )
+    control.acknowledge_sources_batch(
+        "svc1",
+        ["raw/10/b.gz"],
+        manifest_id="m2",
+        expected_owner_epoch=1,
+        next_cursor="cursor_b",
+        domain="request",
+        partition_id="10-19",
+    )
 
-    # Advance partition '00-09'
-    control.advance_partition_source_cursor("svc1", "request", "cursor_a", expected_owner_epoch=1, partition_id="00-09")
-    # Advance partition '10-19'
-    control.advance_partition_source_cursor("svc1", "request", "cursor_b", expected_owner_epoch=1, partition_id="10-19")
-
-    assert control.get_partition_source_cursor("svc1", "request", partition_id="00-09") == "cursor_a"
-    assert control.get_partition_source_cursor("svc1", "request", partition_id="10-19") == "cursor_b"
-    assert control.get_partition_source_cursor("svc1", "request", partition_id="20-29") == ""
+    assert cursors.get(("svc1", "request", "00-09")) == "cursor_a"
+    assert cursors.get(("svc1", "request", "10-19")) == "cursor_b"
+    assert cursors.get(("svc1", "request", "20-29"), "") == ""
 
 
 def test_stale_epoch_fences_all_partition_cursors() -> None:
-    pool = MagicMock()
-    control = PostgresControlPlane(pool=pool)
+    control, _ = _mock_control(owner_epoch=2)
 
-    # Contract requires real method on PostgresControlPlane
-    assert hasattr(control, "advance_partition_source_cursor"), "Missing advance_partition_source_cursor"
-    assert hasattr(control, "get_partition_source_cursor"), "Missing get_partition_source_cursor"
+    with pytest.raises(ValueError, match="owner epoch"):
+        control.acknowledge_sources_batch(
+            "svc1",
+            ["raw/00/a.gz"],
+            manifest_id="m1",
+            expected_owner_epoch=1,
+            next_cursor="cursor_a",
+            domain="request",
+            partition_id="00-09",
+        )
 
 
 def test_partition_failure_holds_only_its_own_cursor() -> None:

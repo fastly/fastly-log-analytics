@@ -436,3 +436,34 @@ def test_get_process_context_with_fallback_falls_back_to_stack():
     with _t.process_context_scope("ctx-via-mirror"):
         _t._PROCESS_CONTEXT.set(None)
         assert _t.get_process_context_with_fallback() == "ctx-via-mirror"
+
+
+# ── debug_envelope ───────────────────────────────────────────────────────────
+
+
+def test_ungated_always_injects_envelope_in_place(monkeypatch):
+    monkeypatch.delenv("DEBUG_RESPONSES", raising=False)
+    res = {"ok": True}
+    out = _t.debug_envelope(res, gated=False)
+    assert out is res
+    assert set(res) == {"ok", "_debug_queries", "_debug_sqlite", "_debug_calls", "_is_cached"}
+    assert res["_is_cached"] is False
+
+
+def test_gated_strips_debug_keys_when_debug_responses_off(monkeypatch):
+    monkeypatch.delenv("DEBUG_RESPONSES", raising=False)
+    src = {"a": 1, "_debug_queries": [1], "_debug_calls": [2], "_debug_sqlite": [3]}
+    out = _t.debug_envelope(src, gated=True, is_cached=True)
+    assert out == {"a": 1, "_debug_sqlite": [3], "_is_cached": True}
+    assert "_is_cached" not in src
+
+
+def test_gated_keeps_debug_keys_when_debug_responses_on(monkeypatch):
+    monkeypatch.setenv("DEBUG_RESPONSES", "1")
+    out = _t.debug_envelope({"a": 1, "_debug_queries": [1], "_debug_calls": [2]}, gated=True)
+    assert out == {"a": 1, "_debug_queries": [1], "_debug_calls": [2], "_is_cached": False}
+
+
+def test_gated_never_injects_collectors(monkeypatch):
+    monkeypatch.setenv("DEBUG_RESPONSES", "1")
+    assert _t.debug_envelope({"a": 1}, gated=True) == {"a": 1, "_is_cached": False}

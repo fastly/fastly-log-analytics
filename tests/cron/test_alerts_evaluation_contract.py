@@ -30,12 +30,8 @@ from backend.repositories import alerts as alert_repo
 # ── Fixtures & Test Helpers ───────────────────────────────────────────────────
 
 
-@pytest.fixture(autouse=True)
-def clean_env(monkeypatch):
-    monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
-
-
 def _sample_source(service_id: str = "svc-alerts-contract") -> dict:
+
     return {
         "name": service_id,
         "service_id": service_id,

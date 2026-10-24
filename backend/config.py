@@ -213,7 +213,7 @@ _ensured_dirs: set[Path] = set()
 # telemetry_middleware runs list_service_ids() on the event loop for every
 # request via get_active_service_id(); under shared-host disk contention that
 # glob stalled the loop for seconds (batch-drained health timeouts). Also
-# explicitly invalidated in save_config/delete_config as a backstop for
+# explicitly invalidated in save_config as a backstop for
 # same-microsecond mtime_ns collisions.
 _service_ids_cache: tuple[Path, int, list[str]] | None = None
 _service_ids_cache_lock = threading.Lock()
@@ -363,7 +363,6 @@ class CidSaltReadError(RuntimeError):
 
 _LOCK_TIMEOUT_S = 5.0
 _LOCK_BACKOFF_START_S = 0.005
-_LOCK_BACKOFF_MAX_S = 0.1
 
 _lock_state = threading.local()
 _lock_degraded = False
@@ -520,41 +519,12 @@ def mutate_config(
 
 
 def snapshot_config(service_id: str) -> str | None:
-    """Raw persisted config text (``None`` when absent), for a later :func:`restore_config`."""
+    """Raw persisted config text (``None`` when absent)."""
     with config_lock(service_id):
         try:
             return config_path(service_id).read_text()
         except FileNotFoundError:
             return None
-
-
-def restore_config(service_id: str, snapshot: str | None) -> None:
-    """Put back what :func:`snapshot_config` captured (rollback of a multi-step change).
-
-    The cid salt is exempt from the rollback: the currently persisted salt is re-adopted so a
-    rotation or first-mint that happened after the snapshot is never undone.
-    """
-    global _cdn_service_id_map
-    path = config_path(service_id)
-    with config_lock(service_id):
-        if snapshot is None:
-            path.unlink(missing_ok=True)
-        else:
-            cfg = json.loads(snapshot)
-            disk_salt = _disk_cid_salt(service_id)
-            rum = cfg.get("rum")
-            if disk_salt and not (isinstance(rum, dict) and rum.get("cid_salt") == disk_salt):
-                if not isinstance(rum, dict):
-                    rum = {}
-                    cfg["rum"] = rum
-                if rum.get("cid_salt"):
-                    logger.warning("cid_salt_overwrite_blocked service_id=%s", service_id)
-                rum["cid_salt"] = disk_salt
-            _atomic_write_json(path, cfg)
-    with _config_cache_lock:
-        _config_cache.pop(service_id, None)
-    _cdn_service_id_map = None
-    _invalidate_service_ids_cache()
 
 
 def update_status(service_id: str, status: dict):
@@ -575,18 +545,6 @@ def get_status(service_id: str) -> dict:
     if not cfg:
         return {}
     return cfg.get("status", {})
-
-
-def delete_config(service_id: str):
-    """Remove a service config file."""
-    global _cdn_service_id_map
-    path = config_path(service_id)
-    with config_lock(service_id):
-        path.unlink(missing_ok=True)
-    _cdn_service_id_map = None
-    with _config_cache_lock:
-        _config_cache.pop(service_id, None)
-    _invalidate_service_ids_cache()
 
 
 _cdn_service_id_map: dict[str, str] | None = None

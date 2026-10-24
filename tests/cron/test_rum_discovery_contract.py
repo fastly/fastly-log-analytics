@@ -108,13 +108,9 @@ FAKE_SRC_HIGH_SCALE = {
 }
 
 
-@pytest.fixture(autouse=True)
-def clean_env(monkeypatch):
-    monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
-
-
 # =============================================================================
 # 1. Dual Architecture & Mode Routing Tests
+
 # =============================================================================
 
 

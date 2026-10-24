@@ -13,17 +13,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.core import share_db
+from backend.routers import share_auth
 from backend.utils import tunnel
-from backend.utils.remote_access import RemoteAccessMiddleware
+from tests.remote_access import oauth_helpers as H
 
 
 def _app() -> FastAPI:
-    from backend.routers import share_auth
-
-    app = FastAPI()
-    app.add_middleware(RemoteAccessMiddleware)
-    app.include_router(share_auth.router)
-    return app
+    return H.make_remote_access_app(share_auth.router)
 
 
 @pytest.fixture

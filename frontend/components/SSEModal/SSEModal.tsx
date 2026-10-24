@@ -14,7 +14,12 @@ import {
 import { Button } from '@/components/ui/button'
 import { useSSE, SSELine, SSEStatus } from '@/hooks/useSSE'
 import { SSEProgressView } from './SSEProgressView'
-import { panelDialogHeaderSolid } from '@/lib/panel-dialog'
+import { cn } from '@/lib/utils'
+import {
+  panelDialogContent,
+  panelDialogFooter,
+  panelDialogHeaderSolid,
+} from '@/lib/panel-dialog'
 
 interface SSEExecutionSectionProps {
   title: string
@@ -86,6 +91,79 @@ export function SSEDialogFooter({
         </Button>
       )}
     </>
+  )
+}
+
+export function makeSSECloseHandler({
+  status,
+  onOpenChange,
+  onComplete,
+}: {
+  status: SSEStatus
+  onOpenChange: (open: boolean) => void
+  onComplete?: () => void
+}) {
+  return (isOpen: boolean) => {
+    if (status === 'streaming') return
+    onOpenChange(isOpen)
+    if (!isOpen && status === 'done') {
+      if (onComplete) onComplete()
+      window.location.reload()
+    }
+  }
+}
+
+export function SSEActionDialogShell({
+  open,
+  onOpenChange,
+  onComplete,
+  status,
+  onStop,
+  isExecuting,
+  maxWidthClassName = 'sm:max-w-xl',
+  titleClassName = 'text-destructive',
+  title,
+  executionSection,
+  confirmButton,
+  doneLabel = 'Close',
+  idleOrErrorLabel = 'Cancel',
+  children,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onComplete?: () => void
+  status: SSEStatus
+  onStop?: () => void
+  isExecuting: boolean
+  maxWidthClassName?: string
+  titleClassName?: string
+  title: React.ReactNode
+  executionSection: React.ReactNode
+  confirmButton: React.ReactNode
+  doneLabel?: string
+  idleOrErrorLabel?: string
+  children: React.ReactNode
+}) {
+  const handleClose = makeSSECloseHandler({ status, onOpenChange, onComplete })
+  return (
+    <Dialog open={open} onOpenChange={handleClose}>
+      <DialogContent className={cn(maxWidthClassName, panelDialogContent)} showCloseButton={status !== 'streaming'}>
+        <DialogHeader className={panelDialogHeaderSolid}>
+          <DialogTitle className={cn('flex items-center gap-2 text-xl font-bold', titleClassName)}>{title}</DialogTitle>
+        </DialogHeader>
+        <div className="flex-1 overflow-y-auto min-h-0">{isExecuting ? executionSection : children}</div>
+        <DialogFooter className={panelDialogFooter}>
+          {!isExecuting ? (
+            <>
+              <Button variant="ghost" onClick={() => onOpenChange(false)} className="h-10 px-6 text-xs">Cancel</Button>
+              {confirmButton}
+            </>
+          ) : (
+            <SSEDialogFooter status={status} onClose={() => handleClose(false)} onStop={onStop} doneLabel={doneLabel} idleOrErrorLabel={idleOrErrorLabel} />
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 

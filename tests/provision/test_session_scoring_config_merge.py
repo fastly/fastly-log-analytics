@@ -9,7 +9,6 @@ across a Fastly call.
 
 from __future__ import annotations
 
-import json
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
@@ -17,8 +16,10 @@ import pytest
 
 from backend import config as svcconfig
 from backend.provision import session_scoring_orchestrator as sso
+from tests._helpers.config_fakes import config_lock_held as _lock_held
+from tests._helpers.config_fakes import read_persisted_config as _persisted
 
-SID = "TestLogSvc456"
+SID = "logsvc1"
 TOKEN = "FAKE_TOKEN"
 USER_FIELD = {"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True}
 
@@ -33,15 +34,8 @@ _META = {
 }
 
 
-def _lock_held() -> bool:
-    return bool(getattr(svcconfig._lock_state, "held", {}).get(SID))
-
-
-def _persisted() -> dict:
-    return json.loads(svcconfig.config_path(SID).read_text())
-
-
 def _concurrent_write(**top_level) -> None:
+
     assert not _lock_held(), "config lock held across a Fastly call"
 
     def _apply(c: dict) -> None:

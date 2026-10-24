@@ -41,23 +41,13 @@ from backend.cron.scheduler import Scheduler
 from backend.deps import get_source
 from backend.main import app
 from tests._helpers.config_fakes import fake_mutate_config
+from tests.cron.conftest import _StubSource
 
 # ── Fixtures & Helpers ────────────────────────────────────────────────────────
 
 
 def _fake_src(service_id: str = "svc-meta-contract", access_level: str = "read_only") -> dict:
-    return {
-        "name": service_id,
-        "service_id": service_id,
-        "service_name": service_id,
-        "logging_service_id": f"log-{service_id}",
-        "bucket": "test-fos-bucket",
-        "access_level": access_level,
-        "endpoint": "https://s3.example.com",
-        "access_key_id": "test-key",
-        "secret_access_key": "test-secret",
-        "region": "us-east-1",
-    }
+    return _StubSource(service_id=service_id, access_level=access_level)
 
 
 def _fake_cfg(

@@ -15,71 +15,18 @@ import type { ComponentProps } from 'react'
 import React from 'react'
 import { partial } from '../../helpers/partial'
 import type { PlotlyChart } from '@/components/PlotlyChart'
+import type { InteractiveDataTableMockProps } from '../../helpers/page-smoke'
 
-type PlotlyMockProps = ComponentProps<typeof PlotlyChart>
-const plotlyMock = vi.fn<(props: PlotlyMockProps) => React.ReactElement>(() => <div data-testid="plotly-chart" />)
-type TableRow = { name?: string; bot_name?: string; fingerprint?: string }
-type ColumnVisibilityMockProps = {
-  columns: Array<{ id: string; label: string }>
-  onChange?: (id: string, visible: boolean) => void
-}
-type FilterValueCellMockProps = { display?: React.ReactNode; filters?: Array<{ value?: React.ReactNode }> }
-vi.mock('@/components/PlotlyChart', () => ({
-  PlotlyChart: (props: PlotlyMockProps) => plotlyMock(props),
+const { plotlyMock, dataTableMock, activeFields } = vi.hoisted(() => ({
+  plotlyMock: vi.fn<(props: ComponentProps<typeof PlotlyChart>) => void>(),
+  dataTableMock: vi.fn<(props: InteractiveDataTableMockProps) => void>(),
+  activeFields: new Set<string>(),
 }))
-
-type DataTableMockProps = { data?: TableRow[]; emptyMessage?: string }
-const dataTableMock = vi.fn<(props: DataTableMockProps) => null>(() => null)
-const columnVisibilityMock = vi.fn<(props: ColumnVisibilityMockProps) => null>(() => null)
-vi.mock('@/components/DataTable', () => ({
-  DataTable: (props: DataTableMockProps) => {
-    dataTableMock(props)
-    return (
-      <div data-testid={`data-table-${props.data?.length ?? 0}`}>
-        {props.data?.length === 0
-          ? <span data-testid="empty">{props.emptyMessage}</span>
-          : props.data?.map((row) => (
-              <div key={row.name || row.bot_name || row.fingerprint} data-testid="row">{row.name || row.bot_name || row.fingerprint}</div>
-            ))}
-      </div>
-    )
-  },
-  ColumnVisibilityDropdown: (props: ColumnVisibilityMockProps) => {
-    columnVisibilityMock(props)
-    return (
-      <button
-        type="button"
-        data-testid="col-vis"
-        onClick={() => props.onChange?.(props.columns[0]?.id, false)}
-      >
-        cols
-      </button>
-    )
-  },
-}))
-
-vi.mock('@/components/FilterValueCell', () => ({
-  FilterValueCell: (props: FilterValueCellMockProps) => <span>{props.display ?? props.filters?.[0]?.value}</span>,
-}))
-
-vi.mock('@/lib/date', () => ({
-  formatDate: (t: string) => t,
-}))
-
-// useActiveLogFields chains useBootstrap + useLogFieldsCatalog (both react-query),
-// which would need a QueryClientProvider. Mock it instead — for BotsSection only
-// the Top TLS Fingerprints table's empty copy is field-gated (ja3/ja4): inactive
-// → "Requires Security: TLS Fingerprinting (Group H) …", active → "No TLS
-// fingerprints in this time range." Default to no active fields so the
-// not-enabled path is exercised; the neutral-branch test adds 'ja3'.
-const { activeFields } = vi.hoisted(() => ({ activeFields: new Set<string>() }))
-vi.mock('@/hooks/useActiveLogFields', () => ({
-  useActiveLogFields: () => ({
-    ready: true,
-    isFieldActive: (id: string) => activeFields.has(id),
-    isGroupActive: () => false,
-  }),
-}))
+vi.mock('@/components/PlotlyChart', async () => (await import('../../helpers/page-smoke')).plotlyChartModuleMock(plotlyMock))
+vi.mock('@/components/DataTable', async () => (await import('../../helpers/page-smoke')).interactiveDataTableModuleMock(dataTableMock))
+vi.mock('@/components/FilterValueCell', async () => (await import('../../helpers/page-smoke')).filterValueCellModuleMock())
+vi.mock('@/lib/date', () => ({ formatDate: (t: string) => t }))
+vi.mock('@/hooks/useActiveLogFields', async () => (await import('../../helpers/page-smoke')).activeLogFieldsSetModuleMock(activeFields))
 
 import { BotsSection } from '@/app/security/_sections/BotsSection'
 
@@ -113,7 +60,6 @@ describe('BotsSection', () => {
   beforeEach(() => {
     plotlyMock.mockClear()
     dataTableMock.mockClear()
-    columnVisibilityMock.mockClear()
     activeFields.clear()
   })
 

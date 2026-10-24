@@ -39,7 +39,6 @@ from __future__ import annotations
 import time
 from unittest.mock import MagicMock, patch
 
-import pytest
 from starlette.testclient import TestClient
 
 from backend.core.metadata.cron_log import CronLeaseHeldError
@@ -75,13 +74,9 @@ FAKE_SRC = {
 }
 
 
-@pytest.fixture(autouse=True)
-def clean_env(monkeypatch):
-    monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
-
-
 # -----------------------------------------------------------------------------
 # 1. Manual Trigger Endpoint Tests
+
 # -----------------------------------------------------------------------------
 
 

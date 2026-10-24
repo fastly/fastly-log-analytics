@@ -13,62 +13,17 @@ import type { ComponentProps } from 'react'
 import React from 'react'
 import { partial } from '../../helpers/partial'
 import type { PlotlyChart } from '@/components/PlotlyChart'
+import type { InteractiveDataTableMockProps } from '../../helpers/page-smoke'
 
-type PlotlyMockProps = ComponentProps<typeof PlotlyChart>
-const plotlyMock = vi.fn<(props: PlotlyMockProps) => React.ReactElement>(() => <div data-testid="plotly-chart" />)
-type TableRow = { ip?: string }
-type ColumnVisibilityMockProps = {
-  columns: Array<{ id: string; label: string }>
-  onChange?: (id: string, visible: boolean) => void
-}
-type FilterValueCellMockProps = { display?: React.ReactNode; filters?: Array<{ value?: React.ReactNode }> }
-vi.mock('@/components/PlotlyChart', () => ({
-  PlotlyChart: (props: PlotlyMockProps) => plotlyMock(props),
+const { plotlyMock, dataTableMock, activeFields } = vi.hoisted(() => ({
+  plotlyMock: vi.fn<(props: ComponentProps<typeof PlotlyChart>) => void>(),
+  dataTableMock: vi.fn<(props: InteractiveDataTableMockProps) => void>(),
+  activeFields: new Set<string>(),
 }))
-
-type DataTableMockProps = { data?: TableRow[]; emptyMessage?: string }
-const dataTableMock = vi.fn<(props: DataTableMockProps) => null>(() => null)
-vi.mock('@/components/DataTable', () => ({
-  DataTable: (props: DataTableMockProps) => {
-    dataTableMock(props)
-    return (
-      <div data-testid={`data-table-${props.data?.length ?? 0}`}>
-        {props.data?.length === 0
-          ? <span data-testid="empty">{props.emptyMessage}</span>
-          : props.data?.map((row) => (
-              <div key={row.ip} data-testid="row">{row.ip}</div>
-            ))}
-      </div>
-    )
-  },
-  ColumnVisibilityDropdown: (props: ColumnVisibilityMockProps) => (
-    <button
-      type="button"
-      data-testid="col-vis"
-      onClick={() => props.onChange?.(props.columns[0]?.id, false)}
-    >
-      cols
-    </button>
-  ),
-}))
-
-vi.mock('@/components/FilterValueCell', () => ({
-  FilterValueCell: (props: FilterValueCellMockProps) => <span>{props.display ?? props.filters?.[0]?.value}</span>,
-}))
-
-// useActiveLogFields chains useBootstrap + useLogFieldsCatalog (both react-query),
-// which would need a QueryClientProvider. Mock it instead — both cards here gate
-// their empty copy on `req_header_bytes`: inactive → "Requires Request Identity
-// (Group A) …", active → neutral "No data in this time range yet." Default to no
-// active fields so the not-enabled path is exercised; the neutral test adds the id.
-const { activeFields } = vi.hoisted(() => ({ activeFields: new Set<string>() }))
-vi.mock('@/hooks/useActiveLogFields', () => ({
-  useActiveLogFields: () => ({
-    ready: true,
-    isFieldActive: (id: string) => activeFields.has(id),
-    isGroupActive: () => false,
-  }),
-}))
+vi.mock('@/components/PlotlyChart', async () => (await import('../../helpers/page-smoke')).plotlyChartModuleMock(plotlyMock))
+vi.mock('@/components/DataTable', async () => (await import('../../helpers/page-smoke')).interactiveDataTableModuleMock(dataTableMock))
+vi.mock('@/components/FilterValueCell', async () => (await import('../../helpers/page-smoke')).filterValueCellModuleMock())
+vi.mock('@/hooks/useActiveLogFields', async () => (await import('../../helpers/page-smoke')).activeLogFieldsSetModuleMock(activeFields))
 
 import { HeaderAnomaliesSection } from '@/app/security/_sections/HeaderAnomaliesSection'
 

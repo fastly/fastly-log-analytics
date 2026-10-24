@@ -14,32 +14,15 @@ import type React from 'react'
 import type { components } from '@/types/api.generated'
 import type { PlotlyChart } from '@/components/PlotlyChart'
 
-type PlotlyProps = React.ComponentProps<typeof PlotlyChart>
 type SecurityData = components['schemas']['SecurityAggregatesResponse']
 
-const plotlyMock = vi.fn<(props: PlotlyProps) => React.ReactElement>(() => <div data-testid="plotly-chart" />)
-vi.mock('@/components/PlotlyChart', () => ({
-  PlotlyChart: (props: PlotlyProps) => plotlyMock(props),
+const { plotlyMock, activeFields } = vi.hoisted(() => ({
+  plotlyMock: vi.fn<(props: React.ComponentProps<typeof PlotlyChart>) => void>(),
+  activeFields: new Set<string>(),
 }))
-
-vi.mock('@/lib/date', () => ({
-  formatDate: (t: string) => t,
-}))
-
-// useActiveLogFields chains useBootstrap + useLogFieldsCatalog (both react-query),
-// which would need a QueryClientProvider. Mock it instead — NetworkSection's
-// contract here is "render the Requires hint when the field is inactive, a
-// neutral no-data state when it's active". Default to no active fields so the
-// "Requires Group X" assertions below exercise the not-enabled path; tests that
-// want the enabled path add ids to `activeFields`.
-const { activeFields } = vi.hoisted(() => ({ activeFields: new Set<string>() }))
-vi.mock('@/hooks/useActiveLogFields', () => ({
-  useActiveLogFields: () => ({
-    ready: true,
-    isFieldActive: (id: string) => activeFields.has(id),
-    isGroupActive: () => false,
-  }),
-}))
+vi.mock('@/components/PlotlyChart', async () => (await import('../../helpers/page-smoke')).plotlyChartModuleMock(plotlyMock))
+vi.mock('@/lib/date', () => ({ formatDate: (t: string) => t }))
+vi.mock('@/hooks/useActiveLogFields', async () => (await import('../../helpers/page-smoke')).activeLogFieldsSetModuleMock(activeFields))
 
 import { NetworkSection } from '@/app/security/_sections/NetworkSection'
 

@@ -138,19 +138,6 @@ def test_save_config_creates_configs_dir_if_missing(tmp_path):
     assert svcconfig.CONFIGS_DIR.exists()
 
 
-def test_delete_config_removes_file():
-    svcconfig.save_config("svc-del", _cfg(service_id="svc-del"))
-    assert svcconfig.load_config("svc-del") is not None
-    svcconfig.delete_config("svc-del")
-    assert svcconfig.load_config("svc-del") is None
-
-
-def test_delete_config_is_idempotent():
-    """Deleting a non-existent config must not raise — the provision
-    teardown path calls this even on partial failures."""
-    svcconfig.delete_config("never-existed")  # must not raise
-
-
 def test_load_config_returns_fresh_dict_each_call():
     """Cache returns reparsed dict on every call so callers that mutate
     the result (e.g. update_status appending to status) don't poison
@@ -338,7 +325,8 @@ def test_list_service_ids_caches_glob_until_dir_changes(monkeypatch):
     assert svcconfig.list_service_ids() == ["alpha", "beta"]
 
     # A deleted config disappears immediately.
-    svcconfig.delete_config("alpha")
+    svcconfig.config_path("alpha").unlink()
+    svcconfig._invalidate_service_ids_cache()
     assert svcconfig.list_service_ids() == ["beta"]
 
 
@@ -981,58 +969,15 @@ def test_resolve_raw_delete_after_forces_false_for_a_high_scale_shared_source():
     assert svcconfig.resolve_raw_delete_after(cfg, requested=True) is False
 
 
-# ── snapshot / restore + concurrent read-modify-write ───────────────────────
+# ── snapshot + concurrent read-modify-write ──────────────────────────────────
 
 
-def test_snapshot_then_restore_puts_back_snapshot_content_and_drops_cache():
+def test_snapshot_config_reads_persisted_content_or_returns_none():
+    assert svcconfig.snapshot_config("svc-1") is None
     svcconfig.save_config("svc-1", _cfg())
     snap = svcconfig.snapshot_config("svc-1")
     assert snap is not None
-
-    svcconfig.mutate_config("svc-1", lambda c: c.update(name="changed"))
-    assert svcconfig.load_config("svc-1")["name"] == "changed"
-
-    svcconfig.restore_config("svc-1", snap)
-
-    assert json.loads(svcconfig.config_path("svc-1").read_text()) == json.loads(snap)
-    assert svcconfig.load_config("svc-1")["name"] == "My Service"
-
-
-def test_restore_keeps_a_cid_salt_minted_after_a_saltless_snapshot():
-    svcconfig.config_path("svc-1").parent.mkdir(parents=True, exist_ok=True)
-    svcconfig.config_path("svc-1").write_text(json.dumps({"service_id": "svc-1"}))
-    snap = svcconfig.snapshot_config("svc-1")
-
-    svcconfig.mutate_config("svc-1", lambda c: c.update(touched=True))
-    minted = svcconfig.load_config("svc-1")["rum"]["cid_salt"]
-    assert minted
-
-    svcconfig.restore_config("svc-1", snap)
-
-    restored = svcconfig.load_config("svc-1")
-    assert "touched" not in restored
-    assert restored["rum"]["cid_salt"] == minted
-
-
-def test_restore_never_undoes_a_cid_salt_rotation():
-    svcconfig.save_config("svc-1", _cfg())
-    snap = svcconfig.snapshot_config("svc-1")
-    old_salt = json.loads(snap)["rum"]["cid_salt"]
-
-    svcconfig.mutate_config("svc-1", lambda c: c["rum"].update(cid_salt="rotated-salt"), allow_cid_salt_change=True)
-
-    svcconfig.restore_config("svc-1", snap)
-
-    assert svcconfig.load_config("svc-1")["rum"]["cid_salt"] == "rotated-salt" != old_salt
-
-
-def test_snapshot_of_missing_config_is_none_and_restore_removes_a_later_file():
-    assert svcconfig.snapshot_config("svc-1") is None
-    svcconfig.save_config("svc-1", _cfg())
-
-    svcconfig.restore_config("svc-1", None)
-
-    assert svcconfig.load_config("svc-1") is None
+    assert json.loads(snap)["name"] == "My Service"
 
 
 def test_concurrent_mutate_config_writers_do_not_lose_each_others_keys():

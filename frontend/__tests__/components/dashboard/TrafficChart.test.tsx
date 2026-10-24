@@ -31,20 +31,8 @@ vi.mock('@/components/charts/TimeSeriesChart', () => ({
 // module — stub it to be safe.
 vi.mock('@/components/PlotlyChart/PlotlyChart', async () => (await import('@/__tests__/helpers/page-smoke')).plotlyChartModuleMock())
 
-// useActiveLogFields chains useBootstrap + useLogFieldsCatalog (both react-query),
-// which would need a QueryClientProvider. Mock it instead — TrafficChart's
-// contract here is "show the neutral 'No logs found for this period.' empty copy
-// when the metric's backing field IS active, and the 'Requires Group …' hint when
-// it is NOT". Default to no active fields so the not-enabled-hint test exercises
-// the hint path; tests that want the neutral path add the field to `activeFields`.
 const { activeFields } = vi.hoisted(() => ({ activeFields: new Set<string>() }))
-vi.mock('@/hooks/useActiveLogFields', () => ({
-  useActiveLogFields: () => ({
-    ready: true,
-    isFieldActive: (id: string) => activeFields.has(id),
-    isGroupActive: () => false,
-  }),
-}))
+vi.mock('@/hooks/useActiveLogFields', async () => (await import('@/__tests__/helpers/page-smoke')).activeLogFieldsSetModuleMock(activeFields))
 
 import { TrafficChart } from '@/app/dashboard/_sections/TrafficChart'
 import type { ReportConfiguration } from '@/hooks/useReportConfig'

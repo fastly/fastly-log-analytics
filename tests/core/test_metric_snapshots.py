@@ -6,22 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from backend.core import metric_snapshots
 from backend.utils.date_utils import iso_z
-
-
-def _get_history(
-    metric: str,
-    *,
-    since: datetime | str,
-    service_id: str | None = None,
-    task: str | None = None,
-) -> list[dict]:
-    batch = metric_snapshots.get_batch(since=since)
-    parts = [metric]
-    if service_id:
-        parts.append(service_id)
-    if task:
-        parts.append(task)
-    return batch.get("|".join(parts), [])
+from tests._helpers.config_fakes import fetch_metric_snapshot_history as _get_history
 
 
 class _FakePgCursor:

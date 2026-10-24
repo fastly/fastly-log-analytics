@@ -18,7 +18,8 @@
  */
 
 import { vi, type MockInstance } from 'vitest'
-import React from 'react'
+import React, { type ComponentProps } from 'react'
+import type { PlotlyChart } from '@/components/PlotlyChart'
 
 /**
  * Children-prop shape passed into the ReportLayout mock. Default values
@@ -104,8 +105,56 @@ export function navigationModuleMock(pathname: string) {
 }
 
 /** `@/components/PlotlyChart`. */
-export function plotlyChartModuleMock() {
-  return { PlotlyChart: () => <div data-testid="plotly-chart" /> }
+export function plotlyChartModuleMock(onRender?: (props: ComponentProps<typeof PlotlyChart>) => void) {
+  return { PlotlyChart: (props: ComponentProps<typeof PlotlyChart>) => (onRender?.(props), <div data-testid="plotly-chart" />) }
+}
+
+/** `@/components/DataTable` smoke stub for page-level tests. */
+export function dataTableModuleMock() {
+  return { DataTable: () => <div data-testid="data-table" />, ColumnVisibilityDropdown: () => null }
+}
+
+export type InteractiveTableRow = { name?: string; bot_name?: string; fingerprint?: string; ip?: string }
+export type InteractiveDataTableMockProps = { data?: InteractiveTableRow[]; emptyMessage?: string }
+
+/** Interactive `@/components/DataTable` mock for section tests that inspect rows + column toggles. */
+export function interactiveDataTableModuleMock(onDataTable?: (props: InteractiveDataTableMockProps) => void) {
+  return {
+    DataTable: (props: InteractiveDataTableMockProps) => {
+      onDataTable?.(props)
+      return (
+        <div data-testid={`data-table-${props.data?.length ?? 0}`}>
+          {props.data?.length === 0 ? <span data-testid="empty">{props.emptyMessage}</span> : props.data?.map((row, idx) => {
+            const label = row.name || row.bot_name || row.fingerprint || row.ip || String(idx)
+            return <div key={label} data-testid="row">{label}</div>
+          })}
+        </div>
+      )
+    },
+    ColumnVisibilityDropdown: (props: { columns: Array<{ id: string; label: string }>; onChange?: (id: string, visible: boolean) => void }) => (
+      <button type="button" data-testid="col-vis" onClick={() => props.onChange?.(props.columns[0]?.id, false)}>cols</button>
+    ),
+  }
+}
+
+/** `@/components/FilterValueCell` passthrough mock for section tests. */
+export function filterValueCellModuleMock() {
+  return {
+    FilterValueCell: (props: { display?: React.ReactNode; filters?: Array<{ value?: React.ReactNode }> }) => (
+      <span>{props.display ?? props.filters?.[0]?.value}</span>
+    ),
+  }
+}
+
+/** `@/hooks/useActiveLogFields` backed by a mutable `Set<string>` for section tests. */
+export function activeLogFieldsSetModuleMock(activeFields: Set<string>) {
+  return {
+    useActiveLogFields: () => ({
+      ready: true,
+      isFieldActive: (id: string) => activeFields.has(id),
+      isGroupActive: () => false,
+    }),
+  }
 }
 
 /**

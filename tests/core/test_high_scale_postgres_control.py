@@ -149,45 +149,6 @@ def test_operational_snapshot_aggregates_source_and_publication_state() -> None:
     assert connection.execute.call_count == 4
 
 
-def test_batch_claim_is_fenced_and_starts_at_generation_one() -> None:
-    store, _, connection = _fake_store()
-    owner_row = _owner_row(owner="high_scale")
-    connection.execute.side_effect = [
-        MagicMock(fetchone=MagicMock(return_value=owner_row)),
-        MagicMock(fetchone=MagicMock(return_value=None)),
-        MagicMock(),
-    ]
-
-    claim = store.claim_batch(
-        "batch-1",
-        "svc",
-        "request",
-        "worker-1",
-        expected_owner="high_scale",
-        expected_owner_epoch=1,
-        now=datetime(2026, 9, 11, 12, tzinfo=UTC),
-    )
-
-    assert claim.claimed is True
-    assert claim.lease_generation == 1
-    assert claim.state == "claimed"
-
-
-def test_batch_claim_rejects_wrong_owner_epoch() -> None:
-    store, _, connection = _fake_store()
-    connection.execute.return_value.fetchone.return_value = _owner_row(owner="standard", epoch=2)
-
-    with pytest.raises(ValueError, match="owner"):
-        store.claim_batch(
-            "batch-1",
-            "svc",
-            "request",
-            "worker-1",
-            expected_owner="high_scale",
-            expected_owner_epoch=1,
-        )
-
-
 def test_discover_source_tolerates_a_sibling_domain_discovering_the_same_object() -> None:
     """Regression test: rum_vitals and rum_errors both list the FOS prefix
     raw/rum/, so the same object is legitimately discovered by both
@@ -447,32 +408,6 @@ def test_source_cursor_for_returns_the_domains_own_persisted_cursor() -> None:
     assert store.source_cursor_for("svc", "rum_vitals") == "__terminal__:raw/rum/a.gz"
 
 
-def test_cutover_increments_epoch_and_preserves_previous_owner() -> None:
-    store, _, connection = _fake_store()
-    current = _owner_row(drained=True)
-    updated = _owner_row(
-        epoch=2,
-        owner="high_scale",
-        previous="standard",
-        drained=True,
-        committed=True,
-        rollback_allowed=True,
-    )
-    cursors = [MagicMock(), MagicMock(), MagicMock()]
-    cursors[0].fetchone.return_value = current
-    cursors[2].fetchone.return_value = updated
-    connection.execute.side_effect = cursors
-
-    result = store.commit_cutover("svc", expected_epoch=1, next_owner="high_scale")
-
-    assert result.owner_epoch == 2
-    assert result.previous_owner == "standard"
-    assert result.current_owner == "high_scale"
-    update_sql = connection.execute.call_args_list[1].args[0]
-    assert "owner_epoch=owner_epoch+1" in update_sql
-    assert "previous_owner=current_owner" in update_sql
-
-
 def test_database_errors_propagate_from_transaction() -> None:
     store, _, connection = _fake_store()
     connection.execute.side_effect = RuntimeError("database unavailable")
@@ -637,17 +572,11 @@ def test_postgres_control_plane_end_to_end() -> None:
             expected_owner="standard",
             expected_owner_epoch=owner.owner_epoch,
         )
-        claim = store.claim_source(
+        store.claim_source(
             service_id,
             source.object_key,
             "worker-1",
             expected_owner="standard",
-            expected_owner_epoch=owner.owner_epoch,
-        )
-        store.mark_source_appended(
-            service_id,
-            source.object_key,
-            lease_generation=claim.lease_generation,
             expected_owner_epoch=owner.owner_epoch,
         )
         store.register_archive_manifest(manifest, owner_epoch=owner.owner_epoch)
@@ -662,14 +591,12 @@ def test_postgres_control_plane_end_to_end() -> None:
                 next_state=next_state,
                 expected_owner_epoch=owner.owner_epoch,
             )
-        store.mark_source_archived(
+        store.acknowledge_sources_batch(
             service_id,
-            source.object_key,
-            lease_generation=claim.lease_generation,
+            [source.object_key],
             manifest_id=manifest.manifest_id,
-            owner_epoch=owner.owner_epoch,
+            expected_owner_epoch=owner.owner_epoch,
         )
-        store.acknowledge_source(service_id, source.object_key, manifest_id=manifest.manifest_id)
         store.transition_archive_manifest(
             manifest.manifest_id,
             expected_state=ArchiveState.MANIFEST_COMMITTED,

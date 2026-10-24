@@ -9,24 +9,12 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from backend.deps import get_source, require_admin
+from backend.deps import require_admin
 from backend.main import app
 
 
-@pytest.fixture
-def override_source():
-    source = {
-        "service_id": "service123",
-        "name": "service123",
-        "bucket": "test-bucket",
-        "access_level": "read_write",
-    }
-    app.dependency_overrides[get_source] = lambda: source
-    yield source
-    app.dependency_overrides.clear()
-
-
 def clean_res(data: dict) -> dict:
+
     return {key: value for key, value in data.items() if not key.startswith("_")}
 
 

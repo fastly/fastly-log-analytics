@@ -18,13 +18,33 @@ The interesting branches:
 
 from __future__ import annotations
 
+import io
 import json
+import os
 import urllib.error
 from unittest.mock import MagicMock, patch
 
 import pytest
+import vcr
 
 from backend.core.fastly import client as fastly_client
+
+CASSETTE_DIR = os.path.join(os.path.dirname(__file__), "..", "cassettes")
+
+_my_vcr = vcr.VCR(
+    cassette_library_dir=CASSETTE_DIR,
+    record_mode="none",
+    filter_headers=[("Fastly-Key", "REDACTED"), ("Authorization", "REDACTED")],
+    match_on=["method", "scheme", "host", "port", "path", "query"],
+)
+
+
+class _Resp(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
 
 
 def _fake_resp(body: bytes = b'{"ok": true}') -> MagicMock:
@@ -334,3 +354,73 @@ def test_fastly_wraps_call_in_telemetry_context_when_available():
     # The context manager was entered + exited
     fake_ctx.__enter__.assert_called_once()
     fake_ctx.__exit__.assert_called_once()
+
+
+# ── fastly_rt ──────────────────────────────────────────────────────────────
+
+
+def test_fastly_rt_targets_rt_host_with_token(monkeypatch):
+    monkeypatch.delenv("FASTLY_MOCK_MODE", raising=False)
+    seen = {}
+
+    def _urlopen(req, timeout):
+        seen["url"] = req.full_url
+        seen["key"] = req.get_header("Fastly-key")
+        seen["timeout"] = timeout
+        return _Resp(json.dumps({"Data": []}).encode())
+
+    with patch("urllib.request.urlopen", side_effect=_urlopen):
+        out = fastly_client.fastly_rt("/v1/channel/abc/ts/h?limit=120", token="tok")
+
+    assert out == {"Data": []}
+    assert seen == {"url": "https://rt.fastly.com/v1/channel/abc/ts/h?limit=120", "key": "tok", "timeout": 10}
+
+
+def test_fastly_rt_raises_runtime_error_on_http_error(monkeypatch):
+    monkeypatch.delenv("FASTLY_MOCK_MODE", raising=False)
+    err = urllib.error.HTTPError("https://rt.fastly.com/x", 403, "no", {}, io.BytesIO(b"denied"))
+    with patch("urllib.request.urlopen", side_effect=err), pytest.raises(RuntimeError, match="HTTP 403 GET /x"):
+        fastly_client.fastly_rt("/x", token="tok")
+
+
+def test_fastly_rt_mock_mode_skips_network(monkeypatch):
+    monkeypatch.setenv("FASTLY_MOCK_MODE", "1")
+    with patch("urllib.request.urlopen", side_effect=AssertionError("network")):
+        assert fastly_client.fastly_rt("/v1/channel/abc/ts/h", token="tok") == {"ok": True}
+
+
+# ── vcrpy wire-level tests ─────────────────────────────────────────────────
+
+
+def test_get_service_returns_parsed_json():
+    """Happy path: 200 OK with a JSON body. The client must return the
+    parsed dict, not the raw bytes."""
+    with _my_vcr.use_cassette("fastly_get_service_success.yaml"):
+        result = fastly_client.fastly("GET", "/service/SU3xxxxxxxxxxxxxx0000", token="test-token-not-real")
+
+    assert result["id"] == "SU3xxxxxxxxxxxxxx0000"
+    assert result["name"] == "Test CDN"
+    assert result["active_version"]["number"] == 42
+
+
+def test_503_is_retried_then_succeeds():
+    """The client's retry policy: 503 triggers an exponential-backoff
+    retry. The cassette has 503 then 200; the call should succeed and
+    surface the 200 body."""
+    with patch("tenacity.nap.time.sleep"):
+        with _my_vcr.use_cassette("fastly_503_then_success.yaml"):
+            result = fastly_client.fastly("GET", "/account", token="test-token-not-real")
+
+    assert result == {"id": "acct-1", "name": "Test Account"}
+
+
+def test_429_is_retried_then_succeeds():
+    """429 (rate limit) is treated identically to 5xx by
+    ``_is_retryable_fastly_error``. The cassette serves 429 then 200; the
+    client must retry and surface the 200 body."""
+    with patch("tenacity.nap.time.sleep"):
+        with _my_vcr.use_cassette("fastly_429_then_success.yaml"):
+            result = fastly_client.fastly("GET", "/service/SU3xxxxxxxxxxxxxx0000", token="test-token-not-real")
+
+    assert result["id"] == "SU3xxxxxxxxxxxxxx0000"
+    assert result["name"] == "Test CDN"

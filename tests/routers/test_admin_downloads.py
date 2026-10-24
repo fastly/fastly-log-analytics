@@ -4,28 +4,9 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from backend.deps import get_source
-from backend.main import app
-
-
-@pytest.fixture
-def override_source():
-    src = {
-        "service_id": "service123",
-        "name": "service123",
-        "bucket": "test-bucket",
-        "prefix": "raw_prefix",
-        "access_level": "read_write",
-        "cdn_url": "",
-    }
-    app.dependency_overrides[get_source] = lambda: src
-    yield src
-    app.dependency_overrides.clear()
-
 
 def test_download_file_missing_key(client, override_source):
+
     # key is empty
     response = client.get("/api/download?key=")
     assert response.status_code == 400

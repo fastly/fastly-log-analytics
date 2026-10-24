@@ -10,25 +10,25 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.core.oauth import client as oidc
-from backend.core.oauth import flow_state, registry
+from backend.core.oauth import flow_state
+from backend.core.oauth.flow_state import FlowStateError
 from backend.utils import tunnel
 from backend.utils.remote_access import RemoteAccessMiddleware
 from tests.remote_access import oauth_helpers as H
+
+_PAYLOAD = {
+    "provider": "google",
+    "state": "state-token",
+    "nonce": "nonce-token",
+    "verifier": "pkce-verifier",
+    "redirect_uri": "https://testserver/api/share/oauth/callback",
+    "return": "/dashboard",
+}
 
 # RFC 7636 Appendix B
 RFC_VERIFIER = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 RFC_CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 UNRESERVED = re.compile(r"^[A-Za-z0-9\-._~]+$")
-
-
-@pytest.fixture(autouse=True)
-def _reset():
-    registry.reset_cache_for_tests()
-    oidc.reset_caches_for_tests()
-    yield
-    oidc.set_test_transport(None)
-    registry.reset_cache_for_tests()
-    oidc.reset_caches_for_tests()
 
 
 def _authorize() -> tuple[dict, dict]:
@@ -89,3 +89,48 @@ def test_authorize_flow_binds_challenge_to_sealed_verifier_and_is_fresh(tmp_path
     assert len({fs1["state"], fs2["state"], fs1["nonce"], fs2["nonce"]}) == 4
     assert fs1["verifier"] != fs2["verifier"]
     assert q1["code_challenge"] != q2["code_challenge"]
+
+
+# ── AES-256-GCM oauth_flow_state cookie codec ────────────────────────────────
+
+
+def test_seal_open_round_trip(monkeypatch):
+    monkeypatch.setenv("OAUTH_FLOW_STATE_SECRET", "secret-abcdef-0123456789")
+    sealed = flow_state.seal_flow_state(_PAYLOAD)
+    assert flow_state.open_flow_state(sealed) == _PAYLOAD
+    assert "pkce-verifier" not in sealed and "nonce-token" not in sealed
+
+
+@pytest.mark.security_regression
+def test_tampered_cookie_fails(monkeypatch):
+    monkeypatch.setenv("OAUTH_FLOW_STATE_SECRET", "secret-abcdef-0123456789")
+    sealed = flow_state.seal_flow_state(_PAYLOAD)
+    flipped = sealed[:-3] + ("AAA" if not sealed.endswith("AAA") else "BBB")
+    with pytest.raises(FlowStateError):
+        flow_state.open_flow_state(flipped)
+
+
+@pytest.mark.security_regression
+def test_wrong_key_cannot_open(monkeypatch):
+    monkeypatch.setenv("OAUTH_FLOW_STATE_SECRET", "secret-A-000000000000")
+    sealed = flow_state.seal_flow_state(_PAYLOAD)
+    monkeypatch.setenv("OAUTH_FLOW_STATE_SECRET", "secret-B-111111111111")
+    with pytest.raises(FlowStateError):
+        flow_state.open_flow_state(sealed)
+
+
+@pytest.mark.security_regression
+def test_missing_secret_fails_closed(monkeypatch):
+    monkeypatch.delenv("OAUTH_FLOW_STATE_SECRET", raising=False)
+    with pytest.raises(FlowStateError):
+        flow_state.seal_flow_state(_PAYLOAD)
+    with pytest.raises(FlowStateError):
+        flow_state.open_flow_state("anything")
+
+
+@pytest.mark.security_regression
+def test_empty_and_garbage_cookie_fail(monkeypatch):
+    monkeypatch.setenv("OAUTH_FLOW_STATE_SECRET", "secret-abcdef-0123456789")
+    for bad in ("", "not-base64!!", "aGVsbG8"):  # empty / bad b64 / too-short
+        with pytest.raises(FlowStateError):
+            flow_state.open_flow_state(bad)

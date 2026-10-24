@@ -123,3 +123,79 @@ def test_web_vitals_collection_on_persists_one_jsonl_line(monkeypatch, tmp_path)
     # Loopback test client is classified as admin; ts is stamped server-side.
     assert rec["cohort"] == "admin"
     assert rec["ts"].endswith("Z")
+
+
+def test_page_telemetry_endpoint(monkeypatch, tmp_path):
+    from backend import config as svcconfig
+    from backend.core.metadata import usage_log, usage_log_db
+
+    monkeypatch.setattr(usage_log_db, "_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(svcconfig, "get_active_service_id", lambda: "demo_service")
+
+    usage_log.log_telemetry_query("demo_service", "page-456", "req-789", "duckdb", "SELECT 42", 12.3)
+
+    response = client.get("/api/debug/page-telemetry?page_load_id=page-456")
+    assert response.status_code == 200
+    data = response.json()
+    assert "queries" in data
+    assert data["queries"][0]["sql_query"] == "SELECT 42"
+
+
+# ── POST /api/ux-events ───────────────────────────────────────────────────
+
+
+def test_ux_events_accepts_well_formed_payload():
+    r = client.post(
+        "/api/ux-events",
+        json={
+            "event": "column_reordered",
+            "pathname": "/sessions",
+            "component_id": "Live Sessions",
+            "details": {"column_id": "ja4", "from_index": 4, "to_index": 1, "column_count": 9},
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json().get("ok") is True
+
+
+def test_ux_events_accepts_minimal_payload():
+    """Only ``event`` is required — pathname / component_id / details
+    are optional so the caller can opt out of context per-event."""
+    r = client.post("/api/ux-events", json={"event": "filter_cleared"})
+    assert r.status_code == 200, r.text
+
+
+def test_ux_events_rejects_missing_event_field():
+    r = client.post("/api/ux-events", json={"pathname": "/dashboard"})
+    assert r.status_code == 422
+
+
+def test_ux_events_rejects_extra_top_level_field():
+    """``extra="forbid"`` so a typo in the SPA caller surfaces as a 422
+    rather than silently landing in the log under an unread key."""
+    r = client.post(
+        "/api/ux-events",
+        json={"event": "column_reordered", "typo_field": "ignored"},
+    )
+    assert r.status_code == 422
+
+
+def test_ux_events_caps_event_name_length():
+    """80-char cap keeps a misbehaving client from pumping arbitrary
+    strings into the log stream."""
+    r = client.post("/api/ux-events", json={"event": "x" * 81})
+    assert r.status_code == 422
+
+
+def test_ux_events_logs_admin_cohort_for_loopback_request(caplog):
+    """Loopback request (no analyst session) is tagged ``admin`` so log
+    slicing can split per-cohort."""
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="backend.ux_events"):
+        r = client.post("/api/ux-events", json={"event": "column_reordered"})
+    assert r.status_code == 200
+    matched = [rec for rec in caplog.records if rec.message == "ux_event"]
+    assert matched, "expected at least one ux_event log record"
+    assert getattr(matched[-1], "ux_cohort", None) == "admin"
+    assert getattr(matched[-1], "ux_event", None) == "column_reordered"

@@ -12,20 +12,15 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.core import share_db
+from backend.routers import share_admin, share_auth
 from backend.utils import tunnel
-from backend.utils.remote_access import RemoteAccessMiddleware
+from tests.remote_access import oauth_helpers as H
 
 _REMOTE = {"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"}
 
 
 def _app() -> FastAPI:
-    from backend.routers import share_admin, share_auth
-
-    app = FastAPI()
-    app.add_middleware(RemoteAccessMiddleware)
-    app.include_router(share_auth.router)
-    app.include_router(share_admin.router)
-    return app
+    return H.make_remote_access_app(share_auth.router, share_admin.router)
 
 
 def _oauth_invite(email="analyst@corp.com", provider="google", pii_policy=None, accept_tos=True):

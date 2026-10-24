@@ -5,27 +5,11 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-import pytest
-
 from backend.core.metadata.cron_log import CronLeaseHeldError
-from backend.deps import get_source
-from backend.main import app
-
-
-@pytest.fixture
-def override_source():
-    src = {
-        "service_id": "service123",
-        "name": "service123",
-        "bucket": "test-bucket",
-        "access_level": "read_write",
-    }
-    app.dependency_overrides[get_source] = lambda: src
-    yield src
-    app.dependency_overrides.clear()
 
 
 def test_iceberg_info_endpoint(client, override_source):
+
     fake_info = {
         "table_name": "logs",
         "table_location": "s3://bucket/prefix/iceberg",

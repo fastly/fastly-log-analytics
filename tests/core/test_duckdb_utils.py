@@ -1,10 +1,22 @@
 """Tests for pure helpers in backend/core/duckdb.py."""
 
-from unittest.mock import patch
+from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
+import duckdb
 import pytest
 
-from backend.core.duckdb import DBBusyError, _safe_table_name, format_asn_label, get_connection
+import backend.core.duckdb as duckdb_mod
+from backend.core.duckdb import (
+    DBBusyError,
+    _safe_table_name,
+    format_asn_label,
+    get_connection,
+    rum_duckdb_path,
+    rum_source_for,
+)
+from backend.core.duckdb_pool import _Pool
 
 
 class TestFormatAsnLabel:
@@ -131,3 +143,73 @@ class TestGetConnectionLockHandling:
         ):
             with pytest.raises(Exception, match="Permission denied"):
                 get_connection(source={"duckdb_path": "/tmp/_test.duckdb"}, max_wait=0.1)
+
+
+def test_threads_setting_is_instance_global(tmp_path):
+    db = str(tmp_path / "svc.duckdb")
+    a = duckdb.connect(db)
+    b = duckdb.connect(db)
+    try:
+        a.execute("SET threads = 1")
+        b.execute("SET threads = 3")
+        assert a.execute("SELECT current_setting('threads')").fetchone()[0] == 3
+    finally:
+        a.close()
+        b.close()
+
+
+def test_pool_fresh_build_never_sets_threads(monkeypatch):
+    monkeypatch.setenv("DUCKDB_POOL_CONN_THREADS", "1")
+    pool = _Pool(service_key="test_no_threads", max_size=1)
+    mock_conn = MagicMock(spec=duckdb.DuckDBPyConnection)
+    with (
+        patch("backend.core.duckdb.get_connection", return_value=mock_conn),
+        patch("backend.core.iceberg.view._view_cache", {}),
+        patch("backend.core.iceberg.view.update_iceberg_view"),
+    ):
+        pool.acquire(src={"name": "test_no_threads"}, max_wait=0.5)
+    executed = [str(c.args[0]).lower() for c in mock_conn.execute.call_args_list if c.args]
+    assert not any("threads" in s for s in executed), executed
+
+
+def test_ensure_threads_only_sets_when_value_differs(tmp_path):
+    con = duckdb.connect(str(tmp_path / "svc.duckdb"))
+    try:
+        con.execute("SET threads = 2")
+        spy = MagicMock(wraps=con)
+        duckdb_mod._ensure_threads(spy, 2)
+        assert not any("SET threads" in str(c.args[0]) for c in spy.execute.call_args_list)
+        duckdb_mod._ensure_threads(spy, 3)
+        assert con.execute("SELECT current_setting('threads')").fetchone()[0] == 3
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        ("/data/.duckdb/svc.duckdb", "/data/.duckdb/svc.rum.duckdb"),
+        ("svc", "svc.rum.duckdb"),
+        ("/a.duckdb.duckdb", "/a.duckdb.rum.duckdb"),
+    ],
+)
+def test_rum_duckdb_path(given: str, expected: str) -> None:
+    assert rum_duckdb_path(given) == expected
+
+
+def test_rum_source_for_only_rewrites_suffix() -> None:
+    out = rum_source_for({"name": "svc", "duckdb_path": "/data/.duckdb/svc.duckdb"})
+    assert out["duckdb_path"] == "/data/.duckdb/svc.rum.duckdb"
+    assert out["name"] == "svc::rum"
+
+
+def test_rum_source_for_is_shallow_and_leaves_original_untouched() -> None:
+    nested = {"k": "v"}
+    source = {"name": "svc", "duckdb_path": "/d/svc.duckdb", "opts": nested}
+
+    out = rum_source_for(source)
+
+    assert source == {"name": "svc", "duckdb_path": "/d/svc.duckdb", "opts": nested}
+    assert out is not source
+    # Nested values are shared by design: callers only read them.
+    assert out["opts"] is nested

@@ -17,17 +17,8 @@ from backend.core.oauth.client import OIDCError
 from tests.remote_access import oauth_helpers as H
 
 
-@pytest.fixture(autouse=True)
-def _reset(monkeypatch):
-    registry.reset_cache_for_tests()
-    client.reset_caches_for_tests()
-    yield
-    client.set_test_transport(None)
-    registry.reset_cache_for_tests()
-    client.reset_caches_for_tests()
-
-
 def _provider(tmp_path, monkeypatch, **kw):
+
     H.configure_registry(monkeypatch, tmp_path, **kw)
     return registry.get_provider("google")
 

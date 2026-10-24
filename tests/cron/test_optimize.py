@@ -13,20 +13,9 @@ from backend.cron.jobs import optimize
 from backend.cron.scheduler import Scheduler
 
 
-@pytest.fixture(autouse=True)
-def _clear_dev_no_crons(monkeypatch):
-    monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
-
-
-@pytest.fixture
-def stub_source(monkeypatch) -> dict:
-    src = {"name": "fos-test-svc", "service_id": "svc-1", "bucket": "fos-test-bkt"}
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src)
-    return src
-
-
 @pytest.fixture
 def optimize_test_source(monkeypatch, tmp_path):
+
     service_id = "svc-optimize-contract"
     cache_root = tmp_path / "cache" / service_id
     cache_root.mkdir(parents=True, exist_ok=True)

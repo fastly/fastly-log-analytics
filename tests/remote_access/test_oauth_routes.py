@@ -14,34 +14,20 @@ from fastapi.testclient import TestClient
 
 from backend.core import share_db
 from backend.core.oauth import client as oidc
-from backend.core.oauth import flow_state, registry
+from backend.core.oauth import flow_state
+from backend.routers import share_oauth
 from backend.utils import tunnel
-from backend.utils.remote_access import RemoteAccessMiddleware
 from tests.remote_access import oauth_helpers as H
 
 REDIRECT_URI = "https://testserver/api/share/oauth/callback"
 
 
-@pytest.fixture(autouse=True)
-def _reset():
-    registry.reset_cache_for_tests()
-    oidc.reset_caches_for_tests()
-    yield
-    oidc.set_test_transport(None)
-    registry.reset_cache_for_tests()
-    oidc.reset_caches_for_tests()
-
-
 def _app() -> FastAPI:
-    from backend.routers import share_oauth
-
-    app = FastAPI()
-    app.add_middleware(RemoteAccessMiddleware)
-    app.include_router(share_oauth.router)
-    return app
+    return H.make_remote_access_app(share_oauth.router)
 
 
 def _client() -> TestClient:
+
     return TestClient(_app(), follow_redirects=False)
 
 

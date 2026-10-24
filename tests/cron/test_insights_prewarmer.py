@@ -866,20 +866,7 @@ async def test_insights_router_records_request_timestamp(monkeypatch):
 
 # ── scheduler registration & cache-warming contract tests ────────────────────
 
-
-def _fake_src(service_id: str = "svc-prewarm-contract", access_level: str = "read_write") -> dict:
-    return {
-        "name": service_id,
-        "service_id": service_id,
-        "service_name": service_id,
-        "logging_service_id": f"log-{service_id}",
-        "bucket": "test-fos-bucket",
-        "access_level": access_level,
-        "endpoint": "https://s3.example.com",
-        "access_key_id": "test-key",
-        "secret_access_key": "test-secret",
-        "region": "us-east-1",
-    }
+from tests.cron.conftest import _StubSource as _fake_src
 
 
 def _fake_cfg(

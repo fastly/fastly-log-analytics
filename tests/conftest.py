@@ -712,3 +712,53 @@ def frozen_clock():
 
     with time_machine.travel(_FROZEN_NOW, tick=False) as traveller:
         yield traveller
+
+
+@pytest.fixture
+def isolated_configs_dir(tmp_path, monkeypatch):
+    """Redirect ``backend.config.CONFIGS_DIR`` and ``DATA_DIR`` to ``tmp_path``."""
+    from backend import config as svcconfig
+
+    cfg_dir = tmp_path / "configs"
+    cfg_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(svcconfig, "CONFIGS_DIR", cfg_dir)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(svcconfig, "DATA_DIR", data_dir)
+    return cfg_dir
+
+
+@pytest.fixture
+def override_source():
+    """Override ``backend.deps.get_source`` with a default read-write test source."""
+    from backend.deps import get_source
+    from backend.main import app
+
+    src = {
+        "service_id": "service123",
+        "name": "service123",
+        "bucket": "test-bucket",
+        "prefix": "raw_prefix",
+        "access_level": "read_write",
+        "cdn_url": "",
+    }
+    app.dependency_overrides[get_source] = lambda: src
+    yield src
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_oauth_caches(request: pytest.FixtureRequest):
+    """Reset OIDC discovery/JWKS and provider registry caches around remote_access tests."""
+    if "remote_access" not in request.node.nodeid:
+        yield
+        return
+    from backend.core.oauth import client as oidc
+    from backend.core.oauth import registry
+
+    registry.reset_cache_for_tests()
+    oidc.reset_caches_for_tests()
+    yield
+    oidc.set_test_transport(None)
+    registry.reset_cache_for_tests()
+    oidc.reset_caches_for_tests()

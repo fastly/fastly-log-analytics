@@ -6,12 +6,11 @@ dropping every stored key the body did not carry beyond four hand-listed ones.
 
 from __future__ import annotations
 
-import json
-
 from backend import config as svcconfig
 from backend.provision import orchestrator
+from tests._helpers.config_fakes import read_persisted_config as _persisted
 
-SID = "svc-test"
+SID = "logsvc1"
 
 
 def _state(**overrides) -> dict:
@@ -33,11 +32,8 @@ def _state(**overrides) -> dict:
     return base
 
 
-def _persisted() -> dict:
-    return json.loads(svcconfig.config_path(SID).read_text())
-
-
 def test_first_write_creates_the_config_with_a_cid_salt():
+
     assert svcconfig.load_config(SID) is None
 
     orchestrator.write_service_config(_state())

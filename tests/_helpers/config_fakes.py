@@ -57,3 +57,38 @@ def mutate_via_save(save: Callable[[str, dict], Any]) -> Callable[..., dict[str,
         return cfg
 
     return _mutate
+
+
+def config_lock_held(service_id: str = "logsvc1") -> bool:
+    """Return True if the in-process config lock for ``service_id`` is currently held."""
+    from backend import config as svcconfig
+
+    return bool(getattr(svcconfig._lock_state, "held", {}).get(service_id))
+
+
+def read_persisted_config(service_id: str = "logsvc1") -> dict[str, Any]:
+    """Read the raw persisted JSON config for ``service_id`` directly from ``CONFIGS_DIR``."""
+    import json
+
+    from backend import config as svcconfig
+
+    return json.loads(svcconfig.config_path(service_id).read_text())
+
+
+def fetch_metric_snapshot_history(
+    metric: str,
+    *,
+    since: Any,
+    service_id: str | None = None,
+    task: str | None = None,
+) -> list[dict[str, Any]]:
+    """Test helper wrapping ``metric_snapshots.get_batch`` for a single metric."""
+    from backend.core import metric_snapshots
+
+    batch = metric_snapshots.get_batch(since=since)
+    parts = [metric]
+    if service_id:
+        parts.append(service_id)
+    if task:
+        parts.append(task)
+    return batch.get("|".join(parts), [])

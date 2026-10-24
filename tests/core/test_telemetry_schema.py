@@ -1,4 +1,8 @@
+from fastapi.testclient import TestClient
+
 from backend.core.metadata import usage_log, usage_log_db
+from backend.main import app
+from backend.utils.telemetry import get_page_load_id
 
 
 def test_telemetry_schema_and_helpers(monkeypatch, tmp_path):
@@ -47,3 +51,10 @@ def test_telemetry_schema_and_helpers(monkeypatch, tmp_path):
     assert len(telemetry["sections"]) == 1
     assert telemetry["sections"][0]["section_name"] == "dashboard.aggregates"
     assert telemetry["sections"][0]["duration_ms"] == 12.5
+
+
+def test_page_load_id_propagation_middleware():
+    client = TestClient(app)
+    response = client.get("/api/health", headers={"X-Page-Load-ID": "test-page-999"})
+    assert response.status_code == 200
+    assert get_page_load_id() is None

@@ -37,10 +37,7 @@ vi.mock('@/components/Map/NetworkMap', () => ({
 vi.mock('@/components/Map/ShieldingMap', () => ({
   ShieldingMap: () => <div data-testid="shielding-map" />,
 }))
-vi.mock('@/components/DataTable', () => ({
-  DataTable: () => <div data-testid="data-table" />,
-  ColumnVisibilityDropdown: () => null,
-}))
+vi.mock('@/components/DataTable', async () => (await import('../helpers/page-smoke')).dataTableModuleMock())
 vi.mock('@/components/AnalyticsCard', () => ({
   AnalyticsCard: ({ title, error, children }: { title: ReactNode; error?: unknown; children?: ReactNode }) => (
     <div data-testid="analytics-card">

@@ -8,13 +8,14 @@ never hold the config lock across a Fastly/FOS call.
 
 from __future__ import annotations
 
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from backend import config as svcconfig
 from backend.provision.rum_orchestrator_v2 import disable_rum, enable_rum, rum_vcl_fingerprint, upgrade_faro_version
+from tests._helpers.config_fakes import config_lock_held as _lock_held
+from tests._helpers.config_fakes import read_persisted_config as _persisted
 
 SID = "logsvc1"
 OLD_VERSION = "1.0.0"
@@ -26,14 +27,6 @@ _FOS = {
     "fos_access_key_id": "AK",
     "fos_secret_access_key": "SK",
 }
-
-
-def _lock_held() -> bool:
-    return bool(getattr(svcconfig._lock_state, "held", {}).get(SID))
-
-
-def _persisted() -> dict:
-    return json.loads(svcconfig.config_path(SID).read_text())
 
 
 def _concurrent_writer(**top_level):

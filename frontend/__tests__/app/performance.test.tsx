@@ -29,10 +29,7 @@ vi.mock('@/lib/api', () => ({
 }))
 
 vi.mock('@/components/PlotlyChart', async () => (await import('../helpers/page-smoke')).plotlyChartModuleMock())
-vi.mock('@/components/DataTable', () => ({
-  DataTable: () => <div data-testid="data-table" />,
-  ColumnVisibilityDropdown: () => null,
-}))
+vi.mock('@/components/DataTable', async () => (await import('../helpers/page-smoke')).dataTableModuleMock())
 
 vi.mock('@/components/ReportLayout', async () =>
   (await import('../helpers/page-smoke')).reportLayoutModuleMock({
