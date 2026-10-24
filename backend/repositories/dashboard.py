@@ -640,6 +640,12 @@ def _compute_dashboard_aggregates(
                         actual_cols=actual_cols,
                     )
                     if rollup_count is not None:
+                        # Rollup counts are half-open; the API's end is inclusive.
+                        rollup_count += runner.execute(
+                            f"SELECT {CANONICAL_METRICS['requests']} FROM {_table_name} "
+                            f"WHERE ({_where}) AND timestamp = ?",
+                            [*_params, parse_iso_utc(end_time)],
+                        ).fetchone()[0]
                         history.window_rows, history.window_count_source = rollup_count, "rollup"
                         return rollup_count
                 except Exception:

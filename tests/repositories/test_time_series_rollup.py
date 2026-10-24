@@ -16,6 +16,7 @@ import duckdb
 import pytest
 
 from backend.repositories._base import QueryRunner
+from backend.repositories.dashboard import get_aggregates
 from tests._helpers.sources import make_source
 
 
@@ -118,6 +119,65 @@ def _populate_past_window(
         _write_per_field_marker(per_field, "requests", hs)
         cursor += timedelta(hours=1)
     return start, end, hours
+
+
+@pytest.mark.parametrize(
+    ("start_seconds", "end_seconds", "expected_count", "expected_source"),
+    [
+        (0, 3600, 5, "rollup"),
+        (30, 3600, 5, "raw"),
+        (0.000001, 3600, 5, "raw"),
+        (0, 3570, 2, "raw"),
+    ],
+)
+def test_dashboard_count_preserves_exact_inclusive_window(
+    rollup_layout, monkeypatch, start_seconds, end_seconds, expected_count, expected_source
+):
+    bundled, per_field, cache_dir = rollup_layout
+    hour = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(hours=4)
+    hour_key = hour.strftime("%Y-%m-%d-%H")
+    hour_dir = bundled / f"hour={hour_key}"
+    hour_dir.mkdir()
+    _write_per_field_marker(per_field, "requests", hour_key)
+    monkeypatch.setattr("backend.core.rollups.rollups_present", lambda src: True)
+
+    with duckdb.connect() as con:
+        con.execute("CREATE TABLE logs_test_service (timestamp TIMESTAMPTZ, status VARCHAR)")
+        con.executemany(
+            "INSERT INTO logs_test_service VALUES (?, '200')",
+            [(hour + timedelta(seconds=offset),) for offset in (45, 60, 3590, 3600, 3600)],
+        )
+        con.sql(
+            "SELECT date_trunc('minute', timestamp) AS bucket, count(*) AS requests "
+            "FROM logs_test_service WHERE timestamp < ? GROUP BY 1",
+            params=[hour + timedelta(hours=1)],
+        ).write_parquet(str(hour_dir / "time_series.parquet"))
+        start, end = hour + timedelta(seconds=start_seconds), hour + timedelta(seconds=end_seconds)
+        raw_count = con.execute(
+            "SELECT count(*) FROM logs_test_service WHERE timestamp >= ? AND timestamp <= ?",
+            [start, end],
+        ).fetchone()[0]
+        result = get_aggregates(
+            con=con,
+            src=make_source(cache_dir),
+            start_time=start.isoformat(),
+            end_time=end.isoformat(),
+            filters={},
+            chart_interval="1 minute",
+            chart_metric="requests",
+            include_time_series=False,
+            include_conn_requests=False,
+            include_map_data=False,
+            include_top_n=False,
+        )
+
+    assert raw_count == expected_count
+    assert result["total_rows"] == raw_count
+    assert result["history"]["window_count_source"] == expected_source
+    count_observation = next(row for row in result["reader_coverage"] if row["reader"] == "dashboard.count")
+    assert count_observation["eligibility_reason"] == (
+        "eligible" if expected_source == "rollup" else "unsupported_interval"
+    )
 
 
 class TestTryTimeSeriesFromRollup:

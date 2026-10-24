@@ -689,6 +689,11 @@ uv run pytest tests/perf/test_benchmarks_micro.py \
 
 ### Section-level performance evidence
 
+Standard dashboard counts preserve the raw query's inclusive end. The count
+rollup reader covers half-open, whole-minute windows; partial-minute bounds
+fall back to raw counts. The dashboard adds exact-end rows from the scoped
+base table after a successful rollup read. Keep these contracts separate.
+
 [`docs/runbooks/section-sweep-measurements.md`](docs/runbooks/section-sweep-measurements.md) defines the Phase 4b reporting contract. Shared visible-results budgets live in `scripts/lib/performance_budgets.json`. `section_sweep.py` requires reviewed prerequisite evidence before any live request; its HTTP-only reports remain incomplete rather than certifying a page. First/repeat request order is not cache state, cached enclosing payloads cannot supply current child timings, and overlapping spans must not be summed into request compute. Response-cache observations are stamped by `repositories/utils/response_cache.py` and direct-cache owners, with single-flight followers explicitly distinguished from computed misses. Network health's `scope="self"` excludes separately assembled shielding; an enclosing subtree hit still makes both historical. Controlled sampling requires TTL expiry before a verified miss/hit pair; its optional CLI flag never bypasses the prerequisite gate. The browser verifier reports both aggregate and bundle observations with explicit unknowns. Do not run profiling while backend instrumentation, history/coverage, real filter verification, analyst lifecycle or browser evidence is missing. Reader-local `_reader_coverage` and `_history` distinguish actual policies, any-field presence and count/extent provenance; they are not complete-history claims. High-Scale task scopes live in `core/high_scale_sections.py`; ClickHouse admission/HTTP/decode phases are client wall observations, never server CPU estimates. Preserve existing debug gates and historical cache/follower semantics. Disposable Chromium analysts use `scripts/lib/analyst_fixture.cjs` only against already-active, exact verified HTTPS origins; ownership journals and unresolved creates are not proof of cleanup until reconciled. Do not reuse the old auto-sharing `setupAnalystSession` helper for qualification.
 
 ### Perf gate scales

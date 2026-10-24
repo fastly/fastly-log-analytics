@@ -2191,6 +2191,9 @@ class QueryRunner:
             observed.eligibility_reason = "invalid_window"
             return None
         observed.window_start, observed.window_end = st.isoformat(), et.isoformat()
+        if st.second or st.microsecond or et.second or et.microsecond:
+            observed.eligibility_reason = "unsupported_interval"
+            return None
         if (et - st) > timedelta(days=366):
             observed.eligibility_reason = "window_too_long"
             return None
