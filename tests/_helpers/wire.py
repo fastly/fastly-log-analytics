@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import Iterable
+import time
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from fastapi.encoders import jsonable_encoder
@@ -60,3 +62,58 @@ def assert_rows_wire_identical(row_cls: type, rows: list[dict[str, Any]]) -> Non
     assert rows, "no rows to compare"
     dumped = [json.loads(row_cls.model_validate(r).model_dump_json(by_alias=True, exclude_unset=True)) for r in rows]
     assert wire(dumped) == wire(rows)
+
+
+def parse_sse_events(text: str) -> list[dict]:
+    """Decode every ``data:`` event in an SSE body into a dict, skipping non-JSON payloads."""
+    out: list[dict] = []
+    for chunk in text.replace("\r\n", "\n").split("\n\n"):
+        chunk = chunk.strip()
+        if chunk.startswith("data:"):
+            try:
+                out.append(json.loads(chunk[len("data:") :].strip()))
+            except json.JSONDecodeError:
+                pass
+    return out
+
+
+def wait_until(
+    check_fn: Callable[[], bool],
+    timeout: float = 1.0,
+    initial_interval: float = 0.001,
+    backoff_factor: float = 2.0,
+    max_interval: float = 0.05,
+    message: str = "",
+) -> None:
+    """Poll ``check_fn`` until it returns truthy or ``timeout`` elapses."""
+    start = time.perf_counter()
+    interval = initial_interval
+    while True:
+        if check_fn():
+            return
+        if time.perf_counter() - start >= timeout:
+            suffix = f": {message}" if message else ""
+            raise AssertionError(f"Timed out after {timeout}s waiting for condition{suffix}")
+        time.sleep(interval)
+        interval = min(interval * backoff_factor, max_interval)
+
+
+async def await_until(
+    check_fn: Callable[[], bool],
+    timeout: float = 1.0,
+    initial_interval: float = 0.001,
+    backoff_factor: float = 2.0,
+    max_interval: float = 0.05,
+    message: str = "",
+) -> None:
+    """Async variant of :func:`wait_until`."""
+    start = time.perf_counter()
+    interval = initial_interval
+    while True:
+        if check_fn():
+            return
+        if time.perf_counter() - start >= timeout:
+            suffix = f": {message}" if message else ""
+            raise AssertionError(f"Timed out after {timeout}s waiting for condition{suffix}")
+        await asyncio.sleep(interval)
+        interval = min(interval * backoff_factor, max_interval)

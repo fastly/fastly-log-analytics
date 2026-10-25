@@ -29,8 +29,10 @@ from backend.high_scale.recovery import (
     rebuild_rum_facts_from_fos,
     rebuild_security_projections_from_fos,
 )
-from backend.high_scale.registry import get_high_scale_service_registry
-from backend.high_scale.registry_bootstrap import register_high_scale_services_from_environment
+from backend.high_scale.registry_bootstrap import (
+    get_high_scale_service_registry,
+    register_high_scale_services_from_environment,
+)
 
 
 def parse_capacity_json(parser: argparse.ArgumentParser, path: Path | None) -> RecoveryCapacityMeasurement | None:

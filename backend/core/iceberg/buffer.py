@@ -45,7 +45,7 @@ import pyarrow.parquet as pq
 # falls through manifest.py's pattern.
 from backend.core.iceberg import _core as _core_mod
 from backend.core.query_instrumentation import InstrumentedDuckDBConnection
-from backend.core.sql_ident import require_safe_ident
+from backend.utils.sql_validator import require_safe_ident
 
 
 def __getattr__(name: str):

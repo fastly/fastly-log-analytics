@@ -16,6 +16,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from backend.repositories._sql.insights import NEW_PROBES
+
 # DuckDB column name -> ClickHouse expression over request_facts.
 COLUMNS: dict[str, str] = {
     "timestamp": "event_timestamp",
@@ -72,28 +74,6 @@ COLUMNS: dict[str, str] = {
     ),
 }
 
-_PROBE_PATHS = (
-    "admin",
-    ".env",
-    ".git",
-    "wp-",
-    "phpmyadmin",
-    "config",
-    "backup",
-    "shell",
-    "passwd",
-    "xmlrpc",
-    "actuator",
-    "console",
-    "cgi-bin",
-    ".php",
-    ".asp",
-    "../../",
-    "swagger",
-    "api-docs",
-    "graphql",
-    "debug",
-)
 _COMPRESSIBLE_EXTENSIONS = (".js", ".css", ".html", ".json", ".svg", ".xml", ".txt")
 _AUTH_PATHS = (
     "login",
@@ -143,7 +123,7 @@ _BOT_UA_TOKENS = (
     "spider",
     "monitor",
 )
-PROBE_REGEX = "(?i)" + "|".join(re.escape(path) for path in _PROBE_PATHS)
+PROBE_REGEX = "(?i)" + "|".join(re.escape(path) for path in NEW_PROBES)
 AUTH_REGEX = "(?i)" + "|".join(re.escape(path) for path in _AUTH_PATHS)
 BOT_UA_REGEX = "(?i)" + "|".join(re.escape(token) for token in _BOT_UA_TOKENS)
 COMPRESSIBLE_REGEX = "(?i)" + "|".join(re.escape(ext) for ext in _COMPRESSIBLE_EXTENSIONS)
@@ -166,19 +146,90 @@ class Detection:
     needs_baseline: bool = True
 
 
-def _share_spike(column: str, share_floor: str, *, extra_row: str = "") -> str:
-    """Window traffic share of one value that spiked versus its baseline share (UA / referer monoculture)."""
+def _share_spike(
+    column: str,
+    share_floor: str,
+    *,
+    extra_row: str = "",
+    min_w_cnt: int = 0,
+    multiplier: int = 3,
+    delta: str = "0.10",
+    limit: int = 10,
+    w_first: bool = False,
+) -> str:
+    """Window traffic share of one value that spiked versus its baseline share."""
+    sel_cols = ", ".join(f"g.{c.strip()}" for c in column.split(","))
+    totals_cols = "t.w_total, t.b_total" if w_first else "t.b_total, t.w_total"
+    cnt_clause = f" AND g.w_cnt >= {min_w_cnt}" if min_w_cnt else ""
     return f"""
     , totals AS (SELECT countIf(is_w) AS w_total, countIf(is_b) AS b_total FROM base),
     grp AS (
         SELECT {column}, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt
         FROM base {extra_row} GROUP BY {column}
     )
-    SELECT g.{column}, g.w_cnt, g.b_cnt, t.b_total, t.w_total
+    SELECT {sel_cols}, g.w_cnt, g.b_cnt, {totals_cols}
     FROM grp g CROSS JOIN totals t
-    WHERE t.w_total > 0 AND g.w_cnt * 1.0 / t.w_total >= {share_floor}
-      AND (t.b_total = 0 OR g.w_cnt * 1.0 / t.w_total >= g.b_cnt * 1.0 / nullIf(t.b_total, 0) * 3 + 0.10)
-    ORDER BY g.w_cnt DESC LIMIT 10
+    WHERE t.w_total > 0{cnt_clause} AND g.w_cnt * 1.0 / t.w_total >= {share_floor}
+      AND (t.b_total = 0 OR g.w_cnt * 1.0 / t.w_total >= g.b_cnt * 1.0 / nullIf(t.b_total, 0) * {multiplier} + {delta})
+    ORDER BY g.w_cnt DESC LIMIT {limit}
+    """
+
+
+def _p95_regression(
+    select_col: str,
+    *,
+    group_by: str | None = None,
+    min_w: int = 20,
+    min_b: int = 50,
+    ratio: float = 1.5,
+    min_delta_ms: int = 100,
+    extra_select: str = "",
+) -> str:
+    grp = group_by or select_col
+    return f"""
+    SELECT {select_col},
+        {_P95}(elapsed, is_w) / 1000.0 AS w_p95,
+        {_P95}(elapsed, is_b) / 1000.0 AS b_p95,
+        countIf(is_w) AS w_total,
+        countIf(is_b) AS b_total{extra_select}
+    FROM base GROUP BY {grp}
+    HAVING w_total >= {min_w} AND b_total >= {min_b} AND w_p95 >= b_p95 * {ratio} AND w_p95 - b_p95 >= {min_delta_ms}
+    ORDER BY (w_p95 / nullIf(b_p95, 0)) DESC LIMIT 15
+    """
+
+
+def _new_traffic(select_col: str, min_w: int, *, where: str = "", group_by: str | None = None) -> str:
+    grp = group_by or select_col
+    where_clause = f" WHERE {where}" if where else ""
+    return f"""
+    SELECT {select_col}, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt
+    FROM base{where_clause} GROUP BY {grp}
+    HAVING w_cnt >= {min_w} AND b_cnt = 0
+    ORDER BY w_cnt DESC LIMIT 20
+    """
+
+
+def _error_spike(
+    select_col: str,
+    *,
+    group_by: str | None = None,
+    status_min: int = 500,
+    min_w: int = 3,
+    min_rate: str = "0.05",
+    min_b: int = 10,
+    multiplier: int = 2,
+) -> str:
+    grp = group_by or select_col
+    return f"""
+    SELECT {select_col},
+        countIf(is_w AND status >= {status_min}) * 1.0 / nullIf(countIf(is_w), 0) AS w_rate,
+        countIf(is_b AND status >= {status_min}) * 1.0 / nullIf(countIf(is_b), 0) AS b_rate,
+        countIf(is_w AND status >= {status_min}) AS w_errors,
+        countIf(is_w) AS w_total,
+        countIf(is_b) AS b_total
+    FROM base GROUP BY {grp}
+    HAVING w_total >= {min_w} AND w_rate >= {min_rate} AND (b_total < {min_b} OR w_rate >= b_rate * {multiplier} + 0.05)
+    ORDER BY (w_rate - coalesce(b_rate, 0)) DESC LIMIT 15
     """
 
 
@@ -328,29 +379,8 @@ def impossible_distance(
 
 
 DETECTIONS: dict[str, Detection] = {
-    "error_spikes": Detection(
-        ("url", "status"),
-        """
-    SELECT url,
-        countIf(is_w AND status >= 500) * 1.0 / nullIf(countIf(is_w), 0) AS w_rate,
-        countIf(is_b AND status >= 500) * 1.0 / nullIf(countIf(is_b), 0) AS b_rate,
-        countIf(is_w AND status >= 500) AS w_errors,
-        countIf(is_w) AS w_total,
-        countIf(is_b) AS b_total
-    FROM base GROUP BY url
-    HAVING w_total >= 3 AND w_rate >= 0.05 AND (b_total < 10 OR w_rate >= b_rate * 2 + 0.05)
-    ORDER BY (w_rate - coalesce(b_rate, 0)) DESC LIMIT 15
-    """,
-    ),
-    "new_country_traffic": Detection(
-        ("country",),
-        """
-    SELECT country, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt
-    FROM base WHERE country != '' GROUP BY country
-    HAVING w_cnt >= 3 AND b_cnt = 0
-    ORDER BY w_cnt DESC LIMIT 20
-    """,
-    ),
+    "error_spikes": Detection(("url", "status"), _error_spike("url")),
+    "new_country_traffic": Detection(("country",), _new_traffic("country", 3, where="country != ''")),
     "ua_monoculture": Detection(("ua",), _share_spike("ua", "0.25")),
     "new_probe_urls": Detection(
         ("url", "status"),
@@ -378,21 +408,7 @@ DETECTIONS: dict[str, Detection] = {
           >= (t.b_proxy_total * 100.0 / nullIf(r.b_total_all, 0)) * 2 + 5
     """,
     ),
-    "asn_concentration": Detection(
-        ("asn",),
-        """
-    , totals AS (SELECT countIf(is_w) AS w_total, countIf(is_b) AS b_total FROM base),
-    grp AS (
-        SELECT asn, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt
-        FROM base WHERE asn IS NOT NULL GROUP BY asn
-    )
-    SELECT g.asn, g.w_cnt, g.b_cnt, t.b_total, t.w_total
-    FROM grp g CROSS JOIN totals t
-    WHERE t.w_total > 0 AND g.w_cnt * 1.0 / t.w_total >= 0.20
-      AND (t.b_total = 0 OR g.w_cnt * 1.0 / t.w_total >= g.b_cnt * 1.0 / nullIf(t.b_total, 0) * 3 + 0.10)
-    ORDER BY g.w_cnt DESC LIMIT 10
-    """,
-    ),
+    "asn_concentration": Detection(("asn",), _share_spike("asn", "0.20", extra_row="WHERE asn IS NOT NULL")),
     "cache_collapse": Detection(
         ("url", "cache"),
         f"""
@@ -421,16 +437,7 @@ DETECTIONS: dict[str, Detection] = {
     ),
     "latency_regression": Detection(
         ("url", "elapsed"),
-        f"""
-    SELECT url,
-        {_P95}(elapsed, is_w) / 1000.0 AS w_p95,
-        {_P95}(elapsed, is_b) / 1000.0 AS b_p95,
-        countIf(is_w) AS w_total,
-        countIf(is_b) AS b_total
-    FROM base GROUP BY url
-    HAVING w_total >= 5 AND b_total >= 20 AND w_p95 >= b_p95 * 2.0 AND w_p95 - b_p95 >= 200
-    ORDER BY (w_p95 / nullIf(b_p95, 0)) DESC LIMIT 15
-    """,
+        _p95_regression("url", min_w=5, min_b=20, ratio=2.0, min_delta_ms=200),
         row_filter="elapsed IS NOT NULL",
     ),
     "tail_latency": Detection(
@@ -466,18 +473,13 @@ DETECTIONS: dict[str, Detection] = {
     ),
     "region_latency": Detection(
         ("server_region", "elapsed", "ottfb"),
-        f"""
-    SELECT server_region,
-        {_P95}(elapsed, is_w) / 1000.0 AS w_p95,
-        {_P95}(elapsed, is_b) / 1000.0 AS b_p95,
-        countIf(is_w) AS w_total,
-        countIf(is_b) AS b_total,
-        if(countIf(is_w AND ottfb IS NOT NULL) >= 20,
-           round(quantileTDigestIf(0.95)(ottfb, is_w AND ottfb IS NOT NULL) / 1000.0, 0), NULL) AS ottfb_p95
-    FROM base GROUP BY server_region
-    HAVING w_total >= 20 AND b_total >= 50 AND w_p95 >= b_p95 * 1.5 AND w_p95 - b_p95 >= 100
-    ORDER BY (w_p95 / nullIf(b_p95, 0)) DESC LIMIT 15
-    """,
+        _p95_regression(
+            "server_region",
+            extra_select=(
+                ",\n        if(countIf(is_w AND ottfb IS NOT NULL) >= 20,\n"
+                "           round(quantileTDigestIf(0.95)(ottfb, is_w AND ottfb IS NOT NULL) / 1000.0, 0), NULL) AS ottfb_p95"
+            ),
+        ),
         row_filter="elapsed IS NOT NULL AND server_region != ''",
     ),
     "origin_latency_spike": Detection(
@@ -556,28 +558,17 @@ DETECTIONS: dict[str, Detection] = {
     "referer_monoculture": Detection(("referer",), _share_spike("referer", "0.20", extra_row="WHERE referer != ''")),
     "method_drift": Detection(
         ("method",),
-        """
-    , totals AS (SELECT countIf(is_w) AS w_total, countIf(is_b) AS b_total FROM base),
-    grp AS (
-        SELECT method, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt
-        FROM base WHERE method != '' AND upper(method) NOT IN ('GET', 'HEAD', 'OPTIONS') GROUP BY method
-    )
-    SELECT g.method, g.w_cnt, g.b_cnt, t.w_total, t.b_total
-    FROM grp g CROSS JOIN totals t
-    WHERE t.w_total > 0 AND g.w_cnt >= 20 AND g.w_cnt * 1.0 / t.w_total >= 0.10
-      AND (t.b_total = 0 OR g.w_cnt * 1.0 / t.w_total >= g.b_cnt * 1.0 / nullIf(t.b_total, 0) * 2 + 0.05)
-    ORDER BY g.w_cnt DESC LIMIT 10
-    """,
+        _share_spike(
+            "method",
+            "0.10",
+            extra_row="WHERE method != '' AND upper(method) NOT IN ('GET', 'HEAD', 'OPTIONS')",
+            min_w_cnt=20,
+            multiplier=2,
+            delta="0.05",
+            w_first=True,
+        ),
     ),
-    "new_asn_traffic": Detection(
-        ("asn",),
-        """
-    SELECT asn, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt
-    FROM base WHERE asn IS NOT NULL GROUP BY asn
-    HAVING w_cnt >= 20 AND b_cnt = 0
-    ORDER BY w_cnt DESC LIMIT 20
-    """,
-    ),
+    "new_asn_traffic": Detection(("asn",), _new_traffic("asn", 20, where="asn IS NOT NULL")),
     "asn_hosting_shift": Detection(
         ("asn", "p_type"),
         """
@@ -609,32 +600,12 @@ DETECTIONS: dict[str, Detection] = {
     ),
     "connection_type_mix": Detection(
         ("c_type", "c_speed"),
-        """
-    , totals AS (SELECT countIf(is_w) AS w_total, countIf(is_b) AS b_total FROM base),
-    grp AS (
-        SELECT c_type, c_speed, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt
-        FROM base GROUP BY c_type, c_speed
-    )
-    SELECT g.c_type, g.c_speed, g.w_cnt, g.b_cnt, t.w_total, t.b_total
-    FROM grp g CROSS JOIN totals t
-    WHERE g.w_cnt >= 20 AND t.w_total > 0 AND g.w_cnt * 1.0 / t.w_total >= 0.15
-      AND (t.b_total = 0 OR g.w_cnt * 1.0 / t.w_total >= g.b_cnt * 1.0 / nullIf(t.b_total, 0) * 2 + 0.05)
-    ORDER BY g.w_cnt DESC LIMIT 15
-    """,
+        _share_spike("c_type, c_speed", "0.15", min_w_cnt=20, multiplier=2, delta="0.05", limit=15, w_first=True),
         row_filter="c_type != ''",
     ),
     "pop_latency_regression": Detection(
         ("pop", "elapsed"),
-        f"""
-    SELECT pop,
-        {_P95}(elapsed, is_w) / 1000.0 AS w_p95,
-        {_P95}(elapsed, is_b) / 1000.0 AS b_p95,
-        countIf(is_w) AS w_total,
-        countIf(is_b) AS b_total
-    FROM base GROUP BY pop
-    HAVING w_total >= 20 AND b_total >= 50 AND w_p95 >= b_p95 * 1.5 AND w_p95 - b_p95 >= 100
-    ORDER BY (w_p95 / nullIf(b_p95, 0)) DESC LIMIT 15
-    """,
+        _p95_regression("pop"),
         row_filter="pop != '' AND elapsed IS NOT NULL",
     ),
     "http3_fallback": Detection(
@@ -787,37 +758,25 @@ DETECTIONS: dict[str, Detection] = {
     ),
     "city_error_spikes": Detection(
         ("city", "region", "country", "status"),
-        f"""
-    SELECT {_CITY_LABEL},
-        countIf(is_w AND status >= 400) * 1.0 / nullIf(countIf(is_w), 0) AS w_rate,
-        countIf(is_b AND status >= 400) * 1.0 / nullIf(countIf(is_b), 0) AS b_rate,
-        countIf(is_w AND status >= 400) AS w_errors, countIf(is_w) AS w_total, countIf(is_b) AS b_total
-    FROM base GROUP BY city, region, country
-    HAVING w_total >= 10 AND w_rate >= 0.10 AND (b_total < 50 OR w_rate >= b_rate * 3 + 0.05)
-    ORDER BY (w_rate - coalesce(b_rate, 0)) DESC LIMIT 15
-    """,
+        _error_spike(
+            _CITY_LABEL,
+            group_by="city, region, country",
+            status_min=400,
+            min_w=10,
+            min_rate="0.10",
+            min_b=50,
+            multiplier=3,
+        ),
         row_filter="city != ''",
     ),
     "city_latency_regressions": Detection(
         ("city", "region", "country", "elapsed"),
-        f"""
-    SELECT {_CITY_LABEL},
-        {_P95}(elapsed, is_w) / 1000.0 AS w_p95, {_P95}(elapsed, is_b) / 1000.0 AS b_p95,
-        countIf(is_w) AS w_total, countIf(is_b) AS b_total
-    FROM base GROUP BY city, region, country
-    HAVING w_total >= 10 AND b_total >= 50 AND w_p95 >= b_p95 * 3.0 AND w_p95 - b_p95 >= 500
-    ORDER BY (w_p95 / nullIf(b_p95, 0)) DESC LIMIT 15
-    """,
+        _p95_regression(_CITY_LABEL, group_by="city, region, country", min_w=10, min_b=50, ratio=3.0, min_delta_ms=500),
         row_filter="city != '' AND elapsed IS NOT NULL",
     ),
     "new_city_traffic": Detection(
         ("city", "region", "country"),
-        f"""
-    SELECT {_CITY_LABEL}, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt
-    FROM base GROUP BY city, region, country
-    HAVING w_cnt >= 5 AND b_cnt = 0
-    ORDER BY w_cnt DESC LIMIT 20
-    """,
+        _new_traffic(_CITY_LABEL, 5, group_by="city, region, country"),
         row_filter="city != ''",
     ),
     "asn_metro_performance": Detection(

@@ -166,7 +166,7 @@ def test_contract_3_usage_log_attribution_cron_full_sync(full_sync_test_source, 
     monkeypatch.setattr("backend.cron_progress.start_progress", lambda *a, **kw: None)
     monkeypatch.setattr("backend.cron_progress.end_progress", lambda *a, **kw: None)
     monkeypatch.setattr(
-        "backend.utils.usage_logger.flush_usage_log",
+        "backend.utils.telemetry.flush_usage_log",
         lambda sid: flush_contexts.append(get_process_context()),
     )
 

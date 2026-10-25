@@ -64,7 +64,7 @@ vi.mock('@/components/Map/ChoroplethMap', () => ({
   ),
 }))
 
-import { GeoMap } from '@/app/dashboard/_sections/GeoMap'
+import { GeoMap } from '@/app/dashboard/_sections/DashboardClient'
 
 const catalog = {
   fields: [{ id: 'country', label: 'Country', group: 'GEO' }],

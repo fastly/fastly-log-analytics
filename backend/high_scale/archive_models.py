@@ -6,6 +6,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from backend.high_scale.models import (  # noqa: F401
+    ARCHIVE_STATES,
+    ArchiveState,
+    RetentionRecommendation,
+    ServiceProfile,
+    StorageProfile,
+    recommend_retention,
+    validate_archive_transition,
+)
+
 
 @dataclass(frozen=True)
 class ArchiveSourceObject:

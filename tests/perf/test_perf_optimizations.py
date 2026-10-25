@@ -243,3 +243,98 @@ def test_prewarm_fires_for_existing_chart_routes():
     """Sanity-check: pre-existing prewarm routes still covered."""
     for route in ["/dashboard", "/network", "/origin", "/performance", "/security", "/insights", "/fastly-value"]:
         assert _needs_prewarm(route) is True, f"{route} should trigger prewarm"
+
+
+# ── Merged from tests/perf/test_benchmarks_micro.py ──
+
+import pytest
+
+from backend.core.duckdb import _safe_table_name
+from backend.utils.hll import HyperLogLog
+from backend.utils.sql_validator import escape_sql_literal
+
+
+@pytest.mark.benchmark
+def test_bench_hll_add_1k_items(benchmark):
+    """Insert 1000 IPv4-shaped strings into a fresh sketch."""
+    items = [f"203.0.113.{i % 256}" for i in range(1000)]
+
+    def _go():
+        sketch = HyperLogLog()
+        for item in items:
+            sketch.add(item)
+        return sketch
+
+    result = benchmark(_go)
+    assert result.count() > 0
+
+
+@pytest.mark.benchmark
+def test_bench_hll_count_after_100k_adds(benchmark):
+    """Estimate cardinality on a fully-populated sketch."""
+    sketch = HyperLogLog()
+    for i in range(100_000):
+        sketch.add(f"203.0.113.{i % 256}.{i // 256}")
+
+    estimate = benchmark(sketch.count)
+    assert estimate > 0
+
+
+@pytest.mark.benchmark
+def test_bench_hll_merge_24_hours(benchmark):
+    """Merge 24 per-hour sketches into a daily roll-up."""
+    sketches = []
+    for hour in range(24):
+        s = HyperLogLog()
+        for i in range(5_000):
+            s.add(f"hour{hour}:198.51.100.{i % 256}.{i // 256}")
+        sketches.append(s)
+
+    def _go():
+        merged = HyperLogLog()
+        for s in sketches:
+            merged.merge(s)
+        return merged
+
+    merged = benchmark(_go)
+    assert merged is not None
+    assert merged.count() > 0
+
+
+@pytest.mark.benchmark
+def test_bench_hll_serialize_roundtrip(benchmark):
+    """to_bytes → from_bytes round-trip on a populated sketch."""
+    sketch = HyperLogLog()
+    for i in range(10_000):
+        sketch.add(f"192.0.2.{i % 256}.{i // 256}")
+    blob = sketch.to_bytes()
+
+    def _roundtrip():
+        return HyperLogLog.from_bytes(blob).to_bytes()
+
+    out = benchmark(_roundtrip)
+    assert out == blob
+
+
+@pytest.mark.benchmark
+def test_bench_safe_table_name(benchmark):
+    """``_safe_table_name`` is called on every QueryRunner construction."""
+    name = "svc-test-account-name-with-dashes-and-some-numbers-42"
+    result = benchmark(_safe_table_name, name)
+    assert result.startswith("logs_")
+
+
+@pytest.mark.benchmark
+def test_bench_escape_sql_literal_typical(benchmark):
+    """Escape a typical FOS object key."""
+    key = "raw/2026-05-15/12/2026-05-15T12-34-56.svc-name.gz"
+    result = benchmark(escape_sql_literal, key)
+    assert result == key
+
+
+@pytest.mark.benchmark
+def test_bench_escape_sql_literal_with_quotes(benchmark):
+    """Escape a key containing single quotes — the worst-case branch."""
+    bad_key = "raw/2026-05-15/O'Brien's-bucket/file.gz"
+    result = benchmark(escape_sql_literal, bad_key)
+    assert "''" in result

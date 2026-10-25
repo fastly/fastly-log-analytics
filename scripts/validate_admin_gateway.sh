@@ -10,11 +10,10 @@ done
 export ADMIN_MTLS_TEST_REQUIRED=1
 uv run pytest -n 0 \
   tests/test_admin_certificates.py \
-  tests/chart/test_admin_gateway.py \
+  tests/chart/test_helm.py \
   tests/deploy/test_gateway_deployment.py \
   tests/deploy/test_admin_tls_client.py \
-  tests/deploy/test_readiness.py \
-  tests/deploy/test_public_gateway_runtime.py
+  tests/deploy/test_readiness.py
 node --test tests/deploy/admin_gateway_client.test.cjs
 helm lint deploy/chart/admin-gateway \
   --set host=admin.example.com --set existingSecret=operator-gateway \

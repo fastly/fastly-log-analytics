@@ -42,6 +42,8 @@ vi.mock('@/lib/api', async (importOriginal) => {
 
 import AdminPage from '@/app/admin/page'
 import Loading from '@/app/admin/loading'
+import RumAdminPage from '@/app/admin/rum/page'
+import RumLoading from '@/app/admin/rum/loading'
 import { OperationsOverview } from '@/app/admin/_sections/OperationsOverview'
 import { ServicesTable } from '@/app/admin/_sections/ServicesTable'
 import { QuarantineSection } from '@/app/admin/_sections/QuarantineSection'
@@ -366,6 +368,200 @@ describe('/admin/trends Page & Client', () => {
 
     await waitFor(() => {
       expect(clientGetSpy.mock.calls.length).toBeGreaterThan(callsBeforeRefresh)
+    })
+  })
+})
+
+test('ServicesTable renders services flowed through MSW + openapi-fetch', async () => {
+  server.use(
+    http.get(`${API_BASE}/api/services`, () =>
+      HttpResponse.json({
+        services: [
+          {
+            service_id: 'test-svc',
+            name: 'Test Service',
+            fos_bucket: 'test-bucket',
+            access_level: 'read_write',
+          },
+        ],
+      }),
+    ),
+  )
+
+  const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
+  renderWithQuery(<ServicesTable />, { queryClient })
+
+  await waitFor(
+    () => {
+      expect(screen.getByText('Test Service')).toBeInTheDocument()
+      expect(screen.getByText('test-svc')).toBeInTheDocument()
+      expect(screen.getByText('test-bucket')).toBeInTheDocument()
+    },
+    { timeout: 3000 },
+  )
+})
+
+test('the row Manage menu offers Delete Data (left of/above Teardown) and opens its confirmation dialog', async () => {
+  server.use(
+    http.get(`${API_BASE}/api/services`, () =>
+      HttpResponse.json({
+        services: [
+          {
+            service_id: 'test-svc',
+            name: 'Test Service',
+            fos_bucket: 'test-bucket',
+            access_level: 'read_write',
+          },
+        ],
+      }),
+    ),
+  )
+
+  const user = userEvent.setup()
+  const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
+  renderWithQuery(<ServicesTable />, { queryClient })
+
+  await waitFor(() => expect(screen.getByText('Test Service')).toBeInTheDocument())
+
+  await user.click(screen.getByRole('button', { name: /manage/i }))
+
+  const deleteDataItem = await screen.findByText('Delete Data')
+  const teardownItem = screen.getByText('Teardown Service')
+  expect(
+    deleteDataItem.compareDocumentPosition(teardownItem) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy()
+
+  await user.click(deleteDataItem)
+  expect(await screen.findByText('Delete Data: Test Service')).toBeInTheDocument()
+})
+
+const SVC_RUM = 'svc-admin-rum-test'
+
+describe('Admin RUM Configuration Page (/admin/rum)', () => {
+  beforeEach(() => {
+    useServiceStore.setState({
+      activeServiceId: SVC_RUM,
+      services: [{ id: SVC_RUM, name: 'Test RUM Service' }],
+      isInitialized: true,
+    })
+  })
+
+  it('renders route-level loading skeleton with zero-CLS reservations', () => {
+    render(<RumLoading />)
+    expect(screen.getByTestId('admin-rum-loading')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-rum-toolbar-skeleton')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-rum-status-skeleton-card')).toBeInTheDocument()
+    expect(screen.getByText('Inspecting RUM beacon pipeline...')).toBeInTheDocument()
+  })
+
+  it('renders in-place skeleton while RUM status query is pending', async () => {
+    server.use(
+      http.get('*/api/services/:service_id/rum/status', async () => {
+        await new Promise((r) => setTimeout(r, 200))
+        return HttpResponse.json({ enabled: false })
+      }),
+      http.get('*/api/services', () =>
+        HttpResponse.json({
+          services: [{ service_id: SVC_RUM, name: 'Test RUM Service' }],
+        }),
+      ),
+    )
+
+    renderWithQuery(<RumAdminPage />)
+
+    expect(screen.getByTestId('admin-rum-root')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-rum-status-reservation')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-rum-status-skeleton')).toBeInTheDocument()
+    expect(screen.getByText('Inspecting RUM beacon pipeline...')).toBeInTheDocument()
+  })
+
+  it('renders enabled RUM status, collectors summary, and Faro SDK version card', async () => {
+    server.use(
+      http.get('*/api/services/:service_id/rum/status', () =>
+        HttpResponse.json({
+          enabled: true,
+          enabled_at: '2026-10-18T10:00:00Z',
+          deployed_vcl_sha: 'sha-123',
+          current_vcl_sha: 'sha-123',
+          vcl_drift: false,
+          capture_vitals: true,
+          capture_performance: true,
+          capture_errors: true,
+          capture_events: false,
+          custom_condition: 'req.url !~ "^/internal"',
+        }),
+      ),
+      http.get('*/api/services/:service_id/rum/versions', () =>
+        HttpResponse.json({
+          available: ['2.3.1', '2.2.0'],
+          current: '2.2.0',
+          latest: '2.3.1',
+          update_available: true,
+        }),
+      ),
+      http.get('*/api/services', () =>
+        HttpResponse.json({
+          services: [{ service_id: SVC_RUM, name: 'Test RUM Service' }],
+        }),
+      ),
+    )
+
+    renderWithQuery(<RumAdminPage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('admin-rum-status-line')).toHaveTextContent('✅ Enabled')
+    })
+
+    expect(screen.getByTestId('admin-rum-status-badge')).toHaveTextContent(
+      'Beacon Pipeline Active',
+    )
+    expect(screen.getByTestId('admin-rum-vcl-drift')).toHaveTextContent('✅ No')
+    expect(screen.getByTestId('admin-rum-capture-summary')).toHaveTextContent(
+      'Vitals, Performance, Errors',
+    )
+    expect(screen.getByTestId('admin-rum-enable-btn')).toBeDisabled()
+    expect(screen.getByTestId('admin-rum-disable-btn')).not.toBeDisabled()
+
+    await waitFor(() => {
+      expect(screen.getByTestId('admin-rum-faro-version')).toHaveTextContent('2.2.0')
+    })
+    expect(screen.getByTestId('admin-rum-settings-btn')).toBeInTheDocument()
+  })
+
+  it('renders disabled RUM state and triggers manual refresh on click', async () => {
+    let statusCalls = 0
+    server.use(
+      http.get('*/api/services/:service_id/rum/status', () => {
+        statusCalls += 1
+        return HttpResponse.json({
+          enabled: false,
+          vcl_drift: false,
+        })
+      }),
+      http.get('*/api/services', () =>
+        HttpResponse.json({
+          services: [{ service_id: SVC_RUM, name: 'Test RUM Service' }],
+        }),
+      ),
+    )
+
+    renderWithQuery(<RumAdminPage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('admin-rum-status-line')).toHaveTextContent('❌ Disabled')
+    })
+
+    expect(screen.getByTestId('admin-rum-status-badge')).toHaveTextContent(
+      'Beacon Pipeline Inactive',
+    )
+    expect(screen.getByTestId('admin-rum-enable-btn')).not.toBeDisabled()
+    expect(screen.getByTestId('admin-rum-disable-btn')).toBeDisabled()
+
+    const callsBeforeRefresh = statusCalls
+    fireEvent.click(screen.getByTestId('admin-rum-refresh-btn'))
+
+    await waitFor(() => {
+      expect(statusCalls).toBeGreaterThan(callsBeforeRefresh)
     })
   })
 })

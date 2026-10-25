@@ -19,6 +19,7 @@ between tests.
 from __future__ import annotations
 
 import copy
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -79,3 +80,23 @@ def make_source(
         raise ValueError(f"unknown source kind {kind!r}")
     src.update({k: _fresh(v) for k, v in overrides.items()})
     return src
+
+
+class TinyFos:
+    """Tiny in-memory Fastly Object Storage seam shared by test runners."""
+
+    def __init__(self) -> None:
+        self.objects: dict[str, tuple[bytes, dict[str, Any]]] = {}
+        self.puts = 0
+
+    def put_object(self, *, Bucket: str, Key: str, Body: bytes, Metadata: dict[str, Any], **_kwargs: Any) -> None:
+        self.objects[Key] = (Body, Metadata)
+        self.puts += 1
+
+    def head_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+        payload, metadata = self.objects[Key]
+        return {"ContentLength": len(payload), "Metadata": metadata}
+
+    def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+        payload, metadata = self.objects[Key]
+        return {"ContentLength": len(payload), "Metadata": metadata, "Body": BytesIO(payload)}

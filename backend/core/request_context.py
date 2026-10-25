@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 
     import duckdb
 
-    from backend.high_scale.registry import HighScaleService
+    from backend.high_scale.registry_bootstrap import HighScaleService
     from backend.utils.remote_access import TimeBounds
 
 logger = logging.getLogger(__name__)
@@ -135,7 +135,7 @@ class RequestContext:
         The registry import is deferred so handlers on the standard DuckDB path never load
         the ClickHouse stack; each handler still lazily imports its own ``hs_*`` function.
         """
-        from backend.high_scale.registry import get_high_scale_service_registry
+        from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
         return get_high_scale_service_registry().resolve(self.service_id)
 

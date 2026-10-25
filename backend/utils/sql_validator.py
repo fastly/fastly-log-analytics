@@ -54,6 +54,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, NoReturn
@@ -763,3 +764,18 @@ def is_simple_select_statement(sql: str, *, parser_con: duckdb.DuckDBPyConnectio
     """
     _parsed, node, err_code, _err_msg = _parse_single_select_node(sql, parser_con, allow_multi=True)
     return err_code is None and node is not None
+
+
+SAFE_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def is_safe_ident(name: object) -> bool:
+    """True when ``name`` is a non-empty ``[A-Za-z_][A-Za-z0-9_]*`` string."""
+    return isinstance(name, str) and SAFE_IDENT_RE.fullmatch(name) is not None
+
+
+def require_safe_ident(name: str, label: str) -> str:
+    """Return ``name`` unchanged or raise ``ValueError(f"{label}: {name!r}")``."""
+    if not is_safe_ident(name):
+        raise ValueError(f"{label}: {name!r}")
+    return name

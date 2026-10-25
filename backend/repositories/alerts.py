@@ -15,9 +15,47 @@ from backend import config as svcconfig
 from backend.core import metadata as metadata_db
 from backend.core.metrics import get_metric_sql
 from backend.models.alerts import Alert
+from backend.models.common import SavedView
 from backend.repositories._base import QueryRunner
-from backend.repositories._sql import alerts as SQL
 from backend.utils.telemetry import track_query
+
+MAX_TIMESTAMP = "SELECT max(timestamp) FROM {table}"
+
+PREVIEW_SERIES = """
+        SELECT {group_sql} as ts, {agg_sql} as val
+        FROM {table}
+        WHERE timestamp >= (SELECT max(timestamp) FROM {table}) - INTERVAL '{lookback_mins} minutes' {scope_filter}
+        GROUP BY 1
+        ORDER BY 1 ASC
+    """
+
+PREVIEW_ANY_ROW = "SELECT 1 FROM {table} LIMIT 1"
+
+PREVIEW_MAX_TS = "SELECT max(timestamp) FROM {table}"
+
+PREVIEW_BASELINE = """
+                SELECT
+                    EXTRACT(hour FROM ts) AS hr,
+                    avg(val) AS mean_val,
+                    stddev(val) AS stddev_val
+                FROM (
+                    SELECT date_trunc('hour', timestamp) AS ts, {agg_sql} AS val
+                    FROM {table}
+                    WHERE {baseline_where}
+                    GROUP BY 1
+                )
+                GROUP BY 1
+            """
+
+PREVIEW_HISTORY = """
+                 SELECT {group_sql} as ts, {agg_sql} as val
+                 FROM {table}
+                 WHERE timestamp >= (SELECT max(timestamp) FROM {table}) - INTERVAL '{start_minutes} minutes'
+                   AND timestamp <= (SELECT max(timestamp) FROM {table}) - INTERVAL '{comp_period} minutes'
+                   {scope_filter}
+                 GROUP BY 1
+                 ORDER BY 1 ASC
+             """
 
 
 def get_alerts(service_id: str | None = None, *, limit: int = 500) -> list[dict]:
@@ -90,7 +128,7 @@ def evaluate_alert(
     status_codes = alert.get("status_codes")
 
     try:
-        max_ts_query = SQL.MAX_TIMESTAMP.format(table=table_name)
+        max_ts_query = MAX_TIMESTAMP.format(table=table_name)
         with track_query(con, max_ts_query, [], "alerts") as cursor:
             max_ts = cursor.fetchone()[0]
 
@@ -405,7 +443,7 @@ def preview_alert_series(
     max_ts_prune = _prune_clause(lookback_mins)
     scope_filter = base_scope_filter + max_ts_prune
 
-    q = SQL.PREVIEW_SERIES.format(
+    q = PREVIEW_SERIES.format(
         group_sql=group_sql,
         agg_sql=agg_sql,
         table=table_name,
@@ -429,7 +467,7 @@ def preview_alert_series(
     # no retry storm) and re-run. A genuinely empty service won't have a status-cache row
     # count, so this won't fire there.
     if not rows and has_status_data():
-        with track_query(con, SQL.PREVIEW_ANY_ROW.format(table=table_name), [], "alerts_preview_check") as cursor:
+        with track_query(con, PREVIEW_ANY_ROW.format(table=table_name), [], "alerts_preview_check") as cursor:
             has_any = cursor.fetchone()
         if not has_any:
             from backend.repositories._base import force_rebuild_view
@@ -470,9 +508,7 @@ def preview_alert_series(
         max_ts_dt = anchor_dt
         if not max_ts_dt:
             try:
-                with track_query(
-                    con, SQL.PREVIEW_MAX_TS.format(table=table_name), [], "alerts_preview_max_ts"
-                ) as cursor:
+                with track_query(con, PREVIEW_MAX_TS.format(table=table_name), [], "alerts_preview_max_ts") as cursor:
                     max_ts_row = cursor.fetchone()
                     max_ts_dt = max_ts_row[0] if max_ts_row else None
             except Exception:
@@ -486,7 +522,7 @@ def preview_alert_series(
             if "timestamp_hour" in existing_cols:
                 baseline_where += f" AND timestamp_hour >= '{st_utc.strftime('%Y-%m-%d-%H')}'"
 
-        q_baseline = SQL.PREVIEW_BASELINE.format(agg_sql=agg_sql, table=table_name, baseline_where=baseline_where)
+        q_baseline = PREVIEW_BASELINE.format(agg_sql=agg_sql, table=table_name, baseline_where=baseline_where)
 
         try:
             with track_query(con, q_baseline, [], "alerts_preview_baseline") as cursor:
@@ -514,7 +550,7 @@ def preview_alert_series(
     if eval_type in ("relative_increase", "relative_decrease") and comp_period:
         res["type"] = "relative"
         hist_scope_filter = base_scope_filter + _prune_clause(lookback_mins + comp_period)
-        q_hist = SQL.PREVIEW_HISTORY.format(
+        q_hist = PREVIEW_HISTORY.format(
             group_sql=group_sql,
             agg_sql=agg_sql,
             table=table_name,
@@ -538,4 +574,70 @@ def preview_alert_series(
 
         res["hist_values"] = [hist_map.get(t, 0) for t in times]
 
+    return res
+
+
+# ── Cron run history (merged from repositories/cron.py) ─────────────────────
+
+
+def get_cron_logs(
+    service_id: str,
+    task: str | None = None,
+    status: str | None = None,
+    page: int = 1,
+    per_page: int = 50,
+    sort_col: str = "started_at",
+    sort_dir: str = "DESC",
+    since_id: int | None = None,
+    *,
+    skip_total: bool = False,
+) -> tuple[int, list[dict]]:
+    return metadata_db.get_cron_runs(
+        service_id,
+        task=task,
+        status=status,
+        page=page,
+        per_page=per_page,
+        sort_col=sort_col,
+        sort_dir=sort_dir,
+        since_id=since_id,
+        with_total=since_id is None and not skip_total,
+    )
+
+
+def delete_cron_log(service_id: str, log_id: int) -> None:
+    metadata_db.delete_cron_run(service_id, log_id)
+
+
+def purge_cron_logs(service_id: str, task: str | None = None, days: int | None = None) -> None:
+    metadata_db.purge_cron_runs(service_id, task=task, days=days)
+
+
+# ── Saved views (merged from repositories/views.py) ─────────────────────────
+
+
+def get_views(service_id: str) -> list[dict]:
+    return metadata_db.list_views(service_id)
+
+
+def save_view(view: SavedView) -> dict:
+    return metadata_db.save_view(view.service_id, view)
+
+
+def get_view_by_id(view_id: str, service_id: str) -> dict | None:
+    """Return the saved-view row whose id matches ``view_id`` in the
+    given service (or None).
+    """
+    for v in metadata_db.list_views(service_id):
+        if v.get("id") == view_id:
+            out = dict(v)
+            out.setdefault("service_id", service_id)
+            return out
+    return None
+
+
+def delete_view(view_id: str, service_id: str) -> dict:
+    """Delete the saved-view row in the given service (or report not_found)."""
+    res = metadata_db.delete_view(service_id, view_id)
+    res["service_id"] = service_id
     return res

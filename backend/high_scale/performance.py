@@ -13,7 +13,7 @@ from backend.high_scale._filters import (
 )
 from backend.high_scale.dashboard import _FIELD_DIMENSIONS
 from backend.high_scale.performance_projection import SCATTER_SAMPLE_SIZE
-from backend.high_scale.registry import HighScaleService
+from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.models.performance import PerformanceAggregatesResponse
 from backend.repositories.utils.response_cache import (
     ResponseMemo,

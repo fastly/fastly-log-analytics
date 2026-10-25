@@ -1,8 +1,10 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { useAutoFlash } from "@/hooks/useAutoFlash";
 import {
   Alert,
   AlertDescription,
@@ -21,15 +23,96 @@ import { LabelWithInfo } from "@/components/ui/label-with-info";
 import {
   CheckCircle2,
   Database,
+  FileJson,
   Info,
   Loader2,
   XCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { WizardState } from "../useWizardState";
-import { JsonImportSection } from "../JsonImportSection";
 import { REGION_LABELS } from "@/lib/service-config-constants";
 import { ANALYST_PATH_A_UNSUPPORTED_REASON } from "../types";
+
+interface JsonImportSectionProps {
+  onImport: (parsed: Record<string, string>) => void;
+}
+
+export function JsonImportSection({ onImport }: JsonImportSectionProps) {
+  const [open, setOpen] = useState(false);
+  const [raw, setRaw] = useState("");
+  const [parseError, setParseError] = useState("");
+  const { active: imported, flash: flashImported } = useAutoFlash(3000);
+
+  const handleImport = () => {
+    setParseError("");
+    try {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed !== "object" || Array.isArray(parsed))
+        throw new Error("Expected a JSON object");
+      onImport(parsed);
+      flashImported();
+      setOpen(false);
+      setRaw("");
+    } catch (e) {
+      setParseError(e instanceof Error && e.message ? e.message : "Invalid JSON");
+    }
+  };
+
+  return (
+    <div className="rounded-lg border bg-muted/20 p-4 space-y-3">
+      {/* a11y: was a <div onClick> — invisible to the keyboard. Native
+          button with aria-expanded/aria-controls so SR users hear the
+          collapse state and can Tab to it like any disclosure. */}
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls="json-import-body"
+        className="w-full flex items-center justify-between select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <div className="flex items-center gap-2">
+          <FileJson className="h-4 w-4 text-muted-foreground" />
+          <span className="text-sm font-medium">Import config from admin</span>
+          {imported && (
+            <span className="text-xs text-emerald-500 font-medium">
+              Fields populated!
+            </span>
+          )}
+        </div>
+        <span className="text-xs text-muted-foreground">
+          {open ? "Cancel" : "Paste JSON"}
+        </span>
+      </button>
+      {open && (
+        <div id="json-import-body" className="space-y-3 animate-in fade-in slide-in-from-top-2 duration-200">
+          <Textarea
+            value={raw}
+            onChange={(e) => {
+              setRaw(e.target.value);
+              setParseError("");
+            }}
+            placeholder={
+              '{\n  "name": "...",\n  "service_id": "...",\n  ...\n}'
+            }
+            className="font-mono text-xs h-36 resize-none"
+            autoFocus
+          />
+          {parseError && (
+            <p className="text-xs text-destructive">{parseError}</p>
+          )}
+          <Button
+            size="sm"
+            disabled={!raw.trim()}
+            onClick={handleImport}
+            className="h-8"
+          >
+            Import
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // Lightweight per-field validators that fire on blur so wizard users see
 // errors as they tab through, not only when the validate-mutation rejects

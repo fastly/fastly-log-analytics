@@ -23,7 +23,7 @@ from backend.repositories.utils.response_cache import (
     serialize_filters_for_key,
 )
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
-from backend.utils.log_throttle import log_once_per
+from backend.utils.telemetry import log_once_per
 
 logger = logging.getLogger(__name__)
 

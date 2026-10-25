@@ -1,6 +1,8 @@
 'use client'
 
+import * as React from 'react'
 import {
+  queryOptions,
   useQuery,
   type QueryClient,
   type QueryKey,
@@ -8,11 +10,119 @@ import {
 } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
+import { queryKeys } from '@/lib/query-keys'
 import type { components } from '@/types/api.generated'
-import {
-  scoringAnalyticsCompositeKey,
-  scoringConfigCompositeKey,
-} from '@/lib/queries/scoring'
+
+/**
+ * Session-scoring composite queries. The admin hover-prefetch
+ * (AdminPrefetchLinks) and the Session Scoring page must share ONE definition:
+ * a prefetch only warms the page if its key and queryFn byte-match.
+ */
+
+export const scoringAnalyticsCompositeKey = (serviceId: string | null | undefined) =>
+  ['scoring-analytics-composite', serviceId] as const
+
+export const scoringConfigCompositeKey = (serviceId: string | null | undefined) =>
+  ['scoring-config-composite', serviceId] as const
+
+export const scoringAnalyticsCompositeOptions = (serviceId: string | null | undefined, sinceHours: number) =>
+  queryOptions({
+    queryKey: [...scoringAnalyticsCompositeKey(serviceId), sinceHours] as const,
+    queryFn: async ({ signal }) =>
+      unwrapClient(
+        client.GET('/api/services/{service_id}/scoring/analytics', {
+          params: {
+            path: { service_id: serviceId ?? '' },
+            query: { since_hours: sinceHours },
+          },
+          signal,
+        }),
+      ),
+  })
+
+export const scoringConfigCompositeOptions = (serviceId: string | null | undefined) =>
+  queryOptions({
+    queryKey: scoringConfigCompositeKey(serviceId),
+    queryFn: async ({ signal }) =>
+      unwrapClient(
+        client.GET('/api/services/{service_id}/scoring/config', {
+          params: { path: { service_id: serviceId ?? '' } },
+          signal,
+        }),
+      ),
+  })
+
+type LabelRowWire = components['schemas']['ScoringLabelRow']
+
+export type LabelValue = LabelRowWire['label']
+
+export type LabelRow = LabelRowWire
+
+interface ScoringLabelsResult {
+  labels: LabelRow[]
+  counts: Record<LabelValue, number>
+  labelBySid: Map<string, LabelValue>
+  /** sid → label id, for callers that need the row id (delete / patch
+   *  paths). Avoids the per-row labels.find(l => l.sid === sid) scan
+   *  the SessionsTable Flag column was doing on every render. */
+  idBySid: Map<string, string>
+  isLoading: boolean
+  isFetching: boolean
+  error: (Error & { status?: number }) | null
+}
+
+interface Opts {
+  /** Skip the fetch when false. Used by the dashboard which only wants
+   *  labels when a service is selected. */
+  enabled?: boolean
+}
+
+/**
+ * Centralised query for /scoring/labels — used by the admin Labels tab,
+ * the TopFlaggedTable's "currently labeled" badges, and the dashboard's
+ * row-level Flag column. Returns a Map<sid, label> for O(1) lookup so
+ * callers don't re-derive it per render.
+ *
+ * staleTime: 5 minutes. Labels only change on explicit user mutation
+ * (which busts the cache via invalidateQueries), so a navigation
+ * between the Overview and Labels tabs should reuse the cached data
+ * instead of refetching it for every consumer.
+ */
+export function useScoringLabels(serviceId: string, opts: Opts = {}): ScoringLabelsResult {
+  const { enabled = true } = opts
+  const q = useQuery({
+    queryKey: queryKeys.scoringLabels(serviceId),
+    enabled: enabled && !!serviceId,
+    queryFn: async () => {
+      return unwrapClient(
+        client.GET('/api/services/{service_id}/scoring/labels', {
+          params: { path: { service_id: serviceId } },
+        }),
+      )
+    },
+    staleTime: 5 * 60_000,
+  })
+
+  const { labelBySid, idBySid } = React.useMemo(() => {
+    const lab = new Map<string, LabelValue>()
+    const id = new Map<string, string>()
+    for (const l of q.data?.labels ?? []) {
+      lab.set(l.sid, l.label)
+      id.set(l.sid, l.id)
+    }
+    return { labelBySid: lab, idBySid: id }
+  }, [q.data])
+
+  return {
+    labels: q.data?.labels ?? [],
+    counts: q.data?.counts ?? { good: 0, bad: 0, neutral: 0 },
+    labelBySid,
+    idBySid,
+    isLoading: q.isLoading,
+    isFetching: q.isFetching,
+    error: (q.error as (Error & { status?: number }) | null) ?? null,
+  }
+}
 
 export const SCORING_KEY_PREFIXES = [
   'scoring-status',

@@ -9,10 +9,10 @@ from unittest.mock import patch
 
 import pytest
 
+from backend.config import path_within_dir
 from backend.core.rollups._common import quote_path_list
 from backend.provision.cmcd_fields import get_cmcd_fields
 from backend.provision.fastly_api import generate_capture_vcl
-from backend.utils.path_safety import path_within_dir
 from backend.utils.sql_validator import escape_sql_literal
 from backend.utils.vcl_safety import (
     LintResult,

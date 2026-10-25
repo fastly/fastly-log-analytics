@@ -167,7 +167,7 @@ def test_correlate_top_values_windowed_freshness_and_telemetry(monkeypatch):
     from datetime import UTC, datetime
 
     from backend.core.metadata import usage_log
-    from backend.repositories import control_room as cr_repo
+    from backend.routers import control_room as cr_repo
     from backend.utils.telemetry import set_page_load_id
 
     recorded: list[dict] = []

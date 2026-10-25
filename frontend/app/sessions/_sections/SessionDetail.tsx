@@ -19,8 +19,23 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Label } from '@/components/ui/label'
-import { MetadataItem } from '@/components/ui/metadata-item'
 import { Switch } from '@/components/ui/switch'
+import { cn } from '@/lib/utils'
+
+interface MetadataItemProps {
+  label: string
+  children: React.ReactNode
+  className?: string
+}
+
+export function MetadataItem({ label, children, className }: MetadataItemProps) {
+  return (
+    <div className={cn('flex flex-col gap-0.5', className)}>
+      <span className="text-[11px] sm:text-[10px] uppercase font-bold text-muted-foreground">{label}</span>
+      <div className="text-xs">{children}</div>
+    </div>
+  )
+}
 import {
   Tooltip,
   TooltipContent,
@@ -29,8 +44,8 @@ import {
 } from '@/components/ui/tooltip'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { useFieldLabel } from '@/hooks/useLogFieldsCatalog'
-import type { LabelRow, LabelValue } from '@/hooks/useScoringLabels'
-import { buildSessionDashboardUrl, buildStreamDetailUrl } from '@/lib/navigation'
+import type { LabelRow, LabelValue } from '@/components/SessionScoring/useScorerTimeseries'
+import { buildSessionDashboardUrl, buildStreamDetailUrl } from '@/lib/utils'
 import { OBJECT_TYPE_LABELS, STREAM_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from '@/app/streaming/_sections/streamingInfo'
 import type { Session, SessionDetailResponse, SessionsResponse } from '@/types/api'
 

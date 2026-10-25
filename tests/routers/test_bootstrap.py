@@ -391,7 +391,7 @@ def test_bootstrap_includes_saved_views_for_active_service(client, tmp_path, mon
     losing this key reintroduces ~50ms per page nav (one Iceberg/SQLite
     round-trip per nav)."""
     from backend import config
-    from backend.repositories import views as _views_repo
+    from backend.repositories import alerts as _views_repo
 
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
     config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
@@ -434,7 +434,7 @@ def test_bootstrap_views_empty_when_no_active_service(client, tmp_path, monkeypa
     """No active service → no views to fold. Pinned so the views
     fetch isn't called with None (which would crash get_views)."""
     from backend import config
-    from backend.repositories import views as _views_repo
+    from backend.repositories import alerts as _views_repo
 
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
 
@@ -459,7 +459,7 @@ def test_bootstrap_views_survives_repo_error(client, tmp_path, monkeypatch):
     Views are UX nicety, not correctness — degrade gracefully to
     empty list and let ViewSelector fall back to its granular GET."""
     from backend import config
-    from backend.repositories import views as _views_repo
+    from backend.repositories import alerts as _views_repo
 
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
     config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
@@ -492,7 +492,7 @@ def test_bootstrap_drops_cron_schedule_and_share_status_seeds(client, tmp_path, 
     regression even before the field assertion (the bootstrap-resilient
     try/except would otherwise swallow it into a silent None)."""
     from backend import config
-    from backend.cron import schedule as _sched
+    from backend.cron import scheduler as _sched
     from backend.routers import share_admin
 
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
@@ -918,7 +918,7 @@ def test_bootstrap_survives_simultaneous_optional_failures(client, tmp_path, mon
     return 200 with the core fields populated. Pins the per-block
     try/except shield: losing any single block must not cascade."""
     _seed_active_service(monkeypatch, tmp_path)
-    from backend.repositories import views as _views_repo
+    from backend.repositories import alerts as _views_repo
 
     monkeypatch.setattr(_views_repo, "get_views", lambda _sid: (_ for _ in ()).throw(RuntimeError("boom")))
 

@@ -5,11 +5,13 @@ import { http, HttpResponse } from 'msw'
 import React from 'react'
 
 import { server } from '@/__tests__/helpers/msw/server'
+import { createTestQueryClient, makeQueryWrapper } from '@/__tests__/helpers/query'
 import { useServiceStore } from '@/stores/serviceStore'
+import { InviteAnalystDialog } from '@/components/InviteAnalystDialog'
 import { InvitationsPanel } from '@/components/share-dashboard/InvitationsPanel'
 import { CreateInviteDialog } from '@/components/share-dashboard/CreateInviteDialog'
-import { useTableSort, type SortAccessors } from '@/components/share-dashboard/sortable'
-import type { ShareStatus } from '@/components/share-dashboard/utils'
+import { useTableSort, type ShareStatus, type SortAccessors } from '@/components/share-dashboard/sortable'
+import type { ServiceConfig } from '@/types/api'
 import { stubMatchMedia } from '@/__tests__/helpers/browser-stubs'
 
 // Radix primitives (Popover/Dialog/Select/Checkbox) need these in jsdom.
@@ -275,5 +277,67 @@ describe('useTableSort', () => {
     act(() => result.current.toggle('n'))
     expect(result.current.sortKey).toBe('n')
     expect(result.current.sortDir).toBe('desc')
+  })
+})
+
+// --- InviteAnalystDialog -------------------------------------------------
+
+const analystService = { service_id: 'svc-copy', name: 'Copy Svc' } as unknown as ServiceConfig
+
+const analystInvite = {
+  name: 'analyst',
+  service_id: 'svc-copy',
+  fos_bucket: 'b',
+  fos_region: 'r',
+  fos_endpoint: 'e',
+  fos_prefix: 'p',
+  access_key_id: 'AKIAEXAMPLE',
+  secret_key: 'not-a-real-secret',
+}
+
+const openAnalystResult = async () => {
+  useServiceStore.setState({ activeServiceId: 'svc-copy' })
+  server.use(
+    http.post('*/api/services/:service_id/generate-viewer-key', () =>
+      HttpResponse.json(analystInvite),
+    ),
+  )
+  render(<InviteAnalystDialog service={analystService} open onOpenChange={vi.fn()} />, {
+    wrapper: makeQueryWrapper(createTestQueryClient()),
+  })
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /generate invite/i }))
+  })
+  return screen.findByRole('button', { name: /copy json/i })
+}
+
+describe('InviteAnalystDialog', () => {
+  test('Copy JSON flips to Copied after a successful write and resets', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    const btn = await openAnalystResult()
+    vi.useFakeTimers()
+    await act(async () => {
+      fireEvent.click(btn)
+    })
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(writeText.mock.calls[0][0]).service_id).toBe('svc-copy')
+    expect(screen.getByRole('button', { name: /copied!/i })).toBeInTheDocument()
+    await act(async () => {
+      vi.advanceTimersByTime(2000)
+    })
+    expect(screen.getByRole('button', { name: /copy json/i })).toBeInTheDocument()
+  })
+
+  test('Copy JSON does not claim success when the clipboard write is rejected', async () => {
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) },
+      configurable: true,
+    })
+    const btn = await openAnalystResult()
+    await act(async () => {
+      fireEvent.click(btn)
+    })
+    expect(screen.queryByRole('button', { name: /copied!/i })).toBeNull()
   })
 })

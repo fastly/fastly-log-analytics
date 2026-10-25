@@ -1,7 +1,12 @@
 'use client'
 
 import React from 'react'
+import dynamic from 'next/dynamic'
+import { parseAsString, parseAsStringLiteral } from 'nuqs'
 import type { ColumnDef, SortingState } from '@tanstack/react-table'
+import type { CodeEditorHandle } from '@/components/CodeEditor/CodeEditor'
+import type { FiltersPayload } from '@/types/filters'
+import type { Schema } from '@/types/api'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
@@ -23,13 +28,270 @@ import {
   DropdownMenuGroup,
 } from '@/components/ui/dropdown-menu'
 import { DataTable } from '@/components/DataTable'
-import { History, Bookmark, Download, X, Filter, Code2, Clock, Database } from 'lucide-react'
+import { History, Bookmark, Download, X, Filter, Code2, Clock, Database, ChevronRight, Columns3 } from 'lucide-react'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { useMounted } from '@/hooks/useMounted'
 import { formatCount } from '@/lib/format'
 import { cn } from '@/lib/utils'
-import type { QueryMode } from '../_sql_builder'
 import type { components } from '@/types/api.generated'
+
+/**
+ * /query URL contract (shared links and the dashboard "See Raw Logs" CTA):
+ *   ?mode=raw            raw-SQL editor (also implied by ?q=)
+ *   ?q=<sql>             seeds the raw editor
+ *   ?start_time&end_time absolute range, applied once to the filter store
+ *   ?filters=<json>      filter payload, applied once to the filter store
+ * Unrecognised `mode` values mean structured mode, as before.
+ */
+export const queryPageUrlParsers = {
+  q: parseAsString,
+  mode: parseAsStringLiteral(['raw'] as const),
+  start_time: parseAsString,
+  end_time: parseAsString,
+  filters: parseAsString,
+}
+
+/** Escape a string literal for safe SQL embedding (single-quote doubling). */
+function sqlEscape(v: string): string {
+  return v.replace(/'/g, "''")
+}
+
+const SIMPLE_IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/
+
+/** Quote a column identifier only when required (unquoted simple identifiers stay compatible with High-Scale ClickHouse console validation). */
+function quoteIdent(name: string): string {
+  if (SIMPLE_IDENT_RE.test(name)) return name
+  return `"${name.replace(/"/g, '""')}"`
+}
+
+const NUMERIC_DUCKDB_TYPES = new Set([
+  'TINYINT', 'SMALLINT', 'INTEGER', 'BIGINT', 'HUGEINT',
+  'UTINYINT', 'USMALLINT', 'UINTEGER', 'UBIGINT', 'UHUGEINT',
+  'FLOAT', 'DOUBLE', 'REAL', 'DECIMAL',
+])
+
+function isNumericType(t: string | undefined): boolean {
+  if (!t) return false
+  const base = t.toUpperCase().split('(')[0].trim()
+  return NUMERIC_DUCKDB_TYPES.has(base)
+}
+
+const NUMERIC_LITERAL_RE = /^-?\d+(\.\d+)?$/
+
+function toCanonicalSqlTs(ts: string): string {
+  const d = new Date(ts)
+  return isNaN(d.getTime()) ? ts : d.toISOString()
+}
+
+function buildWhereClause(
+  filters: FiltersPayload,
+  startTime: string | null,
+  endTime: string | null,
+  fieldTypes?: Record<string, string>,
+): string {
+  const parts: string[] = []
+
+  if (startTime) parts.push(`timestamp >= '${sqlEscape(toCanonicalSqlTs(startTime))}'`)
+  if (endTime) parts.push(`timestamp <= '${sqlEscape(toCanonicalSqlTs(endTime))}'`)
+
+  for (const [rawCol, spec] of Object.entries(filters)) {
+    if (!spec || !Array.isArray(spec.values) || spec.values.length === 0) continue
+    const col = rawCol.replace(/_\d+$/, '')
+    const ident = quoteIdent(col)
+    const colIsNumeric = isNumericType(fieldTypes?.[col])
+    const literals = spec.values
+      .map(v => {
+        const s = String(v)
+        if (colIsNumeric && NUMERIC_LITERAL_RE.test(s)) return s
+        return `'${sqlEscape(s)}'`
+      })
+      .join(', ')
+    const op = spec.mode === 'exclude' ? 'NOT IN' : 'IN'
+    parts.push(`${ident} ${op} (${literals})`)
+  }
+
+  return parts.length > 0 ? `WHERE ${parts.join(' AND ')}` : ''
+}
+
+export function buildStructuredSql(
+  filters: FiltersPayload,
+  startTime: string | null,
+  endTime: string | null,
+  sorting: SortingState,
+  maxRows: number,
+  fieldTypes?: Record<string, string>,
+  tableName: string = 'logs',
+): string {
+  const where = buildWhereClause(filters, startTime, endTime, fieldTypes)
+  const sort = sorting[0]
+  const orderBy = sort
+    ? `ORDER BY ${quoteIdent(sort.id)} ${sort.desc ? 'DESC' : 'ASC'}`
+    : 'ORDER BY timestamp DESC'
+  return [
+    'SELECT *',
+    `FROM ${tableName}`,
+    where,
+    orderBy,
+    `LIMIT ${maxRows}`,
+  ].filter(Boolean).join('\n')
+}
+
+export type QueryMode = 'structured' | 'raw'
+
+type SchemaColumn = {
+  name?: Schema<'SchemaColumn'>['name']
+  column?: string
+  type: Schema<'SchemaColumn'>['type']
+}
+
+interface RawSqlModeProps {
+  rawSql: string
+  onRawSqlChange: (sql: string) => void
+  schema?: SchemaColumn[]
+  tableName?: string
+}
+
+// CodeEditor pulls in CodeMirror + @codemirror/lang-sql (~200KB parsed).
+// Structured Mode is the default landing experience on /query, so we keep
+// the editor off the initial bundle and only load it when the user actually
+// switches to Raw mode (this section mounts). ssr:false skips the SSR pass
+// since CodeMirror touches `window` on hydration anyway.
+//
+// next/dynamic strips refs by default. We promote the underlying component
+// to a forwardRef-aware wrapper so the schema browser can dispatch
+// insert-at-cursor transactions through the CodeEditorHandle ref.
+const CodeEditor = dynamic(
+  () =>
+    import('@/components/CodeEditor/CodeEditor').then(m => {
+      const Inner = m.CodeEditor
+      const Forwarded = React.forwardRef<CodeEditorHandle, React.ComponentProps<typeof Inner>>(
+        (props, ref) => <Inner {...props} ref={ref} />,
+      )
+      Forwarded.displayName = 'DynamicCodeEditor'
+      return { default: Forwarded }
+    }),
+  {
+    ssr: false,
+    loading: () => (
+      // Match the editor's rendered footprint (height=400px + border + rounded)
+      // so the layout doesn't shift when the real component swaps in.
+      <div
+        className="border rounded-md bg-muted/30 animate-pulse"
+        style={{ height: '400px' }}
+        aria-label="Loading SQL editor"
+        role="status"
+      />
+    ),
+  },
+)
+
+/**
+ * Raw mode: a CodeEditor for free-form SQL. The user has full control of the
+ * query string; results are sorted client-side so we don't silently rewrite
+ * their SQL.
+ *
+ * Renders an inline schema browser to the right of the editor (table → columns,
+ * click to insert at cursor) so users don't have to memorise column names or
+ * tab away to another surface. Autocomplete (Ctrl+Space) is provided by the
+ * CodeEditor's @codemirror/lang-sql configuration.
+ */
+export function RawSqlMode({ rawSql, onRawSqlChange, schema, tableName }: RawSqlModeProps) {
+  const editorRef = React.useRef<CodeEditorHandle>(null)
+  const [browserOpen, setBrowserOpen] = React.useState(true)
+  const resolvedTable = tableName || 'logs'
+
+  const normalizedSchema = React.useMemo(
+    () =>
+      (schema ?? []).map(col => ({
+        name: col.name || col.column || '',
+        type: col.type,
+      })).filter(col => Boolean(col.name)),
+    [schema],
+  )
+
+  const handleInsert = React.useCallback((col: string) => {
+    editorRef.current?.insertAtCursor(col)
+  }, [])
+
+  return (
+    <div className="grid gap-3 p-3 md:grid-cols-[1fr_240px]">
+      <CodeEditor
+        ref={editorRef}
+        value={rawSql}
+        onChange={onRawSqlChange}
+        schema={normalizedSchema}
+        tableName={tableName}
+        height="400px"
+      />
+      <SchemaBrowser
+        tableName={resolvedTable}
+        schema={normalizedSchema}
+        open={browserOpen}
+        onOpenChange={setBrowserOpen}
+        onInsert={handleInsert}
+      />
+    </div>
+  )
+}
+
+interface SchemaBrowserProps {
+  tableName: string
+  schema?: { name: string; type: string }[]
+  open: boolean
+  onOpenChange: (next: boolean) => void
+  onInsert: (col: string) => void
+}
+
+function SchemaBrowser({ tableName, schema, open, onOpenChange, onInsert }: SchemaBrowserProps) {
+  return (
+    <aside
+      className="rounded-md border bg-muted/20 text-xs flex flex-col min-h-0"
+      aria-label="Schema browser"
+      data-testid="query-schema-sidebar"
+    >
+      <button
+        type="button"
+        onClick={() => onOpenChange(!open)}
+        aria-expanded={open}
+        className="flex items-center gap-2 w-full px-3 py-2 border-b text-left font-medium hover:bg-muted/40 transition-colors"
+      >
+        <ChevronRight
+          className={cn('h-3.5 w-3.5 text-muted-foreground transition-transform', open && 'rotate-90')}
+        />
+        <Columns3 className="h-3.5 w-3.5 text-muted-foreground" />
+        <span className="flex-1 truncate">{tableName}</span>
+        <span className="text-[10px] text-muted-foreground tabular-nums">
+          {schema?.length ?? 0}
+        </span>
+      </button>
+      {open && (
+        <div className="overflow-y-auto" style={{ maxHeight: '360px' }}>
+          {schema && schema.length > 0 ? (
+            <ul className="py-1">
+              {schema.map(col => (
+                <li key={col.name}>
+                  <button
+                    type="button"
+                    onClick={() => onInsert(col.name)}
+                    title={`Insert ${col.name} at cursor`}
+                    className="flex w-full items-baseline justify-between gap-2 px-3 py-1 text-left font-mono text-[11px] hover:bg-muted/60 focus:bg-muted/60 focus:outline-none"
+                  >
+                    <span className="truncate">{col.name}</span>
+                    <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
+                      {col.type}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="p-3 italic text-muted-foreground">No columns available.</p>
+          )}
+        </div>
+      )}
+    </aside>
+  )
+}
 
 type PresetQuery = components['schemas']['PresetQuery']
 

@@ -11,14 +11,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from backend.core.high_scale_contracts import ArchiveState
-from backend.high_scale.aggregate_writer import compute_dimension_counts
-from backend.high_scale.archive_models import ArchiveManifest, ArchiveSourceObject
+from backend.high_scale.aggregate_batch_adapter import compute_dimension_counts
+from backend.high_scale.archive_models import ArchiveManifest, ArchiveSourceObject, ArchiveState
 from backend.high_scale.archive_publication import ArchivePublication
 from backend.high_scale.archive_writer import write_batch_archive_checkpoint
 from backend.high_scale.cmcd import project_cmcd
 from backend.high_scale.decoder import DecodeResult, decode_source_object
-from backend.high_scale.network_projection import build_network_projection_rows
+from backend.high_scale.network import build_network_projection_rows
 from backend.high_scale.origin_projection import build_origin_projection_rows
 from backend.high_scale.performance_projection import build_performance_projection_rows
 from backend.high_scale.publication import (
@@ -29,7 +28,7 @@ from backend.high_scale.publication import (
     row_matches_serving_domain,
 )
 from backend.high_scale.schema import build_batch_id_from_manifest_id
-from backend.high_scale.security_projection import build_security_projection_rows
+from backend.high_scale.security import build_security_projection_rows
 from backend.high_scale.source_discovery import SourceObjectDescriptor
 
 logger = logging.getLogger(__name__)

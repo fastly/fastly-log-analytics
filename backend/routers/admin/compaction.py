@@ -25,8 +25,8 @@ from backend.models.admin import (
     RollupHealResponse,
     RollupStatusResponse,
 )
-from backend.utils.service_ids import service_id_from_source
 
+from ._helpers import service_id_from_source
 from ._router import router
 
 logger = logging.getLogger(__name__)
@@ -67,7 +67,7 @@ def optimize_service(
     Executes DuckLake durability flush, small-file merge, and data file compaction.
     Logs execution in cron_runs and returns execution outcome.
     """
-    from backend.cron.jobs.optimize import _run_optimize
+    from backend.cron.jobs.compaction import _run_optimize
 
     sid = service_id_from_source(source, service_id, prefer_name=True)
     res = _run_optimize(sid, manual=True)
@@ -89,7 +89,7 @@ def expire_snapshots_service(
     if source.get("access_level") == "read_only":
         raise HTTPException(status_code=403, detail="Read-only services cannot run cloud maintenance.")
 
-    from backend.cron.jobs.expire import _run_expire_snapshots
+    from backend.cron.jobs.compaction import _run_expire_snapshots
 
     result = _run_expire_snapshots(service_id, manual=True)
     return ExpireSnapshotsResponse(**result)
@@ -128,8 +128,8 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         TIME_SERIES_BUNDLE_FILENAME,
         backfill_missing_bundles,
     )
+    from backend.core.rollups.recompute import ADMIN_BACKFILLS, DAY_COMPACTORS
     from backend.core.rollups.sessions import build_session_bundles
-    from backend.core.rollups.spec import ADMIN_BACKFILLS, DAY_COMPACTORS
     from backend.core.rollups.time_series import build_time_series_bundles
 
     sid = service_id_from_source(source)

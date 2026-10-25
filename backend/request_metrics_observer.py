@@ -8,7 +8,7 @@ import time
 
 from backend import config
 from backend.core.request_metrics import interrupt_request_metrics, refresh_durable_request_metrics
-from backend.high_scale.registry import get_high_scale_service_registry
+from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 from backend.sync_status_publisher import publisher
 from backend.sync_status_snapshot import compute_sync_status_cached
 

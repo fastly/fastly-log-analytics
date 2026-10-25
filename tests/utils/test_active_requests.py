@@ -771,11 +771,11 @@ def test_uvicorn_color_message_extra_is_dropped(monkeypatch, capsys):
 # ── Merged from test_system_jobs.py ──────────────────────────────────────────────
 
 
-from backend.utils import system_jobs
+from backend.cron import decorators as system_jobs
 
 
 def _reset() -> None:
-    with system_jobs._lock:
+    with system_jobs._status_lock:
         system_jobs._status.clear()
 
 
@@ -818,7 +818,7 @@ def test_get_returns_a_copy_not_live_state():
 
 
 def test_last_run_at_format():
-    with patch("backend.utils.system_jobs.iso_z_now", return_value="2026-05-15T12:30:45Z"):
+    with patch("backend.cron.decorators.iso_z_now", return_value="2026-05-15T12:30:45Z"):
         system_jobs.record_job_run("bots", "success", 0.1)
     assert system_jobs.get_system_job_status()["bots"]["last_run_at"] == "2026-05-15T12:30:45Z"
 

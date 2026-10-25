@@ -28,13 +28,13 @@ import {
 import { Label } from '@/components/ui/label'
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
-import { cn } from '@/lib/utils'
-import { useCopyToClipboard } from '@/hooks/useAutoFlash'
 import {
+  cn,
   panelDialogContent,
   panelDialogFooter,
   panelDialogHeaderSolid,
-} from '@/lib/panel-dialog'
+} from '@/lib/utils'
+import { useCopyToClipboard } from '@/hooks/useAutoFlash'
 import type { components } from '@/types/api.generated'
 import type { ServiceConfig } from '@/types/api'
 import { useNowMs } from '@/hooks/useNowSeconds'

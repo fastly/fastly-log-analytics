@@ -412,7 +412,7 @@ def run_target_clickhouse(
         ClickHouseBatchAdapter,
         HighScaleBatch,
     )
-    from backend.high_scale.schema_install import install_clickhouse_schema
+    from backend.high_scale.schema import install_clickhouse_schema
 
     # Apply configuration overrides to environment
     if clickhouse_host:

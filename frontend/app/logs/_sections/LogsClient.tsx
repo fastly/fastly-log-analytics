@@ -46,7 +46,7 @@ const IcebergStatus = dynamic(
   { ssr: false },
 )
 const IcebergCalendar = dynamic(
-  () => import('@/components/IcebergStatus/IcebergCalendar').then(m => m.IcebergCalendar),
+  () => import('@/components/IcebergStatus/IcebergStatus').then(m => m.IcebergCalendar),
   { ssr: false },
 )
 const MetadataStorageCard = dynamic(

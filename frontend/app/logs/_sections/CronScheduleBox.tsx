@@ -9,8 +9,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import { useDateFormat } from '@/hooks/useDateFormat'
-import { LiveElapsed, NextRunCountdown } from '@/components/LiveElapsed'
-import { TimeAgo } from '@/components/TimeAgo'
+import { LiveElapsed, NextRunCountdown, TimeAgo } from '@/components/TimeAgo'
 import type { WithRequired, components } from '@/types/api'
 
 export const CRON_EXPLANATIONS: Record<string, string> = {

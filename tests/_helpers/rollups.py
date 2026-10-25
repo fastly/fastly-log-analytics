@@ -16,10 +16,37 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from backend.core.rollups._common import IP_SPREAD_BUNDLE_FILENAME, IP_SPREAD_DIR_NAME
-from tests._helpers.locks import noop_lock
 
 ALL_FIELDS = "all_fields.parquet"
 DEFAULT_ANCHOR = datetime(2026, 3, 15, 10, 0, 0, tzinfo=UTC)
+
+
+@contextmanager
+def noop_lock(*_a: Any, **_k: Any) -> Iterator[None]:
+    """No-op stand-in for per-service context-manager locks in unit tests."""
+    yield
+
+
+def days_ago_iso(days: int) -> str:
+    return (datetime.now(UTC).date() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+def yesterday_iso() -> str:
+    return days_ago_iso(1)
+
+
+def two_days_ago_iso() -> str:
+    return days_ago_iso(2)
+
+
+def three_days_ago_iso() -> str:
+    return days_ago_iso(3)
+
+
+def past_hour(hours_ago: int) -> tuple[str, datetime]:
+    """``(partition key "YYYY-MM-DD-HH", hour-aligned datetime)`` for ``hours_ago`` hours back."""
+    dt = (datetime.now(UTC) - timedelta(hours=hours_ago)).replace(minute=0, second=0, microsecond=0)
+    return dt.strftime("%Y-%m-%d-%H"), dt
 
 
 def write_hour_all_fields(cache_root: str, hour: str) -> None:

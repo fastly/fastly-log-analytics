@@ -14,9 +14,9 @@ from backend.core import rollup_readiness as rr
 from backend.core import rollups
 from backend.core.rollups import day_bundles, rollups_present
 from backend.core.rollups._common import parquet_zstd_target, unlink_quiet, wavg
-from backend.core.rollups.spec import ADMIN_BACKFILLS, DAY_COMPACTORS
-from tests._helpers.dates import past_hour as _past_hour
+from backend.core.rollups.recompute import ADMIN_BACKFILLS, DAY_COMPACTORS
 from tests._helpers.rollups import build_writer_patches, write_hour_bundle, writer_patches
+from tests._helpers.rollups import past_hour as _past_hour
 
 # ── From test_rollup_readiness.py ──
 
@@ -203,7 +203,7 @@ def test_one_failing_writer_does_not_stop_the_others(failing, caplog):
 
 def test_registry_matches_expected_order_and_resolves_on_recompute():
     from backend.core.rollups import recompute
-    from backend.core.rollups.spec import HOUR_WRITERS
+    from backend.core.rollups.recompute import HOUR_WRITERS
 
     assert tuple(s.builder for s in HOUR_WRITERS) == EXPECTED_ORDER
     assert len({s.label for s in HOUR_WRITERS}) == len(HOUR_WRITERS)

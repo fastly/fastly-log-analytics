@@ -10,7 +10,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 
-import type { LabelValue } from '@/hooks/useScoringLabels'
+import type { LabelValue } from './useScorerTimeseries'
 
 interface FlagSessionPopoverProps {
   serviceId: string

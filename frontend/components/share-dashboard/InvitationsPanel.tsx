@@ -24,9 +24,7 @@ import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 
 import { CreateInviteDialog } from './CreateInviteDialog'
-import { SortableHead, useTableSort, type SortAccessors } from './sortable'
-import { useShareMutation } from './utils'
-import { type Invite, type ShareStatus } from './utils'
+import { SortableHead, useShareMutation, useTableSort, type Invite, type ShareStatus, type SortAccessors } from './sortable'
 import { formatDeterministicUTC } from '@/lib/date'
 import { useAutoFlash, useCopyToClipboard } from '@/hooks/useAutoFlash'
 

@@ -82,7 +82,7 @@ def stub_usage_log_phase(monkeypatch) -> None:
     on every invocation."""
     monkeypatch.setattr("backend.core.duckdb.backfill_fastly_edge_writes", MagicMock(return_value=0))
     monkeypatch.setattr("backend.core.duckdb.reconcile_fastly_stats", MagicMock(return_value=0))
-    monkeypatch.setattr("backend.utils.usage_logger.run_usage_log_cleanup", MagicMock())
+    monkeypatch.setattr("backend.utils.telemetry.run_usage_log_cleanup", MagicMock())
 
 
 @pytest.fixture
@@ -598,7 +598,7 @@ def test_usage_log_bookkeeping_runs_only_on_heavy_refresh_ticks(
     cleanup = MagicMock()
     monkeypatch.setattr("backend.core.duckdb.backfill_fastly_edge_writes", backfill)
     monkeypatch.setattr("backend.core.duckdb.reconcile_fastly_stats", MagicMock(return_value=0))
-    monkeypatch.setattr("backend.utils.usage_logger.run_usage_log_cleanup", cleanup)
+    monkeypatch.setattr("backend.utils.telemetry.run_usage_log_cleanup", cleanup)
 
     sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
 
@@ -1660,7 +1660,7 @@ def test_contract_3_usage_log_attributes_fos_class_a_list_and_class_b_get_to_cro
     monkeypatch.setattr("backend.cron_progress.end_progress", lambda *a, **kw: None)
     monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", lambda *a, **kw: None)
     monkeypatch.setattr(
-        "backend.utils.usage_logger.flush_usage_log",
+        "backend.utils.telemetry.flush_usage_log",
         lambda sid: flush_contexts.append(get_process_context()),
     )
 

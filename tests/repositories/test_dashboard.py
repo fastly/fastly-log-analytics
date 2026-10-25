@@ -20,7 +20,7 @@ from backend.core.rollups._common import (
 from backend.core.share_db.validation import apply_pii_policy
 from backend.high_scale import dashboard as high_scale_dashboard
 from backend.high_scale.archive_models import ServingWatermark
-from backend.high_scale.registry import HighScaleService
+from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.models.common import FilterSpec
 from backend.models.dashboard import AggregatesRequest
 from backend.repositories import _base as repo_base

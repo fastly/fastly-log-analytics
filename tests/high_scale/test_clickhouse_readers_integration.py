@@ -36,7 +36,7 @@ from backend.high_scale.dashboard import aggregates as dashboard_aggregates
 from backend.high_scale.insights import cache_collapse_detail_endpoint, insights_endpoint
 from backend.high_scale.origin import aggregates as origin_aggregates
 from backend.high_scale.origin_projection import build_origin_projection_rows
-from backend.high_scale.registry import HighScaleService
+from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.high_scale.sessions import sessions_endpoint
 from backend.models.cmcd import CmcdRequest
 from backend.models.dashboard import AggregatesRequest, SessionsRequest
@@ -644,7 +644,7 @@ def two_tenants(traffic: _Fixture) -> _Fixture:
 
 def _console(service: SimpleNamespace, sql: str, *, window_minutes: int = 30) -> list[dict[str, Any]]:
     from backend.high_scale.query import query_endpoint
-    from backend.models.query import QueryRequest
+    from backend.models.dashboard import QueryRequest
 
     result = query_endpoint(
         service,  # type: ignore[arg-type]

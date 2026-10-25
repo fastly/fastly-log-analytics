@@ -10,8 +10,7 @@ import {
 } from "@/components/ui/dialog";
 import { CheckCircle2, ChevronLeft, Loader2, Plus, RotateCcw } from "lucide-react";
 import { ELAPSED_RELATIVE_AGO, formatElapsed } from "@/lib/format";
-import { panelDialogFooter } from "@/lib/panel-dialog";
-import { cn } from "@/lib/utils";
+import { cn, panelDialogFooter } from "@/lib/utils";
 import type { WizardState } from "./useWizardState";
 import { getStepsForMode, type Step, type WizardDraft } from "./types";
 

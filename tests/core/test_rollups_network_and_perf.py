@@ -30,11 +30,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from tests._helpers.dates import past_hour as _past_hour
-from tests._helpers.dates import three_days_ago_iso as _three_days_ago_iso
-from tests._helpers.dates import two_days_ago_iso as _two_days_ago_iso
-from tests._helpers.dates import yesterday_iso as _yesterday_iso
-from tests._helpers.locks import noop_lock as _noop_lock
 from tests._helpers.rollups import (
     build_writer_patches as _build_patches,
 )
@@ -45,10 +40,25 @@ from tests._helpers.rollups import (
     make_stub_runner as _stub_runner,
 )
 from tests._helpers.rollups import (
+    noop_lock as _noop_lock,
+)
+from tests._helpers.rollups import (
+    past_hour as _past_hour,
+)
+from tests._helpers.rollups import (
+    three_days_ago_iso as _three_days_ago_iso,
+)
+from tests._helpers.rollups import (
+    two_days_ago_iso as _two_days_ago_iso,
+)
+from tests._helpers.rollups import (
     write_hour_all_fields as _write_hour_all_fields,
 )
 from tests._helpers.rollups import (
     write_hour_bundle as _write_hour_bundle,
+)
+from tests._helpers.rollups import (
+    yesterday_iso as _yesterday_iso,
 )
 
 

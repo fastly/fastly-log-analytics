@@ -8,13 +8,12 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from backend.core.request_context import RequestContext, build_request_context
 from backend.deps import ServiceId, get_service_id
+from backend.models.dashboard import PresetQuery, QueryRequest, QueryResponse, QuerySchemaResponse
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
-from backend.models.query import PresetQuery, QueryRequest, QueryResponse, QuerySchemaResponse
 from backend.repositories import query as repo
 from backend.repositories.query import get_cached_presets, set_cached_presets
 from backend.utils.auth import mask_ips_for
-from backend.utils.error_redaction import redact_error_text
-from backend.utils.router_utils import make_error
+from backend.utils.router_utils import make_error, redact_error_text
 
 logger = logging.getLogger(__name__)
 
@@ -239,7 +238,7 @@ def query_schema_endpoint(
     del service_id
     from backend import config as svcconfig
     from backend.core import duckdb as _db
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     name = ctx.source["name"]
     status = svcconfig.get_status(name) or {}

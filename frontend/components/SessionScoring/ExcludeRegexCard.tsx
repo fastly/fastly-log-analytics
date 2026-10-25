@@ -3,7 +3,7 @@
 import * as React from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Check, Filter, Loader2, RotateCcw } from 'lucide-react'
-import { useScoringQuery } from './useScorerTimeseries'
+import { useScoringQuery, scoringConfigCompositeKey } from './useScorerTimeseries'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -13,7 +13,6 @@ import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { client, extractApiError } from '@/lib/api'
-import { scoringConfigCompositeKey } from '@/lib/queries/scoring'
 import { keyByOccurrence } from '@/lib/utils'
 
 interface ExcludeRegexCardProps {

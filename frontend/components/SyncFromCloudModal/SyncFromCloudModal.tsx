@@ -12,15 +12,11 @@ import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Loader2, CloudDownload, Calendar } from 'lucide-react'
-import { formatDateTime, cn } from '@/lib/utils';
+import { formatDateTime, cn, panelDialogContent, panelDialogHeaderMuted } from '@/lib/utils';
 import { formatBytes } from '@/lib/format'
 import { adminJsonResult } from '@/lib/api'
 import type { components } from '@/types/api'
 import { formatForInput, parseFromInput } from '@/lib/date'
-import {
-  panelDialogContent,
-  panelDialogHeaderMuted,
-} from '@/lib/panel-dialog'
 import { useTimezoneStore } from '@/stores/timezoneStore'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useOpenGeneration } from '@/hooks/useDerivedState'

@@ -37,8 +37,7 @@ import threading
 import time
 
 from backend import config
-from backend.core.sql_ident import require_safe_ident
-from backend.utils.sql_validator import escape_sql_literal
+from backend.utils.sql_validator import escape_sql_literal, require_safe_ident
 
 logger = logging.getLogger(__name__)
 

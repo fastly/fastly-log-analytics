@@ -27,7 +27,7 @@ from backend.config import ClickHouseConfig
 from backend.core.clickhouse_client import ClickHouseClient, ClickHouseError
 from backend.high_scale import console_access as access
 from backend.high_scale.query import query_endpoint
-from backend.models.query import QueryRequest
+from backend.models.dashboard import QueryRequest
 from tests.high_scale.conftest import (
     clickhouse_single_node_ddl as _ddl,
 )

@@ -362,9 +362,9 @@ import logging
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
-from backend.core.high_scale_contracts import ArchiveState
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.ingest_controller import HighScaleIngestController
+from backend.high_scale.models import ArchiveState
 from backend.high_scale.publication import (
     ClickHousePublication,
     HighScaleBatch,

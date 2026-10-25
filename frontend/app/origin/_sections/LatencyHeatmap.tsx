@@ -15,7 +15,7 @@ import {
   type OriginSlowUrls,
   type OriginSummary,
   type SectionQuery,
-} from './Aggregates'
+} from './OriginClient'
 import { cn } from '@/lib/utils';
 import { formatBytes, formatCount } from '@/lib/format'
 import { columnHeader, msCell } from '@/lib/table-utils'

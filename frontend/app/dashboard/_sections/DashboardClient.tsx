@@ -1,9 +1,9 @@
 'use client'
 
 import React from 'react'
+import dynamic from 'next/dynamic'
 import { useReportRangeAnchor } from '@/hooks/useReportRangeAnchor'
 import { useRouter } from 'next/navigation'
-import { useCardVisibility } from '@/hooks/useCardVisibility'
 import { useQuery } from '@tanstack/react-query'
 import { useDashboardBundle, type DashboardSection } from '@/hooks/useDashboardBundle'
 import { client, extractApiError } from '@/lib/api'
@@ -12,24 +12,217 @@ import type { ChartMetric } from '@/types/api'
 import { STALE_VIEW_RETRY_OPTIONS, throwIfStaleAggregates, isStaleDashboardViewError } from '@/lib/staleViewRetry'
 import { useFilterStore } from '@/stores/filterStore'
 import { useIsDataReady } from '@/hooks/useIsDataReady'
-import { DashboardHeader } from '@/components/Dashboard/DashboardHeader'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Button } from '@/components/ui/button'
-import { usePlotlyRangeZoom } from '@/hooks/usePlotlyRangeZoom'
-import { LayoutDashboard, ArrowRight } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Label } from '@/components/ui/label'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { LayoutDashboard, ArrowRight, EyeOff } from 'lucide-react'
 import { ReportLayout } from '@/components/ReportLayout'
 import { useShallow } from 'zustand/react/shallow'
-import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
-import { useDashboardCards } from '@/hooks/useDashboardCards'
+import { useActiveLogFields, useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
+import { useDashboardCards, useCardVisibility, usePlotlyRangeZoom } from '@/hooks/useDashboardCards'
+import { cn } from '@/lib/utils'
 
 
 import { TrafficChart } from './TrafficChart'
-import { GeoMap } from './GeoMap'
 import { CardGrid } from './CardGrid'
-import { buildChartLayout, COLLAPSED_SECTIONS_KEY, type DashboardBodyProps } from './categories'
+import { buildChartLayout, COLLAPSED_SECTIONS_KEY, type DashboardAggregates, type DashboardBodyProps, type DashboardCatalog } from './categories'
 import { buildTrafficData } from '@/lib/traffic-chart'
 import { buildTrafficDataAsync } from '@/lib/workers/buildTrafficData'
 import { useLocalStorageString } from '@/hooks/useDerivedState'
 import type { PlotlyTrace } from '@/types/plotly'
+
+// ChoroplethMap pulls in d3-geo and the world-110m topojson. Static-import
+// blocked the dashboard's initial JS parse/eval; dynamic-import slices it
+// off the critical path so the rest of the page paints immediately.
+// ssr:false because d3-geo uses canvas/SVG measurement APIs that don't
+// work in the server-render pass.
+const ChoroplethMap = dynamic(
+  () => import('@/components/Map/ChoroplethMap').then((m) => ({ default: m.ChoroplethMap })),
+  {
+    ssr: false,
+    loading: () => (
+      <div
+        data-empty-placeholder="true"
+        className="flex-1 min-h-[300px] flex items-center justify-center bg-muted/20 rounded"
+        aria-busy="true"
+      >
+        <span className="text-muted-foreground text-xs animate-pulse">Loading map…</span>
+      </div>
+    ),
+  },
+)
+
+interface GeoMapProps {
+  isReady: boolean
+  isFetchingAggs: boolean
+  aggregates: DashboardAggregates | null | undefined
+  catalog: DashboardCatalog | undefined
+  onCountryClick: (countryName: string) => void
+}
+
+export function GeoMap({
+  isReady,
+  isFetchingAggs,
+  aggregates,
+  catalog,
+  onCountryClick,
+}: GeoMapProps) {
+  // Distinguish "field group not enabled" from "enabled but no data in this
+  // window yet" so a low-traffic/fresh service doesn't read as misconfigured.
+  const { isFieldActive } = useActiveLogFields()
+  return (
+    <div className={cn("border rounded-lg p-4 flex flex-col transition-opacity duration-100", isFetchingAggs && "opacity-40 pointer-events-none")}>
+      {/* text-foreground anchors the card title to the high-contrast
+          token — without it the h3 inherited a muted color from a
+          parent and axe flagged it (2.7:1, below AA 4.5:1). */}
+      <h3 className="text-sm font-medium mb-4 text-foreground">Requests by Country</h3>
+      {(!isReady || !aggregates) || (isFetchingAggs && (!aggregates?.map_data || aggregates.map_data.length === 0)) ? (
+        <div data-empty-placeholder="true" className="flex-1 min-h-[300px] flex items-center justify-center bg-muted/20 rounded-md">
+          <span className="text-muted-foreground text-sm animate-pulse">
+            {!isReady ? 'Initializing...' : 'Mapping traffic...'}
+          </span>
+        </div>
+      ) : !aggregates?.map_data || aggregates.map_data.length === 0 ? (
+        <div data-empty-placeholder="true" className="flex-1 min-h-[300px] flex items-center justify-center bg-muted/10 border border-dashed rounded-md">
+          {/* text-foreground (not text-muted-foreground) + remove
+              opacity-70 on the detail line — both were below AA
+              contrast on bg-muted/10. */}
+          <div className="flex flex-col items-center text-foreground text-center px-4">
+            <span className="text-sm font-medium mb-1">No data available</span>
+            <span className="text-[10px] text-muted-foreground">
+              {(() => {
+                if (isFieldActive('country')) {
+                  return "No country data in this time range."
+                }
+                const countryField = catalog?.fields?.find((f) => f.id === 'country')
+                const groupId = countryField?.group
+                if (groupId) {
+                  const groupMeta = catalog?.groups?.find((g) => g.id === groupId)
+                  if (groupMeta) {
+                    return `Requires ${groupMeta.label} fields to be enabled in Fastly logging.`
+                  }
+                }
+                return "Requires Geolocation fields to be enabled in Fastly logging."
+              })()}
+            </span>
+          </div>
+        </div>
+      ) : (
+        <ChoroplethMap
+          data={aggregates?.map_data || []}
+          className="flex-1 min-h-[300px]"
+          onCountryClick={onCountryClick}
+        />
+      )}
+    </div>
+  )
+}
+
+interface DashboardHeaderProps {
+  visibleCardsCount: number
+  allCards: Array<{ id: string, label: string, inActiveFormat?: boolean }>
+  visibleCards: Set<string>
+  onToggleCard: (id: string) => void
+  onShowAll: () => void
+  onResetCards: () => void
+}
+
+export function DashboardHeader({
+  visibleCardsCount,
+  allCards,
+  visibleCards,
+  onToggleCard,
+  onShowAll,
+  onResetCards
+}: DashboardHeaderProps) {
+  return (
+    <Popover>
+      {/* aria-label lives on the PopoverTrigger directly (not on
+          the Button render-prop) so it survives SSR — Base UI's
+          render-prop merge drops aria-label from the inner element
+          on the server pass, leaving the SSR'd button with no
+          accessible name. The visible "Cards" text is
+          `hidden sm:inline` so on <640px viewports it's empty too —
+          the label is the only reliable name across both states. The
+          name must contain the visible text ("Cards" + count, separated
+          by the {' '} text node) or axe flags label-content-name-mismatch. */}
+      <PopoverTrigger
+        aria-label={`Cards ${visibleCardsCount}, toggle visible dashboard cards`}
+        render={
+          <Button variant="outline" size="sm" className="h-9 gap-1.5">
+            <span className="flex items-center gap-1.5">
+              <LayoutDashboard className="h-4 w-4" />
+              <span className="hidden sm:inline text-xs">Cards</span>
+              {' '}
+              <Badge variant="secondary" className="h-4 text-[10px] px-1.5">
+                {visibleCardsCount}
+              </Badge>
+            </span>
+          </Button>
+        }
+      />
+      <PopoverContent align="end" className="w-72 p-3">
+        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">
+          Visible cards
+        </p>
+        <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+          {allCards.map(card => (
+            <div key={card.id} className="flex items-center gap-2">
+              <Checkbox
+                id={`card-${card.id}`}
+                checked={visibleCards.has(card.id)}
+                onCheckedChange={() => React.startTransition(() => onToggleCard(card.id))}
+              />
+              <Label htmlFor={`card-${card.id}`} className="text-xs cursor-pointer leading-tight inline-flex items-center gap-1">
+                {card.label}
+                {card.inActiveFormat === false && (
+                  <Tooltip>
+                    {/* A-8 (a11y, WCAG 2.1.1): tabIndex + role="button" so
+                        keyboard users can focus the EyeOff icon and reveal
+                        the tooltip. A Button here would intercept clicks
+                        meant for the parent Label/Checkbox. */}
+                    <TooltipTrigger
+                      render={
+                        <span
+                          className="inline-flex items-center rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          tabIndex={0}
+                          role="button"
+                          aria-label="Not in active log format"
+                        />
+                      }
+                    >
+                      <EyeOff className="h-3 w-3 text-muted-foreground/70" />
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p className="text-[10px]">Not in active log format.</p>
+                    </TooltipContent>
+                  </Tooltip>
+                )}
+              </Label>
+            </div>
+          ))}
+        </div>
+        <div className="flex gap-2 mt-4 pt-3 border-t">
+          <Button
+            variant="ghost" size="sm" className="text-xs h-7 flex-1"
+            onClick={() => React.startTransition(() => onShowAll())}
+          >
+            Show all
+          </Button>
+          <Button
+            variant="ghost" size="sm" className="text-xs h-7 flex-1"
+            onClick={() => React.startTransition(() => onResetCards())}
+          >
+            Reset
+          </Button>
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
 
 // P-4 slice 3: mirror the section-selector pattern used by /security and
 // /network. The dashboard page consumes all three sections, so the list

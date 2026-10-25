@@ -24,7 +24,10 @@ import time
 from typing import Any
 
 from backend.cron.decorators import cron_task
+from backend.cron.lifecycle import cron_run
 from backend.cron.scheduler import (
+    JOB_COLORS,
+    RESET_COLOR,
     _display_label,
 )
 
@@ -336,8 +339,7 @@ def _run_rollup_compact_daily(
         retire_compacted_hour_bundles,
     )
     from backend.core.rollups._common import _day_bundled_root
-    from backend.core.rollups.recompute import cleanup_old_rollups
-    from backend.core.rollups.spec import DAY_COMPACTORS
+    from backend.core.rollups.recompute import DAY_COMPACTORS, cleanup_old_rollups
     from backend.cron.jobs._common import has_sufficient_disk_space
     from backend.cron.lifecycle import cron_run, record_skip_row
     from backend.utils.active_requests import should_defer_cron
@@ -489,3 +491,207 @@ def _run_partial_hour_merge(service_id: str) -> None:
         run.success(summary)
         if stats["new_files"]:
             run.log_progress({"type": "status", "message": summary})
+
+
+@cron_task("cron:expire_snapshots", job_name="expire_snapshots")
+def _run_expire_snapshots(service_id: str, *, manual: bool = False) -> dict:
+    """Maintenance job: perform cloud maintenance including data deletion, cache cleanup, and snapshot expiry."""
+    from backend.core import iceberg as db_iceberg
+    from backend.core.duckdb import get_source_for_service
+    from backend.cron.scheduler import dev_mode_no_crons
+    from backend.utils.active_requests import should_defer_cron
+
+    if dev_mode_no_crons():
+        return {"status": "skipped", "service_id": service_id, "summary": "FLA_DEV_NO_CRONS=1"}
+    if not manual and should_defer_cron("expire_snapshots", service_id):
+        return {"status": "deferred", "service_id": service_id, "summary": "active requests"}
+
+    src = get_source_for_service(service_id)
+    if src is None:
+        return {"status": "skipped", "service_id": service_id, "summary": "service not found"}
+    if src.get("access_level") == "read_only":
+        return {"status": "skipped", "service_id": service_id, "summary": "read-only services cannot run maintenance"}
+
+    svc_id = src.get("service_id", "unknown")
+    display_name = _display_label(src, str(svc_id))
+
+    with cron_run(
+        service_id,
+        "expire_snapshots",
+        source=src,
+        skip_log_prefix="expire",
+        finalize_duration=True,
+        finalize_running_backstop=True,
+        error_summary="Maintenance raised an uncaught exception",
+        error_result=lambda exc: {
+            "status": "error",
+            "service_id": service_id,
+            "error": str(exc),
+            "summary": "Maintenance raised an uncaught exception",
+        },
+    ) as run:
+        if run.skipped:
+            return {"status": "skipped", "service_id": service_id, "summary": run.skip_reason}
+        if run.ok:
+            logger.info("🏎️  \x1b[90m[expire]\x1b[0m %s: Maintenance job started.", display_name)
+            run.log_progress({"type": "status", "message": "Starting snapshot expiry and retention cleanup..."})
+            result = db_iceberg.run_cloud_maintenance(src)
+            if "error" in result:
+                logger.warning(
+                    "%s %s: %s", JOB_COLORS["expire"] + "[expire]" + RESET_COLOR, display_name, result["error"]
+                )
+                run.record(
+                    "error",
+                    error_message=str(result["error"]),
+                    summary="Maintenance failed at catalog load",
+                )
+                run.result = {
+                    **result,
+                    "status": "error",
+                    "service_id": service_id,
+                    "summary": "Maintenance failed at catalog load",
+                }
+                run.log_progress({"type": "error", "message": str(result["error"])})
+            else:
+                result = {
+                    **result,
+                    "retention_deleted_rows": int(
+                        result.get("retention_deleted_rows", 0)
+                        or sum(
+                            int(result.get(key, 0) or 0)
+                            for key in ("data_rows_deleted", "rum_log_rows_deleted", "rum_beacon_rows_deleted")
+                        )
+                    ),
+                    "snapshots_expired": int(
+                        result.get("snapshots_expired", result.get("snapshots_expired_count", 0)) or 0
+                    ),
+                    "files_unlinked": int(result.get("files_unlinked", result.get("data_files_cleaned", 0)) or 0),
+                }
+                summary_parts = []
+                sub_errors = []
+                for k, v in result.items():
+                    if k.endswith("_error"):
+                        sub_errors.append(f"{k}={v}")
+                    else:
+                        summary_parts.append(f"{k}={v}")
+                summary = ", ".join(summary_parts) if summary_parts else "no work to do"
+                status = "warning" if sub_errors else "success"
+                error_message = "; ".join(sub_errors) if sub_errors else None
+                files_unlinked = result["files_unlinked"]
+                logger.info("🗑️ \x1b[90m[expire]\x1b[0m %s: Maintenance completed. %s", display_name, result)
+                run.record(
+                    status,
+                    error_message=error_message,
+                    summary=summary,
+                    files_deleted_fos=files_unlinked,
+                )
+                run.result = {**result, "status": status, "service_id": service_id, "summary": summary}
+                event_type = "done" if status == "success" else status
+                run.log_progress({"type": event_type, "message": summary})
+
+    logger.info("🏁  \x1b[90m[expire]\x1b[0m %s: Maintenance job finished.", display_name)
+    return dict(run.result) if isinstance(run.result, dict) else {}
+
+
+@cron_task("cron.optimize", job_name="optimize")
+def _run_optimize(service_id: str, manual: bool = False) -> dict | None:
+    """Daily job: compact small Iceberg data files into target-sized ones."""
+    from backend.core import iceberg as db_iceberg
+    from backend.core.duckdb import get_source_for_service
+    from backend.cron.decorators import dev_mode_no_crons
+    from backend.utils.active_requests import should_defer_cron
+
+    if not manual and dev_mode_no_crons():
+        logger.warning("🚫 [scheduler] %s: FLA_DEV_NO_CRONS=1 — optimize refused.", service_id)
+        return {"status": "skipped", "service_id": service_id, "summary": "Skipped due to FLA_DEV_NO_CRONS=1"}
+
+    if not manual and should_defer_cron("optimize", service_id):
+        logger.info("⏸️  [optimize] %s: deferring due to active user queries", service_id)
+        return {"status": "deferred", "service_id": service_id, "summary": "Deferred due to active queries"}
+
+    src = get_source_for_service(service_id)
+    if src is None:
+        return {"status": "error", "service_id": service_id, "summary": "Source not found"}
+
+    _display = _display_label(src, service_id)
+    outcome: dict | None = None
+    with cron_run(
+        service_id,
+        "optimize",
+        source=src,
+        error_summary="Iceberg optimize failed",
+        error_result=lambda exc: {
+            "status": "error",
+            "service_id": service_id,
+            "error": str(exc),
+            "files_rewritten": 0,
+            "files_added": 0,
+            "summary": "Iceberg optimize failed",
+        },
+        finalize_duration=True,
+        skip_log_prefix="optimize",
+    ) as run:
+        if run.skipped:
+            return {"status": "skipped", "service_id": service_id, "summary": run.skip_reason}
+
+        logger.info("🏎️  \x1b[92m[optimize]\x1b[0m %s: Optimize job started.", _display)
+        run.log_progress({"type": "status", "message": "Scanning Iceberg table for small files to compact..."})
+
+        result = db_iceberg.optimize_table(src, min_files_per_partition=10)
+        if "error" in result:
+            run.fail("Iceberg optimize failed", error_message=result["error"])
+            run.log_progress({"type": "error", "message": result["error"]})
+            run.log_progress({"type": "warning", "message": result["error"]})
+            outcome = {
+                "status": "error",
+                "service_id": service_id,
+                "error": result["error"],
+                "files_rewritten": 0,
+                "files_added": 0,
+                "summary": "Iceberg optimize failed",
+            }
+        else:
+            summary = f"Rewrote {result.get('files_rewritten', 0)} files into {result.get('files_added', 0)} files"
+            partition_errors = result.get("partition_errors") or []
+            if partition_errors:
+                eligible = result.get("eligible_partitions", 0)
+                summary += f" — {len(partition_errors)}/{eligible} partitions failed"
+                err_preview = "\n".join(partition_errors[:3])
+                if len(partition_errors) > 3:
+                    err_preview += f"\n... ({len(partition_errors) - 3} more)"
+                status = "error" if result.get("files_added", 0) == 0 else "warning"
+            else:
+                err_preview = None
+                status = "success"
+            run.record(
+                status,
+                summary=summary,
+                error_message=err_preview,
+                parquet_files_optimized=result.get("files_rewritten", 0),
+                parquet_files_created=result.get("files_added", 0),
+            )
+            event_type = "done" if status == "success" else status
+            run.log_progress({"type": event_type, "message": summary})
+            logger.info(
+                "[scheduler] %s: optimize complete — %s",
+                service_id,
+                summary,
+            )
+            outcome = {
+                "status": status,
+                "service_id": service_id,
+                "files_rewritten": result.get("files_rewritten", 0),
+                "files_added": result.get("files_added", 0),
+                "eligible_partitions": result.get("eligible_partitions", 0),
+                "partition_errors": partition_errors,
+                "summary": summary,
+            }
+    if run.result is not None:
+        outcome = run.result
+
+    from backend.cron.jobs._common import publish_sync_status_safe
+
+    publish_sync_status_safe(service_id, "scheduler")
+
+    logger.info("🏁  \x1b[92m[optimize]\x1b[0m %s: Optimize job finished.", _display)
+    return outcome

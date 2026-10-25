@@ -10,11 +10,11 @@ from typing import Any
 from backend.high_scale._common import format_iso_utc_or_empty as _iso
 from backend.high_scale._common import (
     parse_time_window,
+    range_value,
     visible_fact_clauses,
     visible_publication_fence_sql,
 )
-from backend.high_scale._projection_utils import range_value
-from backend.high_scale.registry import HighScaleService
+from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.repositories.utils.filters import filter_spec_attr, normalize_filter_key
 
 # Columns present on BOTH rum fact tables; a filter on anything else cannot apply to every beacon kind.

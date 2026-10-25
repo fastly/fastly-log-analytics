@@ -13,7 +13,7 @@ import pytest
 from backend.high_scale import dashboard as hs_dashboard
 from backend.high_scale import security as hs
 from backend.high_scale.archive_models import ServingWatermark
-from backend.high_scale.registry import HighScaleService
+from backend.high_scale.registry_bootstrap import HighScaleService
 
 START = "2026-10-18T00:00:00Z"
 END = "2026-10-19T00:00:00Z"

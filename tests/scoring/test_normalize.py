@@ -522,3 +522,147 @@ def test_raw_control_chars_now_agree(tmp_path):
         assert (rp, rc) == (want_path, want_cat), (
             f"{url!r}: Rust no longer strips the control char (got {(rp, rc)!r}); the EC-02 fix regressed."
         )
+
+
+# ── Merged from tests/scoring/test_normalize_parity.py ──
+
+import re
+
+from backend.scoring.normalize import _CATEGORY_MAP
+
+_RUST_NORMALIZE = _NORMALIZE_RS
+
+GOLDEN: list[tuple[str, str, str, str, str]] = [
+    ("/", "/", "home", "/", "home"),
+    ("/items/10243", "/items/*", "product", "/items/*", "product"),
+    (
+        "/api/v2/orders/00000abc-1234-5678-9abc-deadbeef0000",
+        "/api/v2/orders/*",
+        "api",
+        "/api/v2/orders/*",
+        "api",
+    ),
+    ("/%61dmin", "/admin", "admin", "/admin", "admin"),
+    ("/static/../admin", "/admin", "admin", "/admin", "admin"),
+    ("/admin/%2e%2e/items/foo", "/items/foo", "product", "/items/foo", "product"),
+    ("/search?q=red+shoes&page=2", "/search", "browse", "/search", "browse"),
+    ("/auth/login%2F..%2F..%2Fproduct", "/auth/login/../../product", "auth", "/auth/login/../../product", "auth"),
+    ("/items/%2e%2e%2fsecret", "/items/../secret", "product", "/items/../secret", "product"),
+    ("/a/b/%2e%2e%2f%2e%2e%2fc", "/a/b/../../c", "other", "/a/b/../../c", "other"),
+]
+
+KNOWN_DIVERGENCES: set[str] = set()
+
+CATEGORY_GOLDEN: list[tuple[str, str]] = [
+    ("/", "home"),
+    ("/api/status", "api"),
+    ("/products/widget", "product"),
+    ("/search", "browse"),
+    ("/cart", "cart"),
+    ("/checkout/step-1", "checkout"),
+    ("/account/settings", "account"),
+    ("/login", "auth"),
+    ("/admin/users", "admin"),
+    ("/static/app.js", "asset"),
+    ("/blog/post", "content"),
+    ("/zzz-unknown", "other"),
+]
+
+
+@pytest.mark.parametrize("url,py_path,py_cat,_rust_path,_rust_cat", GOLDEN)
+def test_python_normalize_matches_golden(url, py_path, py_cat, _rust_path, _rust_cat):
+    """Pin the Python normalizer's output for every golden URL."""
+    r = normalize(url)
+    assert r.path == py_path, f"{url!r}: path drifted {r.path!r} != {py_path!r}"
+    assert r.category == py_cat, f"{url!r}: category drifted {r.category!r} != {py_cat!r}"
+
+
+@pytest.mark.parametrize("url,category", CATEGORY_GOLDEN)
+def test_python_category_golden(url, category):
+    """Pin the Python category bucket for one URL per CATEGORY_MAP value."""
+    assert normalize(url).category == category, f"{url!r}: category drifted {normalize(url).category!r} != {category!r}"
+
+
+def test_divergence_classification_is_honest():
+    """The AGREE/DIVERGE split must match reality."""
+    for url, py_path, py_cat, rust_path, rust_cat in GOLDEN:
+        same = (py_path, py_cat) == (rust_path, rust_cat)
+        if url in KNOWN_DIVERGENCES:
+            assert not same, (
+                f"{url!r} is marked divergent but Python==Rust expected — gap closed? update KNOWN_DIVERGENCES."
+            )
+        else:
+            assert same, (
+                f"{url!r} is treated as parity but expected values differ — new divergence? add it to KNOWN_DIVERGENCES."
+            )
+
+
+def test_finding_014_no_category_evasion():
+    """Finding 014: an encoded slash (`%2F`) must not let a traversal relabel a route's category."""
+    evasion_targets = {
+        "/auth/login%2F..%2F..%2Fproduct": "product",
+        "/items/%2e%2e%2fsecret": "other",
+    }
+    for url, evaded_cat in evasion_targets.items():
+        cat = normalize(url).category
+        assert cat != evaded_cat, f"{url!r}: category-evasion not prevented (got {cat!r})"
+    assert ".." in normalize("/auth/login%2F..%2F..%2Fproduct").path
+
+
+def _read_rust_source() -> str:
+    assert _RUST_NORMALIZE.is_file(), f"Rust normalizer not found at {_RUST_NORMALIZE}"
+    return _RUST_NORMALIZE.read_text(encoding="utf-8")
+
+
+def _extract_slice_body(src: str, const_name: str) -> str:
+    m = re.search(rf"const\s+{re.escape(const_name)}\s*:[^=]*=\s*&\[", src)
+    assert m, f"could not locate `const {const_name}` slice in {_RUST_NORMALIZE.name}"
+    start = m.end()
+    end = src.index("]", start)
+    return src[start:end]
+
+
+def _parse_string_tuples(block: str, arity: int) -> list[tuple[str, ...]]:
+    block = re.sub(r"//[^\n]*", "", block)
+    raw = re.findall(r'"((?:[^"\\]|\\.)*)"', block)
+    literals = [s.replace('\\"', '"').replace("\\\\", "\\") for s in raw]
+    assert literals, f"no string literals parsed from slice body: {block!r}"
+    assert len(literals) % arity == 0, (
+        f"parsed {len(literals)} literals, not a multiple of arity {arity} — "
+        "the Rust table layout drifted from what the parser expects"
+    )
+    return [tuple(literals[i : i + arity]) for i in range(0, len(literals), arity)]
+
+
+def test_rust_category_map_matches_python():
+    rust_pairs = _parse_string_tuples(_extract_slice_body(_read_rust_source(), "CATEGORY_MAP"), 2)
+    py_pairs = list(_CATEGORY_MAP.items())
+    if rust_pairs != py_pairs:
+        only_rust = set(rust_pairs) - set(py_pairs)
+        only_py = set(py_pairs) - set(rust_pairs)
+        raise AssertionError(
+            "CATEGORY_MAP desynced between normalize.rs and normalize.py.\n"
+            f"  only in Rust: {sorted(only_rust)}\n"
+            f"  only in Python: {sorted(only_py)}\n"
+            + ("  (same entries, different order)" if not only_rust and not only_py else "")
+        )
+
+
+def test_rust_parity_golden_matches_python_golden():
+    rust_golden = _parse_string_tuples(_extract_slice_body(_read_rust_source(), "PARITY_GOLDEN"), 3)
+    py_rust_view = [(url, rust_path, rust_cat) for (url, _pp, _pc, rust_path, rust_cat) in GOLDEN]
+    assert rust_golden == py_rust_view, (
+        "PARITY_GOLDEN (normalize.rs) and GOLDEN (test_normalize.py) diverged.\n"
+        f"  Rust:   {rust_golden}\n"
+        f"  Python: {py_rust_view}"
+    )
+
+
+def test_rust_category_golden_matches_python():
+    rust_cat_golden = _parse_string_tuples(_extract_slice_body(_read_rust_source(), "CATEGORY_GOLDEN"), 2)
+    py_cat_golden = [tuple(row) for row in CATEGORY_GOLDEN]
+    assert rust_cat_golden == py_cat_golden, (
+        "CATEGORY_GOLDEN diverged between normalize.rs and test_normalize.py.\n"
+        f"  Rust:   {rust_cat_golden}\n"
+        f"  Python: {py_cat_golden}"
+    )

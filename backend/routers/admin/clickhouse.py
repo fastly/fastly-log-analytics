@@ -14,6 +14,8 @@ from backend.core.clickhouse_manifest import PgManifest
 from backend.core.clickhouse_publication import full_rebuild, replay_unpublished
 from backend.core.clickhouse_schema import CLICKHOUSE_SCHEMA_VERSION, target_identity
 from backend.deps import require_admin
+from backend.high_scale.disk_sampler import latest_disk_snapshot
+from backend.high_scale.models import ServiceProfile, StorageProfile, recommend_retention
 from backend.models.admin_status import (
     ClickHouseReplayErrorResponse,
     ClickHouseReplayRequest,
@@ -21,6 +23,7 @@ from backend.models.admin_status import (
     ClickHouseStatusResponse,
 )
 from backend.models.errors import ErrorDetail
+from backend.models.high_scale import HighScaleRetentionRecommendationResponse
 from backend.routers.admin._router import router
 from backend.utils.router_utils import load_service_config_or_503, make_error, require_service_id
 
@@ -152,3 +155,74 @@ def api_clickhouse_replay(req: ClickHouseReplayRequest):
             )
         )
         return JSONResponse(status_code=503, content=error.model_dump(by_alias=True))
+
+
+@router.get(
+    "/admin/high-scale/retention-recommendation",
+    response_model=HighScaleRetentionRecommendationResponse,
+)
+def api_high_scale_retention_recommendation(
+    service_id: str | None = Query(default=None, max_length=128),
+    events_per_second: float = Query(gt=0, description="Observed or estimated request events per second"),
+    average_row_bytes: float = Query(default=500.0, gt=0),
+    total_bytes: int | None = Query(
+        default=None, gt=0, description="Serving volume size; defaults to the sampled volume"
+    ),
+) -> HighScaleRetentionRecommendationResponse:
+    """Recommend hot/warm retention for sizing; an explicit per-service setting always wins."""
+    service_id = require_service_id(service_id)
+    if not config.is_high_scale_mode():
+        raise HTTPException(404, detail=make_error("high_scale_not_enabled", "High-scale mode is not enabled"))
+    cfg = load_service_config_or_503(service_id)
+
+    volume_source: Literal["request", "sampled"] = "request"
+    volume_bytes = total_bytes
+    if volume_bytes is None:
+        snapshot = latest_disk_snapshot()
+        if snapshot is None:
+            raise HTTPException(
+                409,
+                detail=make_error(
+                    "high_scale_volume_unknown",
+                    "Serving volume size is not sampled yet; pass total_bytes",
+                ),
+            )
+        volume_bytes = snapshot.total_bytes
+        volume_source = "sampled"
+
+    recommendation = recommend_retention(
+        ServiceProfile(events_per_second=events_per_second, average_row_bytes=average_row_bytes),
+        StorageProfile(total_bytes=volume_bytes),
+    )
+    explicit = ((cfg.get("provisioning") or {}).get("cron_sync") or {}).get("data_retention_days")
+    explicit_days = explicit if isinstance(explicit, int) and not isinstance(explicit, bool) and explicit >= 0 else None
+    source: Literal["override", "recommendation"] = "override" if explicit_days is not None else "recommendation"
+    effective: float | None
+    if explicit_days is None:
+        effective = recommendation.warm_days
+    else:
+        effective = float(explicit_days) if explicit_days > 0 else None
+
+    logger.info(
+        "high_scale.retention_recommended",
+        service_id=service_id,
+        events_per_second=events_per_second,
+        average_row_bytes=average_row_bytes,
+        volume_total_bytes=volume_bytes,
+        volume_total_source=volume_source,
+        recommended_hot_days=round(recommendation.hot_days, 3),
+        recommended_warm_days=round(recommendation.warm_days, 3),
+        explicit_retention_days=explicit_days,
+        source=source,
+    )
+    return HighScaleRetentionRecommendationResponse(
+        service_id=service_id,
+        recommended_hot_days=recommendation.hot_days,
+        recommended_warm_days=recommendation.warm_days,
+        reasoning=recommendation.reasoning,
+        volume_total_bytes=volume_bytes,
+        volume_total_source=volume_source,
+        explicit_retention_days=explicit_days,
+        effective_retention_days=effective,
+        source=source,
+    )

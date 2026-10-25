@@ -565,9 +565,16 @@ def test_update_last_triggered_with_none_uses_now():
 
 from unittest.mock import MagicMock  # noqa: E402
 
-from backend.models.views import SavedView  # noqa: E402
-from backend.repositories.cron import delete_cron_log, get_cron_logs, purge_cron_logs  # noqa: E402
-from backend.repositories.views import delete_view, get_views, save_view  # noqa: E402
+from backend.models.common import SavedView  # noqa: E402
+from backend.repositories.alerts import (  # noqa: E402
+    delete_cron_log,
+    delete_view,
+    get_cron_logs,
+    get_view_by_id,
+    get_views,
+    purge_cron_logs,
+    save_view,
+)
 
 
 def _make_view(service_id: str, name: str = "My View") -> SavedView:
@@ -604,8 +611,6 @@ def test_delete_view_unknown_id_returns_not_found():
 
 
 def test_get_view_by_id_returns_view_with_service_id_stamped():
-    from backend.repositories.views import get_view_by_id
-
     sid = "svc-views-get-by-id"
     view = save_view(_make_view(sid, "by-id"))
     row = get_view_by_id(view["id"], sid)
@@ -615,8 +620,6 @@ def test_get_view_by_id_returns_view_with_service_id_stamped():
 
 
 def test_get_view_by_id_returns_none_when_view_does_not_exist():
-    from backend.repositories.views import get_view_by_id
-
     assert get_view_by_id("nonexistent-id", "svc-no-views") is None
 
 

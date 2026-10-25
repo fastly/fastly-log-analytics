@@ -1,15 +1,37 @@
 import contextvars
+from collections import defaultdict
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any
 
 from backend.core.high_scale_sections import HighScaleSections
-from backend.high_scale._filters import build_clickhouse_filters as _build_clickhouse_filters
-from backend.high_scale._projection_utils import (
+from backend.high_scale._common import (
+    bucket as _bucket,
+)
+from backend.high_scale._common import (
+    finite_float as _finite_float,
+)
+from backend.high_scale._common import (
+    optional_int as _finite_int,
+)
+from backend.high_scale._common import (
+    parse_time_window,
+    visible_publication_fence_sql,
+)
+from backend.high_scale._common import (
+    percentiles as _percentiles,
+)
+from backend.high_scale._common import (
     range_value as _range_value,
 )
-from backend.high_scale.registry import HighScaleService
+from backend.high_scale._common import (
+    text as _text,
+)
+from backend.high_scale._filters import build_clickhouse_filters as _build_clickhouse_filters
+from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.models.common import SectionTimingEntry
 from backend.models.network import (
     NetworkBundleRequest,
@@ -28,29 +50,18 @@ from backend.models.network import (
     TransportProtocolShare,
 )
 from backend.models.origin import OriginShieldingAnalysisResponse
+from backend.repositories.network import _avg_hs, _health_score
 from backend.repositories.utils.response_cache import cache_result
 from backend.utils.countries import format_city_label
 
 
-def _health_score(
-    throughput_bps: float | None,
-    rtt_congestion_us: float | None,
-    avg_ploss: float | None,
-    rtt_jitter_us: float | None,
-    error_pct: float | None,
-) -> float:
-    """Byte-identical to repositories.network._health_score (throughput unused)."""
-    pkt = min((avg_ploss or 0) / 0.05, 1.0) if avg_ploss is not None else 0
-    cong = min((rtt_congestion_us or 0) / 200_000, 1.0) if rtt_congestion_us is not None else 0
-    jitter = min((rtt_jitter_us or 0) / 100_000, 1.0) if rtt_jitter_us is not None else 0
-    err = min((error_pct or 0) / 10.0, 1.0) if error_pct is not None else 0
-    weighted = pkt * 0.40 + cong * 0.30 + jitter * 0.20 + err * 0.10
-    return round((1.0 - weighted) * 100, 1)
-
-
-def _avg_hs(buckets_data: dict[str, dict], keys: list[str]) -> float | None:
-    vals = [buckets_data[k]["health_score"] for k in keys if buckets_data[k].get("health_score") is not None]
-    return round(sum(vals) / len(vals), 1) if vals else None
+def _parse_metro_code(metro_raw: Any) -> int | None:
+    if not metro_raw:
+        return None
+    try:
+        return int(float(metro_raw))
+    except (ValueError, TypeError):
+        return None
 
 
 def _fmt_ts(ts: int) -> str:
@@ -66,8 +77,6 @@ _RTT_VAR = "toFloat64OrNull(custom_fields['rtt_var'])"
 _PLOSS = "toFloat64OrNull(custom_fields['ploss'])"
 _STATUS = "toInt32OrZero(custom_fields['status'])"
 _ASN = "toInt32OrNull(custom_fields['asn'])"
-
-from backend.high_scale._common import parse_time_window, visible_publication_fence_sql
 
 _BASE_WHERE = (
     f"service_id={{service_id:String}} AND {visible_publication_fence_sql('request')} "
@@ -481,14 +490,7 @@ def network_health(
         err = float(r["error_pct"]) if r["error_pct"] is not None else None
         reqs = int(r["reqs"])
         hs = _health_score(None, None, pkt, None, err)
-
-        metro_code: int | None = None
-        metro_raw = r.get("metro")
-        if metro_raw:
-            try:
-                metro_code = int(float(metro_raw))
-            except (ValueError, TypeError):
-                metro_code = None
+        metro_code = _parse_metro_code(r.get("metro"))
 
         display_city = city.title() if city else ""
         if metro_code is not None and str(metro_code) in dma_map:
@@ -521,14 +523,7 @@ def network_health(
         pkt = float(r["avg_ploss"]) if r["avg_ploss"] is not None else None
         err = float(r["error_pct"]) if r["error_pct"] is not None else None
         hs = _health_score(None, None, pkt, None, err)
-
-        metro_code = None
-        metro_raw = r.get("metro")
-        if metro_raw:
-            try:
-                metro_code = int(float(metro_raw))
-            except (ValueError, TypeError):
-                metro_code = None
+        metro_code = _parse_metro_code(r.get("metro"))
 
         if metro_code is not None and str(metro_code) in dma_map:
             display = format_city_label(dma_map[str(metro_code)], ctry, region)
@@ -867,27 +862,21 @@ def get_transport_metrics(
         rows = f_main.result()
         p_rows = f_proto.result()
 
-    if rows:
-        r = rows[0]
-        total_requests = int(r.get("total_reqs") or 0)
-        bandwidth_bytes = int(r.get("total_bytes") or 0)
-        tcp_rtt_p50 = round(float(r["rtt_p50"]), 2) if r.get("rtt_p50") is not None else None
-        tcp_rtt_p90 = round(float(r["rtt_p90"]), 2) if r.get("rtt_p90") is not None else None
-        tcp_rtt_p95 = round(float(r["rtt_p95"]), 2) if r.get("rtt_p95") is not None else None
-        tcp_rtt_p99 = round(float(r["rtt_p99"]), 2) if r.get("rtt_p99") is not None else None
-        retrans_rate = round(float(r["avg_retrans"]), 3) if r.get("avg_retrans") is not None else None
-        packet_loss = round(float(r["avg_ploss_pct"]), 3) if r.get("avg_ploss_pct") is not None else None
-        delivery_rate = round(float(r["avg_del_rate_mbps"]), 2) if r.get("avg_del_rate_mbps") is not None else None
-        # No request in the window carries the field => the service does not log it.
-        missing_fields = (
-            [f for f in _TRANSPORT_FIELDS if not int(r.get(f"seen_{f}") or 0)] if total_requests > 0 else []
-        )
-    else:
-        missing_fields = []
-        total_requests = 0
-        bandwidth_bytes = 0
-        tcp_rtt_p50 = tcp_rtt_p90 = tcp_rtt_p95 = tcp_rtt_p99 = None
-        retrans_rate = packet_loss = delivery_rate = None
+    def _opt_round(row: Mapping[str, Any], key: str, ndigits: int) -> float | None:
+        val = row.get(key)
+        return round(float(val), ndigits) if val is not None else None
+
+    r: Mapping[str, Any] = rows[0] if rows else {}
+    total_requests = int(r.get("total_reqs") or 0)
+    bandwidth_bytes = int(r.get("total_bytes") or 0)
+    tcp_rtt_p50 = _opt_round(r, "rtt_p50", 2)
+    tcp_rtt_p90 = _opt_round(r, "rtt_p90", 2)
+    tcp_rtt_p95 = _opt_round(r, "rtt_p95", 2)
+    tcp_rtt_p99 = _opt_round(r, "rtt_p99", 2)
+    retrans_rate = _opt_round(r, "avg_retrans", 3)
+    packet_loss = _opt_round(r, "avg_ploss_pct", 3)
+    delivery_rate = _opt_round(r, "avg_del_rate_mbps", 2)
+    missing_fields = [f for f in _TRANSPORT_FIELDS if not int(r.get(f"seen_{f}") or 0)] if total_requests > 0 else []
 
     protocol_distribution = []
     sum_p = sum(r.get("reqs", 0) for r in p_rows) or total_requests or 1
@@ -988,3 +977,97 @@ def network_bundle(
         pop_health=pop_health,
         transport=transport_resp,
     )
+
+
+@dataclass(frozen=True)
+class NetworkProjection:
+    dimension_rows: tuple[dict[str, Any], ...]
+
+
+@dataclass
+class _Accumulator:
+    requests: int = 0
+    errors: int = 0
+    tcp_rtts: list[float] = field(default_factory=list)
+    ttfbs: list[float] = field(default_factory=list)
+    ploss_sum: float = 0.0
+    ploss_count: int = 0
+
+
+def build_network_projection_rows(rows: tuple[Mapping[str, Any], ...]) -> NetworkProjection:
+    dimensions: dict[tuple[datetime, str, str, str], _Accumulator] = defaultdict(_Accumulator)
+
+    for row in rows:
+        bucket = _bucket(row.get("timestamp"))
+        if bucket is None:
+            continue
+
+        status = _finite_int(row.get("status"))
+        is_error = status is not None and status >= 500
+
+        tcp_rtt = _finite_float(row.get("tcp_rtt"))
+        ttfb = _finite_float(row.get("ttfb"))
+        ploss = _finite_float(row.get("ploss"))
+
+        country = _text(row.get("country"))
+        asn = _text(row.get("asn"))
+        pop = _text(row.get("pop"))
+        region = _text(row.get("region"))
+        c_speed = _text(row.get("c_speed"))
+
+        if country:
+            _update(dimensions[(bucket, "country", country, "")], is_error, tcp_rtt, ttfb, ploss)
+        if asn:
+            _update(dimensions[(bucket, "asn", asn, c_speed)], is_error, tcp_rtt, ttfb, ploss)
+        if pop:
+            _update(dimensions[(bucket, "pop", pop, "")], is_error, tcp_rtt, ttfb, ploss)
+        if region:
+            _update(dimensions[(bucket, "region", region, "")], is_error, tcp_rtt, ttfb, ploss)
+
+    return NetworkProjection(
+        dimension_rows=tuple(
+            _dimension_row(bucket, dimension, value, c_speed, acc)
+            for (bucket, dimension, value, c_speed), acc in sorted(dimensions.items())
+        ),
+    )
+
+
+def _update(acc: _Accumulator, is_error: bool, tcp_rtt: float | None, ttfb: float | None, ploss: float | None) -> None:
+    acc.requests += 1
+    if is_error:
+        acc.errors += 1
+    if tcp_rtt is not None and tcp_rtt > 0:
+        acc.tcp_rtts.append(tcp_rtt)
+    if ttfb is not None and ttfb > 0:
+        acc.ttfbs.append(ttfb)
+    if ploss is not None:
+        acc.ploss_sum += ploss
+        acc.ploss_count += 1
+
+
+def _dimension_row(
+    bucket: datetime,
+    dimension: str,
+    value: str,
+    c_speed: str,
+    acc: _Accumulator,
+) -> dict[str, Any]:
+    rtt_p50, rtt_p95, rtt_p99 = _percentiles(acc.tcp_rtts, (0.50, 0.95, 0.99))
+    ttfb_p50, ttfb_p95 = _percentiles(acc.ttfbs, (0.50, 0.95))
+    return {
+        "bucket_start": bucket.isoformat(),
+        "dimension": dimension,
+        "value": value,
+        "c_speed": c_speed,
+        "requests": acc.requests,
+        "errors": acc.errors,
+        "tcp_rtt_count": len(acc.tcp_rtts),
+        "tcp_rtt_sum": sum(acc.tcp_rtts) if acc.tcp_rtts else None,
+        "tcp_rtt_p50_us": rtt_p50,
+        "tcp_rtt_p95_us": rtt_p95,
+        "tcp_rtt_p99_us": rtt_p99,
+        "ploss_sum": acc.ploss_sum if acc.ploss_count > 0 else None,
+        "ploss_count": acc.ploss_count,
+        "ttfb_p50_us": ttfb_p50,
+        "ttfb_p95_us": ttfb_p95,
+    }

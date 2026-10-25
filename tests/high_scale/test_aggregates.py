@@ -311,7 +311,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from backend.high_scale.aggregate_writer import compute_dimension_counts
+from backend.high_scale.aggregate_batch_adapter import compute_dimension_counts
 
 
 def test_computes_counts_per_dimension_value_and_minute_bucket() -> None:
@@ -485,7 +485,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from backend.high_scale._projection_utils import bucket, finite_float, percentiles, range_value, text
+from backend.high_scale._common import bucket, finite_float, percentiles, range_value, text
 
 
 def test_range_value_keeps_naive_for_date_only_and_tz_for_z():
@@ -522,7 +522,7 @@ def test_percentiles_linear_interpolation(values, q, expected):
 def test_percentiles_sorts_once(monkeypatch):
     import builtins
 
-    from backend.high_scale import _projection_utils as utils
+    from backend.high_scale import _common as utils
 
     calls = []
     real_sorted = builtins.sorted
@@ -537,7 +537,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-from backend.high_scale import publication, raw_query
+from backend.high_scale import _common as raw_query
+from backend.high_scale import publication
 
 
 def test_publication_timestamp_assumes_utc_for_naive_and_wraps_errors() -> None:
@@ -567,7 +568,7 @@ import random
 
 import pytest
 
-from backend.high_scale._projection_utils import RELATIVE_ERROR, sketch
+from backend.high_scale._common import RELATIVE_ERROR, sketch
 
 
 def _weighted_quantile(centroids: list[float], counts: list[int], q: float) -> float:

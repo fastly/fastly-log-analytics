@@ -16,13 +16,13 @@ import {
 } from '@/components/ui/dialog'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { MapPin, RefreshCw, CheckCircle2, AlertCircle } from 'lucide-react'
-import { cn } from '@/lib/utils'
-import type { components } from '@/types/api.generated'
 import {
+  cn,
   panelDialogContent,
   panelDialogFooter,
   panelDialogHeaderMuted,
-} from '@/lib/panel-dialog'
+} from '@/lib/utils'
+import type { components } from '@/types/api.generated'
 
 type PopLocation = components['schemas']['PopLocation']
 

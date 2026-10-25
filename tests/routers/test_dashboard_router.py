@@ -897,7 +897,7 @@ async def test_high_scale_bundle_runs_off_event_loop(monkeypatch):
     from unittest.mock import MagicMock
 
     import backend.high_scale.dashboard as hsd
-    import backend.high_scale.registry as hsreg
+    import backend.high_scale.registry_bootstrap as hsreg
     import backend.routers.dashboard as dash
     from backend.core.request_context import RequestContext
     from backend.models.dashboard import AggregatesRequest

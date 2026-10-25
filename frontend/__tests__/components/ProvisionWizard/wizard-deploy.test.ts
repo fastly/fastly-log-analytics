@@ -14,7 +14,7 @@
  * exercises browser-only `URL.createObjectURL` plumbing not present in
  * jsdom. The other 5 exports are covered.
  */
-import { API_BASE, FULL_CONFIG, serviceStoreMockFactory } from './test-helpers'
+import { API_BASE, FULL_CONFIG, serviceStoreMockFactory } from '@/__tests__/helpers/page-smoke'
 import { without } from '@/__tests__/helpers/partial'
 import { http, HttpResponse } from 'msw'
 import { describe, it, expect, vi, afterEach } from 'vitest'

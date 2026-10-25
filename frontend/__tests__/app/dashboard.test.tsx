@@ -11,7 +11,7 @@ import { densifyBarSeries } from '@/lib/chart-helpers'
 import { buildTrafficData, getIntervalSeconds } from '@/lib/traffic-chart'
 import { createTestQueryClient, renderWithQuery } from '../helpers/query'
 import * as apiLib from '@/lib/api'
-import { getOk, postOk } from '@/__tests__/helpers/api-result'
+import { getOk, postOk } from '@/__tests__/helpers/partial'
 import React from 'react'
 
 vi.mock('@/stores/serviceStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())

@@ -10,7 +10,7 @@ import { ThemeProvider } from "next-themes";
 import { AppLayout } from "@/components/AppLayout";
 import { ServerFooter } from "@/components/ServerFooter";
 import { StoreHydrator } from "@/components/StoreHydrator";
-import { SIDEBAR_COLLAPSED_COOKIE } from "@/lib/cookies";
+import { SIDEBAR_COLLAPSED_COOKIE } from "@/lib/utils";
 import { ErrorBoundaryWithRouteReset } from "@/components/ErrorBoundary";
 import { ReloadLoopGuard } from "@/components/ReloadLoopGuard";
 import { WebVitalsReporter } from "@/components/WebVitalsReporter/WebVitalsReporter";

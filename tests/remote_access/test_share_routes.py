@@ -637,8 +637,7 @@ def test_live_payload_shape_matches_share_channel(client):
 
 
 def _seed_status_fixtures():
-    from backend.utils.tunnel.manager import get_tunnel_manager
-    from backend.utils.tunnel.session import AnalystSession
+    from backend.utils.tunnel.manager import AnalystSession, get_tunnel_manager
 
     share_db.create_remote_invite(
         name="Carol",

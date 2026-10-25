@@ -1342,7 +1342,7 @@ def test_run_bot_data_refresh_records_success_with_total_entries():
     with (
         patch("backend.cron.decorators.dev_mode_no_crons", return_value=False),
         patch("backend.utils.bot_sources.refresh_all_sources", return_value=fake_results),
-        patch("backend.utils.system_jobs.record_job_run") as mock_record,
+        patch("backend.cron.decorators.record_job_run") as mock_record,
     ):
         _run_bot_data_refresh()
 
@@ -1365,7 +1365,7 @@ def test_run_bot_data_refresh_records_warning_on_partial_failure():
     with (
         patch("backend.cron.decorators.dev_mode_no_crons", return_value=False),
         patch("backend.utils.bot_sources.refresh_all_sources", return_value=fake_results),
-        patch("backend.utils.system_jobs.record_job_run") as mock_record,
+        patch("backend.cron.decorators.record_job_run") as mock_record,
     ):
         _run_bot_data_refresh()
 
@@ -1387,7 +1387,7 @@ def test_run_bot_data_refresh_records_error_on_total_failure():
     with (
         patch("backend.cron.decorators.dev_mode_no_crons", return_value=False),
         patch("backend.utils.bot_sources.refresh_all_sources", return_value=fake_results),
-        patch("backend.utils.system_jobs.record_job_run") as mock_record,
+        patch("backend.cron.decorators.record_job_run") as mock_record,
     ):
         _run_bot_data_refresh()
 
@@ -1404,7 +1404,7 @@ def test_run_bot_data_refresh_skips_when_dev_mode_active():
     with (
         patch("backend.cron.decorators.dev_mode_no_crons", return_value=True),
         patch("backend.utils.bot_sources.refresh_all_sources") as mock_refresh,
-        patch("backend.utils.system_jobs.record_job_run") as mock_record,
+        patch("backend.cron.decorators.record_job_run") as mock_record,
     ):
         _run_bot_data_refresh()
 
@@ -1826,7 +1826,7 @@ def test_run_rdns_enrichment_records_success_with_counts():
     with (
         patch("backend.cron.decorators.dev_mode_no_crons", return_value=False),
         patch("backend.utils.rdns_cache.enrich_batch", return_value=fake_summary),
-        patch("backend.utils.system_jobs.record_job_run") as mock_record,
+        patch("backend.cron.decorators.record_job_run") as mock_record,
     ):
         _run_rdns_enrichment()
 
@@ -1847,7 +1847,7 @@ def test_run_rdns_enrichment_records_warning_on_dns_failures():
     with (
         patch("backend.cron.decorators.dev_mode_no_crons", return_value=False),
         patch("backend.utils.rdns_cache.enrich_batch", return_value=fake_summary),
-        patch("backend.utils.system_jobs.record_job_run") as mock_record,
+        patch("backend.cron.decorators.record_job_run") as mock_record,
     ):
         _run_rdns_enrichment()
 
@@ -1864,7 +1864,7 @@ def test_run_rdns_enrichment_skips_when_dev_mode_active():
     with (
         patch("backend.cron.decorators.dev_mode_no_crons", return_value=True),
         patch("backend.utils.rdns_cache.enrich_batch") as mock_enrich,
-        patch("backend.utils.system_jobs.record_job_run") as mock_record,
+        patch("backend.cron.decorators.record_job_run") as mock_record,
     ):
         _run_rdns_enrichment()
 

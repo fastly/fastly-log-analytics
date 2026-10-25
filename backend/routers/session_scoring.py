@@ -1191,6 +1191,13 @@ def scoring_health(
 _MIN_LABELS_PER_CLASS = 3
 
 
+def _label_counts(service_id: str) -> tuple[int, int, int]:
+    from backend.scoring import labels as _labels
+
+    counts = _labels.counts_by_label(service_id)
+    return counts.get("good", 0), counts.get("bad", 0), counts.get("neutral", 0)
+
+
 @router.get(
     "/{service_id}/scoring/evaluation", response_model=ScoringEvaluationResponse, response_model_exclude_unset=True
 )
@@ -1219,10 +1226,7 @@ def scoring_evaluation(
     from backend.scoring import labels as _labels
 
     _enforce_scoring_service_scope(request, service_id)
-    counts = _labels.counts_by_label(service_id)
-    n_good = counts.get("good", 0)
-    n_bad = counts.get("bad", 0)
-    n_neutral = counts.get("neutral", 0)
+    n_good, n_bad, n_neutral = _label_counts(service_id)
 
     # The cache key includes the label count so a new label invalidates
     # the previous snapshot even if the explicit cache bust were to miss.
@@ -1322,9 +1326,7 @@ def scoring_curves(
     from backend.scoring import labels as _labels
 
     _enforce_scoring_service_scope(request, service_id)
-    counts = _labels.counts_by_label(service_id)
-    n_good = counts.get("good", 0)
-    n_bad = counts.get("bad", 0)
+    n_good, n_bad, _ = _label_counts(service_id)
 
     def _produce() -> dict:
         if n_good < _MIN_LABELS_PER_CLASS or n_bad < _MIN_LABELS_PER_CLASS:
@@ -1515,9 +1517,8 @@ def scoring_threshold_preview(
         }
 
     # Label-count-aware cache key so a new label invalidates correctly.
-    counts = _labels.counts_by_label(service_id)
-    n_labels = counts.get("good", 0) + counts.get("bad", 0)
-    return _cached(("threshold-preview", service_id, threshold_int, since_hours, n_labels, win_disc), _produce)
+    n_good, n_bad, _ = _label_counts(service_id)
+    return _cached(("threshold-preview", service_id, threshold_int, since_hours, n_good + n_bad, win_disc), _produce)
 
 
 # ── Admin / training endpoints (carved out for file-size budget) ────────────

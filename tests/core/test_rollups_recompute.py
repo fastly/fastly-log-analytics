@@ -15,8 +15,8 @@ from unittest.mock import patch
 import duckdb
 import pytest
 
-from tests._helpers.dates import past_hour as _past_hour
-from tests._helpers.locks import noop_lock as _noop_lock
+from tests._helpers.rollups import noop_lock as _noop_lock
+from tests._helpers.rollups import past_hour as _past_hour
 
 pytestmark = pytest.mark.usefixtures("frozen_clock")
 

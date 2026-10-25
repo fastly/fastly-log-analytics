@@ -14,7 +14,7 @@ from typing import Any
 
 from backend.core.high_scale_sections import HighScaleSections
 from backend.high_scale._common import parse_time_window
-from backend.high_scale.registry import HighScaleService
+from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.high_scale.schema import build_cmcd_projection_key
 from backend.models.cmcd import CmcdRequest
 from backend.repositories.utils.response_cache import (

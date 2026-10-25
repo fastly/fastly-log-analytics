@@ -2,11 +2,10 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, test, beforeEach, afterEach, vi } from 'vitest'
-import { downloadAsCsv, IP_FAMILY_FIELDS, isIpFamilyField } from '@/lib/utils'
+import { downloadAsCsv, IP_FAMILY_FIELDS, isIpFamilyField, buildSessionDashboardUrl, buildStreamDetailUrl } from '@/lib/utils'
 import { formatBytes, statusBadgeClass } from '@/lib/format'
-import { formatPopGeo } from '@/lib/pop'
+import { formatPopGeo } from '@/components/PopLabel'
 import { shouldLoadRumScript } from '@/lib/ssr/upstream'
-import { buildSessionDashboardUrl, buildStreamDetailUrl } from '@/lib/navigation'
 import {
   isUserActive,
   msSinceLastInteraction,
@@ -17,7 +16,7 @@ import { showReadOnlyToast, showToast } from '@/lib/toast'
 import { toUTCDate, formatTimeAgo, formatLocalDateTime } from '@/lib/date'
 import { resolveRangeWire, DEFAULT_RANGE_TOKEN } from '@/lib/range-wire'
 import { ANCHOR_QUANTUM_SECONDS, quantizeAnchor } from '@/lib/time-window'
-import { invalidInput } from '../helpers/invalid-input'
+import { invalidInput } from '../helpers/partial'
 
 describe('formatBytes', () => {
   it('returns "0 B" for zero', () => {

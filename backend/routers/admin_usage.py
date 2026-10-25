@@ -39,7 +39,7 @@ from backend.models.admin import (
 )
 from backend.models.common import OkResponse
 from backend.routers import admin as _adm
-from backend.utils.service_ids import service_id_from_source
+from backend.routers.admin._helpers import service_id_from_source
 
 router: APIRouter = _adm.router  # type: ignore
 
@@ -356,8 +356,8 @@ def purge_usage_log_endpoint(source: dict = Depends(get_source)):
 )
 def get_system_jobs_endpoint():
     """Return status and schedule info for global background jobs."""
+    from backend.cron.decorators import get_system_job_status
     from backend.cron.scheduler import get_scheduler
-    from backend.utils.system_jobs import get_system_job_status
 
     statuses = get_system_job_status()
     result = []

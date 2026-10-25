@@ -26,14 +26,17 @@ and ``OAUTH_FLOW_STATE_SECRET`` are configured.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 from backend.config import SYSTEM_DATA_DIR
+from backend.core.session_token import seal_aes_gcm, unseal_aes_gcm
 
 logger = logging.getLogger(__name__)
 
@@ -242,3 +245,38 @@ def reset_cache_for_tests() -> None:
     global _cache
     with _lock:
         _cache = None
+
+
+_AAD: Final[bytes] = b"oauth_flow_state"
+
+COOKIE_NAME: Final[str] = "oauth_flow_state"
+COOKIE_PATH: Final[str] = "/api/share/oauth"
+COOKIE_MAX_AGE_S: Final[int] = 600  # 10 minutes
+
+
+class FlowStateError(Exception):
+    """Raised when the flow-state cookie is missing, malformed, tampered with,
+    or sealed under a key this process no longer holds."""
+
+
+def _key() -> bytes:
+    secret = flow_state_secret()
+    if not secret:
+        raise FlowStateError("OAUTH_FLOW_STATE_SECRET is not set")
+    return hashlib.sha256(secret.encode("utf-8")).digest()
+
+
+def seal_flow_state(payload: dict) -> str:
+    """Seal the flow-state dict into the opaque cookie value."""
+    return seal_aes_gcm(_key(), payload, _AAD)
+
+
+def open_flow_state(token: str) -> dict:
+    """Inverse of :func:`seal_flow_state`. Raises :class:`FlowStateError` on any
+    failure."""
+    if not token:
+        raise FlowStateError("missing flow-state cookie")
+    data = unseal_aes_gcm(_key(), token, _AAD, FlowStateError)
+    if not isinstance(data, dict):
+        raise FlowStateError("payload is not an object")
+    return data

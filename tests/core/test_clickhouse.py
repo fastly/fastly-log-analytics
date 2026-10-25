@@ -54,7 +54,7 @@ from backend.models.common import DebugQuery
 from backend.utils import telemetry
 from scripts import clickhouse_replay
 from scripts.clickhouse_replay import parser, run
-from tests.core.clickhouse_fos_fixture import TinyFos
+from tests._helpers.sources import TinyFos
 
 
 # ── Merged from tests/core/test_clickhouse_publication.py ──

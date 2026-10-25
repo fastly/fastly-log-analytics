@@ -728,7 +728,7 @@ class Scheduler:
 
         from backend import config as svcconfig
         from backend.core.duckdb import get_source_for_service, is_configured
-        from backend.high_scale.registry import get_high_scale_service_registry
+        from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
         seen_ids: set[str] = set()
         for cfg in svcconfig.list_configs():
@@ -756,7 +756,7 @@ class Scheduler:
         from backend import config as svcconfig
         from backend.core.duckdb import get_source_for_service, is_configured
         from backend.cron.jobs.commit import _run_commit
-        from backend.cron.jobs.expire import _run_expire_snapshots
+        from backend.cron.jobs.compaction import _run_expire_snapshots, _run_optimize
         from backend.cron.jobs.metadata import (
             _run_bot_data_refresh,
             _run_metadata_cleanup,
@@ -765,7 +765,6 @@ class Scheduler:
             _run_rdns_enrichment,
             _run_share_audit_purge,
         )
-        from backend.cron.jobs.optimize import _run_optimize
         from backend.cron.jobs.rum_commit import _run_rum_commit
         from backend.cron.jobs.rum_sync import _run_rum_sync
         from backend.cron.jobs.sync import _run_full_sweep, _run_gap_heal
@@ -1388,3 +1387,85 @@ def get_scheduler() -> Scheduler:
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("cron.scheduler._last_heavy_refresh", _last_heavy_refresh)
+
+TASK_MAP = {
+    "sync_metadata": "metadata_sync",
+    "log_discovery": "log_discovery",
+    "rum_sync": "rum_sync",
+    "full_sync": "full_sync",
+    "gap_heal": "gap_heal",
+    "commit": "commit",
+    "rum_commit": "rum_commit",
+    "optimize": "optimize",
+    "local_compact": "local_compact",
+    "expire": "expire_snapshots",
+    "alerts_evaluation": "alerts",
+    "ngwaf_sync": "ngwaf_sync",
+    "metadata_cleanup": "metadata_cleanup",
+    "insights_prewarmer": "insights_prewarmer",
+    "rollup_heal": "rollup_hour_heal",
+    "rollup_compact": "rollup_compact_daily",
+    "ledger_sweep": "ledger_sweep",
+    "partial_hour_merge": "partial_hour_merge",
+    "rum_discovery": "rum_discovery",
+    "ledger_rum_sweep": "ledger_rum_sweep",
+}
+
+
+def build_cron_schedule_payload(source: dict) -> dict:
+    """Return ``{"schedules": [...]}`` for the given ``source``."""
+    from backend.core import metadata as metadata_db
+
+    sched = get_scheduler()
+    service_id = source["name"]
+    last_runs: dict[str, dict] = {}
+    try:
+        per_task = metadata_db.latest_cron_per_task(service_id)
+        for task, info in per_task.items():
+            last_runs[task] = {
+                "last_run_time": info["started_at"],
+                "last_run_status": info["status"],
+                "last_run_duration_s": info["duration_s"],
+                "last_run_summary": info["summary"],
+            }
+    except Exception:
+        pass
+    schedules = []
+
+    # Pod-local APScheduler jobs — the ONLY source of cron jobs.
+    for job in sched._sched.get_jobs():
+        job_id = getattr(job, "id", "")
+        if not job_id.endswith(f"_{service_id}"):
+            continue
+        if job_id.startswith("initial_sync"):
+            continue
+        task_name = job_id[: -len(f"_{service_id}")]
+        db_task = TASK_MAP.get(task_name)
+        if db_task is None:
+            continue
+        from backend.utils.date_utils import iso_z
+
+        next_run = iso_z(job.next_run_time) if job.next_run_time else None  # type: ignore
+        schedules.append({"task": db_task, "next_run_time": next_run, **last_runs.get(db_task, {})})
+    existing = {s["task"] for s in schedules}
+    for task, info in last_runs.items():
+        if task not in existing and task in TASK_MAP.values():
+            schedules.append({"task": task, "next_run_time": None, **info})
+
+    try:
+        if metadata_db.count_alerts(service_id) == 0:
+            alerts_entry = next((s for s in schedules if s["task"] == "alerts"), None)
+            if alerts_entry is None:
+                schedules.append(
+                    {
+                        "task": "alerts",
+                        "next_run_time": None,
+                        "disabled_reason": "no_alerts_configured",
+                    }
+                )
+            elif alerts_entry.get("next_run_time") is None:
+                alerts_entry["disabled_reason"] = "no_alerts_configured"
+    except Exception:
+        pass
+
+    return {"schedules": schedules}

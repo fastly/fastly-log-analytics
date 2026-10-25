@@ -149,6 +149,11 @@ from .perf_latency import (
     build_perf_latency_bundles,
 )
 from .recompute import (
+    ADMIN_BACKFILLS,
+    DAY_COMPACTORS,
+    HOUR_WRITERS,
+    DayCompactorSpec,
+    RollupSpec,
     _run_per_field_copy,
     backfill_missing_hour_bundles,
     backfill_missing_hour_ip_spread,
@@ -250,6 +255,11 @@ __all__ = [
     "compact_time_series_closed_days_to_daily",
     "retire_compacted_hour_bundles",
     "recompute_touched_hours",
+    "RollupSpec",
+    "HOUR_WRITERS",
+    "DayCompactorSpec",
+    "DAY_COMPACTORS",
+    "ADMIN_BACKFILLS",
     "backfill_missing_hour_bundles",
     "backfill_missing_hour_ip_spread",
     "backfill_missing_rum_aggregates",

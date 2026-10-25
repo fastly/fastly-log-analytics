@@ -418,33 +418,24 @@ def generate_capture_vcl(
     _scoring_guard_open = 'if (req.http.X-Edge-Scoring-Pass != "1") {\n'
     _scoring_guard_close = "}\n"
 
+    def _group_l_timing(label: str) -> str:
+        return (
+            f"\n# [group-L] Record timing start for {label} fetch\n"
+            + _scoring_guard_open
+            + "set req.http.x-of-start = time.elapsed.usec;\n"
+            "unset bereq.http.x-of-start;\n"
+            'set bereq.http.x-is-cluster-fetch = "1";\n'
+            "if (req.http.x-edge-req-id) {\n"
+            "  set bereq.http.x-edge-req-id = req.http.x-edge-req-id;\n"
+            "} else if (req.http.x-req-id) {\n"
+            "  set bereq.http.x-edge-req-id = req.http.x-req-id;\n"
+            "}\n"
+            "unset bereq.http.x-req-id;\n" + _scoring_guard_close
+        )
+
     if group_l:
-        miss_vcl = base_unset + (
-            "\n# [group-L] Record timing start for origin fetch\n"
-            + _scoring_guard_open
-            + "set req.http.x-of-start = time.elapsed.usec;\n"
-            "unset bereq.http.x-of-start;\n"
-            'set bereq.http.x-is-cluster-fetch = "1";\n'
-            "if (req.http.x-edge-req-id) {\n"
-            "  set bereq.http.x-edge-req-id = req.http.x-edge-req-id;\n"
-            "} else if (req.http.x-req-id) {\n"
-            "  set bereq.http.x-edge-req-id = req.http.x-req-id;\n"
-            "}\n"
-            "unset bereq.http.x-req-id;\n" + _scoring_guard_close
-        )
-        pass_vcl = base_unset + (
-            "\n# [group-L] Record timing start for PASS fetch\n"
-            + _scoring_guard_open
-            + "set req.http.x-of-start = time.elapsed.usec;\n"
-            "unset bereq.http.x-of-start;\n"
-            'set bereq.http.x-is-cluster-fetch = "1";\n'
-            "if (req.http.x-edge-req-id) {\n"
-            "  set bereq.http.x-edge-req-id = req.http.x-edge-req-id;\n"
-            "} else if (req.http.x-req-id) {\n"
-            "  set bereq.http.x-edge-req-id = req.http.x-req-id;\n"
-            "}\n"
-            "unset bereq.http.x-req-id;\n" + _scoring_guard_close
-        )
+        miss_vcl = base_unset + _group_l_timing("origin")
+        pass_vcl = base_unset + _group_l_timing("PASS")
     else:
         miss_vcl = base_unset
         pass_vcl = base_unset
@@ -1152,60 +1143,28 @@ def remove_logging_endpoint(
             MANAGED_DICTIONARY_NAMES,
         )
 
-        # Clean up any managed backends
-        try:
-            backends = fastly("GET", f"/service/{service_id}/version/{new_ver}/backend", token=token)
-            for b in backends:
-                b_name = b.get("name")
-                if b_name in MANAGED_BACKEND_NAMES:
-                    info(f"Removing managed backend '{b_name}' from draft…")
-                    encoded_b = urllib.parse.quote(b_name, safe="")
-                    fastly(
-                        "DELETE",
-                        f"/service/{service_id}/version/{new_ver}/backend/{encoded_b}",
-                        token=token,
-                        expect_empty=True,
-                    )
-                    ok(f"Managed backend '{b_name}' removed from draft")
-        except Exception as e:
-            warn(f"Failed to check/remove backends: {e}")
-
-        # Clean up any managed dictionaries
-        try:
-            dicts = fastly("GET", f"/service/{service_id}/version/{new_ver}/dictionary", token=token)
-            for d in dicts:
-                d_name = d.get("name")
-                if d_name in MANAGED_DICTIONARY_NAMES:
-                    info(f"Removing managed dictionary '{d_name}' from draft…")
-                    encoded_d = urllib.parse.quote(d_name, safe="")
-                    fastly(
-                        "DELETE",
-                        f"/service/{service_id}/version/{new_ver}/dictionary/{encoded_d}",
-                        token=token,
-                        expect_empty=True,
-                    )
-                    ok(f"Managed dictionary '{d_name}' removed from draft")
-        except Exception as e:
-            warn(f"Failed to check/remove dictionaries: {e}")
-
-        # Clean up any managed conditions
-        try:
-            conds = fastly("GET", f"/service/{service_id}/version/{new_ver}/condition", token=token)
-            managed_cond_names = {"Log Sampling", "log_analytics_condition", "rum_log_condition"}
-            for c in conds:
-                c_name = c.get("name")
-                if c_name in managed_cond_names:
-                    info(f"Removing managed condition '{c_name}' from draft…")
-                    encoded_c = urllib.parse.quote(c_name, safe="")
-                    fastly(
-                        "DELETE",
-                        f"/service/{service_id}/version/{new_ver}/condition/{encoded_c}",
-                        token=token,
-                        expect_empty=True,
-                    )
-                    ok(f"Managed condition '{c_name}' removed from draft")
-        except Exception as e:
-            warn(f"Failed to check/remove conditions: {e}")
+        managed_cond_names = {"Log Sampling", "log_analytics_condition", "rum_log_condition"}
+        for res_path, plural, label, allowed_names in (
+            ("backend", "backends", "backend", MANAGED_BACKEND_NAMES),
+            ("dictionary", "dictionaries", "dictionary", MANAGED_DICTIONARY_NAMES),
+            ("condition", "conditions", "condition", managed_cond_names),
+        ):
+            try:
+                items = fastly("GET", f"/service/{service_id}/version/{new_ver}/{res_path}", token=token)
+                for item in items:
+                    item_name = item.get("name")
+                    if item_name in allowed_names:
+                        info(f"Removing managed {label} '{item_name}' from draft…")
+                        encoded_name = urllib.parse.quote(item_name, safe="")
+                        fastly(
+                            "DELETE",
+                            f"/service/{service_id}/version/{new_ver}/{res_path}/{encoded_name}",
+                            token=token,
+                            expect_empty=True,
+                        )
+                        ok(f"Managed {label} '{item_name}' removed from draft")
+            except Exception as e:
+                warn(f"Failed to check/remove {plural}: {e}")
 
     ok(f"Version {new_ver} is now active")
 

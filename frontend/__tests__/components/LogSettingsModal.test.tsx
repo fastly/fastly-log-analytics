@@ -6,7 +6,7 @@ import { LogSettingsModal } from '@/components/LogSettingsModal/LogSettingsModal
 import * as apiLib from '@/lib/api'
 import type { ServiceConfig } from '@/types/api'
 import React from 'react'
-import { getOk } from '@/__tests__/helpers/api-result'
+import { getOk } from '@/__tests__/helpers/partial'
 import { stubMatchMedia } from '@/__tests__/helpers/browser-stubs'
 import { createUseSSEMock } from '@/__tests__/helpers/sse-mock'
 import { renderWithQuery } from '../helpers/query'

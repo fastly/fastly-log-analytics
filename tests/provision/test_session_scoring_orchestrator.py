@@ -34,12 +34,16 @@ from backend.provision.session_scoring_vcl import (
     SCORING_RECV_NAME,
     scoring_snippet_names,
 )
-from tests._helpers.config_fakes import config_lock_held as _lock_held
-from tests._helpers.config_fakes import read_persisted_config as _persisted
-from tests._helpers.scoring_orchestrator import (
+from tests._helpers.config_fakes import (
+    config_lock_held as _lock_held,
+)
+from tests._helpers.config_fakes import (
     make_happy_path_fastly_mock,
     make_happy_path_fastly_mock_with_post_secret,
     make_scoring_meta,
+)
+from tests._helpers.config_fakes import (
+    read_persisted_config as _persisted,
 )
 
 # ── Merged from tests/provision/test_session_scoring_orchestrator.py ──

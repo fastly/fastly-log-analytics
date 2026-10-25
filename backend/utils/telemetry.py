@@ -712,3 +712,72 @@ class tracked_call:
         elapsed = (time.time() - self.t0) * 1000
         status = "Error" if exc_type else "OK"
         record_call(self.method, self.path, elapsed, status=status, service=self.service, details=self.details)
+
+
+_MAX_KEYS = 1024
+_last: dict[str, float] = {}
+_lock = threading.Lock()
+
+
+def log_once_per(key: str, interval_s: float = 60.0) -> bool:
+    """True when ``key`` has not been allowed in the last ``interval_s`` seconds (and records this call)."""
+    now = time.monotonic()
+    with _lock:
+        prev = _last.get(key)
+        if prev is not None and now - prev < interval_s:
+            return False
+        if len(_last) >= _MAX_KEYS:
+            cutoff = now - interval_s
+            for k in [k for k, t in _last.items() if t < cutoff]:
+                del _last[k]
+            if len(_last) >= _MAX_KEYS:
+                _last.clear()
+        _last[key] = now
+        return True
+
+
+def flush_usage_log(service_id: str) -> None:
+    """Write the current context's tracked FOS/CDN calls to _usage_log.
+
+    Safe to call from cron jobs and API middleware — exits silently on any error
+    or when usage logging is disabled globally.
+    """
+    try:
+        from backend import config as svcconfig
+
+        if not svcconfig.is_usage_logging_enabled():
+            return
+
+        calls = _CALLS.get()
+        if not calls:
+            return
+
+        cfg = svcconfig.load_config(service_id)
+        if not cfg:
+            return
+
+        source = svcconfig.config_to_source(cfg)
+        process_context = get_process_context()
+
+        from backend.core.duckdb import log_usage_calls
+
+        log_usage_calls(source, calls, process_context=process_context)
+    except Exception as e:
+        logger.warning("[usage_logger] flush failed: %s", e)
+
+
+def run_usage_log_cleanup(service_id: str) -> None:
+    """Purge old rows from _usage_log per the configured retention period."""
+    try:
+        from backend import config as svcconfig
+
+        cfg = svcconfig.load_config(service_id)
+        if not cfg:
+            return
+        source = svcconfig.config_to_source(cfg)
+
+        from backend.core.duckdb import purge_usage_log
+
+        purge_usage_log(source)
+    except Exception as e:
+        logger.warning("[usage_logger] cleanup failed: %s", e)

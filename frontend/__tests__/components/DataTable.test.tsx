@@ -17,15 +17,29 @@
  * invariants, column visibility, and the resize-race guard.
  */
 import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
-import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest'
+import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest'
+import { http, HttpResponse } from 'msw'
 import { axe } from 'vitest-axe'
-import React from 'react'
-import { DataTable } from '@/components/DataTable/DataTable'
-import { DataTableReadonly } from '@/components/DataTable'
-import { DateTimeCell } from '@/components/DataTable/DateTimeCell'
-import type { ColumnDef } from '@tanstack/react-table'
+import React, { type ReactNode } from 'react'
+import { DataTable, DataTableReadonly, DateTimeCell } from '@/components/DataTable'
+import { makeLatencyColumns, type LatencyRow } from '@/lib/table-utils'
+import { renderWithQuery } from '../helpers/query'
+import { server } from '@/__tests__/helpers/msw/server'
+import { getApiBase } from '@/lib/api'
+import { useServiceStore } from '@/stores/serviceStore'
+import { SchemaTab } from '@/app/logs/_sections/SchemaTab'
+import { BotSourcesPanel } from '@/app/admin/_sections/BotSourcesPanel'
+import type { components } from '@/types/api.generated'
+import type { CellContext, ColumnDef } from '@tanstack/react-table'
 
+vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/origin'))
+vi.mock('@/hooks/useIsAnalyst', () => ({
+  useIsAnalyst: () => false,
+  useMaskIps: () => false,
+  useEnforceMaskedFilters: () => {},
+}))
 vi.mock('@tanstack/react-virtual', async () => (await import('@/__tests__/helpers/virtual-mock')).reactVirtualModuleMock())
 vi.mock('@/hooks/useDateFormat', () => ({
   useDateFormat: () => ({
@@ -214,5 +228,172 @@ describe('DateTimeCell', () => {
   it('renders the live <TimeAgo> on the trigger when iso is provided', () => {
     render(<DateTimeCell iso="2026-06-15T12:00:00Z" />)
     expect(screen.getByText('ago:2026-06-15T12:00:00Z')).toBeInTheDocument()
+  })
+})
+
+type UrlRow = LatencyRow & { url?: string | null }
+
+type CellStub = Pick<CellContext<UrlRow, unknown>, 'getValue'> & {
+  row: Pick<CellContext<UrlRow, unknown>['row'], 'original'>
+}
+
+function ctx(value: unknown, originalRow: UrlRow): CellStub {
+  return {
+    getValue<T>() {
+      return value as T
+    },
+    row: { original: originalRow },
+  }
+}
+
+function cellRenderer(col: ColumnDef<UrlRow>): (info: CellStub) => ReactNode {
+  const cell = col.cell
+  if (typeof cell !== 'function') throw new Error('expected a cell render function')
+  return (info) => cell(info as CellContext<UrlRow, unknown>)
+}
+
+describe('makeLatencyColumns — labelField cell', () => {
+  const cols = makeLatencyColumns<UrlRow>('url', 'URL', 'url')
+  const labelCell = cellRenderer(cols[0])
+
+  it('renders plain span when filter field is null', () => {
+    const { container } = render(labelCell(ctx('/api/data', { url: null })))
+    const span = container.querySelector('span.font-mono')
+    expect(span).not.toBeNull()
+    expect(span?.textContent).toBe('/api/data')
+    expect(container.querySelector('button')).toBeNull()
+  })
+
+  it('renders FilterValueCell (with button trigger) when filter field is non-null', () => {
+    const { container, getByText } = render(
+      labelCell(ctx('/api/data', { url: '/api/data' })),
+    )
+    expect(getByText('/api/data')).toBeInTheDocument()
+    expect(container.querySelector('button')).not.toBeNull()
+  })
+})
+
+describe('makeLatencyColumns — numeric cells', () => {
+  const cols = makeLatencyColumns<UrlRow>('url', 'URL', 'url')
+  const requestsCell = cellRenderer(cols[1])
+  const avgCell = cellRenderer(cols[2])
+  const p50Cell = cellRenderer(cols[3])
+  const p95Cell = cellRenderer(cols[4])
+  const p99Cell = cellRenderer(cols[5])
+
+  it('requests cell: null → "0", number → toLocaleString', () => {
+    expect(requestsCell(ctx(null, {}))).toBe('0')
+    expect(requestsCell(ctx(1234, {}))).toBe((1234).toLocaleString())
+  })
+
+  it('avg/p50/p95/p99 cells: null → "0.00", number → toFixed(2)', () => {
+    for (const c of [avgCell, p50Cell, p95Cell, p99Cell]) {
+      expect(c(ctx(null, {}))).toBe('0.00')
+      expect(c(ctx(12.3456, {}))).toBe('12.35')
+    }
+  })
+})
+
+type SchemaResponse = components['schemas']['SchemaResponse']
+
+describe('SchemaTab', () => {
+  beforeEach(() => {
+    useServiceStore.setState({ activeServiceId: 'svc-tables', isInitialized: true })
+  })
+
+  it('renders every column past 50 rows with formatted stats', () => {
+    const schema = Array.from({ length: 80 }, (_, i) => ({
+      name: `col_${i}`,
+      type: 'VARCHAR',
+      null_percentage: i === 0 ? 25 : 0,
+      approx_unique: 1234,
+      min: 'a',
+      max: 'z',
+    }))
+    render(<SchemaTab schemaData={{ schema } as unknown as SchemaResponse} isLoadingSchema={false} />)
+    for (const name of ['Column Name', 'DuckDB Type', 'Populated %', 'Approx Unique', 'Min Value', 'Max Value']) {
+      expect(screen.getByRole('columnheader', { name })).toBeTruthy()
+    }
+    expect(screen.getByText('col_79')).toBeTruthy()
+    expect(screen.getByText('75.0%')).toBeTruthy()
+  })
+
+  it('shows an em dash for columns without stats', () => {
+    const schema = [{ name: 'bare', type: 'INTEGER' }]
+    render(<SchemaTab schemaData={{ schema } as unknown as SchemaResponse} isLoadingSchema={false} />)
+    const row = screen.getByText('bare').closest('tr') as HTMLElement
+    expect(within(row).getAllByText('—').length).toBe(4)
+  })
+})
+
+describe('BotSourcesPanel', () => {
+  beforeEach(() => {
+    useServiceStore.setState({ activeServiceId: 'svc-tables', isInitialized: true })
+  })
+
+  it('lists sources and POSTs a refresh for the chosen one', async () => {
+    const refreshed: string[] = []
+    const API_BASE = getApiBase()
+    server.use(
+      http.get(`${API_BASE}/api/admin/bot-sources`, () =>
+        HttpResponse.json({
+          sources: [
+            { id: 'src-a', name: 'Alpha Bots', url: 'https://example.test/a', entry_count: 1500, last_updated: null },
+          ],
+          rdns: { total: 10, pending: 2, last_enrichment_at: null },
+        }),
+      ),
+      http.post(`${API_BASE}/api/admin/bot-sources/:id/refresh`, ({ params }) => {
+        refreshed.push(String(params.id))
+        return HttpResponse.json({})
+      }),
+    )
+    const user = userEvent.setup()
+    renderWithQuery(<BotSourcesPanel />)
+    expect(await screen.findByText('Alpha Bots')).toBeTruthy()
+    expect(screen.getByText('not cached')).toBeTruthy()
+    expect(screen.getByText('1,500')).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: /Refresh/ }))
+    await waitFor(() => expect(refreshed).toEqual(['src-a']))
+  })
+
+  const API_BASE = getApiBase()
+  const botSourcesBody = {
+    sources: [],
+    rdns: { total: 10, pending: 2, last_enrichment_at: null },
+  }
+
+  it('Enrich Now POSTs the real rDNS enrich route and refetches the stats', async () => {
+    let enrichCalls = 0
+    let listCalls = 0
+    server.use(
+      http.get(`${API_BASE}/api/admin/bot-sources`, () => {
+        listCalls += 1
+        return HttpResponse.json(botSourcesBody)
+      }),
+      http.post(`${API_BASE}/api/admin/rdns/enrich`, () => {
+        enrichCalls += 1
+        return HttpResponse.json({ ok: true, summary: {} })
+      }),
+    )
+    const user = userEvent.setup()
+    renderWithQuery(<BotSourcesPanel />)
+    await waitFor(() => expect(listCalls).toBe(1))
+    await user.click(await screen.findByRole('button', { name: /Enrich Now/ }))
+    await waitFor(() => expect(enrichCalls).toBe(1))
+    await waitFor(() => expect(listCalls).toBe(2))
+  })
+
+  it('shows an inline error when rDNS enrichment fails', async () => {
+    server.use(
+      http.get(`${API_BASE}/api/admin/bot-sources`, () => HttpResponse.json(botSourcesBody)),
+      http.post(`${API_BASE}/api/admin/rdns/enrich`, () =>
+        HttpResponse.json({ detail: { error: 'rdns_failed', message: 'enrichment exploded' } }, { status: 500 }),
+      ),
+    )
+    const user = userEvent.setup()
+    renderWithQuery(<BotSourcesPanel />)
+    await user.click(await screen.findByRole('button', { name: /Enrich Now/ }))
+    expect(await screen.findByRole('alert')).toBeTruthy()
   })
 })

@@ -15,7 +15,7 @@ import {
   useReactTable,
 } from '@tanstack/react-table'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { columnIdOf } from './DataTable'
+import { columnIdOf } from './index'
 
 export interface DataTableBaseProps<TData, TValue> {
   columns: ColumnDef<TData, TValue>[]

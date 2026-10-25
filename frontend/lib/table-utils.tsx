@@ -1,7 +1,7 @@
 import React from 'react'
 import type { ColumnDef } from '@tanstack/react-table'
 import type { components } from '@/types/api.generated'
-import { DateTimeCell } from '@/components/DataTable/DateTimeCell'
+import { DateTimeCell } from '@/components/DataTable'
 import { FilterValueCell } from '@/components/FilterValueCell'
 
 import { formatBytes, formatCount, formatCountMaybe } from '@/lib/format'

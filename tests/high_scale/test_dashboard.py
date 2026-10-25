@@ -5,7 +5,7 @@ import pytest
 
 from backend.high_scale.archive_models import ServingWatermark
 from backend.high_scale.dashboard import aggregates, bundle, header_metrics
-from backend.high_scale.registry import HighScaleService
+from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.models.dashboard import AggregatesRequest
 
 

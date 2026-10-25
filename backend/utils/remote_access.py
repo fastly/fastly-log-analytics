@@ -1434,7 +1434,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from backend.utils.date_utils import parse_iso_utc
-from backend.utils.error_redaction import redact_error_text
+from backend.utils.router_utils import redact_error_text
 
 # L5: hard ceiling on the width of an analyst's clamped query window. The
 # per-invite ``query_window_hours`` already bounds scoped invites; this is the

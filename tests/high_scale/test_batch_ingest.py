@@ -5,13 +5,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from backend.core.high_scale_contracts import ArchiveState
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.ingest_controller import (
     HIGH_SCALE_PAGE_MAX_BYTES,
     BatchIngestResult,
     HighScaleIngestController,
 )
+from backend.high_scale.models import ArchiveState
 from backend.high_scale.orchestration import HighScaleWorkerCoordinator
 from backend.high_scale.publication import (
     ClickHousePublication,
@@ -570,11 +570,11 @@ import json
 from collections.abc import Sequence
 from typing import Any
 
-from backend.high_scale.aggregate_writer import compute_dimension_counts
-from backend.high_scale.network_projection import build_network_projection_rows
+from backend.high_scale.aggregate_batch_adapter import compute_dimension_counts
+from backend.high_scale.network import build_network_projection_rows
 from backend.high_scale.origin_projection import build_origin_projection_rows
 from backend.high_scale.performance_projection import build_performance_projection_rows
-from backend.high_scale.security_projection import build_security_projection_rows
+from backend.high_scale.security import build_security_projection_rows
 
 
 class _MockClickHouse:

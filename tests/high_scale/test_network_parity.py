@@ -17,7 +17,7 @@ from backend.high_scale.network import (
     network_health,
     network_quality,
 )
-from backend.high_scale.registry import HighScaleService
+from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.models.common import FilterSpec
 from backend.models.network import NetworkBundleRequest, NetworkHealthRequest, NetworkQualityRequest
 

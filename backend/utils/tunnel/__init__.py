@@ -12,23 +12,24 @@ The SSH-to-localhost.run code path was removed in v2.0.
 from __future__ import annotations
 
 from .manager import (
-    TunnelCapacityError,
-    TunnelManager,
-    build_share_live_payload,
-    get_tunnel_manager,
-    reset_for_tests,
-)
-from .session import (
     ABSOLUTE_TIMEOUT_S,
     IDLE_TIMEOUT_S,
     LOGIN_FAILURE_THRESHOLD,
     LOGIN_FAILURE_WINDOW_S,
     LOGIN_LOCKOUT_S,
     AnalystSession,
+    TunnelCapacityError,
+    TunnelManager,
+    TunnelState,
     _LoginRateLimiter,
+    build_share_live_payload,
+    clear_persisted_state,
     compute_fingerprint,
+    get_tunnel_manager,
+    persist_direct_state,
+    reset_for_tests,
+    restore_direct_state,
 )
-from .state import TunnelState
 
 __all__ = [
     "ABSOLUTE_TIMEOUT_S",
@@ -42,7 +43,10 @@ __all__ = [
     "TunnelState",
     "_LoginRateLimiter",
     "build_share_live_payload",
+    "clear_persisted_state",
     "compute_fingerprint",
     "get_tunnel_manager",
+    "persist_direct_state",
     "reset_for_tests",
+    "restore_direct_state",
 ]

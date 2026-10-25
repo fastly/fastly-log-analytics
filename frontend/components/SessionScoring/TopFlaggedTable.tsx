@@ -15,11 +15,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { useScoringLabels } from '@/hooks/useScoringLabels'
-
 import { FlagSessionPopover } from './FlagSessionPopover'
 import { SessionEventsDialog } from './SessionEventsDialog'
-import { useScoringQuery } from './useScorerTimeseries'
+import { useScoringQuery, useScoringLabels } from './useScorerTimeseries'
 import { client } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import type { components } from '@/types/api.generated'

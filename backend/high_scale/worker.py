@@ -233,7 +233,7 @@ class HighScaleWorkerLoop:
         self._last_system_cleanup = now
         for service_id, _ in self._coordinators:
             try:
-                from backend.utils.usage_logger import run_usage_log_cleanup
+                from backend.utils.telemetry import run_usage_log_cleanup
 
                 run_usage_log_cleanup(service_id)
             except Exception:

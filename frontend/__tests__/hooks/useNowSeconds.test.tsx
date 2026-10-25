@@ -13,7 +13,7 @@ import { useColumnVisibility } from '@/hooks/useDerivedState'
 import { useDebounce } from '@/hooks/useDebounce'
 import { useRumStatus } from '@/hooks/useServiceQuery'
 import { useStreamAggregates } from '@/app/sessions/stream/_sections/useStreamAggregates'
-import { useTimeseriesToTraces, type TimeseriesDataPoint } from '@/hooks/useTimeseriesToTraces'
+import { useTimeseriesToTraces, type TimeseriesDataPoint } from '@/lib/chart-builders'
 import { server } from '@/__tests__/helpers/msw/server'
 import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
 

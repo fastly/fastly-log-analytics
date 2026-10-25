@@ -32,7 +32,6 @@ backend/core/rollups/slow_urls.py 1
 backend/core/rollups/time_series.py 2
 backend/repositories/_base.py 4
 backend/repositories/assets.py 2
-backend/repositories/control_room.py 4
 backend/repositories/insights/repository.py 1
 backend/repositories/network.py 3
 backend/repositories/origin.py 1

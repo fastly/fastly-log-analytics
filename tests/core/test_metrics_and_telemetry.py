@@ -30,7 +30,9 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from backend import config
 from backend import config as svcconfig
 from backend.core import (
-    memory_guard,
+    duckdb_recycle as memory_guard,
+)
+from backend.core import (
     metric_expressions,
     metric_snapshots,
     operational_metrics,

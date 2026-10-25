@@ -19,7 +19,7 @@ from backend.core.clickhouse_client import (
 from backend.high_scale._batch_adapter_base import (
     BaseClickHouseBatchAdapter,
 )
-from backend.high_scale._projection_utils import range_value
+from backend.high_scale._common import range_value
 from backend.high_scale.schema import build_cmcd_projection_key
 
 _TEXT_ALIASES: dict[str, tuple[str, ...]] = {

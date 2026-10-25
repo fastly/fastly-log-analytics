@@ -2,27 +2,51 @@
  * @vitest-environment jsdom
  *
  * Consolidated ProvisionWizard component tests: TerraformStep,
- * topology capability (ModeStep + JoinStep), WizardFooter, and RumVersionPicker.
+ * topology capability (ModeStep + JoinStep), WizardFooter, RumVersionPicker, and ResumeBanner.
  */
 import * as React from 'react'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, describe, expect, it, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, test, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
 
-import { TerraformStep } from '@/components/ProvisionWizard/steps/TerraformStep'
-import { ModeStep } from '@/components/ProvisionWizard/steps/ModeStep'
+import { ProvisionWizard, TerraformStep, ModeStep } from '@/components/ProvisionWizard/ProvisionWizard'
 import { JoinStep } from '@/components/ProvisionWizard/steps/JoinStep'
-import { WizardFooter } from '@/components/ProvisionWizard/WizardFooter'
+import { ResumeBanner, WizardFooter } from '@/components/ProvisionWizard/WizardFooter'
 import { RumVersionPicker } from '@/components/ProvisionWizard/RumVersionPicker'
+import {
+  WIZARD_DRAFT_KEY,
+  saveDraft,
+  stripSecretsFromConfig,
+} from '@/components/ProvisionWizard/wizard-draft'
 import {
   ANALYST_PATH_A_UNSUPPORTED_REASON,
   INITIAL_CONFIG,
+  WIZARD_DRAFT_VERSION,
+  type WizardDraft,
   type WizardState,
 } from '@/components/ProvisionWizard/types'
-import { renderWithQuery } from '../../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../../helpers/query'
+import { createUseSSEMock } from '../../helpers/sse-mock'
 import { server } from '@/__tests__/helpers/msw/server'
 import { getApiBase } from '@/lib/api'
+
+vi.mock('@/stores/serviceStore', () => ({
+  useServiceStore: () => ({
+    setActiveServiceId: vi.fn(),
+    setServices: vi.fn(),
+    services: [],
+  }),
+}))
+
+vi.mock('@/stores/timezoneStore', () => ({
+  useTimezoneStore: () => ({
+    timezone: 'UTC',
+  }),
+}))
+
+const { state: sseState } = createUseSSEMock()
+vi.mock('@/hooks/useSSE', () => ({ useSSE: () => sseState }))
 
 const API_BASE = getApiBase()
 const SVC = 'svc-new-1'
@@ -273,5 +297,71 @@ describe('RumVersionPicker', () => {
 
     await waitFor(() => expect(seen).toContain('2.0.0'))
     expect(calls).toBe(2)
+  })
+})
+
+const draftQueryClient = createTestQueryClient()
+
+function makeDraft(overrides: Partial<WizardDraft> = {}): WizardDraft {
+  return {
+    version: WIZARD_DRAFT_VERSION,
+    draftId: 'draft-test',
+    mode: 'provision',
+    step: 'fields',
+    currentStep: 'fields',
+    selectedServiceId: 'svc-1',
+    selectedServiceName: 'My Service',
+    selectedCdnServiceId: null,
+    selectedCdnServiceName: null,
+    tokenInfo: { id: 'tok-1', name: 'tok', type: 'user' },
+    config: stripSecretsFromConfig({ ...INITIAL_CONFIG, endpoint_name: 'EP' }),
+    importMode: 'all',
+    importRange: { start: '', end: '' },
+    syncEnabled: true,
+    syncIntervalMins: '2',
+    icebergMetadataLocation: '',
+    updatedAt: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  }
+}
+
+describe('ResumeBanner', () => {
+  beforeEach(() => {
+    window.localStorage.removeItem(WIZARD_DRAFT_KEY)
+  })
+
+  afterEach(() => {
+    window.localStorage.removeItem(WIZARD_DRAFT_KEY)
+  })
+
+  it('renders the step label from the saved draft and fires the action callbacks', async () => {
+    const user = userEvent.setup()
+    const onResume = vi.fn()
+    const onStartFresh = vi.fn()
+    const draft = makeDraft({ currentStep: 'fields' })
+    render(
+      <ResumeBanner
+        draft={draft}
+        onResume={onResume}
+        onStartFresh={onStartFresh}
+      />,
+    )
+    expect(screen.getByText(/Resume previous wizard/i)).toBeInTheDocument()
+    expect(
+      screen.getByTestId('resume-banner-resume'),
+    ).toHaveTextContent(/Resume from Log Fields/i)
+    await user.click(screen.getByTestId('resume-banner-resume'))
+    expect(onResume).toHaveBeenCalledOnce()
+    await user.click(screen.getByTestId('resume-banner-start-fresh'))
+    expect(onStartFresh).toHaveBeenCalledOnce()
+  })
+
+  it('hydrates the saved draft from localStorage when the wizard opens', () => {
+    saveDraft(makeDraft({ currentStep: 'fields' }))
+    renderWithQuery(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, {
+      queryClient: draftQueryClient,
+    })
+    expect(screen.getByText(/Resume previous wizard/i)).toBeInTheDocument()
   })
 })

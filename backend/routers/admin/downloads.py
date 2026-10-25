@@ -8,9 +8,9 @@ import os
 from fastapi import Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
+from backend.config import path_within_dir
 from backend.deps import get_source
 from backend.models.admin import TreeResponse
-from backend.utils.path_safety import path_within_dir
 from backend.utils.router_utils import query_errors, raise_internal, require_service_id
 
 from ._helpers import _fetch_file_to_zip, stream_zip

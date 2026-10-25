@@ -427,7 +427,35 @@ from backend.models.admin_actions import (  # noqa: E402
 from backend.models.services import CronRunsResponse  # noqa: E402
 from backend.models.session_scoring import ScoringLabelsListResponse  # noqa: E402
 from backend.models.share_admin import ShareBannerResponse  # noqa: E402
-from backend.models.views import SavedView  # noqa: E402
+
+
+class SavedView(WireSafeModel):
+    id: str | None = None
+    service_id: str
+    name: str
+    filters_json: str
+    time_range_type: str | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+    page: str | None = None
+    created_at: str | None = None
+
+
+class SavedViewRecord(SavedView):
+    """Wire-safe read shape for ``GET /api/views/{service_id}`` rows.
+
+    Distinct from the strict ``SavedView`` request body: ``id`` is guaranteed
+    non-null on persisted rows; ``extra="allow"`` + ``response_model_exclude_unset``
+    is inherited from ``SavedView`` (``WireSafeModel``)."""
+
+    id: str
+
+
+class ViewSaveResponse(BaseModel):
+    """Ack from ``POST /api/views/`` — id of the created row."""
+
+    id: str
+    status: str
 
 
 class OpsOverviewResponse(WireSafeModel):

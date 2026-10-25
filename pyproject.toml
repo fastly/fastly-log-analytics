@@ -379,7 +379,6 @@ module = [
     "backend.cron.jobs.compaction",
     "backend.repositories.session_scoring",
     "backend.routers.admin_queries",
-    "backend.utils.tunnel.state",
     # v2.0 final wave (2026-06-12): post-split modules with fresh test
     # coverage. Each verified clean under the strict flags below before
     # opt-in; new files in these packages inherit the stricter checks

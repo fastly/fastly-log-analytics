@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import tempfile
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -21,15 +22,66 @@ from backend.core.log_fields import LOG_FIELD_CATALOG
 from backend.core.request_context import build_request_context
 from backend.deps import get_source
 from backend.main import app
-from backend.models.insights import (
-    InsightsRequest,
-)
+from backend.models.insights import InsightsRequest
 from backend.models.security import SecurityAggregatesResponse
 from backend.repositories._base import QueryRunner, _safe_table, _schema_cols_cache
 from backend.utils import bot_sources
 from backend.utils.remote_access import TimeBounds
 from tests.conftest import MOCK_SERVICE_ID, override_request_context
 from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
+
+_SVC_HEADERS = {"x-fastly-service-id": MOCK_SERVICE_ID}
+
+
+def _seed_logs(con, src, num_logs: int = 10, hours_ago: int | None = None, **overrides) -> list[dict]:
+    kwargs = {" hours_ago".strip(): hours_ago} if hours_ago is not None else {}
+    logs = generate_mock_logs(src, num_logs=num_logs, **kwargs)
+    if overrides:
+        for log in logs:
+            log.update(overrides)
+    insert_mock_logs(con, _safe_table(src["name"]), logs)
+    return logs
+
+
+def _naive_iso_window(hours: int = 3) -> tuple[str, str]:
+    now = datetime.now(UTC)
+    return (
+        (now - timedelta(hours=hours)).replace(tzinfo=None).isoformat(),
+        (now + timedelta(hours=hours)).replace(tzinfo=None).isoformat(),
+    )
+
+
+@contextmanager
+def _with_analyst_ctx(
+    src, con, *, mask_ips: bool = False, time_bounds=None, path: str | None = None, session_id: str = "sess-analyst-1"
+):
+    session = SimpleNamespace(
+        session_id=session_id,
+        pii_policy={"mask_ips": mask_ips},
+        service_ids=[src["service_id"]],
+        time_bounds=time_bounds,
+    )
+    kw = {"source": src, "con": con, "_con_override": con, "session": session, "time_bounds": time_bounds}
+    if path is not None:
+        kw["path"] = path
+    app.dependency_overrides[build_request_context] = override_request_context(**kw)
+    try:
+        yield
+    finally:
+        app.dependency_overrides.pop(build_request_context, None)
+
+
+@contextmanager
+def _patch_range_token(
+    earliest: str = "2026-08-24T00:00:00Z",
+    window: tuple[str, str] = ("2026-08-24T12:00:00Z", "2026-08-24T13:00:00Z"),
+):
+    with (
+        patch("backend.config.get_status", return_value={"earliest_log_at": earliest}),
+        patch("backend.utils.time_window.is_valid_range_token", return_value=True),
+        patch("backend.utils.time_window.resolve_window", return_value=window),
+    ):
+        yield
 
 
 # ── Merged from tests/routers/test_insights_router.py ──
@@ -81,20 +133,9 @@ def _stub_cache_collapse_detail() -> dict:
             }
         ],
         "recent_misses": [
-            {
-                "timestamp": "2026-10-12T00:01:00+00:00",
-                "cache": "MISS",
-                "pop": "SJC",
-                "ip": "1.2.3.4",
-                "status": 200,
-            }
+            {"timestamp": "2026-10-12T00:01:00+00:00", "cache": "MISS", "pop": "SJC", "ip": "1.2.3.4", "status": 200}
         ],
-        "breakdown": {
-            "hits": 10,
-            "misses": 90,
-            "passes": 0,
-            "other": 0,
-        },
+        "breakdown": {"hits": 10, "misses": 90, "passes": 0, "other": 0},
         "baseline_hit_rate": 0.95,
         "window_hit_rate": 0.1,
         "baseline_pass_rate": 0.0,
@@ -112,14 +153,9 @@ def test_insights_request_validation():
     assert valid.force_refresh is True
 
     # Reject non-positive or excessive windows
-    with pytest.raises(Exception):
-        InsightsRequest(window_size_hrs=0)
-    with pytest.raises(Exception):
-        InsightsRequest(window_size_hrs=169)
-    with pytest.raises(Exception):
-        InsightsRequest(baseline_hours=0)
-    with pytest.raises(Exception):
-        InsightsRequest(baseline_hours=2161)
+    for bad_kw in ({"window_size_hrs": 0}, {"window_size_hrs": 169}, {"baseline_hours": 0}, {"baseline_hours": 2161}):
+        with pytest.raises(Exception):
+            InsightsRequest(**bad_kw)
 
 
 def test_insights_admin_passes_force_refresh_true(client):
@@ -133,7 +169,7 @@ def test_insights_admin_passes_force_refresh_true(client):
     with patch("backend.repositories.insights.get_insights", side_effect=_fake):
         resp = client.post(
             "/api/insights",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            headers=_SVC_HEADERS,
             json={"window_size_hrs": 24.0, "baseline_hours": 168.0, "force_refresh": True},
         )
 
@@ -145,38 +181,25 @@ def test_insights_admin_passes_force_refresh_true(client):
 
 def test_insights_analyst_clamps_force_refresh_to_false(client, in_memory_duckdb, test_service_source):
     """Remote analyst session must have force_refresh clamped to False regardless of request."""
-    from backend.core.request_context import build_request_context
-    from backend.main import app
-    from backend.utils.remote_access import TimeBounds
-
     now = datetime.now(UTC)
-    start = now - timedelta(hours=3)
-    end = now - timedelta(hours=2)
-    session = SimpleNamespace(
-        session_id="sess-analyst-1",
-        pii_policy={"mask_ips": True},
-        service_ids=[test_service_source["service_id"]],
-    )
-
+    start, end = now - timedelta(hours=3), now - timedelta(hours=2)
     captured: dict = {}
 
     def _fake(**kw):
         captured.update(kw)
         return _stub_insights()
 
-    app.dependency_overrides[build_request_context] = override_request_context(
-        source=test_service_source,
-        _con_override=in_memory_duckdb,
-        session=session,
-        path="/api/insights",
+    with _with_analyst_ctx(
+        test_service_source,
+        in_memory_duckdb,
+        mask_ips=True,
         time_bounds=TimeBounds(start=start, end=end),
-    )
-
-    try:
+        path="/api/insights",
+    ):
         with patch("backend.repositories.insights.get_insights", side_effect=_fake):
             resp = client.post(
                 "/api/insights",
-                headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+                headers=_SVC_HEADERS,
                 json={"window_size_hrs": 1.0, "baseline_hours": 168.0, "force_refresh": True},
             )
 
@@ -186,8 +209,6 @@ def test_insights_analyst_clamps_force_refresh_to_false(client, in_memory_duckdb
         assert captured["mask_ips"] is True
         assert captured["clamp_end"] == end.isoformat()
         assert captured["clamp_start"] == start.isoformat()
-    finally:
-        app.dependency_overrides.pop(build_request_context, None)
 
 
 def test_insights_endpoint_stale_view_retry(client):
@@ -207,9 +228,7 @@ def test_insights_endpoint_stale_view_retry(client):
         patch("backend.core.iceberg._core.update_iceberg_view") as mock_update,
     ):
         resp = client.post(
-            "/api/insights",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-            json={"window_size_hrs": 24.0, "baseline_hours": 168.0},
+            "/api/insights", headers=_SVC_HEADERS, json={"window_size_hrs": 24.0, "baseline_hours": 168.0}
         )
 
     assert resp.status_code == 200, resp.text
@@ -226,7 +245,7 @@ def test_cache_collapse_detail_endpoint(client):
     with patch("backend.repositories.insights.get_cache_collapse_detail", return_value=_stub_cache_collapse_detail()):
         resp = client.post(
             "/api/insights/cache-collapse-detail",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            headers=_SVC_HEADERS,
             json={"url": "/api/v1/heavy", "window_size_hrs": 24.0, "baseline_hours": 168.0},
         )
 
@@ -243,19 +262,9 @@ def test_cache_collapse_detail_endpoint(client):
 def test_network_health_full_response(client, in_memory_duckdb, test_service_source):
     """sections omitted → full response with shielding_analysis present
     (or null on best-effort failure) and all core keys populated."""
-    table = _safe_table(test_service_source["name"])
-    logs = generate_mock_logs(test_service_source, num_logs=10)
-    for log in logs:
-        log["tcp_rtt"] = 25_000
-        log["asn"] = 7922
-        log["country"] = "US"
-    insert_mock_logs(in_memory_duckdb, table, logs)
+    _seed_logs(in_memory_duckdb, test_service_source, 10, tcp_rtt=25_000, asn=7922, country="US")
 
-    response = client.post(
-        "/api/network-health",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}},
-    )
+    response = client.post("/api/network-health", headers=_SVC_HEADERS, json={"filters": {}})
     assert response.status_code == 200
     data = response.json()
     assert "shielding_analysis" in data
@@ -267,14 +276,9 @@ def test_network_health_rejects_unknown_section(client, in_memory_duckdb, test_s
     """sections=['not_a_section'] returns 400 (router) or 422 (Pydantic
     Literal). Either is an explicit reject so the FE never gets a
     silently-degraded 200."""
-    table = _safe_table(test_service_source["name"])
-    logs = generate_mock_logs(test_service_source, num_logs=5)
-    insert_mock_logs(in_memory_duckdb, table, logs)
-
+    _seed_logs(in_memory_duckdb, test_service_source, 5)
     response = client.post(
-        "/api/network-health",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}, "sections": ["not_a_section"]},
+        "/api/network-health", headers=_SVC_HEADERS, json={"filters": {}, "sections": ["not_a_section"]}
     )
     assert response.status_code in (400, 422)
 
@@ -285,18 +289,10 @@ def test_network_health_shielding_only_skips_core_temp(client, in_memory_duckdb,
     gate works. Confirmed via absence of network-temp section_timings
     entries (the shielding code path runs through origin and has its
     own telemetry shape)."""
-    table = _safe_table(test_service_source["name"])
-    logs = generate_mock_logs(test_service_source, num_logs=10)
-    for log in logs:
-        log["tcp_rtt"] = 25_000
-        log["asn"] = 7922
-        log["country"] = "US"
-    insert_mock_logs(in_memory_duckdb, table, logs)
+    _seed_logs(in_memory_duckdb, test_service_source, 10, tcp_rtt=25_000, asn=7922, country="US")
 
     response = client.post(
-        "/api/network-health",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}, "sections": ["shielding_analysis"]},
+        "/api/network-health", headers=_SVC_HEADERS, json={"filters": {}, "sections": ["shielding_analysis"]}
     )
     assert response.status_code == 200
     data = response.json()
@@ -313,17 +309,11 @@ def test_network_health_shielding_only_skips_core_temp(client, in_memory_duckdb,
 
 def test_network_health_core_plus_shielding_selector(client, in_memory_duckdb, test_service_source):
     """Multi-section selector covers both code paths in one request."""
-    table = _safe_table(test_service_source["name"])
-    logs = generate_mock_logs(test_service_source, num_logs=10)
-    for log in logs:
-        log["tcp_rtt"] = 25_000
-        log["asn"] = 7922
-        log["country"] = "US"
-    insert_mock_logs(in_memory_duckdb, table, logs)
+    _seed_logs(in_memory_duckdb, test_service_source, 10, tcp_rtt=25_000, asn=7922, country="US")
 
     response = client.post(
         "/api/network-health",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        headers=_SVC_HEADERS,
         json={"filters": {}, "sections": ["leaderboard", "shielding_analysis"]},
     )
     assert response.status_code == 200
@@ -337,18 +327,11 @@ def test_network_health_shielding_failure_returns_error_sentinel(client, in_memo
     get_shielding_analysis must NOT be swallowed into a null/empty payload
     that's indistinguishable from "no data". The router logs it and returns
     an explicit ``{error: true}`` sentinel so the UI can surface it."""
-    table = _safe_table(test_service_source["name"])
-    logs = generate_mock_logs(test_service_source, num_logs=5)
-    insert_mock_logs(in_memory_duckdb, table, logs)
+    _seed_logs(in_memory_duckdb, test_service_source, 5)
 
-    with patch(
-        "backend.repositories.origin.get_shielding_analysis",
-        side_effect=RuntimeError("boom"),
-    ):
+    with patch("backend.repositories.origin.get_shielding_analysis", side_effect=RuntimeError("boom")):
         response = client.post(
-            "/api/network-health",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-            json={"filters": {}, "sections": ["shielding_analysis"]},
+            "/api/network-health", headers=_SVC_HEADERS, json={"filters": {}, "sections": ["shielding_analysis"]}
         )
 
     assert response.status_code == 200
@@ -359,27 +342,19 @@ def test_network_health_shielding_failure_returns_error_sentinel(client, in_memo
 
 
 def test_get_pop_health_returns_data(client, in_memory_duckdb, test_service_source):
-    from datetime import UTC, datetime, timedelta
-
-    table = _safe_table(test_service_source["name"])
-    logs = generate_mock_logs(test_service_source, num_logs=5)
-    for log in logs:
-        log["pop"] = "IAD"
-        log["status"] = 200
-        log["tcp_rtt"] = 12000
-        log["ttfb"] = 50.0
-        log["cache"] = "HIT"
-        log["resp_bytes"] = 1000
-    insert_mock_logs(in_memory_duckdb, table, logs)
-
-    now = datetime.now(UTC)
-    st = (now - timedelta(hours=3)).replace(tzinfo=None).isoformat()
-    et = (now + timedelta(hours=3)).replace(tzinfo=None).isoformat()
-
-    response = client.get(
-        f"/api/network/pop-health?start_time={st}&end_time={et}",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+    _seed_logs(
+        in_memory_duckdb,
+        test_service_source,
+        5,
+        pop="IAD",
+        status=200,
+        tcp_rtt=12000,
+        ttfb=50.0,
+        cache="HIT",
+        resp_bytes=1000,
     )
+    st, et = _naive_iso_window(3)
+    response = client.get(f"/api/network/pop-health?start_time={st}&end_time={et}", headers=_SVC_HEADERS)
     assert response.status_code == 200
     data = response.json()["data"]
     assert len(data) > 0
@@ -392,26 +367,22 @@ def test_get_pop_health_returns_data(client, in_memory_duckdb, test_service_sour
 def test_get_pop_health_self_heals_on_lake_detach_race(client, in_memory_duckdb, test_service_source):
     """A DuckLake ``lake``-detach-race CatalogException on the raw base-table
     fallback must self-heal (one retry) instead of surfacing a 500 (Trap #35)."""
-    from datetime import UTC, datetime, timedelta
-
     import duckdb
 
-    table = _safe_table(test_service_source["name"])
-    logs = generate_mock_logs(test_service_source, num_logs=5)
-    for log in logs:
-        log["pop"] = "IAD"
-        log["status"] = 200
-        log["tcp_rtt"] = 12000
-        log["ttfb"] = 50.0
-        log["cache"] = "HIT"
-        log["resp_bytes"] = 1000
-    insert_mock_logs(in_memory_duckdb, table, logs)
-
-    now = datetime.now(UTC)
-    st = (now - timedelta(hours=3)).replace(tzinfo=None).isoformat()
-    et = (now + timedelta(hours=3)).replace(tzinfo=None).isoformat()
-
     from backend.utils import telemetry as telemetry_mod
+
+    _seed_logs(
+        in_memory_duckdb,
+        test_service_source,
+        5,
+        pop="IAD",
+        status=200,
+        tcp_rtt=12000,
+        ttfb=50.0,
+        cache="HIT",
+        resp_bytes=1000,
+    )
+    st, et = _naive_iso_window(3)
 
     real_track_query = telemetry_mod.track_query
     calls = {"n": 0}
@@ -437,10 +408,7 @@ def test_get_pop_health_self_heals_on_lake_detach_race(client, in_memory_duckdb,
         patch("backend.core.iceberg._core.update_iceberg_view", lambda *a, **k: None),
         patch("backend.core.iceberg._core.clear_source_caches", lambda *a, **k: None),
     ):
-        response = client.get(
-            f"/api/network/pop-health?start_time={st}&end_time={et}",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        )
+        response = client.get(f"/api/network/pop-health?start_time={st}&end_time={et}", headers=_SVC_HEADERS)
 
     assert response.status_code == 200
     data = response.json()["data"]
@@ -451,32 +419,29 @@ def test_get_pop_health_self_heals_on_lake_detach_race(client, in_memory_duckdb,
 
 def test_network_bundle_post_full(client, in_memory_duckdb, test_service_source):
     """POST /api/network/bundle returns all requested sections."""
-    from datetime import UTC, datetime, timedelta
-
     table = _safe_table(test_service_source["name"])
     logs = generate_mock_logs(test_service_source, num_logs=10)
     for i, log in enumerate(logs):
-        log["pop"] = "IAD" if i < 5 else "SJC"
-        log["status"] = 200
-        log["tcp_rtt"] = 20_000  # 20ms in µs
-        log["ttfb"] = 45.0
-        log["cache"] = "HIT"
-        log["resp_bytes"] = 2000
-        log["retrans"] = 1
-        log["ploss"] = 0.005
-        log["delivery_rate"] = 10_000_000  # 10 MB/s -> 80 Mbps
-        log["proto"] = "HTTP/2"
-        log["asn"] = 7922
-        log["country"] = "US"
+        log.update(
+            pop="IAD" if i < 5 else "SJC",
+            status=200,
+            tcp_rtt=20_000,  # 20ms in µs
+            ttfb=45.0,
+            cache="HIT",
+            resp_bytes=2000,
+            retrans=1,
+            ploss=0.005,
+            delivery_rate=10_000_000,  # 10 MB/s -> 80 Mbps
+            proto="HTTP/2",
+            asn=7922,
+            country="US",
+        )
     insert_mock_logs(in_memory_duckdb, table, logs)
 
-    now = datetime.now(UTC)
-    st = (now - timedelta(hours=3)).replace(tzinfo=None).isoformat()
-    et = (now + timedelta(hours=3)).replace(tzinfo=None).isoformat()
-
+    st, et = _naive_iso_window(3)
     response = client.post(
         "/api/network/bundle",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        headers=_SVC_HEADERS,
         json={
             "start_time": st,
             "end_time": et,
@@ -503,27 +468,19 @@ def test_network_bundle_post_full(client, in_memory_duckdb, test_service_source)
 
 def test_network_bundle_get_full(client, in_memory_duckdb, test_service_source):
     """GET /api/network/bundle returns 200 with default sections."""
-    from datetime import UTC, datetime, timedelta
-
-    table = _safe_table(test_service_source["name"])
-    logs = generate_mock_logs(test_service_source, num_logs=5)
-    for log in logs:
-        log["pop"] = "LHR"
-        log["status"] = 200
-        log["tcp_rtt"] = 30_000
-        log["proto"] = "HTTP/3"
-        log["asn"] = 13335
-        log["country"] = "GB"
-    insert_mock_logs(in_memory_duckdb, table, logs)
-
-    now = datetime.now(UTC)
-    st = (now - timedelta(hours=2)).replace(tzinfo=None).isoformat()
-    et = (now + timedelta(hours=2)).replace(tzinfo=None).isoformat()
-
-    response = client.get(
-        f"/api/network/bundle?start_time={st}&end_time={et}",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+    _seed_logs(
+        in_memory_duckdb,
+        test_service_source,
+        5,
+        pop="LHR",
+        status=200,
+        tcp_rtt=30_000,
+        proto="HTTP/3",
+        asn=13335,
+        country="GB",
     )
+    st, et = _naive_iso_window(2)
+    response = client.get(f"/api/network/bundle?start_time={st}&end_time={et}", headers=_SVC_HEADERS)
     assert response.status_code == 200
     data = response.json()
     assert "health" in data
@@ -532,27 +489,12 @@ def test_network_bundle_get_full(client, in_memory_duckdb, test_service_source):
 
 def test_network_bundle_selective_sections(client, in_memory_duckdb, test_service_source):
     """POST /api/network/bundle with sections=['transport'] executes only transport."""
-    from datetime import UTC, datetime, timedelta
-
-    table = _safe_table(test_service_source["name"])
-    logs = generate_mock_logs(test_service_source, num_logs=5)
-    for log in logs:
-        log["tcp_rtt"] = 15_000
-        log["proto"] = "HTTP/1.1"
-    insert_mock_logs(in_memory_duckdb, table, logs)
-
-    now = datetime.now(UTC)
-    st = (now - timedelta(hours=1)).replace(tzinfo=None).isoformat()
-    et = (now + timedelta(hours=1)).replace(tzinfo=None).isoformat()
-
+    _seed_logs(in_memory_duckdb, test_service_source, 5, tcp_rtt=15_000, proto="HTTP/1.1")
+    st, et = _naive_iso_window(1)
     response = client.post(
         "/api/network/bundle",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={
-            "start_time": st,
-            "end_time": et,
-            "sections": ["transport"],
-        },
+        headers=_SVC_HEADERS,
+        json={"start_time": st, "end_time": et, "sections": ["transport"]},
     )
     assert response.status_code == 200
     data = response.json()
@@ -571,10 +513,8 @@ def test_network_bundle_missing_optional_fields_fallback(client, in_memory_duckd
     for log in logs:
         log["status"] = 200
         # Omit tcp_rtt, retrans, ploss, delivery_rate
-        log.pop("tcp_rtt", None)
-        log.pop("retrans", None)
-        log.pop("ploss", None)
-        log.pop("delivery_rate", None)
+        for k in ("tcp_rtt", "retrans", "ploss", "delivery_rate"):
+            log.pop(k, None)
 
     # Create table schema excluding the 4 optional transport fields
     excluded = {"tcp_rtt", "retrans", "ploss", "delivery_rate"}
@@ -583,14 +523,15 @@ def test_network_bundle_missing_optional_fields_fallback(client, in_memory_duckd
     for log in logs:
         for k, v in log.items():
             if k not in columns_map and k not in excluded:
-                if isinstance(v, bool):
-                    columns_map[k] = "BOOLEAN"
-                elif isinstance(v, int):
-                    columns_map[k] = "BIGINT"
-                elif isinstance(v, float):
-                    columns_map[k] = "DOUBLE"
-                else:
-                    columns_map[k] = "VARCHAR"
+                columns_map[k] = (
+                    "BOOLEAN"
+                    if isinstance(v, bool)
+                    else "BIGINT"
+                    if isinstance(v, int)
+                    else "DOUBLE"
+                    if isinstance(v, float)
+                    else "VARCHAR"
+                )
     schema_def = ", ".join([f'"{col}" {dtype}' for col, dtype in columns_map.items()])
     in_memory_duckdb.execute(f"CREATE TABLE {table} ({schema_def})")
 
@@ -606,18 +547,9 @@ def test_network_bundle_missing_optional_fields_fallback(client, in_memory_duckd
     finally:
         os.unlink(tf_path)
 
-    now = datetime.now(UTC)
-    st = (now - timedelta(hours=1)).replace(tzinfo=None).isoformat()
-    et = (now + timedelta(hours=1)).replace(tzinfo=None).isoformat()
-
+    st, et = _naive_iso_window(1)
     response = client.post(
-        "/api/network/bundle",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={
-            "start_time": st,
-            "end_time": et,
-            "sections": ["transport"],
-        },
+        "/api/network/bundle", headers=_SVC_HEADERS, json={"start_time": st, "end_time": et, "sections": ["transport"]}
     )
     assert response.status_code == 200
     data = response.json()
@@ -642,23 +574,12 @@ def test_network_bundle_surfaces_section_queries_in_debug_envelope(client, in_me
     """Queries run by a bundle section (transport here) must appear in the bundle's
     own ``_debug_queries`` — they were dropped because only the section sub-model
     carried them."""
-    table = _safe_table(test_service_source["name"])
-    logs = generate_mock_logs(test_service_source, num_logs=5)
-    for log in logs:
-        log["tcp_rtt"] = 20_000
-        log["proto"] = "HTTP/2"
-    insert_mock_logs(in_memory_duckdb, table, logs)
-
-    now = datetime.now(UTC)
+    _seed_logs(in_memory_duckdb, test_service_source, 5, tcp_rtt=20_000, proto="HTTP/2")
+    st, et = _naive_iso_window(3)
     response = client.post(
         "/api/network/bundle",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID, "x-debug-responses": "1"},
-        json={
-            "start_time": (now - timedelta(hours=3)).replace(tzinfo=None).isoformat(),
-            "end_time": (now + timedelta(hours=3)).replace(tzinfo=None).isoformat(),
-            "sections": ["transport"],
-            "filters": {},
-        },
+        headers={**_SVC_HEADERS, "x-debug-responses": "1"},
+        json={"start_time": st, "end_time": et, "sections": ["transport"], "filters": {}},
     )
     assert response.status_code == 200
     assert len(response.json()["_debug_queries"]) > 0
@@ -670,22 +591,20 @@ def _seed_origin_table(con, src) -> None:
     endpoint can return real (non-empty) results."""
     logs = generate_mock_logs(src, num_logs=40, hours_ago=1)
     for i, log in enumerate(logs):
-        log["ottfb"] = 50_000 + i * 1000
-        log["ost"] = 200 if i % 5 != 0 else 500
-        log["oip"] = "203.0.113.1" if i < 25 else "203.0.113.2"
-        log["url"] = "/api/foo" if i % 2 else "/api/bar"
-        log["edge"] = True
-        log["pop"] = "SJC"
+        log.update(
+            ottfb=50_000 + i * 1000,
+            ost=200 if i % 5 != 0 else 500,
+            oip="203.0.113.1" if i < 25 else "203.0.113.2",
+            url="/api/foo" if i % 2 else "/api/bar",
+            edge=True,
+            pop="SJC",
+        )
     insert_mock_logs(con, _safe_table(src["name"]), logs)
 
 
 def test_origin_timeseries_accepts_default_request(client, in_memory_duckdb, test_service_source):
     _seed_origin_table(in_memory_duckdb, test_service_source)
-    resp = client.post(
-        "/api/origin/timeseries",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}},
-    )
+    resp = client.post("/api/origin/timeseries", headers=_SVC_HEADERS, json={"filters": {}})
     assert resp.status_code == 200
     assert "series" in resp.json() or "has_data" in resp.json()
 
@@ -695,19 +614,13 @@ def test_origin_timeseries_validates_metric_enum(client):
     Pinned because a typo'd metric would otherwise reach the repo and
     surface as a SQL error rather than a clear validation message."""
     resp = client.post(
-        "/api/origin/timeseries",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}, "metric": "totally_made_up"},
+        "/api/origin/timeseries", headers=_SVC_HEADERS, json={"filters": {}, "metric": "totally_made_up"}
     )
     assert resp.status_code == 422
 
 
 def test_origin_timeseries_validates_percentile_enum(client):
-    resp = client.post(
-        "/api/origin/timeseries",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}, "percentile": "p42"},
-    )
+    resp = client.post("/api/origin/timeseries", headers=_SVC_HEADERS, json={"filters": {}, "percentile": "p42"})
     assert resp.status_code == 422
 
 
@@ -720,14 +633,8 @@ def test_origin_timeseries_passes_kwargs_to_repo(client, in_memory_duckdb, test_
     with patch("backend.repositories.origin.get_timeseries", return_value={"has_data": False, "series": []}) as mock:
         client.post(
             "/api/origin/timeseries",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-            json={
-                "filters": {},
-                "bucket_minutes": 15,
-                "split_by_leg": True,
-                "metric": "ttlb",
-                "percentile": "p99",
-            },
+            headers=_SVC_HEADERS,
+            json={"filters": {}, "bucket_minutes": 15, "split_by_leg": True, "metric": "ttlb", "percentile": "p99"},
         )
 
     kwargs = mock.call_args.kwargs
@@ -740,11 +647,7 @@ def test_origin_timeseries_passes_kwargs_to_repo(client, in_memory_duckdb, test_
 def test_origin_slow_urls_passes_limit_and_min_requests(client, in_memory_duckdb, test_service_source):
     _seed_origin_table(in_memory_duckdb, test_service_source)
     with patch("backend.repositories.origin.get_slow_urls", return_value={"has_data": False, "rows": []}) as mock:
-        client.post(
-            "/api/origin/slow-urls",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-            json={"filters": {}, "limit": 5, "min_requests": 25},
-        )
+        client.post("/api/origin/slow-urls", headers=_SVC_HEADERS, json={"filters": {}, "limit": 5, "min_requests": 25})
 
     kwargs = mock.call_args.kwargs
     assert kwargs["limit"] == 5
@@ -758,11 +661,7 @@ def test_origin_slow_urls_clamps_limit_at_100(client, in_memory_duckdb, test_ser
     frontend from absurd payload sizes."""
     _seed_origin_table(in_memory_duckdb, test_service_source)
     with patch("backend.repositories.origin.get_slow_urls", return_value={"has_data": False, "rows": []}) as mock:
-        resp = client.post(
-            "/api/origin/slow-urls",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-            json={"filters": {}, "limit": 100_000},
-        )
+        resp = client.post("/api/origin/slow-urls", headers=_SVC_HEADERS, json={"filters": {}, "limit": 100_000})
 
     assert resp.status_code == 200
     # The 100_000 input got clamped down to 100 before reaching the repo
@@ -771,42 +670,27 @@ def test_origin_slow_urls_clamps_limit_at_100(client, in_memory_duckdb, test_ser
 
 def test_origin_status_codes_returns_200(client, in_memory_duckdb, test_service_source):
     _seed_origin_table(in_memory_duckdb, test_service_source)
-    resp = client.post(
-        "/api/origin/status-codes",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}},
-    )
-    assert resp.status_code == 200
+    assert client.post("/api/origin/status-codes", headers=_SVC_HEADERS, json={"filters": {}}).status_code == 200
 
 
 def test_origin_path_breakdown_returns_200(client, in_memory_duckdb, test_service_source):
     _seed_origin_table(in_memory_duckdb, test_service_source)
-    resp = client.post(
-        "/api/origin/path-breakdown",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}},
-    )
-    assert resp.status_code == 200
+    assert client.post("/api/origin/path-breakdown", headers=_SVC_HEADERS, json={"filters": {}}).status_code == 200
 
 
 def test_origin_pop_latency_returns_200(client, in_memory_duckdb, test_service_source):
     _seed_origin_table(in_memory_duckdb, test_service_source)
-    resp = client.post(
-        "/api/origin/pop-latency",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}, "limit": 10},
+    assert (
+        client.post("/api/origin/pop-latency", headers=_SVC_HEADERS, json={"filters": {}, "limit": 10}).status_code
+        == 200
     )
-    assert resp.status_code == 200
 
 
 def test_origin_ip_health_returns_200(client, in_memory_duckdb, test_service_source):
     _seed_origin_table(in_memory_duckdb, test_service_source)
-    resp = client.post(
-        "/api/origin/ip-health",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}, "limit": 10},
+    assert (
+        client.post("/api/origin/ip-health", headers=_SVC_HEADERS, json={"filters": {}, "limit": 10}).status_code == 200
     )
-    assert resp.status_code == 200
 
 
 def test_origin_shielding_analysis_accepts_limit_up_to_200(client, in_memory_duckdb, test_service_source):
@@ -814,26 +698,21 @@ def test_origin_shielding_analysis_accepts_limit_up_to_200(client, in_memory_duc
     endpoints because the shield-arc map renders more rows than the
     list views."""
     _seed_origin_table(in_memory_duckdb, test_service_source)
-    resp = client.post(
-        "/api/origin/shielding-analysis",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}, "limit": 150},
+    assert (
+        client.post(
+            "/api/origin/shielding-analysis", headers=_SVC_HEADERS, json={"filters": {}, "limit": 150}
+        ).status_code
+        == 200
     )
-    assert resp.status_code == 200
 
 
 def test_origin_shielding_analysis_clamps_limit_at_200(client, in_memory_duckdb, test_service_source):
     """``Limit200`` clamps oversized values (same pattern as Limit100)."""
     _seed_origin_table(in_memory_duckdb, test_service_source)
     with patch(
-        "backend.repositories.origin.get_shielding_analysis",
-        return_value={"has_data": False, "rows": []},
+        "backend.repositories.origin.get_shielding_analysis", return_value={"has_data": False, "rows": []}
     ) as mock:
-        resp = client.post(
-            "/api/origin/shielding-analysis",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-            json={"filters": {}, "limit": 500},
-        )
+        resp = client.post("/api/origin/shielding-analysis", headers=_SVC_HEADERS, json={"filters": {}, "limit": 500})
 
     assert resp.status_code == 200
     assert mock.call_args.kwargs["limit"] == 200
@@ -845,21 +724,13 @@ def test_origin_summary_value_error_maps_to_400(client):
     filter parsing raises ValueError on bad filter shape and the
     frontend needs the 400 to render the inline error message."""
     with patch("backend.repositories.origin.get_summary", side_effect=ValueError("bad filter")):
-        resp = client.post(
-            "/api/origin/summary",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-            json={"filters": {}},
-        )
+        resp = client.post("/api/origin/summary", headers=_SVC_HEADERS, json={"filters": {}})
     assert resp.status_code == 400
 
 
 def test_origin_summary_lookup_error_maps_to_404(client):
     with patch("backend.repositories.origin.get_summary", side_effect=KeyError("unknown source")):
-        resp = client.post(
-            "/api/origin/summary",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-            json={"filters": {}},
-        )
+        resp = client.post("/api/origin/summary", headers=_SVC_HEADERS, json={"filters": {}})
     assert resp.status_code == 404
 
 
@@ -870,9 +741,7 @@ def test_origin_aggregates_rejects_unknown_section(client, in_memory_duckdb, tes
     across the 5 P-4 pages."""
     _seed_origin_table(in_memory_duckdb, test_service_source)
     resp = client.post(
-        "/api/origin/aggregates",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}, "sections": ["not_a_section"]},
+        "/api/origin/aggregates", headers=_SVC_HEADERS, json={"filters": {}, "sections": ["not_a_section"]}
     )
     assert resp.status_code in (400, 422)
 
@@ -883,11 +752,7 @@ def test_origin_aggregates_summary_only_suppresses_other_timings(client, in_memo
     harness reads to attribute time. A phantom mark on a section that
     didn't actually run would corrupt that attribution."""
     _seed_origin_table(in_memory_duckdb, test_service_source)
-    resp = client.post(
-        "/api/origin/aggregates",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}, "sections": ["summary"]},
-    )
+    resp = client.post("/api/origin/aggregates", headers=_SVC_HEADERS, json={"filters": {}, "sections": ["summary"]})
     assert resp.status_code == 200
     data = resp.json()
     timings = {t["section"] for t in data.get("_section_timings", [])}
@@ -902,11 +767,7 @@ def test_origin_aggregates_coupling_expands_ts_status_path(client, in_memory_duc
     branch 3's pool conn — splitting them across requests would either
     add another checkout or serialize work that already shares one)."""
     _seed_origin_table(in_memory_duckdb, test_service_source)
-    resp = client.post(
-        "/api/origin/aggregates",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}, "sections": ["timeseries"]},
-    )
+    resp = client.post("/api/origin/aggregates", headers=_SVC_HEADERS, json={"filters": {}, "sections": ["timeseries"]})
     assert resp.status_code == 200
     data = resp.json()
     timings = {t["section"] for t in data.get("_section_timings", [])}
@@ -921,27 +782,17 @@ def test_origin_aggregates_coupling_expands_ts_status_path(client, in_memory_duc
 
 def test_origin_aggregates_range_token(client, in_memory_duckdb, test_service_source):
     _seed_origin_table(in_memory_duckdb, test_service_source)
-    with (
-        patch("backend.config.get_status", return_value={"earliest_log_at": "2026-08-24T00:00:00Z"}),
-        patch("backend.utils.time_window.is_valid_range_token", return_value=True),
-        patch(
-            "backend.utils.time_window.resolve_window", return_value=("2026-08-24T12:00:00Z", "2026-08-24T13:00:00Z")
-        ),
-    ):
+    with _patch_range_token():
         resp = client.post(
             "/api/origin/aggregates",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            headers=_SVC_HEADERS,
             json={"filters": {}, "range_token": "30d", "anchor": "2026-08-24T13:00:00Z"},
         )
     assert resp.status_code == 200
     assert "summary" in resp.json()
 
 
-def test_origin_aggregates_dispatches_registered_high_scale_service(
-    client,
-    monkeypatch,
-    test_service_source,
-):
+def test_origin_aggregates_dispatches_registered_high_scale_service(client, monkeypatch, test_service_source):
     expected = {
         "has_data": True,
         "total": 12,
@@ -954,24 +805,17 @@ def test_origin_aggregates_dispatches_registered_high_scale_service(
         "ip_health": {"has_data": True, "rows": []},
     }
     high_scale_aggregates = MagicMock(return_value=expected)
-    monkeypatch.setitem(
-        sys.modules,
-        "backend.high_scale.origin",
-        SimpleNamespace(aggregates=high_scale_aggregates),
-    )
+    monkeypatch.setitem(sys.modules, "backend.high_scale.origin", SimpleNamespace(aggregates=high_scale_aggregates))
     service = SimpleNamespace(service_id=test_service_source["service_id"])
-    registry = SimpleNamespace(resolve=MagicMock(return_value=service))
     monkeypatch.setattr(
-        "backend.high_scale.registry.get_high_scale_service_registry",
-        lambda: registry,
+        "backend.high_scale.registry_bootstrap.get_high_scale_service_registry",
+        lambda: SimpleNamespace(resolve=MagicMock(return_value=service)),
     )
     standard = AsyncMock(side_effect=AssertionError("standard Origin repository called"))
     monkeypatch.setattr("backend.repositories.origin.get_aggregates", standard)
 
     response = client.post(
-        "/api/origin/aggregates",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}, "sections": ["summary"]},
+        "/api/origin/aggregates", headers=_SVC_HEADERS, json={"filters": {}, "sections": ["summary"]}
     )
 
     assert response.status_code == 200, response.text
@@ -983,11 +827,7 @@ def test_origin_aggregates_dispatches_registered_high_scale_service(
 
 def test_origin_drilldown_accepts_default_request(client, in_memory_duckdb, test_service_source):
     _seed_origin_table(in_memory_duckdb, test_service_source)
-    resp = client.post(
-        "/api/origin/drilldown",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}},
-    )
+    resp = client.post("/api/origin/drilldown", headers=_SVC_HEADERS, json={"filters": {}})
     assert resp.status_code == 200
     data = resp.json()
     assert "has_data" in data
@@ -997,9 +837,7 @@ def test_origin_drilldown_accepts_default_request(client, in_memory_duckdb, test
 
 def test_origin_drilldown_validates_dimension_enum(client):
     resp = client.post(
-        "/api/origin/drilldown",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}, "dimension": "invalid_dimension"},
+        "/api/origin/drilldown", headers=_SVC_HEADERS, json={"filters": {}, "dimension": "invalid_dimension"}
     )
     assert resp.status_code == 422
 
@@ -1010,13 +848,7 @@ def test_origin_drilldown_passes_dimension_and_limit(client, in_memory_duckdb, t
         "backend.repositories.origin.get_drilldown", return_value={"has_data": True, "dimension": "pop", "rows": []}
     ) as mock:
         resp = client.post(
-            "/api/origin/drilldown",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-            json={
-                "filters": {},
-                "dimension": "pop",
-                "limit": 15,
-            },
+            "/api/origin/drilldown", headers=_SVC_HEADERS, json={"filters": {}, "dimension": "pop", "limit": 15}
         )
     assert resp.status_code == 200
     kwargs = mock.call_args.kwargs
@@ -1026,11 +858,7 @@ def test_origin_drilldown_passes_dimension_and_limit(client, in_memory_duckdb, t
 
 def test_origin_drilldown_empty_table(client, in_memory_duckdb, test_service_source):
     # Table exists but no rows seeded with matching criteria
-    resp = client.post(
-        "/api/origin/drilldown",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}, "dimension": "oip"},
-    )
+    resp = client.post("/api/origin/drilldown", headers=_SVC_HEADERS, json={"filters": {}, "dimension": "oip"})
     assert resp.status_code == 200
     data = resp.json()
     assert data["dimension"] == "oip"
@@ -1040,42 +868,35 @@ def test_origin_drilldown_empty_table(client, in_memory_duckdb, test_service_sou
 
 # ── Merged from tests/routers/test_performance_router.py ──
 def _seed_performance_table(con, src) -> None:
-    logs = generate_mock_logs(src, num_logs=20, hours_ago=1)
-    for log in logs:
-        log["elapsed"] = 120000
-        log["ttfb"] = 0.040
-        log["url"] = "/test-perf-url"
-        log["asn"] = 12345
-        log["cache"] = "HIT"
-        log["ttl"] = 3600
-        log["ottfb"] = 30000.0
-        log["ottlb"] = 50000.0
-    insert_mock_logs(con, _safe_table(src["name"]), logs)
+    _seed_logs(
+        con,
+        src,
+        20,
+        hours_ago=1,
+        elapsed=120000,
+        ttfb=0.040,
+        url="/test-perf-url",
+        asn=12345,
+        cache="HIT",
+        ttl=3600,
+        ottfb=30000.0,
+        ottlb=50000.0,
+    )
 
 
 def test_performance_aggregates_default(client, in_memory_duckdb, test_service_source):
     _seed_performance_table(in_memory_duckdb, test_service_source)
-    resp = client.post(
-        "/api/performance/aggregates",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}},
-    )
+    resp = client.post("/api/performance/aggregates", headers=_SVC_HEADERS, json={"filters": {}})
     assert resp.status_code == 200
     assert "top_urls" in resp.json()
 
 
 def test_performance_aggregates_range_token(client, in_memory_duckdb, test_service_source):
     _seed_performance_table(in_memory_duckdb, test_service_source)
-    with (
-        patch("backend.config.get_status", return_value={"earliest_log_at": "2026-08-24T00:00:00Z"}),
-        patch("backend.utils.time_window.is_valid_range_token", return_value=True),
-        patch(
-            "backend.utils.time_window.resolve_window", return_value=("2026-08-24T12:00:00Z", "2026-08-24T13:00:00Z")
-        ),
-    ):
+    with _patch_range_token():
         resp = client.post(
             "/api/performance/aggregates",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            headers=_SVC_HEADERS,
             json={"filters": {}, "range_token": "30d", "anchor": "2026-08-24T13:00:00Z"},
         )
     assert resp.status_code == 200
@@ -1087,10 +908,7 @@ def test_performance_aggregates_telemetry_attribution(client, in_memory_duckdb, 
     _seed_performance_table(in_memory_duckdb, test_service_source)
     resp = client.post(
         "/api/performance/aggregates",
-        headers={
-            "x-fastly-service-id": MOCK_SERVICE_ID,
-            "X-Page-Load-ID": "test-perf-page-load-42",
-        },
+        headers={**_SVC_HEADERS, "X-Page-Load-ID": "test-perf-page-load-42"},
         json={"filters": {}},
     )
     assert resp.status_code == 200
@@ -1105,9 +923,7 @@ def test_performance_aggregates_section_pruning(client, in_memory_duckdb, test_s
 
     # 1. top_urls auto-expands with top_asns (_TOP_N_PAIR), leaving scatter/waterfall/ttl_dist empty
     resp_top = client.post(
-        "/api/performance/aggregates",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}, "sections": ["top_urls"]},
+        "/api/performance/aggregates", headers=_SVC_HEADERS, json={"filters": {}, "sections": ["top_urls"]}
     )
     assert resp_top.status_code == 200
     data_top = resp_top.json()
@@ -1119,9 +935,7 @@ def test_performance_aggregates_section_pruning(client, in_memory_duckdb, test_s
 
     # 2. waterfall auto-expands with scatter (_WATERFALL_SCATTER_PAIR), leaving top_urls/top_asns/ttl_dist empty
     resp_wf = client.post(
-        "/api/performance/aggregates",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}, "sections": ["waterfall"]},
+        "/api/performance/aggregates", headers=_SVC_HEADERS, json={"filters": {}, "sections": ["waterfall"]}
     )
     assert resp_wf.status_code == 200
     data_wf = resp_wf.json()
@@ -1133,9 +947,7 @@ def test_performance_aggregates_section_pruning(client, in_memory_duckdb, test_s
 
     # 3. ttl_dist is independent
     resp_ttl = client.post(
-        "/api/performance/aggregates",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}, "sections": ["ttl_dist"]},
+        "/api/performance/aggregates", headers=_SVC_HEADERS, json={"filters": {}, "sections": ["ttl_dist"]}
     )
     assert resp_ttl.status_code == 200
     data_ttl = resp_ttl.json()
@@ -1149,11 +961,7 @@ def test_performance_aggregates_section_pruning(client, in_memory_duckdb, test_s
 @pytest.mark.parametrize("sort_by", ["avg", "p50", "p95", "p99"])
 def test_performance_aggregates_sort_by_variants(client, in_memory_duckdb, test_service_source, sort_by):
     _seed_performance_table(in_memory_duckdb, test_service_source)
-    resp = client.post(
-        "/api/performance/aggregates",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}, "sort_by": sort_by},
-    )
+    resp = client.post("/api/performance/aggregates", headers=_SVC_HEADERS, json={"filters": {}, "sort_by": sort_by})
     assert resp.status_code == 200
     data = resp.json()
     assert "top_urls" in data
@@ -1163,57 +971,36 @@ def test_performance_aggregates_sort_by_variants(client, in_memory_duckdb, test_
 def test_performance_aggregates_analyst_session_clamps_window(client, in_memory_duckdb, test_service_source):
     start = datetime(2026, 6, 17, 9, 0, tzinfo=UTC)
     end = datetime(2026, 6, 17, 10, 0, tzinfo=UTC)
-    session = SimpleNamespace(
-        session_id="sess-analyst-perf",
-        pii_policy={"mask_ips": True},
-        service_ids=[test_service_source["service_id"]],
-    )
-
     captured: dict = {}
 
     def _fake_get_performance_aggregates(**kw):
         captured.update(kw)
-        return {
-            "top_urls": [],
-            "top_asns": [],
-            "ttl_dist": [],
-            "scatter": [],
-            "waterfall": {},
-        }
+        return {"top_urls": [], "top_asns": [], "ttl_dist": [], "scatter": [], "waterfall": {}}
 
-    app.dependency_overrides[build_request_context] = override_request_context(
-        source=test_service_source,
-        _con_override=in_memory_duckdb,
-        session=session,
-        path="/api/performance/aggregates",
+    with _with_analyst_ctx(
+        test_service_source,
+        in_memory_duckdb,
+        mask_ips=True,
         time_bounds=TimeBounds(start=start, end=end),
-    )
-    try:
+        path="/api/performance/aggregates",
+        session_id="sess-analyst-perf",
+    ):
         with patch(
-            "backend.repositories.performance.get_performance_aggregates",
-            side_effect=_fake_get_performance_aggregates,
+            "backend.repositories.performance.get_performance_aggregates", side_effect=_fake_get_performance_aggregates
         ):
             resp = client.post(
                 "/api/performance/aggregates",
-                headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-                json={
-                    "filters": {},
-                    "start_time": "2026-06-17T00:00:00Z",
-                    "end_time": "2026-06-17T23:59:59Z",
-                },
+                headers=_SVC_HEADERS,
+                json={"filters": {}, "start_time": "2026-06-17T00:00:00Z", "end_time": "2026-06-17T23:59:59Z"},
             )
         assert resp.status_code == 200, resp.text
         assert captured["start_time"] == start.isoformat()
         assert captured["end_time"] == end.isoformat()
-    finally:
-        app.dependency_overrides.pop(build_request_context, None)
 
 
 def test_performance_aggregates_high_scale_dispatch(client, test_service_source):
-    mock_service = MagicMock()
     mock_registry = MagicMock()
-    mock_registry.resolve.return_value = mock_service
-
+    mock_registry.resolve.return_value = MagicMock()
     fake_response = {
         "top_urls": [{"url": "/hs", "requests": 50, "avg": 10.0, "p50": 8.0, "p95": 15.0, "p99": 20.0}],
         "top_asns": [],
@@ -1224,14 +1011,10 @@ def test_performance_aggregates_high_scale_dispatch(client, test_service_source)
     }
 
     with (
-        patch("backend.high_scale.registry.get_high_scale_service_registry", return_value=mock_registry),
+        patch("backend.high_scale.registry_bootstrap.get_high_scale_service_registry", return_value=mock_registry),
         patch("backend.high_scale.performance.performance_aggregates", return_value=fake_response) as mock_hs_perf,
     ):
-        resp = client.post(
-            "/api/performance/aggregates",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-            json={"filters": {}, "sort_by": "p99"},
-        )
+        resp = client.post("/api/performance/aggregates", headers=_SVC_HEADERS, json={"filters": {}, "sort_by": "p99"})
         assert resp.status_code == 200
         assert resp.json()["_approx"] is True
         mock_hs_perf.assert_called_once()
@@ -1243,12 +1026,12 @@ def test_performance_aggregates_high_scale_receives_expanded_sections(client, te
     fake_response = {"top_urls": [], "top_asns": [], "ttl_dist": [], "scatter": [], "waterfall": {}}
 
     with (
-        patch("backend.high_scale.registry.get_high_scale_service_registry", return_value=mock_registry),
+        patch("backend.high_scale.registry_bootstrap.get_high_scale_service_registry", return_value=mock_registry),
         patch("backend.high_scale.performance.performance_aggregates", return_value=fake_response) as mock_hs_perf,
     ):
         resp = client.post(
             "/api/performance/aggregates",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            headers=_SVC_HEADERS,
             json={"filters": {}, "sort_by": "avg", "sections": ["scatter", "top_urls"]},
         )
 
@@ -1266,51 +1049,40 @@ def _seed_security_table(con, src) -> None:
 
     logs = generate_mock_logs(src, num_logs=40, hours_ago=1)
     for i, log in enumerate(logs):
-        log["ja3"] = "771,4865-4866-4867,0-23-65281-10-11,29-23-24,0" if i % 2 == 0 else "772,4865-4866,0-23-10,29-23,0"
-        log["ja4"] = "t13d1516h2_8daaf6152771_0271d18f93db" if i % 2 == 0 else "t13d1516h2_aabbccddeeff_112233445566"
-        log["tls"] = "1.3" if i % 2 == 0 else "1.2"
-        log["tls_ciphers_sha"] = "aabbcc11" if i < 20 else "ddeeff22"
-        log["p_type"] = "VPN" if i % 3 == 0 else None
-        log["ua"] = (
-            "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+        log.update(
+            ja3="771,4865-4866-4867,0-23-65281-10-11,29-23-24,0" if i % 2 == 0 else "772,4865-4866,0-23-10,29-23,0",
+            ja4="t13d1516h2_8daaf6152771_0271d18f93db" if i % 2 == 0 else "t13d1516h2_aabbccddeeff_112233445566",
+            tls="1.3" if i % 2 == 0 else "1.2",
+            tls_ciphers_sha="aabbcc11" if i < 20 else "ddeeff22",
+            p_type="VPN" if i % 3 == 0 else None,
+            ua="Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
             if i % 4 == 0
-            else "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
+            else "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+            host="example.com",
+            waf=i % 7 == 0,
+            req_header_bytes=1024 + i * 50,
+            rtt_min=5 if i % 3 == 0 else 1000,
+            tcp_rtt=1000,
+            lat=37.7749,
+            lon=-122.4194,
+            country="US" if i % 2 == 0 else "DE",
+            asn=15169 if i % 2 == 0 else 3320,
         )
-        log["host"] = "example.com"
-        log["waf"] = True if i % 7 == 0 else False
-        log["req_header_bytes"] = 1024 + i * 50
-        log["rtt_min"] = 5 if i % 3 == 0 else 1000
-        log["tcp_rtt"] = 1000
-        log["lat"] = 37.7749
-        log["lon"] = -122.4194
-        log["country"] = "US" if i % 2 == 0 else "DE"
-        log["asn"] = 15169 if i % 2 == 0 else 3320
     insert_mock_logs(con, _safe_table(src["name"]), logs)
 
 
 def test_security_aggregates_default(client, in_memory_duckdb, test_service_source):
     _seed_security_table(in_memory_duckdb, test_service_source)
-    resp = client.post(
-        "/api/security/aggregates",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}},
-    )
+    resp = client.post("/api/security/aggregates", headers=_SVC_HEADERS, json={"filters": {}})
     assert resp.status_code == 200
     data = resp.json()
-    assert "tls_fingerprints" in data
-    assert "req_size_dist" in data
-    assert "ipv6_adoption" in data
-    assert "proxy_dist" in data
-    assert "conn_reuse_dist" in data
+    for k in ("tls_fingerprints", "req_size_dist", "ipv6_adoption", "proxy_dist", "conn_reuse_dist"):
+        assert k in data
 
 
 def test_security_bundle_post(client, in_memory_duckdb, test_service_source):
     _seed_security_table(in_memory_duckdb, test_service_source)
-    resp = client.post(
-        "/api/security/bundle",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"filters": {}, "bucket_seconds": 300},
-    )
+    resp = client.post("/api/security/bundle", headers=_SVC_HEADERS, json={"filters": {}, "bucket_seconds": 300})
     assert resp.status_code == 200
     data = resp.json()
     assert "tls_fingerprints" in data
@@ -1319,37 +1091,20 @@ def test_security_bundle_post(client, in_memory_duckdb, test_service_source):
 
 def test_security_bundle_get(client, in_memory_duckdb, test_service_source):
     _seed_security_table(in_memory_duckdb, test_service_source)
-    with (
-        patch("backend.config.get_status", return_value={"earliest_log_at": "2026-08-24T00:00:00Z"}),
-        patch("backend.utils.time_window.is_valid_range_token", return_value=True),
-        patch(
-            "backend.utils.time_window.resolve_window",
-            return_value=("2026-08-24T12:00:00Z", "2026-08-24T13:00:00Z"),
-        ),
-    ):
+    with _patch_range_token():
         resp = client.get(
-            "/api/security/bundle",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-            params={"range_token": "24h", "bucket_seconds": 300},
+            "/api/security/bundle", headers=_SVC_HEADERS, params={"range_token": "24h", "bucket_seconds": 300}
         )
     assert resp.status_code == 200
-    data = resp.json()
-    assert "tls_fingerprints" in data
+    assert "tls_fingerprints" in resp.json()
 
 
 def test_security_aggregates_range_token(client, in_memory_duckdb, test_service_source):
     _seed_security_table(in_memory_duckdb, test_service_source)
-    with (
-        patch("backend.config.get_status", return_value={"earliest_log_at": "2026-08-24T00:00:00Z"}),
-        patch("backend.utils.time_window.is_valid_range_token", return_value=True),
-        patch(
-            "backend.utils.time_window.resolve_window",
-            return_value=("2026-08-24T12:00:00Z", "2026-08-24T13:00:00Z"),
-        ),
-    ):
+    with _patch_range_token():
         resp = client.post(
             "/api/security/aggregates",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            headers=_SVC_HEADERS,
             json={"filters": {}, "range_token": "24h", "anchor": "2026-08-24T13:00:00Z"},
         )
     assert resp.status_code == 200
@@ -1360,9 +1115,7 @@ def test_security_aggregates_section_pruning_and_implies(client, in_memory_duckd
     _seed_security_table(in_memory_duckdb, test_service_source)
     with patch("backend.repositories.security.get_security_aggregates", return_value={}) as mock_repo:
         client.post(
-            "/api/security/aggregates",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-            json={"filters": {}, "sections": ["tls_fingerprints"]},
+            "/api/security/aggregates", headers=_SVC_HEADERS, json={"filters": {}, "sections": ["tls_fingerprints"]}
         )
     assert mock_repo.called
     sections_called = mock_repo.call_args.kwargs.get("sections")
@@ -1375,24 +1128,12 @@ def test_security_aggregates_analyst_session_clamps_window(client, in_memory_duc
     _seed_security_table(in_memory_duckdb, test_service_source)
     earlier = datetime.now(UTC) - timedelta(hours=2)
     later = datetime.now(UTC)
-    tb = TimeBounds(start=earlier, end=later)
-    analyst_session = SimpleNamespace(
-        service_ids=[MOCK_SERVICE_ID],
-        time_bounds=tb,
-        pii_policy={"mask_ips": False},
-    )
-
-    override = override_request_context(
-        source=test_service_source,
-        con=in_memory_duckdb,
-        session=analyst_session,
-        time_bounds=tb,
-    )
-    app.dependency_overrides[build_request_context] = override
-    try:
+    with _with_analyst_ctx(
+        test_service_source, in_memory_duckdb, mask_ips=False, time_bounds=TimeBounds(start=earlier, end=later)
+    ):
         resp = client.post(
             "/api/security/aggregates",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            headers=_SVC_HEADERS,
             json={
                 "filters": {},
                 "start_time": (datetime.now(UTC) - timedelta(days=7)).isoformat(),
@@ -1400,53 +1141,31 @@ def test_security_aggregates_analyst_session_clamps_window(client, in_memory_duc
             },
         )
         assert resp.status_code == 200
-    finally:
-        app.dependency_overrides.pop(build_request_context, None)
 
 
 def test_security_aggregates_ip_masking(client, in_memory_duckdb, test_service_source):
     _seed_security_table(in_memory_duckdb, test_service_source)
-    analyst_session = SimpleNamespace(
-        service_ids=[MOCK_SERVICE_ID],
-        time_bounds=None,
-        pii_policy={"mask_ips": True},
-    )
-    override = override_request_context(
-        source=test_service_source,
-        con=in_memory_duckdb,
-        session=analyst_session,
-    )
-    app.dependency_overrides[build_request_context] = override
-    try:
+    with _with_analyst_ctx(test_service_source, in_memory_duckdb, mask_ips=True):
         resp = client.post(
-            "/api/security/aggregates",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-            json={"filters": {}, "sections": ["top_ips_header"]},
+            "/api/security/aggregates", headers=_SVC_HEADERS, json={"filters": {}, "sections": ["top_ips_header"]}
         )
         assert resp.status_code == 200
-        data = resp.json()
-        top_ips = data.get("top_ips_header", [])
-        for entry in top_ips:
+        for entry in resp.json().get("top_ips_header", []):
             ip = entry.get("ip") or entry.get("client_ip")
             if ip:
                 # Should be masked (e.g. 192.168.1.xxx or ends with xxx or * or redacted)
                 assert "xxx" in ip or "*" in ip or ip == "0.0.0.0" or "[redacted]" in ip
-    finally:
-        app.dependency_overrides.pop(build_request_context, None)
 
 
 def test_export_proxies_csv_fastly_acl(client, in_memory_duckdb, test_service_source):
     _seed_security_table(in_memory_duckdb, test_service_source)
     now = datetime.now(UTC)
-    start_time = (now - timedelta(hours=2)).isoformat()
-    end_time = now.isoformat()
-
     resp = client.get(
         "/api/security/proxies/export",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        headers=_SVC_HEADERS,
         params={
-            "start_time": start_time,
-            "end_time": end_time,
+            "start_time": (now - timedelta(hours=2)).isoformat(),
+            "end_time": now.isoformat(),
             "threshold": "High",
             "format": "fastly-acl",
         },
@@ -1454,22 +1173,18 @@ def test_export_proxies_csv_fastly_acl(client, in_memory_duckdb, test_service_so
     assert resp.status_code == 200
     assert "text/csv" in resp.headers.get("content-type", "")
     assert "attachment; filename=" in resp.headers.get("content-disposition", "")
-    text = resp.text
-    assert "ip,comment" in text
+    assert "ip,comment" in resp.text
 
 
 def test_export_proxies_csv_plain(client, in_memory_duckdb, test_service_source):
     _seed_security_table(in_memory_duckdb, test_service_source)
     now = datetime.now(UTC)
-    start_time = (now - timedelta(hours=2)).isoformat()
-    end_time = now.isoformat()
-
     resp = client.get(
         "/api/security/proxies/export",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        headers=_SVC_HEADERS,
         params={
-            "start_time": start_time,
-            "end_time": end_time,
+            "start_time": (now - timedelta(hours=2)).isoformat(),
+            "end_time": now.isoformat(),
             "threshold": "High",
             "format": "plain",
         },
@@ -1482,58 +1197,39 @@ def test_export_proxies_csv_plain(client, in_memory_duckdb, test_service_source)
 def test_export_proxies_csv_ip_masking(client, in_memory_duckdb, test_service_source):
     _seed_security_table(in_memory_duckdb, test_service_source)
     now = datetime.now(UTC)
-    start_time = (now - timedelta(hours=2)).isoformat()
-    end_time = now.isoformat()
-
-    analyst_session = SimpleNamespace(
-        service_ids=[MOCK_SERVICE_ID],
-        time_bounds=None,
-        pii_policy={"mask_ips": True},
-    )
-    override = override_request_context(
-        source=test_service_source,
-        con=in_memory_duckdb,
-        session=analyst_session,
-    )
-    app.dependency_overrides[build_request_context] = override
-    try:
+    with _with_analyst_ctx(test_service_source, in_memory_duckdb, mask_ips=True):
         resp = client.get(
             "/api/security/proxies/export",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            headers=_SVC_HEADERS,
             params={
-                "start_time": start_time,
-                "end_time": end_time,
+                "start_time": (now - timedelta(hours=2)).isoformat(),
+                "end_time": now.isoformat(),
                 "threshold": "High",
                 "format": "plain",
             },
         )
         assert resp.status_code == 200
-        for line in resp.text.splitlines():
-            line = line.strip()
-            if line:
-                assert "xxx" in line or "*" in line or line == "0.0.0.0" or "[redacted]" in line
-    finally:
-        app.dependency_overrides.pop(build_request_context, None)
+        for line in (ln.strip() for ln in resp.text.splitlines() if ln.strip()):
+            assert "xxx" in line or "*" in line or line == "0.0.0.0" or "[redacted]" in line
 
 
 def test_security_threat_intel_default(client, in_memory_duckdb, test_service_source):
     _seed_security_table(in_memory_duckdb, test_service_source)
-    resp = client.get(
-        "/api/security/threat-intel",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-    )
+    resp = client.get("/api/security/threat-intel", headers=_SVC_HEADERS)
     assert resp.status_code == 200
     data = resp.json()
     assert "data" in data
-    items = data["data"]
-    if items:
-        first = items[0]
-        assert "tls_fingerprint" in first
-        assert "requests" in first
-        assert "top_country" in first
-        assert "matched_waf_rules_count" in first
-        assert "bot_percentage" in first
-        assert "is_anonymized_proxy" in first
+    if data["data"]:
+        first = data["data"][0]
+        for k in (
+            "tls_fingerprint",
+            "requests",
+            "top_country",
+            "matched_waf_rules_count",
+            "bot_percentage",
+            "is_anonymized_proxy",
+        ):
+            assert k in first
 
 
 def test_security_telemetry_attribution(client, in_memory_duckdb, test_service_source, monkeypatch):
@@ -1541,10 +1237,7 @@ def test_security_telemetry_attribution(client, in_memory_duckdb, test_service_s
     _seed_security_table(in_memory_duckdb, test_service_source)
     resp = client.post(
         "/api/security/aggregates",
-        headers={
-            "x-fastly-service-id": MOCK_SERVICE_ID,
-            "X-Page-Load-ID": "test-security-page-load-99",
-        },
+        headers={**_SVC_HEADERS, "X-Page-Load-ID": "test-security-page-load-99"},
         json={"filters": {}},
     )
     assert resp.status_code == 200
@@ -1557,41 +1250,22 @@ def test_security_telemetry_attribution(client, in_memory_duckdb, test_service_s
 def _register_high_scale(monkeypatch, test_service_source):
     service = SimpleNamespace(service_id=test_service_source["service_id"])
     monkeypatch.setattr(
-        "backend.high_scale.registry.get_high_scale_service_registry",
+        "backend.high_scale.registry_bootstrap.get_high_scale_service_registry",
         lambda: SimpleNamespace(resolve=lambda _service_id: service),
     )
     return service
-
-
-def _analyst_override(test_service_source, in_memory_duckdb, *, mask_ips: bool, time_bounds=None):
-    analyst_session = SimpleNamespace(
-        service_ids=[MOCK_SERVICE_ID],
-        time_bounds=time_bounds,
-        pii_policy={"mask_ips": mask_ips},
-    )
-    return override_request_context(
-        source=test_service_source,
-        con=in_memory_duckdb,
-        session=analyst_session,
-        time_bounds=time_bounds,
-    )
 
 
 def test_aggregates_receive_expanded_sections_and_mask_flag(client, monkeypatch, in_memory_duckdb, test_service_source):
     service = _register_high_scale(monkeypatch, test_service_source)
     hs_aggregates = MagicMock(return_value=SecurityAggregatesResponse())
     monkeypatch.setattr("backend.high_scale.security.security_aggregates", hs_aggregates)
-    app.dependency_overrides[build_request_context] = _analyst_override(
-        test_service_source, in_memory_duckdb, mask_ips=True
-    )
-    try:
+    with _with_analyst_ctx(test_service_source, in_memory_duckdb, mask_ips=True):
         resp = client.post(
             "/api/security/aggregates",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            headers=_SVC_HEADERS,
             json={"filters": {}, "sections": ["tls_fingerprints", "ngwaf_verified_bots"]},
         )
-    finally:
-        app.dependency_overrides.pop(build_request_context, None)
 
     assert resp.status_code == 200, resp.text
     hs_aggregates.assert_called_once()
@@ -1611,23 +1285,20 @@ def test_threat_intel_is_clamped_to_the_analyst_window(client, monkeypatch, in_m
     monkeypatch.setattr("backend.high_scale.security.get_security_threat_intel", hs_threat_intel)
     ceiling_start = datetime.now(UTC) - timedelta(hours=2)
     ceiling_end = datetime.now(UTC)
-    app.dependency_overrides[build_request_context] = _analyst_override(
+    with _with_analyst_ctx(
         test_service_source,
         in_memory_duckdb,
         mask_ips=False,
         time_bounds=TimeBounds(start=ceiling_start, end=ceiling_end),
-    )
-    try:
+    ):
         resp = client.get(
             "/api/security/threat-intel",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            headers=_SVC_HEADERS,
             params={
                 "start_time": (ceiling_start - timedelta(days=30)).isoformat(),
                 "end_time": ceiling_end.isoformat(),
             },
         )
-    finally:
-        app.dependency_overrides.pop(build_request_context, None)
 
     assert resp.status_code == 200, resp.text
     queried_start = datetime.fromisoformat(hs_threat_intel.call_args.args[1].replace("Z", "+00:00"))
@@ -1645,13 +1316,10 @@ def test_proxies_export_streams_masked_high_risk_clients(client, monkeypatch, in
         }
     )
     monkeypatch.setattr("backend.high_scale.security.get_proxies_data", hs_proxies)
-    app.dependency_overrides[build_request_context] = _analyst_override(
-        test_service_source, in_memory_duckdb, mask_ips=True
-    )
-    try:
+    with _with_analyst_ctx(test_service_source, in_memory_duckdb, mask_ips=True):
         resp = client.get(
             "/api/security/proxies/export",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            headers=_SVC_HEADERS,
             params={
                 "start_time": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
                 "end_time": datetime.now(UTC).isoformat(),
@@ -1659,8 +1327,6 @@ def test_proxies_export_streams_masked_high_risk_clients(client, monkeypatch, in
                 "format": "plain",
             },
         )
-    finally:
-        app.dependency_overrides.pop(build_request_context, None)
 
     assert resp.status_code == 200, resp.text
     assert resp.text.split() == ["198.51.100.xxx"]
@@ -2383,7 +2049,15 @@ ANALYTICS_ROUTES = [
 
 
 @pytest.fixture
-def bare_client():
+def bare_client(monkeypatch):
+    if "backend.core.fastly.ngwaf" not in sys.modules:
+        from backend.models.provision import NgwafWorkspacesResponse
+
+        monkeypatch.setitem(
+            sys.modules,
+            "backend.core.fastly.ngwaf",
+            SimpleNamespace(NgwafWorkspacesResponse=NgwafWorkspacesResponse),
+        )
     saved = dict(app.dependency_overrides)
     app.dependency_overrides.clear()
     try:
@@ -2955,7 +2629,7 @@ def test_assets_aggregates_high_scale():
     from types import SimpleNamespace
 
     from backend.high_scale.assets import assets_aggregates
-    from backend.models.assets import AssetsRequest
+    from backend.models.performance import AssetsRequest
 
     calls: list[tuple[str, dict]] = []
 

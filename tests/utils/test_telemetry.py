@@ -698,7 +698,7 @@ def test_purge_usage_log_skips_when_retention_zero(mock_cfg):
 
 def test_flush_usage_log_skips_when_logging_disabled():
     """Disabled globally → flush is a no-op (no DB writes, no exceptions)."""
-    from backend.utils.usage_logger import flush_usage_log
+    from backend.utils.telemetry import flush_usage_log
 
     with (
         patch("backend.config.is_usage_logging_enabled", return_value=False),
@@ -713,7 +713,7 @@ def test_flush_usage_log_skips_when_no_tracked_calls():
     """If the per-request context has no recorded calls, flush returns
     early without bothering log_usage_calls."""
     from backend.utils import telemetry
-    from backend.utils.usage_logger import flush_usage_log
+    from backend.utils.telemetry import flush_usage_log
 
     telemetry.start_call_tracking()  # reset to empty
 
@@ -728,7 +728,7 @@ def test_flush_usage_log_skips_when_no_tracked_calls():
 
 def test_flush_usage_log_skips_when_service_config_missing():
     from backend.utils import telemetry
-    from backend.utils.usage_logger import flush_usage_log
+    from backend.utils.telemetry import flush_usage_log
 
     telemetry.start_call_tracking()
     telemetry.record_call("PutObject", "/k", 1.0, service="FOS")
@@ -747,7 +747,7 @@ def test_flush_usage_log_happy_path_forwards_calls_and_context():
     """All preconditions met → log_usage_calls is invoked with the source
     dict, the tracked calls list, and the process_context kwarg."""
     from backend.utils import telemetry
-    from backend.utils.usage_logger import flush_usage_log
+    from backend.utils.telemetry import flush_usage_log
 
     telemetry.start_call_tracking()
     telemetry._set_process_context_for_tests("cron:sync:svc-flush-3")
@@ -776,7 +776,7 @@ def test_flush_usage_log_swallows_inner_exception():
     """Even if log_usage_calls raises, flush must NOT propagate — the
     scheduler must keep running its cron jobs."""
     from backend.utils import telemetry
-    from backend.utils.usage_logger import flush_usage_log
+    from backend.utils.telemetry import flush_usage_log
 
     telemetry.start_call_tracking()
     telemetry.record_call("PutObject", "/k", 1.0, service="FOS")
@@ -792,7 +792,7 @@ def test_flush_usage_log_swallows_inner_exception():
 
 
 def test_run_usage_log_cleanup_skips_when_service_config_missing():
-    from backend.utils.usage_logger import run_usage_log_cleanup
+    from backend.utils.telemetry import run_usage_log_cleanup
 
     with (
         patch("backend.config.load_config", return_value=None),
@@ -804,7 +804,7 @@ def test_run_usage_log_cleanup_skips_when_service_config_missing():
 
 
 def test_run_usage_log_cleanup_happy_path_delegates_to_purge():
-    from backend.utils.usage_logger import run_usage_log_cleanup
+    from backend.utils.telemetry import run_usage_log_cleanup
 
     fake_cfg = {"service_id": "svc-cleanup-1", "fos_bucket": "b"}
     fake_source = {"name": "svc-cleanup-1"}
@@ -820,7 +820,7 @@ def test_run_usage_log_cleanup_happy_path_delegates_to_purge():
 
 
 def test_run_usage_log_cleanup_swallows_inner_exception():
-    from backend.utils.usage_logger import run_usage_log_cleanup
+    from backend.utils.telemetry import run_usage_log_cleanup
 
     with (
         patch("backend.config.load_config", return_value={"service_id": "x"}),

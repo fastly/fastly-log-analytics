@@ -8,16 +8,21 @@ from dataclasses import dataclass
 from typing import Any
 
 from backend.core.high_scale_sections import HighScaleSections
-from backend.high_scale._common import _TIMESERIES_METRICS, visible_fact_clauses
+from backend.high_scale._common import (
+    _TIMESERIES_METRICS,
+    RELATIVE_ERROR,
+    visible_fact_clauses,
+)
+from backend.high_scale._common import (
+    range_value as _range_value,
+)
 from backend.high_scale._filters import (
     build_clickhouse_filters,
 )
 from backend.high_scale._filters import (
     build_published_projection_where as _where,
 )
-from backend.high_scale._projection_utils import RELATIVE_ERROR
-from backend.high_scale._projection_utils import range_value as _range_value
-from backend.high_scale.registry import HighScaleService
+from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.utils.date_utils import safe_iso
 
 _EMPTY = {

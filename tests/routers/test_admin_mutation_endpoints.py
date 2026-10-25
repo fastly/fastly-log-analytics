@@ -1519,7 +1519,7 @@ def test_stream_from_worker_disconnect_closes_worker_thread():
     instead of blocking indefinitely on a full queue.
     """
     from backend.routers.admin import ClientDisconnected, _stream_from_worker
-    from tests.utils.polling import wait_until
+    from tests._helpers.wire import wait_until
 
     thread_failed = []
     thread_success = []

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend.models._base import WireSafeModel
 from backend.models.common import BaseResponse, RangeKeyedRequest
@@ -80,3 +80,55 @@ class PerformanceAggregatesResponse(BaseResponse):
     # request-weighted average, so the values are approximate. Emitted as
     # ``_approx`` (same key the origin Aggregates badge reads).
     approx: bool = Field(default=False, alias="_approx")
+
+
+class AssetTypeBreakdownRow(BaseModel):
+    asset_type: str
+    requests: int
+    egress_bytes: int
+    cache_hit_ratio: float
+    compression_rate: float
+
+
+class CachePerformanceRow(BaseModel):
+    asset_type: str
+    cache_status: str
+    requests: int
+    bytes: int
+
+
+class CompressionPerformanceRow(BaseModel):
+    asset_type: str
+    content_encoding: str
+    requests: int
+    bytes: int
+
+
+class LargeUncompressedAssetRow(BaseModel):
+    url: str
+    requests: int
+    avg_bytes: float
+    total_bytes: int
+    status: int
+
+
+class LowTtlAssetRow(BaseModel):
+    url: str
+    requests: int
+    avg_ttl: float
+    asset_type: str
+
+
+class AssetsAggregatesResponse(BaseResponse):
+    """Composite of assets & shield performance cards."""
+
+    asset_type_breakdown: list[AssetTypeBreakdownRow] = []
+    cache_performance: list[CachePerformanceRow] = []
+    compression_performance: list[CompressionPerformanceRow] = []
+    large_uncompressed_assets: list[LargeUncompressedAssetRow] = []
+    low_ttl_assets: list[LowTtlAssetRow] = []
+    missing_fields: list[str] = Field(default_factory=list)
+
+
+class AssetsRequest(RangeKeyedRequest):
+    """Assets analytics request schema supporting relative-range resolving."""

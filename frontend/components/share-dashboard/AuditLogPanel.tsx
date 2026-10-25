@@ -25,8 +25,7 @@ import {
 import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 
-import { SortableHead, useTableSort, type SortAccessors } from './sortable'
-import { type AuditLog, type ShareStatus } from './utils'
+import { SortableHead, useTableSort, type AuditLog, type ShareStatus, type SortAccessors } from './sortable'
 import { formatDeterministicUTC } from '@/lib/date'
 
 const EVENT_TYPE_FILTER_OPTIONS = [

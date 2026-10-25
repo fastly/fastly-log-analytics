@@ -281,8 +281,8 @@ from pathlib import Path
 
 import pytest
 
-from backend.utils import log_throttle
-from backend.utils.log_throttle import log_once_per
+from backend.utils import telemetry as log_throttle
+from backend.utils.telemetry import log_once_per
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -387,7 +387,7 @@ import pytest
 
 from backend.utils import remote_access as ra
 from backend.utils import tunnel
-from backend.utils.tunnel import session as _session_mod
+from backend.utils.tunnel import manager as _session_mod
 
 if hasattr(_session_mod, "MAX_TRACKED_IPS"):
     login_mod = _session_mod

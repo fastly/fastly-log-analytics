@@ -14,7 +14,7 @@ import {
   maplibreMockFactory,
   installMaplibreSideEffects,
 } from '@/__tests__/helpers/maplibre-mock'
-import { selectMockFactory } from '@/__tests__/helpers/ui-mocks'
+import { selectMockFactory } from '@/__tests__/helpers/page-smoke'
 import { formatBucket } from '@/lib/date'
 import type { CityTooltipData, TooltipInfo } from '@/components/Map/NetworkMap/OverlayLayer'
 import type { PlaybackControls as PlaybackControlsComponent } from '@/components/Map/NetworkMap/controls'

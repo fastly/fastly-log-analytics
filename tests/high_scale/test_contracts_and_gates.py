@@ -6,15 +6,16 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from backend.core.high_scale_contracts import (
-    ArchiveState,
-    validate_archive_transition,
-)
 from backend.high_scale.archive_models import ArchiveManifest, ServingWatermark
 from backend.high_scale.exports import ExportManager, ExportState
 from backend.high_scale.models import (
+    ArchiveState,
     HighScaleConfig,
+    ServiceProfile,
+    StorageProfile,
     build_topology_profile,
+    recommend_retention,
+    validate_archive_transition,
 )
 from backend.high_scale.postgres_control import PostgresControlPlane
 from backend.high_scale.publication import (
@@ -29,7 +30,6 @@ from backend.high_scale.recovery import (
     RecoveryCapacityMeasurement,
     evaluate_recovery_capacity,
 )
-from backend.high_scale.retention import ServiceProfile, StorageProfile, recommend_retention
 
 # ── From test_contracts.py ──
 
@@ -330,8 +330,8 @@ def test_retention_recommendation_accounts_for_rum_and_enabled_fields() -> None:
 
 # ── Merged from test_registry_bootstrap.py ──────────────────────────────────
 
-from backend.high_scale.registry import HighScaleServiceRegistry
 from backend.high_scale.registry_bootstrap import (
+    HighScaleServiceRegistry,
     register_high_scale_services,
     register_high_scale_services_from_environment,
 )

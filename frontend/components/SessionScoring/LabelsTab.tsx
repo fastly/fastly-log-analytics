@@ -6,14 +6,13 @@ import { Pencil, Trash2, Loader2 } from 'lucide-react'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { LabelsHelp } from '@/components/SessionScoring/help-content'
-import { DateTimeCell } from '@/components/DataTable/DateTimeCell'
+import { DateTimeCell, DataTableReadonly } from '@/components/DataTable'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Textarea } from '@/components/ui/textarea'
 import type { ColumnDef } from '@tanstack/react-table'
-import { DataTableReadonly } from '@/components/DataTable'
 import {
   Select,
   SelectContent,
@@ -21,7 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { useScoringLabels, type LabelRow, type LabelValue } from '@/hooks/useScoringLabels'
+import { useScoringLabels, type LabelRow, type LabelValue } from './useScorerTimeseries'
 import { useDeferredDeleteWithUndo } from '@/hooks/useDeferredDeleteWithUndo'
 import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'

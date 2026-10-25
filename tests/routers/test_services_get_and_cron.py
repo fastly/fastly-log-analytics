@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient
 from backend.core import metadata as metadata_db
 from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.main import app
-from tests._helpers.sse import parse_sse_events as _parse_sse_events
+from tests._helpers.wire import parse_sse_events as _parse_sse_events
 from tests.conftest import MOCK_SERVICE_ID
 
 

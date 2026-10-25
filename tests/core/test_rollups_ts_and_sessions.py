@@ -28,8 +28,8 @@ import pytest
 
 from backend.core.rollups.rum import backfill_missing_rum_aggregates, recompute_rum_aggregates, table_exists
 from backend.repositories import rum as rum_repo
-from tests._helpers.dates import past_hour as _past_hour
-from tests._helpers.locks import noop_lock as _noop_lock
+from tests._helpers.rollups import noop_lock as _noop_lock
+from tests._helpers.rollups import past_hour as _past_hour
 from tests._helpers.rollups import writer_patches
 
 

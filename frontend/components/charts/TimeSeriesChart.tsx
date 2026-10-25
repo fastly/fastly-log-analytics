@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useMemo } from 'react'
-import { PlotlyChart } from '@/components/PlotlyChart/PlotlyChart'
+import { PlotlyChart } from '@/components/PlotlyChart'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { makeTimeXAxis, TIME_HOVER_LAYOUT } from '@/lib/chart-helpers'
 import type { PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/plotly'

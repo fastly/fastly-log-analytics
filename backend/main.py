@@ -90,8 +90,10 @@ from backend import config as svcconfig
 from backend.core import clickhouse_client, clickhouse_observer, request_telemetry
 from backend.core import duckdb as _db
 from backend.high_scale import console_access
-from backend.high_scale.registry import get_high_scale_service_registry
-from backend.high_scale.registry_bootstrap import register_high_scale_services_from_environment
+from backend.high_scale.registry_bootstrap import (
+    get_high_scale_service_registry,
+    register_high_scale_services_from_environment,
+)
 
 
 def _initialize_service(cfg: dict):
@@ -945,7 +947,7 @@ async def telemetry_middleware(request: Request, call_next):
                 if not sid:
                     sid = svcconfig.get_active_service_id()
                 if sid:
-                    from backend.utils.usage_logger import flush_usage_log
+                    from backend.utils.telemetry import flush_usage_log
 
                     flush_usage_log(sid)
             except Exception:
@@ -1053,8 +1055,6 @@ from backend.routers import (
     rum,
     security,
     sessions,
-    value,
-    views,
 )
 
 app.include_router(dashboard.router)
@@ -1065,19 +1065,17 @@ app.include_router(query.router)
 app.include_router(network.router)
 app.include_router(performance.router)
 app.include_router(security.router)
-app.include_router(views.router)
+app.include_router(alerts.views_router)
 app.include_router(alerts.router)
 app.include_router(origin.router)
 app.include_router(control_room.router)
-app.include_router(value.router)
 app.include_router(rum.router)
 app.include_router(rum.asset_router)
 
-from backend.routers import (
+from backend.routers import (  # noqa: E402
     admin,
     admin_queries,
     bootstrap,
-    cmcd_admin,
     debug,
     provision,
     services,
@@ -1085,9 +1083,7 @@ from backend.routers import (
     share_admin,
     share_auth,
     share_oauth,
-    sharing_domain,
     usage,
-    web_vitals,
 )
 
 app.include_router(bootstrap.router)
@@ -1099,20 +1095,16 @@ app.include_router(admin.router)
 app.include_router(admin.sync_status.meta_router)
 app.include_router(admin_queries.router)
 app.include_router(provision.router)
-app.include_router(sharing_domain.router)
+app.include_router(share_admin.sharing_domain_router)
 app.include_router(session_scoring.router)
-app.include_router(cmcd_admin.router)
 app.include_router(debug.router)
 app.include_router(share_auth.router)
 app.include_router(share_oauth.router)
 app.include_router(share_admin.router)
 # E2E/dev-only in-process mock OIDC provider — mounted ONLY when OAUTH_MOCK_IDP=1
 # so it never appears in the OpenAPI schema or in production.
-from backend.routers import mock_idp  # noqa: E402
-
-if mock_idp.mock_idp_enabled():
-    app.include_router(mock_idp.router)
-app.include_router(web_vitals.router)
+if share_oauth.mock_idp_enabled():
+    app.include_router(share_oauth.mock_idp_router)
 
 
 # ── Health check ──────────────────────────────────────────────────────────────

@@ -49,8 +49,8 @@ from backend.repositories.utils.response_cache import (
 # much smaller, but the cap is a hard backstop.
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.date_utils import parse_iso_utc
-from backend.utils.log_throttle import log_once_per
 from backend.utils.sql_validator import escape_sql_literal
+from backend.utils.telemetry import log_once_per
 
 logger = logging.getLogger(__name__)
 

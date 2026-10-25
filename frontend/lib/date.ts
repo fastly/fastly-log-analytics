@@ -206,3 +206,7 @@ export function parseExtentMs(value: unknown, edge: 'earliest' | 'latest'): numb
   const t = Date.parse(iso)
   return Number.isNaN(t) ? null : t
 }
+
+export function toQueryDate(d: Date): string {
+  return d.toISOString().slice(0, 19) + 'Z'
+}

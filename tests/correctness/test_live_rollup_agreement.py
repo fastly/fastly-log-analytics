@@ -42,7 +42,7 @@ import duckdb
 import pytest
 
 from backend.repositories._base import QueryRunner
-from tests._helpers.locks import noop_lock as _noop_lock
+from tests._helpers.rollups import noop_lock as _noop_lock
 
 # ── Harness ────────────────────────────────────────────────────────────────
 

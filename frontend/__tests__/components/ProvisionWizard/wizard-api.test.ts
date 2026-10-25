@@ -16,7 +16,7 @@
  * touched). Pure MSW pattern — same approach as
  * `__tests__/lib/api/custom-fields.test.ts`.
  */
-import { API_BASE, serviceStoreMockFactory } from './test-helpers'
+import { API_BASE, serviceStoreMockFactory } from '@/__tests__/helpers/page-smoke'
 import { http, HttpResponse } from 'msw'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 

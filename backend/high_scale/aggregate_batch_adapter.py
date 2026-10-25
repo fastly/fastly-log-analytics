@@ -11,17 +11,96 @@ for the same source object in the shared bookkeeping table.
 
 from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
 from backend.high_scale._batch_adapter_base import (
     BaseClickHouseBatchAdapter,
 )
+from backend.high_scale._common import bucket as _bucket
 from backend.high_scale.publication import (
     HighScaleBatch,
     InsertReceipt,
     _batch_uuid,
 )
+
+DIMENSIONS_BY_DOMAIN: dict[str, tuple[str, ...]] = {
+    "request": (
+        "url",
+        "country",
+        "client_ip",
+        "asn",
+        "host",
+        "method",
+        "status",
+        "cache",
+        "proto",
+        "ua",
+        "referer",
+        "cookie_session",
+        "resp_header_content_encoding",
+        "ttl",
+        "age",
+        "hits",
+        "digest",
+        "city",
+        "region",
+        "metro",
+        "transport",
+        "c_speed",
+        "c_type",
+        "pop",
+        "backend",
+        "edge",
+        "server_region",
+        "tls",
+        "is_ipv6",
+        "conn_requests",
+        "waf",
+        "waf_resp",
+        "waf_ms",
+        "p_type",
+        "p_desc",
+        "ja3",
+        "ja4",
+        "tls_ciphers_sha",
+        "io_input_format",
+        "io_output_format",
+    ),
+    "rum_vitals": ("metric_name",),
+    "rum_errors": ("error_message",),
+    "cmcd": ("cmcd_session",),
+}
+_SOURCE_FIELD_OVERRIDES: dict[str, str] = {
+    "client_ip": "ip",
+    "cmcd_session": "sid",
+}
+
+
+def compute_dimension_counts(
+    domain: str,
+    rows: tuple[Mapping[str, Any], ...],
+) -> tuple[dict[str, Any], ...]:
+    """Count occurrences of each configured dimension's value, per minute bucket."""
+    if domain not in DIMENSIONS_BY_DOMAIN:
+        raise ValueError(f"unsupported aggregate write domain: {domain}")
+    dimensions = DIMENSIONS_BY_DOMAIN[domain]
+    counts: Counter[tuple[str, str, datetime]] = Counter()
+    for row in rows:
+        bucket = _bucket(row.get("timestamp"))
+        if bucket is None:
+            continue
+        for dimension in dimensions:
+            field = _SOURCE_FIELD_OVERRIDES.get(dimension, dimension)
+            value = str(row.get(field, ""))
+            counts[(dimension, value, bucket)] += 1
+    return tuple(
+        {"dimension": dimension, "value": value, "bucket_start": bucket.isoformat(), "count": count}
+        for (dimension, value, bucket), count in counts.items()
+    )
+
 
 _AGGREGATE_TABLES: dict[str, tuple[str, str]] = {
     "request_aggregate": ("request_aggregates", "request_count"),

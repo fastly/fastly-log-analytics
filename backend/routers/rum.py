@@ -63,8 +63,8 @@ from backend.repositories.utils.response_cache import bucket_time_to_minute, dig
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.cache_registry import CacheRegistry
 from backend.utils.date_utils import iso_z, parse_iso_utc
-from backend.utils.error_redaction import correlation_id
 from backend.utils.router_utils import (
+    correlation_id,
     load_service_config,
     make_error,
     raise_internal,

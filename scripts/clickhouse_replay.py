@@ -15,7 +15,7 @@ from backend.core.clickhouse_publication import full_rebuild, replay_unpublished
 from backend.core.clickhouse_rows import MAX_BATCH_ROWS, MAX_DATASET_ROWS, utc
 from backend.core.metadata import pg_connection
 from backend.core.request_telemetry import force_flush
-from backend.utils.usage_logger import flush_usage_log
+from backend.utils.telemetry import flush_usage_log
 
 
 def parser() -> argparse.ArgumentParser:

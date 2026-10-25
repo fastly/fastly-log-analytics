@@ -741,7 +741,7 @@ def test_get_analyst_time_bounds_no_session_returns_open():
 
 
 def test_get_analyst_time_bounds_uses_session_fields():
-    from backend.utils.tunnel.session import AnalystSession
+    from backend.utils.tunnel.manager import AnalystSession
 
     session = AnalystSession(
         session_id="sid",
@@ -850,7 +850,7 @@ def test_clamp_or_400_analyst_no_bounds_still_clamps_to_default():
 def test_get_analyst_time_bounds_window_hours_overrides_old_start():
     """A relative window (e.g. last 24h) should TIGHTEN — `start` is the
     max of the absolute start and the relative one."""
-    from backend.utils.tunnel.session import AnalystSession
+    from backend.utils.tunnel.manager import AnalystSession
 
     session = AnalystSession(
         session_id="sid",

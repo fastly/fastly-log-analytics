@@ -21,8 +21,11 @@ from __future__ import annotations
 import logging
 
 from backend.core import duckdb as _db
-from backend.core.duckdb_recycle import _recycle_rss_threshold_bytes, recycle_once
-from backend.core.memory_guard import maybe_graceful_restart
+from backend.core.duckdb_recycle import (
+    _recycle_rss_threshold_bytes,
+    maybe_graceful_restart,
+    recycle_once,
+)
 from backend.cron.decorators import global_job
 
 logger = logging.getLogger(__name__)

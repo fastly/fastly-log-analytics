@@ -4,17 +4,25 @@ from __future__ import annotations
 
 import logging
 import time as _time
+from typing import Any
 
 import duckdb
 
 from backend import config as svcconfig
 from backend.core.metric_expressions import coalesce
 from backend.repositories._base import QueryRunner, _compact_sql_for_debug, _safe_table, record_duckdb_query
-from backend.repositories._sql import usage as SQL
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
 
 logger = logging.getLogger(__name__)
+
+EDGE_RATIO_PCT = "SELECT count(*) FILTER (WHERE edge = true) * 100.0 / count(*) FROM {table}"
+REQUEST_ROW_STATS = "SELECT COUNT(*), MAX(timestamp) FROM {table}"
+WAF_FLAG_COUNTS_7D = """
+SELECT SUM(CASE WHEN waf = true THEN 1 ELSE 0 END), COUNT(*)
+FROM {table}
+WHERE timestamp >= now() - INTERVAL '7 days'
+"""
 
 _LOG_ACTIVITY_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=30.0)
 _CacheRegistry.register("repositories.usage._LOG_ACTIVITY_CACHE", _LOG_ACTIVITY_CACHE)
@@ -29,7 +37,7 @@ def get_edge_ratio(con: duckdb.DuckDBPyConnection, src: dict) -> tuple[float | N
     actual_cols = [col["name"] for col in get_schema(con, src, stats=False)]
     if "edge" not in actual_cols:
         return None, runner.debug_queries
-    result = runner.execute_with_retry(SQL.EDGE_RATIO_PCT.format(table=table))
+    result = runner.execute_with_retry(EDGE_RATIO_PCT.format(table=table))
     if result is None:
         return None, runner.debug_queries
     row = result.fetchone()
@@ -269,3 +277,18 @@ def _log_activity_fallback(
     service_id = src.get("name") or src.get("service_id", "")
     out = metadata_db.get_log_activity(service_id, start_str, end_str, by)
     return {**out, "_debug_queries": [], "_debug_calls": []}
+
+
+def get_request_row_stats(con, table_name: str) -> tuple[int, Any]:
+    """``(total rows, newest timestamp)`` for the request table in one scan; newest is ``None`` when empty."""
+    row = con.execute(REQUEST_ROW_STATS.format(table=table_name)).fetchone()
+    return (row[0], row[1]) if row else (0, None)
+
+
+get_service_row_stats = get_request_row_stats
+
+
+def get_waf_flag_counts_7d(con, table_name: str) -> tuple[Any, Any] | None:
+    """``(rows with waf = true, total rows)`` over the last 7 days, or ``None`` when no row is returned."""
+    result = con.execute(WAF_FLAG_COUNTS_7D.format(table=table_name)).fetchone()
+    return (result[0], result[1]) if result else None

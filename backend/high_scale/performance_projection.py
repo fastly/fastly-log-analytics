@@ -10,16 +10,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from backend.high_scale._projection_utils import (
+from backend.high_scale._common import (
     bucket as _bucket,
 )
-from backend.high_scale._projection_utils import (
+from backend.high_scale._common import (
     finite_float as _finite_float,
 )
-from backend.high_scale._projection_utils import (
+from backend.high_scale._common import (
     percentiles as _percentiles,
 )
-from backend.high_scale._projection_utils import (
+from backend.high_scale._common import (
     text as _text,
 )
 

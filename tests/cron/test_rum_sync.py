@@ -594,43 +594,34 @@ def test_top_level_rum_enabled_flag_alone_is_sufficient(
 # ── self-heal: RUM enabled, no version pinned at all ────────────────────
 
 
-def test_self_heals_missing_pinned_version_to_default(
-    config_store, frozen_now, mock_fos, mock_detect, mock_purge, mock_reconcile, monkeypatch
-):
-    """A service that's RUM-enabled but has never had a version pinned (the
-    real-world case: a service enabled through the older imperative
-    provisioning path, or before every enable path pinned a version by
-    default) must self-heal to DEFAULT_FARO_VERSION, upload a bundle, AND
-    reconcile the deployed VCL (F-4 audit finding) — the tracker JS
-    unconditionally loads /js/faro-sdk.js with no CDN fallback, so leaving
-    it unpinned OR leaving the live VCL unreconciled both mean a permanent
-    404 for every visitor. Uploading the bundle alone (without the
-    reconcile) was the exact gap: the VCL for a service in this state was
-    generated with faro_version=None and never gained the route."""
+def _seed_unpinned_self_heal(config_store, monkeypatch, mock_fos) -> list[tuple]:
     cfg = _cfg()
-    del cfg["rum"]["faro_version"]
-    del cfg["rum"]["faro_content_hash"]
-    del cfg["rum"]["faro_fos_etag_md5"]
+    for k in ("faro_version", "faro_content_hash", "faro_fos_etag_md5"):
+        cfg["rum"].pop(k, None)
     config_store[SERVICE_ID] = cfg
-
     calls: list[tuple] = []
 
     async def fake_download(service_id, version, token, *, status_cb=None, **kwargs):
         calls.append((service_id, version, token))
-        # Mirror the real download_and_upload_faro's persistence (it saves
-        # faro_version/faro_content_hash/faro_fos_etag_md5 via its own
-        # save_config call) so the integrity check right after self-heal
-        # sees a matching bundle, same as it would in production.
         stored = config_store[service_id]
         rum_cfg = dict(stored.get("rum") or {})
-        rum_cfg["faro_version"] = version
-        rum_cfg["faro_content_hash"] = "adopted-hash"
-        rum_cfg["faro_fos_etag_md5"] = "adopted-etag"
+        rum_cfg.update(
+            {"faro_version": version, "faro_content_hash": "adopted-hash", "faro_fos_etag_md5": "adopted-etag"}
+        )
         stored["rum"] = rum_cfg
         return {"version": version}
 
     monkeypatch.setattr("backend.provision.rum_assets.download_and_upload_faro", fake_download)
     mock_fos(lambda request: _head_response(200, etag="adopted-etag"))
+    return calls
+
+
+def test_self_heals_missing_pinned_version_to_default(
+    config_store, frozen_now, mock_fos, mock_detect, mock_purge, mock_reconcile, monkeypatch
+):
+    """A service that's RUM-enabled but has never had a version pinned must self-heal
+    to DEFAULT_FARO_VERSION, upload a bundle, AND reconcile the deployed VCL (F-4)."""
+    calls = _seed_unpinned_self_heal(config_store, monkeypatch, mock_fos)
 
     rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, None)
 
@@ -643,38 +634,11 @@ def test_self_heals_missing_pinned_version_to_default(
 def test_self_heal_refreshes_stored_vcl_sha_after_reconcile(
     config_store, frozen_now, mock_fos, mock_detect, mock_purge, mock_reconcile, monkeypatch
 ):
-    """#2 audit finding: the self-heal reconciles the deployed VCL to match
-    the freshly adopted DEFAULT_FARO_VERSION, but never refreshed the
-    stored ``rum_vcl_sha``. ``rum_vcl_fingerprint`` now depends on
-    ``faro_version`` (F-4), so ``/rum/status``'s ``vcl_drift`` would report
-    drift FOREVER after this self-heal — including immediately after its
-    own successful reconcile, since the stored sha (computed before a
-    version was ever pinned) can never again match the generator's output.
-
-    Pins: after a successful self-heal reconcile, the persisted config
-    carries a ``rum_vcl_sha`` equal to what ``rum_vcl_fingerprint`` computes
-    for the just-adopted config — mirroring the refresh
-    ``upgrade_faro_version`` already does after its own activation.
-    """
+    """#2 audit finding: after a successful self-heal reconcile, the persisted config
+    carries a ``rum_vcl_sha`` equal to what ``rum_vcl_fingerprint`` computes."""
     from backend.provision.rum_orchestrator_v2 import rum_vcl_fingerprint
 
-    cfg = _cfg()
-    del cfg["rum"]["faro_version"]
-    del cfg["rum"]["faro_content_hash"]
-    del cfg["rum"]["faro_fos_etag_md5"]
-    config_store[SERVICE_ID] = cfg
-
-    async def fake_download(service_id, version, token, *, status_cb=None, **kwargs):
-        stored = config_store[service_id]
-        rum_cfg = dict(stored.get("rum") or {})
-        rum_cfg["faro_version"] = version
-        rum_cfg["faro_content_hash"] = "adopted-hash"
-        rum_cfg["faro_fos_etag_md5"] = "adopted-etag"
-        stored["rum"] = rum_cfg
-        return {"version": version}
-
-    monkeypatch.setattr("backend.provision.rum_assets.download_and_upload_faro", fake_download)
-    mock_fos(lambda request: _head_response(200, etag="adopted-etag"))
+    _seed_unpinned_self_heal(config_store, monkeypatch, mock_fos)
 
     rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, None)
 
@@ -686,39 +650,15 @@ def test_self_heal_does_not_thrash_on_the_next_tick(
     config_store, frozen_now, mock_fos, mock_detect, mock_purge, mock_reconcile, monkeypatch
 ):
     """Once self-healed, the next tick must see a pinned version and an
-    intact bundle and do nothing further — the adoption (and the one-time
-    VCL reconcile that comes with it, F-4) is one-time, not a per-tick
-    re-download / re-reconcile."""
+    intact bundle and do nothing further."""
     _, install_detect = mock_detect
     install_detect(result=False)
-
-    cfg = _cfg()
-    del cfg["rum"]["faro_version"]
-    del cfg["rum"]["faro_content_hash"]
-    del cfg["rum"]["faro_fos_etag_md5"]
-    config_store[SERVICE_ID] = cfg
-
-    calls: list[tuple] = []
-
-    async def fake_download(service_id, version, token, *, status_cb=None, **kwargs):
-        calls.append((service_id, version, token))
-        stored = config_store[service_id]
-        rum_cfg = dict(stored.get("rum") or {})
-        rum_cfg["faro_version"] = version
-        rum_cfg["faro_content_hash"] = "adopted-hash"
-        rum_cfg["faro_fos_etag_md5"] = "adopted-etag"
-        stored["rum"] = rum_cfg
-        return {"version": version}
-
-    monkeypatch.setattr("backend.provision.rum_assets.download_and_upload_faro", fake_download)
-    mock_fos(lambda request: _head_response(200, etag="adopted-etag"))
+    calls = _seed_unpinned_self_heal(config_store, monkeypatch, mock_fos)
 
     rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, None)
     assert len(calls) == 1
     assert len(mock_reconcile) == 1
 
-    # Second tick: version is now pinned and the bundle is intact — no
-    # further adoption, no further download, no further reconcile.
     rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, None)
     assert len(calls) == 1
     assert len(mock_reconcile) == 1
@@ -728,36 +668,16 @@ def test_self_heal_reconcile_failure_does_not_raise(
     config_store, frozen_now, mock_fos, mock_detect, mock_purge, monkeypatch
 ):
     """A Fastly API outage during the self-heal's VCL reconcile (F-4) must
-    degrade to a logged warning, never an exception out of the reconcile
-    step — the bundle is already uploaded and purged by this point, and a
-    reconcile failure here must not roll any of that back or crash the
-    cron tick."""
-    cfg = _cfg()
-    del cfg["rum"]["faro_version"]
-    del cfg["rum"]["faro_content_hash"]
-    del cfg["rum"]["faro_fos_etag_md5"]
-    config_store[SERVICE_ID] = cfg
-
-    async def fake_download(service_id, version, token, *, status_cb=None, **kwargs):
-        stored = config_store[service_id]
-        rum_cfg = dict(stored.get("rum") or {})
-        rum_cfg["faro_version"] = version
-        rum_cfg["faro_content_hash"] = "adopted-hash"
-        rum_cfg["faro_fos_etag_md5"] = "adopted-etag"
-        stored["rum"] = rum_cfg
-        return {"version": version}
-
-    monkeypatch.setattr("backend.provision.rum_assets.download_and_upload_faro", fake_download)
+    degrade to a logged warning, never an exception out of the reconcile step."""
+    _seed_unpinned_self_heal(config_store, monkeypatch, mock_fos)
 
     def raising_reconcile(service_id, token, *args, **kwargs):
         raise RuntimeError("Fastly API unreachable")
 
     monkeypatch.setattr("backend.provision.declarative.reconciler.reconcile_vcl_state", raising_reconcile)
-    mock_fos(lambda request: _head_response(200, etag="adopted-etag"))
 
     rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, None)  # must not raise
 
-    # The bundle adoption itself still landed despite the reconcile failure.
     assert config_store[SERVICE_ID]["rum"]["faro_version"] == DEFAULT_FARO_VERSION
     assert len(mock_purge) == 1
 
@@ -849,6 +769,7 @@ def test_skips_when_no_config(config_store, frozen_now, mock_fos, mock_download,
 
 # ── Merged from test_rum_discovery_contract.py ──────────────────────────────────────────────
 
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
@@ -871,75 +792,95 @@ FAKE_CFG_STANDARD = {
     "secret_access_key": "test_secret",
     "deployment_mode": "standard",
     "access_level": "read_write",
-    "rum": {
-        "enabled": True,
-        "sync_interval_seconds": 30,
-        "commit_interval_mins": 1,
-    },
-    "provisioning": {
-        "access_level": "read_write",
-    },
+    "rum": {"enabled": True, "sync_interval_seconds": 30, "commit_interval_mins": 1},
+    "provisioning": {"access_level": "read_write"},
 }
-
-FAKE_SRC_STANDARD = {
-    "service_id": _RUM_DISC_SERVICE_ID,
-    "name": _RUM_DISC_SERVICE_ID,
-    "bucket": "test-rum-bucket",
-    "endpoint": "https://test.fos.fastly.com",
-    "access_key_id": "test_key",
-    "secret_access_key": "test_secret",
-    "deployment_mode": "standard",
-    "access_level": "read_write",
-    "rum": {
-        "enabled": True,
-        "sync_interval_seconds": 30,
-        "commit_interval_mins": 1,
-    },
-    "provisioning": {
-        "access_level": "read_write",
-    },
-}
+FAKE_SRC_STANDARD = FAKE_CFG_STANDARD
 
 FAKE_CFG_HIGH_SCALE = {
-    "service_id": _RUM_DISC_SERVICE_ID,
-    "name": _RUM_DISC_SERVICE_ID,
-    "bucket": "test-rum-bucket",
-    "endpoint": "https://test.fos.fastly.com",
-    "access_key_id": "test_key",
-    "secret_access_key": "test_secret",
+    **FAKE_CFG_STANDARD,
     "deployment_mode": "high_scale",
-    "access_level": "read_write",
-    "rum": {
-        "enabled": True,
-        "sync_interval_seconds": 15,
-    },
-    "provisioning": {
-        "access_level": "read_write",
-    },
+    "rum": {"enabled": True, "sync_interval_seconds": 15},
 }
+FAKE_SRC_HIGH_SCALE = FAKE_CFG_HIGH_SCALE
 
-FAKE_SRC_HIGH_SCALE = {
-    "service_id": _RUM_DISC_SERVICE_ID,
-    "name": _RUM_DISC_SERVICE_ID,
-    "bucket": "test-rum-bucket",
-    "endpoint": "https://test.fos.fastly.com",
-    "access_key_id": "test_key",
-    "secret_access_key": "test_secret",
-    "deployment_mode": "high_scale",
-    "access_level": "read_write",
-    "rum": {
-        "enabled": True,
-        "sync_interval_seconds": 15,
-    },
-    "provisioning": {
-        "access_level": "read_write",
-    },
-}
+
+@contextmanager
+def _override_service_deps(src: dict, service_id: str | None = _RUM_DISC_SERVICE_ID):
+    app.dependency_overrides[get_source] = lambda: src
+    if service_id is not None:
+        app.dependency_overrides[get_service_id] = lambda: service_id
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.pop(get_source, None)
+        if service_id is not None:
+            app.dependency_overrides.pop(get_service_id, None)
+
+
+def _sync_scheduler_for_cfg(
+    monkeypatch,
+    cfg: dict,
+    src: dict,
+    *,
+    high_scale: bool = False,
+    existing_job_id: str | None = None,
+    patch_add_job: bool = True,
+) -> tuple[Scheduler, MagicMock | None]:
+    sched = Scheduler()
+    sched._sched = MagicMock()
+    mock_job = None
+    if existing_job_id:
+        mock_job = MagicMock()
+        sched._sched.get_job.return_value = mock_job
+        sched._job_ids = {existing_job_id: existing_job_id}
+    else:
+        sched._job_ids = {}
+    monkeypatch.setattr("backend.config.list_configs", lambda: [cfg])
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda s: high_scale)
+    monkeypatch.setattr("backend.cron.scheduler.dev_local_crons_enabled", lambda: True)
+    with patch("backend.cron.scheduler.dev_mode_no_crons", return_value=False):
+        if patch_add_job:
+            with patch.object(sched, "_add_job"):
+                sched._sync_jobs()
+        else:
+            sched._sync_jobs()
+    return sched, mock_job
+
+
+def _setup_high_scale_discovery(
+    monkeypatch,
+    *,
+    run_id: int = 701,
+    broker_url: str = "redis://localhost:6379/0",
+    reconcile=None,
+    discover=None,
+) -> dict:
+    log_calls: list = []
+    end_progress_mock = MagicMock()
+    finalize_mock = MagicMock()
+    monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_HIGH_SCALE)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", broker_url)
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: run_id)
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", lambda *a, **kw: log_calls.append((a, kw)))
+    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", finalize_mock)
+    monkeypatch.setattr(
+        "backend.cron.jobs.rum_sync._reconcile_faro_bundle",
+        reconcile if reconcile is not None else (lambda sid, rid: True),
+    )
+    if discover is not None:
+        monkeypatch.setattr("backend.core.ingest.discover_rum_prefix", discover)
+    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.end_progress", end_progress_mock)
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+    return {"log_calls": log_calls, "end_progress": end_progress_mock, "finalize": finalize_mock}
 
 
 # =============================================================================
 # 1. Dual Architecture & Mode Routing Tests
-
 # =============================================================================
 
 
@@ -948,26 +889,12 @@ def test_mode_routing_standard_registers_rum_sync_and_commit(monkeypatch):
     - APScheduler registers rum_sync_{service_id} and rum_commit_{service_id}
     - Does NOT register rum_discovery_{service_id} or ledger_rum_sweep_{service_id}
     """
-    sched = Scheduler()
-    sched._sched = MagicMock()
-    sched._job_ids = {}
-
-    monkeypatch.setattr("backend.config.list_configs", lambda: [FAKE_CFG_STANDARD])
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_STANDARD)
-    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: False)
-    monkeypatch.setattr("backend.cron.scheduler.dev_local_crons_enabled", lambda: True)
-
-    with (
-        patch.object(sched, "_add_job") as mock_add_job,
-        patch("backend.cron.scheduler.dev_mode_no_crons", return_value=False),
-    ):
-        sched._sync_jobs()
-
-        added_ids = [k for k, v in sched._job_ids.items()]
-        assert f"rum_sync_{_RUM_DISC_SERVICE_ID}" in added_ids
-        assert f"rum_commit_{_RUM_DISC_SERVICE_ID}" in added_ids
-        assert f"rum_discovery_{_RUM_DISC_SERVICE_ID}" not in added_ids
-        assert f"ledger_rum_sweep_{_RUM_DISC_SERVICE_ID}" not in added_ids
+    sched, _ = _sync_scheduler_for_cfg(monkeypatch, FAKE_CFG_STANDARD, FAKE_SRC_STANDARD, high_scale=False)
+    added_ids = list(sched._job_ids.keys())
+    assert f"rum_sync_{_RUM_DISC_SERVICE_ID}" in added_ids
+    assert f"rum_commit_{_RUM_DISC_SERVICE_ID}" in added_ids
+    assert f"rum_discovery_{_RUM_DISC_SERVICE_ID}" not in added_ids
+    assert f"ledger_rum_sweep_{_RUM_DISC_SERVICE_ID}" not in added_ids
 
 
 def test_mode_routing_high_scale_registers_discovery_and_sweep(monkeypatch):
@@ -975,54 +902,25 @@ def test_mode_routing_high_scale_registers_discovery_and_sweep(monkeypatch):
     - Registers rum_discovery_{service_id} and ledger_rum_sweep_{service_id}
     - Does NOT register rum_sync_{service_id} or rum_commit_{service_id}
     """
-    sched = Scheduler()
-    sched._sched = MagicMock()
-    sched._job_ids = {}
-
-    monkeypatch.setattr("backend.config.list_configs", lambda: [FAKE_CFG_HIGH_SCALE])
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
-    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
-    monkeypatch.setattr("backend.cron.scheduler.dev_local_crons_enabled", lambda: True)
-
-    with (
-        patch.object(sched, "_add_job") as mock_add_job,
-        patch("backend.cron.scheduler.dev_mode_no_crons", return_value=False),
-    ):
-        sched._sync_jobs()
-
-        added_ids = [k for k, v in sched._job_ids.items()]
-        assert f"rum_discovery_{_RUM_DISC_SERVICE_ID}" in added_ids
-        assert f"ledger_rum_sweep_{_RUM_DISC_SERVICE_ID}" in added_ids
-        assert f"rum_sync_{_RUM_DISC_SERVICE_ID}" not in added_ids
-        assert f"rum_commit_{_RUM_DISC_SERVICE_ID}" not in added_ids
+    sched, _ = _sync_scheduler_for_cfg(monkeypatch, FAKE_CFG_HIGH_SCALE, FAKE_SRC_HIGH_SCALE, high_scale=True)
+    added_ids = list(sched._job_ids.keys())
+    assert f"rum_discovery_{_RUM_DISC_SERVICE_ID}" in added_ids
+    assert f"ledger_rum_sweep_{_RUM_DISC_SERVICE_ID}" in added_ids
+    assert f"rum_sync_{_RUM_DISC_SERVICE_ID}" not in added_ids
+    assert f"rum_commit_{_RUM_DISC_SERVICE_ID}" not in added_ids
 
 
 def test_mode_routing_no_co_registration_guarantee(monkeypatch):
     """The two pipelines must NEVER both be registered for the same service."""
-    sched = Scheduler()
-    sched._sched = MagicMock()
-    sched._job_ids = {}
-
-    monkeypatch.setattr("backend.config.list_configs", lambda: [FAKE_CFG_HIGH_SCALE])
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
-    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
-    monkeypatch.setattr("backend.cron.scheduler.dev_local_crons_enabled", lambda: True)
-
-    with (
-        patch.object(sched, "_add_job"),
-        patch("backend.cron.scheduler.dev_mode_no_crons", return_value=False),
-    ):
-        sched._sync_jobs()
-
-        has_discovery = f"rum_discovery_{_RUM_DISC_SERVICE_ID}" in sched._job_ids
-        has_sync = f"rum_sync_{_RUM_DISC_SERVICE_ID}" in sched._job_ids
-        assert not (has_discovery and has_sync), "Both discovery and sync must never co-register!"
+    sched, _ = _sync_scheduler_for_cfg(monkeypatch, FAKE_CFG_HIGH_SCALE, FAKE_SRC_HIGH_SCALE, high_scale=True)
+    has_discovery = f"rum_discovery_{_RUM_DISC_SERVICE_ID}" in sched._job_ids
+    has_sync = f"rum_sync_{_RUM_DISC_SERVICE_ID}" in sched._job_ids
+    assert not (has_discovery and has_sync), "Both discovery and sync must never co-register!"
 
 
 def test_high_scale_job_early_exits_in_standard_mode(monkeypatch):
     """_run_rum_discovery_cron exits early if the service is not in high_scale mode."""
     start_calls = []
-
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_STANDARD)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_STANDARD)
     monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: False)
@@ -1039,31 +937,18 @@ def test_high_scale_job_early_exits_in_standard_mode(monkeypatch):
 
 def test_role_gate_admin_executes_normally(monkeypatch):
     """Admin (read_write) service starts progress and completes normally."""
-    log_calls = []
-
-    monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_HIGH_SCALE)
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
-    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
-    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "redis://localhost:6379/0")
-    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 701)
-    monkeypatch.setattr("backend.core.duckdb.log_cron_run", lambda *a, **kw: log_calls.append((a, kw)))
-    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", lambda *a, **k: None)
-    monkeypatch.setattr("backend.cron.jobs.rum_sync._reconcile_faro_bundle", lambda sid, rid: True)
-    monkeypatch.setattr("backend.core.ingest.discover_rum_prefix", lambda sid, prefix_subpath=None, run_id=None: 1)
-    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
-
+    state = _setup_high_scale_discovery(
+        monkeypatch, run_id=701, discover=lambda sid, prefix_subpath=None, run_id=None: 1
+    )
     rum_ledger_mod._run_rum_discovery_cron.__wrapped__(_RUM_DISC_SERVICE_ID)
-    assert len(log_calls) == 1
-    assert log_calls[0][0][3] == "success"
+    assert len(state["log_calls"]) == 1
+    assert state["log_calls"][0][0][3] == "success"
 
 
 def test_role_gate_analyst_path_a_discovery_skipped(monkeypatch):
     """Analyst Path A (read_only access_level) discovery tick early-exits without starting cron run."""
     ro_src = {**FAKE_SRC_HIGH_SCALE, "access_level": "read_only"}
     start_calls = []
-
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_HIGH_SCALE)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: ro_src)
     monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
@@ -1076,24 +961,14 @@ def test_role_gate_analyst_path_a_discovery_skipped(monkeypatch):
 def test_role_gate_analyst_path_a_sync_skipped(monkeypatch):
     """Analyst Path A (read_only access_level) sync tick skips execution in standard mode."""
     ro_src = {**FAKE_SRC_STANDARD, "access_level": "read_only"}
-    ingest_mock = MagicMock()
-
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_STANDARD)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: ro_src)
-    monkeypatch.setattr("backend.core.rum_ingest.ingest_rum_logs", ingest_mock)
+    monkeypatch.setattr("backend.core.rum_ingest.ingest_rum_logs", MagicMock())
 
-    # In rum_sync.py, if access_level is read_only, ingest_rum_logs is not called or skips
-    # Let's verify with manual trigger or function call:
-    app.dependency_overrides[get_source] = lambda: ro_src
-    app.dependency_overrides[get_service_id] = lambda: _RUM_DISC_SERVICE_ID
-    try:
-        client = TestClient(app)
+    with _override_service_deps(ro_src) as client:
         resp = client.post(f"/api/admin/rum/sync/{_RUM_DISC_SERVICE_ID}")
         assert resp.status_code == 403
         assert "read-only" in resp.json()["detail"].lower()
-    finally:
-        app.dependency_overrides.pop(get_source, None)
-        app.dependency_overrides.pop(get_service_id, None)
 
 
 # =============================================================================
@@ -1103,100 +978,56 @@ def test_role_gate_analyst_path_a_sync_skipped(monkeypatch):
 
 def test_cadence_derived_from_sync_interval_seconds():
     """RUM interval respects explicit sync_interval_seconds (bounded to >= 5s)."""
-    rum_cfg = {"sync_interval_seconds": 12}
-    interval = _resolve_rum_sync_interval(rum_cfg, {}, default_request_interval=60)
-    assert interval == 12
-
-    # Minimum bound 5s
-    rum_cfg_small = {"sync_interval_seconds": 2}
-    interval_small = _resolve_rum_sync_interval(rum_cfg_small, {}, default_request_interval=60)
-    assert interval_small == 5
+    assert _resolve_rum_sync_interval({"sync_interval_seconds": 12}, {}, default_request_interval=60) == 12
+    assert _resolve_rum_sync_interval({"sync_interval_seconds": 2}, {}, default_request_interval=60) == 5
 
 
 def test_cadence_fallback_to_request_interval():
     """When sync_interval_seconds is omitted, derives interval from RUM period or falls back to request interval."""
-    # Fallback to default request interval when no RUM log period is configured
-    rum_cfg: dict = {}
-    cfg: dict = {}
-    assert _resolve_rum_sync_interval(rum_cfg, cfg, default_request_interval=45) == 45
-
-    # Derive from rum_log_period (< 60: exact, >= 60: period // 2)
-    rum_cfg_short = {"log_period": 30}
-    assert _resolve_rum_sync_interval(rum_cfg_short, {}, default_request_interval=60) == 30
-
-    cfg_long = {"rum_log_period": 90}
-    assert _resolve_rum_sync_interval({}, cfg_long, default_request_interval=60) == 45
+    assert _resolve_rum_sync_interval({}, {}, default_request_interval=45) == 45
+    assert _resolve_rum_sync_interval({"log_period": 30}, {}, default_request_interval=60) == 30
+    assert _resolve_rum_sync_interval({}, {"rum_log_period": 90}, default_request_interval=60) == 45
 
 
 def test_cadence_skips_when_rum_disabled(monkeypatch):
     """When RUM is disabled (rum.enabled=False), no RUM jobs are registered."""
     disabled_cfg = copy.deepcopy(FAKE_CFG_STANDARD)
     disabled_cfg["rum"]["enabled"] = False
-
-    sched = Scheduler()
-    sched._sched = MagicMock()
-    sched._job_ids = {}
-
-    monkeypatch.setattr("backend.config.list_configs", lambda: [disabled_cfg])
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_STANDARD)
-    monkeypatch.setattr("backend.cron.scheduler.dev_local_crons_enabled", lambda: True)
-
-    with (
-        patch.object(sched, "_add_job"),
-        patch("backend.cron.scheduler.dev_mode_no_crons", return_value=False),
-    ):
-        sched._sync_jobs()
-
-        rum_jobs = [
-            k
-            for k in sched._job_ids
-            if k.startswith(("rum_sync_", "rum_commit_", "rum_discovery_", "ledger_rum_sweep_"))
-        ]
-        assert len(rum_jobs) == 0, f"Expected 0 RUM jobs when disabled, got {rum_jobs}"
+    sched, _ = _sync_scheduler_for_cfg(monkeypatch, disabled_cfg, FAKE_SRC_STANDARD, high_scale=False)
+    rum_jobs = [
+        k for k in sched._job_ids if k.startswith(("rum_sync_", "rum_commit_", "rum_discovery_", "ledger_rum_sweep_"))
+    ]
+    assert len(rum_jobs) == 0, f"Expected 0 RUM jobs when disabled, got {rum_jobs}"
 
 
 def test_cadence_dynamic_rescheduling_standard(monkeypatch):
     """Standard mode: when interval updates, rum_sync_{service_id} is dynamically rescheduled."""
-    sched = Scheduler()
-    sched._sched = MagicMock()
-    mock_job = MagicMock()
-    sched._sched.get_job.return_value = mock_job
-    sched._job_ids = {f"rum_sync_{_RUM_DISC_SERVICE_ID}": f"rum_sync_{_RUM_DISC_SERVICE_ID}"}
-
     updated_cfg = copy.deepcopy(FAKE_CFG_STANDARD)
     updated_cfg["rum"]["sync_interval_seconds"] = 45
-
-    monkeypatch.setattr("backend.config.list_configs", lambda: [updated_cfg])
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_STANDARD)
-    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: False)
-    monkeypatch.setattr("backend.cron.scheduler.dev_local_crons_enabled", lambda: True)
-
-    with patch("backend.cron.scheduler.dev_mode_no_crons", return_value=False):
-        sched._sync_jobs()
-
+    sched, mock_job = _sync_scheduler_for_cfg(
+        monkeypatch,
+        updated_cfg,
+        FAKE_SRC_STANDARD,
+        high_scale=False,
+        existing_job_id=f"rum_sync_{_RUM_DISC_SERVICE_ID}",
+        patch_add_job=False,
+    )
     sched._sched.get_job.assert_called_with(f"rum_sync_{_RUM_DISC_SERVICE_ID}")
     mock_job.reschedule.assert_called_once_with("interval", seconds=45)
 
 
 def test_cadence_dynamic_rescheduling_high_scale(monkeypatch):
     """High-Scale mode: when interval updates, rum_discovery_{service_id} is dynamically rescheduled."""
-    sched = Scheduler()
-    sched._sched = MagicMock()
-    mock_job = MagicMock()
-    sched._sched.get_job.return_value = mock_job
-    sched._job_ids = {f"rum_discovery_{_RUM_DISC_SERVICE_ID}": f"rum_discovery_{_RUM_DISC_SERVICE_ID}"}
-
     updated_cfg = copy.deepcopy(FAKE_CFG_HIGH_SCALE)
     updated_cfg["rum"]["sync_interval_seconds"] = 25
-
-    monkeypatch.setattr("backend.config.list_configs", lambda: [updated_cfg])
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
-    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
-    monkeypatch.setattr("backend.cron.scheduler.dev_local_crons_enabled", lambda: True)
-
-    with patch("backend.cron.scheduler.dev_mode_no_crons", return_value=False):
-        sched._sync_jobs()
-
+    sched, mock_job = _sync_scheduler_for_cfg(
+        monkeypatch,
+        updated_cfg,
+        FAKE_SRC_HIGH_SCALE,
+        high_scale=True,
+        existing_job_id=f"rum_discovery_{_RUM_DISC_SERVICE_ID}",
+        patch_add_job=False,
+    )
     sched._sched.get_job.assert_called_with(f"rum_discovery_{_RUM_DISC_SERVICE_ID}")
     mock_job.reschedule.assert_called_once_with("interval", seconds=25)
 
@@ -1239,28 +1070,16 @@ def test_politeness_gate_not_deferred_by_active_requests(monkeypatch, rum_sync_l
 
 def test_faro_reconcile_warning_in_high_scale(monkeypatch):
     """When Faro reconcile fails in High-Scale mode, run status is 'warning' but discovery proceeds."""
-    log_calls = []
-
-    monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_HIGH_SCALE)
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
-    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
-    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "redis://localhost:6379/0")
-    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 702)
-    monkeypatch.setattr("backend.core.duckdb.log_cron_run", lambda *a, **kw: log_calls.append((a, kw)))
-    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", lambda *a, **k: None)
-    monkeypatch.setattr(
-        "backend.cron.jobs.rum_sync._reconcile_faro_bundle",
-        MagicMock(side_effect=RuntimeError("Transient unpkg 503")),
+    state = _setup_high_scale_discovery(
+        monkeypatch,
+        run_id=702,
+        reconcile=MagicMock(side_effect=RuntimeError("Transient unpkg 503")),
+        discover=lambda sid, prefix_subpath=None, run_id=None: 2,
     )
-    monkeypatch.setattr("backend.core.ingest.discover_rum_prefix", lambda sid, prefix_subpath=None, run_id=None: 2)
-    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
-
     rum_ledger_mod._run_rum_discovery_cron.__wrapped__(_RUM_DISC_SERVICE_ID)
 
-    assert len(log_calls) == 1
-    args, kwargs = log_calls[0]
+    assert len(state["log_calls"]) == 1
+    args, kwargs = state["log_calls"][0]
     assert args[3] == "warning"
     assert kwargs.get("files_downloaded") == 10  # 5 slices * 2 files
     assert "Faro bundle reconcile issue" in kwargs.get("summary", "")
@@ -1300,24 +1119,11 @@ def test_minute_prefix_incremental_discovery_slices(monkeypatch):
     """High-Scale discovery queries exactly 5 minute-slices via rum_minute_list_prefix."""
     discovered_slices = []
 
-    monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_HIGH_SCALE)
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
-    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
-    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "redis://localhost:6379/0")
-    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 704)
-    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
-    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", MagicMock())
-    monkeypatch.setattr("backend.cron.jobs.rum_sync._reconcile_faro_bundle", lambda sid, rid: True)
-
     def mock_discover(sid, prefix_subpath=None, run_id=None):
         discovered_slices.append(prefix_subpath)
         return 1
 
-    monkeypatch.setattr("backend.core.ingest.discover_rum_prefix", mock_discover)
-    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
-
+    _setup_high_scale_discovery(monkeypatch, run_id=704, discover=mock_discover)
     rum_ledger_mod._run_rum_discovery_cron.__wrapped__(_RUM_DISC_SERVICE_ID)
 
     assert len(discovered_slices) == 5
@@ -1330,38 +1136,29 @@ def test_minute_prefix_incremental_discovery_slices(monkeypatch):
 # =============================================================================
 
 
-def test_trap_41_chunk_zero_guaranteed_even_if_budget_expired(monkeypatch):
-    """Trap #41: ingest_rum_logs respects max_seconds but always processes chunk 0."""
-    from backend.core import rum_ingest as rum_ingest_mod
-
+def _setup_rum_ingest_logs_env(monkeypatch, *, run_id: int, new_files: list[str], file_size: int = 100):
     log_calls = []
-
+    download_chunks = []
     monkeypatch.setattr("backend.core.rum_ingest.get_source_for_service", lambda sid: FAKE_SRC_STANDARD)
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_STANDARD)
     monkeypatch.setattr("backend.core.rum_ingest._get_fos_client", lambda src: MagicMock())
-    monkeypatch.setattr("backend.core.rum_ingest.start_cron_run", lambda sid, task: 705)
+    monkeypatch.setattr("backend.core.rum_ingest.start_cron_run", lambda sid, task: run_id)
     monkeypatch.setattr("backend.core.rum_ingest.log_cron_run", lambda *a, **kw: log_calls.append((a, kw)))
     monkeypatch.setattr("backend.core.rum_ingest.finalize_cron_run_if_running", MagicMock())
     monkeypatch.setattr("backend.core.ingest._recover_in_flight", MagicMock())
     monkeypatch.setattr("backend.core.metadata.get_ingested_filenames", lambda *a, **k: set())
 
-    # Return 100 new files (2 chunks of 50)
-    fake_files = [f"s3://test-rum-bucket/raw/rum/beacon_{i:03d}.gz" for i in range(100)]
-    file_sizes = {f: 100 for f in fake_files}
+    file_sizes = {f: file_size for f in new_files}
 
     def fake_list_gen(**kw):
         yield {"type": "status", "message": "found files"}
-        return {"new_files": fake_files, "file_sizes": file_sizes, "stranded_already": []}
-
-    monkeypatch.setattr("backend.core.ingest.list_fos_files", fake_list_gen)
-
-    # Time simulation: already expired at start
-    download_chunks = []
+        return {"new_files": new_files, "file_sizes": file_sizes, "stranded_already": []}
 
     def fake_download(s3, chunk, tmpdir):
         download_chunks.append(chunk)
         return {p: f"/fake/{p}" for p in chunk}, []
 
+    monkeypatch.setattr("backend.core.ingest.list_fos_files", fake_list_gen)
     monkeypatch.setattr("backend.core.ingest._download_chunk_to_local", fake_download)
     monkeypatch.setattr(
         "backend.core.ingest._parse_rum_beacon_file",
@@ -1369,19 +1166,22 @@ def test_trap_41_chunk_zero_guaranteed_even_if_budget_expired(monkeypatch):
     )
     monkeypatch.setattr("backend.core.iceberg.write_to_buffer", MagicMock())
     monkeypatch.setattr("backend.core.metadata.insert_ingested_files", MagicMock())
+    return log_calls, download_chunks
 
-    # Advance time after chunk 0
+
+def test_trap_41_chunk_zero_guaranteed_even_if_budget_expired(monkeypatch):
+    """Trap #41: ingest_rum_logs respects max_seconds but always processes chunk 0."""
+    from backend.core import rum_ingest as rum_ingest_mod
+
+    fake_files = [f"s3://test-rum-bucket/raw/rum/beacon_{i:03d}.gz" for i in range(100)]
+    _, download_chunks = _setup_rum_ingest_logs_env(monkeypatch, run_id=705, new_files=fake_files, file_size=100)
+
     t0 = 1000.0
     times = [t0, t0 + 5.0, t0 + 200.0, t0 + 205.0]
-
-    def mock_time():
-        return times.pop(0) if times else 2000.0
-
-    monkeypatch.setattr(rum_ingest_mod.time, "time", mock_time)
+    monkeypatch.setattr(rum_ingest_mod.time, "time", lambda: times.pop(0) if times else 2000.0)
 
     events = list(rum_ingest_mod.ingest_rum_logs(_RUM_DISC_SERVICE_ID, max_seconds=10))
 
-    # Chunk 0 was processed (50 files), chunk 1 was skipped due to budget
     assert len(download_chunks) == 1
     assert len(download_chunks[0]) == 50
     assert any(evt[0] == "status" and evt[1] == "budget" for evt in events)
@@ -1392,39 +1192,31 @@ def test_trap_41_chunk_zero_guaranteed_even_if_budget_expired(monkeypatch):
 # =============================================================================
 
 
-def test_post_sync_immediate_commit_triggered_on_new_beacons(monkeypatch, rum_sync_lease):
-    """When new beacons arrive (total > 0), _run_rum_commit is triggered immediately."""
+def _run_sync_with_beacon_total(monkeypatch, *, run_id: int, total: int) -> MagicMock:
     commit_mock = MagicMock()
     monkeypatch.setattr("backend.cron.jobs.rum_commit._run_rum_commit", commit_mock)
     monkeypatch.setattr("backend.cron.jobs.rum_sync._reconcile_faro_bundle", lambda sid, rid: True)
     monkeypatch.setattr(
         "backend.cron.jobs.rum_sync.ingest_rum_logs",
-        lambda sid, *a, **kw: iter([("started", 706), ("done", 42)]),
+        lambda sid, *a, **kw: iter([("started", run_id), ("done", total)]),
     )
     monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
     monkeypatch.setattr("backend.cron_progress.add_progress", MagicMock())
     monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
     monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
-
     rum_sync_mod._run_rum_sync.__wrapped__(_RUM_DISC_SERVICE_ID)
+    return commit_mock
+
+
+def test_post_sync_immediate_commit_triggered_on_new_beacons(monkeypatch, rum_sync_lease):
+    """When new beacons arrive (total > 0), _run_rum_commit is triggered immediately."""
+    commit_mock = _run_sync_with_beacon_total(monkeypatch, run_id=706, total=42)
     commit_mock.assert_called_once_with(_RUM_DISC_SERVICE_ID)
 
 
 def test_post_sync_immediate_commit_not_triggered_on_zero_beacons(monkeypatch, rum_sync_lease):
     """When zero new beacons arrive (total == 0), _run_rum_commit is NOT triggered."""
-    commit_mock = MagicMock()
-    monkeypatch.setattr("backend.cron.jobs.rum_commit._run_rum_commit", commit_mock)
-    monkeypatch.setattr("backend.cron.jobs.rum_sync._reconcile_faro_bundle", lambda sid, rid: True)
-    monkeypatch.setattr(
-        "backend.cron.jobs.rum_sync.ingest_rum_logs",
-        lambda sid, *a, **kw: iter([("started", 707), ("done", 0)]),
-    )
-    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.add_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
-
-    rum_sync_mod._run_rum_sync.__wrapped__(_RUM_DISC_SERVICE_ID)
+    commit_mock = _run_sync_with_beacon_total(monkeypatch, run_id=707, total=0)
     commit_mock.assert_not_called()
 
 
@@ -1437,34 +1229,8 @@ def test_accounting_outcome_counters_in_cron_runs(monkeypatch):
     """Outcome counters are computed, normalized, and logged in cron_runs."""
     from backend.core import rum_ingest as rum_ingest_mod
 
-    log_calls = []
-
-    monkeypatch.setattr("backend.core.rum_ingest.get_source_for_service", lambda sid: FAKE_SRC_STANDARD)
-    monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_STANDARD)
-    monkeypatch.setattr("backend.core.rum_ingest._get_fos_client", lambda src: MagicMock())
-    monkeypatch.setattr("backend.core.rum_ingest.start_cron_run", lambda sid, task: 708)
-    monkeypatch.setattr("backend.core.rum_ingest.log_cron_run", lambda *a, **kw: log_calls.append((a, kw)))
-    monkeypatch.setattr("backend.core.rum_ingest.finalize_cron_run_if_running", MagicMock())
-    monkeypatch.setattr("backend.core.ingest._recover_in_flight", MagicMock())
-    monkeypatch.setattr("backend.core.metadata.get_ingested_filenames", lambda *a, **k: set())
-
     fake_file = "s3://test-rum-bucket/raw/rum/beacon_001.gz"
-
-    def fake_list_gen(**kw):
-        yield {"type": "status", "message": "found files"}
-        return {"new_files": [fake_file], "file_sizes": {fake_file: 50}, "stranded_already": []}
-
-    monkeypatch.setattr("backend.core.ingest.list_fos_files", fake_list_gen)
-    monkeypatch.setattr(
-        "backend.core.ingest._download_chunk_to_local",
-        lambda s3, chunk, tmpdir: ({fake_file: "/fake/path"}, []),
-    )
-    monkeypatch.setattr(
-        "backend.core.ingest._parse_rum_beacon_file",
-        lambda p, sid: ([{"pathname": "/test", "metric_name": "pageview", "metric_value": 1.0}], [], []),
-    )
-    monkeypatch.setattr("backend.core.iceberg.write_to_buffer", MagicMock())
-    monkeypatch.setattr("backend.core.metadata.insert_ingested_files", MagicMock())
+    log_calls, _ = _setup_rum_ingest_logs_env(monkeypatch, run_id=708, new_files=[fake_file], file_size=50)
 
     list(rum_ingest_mod.ingest_rum_logs(_RUM_DISC_SERVICE_ID))
 
@@ -1484,29 +1250,15 @@ def test_accounting_outcome_counters_in_cron_runs(monkeypatch):
 
 def test_guaranteed_cleanup_rum_discovery(monkeypatch):
     """end_progress and finalize_cron_run_if_running are guaranteed in finally on error."""
-    end_progress_mock = MagicMock()
-    finalize_mock = MagicMock()
-
-    monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_HIGH_SCALE)
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
-    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
-    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "redis://localhost:6379/0")
-    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 709)
-    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
-    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", finalize_mock)
-    monkeypatch.setattr("backend.cron.jobs.rum_sync._reconcile_faro_bundle", lambda sid, rid: True)
-    monkeypatch.setattr(
-        "backend.core.ingest.discover_rum_prefix",
-        MagicMock(side_effect=RuntimeError("FOS connection aborted")),
+    state = _setup_high_scale_discovery(
+        monkeypatch,
+        run_id=709,
+        discover=MagicMock(side_effect=RuntimeError("FOS connection aborted")),
     )
-    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.end_progress", end_progress_mock)
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
-
     rum_ledger_mod._run_rum_discovery_cron.__wrapped__(_RUM_DISC_SERVICE_ID)
 
-    end_progress_mock.assert_called_once_with(709)
-    finalize_mock.assert_called_once_with(FAKE_SRC_HIGH_SCALE, "rum_discovery", 709)
+    state["end_progress"].assert_called_once_with(709)
+    state["finalize"].assert_called_once_with(FAKE_SRC_HIGH_SCALE, "rum_discovery", 709)
 
 
 def test_guaranteed_cleanup_rum_sync(monkeypatch, rum_sync_lease):
@@ -1538,16 +1290,13 @@ def test_guaranteed_cleanup_rum_sync(monkeypatch, rum_sync_lease):
 
 def test_manual_trigger_rum_sync_success():
     """POST /api/admin/rum/sync/{service_id} returns 200, run_id, and starts execution."""
-    app.dependency_overrides[get_source] = lambda: FAKE_SRC_STANDARD
-    app.dependency_overrides[get_service_id] = lambda: _RUM_DISC_SERVICE_ID
-    try:
+    with _override_service_deps(FAKE_SRC_STANDARD) as client:
         with (
             patch("backend.core.duckdb.start_cron_run", return_value=801),
             patch("backend.cron_progress.start_progress"),
             patch("backend.cron.jobs.rum_sync._run_rum_sync"),
             patch("backend.repositories.dashboard.invalidate_service"),
         ):
-            client = TestClient(app)
             resp = client.post(
                 f"/api/admin/rum/sync/{_RUM_DISC_SERVICE_ID}",
                 headers={"x-fastly-service-id": _RUM_DISC_SERVICE_ID},
@@ -1558,16 +1307,11 @@ def test_manual_trigger_rum_sync_success():
         assert body["ok"] is True
         assert body["run_id"] == 801
         assert "started" in body["message"].lower()
-    finally:
-        app.dependency_overrides.pop(get_source, None)
-        app.dependency_overrides.pop(get_service_id, None)
 
 
 def test_manual_trigger_rum_sync_reentrancy():
     """POST /api/admin/rum/sync/{service_id} returns 200 with already running message."""
-    app.dependency_overrides[get_source] = lambda: FAKE_SRC_STANDARD
-    app.dependency_overrides[get_service_id] = lambda: _RUM_DISC_SERVICE_ID
-    try:
+    with _override_service_deps(FAKE_SRC_STANDARD) as client:
         with (
             patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("Already running")),
             patch(
@@ -1576,7 +1320,6 @@ def test_manual_trigger_rum_sync_reentrancy():
             ),
             patch("backend.repositories.dashboard.invalidate_service"),
         ):
-            client = TestClient(app)
             resp = client.post(
                 f"/api/admin/rum/sync/{_RUM_DISC_SERVICE_ID}",
                 headers={"x-fastly-service-id": _RUM_DISC_SERVICE_ID},
@@ -1587,22 +1330,16 @@ def test_manual_trigger_rum_sync_reentrancy():
         assert body["ok"] is True
         assert body["run_id"] == 802
         assert "already running" in body["message"].lower()
-    finally:
-        app.dependency_overrides.pop(get_source, None)
-        app.dependency_overrides.pop(get_service_id, None)
 
 
 def test_manual_trigger_rum_sync_busy_503():
     """POST /api/admin/rum/sync/{service_id} surfaces 503 cron_busy when lease cannot be acquired."""
-    app.dependency_overrides[get_source] = lambda: FAKE_SRC_STANDARD
-    app.dependency_overrides[get_service_id] = lambda: _RUM_DISC_SERVICE_ID
-    try:
+    with _override_service_deps(FAKE_SRC_STANDARD) as client:
         with (
             patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("Lease lock busy")),
             patch("backend.cron_progress.list_active_runs", return_value=[]),
             patch("backend.repositories.dashboard.invalidate_service"),
         ):
-            client = TestClient(app)
             resp = client.post(
                 f"/api/admin/rum/sync/{_RUM_DISC_SERVICE_ID}",
                 headers={"x-fastly-service-id": _RUM_DISC_SERVICE_ID},
@@ -1611,9 +1348,6 @@ def test_manual_trigger_rum_sync_busy_503():
         assert resp.status_code == 503
         body = resp.json()
         assert body["detail"]["error"] == "cron_busy"
-    finally:
-        app.dependency_overrides.pop(get_source, None)
-        app.dependency_overrides.pop(get_service_id, None)
 
 
 def test_manual_trigger_rum_sync_read_only_rejected_403():
@@ -1636,16 +1370,13 @@ def test_manual_trigger_rum_sync_non_admin_rejected_403():
 
 def test_manual_trigger_rum_discovery_success():
     """POST /api/admin/rum/discovery/{service_id} returns 200, run_id, and starts job."""
-    app.dependency_overrides[get_source] = lambda: FAKE_SRC_HIGH_SCALE
-    app.dependency_overrides[get_service_id] = lambda: _RUM_DISC_SERVICE_ID
-    try:
+    with _override_service_deps(FAKE_SRC_HIGH_SCALE) as client:
         with (
             patch("backend.core.duckdb.start_cron_run", return_value=803),
             patch("backend.cron_progress.start_progress"),
             patch("backend.cron.jobs.rum_ledger._run_rum_discovery_cron"),
             patch("backend.repositories.dashboard.invalidate_service"),
         ):
-            client = TestClient(app)
             resp = client.post(
                 f"/api/admin/rum/discovery/{_RUM_DISC_SERVICE_ID}",
                 headers={"x-fastly-service-id": _RUM_DISC_SERVICE_ID},
@@ -1656,9 +1387,6 @@ def test_manual_trigger_rum_discovery_success():
         assert body["ok"] is True
         assert body["run_id"] == 803
         assert "started" in body["message"].lower()
-    finally:
-        app.dependency_overrides.pop(get_source, None)
-        app.dependency_overrides.pop(get_service_id, None)
 
 
 def test_manual_trigger_rum_discovery_standard_mode_rejected_400():
@@ -1681,15 +1409,12 @@ def test_manual_trigger_rum_discovery_read_only_rejected_403():
 
 def test_manual_trigger_rum_discovery_busy_503():
     """POST /api/admin/rum/discovery/{service_id} returns 503 on lease conflict."""
-    app.dependency_overrides[get_source] = lambda: FAKE_SRC_HIGH_SCALE
-    app.dependency_overrides[get_service_id] = lambda: _RUM_DISC_SERVICE_ID
-    try:
+    with _override_service_deps(FAKE_SRC_HIGH_SCALE) as client:
         with (
             patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("Lease locked")),
             patch("backend.cron_progress.list_active_runs", return_value=[]),
             patch("backend.repositories.dashboard.invalidate_service"),
         ):
-            client = TestClient(app)
             resp = client.post(
                 f"/api/admin/rum/discovery/{_RUM_DISC_SERVICE_ID}",
                 headers={"x-fastly-service-id": _RUM_DISC_SERVICE_ID},
@@ -1697,9 +1422,6 @@ def test_manual_trigger_rum_discovery_busy_503():
 
         assert resp.status_code == 503
         assert resp.json()["detail"]["error"] == "cron_busy"
-    finally:
-        app.dependency_overrides.pop(get_source, None)
-        app.dependency_overrides.pop(get_service_id, None)
 
 
 # =============================================================================
@@ -1709,36 +1431,21 @@ def test_manual_trigger_rum_discovery_busy_503():
 
 def test_rum_discovery_missing_broker_error(monkeypatch):
     """When CELERY_BROKER_URL is empty, rum_discovery logs an error run and exits without discovering."""
-    log_calls = []
-
-    monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_HIGH_SCALE)
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
-    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
-    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "")
-    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 99)
-    monkeypatch.setattr(
-        "backend.core.duckdb.log_cron_run",
-        lambda src, task, elapsed, status, **kw: log_calls.append((task, elapsed, status, kw)),
-    )
-    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", lambda *a, **kw: None)
-    monkeypatch.setattr("backend.cron.jobs.rum_sync._reconcile_faro_bundle", lambda sid, rid: True)
-    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
-
     discover_calls = []
-    monkeypatch.setattr(
-        "backend.core.ingest.discover_rum_prefix",
-        lambda *a, **kw: discover_calls.append(a),
+    state = _setup_high_scale_discovery(
+        monkeypatch,
+        run_id=99,
+        broker_url="",
+        discover=lambda *a, **kw: discover_calls.append(a),
     )
 
     rum_ledger_mod._run_rum_discovery_cron.__wrapped__(_RUM_DISC_SERVICE_ID)
 
     assert len(discover_calls) == 0, "Should not attempt discovery without broker URL"
-    assert len(log_calls) == 1
-    task, _elapsed, status, kw = log_calls[0]
-    assert task == "rum_discovery"
-    assert status == "error"
+    assert len(state["log_calls"]) == 1
+    args, kw = state["log_calls"][0]
+    assert args[1] == "rum_discovery"
+    assert args[3] == "error"
     assert "no broker URL" in (kw.get("summary") or "")
     assert "CELERY_BROKER_URL" in (kw.get("error_message") or "")
     assert kw.get("run_id") == 99
@@ -1746,34 +1453,17 @@ def test_rum_discovery_missing_broker_error(monkeypatch):
 
 def test_rum_discovery_broker_unavailable_error(monkeypatch):
     """When broker enqueue fails during prefix discovery, rum_discovery records error status and error_message."""
-    log_calls = []
-
-    monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_HIGH_SCALE)
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
-    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
-    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "redis://localhost:6379/0")
-    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 100)
-    monkeypatch.setattr(
-        "backend.core.duckdb.log_cron_run",
-        lambda src, task, elapsed, status, **kw: log_calls.append((task, elapsed, status, kw)),
-    )
-    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", lambda *a, **kw: None)
-    monkeypatch.setattr("backend.cron.jobs.rum_sync._reconcile_faro_bundle", lambda sid, rid: True)
-    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
 
     def _raise_broker_err(*_a, **_kw):
         raise ConnectionError("Valkey broker connection refused")
 
-    monkeypatch.setattr("backend.core.ingest.discover_rum_prefix", _raise_broker_err)
-
+    state = _setup_high_scale_discovery(monkeypatch, run_id=100, discover=_raise_broker_err)
     rum_ledger_mod._run_rum_discovery_cron.__wrapped__(_RUM_DISC_SERVICE_ID)
 
-    assert len(log_calls) == 1
-    task, _elapsed, status, kw = log_calls[0]
-    assert task == "rum_discovery"
-    assert status == "error"
+    assert len(state["log_calls"]) == 1
+    args, kw = state["log_calls"][0]
+    assert args[1] == "rum_discovery"
+    assert args[3] == "error"
     assert kw.get("summary") == "RUM discovery failed"
     assert "Valkey broker connection refused" in (kw.get("error_message") or "")
     assert kw.get("run_id") == 100
@@ -1873,7 +1563,6 @@ def test_rum_sync_unknown_service_is_a_clean_skip(monkeypatch):
 # ── Merged from test_rum_commit_contract.py ──────────────────────────────────────────────
 
 import os
-from contextlib import contextmanager
 from datetime import UTC, datetime
 
 import pyarrow as pa
@@ -1902,6 +1591,61 @@ _RUM_COMMIT_FAKE_SRC = {
 }
 
 
+def _setup_rum_commit_env(monkeypatch, *, run_id: int = 1101, disk_ok: tuple[bool, str] = (True, "")) -> dict:
+    log_calls: list = []
+    ledger_calls: list = []
+    status_calls: list = []
+    sync_calls: list = []
+    start_progress = MagicMock()
+    end_progress = MagicMock()
+    monkeypatch.setattr("backend.config.load_config", lambda sid: _RUM_COMMIT_FAKE_CFG)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: _RUM_COMMIT_FAKE_SRC)
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: run_id)
+    monkeypatch.setattr("backend.cron.scheduler._check_disk_space", lambda dir, sid, task: disk_ok)
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: "/tmp/cache")
+    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", lambda *a, **k: None)
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", lambda *a, **kw: log_calls.append((a, kw)))
+    monkeypatch.setattr(
+        "backend.core.ingest._mark_ledger_published", lambda sid, rum=False: ledger_calls.append((sid, rum))
+    )
+    monkeypatch.setattr("backend.config.update_status", lambda sid, status: status_calls.append((sid, status)))
+    monkeypatch.setattr("backend.core.iceberg.sync_data", lambda src, table_name: sync_calls.append(table_name))
+    monkeypatch.setattr("backend.cron_progress.start_progress", start_progress)
+    monkeypatch.setattr("backend.cron_progress.end_progress", end_progress)
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+    return {
+        "log_calls": log_calls,
+        "ledger_calls": ledger_calls,
+        "status_calls": status_calls,
+        "sync_calls": sync_calls,
+        "start_progress": start_progress,
+        "end_progress": end_progress,
+    }
+
+
+def _make_vital_row(timestamp: datetime, **overrides) -> dict:
+    base = {
+        "timestamp": timestamp,
+        "metric_name": "LCP",
+        "metric_value": 2.5,
+        "metric_rating": "good",
+        "pathname": "/home",
+        "browser": "Chrome",
+        "os": "macOS",
+        "device": "Desktop",
+        "cid": "cid_user1",
+        "req_id": "req_100",
+        "city": "Denver",
+        "region": "CO",
+        "country": "US",
+        "pop": "DEN",
+        "tls": "1.3",
+        "ttfb": 0.12,
+    }
+    base.update(overrides)
+    return base
+
+
 @pytest.fixture
 def mock_orchestration_env(monkeypatch):
 
@@ -1926,29 +1670,8 @@ def test_contract_full_commit_success_lifecycle(monkeypatch, mock_orchestration_
     - SSE sync-status notification published
     - Progress cleanly starts and ends
     """
-    log_calls = []
-    ledger_calls = []
-    status_calls = []
     sse_published = []
-
-    monkeypatch.setattr("backend.config.load_config", lambda sid: _RUM_COMMIT_FAKE_CFG)
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: _RUM_COMMIT_FAKE_SRC)
-    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 1101)
-    monkeypatch.setattr("backend.cron.scheduler._check_disk_space", lambda dir, sid, task: (True, ""))
-    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: "/tmp/cache")
-    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", lambda *a, **k: None)
-    monkeypatch.setattr(
-        "backend.core.duckdb.log_cron_run",
-        lambda *args, **kwargs: log_calls.append((args, kwargs)),
-    )
-    monkeypatch.setattr(
-        "backend.core.ingest._mark_ledger_published",
-        lambda sid, rum=False: ledger_calls.append((sid, rum)),
-    )
-    monkeypatch.setattr(
-        "backend.config.update_status",
-        lambda sid, status: status_calls.append((sid, status)),
-    )
+    state = _setup_rum_commit_env(monkeypatch, run_id=1101)
 
     def mock_commit(src, table_name):
         if table_name == "client_vitals":
@@ -1958,13 +1681,6 @@ def test_contract_full_commit_success_lifecycle(monkeypatch, mock_orchestration_
         return {}
 
     monkeypatch.setattr("backend.core.iceberg.commit_buffer", mock_commit)
-    monkeypatch.setattr("backend.core.iceberg.sync_data", lambda src, table_name: None)
-
-    start_progress = MagicMock()
-    end_progress = MagicMock()
-    monkeypatch.setattr("backend.cron_progress.start_progress", start_progress)
-    monkeypatch.setattr("backend.cron_progress.end_progress", end_progress)
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
 
     latest = datetime(2026, 10, 11, 14, 30, tzinfo=UTC)
     monkeypatch.setattr("backend.core.rollups.rum.rum_count_and_latest", lambda con: (60, latest))
@@ -1979,15 +1695,15 @@ def test_contract_full_commit_success_lifecycle(monkeypatch, mock_orchestration_
 
     rum_commit_mod._run_rum_commit.__wrapped__(_RUM_COMMIT_SERVICE_ID)
 
-    start_progress.assert_called_once_with(1101, service_id=_RUM_COMMIT_SERVICE_ID, task="rum_commit")
-    end_progress.assert_called_once_with(1101)
+    state["start_progress"].assert_called_once_with(1101, service_id=_RUM_COMMIT_SERVICE_ID, task="rum_commit")
+    state["end_progress"].assert_called_once_with(1101)
 
     # Ledger publication verified
-    assert ledger_calls == [(_RUM_COMMIT_SERVICE_ID, True)]
+    assert state["ledger_calls"] == [(_RUM_COMMIT_SERVICE_ID, True)]
 
     # Cron run log verified
-    assert len(log_calls) == 1
-    args, kwargs = log_calls[0]
+    assert len(state["log_calls"]) == 1
+    args, kwargs = state["log_calls"][0]
     assert args[3] == "success"
     assert kwargs.get("run_id") == 1101
     assert kwargs.get("rows_ingested") == 60
@@ -1998,7 +1714,7 @@ def test_contract_full_commit_success_lifecycle(monkeypatch, mock_orchestration_
     assert sse_published[0][0] == _RUM_COMMIT_SERVICE_ID
 
     # Freshness update verified
-    rum_updates = [s for _, s in status_calls if "rum" in s]
+    rum_updates = [s for _, s in state["status_calls"] if "rum" in s]
     assert rum_updates
     assert rum_updates[-1]["rum"]["total_rows"] == 60
     assert rum_updates[-1]["rum"]["latest_log_at"] == latest.isoformat()
@@ -2011,24 +1727,7 @@ def test_contract_partial_failure_warning_and_ledger_protection(monkeypatch, moc
     - Successful table (client_vitals) syncs metadata
     - Exception is safely handled without raising
     """
-    log_calls = []
-    ledger_calls = []
-    sync_calls = []
-
-    monkeypatch.setattr("backend.config.load_config", lambda sid: _RUM_COMMIT_FAKE_CFG)
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: _RUM_COMMIT_FAKE_SRC)
-    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 1102)
-    monkeypatch.setattr("backend.cron.scheduler._check_disk_space", lambda dir, sid, task: (True, ""))
-    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: "/tmp/cache")
-    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", lambda *a, **k: None)
-    monkeypatch.setattr(
-        "backend.core.duckdb.log_cron_run",
-        lambda *args, **kwargs: log_calls.append((args, kwargs)),
-    )
-    monkeypatch.setattr(
-        "backend.core.ingest._mark_ledger_published",
-        lambda sid, rum=False: ledger_calls.append((sid, rum)),
-    )
+    state = _setup_rum_commit_env(monkeypatch, run_id=1102)
 
     def mock_commit(src, table_name):
         if table_name == "client_vitals":
@@ -2036,23 +1735,16 @@ def test_contract_partial_failure_warning_and_ledger_protection(monkeypatch, moc
         raise OSError("Transient FOS S3 error on errors commit")
 
     monkeypatch.setattr("backend.core.iceberg.commit_buffer", mock_commit)
-    monkeypatch.setattr(
-        "backend.core.iceberg.sync_data",
-        lambda src, table_name: sync_calls.append(table_name),
-    )
-    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
 
     rum_commit_mod._run_rum_commit.__wrapped__(_RUM_COMMIT_SERVICE_ID)
 
     # Client vitals metadata sync occurred
-    assert "client_vitals" in sync_calls
+    assert "client_vitals" in state["sync_calls"]
     # Ledger publication was BLOCKED
-    assert ledger_calls == []
+    assert state["ledger_calls"] == []
 
-    assert len(log_calls) == 1
-    args, kwargs = log_calls[0]
+    assert len(state["log_calls"]) == 1
+    args, kwargs = state["log_calls"][0]
     assert args[3] == "warning"
     assert kwargs.get("rows_ingested") == 30
     assert "Partial RUM commit" in kwargs.get("summary", "")
@@ -2066,23 +1758,7 @@ def test_contract_both_tables_failure_error_status(monkeypatch, mock_orchestrati
     - Summary and error message describe both table failures
     - Ledger publication is blocked
     """
-    log_calls = []
-    ledger_calls = []
-
-    monkeypatch.setattr("backend.config.load_config", lambda sid: _RUM_COMMIT_FAKE_CFG)
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: _RUM_COMMIT_FAKE_SRC)
-    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 1103)
-    monkeypatch.setattr("backend.cron.scheduler._check_disk_space", lambda dir, sid, task: (True, ""))
-    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: "/tmp/cache")
-    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", lambda *a, **k: None)
-    monkeypatch.setattr(
-        "backend.core.duckdb.log_cron_run",
-        lambda *args, **kwargs: log_calls.append((args, kwargs)),
-    )
-    monkeypatch.setattr(
-        "backend.core.ingest._mark_ledger_published",
-        lambda sid, rum=False: ledger_calls.append((sid, rum)),
-    )
+    state = _setup_rum_commit_env(monkeypatch, run_id=1103)
 
     def mock_commit(src, table_name):
         if table_name == "client_vitals":
@@ -2090,15 +1766,12 @@ def test_contract_both_tables_failure_error_status(monkeypatch, mock_orchestrati
         raise RuntimeError("Errors commit network timeout")
 
     monkeypatch.setattr("backend.core.iceberg.commit_buffer", mock_commit)
-    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
 
     rum_commit_mod._run_rum_commit.__wrapped__(_RUM_COMMIT_SERVICE_ID)
 
-    assert ledger_calls == []
-    assert len(log_calls) == 1
-    args, kwargs = log_calls[0]
+    assert state["ledger_calls"] == []
+    assert len(state["log_calls"]) == 1
+    args, kwargs = state["log_calls"][0]
     assert args[3] == "error"
     assert "RUM commit failed for both tables" in kwargs.get("summary", "")
     assert "Vitals commit network timeout" in kwargs.get("error_message", "")
@@ -2111,19 +1784,8 @@ def test_contract_low_disk_precheck_abort(monkeypatch, mock_orchestration_env):
     - Commit and sync are never attempted
     """
     commit_calls = []
-    log_calls = []
-
-    monkeypatch.setattr("backend.config.load_config", lambda sid: _RUM_COMMIT_FAKE_CFG)
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: _RUM_COMMIT_FAKE_SRC)
-    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 1104)
-    monkeypatch.setattr(
-        "backend.cron.scheduler._check_disk_space",
-        lambda dir, sid, task: (False, "Free disk space is 250MB (< 500MB minimum)"),
-    )
-    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: "/tmp/cache")
-    monkeypatch.setattr(
-        "backend.core.duckdb.log_cron_run",
-        lambda *args, **kwargs: log_calls.append((args, kwargs)),
+    state = _setup_rum_commit_env(
+        monkeypatch, run_id=1104, disk_ok=(False, "Free disk space is 250MB (< 500MB minimum)")
     )
     monkeypatch.setattr(
         "backend.core.iceberg.commit_buffer",
@@ -2133,8 +1795,8 @@ def test_contract_low_disk_precheck_abort(monkeypatch, mock_orchestration_env):
     rum_commit_mod._run_rum_commit.__wrapped__(_RUM_COMMIT_SERVICE_ID)
 
     assert commit_calls == []
-    assert len(log_calls) == 1
-    args, kwargs = log_calls[0]
+    assert len(state["log_calls"]) == 1
+    args, kwargs = state["log_calls"][0]
     assert args[3] == "error"
     assert "RUM commit aborted" in kwargs.get("summary", "")
     assert "Free disk space is 250MB" in kwargs.get("error_message", "")
@@ -2145,7 +1807,6 @@ def test_contract_automated_tick_no_deferral(monkeypatch, mock_orchestration_env
     - Automated ticks proceed immediately and are NOT deferred by in-flight queries.
     """
     start_calls = []
-
     monkeypatch.setattr("backend.config.load_config", lambda sid: _RUM_COMMIT_FAKE_CFG)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: _RUM_COMMIT_FAKE_SRC)
     monkeypatch.setattr(
@@ -2185,98 +1846,29 @@ def test_contract_rum_buffer_natural_key_deduplication(tmp_path):
 
     ts1 = datetime(2026, 10, 11, 10, 0, tzinfo=UTC)
     ts2 = datetime(2026, 10, 11, 10, 5, tzinfo=UTC)
+    beacon_a = _make_vital_row(ts1)
+    beacon_b = _make_vital_row(
+        ts2, metric_name="CLS", metric_value=0.05, pathname="/about", cid="cid_user2", req_id="req_101", ttfb=0.08
+    )
+    beacon_c = _make_vital_row(
+        ts2, metric_name="FID", metric_value=15.0, pathname="/contact", cid="cid_user3", req_id="req_102", ttfb=0.09
+    )
 
     # Chunk 1: Beacon A (LCP) and Beacon B (CLS)
-    chunk1_table = pa.Table.from_pylist(
-        [
-            {
-                "timestamp": ts1,
-                "metric_name": "LCP",
-                "metric_value": 2.5,
-                "metric_rating": "good",
-                "pathname": "/home",
-                "browser": "Chrome",
-                "os": "macOS",
-                "device": "Desktop",
-                "cid": "cid_user1",
-                "req_id": "req_100",
-                "city": "Denver",
-                "region": "CO",
-                "country": "US",
-                "pop": "DEN",
-                "tls": "1.3",
-                "ttfb": 0.12,
-            },
-            {
-                "timestamp": ts2,
-                "metric_name": "CLS",
-                "metric_value": 0.05,
-                "metric_rating": "good",
-                "pathname": "/about",
-                "browser": "Chrome",
-                "os": "macOS",
-                "device": "Desktop",
-                "cid": "cid_user2",
-                "req_id": "req_101",
-                "city": "Denver",
-                "region": "CO",
-                "country": "US",
-                "pop": "DEN",
-                "tls": "1.3",
-                "ttfb": 0.08,
-            },
-        ],
-        schema=CLIENT_VITALS_ARROW_SCHEMA,
+    pq.write_table(
+        pa.Table.from_pylist([beacon_a, beacon_b], schema=CLIENT_VITALS_ARROW_SCHEMA),
+        str(buf_dir / "buf1.parquet"),
     )
-    pq.write_table(chunk1_table, str(buf_dir / "buf1.parquet"))
 
     res1 = _commit_buffer_impl(src, table_name="client_vitals")
     assert res1["files_committed"] == 1
     assert res1["rows_committed"] == 2
 
     # Chunk 2: Duplicate of Beacon A + New Beacon C (FID)
-    chunk2_table = pa.Table.from_pylist(
-        [
-            {
-                "timestamp": ts1,
-                "metric_name": "LCP",
-                "metric_value": 2.5,
-                "metric_rating": "good",
-                "pathname": "/home",
-                "browser": "Chrome",
-                "os": "macOS",
-                "device": "Desktop",
-                "cid": "cid_user1",
-                "req_id": "req_100",
-                "city": "Denver",
-                "region": "CO",
-                "country": "US",
-                "pop": "DEN",
-                "tls": "1.3",
-                "ttfb": 0.12,
-            },
-            {
-                "timestamp": ts2,
-                "metric_name": "FID",
-                "metric_value": 15.0,
-                "metric_rating": "good",
-                "pathname": "/contact",
-                "browser": "Chrome",
-                "os": "macOS",
-                "device": "Desktop",
-                "cid": "cid_user3",
-                "req_id": "req_102",
-                "city": "Denver",
-                "region": "CO",
-                "country": "US",
-                "pop": "DEN",
-                "tls": "1.3",
-                "ttfb": 0.09,
-            },
-        ],
-        schema=CLIENT_VITALS_ARROW_SCHEMA,
+    pq.write_table(
+        pa.Table.from_pylist([beacon_a, beacon_c], schema=CLIENT_VITALS_ARROW_SCHEMA),
+        str(buf_dir / "buf2.parquet"),
     )
-    pq.write_table(chunk2_table, str(buf_dir / "buf2.parquet"))
 
     res2 = _commit_buffer_impl(src, table_name="client_vitals")
     assert res2["files_committed"] == 1
@@ -2300,9 +1892,6 @@ def test_contract_rum_local_compaction_natural_key_deduplication(tmp_path):
     import duckdb
 
     cache_dir = tmp_path / "cache"
-    # Use the current UTC hour so the daily-tier rollup (cutoff = today - 1 day)
-    # does not also migrate the merged file and double-count files_merged. With
-    # compact_active_hour=True the hourly pass still compacts this partition.
     now = datetime.now(UTC)
     part_dir = cache_dir / "data_client_vitals" / now.strftime("timestamp_hour=%Y-%m-%d-%H")
     part_dir.mkdir(parents=True)
@@ -2314,76 +1903,32 @@ def test_contract_rum_local_compaction_natural_key_deduplication(tmp_path):
     }
 
     ts = now.replace(minute=15, second=0, microsecond=0)
-
-    # File 1 has Beacon A
-    t1 = pa.Table.from_pylist(
-        [
-            {
-                "timestamp": ts,
-                "metric_name": "LCP",
-                "metric_value": 3.1,
-                "metric_rating": "needs-improvement",
-                "pathname": "/product/1",
-                "browser": "Firefox",
-                "os": "Linux",
-                "device": "Desktop",
-                "cid": "cid_42",
-                "req_id": "req_555",
-                "city": "Austin",
-                "region": "TX",
-                "country": "US",
-                "pop": "DFW",
-                "tls": "1.3",
-                "ttfb": 0.25,
-            }
-        ],
-        schema=CLIENT_VITALS_ARROW_SCHEMA,
+    common_kw = {
+        "pathname": "/product/1",
+        "browser": "Firefox",
+        "os": "Linux",
+        "cid": "cid_42",
+        "city": "Austin",
+        "region": "TX",
+        "pop": "DFW",
+        "ttfb": 0.25,
+    }
+    beacon_a = _make_vital_row(
+        ts, metric_name="LCP", metric_value=3.1, metric_rating="needs-improvement", req_id="req_555", **common_kw
     )
-    pq.write_table(t1, str(part_dir / "part1.parquet"))
-
-    # File 2 has exact duplicate of Beacon A + new Beacon B
-    t2 = pa.Table.from_pylist(
-        [
-            {
-                "timestamp": ts,
-                "metric_name": "LCP",
-                "metric_value": 3.1,
-                "metric_rating": "needs-improvement",
-                "pathname": "/product/1",
-                "browser": "Firefox",
-                "os": "Linux",
-                "device": "Desktop",
-                "cid": "cid_42",
-                "req_id": "req_555",
-                "city": "Austin",
-                "region": "TX",
-                "country": "US",
-                "pop": "DFW",
-                "tls": "1.3",
-                "ttfb": 0.25,
-            },
-            {
-                "timestamp": ts,
-                "metric_name": "CLS",
-                "metric_value": 0.02,
-                "metric_rating": "good",
-                "pathname": "/product/1",
-                "browser": "Firefox",
-                "os": "Linux",
-                "device": "Desktop",
-                "cid": "cid_42",
-                "req_id": "req_556",
-                "city": "Austin",
-                "region": "TX",
-                "country": "US",
-                "pop": "DFW",
-                "tls": "1.3",
-                "ttfb": 0.25,
-            },
-        ],
-        schema=CLIENT_VITALS_ARROW_SCHEMA,
+    beacon_b = _make_vital_row(
+        ts, metric_name="CLS", metric_value=0.02, metric_rating="good", req_id="req_556", **common_kw
     )
-    pq.write_table(t2, str(part_dir / "part2.parquet"))
+
+    # File 1 has Beacon A; File 2 has exact duplicate of Beacon A + new Beacon B
+    pq.write_table(
+        pa.Table.from_pylist([beacon_a], schema=CLIENT_VITALS_ARROW_SCHEMA),
+        str(part_dir / "part1.parquet"),
+    )
+    pq.write_table(
+        pa.Table.from_pylist([beacon_a, beacon_b], schema=CLIENT_VITALS_ARROW_SCHEMA),
+        str(part_dir / "part2.parquet"),
+    )
 
     res = compact_local_partitions(
         src,
@@ -2394,7 +1939,6 @@ def test_contract_rum_local_compaction_natural_key_deduplication(tmp_path):
     assert res["partitions_compacted"] == 1
     assert res["files_merged"] == 2
 
-    # Check the remaining parquet file in the partition
     remaining_files = [f for f in os.listdir(part_dir) if f.endswith(".parquet")]
     assert len(remaining_files) == 1
 
@@ -2402,7 +1946,6 @@ def test_contract_rum_local_compaction_natural_key_deduplication(tmp_path):
     try:
         merged_path = str(part_dir / remaining_files[0])
         rows = con.execute(f"SELECT * FROM read_parquet('{merged_path}')").fetchall()
-        # Exactly 2 rows (duplicate Beacon A was removed)
         assert len(rows) == 2, f"Expected 2 rows in compacted parquet, found {len(rows)}"
     finally:
         con.close()
@@ -2429,21 +1972,10 @@ def test_rum_commit_aggregates_self_heal_on_stale_lake(monkeypatch):
         except Exception:
             return fn(con, *args, **kwargs)
 
-    monkeypatch.setattr("backend.config.load_config", lambda sid: _RUM_COMMIT_FAKE_CFG)
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: _RUM_COMMIT_FAKE_SRC)
-    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 1004)
-    monkeypatch.setattr("backend.cron.scheduler._check_disk_space", lambda dir, sid, task: (True, ""))
-    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: "/tmp/cache")
-    monkeypatch.setattr("backend.core.duckdb.log_cron_run", lambda *a, **k: None)
-    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", lambda *a, **k: None)
+    _setup_rum_commit_env(monkeypatch, run_id=1004)
     monkeypatch.setattr(
         "backend.core.iceberg.commit_buffer", lambda src, table_name: {"files_committed": 1, "rows_committed": 5}
     )
-    monkeypatch.setattr("backend.core.iceberg.sync_data", lambda src, table_name: None)
-    monkeypatch.setattr("backend.core.ingest._mark_ledger_published", lambda sid, rum=False: None)
-    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
     monkeypatch.setattr("backend.core.rollups.rum.recompute_rum_aggregates", flaky_recompute)
     monkeypatch.setattr("backend.core.iceberg.execute_with_stale_view_retry", _retry_double)
 
@@ -2454,8 +1986,6 @@ def test_rum_commit_aggregates_self_heal_on_stale_lake(monkeypatch):
 
 def test_rum_commit_lease_held_is_clean_skip_with_no_row(monkeypatch):
     """When start_cron_run raises CronLeaseHeldError, _run_rum_commit exits cleanly without side effects."""
-    from backend.core.metadata.cron_log import CronLeaseHeldError
-
     log_mock = MagicMock()
     commit_mock = MagicMock()
     end_progress_mock = MagicMock()

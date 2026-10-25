@@ -936,7 +936,7 @@ def test_delete_usage_log_clears_service_entries(mock_ul_cfg):
         app.dependency_overrides.pop(get_source, None)
 
 
-@patch("backend.utils.system_jobs.get_system_job_status")
+@patch("backend.cron.decorators.get_system_job_status")
 @patch("backend.cron.scheduler.get_scheduler")
 def test_get_system_jobs_endpoint(mock_sched, mock_status):
     mock_status.return_value = {

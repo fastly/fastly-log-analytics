@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from backend.high_scale.archive_models import ServingWatermark
-from backend.high_scale.registry import HighScaleService
+from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.high_scale.rum import rum_analytics
 
 

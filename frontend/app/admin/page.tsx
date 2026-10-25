@@ -4,9 +4,8 @@ import { PageHeader } from '@/components/ui/page-header'
 
 import { ServicesTable } from './_sections/ServicesTable'
 import { GlobalSettings, PricingSettings } from './_sections/GlobalSettings'
-import { OperationsOverview } from './_sections/OperationsOverview'
+import { OperationsOverview, AdminPrefetchLinks } from './_sections/OperationsOverview'
 import { QuarantineSection } from './_sections/QuarantineSection'
-import { AdminPrefetchLinks } from './AdminPrefetchLinks'
 
 export const dynamic = 'force-dynamic'
 

@@ -26,7 +26,7 @@ from backend.models.services import (
     ServiceCronSettingsBody,
     ServicesListResponse,
 )
-from backend.repositories import service_stats as service_stats_repo
+from backend.repositories import usage as service_stats_repo
 from backend.repositories._base import SectionTimer
 from backend.utils.auth import require_service_in_scope
 from backend.utils.router_utils import (
@@ -353,7 +353,7 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
 
 @router.get("/cron-schedule", response_model=CronScheduleResponse, response_model_exclude_unset=True)
 def api_cron_schedule(source: dict = Depends(get_source)):
-    from backend.cron.schedule import build_cron_schedule_payload
+    from backend.cron.scheduler import build_cron_schedule_payload
 
     service_id = source["name"]
     now_mono = time.monotonic()
@@ -1172,44 +1172,55 @@ def _persist_custom_fields_change(
     mutate_service_config(service_id, lambda c: c.__setitem__("log_fields", new_lf))
 
 
+def _load_modifiable_custom_fields(
+    request: Request, service_id: str, field_name: str, action_verb: str
+) -> tuple[dict, dict, list]:
+    from backend.core import field_registry as lf_module
+
+    require_service_in_scope(request, service_id)
+    if _is_system_field(field_name):
+        raise HTTPException(
+            status_code=422,
+            detail={"errors": [f"Field '{field_name}' is system-managed and cannot be {action_verb}."]},
+        )
+    cfg = load_service_config(service_id)
+    lf = lf_module.get_lf_config(cfg)
+    return cfg, lf, lf.get("custom_fields", [])
+
+
+def _validate_and_save_custom_field(
+    service_id: str, cfg: dict, lf: dict, field_dict: dict, other_names: list[str], new_custom: list[dict], now: str
+) -> dict:
+    from backend.core import field_registry as lf_module
+
+    errors = lf_module.validate_custom_field(field_dict, other_names)
+    hard_errors = [e for e in errors if not e.startswith("WARN:")]
+    if hard_errors:
+        raise HTTPException(status_code=422, detail={"errors": hard_errors})
+    candidate_lf = {**lf, "custom_fields": new_custom}
+    _validate_log_format_version(candidate_lf)
+    _persist_custom_fields_change(service_id, cfg, lf, new_custom, candidate_lf, now)
+    return {"ok": True, "field": field_dict, "warnings": [e for e in errors if e.startswith("WARN:")]}
+
+
 @router.post("/services/{service_id}/custom-fields", response_model=CustomFieldResponse)
 def api_create_custom_field(request: Request, service_id: str, body: CustomFieldCreate):
     from datetime import UTC
 
-    from backend.core import field_registry as lf_module
-
-    require_service_in_scope(request, service_id)
-
-    cfg = load_service_config(service_id)
-    lf = lf_module.get_lf_config(cfg)
-    existing = lf.get("custom_fields", [])
-    existing_names = [cf["name"] for cf in existing]
     field_dict = body.model_dump()
-
-    # Prevent creating system-managed fields
-    if _is_system_field(field_dict.get("name", "")):
-        raise HTTPException(
-            status_code=422,
-            detail={"errors": [f"Field '{field_dict['name']}' is system-managed and cannot be created manually."]},
-        )
-
-    errors = lf_module.validate_custom_field(field_dict, existing_names)
-    hard_errors = [e for e in errors if not e.startswith("WARN:")]
-    if hard_errors:
-        raise HTTPException(status_code=422, detail={"errors": hard_errors})
+    cfg, lf, existing = _load_modifiable_custom_fields(
+        request, service_id, field_dict.get("name", ""), "created manually"
+    )
+    existing_names = [cf["name"] for cf in existing]
     _check_iceberg_type_lock(
         service_id, field_dict["name"], field_dict.get("duckdb_type"), field_dict.get("value_type")
     )
-    candidate_lf = {**lf, "custom_fields": existing + [field_dict]}
-    _validate_log_format_version(candidate_lf)
     now = datetime.now(UTC).isoformat()
     field_dict["created_at"] = now
     field_dict["updated_at"] = now
-    new_custom = existing + [field_dict]
-    _persist_custom_fields_change(service_id, cfg, lf, new_custom, candidate_lf, now)
-    warnings = [e for e in errors if e.startswith("WARN:")]
-
-    return {"ok": True, "field": field_dict, "warnings": warnings}
+    return _validate_and_save_custom_field(
+        service_id, cfg, lf, field_dict, existing_names, existing + [field_dict], now
+    )
 
 
 @router.patch("/services/{service_id}/custom-fields/{field_name}", response_model=CustomFieldResponse)
@@ -1217,29 +1228,16 @@ def api_update_custom_field(request: Request, service_id: str, field_name: str, 
     from datetime import UTC
 
     from backend.core import duckdb as _db
-    from backend.core import field_registry as lf_module
 
-    require_service_in_scope(request, service_id)
-
-    # Prevent updating system-managed fields
-    if _is_system_field(field_name):
-        raise HTTPException(
-            status_code=422, detail={"errors": [f"Field '{field_name}' is system-managed and cannot be edited."]}
-        )
-
-    cfg = load_service_config(service_id)
-    lf = lf_module.get_lf_config(cfg)
-    existing = lf.get("custom_fields", [])
+    cfg, lf, existing = _load_modifiable_custom_fields(request, service_id, field_name, "edited")
     idx = next((i for i, cf in enumerate(existing) if cf["name"] == field_name), None)
     if idx is None:
         raise HTTPException(status_code=404, detail={"error": f"Custom field '{field_name}' not found"})
     updates = body.model_dump(exclude_unset=True)
-    changing_type = False
     old_field = existing[idx]
-    if "duckdb_type" in updates and updates["duckdb_type"] != old_field.get("duckdb_type"):
-        changing_type = True
-    if "value_type" in updates and updates["value_type"] != old_field.get("value_type"):
-        changing_type = True
+    changing_type = ("duckdb_type" in updates and updates["duckdb_type"] != old_field.get("duckdb_type")) or (
+        "value_type" in updates and updates["value_type"] != old_field.get("value_type")
+    )
     if changing_type:
         # Only Iceberg-backed services have a committed schema to lock against.
         # Fail-closed 503 on catalog error lives in the helper; the 422 for an
@@ -1259,40 +1257,18 @@ def api_update_custom_field(request: Request, service_id: str, field_name: str, 
                     ]
                 },
             )
-    updated = {**existing[idx], **{k: v for k, v in updates.items() if v is not None}}
-    updated["updated_at"] = datetime.now(UTC).isoformat()
-    other_names = [cf["name"] for cf in existing if cf["name"] != field_name]
-    errors = lf_module.validate_custom_field(updated, other_names)
-    hard_errors = [e for e in errors if not e.startswith("WARN:")]
-    if hard_errors:
-        raise HTTPException(status_code=422, detail={"errors": hard_errors})
-    new_custom = existing[:idx] + [updated] + existing[idx + 1 :]
-    candidate_lf = {**lf, "custom_fields": new_custom}
-    _validate_log_format_version(candidate_lf)
     now = datetime.now(UTC).isoformat()
-    _persist_custom_fields_change(service_id, cfg, lf, new_custom, candidate_lf, now)
-    warnings = [e for e in errors if e.startswith("WARN:")]
-
-    return {"ok": True, "field": updated, "warnings": warnings}
+    updated = {**old_field, **{k: v for k, v in updates.items() if v is not None}, "updated_at": now}
+    other_names = [cf["name"] for cf in existing if cf["name"] != field_name]
+    new_custom = existing[:idx] + [updated] + existing[idx + 1 :]
+    return _validate_and_save_custom_field(service_id, cfg, lf, updated, other_names, new_custom, now)
 
 
 @router.delete("/services/{service_id}/custom-fields/{field_name}", response_model=CustomFieldResponse)
 def api_delete_custom_field(request: Request, service_id: str, field_name: str):
     from datetime import UTC
 
-    from backend.core import field_registry as lf_module
-
-    require_service_in_scope(request, service_id)
-
-    # Prevent deleting system-managed fields
-    if _is_system_field(field_name):
-        raise HTTPException(
-            status_code=422, detail={"errors": [f"Field '{field_name}' is system-managed and cannot be deleted."]}
-        )
-
-    cfg = load_service_config(service_id)
-    lf = lf_module.get_lf_config(cfg)
-    existing = lf.get("custom_fields", [])
+    cfg, lf, existing = _load_modifiable_custom_fields(request, service_id, field_name, "deleted")
     field = next((cf for cf in existing if cf["name"] == field_name), None)
     if field is None:
         raise HTTPException(status_code=404, detail={"error": f"Custom field '{field_name}' not found"})
@@ -1459,9 +1435,8 @@ def api_import_custom_fields(request: Request, service_id: str, body: CustomFiel
 from fastapi import Response  # noqa: E402
 
 from backend.core import metadata as metadata_db  # noqa: E402
-from backend.models.services import CronRunsResponse  # noqa: E402
-from backend.models.status_reads import AuditLogsResponse  # noqa: E402
-from backend.repositories.cron import delete_cron_log, get_cron_logs, purge_cron_logs  # noqa: E402
+from backend.models.services import AuditLogsResponse, CronRunsResponse  # noqa: E402
+from backend.repositories.alerts import delete_cron_log, get_cron_logs, purge_cron_logs  # noqa: E402
 
 audit_router = APIRouter(prefix="/api/audit-logs", tags=["audit-logs"], responses=DEFAULT_ERROR_RESPONSES)
 cron_router = APIRouter(prefix="/api/cron-runs", tags=["cron-runs"], responses=DEFAULT_ERROR_RESPONSES)

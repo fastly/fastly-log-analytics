@@ -59,6 +59,17 @@ def _monoculture_processor(row: tuple, filter_key: str) -> dict:
     }
 
 
+def _url_rate_regression_processor(row: tuple, unit: str, *, is_critical: bool) -> dict:
+    return {
+        "label": row[0] or "(empty)",
+        "current_val": float(row[1] or 0) * 100,
+        "baseline_val": float(row[2] or 0) * 100,
+        "unit": unit,
+        "meta": {"window_requests": row[3], "baseline_requests": row[4], "filters": {"url": row[0]}},
+        "severity": "critical" if is_critical else "warning",
+    }
+
+
 def _ip_max_vs_p95_processor(
     row: tuple,
     context: dict,
@@ -469,14 +480,9 @@ registry.register(
 def cache_collapse_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [url, w_rate, b_rate, w_cacheable, b_cacheable]
     # w_rate / b_rate are HIT/(HIT+MISS) — the cacheable hit ratio (PASS excluded).
-    return {
-        "label": row[0] or "(empty)",
-        "current_val": float(row[1] or 0) * 100,
-        "baseline_val": float(row[2] or 0) * 100,
-        "unit": "% HIT",
-        "meta": {"window_requests": row[3], "baseline_requests": row[4], "filters": {"url": row[0]}},
-        "severity": "critical" if (row[1] or 0) <= 0.10 and (row[2] or 0) >= 0.60 else "warning",
-    }
+    return _url_rate_regression_processor(
+        row, "% HIT", is_critical=bool((row[1] or 0) <= 0.10 and (row[2] or 0) >= 0.60)
+    )
 
 
 registry.register(
@@ -499,14 +505,9 @@ def cacheability_regression_processor(row: tuple, definition: InsightDefinition,
     # row schema: [url, w_pass_rate, b_pass_rate, w_total, b_total]
     # w_pass_rate / b_pass_rate are PASS/total — share of requests that bypassed
     # the cache entirely (uncacheable).
-    return {
-        "label": row[0] or "(empty)",
-        "current_val": float(row[1] or 0) * 100,
-        "baseline_val": float(row[2] or 0) * 100,
-        "unit": "% PASS",
-        "meta": {"window_requests": row[3], "baseline_requests": row[4], "filters": {"url": row[0]}},
-        "severity": "critical" if (row[1] or 0) >= 0.80 and (row[2] or 0) <= 0.10 else "warning",
-    }
+    return _url_rate_regression_processor(
+        row, "% PASS", is_critical=bool((row[1] or 0) >= 0.80 and (row[2] or 0) <= 0.10)
+    )
 
 
 registry.register(
@@ -1536,18 +1537,7 @@ registry.register(
 
 def payload_compression_regression_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [url, w_rate, b_rate, w_total, b_total]  (rates = uncompressed share)
-    return {
-        "label": row[0] or "(empty)",
-        "current_val": float(row[1] or 0) * 100,
-        "baseline_val": float(row[2] or 0) * 100,
-        "unit": "% uncompressed",
-        "meta": {
-            "window_requests": row[3],
-            "baseline_requests": row[4],
-            "filters": {"url": row[0]},
-        },
-        "severity": "critical" if (row[1] or 0) >= 0.90 else "warning",
-    }
+    return _url_rate_regression_processor(row, "% uncompressed", is_critical=bool((row[1] or 0) >= 0.90))
 
 
 registry.register(

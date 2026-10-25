@@ -7,8 +7,8 @@ from typing import Any
 
 from backend.high_scale._common import parse_time_window, visible_fact_clauses
 from backend.high_scale._filters import request_filter_clauses
-from backend.high_scale.registry import HighScaleService
-from backend.models.assets import AssetsAggregatesResponse, AssetsRequest
+from backend.high_scale.registry_bootstrap import HighScaleService
+from backend.models.performance import AssetsAggregatesResponse, AssetsRequest
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
     bucket_time_to_minute,

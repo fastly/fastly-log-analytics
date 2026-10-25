@@ -73,7 +73,7 @@ const DebugPanel = dynamic(
   () => import('@/components/DebugPanel').then(m => ({ default: m.DebugPanel })),
   { ssr: false },
 )
-import { PlotlyPrewarm, MapPrewarm } from '@/components/PlotlyChart/PlotlyPrewarm'
+import { PlotlyPrewarm, MapPrewarm } from '@/components/PlotlyChart'
 
 import { useUrlServiceSync } from '@/hooks/useUrlServiceSync'
 import { useBootstrap, useBootstrapSyncEffects } from '@/hooks/useBootstrap'
@@ -83,7 +83,7 @@ import { useRouter } from 'next/navigation'
 import packageJson from '../package.json'
 import { useShareStatusBanner } from '@/hooks/useShareStatusBanner'
 import { useAnalystHeartbeat, useAnalystLogout } from '@/hooks/useAnalystHeartbeat'
-import { SIDEBAR_COLLAPSED_COOKIE } from '@/lib/cookies'
+import { SIDEBAR_COLLAPSED_COOKIE } from '@/lib/utils'
 
 // `analystVisible` controls visibility for FOS-sharing analysts (those
 // running their own copy of the app locally against the admin's FOS

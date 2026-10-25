@@ -35,12 +35,10 @@ from backend.core import share_db
 from backend.main import app
 from backend.routers import alerts as alerts_router
 from backend.routers import share_admin
-from backend.routers import views as views_router
 from backend.routers.services import core as services_core_router
 from backend.utils import sqlite_profiler, telemetry
 from backend.utils.remote_access import RemoteAccessMiddleware, _is_blocked_path
-from backend.utils.tunnel.manager import get_tunnel_manager
-from backend.utils.tunnel.session import AnalystSession
+from backend.utils.tunnel.manager import AnalystSession, get_tunnel_manager
 from tests._helpers.config_fakes import fake_mutate_config
 from tests.conftest import MOCK_SERVICE_ID
 
@@ -54,7 +52,7 @@ def app_with_session():
 
     app = FastAPI()
     app.include_router(alerts_router.router)
-    app.include_router(views_router.router)
+    app.include_router(alerts_router.views_router)
     app.include_router(services_core_router.router)
 
     @app.middleware("http")
@@ -159,7 +157,7 @@ def test_views_list_rejects_unauthorized_analyst(app_with_session):
 
 @pytest.mark.security_regression
 def test_views_list_allows_in_scope(app_with_session):
-    with patch("backend.repositories.views.get_views", return_value=[]):
+    with patch("backend.repositories.alerts.get_views", return_value=[]):
         with TestClient(app_with_session) as c:
             r = c.get("/api/views/svc-A", headers={"x-test-session-services": "svc-A"})
     assert r.status_code == 200
@@ -178,7 +176,7 @@ def test_views_list_admin_unrestricted(app_with_session):
         "page": None,
         "created_at": "2026-01-01 00:00:00",
     }
-    with patch("backend.repositories.views.get_views", return_value=[row]):
+    with patch("backend.repositories.alerts.get_views", return_value=[row]):
         with TestClient(app_with_session) as c:
             r = c.get("/api/views/svc-anything")
     assert r.status_code == 200
@@ -222,7 +220,7 @@ def test_views_delete_rejects_unauthorized_analyst_for_existing_view(app_with_se
     service that's NOT in their session services must still be rejected."""
     with (
         patch(
-            "backend.repositories.views.get_view_by_id",
+            "backend.repositories.alerts.get_view_by_id",
             return_value={"id": "v-existing", "service_id": "svc-B", "name": "n"},
         ),
         TestClient(app_with_session) as c,
@@ -1305,7 +1303,7 @@ def test_teardown_frontend_matches_producer(client):
     cfg = {"service_id": "svc-t", "remote_frontend": {"service_id": "remote-1"}}
     with (
         patch("backend.utils.router_utils.load_service_config", return_value=cfg),
-        patch("backend.routers.sharing_domain.delete_remote_frontend"),
+        patch("backend.routers.share_admin.delete_remote_frontend"),
         patch("backend.config.mutate_config", return_value=cfg),
     ):
         resp = client.post("/api/sharing/teardown-frontend", json={"service_id": "svc-t", "token_override": "t"})
@@ -1337,7 +1335,7 @@ def test_celery_status_matches_producer(client, monkeypatch):
         "inprocess_schedules": [{"name": "job", "trigger": "interval[0:01:00]", "next_run_at": 1700000000.0}],
         "ledger": {"committed": 5},
     }
-    monkeypatch.setattr("backend.routers.admin.celery_status.get_celery_status", lambda: payload)
+    monkeypatch.setattr("backend.routers.admin.health.get_celery_status", lambda: payload)
     resp = client.get("/api/admin/celery/status")
     assert resp.status_code == 200
     assert _body(resp) == _expected(payload)
@@ -1351,7 +1349,7 @@ def test_celery_status_workers_error_branch(client, monkeypatch):
         "inprocess_schedules": [],
         "ledger": {},
     }
-    monkeypatch.setattr("backend.routers.admin.celery_status.get_celery_status", lambda: payload)
+    monkeypatch.setattr("backend.routers.admin.health.get_celery_status", lambda: payload)
     assert _body(client.get("/api/admin/celery/status")) == payload
 
 
@@ -1388,7 +1386,7 @@ def test_control_room_tabs_match_stub_payloads(client):
 
 
 def test_control_room_models_roundtrip_producer_shapes():
-    from backend.models.control_room import (
+    from backend.models.services import (
         CorrelateResponse,
         LogFieldAuditResponse,
         RealtimeSeedResponse,
@@ -1871,14 +1869,14 @@ def test_debug_state_matches_producer(client):
 
 
 def test_schema_response_serializes_schema_alias():
-    from backend.models.status_reads import SchemaResponse
+    from backend.models.services import SchemaResponse
 
     payload = {"schema": [{"name": "ip", "type": "VARCHAR"}], "table_name": "logs_x"}
     assert SchemaResponse.model_validate(payload).model_dump(mode="json", by_alias=True) == payload
 
 
 def test_audit_logs_entries_keep_the_producer_row_shape():
-    from backend.models.status_reads import AuditLogsResponse
+    from backend.models.services import AuditLogsResponse
 
     # ``metadata.get_audit_logs`` stringifies timestamps and json-decodes ``details``.
     entry = {
@@ -2296,7 +2294,7 @@ def test_deploy_frontend_with_token_override(sharing_domain_client):
         "origin_host": "1.1.1.1",
     }
 
-    with patch("backend.routers.sharing_domain.deploy_remote_frontend", return_value=mock_res) as mock_deploy:
+    with patch("backend.routers.share_admin.deploy_remote_frontend", return_value=mock_res) as mock_deploy:
         response = sharing_domain_client.post("/api/sharing/deploy-frontend", json=payload)
         assert response.status_code == 200
         assert clean_res(response.json()) == mock_res
@@ -2332,8 +2330,8 @@ def test_deploy_frontend_resolves_token_from_config(sharing_domain_client):
     ]
 
     with (
-        patch("backend.routers.sharing_domain.list_configs", return_value=mock_configs),
-        patch("backend.routers.sharing_domain.deploy_remote_frontend", return_value=mock_res) as mock_deploy,
+        patch("backend.routers.share_admin.list_configs", return_value=mock_configs),
+        patch("backend.routers.share_admin.deploy_remote_frontend", return_value=mock_res) as mock_deploy,
     ):
         response = sharing_domain_client.post("/api/sharing/deploy-frontend", json=payload)
         assert response.status_code == 200
@@ -2365,9 +2363,9 @@ def test_deploy_frontend_resolves_token_from_env(sharing_domain_client):
     }
 
     with (
-        patch("backend.routers.sharing_domain.list_configs", return_value=[]),
+        patch("backend.routers.share_admin.list_configs", return_value=[]),
         patch.dict(os.environ, {"FASTLY_API_KEY": "env-resolved-token"}),
-        patch("backend.routers.sharing_domain.deploy_remote_frontend", return_value=mock_res) as mock_deploy,
+        patch("backend.routers.share_admin.deploy_remote_frontend", return_value=mock_res) as mock_deploy,
     ):
         response = sharing_domain_client.post("/api/sharing/deploy-frontend", json=payload)
         assert response.status_code == 200
@@ -2392,7 +2390,7 @@ def test_deploy_frontend_missing_token_error(sharing_domain_client):
     }
 
     with (
-        patch("backend.routers.sharing_domain.list_configs", return_value=[]),
+        patch("backend.routers.share_admin.list_configs", return_value=[]),
         patch.dict(os.environ, {}),
     ):
         # Temporarily ensure FASTLY_API_KEY is not in env if it's there
@@ -2429,7 +2427,7 @@ def test_deploy_frontend_fails_500(sharing_domain_client):
     }
 
     with patch(
-        "backend.routers.sharing_domain.deploy_remote_frontend",
+        "backend.routers.share_admin.deploy_remote_frontend",
         side_effect=RuntimeError("Fastly API error during Create Service: HTTP 400 - Name already taken"),
     ):
         response = sharing_domain_client.post("/api/sharing/deploy-frontend", json=payload)
@@ -2457,7 +2455,7 @@ def test_deploy_frontend_with_override_host(sharing_domain_client):
         "origin_host": "1.1.1.1",
     }
 
-    with patch("backend.routers.sharing_domain.deploy_remote_frontend", return_value=mock_res) as mock_deploy:
+    with patch("backend.routers.share_admin.deploy_remote_frontend", return_value=mock_res) as mock_deploy:
         response = sharing_domain_client.post("/api/sharing/deploy-frontend", json=payload)
         assert response.status_code == 200
         assert clean_res(response.json()) == mock_res
@@ -2492,7 +2490,7 @@ def test_teardown_frontend_success(sharing_domain_client):
     saved: dict = {}
     with (
         patch("backend.utils.router_utils.load_service_config", return_value=mock_config) as mock_load,
-        patch("backend.routers.sharing_domain.delete_remote_frontend") as mock_delete,
+        patch("backend.routers.share_admin.delete_remote_frontend") as mock_delete,
         patch("backend.config.mutate_config", side_effect=fake_mutate_config(mock_config, saved)) as mock_mutate,
     ):
         response = sharing_domain_client.post("/api/sharing/teardown-frontend", json=payload)
@@ -2519,7 +2517,7 @@ def test_teardown_frontend_already_removed(sharing_domain_client):
 
     with (
         patch("backend.utils.router_utils.load_service_config", return_value=mock_config),
-        patch("backend.routers.sharing_domain.delete_remote_frontend") as mock_delete,
+        patch("backend.routers.share_admin.delete_remote_frontend") as mock_delete,
         patch("backend.config.mutate_config") as mock_mutate,
     ):
         response = sharing_domain_client.post("/api/sharing/teardown-frontend", json=payload)
@@ -2552,7 +2550,7 @@ def test_deploy_frontend_with_service_id_writes_config(sharing_domain_client):
 
     saved: dict = {}
     with (
-        patch("backend.routers.sharing_domain.deploy_remote_frontend", return_value=mock_res) as mock_deploy,
+        patch("backend.routers.share_admin.deploy_remote_frontend", return_value=mock_res) as mock_deploy,
         patch("backend.config.mutate_config", side_effect=fake_mutate_config(mock_config, saved)) as mock_mutate,
     ):
         response = sharing_domain_client.post("/api/sharing/deploy-frontend", json=payload)
@@ -2586,7 +2584,7 @@ def test_deploy_frontend_with_service_id_save_config_error_graceful(sharing_doma
     }
 
     with (
-        patch("backend.routers.sharing_domain.deploy_remote_frontend", return_value=mock_res),
+        patch("backend.routers.share_admin.deploy_remote_frontend", return_value=mock_res),
         patch("backend.config.mutate_config", side_effect=RuntimeError("filesystem full")),
     ):
         response = sharing_domain_client.post("/api/sharing/deploy-frontend", json=payload)
@@ -2613,8 +2611,8 @@ def test_teardown_frontend_resolves_token_from_config(sharing_domain_client):
 
     with (
         patch("backend.utils.router_utils.load_service_config", return_value=mock_config),
-        patch("backend.routers.sharing_domain.list_configs", return_value=mock_configs),
-        patch("backend.routers.sharing_domain.delete_remote_frontend") as mock_delete,
+        patch("backend.routers.share_admin.list_configs", return_value=mock_configs),
+        patch("backend.routers.share_admin.delete_remote_frontend") as mock_delete,
         patch("backend.config.mutate_config"),
     ):
         response = sharing_domain_client.post("/api/sharing/teardown-frontend", json=payload)
@@ -2637,9 +2635,9 @@ def test_teardown_frontend_resolves_token_from_env(sharing_domain_client):
 
     with (
         patch("backend.utils.router_utils.load_service_config", return_value=mock_config),
-        patch("backend.routers.sharing_domain.list_configs", return_value=[]),
+        patch("backend.routers.share_admin.list_configs", return_value=[]),
         patch.dict(os.environ, {"FASTLY_API_KEY": "env-teardown-token"}),
-        patch("backend.routers.sharing_domain.delete_remote_frontend") as mock_delete,
+        patch("backend.routers.share_admin.delete_remote_frontend") as mock_delete,
         patch("backend.config.mutate_config"),
     ):
         response = sharing_domain_client.post("/api/sharing/teardown-frontend", json=payload)
@@ -2654,7 +2652,7 @@ def test_teardown_frontend_missing_token_error(sharing_domain_client):
     }
 
     with (
-        patch("backend.routers.sharing_domain.list_configs", return_value=[]),
+        patch("backend.routers.share_admin.list_configs", return_value=[]),
         patch.dict(os.environ, {}, clear=True),
     ):
         if "FASTLY_API_KEY" in os.environ:
@@ -2683,7 +2681,7 @@ def test_teardown_frontend_fails_500(sharing_domain_client):
 
     with (
         patch("backend.utils.router_utils.load_service_config", return_value=mock_config),
-        patch("backend.routers.sharing_domain.delete_remote_frontend", side_effect=RuntimeError("fastly offline")),
+        patch("backend.routers.share_admin.delete_remote_frontend", side_effect=RuntimeError("fastly offline")),
     ):
         response = sharing_domain_client.post("/api/sharing/teardown-frontend", json=payload)
         assert response.status_code == 500
@@ -2707,7 +2705,7 @@ def test_teardown_frontend_http_exception_passed_through(sharing_domain_client):
     with (
         patch("backend.utils.router_utils.load_service_config", return_value=mock_config),
         patch(
-            "backend.routers.sharing_domain.delete_remote_frontend",
+            "backend.routers.share_admin.delete_remote_frontend",
             side_effect=HTTPException(status_code=403, detail="Forbidden"),
         ),
     ):

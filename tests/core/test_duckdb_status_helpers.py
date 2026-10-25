@@ -836,7 +836,7 @@ def test_refresh_config_status_skips_legacy_reads_for_high_scale_service():
         ),
         patch("backend.config.config_to_source", return_value={"name": "svc", "bucket": "b"}),
         patch(
-            "backend.high_scale.registry.get_high_scale_service_registry",
+            "backend.high_scale.registry_bootstrap.get_high_scale_service_registry",
             return_value=type("Registry", (), {"resolve": lambda self, service_id: object()})(),
         ),
         patch("backend.core.duckdb.get_connection") as get_connection,

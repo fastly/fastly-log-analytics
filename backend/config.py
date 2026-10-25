@@ -1051,3 +1051,29 @@ def validate_deployment_mode() -> None:
             "shared multi-writer metadata database (Postgres DSN) is REQUIRED. "
             f"Got: {metadata_dsn!r}"
         )
+
+
+def service_id_from_source(
+    source: dict | None,
+    service_id: str | None = None,
+    *,
+    prefer_name: bool = False,
+) -> str:
+    """Resolve ``service_id`` from an explicit override or the ``source`` dict."""
+    if service_id:
+        return service_id
+    if not source:
+        return ""
+    if prefer_name:
+        return source.get("name") or source.get("service_id") or ""
+    return source.get("service_id") or source.get("name") or ""
+
+
+def path_within_dir(base_dir: str, candidate: str) -> bool:
+    """Return ``True`` iff ``candidate`` resolves to a path inside ``base_dir``."""
+    base_real = os.path.realpath(base_dir)
+    candidate_real = os.path.realpath(candidate)
+    try:
+        return os.path.commonpath([base_real, candidate_real]) == base_real
+    except ValueError:
+        return False

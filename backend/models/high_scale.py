@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from backend.high_scale.pagination import MAX_PAGE_SIZE
+from backend.high_scale._common import MAX_PAGE_SIZE
 from backend.models.common import BaseResponse
 
 

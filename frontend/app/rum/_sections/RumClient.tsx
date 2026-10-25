@@ -31,8 +31,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { DataTable } from '@/components/DataTable/DataTable';
-import { DataTableReadonly } from '@/components/DataTable';
+import { DataTable, DataTableReadonly } from '@/components/DataTable';
 import { ColumnDef } from '@tanstack/react-table';
 import { useRumStatus } from '@/hooks/useServiceQuery';
 import { CHART_COLORS } from '@/lib/chart-builders'

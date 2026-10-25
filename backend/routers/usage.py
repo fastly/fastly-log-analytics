@@ -73,7 +73,7 @@ def _extract_fos_ops(record: dict) -> tuple[int, int]:
     not nested under an `object_storage` dict. We accept either shape.
     """
 
-    from backend.core.fastly.models import StatsRecord
+    from backend.core.fastly.client import StatsRecord
 
     return StatsRecord.model_validate(record).fos_ops()
 

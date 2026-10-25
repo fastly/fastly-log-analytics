@@ -45,7 +45,7 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
     if not src:
         return None
     from backend.high_scale.dashboard import header_metrics
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     high_scale_service = get_high_scale_service_registry().resolve(service_id)
     if high_scale_service is not None:

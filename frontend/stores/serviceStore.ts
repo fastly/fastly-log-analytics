@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { setActiveServiceCookie } from '@/lib/cookies'
+import { setActiveServiceCookie } from '@/lib/utils'
 
 export interface Service {
   id: string

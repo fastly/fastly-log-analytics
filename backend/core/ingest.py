@@ -31,8 +31,8 @@ from backend.core.field_registry import LOG_FIELD_CATALOG
 from backend.utils import field_codes as fc
 from backend.utils.active_requests import yield_to_api
 from backend.utils.date_utils import ensure_utc
-from backend.utils.log_throttle import log_once_per
 from backend.utils.sql_validator import escape_sql_literal
+from backend.utils.telemetry import log_once_per
 
 logger = logging.getLogger(__name__)
 
@@ -1680,8 +1680,7 @@ def _celery_ingest_scope(kind: str, service_id: str):
     perform is invisible to the Class A/B cost accounting."""
     from contextlib import contextmanager
 
-    from backend.utils.telemetry import process_context_scope, start_call_tracking
-    from backend.utils.usage_logger import flush_usage_log
+    from backend.utils.telemetry import flush_usage_log, process_context_scope, start_call_tracking
 
     @contextmanager
     def _scope():

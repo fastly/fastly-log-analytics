@@ -18,7 +18,6 @@ from typing import Any
 
 from psycopg_pool import ConnectionPool
 
-from backend.core.high_scale_contracts import ArchiveState, validate_archive_transition
 from backend.core.metadata.pg_connection import get_pg_pool
 from backend.high_scale.archive_models import (
     ArchiveArtifact,
@@ -26,6 +25,7 @@ from backend.high_scale.archive_models import (
     ArchiveSourceEntry,
     ArchiveSourceObject,
 )
+from backend.high_scale.models import ArchiveState, validate_archive_transition
 from backend.high_scale.source_discovery import INITIAL_SOURCE_CURSOR
 
 SCHEMA_DDL = """
@@ -379,21 +379,16 @@ class PostgresControlPlane:
         _require_text(source_cursor, "source_cursor")
         _require_text(expected_owner, "expected_owner")
         with self.transaction() as connection:
-            current = self._locked_owner(connection, service_id)
-            _check_epoch(current, expected_owner_epoch)
-            if current.current_owner != expected_owner:
-                raise ValueError("owner does not match cursor fence")
+            current = self._fenced_owner(
+                connection,
+                service_id,
+                expected_owner_epoch=expected_owner_epoch,
+                expected_owner=expected_owner,
+                fence_name="cursor",
+            )
             if domain is not None:
                 _require_text(domain, "domain")
-                connection.execute(
-                    """
-                    INSERT INTO high_scale_source_cursors (service_id, domain, source_cursor)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (service_id, domain) DO UPDATE
-                    SET source_cursor=EXCLUDED.source_cursor, updated_at=clock_timestamp()
-                    """,
-                    (service_id, domain, source_cursor),
-                )
+                _upsert_domain_cursor(connection, service_id, domain, source_cursor)
                 return current
             connection.execute(
                 """
@@ -434,13 +429,7 @@ class PostgresControlPlane:
 
     def source(self, service_id: str, object_key: str) -> SourceObjectRecord:
         with self.transaction(read_only=True) as connection:
-            row = connection.execute(
-                "SELECT * FROM high_scale_source_objects WHERE service_id=%s AND object_key=%s",
-                (service_id, object_key),
-            ).fetchone()
-            if row is None:
-                raise KeyError(object_key)
-            return _source_from_row(row)
+            return self._locked_source(connection, service_id, object_key, for_update=False)
 
     def expired_claims(self, service_id: str, domain: str, *, limit: int) -> tuple[SourceObjectRecord, ...]:
         _require_text(service_id, "service_id")
@@ -481,8 +470,7 @@ class PostgresControlPlane:
 
     def rollback(self, service_id: str, *, expected_epoch: int) -> OwnerEpochRecord:
         with self.transaction() as connection:
-            current = self._locked_owner(connection, service_id)
-            _check_epoch(current, expected_epoch)
+            current = self._fenced_owner(connection, service_id, expected_owner_epoch=expected_epoch)
             if not current.rollback_allowed or not current.previous_owner:
                 raise ValueError("rollback fence is not satisfied")
             connection.execute(
@@ -523,10 +511,13 @@ class PostgresControlPlane:
             raise ValueError("owner epoch must be positive")
         object_id = _source_object_id(service_id, domain, object_key, checksum)
         with self.transaction() as connection:
-            owner = self._locked_owner(connection, service_id)
-            _check_epoch(owner, expected_owner_epoch)
-            if owner.current_owner != expected_owner:
-                raise ValueError("owner does not match source discovery fence")
+            self._fenced_owner(
+                connection,
+                service_id,
+                expected_owner_epoch=expected_owner_epoch,
+                expected_owner=expected_owner,
+                fence_name="source discovery",
+            )
             row = connection.execute(
                 """
                 SELECT * FROM high_scale_source_objects
@@ -587,21 +578,14 @@ class PostgresControlPlane:
             raise ValueError("owner epoch and lease duration must be positive")
         observed = (now or datetime.now(UTC)).astimezone(UTC)
         with self.transaction() as connection:
-            owner = self._locked_owner(connection, service_id)
-            _check_epoch(owner, expected_owner_epoch)
-            if owner.current_owner != expected_owner:
-                raise ValueError("owner does not match source claim fence")
-            row = connection.execute(
-                """
-                SELECT * FROM high_scale_source_objects
-                WHERE service_id=%s AND object_key=%s
-                FOR UPDATE
-                """,
-                (service_id, object_key),
-            ).fetchone()
-            if row is None:
-                raise KeyError(object_key)
-            source = _source_from_row(row)
+            self._fenced_owner(
+                connection,
+                service_id,
+                expected_owner_epoch=expected_owner_epoch,
+                expected_owner=expected_owner,
+                fence_name="source claim",
+            )
+            source = self._locked_source(connection, service_id, object_key)
             if source.status == "source_deleted":
                 raise ValueError(f"source object is already deleted: {object_key}")
             if source.status not in {"discovered", "claimed"}:
@@ -646,10 +630,13 @@ class PostgresControlPlane:
         observed = (now or datetime.now(UTC)).astimezone(UTC)
         lease_until = observed + timedelta(seconds=lease_seconds)
         with self.transaction() as connection:
-            owner = self._locked_owner(connection, service_id)
-            _check_epoch(owner, expected_owner_epoch)
-            if expected_owner is not None and owner.current_owner != expected_owner:
-                raise ValueError("owner does not match source claim fence")
+            self._fenced_owner(
+                connection,
+                service_id,
+                expected_owner_epoch=expected_owner_epoch,
+                expected_owner=expected_owner,
+                fence_name="source claim",
+            )
             if not object_keys:
                 return ()
             rows = connection.execute(
@@ -720,10 +707,13 @@ class PostgresControlPlane:
             raise ValueError("an error description is required to mark a source missing")
         observed = (now or datetime.now(UTC)).astimezone(UTC)
         with self.transaction() as connection:
-            owner = self._locked_owner(connection, service_id)
-            _check_epoch(owner, expected_owner_epoch)
-            if owner.current_owner != expected_owner:
-                raise ValueError("owner does not match source-missing fence")
+            self._fenced_owner(
+                connection,
+                service_id,
+                expected_owner_epoch=expected_owner_epoch,
+                expected_owner=expected_owner,
+                fence_name="source-missing",
+            )
             source = self._locked_source(connection, service_id, object_key)
             if source.status == "source_missing":
                 return
@@ -750,8 +740,7 @@ class PostgresControlPlane:
         if min(accepted_rows, malformed_rows) < 0:
             raise ValueError("ledger counts must be non-negative")
         with self.transaction() as connection:
-            owner = self._locked_owner(connection, service_id)
-            _check_epoch(owner, expected_owner_epoch)
+            self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
             source = self._locked_source(connection, service_id, object_key)
             if source.status != "claimed" or source.owner_epoch != expected_owner_epoch:
                 raise RuntimeError(f"stale or missing claim for {object_key}")
@@ -838,8 +827,7 @@ class PostgresControlPlane:
         if not domain:
             domain = "request"
         with self.transaction() as connection:
-            owner = self._locked_owner(connection, service_id)
-            _check_epoch(owner, owner_epoch)
+            self._fenced_owner(connection, service_id, expected_owner_epoch=owner_epoch)
             if getattr(manifest, "source", None) is not None:
                 source_key = manifest.source.object_key
                 source_checksum = manifest.source.checksum
@@ -973,7 +961,7 @@ class PostgresControlPlane:
     ) -> tuple[ArchiveManifest, ...]:
         """List archive manifests whose coverage overlaps ``[start, end)``.
 
-        Used by cold-tier historical queries (:mod:`backend.high_scale.raw_query`)
+        Used by cold-tier historical queries (:mod:`backend.high_scale._common`)
         to find which immutable artifacts to scan for a requested time range.
         Read-only; does not lock rows or care about manifest/source status —
         an archived-but-not-yet-deleted source and an already-deleted one are
@@ -1040,8 +1028,7 @@ class PostgresControlPlane:
         if expected_owner_epoch <= 0:
             raise ValueError("owner epoch must be positive")
         with self.transaction() as connection:
-            owner = self._locked_owner(connection, service_id)
-            _check_epoch(owner, expected_owner_epoch)
+            self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
             if object_keys:
                 connection.execute(
                     """
@@ -1062,15 +1049,7 @@ class PostgresControlPlane:
                     (service_id, domain, partition_id, next_cursor),
                 )
                 if partition_id == "default":
-                    connection.execute(
-                        """
-                        INSERT INTO high_scale_source_cursors (service_id, domain, source_cursor, updated_at)
-                        VALUES (%s, %s, %s, clock_timestamp())
-                        ON CONFLICT (service_id, domain) DO UPDATE
-                        SET source_cursor=EXCLUDED.source_cursor, updated_at=clock_timestamp()
-                        """,
-                        (service_id, domain, next_cursor),
-                    )
+                    _upsert_domain_cursor(connection, service_id, domain, next_cursor)
 
     def authorize_source_delete(
         self,
@@ -1086,8 +1065,7 @@ class PostgresControlPlane:
             raise ValueError("source deletion blocked by active replay lease")
         observed = (now or datetime.now(UTC)).astimezone(UTC)
         with self.transaction() as connection:
-            owner = self._locked_owner(connection, service_id)
-            _check_epoch(owner, expected_owner_epoch)
+            self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
             source = self._locked_source(connection, service_id, object_key)
             if (
                 source.status not in {"archived", "acknowledged"}
@@ -1146,8 +1124,7 @@ class PostgresControlPlane:
         expected_owner_epoch: int,
     ) -> None:
         with self.transaction() as connection:
-            owner = self._locked_owner(connection, service_id)
-            _check_epoch(owner, expected_owner_epoch)
+            self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
             source = self._locked_source(connection, service_id, object_key)
             if source.status == "source_deleted" and source.archive_manifest_id == manifest_id:
                 return
@@ -1204,57 +1181,84 @@ class PostgresControlPlane:
                     )
 
     @staticmethod
-    def _owner(connection: Any, service_id: str) -> OwnerEpochRecord:
-        row = connection.execute("SELECT * FROM high_scale_ownership WHERE service_id=%s", (service_id,)).fetchone()
-        if row is None:
-            raise KeyError(service_id)
-        return _owner_from_row(row)
-
-    @staticmethod
-    def _locked_owner(connection: Any, service_id: str) -> OwnerEpochRecord:
+    def _owner(connection: Any, service_id: str, *, for_update: bool = False) -> OwnerEpochRecord:
+        suffix = " FOR UPDATE" if for_update else ""
         row = connection.execute(
-            "SELECT * FROM high_scale_ownership WHERE service_id=%s FOR UPDATE", (service_id,)
+            f"SELECT * FROM high_scale_ownership WHERE service_id=%s{suffix}", (service_id,)
         ).fetchone()
         if row is None:
             raise KeyError(service_id)
         return _owner_from_row(row)
 
+    @classmethod
+    def _locked_owner(cls, connection: Any, service_id: str) -> OwnerEpochRecord:
+        return cls._owner(connection, service_id, for_update=True)
+
+    @classmethod
+    def _fenced_owner(
+        cls,
+        connection: Any,
+        service_id: str,
+        *,
+        expected_owner_epoch: int,
+        expected_owner: str | None = None,
+        fence_name: str = "owner",
+    ) -> OwnerEpochRecord:
+        owner = cls._locked_owner(connection, service_id)
+        _check_epoch(owner, expected_owner_epoch)
+        if expected_owner is not None and owner.current_owner != expected_owner:
+            raise ValueError(f"owner does not match {fence_name} fence")
+        return owner
+
     @staticmethod
-    def _locked_source(connection: Any, service_id: str, object_key: str) -> SourceObjectRecord:
-        row = connection.execute(
+    def _locked_source(
+        connection: Any, service_id: str, object_key: str, *, for_update: bool = True
+    ) -> SourceObjectRecord:
+        sql = (
             """
             SELECT * FROM high_scale_source_objects
             WHERE service_id=%s AND object_key=%s
             FOR UPDATE
-            """,
-            (service_id, object_key),
-        ).fetchone()
+            """
+            if for_update
+            else "SELECT * FROM high_scale_source_objects WHERE service_id=%s AND object_key=%s"
+        )
+        row = connection.execute(sql, (service_id, object_key)).fetchone()
         if row is None:
             raise KeyError(object_key)
         return _source_from_row(row)
 
     @staticmethod
-    def _archive_manifest(connection: Any, manifest_id: str) -> ArchiveManifestRecord:
-        row = connection.execute(
-            "SELECT * FROM high_scale_archive_manifests WHERE manifest_id=%s", (manifest_id,)
-        ).fetchone()
-        if row is None:
-            raise KeyError(manifest_id)
-        return _archive_from_row(row)
-
-    @staticmethod
-    def _locked_archive_manifest(connection: Any, manifest_id: str) -> ArchiveManifestRecord:
-        row = connection.execute(
+    def _archive_manifest(connection: Any, manifest_id: str, *, for_update: bool = False) -> ArchiveManifestRecord:
+        sql = (
             """
             SELECT * FROM high_scale_archive_manifests
             WHERE manifest_id=%s
             FOR UPDATE
-            """,
-            (manifest_id,),
-        ).fetchone()
+            """
+            if for_update
+            else "SELECT * FROM high_scale_archive_manifests WHERE manifest_id=%s"
+        )
+        row = connection.execute(sql, (manifest_id,)).fetchone()
         if row is None:
             raise KeyError(manifest_id)
         return _archive_from_row(row)
+
+    @classmethod
+    def _locked_archive_manifest(cls, connection: Any, manifest_id: str) -> ArchiveManifestRecord:
+        return cls._archive_manifest(connection, manifest_id, for_update=True)
+
+
+def _upsert_domain_cursor(connection: Any, service_id: str, domain: str, source_cursor: str) -> None:
+    connection.execute(
+        """
+        INSERT INTO high_scale_source_cursors (service_id, domain, source_cursor)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (service_id, domain) DO UPDATE
+        SET source_cursor=EXCLUDED.source_cursor, updated_at=clock_timestamp()
+        """,
+        (service_id, domain, source_cursor),
+    )
 
 
 def _owner_from_row(row: Mapping[str, Any] | Any) -> OwnerEpochRecord:

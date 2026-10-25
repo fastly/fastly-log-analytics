@@ -34,7 +34,7 @@ import pytest
 
 from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.core.rollups import partial_hour as ph
-from tests._helpers.locks import noop_lock as _noop_lock
+from tests._helpers.rollups import noop_lock as _noop_lock
 from tests._helpers.sources import make_source
 
 

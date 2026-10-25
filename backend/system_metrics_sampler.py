@@ -196,8 +196,8 @@ def _sample_system_jobs() -> dict[str, Any]:
     # Job-label table kept identical to backend/routers/admin_usage.py's
     # /admin/system-jobs handler so the SSE payload matches the response
     # shape the SystemStatus card already renders from.
+    from backend.cron.decorators import get_system_job_status
     from backend.cron.scheduler import get_scheduler
-    from backend.utils.system_jobs import get_system_job_status
 
     statuses = get_system_job_status()
     job_labels = {

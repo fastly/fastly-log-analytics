@@ -2,7 +2,7 @@
 
 import type { PlotlyTrace } from '@/types/plotly'
 import React, { useMemo, useRef } from 'react'
-import { useInViewOnce } from '@/hooks/useInViewOnce'
+import { useInViewOnce } from '@/components/LazyMount'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
@@ -14,7 +14,7 @@ import { Button } from '@/components/ui/button'
 import { ButtonGroup } from '@/components/ui/button-group'
 import { Skeleton } from '@/components/ui/skeleton'
 import { SkeletonGrid } from '@/components/ui/skeleton'
-import { PlotlyChart } from '@/components/PlotlyChart/PlotlyChart'
+import { PlotlyChart } from '@/components/PlotlyChart'
 import { CostCalculator } from '@/components/CostCalculator/CostCalculator'
 import { Database, HardDrive, Zap, DollarSign, Activity as ActivityIcon } from 'lucide-react'
 import { useTheme } from 'next-themes'
@@ -51,7 +51,7 @@ const FosOperationsHelp = ({ note }: { note?: string }) => (
 
 import { useRouter } from 'next/navigation'
 import { useServiceStore } from '@/stores/serviceStore'
-import { buildServiceHref } from '@/lib/navigation'
+import { buildServiceHref } from '@/lib/utils'
 import { CHART_COLORS } from '@/lib/chart-builders'
 
 export default function UsagePage() {

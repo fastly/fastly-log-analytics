@@ -670,7 +670,7 @@ from types import SimpleNamespace
 
 from backend.high_scale import query as console
 from backend.high_scale.query import _reject_unsafe_functions, _table_filters, query_endpoint
-from backend.models.query import QueryRequest
+from backend.models.dashboard import QueryRequest
 
 START = "2026-09-15T00:00:00+00:00"
 END = "2026-09-15T01:00:00+00:00"

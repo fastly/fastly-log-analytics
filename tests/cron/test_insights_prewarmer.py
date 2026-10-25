@@ -1022,7 +1022,7 @@ def test_contract_local_safety_permitted_under_dev_no_crons():
         patch("backend.config.list_configs", return_value=[cfg]),
         patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-dev-safe")),
         patch("backend.core.duckdb.is_configured", return_value=True),
-        patch("backend.high_scale.registry.get_high_scale_service_registry") as mock_hs_reg,
+        patch("backend.high_scale.registry_bootstrap.get_high_scale_service_registry") as mock_hs_reg,
     ):
         mock_hs_reg.return_value.resolve.return_value = None
         s._register_dev_local_safe_jobs()

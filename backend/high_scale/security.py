@@ -16,16 +16,27 @@ error envelope instead of rendering as an empty card.
 from __future__ import annotations
 
 import contextvars
-from collections.abc import Callable
+from collections import defaultdict
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 from backend.core.high_scale_sections import HighScaleSections, clickhouse_source
-from backend.high_scale._common import _bucket_case, parse_time_window, visible_publication_fence_sql
+from backend.high_scale._common import (
+    _bucket_case,
+    parse_time_window,
+    visible_publication_fence_sql,
+)
+from backend.high_scale._common import (
+    bucket as _bucket,
+)
+from backend.high_scale._common import (
+    text as _text,
+)
 from backend.high_scale._filters import build_clickhouse_filters as _build_clickhouse_filters
-from backend.high_scale.registry import HighScaleService
+from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.models.security import (
     SecurityAggregatesResponse,
     SecurityTopBotsResponse,
@@ -803,4 +814,71 @@ def get_security_threat_intel(
             }
             for r in rows
         ]
+    }
+
+
+@dataclass(frozen=True)
+class SecurityProjection:
+    dimension_rows: tuple[dict[str, Any], ...]
+
+
+@dataclass
+class _Accumulator:
+    requests: int = 0
+    wellknown_bot_name: str = ""
+    bot_category: str = ""
+    verified_count: int = 0
+    impersonator_count: int = 0
+    unverified_count: int = 0
+
+
+def build_security_projection_rows(rows: tuple[Mapping[str, Any], ...]) -> SecurityProjection:
+    dimensions: dict[tuple[datetime, str, str], _Accumulator] = defaultdict(_Accumulator)
+
+    for row in rows:
+        bucket = _bucket(row.get("timestamp"))
+        if bucket is None:
+            continue
+
+        ngwaf_bot = _text(row.get("_ngwaf_bot_name"))
+        if ngwaf_bot:
+            state = _text(row.get("ngwaf_bot_verification_state", "unverified"))
+            acc = dimensions[(bucket, "ngwaf_bot", ngwaf_bot)]
+            acc.requests += 1
+            if state == "verified":
+                acc.verified_count += 1
+            elif state == "impersonator":
+                acc.impersonator_count += 1
+            else:
+                acc.unverified_count += 1
+
+            if not acc.wellknown_bot_name:
+                acc.wellknown_bot_name = _text(row.get("_ngwaf_wellknown_bot_name"))
+            if not acc.bot_category:
+                acc.bot_category = _text(row.get("_ngwaf_bot_category"))
+
+    return SecurityProjection(
+        dimension_rows=tuple(
+            _dimension_row(bucket, dimension, value, acc)
+            for (bucket, dimension, value), acc in sorted(dimensions.items())
+        ),
+    )
+
+
+def _dimension_row(
+    bucket: datetime,
+    dimension: str,
+    value: str,
+    acc: _Accumulator,
+) -> dict[str, Any]:
+    return {
+        "bucket_start": bucket.isoformat(),
+        "dimension": dimension,
+        "value": value,
+        "requests": acc.requests,
+        "wellknown_bot_name": acc.wellknown_bot_name,
+        "bot_category": acc.bot_category,
+        "verified_count": acc.verified_count,
+        "impersonator_count": acc.impersonator_count,
+        "unverified_count": acc.unverified_count,
     }

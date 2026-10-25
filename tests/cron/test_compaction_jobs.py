@@ -1016,7 +1016,7 @@ class TestRollupHealContract:
         - Registration in backend/cron/scheduler.py at minute=5 and startup (NOW() + 5s).
         - Task mapping "rollup_heal": "rollup_hour_heal" in backend/cron/schedule.py.
         """
-        from backend.cron.schedule import TASK_MAP
+        from backend.cron.scheduler import TASK_MAP
 
         assert TASK_MAP.get("rollup_heal") == "rollup_hour_heal"
 

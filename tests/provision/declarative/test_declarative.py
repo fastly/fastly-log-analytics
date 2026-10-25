@@ -878,7 +878,7 @@ class TestRoutersIaC:
         assert args[0] == "srv_123"
         assert args[1] == "fake_token"
 
-    @patch("backend.routers.cmcd_admin._resolve_token", return_value="fake_token")
+    @patch("backend.routers.performance._resolve_token", return_value="fake_token")
     @patch("backend.provision.declarative.iac_reconciler.reconcile_infrastructure")
     def test_cmcd_enable_route(self, mock_reconcile, mock_resolve, mock_config_dir):
         """Verify POST /api/services/{service_id}/cmcd/enable works with the declarative loop."""
@@ -912,7 +912,7 @@ class TestRoutersIaC:
         assert args[0] == "srv_123"
         assert args[1] == "fake_token"
 
-    @patch("backend.routers.cmcd_admin._resolve_token", return_value="fake_token")
+    @patch("backend.routers.performance._resolve_token", return_value="fake_token")
     @patch("backend.provision.declarative.iac_reconciler.reconcile_infrastructure")
     def test_cmcd_disable_route(self, mock_reconcile, mock_resolve, mock_config_dir):
         """Verify POST /api/services/{service_id}/cmcd/disable works with the declarative loop."""

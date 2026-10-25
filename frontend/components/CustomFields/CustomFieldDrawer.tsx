@@ -23,7 +23,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { LabelWithInfo } from '@/components/ui/label-with-info'
-import { customFieldsApi, type CustomField, type VclLintResult } from '@/lib/api/custom-fields'
+import { customFieldsApi, type CustomField, type VclLintResult } from '@/lib/api'
 import { useMutation } from '@tanstack/react-query'
 import { AlertTriangle, CheckCircle2, Loader2, Activity } from 'lucide-react'
 

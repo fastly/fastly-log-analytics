@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import Depends, HTTPException, Query, Response
 
@@ -20,13 +21,66 @@ from backend.models.admin import (
     SustainedLossAlert,
 )
 from backend.models.admin_actions import BackfillWindowResponse
-from backend.repositories import log_accounting as log_accounting_repo
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.router_utils import raise_internal
+from backend.utils.telemetry import track_query
 
 from ._router import router
 
 logger = logging.getLogger(__name__)
+
+ROLLUP_BUCKET_COUNTS = (
+    "SELECT strftime(date_trunc('{unit}', hour_start), '{fmt}') AS bucket, "
+    "  SUM(requests) AS n "
+    "FROM read_parquet([{paths_sql}]) "
+    "WHERE hour_start >= TIMESTAMPTZ '{start_tz}' "
+    "  AND hour_start < TIMESTAMPTZ '{end_tz}' "
+    "GROUP BY date_trunc('{unit}', hour_start)"
+)
+
+ACTIVE_HOUR_BUCKET_COUNTS = (
+    "SELECT strftime(date_trunc('{unit}', timestamp), '{fmt}') AS bucket, COUNT(*) AS n "
+    "FROM read_parquet([{paths_sql}], union_by_name=true) "
+    "WHERE timestamp >= TIMESTAMP '{start_iso}' "
+    "  AND timestamp <  TIMESTAMP '{end_iso}' "
+    "GROUP BY date_trunc('{unit}', timestamp)"
+)
+
+RAW_BUCKET_COUNTS = (
+    "SELECT strftime(date_trunc('{unit}', timestamp), '{fmt}') AS bucket, COUNT(*) AS n "
+    "FROM {table_name} "
+    "WHERE timestamp >= TIMESTAMP '{start_iso}' "
+    "  AND timestamp <  TIMESTAMP '{end_iso}' "
+    "GROUP BY date_trunc('{unit}', timestamp)"
+)
+
+
+def rollup_bucket_counts(
+    con: Any, *, unit: str, fmt: str, paths_sql: str, start_tz: str, end_tz: str
+) -> list[tuple[Any, ...]]:
+    """Closed-hour request counts per bucket from the overview rollup parquet files."""
+    q = ROLLUP_BUCKET_COUNTS.format(unit=unit, fmt=fmt, paths_sql=paths_sql, start_tz=start_tz, end_tz=end_tz)
+    with track_query(con, q, [], "log_accounting.rollup_bucket_counts") as cur:
+        return list(cur.fetchall())
+
+
+def active_hour_bucket_counts(
+    con: Any, *, unit: str, fmt: str, paths_sql: str, start_iso: str, end_iso: str
+) -> list[tuple[Any, ...]]:
+    """Row counts per bucket straight from the active-hour committed + buffer parquet files."""
+    q = ACTIVE_HOUR_BUCKET_COUNTS.format(unit=unit, fmt=fmt, paths_sql=paths_sql, start_iso=start_iso, end_iso=end_iso)
+    with track_query(con, q, [], "log_accounting.active_hour_bucket_counts") as cur:
+        return list(cur.fetchall())
+
+
+def raw_bucket_counts(
+    con: Any, *, unit: str, fmt: str, table_name: str, start_iso: str, end_iso: str
+) -> list[tuple[Any, ...]]:
+    """Full raw-table scan fallback for row counts per bucket."""
+    q = RAW_BUCKET_COUNTS.format(unit=unit, fmt=fmt, table_name=table_name, start_iso=start_iso, end_iso=end_iso)
+    with track_query(con, q, [], "log_accounting.raw_bucket_counts") as cur:
+        return list(cur.fetchall())
+
 
 # Short-TTL memo for the Fastly Stats API fetch (the dominant cost
 # inside compute_log_accounting: ~1.8 s p95). Key includes the (already
@@ -87,8 +141,7 @@ def _fetch_fastly_request_counts(
     """
     from datetime import UTC, datetime
 
-    from backend.core.fastly.client import fastly
-    from backend.core.fastly.models import StatsResponse
+    from backend.core.fastly.client import StatsResponse, fastly
 
     cache_key = (logging_svc_id, from_ts, to_ts, by, edge_only)
     cached: dict[str, int] | None = _FASTLY_COUNTS_CACHE.get(cache_key)
@@ -203,9 +256,7 @@ def _try_row_counts_from_rollup(
         st_tz = start.astimezone(UTC).isoformat()
         et_tz = end.astimezone(UTC).isoformat()
         with _ConnectionHolder(source, read_only=True) as con:
-            rows = log_accounting_repo.rollup_bucket_counts(
-                con, unit=unit, fmt=fmt, paths_sql=paths_sql, start_tz=st_tz, end_tz=et_tz
-            )
+            rows = rollup_bucket_counts(con, unit=unit, fmt=fmt, paths_sql=paths_sql, start_tz=st_tz, end_tz=et_tz)
         for b, n in rows:
             result[b] = int(n)
 
@@ -242,7 +293,7 @@ def _try_row_counts_from_rollup(
         if active_paths:
             paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in active_paths)
             with _ConnectionHolder(source, read_only=True) as con:
-                rows = log_accounting_repo.active_hour_bucket_counts(
+                rows = active_hour_bucket_counts(
                     con, unit=unit, fmt=fmt, paths_sql=paths_sql, start_iso=live_start_iso, end_iso=end_iso
                 )
             for b, n in rows:
@@ -266,9 +317,7 @@ def _raw_row_counts(
     end_iso = end.strftime("%Y-%m-%d %H:%M:%S")
     unit = "day" if "%H" not in fmt else "hour"
     with _ConnectionHolder(source, read_only=True) as con:
-        rows = log_accounting_repo.raw_bucket_counts(
-            con, unit=unit, fmt=fmt, table_name=table_name, start_iso=start_iso, end_iso=end_iso
-        )
+        rows = raw_bucket_counts(con, unit=unit, fmt=fmt, table_name=table_name, start_iso=start_iso, end_iso=end_iso)
     return {b: int(n) for b, n in rows}
 
 
@@ -369,7 +418,6 @@ def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> d
     import contextvars
     import time as _time
     from concurrent.futures import ThreadPoolExecutor
-    from typing import Any
 
     def _run_timed(fn: Any) -> tuple[Any, float]:
         t0 = _time.perf_counter()

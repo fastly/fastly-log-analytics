@@ -6,10 +6,9 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from backend.high_scale._common import format_iso_utc as _iso
-from backend.high_scale._common import parse_time_window, visible_fact_clauses
+from backend.high_scale._common import parse_time_window, range_value, visible_fact_clauses
 from backend.high_scale._filters import request_filter_clauses
-from backend.high_scale._projection_utils import range_value
-from backend.high_scale.registry import HighScaleService
+from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.models.dashboard import SessionDetailRequest, SessionsRequest
 from backend.repositories.utils.response_cache import (
     ResponseMemo,

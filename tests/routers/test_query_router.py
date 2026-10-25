@@ -212,7 +212,7 @@ def test_query_request_rejects_oversized_max_rows():
     """M1: the model caps max_rows at 10_000 (was unbounded → OOM lever)."""
     from pydantic import ValidationError
 
-    from backend.models.query import QueryRequest
+    from backend.models.dashboard import QueryRequest
 
     with pytest.raises(ValidationError):
         QueryRequest(sql="SELECT 1", max_rows=10_001)
@@ -489,7 +489,7 @@ def test_query_high_scale_validates_ast_and_masks_ips(client, monkeypatch):
     fake_hs_service = SimpleNamespace(service_id=MOCK_SERVICE_ID, client=fake_hs_client)
 
     with patch(
-        "backend.high_scale.registry.get_high_scale_service_registry",
+        "backend.high_scale.registry_bootstrap.get_high_scale_service_registry",
         return_value=SimpleNamespace(resolve=lambda sid: fake_hs_service),
     ):
         # 1. Mutating query must 403
@@ -572,7 +572,7 @@ def test_query_high_scale_is_closed_to_analysts_until_clickhouse_enforces_the_bo
     )
 
     with patch(
-        "backend.high_scale.registry.get_high_scale_service_registry",
+        "backend.high_scale.registry_bootstrap.get_high_scale_service_registry",
         return_value=SimpleNamespace(resolve=lambda sid: fake_hs_service),
     ):
         resp = client.post(
@@ -611,7 +611,7 @@ def _analyst_on_high_scale(client, in_memory_duckdb, test_service_source, main_c
     )
     with (
         patch(
-            "backend.high_scale.registry.get_high_scale_service_registry",
+            "backend.high_scale.registry_bootstrap.get_high_scale_service_registry",
             return_value=SimpleNamespace(resolve=lambda sid: fake_hs_service),
         ),
         patch("backend.high_scale.console_access.get_console_clients", return_value=console),
@@ -758,7 +758,7 @@ def test_the_console_picks_the_masked_identity_unless_the_invite_explicitly_disa
     hs_service = SimpleNamespace(service_id=MOCK_SERVICE_ID, client=SimpleNamespace(execute=lambda *a, **k: []))
     with (
         patch(
-            "backend.high_scale.registry.get_high_scale_service_registry",
+            "backend.high_scale.registry_bootstrap.get_high_scale_service_registry",
             return_value=SimpleNamespace(resolve=lambda sid: hs_service),
         ),
         patch(

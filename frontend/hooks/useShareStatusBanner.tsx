@@ -10,7 +10,7 @@ import { queryKeys } from '@/lib/query-keys'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useSessionRoleStore } from '@/stores/sessionRoleStore'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
-import { buildServiceHref } from '@/lib/navigation'
+import { buildServiceHref } from '@/lib/utils'
 import type { BootstrapResponse, ShareBanner } from '@/types/api'
 
 interface Options {

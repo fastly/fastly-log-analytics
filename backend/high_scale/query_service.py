@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
 
+from backend.high_scale._common import MAX_PAGE_SIZE, KeysetCursor
 from backend.high_scale.archive_models import ServingWatermark
-from backend.high_scale.pagination import MAX_PAGE_SIZE, KeysetCursor
 from backend.utils.telemetry import _QUERIES, _RECORDING_TELEMETRY, get_page_load_id, get_queries
 
 QueryStatus = Literal["complete", "partial", "queued", "running", "failed"]

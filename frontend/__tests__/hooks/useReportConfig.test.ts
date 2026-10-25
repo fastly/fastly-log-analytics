@@ -3,9 +3,8 @@
  */
 import { renderHook, act } from '@testing-library/react'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { useReportConfig } from '@/hooks/useReportConfig'
+import { useReportConfig, useInsightsDefaults } from '@/hooks/useReportConfig'
 import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
-import { useInsightsDefaults } from '@/hooks/useInsightsDefaults'
 
 let mockState = {
   startTime: '',

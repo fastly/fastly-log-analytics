@@ -72,12 +72,14 @@ def stream_zip(
 
     def zip_worker(q: queue.Queue):
         from backend.utils.telemetry import (
+            flush_usage_log as _flush,
+        )
+        from backend.utils.telemetry import (
             process_context_scope as _pcs,
         )
         from backend.utils.telemetry import (
             start_call_tracking as _sct,
         )
-        from backend.utils.usage_logger import flush_usage_log as _flush
 
         _sct()
         with _pcs(context_label):

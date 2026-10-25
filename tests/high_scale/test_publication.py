@@ -649,7 +649,7 @@ def test_archive_checkpoint_accepts_empty_rum_body(tmp_path) -> None:
 # ── Merged from test_raw_query.py ──
 
 
-from backend.high_scale.raw_query import raw_query_producer
+from backend.high_scale._common import raw_query_producer
 from tests.high_scale.conftest import (
     InMemoryManifestCatalog as _Catalog,
 )

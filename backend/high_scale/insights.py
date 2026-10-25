@@ -32,7 +32,7 @@ from backend.high_scale.insight_queries import (
     impossible_distance,
     repeated_patterns_fp,
 )
-from backend.high_scale.registry import HighScaleService
+from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.models.insights import CacheCollapseDetailResponse, InsightsResponse
 from backend.repositories.insights import InsightDefinition, registry  # noqa: F401  (registers the detections)
 from backend.utils.bounded_cache import BoundedTTLCache

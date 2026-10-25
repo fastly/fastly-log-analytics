@@ -5,7 +5,6 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
-from backend.core.high_scale_contracts import ArchiveState
 from backend.high_scale.archive_models import (
     ArchiveArtifact,
     ArchiveManifest,
@@ -19,6 +18,7 @@ from backend.high_scale.deletion import (
     HighScaleDeletionSweeper,
     PostgresDeletionLedger,
 )
+from backend.high_scale.models import ArchiveState
 from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
 
 

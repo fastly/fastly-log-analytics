@@ -43,7 +43,6 @@ from hypothesis import strategies as st
 from backend import config
 from backend.core import field_registry as fr
 from backend.core import log_fields as lf
-from backend.core import sql_ident
 from backend.core.field_registry import (
     BY_CODE,
     BY_GROUP,
@@ -58,6 +57,7 @@ from backend.core.log_fields import (
 )
 from backend.main import app
 from backend.provision import generate_capture_vcl
+from backend.utils import sql_validator as sql_ident
 
 
 # ── Merged from tests/core/test_log_fields.py ──
@@ -980,7 +980,7 @@ def test_bare_identifier_regex_has_one_owner() -> None:
     needles = ("[A-Za-z_][A-Za-z0-9_]*",)
     offenders = []
     for path in BACKEND.rglob("*.py"):
-        if path.name == "sql_ident.py":
+        if path.name in {"sql_ident.py", "sql_validator.py"}:
             continue
         text = path.read_text()
         # pg_connection's unanchored token matcher and clickhouse param-name

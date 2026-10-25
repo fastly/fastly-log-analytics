@@ -56,8 +56,8 @@ from backend.repositories.top_n_rollups import fold_rows as _fold_rows
 from backend.repositories.top_n_rollups import live_topn_fields as _live_topn_fields
 from backend.repositories.top_n_rollups import plan_top_n_paths as _plan_top_n_paths
 from backend.repositories.top_n_rollups import truncate_top_n as _truncate_top_n
-from backend.utils.log_throttle import log_once_per
 from backend.utils.sql_validator import escape_sql_literal
+from backend.utils.telemetry import log_once_per
 
 _logger = logging.getLogger(__name__)
 
@@ -3994,21 +3994,19 @@ class QueryRunner:
             return None
 
         counts: dict[tuple[str, str], int] = {}
-        for bot_name, category, cnt in rows:
-            key = (bot_name, category)
-            counts[key] = counts.get(key, 0) + int(cnt or 0)
-
-        for bot_name, category, cnt in self._ngwaf_active_hour_live_rows(
-            st,
-            et,
-            select_cols_sql="nb.bot_name, nb.category",
-            cache_table="ngwaf_top_ngwaf_bots",
-            group_by_sql="1, 2",
-            log_tag="ngwaf_bots_rollup",
-            observed=observed,
+        for bot_name, category, cnt in (
+            *rows,
+            *self._ngwaf_active_hour_live_rows(
+                st,
+                et,
+                select_cols_sql="nb.bot_name, nb.category",
+                cache_table="ngwaf_top_ngwaf_bots",
+                group_by_sql="1, 2",
+                log_tag="ngwaf_bots_rollup",
+                observed=observed,
+            ),
         ):
-            key = (bot_name, category)
-            counts[key] = counts.get(key, 0) + int(cnt or 0)
+            counts[(bot_name, category)] = counts.get((bot_name, category), 0) + int(cnt or 0)
 
         ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[: max(0, int(n))]
         observed.outcome = "served"
@@ -4056,20 +4054,19 @@ class QueryRunner:
             return None
 
         counts: dict[tuple[str | None, str | None, str | None], int] = {}
-        for bot_name, wellknown_bot_name, category, cnt in rows:
-            key = (bot_name, wellknown_bot_name, category)
-            counts[key] = counts.get(key, 0) + int(cnt or 0)
-
-        for bot_name, wellknown_bot_name, category, cnt in self._ngwaf_active_hour_live_rows(
-            st,
-            et,
-            select_cols_sql="nb.bot_name, nb.wellknown_bot_name, nb.category",
-            cache_table="ngwaf_cache_ngwaf_bots",
-            group_by_sql="1, 2, 3",
-            log_tag="ngwaf_verified_bots_rollup",
+        for row in (
+            *rows,
+            *self._ngwaf_active_hour_live_rows(
+                st,
+                et,
+                select_cols_sql="nb.bot_name, nb.wellknown_bot_name, nb.category",
+                cache_table="ngwaf_cache_ngwaf_bots",
+                group_by_sql="1, 2, 3",
+                log_tag="ngwaf_verified_bots_rollup",
+            ),
         ):
-            key = (bot_name, wellknown_bot_name, category)
-            counts[key] = counts.get(key, 0) + int(cnt or 0)
+            key = (row[0], row[1], row[2])
+            counts[key] = counts.get(key, 0) + int(row[3] or 0)
 
         ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
         return [
@@ -4130,17 +4127,16 @@ class QueryRunner:
             return None
 
         counts: dict[tuple[Any, str], int] = {}
-        for bucket, bot_name, cnt in rows:
-            key = (bucket, str(bot_name))
-            counts[key] = counts.get(key, 0) + int(cnt or 0)
-
-        for bucket, bot_name, cnt in self._ngwaf_active_hour_live_rows(
-            st,
-            et,
-            select_cols_sql=f"time_bucket(INTERVAL '{n} seconds', t.timestamp) AS bucket, nb.bot_name",
-            cache_table="ngwaf_cache_ngwaf_bots",
-            group_by_sql="1, 2",
-            log_tag="ngwaf_verified_bots_ts_rollup",
+        for bucket, bot_name, cnt in (
+            *rows,
+            *self._ngwaf_active_hour_live_rows(
+                st,
+                et,
+                select_cols_sql=f"time_bucket(INTERVAL '{n} seconds', t.timestamp) AS bucket, nb.bot_name",
+                cache_table="ngwaf_cache_ngwaf_bots",
+                group_by_sql="1, 2",
+                log_tag="ngwaf_verified_bots_ts_rollup",
+            ),
         ):
             key = (bucket, str(bot_name))
             counts[key] = counts.get(key, 0) + int(cnt or 0)

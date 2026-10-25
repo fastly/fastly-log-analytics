@@ -9,7 +9,7 @@ import { useServiceStore } from '@/stores/serviceStore'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
-import { DataTable } from '@/components/DataTable/DataTable'
+import { DataTable } from '@/components/DataTable'
 import {
   AlertTriangle,
   Activity,

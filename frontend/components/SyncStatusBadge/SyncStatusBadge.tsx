@@ -9,8 +9,7 @@ import { useSyncStatus, useLastSync, useSeededReady } from '@/hooks/useSyncStatu
 import { useHeaderBadgeStream } from '@/hooks/useHeaderBadgeStream'
 import { useAdminEventStream, type AdminEventChannel } from '@/hooks/useAdminEventStream'
 import { useBootstrap } from '@/hooks/useBootstrap'
-import { LiveElapsed } from '@/components/LiveElapsed'
-import { TimeAgo } from '@/components/TimeAgo'
+import { LiveElapsed, TimeAgo } from '@/components/TimeAgo'
 import { queryKeys } from '@/lib/query-keys'
 
 import { formatCount } from '@/lib/format'

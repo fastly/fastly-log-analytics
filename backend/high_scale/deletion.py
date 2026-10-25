@@ -7,8 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from backend.core.high_scale_contracts import ArchiveState
-from backend.high_scale.archive_models import ArchiveManifest
+from backend.high_scale.archive_models import ArchiveManifest, ArchiveState
 from backend.high_scale.archive_publication import ArchivePublication, ObjectStore
 
 

@@ -36,9 +36,13 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { extractApiError } from '@/lib/api'
 
-import { matchesQueryRowFilters, useFilteredActive } from './_hooks/useFilteredActive'
-import { useKeyboardShortcuts, type ShortcutBinding } from './_hooks/useKeyboardShortcuts'
-import { useQueryMonitorUrlState } from './_hooks/useQueryMonitorUrlState'
+import {
+  matchesQueryRowFilters,
+  useFilteredActive,
+  useKeyboardShortcuts,
+  useQueryMonitorUrlState,
+  type ShortcutBinding,
+} from './_hooks/useFilteredActive'
 import { ActiveTable, CompletedTable } from './_sections/queryColumns'
 import {
   FilterChipRow,

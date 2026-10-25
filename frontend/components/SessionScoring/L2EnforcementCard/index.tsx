@@ -14,8 +14,7 @@ import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 import { formatPctValue } from '@/lib/format'
 
-import { useScoringQuery } from '../useScorerTimeseries'
-import { scoringAnalyticsCompositeKey, scoringConfigCompositeKey } from '@/lib/queries/scoring'
+import { useScoringQuery, scoringAnalyticsCompositeKey, scoringConfigCompositeKey } from '../useScorerTimeseries'
 
 /**
  * Operator control for whether edge Layer-2 contributes to the *enforced*

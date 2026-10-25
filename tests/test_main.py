@@ -558,7 +558,7 @@ def test_middleware_resolves_cdn_service_id_to_logging_service_id(client):
         patch.object(svcconfig, "load_config", return_value=None),
         patch.object(svcconfig, "get_cdn_service_id_map", return_value={"cdn-svc-1": "log-svc-1"}),
         patch.object(svcconfig, "get_active_service_id", return_value=None),
-        patch("backend.utils.usage_logger.flush_usage_log") as mock_flush,
+        patch("backend.utils.telemetry.flush_usage_log") as mock_flush,
     ):
         client.get("/api/health", headers={"x-fastly-service-id": "cdn-svc-1"})
 
@@ -573,7 +573,7 @@ def test_middleware_flush_swallows_exceptions(client):
     """The flush call is wrapped in try/except — pinned because a
     usage-log write failure on a long-running query would otherwise
     fail the request AFTER the response was already streamed back."""
-    with patch("backend.utils.usage_logger.flush_usage_log", side_effect=RuntimeError("disk full")):
+    with patch("backend.utils.telemetry.flush_usage_log", side_effect=RuntimeError("disk full")):
         resp = client.get("/api/health")
 
     assert resp.status_code == 200  # request succeeds despite flush error
@@ -1150,7 +1150,7 @@ def test_new_request_id_is_nonempty_hex():
 
 
 def test_global_job_runs_in_cron_attribution_scope(monkeypatch):
-    import backend.utils.system_jobs as sj
+    import backend.cron.decorators as sj
     from backend.core.query_attribution import current_attribution
     from backend.cron.decorators import global_job
 

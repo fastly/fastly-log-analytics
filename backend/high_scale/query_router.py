@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
-from backend.high_scale.pagination import MAX_PAGE_SIZE
+from backend.high_scale._common import MAX_PAGE_SIZE
 
 
 class QueryTier(StrEnum):

@@ -151,8 +151,11 @@ def cron_task(name: str, job_name: str | None = None):
         def wrapper(service_id: str, *args, **kwargs):
             def _body():
 
-                from backend.utils.telemetry import process_context_scope, start_call_tracking
-                from backend.utils.usage_logger import flush_usage_log
+                from backend.utils.telemetry import (
+                    flush_usage_log,
+                    process_context_scope,
+                    start_call_tracking,
+                )
 
                 with process_context_scope(name):
                     start_call_tracking()
@@ -203,7 +206,6 @@ def global_job(job_id: str, *, color: str, tag: str, label: str):
     def decorator(fn):
         @wraps(fn)
         def wrapper() -> None:
-            from backend.utils.system_jobs import record_job_run
             from backend.utils.telemetry import process_context_scope
 
             prefix = f"\x1b[{color}m[{tag}]\x1b[0m"
@@ -227,4 +229,40 @@ def global_job(job_id: str, *, color: str, tag: str, label: str):
     return decorator
 
 
-__all__ = ["_CRON_HARD_CAP_S", "cron_task", "global_job"]
+_status_lock = threading.Lock()
+_status: dict[str, dict] = {}
+
+
+from backend.utils.date_utils import iso_z_now
+
+
+def record_job_run(job_id: str, status: str, duration_s: float, detail: str = "") -> None:
+    """Record the outcome of a completed global job run."""
+    with _status_lock:
+        _status[job_id] = {
+            "last_run_at": iso_z_now(),
+            "status": status,
+            "duration_s": round(duration_s, 2),
+            "detail": detail,
+        }
+
+
+def get_system_job_status() -> dict[str, dict]:
+    """Return a snapshot of all recorded job statuses."""
+    with _status_lock:
+        return dict(_status)
+
+
+# R-1: drain the job-status dict between tests so an earlier test's
+# record_job_run doesn't bleed into the next test's snapshot read.
+from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+
+_CacheRegistry.register("utils.system_jobs._status", _status)
+
+__all__ = [
+    "_CRON_HARD_CAP_S",
+    "cron_task",
+    "get_system_job_status",
+    "global_job",
+    "record_job_run",
+]

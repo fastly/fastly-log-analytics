@@ -40,7 +40,7 @@ from backend.routers.admin import clickhouse as api
 from backend.utils.remote_access import _is_blocked_path
 from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware
 from tests._helpers.config_fakes import fake_mutate_config as _fake_mutate
-from tests.core.clickhouse_fos_fixture import TinyFos
+from tests._helpers.sources import TinyFos
 from tests.core.test_clickhouse import fixture_manifest
 
 

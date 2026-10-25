@@ -5,7 +5,7 @@ from backend.core.high_scale_sections import current_clickhouse_scope
 from backend.core.request_context import build_request_context
 from backend.high_scale.archive_models import ServingWatermark
 from backend.high_scale.exports import ExportManager, get_export_manager
-from backend.high_scale.registry import HighScaleService, HighScaleServiceRegistry
+from backend.high_scale.registry_bootstrap import HighScaleService, HighScaleServiceRegistry
 from backend.main import app
 from backend.utils.remote_access import TimeBounds
 
@@ -126,7 +126,7 @@ def test_export_routes_registered():
 
 
 def test_admin_can_request_and_read_export(client, test_service_source, monkeypatch):
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     manager = ExportManager(max_workers=1, max_rows=10, max_bytes=10_000)
     monkeypatch.setattr("backend.routers.high_scale.metadata.record_audit", lambda *args, **kwargs: None)
@@ -151,7 +151,7 @@ def test_export_cancel_is_admin_only(client, test_service_source, monkeypatch):
     from fastapi import HTTPException
 
     from backend.deps import require_admin
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     manager = ExportManager(max_workers=1)
     monkeypatch.setattr("backend.routers.high_scale.metadata.record_audit", lambda *args, **kwargs: None)
@@ -174,7 +174,7 @@ def test_export_cancel_is_admin_only(client, test_service_source, monkeypatch):
 
 
 def test_admin_can_query_request_facts(client, test_service_source):
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(_service())
     response = client.post(
@@ -194,7 +194,7 @@ def test_admin_can_query_request_facts(client, test_service_source):
 
 
 def test_analyst_request_facts_masks_client_ip(client, in_memory_duckdb, test_service_source):
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(_service())
     app.dependency_overrides[build_request_context] = lambda: _analyst_context(test_service_source, in_memory_duckdb)
@@ -208,7 +208,7 @@ def test_analyst_request_facts_masks_client_ip(client, in_memory_duckdb, test_se
 
 
 def test_request_facts_rejects_service_binding_mismatch(client, test_service_source):
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     class _MismatchRegistry:
         def resolve(self, service_id):
@@ -225,7 +225,7 @@ def test_request_facts_rejects_service_binding_mismatch(client, test_service_sou
 
 
 def test_request_facts_rejects_non_high_scale_service(client, test_service_source):
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry()
     response = client.post(
@@ -238,7 +238,7 @@ def test_request_facts_rejects_non_high_scale_service(client, test_service_sourc
 
 
 def test_request_facts_rejects_invalid_cursor(client, test_service_source):
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(_service())
     response = client.post(
@@ -255,7 +255,7 @@ def test_request_facts_rejects_invalid_cursor(client, test_service_source):
 
 
 def test_rum_facts_queries_configured_domain(client, test_service_source):
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(_service())
     response = client.post(
@@ -268,7 +268,7 @@ def test_rum_facts_queries_configured_domain(client, test_service_source):
 
 
 def test_rum_facts_rejects_unconfigured_domain(client, test_service_source):
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(_service())
     response = client.post(
@@ -281,7 +281,7 @@ def test_rum_facts_rejects_unconfigured_domain(client, test_service_source):
 
 
 def test_cmcd_facts_queries_configured_domain(client, test_service_source):
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     service = _service()
     app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(service)
@@ -315,7 +315,7 @@ class _AggregateQueryClient:
 
 
 def test_aggregates_queries_configured_domain_and_dimension(client, test_service_source):
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     service = _service()
     object.__setattr__(
@@ -350,7 +350,7 @@ def test_aggregates_queries_configured_domain_and_dimension(client, test_service
 
 
 def test_aggregates_rejects_unconfigured_domain(client, test_service_source):
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(_service())
     response = client.post(
@@ -367,7 +367,7 @@ def test_aggregates_rejects_unconfigured_domain(client, test_service_source):
 
 
 def test_aggregates_masks_client_ip_dimension_for_analysts(client, test_service_source):
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     service = _service()
     object.__setattr__(
@@ -398,7 +398,7 @@ def _iso(value: datetime) -> str:
 
 
 def test_queries_recent_tier_returns_rows_immediately(client, test_service_source):
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     service = _service()
     app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(service)
@@ -421,7 +421,7 @@ def test_queries_recent_tier_returns_rows_immediately(client, test_service_sourc
 
 
 def test_queries_cold_tier_without_archive_configured_reports_unavailable(client, test_service_source):
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     service = _service()
     app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(service)
@@ -443,7 +443,7 @@ def test_queries_cold_tier_without_archive_configured_reports_unavailable(client
 def test_queries_cold_tier_submits_and_completes_a_historical_job(client, test_service_source):
     from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
     from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     now = datetime.now(UTC)
     coverage_start = now - timedelta(days=60)
@@ -531,7 +531,7 @@ def _sha256(value: bytes) -> str:
 
 
 def test_request_facts_clickhouse_filters_and_telemetry(client, test_service_source):
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     service = _service()
     agg_client = _AggregateQueryClient(
@@ -582,7 +582,7 @@ def test_request_facts_clickhouse_filters_and_telemetry(client, test_service_sou
 
 
 def test_request_facts_standard_mode_duckdb_emulation_and_filters(client, in_memory_duckdb, test_service_source):
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     in_memory_duckdb.execute(
         """
@@ -654,7 +654,7 @@ def test_request_facts_standard_mode_duckdb_emulation_and_filters(client, in_mem
 
 
 def test_request_facts_standard_emulation_masks_analyst_ip(client, in_memory_duckdb, test_service_source):
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     in_memory_duckdb.execute(
         """

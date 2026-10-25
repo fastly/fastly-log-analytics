@@ -31,6 +31,7 @@ from __future__ import annotations
 import gc
 import logging
 import os
+import signal
 import time
 
 from backend import config as svcconfig
@@ -240,3 +241,44 @@ def recycle_once(reason: str = "interval") -> str:
 # ``_recycle_rss_threshold_bytes`` from here. Keeping the decorator in the cron
 # layer is what keeps this core module free of a ``backend.cron`` import (the
 # "Core does not depend on routers" contract: core → cron → routers).
+
+
+def graceful_restart_rss_threshold_bytes() -> int:
+    """Restart threshold (``BACKEND_GRACEFUL_RESTART_RSS_MB``, MB→bytes).
+
+    0 (default) disables the guard entirely.
+    """
+    raw = os.getenv("BACKEND_GRACEFUL_RESTART_RSS_MB", "0")
+    try:
+        return max(0, int(raw)) * 1024 * 1024
+    except (TypeError, ValueError):
+        return 0
+
+
+def maybe_graceful_restart() -> bool:
+    """SIGTERM self for a clean docker restart if RSS is at/over the threshold.
+
+    Returns True iff a restart was triggered. Never raises — a guard that
+    crashes the scheduler tick would defeat its purpose.
+    """
+    threshold = graceful_restart_rss_threshold_bytes()
+    if threshold <= 0:
+        return False
+    try:
+        from backend.core.duckdb import current_rss_bytes
+
+        rss = current_rss_bytes()
+    except Exception:
+        return False
+    if rss is None or rss < threshold:
+        return False
+    logger.warning(
+        "\U0001f501 [memguard] RSS %.0fMB >= %.0fMB restart threshold — sending "
+        "SIGTERM for a graceful restart (uvicorn drains + exits 0; docker "
+        "restart:unless-stopped brings up a fresh process). STOPGAP for the "
+        "unresolved memory growth; see backend-oom-restart-loop.",
+        rss / 1e6,
+        threshold / 1e6,
+    )
+    os.kill(os.getpid(), signal.SIGTERM)
+    return True

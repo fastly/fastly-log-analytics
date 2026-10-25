@@ -652,7 +652,7 @@ state/nonce/verifier are fully controlled.
 import pytest
 
 from backend.core.oauth import client as oidc
-from backend.core.oauth import flow_state
+from backend.core.oauth import registry as flow_state
 from backend.routers import share_oauth
 
 REDIRECT_URI = "https://testserver/api/share/oauth/callback"
@@ -981,7 +981,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from backend.core.oauth.flow_state import FlowStateError
+from backend.core.oauth.registry import FlowStateError
 from backend.utils.remote_access import RemoteAccessMiddleware
 
 _PAYLOAD = {

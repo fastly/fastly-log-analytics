@@ -668,7 +668,7 @@ def _run_log_discovery_cron(
 
     def _usage_log_phase() -> None:
         from backend.core.duckdb import backfill_fastly_edge_writes, reconcile_fastly_stats
-        from backend.utils.usage_logger import run_usage_log_cleanup
+        from backend.utils.telemetry import run_usage_log_cleanup
 
         try:
             inserted = backfill_fastly_edge_writes(src)

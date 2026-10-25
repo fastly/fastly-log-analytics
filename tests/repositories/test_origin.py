@@ -29,7 +29,7 @@ from backend.repositories.origin import (
     get_summary,
     get_timeseries,
 )
-from tests._helpers.locks import noop_lock as _noop_lock
+from tests._helpers.rollups import noop_lock as _noop_lock
 from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
 
 

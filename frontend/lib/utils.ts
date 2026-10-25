@@ -108,3 +108,84 @@ export const IP_FAMILY_FIELDS = ['ip', 'client_ip', 'ip_address', 'remote_addr']
 export function isIpFamilyField(column: string): boolean {
   return (IP_FAMILY_FIELDS as readonly string[]).includes(column)
 }
+
+// Cookie names and helpers shared between SSR Server Components and client stores.
+// No 'use client' directive — imported by both Server Components (app/layout.tsx)
+// and Client Components (AppLayout.tsx, StoreHydrator.tsx, DebugPanel.tsx).
+// Adding 'use client' here would wrap string constants in Next's client-reference
+// proxy so they evaluate to `undefined` inside Server Components.
+
+export const ACTIVE_SERVICE_COOKIE = 'fla.activeServiceId'
+
+export function setActiveServiceCookie(serviceId: string | null) {
+  if (typeof document === 'undefined') return
+  if (serviceId && /^[A-Za-z0-9]{10,30}$/.test(serviceId)) {
+    document.cookie = `${ACTIVE_SERVICE_COOKIE}=${serviceId}; path=/; max-age=31536000; samesite=lax`
+  } else {
+    document.cookie = `${ACTIVE_SERVICE_COOKIE}=; path=/; max-age=0; samesite=lax`
+  }
+}
+
+export const DEBUG_RESPONSES_COOKIE = 'fla.debugResponses'
+
+export const SIDEBAR_COLLAPSED_COOKIE = 'fla.sidebarCollapsed'
+
+export function buildServiceHref(path: string, serviceId: string | null | undefined): string {
+  if (!serviceId) return path
+  const sep = path.includes('?') ? '&' : '?'
+  return `${path}${sep}service=${encodeURIComponent(serviceId)}`
+}
+
+export function buildStreamDetailUrl(token: string, serviceId?: string | null): string {
+  const base = `/sessions/stream?token=${encodeURIComponent(token)}`
+  return serviceId ? `${base}&service=${encodeURIComponent(serviceId)}` : base
+}
+
+export function buildSessionDashboardUrl(
+  serviceId: string | null | undefined,
+  filterKey: string,
+  filterValue: string | null | undefined,
+  sessionStart: string | null | undefined,
+  sessionEnd: string | null | undefined,
+): string {
+  const params = new URLSearchParams()
+  if (serviceId != null) params.set('service', serviceId)
+  if (filterValue != null) params.set(`filter_${filterKey}`, filterValue)
+  if (sessionStart != null) params.set('start_time', sessionStart)
+  if (sessionEnd != null) params.set('end_time', sessionEnd)
+  return `/dashboard?${params.toString()}`
+}
+
+/**
+ * Shared className strings for the "panel" dialog pattern used across
+ * the app's larger modals (CronSettingsModal, InviteAnalystDialog,
+ * PopLocationsModal, TeardownDialog, SyncFromCloudModal,
+ * CreateInviteDialog, LogSettingsModal, ProvisionWizard, SSEModal).
+ *
+ * Pattern: fixed-max-height panel with flex column layout, scrollable
+ * body sandwiched between a sticky header (border-b) and footer
+ * (border-t bg-muted/10). The body itself is left to each caller since
+ * padding / scroll behavior varies (some use ScrollArea, some plain
+ * overflow-y-auto, some inline form layouts).
+ *
+ * Headers come in two flavors:
+ *  - `panelDialogHeaderSolid` (bg-background): used when the header has
+ *    busy UI (badges, step indicators) and needs more visual weight.
+ *  - `panelDialogHeaderMuted` (bg-muted/10): the default for simpler
+ *    headers — pairs visually with the matching footer background.
+ *
+ * Compose with `cn()` so callers can append width / showCloseButton /
+ * conditional classes without fighting tailwind-merge ordering.
+ */
+
+export const panelDialogContent =
+  "max-h-[90vh] flex flex-col p-0 overflow-hidden"
+
+export const panelDialogHeaderMuted =
+  "px-6 pt-6 pb-4 border-b bg-muted/10 shrink-0"
+
+export const panelDialogHeaderSolid =
+  "px-6 pt-6 pb-4 border-b bg-background shrink-0"
+
+export const panelDialogFooter =
+  "px-6 py-4 border-t bg-muted/10 shrink-0"

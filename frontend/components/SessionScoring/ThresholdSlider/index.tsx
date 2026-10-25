@@ -8,7 +8,7 @@ import { Check, Loader2, ShieldCheck, ShieldOff, SlidersHorizontal } from 'lucid
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { ThresholdSliderHelp } from '@/components/SessionScoring/help-content'
-import { useScoringQuery } from '../useScorerTimeseries'
+import { useScoringQuery, scoringConfigCompositeKey } from '../useScorerTimeseries'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -16,7 +16,6 @@ import { Slider } from '@/components/ui/slider'
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 import { formatCount, formatPercent } from '@/lib/format'
-import { scoringConfigCompositeKey } from '@/lib/queries/scoring'
 import type { Expect, Simplify, WireParity, WithRequired, WithRequiredNullable, components } from '@/types/api'
 
 // ─── ThresholdSliderControls ─────────────────────────────────────────────────

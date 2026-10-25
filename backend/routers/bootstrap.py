@@ -14,9 +14,9 @@ from fastapi.concurrency import run_in_threadpool
 from backend.deps import get_con, get_service_id, get_source
 from backend.models.common import BootstrapResponse, LogFieldsCatalogResponse
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
-from backend.models.status_reads import SchemaResponse
+from backend.models.services import SchemaResponse
 from backend.repositories import rum as rum_repo
-from backend.repositories import service_stats as service_stats_repo
+from backend.repositories import usage as service_stats_repo
 from backend.repositories._base import SectionTimer
 from backend.utils.auth import mask_ips_for, require_service_in_scope
 from backend.utils.router_utils import query_errors
@@ -719,7 +719,7 @@ def _bootstrap_sync(
     def _resolve_views() -> list[dict]:
         if not valid_active_id:
             return []
-        from backend.repositories import views as _views_repo
+        from backend.repositories import alerts as _views_repo
 
         try:
             return _views_repo.get_views(valid_active_id)

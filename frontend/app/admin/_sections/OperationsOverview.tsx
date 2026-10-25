@@ -19,19 +19,103 @@
 
 import * as React from 'react'
 import { formatCount } from '@/lib/format'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import Link from 'next/link'
-import { Activity, Database, AlertTriangle } from 'lucide-react'
+import { Activity, Database, AlertTriangle, UserPlus, ShieldCheck, TrendingUp, Layers, Eye } from 'lucide-react'
 
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { buttonVariants } from '@/components/ui/button'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import { useMounted } from '@/hooks/useMounted'
 import type { components } from '@/types/api.generated'
-import { adminJson } from '@/lib/api'
+import { adminJson, client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
+import { scoringAnalyticsCompositeOptions, scoringConfigCompositeOptions } from '@/components/SessionScoring/useScorerTimeseries'
 import { useServiceStore } from '@/stores/serviceStore'
-import { buildServiceHref } from '@/lib/navigation'
+import { buildServiceHref } from '@/lib/utils'
 import { queryKeys } from '@/lib/query-keys'
+
+const ADMIN_PREFETCH_LINKS = [
+  { href: '/admin/share', testId: 'open-share-dialog', label: 'Share Dashboard', icon: UserPlus, key: 'share' },
+  { href: '/admin/session-scoring', label: 'Session Scoring', icon: ShieldCheck, key: 'scoring' },
+  { href: '/admin/queries', label: 'Live Queries', icon: Activity, key: 'queries' },
+  { href: '/admin/trends', label: 'Trends', icon: TrendingUp, key: 'trends' },
+  { href: '/admin/queue', label: 'Queue', icon: Layers, key: 'queue' },
+  { href: '/admin/rum', label: 'RUM', icon: Eye, key: 'rum' },
+  { href: '/admin/clickhouse', label: 'ClickHouse', icon: Database, key: 'clickhouse', highScaleOnly: true },
+] as const
+
+export function AdminPrefetchLinks({ isHighScale }: { isHighScale?: boolean } = {}) {
+  const queryClient = useQueryClient()
+  const mounted = useMounted()
+  const storeServiceId = useServiceStore(s => s.activeServiceId)
+  const services = useServiceStore(s => s.services)
+  const activeServiceId = mounted ? storeServiceId : null
+  const showClickHouse = isHighScale ?? services.some(s => Boolean(s.is_high_scale))
+
+  const handlePrefetch = (key: (typeof ADMIN_PREFETCH_LINKS)[number]['key']) => {
+    if (key === 'share') {
+      queryClient.prefetchQuery({
+        queryKey: queryKeys.admin.shareStatus(),
+        queryFn: async ({ signal }) =>
+          unwrapClient(client.GET('/api/admin/share/status', { signal })),
+      })
+    } else if (key === 'scoring' && activeServiceId) {
+      queryClient.prefetchQuery(scoringAnalyticsCompositeOptions(activeServiceId, 24))
+      queryClient.prefetchQuery(scoringConfigCompositeOptions(activeServiceId))
+    } else if (key === 'trends') {
+      queryClient.prefetchQuery({
+        queryKey: queryKeys.admin.metricHistoryBatch('1h'),
+        queryFn: async ({ signal }) =>
+          unwrapClient(
+            client.GET('/api/admin/metric-history/batch', {
+              params: { query: { since: '1h' } },
+              signal,
+            }),
+          ),
+      })
+    } else if (key === 'queue') {
+      queryClient.prefetchQuery({
+        queryKey: queryKeys.admin.celeryStatus(),
+        queryFn: async ({ signal }) =>
+          unwrapClient(client.GET('/api/admin/celery/status', { signal })),
+      })
+    } else if (key === 'clickhouse' && activeServiceId) {
+      queryClient.prefetchQuery({
+        queryKey: queryKeys.admin.clickhouseStatus(activeServiceId),
+        queryFn: async ({ signal }) => {
+          const { data, response } = await client.GET('/api/admin/clickhouse/status', {
+            params: { query: { service_id: activeServiceId } },
+            signal,
+          })
+          if (!response.ok && response.status !== 503) throw new Error(`status ${response.status}`)
+          return data
+        },
+      })
+    }
+  }
+
+  return (
+    <>
+      {ADMIN_PREFETCH_LINKS.filter(item => !('highScaleOnly' in item && item.highScaleOnly) || showClickHouse).map(item => {
+        const Icon = item.icon
+        return (
+          <Link
+            key={item.key}
+            href={activeServiceId ? `${item.href}?service=${activeServiceId}` : item.href}
+            prefetch={false}
+            onMouseEnter={() => handlePrefetch(item.key)}
+            data-testid={'testId' in item ? item.testId : undefined}
+            className={buttonVariants({ variant: 'secondary', size: 'sm' })}
+          >
+            <Icon className="h-4 w-4 mr-1" /> {item.label}
+          </Link>
+        )
+      })}
+    </>
+  )
+}
 
 const POLL_MS = 10_000
 

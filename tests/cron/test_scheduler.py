@@ -1256,7 +1256,7 @@ def test_dev_local_allowlist_skips_high_scale_services(monkeypatch):
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc-high"}),
         patch("backend.core.duckdb.is_configured", return_value=True),
         patch(
-            "backend.high_scale.registry.get_high_scale_service_registry",
+            "backend.high_scale.registry_bootstrap.get_high_scale_service_registry",
             return_value=type("Registry", (), {"resolve": lambda self, service_id: object()})(),
         ),
         patch.object(sched._sched, "add_job") as add_job,
@@ -1887,8 +1887,8 @@ class TestLogCronRunDurationIsFloat:
             patch("backend.cron_progress.get_progress", return_value=[]),
             patch("backend.core.duckdb.backfill_fastly_edge_writes"),
             patch("backend.core.duckdb.reconcile_fastly_stats"),
-            patch("backend.utils.usage_logger.flush_usage_log"),
-            patch("backend.utils.usage_logger.run_usage_log_cleanup"),
+            patch("backend.utils.telemetry.flush_usage_log"),
+            patch("backend.utils.telemetry.run_usage_log_cleanup"),
             patch("backend.core.duckdb.update_cron_duration"),
         ):
             _run_log_discovery_cron("test", force=True, run_id=1)

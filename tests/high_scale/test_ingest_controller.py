@@ -7,10 +7,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from backend.core.high_scale_contracts import ArchiveState
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.deletion import DeletionController
 from backend.high_scale.ingest_controller import HighScaleIngestController
+from backend.high_scale.models import ArchiveState
 from backend.high_scale.publication import (
     ClickHousePublication,
     InMemoryBatchManifestStore,
@@ -804,7 +804,7 @@ def test_worker_run_once_continues_when_maintenance_fails(caplog: pytest.LogCapt
 
     with (
         patch("backend.core.clickhouse_client.get_clickhouse_client", return_value=mock_client),
-        patch("backend.utils.usage_logger.run_usage_log_cleanup", return_value=None),
+        patch("backend.utils.telemetry.run_usage_log_cleanup", return_value=None),
         caplog.at_level(logging.DEBUG),
     ):
         results = worker.run_once()

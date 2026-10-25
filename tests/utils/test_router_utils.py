@@ -656,7 +656,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from backend.utils import valkey_publisher as vp
-from backend.utils.log_throttle import _last as _last_error_log
+from backend.utils.telemetry import _last as _last_error_log
 from backend.utils.valkey_publisher import ValkeyPublisher
 
 

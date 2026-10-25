@@ -9,7 +9,7 @@ import { Shield, ShieldAlert, Cpu, Globe, Activity, HelpCircle } from 'lucide-re
 import type { components } from '@/types/api.generated'
 import { ColumnDef } from '@tanstack/react-table'
 import { FilterValueCell } from '@/components/FilterValueCell'
-import { DataTable } from '@/components/DataTable/DataTable'
+import { DataTable } from '@/components/DataTable'
 import { HelpDialog } from '@/components/ui/help-dialog'
 import { Button } from '@/components/ui/button'
 

@@ -32,7 +32,7 @@ import duckdb
 from backend import config as svcconfig
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.date_utils import safe_iso as _safe_iso  # noqa: E402
-from backend.utils.log_throttle import log_once_per
+from backend.utils.telemetry import log_once_per
 
 logger = logging.getLogger(__name__.replace("_duckdb_status", "duckdb"))
 
@@ -665,7 +665,7 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
         return
 
     source = svcconfig.config_to_source(src)
-    from backend.high_scale.registry import get_high_scale_service_registry
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     if get_high_scale_service_registry().resolve(service_id) is not None:
         logger.info("[refresh_status] %s: high-scale service uses ClickHouse status", service_id)
@@ -1388,8 +1388,7 @@ def reconcile_fastly_stats(source: dict, hours_back: int = 12) -> int:
         from datetime import UTC, datetime, timedelta
 
         from backend.core import metadata as metadata_db
-        from backend.core.fastly.client import fastly
-        from backend.core.fastly.models import StatsResponse
+        from backend.core.fastly.client import StatsResponse, fastly
 
         # Hourly gate — Fastly's hourly /stats/aggregate snaps to the wall
         # clock so re-pulling more than once per hour is pure waste, and the

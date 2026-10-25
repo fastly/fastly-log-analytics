@@ -17,7 +17,7 @@ from backend.core.iceberg import buffer as buffer_mod
 from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.core.query_attribution import current_attribution
 from backend.core.query_registry import query_registry
-from backend.cron.jobs import expire
+from backend.cron.jobs import compaction as expire
 from backend.cron.scheduler import Scheduler
 from backend.utils.telemetry import process_context_scope
 from tests.cron.conftest import make_cron_source as _source
@@ -329,7 +329,7 @@ def test_manual_trigger_runs_expire_and_persists_file_deletion_count(client, mon
     monkeypatch.setattr("backend.cron_progress.end_progress", lambda *args, **kwargs: None)
     monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", lambda *args, **kwargs: None)
 
-    with patch("backend.cron.jobs.expire._run_expire_snapshots", return_value={"status": "success"}) as run_expire:
+    with patch("backend.cron.jobs.compaction._run_expire_snapshots", return_value={"status": "success"}) as run_expire:
         response = client.post("/api/admin/expire-snapshots/svc-expire-contract")
 
     assert response.status_code == 200
@@ -442,7 +442,7 @@ def test_expire_cron_context_attributes_queries_and_flushes_usage(monkeypatch):
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *_args: False)
     monkeypatch.setattr("backend.utils.telemetry.start_call_tracking", lambda: None)
     monkeypatch.setattr(
-        "backend.utils.usage_logger.flush_usage_log",
+        "backend.utils.telemetry.flush_usage_log",
         lambda _service_id: flush_contexts.append(get_process_context()),
     )
     monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", lambda: None)
@@ -672,7 +672,7 @@ import logging
 import pytest
 from starlette.testclient import TestClient
 
-from backend.cron.jobs import optimize
+from backend.cron.jobs import compaction as optimize
 
 
 @pytest.fixture

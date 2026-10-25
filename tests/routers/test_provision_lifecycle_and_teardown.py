@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient
 
 from backend import config as svcconfig
 from backend.main import app
-from tests._helpers.sse import parse_sse_events as _parse_sse_events
+from tests._helpers.wire import parse_sse_events as _parse_sse_events
 
 
 # ── Merged from tests/routers/test_provision_lifecycle.py ──

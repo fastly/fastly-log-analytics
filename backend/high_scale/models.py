@@ -5,6 +5,90 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
+
+_BASELINE_HOT_DAYS = 1.0
+_BASELINE_WARM_DAYS = 30.0
+_PROTECTED_RESERVE_FRACTION = 0.20
+_WARM_COMPACTION_RATIO = 0.3
+_SECONDS_PER_DAY = 86_400
+
+
+class ArchiveState(StrEnum):
+    ARTIFACT_UPLOADING = "artifact_uploading"
+    ARTIFACT_VERIFIED = "artifact_verified"
+    MANIFEST_PREPARED = "manifest_prepared"
+    MANIFEST_COMMITTED = "manifest_committed"
+    DELETION_ELIGIBLE = "deletion_eligible"
+    SOURCE_DELETED = "source_deleted"
+
+
+ARCHIVE_STATES = tuple(ArchiveState)
+
+
+def validate_archive_transition(current: ArchiveState, next_state: ArchiveState) -> None:
+    """Reject state regressions and transitions that skip a protocol phase."""
+    try:
+        current_index = ARCHIVE_STATES.index(current)
+        next_index = ARCHIVE_STATES.index(next_state)
+    except ValueError as exc:
+        raise ValueError("unknown archive state") from exc
+    if next_index != current_index + 1:
+        raise ValueError("archive state transitions must be monotonic and adjacent")
+
+
+@dataclass(frozen=True)
+class ServiceProfile:
+    events_per_second: float
+    average_row_bytes: float = 500.0
+
+    def __post_init__(self) -> None:
+        if self.events_per_second <= 0:
+            raise ValueError("events_per_second must be positive")
+        if self.average_row_bytes <= 0:
+            raise ValueError("average_row_bytes must be positive")
+
+
+@dataclass(frozen=True)
+class StorageProfile:
+    total_bytes: int
+    protected_reserve_fraction: float = _PROTECTED_RESERVE_FRACTION
+
+    def __post_init__(self) -> None:
+        if self.total_bytes <= 0:
+            raise ValueError("total_bytes must be positive")
+        if not 0.0 <= self.protected_reserve_fraction < 1.0:
+            raise ValueError("protected_reserve_fraction must be in [0, 1)")
+
+
+@dataclass(frozen=True)
+class RetentionRecommendation:
+    hot_days: float
+    warm_days: float
+    reasoning: str
+
+
+def recommend_retention(
+    service_profile: ServiceProfile,
+    storage_profile: StorageProfile,
+) -> RetentionRecommendation:
+    usable_bytes = storage_profile.total_bytes * (1.0 - storage_profile.protected_reserve_fraction)
+    bytes_per_day = service_profile.events_per_second * service_profile.average_row_bytes * _SECONDS_PER_DAY
+
+    max_hot_days = usable_bytes / bytes_per_day
+    hot_days = min(_BASELINE_HOT_DAYS, max_hot_days)
+
+    remaining_bytes = max(0.0, usable_bytes - hot_days * bytes_per_day)
+    warm_bytes_per_day = bytes_per_day * _WARM_COMPACTION_RATIO
+    max_warm_days = remaining_bytes / warm_bytes_per_day if warm_bytes_per_day > 0 else 0.0
+    warm_days = min(_BASELINE_WARM_DAYS, hot_days + max_warm_days)
+
+    reasoning = (
+        f"{service_profile.events_per_second:.0f} events/s at {service_profile.average_row_bytes:.0f} "
+        f"bytes/row against {usable_bytes:.0f} usable bytes "
+        f"({storage_profile.protected_reserve_fraction:.0%} reserved)"
+    )
+    return RetentionRecommendation(hot_days=hot_days, warm_days=warm_days, reasoning=reasoning)
 
 
 @dataclass(frozen=True)

@@ -25,7 +25,7 @@ from backend.models.services import CronSettingsPartial
 from backend.provision import fastly_api
 from backend.routers.services import core as services_core
 from tests._helpers.config_fakes import mutate_via_save
-from tests._helpers.sse import parse_sse_events as _parse_sse_events
+from tests._helpers.wire import parse_sse_events as _parse_sse_events
 from tests.conftest import MOCK_SERVICE_ID
 
 # ── Merged from tests/routers/test_service_mutations.py ──

@@ -1324,7 +1324,7 @@ def provision_ngwaf_workspaces(
     Either way an unauthenticated caller can't enumerate workspaces
     even if they reach the loopback admin surface.
     """
-    from backend.core.fastly.models import NgwafWorkspacesResponse
+    from backend.core.fastly.client import NgwafWorkspacesResponse
     from backend.provision import fastly
     from backend.utils.router_utils import format_debug_request
 

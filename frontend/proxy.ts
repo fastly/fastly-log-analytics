@@ -1,5 +1,5 @@
 import { NextResponse, NextRequest } from 'next/server'
-import { ACTIVE_SERVICE_COOKIE } from './lib/cookies'
+import { ACTIVE_SERVICE_COOKIE } from './lib/utils'
 
 // Two responsibilities live here:
 //

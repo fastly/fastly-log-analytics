@@ -23,9 +23,16 @@ import { PageHeader } from '@/components/ui/page-header'
 import { downloadAsCsv } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { FiltersPayload } from '@/types/filters'
-import { buildStructuredSql, queryPageUrlParsers, type QueryMode } from './_sql_builder'
-import { RawSqlMode } from './_sections/RawSqlMode'
-import { QueryToolbar, ModeToggle, StructuredMode, ResultsTable } from './_sections/QueryToolbar'
+import {
+  buildStructuredSql,
+  queryPageUrlParsers,
+  type QueryMode,
+  RawSqlMode,
+  QueryToolbar,
+  ModeToggle,
+  StructuredMode,
+  ResultsTable,
+} from './_sections/QueryToolbar'
 import { queryKeys } from '@/lib/query-keys'
 import type { components } from '@/types/api.generated'
 

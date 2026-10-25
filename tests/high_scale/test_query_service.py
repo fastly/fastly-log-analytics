@@ -4,8 +4,8 @@ from datetime import UTC, datetime
 
 import pytest
 
+from backend.high_scale._common import KeysetCursor
 from backend.high_scale.archive_models import ServingWatermark
-from backend.high_scale.pagination import KeysetCursor
 from backend.high_scale.query_service import query_cmcd_facts, query_request_facts, query_rum_facts
 
 

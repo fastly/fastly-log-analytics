@@ -811,19 +811,7 @@ def _bootstrap_featurestate_from_fastly(service_id: str, token: str) -> FeatureS
     source_ver = active_ver
 
     if source_ver is None:
-        try:
-            resp = fastly("GET", f"/service/{service_id}/version", token=token)
-            if isinstance(resp, list):
-                versions = sorted([int(v.get("number", 0)) for v in resp if isinstance(v, dict)])
-            elif isinstance(resp, dict) and "items" in resp:
-                versions = sorted([int(v.get("number", 0)) for v in resp.get("items", [])])
-            else:
-                versions = []
-
-            if versions:
-                source_ver = versions[-1]
-        except Exception:
-            pass
+        source_ver = _fetch_highest_version(service_id, token)
 
     if source_ver is None:
         return FeatureState(
@@ -885,36 +873,42 @@ def _bootstrap_featurestate_from_fastly(service_id: str, token: str) -> FeatureS
     )
 
 
+def _fetch_highest_version(service_id: str, token: str, *, raise_on_error: bool = False) -> int | None:
+    """Return the highest existing version number for ``service_id``, or ``None``."""
+    try:
+        resp = fastly("GET", f"/service/{service_id}/version", token=token)
+    except Exception as e:
+        if raise_on_error:
+            raise RuntimeError(f"Cannot determine version to clone for {service_id}: {e}")
+        return None
+    items = resp if isinstance(resp, list) else (resp.get("items", []) if isinstance(resp, dict) else [])
+    versions = sorted([int(v.get("number", 0)) for v in items if isinstance(v, dict)])
+    return versions[-1] if versions else None
+
+
+def _fetch_from_active(service_id: str, token: str, fetcher: Callable[[str, int, str], list]) -> list:
+    active_ver = fastly_integration.fetch_active_version(service_id, token)
+    return fetcher(service_id, active_ver, token) if active_ver is not None else []
+
+
 def _fetch_snippets(service_id: str, token: str) -> list[VCLSnippet]:
     """Fetch current VCL snippets from Fastly (from active version)."""
-    active_ver = fastly_integration.fetch_active_version(service_id, token)
-    if active_ver is None:
-        return []
-    return fastly_integration.fetch_snippets(service_id, active_ver, token)
+    return _fetch_from_active(service_id, token, fastly_integration.fetch_snippets)
 
 
 def _fetch_logging_endpoints(service_id: str, token: str) -> list[LoggingEndpoint]:
     """Fetch current logging endpoints from Fastly (from active version)."""
-    active_ver = fastly_integration.fetch_active_version(service_id, token)
-    if active_ver is None:
-        return []
-    return fastly_integration.fetch_logging_endpoints(service_id, active_ver, token)
+    return _fetch_from_active(service_id, token, fastly_integration.fetch_logging_endpoints)
 
 
 def _fetch_backends(service_id: str, token: str) -> list[Backend]:
     """Fetch current backends from Fastly (from active version)."""
-    active_ver = fastly_integration.fetch_active_version(service_id, token)
-    if active_ver is None:
-        return []
-    return fastly_integration.fetch_backends(service_id, active_ver, token)
+    return _fetch_from_active(service_id, token, fastly_integration.fetch_backends)
 
 
 def _fetch_dictionaries(service_id: str, token: str) -> list[ServiceDictionary]:
     """Fetch current dictionaries from Fastly (from active version)."""
-    active_ver = fastly_integration.fetch_active_version(service_id, token)
-    if active_ver is None:
-        return []
-    return fastly_integration.fetch_dictionaries(service_id, active_ver, token)
+    return _fetch_from_active(service_id, token, fastly_integration.fetch_dictionaries)
 
 
 def _ensure_cdn_domain(
@@ -1001,25 +995,9 @@ def _clone_active_version(service_id: str, token: str, desired_state: FeatureSta
         return fastly_integration.clone_version(service_id, active_ver, token, comment)
 
     # Gotcha 1: No active version - clone the highest existing version
-    from backend.core.fastly.client import fastly as fastly_client
-
-    try:
-        resp = fastly_client("GET", f"/service/{service_id}/version", token=token)
-    except Exception as e:
-        raise RuntimeError(f"Cannot determine version to clone for {service_id}: {e}")
-
-    if isinstance(resp, list):
-        versions = sorted([int(v.get("number", 0)) for v in resp if isinstance(v, dict)], reverse=True)
-    elif isinstance(resp, dict) and "items" in resp:
-        versions = sorted([int(v.get("number", 0)) for v in resp.get("items", [])], reverse=True)
-    else:
-        versions = []
-
-    if versions:
-        highest = versions[0]
-        # Clone the highest version to get a writable draft
-        new_ver = fastly_integration.clone_version(service_id, highest, token, comment)
-        return new_ver
+    highest = _fetch_highest_version(service_id, token, raise_on_error=True)
+    if highest is not None:
+        return fastly_integration.clone_version(service_id, highest, token, comment)
 
     # Fallback: create on v1 (should not happen)
     raise RuntimeError(f"Cannot determine version to clone for {service_id}")
@@ -1099,53 +1077,51 @@ def _apply_diff(
         except Exception:
             pass
 
-    # Step 6.1: Purge old snippets (including legacy ones)
-    for snippet_name in diff.snippets_to_remove:
-        if not _is_managed_snippet(snippet_name):
-            continue
-        if status_cb:
-            status_cb(f"🧹 Removing outdated VCL snippet '{snippet_name}'...")
-        try:
-            fastly_integration.delete_snippet(service_id, draft_version, snippet_name, token)
-        except Exception:
-            pass
+    def _purge_outdated(
+        names: list[str],
+        label: str,
+        deleter: Callable[[str, int, str, str], None],
+        *,
+        whitelist: set[str] | None = None,
+        err_label: str = "",
+        skip_fn: Callable[[str], bool] | None = None,
+    ) -> None:
+        for name in names:
+            if skip_fn and skip_fn(name):
+                continue
+            if whitelist is not None and name not in whitelist:
+                raise RuntimeError(
+                    f"CRITICAL: Attempted to delete non-whitelisted {err_label} '{name}'. Whitelisted: {whitelist}"
+                )
+            if status_cb:
+                status_cb(f"🧹 Removing outdated {label} '{name}'...")
+            try:
+                deleter(service_id, draft_version, name, token)
+            except Exception:
+                pass
 
-    # Step 6.2: Purge old endpoints
-    for endpoint_name in diff.endpoints_to_remove:
-        if status_cb:
-            status_cb(f"🧹 Removing outdated logging endpoint '{endpoint_name}'...")
-        try:
-            fastly_integration.delete_logging_endpoint(service_id, draft_version, endpoint_name, token)
-        except Exception:
-            pass
-
-    # Step 6.3: Purge old backends (with whitelist guard)
-    for backend_name in diff.backends_to_remove:
-        if backend_name not in MANAGED_BACKEND_NAMES:
-            raise RuntimeError(
-                f"CRITICAL: Attempted to delete non-whitelisted backend '{backend_name}'. "
-                f"Whitelisted: {MANAGED_BACKEND_NAMES}"
-            )
-        if status_cb:
-            status_cb(f"🧹 Removing outdated backend '{backend_name}'...")
-        try:
-            fastly_integration.delete_backend(service_id, draft_version, backend_name, token)
-        except Exception:
-            pass
-
-    # Step 6.4: Purge old dictionaries (with whitelist guard)
-    for dict_name in diff.dictionaries_to_remove:
-        if dict_name not in MANAGED_DICTIONARY_NAMES:
-            raise RuntimeError(
-                f"CRITICAL: Attempted to delete non-whitelisted dictionary '{dict_name}'. "
-                f"Whitelisted: {MANAGED_DICTIONARY_NAMES}"
-            )
-        if status_cb:
-            status_cb(f"🧹 Removing outdated edge dictionary '{dict_name}'...")
-        try:
-            fastly_integration.delete_dictionary(service_id, draft_version, dict_name, token)
-        except Exception:
-            pass
+    # Step 6.1–6.4: Purge old snippets, endpoints, backends, and dictionaries
+    _purge_outdated(
+        diff.snippets_to_remove,
+        "VCL snippet",
+        fastly_integration.delete_snippet,
+        skip_fn=lambda n: not _is_managed_snippet(n),
+    )
+    _purge_outdated(diff.endpoints_to_remove, "logging endpoint", fastly_integration.delete_logging_endpoint)
+    _purge_outdated(
+        diff.backends_to_remove,
+        "backend",
+        fastly_integration.delete_backend,
+        whitelist=MANAGED_BACKEND_NAMES,
+        err_label="backend",
+    )
+    _purge_outdated(
+        diff.dictionaries_to_remove,
+        "edge dictionary",
+        fastly_integration.delete_dictionary,
+        whitelist=MANAGED_DICTIONARY_NAMES,
+        err_label="dictionary",
+    )
 
     # Step 6.4.5: Ensure unified conditions are present if any of the endpoints/backends references them
     from backend.core.fastly.service import ensure_condition

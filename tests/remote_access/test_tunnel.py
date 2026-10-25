@@ -590,7 +590,7 @@ def test_rate_limiter_lru_eviction(monkeypatch):
     try:
         from backend.utils.tunnel import rate_limiter
     except ImportError:
-        from backend.utils.tunnel import session as rate_limiter
+        from backend.utils.tunnel import manager as rate_limiter
 
     # Set MAX_TRACKED_IPS to 3 for testing.
     monkeypatch.setattr(rate_limiter, "MAX_TRACKED_IPS", 3)
@@ -710,7 +710,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.utils.tunnel.state import (
+from backend.utils.tunnel.manager import (
     TunnelState,
     clear_persisted_state,
     persist_direct_state,
@@ -759,7 +759,7 @@ def test_persist_then_restore_round_trip(state_file: Path):
 def test_persist_swallows_io_errors(monkeypatch):
     """persist_direct_state is best-effort — an IO failure must not
     propagate up to the tunnel manager and break setup."""
-    from backend.utils.tunnel import state as state_mod
+    from backend.utils.tunnel import manager as state_mod
 
     monkeypatch.setattr(state_mod, "_state_file_path", lambda: "/nonexistent/dir/x.json")
     # Must not raise — exception is logged + swallowed.
@@ -780,7 +780,7 @@ def test_clear_is_noop_when_file_missing(state_file: Path):
 
 
 def test_clear_swallows_io_errors(monkeypatch):
-    from backend.utils.tunnel import state as state_mod
+    from backend.utils.tunnel import manager as state_mod
 
     # Make the path point to something that exists but can't be removed
     # (a directory, in this case — os.remove on a dir raises OSError).

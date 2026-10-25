@@ -24,10 +24,9 @@ import {
 } from '@/components/ui/select'
 import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
-import { cn } from '@/lib/utils'
-import { panelDialogContent, panelDialogHeaderSolid } from '@/lib/panel-dialog'
+import { cn, panelDialogContent, panelDialogHeaderSolid } from '@/lib/utils'
 
-import type { ShareStatus } from './utils'
+import type { ShareStatus } from './sortable'
 
 const DURATION_OPTIONS = [
   { label: '1 hour', value: 1 },

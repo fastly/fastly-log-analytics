@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { buildStreamRequest } from '@/lib/streamRequest'
-import { buildServiceHref } from '@/lib/navigation'
+import { buildServiceHref } from '@/lib/utils'
 import { runEventStream } from '@/hooks/useEventStream'
 import { useServiceStore } from '@/stores/serviceStore'
 

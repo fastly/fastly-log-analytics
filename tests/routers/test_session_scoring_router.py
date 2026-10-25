@@ -40,6 +40,80 @@ def _clear_analytics_cache_between_tests(monkeypatch):
     _ss._scoring_pragma_cache.clear()
 
 
+from contextlib import contextmanager
+
+
+def _parse_sse(resp) -> list[dict]:
+    return [json.loads(line[len("data: ") :]) for line in resp.text.splitlines() if line.startswith("data: ")]
+
+
+def _patch_run_with_events(
+    events=({"type": "status", "message": "fake"},),
+    *,
+    capture_token: dict | None = None,
+    on_done=None,
+    raise_exc: Exception | None = None,
+):
+    def _fake(func, *args, **kwargs):
+        if capture_token is not None:
+            capture_token["t"] = args[1]
+        yield from events
+        if raise_exc is not None:
+            raise raise_exc
+        if on_done is not None:
+            on_done()
+
+    return patch("backend.provision.orchestrator.run_with_events", side_effect=_fake)
+
+
+@contextmanager
+def _patch_labels(labels: list[dict], counts: dict[str, int]):
+    with (
+        patch("backend.scoring.labels.list_labels", return_value=labels),
+        patch("backend.scoring.labels.counts_by_label", return_value=counts),
+    ):
+        yield
+
+
+@contextmanager
+def _capture_fastly_and_audit(*, get_handler=None):
+    fastly_calls: list[tuple] = []
+    audit_calls: list[tuple] = []
+
+    def fake_fastly(method, path, body=None, *args, **kwargs):
+        if method == "GET" and get_handler is not None:
+            return get_handler(path)
+        fastly_calls.append((method, path, body))
+        return {}
+
+    def fake_audit(service_id, action, *, actor="operator", details=None):
+        audit_calls.append((service_id, action, details))
+
+    with (
+        patch("backend.core.fastly.client.fastly", side_effect=fake_fastly),
+        patch("backend.core.metadata.record_scoring_audit", side_effect=fake_audit),
+    ):
+        yield fastly_calls, audit_calls
+
+
+def _health_row(**overrides) -> dict:
+    row = {
+        "total_edge_rows": 1000,
+        "scored_rows": 200,
+        "distinct_sids": 50,
+        "avg_score": 10.0,
+        "p50_score": 0.0,
+        "p95_score": 0.0,
+        "max_score": 100,
+        "scorer_errors": 0,
+        "top_reasons": [],
+        "l2_evaluated": 100,
+        "l2_high_count": 5,
+    }
+    row.update(overrides)
+    return row
+
+
 # ── /scoring/status ──────────────────────────────────────────────────────────
 
 
@@ -274,17 +348,8 @@ def test_enable_uses_config_token_when_query_token_absent(client, with_config):
     """Token resolution: prefer query-param token, fall back to
     cfg.fastly_api_key. Without either we 400."""
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "fastly_api_key": "FROM_CONFIG"}
-
     captured_token: dict = {}
-
-    def fake_run_with_events(func, *args, **kwargs):
-        captured_token["t"] = args[1]
-        yield {"type": "status", "message": "fake"}
-
-    with patch(
-        "backend.provision.orchestrator.run_with_events",
-        side_effect=fake_run_with_events,
-    ):
+    with _patch_run_with_events(capture_token=captured_token):
         r = client.post(f"/api/services/{LOG_SVC}/scoring/enable")
     assert r.status_code == 200
     assert captured_token["t"] == "FROM_CONFIG"
@@ -292,17 +357,8 @@ def test_enable_uses_config_token_when_query_token_absent(client, with_config):
 
 def test_enable_query_token_overrides_config_token(client, with_config):
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "fastly_api_key": "FROM_CONFIG"}
-
     captured_token: dict = {}
-
-    def fake_run_with_events(func, *args, **kwargs):
-        captured_token["t"] = args[1]
-        yield {"type": "status", "message": "fake"}
-
-    with patch(
-        "backend.provision.orchestrator.run_with_events",
-        side_effect=fake_run_with_events,
-    ):
+    with _patch_run_with_events(capture_token=captured_token):
         r = client.post(f"/api/services/{LOG_SVC}/scoring/enable", json={"token": "FROM_QUERY"})
     assert r.status_code == 200
     assert captured_token["t"] == "FROM_QUERY"
@@ -317,7 +373,6 @@ def test_enable_streams_status_events_then_done(client, with_config):
     block."""
     cfg = {"service_id": LOG_SVC, "fastly_api_key": "TOKEN"}
     with_config[LOG_SVC] = cfg
-
     enabled_cfg = {
         **cfg,
         "scoring": {
@@ -327,28 +382,15 @@ def test_enable_streams_status_events_then_done(client, with_config):
         },
     }
 
-    def fake_run_with_events(func, *args, **kwargs):
-        yield {"type": "status", "message": "step 1"}
-        yield {"type": "status", "message": "step 2"}
-        # When orchestrator finishes, the router re-loads config to surface
-        # the final scoring block. Flip the fake config now.
-        with_config[LOG_SVC] = enabled_cfg
-
-    with patch(
-        "backend.provision.orchestrator.run_with_events",
-        side_effect=fake_run_with_events,
+    with _patch_run_with_events(
+        [{"type": "status", "message": "step 1"}, {"type": "status", "message": "step 2"}],
+        on_done=lambda: with_config.__setitem__(LOG_SVC, enabled_cfg),
     ):
         r = client.post(f"/api/services/{LOG_SVC}/scoring/enable", json={"token": "TOKEN"})
 
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/event-stream")
-
-    # Parse SSE: each "data: {...}" line is a JSON event.
-    events = []
-    for line in r.text.splitlines():
-        if line.startswith("data: "):
-            events.append(json.loads(line[len("data: ") :]))
-
+    events = _parse_sse(r)
     types = [e["type"] for e in events]
     assert "status" in types
     assert "done" in types
@@ -358,19 +400,14 @@ def test_enable_streams_status_events_then_done(client, with_config):
 
 def test_enable_streams_error_event_on_orchestrator_failure(client, with_config):
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "fastly_api_key": "TOKEN"}
-
-    def fake_run_with_events(func, *args, **kwargs):
-        yield {"type": "status", "message": "got partway"}
-        raise RuntimeError("boom — validation failed at step 7")
-
-    with patch(
-        "backend.provision.orchestrator.run_with_events",
-        side_effect=fake_run_with_events,
+    with _patch_run_with_events(
+        [{"type": "status", "message": "got partway"}],
+        raise_exc=RuntimeError("boom — validation failed at step 7"),
     ):
         r = client.post(f"/api/services/{LOG_SVC}/scoring/enable", json={"token": "TOKEN"})
 
     assert r.status_code == 200  # streaming endpoint always 200; error is in the body
-    events = [json.loads(line[len("data: ") :]) for line in r.text.splitlines() if line.startswith("data: ")]
+    events = _parse_sse(r)
     types = [e["type"] for e in events]
     assert "error" in types
     assert "done" not in types  # error short-circuits before done
@@ -382,14 +419,9 @@ def test_enable_blocked_when_preflight_pragmas_missing(client, with_config, monk
     """When service_has_scoring_pragmas returns False, /scoring/enable refuses to
     mutate scoring.enabled or run the reconciler, and emits an SSE error event
     without leaking internal pragma names."""
-    cfg = {"service_id": LOG_SVC, "fastly_api_key": "TOKEN", "scoring": {"enabled": False}}
-    with_config[LOG_SVC] = cfg
+    with_config[LOG_SVC] = {"service_id": LOG_SVC, "fastly_api_key": "TOKEN", "scoring": {"enabled": False}}
     mutated = {"called": False}
-
-    def fake_mutate(*args, **kwargs):
-        mutated["called"] = True
-
-    monkeypatch.setattr("backend.config.mutate_config", fake_mutate)
+    monkeypatch.setattr("backend.config.mutate_config", lambda *a, **kw: mutated.__setitem__("called", True))
 
     with (
         patch("backend.provision.fastly_api.service_has_scoring_pragmas", return_value=False),
@@ -400,7 +432,7 @@ def test_enable_blocked_when_preflight_pragmas_missing(client, with_config, monk
     assert r.status_code == 200
     assert mutated["called"] is False
     mock_run.assert_not_called()
-    events = [json.loads(line[len("data: ") :]) for line in r.text.splitlines() if line.startswith("data: ")]
+    events = _parse_sse(r)
     assert len(events) == 1
     assert events[0]["type"] == "error"
     assert events[0]["code"] == "missing_scoring_pragmas"
@@ -419,30 +451,27 @@ def test_disable_streams_status_events_then_done(client, with_config):
         "fastly_api_key": "TOKEN",
         "scoring": {"enabled": True, "scoring_service_id": "x"},
     }
-
-    def fake_run_with_events(func, *args, **kwargs):
-        yield {"type": "status", "message": "tearing down"}
-
-    with patch(
-        "backend.provision.orchestrator.run_with_events",
-        side_effect=fake_run_with_events,
-    ):
+    with _patch_run_with_events([{"type": "status", "message": "tearing down"}]):
         r = client.post(f"/api/services/{LOG_SVC}/scoring/disable", json={"token": "TOKEN"})
 
     assert r.status_code == 200
-    events = [json.loads(line[len("data: ") :]) for line in r.text.splitlines() if line.startswith("data: ")]
-    assert any(e["type"] == "done" for e in events)
+    assert any(e["type"] == "done" for e in _parse_sse(r))
 
 
 # ── /scoring/labels CRUD ─────────────────────────────────────────────────────
 
 
+def _post_label(client, **payload):
+    return client.post(f"/api/services/{LOG_SVC}/scoring/labels", json=payload)
+
+
+def _patch_label(client, label_id: str, **payload):
+    return client.patch(f"/api/services/{LOG_SVC}/scoring/labels/{label_id}", json=payload)
+
+
 def test_labels_create_and_list_round_trip(client):
     # Create
-    r = client.post(
-        f"/api/services/{LOG_SVC}/scoring/labels",
-        json={"sid": "deadbeef1234", "label": "bad", "notes": "scraper", "sample_ip": "1.2.3.4"},
-    )
+    r = _post_label(client, sid="deadbeef1234", label="bad", notes="scraper", sample_ip="1.2.3.4")
     assert r.status_code == 200, r.text
     saved = r.json()
     assert saved["sid"] == "deadbeef1234"
@@ -459,10 +488,7 @@ def test_labels_create_and_list_round_trip(client):
 
 
 def test_labels_create_400_when_sid_missing(client):
-    r = client.post(
-        f"/api/services/{LOG_SVC}/scoring/labels",
-        json={"label": "bad"},
-    )
+    r = _post_label(client, label="bad")
     assert r.status_code == 400
     body = r.json()["detail"]
     assert body["error"] == "invalid_label"
@@ -470,18 +496,12 @@ def test_labels_create_400_when_sid_missing(client):
 
 
 def test_labels_create_400_when_label_invalid(client):
-    r = client.post(
-        f"/api/services/{LOG_SVC}/scoring/labels",
-        json={"sid": "abc", "label": "ugly"},
-    )
+    r = _post_label(client, sid="abc", label="ugly")
     assert r.status_code == 400
 
 
 def test_labels_create_accepts_neutral(client):
-    r = client.post(
-        f"/api/services/{LOG_SVC}/scoring/labels",
-        json={"sid": "uncertain1", "label": "neutral"},
-    )
+    r = _post_label(client, sid="uncertain1", label="neutral")
     assert r.status_code == 200
     assert r.json()["label"] == "neutral"
 
@@ -489,14 +509,8 @@ def test_labels_create_accepts_neutral(client):
 def test_labels_create_upserts_on_sid(client):
     """Re-labeling the same sid via the endpoint must overwrite, not duplicate."""
     sid = "samesid01"
-    r1 = client.post(
-        f"/api/services/{LOG_SVC}/scoring/labels",
-        json={"sid": sid, "label": "bad"},
-    )
-    r2 = client.post(
-        f"/api/services/{LOG_SVC}/scoring/labels",
-        json={"sid": sid, "label": "good", "notes": "actually fine"},
-    )
+    r1 = _post_label(client, sid=sid, label="bad")
+    r2 = _post_label(client, sid=sid, label="good", notes="actually fine")
     assert r1.json()["id"] == r2.json()["id"]
     assert r2.json()["label"] == "good"
 
@@ -506,36 +520,21 @@ def test_labels_create_upserts_on_sid(client):
 
 
 def test_labels_patch_updates_notes(client):
-    created = client.post(
-        f"/api/services/{LOG_SVC}/scoring/labels",
-        json={"sid": "patchme", "label": "bad", "notes": "initial"},
-    ).json()
-    r = client.patch(
-        f"/api/services/{LOG_SVC}/scoring/labels/{created['id']}",
-        json={"notes": "revised"},
-    )
+    created = _post_label(client, sid="patchme", label="bad", notes="initial").json()
+    r = _patch_label(client, created["id"], notes="revised")
     assert r.status_code == 200
     assert r.json()["notes"] == "revised"
     assert r.json()["label"] == "bad"  # untouched
 
 
 def test_labels_patch_400_on_invalid_label(client):
-    created = client.post(
-        f"/api/services/{LOG_SVC}/scoring/labels",
-        json={"sid": "x", "label": "good"},
-    ).json()
-    r = client.patch(
-        f"/api/services/{LOG_SVC}/scoring/labels/{created['id']}",
-        json={"label": "ugly"},
-    )
+    created = _post_label(client, sid="x", label="good").json()
+    r = _patch_label(client, created["id"], label="ugly")
     assert r.status_code == 400
 
 
 def test_labels_delete_is_idempotent(client):
-    created = client.post(
-        f"/api/services/{LOG_SVC}/scoring/labels",
-        json={"sid": "deleteme", "label": "bad"},
-    ).json()
+    created = _post_label(client, sid="deleteme", label="bad").json()
     r1 = client.delete(f"/api/services/{LOG_SVC}/scoring/labels/{created['id']}")
     r2 = client.delete(f"/api/services/{LOG_SVC}/scoring/labels/{created['id']}")
     assert r1.status_code == 200
@@ -546,6 +545,14 @@ def test_labels_delete_is_idempotent(client):
 
 _LABEL_PII_KEYS = ("notes", "flagged_by", "sample_ip", "sample_ua", "sample_url")
 _LABEL_SAFE_KEYS = ("id", "service_id", "sid", "label", "created_at", "updated_at")
+
+
+def _assert_analyst_projected(row: dict, *, check_safe: bool = False) -> None:
+    for k in _LABEL_PII_KEYS:
+        assert k not in row, f"analyst response should NOT include {k!r}"
+    if check_safe:
+        for k in _LABEL_SAFE_KEYS:
+            assert k in row, f"analyst response should include {k!r}"
 
 
 def test_project_label_for_analyst_strips_pii_fields_only():
@@ -565,26 +572,20 @@ def test_project_label_for_analyst_strips_pii_fields_only():
         "sample_ua": "Mozilla/5.0",
         "sample_url": "/admin/super-secret-path",
     }
-    out = _project_label_for_analyst(full)
-    for k in _LABEL_PII_KEYS:
-        assert k not in out, f"PII field {k!r} should be stripped"
-    for k in _LABEL_SAFE_KEYS:
-        assert k in out, f"safe field {k!r} should be kept"
+    _assert_analyst_projected(_project_label_for_analyst(full), check_safe=True)
 
 
 def test_labels_list_admin_returns_full_pii(client):
     """Admin path (no analyst session) must still return PII for the
     scoring-labels admin UI."""
-    client.post(
-        f"/api/services/{LOG_SVC}/scoring/labels",
-        json={
-            "sid": "admin-pii-test",
-            "label": "bad",
-            "notes": "n",
-            "sample_ip": "9.9.9.9",
-            "sample_ua": "ua",
-            "sample_url": "/x",
-        },
+    _post_label(
+        client,
+        sid="admin-pii-test",
+        label="bad",
+        notes="n",
+        sample_ip="9.9.9.9",
+        sample_ua="ua",
+        sample_url="/x",
     )
     listing = client.get(f"/api/services/{LOG_SVC}/scoring/labels").json()
     row = next(r for r in listing["labels"] if r["sid"] == "admin-pii-test")
@@ -604,17 +605,11 @@ def test_labels_list_analyst_omits_pii(client, monkeypatch):
     """
     from backend.routers import session_scoring as _ss
 
-    client.post(
-        f"/api/services/{LOG_SVC}/scoring/labels",
-        json={"sid": "analyst-pii-test", "label": "bad", "notes": "n", "sample_ip": "1.1.1.1"},
-    )
+    _post_label(client, sid="analyst-pii-test", label="bad", notes="n", sample_ip="1.1.1.1")
     monkeypatch.setattr(_ss, "_is_analyst_request", lambda req: True)
     listing = client.get(f"/api/services/{LOG_SVC}/scoring/labels").json()
     row = next(r for r in listing["labels"] if r["sid"] == "analyst-pii-test")
-    for k in _LABEL_PII_KEYS:
-        assert k not in row, f"analyst response should NOT include {k!r}"
-    for k in _LABEL_SAFE_KEYS:
-        assert k in row, f"analyst response should include {k!r}"
+    _assert_analyst_projected(row, check_safe=True)
 
 
 def test_labels_create_response_analyst_omits_pii(client, monkeypatch):
@@ -622,33 +617,20 @@ def test_labels_create_response_analyst_omits_pii(client, monkeypatch):
     from backend.routers import session_scoring as _ss
 
     monkeypatch.setattr(_ss, "_is_analyst_request", lambda req: True)
-    r = client.post(
-        f"/api/services/{LOG_SVC}/scoring/labels",
-        json={"sid": "analyst-post-test", "label": "good", "notes": "n", "sample_ip": "2.2.2.2"},
-    )
+    r = _post_label(client, sid="analyst-post-test", label="good", notes="n", sample_ip="2.2.2.2")
     assert r.status_code == 200
-    body = r.json()
-    for k in _LABEL_PII_KEYS:
-        assert k not in body, f"analyst POST response should NOT include {k!r}"
+    _assert_analyst_projected(r.json())
 
 
 def test_labels_patch_response_analyst_omits_pii(client, monkeypatch):
     """PATCH response must also be projected for analyst."""
     from backend.routers import session_scoring as _ss
 
-    created = client.post(
-        f"/api/services/{LOG_SVC}/scoring/labels",
-        json={"sid": "analyst-patch-test", "label": "bad", "notes": "initial"},
-    ).json()
+    created = _post_label(client, sid="analyst-patch-test", label="bad", notes="initial").json()
     monkeypatch.setattr(_ss, "_is_analyst_request", lambda req: True)
-    r = client.patch(
-        f"/api/services/{LOG_SVC}/scoring/labels/{created['id']}",
-        json={"notes": "revised"},
-    )
+    r = _patch_label(client, created["id"], notes="revised")
     assert r.status_code == 200
-    body = r.json()
-    for k in _LABEL_PII_KEYS:
-        assert k not in body, f"analyst PATCH response should NOT include {k!r}"
+    _assert_analyst_projected(r.json())
 
 
 def test_labels_create_analyst_does_not_persist_pii(client, monkeypatch):
@@ -663,17 +645,15 @@ def test_labels_create_analyst_does_not_persist_pii(client, monkeypatch):
 
     sid = "analyst-write-pii"
     monkeypatch.setattr(_ss, "_is_analyst_request", lambda req: True)
-    r = client.post(
-        f"/api/services/{LOG_SVC}/scoring/labels",
-        json={
-            "sid": sid,
-            "label": "bad",
-            "notes": "injected",
-            "flagged_by": "spoofed-operator",
-            "sample_ip": "9.9.9.9",
-            "sample_ua": "evil-agent",
-            "sample_url": "/admin/secret",
-        },
+    r = _post_label(
+        client,
+        sid=sid,
+        label="bad",
+        notes="injected",
+        flagged_by="spoofed-operator",
+        sample_ip="9.9.9.9",
+        sample_ua="evil-agent",
+        sample_url="/admin/secret",
     )
     assert r.status_code == 200, r.text
 
@@ -693,16 +673,10 @@ def test_labels_patch_analyst_cannot_overwrite_notes(client, monkeypatch):
     from backend.scoring import labels as _labels
 
     sid = "analyst-patch-notes"
-    created = client.post(
-        f"/api/services/{LOG_SVC}/scoring/labels",
-        json={"sid": sid, "label": "bad", "notes": "admin-original"},
-    ).json()
+    created = _post_label(client, sid=sid, label="bad", notes="admin-original").json()
 
     monkeypatch.setattr(_ss, "_is_analyst_request", lambda req: True)
-    r = client.patch(
-        f"/api/services/{LOG_SVC}/scoring/labels/{created['id']}",
-        json={"label": "good", "notes": "analyst-overwrite"},
-    )
+    r = _patch_label(client, created["id"], label="good", notes="analyst-overwrite")
     assert r.status_code == 200, r.text
 
     stored = next(row for row in _labels.list_labels(LOG_SVC) if row["sid"] == sid)
@@ -868,25 +842,21 @@ def test_health_includes_latency_when_columns_present(client, monkeypatch):
         },
     )
     canned = [
-        {
-            "total_edge_rows": 1000,
-            "scored_rows": 800,
-            "distinct_sids": 50,
-            "avg_score": 12.5,
-            "p50_score": 5,
-            "p95_score": 60,
-            "max_score": 100,
-            "scorer_errors": 40,
-            "top_reasons": [],
-            "l2_evaluated": 200,
-            "l2_high_count": 10,
-            "rtt_p50_us": 8000,
-            "rtt_p95_us": 42000,
-            "rtt_p99_us": 91000,
-            "rtt_max_us": 100000,
-            "exec_p50_us": 540,
-            "exec_p95_us": 880,
-        }
+        _health_row(
+            scored_rows=800,
+            avg_score=12.5,
+            p50_score=5,
+            p95_score=60,
+            scorer_errors=40,
+            l2_evaluated=200,
+            l2_high_count=10,
+            rtt_p50_us=8000,
+            rtt_p95_us=42000,
+            rtt_p99_us=91000,
+            rtt_max_us=100000,
+            exec_p50_us=540,
+            exec_p95_us=880,
+        )
     ]
     with _patch_query_logs(canned):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/health?since_hours=24")
@@ -904,19 +874,15 @@ def test_health_omits_latency_when_columns_absent(client, monkeypatch):
 
     monkeypatch.setattr(_ss, "_table_columns", lambda sid: {"edge_score", "edge_score_reason"})
     canned = [
-        {
-            "total_edge_rows": 10,
-            "scored_rows": 8,
-            "distinct_sids": 2,
-            "avg_score": 1.0,
-            "p50_score": 0,
-            "p95_score": 0,
-            "max_score": 5,
-            "scorer_errors": 0,
-            "top_reasons": [],
-            "l2_evaluated": 0,
-            "l2_high_count": 0,
-        }
+        _health_row(
+            total_edge_rows=10,
+            scored_rows=8,
+            distinct_sids=2,
+            avg_score=1.0,
+            max_score=5,
+            l2_evaluated=0,
+            l2_high_count=0,
+        )
     ]
     with _patch_query_logs(canned):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/health?since_hours=12")
@@ -981,14 +947,10 @@ def test_latency_timeseries_buckets_by_minute_for_1h_window(client, monkeypatch)
     from backend.routers import session_scoring as _ss
 
     monkeypatch.setattr(_ss, "_table_columns", lambda sid: {"edge_score", "edge_score_reason"})
-
     captured: dict[str, str] = {}
 
     def _fake_query_logs(*args, **kwargs):
-        captured["sql"] = next(
-            (a for a in [*args, *kwargs.values()] if isinstance(a, str) and "date_trunc" in a),
-            "",
-        )
+        captured["sql"] = next((a for a in [*args, *kwargs.values()] if isinstance(a, str) and "date_trunc" in a), "")
         return [{"hour": "2026-06-17 10:00:00", "scored_count": 1, "fail_open_count": 0}]
 
     with patch("backend.repositories.session_scoring.query_logs", side_effect=_fake_query_logs):
@@ -1052,10 +1014,7 @@ def test_evaluation_returns_min_samples_cta_when_under_threshold(client, with_co
     this branch — purely a label-count check."""
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True, "matrix_version": "2026-06-01-a"}}
 
-    with (
-        patch("backend.scoring.labels.list_labels", return_value=[]),
-        patch("backend.scoring.labels.counts_by_label", return_value={"good": 1, "bad": 0, "neutral": 0}),
-    ):
+    with _patch_labels([], {"good": 1, "bad": 0, "neutral": 0}):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/evaluation")
     assert r.status_code == 200
     body = r.json()
@@ -1084,17 +1043,10 @@ def test_evaluation_returns_auc_when_min_samples_met(client, with_config):
     # scoring/matrix internals.
     from backend.scoring.evaluate import EvaluationResult
 
-    fake_result = EvaluationResult(
-        auc=0.85,
-        pass_threshold=0.85,
-        passed=True,
-        n_good=3,
-        n_bad=3,
-    )
+    fake_result = EvaluationResult(auc=0.85, pass_threshold=0.85, passed=True, n_good=3, n_bad=3)
 
     with (
-        patch("backend.scoring.labels.list_labels", return_value=fake_labels),
-        patch("backend.scoring.labels.counts_by_label", return_value=fake_counts),
+        _patch_labels(fake_labels, fake_counts),
         patch("backend.routers.session_scoring._load_matrix", return_value={"transitions": {}}),
         patch(
             "backend.repositories.session_scoring.reconstruct_labeled_sessions",
@@ -1104,9 +1056,6 @@ def test_evaluation_returns_auc_when_min_samples_met(client, with_config):
         ),
         patch("backend.scoring.evaluate.evaluate_from_persisted_scores", return_value=fake_result),
     ):
-        from backend.routers import session_scoring as _ss
-
-        _ss._analytics_cache.clear()
         r = client.get(f"/api/services/{LOG_SVC}/scoring/evaluation")
     assert r.status_code == 200
     body = r.json()
@@ -1120,13 +1069,7 @@ def test_evaluation_returns_auc_when_min_samples_met(client, with_config):
 
 def test_curves_returns_min_samples_cta_under_threshold(client, with_config):
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
-    with (
-        patch("backend.scoring.labels.list_labels", return_value=[]),
-        patch("backend.scoring.labels.counts_by_label", return_value={"good": 1, "bad": 0, "neutral": 0}),
-    ):
-        from backend.routers import session_scoring as _ss
-
-        _ss._analytics_cache.clear()
+    with _patch_labels([], {"good": 1, "bad": 0, "neutral": 0}):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/curves")
     body = r.json()
     assert body["has_min_samples"] is False
@@ -1138,13 +1081,8 @@ def test_curves_computes_perfect_separation_correctly(client, with_config):
     """If all bad sessions score above all good ones, the ROC curve is
     a single right-angle (FPR=0, TPR=1) and AUC = 1.0."""
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
-    fake_labels = [
-        {"sid": "good1", "label": "good"},
-        {"sid": "good2", "label": "good"},
-        {"sid": "good3", "label": "good"},
-        {"sid": "bad1", "label": "bad"},
-        {"sid": "bad2", "label": "bad"},
-        {"sid": "bad3", "label": "bad"},
+    fake_labels = [{"sid": f"good{i}", "label": "good"} for i in (1, 2, 3)] + [
+        {"sid": f"bad{i}", "label": "bad"} for i in (1, 2, 3)
     ]
     fake_counts = {"good": 3, "bad": 3, "neutral": 0}
     reconstructed = [
@@ -1156,13 +1094,9 @@ def test_curves_computes_perfect_separation_correctly(client, with_config):
         ({"session_id": "bad3", "events": [], "max_edge_score": 90}, "bad"),
     ]
     with (
-        patch("backend.scoring.labels.list_labels", return_value=fake_labels),
-        patch("backend.scoring.labels.counts_by_label", return_value=fake_counts),
+        _patch_labels(fake_labels, fake_counts),
         patch("backend.repositories.session_scoring.reconstruct_labeled_sessions", return_value=reconstructed),
     ):
-        from backend.routers import session_scoring as _ss
-
-        _ss._analytics_cache.clear()
         r = client.get(f"/api/services/{LOG_SVC}/scoring/curves")
     body = r.json()
     assert body["has_min_samples"] is True
@@ -1203,26 +1137,16 @@ def test_threshold_preview_buckets_sessions_correctly(client, with_config):
         "passed_bad": 1,
     }
 
-    fake_labels = [
-        {"sid": "bad1", "label": "bad"},
-        {"sid": "bad2", "label": "bad"},
-        {"sid": "bad3", "label": "bad"},
-        {"sid": "good1", "label": "good"},
-        {"sid": "good2", "label": "good"},
+    fake_labels = [{"sid": f"bad{i}", "label": "bad"} for i in (1, 2, 3)] + [
+        {"sid": f"good{i}", "label": "good"} for i in (1, 2)
     ]
     fake_counts = {"good": 2, "bad": 3, "neutral": 0}
 
     with (
-        patch("backend.repositories.session_scoring.query_logs", return_value=[aggregate_row]),
-        patch("backend.scoring.labels.list_labels", return_value=fake_labels),
-        patch("backend.scoring.labels.counts_by_label", return_value=fake_counts),
+        _patch_query_logs([aggregate_row]),
+        _patch_labels(fake_labels, fake_counts),
         patch("backend.routers.session_scoring._bust_analytics_cache"),
     ):
-        # Bust the in-process cache between asserts so different threshold
-        # queries don't collide.
-        from backend.routers import session_scoring as _ss
-
-        _ss._analytics_cache.clear()
         r = client.get(f"/api/services/{LOG_SVC}/scoring/threshold-preview?threshold=50&since_hours=24")
     assert r.status_code == 200
     body = r.json()
@@ -1250,24 +1174,12 @@ def test_threshold_preview_extreme_thresholds(client, with_config):
     # threshold 100 only a flagged.
     agg_low = [{"total": 2, "flagged_total": 2, "passed_total": 0}]
     agg_high = [{"total": 2, "flagged_total": 1, "passed_total": 1}]
-
     call_count = {"n": 0}
 
     # The core scoring columns a provisioned service carries — so the
     # _table_columns() probe reports a full schema and _scoring_source
     # passes the table through unwrapped.
-    _provisioned_cols = [
-        {"column_name": c}
-        for c in (
-            "edge",
-            "edge_sid",
-            "edge_score",
-            "edge_score_l1",
-            "edge_score_l2",
-            "edge_score_reason",
-            "edge_cookie_compliance",
-        )
-    ]
+    _provisioned_cols = [{"column_name": c} for c in ("edge", *tuple(_SCORING_COLUMN_TYPES))]
 
     def _route_query(_service_id, sql, *_args, **_kwargs):
         # _table_columns() fires a DESCRIBE before the aggregate query;
@@ -1280,8 +1192,7 @@ def test_threshold_preview_extreme_thresholds(client, with_config):
 
     with (
         patch("backend.repositories.session_scoring.query_logs", side_effect=_route_query),
-        patch("backend.scoring.labels.list_labels", return_value=[]),
-        patch("backend.scoring.labels.counts_by_label", return_value={"good": 0, "bad": 0, "neutral": 0}),
+        _patch_labels([], {"good": 0, "bad": 0, "neutral": 0}),
     ):
         from backend.routers import session_scoring as _ss
 
@@ -1331,8 +1242,7 @@ def test_retrain_smoke(client, with_config, tmp_path, monkeypatch):
         patch("backend.core.duckdb.get_connection") as mock_get_con,
         patch("backend.scoring.fixtures.extract_traces", return_value=iter([])),
         patch("backend.scoring.matrix.build_matrix", return_value=(fake_matrix, fake_stats)),
-        patch("backend.scoring.labels.list_labels", return_value=[]),
-        patch("backend.scoring.labels.counts_by_label", return_value={"good": 0, "bad": 0, "neutral": 0}),
+        _patch_labels([], {"good": 0, "bad": 0, "neutral": 0}),
         patch("backend.provision.session_scoring_orchestrator._MATRIX_PATH", tmp_path / "matrix.json"),
         patch("backend.state_sync.publish_matrix_to_fos"),
         patch("backend.routers.session_scoring_admin.resolve_fastly_token", return_value="tok"),
@@ -1361,31 +1271,19 @@ def test_session_events_returns_event_timeline(client, with_config):
     timestamped url sequence for one sid. The frontend SessionEventsDialog
     consumes this to render the per-session detail view."""
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
+    base_ev = {
+        "edge_sid": "abc123",
+        "status": 200,
+        "ip": "1.1.1.1",
+        "ua": "browser",
+        "edge_cookie_compliance": "ok",
+        "edge_score_reason": "",
+    }
     canned = [
-        {
-            "edge_sid": "abc123",
-            "ts": "2026-06-02T20:00:00",
-            "url": "/",
-            "status": 200,
-            "ip": "1.1.1.1",
-            "ua": "browser",
-            "edge_score": 0,
-            "edge_cookie_compliance": "ok",
-            "edge_score_reason": "",
-        },
-        {
-            "edge_sid": "abc123",
-            "ts": "2026-06-02T20:00:05",
-            "url": "/login",
-            "status": 200,
-            "ip": "1.1.1.1",
-            "ua": "browser",
-            "edge_score": 10,
-            "edge_cookie_compliance": "ok",
-            "edge_score_reason": "",
-        },
+        {**base_ev, "ts": "2026-06-02T20:00:00", "url": "/", "edge_score": 0},
+        {**base_ev, "ts": "2026-06-02T20:00:05", "url": "/login", "edge_score": 10},
     ]
-    with patch("backend.repositories.session_scoring.query_logs", return_value=canned):
+    with _patch_query_logs(canned):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/sessions/abc123/events")
     assert r.status_code == 200
     body = r.json()
@@ -1402,7 +1300,7 @@ def test_session_events_empty_when_sid_not_in_duckdb(client, with_config):
     yet (or rotated away). Return event_count=0, NOT 404 — the UI
     surfaces a 'no events yet' message."""
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
-    with patch("backend.repositories.session_scoring.query_logs", return_value=[]):
+    with _patch_query_logs([]):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/sessions/nosuch/events")
     assert r.status_code == 200
     assert r.json()["event_count"] == 0
@@ -1414,16 +1312,10 @@ def test_evaluation_reports_missing_matrix_gracefully(client, with_config):
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True, "matrix_version": "v"}}
 
     fake_labels = [{"sid": f"x{i:04x}", "label": "good" if i < 3 else "bad"} for i in range(6)]
-    fake_counts = {"good": 3, "bad": 3, "neutral": 0}
-
     with (
-        patch("backend.scoring.labels.list_labels", return_value=fake_labels),
-        patch("backend.scoring.labels.counts_by_label", return_value=fake_counts),
+        _patch_labels(fake_labels, {"good": 3, "bad": 3, "neutral": 0}),
         patch("backend.routers.session_scoring._load_matrix", return_value=None),
     ):
-        from backend.routers import session_scoring as _ss
-
-        _ss._analytics_cache.clear()
         r = client.get(f"/api/services/{LOG_SVC}/scoring/evaluation")
     assert r.status_code == 200
     body = r.json()
@@ -1444,24 +1336,14 @@ def test_scoring_health_returns_expected_shape(client, with_config):
     landing."""
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
     canned = [
-        {
-            "total_edge_rows": 1000,
-            "scored_rows": 200,
-            "distinct_sids": 50,
-            "avg_score": 45.5,
-            "p50_score": 50.0,
-            "p95_score": 75.0,
-            "max_score": 100,
-            "scorer_errors": 0,
-            "top_reasons": [{"reason": "cookie-missing", "count": 10}],
-            "l2_evaluated": 100,
-            "l2_high_count": 5,
-        }
+        _health_row(
+            avg_score=45.5,
+            p50_score=50.0,
+            p95_score=75.0,
+            top_reasons=[{"reason": "cookie-missing", "count": 10}],
+        )
     ]
-    with patch("backend.repositories.session_scoring.query_logs", return_value=canned):
-        from backend.routers import session_scoring as _ss
-
-        _ss._analytics_cache.clear()
+    with _patch_query_logs(canned):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/health?since_hours=24")
     assert r.status_code == 200
     body = r.json()
@@ -1478,29 +1360,18 @@ def test_scoring_health_surfaces_fail_open_breakdown(client, with_config):
     vs -500 vs internal-error-keys) rather than a single lumped count."""
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
     canned = [
-        {
-            "total_edge_rows": 1000,
-            "scored_rows": 200,
-            "distinct_sids": 50,
-            "avg_score": 10.0,
-            "p50_score": 0.0,
-            "p95_score": 0.0,
-            "max_score": 75,
-            "scorer_errors": 7,
-            "top_reasons": [{"reason": "cookie-missing", "count": 180}],
-            "fail_open_breakdown": [
+        _health_row(
+            max_score=75,
+            scorer_errors=7,
+            top_reasons=[{"reason": "cookie-missing", "count": 180}],
+            fail_open_breakdown=[
                 {"reason": "compute-unavailable-503", "count": 5},
                 {"reason": "compute-unavailable-500", "count": 1},
                 {"reason": "internal-error-keys", "count": 1},
             ],
-            "l2_evaluated": 100,
-            "l2_high_count": 5,
-        }
+        )
     ]
-    with patch("backend.repositories.session_scoring.query_logs", return_value=canned):
-        from backend.routers import session_scoring as _ss
-
-        _ss._analytics_cache.clear()
+    with _patch_query_logs(canned):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/health?since_hours=24")
     assert r.status_code == 200
     body = r.json()
@@ -1523,10 +1394,7 @@ def test_scoring_health_fail_open_breakdown_defaults_empty(client, with_config):
     a clean 'no fail-opens' state."""
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
     canned = [{"total_edge_rows": 10, "scored_rows": 10, "top_reasons": []}]
-    with patch("backend.repositories.session_scoring.query_logs", return_value=canned):
-        from backend.routers import session_scoring as _ss
-
-        _ss._analytics_cache.clear()
+    with _patch_query_logs(canned):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/health?since_hours=24")
     assert r.status_code == 200
     assert r.json()["fail_open_breakdown"] == []
@@ -1540,13 +1408,9 @@ def test_scoring_dashboard_returns_all_subobjects(client, with_config):
     so the frontend can swap to a single useDashboard() hook."""
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True, "scoring_service_id": "scorer-x"}}
     with (
-        patch("backend.scoring.labels.list_labels", return_value=[]),
-        patch("backend.scoring.labels.counts_by_label", return_value={"good": 0, "bad": 0, "neutral": 0}),
-        patch("backend.repositories.session_scoring.query_logs", return_value=[]),
+        _patch_labels([], {"good": 0, "bad": 0, "neutral": 0}),
+        _patch_query_logs([]),
     ):
-        from backend.routers import session_scoring as _ss
-
-        _ss._analytics_cache.clear()
         r = client.get(f"/api/services/{LOG_SVC}/scoring/dashboard?since_hours=24&threshold=75")
     assert r.status_code == 200
     body = r.json()
@@ -1600,13 +1464,10 @@ def test_scoring_threshold_get_returns_null_when_unset(client, with_config):
 def test_scoring_threshold_put_persists_value_and_returns_it(client, with_config, monkeypatch):
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
     saved: dict = {}
-
-    def fake_save(service_id, cfg):
-        saved["sid"] = service_id
-        saved["cfg"] = cfg
-
-    monkeypatch.setattr("backend.config.save_config", fake_save)
-    monkeypatch.setattr("backend.config.mutate_config", mutate_via_save(fake_save))
+    monkeypatch.setattr("backend.config.save_config", lambda sid, cfg: saved.update(sid=sid, cfg=cfg))
+    monkeypatch.setattr(
+        "backend.config.mutate_config", mutate_via_save(lambda sid, cfg: saved.update(sid=sid, cfg=cfg))
+    )
 
     r = client.put(f"/api/services/{LOG_SVC}/scoring/threshold", json={"threshold": 80})
     assert r.status_code == 200
@@ -1662,10 +1523,7 @@ def test_matrix_versions_list_empty_history_returns_current_version(client, with
     been archived yet (first deploy), versions is empty but
     current_version is surfaced from cfg.scoring.matrix_version so the
     UI can show 'current: vX (no history)'."""
-    with_config[LOG_SVC] = {
-        "service_id": LOG_SVC,
-        "scoring": {"enabled": True, "matrix_version": "2026-06-01-a"},
-    }
+    with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True, "matrix_version": "2026-06-01-a"}}
     with patch("backend.state_sync.list_scoring_matrix_versions", return_value=[]):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/matrix-versions")
     assert r.status_code == 200
@@ -1678,29 +1536,15 @@ def test_matrix_versions_list_returns_history_newest_first(client, with_config):
     """When state_sync returns 3 archived versions (already sorted
     desc by last_modified), the endpoint passes them through unchanged
     and exposes the cfg's matrix_version as current_version."""
-    with_config[LOG_SVC] = {
-        "service_id": LOG_SVC,
-        "scoring": {"enabled": True, "matrix_version": "2026-06-03-c"},
-    }
+    with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True, "matrix_version": "2026-06-03-c"}}
     fake_versions = [
         {
-            "version": "2026-06-03-c",
-            "key": "iceberg/meta/scoring_matrix_history/2026-06-03-c.json",
-            "size_bytes": 4096,
-            "last_modified": "2026-06-03T10:00:00+00:00",
-        },
-        {
-            "version": "2026-06-02-b",
-            "key": "iceberg/meta/scoring_matrix_history/2026-06-02-b.json",
-            "size_bytes": 4000,
-            "last_modified": "2026-06-02T10:00:00+00:00",
-        },
-        {
-            "version": "2026-06-01-a",
-            "key": "iceberg/meta/scoring_matrix_history/2026-06-01-a.json",
-            "size_bytes": 3900,
-            "last_modified": "2026-06-01T10:00:00+00:00",
-        },
+            "version": v,
+            "key": f"iceberg/meta/scoring_matrix_history/{v}.json",
+            "size_bytes": sz,
+            "last_modified": f"{v[:10]}T10:00:00+00:00",
+        }
+        for v, sz in (("2026-06-03-c", 4096), ("2026-06-02-b", 4000), ("2026-06-01-a", 3900))
     ]
     with patch("backend.state_sync.list_scoring_matrix_versions", return_value=fake_versions):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/matrix-versions")
@@ -1734,11 +1578,7 @@ def test_matrix_versions_restore_happy_path(client, with_config, monkeypatch, tm
     Store for the live scorer."""
     with_config[LOG_SVC] = {
         "service_id": LOG_SVC,
-        "scoring": {
-            "enabled": True,
-            "matrix_version": "2026-06-03-c",
-            "scoring_matrix_store_id": "MATRIX_STORE",
-        },
+        "scoring": {"enabled": True, "matrix_version": "2026-06-03-c", "scoring_matrix_store_id": "MATRIX_STORE"},
     }
     saved: dict = {}
 
@@ -1760,17 +1600,18 @@ def test_matrix_versions_restore_happy_path(client, with_config, monkeypatch, tm
     fake_matrix_path.write_text('{"transitions": {}}')
 
     audit_calls: list = []
-
-    def fake_audit(svc, action, details=None):
-        audit_calls.append({"service_id": svc, "action": action, "details": details})
-
     with (
         patch(
             "backend.state_sync.restore_scoring_matrix_version",
             return_value={"version": "2026-06-01-a", "restored_at": "2026-06-03T11:00:00+00:00"},
         ) as mock_restore,
         patch("backend.provision.session_scoring_orchestrator._MATRIX_PATH", fake_shared_path),
-        patch("backend.core.metadata.record_scoring_audit", side_effect=fake_audit),
+        patch(
+            "backend.core.metadata.record_scoring_audit",
+            side_effect=lambda svc, action, details=None: audit_calls.append(
+                {"service_id": svc, "action": action, "details": details}
+            ),
+        ),
         patch("backend.routers.session_scoring_admin.resolve_fastly_token", return_value="tok"),
         patch("backend.provision.session_scoring_orchestrator._write_matrix_to_kv") as mock_kv,
     ):
@@ -1785,20 +1626,15 @@ def test_matrix_versions_restore_happy_path(client, with_config, monkeypatch, tm
     assert body["matrix_kv_written"] is True
     assert "KV" in body["deploy_hint"]
     mock_kv.assert_called_once_with("MATRIX_STORE", LOG_SVC, "tok")
-
     # state_sync was invoked with (service_id, version)
     mock_restore.assert_called_once_with(LOG_SVC, "2026-06-01-a")
-
     # The tenant-scoped local matrix must be gone so the next
     # _load_matrix call falls through to FOS instead of shadowing the
     # restore.
     assert not fake_matrix_path.exists()
-
     # cfg.scoring.matrix_version was rolled back to the restored version
     assert saved["cfg"]["scoring"]["matrix_version"] == "2026-06-01-a"
-
     # Audit log recorded the mutation
-    assert any(c["action"] == "matrix_restored" for c in audit_calls)
     restored_audit = next(c for c in audit_calls if c["action"] == "matrix_restored")
     assert restored_audit["details"]["restored_version"] == "2026-06-01-a"
 
@@ -1807,10 +1643,7 @@ def test_matrix_versions_restore_404_when_version_missing_in_fos(client, with_co
     """If state_sync.restore_scoring_matrix_version returns None (the
     version key isn't present in FOS history), surface a 404 — and do
     NOT touch cfg or unlink the local matrix.json."""
-    with_config[LOG_SVC] = {
-        "service_id": LOG_SVC,
-        "scoring": {"enabled": True, "matrix_version": "2026-06-03-c"},
-    }
+    with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True, "matrix_version": "2026-06-03-c"}}
     with (
         patch("backend.state_sync.restore_scoring_matrix_version", return_value=None),
         patch("backend.core.metadata.record_scoring_audit") as mock_audit,
@@ -1949,15 +1782,13 @@ def test_audit_limit_default_is_100(client, with_config):
     captured: dict = {}
 
     def fake_list(service_id, *, limit, since=None):
-        captured["limit"] = limit
-        captured["since"] = since
+        captured.update(limit=limit, since=since)
         return []
 
     with patch("backend.core.metadata.list_scoring_audit", side_effect=fake_list):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/audit")
     assert r.status_code == 200
-    assert captured["limit"] == 100
-    assert captured["since"] is None
+    assert captured == {"limit": 100, "since": None}
     assert r.json()["limit"] == 100
 
 
@@ -1981,23 +1812,15 @@ def test_audit_since_param_forwarded_to_db_layer(client, with_config):
     captured: dict = {}
 
     def fake_list(service_id, *, limit, since=None):
-        captured["service_id"] = service_id
-        captured["since"] = since
+        captured.update(service_id=service_id, since=since)
         return [
-            {
-                "id": 5,
-                "timestamp": "2026-06-03T12:00:00",
-                "action": "key_rotated",
-                "actor": "operator",
-                "details": None,
-            }
+            {"id": 5, "timestamp": "2026-06-03T12:00:00", "action": "key_rotated", "actor": "operator", "details": None}
         ]
 
     with patch("backend.core.metadata.list_scoring_audit", side_effect=fake_list):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/audit?since=2026-06-03T11:00:00")
     assert r.status_code == 200
-    assert captured["service_id"] == LOG_SVC
-    assert captured["since"] == "2026-06-03T11:00:00"
+    assert captured == {"service_id": LOG_SVC, "since": "2026-06-03T11:00:00"}
     # And the filtered row reaches the client.
     assert len(r.json()["audit"]) == 1
     assert r.json()["audit"][0]["action"] == "key_rotated"
@@ -2050,10 +1873,7 @@ class _EnforceThresholdFixtures:
         return {
             "service_id": LOG_SVC,
             "fastly_api_key": "TOKEN",
-            "scoring": {
-                "enabled": True,
-                "scoring_config_store_id": "cs_abc123",
-            },
+            "scoring": {"enabled": True, "scoring_config_store_id": "cs_abc123"},
         }
 
 
@@ -2076,12 +1896,7 @@ def test_scoring_enforce_threshold_get_returns_unset_when_configstore_404s(clien
     into threshold=None rather than bubbling up an HTTP 502 - this is the
     pre-rollout default state for every newly-provisioned service."""
     with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
-
-    def fake_fastly(method, path, *args, **kwargs):
-        # mirror the runtime error fastly() raises for a missing item
-        raise RuntimeError("Fastly API 404: not found")
-
-    with patch("backend.core.fastly.client.fastly", side_effect=fake_fastly):
+    with patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("Fastly API 404: not found")):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/enforce-threshold")
 
     assert r.status_code == 200
@@ -2098,8 +1913,7 @@ def test_scoring_enforce_threshold_get_returns_value_when_set(client, with_confi
     with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
 
     def fake_fastly(method, path, *args, **kwargs):
-        assert method == "GET"
-        assert path.endswith("/item/enforce_threshold")
+        assert method == "GET" and path.endswith("/item/enforce_threshold")
         return {"item_key": "enforce_threshold", "item_value": "75"}
 
     with patch("backend.core.fastly.client.fastly", side_effect=fake_fastly):
@@ -2117,11 +1931,7 @@ def test_scoring_enforce_threshold_get_502_on_generic_configstore_error(client, 
     (narrowed exception handling - we don't want a silent threshold=None
     response masking real Fastly API outages)."""
     with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
-
-    def fake_fastly(method, path, *args, **kwargs):
-        raise RuntimeError("Fastly API 503: service unavailable")
-
-    with patch("backend.core.fastly.client.fastly", side_effect=fake_fastly):
+    with patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("Fastly API 503: service unavailable")):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/enforce-threshold")
 
     assert r.status_code == 502
@@ -2134,10 +1944,7 @@ def test_scoring_enforce_threshold_put_requires_confirm_flag(client, with_config
     """Without ?confirm=true the PUT must 400 - this is the kill switch that
     prevents an accidental click from flipping live edge blocking."""
     with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
-    r = client.put(
-        f"/api/services/{LOG_SVC}/scoring/enforce-threshold",
-        json={"threshold": 75},
-    )
+    r = client.put(f"/api/services/{LOG_SVC}/scoring/enforce-threshold", json={"threshold": 75})
     assert r.status_code == 400
     assert "confirm=true" in r.json()["detail"]["error"]
 
@@ -2153,25 +1960,8 @@ def test_scoring_enforce_threshold_put_writes_value_and_records_audit(client, wi
       - response carries enforced=True + the chosen threshold."""
     with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
 
-    fastly_calls: list[tuple] = []
-
-    def fake_fastly(method, path, body=None, *args, **kwargs):
-        fastly_calls.append((method, path, body))
-        return {}  # PATCH succeeds, no POST fallback needed
-
-    audit_calls: list[tuple] = []
-
-    def fake_audit(service_id, action, *, actor="operator", details=None):
-        audit_calls.append((service_id, action, details))
-
-    with (
-        patch("backend.core.fastly.client.fastly", side_effect=fake_fastly),
-        patch("backend.core.metadata.record_scoring_audit", side_effect=fake_audit),
-    ):
-        r = client.put(
-            f"/api/services/{LOG_SVC}/scoring/enforce-threshold?confirm=true",
-            json={"threshold": 75},
-        )
+    with _capture_fastly_and_audit() as (fastly_calls, audit_calls):
+        r = client.put(f"/api/services/{LOG_SVC}/scoring/enforce-threshold?confirm=true", json={"threshold": 75})
 
     assert r.status_code == 200
     body = r.json()
@@ -2188,11 +1978,7 @@ def test_scoring_enforce_threshold_put_writes_value_and_records_audit(client, wi
     assert (payload or {}).get("item_value") == "75"
 
     # Audit captured with the 'set' action name + threshold detail
-    assert len(audit_calls) == 1
-    svc, action, details = audit_calls[0]
-    assert svc == LOG_SVC
-    assert action == "threshold_enforced"
-    assert details == {"threshold": 75}
+    assert audit_calls == [(LOG_SVC, "threshold_enforced", {"threshold": 75})]
 
 
 def test_scoring_enforce_threshold_put_clears_when_null(client, with_config):
@@ -2201,25 +1987,8 @@ def test_scoring_enforce_threshold_put_clears_when_null(client, with_config):
     action so the operator can see when enforcement was turned off."""
     with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
 
-    fastly_calls: list[tuple] = []
-
-    def fake_fastly(method, path, body=None, *args, **kwargs):
-        fastly_calls.append((method, path, body))
-        return {}
-
-    audit_calls: list[tuple] = []
-
-    def fake_audit(service_id, action, *, actor="operator", details=None):
-        audit_calls.append((service_id, action, details))
-
-    with (
-        patch("backend.core.fastly.client.fastly", side_effect=fake_fastly),
-        patch("backend.core.metadata.record_scoring_audit", side_effect=fake_audit),
-    ):
-        r = client.put(
-            f"/api/services/{LOG_SVC}/scoring/enforce-threshold?confirm=true",
-            json={"threshold": None},
-        )
+    with _capture_fastly_and_audit() as (fastly_calls, audit_calls):
+        r = client.put(f"/api/services/{LOG_SVC}/scoring/enforce-threshold?confirm=true", json={"threshold": None})
 
     assert r.status_code == 200
     body = r.json()
@@ -2232,20 +2001,14 @@ def test_scoring_enforce_threshold_put_clears_when_null(client, with_config):
     assert (payload or {}).get("item_value") == ""
 
     # Audit logs the 'disabled' action with threshold=None
-    assert len(audit_calls) == 1
-    _svc, action, details = audit_calls[0]
-    assert action == "threshold_enforce_disabled"
-    assert details == {"threshold": None}
+    assert audit_calls == [(LOG_SVC, "threshold_enforce_disabled", {"threshold": None})]
 
 
 def test_scoring_enforce_threshold_put_rejects_out_of_range(client, with_config):
     """Same 0-100 validator as /scoring/threshold - threshold > 100 -> 400.
     Mirrors test_scoring_threshold_put_rejects_out_of_range above."""
     with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
-    r = client.put(
-        f"/api/services/{LOG_SVC}/scoring/enforce-threshold?confirm=true",
-        json={"threshold": 150},
-    )
+    r = client.put(f"/api/services/{LOG_SVC}/scoring/enforce-threshold?confirm=true", json={"threshold": 150})
     assert r.status_code == 400
     assert "0-100" in r.json()["detail"]["error"]
 
@@ -2253,10 +2016,7 @@ def test_scoring_enforce_threshold_put_rejects_out_of_range(client, with_config)
 def test_scoring_enforce_threshold_put_rejects_negative(client, with_config):
     """Lower bound of the validator: negative ints also 400."""
     with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
-    r = client.put(
-        f"/api/services/{LOG_SVC}/scoring/enforce-threshold?confirm=true",
-        json={"threshold": -5},
-    )
+    r = client.put(f"/api/services/{LOG_SVC}/scoring/enforce-threshold?confirm=true", json={"threshold": -5})
     assert r.status_code == 400
 
 
@@ -2265,10 +2025,7 @@ def test_scoring_enforce_threshold_put_400_when_scoring_not_enabled(client, with
     Fastly side-effect. Note the confirm gate fires first so we must include
     ?confirm=true to actually reach the scoring-enabled check."""
     with_config[LOG_SVC] = {"service_id": LOG_SVC}  # no scoring block
-    r = client.put(
-        f"/api/services/{LOG_SVC}/scoring/enforce-threshold?confirm=true",
-        json={"threshold": 75},
-    )
+    r = client.put(f"/api/services/{LOG_SVC}/scoring/enforce-threshold?confirm=true", json={"threshold": 75})
     assert r.status_code == 400
     assert "Scoring not enabled" in r.json()["detail"]["error"]
 
@@ -2353,23 +2110,21 @@ def test_scoring_l2_enforce_get_400_when_scoring_not_enabled(client, with_config
     assert "Scoring not enabled" in r.json()["detail"]["error"]
 
 
+def _get_l2_saturated(path: str) -> dict:
+    if path.endswith("/item/l2_enforce_enabled"):
+        return {"item_value": "1"}
+    if path.endswith(("/item/l2_enabled_at", "/item/scoring_enabled_at")):
+        return {"item_value": "1700000000"}
+    raise AssertionError(f"unexpected GET {path}")
+
+
 def test_scoring_l2_enforce_get_returns_state_shape(client, with_config):
     """Happy path: GET reads the flag + anchors and returns the enabled/ramp/
     readiness shape. Uses anchors deep in the past so the ramp/readiness are
     fully saturated regardless of the wall clock."""
     with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
 
-    def fake_fastly(method, path, *args, **kwargs):
-        assert method == "GET"
-        if path.endswith("/item/l2_enforce_enabled"):
-            return {"item_value": "1"}
-        if path.endswith("/item/l2_enabled_at"):
-            return {"item_value": "1700000000"}  # 2023 → fully ramped
-        if path.endswith("/item/scoring_enabled_at"):
-            return {"item_value": "1700000000"}  # 2023 → ready
-        raise AssertionError(f"unexpected GET {path}")
-
-    with patch("backend.core.fastly.client.fastly", side_effect=fake_fastly):
+    with _capture_fastly_and_audit(get_handler=_get_l2_saturated):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/l2-enforce")
 
     assert r.status_code == 200
@@ -2386,12 +2141,13 @@ def test_scoring_l2_enforce_put_requires_confirm_flag(client, with_config):
     """Without ?confirm=true the PUT must 400 — same kill switch as
     enforce-threshold (it changes live edge blocking)."""
     with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
-    r = client.put(
-        f"/api/services/{LOG_SVC}/scoring/l2-enforce",
-        json={"enabled": True},
-    )
+    r = client.put(f"/api/services/{LOG_SVC}/scoring/l2-enforce", json={"enabled": True})
     assert r.status_code == 400
     assert "confirm=true" in r.json()["detail"]["error"]
+
+
+def _get_404(_path: str):
+    raise RuntimeError("Fastly API 404: not found")
 
 
 def test_scoring_l2_enforce_put_enable_writes_flag_anchor_and_audit(client, with_config):
@@ -2399,28 +2155,8 @@ def test_scoring_l2_enforce_put_enable_writes_flag_anchor_and_audit(client, with
     l2_enabled_at anchor (epoch seconds), and audits 'l2_enforce_enabled'."""
     with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
 
-    writes: list[tuple] = []
-
-    def fake_fastly(method, path, body=None, *args, **kwargs):
-        if method == "GET":
-            # currently-off + no anchor yet.
-            raise RuntimeError("Fastly API 404: not found")
-        writes.append((method, path, body))
-        return {}
-
-    audit_calls: list[tuple] = []
-
-    def fake_audit(service_id, action, *, actor="operator", details=None):
-        audit_calls.append((service_id, action, details))
-
-    with (
-        patch("backend.core.fastly.client.fastly", side_effect=fake_fastly),
-        patch("backend.core.metadata.record_scoring_audit", side_effect=fake_audit),
-    ):
-        r = client.put(
-            f"/api/services/{LOG_SVC}/scoring/l2-enforce?confirm=true",
-            json={"enabled": True},
-        )
+    with _capture_fastly_and_audit(get_handler=_get_404) as (writes, audit_calls):
+        r = client.put(f"/api/services/{LOG_SVC}/scoring/l2-enforce?confirm=true", json={"enabled": True})
 
     assert r.status_code == 200
     body = r.json()
@@ -2430,12 +2166,11 @@ def test_scoring_l2_enforce_put_enable_writes_flag_anchor_and_audit(client, with
 
     # Both the flag and the anchor were written.
     def _wrote(key, value_pred):
-        for method, path, payload in writes:
-            payload = payload or {}
-            key_match = path.endswith(f"/item/{key}") or payload.get("item_key") == key
-            if key_match and value_pred(payload.get("item_value")):
-                return True
-        return False
+        return any(
+            (path.endswith(f"/item/{key}") or (payload or {}).get("item_key") == key)
+            and value_pred((payload or {}).get("item_value"))
+            for _m, path, payload in writes
+        )
 
     assert _wrote("l2_enforce_enabled", lambda v: v == "1"), writes
     assert _wrote("l2_enabled_at", lambda v: v and str(v).isdigit()), writes
@@ -2454,26 +2189,15 @@ def test_scoring_l2_enforce_put_enable_when_already_on_preserves_anchor(client, 
     (no anchor write)."""
     with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
 
-    writes: list[tuple] = []
+    def _get_already_on(path: str):
+        if path.endswith("/item/l2_enforce_enabled"):
+            return {"item_value": "1"}  # already on
+        if path.endswith("/item/l2_enabled_at"):
+            return {"item_value": "1700000000"}  # existing anchor
+        raise RuntimeError("Fastly API 404: not found")
 
-    def fake_fastly(method, path, body=None, *args, **kwargs):
-        if method == "GET":
-            if path.endswith("/item/l2_enforce_enabled"):
-                return {"item_value": "1"}  # already on
-            if path.endswith("/item/l2_enabled_at"):
-                return {"item_value": "1700000000"}  # existing anchor
-            raise RuntimeError("Fastly API 404: not found")
-        writes.append((method, path, body))
-        return {}
-
-    with (
-        patch("backend.core.fastly.client.fastly", side_effect=fake_fastly),
-        patch("backend.core.metadata.record_scoring_audit", side_effect=lambda *a, **k: None),
-    ):
-        r = client.put(
-            f"/api/services/{LOG_SVC}/scoring/l2-enforce?confirm=true",
-            json={"enabled": True},
-        )
+    with _capture_fastly_and_audit(get_handler=_get_already_on) as (writes, _audit):
+        r = client.put(f"/api/services/{LOG_SVC}/scoring/l2-enforce?confirm=true", json={"enabled": True})
 
     assert r.status_code == 200
     body = r.json()
@@ -2482,8 +2206,7 @@ def test_scoring_l2_enforce_put_enable_when_already_on_preserves_anchor(client, 
 
     # The anchor key must NOT have been (re)written.
     for method, path, payload in writes:
-        payload = payload or {}
-        is_anchor = path.endswith("/item/l2_enabled_at") or payload.get("item_key") == "l2_enabled_at"
+        is_anchor = path.endswith("/item/l2_enabled_at") or (payload or {}).get("item_key") == "l2_enabled_at"
         assert not is_anchor, f"anchor must be preserved, but a write targeted it: {(method, path, payload)}"
 
 
@@ -2492,27 +2215,8 @@ def test_scoring_l2_enforce_put_disable_writes_zero(client, with_config):
     The anchor is left untouched so a later re-enable restarts the fade-in."""
     with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
 
-    writes: list[tuple] = []
-
-    def fake_fastly(method, path, body=None, *args, **kwargs):
-        if method == "GET":
-            raise RuntimeError("Fastly API 404: not found")
-        writes.append((method, path, body))
-        return {}
-
-    audit_calls: list[tuple] = []
-
-    def fake_audit(service_id, action, *, actor="operator", details=None):
-        audit_calls.append((service_id, action, details))
-
-    with (
-        patch("backend.core.fastly.client.fastly", side_effect=fake_fastly),
-        patch("backend.core.metadata.record_scoring_audit", side_effect=fake_audit),
-    ):
-        r = client.put(
-            f"/api/services/{LOG_SVC}/scoring/l2-enforce?confirm=true",
-            json={"enabled": False},
-        )
+    with _capture_fastly_and_audit(get_handler=_get_404) as (writes, audit_calls):
+        r = client.put(f"/api/services/{LOG_SVC}/scoring/l2-enforce?confirm=true", json={"enabled": False})
 
     assert r.status_code == 200
     assert r.json()["enabled"] is False
@@ -2520,15 +2224,12 @@ def test_scoring_l2_enforce_put_disable_writes_zero(client, with_config):
     # Wrote "0" to the flag; never wrote the anchor.
     flag_writes = [
         p
-        for (m, path, p) in writes
+        for (_m, path, p) in writes
         if path.endswith("/item/l2_enforce_enabled") or (p or {}).get("item_key") == "l2_enforce_enabled"
     ]
-    assert flag_writes, writes
-    assert (flag_writes[0] or {}).get("item_value") == "0"
-    for method, path, payload in writes:
-        payload = payload or {}
-        is_anchor = path.endswith("/item/l2_enabled_at") or payload.get("item_key") == "l2_enabled_at"
-        assert not is_anchor
+    assert flag_writes and (flag_writes[0] or {}).get("item_value") == "0", writes
+    for _method, path, payload in writes:
+        assert not (path.endswith("/item/l2_enabled_at") or (payload or {}).get("item_key") == "l2_enabled_at")
 
     assert len(audit_calls) == 1
     _svc, action, details = audit_calls[0]
@@ -2549,26 +2250,10 @@ def test_scoring_health_includes_l2_enforce_readiness_block(client, with_config)
     """scoring_health carries the admin-only l2_enforce readiness block built
     from the scoring_config ConfigStore (best-effort, separately cached). Pin its
     presence + shape so the L2EnforcementCard can read it off the composite."""
-    cfg = _EnforceThresholdFixtures.enabled_cfg()
-    with_config[LOG_SVC] = cfg
-    canned = [{"total_edge_rows": 100, "scored_rows": 50, "top_reasons": [], "l2_evaluated": 0, "l2_high_count": 0}]
+    with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
+    canned = [_health_row(total_edge_rows=100, scored_rows=50, l2_evaluated=0, l2_high_count=0)]
 
-    def fake_fastly(method, path, *args, **kwargs):
-        if path.endswith("/item/l2_enforce_enabled"):
-            return {"item_value": "1"}
-        if path.endswith("/item/l2_enabled_at"):
-            return {"item_value": "1700000000"}
-        if path.endswith("/item/scoring_enabled_at"):
-            return {"item_value": "1700000000"}
-        raise AssertionError(f"unexpected fastly call {method} {path}")
-
-    with (
-        patch("backend.repositories.session_scoring.query_logs", return_value=canned),
-        patch("backend.core.fastly.client.fastly", side_effect=fake_fastly),
-    ):
-        from backend.routers import session_scoring as _ss
-
-        _ss._analytics_cache.clear()
+    with _patch_query_logs(canned), _capture_fastly_and_audit(get_handler=_get_l2_saturated):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/health?since_hours=24")
 
     assert r.status_code == 200
@@ -2583,11 +2268,7 @@ def test_scoring_health_l2_enforce_unavailable_without_config_store(client, with
     """When the service has no scoring_config_store_id, the readiness block
     degrades to available=False (no Fastly call) rather than breaking health."""
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
-    canned = [{"total_edge_rows": 0, "scored_rows": 0, "top_reasons": []}]
-    with patch("backend.repositories.session_scoring.query_logs", return_value=canned):
-        from backend.routers import session_scoring as _ss
-
-        _ss._analytics_cache.clear()
+    with _patch_query_logs([{"total_edge_rows": 0, "scored_rows": 0, "top_reasons": []}]):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/health?since_hours=24")
     assert r.status_code == 200
     assert r.json()["l2_enforce"]["available"] is False
@@ -2629,10 +2310,7 @@ def test_scoring_enforce_status_code_put_requires_confirm_flag(client, with_conf
     """Without ?confirm=true the PUT must 400 — same kill-switch shape as
     enforce-threshold."""
     with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
-    r = client.put(
-        f"/api/services/{LOG_SVC}/scoring/enforce-status-code",
-        json={"status_code": 403},
-    )
+    r = client.put(f"/api/services/{LOG_SVC}/scoring/enforce-status-code", json={"status_code": 403})
     assert r.status_code == 400
     assert "confirm=true" in r.json()["detail"]["error"]
 
@@ -2641,10 +2319,7 @@ def test_scoring_enforce_status_code_put_rejects_out_of_range(client, with_confi
     """Status code outside HTTP 400-599 → 400."""
     with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
     for bad in (399, 600, 200, 0, -1):
-        r = client.put(
-            f"/api/services/{LOG_SVC}/scoring/enforce-status-code?confirm=true",
-            json={"status_code": bad},
-        )
+        r = client.put(f"/api/services/{LOG_SVC}/scoring/enforce-status-code?confirm=true", json={"status_code": bad})
         assert r.status_code == 400, f"expected 400 for status_code={bad}"
         assert "400-599" in r.json()["detail"]["error"]
 
@@ -2659,17 +2334,13 @@ def test_scoring_enforce_status_code_put_rejects_non_int(client, with_config):
         json={"status_code": "not-an-int"},
     )
     assert r.status_code == 422
-    errors = r.json()["detail"]
-    assert any(e.get("loc", [])[-1] == "status_code" for e in errors)
+    assert any(e.get("loc", [])[-1] == "status_code" for e in r.json()["detail"])
 
 
 def test_scoring_enforce_status_code_put_400_when_scoring_not_enabled(client, with_config):
     """No scoring block → 400 before any Fastly side-effect."""
     with_config[LOG_SVC] = {"service_id": LOG_SVC}
-    r = client.put(
-        f"/api/services/{LOG_SVC}/scoring/enforce-status-code?confirm=true",
-        json={"status_code": 403},
-    )
+    r = client.put(f"/api/services/{LOG_SVC}/scoring/enforce-status-code?confirm=true", json={"status_code": 403})
     assert r.status_code == 400
     assert "Session scoring is not enabled" in r.json()["detail"]["error"]
 
@@ -2679,7 +2350,6 @@ def test_scoring_enforce_status_code_put_happy_path(client, with_config):
     calls the orchestrator, records an audit row, returns 200 with the new
     effective code."""
     with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
-
     orchestrator_calls: list[dict] = []
 
     def fake_update(service_id, token, *, new_status_code):
@@ -2690,22 +2360,11 @@ def test_scoring_enforce_status_code_put_happy_path(client, with_config):
             "logging_service_active_version": 42,
         }
 
-    audit_calls: list[tuple] = []
-
-    def fake_audit(service_id, action, *, actor="operator", details=None):
-        audit_calls.append((service_id, action, details))
-
     with (
-        patch(
-            "backend.provision.session_scoring_orchestrator.update_enforce_status_code",
-            side_effect=fake_update,
-        ),
-        patch("backend.core.metadata.record_scoring_audit", side_effect=fake_audit),
+        patch("backend.provision.session_scoring_orchestrator.update_enforce_status_code", side_effect=fake_update),
+        _capture_fastly_and_audit() as (_fc, audit_calls),
     ):
-        r = client.put(
-            f"/api/services/{LOG_SVC}/scoring/enforce-status-code?confirm=true",
-            json={"status_code": 451},
-        )
+        r = client.put(f"/api/services/{LOG_SVC}/scoring/enforce-status-code?confirm=true", json={"status_code": 451})
 
     assert r.status_code == 200, r.json()
     body = r.json()
@@ -2713,9 +2372,7 @@ def test_scoring_enforce_status_code_put_happy_path(client, with_config):
     assert body["effective_status_code"] == 451
     assert body["is_default"] is False
     assert body["logging_service_active_version"] == 42
-
-    assert len(orchestrator_calls) == 1
-    assert orchestrator_calls[0]["new_status_code"] == 451
+    assert len(orchestrator_calls) == 1 and orchestrator_calls[0]["new_status_code"] == 451
 
     assert len(audit_calls) == 1
     _svc, action, details = audit_calls[0]
@@ -2729,24 +2386,14 @@ def test_scoring_enforce_status_code_put_null_resets_to_default(client, with_con
     and the response reports is_default=True."""
     with_config[LOG_SVC] = _EnforceThresholdFixtures.enabled_cfg()
 
-    def fake_update(service_id, token, *, new_status_code):
-        return {
-            "effective_status_code": 429,
-            "is_default": True,
-            "logging_service_active_version": 7,
-        }
-
     with (
         patch(
             "backend.provision.session_scoring_orchestrator.update_enforce_status_code",
-            side_effect=fake_update,
+            return_value={"effective_status_code": 429, "is_default": True, "logging_service_active_version": 7},
         ),
         patch("backend.core.metadata.record_scoring_audit"),
     ):
-        r = client.put(
-            f"/api/services/{LOG_SVC}/scoring/enforce-status-code?confirm=true",
-            json={"status_code": None},
-        )
+        r = client.put(f"/api/services/{LOG_SVC}/scoring/enforce-status-code?confirm=true", json={"status_code": None})
 
     assert r.status_code == 200
     body = r.json()

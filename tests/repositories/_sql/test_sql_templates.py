@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from backend.repositories._sql import alerts as alerts_sql
+from backend.repositories import alerts as alerts_sql
+from backend.repositories import usage as usage_sql
 from backend.repositories._sql import dashboard as dashboard_sql
 from backend.repositories._sql import insights as insights_sql
 from backend.repositories._sql import network as network_sql
@@ -8,7 +9,6 @@ from backend.repositories._sql import origin as origin_sql
 from backend.repositories._sql import query as query_sql
 from backend.repositories._sql import security as security_sql
 from backend.repositories._sql import sessions as sessions_sql
-from backend.repositories._sql import usage as usage_sql
 from backend.repositories.insights import registry
 
 # ── From test_alerts.py ──

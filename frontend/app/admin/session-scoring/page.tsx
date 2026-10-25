@@ -31,12 +31,12 @@ import { StatusPanel } from '@/components/SessionScoring/StatusPanel'
 import { ThresholdSlider } from '@/components/SessionScoring/ThresholdSlider'
 import { L2EnforcementCard } from '@/components/SessionScoring/L2EnforcementCard'
 import { TopFlaggedTable } from '@/components/SessionScoring/TopFlaggedTable'
-import { invalidateServiceScoringQueries } from '@/components/SessionScoring/useScorerTimeseries'
-import { useServiceStore } from '@/stores/serviceStore'
 import {
+  invalidateServiceScoringQueries,
   scoringAnalyticsCompositeOptions,
   scoringConfigCompositeOptions,
-} from '@/lib/queries/scoring'
+} from '@/components/SessionScoring/useScorerTimeseries'
+import { useServiceStore } from '@/stores/serviceStore'
 import Loading from './loading'
 
 // LabelsTab is gated behind the "Labels" tab — most page loads never open

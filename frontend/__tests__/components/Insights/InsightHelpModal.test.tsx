@@ -3,7 +3,7 @@ import { describe, expect, test } from 'vitest'
 import React, { isValidElement } from 'react'
 import { getPerformanceContent } from '@/components/Insights/InsightHelpModal/sections/performance'
 import { getSecurityContent } from '@/components/Insights/InsightHelpModal/sections/security'
-import { getTrafficContent } from '@/components/Insights/InsightHelpModal/sections/traffic'
+import { getTrafficContent } from '@/components/Insights/InsightHelpModal'
 
 const PERFORMANCE_IDS = [
   'city_latency_regressions',

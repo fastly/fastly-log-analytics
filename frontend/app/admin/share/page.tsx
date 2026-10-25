@@ -10,14 +10,13 @@ import { parseAsStringLiteral, useQueryState } from 'nuqs'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { BackToAdminLink } from '@/components/BackToAdminLink'
 import { Button } from '@/components/ui/button'
-import { DeployRemoteFrontendDialog } from '@/components/DeployRemoteFrontendDialog/DeployRemoteFrontendDialog'
-import { TeardownRemoteFrontendDialog } from '@/components/DeployRemoteFrontendDialog/TeardownRemoteFrontendDialog'
+import { DeployRemoteFrontendDialog, TeardownRemoteFrontendDialog } from '@/components/DeployRemoteFrontendDialog/DeployRemoteFrontendDialog'
 import { PageHeader } from '@/components/ui/page-header'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { InvitationsPanel } from '@/components/share-dashboard/InvitationsPanel'
 import { SharingControlPanel } from '@/components/share-dashboard/SharingControlPanel'
-import type { ShareStatus } from '@/components/share-dashboard/utils'
+import type { ShareStatus } from '@/components/share-dashboard/sortable'
 import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
 import { queryKeys } from '@/lib/query-keys'
@@ -38,7 +37,7 @@ const shareTabParser = parseAsStringLiteral(SHARE_TABS)
 // SessionsPanel + AuditLogPanel stay lazy because they only mount on
 // tab click; ``ssr: false`` keeps their hooks off the SSR pass.
 const SessionsPanel = dynamic(
-  () => import('@/components/share-dashboard/SessionsPanel').then((m) => m.SessionsPanel),
+  () => import('@/components/share-dashboard/SharingControlPanel').then((m) => m.SessionsPanel),
   {
     ssr: false,
     loading: () => (

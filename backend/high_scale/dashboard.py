@@ -9,17 +9,20 @@ from functools import partial
 from typing import Any
 
 from backend.core.high_scale_sections import HighScaleSections
-from backend.high_scale._common import inclusive_minute_end, visible_fact_clauses
-from backend.high_scale._filters import request_filter_clauses
-from backend.high_scale._projection_utils import (
+from backend.high_scale._common import (
+    inclusive_minute_end,
+    visible_fact_clauses,
+)
+from backend.high_scale._common import (
     range_value as _range_value,
 )
+from backend.high_scale._filters import request_filter_clauses
 from backend.high_scale.aggregate_query import (
     AggregateRequest,
     query_clickhouse_aggregate,
     query_clickhouse_aggregates_batch,
 )
-from backend.high_scale.registry import HighScaleService
+from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.models.common import ResponseCacheObservation
 from backend.models.dashboard import (
     AggregatesRequest,

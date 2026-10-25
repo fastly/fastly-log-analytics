@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from backend.high_scale._projection_utils import range_value as _range_value
+from backend.high_scale._common import range_value as _range_value
 from backend.repositories.utils.filters import filter_spec_attr, normalize_filter_key
 
 # Real columns on request_facts; every other key lives in the ``custom_fields`` map.

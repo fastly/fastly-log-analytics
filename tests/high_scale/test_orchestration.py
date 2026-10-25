@@ -627,7 +627,7 @@ def test_s3_lister_ignores_a_terminal_cursor_outside_its_own_prefix() -> None:
 
 from datetime import UTC, datetime
 
-from backend.high_scale.pagination import KeysetCursor
+from backend.high_scale._common import KeysetCursor
 
 
 def test_cursor_is_signed_and_service_bound() -> None:

@@ -32,7 +32,7 @@ def test_get_pool_status_and_barrier():
 def test_run_duckdb_recycle_rss_threshold_skip():
     """Recycle is skipped when RSS is below the configured threshold."""
     with (
-        patch("backend.core.memory_guard.maybe_graceful_restart", return_value=False),
+        patch("backend.core.duckdb_recycle.maybe_graceful_restart", return_value=False),
         patch("backend.cron.jobs.duckdb_recycle._recycle_rss_threshold_bytes", return_value=500 * 1024 * 1024),
         patch("backend.core.duckdb.current_rss_bytes", return_value=100 * 1024 * 1024),
         patch("backend.cron.jobs.duckdb_recycle.recycle_once") as mock_recycle,
@@ -53,7 +53,7 @@ def test_run_duckdb_recycle_adaptive_expedite():
     mock_sched.get_job.return_value = mock_job
 
     with (
-        patch("backend.core.memory_guard.maybe_graceful_restart", return_value=False),
+        patch("backend.core.duckdb_recycle.maybe_graceful_restart", return_value=False),
         patch("backend.cron.jobs.duckdb_recycle._recycle_rss_threshold_bytes", return_value=1000 * 1024 * 1024),
         patch("backend.core.duckdb.current_rss_bytes", return_value=850 * 1024 * 1024),
         patch("backend.cron.scheduler.get_scheduler", return_value=mock_sched),
@@ -77,7 +77,7 @@ def test_run_duckdb_recycle_adaptive_incomplete():
     mock_sched.get_job.return_value = mock_job
 
     with (
-        patch("backend.core.memory_guard.maybe_graceful_restart", return_value=False),
+        patch("backend.core.duckdb_recycle.maybe_graceful_restart", return_value=False),
         patch("backend.cron.jobs.duckdb_recycle._recycle_rss_threshold_bytes", return_value=0),
         patch("backend.core.duckdb.current_rss_bytes", return_value=200 * 1024 * 1024),
         patch("backend.cron.scheduler.get_scheduler", return_value=mock_sched),
@@ -102,7 +102,7 @@ def test_run_duckdb_recycle_adaptive_relax():
     mock_sched.get_job.return_value = mock_job
 
     with (
-        patch("backend.core.memory_guard.maybe_graceful_restart", return_value=False),
+        patch("backend.core.duckdb_recycle.maybe_graceful_restart", return_value=False),
         patch("backend.cron.jobs.duckdb_recycle._recycle_rss_threshold_bytes", return_value=1000 * 1024 * 1024),
         patch("backend.core.duckdb.current_rss_bytes", side_effect=[1100 * 1024 * 1024, 400 * 1024 * 1024]),
         patch("backend.cron.scheduler.get_scheduler", return_value=mock_sched),

@@ -1,6 +1,9 @@
-import { useMemo } from 'react'
+import { useState, useCallback, useMemo } from 'react'
 import { useLogFieldsCatalog } from './useLogFieldsCatalog'
 import { useBootstrap } from './useBootstrap'
+import { useMounted } from '@/hooks/useMounted'
+import { parseFromInput } from '@/lib/date'
+import type { PlotlyRelayoutEvent } from '@/types/plotly'
 import { CATEGORIZED_CARD_IDS } from '@/app/dashboard/_sections/categories'
 
 export interface DashboardCard {
@@ -142,4 +145,145 @@ export function useDashboardCards(): DashboardCard[] {
       return true
     })
   }, [catalog, bootstrap])
+}
+
+export function usePlotlyRangeZoom(
+  timezone: string,
+  setRange: (start: string, end: string) => void,
+) {
+  return useCallback(
+    (event: PlotlyRelayoutEvent) => {
+      if (event['xaxis.autorange'] === true || event['xaxis.showspikes'] !== undefined) return
+
+      const nested = Array.isArray(event['xaxis.range']) ? event['xaxis.range'] : []
+      const bound = (flat: unknown, fallback: unknown): string | number | undefined => {
+        const v = flat ?? fallback
+        return typeof v === 'string' || typeof v === 'number' ? v : undefined
+      }
+      const x0 = bound(event['xaxis.range[0]'], nested[0])
+      const x1 = bound(event['xaxis.range[1]'], nested[1])
+
+      if (x0 === undefined || x1 === undefined) return
+
+      try {
+        const toLocalStr = (val: string | number) => {
+          if (typeof val === 'number') {
+            const d = new Date(val)
+            const pad = (n: number) => n.toString().padStart(2, '0')
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+          }
+          return val.replace(' ', 'T')
+        }
+        const parsedStart = parseFromInput(toLocalStr(x0), timezone)
+        const parsedEnd = parseFromInput(toLocalStr(x1), timezone)
+        if (parsedStart && parsedEnd) {
+          setRange(parsedStart, parsedEnd)
+        }
+      } catch {
+        // Ignore unparseable zoom events
+      }
+    },
+    [setRange, timezone],
+  )
+}
+
+interface CardVisibilityMigration {
+  /** Bump when the set of IDs to retire or surface changes. Stored under `<storageKey>_mv`. */
+  version: number
+  /** IDs to strip from the saved set on first load after a version bump. */
+  removeIds?: string[]
+  /** IDs to insert into the saved set on first load after a version bump. */
+  addIds?: string[]
+}
+
+/**
+ * Persists a Set of visible card IDs to localStorage and keeps it in sync
+ * across re-renders.
+ *
+ * @param storageKey   - The localStorage key to persist under.
+ * @param allIds       - Every possible card ID (used to build the "show all" set).
+ * @param defaultIds   - Optional subset of `allIds` to use as the initial visible set
+ *                       (e.g., fields currently in the active log format). If omitted,
+ *                       defaults to `allIds`.
+ * @param migration    - Optional one-time prune. When `version` exceeds the stored
+ *                       `<storageKey>_mv` value, `removeIds` are stripped from the
+ *                       saved set and the new version is recorded. Lets us retire
+ *                       cards from existing browsers without nuking other choices.
+ */
+export function useCardVisibility(
+  storageKey: string,
+  allIds: string[],
+  defaultIds?: string[],
+  migration?: CardVisibilityMigration,
+) {
+  const allIdsStr = JSON.stringify(allIds)
+  const defaultIdsStr = JSON.stringify(defaultIds ?? allIds)
+  const allVisible = useMemo(() => new Set<string>(JSON.parse(allIdsStr)), [allIdsStr])
+  const defaultVisible = useMemo(() => new Set<string>(JSON.parse(defaultIdsStr)), [defaultIdsStr])
+
+  const migrationKey = `${storageKey}_mv`
+  const migrationVersion = migration?.version
+  const migrationRemoveStr = JSON.stringify(migration?.removeIds ?? [])
+  const migrationAddStr = JSON.stringify(migration?.addIds ?? [])
+
+  const load = useCallback((): Set<string> => {
+    if (typeof window === 'undefined') return defaultVisible
+    try {
+      const stored = localStorage.getItem(storageKey)
+      if (!stored) return defaultVisible
+
+      const set = new Set<string>(JSON.parse(stored))
+
+      if (migrationVersion !== undefined) {
+        const storedVersion = Number(localStorage.getItem(migrationKey) ?? 0)
+        if (storedVersion < migrationVersion) {
+          const removeIds: string[] = JSON.parse(migrationRemoveStr)
+          const addIds: string[] = JSON.parse(migrationAddStr)
+          for (const id of removeIds) set.delete(id)
+          for (const id of addIds) set.add(id)
+          try {
+            localStorage.setItem(storageKey, JSON.stringify([...set]))
+            localStorage.setItem(migrationKey, String(migrationVersion))
+          } catch {}
+        }
+      }
+
+      return set
+    } catch {}
+    return defaultVisible
+  }, [storageKey, defaultVisible, migrationKey, migrationVersion, migrationRemoveStr, migrationAddStr])
+
+  // SSR-safe: the hydration render ALWAYS uses the deterministic default set. Reading
+  // localStorage there made the first client render diverge from the server's default-set
+  // render (React #418 on /charts and the dashboard for users who had toggled cards). Once
+  // mounted, the persisted value (with the migration applied) takes over; it re-derives
+  // whenever `load` changes (e.g. allCards arriving from the catalog query). A user edit is
+  // tied to the `load` it was made under, so a later `load` change re-reads storage (which
+  // already holds the edit).
+  const mounted = useMounted()
+  const [edit, setEdit] = useState<{ source: typeof load; set: Set<string> } | null>(null)
+  const stored = useMemo(() => (mounted ? load() : defaultVisible), [mounted, load, defaultVisible])
+  const visibleCards = edit && edit.source === load ? edit.set : stored
+
+  const toggleCard = useCallback((id: string) => {
+    setEdit(prev => {
+      const next = new Set(prev && prev.source === load ? prev.set : stored)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      try { localStorage.setItem(storageKey, JSON.stringify([...next])) } catch {}
+      return { source: load, set: next }
+    })
+  }, [storageKey, load, stored])
+
+  const showAll = useCallback(() => {
+    setEdit({ source: load, set: allVisible })
+    try { localStorage.setItem(storageKey, JSON.stringify([...allVisible])) } catch {}
+  }, [storageKey, allVisible, load])
+
+  const reset = useCallback(() => {
+    setEdit({ source: load, set: defaultVisible })
+    try { localStorage.setItem(storageKey, JSON.stringify([...defaultVisible])) } catch {}
+  }, [storageKey, defaultVisible, load])
+
+  return { visibleCards, toggleCard, showAll, reset, defaultVisible }
 }

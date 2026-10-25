@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from backend.models._base import PassthroughModel, WireSafeModel
+from backend.models._base import PassthroughModel, SchemaColumn, WireSafeModel
 from backend.models.common import BaseResponse
 
 
@@ -315,3 +315,162 @@ class LogFieldsUpdateResponse(PassthroughModel):
 class CustomFieldsImportResponse(PassthroughModel):
     ok: bool | None = None
     imported_count: int | None = None
+
+
+# ── Status & Read Models (folded from status_reads.py) ────────────────────────
+
+
+class CmcdEnableBody(BaseModel):
+    token: str = ""
+    mode: Literal["query_string", "headers"] = "query_string"
+    version: int = 1
+
+
+class CmcdDisableBody(BaseModel):
+    token: str = ""
+
+
+class DebugStateResponse(WireSafeModel):
+    """``GET /api/debug/state``."""
+
+    debug_responses_enabled: bool
+
+
+class SchemaResponse(WireSafeModel):
+    """``GET /api/schema``: cached or live column list plus the safe table name."""
+
+    schema_: list[SchemaColumn] = Field(alias="schema")
+    table_name: str
+
+
+class AuditLogEntry(WireSafeModel):
+    """One ``metadata.get_audit_logs`` row (``details`` is the json-decoded payload)."""
+
+    id: int
+    timestamp: str
+    event_type: str
+    details: dict[str, Any]
+    actor: str | None
+    source: str
+
+
+class AuditLogsResponse(WireSafeModel):
+    """``GET /api/audit-logs``. ``_debug_calls`` rides along as an extra."""
+
+    total: int
+    page: int
+    per_page: int
+    entries: list[AuditLogEntry]
+
+
+class CmcdStatusResponse(WireSafeModel):
+    """``GET /api/services/{id}/cmcd/status``; only ``enabled`` is set when CMCD is off."""
+
+    enabled: bool
+    mode: str | None = None
+    version: int | None = None
+    enabled_at: str | None = None
+
+
+class SqliteProfilerEntry(BaseModel):
+    seq: int
+    ts: str
+    sql: str
+    params_kind: str
+    time_ms: float
+    rows: int
+    op: Literal["execute", "executemany", "executescript"]
+
+
+class RecentSqliteResponse(BaseModel):
+    queries: list[SqliteProfilerEntry]
+    buffer_size: int
+    buffer_cap: int
+    dropped: int
+    last_seq: int
+
+
+class ClearSqliteResponse(BaseModel):
+    ok: bool = True
+    buffer_size: int
+    buffer_cap: int
+    dropped: int
+
+
+# ── Control Room Models (folded from control_room.py) ─────────────────────────
+
+
+class MutationStub(BaseModel):
+    """Generic request body for Phase 0 mutation stubs."""
+
+    action: str = ""
+    payload: dict[str, Any] = {}
+
+
+class ControlRoomActionResponse(WireSafeModel):
+    status: str | None = None
+    message: str | None = None
+
+
+class CorrelateRequest(BaseModel):
+    dimension: str
+    window_minutes: int = Field(default=5, ge=1, le=60)
+    limit: int = Field(default=10, ge=1, le=100)
+
+
+class WizardStepRequest(BaseModel):
+    """Request body for recording a wizard step completion."""
+
+    step: str
+    details: dict[str, Any] = {}
+
+
+class ControlRoomTabResponse(WireSafeModel):
+    """Canned per-tab payload (``TAB_STUBS``); the metric keys differ per tab."""
+
+    tab: str
+    status: str | None = None
+
+
+class RealtimeSeedResponse(WireSafeModel):
+    ticks: list[dict[str, Any]]
+
+
+class LogFieldAuditFeature(WireSafeModel):
+    name: str
+    required_fields: list[str]
+    status: str
+    missing_fields: list[str]
+
+
+class LogFieldAuditResponse(WireSafeModel):
+    service_id: str
+    enabled_fields: list[str]
+    features: list[LogFieldAuditFeature]
+
+
+class CorrelatorTopRow(WireSafeModel):
+    value: str | int | float | None
+    count: int
+
+
+class CorrelatorFreshness(WireSafeModel):
+    latest_log_at: str | None = None
+    lag_seconds: int
+
+
+class CorrelateResponse(WireSafeModel):
+    dimension: str
+    top: list[CorrelatorTopRow]
+    freshness: CorrelatorFreshness
+
+
+class WizardStateResponse(WireSafeModel):
+    service_id: str
+    completed_steps: list[str]
+    is_complete: bool
+
+
+class WizardStepResponse(WireSafeModel):
+    recorded: bool
+    step: str

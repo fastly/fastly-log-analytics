@@ -34,7 +34,7 @@ import {
 import { ReportLayout } from '@/components/ReportLayout'
 import { WINDOW_OPTIONS, BASELINE_OPTIONS, historyHoursFromExtents } from '@/lib/insights-defaults'
 import { useDebounce } from '@/hooks/useDebounce'
-import { useInsightsDefaults } from '@/hooks/useInsightsDefaults'
+import { useInsightsDefaults } from '@/hooks/useReportConfig'
 import { useDebouncedFilterPayload } from '@/hooks/useFilterPayload'
 import {
   normalizeTabKey,

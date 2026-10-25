@@ -50,8 +50,6 @@ app.conf.update(
         "backend.cron.jobs.sync",
         "backend.cron.jobs.commit",
         "backend.cron.jobs.compaction",
-        "backend.cron.jobs.optimize",
-        "backend.cron.jobs.expire",
         "backend.cron.jobs.duckdb_recycle",
         "backend.cron.jobs.insights_prewarmer",
         "backend.cron.jobs.metric_snapshot",

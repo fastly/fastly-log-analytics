@@ -78,7 +78,7 @@ def test_high_scale_snapshot_uses_clickhouse_header_metrics(monkeypatch):
     from datetime import UTC, datetime
 
     from backend.high_scale.archive_models import ServingWatermark
-    from backend.high_scale.registry import HighScaleService
+    from backend.high_scale.registry_bootstrap import HighScaleService
 
     class Client:
         def execute(self, sql, params=None):
@@ -118,7 +118,7 @@ def test_high_scale_snapshot_uses_clickhouse_header_metrics(monkeypatch):
         lambda _: {"name": "high-scale-svc", "access_level": "read_write"},
     )
     monkeypatch.setattr(
-        "backend.high_scale.registry.get_high_scale_service_registry",
+        "backend.high_scale.registry_bootstrap.get_high_scale_service_registry",
         lambda: type("Registry", (), {"resolve": lambda _, service_id: service})(),
     )
     monkeypatch.setattr(
@@ -139,7 +139,7 @@ def test_high_scale_log_extents_uses_clickhouse_snapshot(monkeypatch):
     from datetime import UTC, datetime
 
     from backend.high_scale.archive_models import ServingWatermark
-    from backend.high_scale.registry import HighScaleService
+    from backend.high_scale.registry_bootstrap import HighScaleService
 
     class Client:
         def execute(self, sql, params=None):
@@ -175,7 +175,7 @@ def test_high_scale_log_extents_uses_clickhouse_snapshot(monkeypatch):
         lambda _: {"name": "high-scale-svc", "access_level": "read_write"},
     )
     monkeypatch.setattr(
-        "backend.high_scale.registry.get_high_scale_service_registry",
+        "backend.high_scale.registry_bootstrap.get_high_scale_service_registry",
         lambda: type("Registry", (), {"resolve": lambda _, service_id: service})(),
     )
     monkeypatch.setattr(
@@ -245,7 +245,7 @@ from fastapi.testclient import TestClient
 
 from backend.main import app
 from backend.sync_status_publisher import SyncStatusPublisher
-from tests.utils.polling import await_until
+from tests._helpers.wire import await_until
 
 
 def _parse_sse_data_events(text: str) -> list[dict]:

@@ -80,7 +80,7 @@ from typing import Any
 
 import duckdb
 
-from backend.utils.log_throttle import log_once_per
+from backend.utils.telemetry import log_once_per
 
 logger = logging.getLogger(__name__)
 

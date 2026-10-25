@@ -32,7 +32,7 @@ from backend.high_scale.replay import (
     replay_origin_projections,
     replay_performance_projections,
 )
-from backend.high_scale.security_projection import build_security_projection_rows
+from backend.high_scale.security import build_security_projection_rows
 
 logger = structlog.get_logger(__name__)
 

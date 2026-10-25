@@ -16,7 +16,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { NextRunCountdown } from '@/components/LiveElapsed'
+import { NextRunCountdown } from '@/components/TimeAgo'
 import { components } from '@/types/api.generated'
 import type { ColumnDef } from '@tanstack/react-table'
 import { DataTableReadonly } from '@/components/DataTable'

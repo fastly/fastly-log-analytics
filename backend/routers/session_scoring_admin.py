@@ -85,6 +85,7 @@ _fetch_session_events = _ss._scoring_repo.fetch_session_events  # type: ignore[h
 _scoring_time_window = _ss._scoring_time_window  # type: ignore[has-type]
 _reconstruct_labeled_sessions = _ss._reconstruct_labeled_sessions  # type: ignore[has-type]
 _MIN_LABELS_PER_CLASS = _ss._MIN_LABELS_PER_CLASS  # type: ignore[has-type]
+_label_counts = _ss._label_counts  # type: ignore[has-type]
 _table_columns = _ss._table_columns  # type: ignore[has-type]
 _tenant_matrix_path = _ss._tenant_matrix_path  # type: ignore[has-type]
 
@@ -249,15 +250,55 @@ def _read_l2_enforce_state(service_id: str, config_store_id: str, token: str) ->
     return block
 
 
+def _load_scoring_cfg(service_id: str) -> tuple[dict, dict]:
+    from backend import config as svcconfig
+
+    cfg = svcconfig.load_config(service_id) or {}
+    return cfg, (cfg.get("scoring") or {})
+
+
+def _require_confirm(confirm: bool, detail_msg: str) -> None:
+    if not confirm:
+        raise HTTPException(status_code=400, detail={"error": detail_msg})
+
+
+def _push_matrix_to_kv_if_configured(service_id: str, cfg: dict | None, matrix_dict: dict | None = None) -> bool:
+    matrix_store_id = ((cfg or {}).get("scoring") or {}).get("scoring_matrix_store_id", "")
+    resolved_token = resolve_fastly_token(service_id)
+    if not matrix_store_id or not resolved_token:
+        if not matrix_store_id and matrix_dict is not None:
+            logger.info("retrain: no scoring_matrix store id in config — KV push skipped (re-enable to provision it)")
+        return False
+    try:
+        if matrix_dict is not None:
+            from backend.core.fastly.client import fastly_raw
+            from backend.provision.session_scoring_setup import MATRIX_KEY_NAME
+            from backend.scoring.matrix import serialize_kv
+
+            fastly_raw(
+                "PUT",
+                f"/resources/stores/kv/{matrix_store_id}/keys/{MATRIX_KEY_NAME}",
+                serialize_kv(matrix_dict),
+                content_type="application/octet-stream",
+                token=resolved_token,
+            )
+        else:
+            from backend.provision.session_scoring_orchestrator import _write_matrix_to_kv
+
+            _write_matrix_to_kv(matrix_store_id, service_id, resolved_token)
+        return True
+    except Exception as exc:
+        logger.warning(f"Could not write matrix to scoring_matrix KV: {exc}")
+        return False
+
+
 def l2_enforce_readiness_block(service_id: str) -> dict:
     """Best-effort L2-enforce/readiness block for the scoring_health composite.
     Degrades to the unavailable block on any missing-config / no-token / Fastly
     error so it can never break the (DuckDB-driven) health response. Called from
     ``scoring_health`` for admin requests only."""
-    from backend import config as svcconfig
-
-    cfg = svcconfig.load_config(service_id) or {}
-    config_store_id = (cfg.get("scoring") or {}).get("scoring_config_store_id")
+    _cfg, scoring = _load_scoring_cfg(service_id)
+    config_store_id = scoring.get("scoring_config_store_id")
     if not config_store_id:
         return _l2_enforce_unavailable()
     token = resolve_fastly_token(service_id)
@@ -337,8 +378,8 @@ def scoring_retrain(
     # 3. Evaluate against accumulated labels if we have enough of each.
     auc_result = None
     label_rows = _labels.list_labels(service_id)
-    counts = _labels.counts_by_label(service_id)
-    if counts.get("good", 0) >= _MIN_LABELS_PER_CLASS and counts.get("bad", 0) >= _MIN_LABELS_PER_CLASS:
+    n_good, n_bad, _ = _label_counts(service_id)
+    if n_good >= _MIN_LABELS_PER_CLASS and n_bad >= _MIN_LABELS_PER_CLASS:
         labeled_sessions = _reconstruct_labeled_sessions(service_id, label_rows)
         if labeled_sessions:
             er = _evaluate(matrix_dict, labeled_sessions)
@@ -381,29 +422,7 @@ def scoring_retrain(
     #     read-only mount). Best-effort: needs a Fastly token + a provisioned
     #     matrix store. On failure the matrix is still in FOS and a subsequent
     #     enable re-seeds KV. Takes effect as Compute instances recycle.
-    kv_written = False
-    matrix_store_id = (cfg.get("scoring") or {}).get("scoring_matrix_store_id", "")
-    resolved_token = resolve_fastly_token(service_id)
-    if matrix_store_id and resolved_token:
-        try:
-            from backend.core.fastly.client import fastly_raw
-            from backend.provision.session_scoring_setup import MATRIX_KEY_NAME
-            from backend.scoring.matrix import serialize_kv
-
-            # FSM1 binary (compact, cold-start-fast) — same encoding the enable
-            # flow's _write_matrix_to_kv uses; JSON stays on disk/FOS for eval.
-            fastly_raw(
-                "PUT",
-                f"/resources/stores/kv/{matrix_store_id}/keys/{MATRIX_KEY_NAME}",
-                serialize_kv(matrix_dict),
-                content_type="application/octet-stream",
-                token=resolved_token,
-            )
-            kv_written = True
-        except Exception as exc:
-            logger.warning(f"Could not write matrix to scoring_matrix KV: {exc}")
-    elif not matrix_store_id:
-        logger.info("retrain: no scoring_matrix store id in config — KV push skipped (re-enable to provision it)")
+    kv_written = _push_matrix_to_kv_if_configured(service_id, cfg, matrix_dict)
 
     # 5. Bust analytics caches so the next StatusPanel hit sees the new AUC.
     _bust_analytics_cache(service_id)
@@ -502,10 +521,7 @@ def scoring_session_events(
 
 def _require_scoring_config_store(service_id: str, token: str = "") -> tuple[dict, str, str]:
     """Resolve ``(cfg, config_store_id, resolved_token)`` or raise HTTP 400."""
-    from backend import config as svcconfig
-
-    cfg = svcconfig.load_config(service_id) or {}
-    scoring = cfg.get("scoring") or {}
+    cfg, scoring = _load_scoring_cfg(service_id)
     config_store_id = scoring.get("scoring_config_store_id")
     if not config_store_id:
         raise HTTPException(status_code=400, detail={"error": "Scoring not enabled or config store missing"})
@@ -597,11 +613,7 @@ def scoring_enforce_threshold_put(
 
     Gated by ``?confirm=true`` (matches the matrix-restore pattern) so
     an accidental click can't silently flip enforcement at the edge."""
-    if not confirm:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "Pass ?confirm=true to actually change enforcement. This affects live edge blocking."},
-        )
+    _require_confirm(confirm, "Pass ?confirm=true to actually change enforcement. This affects live edge blocking.")
 
     from backend.core import metadata as metadata_db
 
@@ -700,11 +712,7 @@ def scoring_l2_enforce_put(
     Effective at the edge within seconds (the scorer re-reads the ConfigStore each
     request). Audited. Gated by ``?confirm=true`` — the same kill switch as
     enforce-threshold — because it changes live edge blocking."""
-    if not confirm:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "Pass ?confirm=true to actually change L2 enforcement. This affects live edge blocking."},
-        )
+    _require_confirm(confirm, "Pass ?confirm=true to actually change L2 enforcement. This affects live edge blocking.")
 
     import datetime as _dt
 
@@ -787,14 +795,12 @@ def scoring_exclude_regex_get(service_id: ServiceId) -> dict:
         "effective":    str,    # what's actually interpolated into VCL
       }
     """
-    from backend import config as svcconfig
     from backend.provision.session_scoring_vcl import (
         DEFAULT_ASSET_EXT_REGEX,
         resolve_exclude_url_regex,
     )
 
-    cfg = svcconfig.load_config(service_id) or {}
-    scoring = cfg.get("scoring") or {}
+    _cfg, scoring = _load_scoring_cfg(service_id)
     current = scoring.get("exclude_url_regex") or ""
     effective = resolve_exclude_url_regex(current or None)
     return {
@@ -810,16 +816,14 @@ def scoring_exclude_regex_get(service_id: ServiceId) -> dict:
     }
 
 
-def _require_scoring_enabled_and_token(service_id: str, token: str) -> str:
-    from backend import config as svcconfig
-
-    cfg = svcconfig.load_config(service_id) or {}
-    if not (cfg.get("scoring") or {}).get("enabled"):
+def _require_scoring_enabled_and_token(service_id: str, token: str = "") -> tuple[dict, dict, str]:
+    cfg, scoring = _load_scoring_cfg(service_id)
+    if not scoring.get("enabled"):
         raise HTTPException(status_code=400, detail={"error": "Session scoring is not enabled for this service"})
     resolved_token = resolve_fastly_token(service_id, token)
     if not resolved_token:
         raise HTTPException(status_code=400, detail={"error": "Fastly API token required"})
-    return resolved_token
+    return cfg, scoring, resolved_token
 
 
 def _validate_service_exclude_regex(service_id: str, raw: str):
@@ -865,19 +869,15 @@ def scoring_exclude_regex_put(
     nothing → every request scored). The confirm flag matches the
     enforce-threshold + matrix-restore precedent.
     """
-    if not confirm:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "Pass ?confirm=true to actually apply the change. This re-publishes the active VCL version."
-            },
-        )
+    _require_confirm(
+        confirm, "Pass ?confirm=true to actually apply the change. This re-publishes the active VCL version."
+    )
 
     from backend.core import metadata as metadata_db
     from backend.provision.session_scoring_orchestrator import update_recv_exclusion_regex
     from backend.utils.vcl_validator import RegexValidationError
 
-    resolved_token = _require_scoring_enabled_and_token(service_id, token)
+    _cfg, _scoring, resolved_token = _require_scoring_enabled_and_token(service_id, token)
 
     try:
         cleaned, lint = _validate_service_exclude_regex(service_id, body.regex)
@@ -991,7 +991,6 @@ def scoring_enforce_status_code_get(service_id: ServiceId) -> dict:
         "is_default":  bool,
       }
     """
-    from backend import config as svcconfig
     from backend.provision.session_scoring_vcl import (
         _ENFORCE_STATUS_CODE_MAX,
         _ENFORCE_STATUS_CODE_MIN,
@@ -999,8 +998,7 @@ def scoring_enforce_status_code_get(service_id: ServiceId) -> dict:
         resolve_enforce_status_code,
     )
 
-    cfg = svcconfig.load_config(service_id) or {}
-    scoring = cfg.get("scoring") or {}
+    _cfg, scoring = _load_scoring_cfg(service_id)
     current = scoring.get("enforce_status_code")
     effective = resolve_enforce_status_code(current)
     return {
@@ -1042,13 +1040,9 @@ def scoring_enforce_status_code_put(
     response codes seen by real users — same precedent as
     enforce-threshold and exclude-regex.
     """
-    if not confirm:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "Pass ?confirm=true to actually apply the change. This re-publishes the active VCL version."
-            },
-        )
+    _require_confirm(
+        confirm, "Pass ?confirm=true to actually apply the change. This re-publishes the active VCL version."
+    )
 
     from backend.core import metadata as metadata_db
     from backend.provision.session_scoring_orchestrator import update_enforce_status_code
@@ -1066,7 +1060,7 @@ def scoring_enforce_status_code_put(
             },
         )
 
-    resolved_token = _require_scoring_enabled_and_token(service_id, token)
+    _cfg, _scoring, resolved_token = _require_scoring_enabled_and_token(service_id, token)
 
     try:
         result = update_enforce_status_code(service_id, resolved_token, new_status_code=new_code)
@@ -1110,11 +1104,10 @@ def scoring_matrix_versions_list(service_id: ServiceId) -> dict:
     ``iceberg/meta/scoring_matrix_history/{version}.json`` before
     overwriting, so the operator can roll back to any prior trained
     matrix. Returns most-recent first."""
-    from backend import config as svcconfig
     from backend.state_sync import list_scoring_matrix_versions
 
-    cfg = svcconfig.load_config(service_id) or {}
-    current_version = (cfg.get("scoring") or {}).get("matrix_version")
+    _cfg, scoring = _load_scoring_cfg(service_id)
+    current_version = scoring.get("matrix_version")
     return {
         "versions": list_scoring_matrix_versions(service_id),
         "current_version": current_version,
@@ -1146,11 +1139,7 @@ def scoring_matrix_versions_restore(
 
     Gated by ``?confirm=true`` so an accidental click can't silently
     rewind the live AUC numbers."""
-    if not confirm:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "Pass ?confirm=true to actually restore. This will replace the current matrix."},
-        )
+    _require_confirm(confirm, "Pass ?confirm=true to actually restore. This will replace the current matrix.")
 
     from backend import config as svcconfig
     from backend.core import metadata as metadata_db
@@ -1183,17 +1172,7 @@ def scoring_matrix_versions_restore(
     # Push the FOS-restored matrix into the scoring_matrix KV Store so the live
     # scorer rolls back too. _write_matrix_to_kv resolves via the FOS chain
     # (the local copy was just deleted). Best-effort — needs a token + store.
-    kv_written = False
-    matrix_store_id = ((cfg or {}).get("scoring") or {}).get("scoring_matrix_store_id", "")
-    resolved_token = resolve_fastly_token(service_id)
-    if matrix_store_id and resolved_token:
-        try:
-            from backend.provision.session_scoring_orchestrator import _write_matrix_to_kv
-
-            _write_matrix_to_kv(matrix_store_id, service_id, resolved_token)
-            kv_written = True
-        except Exception as exc:
-            logger.warning(f"Could not push restored matrix to scoring_matrix KV: {exc}")
+    kv_written = _push_matrix_to_kv_if_configured(service_id, cfg)
 
     _bust_analytics_cache(service_id)
 
@@ -1248,11 +1227,8 @@ def scoring_rotate_key(
     from backend.core import metadata as metadata_db
     from backend.provision.session_scoring_setup import rotate_aes_key
 
-    cfg = load_service_config(service_id)
-
-    scoring = cfg.get("scoring") or {}
-    if not scoring.get("enabled"):
-        raise HTTPException(status_code=400, detail={"error": "Scoring is not enabled for this service"})
+    load_service_config(service_id)
+    _cfg, scoring, resolved_token = _require_scoring_enabled_and_token(service_id, token)
 
     scoring_keys_store_id = scoring.get("scoring_keys_store_id")
     if not scoring_keys_store_id:
@@ -1262,10 +1238,6 @@ def scoring_rotate_key(
                 "error": "Service has no scoring_keys_store_id (was scoring enabled before key rotation was supported?)"
             },
         )
-
-    resolved_token = resolve_fastly_token(service_id, token)
-    if not resolved_token:
-        raise HTTPException(status_code=400, detail={"error": "Fastly API token required"})
 
     result = rotate_aes_key(scoring_keys_store_id, token=resolved_token)
 
@@ -1346,10 +1318,7 @@ def scoring_threshold_get(service_id: ServiceId) -> dict:
     requires a Rust scorer change + Wasm redeploy and is deferred to
     a future release once the operator is confident in the value.
     """
-    from backend import config as svcconfig
-
-    cfg = svcconfig.load_config(service_id) or {}
-    scoring = cfg.get("scoring") or {}
+    _cfg, scoring = _load_scoring_cfg(service_id)
     return {
         "threshold": scoring.get("operator_threshold"),
         "set_at": scoring.get("operator_threshold_set_at"),
@@ -1437,10 +1406,7 @@ def scoring_evaluation_per_reason(
     from backend.scoring import labels as _labels
     from backend.scoring.evaluate import evaluate_per_reason
 
-    counts = _labels.counts_by_label(service_id)
-    n_good = counts.get("good", 0)
-    n_bad = counts.get("bad", 0)
-    n_neutral = counts.get("neutral", 0)
+    n_good, n_bad, n_neutral = _label_counts(service_id)
 
     cache_key = ("scoring-evaluation-per-reason", service_id, n_good, n_bad, n_neutral)
 
@@ -1515,12 +1481,8 @@ def scoring_dashboard(
     label counts so label mutations + slider drags invalidate naturally.
     """
     from backend import config as svcconfig
-    from backend.scoring import labels as _labels
 
-    counts = _labels.counts_by_label(service_id)
-    n_good = counts.get("good", 0)
-    n_bad = counts.get("bad", 0)
-    n_neutral = counts.get("neutral", 0)
+    n_good, n_bad, n_neutral = _label_counts(service_id)
 
     cache_key = (
         "scoring-dashboard",

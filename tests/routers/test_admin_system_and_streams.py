@@ -38,8 +38,8 @@ from backend.routers.admin import router as admin_router
 from backend.utils.date_utils import iso_z
 from backend.utils.remote_access import _is_blocked_path
 from tests._helpers.sources import make_source
+from tests._helpers.wire import await_until
 from tests.conftest import MOCK_SERVICE_ID
-from tests.utils.polling import await_until
 
 
 # ── Merged from tests/routers/test_admin_events_stream.py ──
@@ -352,7 +352,7 @@ def test_sync_status_routes_high_scale_service_without_duckdb(client):
     }
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
-        patch("backend.high_scale.registry.get_high_scale_service_registry") as mock_reg,
+        patch("backend.high_scale.registry_bootstrap.get_high_scale_service_registry") as mock_reg,
         patch("backend.routers.admin.sync_status.compute_sync_status_cached", return_value=cached_metrics),
         patch("backend.core.duckdb.get_connection") as mock_conn,
     ):
@@ -1199,7 +1199,7 @@ def test_admin_manual_cron_trigger_routes(overview_client: TestClient):
                 },
             ),
             patch(
-                "backend.cron.jobs.optimize._run_optimize",
+                "backend.cron.jobs.compaction._run_optimize",
                 return_value={"files_rewritten": 4, "files_added": 1},
             ),
         ):

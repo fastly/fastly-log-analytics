@@ -7,12 +7,12 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { withNuqsTestingAdapter, type OnUrlUpdateFunction } from 'nuqs/adapters/testing'
 
-import { useQueryMonitorUrlState } from '@/app/admin/queries/_hooks/useQueryMonitorUrlState'
 import {
+  useFilteredActive,
   useKeyboardShortcuts,
+  useQueryMonitorUrlState,
   type ShortcutBinding,
-} from '@/app/admin/queries/_hooks/useKeyboardShortcuts'
-import { useFilteredActive } from '@/app/admin/queries/_hooks/useFilteredActive'
+} from '@/app/admin/queries/_hooks/useFilteredActive'
 import type {
   ActiveRow,
   Attribution,

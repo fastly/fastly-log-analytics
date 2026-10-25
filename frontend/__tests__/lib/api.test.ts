@@ -11,7 +11,7 @@ import { http, HttpResponse } from 'msw'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 import { server } from '@/__tests__/helpers/msw/server'
-import { invalidInput } from '@/__tests__/helpers/invalid-input'
+import { invalidInput } from '@/__tests__/helpers/partial'
 import type { components } from '@/types/api.generated'
 
 const API_BASE = 'http://127.0.0.1:8000'
@@ -43,8 +43,7 @@ vi.mock('@/stores/debugStore', () => {
   return { useDebugStore }
 })
 
-import { client, extractApiError } from '@/lib/api'
-import { customFieldsApi, type CustomField, type VclLintRequest } from '@/lib/api/custom-fields'
+import { client, extractApiError, customFieldsApi, type CustomField, type VclLintRequest } from '@/lib/api'
 import { isUserActive } from '@/lib/userActivity'
 
 function wrapper() {

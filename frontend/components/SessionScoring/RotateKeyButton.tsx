@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { useAutoFlash } from '@/hooks/useAutoFlash'
 import { client, extractApiError } from '@/lib/api'
-import { scoringConfigCompositeKey } from '@/lib/queries/scoring'
+import { scoringConfigCompositeKey } from './useScorerTimeseries'
 import type { components } from '@/types/api.generated'
 
 interface RotateKeyButtonProps {

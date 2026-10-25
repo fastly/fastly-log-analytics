@@ -11,6 +11,12 @@ from typing import Any
 from fastapi import Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
+from backend.celery_status import (
+    get_celery_status,
+    list_ingest_ledger_entries,
+    purge_ingest_ledger_entries,
+    retry_ingest_ledger_entries,
+)
 from backend.core import duckdb as _db
 from backend.core import duckdb_pool as _pool
 from backend.core import duckdb_recycle as _recycle
@@ -24,7 +30,13 @@ from backend.models.admin import (
     MetricHistoryBatchResponse,
 )
 from backend.models.admin_actions import DuckdbRecycleResponse, VclHealthResponse
-from backend.models.admin_status import DuckdbStatusResponse
+from backend.models.admin_status import (
+    CeleryStatusResponse,
+    DuckdbStatusResponse,
+    IngestLedgerActionRequest,
+    IngestLedgerActionResponse,
+    IngestLedgerListResponse,
+)
 from backend.utils.date_utils import parse_relative_time_window
 from backend.utils.router_utils import bad_request, make_error, require_service_id
 
@@ -537,3 +549,56 @@ def get_duckdb_status_endpoint() -> dict[str, Any]:
         "pools": pool_stats["pools"],
         "retired_pools": pool_stats["retired_pools"],
     }
+
+
+@router.get(
+    "/admin/celery/status",
+    response_model=CeleryStatusResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+def api_celery_status() -> dict[str, Any]:
+    """Expose Celery queue depths, worker status, APScheduler schedule, and
+    ingest-ledger summary."""
+    return attach_debug_db_snapshot(dict(get_celery_status()))
+
+
+@router.get(
+    "/admin/celery/ledger",
+    response_model=IngestLedgerListResponse,
+    dependencies=[Depends(require_admin)],
+)
+def api_celery_ledger_list(
+    status: str | None = Query(
+        default="problem",
+        description="Filter by ledger status ('problem', 'all', 'dead_letter', 'quarantined', 'discovered', 'claimed', 'committed')",
+    ),
+    service_id: str | None = Query(default=None, description="Optional service_id filter"),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """List entries in ``ingest_ledger`` across services (defaults to dead_letter + quarantined)."""
+    return list_ingest_ledger_entries(status=status, service_id=service_id, limit=limit, offset=offset)
+
+
+@router.post(
+    "/admin/celery/ledger/retry",
+    response_model=IngestLedgerActionResponse,
+    dependencies=[Depends(require_admin)],
+)
+def api_celery_ledger_retry(body: IngestLedgerActionRequest) -> dict[str, Any]:
+    """Reset ``dead_letter`` / ``quarantined`` ledger entries back to ``discovered`` and
+    best-effort dispatch Celery convert batches."""
+    items = [item.model_dump() for item in body.items] if body.items else None
+    return retry_ingest_ledger_entries(items=items, status=body.status, service_id=body.service_id)
+
+
+@router.post(
+    "/admin/celery/ledger/purge",
+    response_model=IngestLedgerActionResponse,
+    dependencies=[Depends(require_admin)],
+)
+def api_celery_ledger_purge(body: IngestLedgerActionRequest) -> dict[str, Any]:
+    """Delete ``dead_letter`` / ``quarantined`` entries from ``ingest_ledger``."""
+    items = [item.model_dump() for item in body.items] if body.items else None
+    return purge_ingest_ledger_entries(items=items, status=body.status, service_id=body.service_id)

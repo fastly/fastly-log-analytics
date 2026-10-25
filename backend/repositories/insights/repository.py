@@ -297,65 +297,46 @@ def _coalesced_url_aggregates(
 
     counter = 0
     for r in _exec_coalesced(runner, sql, [window_start_s, window_start_s], shadow_cursor, debug_lock, chunked=True):
-        if use_extended:
-            (
-                url,
-                w_total,
-                b_total,
-                w_5xx,
-                b_5xx,
-                w_hits,
-                b_hits,
-                w_miss,
-                b_miss,
-                w_pass,
-                b_pass,
-                w_lat_total,
-                b_lat_total,
-                w_p95,
-                b_p95,
-                w_p99,
-                w_p50,
-                is_probe,
-                w_4xx,
-                is_comp,
-                pcr_w_uncomp,
-                pcr_w_total,
-                pcr_b_uncomp,
-                pcr_b_total,
-                is_img,
-                img_w_cnt,
-                img_w_bytes,
-                img_w_avg_bytes,
-                img_w_mobile,
-                ttl_w_cnt,
-                ttl_w_avg_ttl,
-                ttl_w_avg_hits,
-                ttl_w_avg_age,
-                oret_w_cnt,
-                oret_w_avg,
-                oret_w_max,
-            ) = r
-        else:
-            (
-                url,
-                w_total,
-                b_total,
-                w_5xx,
-                b_5xx,
-                w_hits,
-                b_hits,
-                w_miss,
-                b_miss,
-                w_pass,
-                b_pass,
-                w_lat_total,
-                b_lat_total,
-                w_p95,
-                b_p95,
-                w_p99,
-                w_p50,
-            ) = r
+        (
+            url,
+            w_total,
+            b_total,
+            w_5xx,
+            b_5xx,
+            w_hits,
+            b_hits,
+            w_miss,
+            b_miss,
+            w_pass,
+            b_pass,
+            w_lat_total,
+            b_lat_total,
+            w_p95,
+            b_p95,
+            w_p99,
+            w_p50,
+        ) = r[:17]
+        (
+            is_probe,
+            w_4xx,
+            is_comp,
+            pcr_w_uncomp,
+            pcr_w_total,
+            pcr_b_uncomp,
+            pcr_b_total,
+            is_img,
+            img_w_cnt,
+            img_w_bytes,
+            img_w_avg_bytes,
+            img_w_mobile,
+            ttl_w_cnt,
+            ttl_w_avg_ttl,
+            ttl_w_avg_hits,
+            ttl_w_avg_age,
+            oret_w_cnt,
+            oret_w_avg,
+            oret_w_max,
+        ) = r[17:] if use_extended else (None,) * 19
 
         w_total_i = w_total or 0
         b_total_i = b_total or 0
@@ -418,7 +399,14 @@ def _coalesced_url_aggregates(
                 _push_top_k(new_probe_urls_heap, float(w_total_i), counter, item_npu, k=25)
 
             # ── payload_compression_regression ────────────────────────────
-            if has_pcr and is_comp and (pcr_w_total or 0) >= 10 and (pcr_b_total or 0) >= 50:
+            if (
+                has_pcr
+                and is_comp
+                and pcr_w_total is not None
+                and pcr_w_total >= 10
+                and pcr_b_total is not None
+                and pcr_b_total >= 50
+            ):
                 w_rate_p = (pcr_w_uncomp or 0) / pcr_w_total
                 b_rate_p = (pcr_b_uncomp or 0) / pcr_b_total
                 if b_rate_p <= 0.20 and w_rate_p >= 0.50 and w_rate_p >= b_rate_p + 0.30:
@@ -426,7 +414,7 @@ def _coalesced_url_aggregates(
                     _push_top_k(payload_comp_heap, w_rate_p - b_rate_p, counter, item_pcr, k=15)
 
             # ── image_optimization_opportunities ──────────────────────────
-            if has_img and is_img and (img_w_bytes or 0) > 524288:
+            if has_img and is_img and img_w_bytes is not None and img_w_bytes > 524288:
                 avg_kb = round((img_w_avg_bytes or 0.0) / 1024.0, 1)
                 mobile_ratio = ((img_w_mobile or 0) * 1.0 / img_w_cnt) if img_w_cnt else 0.0
                 item_img: tuple = (url, img_w_cnt, img_w_bytes, avg_kb, mobile_ratio)
@@ -528,52 +516,37 @@ def _coalesced_ip_security_aggregates(
     counter = 0
 
     for r in _exec_coalesced(runner, sql, [window_start_s, window_start_s], shadow_cursor, debug_lock, chunked=True):
-        if use_extended:
-            (
-                ip,
-                ls_hits,
-                ls_distinct,
-                ls_min_sec,
-                ls_max_sec,
-                ce_w_denied,
-                ce_w_attempts,
-                ce_w_paths,
-                ce_b_denied,
-                cd_w_404,
-                cd_w_total,
-                cd_distinct_404,
-                cd_b_404,
-                odc_w_reqs,
-                odc_w_urls,
-                odc_b_reqs,
-                sh_w_sessions,
-                sh_w_reqs,
-                sh_b_sessions,
-                rsa_w_cnt,
-                rsa_w_max,
-                rsa_b_min,
-                _rsa_b_max,
-                ca_w_cnt,
-                ca_w_max,
-                ca_b_min,
-                _ca_b_max,
-            ) = r
-        else:
-            (
-                ip,
-                ls_hits,
-                ls_distinct,
-                ls_min_sec,
-                ls_max_sec,
-                ce_w_denied,
-                ce_w_attempts,
-                ce_w_paths,
-                ce_b_denied,
-                cd_w_404,
-                cd_w_total,
-                cd_distinct_404,
-                cd_b_404,
-            ) = r
+        (
+            ip,
+            ls_hits,
+            ls_distinct,
+            ls_min_sec,
+            ls_max_sec,
+            ce_w_denied,
+            ce_w_attempts,
+            ce_w_paths,
+            ce_b_denied,
+            cd_w_404,
+            cd_w_total,
+            cd_distinct_404,
+            cd_b_404,
+        ) = r[:13]
+        (
+            odc_w_reqs,
+            odc_w_urls,
+            odc_b_reqs,
+            sh_w_sessions,
+            sh_w_reqs,
+            sh_b_sessions,
+            rsa_w_cnt,
+            rsa_w_max,
+            rsa_b_min,
+            _rsa_b_max,
+            ca_w_cnt,
+            ca_w_max,
+            ca_b_min,
+            _ca_b_max,
+        ) = r[13:] if use_extended else (None,) * 14
         counter += 1
 
         # ── low_and_slow ──────────────────────────────────────────────────
@@ -605,7 +578,7 @@ def _coalesced_ip_security_aggregates(
 
         if use_extended:
             # ── orphaned_deep_crawl ───────────────────────────────────────
-            if has_odc and (odc_w_reqs or 0) >= 50 and (odc_w_urls or 0) >= 10:
+            if has_odc and odc_w_reqs is not None and odc_w_reqs >= 50 and odc_w_urls is not None and odc_w_urls >= 10:
                 b_reqs_i = odc_b_reqs or 0
                 reqs_per_url = odc_w_reqs * 1.0 / max(odc_w_urls, 1.0)
                 surge_ratio = odc_w_reqs * 1.0 / max(b_reqs_i / baseline_scale * window_hours, 1.0)
@@ -613,7 +586,7 @@ def _coalesced_ip_security_aggregates(
                 _push_top_k(orphaned_deep_crawl_heap, (odc_w_reqs,), counter, item_odc)
 
             # ── session_harvesting ────────────────────────────────────────
-            if has_sh and (sh_w_sessions or 0) >= 20:
+            if has_sh and sh_w_sessions is not None and sh_w_sessions >= 20:
                 b_sess_i = sh_b_sessions or 0
                 if sh_w_sessions > b_sess_i * 2 + 10:
                     item_sh: tuple = (ip, sh_w_sessions, sh_w_reqs, b_sess_i)
@@ -1256,33 +1229,26 @@ def _coalesced_geo_latency_aggregates(
         b_dr_total,
     ) in raw_rows:
         gid_i = int(gid or 0)
-        if gid_i == 3 and has_pop and pop is not None and pop != "":
-            wt = int(w_lat_total or 0)
-            bt = int(b_lat_total or 0)
-            if (
-                wt >= 20
-                and bt >= 50
-                and w_p95 is not None
-                and b_p95 is not None
-                and w_p95 >= b_p95 * 1.5
-                and (w_p95 - b_p95) >= 100
-            ):
-                ratio = (w_p95 / b_p95) if b_p95 else float("inf")
-                pop_out.append((ratio, (pop, w_p95, b_p95, wt, bt)))
-        elif gid_i == 5 and has_sreg and server_region is not None and server_region != "":
-            wt = int(w_lat_total or 0)
-            bt = int(b_lat_total or 0)
-            if (
-                wt >= 20
-                and bt >= 50
-                and w_p95 is not None
-                and b_p95 is not None
-                and w_p95 >= b_p95 * 1.5
-                and (w_p95 - b_p95) >= 100
-            ):
-                ottfb_val = w_ottfb_p95 if (has_ottfb and int(w_ottfb_cnt or 0) >= 20) else None
-                ratio = (w_p95 / b_p95) if b_p95 else float("inf")
-                sreg_out.append((ratio, (server_region, w_p95, b_p95, wt, bt, ottfb_val)))
+        if gid_i in (3, 5):
+            is_pop = gid_i == 3
+            dim_val = pop if is_pop else server_region
+            if (is_pop and has_pop or not is_pop and has_sreg) and dim_val is not None and dim_val != "":
+                wt = int(w_lat_total or 0)
+                bt = int(b_lat_total or 0)
+                if (
+                    wt >= 20
+                    and bt >= 50
+                    and w_p95 is not None
+                    and b_p95 is not None
+                    and w_p95 >= b_p95 * 1.5
+                    and (w_p95 - b_p95) >= 100
+                ):
+                    ratio = (w_p95 / b_p95) if b_p95 else float("inf")
+                    if is_pop:
+                        pop_out.append((ratio, (pop, w_p95, b_p95, wt, bt)))
+                    else:
+                        ottfb_val = w_ottfb_p95 if (has_ottfb and int(w_ottfb_cnt or 0) >= 20) else None
+                        sreg_out.append((ratio, (server_region, w_p95, b_p95, wt, bt, ottfb_val)))
         elif gid_i == 6 and has_metro_dr and metro is not None:
             wdt = int(w_dr_total or 0)
             bdt = int(b_dr_total or 0)
