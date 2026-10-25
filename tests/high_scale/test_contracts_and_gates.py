@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 import time
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
+import structlog
 from backend.high_scale.exports import ExportManager, ExportState
 
 from backend.high_scale.archive_models import (
@@ -935,14 +937,36 @@ def test_non_positive_rate_is_rejected(client) -> None:
     assert resp.status_code == 422
 
 
-def test_recommendation_is_logged_with_its_inputs(client) -> None:
-    with capture_logs() as logs:
-        _get(client, _cfg(retention_days=14), total_bytes=_TB)
+def test_recommendation_is_logged_with_its_inputs(client, caplog: pytest.LogCaptureFixture) -> None:
+    # Exercise the same cached logger used by earlier requests in a full worker.
+    assert _get(client, _cfg(), total_bytes=_TB).status_code == 200
+    processors = structlog.get_config()["processors"]
+    caplog.clear()
+    try:
+        # Production logging reconfiguration replaces the processor list;
+        # already-bound loggers retain the previous, equivalent chain.
+        structlog.configure(processors=list(processors))
+        # Capture the emitted stdlib record, not only the latest global
+        # processor list: cached loggers can still use an older valid chain.
+        with caplog.at_level(logging.INFO):
+            assert _get(client, _cfg(retention_days=14), total_bytes=_TB).status_code == 200
+    finally:
+        structlog.configure(processors=processors)
 
-    event = next(e for e in logs if e["event"] == "high_scale.retention_recommended")
+    events = [
+        record.msg
+        for record in caplog.records
+        if isinstance(record.msg, dict) and record.msg.get("event") == "high_scale.retention_recommended"
+    ]
+    assert len(events) == 1
+    event = events[0]
     assert event["service_id"] == "svc-hs"
     assert event["source"] == "override"
     assert event["explicit_retention_days"] == 14
+    assert event["events_per_second"] == 1000
+    assert event["average_row_bytes"] == 500
+    assert event["volume_total_bytes"] == _TB
+    assert event["volume_total_source"] == "request"
 
 
 def test_endpoint_is_analyst_blocked_by_the_admin_prefix() -> None:
