@@ -609,6 +609,20 @@ class BackfillBundleRollupsResponse(PassthroughModel):
     rum: int | None = None
 
 
+class RebuildTimeSeriesRollupsRequest(BaseModel):
+    """Explicit closed UTC hours whose request-count bundles should be rebuilt."""
+
+    hours: list[str] = Field(min_length=1, max_length=24)
+
+
+class RebuildTimeSeriesRollupsResponse(PassthroughModel):
+    """Result from ``POST /admin/rebuild-time-series-rollups``."""
+
+    service_id: str
+    requested_hours: list[str]
+    rebuilt: int
+
+
 class ConsolidateRollupsResponse(PassthroughModel):
     """Result from POST /admin/consolidate-rollups."""
 

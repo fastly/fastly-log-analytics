@@ -101,6 +101,22 @@ observation; absence is not evidence of eligibility or coverage. These are
 instrumentation capabilities, not verified deployed history. The full
 prerequisite gate remains closed.
 
+### Targeted time-series bundle repair
+
+When a matched raw-versus-rollup comparison proves that specific closed UTC
+hour bundles are wrong, an administrator can rebuild only those hours with
+`POST /api/admin/rebuild-time-series-rollups` and `{"hours":["YYYY-MM-DD-HH"]}`.
+The endpoint accepts 1–24 unique, valid, closed UTC hours and atomically
+replaces only their `time_series.parquet` files from the current serving view.
+It does not clear caches, rebuild other rollups, or fill missing event history.
+It also does not rebuild daily time-series derivatives; readers selecting a
+day-bundled tier will not see this hourly repair until that derivative is
+separately rebuilt and verified.
+After the normal aggregate response-cache TTL expires and a computed miss is
+confirmed, compare the same half-open raw event-time bounds and minute buckets
+again; do not flush shared caches, and do not treat a reported write count
+alone as content-correctness evidence.
+
 ## High-Scale section and query correlation
 
 The dashboard, Security, Origin, Performance, Network and CMCD readers instrument

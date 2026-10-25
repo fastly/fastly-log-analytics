@@ -2511,6 +2511,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/rebuild-time-series-rollups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rebuild Time Series Rollups
+         * @description Rebuild only the explicitly requested closed UTC time-series bundles.
+         */
+        post: operations["rebuild_time_series_rollups_api_admin_rebuild_time_series_rollups_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/consolidate-rollups": {
         parameters: {
             query?: never;
@@ -17096,6 +17116,28 @@ export interface components {
             ticks: {
                 [key: string]: unknown;
             }[];
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * RebuildTimeSeriesRollupsRequest
+         * @description Explicit closed UTC hours whose request-count bundles should be rebuilt.
+         */
+        RebuildTimeSeriesRollupsRequest: {
+            /** Hours */
+            hours: string[];
+        };
+        /**
+         * RebuildTimeSeriesRollupsResponse
+         * @description Result from ``POST /admin/rebuild-time-series-rollups``.
+         */
+        RebuildTimeSeriesRollupsResponse: {
+            /** Service Id */
+            service_id: string;
+            /** Requested Hours */
+            requested_hours: string[];
+            /** Rebuilt */
+            rebuilt: number;
         } & {
             [key: string]: unknown;
         };
@@ -36771,6 +36813,117 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BackfillBundleRollupsResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    rebuild_time_series_rollups_api_admin_rebuild_time_series_rollups_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RebuildTimeSeriesRollupsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RebuildTimeSeriesRollupsResponse"];
                 };
             };
             /** @description Bad request */

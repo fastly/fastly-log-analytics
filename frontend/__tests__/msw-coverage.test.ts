@@ -97,6 +97,7 @@ const ALLOWED_GAPS = new Set<string>([
   'POST /api/admin/rollup-heal',
   'GET /api/admin/rollups/status/:service_id',
   'GET /api/admin/rollups/status',
+  'POST /api/admin/rebuild-time-series-rollups',
   'POST /api/admin/partial-hour-merge/:service_id',
   'POST /api/admin/partial-hour-merge',
   'GET /api/admin/partial-hour-status/:service_id',

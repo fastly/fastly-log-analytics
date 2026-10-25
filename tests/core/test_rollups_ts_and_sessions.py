@@ -416,6 +416,47 @@ def test_build_time_series_writes_per_minute_buckets(tmp_path):
 
 
 @pytest.mark.usefixtures("frozen_clock")
+def test_build_time_series_replaces_an_existing_hour_bundle(tmp_path):
+    from backend.core.rollups import time_series
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-ts-rebuild"}
+    hour_token, hour_dt = _past_hour(2)
+    db_path = tmp_path / "source.duckdb"
+    con = duckdb.connect(str(db_path))
+    _seed_logs_rollups_time_series(
+        con,
+        "logs_ts",
+        [
+            {
+                "timestamp": hour_dt + timedelta(minutes=59),
+                "status": 200,
+                "cache": "MISS",
+                "resp_bytes": 100,
+                "ttfb": 0.05,
+            }
+        ],
+    )
+
+    bundle = cache_root / "rollups" / "hour_bundled" / f"hour={hour_token}" / "time_series.parquet"
+    with writer_patches(cache_root, "logs_ts", con):
+        assert time_series.build_time_series_bundles("svc-ts-rebuild", src, [hour_token]) == 1
+
+    assert pq.read_table(str(bundle))["requests"].to_pylist() == [1]
+
+    con = duckdb.connect(str(db_path))
+    con.execute(
+        "INSERT INTO logs_ts VALUES (?, ?, ?, ?, ?)",
+        [hour_dt + timedelta(minutes=59, seconds=30), 200, "MISS", 100, 0.05],
+    )
+    with writer_patches(cache_root, "logs_ts", con):
+        assert time_series.build_time_series_bundles("svc-ts-rebuild", src, [hour_token]) == 1
+
+    assert pq.read_table(str(bundle))["requests"].to_pylist() == [2]
+
+
+@pytest.mark.usefixtures("frozen_clock")
 def test_build_time_series_skips_active_hour(tmp_path):
     from backend.core.rollups import time_series
 

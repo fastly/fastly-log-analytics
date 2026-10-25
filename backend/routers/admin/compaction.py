@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 from fastapi import Depends, HTTPException, Query
 
+from backend.core.rollups.time_series import build_time_series_bundles
 from backend.deps import get_source, require_admin
 from backend.models.admin import (
     BackfillBundleRollupsResponse,
@@ -21,10 +22,14 @@ from backend.models.admin import (
     OptimizeNowResponse,
     PartialHourMergeResponse,
     PartialHourStatusResponse,
+    RebuildTimeSeriesRollupsRequest,
+    RebuildTimeSeriesRollupsResponse,
     RollupCompactResponse,
     RollupHealResponse,
     RollupStatusResponse,
 )
+from backend.utils.date_utils import parse_hour_key_strict
+from backend.utils.router_utils import make_error
 
 from ._helpers import service_id_from_source
 from ._router import router
@@ -182,6 +187,44 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         logger.warning("RUM aggregates backfill failed: %s", rum_backfill_err, exc_info=True)
 
     return {"time_series": n_ts, "sessions": n_sess, **counts, "rum": n_rum}
+
+
+@router.post(
+    "/admin/rebuild-time-series-rollups",
+    response_model=RebuildTimeSeriesRollupsResponse,
+    response_model_exclude_unset=True,
+)
+def rebuild_time_series_rollups(
+    payload: RebuildTimeSeriesRollupsRequest,
+    _admin: None = Depends(require_admin),
+    source: dict = Depends(get_source),
+) -> RebuildTimeSeriesRollupsResponse:
+    """Rebuild only the explicitly requested closed UTC time-series bundles."""
+    if len(set(payload.hours)) != len(payload.hours):
+        raise HTTPException(status_code=400, detail=make_error("duplicate_rollup_hours"))
+
+    try:
+        hour_starts = [parse_hour_key_strict(hour) for hour in payload.hours]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=make_error("invalid_rollup_hour")) from exc
+
+    active_hour = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    if any(hour_start >= active_hour for hour_start in hour_starts):
+        raise HTTPException(status_code=400, detail=make_error("rollup_hour_not_closed"))
+
+    sid = service_id_from_source(source)
+    rebuilt = build_time_series_bundles(sid, source, payload.hours)
+    logger.info(
+        "time_series_rollup_rebuild service_id=%s requested_hours=%s rebuilt=%d",
+        sid,
+        payload.hours,
+        rebuilt,
+    )
+    return RebuildTimeSeriesRollupsResponse(
+        service_id=sid,
+        requested_hours=payload.hours,
+        rebuilt=rebuilt,
+    )
 
 
 @router.post(

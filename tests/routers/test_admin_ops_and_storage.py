@@ -21,12 +21,13 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from backend.core import metric_snapshots
@@ -37,6 +38,7 @@ from backend.core.query_registry import query_registry
 from backend.deps import require_admin
 from backend.main import app
 from backend.routers.admin import clickhouse as api
+from backend.routers.admin import router as admin_router
 from backend.utils.remote_access import _is_blocked_path
 from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware
 from tests._helpers.config_fakes import fake_mutate_config as _fake_mutate
@@ -1255,6 +1257,70 @@ def test_backfill_bundle_rollups_response_maps_each_backfiller_and_compactor_to_
     for name, key in {**backfills, **compactors}.items():
         if key is not None:
             assert body[key] == values[name], f"{key} should come from {name}"
+
+
+def test_rebuild_time_series_rollups_rebuilds_only_requested_closed_hours(client):
+    current_hour = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    hours = [(current_hour - timedelta(hours=offset)).strftime("%Y-%m-%d-%H") for offset in (3, 2, 1)]
+    with (
+        patch(
+            "backend.routers.admin.compaction.build_time_series_bundles",
+            return_value=len(hours),
+        ) as rebuild,
+        patch("backend.core.rollups.recompute.recompute_touched_hours") as recompute,
+    ):
+        response = client.post(
+            "/api/admin/rebuild-time-series-rollups",
+            json={"hours": hours},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["requested_hours"] == hours
+    assert response.json()["rebuilt"] == len(hours)
+    rebuild.assert_called_once()
+    assert rebuild.call_args.args[2] == hours
+    recompute.assert_not_called()
+
+
+def test_rebuild_time_series_rollups_rejects_invalid_or_future_hours(client):
+    for hours in (["not-an-hour"], ["2099-01-01-00"]):
+        response = client.post(
+            "/api/admin/rebuild-time-series-rollups",
+            json={"hours": hours},
+        )
+        assert response.status_code == 400
+
+    current_hour = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    closed_hour = (current_hour - timedelta(hours=1)).strftime("%Y-%m-%d-%H")
+    response = client.post(
+        "/api/admin/rebuild-time-series-rollups",
+        json={"hours": [closed_hour, closed_hour]},
+    )
+    assert response.status_code == 400
+
+
+def test_rebuild_time_series_rollups_rejects_analyst_path_b():
+    analyst_app = FastAPI()
+
+    @analyst_app.middleware("http")
+    async def stamp_analyst(request: Request, call_next):
+        request.state.analyst_session = SimpleNamespace(
+            session_id="sess-analyst-1",
+            service_ids=["svc-a"],
+            email="analyst@example.com",
+        )
+        return await call_next(request)
+
+    analyst_app.include_router(admin_router)
+
+    with TestClient(analyst_app) as analyst_client:
+        response = analyst_client.post(
+            "/api/admin/rebuild-time-series-rollups",
+            json={"hours": ["2026-10-24-04"]},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["error"] == "admin_only"
 
 
 # ── Merged from tests/routers/test_admin_downloads.py ──
