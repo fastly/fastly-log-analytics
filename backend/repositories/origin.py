@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import sys as _sys
+import time
 from typing import Any
 
 import duckdb
@@ -501,7 +502,11 @@ def get_summary(
     params, where = build_where_clause(start_time, end_time, filters, actual_cols)
     # Unified latency expression: prefer ottfb (micros), fallback to ttfb (seconds).
     lat_val = origin_latency_us_expr(actual_cols)
+    timer = SectionTimer()
+    started = time.perf_counter()
     payload: dict[str, Any] = _shape_summary(runner, table_name, where, params, lat_val, actual_cols)
+    timer.mark("summary", started, source="live", activity="compute", current_execution=True, outcome="served")
+    payload["section_timings"] = timer.entries
     return _store_response_cache(cache_key, payload, runner)
 
 
@@ -664,11 +669,14 @@ def _run_origin_card(
     if use_lat_val:
         fmt_kwargs["lat_val"] = origin_latency_us_expr(actual_cols)
 
+    timer = SectionTimer()
+    started = time.perf_counter()
     rows = runner.execute(
         sql_template.format(**fmt_kwargs),
         params + (extra_params or []),
     ).fetchall()
-    return _store_response_cache(cache_key, shaper(rows), runner)
+    timer.mark(endpoint, started, source="live", activity="compute", current_execution=True, outcome="served")
+    return _store_response_cache(cache_key, {**shaper(rows), "section_timings": timer.entries}, runner)
 
 
 def get_timeseries(
@@ -710,6 +718,8 @@ def get_timeseries(
         return _store_response_cache(cache_key, {"has_data": False, "series": []}, runner)
     lat_expr, unit_conv = resolved
 
+    timer = SectionTimer()
+    started = time.perf_counter()
     payload = _run_timeseries_query(
         runner,
         table_name,
@@ -722,6 +732,8 @@ def get_timeseries(
         split_by_leg=split_by_leg,
         percentile=percentile,
     )
+    timer.mark("timeseries", started, source="live", activity="compute", current_execution=True, outcome="served")
+    payload["section_timings"] = timer.entries
     return _store_response_cache(cache_key, payload, runner)
 
 
@@ -891,6 +903,8 @@ def get_drilldown(
     else:
         bytes_expr = "NULL"
 
+    timer = SectionTimer()
+    started = time.perf_counter()
     rows = runner.execute(
         SQL.DRILLDOWN.format(
             dim_col=dim_col,
@@ -902,9 +916,10 @@ def get_drilldown(
         ),
         params + [limit],
     ).fetchall()
+    timer.mark("drilldown", started, source="live", activity="compute", current_execution=True, outcome="served")
 
     if not rows:
-        payload = {"has_data": False, "dimension": dimension, "rows": []}
+        payload = {"has_data": False, "dimension": dimension, "rows": [], "section_timings": timer.entries}
         return _store_response_cache(cache_key, payload, runner)
 
     rows_out = [
@@ -923,6 +938,7 @@ def get_drilldown(
         "has_data": True,
         "dimension": dimension,
         "rows": rows_out,
+        "section_timings": timer.entries,
     }
     return _store_response_cache(cache_key, payload, runner)
 
@@ -971,6 +987,8 @@ def get_shielding_analysis(
 
     # The query binds two trailing rank cutoffs (top-by-requests OR
     # top-by-overhead) — see SHIELDING_ANALYSIS docstring (M1).
+    timer = SectionTimer()
+    started = time.perf_counter()
     cur = runner.execute(query, params + time_params + [limit, limit])
     # Consume rows via ``cursor.description`` (dict access) rather than
     # positional ``r[0..5]``. A column reorder in SHIELDING_ANALYSIS would
@@ -978,20 +996,27 @@ def get_shielding_analysis(
     # offset-by-N footgun ``_shape_summary`` was already hardened against.
     col_names = [d[0] for d in cur.description]
     raw_rows = [dict(zip(col_names, r, strict=False)) for r in cur.fetchall()]
+    timer.mark(
+        "shielding_analysis", started, source="live", activity="compute", current_execution=True, outcome="served"
+    )
 
     # If the join returned zero rows, distinguish "no shield logs at all" (edge_only)
     # from "shield logs exist but didn't match any edge rid". Old code did a separate
     # shield-existence probe up-front; we fold that into a single cheap check on the
     # already-scanned data instead by re-checking the time window for any shield log.
     if not raw_rows:
+        started = time.perf_counter()
         shield_exists = runner.execute(
             f'SELECT 1 FROM {table_name} WHERE {time_where} AND "edge" = false AND "prid" IS NOT NULL AND "prid" != \'\' LIMIT 1',
             time_params,
         ).fetchone()
+        timer.mark(
+            "shielding_presence", started, source="live", activity="compute", current_execution=True, outcome="served"
+        )
         if shield_exists is None:
-            payload = {"has_data": False, "edge_only": True, "rows": []}
+            payload = {"has_data": False, "edge_only": True, "rows": [], "section_timings": timer.entries}
         else:
-            payload = {"has_data": False, "rows": []}
+            payload = {"has_data": False, "rows": [], "section_timings": timer.entries}
         return _store_response_cache(cache_key, payload, runner)
 
     # ``total_routes`` is a window COUNT(*) OVER () — identical across rows.
@@ -1025,6 +1050,7 @@ def get_shielding_analysis(
         # and flag truncation instead of implying the table is complete.
         "total_routes": total_routes,
         "truncated": total_routes > len(enriched_rows),
+        "section_timings": timer.entries,
     }
     return _store_response_cache(cache_key, payload, runner)
 

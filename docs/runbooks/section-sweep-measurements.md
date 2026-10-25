@@ -250,6 +250,8 @@ Network preserves the list-shaped `pop_health` data and carries its own cache/ti
 
 Standard Security, Origin, Performance, CMCD and Network dispatch sites stamp their actual reader source and current activity. Gated or missed rollup attempts are overhead with a fallback outcome, not evidence that a rollup served the data. Skipped materializations are not compute, and Performance ASN-label enrichment is separately timed overhead. Network quality retains its rollup timing envelope on the successful early-return path. These stamps do not supply missing reader-local coverage/history, prove raw-count parity, or qualify a page; ordinary cache hits still reuse historical work.
 
+Standard granular Origin endpoints stamp the live reader only after it runs; SQL templates named `ROLLUP` do not imply a precomputed rollup source. Shielding records its no-match presence probe separately, only when executed. Missing required columns or latency expressions emit no compute claim. The existing response memo retains these timings as historical on a hit; cache reuse does not become new reader execution.
+
 The current live sampler uses administrator mTLS only. It does not implement the Analyst Path B lifecycle or imply analyst coverage. HTTP sampling does not establish page-ready, interactions, history, coverage, controlled misses or complete query/I/O attribution. Consequently it reports `qualification: incomplete` and exits with status 2 even when requests succeed.
 
 ## Prerequisite gate
