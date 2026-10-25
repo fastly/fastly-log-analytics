@@ -761,6 +761,8 @@ def get_top_bots(
             rolled_ngwaf: list[dict] | None = None
             if use_rollups:
                 _t = _time.perf_counter()
+                coverage_start = len(runner.reader_coverage)
+                rollup_error = False
                 try:
                     rolled_ngwaf = runner.try_ngwaf_top_bots_from_rollup(
                         start_time, end_time, has_filters=bool(filters), n=n
@@ -768,18 +770,42 @@ def get_top_bots(
                 except Exception as e:
                     _logger.warning("[security] ngwaf_bots rollup read failed, falling back: %s", e)
                     rolled_ngwaf = None
+                    rollup_error = True
                 timer.mark("top_bots:ngwaf_rollup", _t)
+                observed = next(
+                    (row for row in runner.reader_coverage[coverage_start:] if row.reader == "dashboard.ngwaf_bots"),
+                    None,
+                )
+                # Reuse the reader's actual decision: an eligibility refusal is
+                # not a parquet read, and a live top-up is not rollup-only work.
+                source = "unknown"
+                if observed is not None:
+                    if observed.outcome in {"served", "read_failed"}:
+                        source = "mixed" if observed.live_top_up in {"used", "failed"} else "rollup"
+                    rollup_error = rollup_error or observed.outcome == "read_failed" or observed.live_top_up == "failed"
+                timer.entries[-1].update(
+                    source=source,
+                    activity="overhead" if source == "unknown" else "compute",
+                    current_execution=True,
+                    outcome="error" if rollup_error else "success",
+                )
             if rolled_ngwaf is not None:
                 ngwaf_bots = rolled_ngwaf
             else:
+                _t = _time.perf_counter()
+                join_outcome = "error"
                 try:
-                    _t = _time.perf_counter()
                     q = SQL.NGWAF_TOP_BOTS_JOIN_DIRECT.format(table_name=table_name, where_clause=where_clause, n=n)
                     res = runner.execute(q, params).fetchall()
                     ngwaf_bots = [{"name": r[0], "category": r[1], "request_count": r[2]} for r in res]
-                    timer.mark("top_bots:ngwaf_join_direct", _t)
+                    join_outcome = "success"
                 except Exception as e:
                     _logger.error("[security] NGWAF top bots failed: %s", e)
+                finally:
+                    timer.mark("top_bots:ngwaf_join_direct", _t)
+                    timer.entries[-1].update(
+                        source="live", activity="compute", current_execution=True, outcome=join_outcome
+                    )
         elif cols_needed:
             _t = _time.perf_counter()
             from contextlib import nullcontext
@@ -811,14 +837,20 @@ def get_top_bots(
                         _logger.error("[security] arcjet top bots failed: %s", e)
 
                 if ngwaf_attached:
+                    _t = _time.perf_counter()
+                    join_outcome = "error"
                     try:
-                        _t = _time.perf_counter()
                         q = SQL.NGWAF_TOP_BOTS_JOIN.format(temp_table=temp_table, n=n)
                         res = runner.execute(q).fetchall()
                         ngwaf_bots = [{"name": r[0], "category": r[1], "request_count": r[2]} for r in res]
-                        timer.mark("top_bots:ngwaf_join", _t)
+                        join_outcome = "success"
                     except Exception as e:
                         _logger.error("[security] NGWAF top bots failed: %s", e)
+                    finally:
+                        timer.mark("top_bots:ngwaf_join", _t)
+                        timer.entries[-1].update(
+                            source="live", activity="compute", current_execution=True, outcome=join_outcome
+                        )
     finally:
         if use_rollups:
             runner.end_shared_active_hour_temps()
