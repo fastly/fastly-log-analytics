@@ -27,7 +27,7 @@ from backend.high_scale.archive_models import (
     ArchiveState,
     validate_archive_transition,
 )
-from backend.high_scale.source_discovery import INITIAL_SOURCE_CURSOR
+from backend.high_scale.source_discovery import INITIAL_SOURCE_CURSOR, RUM_SOURCE_DOMAINS
 
 SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS high_scale_ownership (
@@ -46,10 +46,18 @@ CREATE TABLE IF NOT EXISTS high_scale_source_cursors (
     service_id TEXT NOT NULL,
     domain TEXT NOT NULL,
     source_cursor TEXT NOT NULL,
+    reinspection_cursor TEXT NOT NULL DEFAULT '__initial__',
+    forward_pages_since_reinspection INTEGER NOT NULL DEFAULT 0
+        CHECK (forward_pages_since_reinspection >= 0),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (service_id, domain),
     FOREIGN KEY (service_id) REFERENCES high_scale_ownership(service_id) ON DELETE CASCADE
 );
+
+ALTER TABLE high_scale_source_cursors
+    ADD COLUMN IF NOT EXISTS reinspection_cursor TEXT NOT NULL DEFAULT '__initial__';
+ALTER TABLE high_scale_source_cursors
+    ADD COLUMN IF NOT EXISTS forward_pages_since_reinspection INTEGER NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS high_scale_partition_cursors (
     service_id TEXT NOT NULL,
@@ -376,9 +384,13 @@ class PostgresControlPlane:
         expected_owner: str,
         expected_owner_epoch: int,
         domain: str | None = None,
+        reinspection_cursor: str | None = None,
+        forward_pages_since_reinspection: int | None = None,
     ) -> OwnerEpochRecord:
         _require_text(source_cursor, "source_cursor")
         _require_text(expected_owner, "expected_owner")
+        if forward_pages_since_reinspection is not None and forward_pages_since_reinspection < 0:
+            raise ValueError("forward_pages_since_reinspection cannot be negative")
         with self.transaction() as connection:
             current = self._fenced_owner(
                 connection,
@@ -389,7 +401,14 @@ class PostgresControlPlane:
             )
             if domain is not None:
                 _require_text(domain, "domain")
-                _upsert_domain_cursor(connection, service_id, domain, source_cursor)
+                _upsert_domain_cursor(
+                    connection,
+                    service_id,
+                    domain,
+                    source_cursor,
+                    reinspection_cursor=reinspection_cursor,
+                    forward_pages_since_reinspection=forward_pages_since_reinspection,
+                )
                 return current
             connection.execute(
                 """
@@ -400,6 +419,65 @@ class PostgresControlPlane:
                 (source_cursor, service_id, expected_owner_epoch, expected_owner),
             )
             return self._owner(connection, service_id)
+
+    def source_reinspection_state_for(self, service_id: str, domain: str) -> tuple[str, int]:
+        """Return the independent bounded-reinspection state for one domain."""
+        _require_text(service_id, "service_id")
+        _require_text(domain, "domain")
+        if domain not in RUM_SOURCE_DOMAINS:
+            raise ValueError("only RUM source domains support reinspection")
+        with self.transaction(read_only=True) as connection:
+            row = connection.execute(
+                """
+                SELECT reinspection_cursor, forward_pages_since_reinspection
+                FROM high_scale_source_cursors
+                WHERE service_id=%s AND domain=%s
+                """,
+                (service_id, domain),
+            ).fetchone()
+            if row is None:
+                return INITIAL_SOURCE_CURSOR, 0
+            return str(row[0]), int(row[1])
+
+    def advance_reinspection_state(
+        self,
+        service_id: str,
+        domain: str,
+        reinspection_cursor: str,
+        forward_pages_since_reinspection: int,
+        *,
+        expected_owner: str,
+        expected_owner_epoch: int,
+    ) -> None:
+        """Advance only the bounded RUM sweep, leaving forward progress intact."""
+        _require_text(service_id, "service_id")
+        _require_text(domain, "domain")
+        _require_text(reinspection_cursor, "reinspection_cursor")
+        _require_text(expected_owner, "expected_owner")
+        if domain not in RUM_SOURCE_DOMAINS:
+            raise ValueError("only RUM source domains support reinspection")
+        if forward_pages_since_reinspection < 0:
+            raise ValueError("forward_pages_since_reinspection cannot be negative")
+        with self.transaction() as connection:
+            self._fenced_owner(
+                connection,
+                service_id,
+                expected_owner_epoch=expected_owner_epoch,
+                expected_owner=expected_owner,
+                fence_name="reinspection cursor",
+            )
+            updated = connection.execute(
+                """
+                UPDATE high_scale_source_cursors
+                SET reinspection_cursor=%s,
+                    forward_pages_since_reinspection=%s,
+                    updated_at=clock_timestamp()
+                WHERE service_id=%s AND domain=%s
+                """,
+                (reinspection_cursor, forward_pages_since_reinspection, service_id, domain),
+            )
+            if getattr(updated, "rowcount", None) == 0:
+                raise RuntimeError("RUM reinspection cursor state disappeared during update")
 
     def source_cursor_for(self, service_id: str, domain: str) -> str:
         """Return this domain's own persisted cursor, or its own initial
@@ -1250,15 +1328,48 @@ class PostgresControlPlane:
         return cls._archive_manifest(connection, manifest_id, for_update=True)
 
 
-def _upsert_domain_cursor(connection: Any, service_id: str, domain: str, source_cursor: str) -> None:
+def _upsert_domain_cursor(
+    connection: Any,
+    service_id: str,
+    domain: str,
+    source_cursor: str,
+    *,
+    reinspection_cursor: str | None = None,
+    forward_pages_since_reinspection: int | None = None,
+) -> None:
+    if (reinspection_cursor is None) != (forward_pages_since_reinspection is None):
+        raise ValueError("reinspection cursor and page count must be updated together")
+    if reinspection_cursor is None and forward_pages_since_reinspection is None:
+        connection.execute(
+            """
+            INSERT INTO high_scale_source_cursors (service_id, domain, source_cursor)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (service_id, domain) DO UPDATE
+            SET source_cursor=EXCLUDED.source_cursor, updated_at=clock_timestamp()
+            """,
+            (service_id, domain, source_cursor),
+        )
+        return
     connection.execute(
         """
-        INSERT INTO high_scale_source_cursors (service_id, domain, source_cursor)
-        VALUES (%s, %s, %s)
+        INSERT INTO high_scale_source_cursors (
+            service_id, domain, source_cursor, reinspection_cursor,
+            forward_pages_since_reinspection
+        )
+        VALUES (%s, %s, %s, %s, %s)
         ON CONFLICT (service_id, domain) DO UPDATE
-        SET source_cursor=EXCLUDED.source_cursor, updated_at=clock_timestamp()
+        SET source_cursor=EXCLUDED.source_cursor,
+            reinspection_cursor=EXCLUDED.reinspection_cursor,
+            forward_pages_since_reinspection=EXCLUDED.forward_pages_since_reinspection,
+            updated_at=clock_timestamp()
         """,
-        (service_id, domain, source_cursor),
+        (
+            service_id,
+            domain,
+            source_cursor,
+            reinspection_cursor or INITIAL_SOURCE_CURSOR,
+            forward_pages_since_reinspection or 0,
+        ),
     )
 
 

@@ -40,6 +40,41 @@ may accelerate recovery but cannot replace the verified archive. Source
 deletion remains blocked until the archive manifest is committed, the grace
 period expires, the owner epoch matches, and no replay lease is active.
 
+## Late-arriving RUM source objects
+
+RUM source listing (`rum_vitals` and `rum_errors`) maintains independent
+forward and reinspection positions in `high_scale_source_cursors`:
+
+- `source_cursor` remains the forward cursor. Existing opaque paginator tokens
+  and `__terminal__:<key>`/S3 `StartAfter` behavior are preserved.
+- `reinspection_cursor` is an additive, per-domain cursor for an occasional
+  bounded pass over the RUM prefix.
+- `forward_pages_since_reinspection` counts successful forward pages. After
+  ten pages, the next worker listing inspects exactly one reinspection page,
+  then returns to forward discovery. Multi-page sweeps resume after the last
+  key with `StartAfter`; they do not restart at page one each tick.
+- Reinspection uses the normal source-object ledger, claim, archive, and
+  publication path. Its state is persisted separately and owner-epoch fenced;
+  it never rewinds the forward cursor. A failed/transiently unreadable page
+  advances neither position. Confirmed missing objects are durably recorded
+  as `source_missing` and may be skipped, matching the forward-stream policy.
+
+The columns are created for new schemas and added with `ALTER TABLE ... ADD
+COLUMN IF NOT EXISTS` for existing installations. Old rows start with an
+initial reinspection cursor and a zero page count. This is eventual
+reconciliation, not a freshness SLA: each sweep page is bounded, but a large
+RUM prefix can take many worker ticks to revisit. It does not promise that a
+late object is found within 20 seconds. Request discovery is unchanged.
+
+For a known, relevant missed object, prefer an exact-key idempotent reconcile:
+read its current S3 metadata and payload, register the exact descriptor with
+`discover_source`, claim it through `claim_sources_batch`, then pass that
+single descriptor/payload to `HighScaleIngestController.ingest_batch` with no
+next cursor. This uses the regular archive/publication path without changing
+either discovery cursor or replaying unrelated objects. Verify the resulting
+source-ledger and serving/archive records before declaring the reconciliation
+complete; do not reset or rewind a shared cursor for a key-specific repair.
+
 ## Capacity profiles
 
 The portable production profile uses two ClickHouse replicas per shard and

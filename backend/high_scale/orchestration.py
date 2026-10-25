@@ -15,7 +15,10 @@ from typing import Any, Protocol
 
 from backend.high_scale.ingest_controller import HighScaleIngestController
 from backend.high_scale.source_discovery import (
+    INITIAL_SOURCE_CURSOR,
     MAX_SOURCE_PAGE_SIZE,
+    RUM_REINSPECTION_INTERVAL,
+    RUM_SOURCE_DOMAINS,
     TERMINAL_SOURCE_CURSOR_PREFIX,
     SourceObjectDescriptor,
     SourceObjectLister,
@@ -33,6 +36,19 @@ class SourceControlPlane(Protocol):
     def owner(self, service_id: str) -> Any: ...
 
     def source_cursor_for(self, service_id: str, domain: str) -> str: ...
+
+    def source_reinspection_state_for(self, service_id: str, domain: str) -> tuple[str, int]: ...
+
+    def advance_reinspection_state(
+        self,
+        service_id: str,
+        domain: str,
+        reinspection_cursor: str,
+        forward_pages_since_reinspection: int,
+        *,
+        expected_owner: str,
+        expected_owner_epoch: int,
+    ) -> None: ...
 
     def discover_source(
         self,
@@ -132,11 +148,29 @@ class HighScaleWorkerCoordinator:
             if hasattr(cursor_reader, "source_cursor_for"):
                 persisted_cursor = cursor_reader.source_cursor_for(service_id, domain)
         listing_cursor = persisted_cursor if cursor is None else cursor
+        reinspection_cursor = INITIAL_SOURCE_CURSOR
+        forward_pages_since_reinspection = 0
+        has_reinspection_state = False
+        should_reinspect = False
+        if self._control is not None and domain in RUM_SOURCE_DOMAINS:
+            reinspection_cursor, forward_pages_since_reinspection = self._control.source_reinspection_state_for(
+                service_id, domain
+            )
+            has_reinspection_state = True
+            should_reinspect = forward_pages_since_reinspection >= RUM_REINSPECTION_INTERVAL
+        listing_options: dict[str, Any] = {}
+        if has_reinspection_state:
+            listing_options = {
+                "reinspection_cursor": reinspection_cursor,
+                "reinspect": should_reinspect,
+                "forward_pages_since_reinspection": forward_pages_since_reinspection,
+            }
         page = self._lister.list_source_objects(
             service_id,
             domain,
             page_size=self._page_size,
             cursor=listing_cursor,
+            **listing_options,
         )
         objects = tuple(page.objects)
         if len(objects) > self._page_size:
@@ -276,7 +310,7 @@ class HighScaleWorkerCoordinator:
 
                 if valid_payloads:
                     try:
-                        batch_next_cursor = None if failed > 0 else next_cursor
+                        batch_next_cursor = None if failed > 0 or page.reinspection_page else next_cursor
                         batch_res = self._controller.ingest_batch(
                             service_id=service_id,
                             domain=domain,
@@ -298,7 +332,27 @@ class HighScaleWorkerCoordinator:
                         failed += len(valid_payloads)
 
         if failed == 0:
-            self._advance_cursor(service_id, domain, next_cursor, current_owner, epoch)
+            if page.reinspection_page and has_reinspection_state and self._control is not None:
+                self._control.advance_reinspection_state(
+                    service_id,
+                    domain,
+                    page.next_reinspection_cursor or INITIAL_SOURCE_CURSOR,
+                    page.forward_pages_since_reinspection or 0,
+                    expected_owner=current_owner,
+                    expected_owner_epoch=epoch,
+                )
+            else:
+                self._advance_cursor(
+                    service_id,
+                    domain,
+                    next_cursor,
+                    current_owner,
+                    epoch,
+                    reinspection_cursor=page.next_reinspection_cursor if has_reinspection_state else None,
+                    forward_pages_since_reinspection=(
+                        page.forward_pages_since_reinspection if has_reinspection_state else None
+                    ),
+                )
         return PageRun(listing_cursor, next_cursor, len(objects), processed, duplicates, failed, missing)
 
     def _expired_claim_descriptors(
@@ -373,16 +427,33 @@ class HighScaleWorkerCoordinator:
             version=source.version,
         )
 
-    def _advance_cursor(self, service_id: str, domain: str, cursor: str | None, owner: str, epoch: int) -> None:
+    def _advance_cursor(
+        self,
+        service_id: str,
+        domain: str,
+        cursor: str | None,
+        owner: str,
+        epoch: int,
+        *,
+        reinspection_cursor: str | None = None,
+        forward_pages_since_reinspection: int | None = None,
+    ) -> None:
         if cursor is None:
             return
         if self._control is not None and hasattr(self._control, "advance_source_cursor"):
+            state_kwargs: dict[str, Any] = {}
+            if reinspection_cursor is not None and forward_pages_since_reinspection is not None:
+                state_kwargs = {
+                    "reinspection_cursor": reinspection_cursor,
+                    "forward_pages_since_reinspection": forward_pages_since_reinspection,
+                }
             self._control.advance_source_cursor(
                 service_id,
                 cursor,
                 expected_owner=owner,
                 expected_owner_epoch=epoch,
                 domain=domain,
+                **state_kwargs,
             )
         elif hasattr(self._ownership, "advance_cursor"):
             self._ownership.advance_cursor(

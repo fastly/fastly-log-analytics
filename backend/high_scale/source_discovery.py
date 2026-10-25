@@ -20,6 +20,9 @@ class SourceObjectMissingError(RuntimeError):
 MAX_SOURCE_PAGE_SIZE = 500
 INITIAL_SOURCE_CURSOR = "__initial__"
 TERMINAL_SOURCE_CURSOR_PREFIX = "__terminal__:"
+RUM_REINSPECTION_INTERVAL = 10
+
+RUM_SOURCE_DOMAINS = frozenset({"rum_vitals", "rum_errors"})
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,9 @@ class SourceObjectDescriptor:
 class SourceObjectPage:
     objects: Sequence[SourceObjectDescriptor]
     next_cursor: str | None
+    next_reinspection_cursor: str | None = None
+    forward_pages_since_reinspection: int | None = None
+    reinspection_page: bool = False
 
 
 class SourceObjectLister(Protocol):
@@ -44,6 +50,9 @@ class SourceObjectLister(Protocol):
         *,
         page_size: int,
         cursor: str | None,
+        reinspection_cursor: str | None = None,
+        reinspect: bool = False,
+        forward_pages_since_reinspection: int = 0,
     ) -> SourceObjectPage: ...
 
 
@@ -70,6 +79,9 @@ class S3SourceObjectLister:
         *,
         page_size: int,
         cursor: str | None,
+        reinspection_cursor: str | None = None,
+        reinspect: bool = False,
+        forward_pages_since_reinspection: int = 0,
     ) -> SourceObjectPage:
         del service_id
         if page_size <= 0 or page_size > MAX_SOURCE_PAGE_SIZE:
@@ -78,15 +90,20 @@ class S3SourceObjectLister:
         if domain_prefix is None:
             raise ValueError(f"unsupported source domain: {domain}")
         resolved_prefix = self._key(domain_prefix)
+        if reinspect and domain not in RUM_SOURCE_DOMAINS:
+            raise ValueError("only RUM source domains support reinspection")
+        if forward_pages_since_reinspection < 0:
+            raise ValueError("forward_pages_since_reinspection cannot be negative")
+        listing_cursor = (reinspection_cursor or INITIAL_SOURCE_CURSOR) if reinspect else cursor
         paginator = self._client.get_paginator("list_objects_v2")
         request: dict[str, Any] = {
             "Bucket": self._bucket,
             "Prefix": resolved_prefix,
             "PaginationConfig": {"PageSize": page_size},
         }
-        if cursor and cursor != INITIAL_SOURCE_CURSOR:
-            if cursor.startswith(TERMINAL_SOURCE_CURSOR_PREFIX):
-                start_after = cursor.removeprefix(TERMINAL_SOURCE_CURSOR_PREFIX)
+        if listing_cursor and listing_cursor != INITIAL_SOURCE_CURSOR:
+            if listing_cursor.startswith(TERMINAL_SOURCE_CURSOR_PREFIX):
+                start_after = listing_cursor.removeprefix(TERMINAL_SOURCE_CURSOR_PREFIX)
                 # Defense in depth against a foreign-domain cursor slipping
                 # through (e.g. from the owner-level fallback this class of
                 # bug came from): a StartAfter key outside this domain's own
@@ -96,7 +113,7 @@ class S3SourceObjectLister:
                 if start_after.startswith(resolved_prefix):
                     request["StartAfter"] = start_after
             else:
-                request["PaginationConfig"]["StartingToken"] = cursor
+                request["PaginationConfig"]["StartingToken"] = listing_cursor
         page = next(iter(paginator.paginate(**request)))
         objects = tuple(
             SourceObjectDescriptor(
@@ -108,7 +125,34 @@ class S3SourceObjectLister:
             for item in page.get("Contents", [])
             if isinstance(item.get("Key"), str)
         )
-        return SourceObjectPage(objects, page.get("NextToken"))
+        next_cursor = page.get("NextToken")
+        if domain not in RUM_SOURCE_DOMAINS:
+            return SourceObjectPage(objects, next_cursor)
+        if reinspect:
+            # This page is from the independent cursor. Keep the main cursor
+            # byte-for-byte unchanged for older worker versions and advance
+            # only the separate persisted reinspection position. S3 returns
+            # NextContinuationToken, not boto's paginator StartingToken; using
+            # the last key with StartAfter is the bounded, resumable cursor.
+            has_more = bool(page.get("NextContinuationToken"))
+            next_reinspection_cursor = (
+                f"{TERMINAL_SOURCE_CURSOR_PREFIX}{objects[-1].object_key}"
+                if has_more and objects
+                else INITIAL_SOURCE_CURSOR
+            )
+            return SourceObjectPage(
+                objects,
+                cursor or INITIAL_SOURCE_CURSOR,
+                next_reinspection_cursor=next_reinspection_cursor,
+                forward_pages_since_reinspection=0,
+                reinspection_page=True,
+            )
+        return SourceObjectPage(
+            objects,
+            next_cursor,
+            next_reinspection_cursor=reinspection_cursor or INITIAL_SOURCE_CURSOR,
+            forward_pages_since_reinspection=forward_pages_since_reinspection + 1,
+        )
 
     def _key(self, key: str) -> str:
         normalized = key.lstrip("/")

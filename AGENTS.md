@@ -125,6 +125,8 @@ Two data planes are selected by `DEPLOYMENT_MODE`: `standard` uses synchronous D
 
 **`DEPLOYMENT_MODE=high_scale` mode** — ingest is handled by dedicated `high-scale-worker` micro-batching directly to ClickHouse and FOS archive Parquet for K8s clusters, backed by partitioned cursors and multi-source ArchiveManifests. ClickHouse serves as the high-throughput analytical engine. Requires ClickHouse cluster and PostgreSQL metadata. **Ingest scales horizontally across worker replicas; the backend serving tier is single-pod.**
 
+RUM worker discovery keeps `high_scale_source_cursors.source_cursor` as the existing forward position and adds per-domain `reinspection_cursor` plus `forward_pages_since_reinspection` state. Existing schemas acquire the two columns additively with `ADD COLUMN IF NOT EXISTS`. Every ten successful forward pages, the next RUM listing inspects one bounded page through the same ledger/claim/archive path; multi-page reinspection resumes with `StartAfter` at the last key and does not rewind the forward cursor. This provides eventual late-arrival reconciliation, **not a 20-second guarantee** (a large prefix takes multiple ticks). Request discovery is unchanged. See [High-Scale Capacity and Recovery](docs/runbooks/high-scale-capacity-and-recovery.md#late-arriving-rum-source-objects) before changing cursor handling or reconciling missed objects.
+
 Teardown removes jobs on the next `_sync_jobs()` reload. The `config not found, skipping` warning during teardown is normal — a job fired after the config was deleted; harmless.
 
 ### Local-Only Parquet Compaction (Dashboard Performance)
