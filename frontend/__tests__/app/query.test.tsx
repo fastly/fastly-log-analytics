@@ -35,9 +35,9 @@ vi.mock('@uiw/react-codemirror', async () => {
   return {
     default: React.forwardRef(function MockCodeMirror(
       { value, onChange }: { value: string; onChange: (v: string) => void },
-      _ref: React.Ref<unknown>,
+      ref: React.Ref<HTMLTextAreaElement>,
     ) {
-      return <textarea data-testid="mock-editor" value={value} onChange={(e) => onChange(e.target.value)} />
+      return <textarea ref={ref} data-testid="mock-editor" value={value} onChange={(e) => onChange(e.target.value)} />
     }),
   }
 })
