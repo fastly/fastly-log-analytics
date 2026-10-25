@@ -358,7 +358,7 @@ def performance_aggregates(
                     sort_column=sort_column,
                     min_requests=_MIN_ASN_REQUESTS,
                 )
-            return _asn_rows(service, rows)
+            return rows
 
         tasks.append(("top_asns", _fetch_top_asns))
 
@@ -370,6 +370,10 @@ def performance_aggregates(
         tasks.append(("scatter", lambda: _scatter(service, start_time, end_time, filters)))
 
     result = trace.run_parallel(tasks, source="fact" if filters else "projection")
+    if "top_asns" in result:
+        result["top_asns"] = trace.run(
+            "asn_labels", lambda: _asn_rows(service, result["top_asns"]), activity="overhead"
+        )
 
     # Unfiltered top tables request-weight-average per-minute percentiles; filtered ones
     # are exact ClickHouse quantiles over the matching facts.

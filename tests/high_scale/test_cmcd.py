@@ -8,9 +8,11 @@ from typing import Any
 import pytest
 
 from backend.core.high_scale_sections import current_clickhouse_scope
+from backend.core.query_attribution import Attribution, current_attribution
 from backend.high_scale import cmcd as hs_cmcd
 from backend.high_scale.cmcd import cmcd_aggregates
 from backend.models.cmcd import CmcdAggregatesResponse, CmcdRequest
+from backend.utils import telemetry
 
 START = "2026-09-14T10:00:00Z"
 END = "2026-09-14T10:15:00Z"
@@ -139,7 +141,7 @@ def test_probe_and_multicall_overview_share_explicit_projected_fact_ownership() 
     hit = _run(client, sections={"overview"})
     assert len(client.calls) == 4
     assert hit["_response_cache"]["state"] == "hit"
-    assert hit["section_timings"] == result["section_timings"]
+    assert "section_timings" not in hit
 
 
 def test_no_cmcd_events_in_the_window_reports_no_data_after_a_single_probe() -> None:
@@ -527,3 +529,111 @@ def test_batch_ingest_publishes_a_manifest_scoped_cmcd_batch() -> None:
     assert cmcd_batch.batch_id == build_batch_id_from_manifest_id(f"{result.manifest.manifest_id}:cmcd")
     assert len(cmcd_batch.rows) == 2
     assert len(clickhouse.by_domain("request")[0].rows) == 3
+
+
+def test_probe_and_asn_enrichment_are_disjoint_overhead(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [0.0]
+    lookup_scopes: list[dict[str, Any]] = []
+    monkeypatch.setattr("backend.core.high_scale_sections.time.perf_counter", lambda: clock[0])
+
+    class TimedClient(_Client):
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            clock[0] += 0.01 if "cmcd:probe" in sql else 0.02
+            return super().execute(sql, params)
+
+    def names(service_id: str, asns: list[int]) -> dict[int, str]:
+        assert service_id == "svc" and asns == [7922]
+        lookup_scopes.append(current_clickhouse_scope())
+        clock[0] += 0.03
+        return {7922: "Example Network"}
+
+    monkeypatch.setattr(hs_cmcd, "_asn_names", names)
+    client = TimedClient()
+    result = _run(client, sections={"rebuffer_by_asn"})
+    timings = {row["section"]: row for row in result["section_timings"]}
+    assert set(timings) == {"cmcd.probe", "cmcd.rebuffer_asn", "cmcd.asn_labels"}
+    assert timings["cmcd.probe"]["activity"] == "overhead"
+    assert timings["cmcd.probe"]["time_ms"] == pytest.approx(10)
+    assert timings["cmcd.rebuffer_asn"]["activity"] == "compute"
+    assert timings["cmcd.rebuffer_asn"]["time_ms"] == pytest.approx(20)
+    assert timings["cmcd.asn_labels"]["activity"] == "overhead"
+    assert timings["cmcd.asn_labels"]["time_ms"] == pytest.approx(30)
+    assert timings["cmcd.asn_labels"]["source"] == "unknown"
+    assert lookup_scopes[0]["section_id"] == timings["cmcd.asn_labels"]["section_id"]
+    assert all(row["parent_section_id"] is None for row in timings.values())
+    assert all(row["timing_kind"] == "client_section_wall" and row["server_cpu_ms"] is None for row in timings.values())
+    assert all(row["source"] == "projected_fact" for row in client.scopes)
+    assert {row["section_id"] for row in client.scopes} == {
+        timings["cmcd.probe"]["section_id"],
+        timings["cmcd.rebuffer_asn"]["section_id"],
+    }
+    assert result["rebuffer_by_asn"][0]["label"] == "Example Network (7922)"
+    assert result["_response_cache"]["state"] == "miss"
+    assert result["_response_cache"]["single_flight"] == "leader"
+    hit = _run(client, sections={"rebuffer_by_asn"})
+    assert hit["_response_cache"]["state"] == "hit"
+    assert hit["_response_cache"]["ttl_seconds"] == pytest.approx(hs_cmcd._memo.cache.ttl)
+    assert hit["_response_cache"]["prewarmer"] is False
+    assert "section_timings" not in hit
+    assert len(lookup_scopes) == 1 and len(client.calls) == 2
+    assert current_clickhouse_scope()["section_id"] is None
+
+
+def test_asn_enrichment_failure_is_overhead_and_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    observations: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "backend.core.high_scale_sections._logger.info", lambda event, **entry: observations.append(entry)
+    )
+
+    def fails(service_id: str, asns: list[int]) -> dict[int, str]:
+        raise RuntimeError("metadata unavailable")
+
+    monkeypatch.setattr(hs_cmcd, "_asn_names", fails)
+    client = _Client()
+    with pytest.raises(RuntimeError, match="metadata unavailable"):
+        _run(client, sections={"rebuffer_by_asn"})
+    by_section = {row["section"]: row for row in observations}
+    assert by_section["cmcd.rebuffer_asn"]["outcome"] == "success"
+    assert by_section["cmcd.asn_labels"]["outcome"] == "error"
+    assert by_section["cmcd.asn_labels"]["activity"] == "overhead"
+    assert current_clickhouse_scope()["section_id"] is None
+    assert len(hs_cmcd._memo.cache) == 0
+
+
+def test_all_cmcd_tasks_preserve_request_and_page_correlation() -> None:
+    client = _Client()
+    request_token = current_attribution.set(Attribution(kind="admin", request_id="request-cmcd"))
+    page_token = telemetry._PAGE_LOAD_ID.set("page-cmcd")
+    try:
+        result = _run(client)
+    finally:
+        telemetry._PAGE_LOAD_ID.reset(page_token)
+        current_attribution.reset(request_token)
+    timings = {row["section_id"]: row for row in result["section_timings"]}
+    assert {row["section"] for row in timings.values()} == {
+        "cmcd.probe",
+        "cmcd.overview",
+        "cmcd.timeseries",
+        "cmcd.top_content",
+        "cmcd.rebuffer_country",
+        "cmcd.rebuffer_asn",
+        "cmcd.object_type",
+        "cmcd.streaming_format",
+        "cmcd.session_duration",
+        "cmcd.asn_labels",
+    }
+    for scope in client.scopes:
+        section = timings[scope["section_id"]]
+        assert section["section"] == scope["section"]
+        assert section["request_id"] == scope["request_id"] == "request-cmcd"
+        assert section["page_load_id"] == scope["page_load_id"] == "page-cmcd"
+        assert section["service_id"] == scope["service_id"] == "svc"
+        assert section["source"] == scope["source"] == "projected_fact"
+        assert section["server_cpu_ms"] is None
+    assert (
+        timings[next(row["section_id"] for row in client.scopes if row["section"] == "cmcd.timeseries")][
+            "executor_dispatch"
+        ]
+        == "thread_pool"
+    )
+    assert current_clickhouse_scope()["section_id"] is None

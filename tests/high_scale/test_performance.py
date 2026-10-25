@@ -159,6 +159,70 @@ def test_top_asns_carry_resolved_labels_and_ints():
     assert res.top_asns[1].label == "AS64512"
 
 
+@pytest.mark.parametrize("filtered", [False, True])
+def test_asn_enrichment_is_disjoint_overhead_and_cache_reuse_is_historical(
+    monkeypatch: pytest.MonkeyPatch, filtered: bool
+) -> None:
+    from backend.core.high_scale_sections import current_clickhouse_scope
+    from backend.core.query_attribution import Attribution, current_attribution
+    from backend.utils.telemetry import get_page_load_id, set_page_load_id
+
+    clock = [0.0]
+    scopes: dict[str, dict] = {}
+    monkeypatch.setattr("backend.core.high_scale_sections.time.perf_counter", lambda: clock[0])
+
+    class Client(_Client):
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            scopes["query"] = current_clickhouse_scope()
+            clock[0] += 0.01
+            return super().execute(sql, params)
+
+    def labels(service_id: str, asns: list[int]) -> dict[int, str]:
+        assert service_id == "svc" and asns == [7922]
+        scopes["labels"] = current_clickhouse_scope()
+        clock[0] += 0.04
+        return {7922: "Comcast Cable"}
+
+    monkeypatch.setattr("backend.core.duckdb.get_asn_names", labels)
+    client = Client({"top_asns": [{**_PERCENTILE_ROW, "value": "7922", "req_count": 40}]})
+    req = _req(filters={"country": FilterSpec(mode="include", values=["US"])} if filtered else {})
+    token = current_attribution.set(Attribution(kind="admin", request_id="request-perf"))
+    previous_page = get_page_load_id()
+    set_page_load_id("page-perf")
+    try:
+        response = _run(client, req, sections={"top_asns"})
+        hit = _run(client, req, sections={"top_asns"})
+    finally:
+        set_page_load_id(previous_page)
+        current_attribution.reset(token)
+
+    timings = {row["section"]: row for row in response.section_timings}
+    query = timings["performance.top_asns"]
+    enrichment = timings["performance.asn_labels"]
+    assert query["source"] == ("fact" if filtered else "projection")
+    assert query["activity"] == "compute"
+    assert query["time_ms"] == pytest.approx(10)
+    assert enrichment["source"] == "unknown"
+    assert enrichment["activity"] == "overhead"
+    assert enrichment["time_ms"] == pytest.approx(40)
+    assert enrichment["executor_dispatch"] == "inline"
+    assert enrichment["executor_wait_ms"] is None
+    assert scopes["query"]["section_id"] == query["section_id"]
+    assert scopes["labels"]["section_id"] == enrichment["section_id"]
+    assert query["section_id"] != enrichment["section_id"]
+    for row in timings.values():
+        assert row["service_id"] == "svc"
+        assert row["request_id"] == "request-perf"
+        assert row["page_load_id"] == "page-perf"
+        assert row["server_cpu_ms"] is None
+    assert response.top_asns[0].label == "Comcast Cable (7922)"
+    assert hit.response_cache.state == "hit"
+    assert hit.section_timings == response.section_timings
+    assert len(client.calls) == 1
+    assert clock[0] == pytest.approx(0.05)
+    assert current_clickhouse_scope()["section_id"] is None
+
+
 def test_projection_latencies_are_converted_from_stored_microseconds_to_milliseconds():
     client = _Client({"top_urls": [_PERCENTILE_ROW]})
 

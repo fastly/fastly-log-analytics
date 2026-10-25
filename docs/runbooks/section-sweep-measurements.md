@@ -115,6 +115,11 @@ inline execution declares that no executor queue was used. The Network bundle re
 PoP query timing while preserving its list-shaped PoP payload. Cache hits and
 single-flight followers do not create fresh execution sections.
 
+Performance's `top_asns` section ends before ASN metadata enrichment.
+The separate inline `performance.asn_labels` overhead section retains request
+and page correlation without claiming a ClickHouse fact/projection source.
+Cached responses reuse both observations as historical execution.
+
 `ClickHouseClient._request` correlates the transmitted query ID and records:
 
 - `admission_wait_ms`: the existing bounded client semaphore acquisition;

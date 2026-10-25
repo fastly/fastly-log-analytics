@@ -165,7 +165,7 @@ def test_dashboard_count_preserves_exact_inclusive_window(
             filters={},
             chart_interval="1 minute",
             chart_metric="requests",
-            include_time_series=False,
+            include_time_series=True,
             include_conn_requests=False,
             include_map_data=False,
             include_top_n=False,
@@ -178,6 +178,10 @@ def test_dashboard_count_preserves_exact_inclusive_window(
     assert count_observation["eligibility_reason"] == (
         "eligible" if expected_source == "rollup" else "unsupported_interval"
     )
+    if expected_source == "raw":
+        assert sum(row["value"] for row in result["time_series"]) == raw_count
+        chart_observation = next(row for row in result["reader_coverage"] if row["reader"] == "dashboard.time_series")
+        assert chart_observation["eligibility_reason"] == "unsupported_interval"
 
 
 class TestTryTimeSeriesFromRollup:

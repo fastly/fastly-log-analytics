@@ -28,6 +28,7 @@ import io
 # in this file resolve.
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from backend.config import service_id_from_source
 from backend.deps import get_source, require_admin
 from backend.models.admin import (
     SystemJobsResponse,
@@ -39,7 +40,6 @@ from backend.models.admin import (
 )
 from backend.models.common import OkResponse
 from backend.routers import admin as _adm
-from backend.routers.admin._helpers import service_id_from_source
 
 router: APIRouter = _adm.router  # type: ignore
 

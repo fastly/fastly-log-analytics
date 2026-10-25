@@ -13,6 +13,7 @@ from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS, ma
 from backend.repositories._base import SectionTimer, _compact_sql_for_debug, _safe_table, record_duckdb_query
 from backend.repositories._sql import query as SQL
 from backend.utils.date_utils import parse_iso_utc
+from backend.utils.error_redaction import register_salt
 from backend.utils.sql_validator import (
     SQLValidationError,
     apply_user_query_limits,
@@ -310,7 +311,6 @@ def _rebind_table_to_window_view(
             escaped_col = col.replace('"', '""')
             if col == "cid" and service_id:
                 from backend.core.duckdb import get_or_generate_cid_salt
-                from backend.utils.router_utils import register_salt
 
                 cid_salt = get_or_generate_cid_salt(service_id)
                 register_salt(cid_salt)

@@ -240,7 +240,7 @@ def cmcd_aggregates(
         return _cmcd_aggregates_compute(service, req, start_time, end_time, sections, mask_ips)
 
     result = _memo.coalesce(f"hs_cmcd_agg:{memo_key}", _compute)
-    _memo.put(memo_key, result)
+    _memo.put(memo_key, result, strip=("section_timings",))
     return result
 
 
@@ -273,6 +273,7 @@ def _cmcd_aggregates_compute(
             params,
         ),
         source="projected_fact",
+        activity="overhead",
     )[0]
     if not int(probe["events"] or 0):
         return {"available": True, "has_data": False, "section_timings": trace.timings()}
@@ -496,12 +497,11 @@ def _cmcd_aggregates_compute(
                 "GROUP BY asn ORDER BY session_count DESC, asn LIMIT {top_n:UInt32}",
                 params,
             )
-            names = _asn_names(service.service_id, [int(row["asn"]) for row in rows])
             return {
                 "rebuffer_by_asn": [
                     {
                         "asn": int(row["asn"]),
-                        "label": _asn_label(int(row["asn"]), names),
+                        "label": "",
                         "rebuffer_rate": _round(row.get("rebuffer_rate")),
                         "session_count": int(row["session_count"]),
                         "avg_bitrate": _round(row.get("avg_br")),
@@ -571,6 +571,17 @@ def _cmcd_aggregates_compute(
 
     for d in trace.run_parallel(tasks, source="projected_fact", max_workers=8).values():
         result.update(d)
+
+    if "rebuffer_by_asn" in result:
+        # Metadata lookup/label assembly is overhead, not ClickHouse analytics.
+        # Run after the query tasks so its wall span does not overlap theirs.
+        def _label_asns() -> None:
+            rows = result["rebuffer_by_asn"]
+            names = _asn_names(service.service_id, [row["asn"] for row in rows])
+            for row in rows:
+                row["label"] = _asn_label(row["asn"], names)
+
+        trace.run("asn_labels", _label_asns, activity="overhead")
 
     result["section_timings"] = trace.timings()
     return result

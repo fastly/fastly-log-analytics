@@ -69,6 +69,13 @@ describe('PlotlyChart', () => {
     expect(screen.getByTestId('plot-stub')).toBeInTheDocument()
   })
 
+  it('renders the Plot subtree when IntersectionObserver is unavailable', () => {
+    vi.stubGlobal('IntersectionObserver', undefined)
+    render(<PlotlyChart data={[]} a11yTitle="x" />)
+    expect(screen.getByTestId('plot-stub')).toBeInTheDocument()
+    expect(lastIOCallback).toBeNull()
+  })
+
   it('uses the nearest scroll container as the observer root', () => {
     const { container } = render(
       <div style={{ overflowY: 'auto' }}>

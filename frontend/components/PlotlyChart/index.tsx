@@ -283,6 +283,10 @@ function findScrollContainer(node: HTMLElement): HTMLElement | null {
   return null
 }
 
+const subscribeToObserverAvailability = () => () => {}
+const getObserverAvailabilitySnapshot = () => typeof IntersectionObserver !== 'undefined'
+const getObserverAvailabilityServerSnapshot = () => true
+
 export const PlotlyChart = React.memo(function PlotlyChart({
   data,
   layout,
@@ -304,7 +308,7 @@ export const PlotlyChart = React.memo(function PlotlyChart({
   // Store the graphDiv so we can re-attach listeners if needed
   const graphDivRef = useRef<PlotlyGraphDiv | null>(null)
 
-  const handleInitialized = useRef((_figure: PlotlyFigure, element: HTMLElement) => {
+  const handleInitialized = React.useCallback((_figure: PlotlyFigure, element: HTMLElement) => {
     const graphDiv: PlotlyGraphDiv = element
     graphDivRef.current = graphDiv
 
@@ -313,10 +317,15 @@ export const PlotlyChart = React.memo(function PlotlyChart({
     graphDiv.on?.('plotly_relayout', (event) => {
       onRelayoutRef.current?.(event)
     })
-  }).current
+  }, [])
 
   const containerRef = useRef<HTMLDivElement>(null)
   const [visible, setVisible] = useState(false)
+  const observerAvailable = React.useSyncExternalStore(
+    subscribeToObserverAvailability,
+    getObserverAvailabilitySnapshot,
+    getObserverAvailabilityServerSnapshot,
+  )
   const [narrow, setNarrow] = useState(false)
 
   const narrowLegendDefaults = narrow
@@ -380,11 +389,7 @@ export const PlotlyChart = React.memo(function PlotlyChart({
   }
 
   useEffect(() => {
-    if (visible || !containerRef.current) return
-    if (typeof IntersectionObserver === 'undefined') {
-      setVisible(true)
-      return
-    }
+    if (visible || !observerAvailable || !containerRef.current) return
     const node = containerRef.current
     const observer = new IntersectionObserver(
       ([entry]) => {
@@ -397,7 +402,7 @@ export const PlotlyChart = React.memo(function PlotlyChart({
     )
     observer.observe(node)
     return () => observer.disconnect()
-  }, [visible])
+  }, [observerAvailable, visible])
 
   useEffect(() => {
     if (!containerRef.current || typeof ResizeObserver === 'undefined') return
@@ -414,7 +419,7 @@ export const PlotlyChart = React.memo(function PlotlyChart({
 
   return (
     <div ref={containerRef} className={className} style={{ height: effectiveHeight, position: 'relative', overflow: 'hidden' }}>
-      {visible ? (
+      {visible || !observerAvailable ? (
         <Plot
           data={data}
           layout={defaultLayout}

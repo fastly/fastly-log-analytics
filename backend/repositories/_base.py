@@ -1942,7 +1942,8 @@ class QueryRunner:
     ) -> list[dict] | None:
         """Serve the dashboard time_series chart from per-hour rollup parquets
         when eligible, falling back transparently to ``None`` otherwise (the
-        caller then runs its existing raw query).
+        caller then runs its existing raw query). Partial-minute bounds require
+        raw event timestamps, which the minute buckets cannot reconstruct.
         """
         from datetime import UTC
 
@@ -1958,7 +1959,7 @@ class QueryRunner:
             start_time,
             end_time,
             can_use_overview=chart_metric == "requests" and interval in ("1 hour", "1 day"),
-            require_minute_aligned=False,
+            require_minute_aligned=True,
             observed=observed,
         )
         if planned is None:
