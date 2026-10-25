@@ -797,3 +797,61 @@ def test_decode_expands_faro_rum_body_matching_standard_mode_parity() -> None:
     ch_errors_tuples = _rows_for_domain(errors_batch, "00000000-0000-0000-0000-000000000002")
     assert len(ch_errors_tuples) == len(standard_errors)
     assert len({row[1] for row in ch_errors_tuples}) == len(standard_errors)
+
+
+@pytest.mark.parametrize("claimed_domain", ["rum_vitals", "rum_errors"])
+def test_faro_exception_without_message_survives_without_becoming_a_vital(claimed_domain) -> None:
+    """Flat edge fields describe the envelope, not the expanded Faro record."""
+    from backend.high_scale.publication import row_matches_serving_domain
+
+    record = {
+        "timestamp": "2026-10-25T12:00:00Z",
+        "rum_metric_name": "LCP",
+        "rum_metric_value": "123",
+        "url": "/beacon?rum_metric_name=LCP&rum_metric_value=123",
+        "rum_body": json.dumps({"exceptions": [{"stacktrace": {"frames": [{"filename": "app.js"}]}}]}),
+    }
+    source = ArchiveSourceObject("svc", claimed_domain, "raw/rum/mixed.gz", "sha256:source", 100, "v1")
+    result = decode_source_object(source, json.dumps(record).encode(), transform_version="normalize.v1")
+
+    assert result.quarantined_rows == 0
+    assert len(result.events) == 1
+    assert row_matches_serving_domain("rum_errors", result.events[0])
+    assert not row_matches_serving_domain("rum_vitals", result.events[0])
+    assert result.events[0]["error_message"] == "Unknown error"
+
+
+def test_invalid_faro_metric_is_quarantined_instead_of_silently_becoming_zero() -> None:
+    record = {
+        "timestamp": "2026-10-25T12:00:00Z",
+        "rum_body": json.dumps({"measurements": [{"type": "web-vitals", "values": {"lcp": "broken"}}]}),
+    }
+    source = ArchiveSourceObject("svc", "rum_errors", "raw/rum/invalid.gz", "sha256:source", 100, "v1")
+    payload = json.dumps(record).encode()
+    result = decode_source_object(source, payload, transform_version="normalize.v1")
+
+    assert result.accepted_rows == 0
+    assert result.quarantined_rows == 1
+    assert result.dead_letters[0].raw_line == payload
+
+
+def test_flat_error_with_stack_but_empty_message_survives() -> None:
+    from backend.high_scale.publication import row_matches_serving_domain
+
+    source = ArchiveSourceObject("svc", "rum_errors", "raw/rum/flat.gz", "sha256:source", 100, "v1")
+    payload = b'{"timestamp":"2026-10-25T12:00:00Z","rum_error_message":"","rum_error_stack":"at app.js:1"}'
+    result = decode_source_object(source, payload, transform_version="normalize.v1")
+
+    assert result.accepted_rows == 1
+    assert row_matches_serving_domain("rum_errors", result.events[0])
+    assert result.events[0]["error_message"] == "Unknown error"
+
+
+@pytest.mark.parametrize("domain", ["rum_vitals", "rum_errors"])
+def test_flat_rum_record_without_any_metric_or_error_is_quarantined(domain) -> None:
+    source = ArchiveSourceObject("svc", domain, "raw/rum/empty.gz", "sha256:source", 100, "v1")
+    payload = b'{"timestamp":"2026-10-25T12:00:00Z","rum_error_message":"","rum_metric_value":""}'
+    result = decode_source_object(source, payload, transform_version="normalize.v1")
+    assert result.accepted_rows == 0
+    assert result.quarantined_rows == 1
+    assert result.dead_letters[0].raw_line == payload

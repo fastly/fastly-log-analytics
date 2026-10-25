@@ -6,7 +6,6 @@ from datetime import UTC, datetime, timedelta
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from backend.high_scale.replay import replay_manifest
 from backend.high_scale.source_discovery import SourceObjectDescriptor
 
 from backend.high_scale.archive_models import ArchiveState
@@ -18,6 +17,7 @@ from backend.high_scale.publication import (
     InMemoryBatchManifestStore,
     InsertReceipt,
 )
+from backend.high_scale.replay import replay_manifest
 from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
 
 
@@ -334,6 +334,50 @@ def test_rum_errors_claim_also_publishes_sibling_vitals_from_the_shared_object()
     assert [row["error_message"] for row in by_domain["rum_errors"].rows] == ["boom"]
     assert sorted(row["metric_name"] for row in by_domain["rum_vitals"].rows) == ["CLS", "LCP"]
     assert len({batch.batch_id for batch in clickhouse.batches}) == 2
+
+
+@pytest.mark.parametrize("domain", ["rum_vitals", "rum_errors"])
+def test_empty_message_exception_is_visible_before_ack_and_invalid_record_is_archived(domain) -> None:
+    ownership = OwnershipStore()
+    ledger = HighScaleLedger()
+    control = _PostgresControl()
+    archive = ArchivePublication(InMemoryObjectStore())
+
+    class BeforeAck(_ClickHouse):
+        def insert(self, batch):
+            assert "acknowledged" not in control.calls
+            return super().insert(batch)
+
+    clickhouse = BeforeAck()
+    controller = HighScaleIngestController(
+        ownership=ownership,
+        ledger=ledger,
+        archive=archive,
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
+        control_plane=control,
+        worker_id="worker-1",
+    )
+    payload = (
+        b'{"timestamp":"2026-09-14T20:00:01Z","rum_error_message":"","rum_error_stack":"at app.js:1"}\n'
+        b'{"timestamp":"2026-09-14T20:00:02Z","rum_metric_value":"","rum_error_message":""}\n'
+    )
+    result = _ingest_one(
+        controller,
+        service_id="svc",
+        domain=domain,
+        object_key="raw/rum/empty-message.gz",
+        checksum="sha256:empty-message",
+        payload=payload,
+        version="v1",
+        max_dead_letter_ratio=1.0,
+    )
+    assert [(batch.domain, len(batch.rows)) for batch in clickhouse.batches] == [("rum_errors", 1)]
+    assert clickhouse.batches[0].rows[0]["error_message"] == "Unknown error"
+    assert result.quarantined_events == 1
+    archived = pq.read_table(pa.BufferReader(archive.read_artifact(result.manifest))).to_pylist()
+    assert [row["_record_kind"] for row in archived] == ["event", "dead_letter"]
+    assert archived[1]["line_ordinal"] == 1
+    assert control.calls[-1] == "acknowledged"
 
 
 def test_pure_vitals_object_publishes_no_sibling_error_rows() -> None:

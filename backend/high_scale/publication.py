@@ -665,6 +665,10 @@ def row_matches_serving_domain(domain: str, row: Mapping[str, Any]) -> bool:
     stays strict (raises on a mismatched row) as a defense against a caller
     that forgot to filter, rather than silently degrading again.
     """
+    if domain in {"rum_vitals", "rum_errors"}:
+        kind = row.get("_rum_kind")
+        if kind is not None and kind != ("vitals" if domain == "rum_vitals" else "errors"):
+            return False
     if domain == "rum_vitals":
         metric_value = row.get("metric_value")
         return (
