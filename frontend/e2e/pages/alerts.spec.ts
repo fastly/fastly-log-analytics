@@ -60,9 +60,10 @@ test.describe('Alerts & Notifications Page Contract (/alerts)', () => {
 
     // 3. Verify status filter controls in UI
     await page.goto('/alerts')
-    await expect(page.locator('[data-testid="alerts-status-filter"]')).toBeVisible({ timeout: 15_000 })
+    const statusFilter = page.locator('[data-testid="alerts-status-filter"]:visible')
+    await expect(statusFilter).toHaveCount(1, { timeout: 15_000 })
     for (const status of ['all', 'alerting', 'ok', 'muted']) {
-      const btn = page.locator(`[data-testid="alerts-filter-${status}"]`)
+      const btn = statusFilter.getByTestId(`alerts-filter-${status}`)
       await expect(btn).toBeVisible({ timeout: 5_000 })
     }
   })
