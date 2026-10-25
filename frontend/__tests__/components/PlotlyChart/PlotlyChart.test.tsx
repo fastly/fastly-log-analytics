@@ -9,7 +9,7 @@ import React from 'react'
 
 import { PlotlyChart, ChartA11yTable, tracesToTable } from '@/components/PlotlyChart'
 import type { PlotlyConfig, PlotlyGraphDiv, PlotlyLayout, PlotlyRelayoutEvent } from '@/types/plotly'
-import { stubResizeObserver } from '../../helpers/browser-stubs'
+import { stubResizeObserver } from '../../helpers/page-smoke'
 
 type PlotStubProps = {
   layout?: PlotlyLayout

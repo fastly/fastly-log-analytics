@@ -4,11 +4,97 @@ import type { StripIndex, WireParity } from "@/types/api";
 import { useDebugStore } from "@/stores/debugStore";
 import { useServiceStore } from "@/stores/serviceStore";
 import { useSessionRoleStore } from "@/stores/sessionRoleStore";
-import { showReadOnlyToast, showBusyToast, showToast } from "@/lib/toast";
-import { isUserActive } from "@/lib/userActivity";
-import { extractApiError, getPageLoadId, rotatePageLoadId, unwrapClient } from "@/lib/api-client";
+import { parseExtentMs } from "@/lib/date";
+import { showReadOnlyToast, showBusyToast, showToast, isUserActive } from "@/lib/utils";
 
-export { getPageLoadId, rotatePageLoadId, extractApiError };
+let pageLoadId: string | null = null
+
+export function getPageLoadId(): string | null {
+  if (typeof window === "undefined") return null
+  if (!pageLoadId) {
+    pageLoadId = typeof crypto?.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  }
+  return pageLoadId
+}
+
+export function rotatePageLoadId(): string | null {
+  if (typeof window === "undefined") return null
+  pageLoadId = typeof crypto?.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return pageLoadId
+}
+
+export function extractApiError(error: unknown): string {
+  if (!error) return 'Unknown error'
+  if (typeof error === 'string') return error
+  if (error instanceof Error && error.message) return error.message
+  const e = error as {
+    detail?: unknown;
+    message?: unknown;
+    error?: unknown;
+    errors?: unknown;
+  }
+  if (e.detail) {
+    if (typeof e.detail === 'string') return e.detail
+    if (Array.isArray(e.detail)) {
+      return (e.detail as Array<{ loc?: unknown[]; msg?: unknown }>).map((err) => {
+        const field = Array.isArray(err.loc) && err.loc.length > 0 ? String(err.loc[err.loc.length - 1]) : 'Field'
+        const msg = typeof err.msg === 'string' ? err.msg : 'Invalid value'
+        return `${field}: ${msg}`
+      }).join(', ')
+    }
+    if (typeof e.detail === 'object' && e.detail !== null) {
+      const detailObj = e.detail as {
+        errors?: unknown;
+        messages?: unknown;
+        message?: unknown;
+        error?: unknown;
+      }
+      if (Array.isArray(detailObj.errors)) {
+        return detailObj.errors.map(String).join(', ')
+      }
+      if (Array.isArray(detailObj.messages) && detailObj.messages.length > 0) {
+        return detailObj.messages.map(String).join(', ')
+      }
+      if (typeof detailObj.message === 'string' && detailObj.message) {
+        return detailObj.message
+      }
+      if (detailObj.error) {
+        return String(detailObj.error)
+      }
+    }
+    return JSON.stringify(e.detail)
+  }
+  if (typeof e.message === 'string' && e.message) return e.message
+  if (e.error) return String(e.error)
+  if (Array.isArray(e.errors)) return e.errors.map(String).join(', ')
+  try { return JSON.stringify(error) } catch { return 'Unknown error' }
+}
+
+export async function unwrapClient<T>(
+  promise: Promise<{ data?: T; error?: unknown; response?: Response }>,
+  fallbackMessage?: string,
+): Promise<T> {
+  const { data, error, response } = await promise;
+  if (error || (response && !response.ok)) {
+    const status = response?.status ?? 500;
+    const statusText = fallbackMessage || response?.statusText || `HTTP ${status}`;
+    const msg = error ? extractApiError(error) : statusText;
+    const err = new Error(msg && msg !== 'Unknown error' ? msg : statusText) as Error & {
+      status?: number;
+      response?: Response;
+      detail?: unknown;
+    };
+    err.status = status;
+    if (response) err.response = response;
+    err.detail = error;
+    throw err;
+  }
+  return data as T;
+}
 
 export function getApiBase() {
   if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
@@ -458,3 +544,75 @@ export const customFieldsApi = {
     )
   }
 }
+
+// ── Stale View Retry ──────────────────────────────────────────────────────────
+
+class StaleDashboardViewError extends Error {
+  constructor() {
+    super('dashboard aggregates response is internally inconsistent (likely stale-view symptom during a metadata_sync tick)')
+    this.name = 'StaleDashboardViewError'
+  }
+}
+
+export function isStaleDashboardViewError(err: unknown): err is StaleDashboardViewError {
+  return (
+    err instanceof StaleDashboardViewError ||
+    (err instanceof Error && err.name === 'StaleDashboardViewError')
+  )
+}
+
+interface AggregatesWindow {
+  startTime?: string | null
+  endTime?: string | null
+}
+
+function isStaleDashboardAggregates(
+  d: unknown,
+  window?: AggregatesWindow,
+  hasFilters = false,
+): boolean {
+  if (!d || typeof d !== 'object') return false
+  if (hasFilters) return false
+  const r = d as Record<string, unknown>
+  if (!r.latest_log_at) return false
+
+  if (window?.startTime && window?.endTime) {
+    const winStart = Date.parse(window.startTime)
+    const winEnd = Date.parse(window.endTime)
+    const dataLatest = parseExtentMs(r.latest_log_at, 'latest')
+    if (Number.isFinite(winStart) && Number.isFinite(winEnd) && dataLatest !== null) {
+      const dataEarliest = parseExtentMs(r.earliest_log_at, 'earliest') ?? dataLatest
+      const overlaps = dataEarliest <= winEnd && dataLatest >= winStart
+      if (!overlaps) return false
+    }
+  }
+
+  const timeSeries = (r.time_series ?? r.timeseries) as unknown[] | undefined
+  if (Array.isArray(timeSeries) && timeSeries.length > 0) return false
+  const fields = r.data as Record<string, { total?: number; top?: unknown[] }> | undefined
+  if (!fields) return true
+  return Object.values(fields).every(
+    (f) => !f || ((f.total ?? 0) === 0 && (!f.top || f.top.length === 0)),
+  )
+}
+
+export function throwIfStaleAggregates<T>(
+  data: T,
+  window?: AggregatesWindow,
+  hasFilters = false,
+): T {
+  if (isStaleDashboardAggregates(data, window, hasFilters)) throw new StaleDashboardViewError()
+  return data
+}
+
+export const STALE_VIEW_POLL_MS = 5000
+
+export const STALE_VIEW_RETRY_OPTIONS = {
+  retry: (failureCount: number, error: Error) =>
+    isStaleDashboardViewError(error) && failureCount < 2,
+  retryDelay: (attempt: number) => 400 * (attempt + 1),
+  refetchInterval: (query: { state: { error: unknown; data?: unknown } }) =>
+    isStaleDashboardViewError(query.state.error) && query.state.data == null
+      ? STALE_VIEW_POLL_MS
+      : false,
+} as const

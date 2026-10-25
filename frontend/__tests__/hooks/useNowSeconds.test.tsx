@@ -9,13 +9,13 @@ import { renderHook, act, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { withNuqsTestingAdapter, type OnUrlUpdateFunction } from 'nuqs/adapters/testing'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { useColumnVisibility } from '@/hooks/useDerivedState'
-import { useDebounce } from '@/hooks/useFilterPayload'
-import { useRumStatus } from '@/hooks/useServiceQuery'
+import { useColumnVisibility } from '@/hooks/useSSE'
+import { useDebounce } from '@/hooks/useDashboardCards'
+import { useRumStatus } from '@/hooks/useDashboardCards'
 import { useStreamAggregates } from '@/app/sessions/stream/_sections/useStreamAggregates'
-import { useTimeseriesToTraces, type TimeseriesDataPoint } from '@/lib/chart-builders'
-import { server } from '@/__tests__/helpers/msw/server'
-import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
+import { useTimeseriesToTraces, type TimeseriesDataPoint } from '@/lib/chart-helpers'
+import { server } from '@/__tests__/helpers/msw/handlers'
+import { createTestQueryClient, makeQueryWrapper } from '../helpers/page-smoke'
 
 const mockAddFilter = vi.fn()
 const mockClearFilters = vi.fn()
@@ -95,14 +95,14 @@ describe('useNowMs', () => {
   })
 
   it('returns a value close to Date.now() on first render', async () => {
-    const { useNowMs } = await import('@/hooks/useNowSeconds')
+    const { useNowMs } = await import('@/hooks/useSSE')
     const { result } = renderHook(() => useNowMs())
     expect(Number.isFinite(result.current)).toBe(true)
     expect(result.current).toBeGreaterThan(0)
   })
 
   it('updates after the 1s interval fires', async () => {
-    const { useNowMs } = await import('@/hooks/useNowSeconds')
+    const { useNowMs } = await import('@/hooks/useSSE')
     const { result } = renderHook(() => useNowMs())
     const before = result.current
 
@@ -116,7 +116,7 @@ describe('useNowMs', () => {
   })
 
   it('multiple subscribers share the same snapshot value', async () => {
-    const { useNowMs } = await import('@/hooks/useNowSeconds')
+    const { useNowMs } = await import('@/hooks/useSSE')
     const { result: a } = renderHook(() => useNowMs())
     const { result: b } = renderHook(() => useNowMs())
     expect(a.current).toBe(b.current)
@@ -130,7 +130,7 @@ describe('useNowMs', () => {
   })
 
   it('keeps ticking while at least one subscriber is mounted', async () => {
-    const { useNowMs } = await import('@/hooks/useNowSeconds')
+    const { useNowMs } = await import('@/hooks/useSSE')
     const { result: a, unmount: unmountA } = renderHook(() => useNowMs())
     const { result: b } = renderHook(() => useNowMs())
 
@@ -153,7 +153,7 @@ describe('useNowMs', () => {
     const setIntervalSpy = vi.spyOn(globalThis, 'setInterval')
     const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval')
 
-    const { useNowMs } = await import('@/hooks/useNowSeconds')
+    const { useNowMs } = await import('@/hooks/useSSE')
     const { unmount } = renderHook(() => useNowMs())
 
     unmount()

@@ -6,16 +6,17 @@ import { LogSettingsModal } from '@/components/LogSettingsModal/LogSettingsModal
 import * as apiLib from '@/lib/api'
 import type { ServiceConfig } from '@/types/api'
 import React from 'react'
-import { getOk } from '@/__tests__/helpers/partial'
-import { stubMatchMedia } from '@/__tests__/helpers/browser-stubs'
-import { createUseSSEMock } from '@/__tests__/helpers/sse-mock'
-import { renderWithQuery } from '../helpers/query'
+import { getOk } from '@/__tests__/helpers/page-smoke'
+import { stubMatchMedia } from '@/__tests__/helpers/page-smoke'
+import { createUseSSEMock } from '@/__tests__/helpers/page-smoke'
+import { renderWithQuery } from '../helpers/page-smoke'
 
 stubMatchMedia()
 window.HTMLElement.prototype.scrollIntoView = vi.fn()
 
 const { state: sseState } = createUseSSEMock()
-vi.mock('@/hooks/useSSE', () => ({ useSSE: () => sseState }))
+vi.mock('@/hooks/useSSE', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useSSE')>()), useSSE: () => sseState }))
 
 afterEach(() => {
   vi.useRealTimers()

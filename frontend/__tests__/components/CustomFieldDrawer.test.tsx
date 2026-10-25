@@ -7,13 +7,13 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { axe } from 'vitest-axe'
 import React from 'react'
 import { CustomFieldDrawer } from '@/components/CustomFields/CustomFieldDrawer'
-import { CustomFieldsManager } from '@/components/CustomFields/CustomFieldsManager'
+import { CustomFieldsManager } from '@/components/CustomFields/CustomFieldDrawer'
 import * as customFieldsApi from '@/lib/api'
 import type { components } from '@/types/api.generated'
-import { renderWithQuery } from '../helpers/query'
-import { stubMatchMedia, stubPointerCaptureAndScroll } from '../helpers/browser-stubs'
+import { renderWithQuery } from '../helpers/page-smoke'
+import { stubMatchMedia, stubPointerCaptureAndScroll } from '../helpers/page-smoke'
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/browser-stubs')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/page-smoke')).reactVirtualModuleMock())
 
 // monaco-editor breaks under jsdom; replace with a plain textarea.
 vi.mock('@monaco-editor/react', () => ({

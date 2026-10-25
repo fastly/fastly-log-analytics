@@ -2,8 +2,8 @@
 
 import React from 'react'
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
-import { FilterValueCell } from '@/components/FilterValueCell'
-import { PopLabel } from '@/components/PopLabel'
+import { FilterValueCell } from '@/components/DataTable'
+import { PopLabel } from '@/components/DataTable'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import {
   ApproxBadge,
@@ -18,9 +18,9 @@ import {
 } from './OriginClient'
 import { cn } from '@/lib/utils';
 import { formatBytes, formatCount } from '@/lib/format'
-import { columnHeader, msCell } from '@/lib/table-utils'
+import { columnHeader, msCell } from '@/components/DataTable'
 import { Server, MapPin, Globe } from 'lucide-react'
-import { useActiveLogFields } from '@/hooks/useLogFieldsCatalog'
+import { useActiveLogFields } from '@/hooks/useBootstrap'
 import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
 
 // Shared column scaffolding — every column header is the same dense

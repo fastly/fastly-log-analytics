@@ -10,9 +10,9 @@ import {
 } from 'lucide-react'
 
 import { client, extractApiError } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
-import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useIsDataReady'
-import { NoServiceSelected } from '@/components/NoServiceSelected'
+import { unwrapClient } from '@/lib/api'
+import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useBootstrap'
+import { NoServiceSelected } from '@/components/ReportLayout'
 import { PageHeader } from '@/components/ui/page-header'
 import { StatCard } from '@/components/ui/stat-card'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
@@ -26,7 +26,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useStreamAggregates, type TimelinePoint } from './_sections/useStreamAggregates'
 
 import { formatDuration } from '@/lib/date'
-import { CHART_COLORS } from '@/lib/chart-builders'
+import { CHART_COLORS } from '@/lib/chart-helpers'
 
 const TIMELINE_LAYOUT = {
   yaxis: { title: { text: 'kbps' } },

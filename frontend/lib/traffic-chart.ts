@@ -1,5 +1,5 @@
 import { formatDate, toUTCDate } from '@/lib/date'
-import { INTERVAL_SECONDS } from '@/lib/constants'
+import { INTERVAL_SECONDS } from '@/lib/utils'
 import { CHART_COLORS, densifyBarSeries, type BarSeriesPoint } from '@/lib/chart-helpers'
 import type { components } from '@/types/api.generated'
 import type { PlotlyTrace } from '@/types/plotly'

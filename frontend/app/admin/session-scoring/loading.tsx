@@ -1,5 +1,5 @@
 import { ShieldCheck } from 'lucide-react'
-import { BackToAdminLink } from '@/components/BackToAdminLink'
+import { BackToAdminLink } from '@/components/ReportLayout'
 import { PageHeader } from '@/components/ui/page-header'
 import { Skeleton } from '@/components/ui/skeleton'
 

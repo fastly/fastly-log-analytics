@@ -8,8 +8,8 @@
  */
 import { renderHook, act } from '@testing-library/react'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { useAnalystHeartbeat } from '@/hooks/useAnalystHeartbeat'
-import { __resetForTests } from '@/lib/userActivity'
+import { useAnalystHeartbeat } from '@/hooks/useBootstrap'
+import { __resetForTests } from '@/lib/utils'
 
 const replace = vi.fn()
 vi.mock('next/navigation', () => ({

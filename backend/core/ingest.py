@@ -279,27 +279,18 @@ def _parse_key_layout_dt(key: str) -> tuple[str, datetime] | None:
 
     Returns the recognized layout and timestamp, or None for unrelated keys.
     """
-    m = _V3_MINUTE_KEY_RE.search(key)
-    if m:
-        try:
-            y, mo, d, h, mi = (int(g) for g in m.groups())
-            return ("v3", datetime(y, mo, d, h, mi, tzinfo=UTC))
-        except ValueError:
-            return None
-    m = _MINUTE_KEY_RE.search(key)
-    if m:
-        try:
-            y, mo, d, h, mi = (int(g) for g in m.groups())
-            return ("minute", datetime(y, mo, d, h, mi, tzinfo=UTC))
-        except ValueError:
-            return None
-    m = _SLASHED_KEY_RE.search(key)
-    if m:
-        try:
-            y, mo, d, h, mi = (int(g) for g in m.groups())
-            return ("slashed", datetime(y, mo, d, h, mi, tzinfo=UTC))
-        except ValueError:
-            return None
+    for layout, pattern in (
+        ("v3", _V3_MINUTE_KEY_RE),
+        ("minute", _MINUTE_KEY_RE),
+        ("slashed", _SLASHED_KEY_RE),
+    ):
+        m = pattern.search(key)
+        if m:
+            try:
+                y, mo, d, h, mi = (int(g) for g in m.groups())
+                return (layout, datetime(y, mo, d, h, mi, tzinfo=UTC))
+            except ValueError:
+                return None
     m = _DASH_KEY_RE.search(key)
     if m:
         fname_dt = _parse_fastly_filename_dt(key.split("/")[-1])
@@ -2488,7 +2479,7 @@ def _redispatch_pending(
     try:
         import sys as _sys
 
-        from backend import celery_queue as _cq
+        from backend import celery_app as _cq
 
         if queue_depths_fn is not None:
             depth_fn = queue_depths_fn
@@ -2736,6 +2727,41 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
     vitals_rows: list[dict] = []
     errors_rows: list[dict] = []
 
+    def _append_rum_row(
+        *,
+        is_error: bool,
+        err_msg: Any,
+        err_file: Any,
+        err_line: Any,
+        err_col: Any,
+        metric_name: Any,
+        metric_value: Any,
+        metric_rating: Any,
+        common: dict,
+    ) -> None:
+        if is_error:
+            errors_rows.append(
+                {
+                    "timestamp": dt,
+                    "error_message": err_msg or "Unknown error",
+                    "error_file": err_file or "unknown.js",
+                    "error_line": safe_int(err_line),
+                    "error_col": safe_int(err_col),
+                    **common,
+                }
+            )
+        else:
+            val = safe_float(metric_value)
+            vitals_rows.append(
+                {
+                    "timestamp": dt,
+                    "metric_name": metric_name or "unknown",
+                    "metric_value": val if val is not None else 0.0,
+                    "metric_rating": metric_rating or "",
+                    **common,
+                }
+            )
+
     raw_body = log_data.get("rum_body")
     extracted_metrics: list[dict] = []
     if raw_body:
@@ -2758,29 +2784,17 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
             pathname_val = metric.get("pathname") or "/"
             common = _common(pathname_val, browser_val, os_val, device_val, cid_val, req_id_val)
 
-            is_exception = (metric.get("metric_name") == "exception") or metric.get("error_message")
-            if is_exception:
-                errors_rows.append(
-                    {
-                        "timestamp": dt,
-                        "error_message": metric.get("error_message") or "Unknown error",
-                        "error_file": metric.get("error_file") or "unknown.js",
-                        "error_line": safe_int(metric.get("error_line")),
-                        "error_col": safe_int(metric.get("error_col")),
-                        **common,
-                    }
-                )
-            else:
-                val = safe_float(metric.get("metric_value"))
-                vitals_rows.append(
-                    {
-                        "timestamp": dt,
-                        "metric_name": metric.get("metric_name") or "unknown",
-                        "metric_value": val if val is not None else 0.0,
-                        "metric_rating": metric.get("metric_rating") or "",
-                        **common,
-                    }
-                )
+            _append_rum_row(
+                is_error=bool((metric.get("metric_name") == "exception") or metric.get("error_message")),
+                err_msg=metric.get("error_message"),
+                err_file=metric.get("error_file"),
+                err_line=metric.get("error_line"),
+                err_col=metric.get("error_col"),
+                metric_name=metric.get("metric_name"),
+                metric_value=metric.get("metric_value"),
+                metric_rating=metric.get("metric_rating"),
+                common=common,
+            )
     else:
         metric_name = log_data.get("rum_metric_name")
         metric_value = log_data.get("rum_metric_value")
@@ -2830,28 +2844,17 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
         req_id_val = log_data.get("fastly_req_id") or ""
         common = _common(pathname_val, browser_val, os_val, device_val, cid_val, req_id_val)
 
-        if log_data.get("rum_error_message"):
-            errors_rows.append(
-                {
-                    "timestamp": dt,
-                    "error_message": log_data.get("rum_error_message") or "Unknown error",
-                    "error_file": log_data.get("rum_error_file") or "unknown.js",
-                    "error_line": safe_int(log_data.get("rum_error_line")),
-                    "error_col": safe_int(log_data.get("rum_error_col")),
-                    **common,
-                }
-            )
-        else:
-            val = safe_float(metric_value)
-            vitals_rows.append(
-                {
-                    "timestamp": dt,
-                    "metric_name": metric_name or "unknown",
-                    "metric_value": val if val is not None else 0.0,
-                    "metric_rating": metric_rating or "",
-                    **common,
-                }
-            )
+        _append_rum_row(
+            is_error=bool(log_data.get("rum_error_message")),
+            err_msg=log_data.get("rum_error_message"),
+            err_file=log_data.get("rum_error_file"),
+            err_line=log_data.get("rum_error_line"),
+            err_col=log_data.get("rum_error_col"),
+            metric_name=metric_name,
+            metric_value=metric_value,
+            metric_rating=metric_rating,
+            common=common,
+        )
 
     return vitals_rows, errors_rows
 

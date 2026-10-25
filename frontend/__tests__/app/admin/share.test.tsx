@@ -16,12 +16,12 @@
  */
 import { describe, expect, test, vi, beforeEach } from 'vitest'
 import { fireEvent, screen, waitFor } from '@testing-library/react'
-import { renderWithQuery } from '../../helpers/query'
+import { renderWithQuery } from '../../helpers/page-smoke'
 import { http, HttpResponse } from 'msw'
 import React from 'react'
 import { withNuqsTestingAdapter, type OnUrlUpdateFunction } from 'nuqs/adapters/testing'
 
-import { server } from '@/__tests__/helpers/msw/server'
+import { server } from '@/__tests__/helpers/msw/handlers'
 import { getApiBase } from '@/lib/api'
 import ShareDashboardPage from '@/app/admin/share/page'
 

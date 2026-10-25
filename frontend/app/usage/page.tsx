@@ -2,13 +2,13 @@
 
 import type { PlotlyTrace } from '@/types/plotly'
 import React, { useMemo, useRef } from 'react'
-import { useInViewOnce } from '@/components/LazyMount'
+import { useInViewOnce } from '@/components/AnalyticsCard'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
-import { useIsDataReady } from '@/hooks/useIsDataReady'
-import type { ChartInterval } from '@/lib/constants'
-import type { ReportConfiguration } from '@/hooks/useReportConfig'
+import { unwrapClient } from '@/lib/api'
+import { useIsDataReady } from '@/hooks/useBootstrap'
+import type { ChartInterval } from '@/lib/utils'
+import type { ReportConfiguration } from '@/hooks/useDashboardCards'
 import { StatCard } from '@/components/ui/stat-card'
 import { Button } from '@/components/ui/button'
 import { ButtonGroup } from '@/components/ui/button-group'
@@ -52,7 +52,7 @@ const FosOperationsHelp = ({ note }: { note?: string }) => (
 import { useRouter } from 'next/navigation'
 import { useServiceStore } from '@/stores/serviceStore'
 import { buildServiceHref } from '@/lib/utils'
-import { CHART_COLORS } from '@/lib/chart-builders'
+import { CHART_COLORS } from '@/lib/chart-helpers'
 
 export default function UsagePage() {
   return (

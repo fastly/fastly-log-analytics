@@ -8,7 +8,7 @@ import { act, render, renderHook, screen, fireEvent } from '@testing-library/rea
 import userEvent from '@testing-library/user-event'
 import { describe, it, test, expect, vi, beforeEach, afterEach } from 'vitest'
 import type * as maplibregl from 'maplibre-gl'
-import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
+import { stubResizeObserver } from '@/__tests__/helpers/page-smoke'
 import {
   mapInstances,
   maplibreMockFactory,

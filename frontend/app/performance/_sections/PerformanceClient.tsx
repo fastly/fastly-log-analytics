@@ -2,20 +2,20 @@
 
 import React from 'react'
 import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import type { components } from '@/types/api'
-import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
-import { useColumnVisibility } from '@/hooks/useDerivedState'
-import { useReportRangeAnchor } from '@/hooks/useReportRangeAnchor'
+import { useAnalyticsReportQuery } from '@/hooks/useDashboardCards'
+import { useColumnVisibility } from '@/hooks/useSSE'
+import { useReportRangeAnchor } from '@/hooks/useDashboardCards'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { DataTable } from '@/components/DataTable'
 import { Zap, Server, Shield, Clock, Network, Activity, TrendingUp } from 'lucide-react'
 import { ReportLayout } from '@/components/ReportLayout'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ColumnVisibilityDropdown } from '@/components/DataTable'
-import { makeLatencyColumns } from '@/lib/table-utils'
-import { useFieldLabel } from '@/hooks/useLogFieldsCatalog';
-import { CHART_COLORS } from '@/lib/chart-builders'
+import { makeLatencyColumns } from '@/components/DataTable'
+import { useFieldLabel } from '@/hooks/useBootstrap';
+import { CHART_COLORS } from '@/lib/chart-helpers'
 import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
 import type { FiltersPayload } from '@/types/filters'
 

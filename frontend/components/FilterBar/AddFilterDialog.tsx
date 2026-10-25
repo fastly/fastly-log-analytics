@@ -26,9 +26,9 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useFilterStore } from '@/stores/filterStore'
 import { cn, isIpFamilyField } from '@/lib/utils'
-import { useDebounce } from '@/hooks/useFilterPayload'
-import { useFieldValues, useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
-import { useMaskIps } from '@/hooks/useIsAnalyst'
+import { useDebounce } from '@/hooks/useDashboardCards'
+import { useFieldValues, useLogFieldsCatalog } from '@/hooks/useBootstrap'
+import { useMaskIps } from '@/hooks/useBootstrap'
 import { formatCount } from '@/lib/format'
 
 const COMMON_FIELD_IDS = [

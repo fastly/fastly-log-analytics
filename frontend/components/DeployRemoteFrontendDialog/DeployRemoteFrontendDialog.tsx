@@ -33,7 +33,7 @@ import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { client, extractApiError } from '@/lib/api'
 import { cn, panelDialogContent, panelDialogHeaderSolid, panelDialogFooter } from '@/lib/utils'
-import { useOpenGeneration } from '@/hooks/useDerivedState'
+import { useOpenGeneration } from '@/hooks/useSSE'
 import type { Schema } from '@/types/api'
 import { useSearchParams } from 'next/navigation'
 

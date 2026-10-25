@@ -1,5 +1,17 @@
+from __future__ import annotations
+
+import logging
+import os
+import sys as _sys
 import threading
 import time
+from typing import Any
+
+from backend.celery_app import _InProcessPublisher
+from backend.config import SSE_BACKPLANE
+from backend.utils.dir_size import _get_dir_size
+
+logger = logging.getLogger(__name__)
 
 _progress: dict[int, list[dict]] = {}
 _last_update: dict[int, float] = {}
@@ -141,14 +153,6 @@ def reap_zombie_runs() -> int:
     the dicts. Called from the scheduler's per-tick cleanup so
     /admin/health-snapshot doesn't drift by minutes between sync
     ticks. Returns the count evicted for log telemetry.
-
-    Why this and not just rely on cleanup_progress's 1-hour TTL: a
-    zombie sync that ran for 2 minutes then died leaves a stale entry
-    that's still <1h old. cleanup_progress wouldn't touch it.
-    list_active_runs filters the badge but the entry still bloats
-    _run_metadata and shows up in any other code path that walks
-    the dict (admin.py:210/238/1022 — patched 2026-06-02 but easy
-    to regress).
     """
     now = time.time()
     evicted = 0
@@ -217,20 +221,7 @@ def get_latest_progress_for_service(service_id: str) -> dict | None:
 
 
 def end_progress(run_id: int | None, final_event: dict | None = None):
-    """Mark a cron run as ended.
-
-    AUTO-DONE: if no ``final_event`` is provided AND the run's last
-    event isn't already a terminal type ("done"/"error"), automatically
-    append a ``{"type": "done"}`` event so ``list_active_runs`` can
-    filter the run out. Without this, callers that emit only "status"
-    events during their lifetime (the sync path's view-refresh message
-    is the canonical example) leave the run "active" until the 1-hour
-    TTL — accumulating dozens of stale entries on the System Health card.
-
-    Explicit callers that want a richer terminal event can still pass
-    ``final_event={"type": "done", "rows": N}`` and the same append path
-    runs. The auto-emit only kicks in when the caller forgot.
-    """
+    """Mark a cron run as ended."""
     # See start_progress for why run_id can be None — no-op in that case.
     if run_id is None:
         return
@@ -246,16 +237,7 @@ def end_progress(run_id: int | None, final_event: dict | None = None):
 
 
 def cleanup_progress_and_reap():
-    """Convenience helper that runs cleanup_progress + reap_zombie_runs.
-
-    The two are always called as a pair from every cron entrypoint
-    (7 scheduler functions today). Wrapping them prevents the
-    common bug where a new cron runner remembers cleanup but forgets
-    the reap — leaving zombie entries in the System Health card.
-
-    Returns the reap count for log telemetry; cleanup_progress's
-    return value is None.
-    """
+    """Convenience helper that runs cleanup_progress + reap_zombie_runs."""
     cleanup_progress()
     return reap_zombie_runs()
 
@@ -280,3 +262,162 @@ _CacheRegistry.register("cron_progress._progress", _progress)
 _CacheRegistry.register("cron_progress._last_update", _last_update)
 _CacheRegistry.register("cron_progress._run_metadata", _run_metadata)
 _CacheRegistry.register("cron_progress._terminal_run_ids", _terminal_run_ids)
+
+
+# ── In-process pub/sub for cron-run state-change events (folded from cron_runs_publisher.py) ──
+
+
+class CronRunsPublisher(_InProcessPublisher):
+    def __init__(self) -> None:
+        super().__init__(replay_size=0)
+
+
+publisher: Any
+if SSE_BACKPLANE == "valkey":
+    from backend.utils.valkey_publisher import ValkeyPublisher
+
+    publisher = ValkeyPublisher("cron-runs")
+else:
+    publisher = CronRunsPublisher()
+
+
+# ── Cached sync-status snapshot (folded from sync_status_snapshot.py) ─────────
+
+
+def compute_sync_status_cached(service_id: str | None) -> dict | None:
+    """Return the cached sync-status payload for ``service_id`` without
+    grabbing a DuckDB connection.
+    """
+    from backend import config as svcconfig
+    from backend.core import duckdb as _db
+
+    if not service_id:
+        return None
+    src = _db.get_source_for_service(service_id)
+    if not src:
+        return None
+    from backend.high_scale.dashboard import header_metrics
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(service_id)
+    if high_scale_service is not None:
+        metrics = header_metrics(high_scale_service)
+        try:
+            from backend.core.metadata.cron_log import latest_cron_per_task
+
+            latest_crons = latest_cron_per_task(service_id)
+
+            req_sync = None
+            for t in ("log_discovery", "commit", "ledger_sweep"):
+                if t in latest_crons and latest_crons[t].get("started_at"):
+                    ts = latest_crons[t]["started_at"]
+                    if req_sync is None or ts > req_sync:
+                        req_sync = ts
+            if req_sync and metrics.get("request"):
+                metrics["request"]["last_sync_at"] = req_sync
+
+            rum_sync = None
+            for t in ("rum_discovery", "rum_sync", "ledger_rum_sweep"):
+                if t in latest_crons and latest_crons[t].get("started_at"):
+                    ts = latest_crons[t]["started_at"]
+                    if rum_sync is None or ts > rum_sync:
+                        rum_sync = ts
+            if rum_sync and metrics.get("rum"):
+                metrics["rum"]["last_sync_at"] = rum_sync
+        except Exception:
+            pass
+
+        return {
+            "configured": True,
+            **metrics,
+            "access_level": src.get("access_level", "read_write"),
+            "storage_mode": src.get("storage_mode", "cloud"),
+        }
+    lookup_key = service_id or src.get("service_id") or src.get("name", "")
+    cached_status = svcconfig.get_status(lookup_key) or (svcconfig.get_status(src["name"]) if "name" in src else {})
+    if not cached_status:
+        return None  # fall through to dedicated endpoint
+
+    # Request metrics are queryable event-time extents, not raw-object times.
+    # Prefer the current request snapshot even when it moves backwards or is
+    # explicitly empty after a reset. Never substitute RUM or a filename.
+    request_status = cached_status.get("request")
+    if isinstance(request_status, dict):
+        cached_status["latest_log_at"] = request_status.get("latest_log_at")
+
+    # Real-time SQLite/PostgreSQL metadata lookup overlay to bypass stale on-disk config cache
+    try:
+        import re
+
+        from backend.core import metadata as metadata_db
+
+        summary = metadata_db.get_ingested_files_status_summary(lookup_key)
+        if not summary.get("latest_file_name") and "name" in src:
+            summary = metadata_db.get_ingested_files_status_summary(src["name"]) or summary
+        latest_file_name = summary.get("latest_file_name")
+        total_rows = summary.get("total_rows") or 0
+
+        try:
+            from backend.core.metadata.base import get_con as _get_meta_con
+
+            lrow = (
+                _get_meta_con(service_id)
+                .execute(
+                    "SELECT object_key FROM ingest_ledger WHERE service_id = ? AND status = 'committed' "
+                    "ORDER BY object_key DESC LIMIT 1",
+                    (service_id,),
+                )
+                .fetchone()
+            )
+            ledger_latest = lrow[0] if lrow else None
+            if ledger_latest and (
+                not latest_file_name or ledger_latest.split("/")[-1] > latest_file_name.split("/")[-1]
+            ):
+                latest_file_name = ledger_latest
+        except Exception:
+            pass
+
+        if latest_file_name:
+            fname = latest_file_name.split("/")[-1]
+            m = re.search(r"(\d{4}-\d{2}-\d{2})[T-](\d{2}[:.-]\d{2}[:.-]\d{2})", fname)
+            if m:
+                latest_ingested_file_at = f"{m.group(1)} {m.group(2).replace('-', ':').replace('.', ':')}"
+                cached_status["latest_ingested_file_at"] = latest_ingested_file_at
+                cached_status["latest_available_file_at"] = latest_ingested_file_at
+
+        if request_status is None and total_rows > 0 and cached_status.get("local_rows") is None:
+            cached_status["local_rows"] = total_rows
+    except Exception as e:
+        logger.debug("[compute_sync_status_cached] failed to overlay real-time SQLite metadata: %s", e)
+
+    cached_status["access_level"] = src.get("access_level", "read_write")
+    cached_status["storage_mode"] = src.get("storage_mode", "cloud")
+    cached_status["configured"] = True
+
+    db_path = src.get("duckdb_path") or svcconfig.duckdb_path(service_id)
+    db_exists = os.path.exists(db_path)
+    db_size = os.path.getsize(db_path) if db_exists else 0
+    cache_size = _get_dir_size(_db._cache_dir(src))
+    cached_status["duckdb_size_bytes"] = db_size + cache_size
+    cached_status["duckdb_exists"] = db_exists
+
+    active_run = get_latest_progress_for_service(service_id)
+    if active_run:
+        cached_status["active_run"] = active_run
+        cached_status["busy"] = True
+
+    cfg = svcconfig.load_config(service_id) or {}
+    cached_status["ngwaf_workspace_id"] = cfg.get("ngwaf_workspace_id")
+    return cached_status
+
+
+_self_mod = _sys.modules[__name__]
+for _alias in (
+    "backend.cron_runs_publisher",
+    "backend.sync_status_snapshot",
+):
+    _sys.modules[_alias] = _self_mod
+if "backend" in _sys.modules:
+    _backend_pkg = _sys.modules["backend"]
+    _backend_pkg.cron_runs_publisher = _self_mod  # type: ignore[attr-defined]
+    _backend_pkg.sync_status_snapshot = _self_mod  # type: ignore[attr-defined]

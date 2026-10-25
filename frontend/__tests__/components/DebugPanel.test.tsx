@@ -19,7 +19,7 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
 import { QueryClient, type QueryCacheNotifyEvent } from '@tanstack/react-query'
-import { createTestQueryClient, renderWithQuery } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/page-smoke'
 import { selectMockFactory } from '../helpers/page-smoke'
 import React from 'react'
 import { DebugPanel } from '@/components/DebugPanel'
@@ -27,11 +27,12 @@ import { DiagnosticsPanel } from '@/app/admin/_sections/GlobalSettings'
 import { useDebugStore } from '@/stores/debugStore'
 import { useServiceStore } from '@/stores/serviceStore'
 import { DEBUG_RESPONSES_COOKIE } from '@/lib/utils'
-import { server } from '@/__tests__/helpers/msw/server'
+import { server } from '@/__tests__/helpers/msw/handlers'
 
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/dashboard'))
 
-vi.mock('@/hooks/useBootstrap', () => ({
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
   useBootstrap: () => ({ data: { debug_state: { debug_responses_enabled: true } } }),
 }))
 

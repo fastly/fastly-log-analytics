@@ -4,15 +4,15 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
 import React from 'react'
 
-import { server } from '@/__tests__/helpers/msw/server'
-import { createTestQueryClient, makeQueryWrapper } from '@/__tests__/helpers/query'
+import { server } from '@/__tests__/helpers/msw/handlers'
+import { createTestQueryClient, makeQueryWrapper } from '@/__tests__/helpers/page-smoke'
 import { useServiceStore } from '@/stores/serviceStore'
 import { InviteAnalystDialog } from '@/components/InviteAnalystDialog'
 import { InvitationsPanel } from '@/components/share-dashboard/InvitationsPanel'
 import { CreateInviteDialog } from '@/components/share-dashboard/CreateInviteDialog'
-import { useTableSort, type ShareStatus, type SortAccessors } from '@/components/share-dashboard/sortable'
+import { useTableSort, type ShareStatus, type SortAccessors } from '@/components/share-dashboard/SharingControlPanel'
 import type { ServiceConfig } from '@/types/api'
-import { stubMatchMedia } from '@/__tests__/helpers/browser-stubs'
+import { stubMatchMedia } from '@/__tests__/helpers/page-smoke'
 
 // Radix primitives (Popover/Dialog/Select/Checkbox) need these in jsdom.
 stubMatchMedia()

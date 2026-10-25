@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { useOpenGeneration } from '@/hooks/useDerivedState'
+import { useOpenGeneration } from '@/hooks/useSSE'
 import {
   Dialog,
   DialogContent,
@@ -27,17 +27,17 @@ import {
 } from 'lucide-react'
 import { Label } from '@/components/ui/label'
 import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import {
   cn,
   panelDialogContent,
   panelDialogFooter,
   panelDialogHeaderSolid,
 } from '@/lib/utils'
-import { useCopyToClipboard } from '@/hooks/useAutoFlash'
+import { useCopyToClipboard } from '@/hooks/useAdminEventStream'
 import type { components } from '@/types/api.generated'
 import type { ServiceConfig } from '@/types/api'
-import { useNowMs } from '@/hooks/useNowSeconds'
+import { useNowMs } from '@/hooks/useSSE'
 
 type AnalystInvite = components["schemas"]["AnalystInvite"]
 

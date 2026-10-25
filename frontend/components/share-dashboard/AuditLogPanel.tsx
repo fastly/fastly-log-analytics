@@ -23,9 +23,9 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { client, extractApiError } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 
-import { SortableHead, useTableSort, type AuditLog, type ShareStatus, type SortAccessors } from './sortable'
+import { SortableHead, useTableSort, type AuditLog, type ShareStatus, type SortAccessors } from './SharingControlPanel'
 import { formatDeterministicUTC } from '@/lib/date'
 
 const EVENT_TYPE_FILTER_OPTIONS = [

@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Textarea } from '@/components/ui/textarea'
 import { client, extractApiError } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 
 import type { LabelValue } from './useScorerTimeseries'
 

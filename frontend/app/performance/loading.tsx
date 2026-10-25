@@ -1,4 +1,4 @@
-import { DashboardSkeleton } from '@/components/skeletons/PageSkeleton'
+import { DashboardSkeleton } from '@/components/ReportLayout'
 
 // title/description mirror the ReportLayout props in page.tsx so the
 // instant route skeleton shows the real header before the bundle loads.

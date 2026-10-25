@@ -1,41 +1,20 @@
 'use client'
 
 import { useEffect, useEffectEvent, useState } from 'react'
-import { parseSSEFrames } from '@/lib/streamRequest'
-
-/**
- * Shared fetch-based SSE transport primitive.
- *
- * The frontend has three SSE consumers with distinct public APIs — the
- * imperative wizard/live-log consumer (``useSSE``), the declarative
- * service-scoped push channel (``useServiceStream``), and the multiplexed
- * admin stream (``useAdminEventStream``, itself an adapter over
- * ``useServiceStream``). They used to each hand-roll the same fetch +
- * ``ReadableStream`` read loop, ``TextDecoder`` + buffer framing, reader
- * cancellation, and reconnect bookkeeping.
- *
- * This module factors that out ONCE:
- *   - ``runEventStream`` — a single connection's read loop (fetch → decode →
- *     frame → dispatch), with abort + an extra liveness gate. Reused by the
- *     imperative ``useSSE`` and by the declarative ``useEventStream`` below.
- *   - ``useEventStream`` — the declarative hook: reconnect-forever with the
- *     1s→30s exponential backoff, connection-state surface, stale-callback
- *     ref, and abort-on-unmount. ``useServiceStream`` is a thin adapter over
- *     it.
- *
- * Framing is delegated to ``parseSSEFrames`` (``lib/sse-parser.ts``), which
- * preserves the multi-separator split (``\r\n\r\n`` | ``\n\n`` | ``\r\r``) —
- * sse-starlette emits CRLF, so a naive ``\n\n`` parser returns zero frames.
- */
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useBootstrapPending, useIsAnalyst } from '@/hooks/useBootstrap'
+import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api'
+import { queryKeys } from '@/lib/query-keys'
+import { parseSSEFrames } from '@/lib/admin-stream-apply'
+import { useServiceStore } from '@/stores/serviceStore'
+import type { components } from '@/types/api.generated'
 
 /** Public connection-state for the declarative stream, surfaced for UI. */
 export type SSEConnectionState = 'idle' | 'connecting' | 'open' | 'reconnecting'
 
 /**
- * Error thrown by ``runEventStream`` on a non-2xx response. Carries the HTTP
- * status so callers can branch on it (e.g. stop reconnecting on 401/403)
- * without string-parsing the message. The message mirrors the historical
- * ``useSSE`` text so any UI rendering ``error`` is unchanged.
+ * Error thrown by ``runEventStream`` on a non-2xx response.
  */
 export class EventStreamHttpError extends Error {
   readonly status: number
@@ -47,43 +26,26 @@ export class EventStreamHttpError extends Error {
 }
 
 interface RunEventStreamOptions {
-  /** Fully-built absolute URL (caller owns URL + query-param construction). */
   url: string
   method?: 'GET' | 'POST'
   body?: BodyInit
   headers?: Record<string, string>
   cache?: RequestCache
   signal: AbortSignal
-  /** Fired once the response is OK and the body reader is obtained. */
   onOpen?: () => void
-  /** Fired for each complete SSE frame (raw frame text, pre-trim). */
   onFrame: (frame: string) => void
-  /**
-   * Extra liveness gate layered on top of the ``AbortSignal`` — used by the
-   * imperative ``useSSE`` for its request-id / mounted race guard. When it
-   * returns ``false`` mid-read, the loop cancels the reader and returns
-   * without dispatching further frames.
-   */
   isActive?: () => boolean
-  /** Injectable fetch, for tests. Defaults to the global ``fetch``. */
   fetchImpl?: typeof fetch
 }
 
 /**
  * Run a single SSE connection to completion: fetch, read the body stream,
  * decode, split into frames, and dispatch each frame to ``onFrame``.
- *
- * Returns normally when the stream closes (server ``done`` or EOF). Throws
- * ``EventStreamHttpError`` on a non-2xx response, or propagates fetch/read
- * errors (e.g. ``TypeError`` for a network failure, ``AbortError`` on abort).
  */
 export async function runEventStream(opts: RunEventStreamOptions): Promise<void> {
   const { url, method = 'GET', body, headers, cache, signal, onOpen, onFrame, isActive } = opts
   const fetchFn = opts.fetchImpl ?? fetch
 
-  // Raw fetch (not the typed `client`): SSE needs ReadableStream access via
-  // `response.body.getReader()`. openapi-fetch's middleware consumes the body
-  // as JSON before it can be streamed.
   const response = await fetchFn(url, {
     method,
     ...(cache ? { cache } : {}),
@@ -92,7 +54,6 @@ export async function runEventStream(opts: RunEventStreamOptions): Promise<void>
     signal,
   })
 
-  // Liveness check after the fetch settles (stop()/unmount while pending).
   if (isActive && !isActive()) {
     try {
       response.body?.getReader().cancel().catch(() => {})
@@ -111,8 +72,6 @@ export async function runEventStream(opts: RunEventStreamOptions): Promise<void>
     throw new Error('Response body is null')
   }
 
-  // Ensure the reader is released when the connection is aborted — mirrors the
-  // historical hand-rolled cleanup that called `reader.cancel()`.
   const onAbort = () => {
     try {
       reader.cancel().catch(() => {})
@@ -140,8 +99,6 @@ export async function runEventStream(opts: RunEventStreamOptions): Promise<void>
 
       if (value) {
         buffer += decoder.decode(value, { stream: true })
-        // SSE event-boundary is an empty line; the spec allows "\n\n",
-        // "\r\n\r\n", or "\r\r". parseSSEFrames covers all three.
         const { frames, remainder } = parseSSEFrames(buffer)
         buffer = remainder
         for (const frame of frames) {
@@ -164,8 +121,6 @@ export interface EventStreamRequest {
 
 function requestKey(req: EventStreamRequest | null): string {
   if (!req) return ''
-  // Headers are rebuilt with a stable key order each render, so JSON.stringify
-  // yields a deterministic reconnect key.
   return [
     req.method ?? 'GET',
     req.url,
@@ -176,22 +131,11 @@ function requestKey(req: EventStreamRequest | null): string {
 }
 
 interface UseEventStreamOptions {
-  /** Notified on every connection-state transition. */
   onStateChange?: (state: SSEConnectionState) => void
 }
 
 /**
- * Declarative reconnecting SSE hook. Opens ``request`` while ``enabled`` is
- * true, dispatches each ``data:`` frame's raw payload to ``onEvent``, and
- * reconnects forever with exponential backoff (1s → 30s cap), resetting the
- * backoff on every successful connect. Stops reconnecting on 401/403.
- *
- * ``onEvent`` is intentionally read through a ref and NOT a reconnect trigger —
- * callers pass an inline arrow that changes every render; including it would
- * tear down and reopen the stream on every render.
- *
- * Reconnects whenever ``request`` changes (url / headers / cache / method /
- * body), via a derived key.
+ * Declarative reconnecting SSE hook.
  */
 export function useEventStream(
   enabled: boolean,
@@ -201,7 +145,6 @@ export function useEventStream(
 ): { state: SSEConnectionState } {
   const [state, setState] = useState<SSEConnectionState>('idle')
 
-  // Effect events read the latest callbacks / request without making them reconnect triggers.
   const emitEvent = useEffectEvent(onEvent)
   const emitState = useEffectEvent((next: SSEConnectionState) => opts.onStateChange?.(next))
   const latestRequest = useEffectEvent(() => request)
@@ -238,7 +181,7 @@ export function useEventStream(
             cache: req.cache,
             signal: abort.signal,
             onOpen: () => {
-              attempt = 0 // successful connect resets the backoff
+              attempt = 0
               safeSetState('open')
             },
             onFrame: (frame) => {
@@ -251,12 +194,10 @@ export function useEventStream(
           })
         } catch (err) {
           if (cancelled) return
-          // Auth failures are terminal — retrying just 403-loops.
           if (err instanceof EventStreamHttpError && (err.status === 401 || err.status === 403)) {
             cancelled = true
             return
           }
-          // Otherwise fall through to backoff retry.
         }
         if (cancelled) return
         safeSetState('reconnecting')
@@ -272,10 +213,107 @@ export function useEventStream(
       abort.abort()
       setState('idle')
     }
-    // `key` captures every reconnect-worthy change in `request`; the request
-    // itself is read through an effect event so a new-identity object with the
-    // same key doesn't churn the connection.
   }, [enabled, key])
 
   return { state }
+}
+
+type KeyFn = (serviceId: string) => readonly unknown[]
+
+/**
+ * Pre-seed ``null`` into each per-service cache entry that does not exist yet,
+ * then report ``true`` once that has happened.
+ */
+export function useSeededReady(
+  serviceId: string | null | undefined,
+  keyFns: readonly KeyFn[],
+  readyWithoutService = false,
+): boolean {
+  const queryClient = useQueryClient()
+  const [ready, setReady] = useState(false)
+  useEffect(() => {
+    if (serviceId) {
+      for (const keyFn of keyFns) {
+        const key = keyFn(serviceId)
+        if (queryClient.getQueryData(key) === undefined) {
+          queryClient.setQueryData(key, null)
+        }
+      }
+    }
+    const next = serviceId ? true : readyWithoutService
+    queueMicrotask(() => {
+      setReady(next)
+    })
+  }, [serviceId, queryClient, keyFns, readyWithoutService])
+  return ready
+}
+
+const SEED_KEYS = [queryKeys.syncStatus] as const
+const LAST_SYNC_SEED_KEYS = [queryKeys.lastSync] as const
+
+export type SyncStatus = components['schemas']['SyncStatusResponse']
+type CronRunEntry = components['schemas']['CronRunEntry']
+type LastSyncInfo = { [K in 'started_at' | 'status' | 'duration_s']: CronRunEntry[K] | null }
+
+/**
+ * Single source of truth for `/api/sync-status`.
+ */
+export function useSyncStatus() {
+  const activeServiceId = useServiceStore(s => s.activeServiceId)
+  const bootstrapPending = useBootstrapPending()
+  const isAnalyst = useIsAnalyst()
+  const ready = useSeededReady(activeServiceId, SEED_KEYS)
+
+  return useQuery({
+    queryKey: queryKeys.syncStatus(activeServiceId),
+    queryFn: async ({ signal }) => {
+      return (await unwrapClient(
+        client.GET('/api/sync-status', {
+          signal,
+          params: { query: { skip_fos: true } },
+        }),
+      )) as SyncStatus
+    },
+    enabled: !!activeServiceId && !bootstrapPending && !isAnalyst && ready,
+    staleTime: 60_000,
+    refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: false,
+    retry: false,
+  })
+}
+
+/**
+ * Fetches the most recent ``sync``-task row from ``/api/cron-runs``,
+ * surfaced as the "Last Sync: Xs ago" header badge.
+ */
+export function useLastSync() {
+  const activeServiceId = useServiceStore(s => s.activeServiceId)
+  const isAnalyst = useIsAnalyst()
+  const bootstrapPending = useBootstrapPending()
+  const ready = useSeededReady(activeServiceId, LAST_SYNC_SEED_KEYS)
+
+  return useQuery({
+    queryKey: queryKeys.lastSync(activeServiceId),
+    queryFn: async ({ signal }) => {
+      const data = await unwrapClient(
+        client.GET('/api/cron-runs', {
+          signal,
+          params: { query: { task: 'log_discovery', per_page: 1, page: 1, skip_total: true } },
+        }),
+      )
+      const e = data?.entries?.[0]
+      return {
+        started_at: e?.started_at ?? null,
+        status: e?.status ?? null,
+        duration_s: e?.duration_s ?? null,
+      } satisfies LastSyncInfo
+    },
+    enabled: !!activeServiceId && !bootstrapPending && !isAnalyst && ready,
+    staleTime: 5 * 60_000,
+    refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: false,
+    retry: false,
+  })
 }

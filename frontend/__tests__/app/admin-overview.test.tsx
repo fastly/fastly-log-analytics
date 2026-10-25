@@ -1,15 +1,23 @@
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
-import { createTestQueryClient, renderWithQuery } from '../helpers/query'
+import { withNuqsTestingAdapter } from 'nuqs/adapters/testing'
+import { createTestQueryClient, renderWithQuery, renderWithQueryClient } from '../helpers/page-smoke'
 import { describe, expect, it, test, vi, beforeEach, afterEach } from 'vitest'
 import React from 'react'
 
-const { adminFetchSpy, clientGetSpy, realApiRef } = vi.hoisted(() => ({
+const { adminFetchSpy, adminJsonSpy, adminJsonResultSpy, clientGetSpy, realApiRef, notFoundMock } = vi.hoisted(() => ({
   adminFetchSpy: vi.fn(),
+  adminJsonSpy: vi.fn(),
+  adminJsonResultSpy: vi.fn(),
   clientGetSpy: vi.fn(),
+  notFoundMock: vi.fn(() => {
+    throw new Error('NEXT_HTTP_ERROR_FALLBACK;404')
+  }),
   realApiRef: {
     adminFetch: null as ((...args: unknown[]) => Promise<Response>) | null,
+    adminJson: null as ((...args: unknown[]) => Promise<unknown>) | null,
+    adminJsonResult: null as ((...args: unknown[]) => Promise<unknown>) | null,
     clientGet: null as ((...args: unknown[]) => Promise<unknown>) | null,
   },
 }))
@@ -18,21 +26,28 @@ vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>()
   realApiRef.adminFetch = actual.adminFetch as (...args: unknown[]) => Promise<Response>
   realApiRef.clientGet = actual.client.GET as (...args: unknown[]) => Promise<unknown>
+  realApiRef.adminJsonResult = actual.adminJsonResult as (...args: unknown[]) => Promise<unknown>
+  const defaultAdminJson = async (...args: unknown[]): Promise<unknown> => {
+    const [, url, init, errorMessage] = args as [
+      unknown,
+      unknown,
+      unknown,
+      ((status: number) => string) | undefined,
+    ]
+    const r = await adminFetchSpy(url, init)
+    if (!r.ok) throw new Error((errorMessage ?? ((status: number) => `status ${status}`))(r.status))
+    return r.json()
+  }
+  realApiRef.adminJson = defaultAdminJson
   adminFetchSpy.mockImplementation(realApiRef.adminFetch)
+  adminJsonSpy.mockImplementation(defaultAdminJson)
+  adminJsonResultSpy.mockImplementation(realApiRef.adminJsonResult)
   clientGetSpy.mockImplementation(realApiRef.clientGet)
   return {
     ...actual,
     adminFetch: (...args: unknown[]) => adminFetchSpy(...args),
-    adminJson: async (
-      _spec: string,
-      url: string,
-      init?: RequestInit,
-      errorMessage: (status: number) => string = (status) => `status ${status}`,
-    ) => {
-      const r = await adminFetchSpy(url, init)
-      if (!r.ok) throw new Error(errorMessage(r.status))
-      return r.json()
-    },
+    adminJson: (...args: unknown[]) => adminJsonSpy(...args),
+    adminJsonResult: (...args: unknown[]) => adminJsonResultSpy(...args),
     client: {
       ...actual.client,
       GET: (...args: unknown[]) => clientGetSpy(...args),
@@ -44,23 +59,33 @@ import AdminPage from '@/app/admin/page'
 import Loading from '@/app/admin/loading'
 import RumAdminPage from '@/app/admin/rum/page'
 import RumLoading from '@/app/admin/rum/loading'
-import { OperationsOverview } from '@/app/admin/_sections/OperationsOverview'
+import QueryMonitorPage from '@/app/admin/queries/page'
+import QueriesLoading from '@/app/admin/queries/loading'
+import ClickHouseLoading from '@/app/admin/clickhouse/loading'
+import ClickHouseAdminPage from '@/app/admin/clickhouse/page'
+import ClickHouseAdminClient, { ClickHouseStatusNotice } from '@/app/admin/clickhouse/_sections/ClickHouseAdminClient'
+import { OperationsOverview, AdminTrendsClient } from '@/app/admin/_sections/OperationsOverview'
 import { ServicesTable } from '@/app/admin/_sections/ServicesTable'
 import { QuarantineSection } from '@/app/admin/_sections/QuarantineSection'
-import AdminTrendsClient from '@/app/admin/trends/_sections/AdminTrendsClient'
 import TrendsLoading from '@/app/admin/trends/loading'
 import { useServiceStore } from '@/stores/serviceStore'
 import { getApiBase } from '@/lib/api'
-import { server } from '@/__tests__/helpers/msw/server'
+import { server } from '@/__tests__/helpers/msw/handlers'
 
 const API_BASE = getApiBase()
 
-vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/admin'))
-vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/browser-stubs')).reactVirtualModuleMock())
+vi.mock('next/navigation', async () => ({
+  ...(await import('../helpers/page-smoke')).navigationModuleMock('/admin'),
+  useSearchParams: vi.fn(() => new URLSearchParams('service=svc-test')),
+  notFound: () => notFoundMock(),
+}))
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/page-smoke')).reactVirtualModuleMock())
 
 beforeEach(() => {
   vi.clearAllMocks()
   if (realApiRef.adminFetch) adminFetchSpy.mockImplementation(realApiRef.adminFetch)
+  if (realApiRef.adminJson) adminJsonSpy.mockImplementation(realApiRef.adminJson)
+  if (realApiRef.adminJsonResult) adminJsonResultSpy.mockImplementation(realApiRef.adminJsonResult)
   if (realApiRef.clientGet) clientGetSpy.mockImplementation(realApiRef.clientGet)
   useServiceStore.setState({ activeServiceId: 'test-svc', isInitialized: true })
 })
@@ -563,5 +588,343 @@ describe('Admin RUM Configuration Page (/admin/rum)', () => {
     await waitFor(() => {
       expect(statusCalls).toBeGreaterThan(callsBeforeRefresh)
     })
+  })
+})
+
+describe('Admin Live Query Monitor (/admin/queries)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('renders Loading skeleton with zero-CLS reservations and contextual copy', () => {
+    render(<QueriesLoading />)
+
+    const loadingRoot = screen.getByTestId('admin-queries-loading')
+    expect(loadingRoot).toBeDefined()
+    expect(screen.getByText('Live Query Monitor')).toBeDefined()
+    expect(screen.getAllByText('Inspecting DuckDB connection pool...').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Loading query telemetry...').length).toBeGreaterThan(0)
+
+    const summarySkel = screen.getByTestId('admin-queries-summary-skeleton')
+    expect(summarySkel.className).toContain('[contain-intrinsic-size:auto_36px]')
+    expect(summarySkel.className).toContain('[content-visibility:auto]')
+  })
+
+  it('renders QueryMonitorPage with zero-CLS reservation containers and contextual in-place skeletons while pending', () => {
+    adminJsonSpy.mockImplementation((_spec: string, route: string) => {
+      if (route === '/api/admin/app-config/query-monitor') {
+        return Promise.resolve({ enabled: true })
+      }
+      return new Promise(() => {})
+    })
+
+    renderWithQuery(<QueryMonitorPage />, { wrapper: withNuqsTestingAdapter() })
+
+    expect(screen.getByTestId('admin-queries-root')).toBeDefined()
+    expect(screen.getByText('Live Query Monitor')).toBeDefined()
+
+    const reservations = [
+      'admin-queries-summary-reservation',
+      'admin-queries-active-reservation',
+      'admin-queries-slow-reservation',
+      'admin-queries-completed-reservation',
+    ]
+
+    for (const id of reservations) {
+      const el = screen.getByTestId(id)
+      expect(el).toBeDefined()
+      expect(el.className).toContain('[contain-intrinsic-size:auto_')
+      expect(el.className).toContain('[content-visibility:auto]')
+    }
+
+    expect(screen.getByTestId('admin-queries-active-skeleton')).toBeDefined()
+    expect(screen.getByTestId('admin-queries-slow-skeleton')).toBeDefined()
+    expect(screen.getByText('Inspecting DuckDB connection pool...')).toBeDefined()
+    expect(screen.getByText('Loading query telemetry...')).toBeDefined()
+  })
+
+  it('renders populated active, slow, and completed queries and supports refresh and pause controls', async () => {
+    const nowSec = Math.floor(Date.now() / 1000)
+    adminJsonSpy.mockImplementation(async (spec: string, route: string) => {
+      if (spec === '/api/admin/app-config/query-monitor' || route === '/api/admin/app-config/query-monitor') {
+        return { enabled: true }
+      }
+      if (spec === '/api/admin/queries' || route.startsWith('/api/admin/queries')) {
+        return {
+          last_seq: 12,
+          active: [
+            {
+              query_id: 11,
+              db_type: 'DuckDB',
+              sql_preview: 'SELECT count(*) FROM logs WHERE status >= 500',
+              sql: 'SELECT count(*) FROM logs WHERE status >= 500',
+              sql_len: 46,
+              service_id: 'svc_alpha',
+              started_at_utc: nowSec - 2,
+              duration_ms: 1450.0,
+              cancellable: true,
+              cancelled_at: null,
+              attribution: {
+                kind: 'admin',
+                label: 'admin @ 127.0.0.1',
+                principal_id: '127.0.0.1',
+                caller_qualname: 'dashboard.aggregates',
+                caller_file: 'backend/routers/dashboard.py:42',
+                request_path: '/api/dashboard/aggregates',
+                request_id: 'req-11',
+                cron_job: null,
+                cron_run_id: null,
+                pool_slot: 'pool#0',
+              },
+            },
+          ],
+          completed: [
+            {
+              query_id: 12,
+              db_type: 'Postgres',
+              sql_preview: 'SELECT * FROM slow_queries WHERE service_id = $1',
+              sql: 'SELECT * FROM slow_queries WHERE service_id = $1',
+              sql_len: 49,
+              service_id: 'svc_alpha',
+              started_at_utc: nowSec - 20,
+              ended_at_utc: nowSec - 19,
+              duration_ms: 820.0,
+              outcome: 'ok',
+              error_type: null,
+              error_message: null,
+              peak_memory_mb: 18.2,
+              attribution: {
+                kind: 'cron',
+                label: 'cron:full_sync',
+                principal_id: null,
+                caller_qualname: 'slow_queries.list_slow_queries',
+                caller_file: 'backend/core/metadata/slow_queries.py:187',
+                request_path: null,
+                request_id: null,
+                cron_job: 'full_sync',
+                cron_run_id: 42,
+                pool_slot: null,
+              },
+            },
+          ],
+        }
+      }
+      if (spec === '/api/admin/slow-queries' || route.startsWith('/api/admin/slow-queries')) {
+        return {
+          rows: [],
+          since_hours: 24,
+          threshold_ms: 500,
+        }
+      }
+      return {}
+    })
+
+    renderWithQuery(<QueryMonitorPage />, { wrapper: withNuqsTestingAdapter() })
+
+    const statusLive = await screen.findByText('1 active query')
+    expect(statusLive).toBeDefined()
+    expect(screen.getByText(/longest:\s*1\.45 s/)).toBeDefined()
+
+    expect(screen.getByText(/Active & Just-Finished/)).toBeDefined()
+    expect(screen.getByText('Notable Slow Queries')).toBeDefined()
+    expect(screen.getByText('Recently Completed')).toBeDefined()
+
+    const pauseBtn = screen.getByRole('button', { name: /Pause/i })
+    fireEvent.click(pauseBtn)
+    expect(await screen.findByRole('button', { name: /Resume/i })).toBeDefined()
+
+    const refreshBtn = screen.getByTestId('admin-queries-refresh-btn')
+    expect(refreshBtn).toBeDefined()
+    fireEvent.click(refreshBtn)
+  })
+
+  it('hydrates filters from a pre-nuqs shared link (?q=&kind=&view=&slow=&db=&nogroup=)', async () => {
+    adminJsonSpy.mockImplementation(async (_spec: string, route: string) =>
+      route === '/api/admin/app-config/query-monitor' ? { enabled: true } : new Promise(() => {}),
+    )
+
+    renderWithQuery(<QueryMonitorPage />, {
+      wrapper: withNuqsTestingAdapter({
+        searchParams: '?q=COMPACT&kind=cron&view=live&slow=250&db=DuckDB&nogroup=1',
+      }),
+    })
+
+    expect(await screen.findByDisplayValue('COMPACT')).toBeDefined()
+    expect(screen.getByRole('tab', { name: /live only/i }).getAttribute('aria-selected')).toBe('true')
+  })
+})
+
+describe('/admin/clickhouse page & ClickHouseAdminClient', () => {
+  beforeEach(() => {
+    notFoundMock.mockClear()
+    vi.unstubAllEnvs()
+    useServiceStore.setState({
+      activeServiceId: 'svc-test',
+      services: [{ id: 'svc-test', name: 'Test Service' }],
+    })
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('renders route-level loading skeleton with pre-allocated zero-CLS reservation containers', () => {
+    vi.stubEnv('DEPLOYMENT_MODE', 'high_scale')
+    render(<ClickHouseLoading />)
+    expect(screen.getByTestId('admin-clickhouse-loading')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-clickhouse-toolbar')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-clickhouse-vitals-reservation')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-clickhouse-generation-reservation')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-clickhouse-replay-reservation')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-clickhouse-disabled-banner')).toHaveAttribute('aria-hidden', 'true')
+    expect(screen.getByTestId('admin-clickhouse-unavailable-banner')).toHaveAttribute('aria-hidden', 'true')
+  })
+
+  it('triggers notFound() for the route-level loading shell in Standard deployment mode', () => {
+    vi.stubEnv('DEPLOYMENT_MODE', 'standard')
+    expect(() => render(<ClickHouseLoading />)).toThrow('NEXT_HTTP_ERROR_FALLBACK;404')
+    expect(notFoundMock).toHaveBeenCalled()
+  })
+
+  it('keeps notice reservations mounted while status changes and exposes only the applicable notice', () => {
+    const { rerender } = render(<ClickHouseStatusNotice />)
+    const disabled = screen.getByTestId('admin-clickhouse-disabled-banner')
+    const unavailable = screen.getByTestId('admin-clickhouse-unavailable-banner')
+    expect(disabled).toHaveAttribute('aria-hidden', 'true')
+    expect(unavailable).toHaveAttribute('aria-hidden', 'true')
+
+    rerender(<ClickHouseStatusNotice enabled={false} health="disabled" />)
+    expect(screen.getByTestId('admin-clickhouse-disabled-banner')).toBe(disabled)
+    expect(disabled).toHaveAttribute('aria-hidden', 'false')
+    expect(disabled).not.toHaveClass('invisible')
+    expect(unavailable).toHaveClass('invisible')
+
+    rerender(<ClickHouseStatusNotice enabled health="unavailable" />)
+    expect(screen.getByTestId('admin-clickhouse-unavailable-banner')).toBe(unavailable)
+    expect(unavailable).toHaveAttribute('aria-hidden', 'false')
+    expect(unavailable).not.toHaveClass('invisible')
+    expect(disabled).toHaveClass('invisible')
+
+    rerender(<ClickHouseStatusNotice enabled health="ok" />)
+    expect(disabled).toHaveAttribute('aria-hidden', 'true')
+    expect(unavailable).toHaveAttribute('aria-hidden', 'true')
+    expect(disabled).toHaveClass('invisible')
+    expect(unavailable).toHaveClass('invisible')
+  })
+
+  it('triggers notFound() on /admin/clickhouse in Standard deployment mode and renders disabled client banner when mounted in High-Scale mode', async () => {
+    vi.stubEnv('DEPLOYMENT_MODE', 'standard')
+    expect(() => renderWithQueryClient(<ClickHouseAdminPage />)).toThrow('NEXT_HTTP_ERROR_FALLBACK;404')
+    expect(notFoundMock).toHaveBeenCalled()
+
+    vi.stubEnv('DEPLOYMENT_MODE', 'high_scale')
+    renderWithQueryClient(<ClickHouseAdminPage />)
+
+    expect(screen.getByTestId('admin-clickhouse-root')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByTestId('admin-clickhouse-health-badge')).toHaveTextContent('disabled')
+    })
+    expect(screen.getByTestId('admin-clickhouse-disabled-banner')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-clickhouse-disabled-banner')).toHaveAttribute('aria-hidden', 'false')
+    expect(screen.getByTestId('admin-clickhouse-vital-enabled')).toHaveTextContent('Disabled')
+    expect(screen.getByTestId('admin-clickhouse-replay-disabled-hint')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-clickhouse-replay-submit-btn')).toBeDisabled()
+  })
+
+  it('renders High-Scale mode ok state, active generation, pre-fill, and dry-run replay workflow', async () => {
+    server.use(
+      http.get('*/api/admin/clickhouse/status', () =>
+        HttpResponse.json({
+          service_id: 'svc-test',
+          enabled: true,
+          health: 'ok',
+          schema_version: 2,
+          publication_counts: { pending: 2, claimed: 1, failed: 0, published: 14 },
+          oldest_pending_age_seconds: 18.4,
+          last_published_at: '2026-10-20T12:00:00Z',
+          active_generation: {
+            generation: 'gen-active-01',
+            dataset_id: 'ds-active-01',
+            coverage_start: '2026-10-20T10:00:00Z',
+            coverage_end: '2026-10-20T12:00:00Z',
+            expires_at: '2026-10-21T12:00:00Z',
+            expired: false,
+            target_matches: true,
+            coverage_age_seconds: 120,
+          },
+          expired_dataset_count: 3,
+        }),
+      ),
+      http.post('*/api/admin/clickhouse/replay', async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>
+        return HttpResponse.json({
+          service_id: body.service_id,
+          dry_run: body.dry_run,
+          operation: body.dataset_id ? 'rebuild' : 'resume',
+          dataset_id: (body.dataset_id as string) || 'ds-active-01',
+          generation: (body.generation as string) || 'gen-active-01',
+          artifact_count: 5,
+          planned_artifacts: 5,
+          attempted: body.dry_run ? 0 : 5,
+          published: body.dry_run ? 0 : 5,
+          activated: !body.dry_run,
+          limit: body.limit ?? 100,
+        })
+      }),
+    )
+
+    renderWithQueryClient(<ClickHouseAdminClient initialServiceId="svc-test" />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('admin-clickhouse-health-badge')).toHaveTextContent('ok')
+    })
+
+    expect(screen.getByTestId('admin-clickhouse-vital-enabled')).toHaveTextContent('High-Scale (Enabled)')
+    expect(screen.getByTestId('admin-clickhouse-vital-counts')).toHaveTextContent('14 / 2')
+    expect(screen.getByTestId('admin-clickhouse-gen-id')).toHaveTextContent('gen-active-01')
+    expect(screen.getByTestId('admin-clickhouse-dataset-id')).toHaveTextContent('ds-active-01')
+
+    fireEvent.click(screen.getByTestId('admin-clickhouse-prefill-btn'))
+    const refInput = screen.getByTestId('admin-clickhouse-reference-input') as HTMLInputElement
+    expect(refInput.value).toBe('ds-active-01')
+
+    fireEvent.click(screen.getByTestId('admin-clickhouse-replay-submit-btn'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('admin-clickhouse-replay-outcome')).toBeInTheDocument()
+    })
+    expect(screen.getByTestId('admin-clickhouse-replay-outcome')).toHaveTextContent('Dry-Run Replay Preview')
+    expect(screen.getByTestId('admin-clickhouse-replay-outcome')).toHaveTextContent('operation: rebuild')
+  })
+
+  it('renders unavailable 503 status payload gracefully without crashing', async () => {
+    server.use(
+      http.get('*/api/admin/clickhouse/status', () =>
+        HttpResponse.json(
+          {
+            service_id: 'svc-test',
+            enabled: true,
+            health: 'unavailable',
+            schema_version: 1,
+            publication_counts: { pending: 0, claimed: 0, failed: 1, published: 4 },
+            oldest_pending_age_seconds: null,
+            last_published_at: null,
+            active_generation: null,
+            expired_dataset_count: 0,
+          },
+          { status: 503 },
+        ),
+      ),
+    )
+
+    renderWithQueryClient(<ClickHouseAdminClient initialServiceId="svc-test" />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('admin-clickhouse-health-badge')).toHaveTextContent('unavailable')
+    })
+    expect(screen.getByTestId('admin-clickhouse-unavailable-banner')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-clickhouse-unavailable-banner')).toHaveAttribute('aria-hidden', 'false')
   })
 })

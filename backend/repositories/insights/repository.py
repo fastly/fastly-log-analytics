@@ -17,8 +17,15 @@ from typing import Any
 import duckdb
 
 from backend.repositories._base import QueryRunner, _compact_sql_for_debug, _safe_table, record_duckdb_query
-from backend.repositories._sql import insights as _insights_sql
-from backend.repositories._sql.insights import (
+from backend.repositories.insights import registry
+
+from . import (
+    definitions as _definitions,  # noqa: F401  side-effect import: registers insight defs with the registry
+)
+from . import (
+    definitions as _insights_sql,
+)
+from .definitions import (
     COALESCED_ASN_AGGREGATES,
     COALESCED_CITY_AGGREGATES,
     COALESCED_DIM_AGGREGATES,
@@ -31,9 +38,6 @@ from backend.repositories._sql.insights import (
     COALESCED_URL_EXTENDED_AGGREGATES,
     REPEATED_BOT_UA_REGEX,
 )
-from backend.repositories.insights import registry
-
-from . import definitions as _definitions  # noqa: F401  side-effect import: registers insight defs with the registry
 
 logger = logging.getLogger(__name__)
 

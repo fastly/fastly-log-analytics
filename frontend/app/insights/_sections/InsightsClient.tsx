@@ -4,11 +4,11 @@ import React, { useState, useMemo } from 'react'
 import Link from 'next/link'
 import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import type { FiltersPayload } from '@/types/filters'
 import { cn } from '@/lib/utils'
-import { useEffectiveServiceId } from '@/hooks/useIsDataReady'
+import { useEffectiveServiceId } from '@/hooks/useBootstrap'
 import { useSessionRoleStore } from '@/stores/sessionRoleStore'
 import { InsightCard, SEVERITY_BADGE_CLASS } from '@/components/Insights/InsightCard'
 import { InsightCardSkeleton } from '@/components/Insights/InsightCard'
@@ -24,7 +24,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from '@/components/ui/badge'
 import { Info, AlertCircle, CheckCircle, Lightbulb, Filter, Loader2, RefreshCw } from 'lucide-react'
-import { useDateFormat } from '@/hooks/useDateFormat'
+import { useDateFormat } from '@/hooks/useSSE'
 import {
   Tooltip,
   TooltipContent,
@@ -33,8 +33,8 @@ import {
 } from '@/components/ui/tooltip'
 import { ReportLayout } from '@/components/ReportLayout'
 import { WINDOW_OPTIONS, BASELINE_OPTIONS, historyHoursFromExtents } from '@/lib/insights-defaults'
-import { useInsightsDefaults } from '@/hooks/useReportConfig'
-import { useDebounce, useDebouncedFilterPayload } from '@/hooks/useFilterPayload'
+import { useInsightsDefaults } from '@/hooks/useDashboardCards'
+import { useDebounce, useDebouncedFilterPayload } from '@/hooks/useDashboardCards'
 import {
   normalizeTabKey,
   SECTION_LOADING_MESSAGES,

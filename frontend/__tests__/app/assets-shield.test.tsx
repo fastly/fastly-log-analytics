@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { expect, test, vi, beforeEach, afterEach } from 'vitest'
 import AssetsClient, { AssetsReportContent } from '@/app/assets-shield/_sections/AssetsClient'
-import { createTestQueryClient, renderWithQuery } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/page-smoke'
 import React from 'react'
 import { spyOnConsoleError } from '../helpers/page-smoke'
 
@@ -9,14 +9,15 @@ vi.mock('@/stores/serviceStore', async () => (await import('../helpers/page-smok
 
 vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke')).filterStoreModuleMock())
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/browser-stubs')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/page-smoke')).reactVirtualModuleMock())
 
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/assets-shield'))
 
 const mockPost = vi.fn()
 const mockGet = vi.fn()
 
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api')>()),
   client: {
     GET: (...args: unknown[]) => mockGet(...args),
     POST: (...args: unknown[]) => mockPost(...args),
@@ -237,7 +238,7 @@ test('assets-shield refetches when only the custom range start changes', async (
 })
 
 test('assets-shield first paint hits the SSR-seeded cache entry (no refetch)', async () => {
-  const { resolveRangeWire, quantizeAnchor } = await import('@/lib/range-wire')
+  const { resolveRangeWire, quantizeAnchor } = await import('@/lib/utils')
   const anchor = quantizeAnchor('2026-01-01T01:00:00Z')
   const { rangeKey } = resolveRangeWire({
     relativeRange: null,

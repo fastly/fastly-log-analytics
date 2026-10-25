@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import hashlib
+import heapq
 import os
+import sys
+from collections import defaultdict
 from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
-from backend.core.high_scale_sections import HighScaleSections
+from backend.core.request_telemetry import HighScaleSections
+from backend.high_scale._common import (
+    bucket as _bucket,
+)
 from backend.high_scale._common import (
     build_published_facts_where as _facts_where,
 )
@@ -12,10 +21,18 @@ from backend.high_scale._common import (
     build_published_projection_where as _where,
 )
 from backend.high_scale._common import (
+    finite_float as _finite_float,
+)
+from backend.high_scale._common import (
+    percentiles as _percentiles,
+)
+from backend.high_scale._common import (
     resolve_asn_display_labels,
 )
+from backend.high_scale._common import (
+    text as _text,
+)
 from backend.high_scale.dashboard import _FIELD_DIMENSIONS
-from backend.high_scale.performance_projection import SCATTER_SAMPLE_SIZE
 from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.models.performance import PerformanceAggregatesResponse
 from backend.repositories.utils.response_cache import (
@@ -25,7 +42,175 @@ from backend.repositories.utils.response_cache import (
     digest_cache_key,
     serialize_filters_for_key,
 )
-from backend.utils.bounded_cache import CacheRegistry
+from backend.utils.time_window import CacheRegistry
+
+# Matches the standard path's ``USING SAMPLE 300``. Each batch keeps its lowest
+# ``sample_key`` rows, so the lowest keys across any union of batches are a
+# uniform sample of the union's rows.
+SCATTER_SAMPLE_SIZE = 300
+
+
+@dataclass(frozen=True)
+class PerformanceProjection:
+    dimension_rows: tuple[dict[str, Any], ...]
+    summary_rows: tuple[dict[str, Any], ...] = ()
+    scatter_rows: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass
+class _Accumulator:
+    requests: int = 0
+    latencies: list[float] = field(default_factory=list)
+
+
+@dataclass
+class _WaterfallSums:
+    count: int = 0
+    edge_processing: float = 0.0
+    origin_wait: float = 0.0
+    origin_download: float = 0.0
+    client_download: float = 0.0
+
+
+def _asn_text(value: Any) -> str:
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return _text(value)
+
+
+def build_performance_projection_rows(rows: tuple[Mapping[str, Any], ...]) -> PerformanceProjection:
+    dimensions: dict[tuple[datetime, str, str], _Accumulator] = defaultdict(_Accumulator)
+    waterfalls: dict[datetime, _WaterfallSums] = defaultdict(_WaterfallSums)
+    scatter_candidates: list[tuple[int, int, dict[str, Any]]] = []
+
+    for index, row in enumerate(rows):
+        bucket = _bucket(row.get("timestamp"))
+        if bucket is None:
+            continue
+
+        elapsed = _finite_float(row.get("elapsed"))
+        _add_waterfall_and_scatter(row, index, bucket, elapsed, waterfalls, scatter_candidates)
+
+        # URL dimension
+        url = _text(row.get("url"))
+        if url:
+            acc = dimensions[(bucket, "url", url)]
+            acc.requests += 1
+            if elapsed is not None:
+                acc.latencies.append(elapsed)
+
+        # ASN dimension
+        asn = _asn_text(row.get("asn"))
+        if asn:
+            acc = dimensions[(bucket, "asn", asn)]
+            acc.requests += 1
+            if elapsed is not None:
+                acc.latencies.append(elapsed)
+
+        # Top Bots? (Wait, user said "bot detection metrics")
+        # NGWAF Bots might use "ngwaf_bot_name"
+        # Let's add ASN and URL for now, maybe bot later or add it now if we need.
+        bot = _text(row.get("_ngwaf_bot_name"))
+        if bot:
+            acc = dimensions[(bucket, "bot", bot)]
+            acc.requests += 1
+            if elapsed is not None:
+                acc.latencies.append(elapsed)
+
+    return PerformanceProjection(
+        dimension_rows=tuple(
+            _dimension_row(bucket, dimension, value, acc)
+            for (bucket, dimension, value), acc in sorted(dimensions.items())
+        ),
+        summary_rows=tuple(_summary_row(bucket, sums) for bucket, sums in sorted(waterfalls.items())),
+        scatter_rows=tuple(
+            row for _, _, row in heapq.nsmallest(SCATTER_SAMPLE_SIZE, scatter_candidates, key=lambda c: c[:2])
+        ),
+    )
+
+
+def _add_waterfall_and_scatter(
+    row: Mapping[str, Any],
+    index: int,
+    bucket: datetime,
+    elapsed_us: float | None,
+    waterfalls: dict[datetime, _WaterfallSums],
+    scatter_candidates: list[tuple[int, int, dict[str, Any]]],
+) -> None:
+    """Mirror the standard ``components`` CTE: rows need both ``ttfb`` and ``elapsed``."""
+    ttfb_s = _finite_float(row.get("ttfb"))
+    if elapsed_us is None or ttfb_s is None:
+        return
+    elapsed_ms = elapsed_us / 1000.0
+    ttfb_ms = ttfb_s * 1000.0
+    ottfb_ms = (_finite_float(row.get("ottfb")) or 0.0) / 1000.0
+    ottlb_ms = (_finite_float(row.get("ottlb")) or 0.0) / 1000.0
+
+    sums = waterfalls[bucket]
+    sums.count += 1
+    sums.edge_processing += max(0.0, ttfb_ms - ottfb_ms)
+    sums.origin_wait += ottfb_ms
+    sums.origin_download += max(0.0, ottlb_ms - ottfb_ms)
+    sums.client_download += max(0.0, elapsed_ms - max(ottlb_ms, ttfb_ms))
+
+    edge_ms = elapsed_ms - ttfb_ms
+    if edge_ms < 0:
+        return
+    sample_key = _sample_key(row, index)
+    scatter_candidates.append(
+        (
+            sample_key,
+            index,
+            {
+                "bucket_start": bucket.isoformat(),
+                "sample_key": sample_key,
+                "origin_ms": ttfb_ms,
+                "edge_ms": edge_ms,
+                "cache": _text(row.get("cache")),
+            },
+        )
+    )
+
+
+def _sample_key(row: Mapping[str, Any], index: int) -> int:
+    identity = _text(row.get("event_id")) or f"{row.get('timestamp')}|{row.get('url')}|{index}"
+    return int.from_bytes(hashlib.sha256(identity.encode()).digest()[:8], "big")
+
+
+def _summary_row(bucket: datetime, sums: _WaterfallSums) -> dict[str, Any]:
+    return {
+        "bucket_start": bucket.isoformat(),
+        "component_count": sums.count,
+        "edge_processing_sum_ms": sums.edge_processing,
+        "origin_wait_sum_ms": sums.origin_wait,
+        "origin_download_sum_ms": sums.origin_download,
+        "client_download_sum_ms": sums.client_download,
+    }
+
+
+def _dimension_row(
+    bucket: datetime,
+    dimension: str,
+    value: str,
+    acc: _Accumulator,
+) -> dict[str, Any]:
+    lat_p50, lat_p95, lat_p99 = _percentiles(acc.latencies, (0.50, 0.95, 0.99))
+    return {
+        "bucket_start": bucket.isoformat(),
+        "dimension": dimension,
+        "value": value,
+        "requests": acc.requests,
+        "latency_count": len(acc.latencies),
+        "latency_sum_ms": sum(acc.latencies) if acc.latencies else None,
+        "latency_p50_ms": lat_p50,
+        "latency_p95_ms": lat_p95,
+        "latency_p99_ms": lat_p99,
+    }
+
 
 _HS_PERF_CACHE_TTL = float(os.getenv("HS_PERF_CACHE_TTL_SECONDS", "30"))
 _memo = ResponseMemo(ttl=_HS_PERF_CACHE_TTL, maxsize=128, prewarmer=False)
@@ -78,13 +263,13 @@ _OTTLB_MS = "coalesce(toFloat64OrNull(custom_fields['ottlb']), 0) / 1000.0"
 def _active_filters(req: Any) -> dict[str, Any]:
     """Filters that actually constrain rows; a field with no facts mapping is rejected, never ignored."""
     active: dict[str, Any] = {}
-    for field, config in (getattr(req, "filters", None) or {}).items():
+    for field_name, config in (getattr(req, "filters", None) or {}).items():
         values = config.get("values") if isinstance(config, Mapping) else getattr(config, "values", None)
         if not values:
             continue
-        if field not in _FIELD_DIMENSIONS:
-            raise ValueError(f"unsupported Performance filter field for high-scale: {field}")
-        active[field] = config
+        if field_name not in _FIELD_DIMENSIONS:
+            raise ValueError(f"unsupported Performance filter field for high-scale: {field_name}")
+        active[field_name] = config
     return active
 
 
@@ -385,3 +570,10 @@ def performance_aggregates(
     return PerformanceAggregatesResponse.with_telemetry(
         **_memo.result(payload, state="miss" if cache_key is not None else "bypass")
     )
+
+
+_self_mod = sys.modules[__name__]
+sys.modules["backend.high_scale.performance_projection"] = _self_mod
+_hs_pkg = sys.modules.get("backend.high_scale")
+if _hs_pkg is not None:
+    setattr(_hs_pkg, "performance_projection", _self_mod)

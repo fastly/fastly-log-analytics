@@ -1,6 +1,6 @@
 import { AlertTriangle, ShieldAlert } from 'lucide-react'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { BackToAdminLink } from '@/components/BackToAdminLink'
+import { BackToAdminLink } from '@/components/ReportLayout'
 import { PageHeader } from '@/components/ui/page-header'
 import { Skeleton } from '@/components/ui/skeleton'
 

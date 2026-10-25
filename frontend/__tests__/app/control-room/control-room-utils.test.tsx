@@ -7,8 +7,8 @@ import { describe, it, expect } from 'vitest'
 
 import { CorrelatorLeaderboard, useTickHistory, type MetricsTick as HistoryMetricsTick } from '@/app/control-room/_sections/ControlRoomClient'
 import type { SSELine } from '@/hooks/useSSE'
-import { createTestQueryClient, makeQueryWrapper } from '../../helpers/query'
-import { server } from '@/__tests__/helpers/msw/server'
+import { createTestQueryClient, makeQueryWrapper } from '../../helpers/page-smoke'
+import { server } from '@/__tests__/helpers/msw/handlers'
 
 describe('CorrelatorLeaderboard', () => {
   it('posts the dimension/limit and renders the leaderboard', async () => {

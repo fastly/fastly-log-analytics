@@ -1,6 +1,6 @@
 import React from 'react'
 import { PageHeader } from '@/components/ui/page-header'
-import { BackToAdminLink } from '@/components/BackToAdminLink'
+import { BackToAdminLink } from '@/components/ReportLayout'
 import { QueueClient } from './_sections/QueueClient'
 
 export default function AdminQueuePage() {

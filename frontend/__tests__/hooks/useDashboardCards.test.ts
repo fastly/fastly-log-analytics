@@ -17,13 +17,12 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 const useBootstrap = vi.fn()
 const useLogFieldsCatalog = vi.fn()
 
-vi.mock('@/hooks/useBootstrap', () => ({
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
   useBootstrap: () => useBootstrap(),
-}))
-vi.mock('@/hooks/useLogFieldsCatalog', () => ({
   useLogFieldsCatalog: () => useLogFieldsCatalog(),
 }))
-vi.mock('@/app/dashboard/_sections/categories', () => ({
+vi.mock('@/app/dashboard/_sections/CardGrid', () => ({
   CATEGORIZED_CARD_IDS: new Set([
     'status', 'method', '_bot_name', '_ngwaf_bot_name', 'waf_sig_ind',
     'rid', 'prid', 'waf_sig', 'waf_req_id', 'ottfb', 'tcp_rtt'

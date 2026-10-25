@@ -4,9 +4,9 @@
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { hashKey, QueryClient } from '@tanstack/react-query'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { useReportConfig, useInsightsDefaults } from '@/hooks/useReportConfig'
-import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
-import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
+import { useReportConfig, useInsightsDefaults } from '@/hooks/useDashboardCards'
+import { useAnalyticsReportQuery } from '@/hooks/useDashboardCards'
+import { createTestQueryClient, makeQueryWrapper } from '../helpers/page-smoke'
 
 let mockState = {
   startTime: '',
@@ -19,13 +19,15 @@ vi.mock('@/stores/filterStore', () => {
   }
 })
 
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api')>()),
   client: { GET: vi.fn(async () => ({ data: undefined })) },
 }))
 
 // useServiceQuery gates `enabled` on useIsDataReady — force it ready so the
 // queryFn actually runs in useAnalyticsReportQuery tests.
-vi.mock('@/hooks/useIsDataReady', () => ({
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
   useIsDataReady: () => true,
 }))
 

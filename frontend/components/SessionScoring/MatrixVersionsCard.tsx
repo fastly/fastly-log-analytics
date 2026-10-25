@@ -6,7 +6,7 @@ import { History, Info, RotateCcw, ScrollText } from 'lucide-react'
 import { invalidateServiceScoringQueries, useScoringQuery } from './useScorerTimeseries'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { CardErrorState } from '@/components/CardErrorState'
+import { CardErrorState } from '@/components/AnalyticsCard'
 import { AuditLogHelp, MatrixHistoryHelp } from '@/components/SessionScoring/help-content'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'

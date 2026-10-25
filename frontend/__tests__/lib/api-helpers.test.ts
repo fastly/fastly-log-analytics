@@ -17,17 +17,17 @@ vi.mock('@/lib/api', async (importOriginal) => {
 import { adminJson, adminJsonResult } from '@/lib/api'
 import { arrayOrEmpty, recordOrNull } from '@/lib/utils'
 import { queryKeys } from '@/lib/query-keys'
-import { keepPreviousWithinService } from '@/hooks/useServiceQuery'
-import { buildStreamRequest } from '@/lib/streamRequest'
+import { keepPreviousWithinService } from '@/hooks/useDashboardCards'
+import { buildStreamRequest } from '@/lib/admin-stream-apply'
 import {
   throwIfStaleAggregates,
   isStaleDashboardViewError,
   STALE_VIEW_RETRY_OPTIONS,
   STALE_VIEW_POLL_MS,
-} from '@/lib/staleViewRetry'
+} from '@/lib/api'
 import type { components } from '@/types/api'
-import { server } from '@/__tests__/helpers/msw/server'
-import { createTestQueryClient } from '../helpers/query'
+import { server } from '@/__tests__/helpers/msw/handlers'
+import { createTestQueryClient } from '../helpers/page-smoke'
 
 describe('adminJson', () => {
   it('returns the parsed body on 2xx', async () => {

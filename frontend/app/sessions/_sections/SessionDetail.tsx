@@ -7,7 +7,7 @@ import { ColumnDef } from '@tanstack/react-table'
 import { AlertTriangle, Clock, ExternalLink, Film, Globe, Shield, Users } from 'lucide-react'
 
 import { client, extractApiError } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import { DataTable } from '@/components/DataTable'
 import { FlagSessionPopover } from '@/components/SessionScoring/FlagSessionPopover'
 import { Badge } from '@/components/ui/badge'
@@ -42,8 +42,8 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { useDateFormat } from '@/hooks/useDateFormat'
-import { useFieldLabel } from '@/hooks/useLogFieldsCatalog'
+import { useDateFormat } from '@/hooks/useSSE'
+import { useFieldLabel } from '@/hooks/useBootstrap'
 import type { LabelRow, LabelValue } from '@/components/SessionScoring/useScorerTimeseries'
 import { buildSessionDashboardUrl, buildStreamDetailUrl } from '@/lib/utils'
 import { OBJECT_TYPE_LABELS, STREAM_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from '@/app/streaming/_sections/streamingInfo'

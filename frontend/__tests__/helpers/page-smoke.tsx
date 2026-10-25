@@ -17,8 +17,19 @@
  * still call `vi.mock` for their own section components.
  */
 
-import { vi, type MockInstance } from 'vitest'
+import {
+  createServer,
+  type IncomingHttpHeaders,
+  type IncomingMessage,
+  type ServerResponse,
+} from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { afterEach, beforeEach, vi, type MockInstance } from 'vitest'
 import React, { type ComponentProps } from 'react'
+import { render, type RenderOptions, type RenderResult } from '@testing-library/react'
+import { QueryClient, QueryClientProvider, type QueryClientConfig } from '@tanstack/react-query'
+import { NuqsTestingAdapter } from 'nuqs/adapters/testing'
+import type { client } from '@/lib/api'
 import type { PlotlyChart } from '@/components/PlotlyChart'
 import { INITIAL_CONFIG } from '@/components/ProvisionWizard/types'
 
@@ -113,15 +124,23 @@ export function plotlyChartModuleMock(onRender?: (props: ComponentProps<typeof P
 /** `@/components/DataTable` smoke stub for page-level tests. */
 export async function dataTableModuleMock() {
   const actual = await vi.importActual<typeof import('@/components/DataTable')>('@/components/DataTable')
-  return { ...actual, DataTable: () => <div data-testid="data-table" />, ColumnVisibilityDropdown: () => null }
+  return {
+    ...actual,
+    ...filterValueCellModuleMock(),
+    DataTable: () => <div data-testid="data-table" />,
+    ColumnVisibilityDropdown: () => null,
+  }
 }
 
 export type InteractiveTableRow = { name?: string; bot_name?: string; fingerprint?: string; ip?: string }
 export type InteractiveDataTableMockProps = { data?: InteractiveTableRow[]; emptyMessage?: string }
 
 /** Interactive `@/components/DataTable` mock for section tests that inspect rows + column toggles. */
-export function interactiveDataTableModuleMock(onDataTable?: (props: InteractiveDataTableMockProps) => void) {
+export async function interactiveDataTableModuleMock(onDataTable?: (props: InteractiveDataTableMockProps) => void) {
+  const actual = await vi.importActual<typeof import('@/components/DataTable')>('@/components/DataTable')
   return {
+    ...actual,
+    ...filterValueCellModuleMock(),
     DataTable: (props: InteractiveDataTableMockProps) => {
       onDataTable?.(props)
       return (
@@ -175,8 +194,10 @@ export function dateFormatModuleMock(timezone = 'UTC') {
  * so each caller passes the exact object its page reads (no defaults merged,
  * to keep the children() call byte-identical to the inlined mock).
  */
-export function reportLayoutModuleMock(childArgs: ReportLayoutChildArgs) {
+export async function reportLayoutModuleMock(childArgs: ReportLayoutChildArgs) {
+  const actual = await vi.importActual<typeof import('@/components/ReportLayout')>('@/components/ReportLayout')
   return {
+    ...actual,
     ReportLayout: ({
       children,
       title,
@@ -292,4 +313,474 @@ export function serviceStoreMockFactory() {
     { getState: () => state },
   )
   return { useServiceStore }
+}
+
+// ── Typed Partial / Fixture Helpers (folded from partial.ts) ─────────────────
+
+type DeepPartial<T> = T extends readonly (infer U)[]
+  ? DeepPartial<U>[]
+  : T extends object
+    ? { [K in keyof T]?: DeepPartial<T[K]> }
+    : T
+
+/** Build a fixture from only the fields a test reads; the rest of `T` stays unset. */
+export function partial<T>(value: DeepPartial<T>): T {
+  return value as T
+}
+
+/** Copy of `obj` with `key` removed, for tests that exercise a missing required field. */
+export function without<T extends object, K extends keyof T>(obj: T, key: K): Omit<T, K> {
+  const copy: Partial<T> = { ...obj }
+  delete copy[key]
+  return copy as Omit<T, K>
+}
+
+/**
+ * The single sanctioned type escape in the test tree. Use it ONLY to feed a
+ * deliberately malformed value (a shape the compiler would reject) into code
+ * under test to prove runtime handling.
+ */
+export function invalidInput(value: unknown): never {
+  return value as never
+}
+
+type GetResult = Awaited<ReturnType<typeof client.GET>>
+type PostResult = Awaited<ReturnType<typeof client.POST>>
+
+/** Successful openapi-fetch GET result carrying `data`; type the payload at the call site with `satisfies`. */
+export function getOk(data: NonNullable<GetResult['data']>): GetResult {
+  return partial<GetResult>({ data, error: undefined })
+}
+
+/** Successful openapi-fetch POST result carrying `data`. */
+export function postOk(data: NonNullable<PostResult['data']>): PostResult {
+  return partial<PostResult>({ data, error: undefined })
+}
+
+// ── SSE Mock Helpers (folded from sse-mock.ts) ───────────────────────────────
+
+export function makeStreamResponse(messages: string[], status = 200): Response {
+  const enc = new TextEncoder()
+  let i = 0
+  const stream = new ReadableStream({
+    pull(controller) {
+      if (i >= messages.length) {
+        controller.close()
+        return
+      }
+      controller.enqueue(enc.encode(messages[i]))
+      i += 1
+    },
+  })
+  return new Response(stream, { status })
+}
+
+export function makeNeverClosingStreamResponse(initialChunks: string[] = []): Response {
+  const enc = new TextEncoder()
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of initialChunks) {
+        controller.enqueue(enc.encode(chunk))
+      }
+    },
+  })
+  return new Response(stream, { status: 200 })
+}
+
+export type MockSSEStatus = 'idle' | 'streaming' | 'done' | 'error'
+
+export function createUseSSEMock() {
+  const start = vi.fn()
+  const stop = vi.fn()
+  const reset = vi.fn()
+  const state: {
+    lines: Array<Record<string, unknown>>
+    status: MockSSEStatus
+    error: string | null
+    isDone: boolean
+    start: typeof start
+    stop: typeof stop
+    reset: typeof reset
+  } = {
+    lines: [],
+    status: 'idle',
+    error: null,
+    isDone: false,
+    start,
+    stop,
+    reset,
+  }
+  return {
+    state,
+    start,
+    stop,
+    reset,
+    resetState() {
+      state.lines = []
+      state.status = 'idle'
+      state.error = null
+      state.isDone = false
+      start.mockClear()
+      stop.mockClear()
+      reset.mockClear()
+    },
+  }
+}
+
+// ── QueryClient & Render Helpers (folded from query.tsx) ─────────────────────
+
+export function createTestQueryClient(overrides?: QueryClientConfig['defaultOptions']): QueryClient {
+  return new QueryClient({
+    defaultOptions: {
+      ...overrides,
+      queries: { retry: false, ...overrides?.queries },
+    },
+  })
+}
+
+export function makeQueryWrapper(qc: QueryClient) {
+  return function QueryWrapper({ children }: { children: React.ReactNode }) {
+    return (
+      <NuqsTestingAdapter searchParams={window.location.search}>
+        <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+      </NuqsTestingAdapter>
+    )
+  }
+}
+
+interface RenderWithQueryOptions extends RenderOptions {
+  queryClient?: QueryClient
+  queryOptions?: QueryClientConfig['defaultOptions']
+  withNuqs?: boolean
+}
+
+export function renderWithQuery(
+  ui: React.ReactElement,
+  options?: RenderWithQueryOptions
+): RenderResult & { queryClient: QueryClient } {
+  const {
+    queryClient: providedClient,
+    queryOptions,
+    withNuqs = false,
+    wrapper: InnerWrapper,
+    ...renderOptions
+  } = options ?? {}
+  const queryClient =
+    providedClient ??
+    createTestQueryClient({
+      mutations: { retry: false, ...queryOptions?.mutations },
+      ...queryOptions,
+      queries: { retry: false, gcTime: 0, ...queryOptions?.queries },
+    })
+  const Wrapper = ({ children }: { children: React.ReactNode }) => {
+    const content = InnerWrapper ? <InnerWrapper>{children}</InnerWrapper> : children
+    if (withNuqs) {
+      return (
+        <NuqsTestingAdapter searchParams={window.location.search}>
+          <QueryClientProvider client={queryClient}>{content}</QueryClientProvider>
+        </NuqsTestingAdapter>
+      )
+    }
+    return <QueryClientProvider client={queryClient}>{content}</QueryClientProvider>
+  }
+  return {
+    queryClient,
+    ...render(ui, { wrapper: Wrapper, ...renderOptions }),
+  }
+}
+
+export const renderWithQueryClient = renderWithQuery
+
+// ── SSR & Test HTTP Server Helpers (folded from ssr.ts) ──────────────────────
+
+export const mockCookies = vi.fn((): {
+  toString: () => string
+  get: (name: string) => { value: string } | undefined
+} => ({
+  toString: () => '',
+  get: () => undefined,
+}))
+export const mockHeaders = vi.fn(() => headerGetter({}))
+
+vi.mock('next/headers', () => ({
+  cookies: () => mockCookies(),
+  headers: () => mockHeaders(),
+}))
+
+export function headerGetter(entries: Record<string, string>) {
+  const normalized: Record<string, string> = {}
+  for (const [k, v] of Object.entries(entries)) {
+    normalized[k.toLowerCase()] = v
+  }
+  return {
+    get: (k: string) => normalized[k.toLowerCase()] ?? null,
+  }
+}
+
+export interface SetupNextHeadersOptions {
+  cookies?: string
+  headers?: Record<string, string>
+}
+
+export function setupNextHeadersMock(defaults: SetupNextHeadersOptions = {}) {
+  beforeEach(() => {
+    mockCookies.mockReturnValue({
+      toString: () => defaults.cookies ?? '',
+      get: () => undefined,
+    })
+    mockHeaders.mockReturnValue(headerGetter(defaults.headers ?? {}))
+  })
+
+  afterEach(() => {
+    mockCookies.mockReset()
+    mockHeaders.mockReset()
+    delete process.env.API_PROXY_URL
+    vi.unstubAllEnvs()
+  })
+
+  return {
+    mockCookies,
+    mockHeaders,
+    headerGetter,
+    setHeaders: (entries: Record<string, string>) => {
+      mockHeaders.mockReturnValue(headerGetter(entries))
+    },
+    setCookies: (
+      cookieStr: string,
+      getter?: (name: string) => { value: string } | undefined,
+    ) => {
+      mockCookies.mockReturnValue({
+        toString: () => cookieStr,
+        get: getter ?? (() => undefined),
+      })
+    },
+  }
+}
+
+export interface CapturedHttpRequest {
+  headers: IncomingHttpHeaders
+  method: string
+  url: string
+  body: string
+}
+
+export interface TestHttpServerContext {
+  port: number
+  url: string
+  requests: CapturedHttpRequest[]
+  readonly lastRequest: CapturedHttpRequest | undefined
+  clearRequests: () => void
+}
+
+export type TestHttpRequestHandler = (
+  req: IncomingMessage,
+  res: ServerResponse,
+  captured: CapturedHttpRequest,
+) => void | Promise<void>
+
+export async function withTestHttpServer<T>(
+  handler: TestHttpRequestHandler,
+  fn: (ctx: TestHttpServerContext) => Promise<T>,
+): Promise<T> {
+  const requests: CapturedHttpRequest[] = []
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk: Buffer) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+    })
+    req.on('end', () => {
+      const captured: CapturedHttpRequest = {
+        headers: req.headers,
+        method: req.method ?? '',
+        url: req.url ?? '',
+        body: Buffer.concat(chunks).toString('utf8'),
+      }
+      requests.push(captured)
+      void handler(req, res, captured)
+    })
+  })
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as AddressInfo).port
+  const url = `http://127.0.0.1:${port}`
+  process.env.API_PROXY_URL = url
+
+  const ctx: TestHttpServerContext = {
+    port,
+    url,
+    requests,
+    get lastRequest() {
+      return requests[requests.length - 1]
+    },
+    clearRequests: () => {
+      requests.length = 0
+    },
+  }
+
+  try {
+    return await fn(ctx)
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve())),
+    )
+  }
+}
+
+// ── Browser & DOM Stubs (folded from browser-stubs.ts) ───────────────────────
+
+type ResizeCallback = (entries: ResizeObserverEntry[], observer: ResizeObserver) => void
+
+export class StubResizeObserver implements ResizeObserver {
+  static instances: StubResizeObserver[] = []
+
+  constructor(private readonly callback?: ResizeCallback) {
+    StubResizeObserver.instances.push(this)
+  }
+
+  observe = vi.fn()
+  unobserve = vi.fn()
+  disconnect = vi.fn()
+
+  fire(): void {
+    this.callback?.([], this)
+  }
+}
+
+export function stubResizeObserver(): {
+  observe: ReturnType<typeof vi.fn>
+  disconnect: ReturnType<typeof vi.fn>
+  fire: () => void
+} {
+  StubResizeObserver.instances = []
+  const observe = vi.fn()
+  const disconnect = vi.fn()
+  class TrackedResizeObserver extends StubResizeObserver {
+    observe = observe
+    disconnect = disconnect
+  }
+  vi.stubGlobal('ResizeObserver', TrackedResizeObserver)
+  return {
+    observe,
+    disconnect,
+    fire: () => {
+      for (const ro of StubResizeObserver.instances) ro.fire()
+    },
+  }
+}
+
+type IntersectionCallback = (entries: IntersectionObserverEntry[], observer: IntersectionObserver) => void
+
+export class StubIntersectionObserver implements IntersectionObserver {
+  static instances: StubIntersectionObserver[] = []
+
+  readonly root: Element | Document | null = null
+  readonly rootMargin: string = '0px'
+  readonly thresholds: ReadonlyArray<number> = [0]
+
+  constructor(private readonly callback: IntersectionCallback) {
+    StubIntersectionObserver.instances.push(this)
+  }
+
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
+  takeRecords(): IntersectionObserverEntry[] {
+    return []
+  }
+
+  fire(isIntersecting: boolean): void {
+    const entry = { isIntersecting } satisfies Partial<IntersectionObserverEntry>
+    this.callback([entry as IntersectionObserverEntry], this)
+  }
+}
+
+export function stubIntersectionObserver(): { fire: (isIntersecting: boolean) => void } {
+  StubIntersectionObserver.instances = []
+  vi.stubGlobal('IntersectionObserver', StubIntersectionObserver)
+  return {
+    fire: (isIntersecting) => {
+      for (const io of StubIntersectionObserver.instances) io.fire(isIntersecting)
+    },
+  }
+}
+
+export function stubSystemTimeZone(timeZone: string): void {
+  const Real = Intl.DateTimeFormat
+  const build = (args: ConstructorParameters<typeof Intl.DateTimeFormat>): Intl.DateTimeFormat => {
+    const instance = new Real(...args)
+    if (args.length === 0) {
+      const resolvedOptions = instance.resolvedOptions.bind(instance)
+      instance.resolvedOptions = () => ({ ...resolvedOptions(), timeZone })
+    }
+    return instance
+  }
+  const ZoneStub = new Proxy(Real, {
+    apply: (_target, _thisArg, args: ConstructorParameters<typeof Intl.DateTimeFormat>) => build(args),
+    construct: (_target, args: ConstructorParameters<typeof Intl.DateTimeFormat>) => build(args),
+  })
+  vi.stubGlobal('Intl', Object.assign(Object.create(Intl) as typeof Intl, { DateTimeFormat: ZoneStub }))
+}
+
+function define(target: object, key: string, value: unknown) {
+  Object.defineProperty(target, key, { value, configurable: true, writable: true })
+}
+
+export function stubPointerCaptureAndScroll() {
+  define(window.HTMLElement.prototype, 'hasPointerCapture', vi.fn())
+  define(window.HTMLElement.prototype, 'releasePointerCapture', vi.fn())
+  define(window.HTMLElement.prototype, 'scrollIntoView', vi.fn())
+}
+
+export function stubGetAnimations() {
+  define(window.Element.prototype, 'getAnimations', vi.fn(() => []))
+}
+
+export function stubMatchMedia() {
+  define(
+    window,
+    'matchMedia',
+    vi.fn().mockImplementation((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  )
+}
+
+export function stubWindowLocationAssign(assignSpy = vi.fn(), href = 'http://localhost/') {
+  Object.defineProperty(window, 'location', {
+    configurable: true,
+    writable: true,
+    value: {
+      ...window.location,
+      assign: assignSpy,
+      origin: 'http://localhost',
+      href,
+    },
+  })
+  return assignSpy
+}
+
+export function reactVirtualModuleMock(rowHeight = 40) {
+  return {
+    useVirtualizer: (options: { count?: number }) => {
+      const count = options.count ?? 0
+      return {
+        getVirtualItems: () =>
+          Array.from({ length: count }).map((_, i) => ({
+            index: i,
+            key: i,
+            start: i * rowHeight,
+            end: (i + 1) * rowHeight,
+            size: rowHeight,
+          })),
+        getTotalSize: () => count * rowHeight,
+      }
+    },
+  }
 }

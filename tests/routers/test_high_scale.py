@@ -3,9 +3,10 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from backend.core.high_scale_sections import current_clickhouse_scope
+from backend.high_scale.exports import ExportManager, get_export_manager
+
 from backend.core.request_context import build_request_context
 from backend.high_scale.archive_models import ServingWatermark
-from backend.high_scale.exports import ExportManager, get_export_manager
 from backend.high_scale.registry_bootstrap import HighScaleService, HighScaleServiceRegistry
 from backend.main import app
 from backend.utils.remote_access import TimeBounds

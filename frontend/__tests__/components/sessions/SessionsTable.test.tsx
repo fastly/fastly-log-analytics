@@ -4,7 +4,7 @@
  * Consolidated tests for SessionsTable and ScoringControls (which both live in
  * `@/app/sessions/_sections/SessionsTable`).
  */
-import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
+import { stubResizeObserver } from '@/__tests__/helpers/page-smoke'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest'
@@ -17,7 +17,7 @@ import type { SessionsResponse } from '@/types/api'
 
 type SessionRow = components['schemas']['Session']
 
-vi.mock('@tanstack/react-virtual', async () => (await import('@/__tests__/helpers/browser-stubs')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('@/__tests__/helpers/page-smoke')).reactVirtualModuleMock())
 
 // FlagSessionPopover ultimately POSTs to the labels endpoint; stub it so
 // the table doesn't try to set up popover state for each row. We

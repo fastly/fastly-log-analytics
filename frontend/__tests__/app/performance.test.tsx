@@ -8,8 +8,8 @@ import OriginClient from '@/app/origin/_sections/OriginClient'
 import FastlyValueClient from '@/app/fastly-value/page'
 import IOValueTab from '@/app/fastly-value/_sections/tabs/IOValueTab'
 import type { components } from '@/types/api.generated'
-import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
-import { createTestQueryClient, renderWithQuery } from '../helpers/query'
+import { stubResizeObserver } from '@/__tests__/helpers/page-smoke'
+import { createTestQueryClient, renderWithQuery } from '../helpers/page-smoke'
 import React from 'react'
 import { spyOnConsoleError } from '../helpers/page-smoke'
 
@@ -17,7 +17,7 @@ import { spyOnConsoleError } from '../helpers/page-smoke'
 // the page mounts, renders all cards, contextual loading messages, empty states,
 // and the approximate badge.
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/browser-stubs')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/page-smoke')).reactVirtualModuleMock())
 vi.mock('@/stores/serviceStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())
 
 vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke')).filterStoreModuleMock())
@@ -27,7 +27,8 @@ vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).n
 type ApiCall = (url: string, opts?: unknown) => Promise<{ data: unknown }>
 const mockPost = vi.fn<ApiCall>()
 
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api')>()),
   client: { GET: vi.fn(), POST: (url: string, opts?: unknown) => mockPost(url, opts), use: vi.fn() },
   extractApiError: vi.fn((e: unknown) => String(e)),
   getApiBase: vi.fn(() => 'http://test'),
@@ -35,11 +36,8 @@ vi.mock('@/lib/api', () => ({
 
 vi.mock('@/components/PlotlyChart', async () => (await import('../helpers/page-smoke')).plotlyChartModuleMock())
 vi.mock('@/components/DataTable', async () => (await import('../helpers/page-smoke')).dataTableModuleMock())
-vi.mock('@/components/FilterValueCell', () => ({
-  FilterValueCell: ({ display }: { display: string }) => <span>{display}</span>,
-}))
-vi.mock('@/hooks/useLogFieldsCatalog', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/hooks/useLogFieldsCatalog')>()
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/hooks/useBootstrap')>()
   return {
     ...actual,
     useActiveLogFields: () => ({
@@ -218,7 +216,7 @@ test('fastly-value page mounts and renders title and tab navigation', () => {
 })
 
 test('fastly-value summary query key keeps its pre-migration shape', async () => {
-  const { resolveRangeWire, quantizeAnchor } = await import('@/lib/range-wire')
+  const { resolveRangeWire, quantizeAnchor } = await import('@/lib/utils')
   renderWithQuery(<FastlyValueClient />, { queryClient })
   const anchor = quantizeAnchor('2026-01-01T01:00:00Z')
   const { rangeKey } = resolveRangeWire({

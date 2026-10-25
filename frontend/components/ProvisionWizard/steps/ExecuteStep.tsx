@@ -23,9 +23,9 @@ import { formatBytes } from "@/lib/format"
 import {
   evaluateLogFieldPresetSummary,
   resolveEnabledGroupsWithDeps,
-} from "@/lib/log-field-config-ops";
+} from '@/lib/query-keys';
 import type { WizardState } from "../useWizardState";
-import { REGION_LABELS, SHIELD_LABELS } from "@/lib/constants";
+import { REGION_LABELS, SHIELD_LABELS } from '@/lib/utils';
 
 export function ExecuteStep({ s }: { s: WizardState }) {
   const { config, catalog, selectedService } = s;

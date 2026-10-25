@@ -21,12 +21,12 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { useScoringLabels, type LabelRow, type LabelValue } from './useScorerTimeseries'
-import { useDeferredDeleteWithUndo } from '@/hooks/useDeferredDeleteWithUndo'
+import { useDeferredDeleteWithUndo } from '@/hooks/useAdminEventStream'
 import { client, extractApiError } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 
-import { SessionEventsDialog } from './SessionEventsDialog'
+import { SessionEventsDialog } from './TopFlaggedTable'
 
 interface LabelsTabProps {
   serviceId: string

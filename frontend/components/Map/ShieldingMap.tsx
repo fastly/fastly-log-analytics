@@ -7,9 +7,9 @@ import * as maplibregl from 'maplibre-gl'
 maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs')
 import { useTheme } from 'next-themes'
 import { Shield, Maximize2 } from 'lucide-react'
-import { addCountryBaseLayer, createBaseMap, removeMapTabStops, updateCountryBaseLayerTheme } from '@/components/Map/baseLayers'
-import { observeMapResize } from '@/components/Map/shared'
-import { PopLabel } from '@/components/PopLabel'
+import { addCountryBaseLayer, createBaseMap, removeMapTabStops, updateCountryBaseLayerTheme } from '@/components/Map/ChoroplethMap'
+import { observeMapResize } from '@/components/Map/ChoroplethMap'
+import { PopLabel } from '@/components/DataTable'
 import {
   Dialog,
   DialogContent,
@@ -17,7 +17,7 @@ import {
   DialogTitle,
   DialogDescription,
 } from '@/components/ui/dialog'
-import { CHART_COLORS } from '@/lib/chart-builders'
+import { CHART_COLORS } from '@/lib/chart-helpers'
 import type { ShieldingRowInput } from '@/app/network/help-content'
 
 import { formatCount, formatCountMaybe } from '@/lib/format'
@@ -44,7 +44,7 @@ interface TooltipInfo {
   props: Record<string, unknown>
 }
 
-import { rafThrottle } from '@/components/Map/shared'
+import { rafThrottle } from '@/components/Map/ChoroplethMap'
 
 // ── Geometry helpers ──────────────────────────────────────────────────────────
 

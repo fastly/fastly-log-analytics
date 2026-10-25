@@ -4,7 +4,7 @@ import { useEffect, useEffectEvent } from "react";
 import type { QueryClient } from "@tanstack/react-query";
 import { client, extractApiError } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
-import { SHIELD_MAP } from "@/lib/constants";
+import { SHIELD_MAP } from '@/lib/utils';
 import type { FosStatus, JoinPhase, ProvisionConfig, ProvisionService, Step, WizardDraft, WizardMode } from "./types";
 
 interface WizardEffectsArgs {

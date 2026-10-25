@@ -7,8 +7,8 @@ import React from 'react'
 import { render, screen, cleanup, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, test, vi } from 'vitest'
-import { createUseSSEMock } from '../helpers/sse-mock'
-import { renderWithQuery } from '../helpers/query'
+import { createUseSSEMock } from '../helpers/page-smoke'
+import { renderWithQuery } from '../helpers/page-smoke'
 import { spyOnConsoleError } from '../helpers/page-smoke'
 
 const { state: sseState, resetState: resetSSE } = createUseSSEMock()
@@ -18,24 +18,29 @@ const { showToastMock, postMock } = vi.hoisted(() => ({
   postMock: vi.fn(),
 }))
 
-vi.mock('@/hooks/useSSE', () => ({
+vi.mock('@/hooks/useSSE', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useSSE')>()),
   useSSE: () => sseState,
-}))
-
-vi.mock('@/hooks/useDateFormat', () => ({
   useDateFormat: () => ({
     full: (d: string) => `FULL(${d})`,
     abbr: () => 'TZ',
   }),
 }))
 
-vi.mock('@/lib/toast', () => ({ showToast: showToastMock }))
-vi.mock('@/lib/cron-cache-bust', () => ({ cronCacheBust: vi.fn() }))
+vi.mock('@/lib/utils', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/utils')>()),
+  showToast: showToastMock,
+}))
+vi.mock('@/lib/admin-stream-apply', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/admin-stream-apply')>()),
+  cronCacheBust: vi.fn(),
+}))
 
 vi.mock('@/stores/serviceStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/logs'))
 
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api')>()),
   client: { GET: vi.fn(), POST: postMock, use: vi.fn() },
   extractApiError: (e: unknown) => (e instanceof Error ? e.message : String(e)),
   getApiBase: vi.fn(() => 'http://test'),
@@ -101,7 +106,10 @@ vi.mock('@/app/logs/_sections/FloatingOperationsDock', async (importOriginal) =>
   ...(await importOriginal<typeof import('@/app/logs/_sections/FloatingOperationsDock')>()),
   FloatingOperationsDock: () => null,
 }))
-vi.mock('@/app/logs/_sections/CronTab', () => ({ CronTab: () => <div data-testid="cron-tab" /> }))
+vi.mock('@/app/logs/_sections/CronTab', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/app/logs/_sections/CronTab')>()),
+  CronTab: () => <div data-testid="cron-tab" />,
+}))
 vi.mock('@/app/logs/_sections/SchemaTab', () => ({
   SchemaTab: () => null,
   ServiceHistoryTab: () => null,
@@ -117,12 +125,15 @@ vi.mock('@/components/SSEModal', () => ({
 vi.mock('@/components/SyncFromCloudModal/SyncFromCloudModal', () => ({
   SyncFromCloudModal: () => null,
 }))
-vi.mock('@/components/NoServiceSelected', () => ({ NoServiceSelected: () => null }))
+vi.mock('@/components/ReportLayout', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/components/ReportLayout')>()),
+  NoServiceSelected: () => null,
+}))
 
 import { CronLiveLog } from '@/app/logs/_sections/FloatingOperationsDock'
 import { LogSyncSection } from '@/components/CronSettingsModal/Schedule'
 import LogsClient, { QuickActionsBar } from '@/app/logs/_sections/LogsClient'
-import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES, CRON_GROUPS } from '@/app/logs/_sections/CronScheduleBox'
+import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES, CRON_GROUPS } from '@/app/logs/_sections/CronTab'
 
 let errorSpy: ReturnType<typeof spyOnConsoleError>
 

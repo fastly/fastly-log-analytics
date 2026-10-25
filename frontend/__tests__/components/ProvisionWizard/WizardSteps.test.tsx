@@ -13,7 +13,7 @@ import { http, HttpResponse } from 'msw'
 import { ProvisionWizard, TerraformStep, ModeStep } from '@/components/ProvisionWizard/ProvisionWizard'
 import { JoinStep } from '@/components/ProvisionWizard/steps/JoinStep'
 import { ResumeBanner, WizardFooter } from '@/components/ProvisionWizard/WizardFooter'
-import { RumVersionPicker } from '@/components/ProvisionWizard/RumVersionPicker'
+import { RumVersionPicker } from '@/components/ProvisionWizard/steps/StorageStep'
 import {
   WIZARD_DRAFT_KEY,
   saveDraft,
@@ -26,9 +26,9 @@ import {
   type WizardDraft,
   type WizardState,
 } from '@/components/ProvisionWizard/types'
-import { createTestQueryClient, renderWithQuery } from '../../helpers/query'
-import { createUseSSEMock } from '../../helpers/sse-mock'
-import { server } from '@/__tests__/helpers/msw/server'
+import { createTestQueryClient, renderWithQuery } from '../../helpers/page-smoke'
+import { createUseSSEMock } from '../../helpers/page-smoke'
+import { server } from '@/__tests__/helpers/msw/handlers'
 import { getApiBase } from '@/lib/api'
 
 vi.mock('@/stores/serviceStore', () => ({
@@ -46,7 +46,8 @@ vi.mock('@/stores/timezoneStore', () => ({
 }))
 
 const { state: sseState } = createUseSSEMock()
-vi.mock('@/hooks/useSSE', () => ({ useSSE: () => sseState }))
+vi.mock('@/hooks/useSSE', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useSSE')>()), useSSE: () => sseState }))
 
 const API_BASE = getApiBase()
 const SVC = 'svc-new-1'

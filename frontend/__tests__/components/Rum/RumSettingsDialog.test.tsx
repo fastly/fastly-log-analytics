@@ -7,15 +7,15 @@ import {
   stubResizeObserver,
   stubPointerCaptureAndScroll,
   stubGetAnimations,
-} from '@/__tests__/helpers/browser-stubs'
-import { createUseSSEMock } from '../../helpers/sse-mock'
+} from '@/__tests__/helpers/page-smoke'
+import { createUseSSEMock } from '../../helpers/page-smoke'
 import * as React from 'react'
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
-import { createTestQueryClient, makeQueryWrapper } from '../../helpers/query'
-import { server } from '@/__tests__/helpers/msw/server'
+import { createTestQueryClient, makeQueryWrapper } from '../../helpers/page-smoke'
+import { server } from '@/__tests__/helpers/msw/handlers'
 import { useServiceStore } from '@/stores/serviceStore'
 import { queryKeys } from '@/lib/query-keys'
 import { RumSettingsDialog } from '@/components/Rum/RumSettingsDialog'
@@ -28,7 +28,8 @@ beforeAll(() => {
 })
 
 const { state: sseState, start: mockStart, resetState } = createUseSSEMock()
-vi.mock('@/hooks/useSSE', () => ({ useSSE: () => sseState }))
+vi.mock('@/hooks/useSSE', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useSSE')>()), useSSE: () => sseState }))
 
 const { mockAdminFetch, realAdminFetchRef } = vi.hoisted(() => ({
   mockAdminFetch: vi.fn(),

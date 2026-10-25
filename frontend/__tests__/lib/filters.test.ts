@@ -94,7 +94,7 @@ function setSearch(search: string) {
 }
 
 async function hydrate() {
-  const mod = await import('@/lib/urlFilterHydration')
+  const mod = await import('@/lib/utils')
   mod._resetUrlHydrationFlag()
   mod.hydrateFilterStoreFromUrl()
 }

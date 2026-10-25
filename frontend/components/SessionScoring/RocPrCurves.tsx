@@ -5,14 +5,14 @@ import { Info, LineChart, ListChecks } from 'lucide-react'
 import { useScoringQuery } from './useScorerTimeseries'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { CardErrorState } from '@/components/CardErrorState'
+import { CardErrorState } from '@/components/AnalyticsCard'
 import { PerReasonAucHelp, RocPrCurvesHelp } from '@/components/SessionScoring/help-content'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
-import { CHART_COLORS } from '@/lib/chart-builders'
+import { CHART_COLORS } from '@/lib/chart-helpers'
 
 // Generated from the /scoring/curves response_model — single source of truth.
 type CurvePoint = NonNullable<components['schemas']['ScoringCurvePoint']>

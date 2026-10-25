@@ -3,7 +3,7 @@
  *
  * Consolidated tests for log-field config ops and wizard draft persistence.
  */
-import { without } from '@/__tests__/helpers/partial'
+import { without } from '@/__tests__/helpers/page-smoke'
 import { afterEach, beforeEach, describe, it, expect } from 'vitest'
 
 import {
@@ -11,7 +11,7 @@ import {
   toggleLogFieldOverride,
   toggleLogFieldPreset,
   updateLogFieldLimit,
-} from '@/lib/log-field-config-ops'
+} from '@/lib/query-keys'
 import {
   WIZARD_DRAFT_KEY,
   clearDraft,

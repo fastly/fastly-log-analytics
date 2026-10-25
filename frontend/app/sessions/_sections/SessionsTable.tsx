@@ -12,7 +12,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { useDateFormat } from '@/hooks/useDateFormat'
+import { useDateFormat } from '@/hooks/useSSE'
 import type { LabelRow, LabelValue } from '@/components/SessionScoring/useScorerTimeseries'
 import { cn } from '@/lib/utils'
 import type { Session, SessionsResponse } from '@/types/api'

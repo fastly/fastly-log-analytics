@@ -1,14 +1,72 @@
+'use client'
+
+import * as React from 'react'
+import { startTransition, useCallback, useEffect, useEffectEvent, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQueryState } from 'nuqs'
+import { useShallow } from 'zustand/react/shallow'
 import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { getPageLoadId, unwrapClient } from '@/lib/api'
 import { queryKeys, seedBootstrapDependentCaches } from '@/lib/query-keys'
-import { useSessionRoleStore } from '@/stores/sessionRoleStore'
-import { useServiceStore } from '@/stores/serviceStore'
-import { usePopGeoStore } from '@/stores/popGeoStore'
+import { isUserActive, msSinceLastInteraction } from '@/lib/utils'
+import { DEBUG_RESPONSES_COOKIE, isIpFamilyField } from '@/lib/utils'
 import { useDebugStore } from '@/stores/debugStore'
-import { DEBUG_RESPONSES_COOKIE } from '@/lib/utils'
-import { useEffect, useSyncExternalStore } from 'react'
+import { useFilterStore } from '@/stores/filterStore'
+import { usePopGeoStore } from '@/stores/popGeoStore'
+import { useServiceStore } from '@/stores/serviceStore'
+import { useSessionRoleStore } from '@/stores/sessionRoleStore'
 import { toService } from '@/types/api'
+import { buildFiltersPayload, type FiltersPayload } from '@/types/filters'
+
+/** Returns a debounced copy of value that only updates after delay ms of silence. */
+export function useDebounce<T>(value: T, delay = 300): T {
+  const [debounced, setDebounced] = useState<T>(value)
+  useEffect(() => {
+    const id = setTimeout(() => setDebounced(value), delay)
+    return () => clearTimeout(id)
+  }, [value, delay])
+  return debounced
+}
+
+/**
+ * Returns a memoised FiltersPayload built from the global filter store.
+ */
+export function useFilterPayload(includeEdgeOnly = false): FiltersPayload {
+  const { filters, edgeOnly } = useFilterStore(
+    useShallow(s => ({ filters: s.filters, edgeOnly: s.edgeOnly }))
+  )
+  return useMemo(() => {
+    const payload = buildFiltersPayload(filters)
+    if (includeEdgeOnly && edgeOnly) {
+      payload['edge'] = { mode: 'include', values: ['true'] }
+    }
+    return payload
+  }, [filters, edgeOnly, includeEdgeOnly])
+}
+
+/**
+ * Same as `useFilterPayload`, but debounces the resulting payload so rapid
+ * pill add/remove/toggleMode bursts collapse into a single React Query key
+ * change.
+ */
+export function useDebouncedFilterPayload(includeEdgeOnly = false): FiltersPayload {
+  return useDebounce(useFilterPayload(includeEdgeOnly), 250)
+}
+
+const subscribeNever = () => () => {}
+
+/**
+ * Returns false on the server and on the client's FIRST (hydration) render,
+ * then true after mount.
+ */
+export function useMounted(): boolean {
+  return useSyncExternalStore(
+    subscribeNever,
+    () => true,
+    () => false,
+  )
+}
 
 /**
  * Subscribe to a derived slice of the React Query `['bootstrap']` cache entry
@@ -23,6 +81,46 @@ export function useBootstrapCacheSelector<T>(
     (onChange) => queryClient.getQueryCache().subscribe(onChange),
     () => selector(queryClient.getQueryData<Record<string, unknown>>(queryKeys.bootstrap())),
     () => serverFallback,
+  )
+}
+
+export function useEffectiveServiceId(): string | null | undefined {
+  const stored = useServiceStore(s => s.activeServiceId)
+  const isInitialized = useServiceStore(s => s.isInitialized)
+  const searchParams = useSearchParams()
+  const queryClient = useQueryClient()
+
+  if (isInitialized) return stored
+  if (stored) return stored
+
+  const urlServiceId = searchParams?.get('service')
+  if (urlServiceId) return urlServiceId
+
+  const bootstrap = queryClient.getQueryData(queryKeys.bootstrap()) as
+    | { active_service_id?: string | null }
+    | undefined
+  return bootstrap?.active_service_id ?? stored
+}
+
+export function useIsDataReady(): boolean {
+  return !!useEffectiveServiceId()
+}
+
+export function useBootstrapResolved(): boolean {
+  const queryClient = useQueryClient()
+  return queryClient.getQueryData(queryKeys.bootstrap()) !== undefined
+}
+
+export function useBootstrapPending(): boolean {
+  const queryClient = useQueryClient()
+  const s = queryClient.getQueryState(queryKeys.bootstrap())
+  return s !== undefined && s.status === 'pending'
+}
+
+export function useBootstrapSettled(): boolean {
+  return useBootstrapCacheSelector(
+    (bootstrapData) => bootstrapData !== undefined,
+    false,
   )
 }
 
@@ -70,9 +168,6 @@ export function useBootstrapSyncEffects(
     setServices((data.services ?? []).map(toService))
     setInitialized(true)
 
-    // Seed the PoP geo map for the shared <PopLabel> (city/state/country
-    // shown next to PoP codes everywhere). Parsed server-side from the
-    // /datacenters cache; empty when the cache isn't populated.
     usePopGeoStore.getState().setMap(data.pop_geo ?? {})
 
     const popsRaw = data.pops
@@ -84,14 +179,10 @@ export function useBootstrapSyncEffects(
       usePopGeoStore.getState().setLocations(locations)
     }
 
-    // When the SSR HydrationBoundary pre-populates the bootstrap cache,
-    // useBootstrap's queryFn is skipped on the first client mount, so mirror
-    // the role flag here too. See sessionRoleStore.
     useSessionRoleStore.getState().setIsRemoteAnalyst(
       data?.settings?.is_remote_analyst === true,
     )
 
-    // Synchronize client-side debugStore with the backend-defined debug settings
     const isAnalyst = data?.settings?.is_remote_analyst === true
     const queryVis = data?.debug_state?.query_debug_visibility ?? 'disabled'
     const apiVis = data?.debug_state?.api_call_debug_visibility ?? 'disabled'
@@ -110,19 +201,8 @@ export function useBootstrapSyncEffects(
       const shouldAttach = queryDebugEnabled || apiCallsDebugEnabled
       document.cookie = `${DEBUG_RESPONSES_COOKIE}=${shouldAttach ? '1' : '0'}; path=/; max-age=31536000; samesite=lax`
     }
-
-    // Note: views + log-fields-catalog cache seeding now happens
-    // inside the queryFn (synchronously after the fetch resolves) so
-    // dependent hooks gated on bootstrap status find data already in
-    // their target cache. Moving it here would re-introduce the race
-    // where dependent hooks re-render before useEffect runs.
   }, [data, isRealQueryResult])
 
-  // `isStale` gates the revert branch below. When true, query.data is a cached
-  // snapshot that may predate the live service set (a refetch hasn't yet
-  // replaced it — e.g. the 5-min staleTime window after a service was just
-  // added). Reverting a just-selected activeServiceId against a stale snapshot
-  // is the "Switch To a freshly-added service bounces back" bug.
   const bootstrapIsStale = Boolean(query.isStale)
 
   useEffect(() => {
@@ -150,14 +230,6 @@ export function useBootstrapSyncEffects(
         : services[0]?.id
       if (defaultId) useServiceStore.getState().setActiveServiceId(defaultId)
     } else if (resolvedActiveServiceId && !currentServiceExists) {
-      // HARDENING: only evict a selected service when the bootstrap snapshot is
-      // fresh (just fetched, not a stale cached copy). A stale snapshot can be
-      // missing a brand-new service the user just switched to — reverting off
-      // it bounces them back to the previous service (and AppLayout then to
-      // /admin). When stale, defer: the pending refetch lands a fresh list
-      // (this effect re-runs on query.data change) and reconciles correctly
-      // against real data. Switch-to call sites also invalidate bootstrap to
-      // trigger that refetch promptly.
       if (bootstrapIsStale) return
       const defaultId = services.length > 0 ? (
         (data.active_service_id && services.some(s => s.id === data.active_service_id))
@@ -174,60 +246,21 @@ export function useBootstrap() {
   const query = useQuery({
     queryKey: queryKeys.bootstrap(),
     queryFn: async () => {
-      const data = await unwrapClient(client.GET("/api/bootstrap"))
-      // Mirror the caller's role so lib/api.ts's 401 handler can tell an
-      // admin (must NOT be bounced to the analyst /share-login) from a remote
-      // analyst whose session died (should be). See sessionRoleStore.
+      const data = await unwrapClient(client.GET('/api/bootstrap'))
       useSessionRoleStore.getState().setIsRemoteAnalyst(
         data?.settings?.is_remote_analyst === true,
       )
-      // Seed dependent caches INSIDE the queryFn so subscribers that
-      // gate on `bootstrap === 'pending' → fire own fetch` find data
-      // already in their target cache by the time React Query unblocks
-      // them. Doing this in a useEffect outside the queryFn races:
-      // bootstrap status transitions pending→success and the
-      // dependent hook re-renders BEFORE useEffect runs, so its
-      // `enabled` flips true and it queries an empty cache. Seeding
-      // here closes that race.
       seedBootstrapDependentCaches(queryClient, data)
       return data
     },
-    // Bootstrap returns the services list + role flags + analyst session
-    // metadata — none of which change within a typical browsing session.
-    // staleTime: 5min so revisits to ANY route within that window skip
-    // the refetch and don't re-block AppLayout's loading flag.
-    // gcTime: 30min keeps the cache entry alive across brief tab
-    // backgrounding so returning to the tab doesn't pay the cold fetch.
     staleTime: 5 * 60 * 1000,
     gcTime: 30 * 60 * 1000,
-    // Bootstrap is the cold-path fan-out; during an incident the global
-    // 2-retry policy multiplies its load. Keep the 4xx-skip (admin 401s must
-    // never retry) but cap bootstrap at a SINGLE retry — the backend
-    // single-flight + admin SSR dedup are the real storm guards, and
-    // refetchOnMount / SSE invalidation / the manual Retry button still
-    // recover a transient blip. See the 2026-06-23 bootstrap-storm outage.
     retry: (failureCount: number, error: unknown) => {
       const err = error as { status?: number; response?: { status?: number } } | null
       const status = err?.status ?? err?.response?.status
       if (status !== undefined && status >= 400 && status < 500) return false
       return failureCount < 1
     },
-    // Once that single retry is spent the query parks in `error` forever, and
-    // AppLayout renders a dead-end "Can't reach the server" card that only
-    // recovers if the user clicks Retry. A deploy takes the backend away for a
-    // few seconds, so an open tab burns its one retry and strands the user on
-    // that card long after the server is back.
-    //
-    // Poll — but ONLY while errored, which is what keeps the 2026-06-23
-    // bootstrap-storm guard intact. This is a flat one-request-per-interval
-    // per stranded client, not the exponential fan-out that caused the storm,
-    // and it stops the instant a fetch succeeds. Jittered so a fleet of tabs
-    // orphaned by the same restart doesn't rendezvous into a thundering herd.
-    // refetchIntervalInBackground stays default-false: hidden tabs don't poll.
-    //
-    // Also poll every 2s while the backend reports it is still initializing
-    // (first-run warmup) so AppLayout leaves its "Initializing" state as soon
-    // as it is ready.
     refetchInterval: query => {
       if (query.state.status === 'error') return 5000 + Math.floor(Math.random() * 2000)
       const settings = (query.state.data as { settings?: { initializing?: boolean } } | undefined)?.settings
@@ -239,4 +272,342 @@ export function useBootstrap() {
   useBootstrapSyncEffects(query, activeServiceId)
 
   return query
+}
+
+/**
+ * Returns the log fields catalog, optionally scoped to a service ID to include custom fields.
+ */
+export function useLogFieldsCatalog(serviceId?: string) {
+  const effectiveSid = useEffectiveServiceId()
+  const sid = serviceId ?? effectiveSid ?? undefined
+  const bootstrapPending = useBootstrapPending()
+
+  return useQuery({
+    queryKey: queryKeys.logFieldsCatalog(sid),
+    queryFn: async () => {
+      return await unwrapClient(
+        client.GET('/api/log-fields/catalog', {
+          params: { query: { service_id: sid } },
+        }),
+      )
+    },
+    staleTime: Infinity,
+    enabled: !bootstrapPending,
+  })
+}
+
+/**
+ * Returns a function that maps a log field id to its human-readable label.
+ */
+export function useFieldLabel(): (colId: string) => string {
+  const { data } = useLogFieldsCatalog()
+  return useCallback(
+    (colId: string) => data?.fields?.find((f) => f.id === colId)?.label ?? colId,
+    [data],
+  )
+}
+
+interface UseFieldValuesOptions {
+  field: string
+  search: string
+  limit?: number
+  enabled?: boolean
+}
+
+export function useFieldValues({ field, search, limit = 50, enabled = true }: UseFieldValuesOptions) {
+  const activeServiceId = useServiceStore(s => s.activeServiceId)
+  const { startTime, endTime } = useFilterStore(
+    useShallow(s => ({ startTime: s.startTime, endTime: s.endTime }))
+  )
+  const filterPayload = useDebouncedFilterPayload()
+
+  return useQuery({
+    queryKey: queryKeys.filtered('dashboard', 'field_values', activeServiceId, startTime, endTime, filterPayload, field, search),
+    queryFn: async () => {
+      return await unwrapClient(
+        client.POST('/api/dashboard/field-values', {
+          body: {
+            start_time: startTime,
+            end_time: endTime,
+            filters: filterPayload,
+            field,
+            search,
+            limit,
+          },
+        }),
+      )
+    },
+    enabled: !!activeServiceId && enabled,
+  })
+}
+
+/**
+ * Single source of truth for "is this log field / field-group actually enabled
+ * for the active service?" — derived from `bootstrap.active_log_field_ids`.
+ */
+export function useActiveLogFields() {
+  const { data: bootstrap } = useBootstrap()
+  const { data: catalog } = useLogFieldsCatalog()
+
+  return useMemo(() => {
+    const ids =
+      (bootstrap as { active_log_field_ids?: string[] } | undefined)?.active_log_field_ids ?? []
+    const activeIds = new Set<string>(ids)
+    const ready = activeIds.size > 0
+
+    const isFieldActive = (id: string): boolean => !ready || activeIds.has(id)
+
+    const groups = (catalog?.groups ?? []) as Array<{ id: string; fields: string[] }>
+    const isGroupActive = (groupId: string): boolean => {
+      if (!ready) return true
+      const grp = groups.find((g) => g?.id === groupId)
+      return grp ? grp.fields.some((f) => activeIds.has(f)) : false
+    }
+
+    return { ready, isFieldActive, isGroupActive }
+  }, [bootstrap, catalog])
+}
+
+/**
+ * Bidirectional sync between the active service ID and the URL's
+ * `?service=` query param.
+ */
+export function useUrlServiceSync() {
+  const activeServiceId = useServiceStore(state => state.activeServiceId)
+  const services = useServiceStore(state => state.services)
+  const isInitialized = useServiceStore(state => state.isInitialized)
+  const setActiveServiceId = useServiceStore(state => state.setActiveServiceId)
+
+  const [urlService, setUrlService] = useQueryState('service', {
+    history: 'replace',
+    shallow: true,
+  })
+
+  useEffect(() => {
+    if (!urlService) return
+    if (urlService === activeServiceId) return
+    if (isInitialized && !services.some(s => s.id === urlService)) return
+    setActiveServiceId(urlService)
+  }, [urlService, activeServiceId, services, isInitialized, setActiveServiceId])
+
+  useEffect(() => {
+    if (!isInitialized) return
+    const hasServices = services.length > 0
+    const target = hasServices ? activeServiceId : null
+    if (target === urlService) return
+    if (urlService && services.some((s) => s.id === urlService)) return
+    if (hasServices && activeServiceId && !services.some((s) => s.id === activeServiceId)) return
+    startTransition(() => {
+      setUrlService(target)
+    })
+  }, [activeServiceId, services, isInitialized, urlService, setUrlService])
+}
+
+/**
+ * Invokes `callback(prevServiceId, nextServiceId)` whenever the active service
+ * changes away from a previously non-null service ID (ignoring initial mount /
+ * hydration from null -> initial service).
+ */
+export function useServiceSwitchReset(
+  activeServiceId: string | null | undefined,
+  callback: (prevServiceId: string, nextServiceId: string | null) => void,
+) {
+  const storeActiveServiceId = useServiceStore((s) => s.activeServiceId)
+  const resolvedServiceId =
+    activeServiceId === undefined ? storeActiveServiceId : activeServiceId
+  const prevServiceRef = useRef<string | null>(resolvedServiceId)
+  const onReset = useEffectEvent(callback)
+
+  useEffect(() => {
+    const prev = prevServiceRef.current
+    if (prev && prev !== resolvedServiceId) {
+      onReset(prev, resolvedServiceId)
+    }
+    prevServiceRef.current = resolvedServiceId
+  }, [resolvedServiceId])
+}
+
+/**
+ * Whether the current session is an "analyst" (read-only role).
+ */
+export function useIsAnalyst(): boolean {
+  const activeServiceId = useServiceStore(s => s.activeServiceId)
+  const services = useServiceStore(s => s.services)
+  const isRemoteAnalyst = useBootstrapCacheSelector(
+    (bootstrapData) =>
+      (bootstrapData?.settings as Record<string, unknown> | undefined)?.is_remote_analyst === true,
+    false,
+  )
+  const activeService = services?.find(s => s.id === activeServiceId)
+  return (
+    activeService?.accessLevel === 'read_only' ||
+    isRemoteAnalyst
+  )
+}
+
+/**
+ * Whether the current session has client-IP PII masking enabled.
+ */
+export function useMaskIps(): boolean {
+  return useBootstrapCacheSelector(
+    (bootstrapData) =>
+      (bootstrapData?.settings as { mask_ips?: boolean } | undefined)?.mask_ips === true,
+    false,
+  )
+}
+
+/**
+ * Defense-in-depth UX guard for PII masking: strip any IP-family filter from
+ * the filter store when the current session masks client IPs.
+ */
+export function useEnforceMaskedFilters(): void {
+  const maskIps = useMaskIps()
+  const filters = useFilterStore(s => s.filters)
+  const removeFilter = useFilterStore(s => s.removeFilter)
+
+  React.useEffect(() => {
+    if (!maskIps) return
+    for (const f of filters) {
+      if (isIpFamilyField(f.column.replace(/_\d+$/, ''))) removeFilter(f.id)
+    }
+  }, [maskIps, filters, removeFilter])
+}
+
+/**
+ * fetch() wrapper that aborts after `timeoutMs` (default 30s).
+ */
+export async function fetchWithTimeout(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = 30_000,
+): Promise<Response> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  const callerSignal = init.signal
+  if (callerSignal) {
+    if (callerSignal.aborted) {
+      ctrl.abort()
+    } else {
+      callerSignal.addEventListener('abort', () => ctrl.abort(), { once: true })
+    }
+  }
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * Shared transport for remote-analyst requests (heartbeat, logout,
+ * share-login, TOS acknowledge).
+ */
+export function analystFetch(path: string, init: RequestInit = {}, timeoutMs?: number): Promise<Response> {
+  const loadId = getPageLoadId()
+  return fetchWithTimeout(
+    path,
+    {
+      ...init,
+      credentials: 'include',
+      headers: {
+        'X-Remote-Analyst': '1',
+        'X-User-Active': isUserActive() ? '1' : '0',
+        ...(loadId ? { 'X-Page-Load-ID': loadId } : {}),
+        ...init.headers,
+      },
+    },
+    timeoutMs,
+  )
+}
+
+interface HeartbeatOptions {
+  enabled: boolean
+  idleAfterMs?: number
+  intervalMs?: number
+  failuresBeforeOverlay?: number
+}
+
+const DEFAULT_IDLE = 15_000
+const DEFAULT_INTERVAL = 30_000
+const DEFAULT_FAILURES = 2
+
+export function useAnalystHeartbeat({
+  enabled,
+  idleAfterMs = DEFAULT_IDLE,
+  intervalMs = DEFAULT_INTERVAL,
+  failuresBeforeOverlay = DEFAULT_FAILURES,
+}: HeartbeatOptions) {
+  const router = useRouter()
+  const [isTerminated, setIsTerminated] = React.useState(false)
+  const [disconnected, setDisconnected] = React.useState(false)
+
+  React.useEffect(() => {
+    if (!enabled || isTerminated) return
+    if (typeof window === 'undefined') return
+
+    let timer: ReturnType<typeof setInterval> | null = null
+    let cancelled = false
+    let consecutiveFailures = 0
+
+    const tick = async () => {
+      if (cancelled || isTerminated) return
+      if (document.hidden) return
+      if (msSinceLastInteraction() < idleAfterMs) return
+      try {
+        const res = await analystFetch('/api/share/heartbeat', {}, 10_000)
+        if (res.status === 401 || res.status === 403) {
+          cancelled = true
+          if (timer) clearInterval(timer)
+          setIsTerminated(true)
+          router.replace('/share-login')
+          return
+        }
+        if (!res.ok) {
+          consecutiveFailures++
+        } else {
+          consecutiveFailures = 0
+          setDisconnected(false)
+        }
+      } catch {
+        consecutiveFailures++
+      }
+      if (consecutiveFailures >= failuresBeforeOverlay) {
+        setDisconnected(true)
+      }
+    }
+
+    timer = setInterval(tick, intervalMs)
+
+    return () => {
+      cancelled = true
+      if (timer) clearInterval(timer)
+    }
+  }, [enabled, isTerminated, idleAfterMs, intervalMs, failuresBeforeOverlay, router])
+
+  return { disconnected }
+}
+
+/**
+ * Self-service logout for remote analysts.
+ */
+export function useAnalystLogout(): { logout: () => Promise<void>; isLoggingOut: boolean } {
+  const [isLoggingOut, setIsLoggingOut] = React.useState(false)
+
+  const logout = React.useCallback(async () => {
+    if (isLoggingOut) return
+    setIsLoggingOut(true)
+    try {
+      await analystFetch('/api/share/logout', { method: 'POST' }, 10_000)
+    } catch {
+      // Swallow — redirect anyway.
+    } finally {
+      if (typeof window !== 'undefined') {
+        window.location.assign('/share-login')
+      } else {
+        setIsLoggingOut(false)
+      }
+    }
+  }, [isLoggingOut])
+
+  return { logout, isLoggingOut }
 }

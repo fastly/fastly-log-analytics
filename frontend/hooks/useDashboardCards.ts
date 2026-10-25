@@ -1,10 +1,483 @@
-import { useState, useCallback, useMemo } from 'react'
-import { useLogFieldsCatalog } from './useLogFieldsCatalog'
-import { useBootstrap } from './useBootstrap'
-import { useMounted } from '@/hooks/useMounted'
+'use client'
+
+import { useState, useCallback, useEffect, useMemo } from 'react'
+import { usePathname } from 'next/navigation'
+import { useQuery, type UseQueryOptions, type QueryFunctionContext, type QueryKey } from '@tanstack/react-query'
+import { useShallow } from 'zustand/react/shallow'
+import {
+  useBootstrap,
+  useDebounce,
+  useDebouncedFilterPayload,
+  useFilterPayload,
+  useIsDataReady,
+  useLogFieldsCatalog,
+  useMounted,
+} from '@/hooks/useBootstrap'
+import { adminJsonResult, client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api'
+import { type ChartInterval, INTERVAL_SECONDS, INTERVALS } from '@/lib/utils'
 import { parseFromInput } from '@/lib/date'
+import { historyHoursFromExtents, pickInsightsDefault } from '@/lib/insights-defaults'
+import { queryKeys } from '@/lib/query-keys'
+import { quantizeAnchor, resolveRangeWire, type RangeWire, type RangeWireArgs } from '@/lib/utils'
+import { _resetUrlHydrationFlag, hydrateFilterStoreFromUrl, rangeLabelToHours } from '@/lib/utils'
+import { useFilterStore } from '@/stores/filterStore'
+import type { Simplify, WithRequired, components } from '@/types/api'
 import type { PlotlyRelayoutEvent } from '@/types/plotly'
-import { CATEGORIZED_CARD_IDS } from '@/app/dashboard/_sections/categories'
+
+export { useDebounce, useFilterPayload, useDebouncedFilterPayload }
+
+export type CardTint = {
+  bg: string
+  border: string
+  dot: string
+}
+
+export type CardCategory = {
+  id: string
+  label: string
+  cardIds: string[]
+  tint: CardTint
+}
+
+export const CARD_CATEGORIES: CardCategory[] = [
+  {
+    id: 'request',
+    label: 'Request',
+    cardIds: ['ip', 'asn', 'host', 'url', 'method', 'status', 'cache', 'proto', 'ua', 'referer', 'cookie_session', 'resp_header_content_encoding'],
+    tint: { bg: 'bg-blue-50/60 dark:bg-blue-950/40', border: 'border-blue-200/70 dark:border-blue-900/60', dot: 'bg-blue-500' },
+  },
+  {
+    id: 'cache',
+    label: 'Cache',
+    cardIds: ['ttl', 'age', 'hits', 'digest'],
+    tint: { bg: 'bg-amber-50/60 dark:bg-amber-950/40', border: 'border-amber-200/70 dark:border-amber-900/60', dot: 'bg-amber-500' },
+  },
+  {
+    id: 'geo',
+    label: 'Geography',
+    cardIds: ['city', 'region', 'country', 'metro'],
+    tint: { bg: 'bg-emerald-50/60 dark:bg-emerald-950/40', border: 'border-emerald-200/70 dark:border-emerald-900/60', dot: 'bg-emerald-500' },
+  },
+  {
+    id: 'network',
+    label: 'Network & Connection',
+    cardIds: [
+      'tcp_rtt', 'transport', 'ploss', 'rtt_min', 'rtt_var', 'retrans',
+      'c_speed', 'c_type', 'delivery_rate', 'data_segs_out',
+    ],
+    tint: { bg: 'bg-cyan-50/60 dark:bg-cyan-950/40', border: 'border-cyan-200/70 dark:border-cyan-900/60', dot: 'bg-cyan-500' },
+  },
+  {
+    id: 'edge',
+    label: 'Edge Infrastructure',
+    cardIds: ['pop', 'backend', 'edge', 'server_region', 'tls', 'is_ipv6', 'conn_requests'],
+    tint: { bg: 'bg-violet-50/60 dark:bg-violet-950/40', border: 'border-violet-200/70 dark:border-violet-900/60', dot: 'bg-violet-500' },
+  },
+  {
+    id: 'security',
+    label: 'Security',
+    cardIds: [
+      '_bot_name', '_ngwaf_bot_name', 'waf_sig_ind', 'edge_score_reason_ind',
+      'waf', 'waf_resp', 'waf_ms',
+      'p_type', 'p_desc',
+      'ja3', 'ja4', 'tls_ciphers_sha',
+    ],
+    tint: { bg: 'bg-rose-50/60 dark:bg-rose-950/40', border: 'border-rose-200/70 dark:border-rose-900/60', dot: 'bg-rose-500' },
+  },
+  {
+    id: 'origin',
+    label: 'Origin',
+    cardIds: ['ottfb', 'ottlb', 'ost', 'obytes', 'oip', 'oretries'],
+    tint: { bg: 'bg-yellow-50/60 dark:bg-yellow-950/40', border: 'border-yellow-200/70 dark:border-yellow-900/60', dot: 'bg-yellow-500' },
+  },
+  {
+    id: 'quic',
+    label: 'QUIC / HTTP3',
+    cardIds: ['bw', 'q_rtt', 'q_rtt_var', 'q_lost', 'q_cwnd'],
+    tint: { bg: 'bg-indigo-50/60 dark:bg-indigo-950/40', border: 'border-indigo-200/70 dark:border-indigo-900/60', dot: 'bg-indigo-500' },
+  },
+  {
+    id: 'io',
+    label: 'Image Optimization',
+    cardIds: ['io_input_format', 'io_output_format'],
+    tint: { bg: 'bg-fuchsia-50/60 dark:bg-fuchsia-950/40', border: 'border-fuchsia-200/70 dark:border-fuchsia-900/60', dot: 'bg-fuchsia-500' },
+  },
+]
+
+export const CUSTOM_TINT: CardTint = {
+  bg: 'bg-slate-50/60 dark:bg-slate-900/30',
+  border: 'border-slate-200/60 dark:border-slate-800/50',
+  dot: 'bg-slate-400',
+}
+
+export const CATEGORIZED_CARD_IDS = new Set(CARD_CATEGORIES.flatMap(c => c.cardIds))
+
+/**
+ * Bidirectional sync between the global filterStore and the page URL.
+ */
+export function useFilterUrlWriteback(): void {
+  const pathname = usePathname()
+  const { startTime, endTime, isAutoRange, relativeRange } = useFilterStore(
+    useShallow(state => ({
+      startTime: state.startTime,
+      endTime: state.endTime,
+      isAutoRange: state.isAutoRange,
+      relativeRange: state.relativeRange,
+    })),
+  )
+  const filterPayload = useFilterPayload()
+
+  useEffect(() => {
+    _resetUrlHydrationFlag()
+    hydrateFilterStoreFromUrl()
+
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search)
+      const qsStart = params.get('start_time')
+      const qsEnd = params.get('end_time')
+      const qsRange = params.get('range')
+
+      if (!qsStart && !qsEnd) {
+        const store = useFilterStore.getState()
+        const now = new Date()
+        const activeRange = qsRange || store.relativeRange
+
+        if (activeRange) {
+          const hours = rangeLabelToHours(activeRange)
+          if (hours !== null) {
+            const start = new Date(now.getTime() - hours * 3600 * 1000).toISOString()
+            store.setRelativeRange(activeRange, start, now.toISOString())
+          }
+        } else if (store.isAutoRange && (!store.startTime || !store.endTime)) {
+          useFilterStore.setState({
+            startTime: new Date(now.getTime() - 24 * 3600 * 1000).toISOString(),
+            endTime: now.toISOString(),
+          })
+        }
+      }
+    }
+  }, [pathname])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+
+    const url = new URL(window.location.href)
+    if (Object.keys(filterPayload).length > 0) {
+      url.searchParams.set('filters', JSON.stringify(filterPayload))
+    } else {
+      url.searchParams.delete('filters')
+    }
+    if (relativeRange) {
+      url.searchParams.set('range', relativeRange)
+      url.searchParams.delete('start_time')
+      url.searchParams.delete('end_time')
+    } else if (!isAutoRange && startTime && endTime) {
+      url.searchParams.set('start_time', startTime)
+      url.searchParams.set('end_time', endTime)
+      url.searchParams.delete('range')
+    } else {
+      url.searchParams.delete('start_time')
+      url.searchParams.delete('end_time')
+      url.searchParams.delete('range')
+    }
+    window.history.replaceState({}, '', url.toString())
+  }, [filterPayload, startTime, endTime, isAutoRange, relativeRange, pathname])
+}
+
+/**
+ * Active time-range selection (primary + compare).
+ */
+export function useTimeRange() {
+  return useFilterStore(
+    useShallow(s => ({
+      startTime: s.startTime,
+      endTime: s.endTime,
+      compareMode: s.compareMode,
+      compareStartTime: s.compareStartTime,
+      compareEndTime: s.compareEndTime,
+    }))
+  )
+}
+
+/**
+ * Shared hook that resolves the `(relativeRange, isAutoRange, anchor)` tuple
+ * for analytics report pages.
+ */
+export function useReportRangeAnchor(nowServerStr?: string) {
+  const mounted = useMounted()
+  const relativeRange = useFilterStore((s) => s.relativeRange)
+  const isAutoRange = useFilterStore((s) => s.isAutoRange)
+  const storeEndTime = useFilterStore((s) => s.endTime)
+
+  const anchor = useMemo(() => {
+    const baseVal = !mounted && nowServerStr ? nowServerStr : storeEndTime
+    return quantizeAnchor(baseVal || undefined)
+  }, [storeEndTime, nowServerStr, mounted])
+
+  return { relativeRange, isAutoRange, anchor }
+}
+
+/**
+ * `placeholderData` that holds the previous result across key changes within
+ * one service (filter/range/page changes) but never across a service switch.
+ */
+export function keepPreviousWithinService(currentKey: QueryKey, serviceIdIndex = 2) {
+  return <T>(previousData: T | undefined, previousQuery: { queryKey: QueryKey } | undefined): T | undefined => {
+    if (!previousQuery) return undefined
+    const prevKey = previousQuery.queryKey
+    if (
+      Array.isArray(currentKey) &&
+      Array.isArray(prevKey) &&
+      currentKey.length > serviceIdIndex &&
+      prevKey.length > serviceIdIndex &&
+      currentKey[serviceIdIndex] !== prevKey[serviceIdIndex]
+    ) {
+      return undefined
+    }
+    return previousData
+  }
+}
+
+/**
+ * Wraps useQuery with the standard enabled/placeholderData defaults every
+ * data page uses: enabled when the service is ready, hold prior data while
+ * the new fetch is in-flight.
+ */
+export function useServiceQuery<T>(
+  queryKey: unknown[],
+  queryFn: (context: QueryFunctionContext) => Promise<T>,
+  options?: Omit<UseQueryOptions<T, Error, T, readonly unknown[]>, 'queryKey' | 'queryFn' | 'placeholderData'>
+) {
+  const isReady = useIsDataReady()
+  return useQuery<T, Error, T>({
+    ...options,
+    queryKey,
+    queryFn,
+    enabled: isReady && (options?.enabled ?? true),
+    placeholderData: keepPreviousWithinService(queryKey),
+  })
+}
+
+type RumStatusWire = WithRequired<components['schemas']['RumStatusResponse'], 'enabled'>
+type RumStatus = Simplify<RumStatusWire & { unauthorized?: boolean }>
+
+interface UseRumStatusOptions {
+  enabled?: boolean
+  refetchInterval?: number
+}
+
+/**
+ * Single owner of the `['rum-status', serviceId]` cache entry.
+ */
+export function useRumStatus(
+  serviceId: string | null | undefined,
+  { enabled = true, refetchInterval }: UseRumStatusOptions = {},
+) {
+  return useQuery<RumStatus | null>({
+    queryKey: queryKeys.rumStatus(serviceId),
+    queryFn: async () => {
+      if (!serviceId) return null
+      const res = await adminJsonResult<'/api/services/{service_id}/rum/status', RumStatusWire>(
+        '/api/services/{service_id}/rum/status',
+        `/api/services/${serviceId}/rum/status`,
+      )
+      if (res.status === 403) return { enabled: false, unauthorized: true }
+      return res.ok ? res.data : null
+    },
+    enabled: !!serviceId && enabled,
+    refetchInterval,
+  })
+}
+
+interface AnalyticsReportQueryContext {
+  rangeBody: RangeWire['rangeBody']
+  rangeToken: RangeWire['rangeToken']
+  signal: AbortSignal | undefined
+}
+
+interface AnalyticsReportQueryArgs<TData> {
+  namespace: readonly unknown[]
+  serviceId: string | null
+  filterPayload: unknown
+  range: RangeWireArgs
+  keyParts?: readonly unknown[]
+  queryFn: (ctx: AnalyticsReportQueryContext) => Promise<TData>
+  queryOptions?: Omit<
+    UseQueryOptions<TData, Error, TData, readonly unknown[]>,
+    'queryKey' | 'queryFn' | 'placeholderData'
+  >
+}
+
+/**
+ * Centralizes the query shape shared by the SSR-seedable analytics pages.
+ */
+export function useAnalyticsReportQuery<TData>({
+  namespace,
+  serviceId,
+  filterPayload,
+  range,
+  keyParts,
+  queryFn,
+  queryOptions,
+}: AnalyticsReportQueryArgs<TData>) {
+  const { rangeKey, rangeBody, rangeToken } = resolveRangeWire(range)
+  const queryKey: unknown[] = [
+    ...namespace,
+    serviceId,
+    rangeKey,
+    range.anchor,
+    filterPayload,
+    ...(keyParts ?? []),
+  ]
+  return useServiceQuery<TData>(
+    queryKey,
+    ({ signal }) => queryFn({ rangeBody, rangeToken, signal }),
+    queryOptions,
+  )
+}
+
+interface ReportConfigOptions {
+  defaultMetric?: string
+  defaultInterval?: ChartInterval
+  defaultTrend?: string
+}
+
+export interface ReportConfiguration {
+  spanHours: number
+  validIntervals: Set<ChartInterval>
+  validTrends: Set<string>
+  effectiveInterval: ChartInterval
+}
+
+export function useReportConfig(options: ReportConfigOptions = {}) {
+  const { startTime, endTime } = useFilterStore(useShallow(state => ({
+    startTime: state.startTime,
+    endTime: state.endTime,
+  })))
+
+  const [metric, setMetric] = useState(options.defaultMetric || 'requests')
+  const [chartInterval, setChartInterval] = useState<ChartInterval>(options.defaultInterval ?? '1 minute')
+  const [manualInterval, setManualInterval] = useState<string | null>(null)
+  const [trend, setTrend] = useState(options.defaultTrend || 'off')
+
+  const config = useMemo((): ReportConfiguration => {
+    const spanSecs = (!startTime || !endTime) ? 0 : (new Date(endTime).getTime() - new Date(startTime).getTime()) / 1000
+    const spanHours = spanSecs / 3600
+
+    const intervals = new Set(INTERVALS.map(i => i.value))
+
+    if (spanHours > 6) intervals.delete('1 second')
+    if (spanHours > 168) intervals.delete('1 minute')
+    if (spanHours > 720) intervals.delete('1 hour')
+
+    if (spanSecs <= 86400) intervals.delete('1 day')
+    if (spanSecs <= 3600) intervals.delete('1 hour')
+    if (spanSecs <= 60) intervals.delete('1 minute')
+
+    let effectiveInt: ChartInterval = chartInterval
+    if (!manualInterval || !intervals.has(effectiveInt)) {
+      if (spanHours >= 720 && intervals.has('1 day')) effectiveInt = '1 day'
+      else if (spanHours >= 24 && intervals.has('1 hour')) effectiveInt = '1 hour'
+      else if (spanSecs >= 300 && intervals.has('1 minute')) effectiveInt = '1 minute'
+      else if (intervals.has('1 second')) effectiveInt = '1 second'
+      else {
+        const ordered: ChartInterval[] = ['1 day', '1 hour', '1 minute', '1 second']
+        effectiveInt = ordered.find(i => intervals.has(i)) ?? '1 minute'
+      }
+    }
+
+    const trends = new Set(['off', 'auto'])
+    const trendMap: Record<string, number> = { '1m': 60, '5m': 300, '1h': 3600, '1d': 86400 }
+    const curInt = INTERVAL_SECONDS[effectiveInt] || 60
+    for (const [t, secs] of Object.entries(trendMap)) {
+      if (secs > curInt) trends.add(t)
+    }
+
+    return {
+      spanHours: spanHours,
+      validIntervals: intervals,
+      validTrends: trends,
+      effectiveInterval: effectiveInt
+    }
+  }, [startTime, endTime, chartInterval, manualInterval])
+
+  const effectiveInterval = config.effectiveInterval
+  const effectiveTrend = config.validTrends.has(trend) ? trend : 'off'
+
+  return {
+    metric,
+    setMetric,
+    chartInterval: effectiveInterval,
+    setChartInterval: (val: ChartInterval) => {
+      setChartInterval(val)
+      setManualInterval(val)
+    },
+    trend: effectiveTrend,
+    setTrend,
+    config
+  }
+}
+
+export interface InsightsDefaults {
+  windowHours: string
+  baselineHours: string
+  setWindowHours: (value: string) => void
+  setBaselineHours: (value: string) => void
+}
+
+interface Override {
+  sid: string | null | undefined
+  window?: string
+  baseline?: string
+}
+
+const NO_OVERRIDE: Override = { sid: undefined }
+
+export function useInsightsDefaults(
+  activeServiceId: string | null | undefined,
+): InsightsDefaults {
+  const { data } = useQuery({
+    queryKey: queryKeys.logExtents(activeServiceId),
+    queryFn: async () => {
+      return await unwrapClient(client.GET('/api/log-extents'))
+    },
+    enabled: !!activeServiceId,
+    staleTime: 60_000,
+  })
+
+  const adaptive = useMemo(
+    () => pickInsightsDefault(historyHoursFromExtents(data?.earliest_log_at)),
+    [data?.earliest_log_at],
+  )
+
+  const [override, setOverride] = useState<Override>({ sid: activeServiceId })
+  const eff = override.sid === activeServiceId ? override : NO_OVERRIDE
+
+  const windowHours = eff.window ?? adaptive.window
+  const baselineHours = eff.baseline ?? adaptive.baseline
+
+  const setWindowHours = useCallback(
+    (value: string) =>
+      setOverride((prev) => ({
+        sid: activeServiceId,
+        baseline: prev.sid === activeServiceId ? prev.baseline : undefined,
+        window: value,
+      })),
+    [activeServiceId],
+  )
+  const setBaselineHours = useCallback(
+    (value: string) =>
+      setOverride((prev) => ({
+        sid: activeServiceId,
+        window: prev.sid === activeServiceId ? prev.window : undefined,
+        baseline: value,
+      })),
+    [activeServiceId],
+  )
+
+  return { windowHours, baselineHours, setWindowHours, setBaselineHours }
+}
 
 export interface DashboardCard {
   id: string
@@ -14,8 +487,6 @@ export interface DashboardCard {
 
 const NGWAF_CARD_IDS = new Set(['_ngwaf_bot_name', 'waf_sig_ind'])
 
-// Numerical metrics, IPs, and high-cardinality IDs that do not support
-// categorical top-N lists and are excluded from the aggregates endpoint on the backend.
 const NON_TOP_N_FIELDS = new Set([
   'timestamp',
   'elapsed',
@@ -30,7 +501,6 @@ const NON_TOP_N_FIELDS = new Set([
   'waf_req_id',
   'waf_sig',
   '_source_file',
-  // Network quality (Group F/G)
   'tcp_rtt',
   'ploss',
   'rtt_min',
@@ -39,12 +509,10 @@ const NON_TOP_N_FIELDS = new Set([
   'bw',
   'delivery_rate',
   'data_segs_out',
-  // QUIC/HTTP3 (Group K)
   'q_rtt',
   'q_rtt_var',
   'q_lost',
   'q_cwnd',
-  // Origin metrics (Group L)
   'ottfb',
   'ottlb',
   'oconnect_ms',
@@ -52,10 +520,8 @@ const NON_TOP_N_FIELDS = new Set([
   'obytes',
   'oip',
   'oretries',
-  // IO / other stats
   'io_input_bytes',
   'io_output_bytes',
-  // Edge score / threat indicators
   'edge_score',
   'edge_score_l1',
   'edge_score_l2',
@@ -73,12 +539,7 @@ export function useDashboardCards(): DashboardCard[] {
     const excludedGroups = ['METRICS', 'INTERNAL']
     const excludedIds = ['timestamp', 'elapsed', 'req_bytes', 'resp_bytes', 'req_header_bytes', 'ttfb', 'lat', 'lon']
 
-    // VIRTUAL fields aren't in any user-toggleable log group, so the
-    // active_log_field_ids check below would hide them by default. Force-show
-    // them when supported — NGWAF cards are filtered by attachment below.
     const FORCE_VISIBLE = new Set(['_bot_name', ...NGWAF_CARD_IDS])
-    // Cards that ARE in an active group but are noisy and rarely wanted on
-    // the default dashboard (per-request IDs, raw WAF tag blob).
     const FORCE_HIDDEN = new Set(['rid', 'prid', 'waf_sig', 'waf_req_id'])
 
     const activeIds = new Set<string>(bootstrap.active_log_field_ids ?? [])
@@ -91,7 +552,6 @@ export function useDashboardCards(): DashboardCard[] {
 
         const isCustom = f.is_custom || f.group === 'custom'
         if (isCustom) {
-          // Check if it is a system-managed custom field
           const isSystemField =
             f.id.startsWith('cmcd_') ||
             f.id.startsWith('edge_') ||
@@ -102,10 +562,8 @@ export function useDashboardCards(): DashboardCard[] {
             return false
           }
 
-          // For actual user custom fields, only show if user asked to show on dashboard
           return !!f.show_in_dashboard
         } else {
-          // For built-in fields, only show if they are explicitly categorized and support top-N
           return CATEGORIZED_CARD_IDS.has(f.id) && !NON_TOP_N_FIELDS.has(f.id)
         }
       })
@@ -123,7 +581,6 @@ export function useDashboardCards(): DashboardCard[] {
 
     const customCards: DashboardCard[] = (bootstrap.custom_dashboard_cards ?? [])
       .filter(c => {
-        // Exclude system fields from bootstrap custom cards too
         const isSystemField =
           c.id.startsWith('cmcd_') ||
           c.id.startsWith('edge_') ||
@@ -188,28 +645,11 @@ export function usePlotlyRangeZoom(
 }
 
 interface CardVisibilityMigration {
-  /** Bump when the set of IDs to retire or surface changes. Stored under `<storageKey>_mv`. */
   version: number
-  /** IDs to strip from the saved set on first load after a version bump. */
   removeIds?: string[]
-  /** IDs to insert into the saved set on first load after a version bump. */
   addIds?: string[]
 }
 
-/**
- * Persists a Set of visible card IDs to localStorage and keeps it in sync
- * across re-renders.
- *
- * @param storageKey   - The localStorage key to persist under.
- * @param allIds       - Every possible card ID (used to build the "show all" set).
- * @param defaultIds   - Optional subset of `allIds` to use as the initial visible set
- *                       (e.g., fields currently in the active log format). If omitted,
- *                       defaults to `allIds`.
- * @param migration    - Optional one-time prune. When `version` exceeds the stored
- *                       `<storageKey>_mv` value, `removeIds` are stripped from the
- *                       saved set and the new version is recorded. Lets us retire
- *                       cards from existing browsers without nuking other choices.
- */
 export function useCardVisibility(
   storageKey: string,
   allIds: string[],
@@ -253,13 +693,6 @@ export function useCardVisibility(
     return defaultVisible
   }, [storageKey, defaultVisible, migrationKey, migrationVersion, migrationRemoveStr, migrationAddStr])
 
-  // SSR-safe: the hydration render ALWAYS uses the deterministic default set. Reading
-  // localStorage there made the first client render diverge from the server's default-set
-  // render (React #418 on /charts and the dashboard for users who had toggled cards). Once
-  // mounted, the persisted value (with the migration applied) takes over; it re-derives
-  // whenever `load` changes (e.g. allCards arriving from the catalog query). A user edit is
-  // tied to the `load` it was made under, so a later `load` change re-reads storage (which
-  // already holds the edit).
   const mounted = useMounted()
   const [edit, setEdit] = useState<{ source: typeof load; set: Set<string> } | null>(null)
   const stored = useMemo(() => (mounted ? load() : defaultVisible), [mounted, load, defaultVisible])

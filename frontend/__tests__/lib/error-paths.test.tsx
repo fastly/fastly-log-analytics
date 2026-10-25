@@ -28,7 +28,7 @@
  */
 import { renderHook, waitFor } from '@testing-library/react'
 import { useQuery } from '@tanstack/react-query'
-import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
+import { createTestQueryClient, makeQueryWrapper } from '../helpers/page-smoke'
 import { http, HttpResponse } from 'msw'
 import childProcess, { ChildProcess, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -37,7 +37,7 @@ import { EventEmitter } from 'node:events'
 import { join } from 'node:path'
 import { afterEach, describe, it, expect, beforeEach, vi } from 'vitest'
 
-import { server } from '@/__tests__/helpers/msw/server'
+import { server } from '@/__tests__/helpers/msw/handlers'
 
 vi.mock('../../playwright.config', () => ({
   E2E_BACKEND_PORT: 18004,
@@ -274,7 +274,7 @@ describe('backend harness child isolation', () => {
   })
 
   it.each(['contract', 'e2e'])('%s rejects deployment env before spawning uv', async (harness) => {
-    const contract = await import('../helpers/setup-backend')
+    const contract = await import('../helpers/msw/handlers')
     try {
       if (harness === 'contract') {
         await contract.startBackend()

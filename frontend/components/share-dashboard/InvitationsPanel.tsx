@@ -21,12 +21,12 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { client, extractApiError } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 
 import { CreateInviteDialog } from './CreateInviteDialog'
-import { SortableHead, useShareMutation, useTableSort, type Invite, type ShareStatus, type SortAccessors } from './sortable'
+import { SortableHead, useShareMutation, useTableSort, type Invite, type ShareStatus, type SortAccessors } from './SharingControlPanel'
 import { formatDeterministicUTC } from '@/lib/date'
-import { useAutoFlash, useCopyToClipboard } from '@/hooks/useAutoFlash'
+import { useAutoFlash, useCopyToClipboard } from '@/hooks/useAdminEventStream'
 
 interface InvitationsPanelProps {
   status: ShareStatus | null

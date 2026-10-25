@@ -25,19 +25,252 @@ import logging
 import os
 import re
 import secrets
+import sys
+import threading
 import time
-from urllib.parse import urlparse
+from collections import OrderedDict, deque
+from collections.abc import Callable
+from typing import Literal
+from urllib.parse import urlparse, urlsplit
 
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse, Response
-
-from backend.core import share_db
-from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS
-from backend.utils.rate_limit import SlidingWindowLimiter
-from backend.utils.tunnel import compute_fingerprint, get_tunnel_manager
+from starlette.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Single in-process sliding-window limiter (folded from backend.utils.rate_limit)
+# ---------------------------------------------------------------------------
+
+
+class SlidingWindowLimiter:
+    def __init__(
+        self,
+        *,
+        window_s: float,
+        max_keys: int,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self.window_s = window_s
+        self.max_keys = max_keys
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._events: OrderedDict[str, deque[tuple[float, int]]] = OrderedDict()
+        self._locks: OrderedDict[str, float] = OrderedDict()
+
+    @property
+    def MAX_TRACKED_IPS(self) -> int:
+        return self.max_keys
+
+    @MAX_TRACKED_IPS.setter
+    def MAX_TRACKED_IPS(self, value: int) -> None:
+        self.max_keys = value
+
+    def _now(self) -> float:
+        return self._clock() if self._clock is not None else time.time()
+
+    def _prune_key(self, key: str, cutoff: float) -> deque[tuple[float, int]]:
+        events = self._events.get(key)
+        if events is None:
+            return deque()
+        while events and events[0][0] < cutoff:
+            events.popleft()
+        return events
+
+    def _store(self, key: str, events: deque[tuple[float, int]], cutoff: float) -> None:
+        self._events[key] = events
+        self._events.move_to_end(key)
+        while self._events:
+            oldest, history = next(iter(self._events.items()))
+            if history and history[-1][0] >= cutoff:
+                break
+            del self._events[oldest]
+        while len(self._events) > self.max_keys:
+            self._events.popitem(last=False)
+
+    def try_acquire(
+        self,
+        key: str,
+        weight: int = 0,
+        *,
+        max_events: int | None = None,
+        max_weight: int | None = None,
+    ) -> bool:
+        """Admit one event if the key is under ``max_events`` in the window."""
+        with self._lock:
+            now = self._now()
+            cutoff = now - self.window_s
+            events = self._prune_key(key, cutoff)
+            if max_events is not None and len(events) >= max_events:
+                self._store(key, events, cutoff)
+                return False
+            events.append((now, max(0, int(weight))))
+            self._store(key, events, cutoff)
+            return max_weight is None or sum(w for _, w in events) <= max_weight
+
+    def strike(self, key: str, *, threshold: int, lockout_s: float, max_locks: int | None = None) -> bool:
+        """Record one failure; return True iff this call starts a NEW lockout."""
+        with self._lock:
+            now = self._now()
+            cutoff = now - self.window_s
+            events = self._prune_key(key, cutoff)
+            events.append((now, 1))
+            self._store(key, events, cutoff)
+            if len(events) >= threshold and key not in self._locks:
+                self._locks[key] = now + lockout_s
+                while len(self._locks) > (max_locks if max_locks is not None else self.max_keys):
+                    self._locks.popitem(last=False)
+                return True
+            return False
+
+    def is_locked(self, key: str) -> tuple[bool, int]:
+        """``(locked, remaining_seconds)``; an expired lockout is dropped."""
+        with self._lock:
+            until = self._locks.get(key)
+            if until is None:
+                return False, 0
+            now = self._now()
+            if now >= until:
+                del self._locks[key]
+                return False, 0
+            return True, int(until - now)
+
+    def snapshot(self) -> tuple[dict[str, int], dict[str, int]]:
+        """``(live_event_counts, remaining_lockout_seconds)`` with stale state pruned."""
+        with self._lock:
+            now = self._now()
+            cutoff = now - self.window_s
+            counts: dict[str, int] = {}
+            for key in list(self._events):
+                events = self._prune_key(key, cutoff)
+                if events:
+                    counts[key] = len(events)
+                else:
+                    del self._events[key]
+            locks: dict[str, int] = {}
+            for key, until in list(self._locks.items()):
+                if until <= now:
+                    del self._locks[key]
+                else:
+                    locks[key] = int(until - now)
+            return counts, locks
+
+
+# ---------------------------------------------------------------------------
+# Shared analyst-scope helpers (folded from backend.utils.auth)
+# ---------------------------------------------------------------------------
+
+ANALYST_SESSION_COOKIE = "analyst_session_id"
+ANALYST_PENDING_SESSION_COOKIE = "analyst_pending_session_id"
+
+
+def analyst_cookie_is_secure(request: Request, public_url: str | None) -> bool:
+    """Keep analyst bearer cookies secure when TLS terminates at a proxy."""
+    if request.url.scheme.lower() == "https":
+        return True
+    if not public_url:
+        return False
+    try:
+        parsed = urlsplit(public_url)
+    except ValueError:
+        return False
+    return parsed.scheme.lower() == "https" and bool(parsed.netloc)
+
+
+def set_analyst_session_cookies(
+    response: Response,
+    session_id: str,
+    *,
+    tos_pending: bool,
+    secure: bool,
+    samesite: Literal["strict", "lax"] = "strict",
+) -> None:
+    """Issue the active or TOS-pending analyst session cookie and clear the counterpart."""
+    target_cookie = ANALYST_PENDING_SESSION_COOKIE if tos_pending else ANALYST_SESSION_COOKIE
+    other_cookie = ANALYST_SESSION_COOKIE if tos_pending else ANALYST_PENDING_SESSION_COOKIE
+    response.set_cookie(
+        key=target_cookie,
+        value=session_id,
+        httponly=True,
+        secure=secure,
+        samesite=samesite,
+        max_age=24 * 60 * 60,
+        path="/",
+    )
+    response.delete_cookie(other_cookie, path="/")
+
+
+def safe_audit_email(email: str | None) -> str:
+    """Bound + strip an unauth-supplied email before it reaches the audit log."""
+    if not email:
+        return "-"
+    cleaned = "".join(c for c in email if c.isprintable())
+    return cleaned[:254] or "-"
+
+
+def analyst_allowed_services(request: Request) -> set[str] | None:
+    """Return the set of service IDs the caller (analyst session) can see,
+    or ``None`` for admin requests (no scope restriction).
+    """
+    analyst_session = getattr(request.state, "analyst_session", None)
+    if analyst_session is None:
+        return None
+    return set(analyst_session.service_ids or [])
+
+
+def require_service_in_scope(request: Request, service_id: str | None) -> set[str] | None:
+    """Raise 403 ``service_not_authorized`` when the caller's analyst scope
+    excludes ``service_id``; return the allowed-service set (``None`` for
+    admins).
+    """
+    allowed = analyst_allowed_services(request)
+    if allowed is not None and service_id not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "service_not_authorized", "service": service_id},
+        )
+    return allowed
+
+
+def require_owned_row(
+    request: Request,
+    service_id: str,
+    row_id: str,
+    fetch: Callable[[str, str], dict | None],
+) -> dict | None:
+    """Pre-mutation cross-tenant gate for a row addressed by ``(service_id, row_id)``."""
+    allowed = require_service_in_scope(request, service_id)
+    if allowed is None:
+        return None
+    existing = fetch(row_id, service_id)
+    if existing and existing.get("service_id") not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "service_not_authorized", "service": existing.get("service_id")},
+        )
+    return existing
+
+
+def mask_ips_for(analyst_session: object | None) -> bool:
+    """Return ``True`` iff the analyst's invite carries ``mask_ips``."""
+    if analyst_session is None:
+        return False
+    policy = getattr(analyst_session, "pii_policy", None)
+    return bool(policy.get("mask_ips")) if isinstance(policy, dict) else False
+
+
+sys.modules["backend.utils.rate_limit"] = sys.modules[__name__]
+sys.modules["backend.utils.auth"] = sys.modules[__name__]
+_utils_pkg = sys.modules.get("backend.utils")
+if _utils_pkg is not None:
+    _utils_pkg.rate_limit = sys.modules[__name__]  # type: ignore[attr-defined]
+    _utils_pkg.auth = sys.modules[__name__]  # type: ignore[attr-defined]
+
+from backend.core import share_db  # noqa: E402
+from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS  # noqa: E402
+from backend.utils.tunnel import compute_fingerprint, get_tunnel_manager  # noqa: E402
 
 ADMIN_GATEWAY_HEADER = "X-Admin-Gateway-Token"
 

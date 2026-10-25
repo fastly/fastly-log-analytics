@@ -1241,12 +1241,12 @@ function loadFrontend(relativePath) {
 function resolveNavigation(href) {
   frontendWindow.location = {href, search: new URL(href).search};
   const {useFilterStore} = loadFrontend('stores/filterStore.ts');
-  const hydration = loadFrontend('lib/urlFilterHydration.ts');
+  const utilsMod = loadFrontend('lib/utils.ts');
   useFilterStore.getState().resetAll();
-  hydration._resetUrlHydrationFlag();
-  hydration.hydrateFilterStoreFromUrl();
+  utilsMod._resetUrlHydrationFlag();
+  utilsMod.hydrateFilterStoreFromUrl();
   const state = useFilterStore.getState();
-  return loadFrontend('lib/range-wire.ts').resolveRangeWire({...state, anchor: state.endTime});
+  return utilsMod.resolveRangeWire({...state, anchor: state.endTime});
 }
 """
 

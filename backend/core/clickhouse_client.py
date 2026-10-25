@@ -12,21 +12,25 @@ from __future__ import annotations
 import json
 import math
 import re
+import sys
 import threading
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from functools import cache, partial
 from ipaddress import IPv4Address, IPv6Address
 from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
 import structlog
+from opentelemetry.metrics import Observation
 
 from backend import config
-from backend.core.high_scale_sections import current_clickhouse_scope
 from backend.core.query_registry import query_registry
+from backend.core.request_telemetry import current_clickhouse_scope, get_meter
 from backend.utils.telemetry import _QUERIES, get_queries, record_call
 
 logger = structlog.get_logger(__name__)
@@ -661,4 +665,159 @@ def close_clickhouse_client() -> None:
         client.close()
 
 
-from backend.core.clickhouse_observer import record_operation  # noqa: E402
+# ── ClickHouse OTel Observer & Metrics (formerly backend.core.clickhouse_observer) ──
+
+
+@cache
+def _instrument(name: str, kind: str, unit: str = ""):
+    meter = get_meter()
+    create = meter.create_histogram if kind == "histogram" else meter.create_counter
+    return create(f"app.clickhouse_{name}", unit=unit)
+
+
+def record_operation(stats: dict) -> None:
+    if stats["operation"] not in {"execute", "insert"}:
+        return
+    try:
+        insert = stats["operation"] == "insert"
+        _instrument("insert_duration_ms" if insert else "query_duration_ms", "histogram", "ms").record(
+            stats["duration_ms"], {"outcome": stats["outcome"]}
+        )
+        for phase in ("admission_wait_ms", "network_ms", "decode_ms", "server_elapsed_ms"):
+            value = stats.get(phase)
+            if value is not None:
+                _instrument(phase, "histogram", "ms").record(
+                    value, {"operation": stats["operation"], "outcome": stats["outcome"]}
+                )
+        if not insert:
+            _instrument("queries_total", "counter").add(1, {"outcome": stats["outcome"]})
+        elif stats["outcome"] == "success":
+            # Physical acknowledged rows, including identical retry copies.
+            _instrument("rows_inserted_total", "counter").add(stats["rows_written"])
+        _instrument("bytes_read", "counter", "By").add(stats["bytes_read"])
+    except Exception:
+        logger.debug("record_operation: _instrument failed (ignored)", exc_info=True)
+
+
+def record_publication(outcome: str) -> None:
+    try:
+        _instrument("publications_total", "counter").add(1, {"outcome": outcome})
+    except Exception:
+        logger.debug("record_publication: _instrument failed (ignored)", exc_info=True)
+
+
+def __getattr__(name: str):
+    if name == "PgManifest":
+        from backend.core.clickhouse_manifest import PgManifest
+
+        return PgManifest
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+class ClickHouseObserver:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._client: ClickHouseClient | None = None
+        self._registered = False
+        self._sampled_at = 0.0
+        self._values: dict[str, float] = {}
+
+    def start(self, client: ClickHouseClient) -> None:
+        with self._lock:
+            if self._client is not None:
+                client.close()
+                return
+            self._client = client
+            self._sampled_at = 0
+            if not self._registered:
+                meter = get_meter()
+                for key, name, unit in (
+                    ("up", "up", ""),
+                    ("disk_free", "disk_free", "By"),
+                    ("disk_total", "disk_total", "By"),
+                    ("lag", "publication_lag_seconds", "s"),
+                ):
+                    meter.create_observable_gauge(
+                        f"app.clickhouse_{name}",
+                        callbacks=[partial(self.observe, key)],
+                        unit=unit,
+                    )
+                self._registered = True
+
+    def observe(self, key: str, options=None) -> list[Observation]:
+        # All four callbacks run on the exporter, never the serving path.
+        with self._lock:
+            if self._client is None:
+                return []
+            if time.monotonic() - self._sampled_at >= 10:
+                values: dict[str, float] = {"up": 0}
+                try:
+                    values.update(self._client.storage_health())
+                except Exception as exc:
+                    self._log_error("storage", exc)
+                try:
+                    from backend.core.clickhouse_manifest import PgManifest as _PgManifest
+
+                    manifest_cls = globals().get("PgManifest", _PgManifest)
+                    values["lag"] = manifest_cls().publication_lag_seconds()
+                except Exception as exc:
+                    self._log_error("manifest", exc)
+                self._values = values
+                self._sampled_at = time.monotonic()
+            value = self._values.get(key)
+            return [] if value is None else [Observation(value)]
+
+    @staticmethod
+    def _log_error(probe: str, exc: Exception) -> None:
+        try:
+            logger.warning("clickhouse.observe_failed", probe=probe, error_kind=type(exc).__name__)
+        except Exception:
+            logger.debug("_log_error: logger.warning failed (ignored)", exc_info=True)
+
+    def stop(self) -> None:
+        with self._lock:
+            client, self._client = self._client, None
+            self._values = {}
+        if client is not None:
+            client.close()
+
+
+_observer = ClickHouseObserver()
+
+
+def start_clickhouse_observer() -> None:
+    try:
+        settings = config.load_clickhouse_config()
+        if settings is None:
+            return
+        client_cls = globals().get("ClickHouseClient", ClickHouseClient)
+        # Do not contend with serving admission or inherit long query timeouts.
+        client = client_cls(
+            replace(
+                settings,
+                pool_max_size=1,
+                connect_timeout_s=2,
+                query_timeout_s=2,
+                pool_timeout_s=2,
+            )
+        )
+        _observer.start(client)
+    except Exception as exc:
+        stop_clickhouse_observer()
+        _observer._log_error("startup", exc)
+
+
+def stop_clickhouse_observer() -> None:
+    try:
+        _observer.stop()
+    except Exception as exc:
+        _observer._log_error("shutdown", exc)
+
+
+_this_module = sys.modules[__name__]
+sys.modules["backend.core.clickhouse_observer"] = _this_module
+sys.modules["backend.core.clickhouse_metrics"] = _this_module
+_core_pkg = sys.modules.get("backend.core")
+if _core_pkg is not None:
+    setattr(_core_pkg, "clickhouse_observer", _this_module)
+    setattr(_core_pkg, "clickhouse_metrics", _this_module)

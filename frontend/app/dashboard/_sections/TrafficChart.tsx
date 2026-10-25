@@ -1,7 +1,7 @@
 'use client'
 
 import React from 'react'
-import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
+import { TimeSeriesChart } from '@/components/AnalyticsCard'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { ButtonGroup } from '@/components/ui/button-group'
 import {
@@ -12,11 +12,11 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { TRENDS } from '@/lib/constants'
-import { useActiveLogFields } from '@/hooks/useLogFieldsCatalog'
+import { TRENDS } from '@/lib/utils'
+import { useActiveLogFields } from '@/hooks/useBootstrap'
 import type { PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/plotly'
-import type { ReportConfiguration } from '@/hooks/useReportConfig'
-import type { DashboardAggregates, DashboardCatalog } from './categories'
+import type { ReportConfiguration } from '@/hooks/useDashboardCards'
+import type { DashboardAggregates, DashboardCatalog } from './CardGrid'
 
 interface TrafficChartProps {
   catalog: DashboardCatalog | undefined

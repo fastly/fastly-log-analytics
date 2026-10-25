@@ -3,11 +3,185 @@
 from __future__ import annotations
 
 import os as _os
+import sys
+from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, AliasChoices, BaseModel, Field, field_validator, model_serializer
+from fastapi.encoders import jsonable_encoder
+from pydantic import (
+    AfterValidator,
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    PlainSerializer,
+    field_validator,
+    model_serializer,
+)
 
-from backend.models._base import ClickHouseQueryObservation, WireSafeModel  # noqa: F401 (re-exported)
+
+class MetricType(StrEnum):
+    """Available metrics for timeseries and analysis endpoints."""
+
+    REQUESTS = "requests"
+    ERRORS_5XX = "5xx"
+    ERRORS_4XX = "4xx"
+    HIT_RATE = "hit_rate"
+    LATENCY_P95 = "p95_latency"
+    THROUGHPUT = "throughput"
+    REQ_SIZE = "req_size"
+    TTFB = "ttfb"
+    SPECIFIC_STATUS = "specific_status"
+
+
+class ClickHouseQueryObservation(BaseModel):
+    query_id: str
+    request_id: str | None = None
+    page_load_id: str | None = None
+    service_id: str | None = None
+    component: str | None = None
+    section: str | None = None
+    section_id: str | None = None
+    parent_section_id: str | None = None
+    source: Literal["fact", "projection", "projected_fact", "mixed", "unknown"] = "unknown"
+    outcome: Literal["success", "error", "timeout"]
+    client_elapsed_ms: float = Field(ge=0, allow_inf_nan=False)
+    admission_wait_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    network_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    decode_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    server_elapsed_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    server_elapsed_source: Literal["statistics.elapsed"] | None = None
+    server_cpu_ms: None = None
+    timing_kind: Literal["client_operation_wall"] = "client_operation_wall"
+
+
+class PassthroughModel(BaseModel):
+    """Read model that tolerates unknown keys (``extra="allow"``)."""
+
+    model_config = ConfigDict(extra="allow")
+
+    def __getitem__(self, key: str) -> Any:
+        if key in type(self).model_fields:
+            return getattr(self, key)
+        extra = self.__pydantic_extra__ or {}
+        if key in extra:
+            return extra[key]
+        raise KeyError(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __contains__(self, key: object) -> bool:
+        if not isinstance(key, str):
+            return False
+        extra = self.__pydantic_extra__ or {}
+        return (
+            key in self.model_fields_set
+            or key in extra
+            or (key in type(self).model_fields and getattr(self, key) is not None)
+        )
+
+
+class WireSafeModel(PassthroughModel):
+    """``extra="allow"`` model whose serialization omits never-set fields.
+
+    Nested use inside a model whose route does not pass
+    ``response_model_exclude_unset=True`` would otherwise emit every declared
+    optional field as ``null``. Dropping unset declared fields here keeps the
+    wire payload byte-identical to the dict the producer built.
+    """
+
+    @model_serializer(mode="wrap")
+    def _drop_unset(self, handler):
+        data = handler(self)
+        fields = type(self).model_fields
+        for name in fields.keys() - self.model_fields_set:
+            data.pop(name, None)
+            info = fields[name]
+            for alias in (info.alias, info.serialization_alias):
+                if alias:
+                    data.pop(alias, None)
+        return data
+
+
+class SchemaColumn(WireSafeModel):
+    column: str | None = None
+    name: str = ""
+    type: str
+    min: str | None = None
+    max: str | None = None
+    approx_unique: int | None = None
+    null_percentage: float | None = None
+    count: int | None = None
+
+
+# One cell of a raw-log row: VARCHAR, the integer/float widths and BOOLEAN pass through; TIMESTAMP
+# columns arrive already serialized to ISO strings.
+ScalarCell = str | int | float | bool | None
+
+# DB/cache-native values (Decimal, tz-aware datetimes, bytes) encode differently under
+# pydantic's JSON mode than under ``jsonable_encoder`` (the pre-typing wire path, e.g.
+# ``+00:00`` vs ``Z``). These aliases keep the old encoding while the OpenAPI schema
+# still advertises the row/dict shape.
+JsonRows = Annotated[
+    list[dict[str, Any]], PlainSerializer(jsonable_encoder, return_type=list[dict[str, Any]], when_used="json")
+]
+JsonAny = Annotated[Any, PlainSerializer(jsonable_encoder, when_used="json")]
+JsonDict = Annotated[dict[str, Any], PlainSerializer(jsonable_encoder, return_type=dict[str, Any], when_used="json")]
+
+
+class ErrorDetail(PassthroughModel):
+    """Inner detail object for the canonical error envelope.
+
+    Allows extra fields because a handful of historical 403 sites attach
+    context (``service``, ``invite_id``, etc.) alongside the canonical
+    ``error`` code. Locking the shape down would force a coordinated
+    rewrite of those handlers without changing observable behavior — the
+    frontend's ``extractApiError`` already keys on ``detail.error`` and
+    ignores extras.
+    """
+
+    error: str
+    """Machine-readable code the frontend keys on (e.g. ``"not_found"``)."""
+    error_id: str | None = None
+    """Server-side correlation id; populated by ``raise_internal`` on 5xx."""
+    messages: list[str] | None = None
+    """Optional human-readable messages, populated by ``validation_failed``."""
+
+
+class ErrorEnvelope(BaseModel):
+    """Canonical FastAPI HTTPException envelope shape."""
+
+    detail: ErrorDetail
+
+
+# ── Default responses= mapping ────────────────────────────────────────────────
+#
+# Apply to every router via ``APIRouter(responses=DEFAULT_ERROR_RESPONSES)``
+# so the OpenAPI schema documents every error code the router tree actually
+# raises. Per-endpoint ``responses=`` keyword arguments still override these
+# entries when an endpoint needs a more specific shape (e.g. the 415 from
+# provision.check_fos which uses an HTTP-standard reason phrase).
+DEFAULT_ERROR_RESPONSES: dict[int | str, dict] = {
+    400: {"model": ErrorEnvelope, "description": "Bad request"},
+    401: {"model": ErrorEnvelope, "description": "Unauthenticated"},
+    403: {"model": ErrorEnvelope, "description": "Forbidden"},
+    404: {"model": ErrorEnvelope, "description": "Not found"},
+    422: {"model": ErrorEnvelope, "description": "Validation failed"},
+    429: {"model": ErrorEnvelope, "description": "Rate limited"},
+    500: {"model": ErrorEnvelope, "description": "Internal error"},
+    502: {"model": ErrorEnvelope, "description": "Upstream error"},
+    503: {"model": ErrorEnvelope, "description": "Service unavailable"},
+}
+
+_self_mod = sys.modules[__name__]
+sys.modules["backend.models._base"] = _self_mod
+_models_pkg = sys.modules.get("backend.models")
+if _models_pkg is not None:
+    setattr(_models_pkg, "_base", _self_mod)
 
 
 class LogFieldCatalogEntry(WireSafeModel):
@@ -413,7 +587,6 @@ class LastSyncInfo(WireSafeModel):
     duration_s: float | None = None
 
 
-from backend.models._base import SchemaColumn  # noqa: E402
 from backend.models.admin import (  # noqa: E402
     LogAccountingResponse,
     LogExtentsResponse,
@@ -723,3 +896,23 @@ class AlertTestWebhookResponse(BaseResponse):
 
 class _ToggleBody(BaseModel):
     enabled: bool
+
+
+UxTelemetryPayload = UxEventPayload
+WebVitalPayload = WebVitalsPayload
+
+
+def __getattr__(name: str) -> Any:
+    if name in ("DebugStateResponse", "RecentSqliteResponse", "ClearSqliteResponse"):
+        from backend.models import services as _svc_models
+
+        return getattr(_svc_models, name)
+    if name == "StatusResponse":
+        from backend.models import services as _svc_models
+
+        return _svc_models.ClearSqliteResponse
+    if name == "PageTelemetryResponse":
+        from backend.models import admin_actions as _admin_act_models
+
+        return _admin_act_models.PageTelemetryResponse
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

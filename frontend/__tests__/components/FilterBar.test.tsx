@@ -3,7 +3,7 @@
  *
  * Consolidated tests for FilterBar, ActiveFiltersBanner, AddFilterDialogContent, and FilterValueCell.
  */
-import { stubResizeObserver, stubPointerCaptureAndScroll } from '@/__tests__/helpers/browser-stubs'
+import { stubResizeObserver, stubPointerCaptureAndScroll } from '@/__tests__/helpers/page-smoke'
 import { render, screen, cleanup, act, fireEvent, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeEach, beforeAll, afterEach } from 'vitest'
@@ -11,7 +11,7 @@ import { axe } from 'vitest-axe'
 import React from 'react'
 import { FilterBar, ActiveFiltersBanner } from '@/components/FilterBar/FilterBar'
 import { AddFilterDialogContent } from '@/components/FilterBar/AddFilterDialog'
-import { FilterValueCell, buildDashboardFilterUrl } from '@/components/FilterValueCell'
+import { FilterValueCell, buildDashboardFilterUrl } from '@/components/DataTable'
 import { Dialog } from '@/components/ui/dialog'
 import { useFilterStore } from '@/stores/filterStore'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -40,12 +40,11 @@ vi.mock('@tanstack/react-query', async () => {
   }
 })
 
-vi.mock('@/hooks/useIsAnalyst', () => ({
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
   useIsAnalyst: () => false,
   useMaskIps: () => maskIps,
   useEnforceMaskedFilters: () => {},
-}))
-vi.mock('@/hooks/useLogFieldsCatalog', () => ({
   useLogFieldsCatalog: () => ({ data: undefined }),
   useFieldLabel: () => (f: string) => f,
   useFieldValues: () => ({ data: { values: suggestionValues }, isLoading: false }),
@@ -53,8 +52,8 @@ vi.mock('@/hooks/useLogFieldsCatalog', () => ({
 vi.mock('@/components/ui/scroll-area', () => ({
   ScrollArea: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
 }))
-vi.mock('@/hooks/useFilterPayload', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/hooks/useFilterPayload')>()),
+vi.mock('@/hooks/useDashboardCards', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useDashboardCards')>()),
   useDebounce: (v: string) => v,
 }))
 

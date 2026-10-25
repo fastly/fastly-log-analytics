@@ -13,7 +13,7 @@ import {
   type RepeatedPatternsFpItem,
   type RepeatedPatternsItem,
   type ScriptedTrafficData,
-} from './shared'
+} from '@/components/Insights/InsightCard'
 
 import { formatCount, formatCountMaybe } from '@/lib/format'
 

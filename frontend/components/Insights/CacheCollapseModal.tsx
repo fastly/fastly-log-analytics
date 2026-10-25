@@ -11,19 +11,19 @@ import {
 } from '@/components/ui/dialog'
 import { useQuery } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
-import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
-import { useDateFormat } from '@/hooks/useDateFormat'
+import { TimeSeriesChart } from '@/components/AnalyticsCard'
+import { useDateFormat } from '@/hooks/useSSE'
 import { AlertCircle, Loader2, Clock, Activity, ShieldAlert, FileText, CheckCircle2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { CHART_COLORS } from '@/lib/chart-builders'
+import { CHART_COLORS } from '@/lib/chart-helpers'
 
 import { formatCount, statusBadgeClass } from '@/lib/format'
 import type { ColumnDef } from '@tanstack/react-table'
 import { DataTableReadonly } from '@/components/DataTable'
 import type { components } from '@/types/api.generated'
-import { InsightStatCard } from './shared'
+import { InsightStatCard } from '@/components/Insights/InsightCard'
 
 type CacheMiss = components['schemas']['CacheMissPoint']
 interface CacheCollapseModalProps {

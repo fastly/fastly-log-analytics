@@ -1,6 +1,7 @@
 'use client'
 
-import { useDerivedState, useOpenGeneration } from '@/hooks/useDerivedState'
+import { useQuery } from '@tanstack/react-query'
+import { useDerivedState, useOpenGeneration } from '@/hooks/useSSE'
 import React, { useState } from 'react'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -10,12 +11,178 @@ import { Switch } from '@/components/ui/switch'
 import {
   AlertTriangle,
   Trash2,
-  AlertCircle
+  AlertCircle,
+  HardDrive,
+  Cloud,
 } from 'lucide-react'
 import { useSSE } from '@/hooks/useSSE'
 import { SSEActionDialogShell, SSEExecutionSection } from '@/components/SSEModal'
+import { client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api'
+import { formatBytes, formatCount } from '@/lib/format'
+import { queryKeys } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 import type { ServiceConfig } from '@/types/api'
+
+interface DeleteDataDialogProps {
+  service: ServiceConfig | null
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onComplete?: () => void
+}
+
+export function DeleteDataDialog(props: DeleteDataDialogProps) {
+  const { service, open } = props
+  const generation = useOpenGeneration(open)
+  return <DeleteDataDialogBody key={`${service?.service_id ?? ''}|${generation}`} {...props} />
+}
+
+function DeleteDataDialogBody({ service, open, onOpenChange, onComplete }: DeleteDataDialogProps) {
+  const [isExecuting, setIsExecuting] = useState(false)
+  const [confirmText, setConfirmText] = useState('')
+  const { lines, status, error: sseError, start, stop } = useSSE()
+
+  const serviceId = service?.service_id
+  const { data: icebergInfo, isLoading: icebergLoading } = useQuery({
+    queryKey: queryKeys.admin.icebergInfo(serviceId),
+    queryFn: async () => {
+      return unwrapClient(client.GET('/api/admin/iceberg-info', {
+        params: { query: { service_id: serviceId } as Record<string, string> },
+      }))
+    },
+    enabled: open && !isExecuting && !!serviceId,
+    staleTime: 30_000,
+  })
+
+  if (!service) return null
+
+  const canExecute = confirmText.trim() === service.name
+
+  const handleExecute = () => {
+    if (!canExecute) return
+    setIsExecuting(true)
+    start(`/api/admin/reset-logs?service_id=${encodeURIComponent(service.service_id)}`, {
+      confirm: service.service_id,
+    })
+  }
+
+  return (
+    <SSEActionDialogShell
+      open={open}
+      onOpenChange={onOpenChange}
+      onComplete={onComplete}
+      status={status}
+      onStop={stop}
+      isExecuting={isExecuting}
+      maxWidthClassName="sm:max-w-lg"
+      title={<><AlertTriangle className="h-6 w-6" />Delete Data: {service.name}</>}
+      executionSection={
+        <SSEExecutionSection
+          title="Deleting Log Data"
+          subtitle="Please do not close this window until the process is complete."
+          lines={lines}
+          status={status}
+          error={sseError}
+          heightClassName="h-[320px]"
+          progressLabel="Progress"
+          doneMessage="Log data deleted. You may now close this window."
+        />
+      }
+      confirmButton={
+        <Button
+          variant="destructive"
+          className="h-10 px-8 font-bold"
+          onClick={handleExecute}
+          disabled={!canExecute}
+          title={!canExecute ? `Type "${service.name}" to confirm` : undefined}
+        >
+          Delete Data
+        </Button>
+      }
+    >
+      <div className="p-8 space-y-6">
+        <Alert variant="destructive" className="bg-destructive/5 text-destructive border-destructive/20">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription className="text-[13px] ml-1 font-medium">
+            {service.is_high_scale
+              ? "This permanently deletes all of this service's log data from the high-scale ClickHouse cluster. New logs from the live edge will start populating immediately afterward. This cannot be undone."
+              : "This permanently deletes all of this service's log data — both local (the analytical database and cache) and cloud-stored (the Iceberg log table in Fastly Object Storage). New logs from the live edge will start populating immediately afterward. This cannot be undone."
+            }
+          </AlertDescription>
+        </Alert>
+
+        {!service.is_high_scale ? (
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 space-y-1">
+              <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                <HardDrive className="h-3 w-3" /> Local
+              </div>
+              <div className="text-lg font-mono font-bold tracking-tight">
+                {formatBytes(service.duckdb_size_bytes ?? 0)}
+              </div>
+              <div className="text-[11px] text-muted-foreground">
+                {formatCount(service.cache_file_count ?? 0)} file{service.cache_file_count === 1 ? '' : 's'}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 space-y-1">
+              <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                <Cloud className="h-3 w-3" /> Cloud
+              </div>
+              {icebergLoading ? (
+                <div className="text-lg font-mono font-bold tracking-tight text-muted-foreground">…</div>
+              ) : (
+                <>
+                  <div className="text-lg font-mono font-bold tracking-tight">
+                    {formatBytes(icebergInfo?.size_bytes ?? 0)}
+                  </div>
+                  <div className="text-[11px] text-muted-foreground">
+                    {formatCount(icebergInfo?.data_files ?? 0)} file{icebergInfo?.data_files === 1 ? '' : 's'}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="grid gap-3">
+            <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 space-y-1">
+              <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                <HardDrive className="h-3 w-3" /> Analytics Cluster
+              </div>
+              <div className="text-sm font-medium tracking-tight">
+                High-Scale ClickHouse Backend
+              </div>
+              <div className="text-[11px] text-muted-foreground">
+                Data deletion is synchronous and cluster-wide.
+              </div>
+            </div>
+          </div>
+        )}
+
+        <p className="text-xs text-muted-foreground">
+          Preserved: saved views, alerts, source configuration, audit history, and scoring labels.
+        </p>
+
+        <div className="space-y-2">
+          <Label htmlFor="delete-data-confirm" className="text-sm font-medium">
+            Type <span className="font-mono font-bold text-destructive">{service.name}</span> to confirm
+          </Label>
+          <Input
+            id="delete-data-confirm"
+            value={confirmText}
+            onChange={(e) => setConfirmText(e.target.value)}
+            placeholder={service.name}
+            className="font-mono text-sm"
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck={false}
+          />
+        </div>
+      </div>
+    </SSEActionDialogShell>
+  )
+}
 
 
 interface TeardownDialogProps {

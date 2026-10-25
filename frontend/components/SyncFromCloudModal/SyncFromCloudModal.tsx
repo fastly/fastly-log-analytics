@@ -19,7 +19,7 @@ import type { components } from '@/types/api'
 import { formatForInput, parseFromInput } from '@/lib/date'
 import { useTimezoneStore } from '@/stores/timezoneStore'
 import { useServiceStore } from '@/stores/serviceStore'
-import { useOpenGeneration } from '@/hooks/useDerivedState'
+import { useOpenGeneration } from '@/hooks/useSSE'
 
 interface SyncFromCloudModalProps {
   open: boolean

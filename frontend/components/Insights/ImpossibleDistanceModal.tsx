@@ -15,10 +15,10 @@ import {
 import { useTheme } from 'next-themes'
 import { Info, Zap, Globe } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { ImpossibleDistanceData } from './shared'
-import { addCountryBaseLayer, updateCountryBaseLayerTheme } from '@/components/Map/baseLayers'
-import { useMapResize } from '@/components/Map/shared'
-import { CHART_COLORS } from '@/lib/chart-builders'
+import { ImpossibleDistanceData } from '@/components/Insights/InsightCard'
+import { addCountryBaseLayer, updateCountryBaseLayerTheme } from '@/components/Map/ChoroplethMap'
+import { useMapResize } from '@/components/Map/ChoroplethMap'
+import { CHART_COLORS } from '@/lib/chart-helpers'
 
 import { formatCount } from '@/lib/format'
 

@@ -45,16 +45,16 @@ import {
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { AddFilterDialog } from './AddFilterDialog'
 import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
-import { useBootstrapPending } from '@/hooks/useIsDataReady'
-import { useDeferredDeleteWithUndo } from '@/hooks/useDeferredDeleteWithUndo'
+import { useBootstrapPending } from '@/hooks/useBootstrap'
+import { useDeferredDeleteWithUndo } from '@/hooks/useAdminEventStream'
 import type { components } from '@/types/api.generated'
 import type { FilterPill } from '@/types/filters'
 
 import { useShallow } from 'zustand/react/shallow'
-import { useMounted } from '@/hooks/useMounted'
-import { useServiceSwitchReset } from '@/hooks/useUrlServiceSync'
+import { useMounted } from '@/hooks/useBootstrap'
+import { useServiceSwitchReset } from '@/hooks/useBootstrap'
 
 type SavedView = components["schemas"]["SavedViewRecord"]
 
@@ -664,16 +664,19 @@ export const FilterBar = React.memo(function FilterBar() {
     }
   })
 
-  const quickPresets = React.useMemo(() => [
-    { label: '1h',  value: () => pickRelative('1h', 1) },
-    { label: '3h',  value: () => pickRelative('3h', 3) },
-    { label: '6h',  value: () => pickRelative('6h', 6) },
-    { label: '12h', value: () => pickRelative('12h', 12) },
-    { label: '24h', value: () => pickRelative('24h', 24) },
-    { label: '3d',  value: () => pickRelative('3d', 72) },
-    { label: '7d',  value: () => pickRelative('7d', 168) },
-    { label: '30d', value: () => pickRelative('30d', 720) },
-  ], [pickRelative])
+  const quickPresets = React.useMemo(
+    () => [
+      { label: '1h', value: () => pickRelative('1h', 1) },
+      { label: '3h', value: () => pickRelative('3h', 3) },
+      { label: '6h', value: () => pickRelative('6h', 6) },
+      { label: '12h', value: () => pickRelative('12h', 12) },
+      { label: '24h', value: () => pickRelative('24h', 24) },
+      { label: '3d', value: () => pickRelative('3d', 72) },
+      { label: '7d', value: () => pickRelative('7d', 168) },
+      { label: '30d', value: () => pickRelative('30d', 720) },
+    ],
+    [pickRelative],
+  )
 
   // Render the real bar structure from first paint instead of a fixed-height
   // placeholder. The old `if (!mounted) return <div h-20/>` placeholder was
@@ -758,33 +761,24 @@ export const FilterBar = React.memo(function FilterBar() {
                 role="group"
                 aria-label="Compare range presets"
               >
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => applyComparePreset(7)}
-                  title="Same window, 7 days earlier"
-                  className="h-7 sm:h-6 px-1.5 text-[10px] font-medium text-orange-700 dark:text-orange-300 hover:bg-orange-500/20"
-                >
-                  1w
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => applyComparePreset(28)}
-                  title="Same window, 28 days earlier"
-                  className="h-7 sm:h-6 px-1.5 text-[10px] font-medium text-orange-700 dark:text-orange-300 hover:bg-orange-500/20"
-                >
-                  4w
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => applyComparePreset(365)}
-                  title="Same window, 1 year earlier"
-                  className="h-7 sm:h-6 px-1.5 text-[10px] font-medium text-orange-700 dark:text-orange-300 hover:bg-orange-500/20"
-                >
-                  1y
-                </Button>
+                {(
+                  [
+                    ['1w', 7, 'Same window, 7 days earlier'],
+                    ['4w', 28, 'Same window, 28 days earlier'],
+                    ['1y', 365, 'Same window, 1 year earlier'],
+                  ] as const
+                ).map(([label, days, title]) => (
+                  <Button
+                    key={label}
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => applyComparePreset(days)}
+                    title={title}
+                    className="h-7 sm:h-6 px-1.5 text-[10px] font-medium text-orange-700 dark:text-orange-300 hover:bg-orange-500/20"
+                  >
+                    {label}
+                  </Button>
+                ))}
               </div>
             </div>
           )}

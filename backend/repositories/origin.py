@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import sys as _sys
 from typing import Any
 
 import duckdb
@@ -19,7 +20,6 @@ from backend.repositories._base import (
     origin_latency_us_expr,
     safe_iso,
 )
-from backend.repositories._sql import origin as SQL
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
@@ -29,6 +29,173 @@ from backend.repositories.utils.response_cache import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ── SQL templates (folded from backend/repositories/_sql/origin.py) ──────────
+
+SUMMARY_ROLLUP = """
+        SELECT
+          COUNT(*)                                                                            AS requests,
+          {total_misses}                                                                      AS total_misses,
+          {total_passes}                                                                      AS total_passes,
+          MEDIAN({lat_val}) / 1000.0                                                          AS ottfb_p50_ms,
+          APPROX_QUANTILE({lat_val}, 0.75) / 1000.0                                           AS ottfb_p75_ms,
+          APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                                           AS ottfb_p95_ms,
+          APPROX_QUANTILE({lat_val}, 0.99) / 1000.0                                           AS ottfb_p99_ms,
+          {ottlb_p50}                                                                          AS ottlb_p50_ms,
+          {ottlb_p95}                                                                          AS ottlb_p95_ms,
+          {cdn_ovh}                                                                            AS cdn_overhead_p50_ms,
+          {ost_5xx}                                                                            AS origin_error_rate,
+          {obytes_p50}                                                                         AS obytes_p50
+        FROM {table}
+        WHERE {where} AND ({lat_val} IS NOT NULL)
+        """
+
+TIMESERIES_BUCKETED = """
+        SELECT
+          time_bucket({interval}, "timestamp")                              AS ts,
+          COUNT(*)                                                          AS miss_count,
+          {agg_expr} {unit_conv}                                            AS value
+          {edge_col}
+        FROM {table}
+        WHERE {where} AND ({lat_expr} IS NOT NULL)
+        GROUP BY ts {edge_group}
+        ORDER BY ts
+        """
+
+SLOW_URLS = """
+        SELECT
+          "url",
+          COUNT(*)                                                         AS requests,
+          MEDIAN({lat_val}) / 1000.0                                       AS p50_ms,
+          APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                        AS p95_ms,
+          APPROX_QUANTILE({lat_val}, 0.99) / 1000.0                        AS p99_ms
+        FROM {table}
+        WHERE {where} AND ({lat_val} IS NOT NULL) AND "url" IS NOT NULL
+        GROUP BY "url"
+        HAVING COUNT(*) >= ?
+        ORDER BY p95_ms DESC
+        LIMIT ?
+        """
+
+STATUS_CODES = """
+        SELECT
+          CASE
+            WHEN "ost" BETWEEN 100 AND 599 THEN "ost"
+            ELSE -1
+          END                                              AS status,
+          COUNT(*)                                         AS count,
+          COUNT(*) * 100.0 / SUM(COUNT(*)) OVER ()        AS pct
+        FROM {table}
+        WHERE {where} AND "ost" IS NOT NULL
+        GROUP BY 1
+        ORDER BY count DESC
+        """
+
+PATH_BREAKDOWN = """
+        SELECT
+          "edge",
+          COUNT(*)                                                          AS requests,
+          MEDIAN({lat_val}) / 1000.0                                        AS p50_ms,
+          APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                         AS p95_ms
+        FROM {table}
+        WHERE {where} AND ({lat_val} IS NOT NULL)
+        GROUP BY "edge"
+        """
+
+POP_LATENCY = """
+        SELECT
+          "pop",
+          COUNT(*)                                                          AS requests,
+          MEDIAN({lat_val}) / 1000.0                                        AS p50_ms,
+          APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                         AS p95_ms
+        FROM {table}
+        WHERE {where} AND ({lat_val} IS NOT NULL) AND "pop" IS NOT NULL AND "pop" != ''
+        GROUP BY "pop"
+        ORDER BY p95_ms DESC
+        LIMIT ?
+        """
+
+IP_HEALTH = """
+        SELECT
+          "oip",
+          COUNT(*)                                                            AS requests,
+          MEDIAN({lat_val}) / 1000.0                                          AS p50_ms,
+          APPROX_QUANTILE({lat_val}, 0.95) / 1000.0                           AS p95_ms,
+          ROUND(COUNT(*) FILTER (WHERE "ost" >= 500) * 100.0
+            / NULLIF(COUNT(*), 0), 1)                                         AS error_pct
+        FROM {table}
+        WHERE {where} AND "oip" IS NOT NULL AND "oip" != '' AND "ost" IS NOT NULL
+        GROUP BY "oip"
+        HAVING COUNT(*) >= 10
+        ORDER BY error_pct DESC
+        LIMIT ?
+        """
+
+_EDGE_MINUS_SHIELD_OTTFB = (
+    f"({metric_expressions.coalesce('e.ottfb', 'e.ttfb * 1000000')} - "
+    f"{metric_expressions.coalesce('s.ottfb', 's.ttfb * 1000000')})"
+)
+
+SHIELDING_ANALYSIS = f"""
+        WITH edge_logs AS (
+            SELECT "rid", "pop", "ottfb", "ttfb"
+            FROM {{table}}
+            WHERE {{where}} AND "edge" = true
+        ),
+        shield_logs AS (
+            SELECT "prid", "pop", "ottfb", "ttfb"
+            FROM {{table}}
+            WHERE {{time_where}} AND "edge" = false AND "prid" IS NOT NULL AND "prid" != ''
+        ),
+        pairs AS (
+          SELECT
+            e.pop                                                                    AS edge_pop,
+            s.pop                                                                    AS shield_pop,
+            COUNT(*)                                                                 AS requests,
+            PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY {_EDGE_MINUS_SHIELD_OTTFB}) / 1000.0 AS p50_ms,
+            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY {_EDGE_MINUS_SHIELD_OTTFB}) / 1000.0 AS p95_ms,
+            PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY {_EDGE_MINUS_SHIELD_OTTFB}) / 1000.0 AS p99_ms
+          FROM edge_logs e
+          INNER JOIN shield_logs s ON s.prid = e.rid
+          GROUP BY 1, 2
+        ),
+        ranked AS (
+          SELECT
+            *,
+            COUNT(*) OVER ()                                       AS total_routes,
+            ROW_NUMBER() OVER (ORDER BY requests DESC)            AS rn_requests,
+            ROW_NUMBER() OVER (ORDER BY p50_ms DESC NULLS LAST)  AS rn_overhead
+          FROM pairs
+        )
+        SELECT edge_pop, shield_pop, requests, p50_ms, p95_ms, p99_ms, total_routes
+        FROM ranked
+        WHERE rn_requests <= ? OR rn_overhead <= ?
+        ORDER BY requests DESC
+    """
+
+DRILLDOWN = f"""
+        SELECT
+          {metric_expressions.coalesce('CAST("{dim_col}" AS VARCHAR)', "'unknown'")}                   AS dim_key,
+          COUNT(*)                                                            AS requests,
+          ROUND(MEDIAN({{lat_val}}) / 1000.0, 2)                                AS p50_ms,
+          ROUND(APPROX_QUANTILE({{lat_val}}, 0.95) / 1000.0, 2)                 AS p95_ms,
+          ROUND(APPROX_QUANTILE({{lat_val}}, 0.99) / 1000.0, 2)                 AS p99_ms,
+          ROUND(COUNT(*) FILTER (WHERE {{error_expr}}) * 100.0
+                / NULLIF(COUNT(*), 0), 2)                                     AS error_rate,
+          {{bytes_expr}}                                                        AS bytes
+        FROM {{table}}
+        WHERE {{where}} AND ({{lat_val}} IS NOT NULL) AND "{{dim_col}}" IS NOT NULL AND "{{dim_col}}" != ''
+        GROUP BY 1
+        ORDER BY requests DESC
+        LIMIT ?
+        """
+
+AGGREGATES_CREATE_TEMP = (
+    "CREATE TABLE {temp_table} AS SELECT {select_cols}, {lat_us_expr} AS lat_us FROM {table} WHERE {where_clause}"
+)
+
+SQL: Any = _sys.modules[__name__]
+_sys.modules.setdefault("backend.repositories._sql.origin", _sys.modules[__name__])
 
 # ── Response memo cache ───────────────────────────────────────────────────────
 # Frontend Origin page fires 6 endpoints in parallel; on cold load each one

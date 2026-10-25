@@ -18,12 +18,12 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { useAutoFlash } from '@/hooks/useAutoFlash'
+import { useAutoFlash } from '@/hooks/useAdminEventStream'
 import { client, extractApiError } from '@/lib/api'
 import type { components } from '@/types/api.generated'
 
 import { formatCount } from '@/lib/format'
-import { useOpenGeneration } from '@/hooks/useDerivedState'
+import { useOpenGeneration } from '@/hooks/useSSE'
 import { invalidateServiceScoringQueries, scoringConfigCompositeKey } from './useScorerTimeseries'
 type RetrainResult = components['schemas']['ScoringRetrainResponse']
 type RotateKeyResponse = components['schemas']['ScoringRotateKeyResponse']

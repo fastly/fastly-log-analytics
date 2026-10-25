@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import sys as _sys
 from collections.abc import Callable
 from datetime import UTC
 from typing import Any
 
 import duckdb
 
+from backend.core.metric_expressions import coalesce as _sql_coalesce
 from backend.core.metric_expressions import sum_or_zero
 
 logger = logging.getLogger(__name__)
@@ -16,7 +18,6 @@ logger = logging.getLogger(__name__)
 from backend.core import duckdb as _db
 from backend.models.common import FiltersDict
 from backend.repositories._base import QueryRunner, SectionTimer, _drop_temp_table, _safe_table
-from backend.repositories._sql import network as SQL
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
@@ -26,6 +27,213 @@ from backend.repositories.utils.response_cache import (
     serialize_filters_for_key,
 )
 from backend.utils.countries import format_city_label
+
+# ── SQL templates (folded from backend/repositories/_sql/network.py) ─────────
+
+HEATMAP_BY_ASN_BUCKET = """
+            WITH precomputed AS (
+                SELECT
+                    *,
+                    EPOCH_MS(
+                        CAST((EPOCH_MS(timestamp)::BIGINT // {bucket_ms}) * {bucket_ms} AS BIGINT)
+                    )::TIMESTAMP AS bucket
+                FROM {table}
+                WHERE {where}
+                  AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
+            ),
+            top_cells AS (
+                SELECT
+                    asn,
+                    bucket,
+                    COUNT(*) AS reqs,
+                    SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) AS err_count
+                FROM precomputed
+                WHERE {where}
+                  AND asn IS NOT NULL
+                GROUP BY 1, 2
+                ORDER BY reqs DESC
+                LIMIT {row_limit}
+            )
+            SELECT
+                tc.asn,
+                tc.bucket,
+                APPROX_QUANTILE(
+                    CASE WHEN cache LIKE '%HIT%' AND elapsed > 0
+                    THEN resp_bytes * 1000000.0 / elapsed END,
+                    0.5
+                ) AS throughput_bps,
+                APPROX_QUANTILE(tcp_rtt, 0.5)          AS rtt_med_us,
+                {rtt_min_expr}           AS rtt_baseline_us,
+                {congestion_expr}        AS rtt_congestion_us,
+                {ploss_expr}             AS avg_ploss,
+                {rtt_var_expr}           AS rtt_jitter_us,
+                tc.err_count * 100.0 / NULLIF(tc.reqs, 0) AS error_pct,
+                tc.reqs
+            FROM precomputed AS {table}
+            INNER JOIN top_cells tc
+                ON {table}.asn = tc.asn
+               AND {table}.bucket = tc.bucket
+            GROUP BY tc.asn, tc.bucket, tc.reqs, tc.err_count
+            ORDER BY tc.reqs DESC
+        """
+
+MAP_BY_COUNTRY_BUCKET = """
+                WITH precomputed AS (
+                    SELECT
+                        *,
+                        {city_col} AS city,
+                        {lat_col}  AS lat,
+                        {lon_col}  AS lon,
+                        {metro_col} AS metro,
+                        EPOCH_MS(
+                            CAST((EPOCH_MS(timestamp)::BIGINT // {bucket_ms}) * {bucket_ms} AS BIGINT)
+                        )::TIMESTAMP AS bucket
+                    FROM {table}
+                    WHERE {where}
+                      AND country IS NOT NULL AND country != ''
+                      AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
+                ),
+                top_cells AS (
+                    SELECT
+                        country,
+                        city,
+                        lat,
+                        lon,
+                        metro,
+                        bucket,
+                        COUNT(*) AS reqs,
+                        SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) AS err_count
+                    FROM precomputed
+                    WHERE {where}
+                    GROUP BY 1, 2, 3, 4, 5, 6
+                    ORDER BY reqs DESC
+                    LIMIT 5000
+                )
+                SELECT * FROM (
+                    SELECT
+                        tc.country,
+                        tc.city,
+                        tc.lat,
+                        tc.lon,
+                        tc.metro,
+                        tc.bucket,
+                        APPROX_QUANTILE({table}.tcp_rtt, 0.5) AS rtt_med_us,
+                        {ploss_expr}    AS avg_ploss,
+                        tc.err_count * 100.0 / NULLIF(tc.reqs, 0) AS error_pct,
+                        tc.reqs
+                    FROM precomputed AS {table}
+                    INNER JOIN top_cells tc
+                        ON {table}.country = tc.country
+                       AND ({join_city_col})  IS NOT DISTINCT FROM tc.city
+                       AND ({join_lat_col})   IS NOT DISTINCT FROM tc.lat
+                       AND ({join_lon_col})   IS NOT DISTINCT FROM tc.lon
+                       AND ({join_metro_col}) IS NOT DISTINCT FROM tc.metro
+                       AND {table}.bucket = tc.bucket
+                    WHERE 1=1
+                      AND {table}.tcp_rtt IS NOT NULL AND {table}.tcp_rtt > 0
+                    GROUP BY tc.country, tc.city, tc.lat, tc.lon, tc.metro, tc.bucket, tc.reqs, tc.err_count
+                ) ranked
+                ORDER BY bucket, reqs DESC
+            """
+
+METRO_LEADERBOARD = """
+                WITH top_cells AS (
+                    SELECT
+                        country,
+                        {city_col}   AS city,
+                        {region_col} AS region,
+                        {metro_col}  AS metro,
+                        COUNT(*) AS reqs,
+                        SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) AS err_count
+                    FROM {table}
+                    WHERE {where}
+                      AND country IS NOT NULL AND country != ''
+                      AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
+                    GROUP BY 1, 2, 3, 4
+                    ORDER BY reqs DESC
+                    LIMIT 100
+                )
+                SELECT
+                    tc.country,
+                    tc.city,
+                    tc.region,
+                    tc.metro,
+                    APPROX_QUANTILE(tcp_rtt, 0.5) AS rtt_med_us,
+                    {ploss_expr} AS avg_ploss,
+                    tc.err_count * 100.0 / NULLIF(tc.reqs, 0) AS error_pct,
+                    tc.reqs
+                FROM {table}
+                INNER JOIN top_cells tc
+                    ON {table}.country = tc.country
+                   AND ({join_city_col})   IS NOT DISTINCT FROM tc.city
+                   AND ({join_region_col}) IS NOT DISTINCT FROM tc.region
+                   AND ({join_metro_col})  IS NOT DISTINCT FROM tc.metro
+                WHERE {where}
+                  AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
+                GROUP BY tc.country, tc.city, tc.region, tc.metro, tc.reqs, tc.err_count
+                ORDER BY tc.reqs DESC
+            """
+
+SPEED_DISTRIBUTION_BY_ASN = """
+                SELECT asn, c_speed, COUNT(*) AS cnt FROM {table}
+                WHERE {where} AND asn IN ({placeholders})
+                  AND c_speed IS NOT NULL AND c_speed != ''
+                GROUP BY asn, c_speed
+                ORDER BY asn, cnt DESC
+                """
+
+RTT_PERCENTILES_BY_ASN = """
+                SELECT asn,
+                    APPROX_QUANTILE(tcp_rtt, 0.95) AS p95_us,
+                    APPROX_QUANTILE(tcp_rtt, 0.99) AS p99_us
+                FROM {table}
+                WHERE {where} AND asn IN ({placeholders})
+                  AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
+                GROUP BY asn
+                """
+
+QUALITY_BAR_BY_GROUP = """
+            SELECT "{group_col}" AS label, APPROX_QUANTILE(tcp_rtt, 0.5) / 1000.0 AS rtt_ms, COUNT(*) AS reqs
+            FROM {table}
+            WHERE {rtt_filter}{extra_where}
+              AND "{group_col}" IS NOT NULL AND CAST("{group_col}" AS VARCHAR) != ''
+            GROUP BY "{group_col}"
+            ORDER BY reqs DESC
+            LIMIT 25
+        """
+
+QUALITY_COUNTRIES_DISTINCT = """
+        SELECT DISTINCT country FROM {table}
+        WHERE {where_clause} AND country IS NOT NULL AND country != ''
+        ORDER BY country
+    """
+
+QUALITY_SCATTER = f"""
+            SELECT tcp_rtt / 1000.0 AS rtt_ms, ttfb * 1000.0 AS ttfb_ms,
+                   {_sql_coalesce("cache", "'UNKNOWN'")} AS cache_state
+            FROM {{table}}
+            WHERE {{rtt_filter}} AND ttfb IS NOT NULL AND ttfb > 0
+            USING SAMPLE 2000
+        """
+
+POP_HEALTH_LIVE = """
+            SELECT
+                pop,
+                COUNT(*) AS requests,
+                COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS errors,
+                ROUND(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) * 100.0 / COUNT(*), 2) AS error_rate,
+                approx_quantile(tcp_rtt, 0.5) AS p50_rtt_us,
+                approx_quantile(ttfb, 0.95) * 1000.0 AS p95_ttfb_ms,
+                ROUND(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) * 100.0 / COUNT(*), 2) AS cache_hit_rate,
+                SUM(resp_bytes) AS bandwidth_bytes
+            FROM {table_name}
+            WHERE timestamp >= ? AND timestamp <= ? AND pop IS NOT NULL AND pop != ''
+            GROUP BY pop
+            ORDER BY requests DESC
+        """
+
+SQL: Any = _sys.modules[__name__]
+_sys.modules.setdefault("backend.repositories._sql.network", _sys.modules[__name__])
 
 
 class _TempTableUnavailable(Exception):

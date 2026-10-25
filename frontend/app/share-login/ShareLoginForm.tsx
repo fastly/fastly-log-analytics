@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Eye, EyeOff, Loader2, AlertTriangle, Check } from 'lucide-react'
 import type { components } from '@/types/api.generated'
-import { analystFetch } from '@/hooks/useAnalystHeartbeat'
+import { analystFetch } from '@/hooks/useBootstrap'
 
 type LoginResponse = components['schemas']['ShareLoginResponse']
 type AuthConfig = components['schemas']['AuthConfigResponse']

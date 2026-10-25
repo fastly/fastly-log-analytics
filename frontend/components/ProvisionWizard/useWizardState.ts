@@ -3,12 +3,12 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { client, extractApiError } from "@/lib/api";
-import { unwrapClient } from "@/lib/api-client";
+import { unwrapClient } from '@/lib/api';
 import { queryKeys } from "@/lib/query-keys";
 import { useServiceStore } from "@/stores/serviceStore";
 import { useTimezoneStore } from "@/stores/timezoneStore";
 import { useSSE } from "@/hooks/useSSE";
-import { showToast } from "@/lib/toast";
+import { showToast } from '@/lib/utils';
 import type { Schema } from "@/types/api";
 import {
   INITIAL_CONFIG,
@@ -52,7 +52,7 @@ import {
   toggleLogFieldOverride,
   toggleLogFieldPreset,
   updateLogFieldLimit,
-} from "@/lib/log-field-config-ops";
+} from '@/lib/query-keys';
 
 // Re-export so consumers (step components) can import WizardState from this hook module
 export type { WizardState } from "./types";

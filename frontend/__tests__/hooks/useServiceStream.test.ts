@@ -13,9 +13,10 @@
  */
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { makeStreamResponse, makeNeverClosingStreamResponse } from '../helpers/sse-mock'
+import { makeStreamResponse, makeNeverClosingStreamResponse } from '../helpers/page-smoke'
 
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api')>()),
   getApiBase: () => 'http://test',
 }))
 

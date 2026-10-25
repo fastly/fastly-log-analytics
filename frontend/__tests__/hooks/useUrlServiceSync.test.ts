@@ -61,14 +61,14 @@ beforeEach(() => {
 describe('useUrlServiceSync — URL → store', () => {
   it('writes ?service= URL param into the store on mount', async () => {
     mockUrlService = 'svc-from-url'
-    const { useUrlServiceSync } = await import('@/hooks/useUrlServiceSync')
+    const { useUrlServiceSync } = await import('@/hooks/useBootstrap')
     renderHook(() => useUrlServiceSync())
     expect(mockSetActiveServiceId).toHaveBeenCalledWith('svc-from-url')
   })
 
   it('does nothing when there is no ?service= param', async () => {
     mockUrlService = null
-    const { useUrlServiceSync } = await import('@/hooks/useUrlServiceSync')
+    const { useUrlServiceSync } = await import('@/hooks/useBootstrap')
     renderHook(() => useUrlServiceSync())
     expect(mockSetActiveServiceId).not.toHaveBeenCalled()
   })
@@ -76,7 +76,7 @@ describe('useUrlServiceSync — URL → store', () => {
   it('does not re-write when URL param matches store already', async () => {
     mockState.activeServiceId = 'svc-1'
     mockUrlService = 'svc-1'
-    const { useUrlServiceSync } = await import('@/hooks/useUrlServiceSync')
+    const { useUrlServiceSync } = await import('@/hooks/useBootstrap')
     renderHook(() => useUrlServiceSync())
     expect(mockSetActiveServiceId).not.toHaveBeenCalled()
   })
@@ -92,7 +92,7 @@ describe('useUrlServiceSync — store → URL', () => {
     }
     mockUrlService = null
 
-    const { useUrlServiceSync } = await import('@/hooks/useUrlServiceSync')
+    const { useUrlServiceSync } = await import('@/hooks/useBootstrap')
     const { rerender } = renderHook(() => useUrlServiceSync())
     act(() => {
       rerender()
@@ -110,7 +110,7 @@ describe('useUrlServiceSync — store → URL', () => {
     }
     mockUrlService = 'svc-orphan'
 
-    const { useUrlServiceSync } = await import('@/hooks/useUrlServiceSync')
+    const { useUrlServiceSync } = await import('@/hooks/useBootstrap')
     const { rerender } = renderHook(() => useUrlServiceSync())
     act(() => {
       rerender()
@@ -130,7 +130,7 @@ describe('useUrlServiceSync — store → URL', () => {
     }
     mockUrlService = null
 
-    const { useUrlServiceSync } = await import('@/hooks/useUrlServiceSync')
+    const { useUrlServiceSync } = await import('@/hooks/useBootstrap')
     renderHook(() => useUrlServiceSync())
     expect(mockSetUrlService).not.toHaveBeenCalled()
   })
@@ -144,7 +144,7 @@ describe('useUrlServiceSync — store → URL', () => {
     }
     mockUrlService = 'svc-1'
 
-    const { useUrlServiceSync } = await import('@/hooks/useUrlServiceSync')
+    const { useUrlServiceSync } = await import('@/hooks/useBootstrap')
     const { rerender } = renderHook(() => useUrlServiceSync())
     act(() => {
       rerender()
@@ -172,7 +172,7 @@ describe('useUrlServiceSync — store → URL', () => {
     }
     mockUrlService = 'svc-new'
 
-    const { useUrlServiceSync } = await import('@/hooks/useUrlServiceSync')
+    const { useUrlServiceSync } = await import('@/hooks/useBootstrap')
     const { rerender } = renderHook(() => useUrlServiceSync())
     act(() => {
       rerender()
@@ -204,7 +204,7 @@ describe('useUrlServiceSync — store → URL', () => {
     }
     mockUrlService = null
 
-    const { useUrlServiceSync } = await import('@/hooks/useUrlServiceSync')
+    const { useUrlServiceSync } = await import('@/hooks/useBootstrap')
     const { rerender } = renderHook(() => useUrlServiceSync())
     act(() => {
       rerender()
@@ -234,7 +234,7 @@ describe('useUrlServiceSync — store → URL', () => {
     }
     mockUrlService = null
 
-    const { useUrlServiceSync } = await import('@/hooks/useUrlServiceSync')
+    const { useUrlServiceSync } = await import('@/hooks/useBootstrap')
     const { rerender } = renderHook(() => useUrlServiceSync())
     act(() => {
       rerender()
@@ -256,7 +256,7 @@ describe('useUrlServiceSync — store → URL', () => {
     }
     mockUrlService = 'svc-dead'
 
-    const { useUrlServiceSync } = await import('@/hooks/useUrlServiceSync')
+    const { useUrlServiceSync } = await import('@/hooks/useBootstrap')
     const { rerender } = renderHook(() => useUrlServiceSync())
     act(() => {
       rerender()

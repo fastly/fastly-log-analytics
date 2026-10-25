@@ -9,8 +9,8 @@ import userEvent from '@testing-library/user-event'
 import { describe, it, expect, test, vi, beforeEach, afterEach } from 'vitest'
 import type { ComponentProps } from 'react'
 import React from 'react'
-import { partial } from '../../helpers/partial'
-import { createTestQueryClient, renderWithQuery } from '../../helpers/query'
+import { partial } from '../../helpers/page-smoke'
+import { createTestQueryClient, renderWithQuery } from '../../helpers/page-smoke'
 import type { PlotlyChart } from '@/components/PlotlyChart'
 import type { InteractiveDataTableMockProps } from '../../helpers/page-smoke'
 import type { components } from '@/types/api.generated'
@@ -27,9 +27,11 @@ vi.mock('@/stores/filterStore', async () => (await import('../../helpers/page-sm
 vi.mock('next/navigation', async () => (await import('../../helpers/page-smoke')).navigationModuleMock('/security'))
 vi.mock('@/components/PlotlyChart', async () => (await import('../../helpers/page-smoke')).plotlyChartModuleMock(plotlyMock))
 vi.mock('@/components/DataTable', async () => (await import('../../helpers/page-smoke')).interactiveDataTableModuleMock(dataTableMock))
-vi.mock('@/components/FilterValueCell', async () => (await import('../../helpers/page-smoke')).filterValueCellModuleMock())
 vi.mock('@/lib/date', () => ({ formatDate: (t: string) => t }))
-vi.mock('@/hooks/useLogFieldsCatalog', async () => (await import('../../helpers/page-smoke')).activeLogFieldsSetModuleMock(activeFields))
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
+  ...(await import('../../helpers/page-smoke')).activeLogFieldsSetModuleMock(activeFields),
+}))
 vi.mock('@/components/ReportLayout', async () =>
   (await import('../../helpers/page-smoke')).reportLayoutModuleMock({
     data: { security_signals: [], top_bots: [], ngwaf_bots: [] },

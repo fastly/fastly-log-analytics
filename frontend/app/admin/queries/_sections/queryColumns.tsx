@@ -32,7 +32,7 @@ import {
   type ActiveOrPromotedRow,
   type ActiveRow,
   type GroupedCompletedRow,
-} from '../_types'
+} from '../_hooks/useFilteredActive'
 
 // ── Shared cell renderers ─────────────────────────────────────────────────
 

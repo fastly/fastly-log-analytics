@@ -42,7 +42,7 @@ import {
   type CompletedRow,
   type SnapshotResponse,
   type SummaryResponse,
-} from '../_types'
+} from '../_hooks/useFilteredActive'
 import { queryKeys } from '@/lib/query-keys'
 
 type AnyRow = ActiveOrPromotedRow | CompletedRow

@@ -15,8 +15,8 @@ import {
 import { DateTimeCell } from '@/components/DataTable'
 import { ColumnDef } from '@tanstack/react-table'
 import { cn } from '@/lib/utils'
-import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES } from './CronScheduleBox'
-import { LiveElapsed } from '@/components/TimeAgo'
+import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES } from './CronTab'
+import { LiveElapsed } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import type { CronRun } from '../_state'
 
 import { formatCount } from '@/lib/format'

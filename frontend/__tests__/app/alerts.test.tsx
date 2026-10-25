@@ -1,17 +1,17 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
-import { createTestQueryClient, renderWithQuery } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/page-smoke'
 import { describe, expect, test, vi, beforeEach } from 'vitest'
 import React from 'react'
 import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
 
 import AlertsClient from '@/app/alerts/_sections/AlertsClient'
-import { AlertPreview } from '@/app/alerts/_sections/AlertPreview'
+import { AlertPreview } from '@/app/alerts/_sections/AlertEditor'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useFilterStore } from '@/stores/filterStore'
 import { useTimezoneStore } from '@/stores/timezoneStore'
-import { server } from '@/__tests__/helpers/msw/server'
+import { server } from '@/__tests__/helpers/msw/handlers'
 
 const plotlyChartCalls: Array<{ data: PlotlyTrace[]; layout: PlotlyLayout | undefined }> = []
 
@@ -21,9 +21,10 @@ vi.mock('@/components/PlotlyChart', async () =>
   }),
 )
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/browser-stubs')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/page-smoke')).reactVirtualModuleMock())
 
-vi.mock('@/hooks/useLogFieldsCatalog', () => ({
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
   useLogFieldsCatalog: vi.fn(() => ({
     data: {
       fields: [

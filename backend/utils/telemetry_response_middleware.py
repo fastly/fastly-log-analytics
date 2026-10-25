@@ -268,3 +268,115 @@ def _reconstruct(original: Response, body: bytes) -> Response:
     new = Response(content=body, status_code=original.status_code, media_type=media_type)
     new.raw_headers.extend((k, v) for k, v in original.raw_headers if k.lower() not in drop)
     return new
+
+
+# ---------------------------------------------------------------------------
+# Atomic in-flight-request counter + cron-defer helper
+# (folded from backend.utils.active_requests)
+# ---------------------------------------------------------------------------
+
+import sys  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+from collections.abc import Callable  # noqa: E402
+
+_active_requests_logger = logging.getLogger("backend.utils.active_requests")
+
+_lock = threading.Lock()
+_active_count = 0
+_defer_started_at: dict[tuple[str, str], float] = {}
+
+
+def increment_active_requests() -> None:
+    global _active_count
+    with _lock:
+        _active_count += 1
+
+
+def decrement_active_requests() -> None:
+    global _active_count
+    with _lock:
+        if _active_count > 0:
+            _active_count -= 1
+
+
+def active_request_count() -> int:
+    """Snapshot read of the in-flight count. Mostly useful for tests."""
+    with _lock:
+        return _active_count
+
+
+def should_defer_cron(job_name: str, service_id: str, *, max_defer_secs: float = 30.0) -> bool:
+    """Returns True if the cron tick should be SKIPPED for now (requests
+    are in flight and we haven't been deferring for too long). False means
+    the cron should proceed.
+    """
+    key = (job_name, service_id)
+    with _lock:
+        if _active_count == 0:
+            _defer_started_at.pop(key, None)
+            return False
+        now = time.monotonic()
+        started = _defer_started_at.get(key)
+        if started is None:
+            _defer_started_at[key] = now
+            return True
+        if (now - started) >= max_defer_secs:
+            _defer_started_at.pop(key, None)
+            _active_requests_logger.warning(
+                "[active-request-gate] %s/%s ran after %.1fs of active-request deferrals — "
+                "sustained traffic on this service; consider raising max_defer_secs.",
+                job_name,
+                service_id,
+                now - started,
+            )
+            return False
+        return True
+
+
+def yield_to_api(
+    *,
+    max_wait_secs: float = 1.0,
+    poll_interval: float = 0.1,
+    sleep_fn: Callable[[float], None] | None = None,
+) -> float:
+    """Cooperative yield: if API requests are in flight, sleep briefly to
+    let them make progress before the caller resumes.
+    """
+    if active_request_count() == 0:
+        return 0.0
+    sleep = sleep_fn or time.sleep
+    deadline = time.monotonic() + max_wait_secs
+    slept = 0.0
+    while time.monotonic() < deadline:
+        sleep(poll_interval)
+        slept += poll_interval
+        if active_request_count() == 0:
+            return slept
+    return slept
+
+
+def _reset_for_tests() -> None:
+    """Tests: clear counter + defer windows between cases."""
+    global _active_count
+    with _lock:
+        _active_count = 0
+        _defer_started_at.clear()
+
+
+class _ActiveRequestsResetAdapter:
+    """Exposes ``.clear()`` → ``_reset_for_tests()`` for CacheRegistry."""
+
+    @staticmethod
+    def clear() -> None:
+        _reset_for_tests()
+
+
+from backend.utils.time_window import CacheRegistry as _CacheRegistry  # noqa: E402
+
+_CacheRegistry.register("utils.active_requests", _ActiveRequestsResetAdapter())
+
+sys.modules["backend.utils.active_requests"] = sys.modules[__name__]
+_utils_pkg = sys.modules.get("backend.utils")
+if _utils_pkg is not None:
+    _utils_pkg.active_requests = sys.modules[__name__]  # type: ignore[attr-defined]

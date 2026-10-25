@@ -26,8 +26,8 @@ import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { formatBytes, formatCount } from '@/lib/format'
 import { useServiceStore } from '@/stores/serviceStore'
-import { InsightStatCard as StatCard, buildInvestigateHref } from './shared'
-import type { BotFindingModalData } from './shared'
+import { InsightStatCard as StatCard, buildInvestigateHref } from '@/components/Insights/InsightCard'
+import type { BotFindingModalData } from '@/components/Insights/InsightCard'
 
 interface BotFindingModalProps {
   isOpen: boolean

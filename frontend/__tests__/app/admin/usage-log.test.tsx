@@ -1,7 +1,7 @@
 import React from 'react'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { renderWithQuery } from '@/__tests__/helpers/query'
+import { renderWithQuery } from '@/__tests__/helpers/page-smoke'
 
 const { mockGet, mockDelete, mockPush } = vi.hoisted(() => ({
   mockGet: vi.fn(),
@@ -9,7 +9,7 @@ const { mockGet, mockDelete, mockPush } = vi.hoisted(() => ({
   mockPush: vi.fn(),
 }))
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../../helpers/browser-stubs')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../../helpers/page-smoke')).reactVirtualModuleMock())
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({
@@ -19,7 +19,8 @@ vi.mock('next/navigation', () => ({
   }),
 }))
 
-vi.mock('@/components/charts/TimeSeriesChart', () => ({
+vi.mock('@/components/AnalyticsCard', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/components/AnalyticsCard')>()),
   TimeSeriesChart: () => <div data-testid="mock-time-series-chart" className="h-[240px]" />,
 }))
 

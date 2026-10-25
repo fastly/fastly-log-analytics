@@ -17,16 +17,16 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn, isIpFamilyField } from '@/lib/utils'
 import { formatValue, calculateDelta, formatCount, formatCountMaybe } from '@/lib/format'
-import { PopLabel } from '@/components/PopLabel'
+import { PopLabel } from '@/components/DataTable'
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import { useDebounce } from '@/hooks/useFilterPayload'
-import { useFieldValues, useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
-import { useMaskIps } from '@/hooks/useIsAnalyst'
-import { useCopyToClipboard } from '@/hooks/useAutoFlash'
+import { useDebounce } from '@/hooks/useDashboardCards'
+import { useFieldValues, useLogFieldsCatalog } from '@/hooks/useBootstrap'
+import { useMaskIps } from '@/hooks/useBootstrap'
+import { useCopyToClipboard } from '@/hooks/useAdminEventStream'
 
 interface FieldSearchDialogProps {
   field: string

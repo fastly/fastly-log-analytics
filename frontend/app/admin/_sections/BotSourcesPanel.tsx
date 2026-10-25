@@ -3,11 +3,11 @@ import React, { useState } from 'react'
 import { ELAPSED_RELATIVE_AGO_JUST_NOW, formatCount, formatElapsed } from '@/lib/format'
 import { useQuery } from '@tanstack/react-query'
 import { adminFetch, client, extractApiError } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { downloadBlob } from '@/lib/utils'
-import { useDateFormat } from '@/hooks/useDateFormat'
-import { useMounted } from '@/hooks/useMounted'
+import { useDateFormat } from '@/hooks/useSSE'
+import { useMounted } from '@/hooks/useBootstrap'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import {
@@ -16,7 +16,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { NextRunCountdown } from '@/components/TimeAgo'
+import { NextRunCountdown } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { components } from '@/types/api.generated'
 import type { ColumnDef } from '@tanstack/react-table'
 import { DataTableReadonly } from '@/components/DataTable'

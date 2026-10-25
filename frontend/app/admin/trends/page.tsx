@@ -1,8 +1,8 @@
 import { HydrationBoundary } from '@tanstack/react-query'
 
-import { fetchMetricHistoryBatchServerSide } from '@/lib/ssr/admin_gateway'
-import { seedDehydratedState } from '@/lib/ssr/seed'
-import AdminTrendsClient from './_sections/AdminTrendsClient'
+import { fetchMetricHistoryBatchServerSide } from '@/lib/ssr/upstream'
+import { seedDehydratedState } from '@/lib/ssr/upstream'
+import { AdminTrendsClient } from '../_sections/OperationsOverview'
 import { queryKeys } from '@/lib/query-keys'
 
 // Per-request RSC shell for /admin/trends. Pre-fetches the default 1-hour

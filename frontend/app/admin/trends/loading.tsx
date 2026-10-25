@@ -3,10 +3,10 @@
 import { TrendingUp } from 'lucide-react'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { BackToAdminLink } from '@/components/BackToAdminLink'
+import { BackToAdminLink } from '@/components/ReportLayout'
 import { Button } from '@/components/ui/button'
 import { PageHeader } from '@/components/ui/page-header'
-import { SERIES_LAYOUT, WINDOWS } from './_sections/AdminTrendsClient'
+import { SERIES_LAYOUT, WINDOWS } from '../_sections/OperationsOverview'
 
 export default function Loading() {
   return (

@@ -1,4 +1,4 @@
-import { DashboardSkeleton } from '@/components/skeletons/PageSkeleton'
+import { DashboardSkeleton } from '@/components/ReportLayout'
 
 // Insights uses the same ReportLayout chrome as the other report pages
 // (dashboard / performance / security / origin / usage / sessions), so

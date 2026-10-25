@@ -6,11 +6,12 @@
  */
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { QueryClient } from '@tanstack/react-query'
-import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
-import { makeStreamResponse, makeNeverClosingStreamResponse } from '../helpers/sse-mock'
+import { createTestQueryClient, makeQueryWrapper } from '../helpers/page-smoke'
+import { makeStreamResponse, makeNeverClosingStreamResponse } from '../helpers/page-smoke'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api')>()),
   getApiBase: () => 'http://test',
 }))
 

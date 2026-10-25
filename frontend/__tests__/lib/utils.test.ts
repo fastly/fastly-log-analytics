@@ -4,18 +4,18 @@
 import { describe, it, expect, test, beforeEach, afterEach, vi } from 'vitest'
 import { downloadAsCsv, IP_FAMILY_FIELDS, isIpFamilyField, buildSessionDashboardUrl, buildStreamDetailUrl } from '@/lib/utils'
 import { formatBytes, statusBadgeClass } from '@/lib/format'
-import { formatPopGeo } from '@/components/PopLabel'
+import { formatPopGeo } from '@/components/DataTable'
 import { shouldLoadRumScript } from '@/lib/ssr/upstream'
 import {
   isUserActive,
   msSinceLastInteraction,
   __resetForTests,
   ACTIVE_WINDOW_MS,
-} from '@/lib/userActivity'
-import { showReadOnlyToast, showToast } from '@/lib/toast'
+} from '@/lib/utils'
+import { showReadOnlyToast, showToast } from '@/lib/utils'
 import { toUTCDate, formatTimeAgo, formatLocalDateTime } from '@/lib/date'
-import { resolveRangeWire, DEFAULT_RANGE_TOKEN, ANCHOR_QUANTUM_SECONDS, quantizeAnchor } from '@/lib/range-wire'
-import { invalidInput } from '../helpers/partial'
+import { resolveRangeWire, DEFAULT_RANGE_TOKEN, ANCHOR_QUANTUM_SECONDS, quantizeAnchor } from '@/lib/utils'
+import { invalidInput } from '../helpers/page-smoke'
 
 describe('formatBytes', () => {
   it('returns "0 B" for zero', () => {

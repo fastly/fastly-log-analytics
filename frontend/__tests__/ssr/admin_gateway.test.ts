@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { setupNextHeadersMock, withTestHttpServer } from '../helpers/ssr'
+import { setupNextHeadersMock, withTestHttpServer } from '../helpers/page-smoke'
 
 const { setHeaders: inbound, setCookies } = setupNextHeadersMock()
 
@@ -130,7 +130,7 @@ describe('certificate gateway SSR trust', () => {
   })
 
   it('never returns a shared admin bootstrap to an uncredentialed localhost request', async () => {
-    const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
+    const { fetchBootstrapServerSide } = await import('@/lib/ssr/upstream')
     await withTestHttpServer(
       (_req, res) => {
         res.end(JSON.stringify(upstreamBody))
@@ -147,7 +147,7 @@ describe('certificate gateway SSR trust', () => {
   })
 
   it('does not share public analyst bootstrap responses between requests', async () => {
-    const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
+    const { fetchBootstrapServerSide } = await import('@/lib/ssr/upstream')
     await withTestHttpServer(
       (_req, res) => {
         res.end(JSON.stringify(upstreamBody))
@@ -163,7 +163,7 @@ describe('certificate gateway SSR trust', () => {
   })
 
   it('bypasses the shared bootstrap cache for an analyst session cookie', async () => {
-    const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
+    const { fetchBootstrapServerSide } = await import('@/lib/ssr/upstream')
     await withTestHttpServer(
       (_req, res) => {
         res.end(JSON.stringify(upstreamBody))
@@ -189,7 +189,7 @@ describe('certificate gateway SSR trust', () => {
   })
 
   it('never caches a bootstrap response marked as analyst-scoped', async () => {
-    const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
+    const { fetchBootstrapServerSide } = await import('@/lib/ssr/upstream')
     await withTestHttpServer(
       (_req, res) => {
         res.end(JSON.stringify(upstreamBody))
@@ -219,7 +219,7 @@ describe('fetchTosServerSide', () => {
   })
 
   it('returns null when API_PROXY_URL is unset (pure `next dev` outside docker compose)', async () => {
-    const { fetchTosServerSide } = await import('@/lib/ssr/admin_gateway')
+    const { fetchTosServerSide } = await import('@/lib/ssr/upstream')
     const out = await fetchTosServerSide()
     expect(out).toBeNull()
   })
@@ -227,7 +227,7 @@ describe('fetchTosServerSide', () => {
   it('returns null on a non-2xx, non-401 upstream response', async () => {
     process.env.API_PROXY_URL = 'http://127.0.0.1:1'
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const { fetchTosServerSide } = await import('@/lib/ssr/admin_gateway')
+    const { fetchTosServerSide } = await import('@/lib/ssr/upstream')
     const out = await fetchTosServerSide()
     expect(out).toBeNull()
     expect(warn).toHaveBeenCalled()
@@ -240,7 +240,7 @@ describe('fetchTosServerSide', () => {
         res.end('{"detail":"unauthenticated"}')
       },
       async () => {
-        const { fetchTosServerSide } = await import('@/lib/ssr/admin_gateway')
+        const { fetchTosServerSide } = await import('@/lib/ssr/upstream')
         const out = await fetchTosServerSide()
         expect(out).toBe('unauthenticated')
       },
@@ -255,7 +255,7 @@ describe('fetchTosServerSide', () => {
         res.end('not json {{{')
       },
       async () => {
-        const { fetchTosServerSide } = await import('@/lib/ssr/admin_gateway')
+        const { fetchTosServerSide } = await import('@/lib/ssr/upstream')
         const out = await fetchTosServerSide()
         expect(out).toBeNull()
         expect(warn).toHaveBeenCalled()
@@ -277,7 +277,7 @@ describe('fetchTosServerSide', () => {
         res.end(JSON.stringify({ version: 'v1', text: 'TOS body' }))
       },
       async (srv) => {
-        const { fetchTosServerSide } = await import('@/lib/ssr/admin_gateway')
+        const { fetchTosServerSide } = await import('@/lib/ssr/upstream')
         const out = await fetchTosServerSide()
         expect(out).toEqual({ version: 'v1', text: 'TOS body' })
         const capturedHeaders = srv.lastRequest!.headers
@@ -293,7 +293,7 @@ describe('fetchTosServerSide', () => {
     setCookies('')
     inbound({ host: 'fastly-log-analytics.global.ssl.fastly.net' })
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const { fetchTosServerSide } = await import('@/lib/ssr/admin_gateway')
+    const { fetchTosServerSide } = await import('@/lib/ssr/upstream')
     const out = await fetchTosServerSide()
     expect(out).toBeNull()
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('no X-Proxied-By-Caddy marker'))
@@ -310,7 +310,7 @@ describe('fetchTosServerSide', () => {
         res.end(JSON.stringify({ version: 'v1', text: 'TOS body' }))
       },
       async (srv) => {
-        const { fetchTosServerSide } = await import('@/lib/ssr/admin_gateway')
+        const { fetchTosServerSide } = await import('@/lib/ssr/upstream')
         const out = await fetchTosServerSide()
         expect(out).toEqual({ version: 'v1', text: 'TOS body' })
         expect(srv.lastRequest?.headers['x-remote-analyst']).toBeUndefined()
@@ -323,7 +323,7 @@ describe('fetchTosServerSide', () => {
     setCookies('')
     inbound({})
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const { fetchTosServerSide } = await import('@/lib/ssr/admin_gateway')
+    const { fetchTosServerSide } = await import('@/lib/ssr/upstream')
     const out = await fetchTosServerSide()
     expect(out).toBeNull()
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('no X-Proxied-By-Caddy marker'))
@@ -338,7 +338,7 @@ describe('fetchCronRunsServerSide (logs SSR)', () => {
 
   it('returns null without a serviceId', async () => {
     process.env.API_PROXY_URL = 'http://127.0.0.1:1'
-    const { fetchCronRunsServerSide } = await import('@/lib/ssr/admin_gateway')
+    const { fetchCronRunsServerSide } = await import('@/lib/ssr/upstream')
     expect(await fetchCronRunsServerSide(undefined)).toBeNull()
   })
 
@@ -351,7 +351,7 @@ describe('fetchCronRunsServerSide (logs SSR)', () => {
         res.end('{"rows":[]}')
       },
       async (srv) => {
-        const { fetchCronRunsServerSide } = await import('@/lib/ssr/admin_gateway')
+        const { fetchCronRunsServerSide } = await import('@/lib/ssr/upstream')
         const out = await fetchCronRunsServerSide('svc-1')
         expect(out).toBeNull()
         expect(srv.requests).toHaveLength(0)
@@ -369,7 +369,7 @@ describe('fetchCronRunsServerSide (logs SSR)', () => {
         res.end('{"rows":[1,2,3]}')
       },
       async (srv) => {
-        const { fetchCronRunsServerSide } = await import('@/lib/ssr/admin_gateway')
+        const { fetchCronRunsServerSide } = await import('@/lib/ssr/upstream')
         const out = await fetchCronRunsServerSide('svc-1')
         expect(out).toEqual({ rows: [1, 2, 3] })
         expect(srv.lastRequest?.headers['x-remote-analyst']).toBeUndefined()
@@ -390,7 +390,7 @@ describe('fetchCronRunsServerSide (logs SSR)', () => {
         res.end('{"rows":[1,2,3]}')
       },
       async (srv) => {
-        const { fetchCronRunsServerSide } = await import('@/lib/ssr/admin_gateway')
+        const { fetchCronRunsServerSide } = await import('@/lib/ssr/upstream')
         const out = await fetchCronRunsServerSide('svc-1')
         expect(out).toEqual({ rows: [1, 2, 3] })
         expect(srv.lastRequest?.headers['x-remote-analyst']).toBe('1')
@@ -417,7 +417,7 @@ describe('fetchUsageLogServerSide (usage-log SSR)', () => {
         res.end('{"rows":[]}')
       },
       async (srv) => {
-        const { fetchUsageLogServerSide } = await import('@/lib/ssr/admin_gateway')
+        const { fetchUsageLogServerSide } = await import('@/lib/ssr/upstream')
         const out = await fetchUsageLogServerSide(args)
         expect(out).toBeNull()
         expect(srv.requests).toHaveLength(0)
@@ -435,7 +435,7 @@ describe('fetchUsageLogServerSide (usage-log SSR)', () => {
         res.end('{"rows":[1]}')
       },
       async (srv) => {
-        const { fetchUsageLogServerSide } = await import('@/lib/ssr/admin_gateway')
+        const { fetchUsageLogServerSide } = await import('@/lib/ssr/upstream')
         const out = await fetchUsageLogServerSide(args)
         expect(out).toEqual({ rows: [1] })
         expect(srv.lastRequest?.headers['x-remote-analyst']).toBeUndefined()

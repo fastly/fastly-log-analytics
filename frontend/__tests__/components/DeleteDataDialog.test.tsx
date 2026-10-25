@@ -2,14 +2,14 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { describe, expect, it, test, vi, beforeEach } from 'vitest'
-import { DeleteDataDialog } from '@/components/DeleteDataDialog'
+import { DeleteDataDialog } from '@/components/TeardownDialog'
 import { TeardownDialog } from '@/components/TeardownDialog'
 import { SSEProgressView } from '@/components/SSEModal'
-import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
-import { createUseSSEMock } from '../helpers/sse-mock'
+import { createTestQueryClient, makeQueryWrapper } from '../helpers/page-smoke'
+import { createUseSSEMock } from '../helpers/page-smoke'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
-import { server } from '@/__tests__/helpers/msw/server'
+import { server } from '@/__tests__/helpers/msw/handlers'
 import type { ServiceConfig } from '@/types/api'
 import type { SSELine } from '@/hooks/useSSE'
 import React from 'react'
@@ -22,7 +22,8 @@ vi.mock('@/components/ui/scroll-area', () => ({
 }))
 
 const { state: sseState, start: mockStart, stop: mockStop, resetState } = createUseSSEMock()
-vi.mock('@/hooks/useSSE', () => ({ useSSE: () => sseState }))
+vi.mock('@/hooks/useSSE', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useSSE')>()), useSSE: () => sseState }))
 
 beforeEach(() => {
   resetState()

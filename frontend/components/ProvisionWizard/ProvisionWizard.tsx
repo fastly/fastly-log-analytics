@@ -25,7 +25,7 @@ import {
   TabsTrigger,
 } from "@/components/ui/tabs";
 import { CollapsibleGroup } from "@/components/LogSettingsModal/FieldGroups";
-import { CmcdConfigSection } from "@/components/CmcdConfigSection";
+import { CmcdConfigSection } from "@/components/LogSettingsModal/FieldGroups";
 import {
   ReviewCard,
   ReviewHeader,
@@ -298,12 +298,11 @@ export function SettingsStep({ s }: { s: WizardState }) {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="1">Every 1 min</SelectItem>
-                      <SelectItem value="2">Every 2 mins</SelectItem>
-                      <SelectItem value="5">Every 5 mins</SelectItem>
-                      <SelectItem value="15">Every 15 mins</SelectItem>
-                      <SelectItem value="30">Every 30 mins</SelectItem>
-                      <SelectItem value="60">Every 60 mins</SelectItem>
+                      {["1", "2", "5", "15", "30", "60"].map((mins) => (
+                        <SelectItem key={mins} value={mins}>
+                          Every {mins} {mins === "1" ? "min" : "mins"}
+                        </SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </div>
@@ -885,6 +884,39 @@ export function ModeStep({ s }: { s: WizardState }) {
   );
 }
 
+const TERRAFORM_TABS = [
+  {
+    value: "instructions",
+    label: "Instructions",
+    icon: FileText,
+    defaultFile: "instructions",
+    match: (f: string) => f === "instructions",
+  },
+  {
+    value: "logging",
+    label: "Logging Service",
+    icon: Zap,
+    defaultFile: "logging_service.tf",
+    match: (f: string) =>
+      f === "logging_service.tf" || f === "log_format.vcl" || f.startsWith("capture_snippets/"),
+  },
+  {
+    value: "cdn",
+    label: "CDN & Storage",
+    icon: Globe,
+    defaultFile: "fos.tf",
+    match: (f: string) =>
+      f === "fos.tf" || f === "cdn_proxy.tf" || f === "cdn_proxy.vcl" || f.startsWith("cdn_snippets/"),
+  },
+  {
+    value: "all",
+    label: "All Files",
+    icon: FileJson,
+    defaultFile: undefined,
+    match: () => true,
+  },
+] as const;
+
 export function TerraformStep({ s }: { s: WizardState }) {
   const { terraformFiles, selectedTfFile, setSelectedTfFile } = s;
   return (
@@ -914,60 +946,29 @@ export function TerraformStep({ s }: { s: WizardState }) {
             defaultValue="instructions"
             className="flex-1 flex flex-col min-h-0"
             onValueChange={(tab) => {
-              if (tab === "logging") setSelectedTfFile("logging_service.tf");
-              else if (tab === "cdn") setSelectedTfFile("fos.tf");
-              else if (tab === "instructions") setSelectedTfFile("instructions");
+              const found = TERRAFORM_TABS.find((t) => t.value === tab);
+              if (found?.defaultFile) setSelectedTfFile(found.defaultFile);
             }}
           >
             <TabsList className="grid w-full grid-cols-4 shrink-0">
-              <TabsTrigger
-                value="instructions"
-                className="flex items-center gap-2"
-              >
-                <FileText className="w-3.5 h-3.5" />
-                Instructions
-              </TabsTrigger>
-              <TabsTrigger value="logging" className="flex items-center gap-2">
-                <Zap className="w-3.5 h-3.5" />
-                Logging Service
-              </TabsTrigger>
-              <TabsTrigger value="cdn" className="flex items-center gap-2">
-                <Globe className="w-3.5 h-3.5" />
-                CDN & Storage
-              </TabsTrigger>
-              <TabsTrigger value="all" className="flex items-center gap-2">
-                <FileJson className="w-3.5 h-3.5" />
-                All Files
-              </TabsTrigger>
+              {TERRAFORM_TABS.map(({ value, label, icon: Icon }) => (
+                <TabsTrigger key={value} value={value} className="flex items-center gap-2">
+                  <Icon className="w-3.5 h-3.5" />
+                  {label}
+                </TabsTrigger>
+              ))}
             </TabsList>
 
-            {["instructions", "logging", "cdn", "all"].map((tab) => (
+            {TERRAFORM_TABS.map(({ value, match }) => (
               <TabsContent
-                key={tab}
-                value={tab}
+                key={value}
+                value={value}
                 className="flex-1 flex gap-4 min-h-0 pt-4 mt-0"
               >
                 <div className="w-64 shrink-0 flex flex-col gap-1 overflow-y-auto pr-2 custom-scrollbar border-r">
                   {Object.keys(terraformFiles)
-                    .filter((f) => {
-                      if (tab === "logging")
-                        return (
-                          f === "logging_service.tf" ||
-                          f === "log_format.vcl" ||
-                          f.startsWith("capture_snippets/")
-                        );
-                      if (tab === "cdn")
-                        return (
-                          f === "fos.tf" ||
-                          f === "cdn_proxy.tf" ||
-                          f === "cdn_proxy.vcl" ||
-                          f.startsWith("cdn_snippets/")
-                        );
-                      if (tab === "instructions") return f === "instructions";
-                      return true;
-                    })
+                    .filter(match)
                     .sort((a, b) => {
-                      // Prioritize .tf files
                       if (a.endsWith(".tf") && !b.endsWith(".tf")) return -1;
                       if (!a.endsWith(".tf") && b.endsWith(".tf")) return 1;
                       return a.localeCompare(b);
@@ -1018,8 +1019,25 @@ export function TerraformStep({ s }: { s: WizardState }) {
   );
 }
 
+const STEP_COMPONENTS: Record<WizardState["step"], React.ComponentType<{ s: WizardState }>> = {
+  mode: ModeStep,
+  token: TokenStep,
+  service: ServiceStep,
+  storage: StorageStep,
+  features: FeaturesStep,
+  join: JoinStep,
+  analyze: AnalyzeStep,
+  settings: SettingsStep,
+  confirm: ConfirmStep,
+  ngwaf: NgwafStep,
+  fields: FieldsStep,
+  execute: ExecuteStep,
+  terraform: TerraformStep,
+};
+
 export function ProvisionWizard({ open, onOpenChange }: ProvisionWizardProps) {
   const s = useWizardState(open, onOpenChange);
+  const StepComponent = STEP_COMPONENTS[s.step];
 
   return (
     <Dialog open={open} onOpenChange={s.handleModalClose}>
@@ -1042,19 +1060,7 @@ export function ProvisionWizard({ open, onOpenChange }: ProvisionWizardProps) {
         <WizardHeader s={s} />
 
         <div className="flex-1 overflow-hidden flex flex-col">
-          {s.step === "mode" && <ModeStep s={s} />}
-          {s.step === "token" && <TokenStep s={s} />}
-          {s.step === "service" && <ServiceStep s={s} />}
-          {s.step === "storage" && <StorageStep s={s} />}
-          {s.step === "features" && <FeaturesStep s={s} />}
-          {s.step === "join" && <JoinStep s={s} />}
-          {s.step === "analyze" && <AnalyzeStep s={s} />}
-          {s.step === "settings" && <SettingsStep s={s} />}
-          {s.step === "confirm" && <ConfirmStep s={s} />}
-          {s.step === "ngwaf" && <NgwafStep s={s} />}
-          {s.step === "fields" && <FieldsStep s={s} />}
-          {s.step === "execute" && <ExecuteStep s={s} />}
-          {s.step === "terraform" && <TerraformStep s={s} />}
+          {StepComponent && <StepComponent s={s} />}
         </div>
 
         <WizardFooter s={s} />

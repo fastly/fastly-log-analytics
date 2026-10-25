@@ -11,14 +11,12 @@ import {
   useFilteredActive,
   useKeyboardShortcuts,
   useQueryMonitorUrlState,
+  type ActiveRow,
+  type Attribution,
+  type CompletedRow,
   type ShortcutBinding,
+  type SnapshotResponse,
 } from '@/app/admin/queries/_hooks/useFilteredActive'
-import type {
-  ActiveRow,
-  Attribution,
-  CompletedRow,
-  SnapshotResponse,
-} from '@/app/admin/queries/_types'
 
 const DEFAULT_SLOW = 500
 

@@ -13,9 +13,9 @@
  * resolve with a deterministic SessionDetailResponse shape and wait for
  * the timeline to render.
  */
-import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
+import { stubResizeObserver } from '@/__tests__/helpers/page-smoke'
 import { screen, cleanup, waitFor, act } from '@testing-library/react'
-import { renderWithQuery } from '../../helpers/query'
+import { renderWithQuery } from '../../helpers/page-smoke'
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest'
 import React from 'react'
 
@@ -29,7 +29,8 @@ type SessionRow = components['schemas']['Session']
 
 const postMock = vi.fn()
 
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api')>()),
   client: {
     POST: (...args: unknown[]) => postMock(...args),
     GET: vi.fn(),
@@ -40,12 +41,13 @@ vi.mock('@/lib/api', () => ({
 
 // useFieldLabel pulls a catalog over the network; replace with an
 // identity mapper so the timeline columns render predictably.
-vi.mock('@/hooks/useLogFieldsCatalog', () => ({
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
   useFieldLabel: () => (id: string) => id,
 }))
 
 // Virtualizer needs to enumerate every row for jsdom layout-free tests.
-vi.mock('@tanstack/react-virtual', async () => (await import('@/__tests__/helpers/browser-stubs')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('@/__tests__/helpers/page-smoke')).reactVirtualModuleMock())
 
 vi.mock('@/components/SessionScoring/FlagSessionPopover', () => ({
   FlagSessionPopover: () => <span data-testid="flag-popover" />,

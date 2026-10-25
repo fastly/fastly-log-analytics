@@ -1,11 +1,15 @@
+import { cookies, headers } from 'next/headers'
+import { QueryClient, dehydrate } from '@tanstack/react-query'
+import type { DehydratedState, QueryKey } from '@tanstack/react-query'
 import {
   historyHoursFromExtents,
   pickInsightsDefault,
 } from '@/lib/insights-defaults'
 import type { Schema } from '@/types/api'
-import { quantizeAnchor } from '@/lib/range-wire'
+import type { components } from '@/types/api.generated'
+import { quantizeAnchor } from '@/lib/utils'
 
-import { parseSsrJson, ssrUpstreamGet } from './_transport'
+import { classifySsrRequest, parseSsrJson, ssrUpstreamGet } from './_transport'
 
 export function shouldLoadRumScript({
   host,
@@ -318,4 +322,192 @@ export async function fetchInsightsServerSide(
 
   if (data == null) return null
   return { data, windowHours, baselineHours }
+}
+
+// ── Bootstrap SSR ─────────────────────────────────────────────────────────────
+
+type BootstrapResponse = components['schemas']['BootstrapResponse']
+
+const _ADMIN_SSR_TTL_MS = 2000
+const _adminInflightMap = new Map<string, Promise<BootstrapResponse | null>>()
+const _adminCachedMap = new Map<string, { at: number; value: BootstrapResponse | null }>()
+
+function _fetchBootstrapUpstream(serviceId?: string | null): Promise<BootstrapResponse | null> {
+  const path = serviceId ? `/api/bootstrap?service_id=${encodeURIComponent(serviceId)}` : '/api/bootstrap'
+  return ssrUpstreamGet({ path, logPrefix: 'ssr/bootstrap' }).then((resp) =>
+    parseSsrJson<BootstrapResponse>(resp, 'ssr/bootstrap'),
+  )
+}
+
+export async function fetchBootstrapServerSide(): Promise<BootstrapResponse | null> {
+  const [hdrs, cookieJar] = await Promise.all([headers(), cookies()])
+  const { admin: isAdmin } = classifySsrRequest(hdrs)
+  const serviceId = hdrs.get('x-service-id')
+
+  if (!isAdmin || cookieJar.get('analyst_session_id')) {
+    return _fetchBootstrapUpstream(serviceId)
+  }
+
+  const cacheKey = serviceId || '__default__'
+  const now = Date.now()
+  const cached = _adminCachedMap.get(cacheKey)
+  if (cached && now - cached.at < _ADMIN_SSR_TTL_MS) {
+    return cached.value
+  }
+  const inflight = _adminInflightMap.get(cacheKey)
+  if (inflight) return inflight
+
+  const promise = (async () => {
+    try {
+      const value = await _fetchBootstrapUpstream(serviceId)
+      if (!value?.settings?.is_remote_analyst) {
+        _adminCachedMap.set(cacheKey, { at: Date.now(), value })
+      }
+      return value
+    } finally {
+      _adminInflightMap.delete(cacheKey)
+    }
+  })()
+  _adminInflightMap.set(cacheKey, promise)
+  return promise
+}
+
+// ── Seed Helpers ──────────────────────────────────────────────────────────────
+
+export function seedDehydratedState(key: QueryKey, data: unknown): DehydratedState | null {
+  if (data == null) return null
+  const qc = new QueryClient()
+  qc.setQueryData(key, data)
+  return dehydrate(qc)
+}
+
+export const firstParam = (v: string | string[] | undefined): string | undefined =>
+  Array.isArray(v) ? v[0] : v
+
+export function resolveServerServiceId(
+  params: { service?: string | string[] },
+  bootstrap:
+    | {
+        active_service_id?: string | null
+        services?: ReadonlyArray<{ id?: unknown; service_id?: unknown }> | null
+      }
+    | null
+    | undefined,
+  options?: { fallbackFirstService?: boolean },
+): string | undefined {
+  const urlServiceId = firstParam(params.service)
+  if (urlServiceId) return urlServiceId
+  if (bootstrap?.active_service_id) return bootstrap.active_service_id
+  if (options?.fallbackFirstService) {
+    const first = bootstrap?.services?.[0]
+    const firstId = first?.id ?? first?.service_id
+    if (typeof firstId === 'string') return firstId
+  }
+  return undefined
+}
+
+export async function resolvePageServiceId(
+  params: { service?: string | string[] },
+  options?: { fallbackFirstService?: boolean },
+): Promise<string | undefined> {
+  const urlServiceId = firstParam(params.service)
+  if (urlServiceId) return urlServiceId
+  const bootstrap = await fetchBootstrapServerSide()
+  return resolveServerServiceId(params, bootstrap, options)
+}
+
+// ── Admin Gateway SSR Fetchers ────────────────────────────────────────────────
+
+export async function fetchMetricHistoryBatchServerSide(): Promise<unknown | null> {
+  return parseSsrJson(
+    await ssrUpstreamGet({
+      path: '/api/admin/metric-history/batch?since=1h',
+      logPrefix: 'ssr/admin-trends',
+    }),
+    'ssr/admin-trends',
+  )
+}
+
+type AlertListResponse = components['schemas']['AlertListResponse']
+
+export async function fetchAlertsServerSide(
+  serviceId: string | undefined,
+): Promise<AlertListResponse | null> {
+  const path = serviceId
+    ? `/api/alerts/${encodeURIComponent(serviceId)}`
+    : '/api/alerts/'
+
+  return parseSsrJson<AlertListResponse>(
+    await ssrUpstreamGet({ path, logPrefix: 'ssr/alerts' }),
+    'ssr/alerts',
+  )
+}
+
+export async function fetchCronRunsServerSide(
+  serviceId: string | undefined,
+): Promise<unknown | null> {
+  if (!serviceId) return null
+
+  return parseSsrJson(
+    await ssrUpstreamGet({
+      path: '/api/cron-runs?page=1&per_page=500',
+      logPrefix: 'ssr/logs',
+      extraHeaders: { 'X-Fastly-Service-Id': serviceId },
+    }),
+    'ssr/logs',
+  )
+}
+
+export async function fetchCronScheduleServerSide(
+  serviceId: string | undefined,
+): Promise<unknown | null> {
+  if (!serviceId) return null
+
+  return parseSsrJson(
+    await ssrUpstreamGet({
+      path: '/api/cron-schedule',
+      logPrefix: 'ssr/logs-schedule',
+      extraHeaders: { 'X-Fastly-Service-Id': serviceId },
+    }),
+    'ssr/logs-schedule',
+  )
+}
+
+type TosPayload = components['schemas']['TosDocument']
+type TosResult = TosPayload | 'unauthenticated' | null
+
+export async function fetchTosServerSide(): Promise<TosResult> {
+  const resp = await ssrUpstreamGet({ path: '/api/share/tos', logPrefix: 'ssr/tos' })
+  if (resp?.statusCode === 401) return 'unauthenticated'
+  return parseSsrJson<TosPayload>(resp, 'ssr/tos')
+}
+
+interface UsageLogSsrArgs {
+  serviceId: string | undefined
+  start: string
+  end: string
+  pageSize: number
+  usageType?: string
+  processContext?: string
+  operationType?: string
+}
+
+export async function fetchUsageLogServerSide(args: UsageLogSsrArgs): Promise<unknown | null> {
+  const query = new URLSearchParams({
+    service_id: args.serviceId || '',
+    start: args.start,
+    end: args.end,
+    page_size: String(args.pageSize),
+  })
+  if (args.usageType) query.set('usage_type', args.usageType)
+  if (args.processContext) query.set('process_context', args.processContext)
+  if (args.operationType) query.set('operation_type', args.operationType)
+
+  return parseSsrJson(
+    await ssrUpstreamGet({
+      path: `/api/admin/usage-log?${query.toString()}`,
+      logPrefix: 'ssr/usage_log',
+    }),
+    'ssr/usage_log',
+  )
 }

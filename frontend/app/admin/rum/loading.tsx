@@ -1,4 +1,4 @@
-import { BackToAdminLink } from '@/components/BackToAdminLink';
+import { BackToAdminLink } from '@/components/ReportLayout';
 import { PageHeader } from '@/components/ui/page-header';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';

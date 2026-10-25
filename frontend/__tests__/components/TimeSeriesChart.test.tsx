@@ -13,7 +13,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { ComponentProps } from 'react'
 import React from 'react'
 
-import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
+import { TimeSeriesChart } from '@/components/AnalyticsCard'
 import type { PlotlyChart } from '@/components/PlotlyChart'
 import type { PlotlyTrace, PlotlyLayout } from '@/types/plotly'
 

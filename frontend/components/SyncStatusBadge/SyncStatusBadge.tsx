@@ -1,21 +1,47 @@
 'use client'
 
-import React, { useMemo, useState } from 'react'
+import React, { useMemo, useState, type ReactNode } from 'react'
 import { Loader2 } from 'lucide-react'
 import { usePathname } from 'next/navigation'
 import { useServiceStore } from '@/stores/serviceStore'
-import { useIsAnalyst } from '@/hooks/useIsAnalyst'
-import { useSyncStatus, useLastSync, useSeededReady } from '@/hooks/useSyncStatus'
+import { useIsAnalyst } from '@/hooks/useBootstrap'
+import { useSyncStatus, useLastSync, useSeededReady } from '@/hooks/useEventStream'
 import { useAdminEventStream, useHeaderBadgeStream, type AdminEventChannel } from '@/hooks/useAdminEventStream'
 import { useBootstrap } from '@/hooks/useBootstrap'
-import { LiveElapsed, TimeAgo } from '@/components/TimeAgo'
+import { useElapsedTime, useNowMs } from '@/hooks/useSSE'
+import { useMounted } from '@/hooks/useBootstrap'
+import { formatCompactDuration, formatTimeAgo, toUTCDate } from '@/lib/date'
 import { queryKeys } from '@/lib/query-keys'
-
 import { formatCount } from '@/lib/format'
-// The live "X ago" text node now lives in the shared `@/components/TimeAgo`
-// (text-only leaf so the surrounding header chrome stays stable between
-// cron pushes — putting useNowMs() on SyncStatusBadge itself would
-// re-render the whole badge every second). Imported above.
+
+export function TimeAgo({
+  timestamp,
+  fallback = null,
+}: {
+  timestamp: string | null | undefined
+  fallback?: ReactNode
+}) {
+  useNowMs()
+  const mounted = useMounted()
+  if (!timestamp) return <>{fallback}</>
+  if (!mounted) return <>{fallback}</>
+  return <>{formatTimeAgo(timestamp)}</>
+}
+
+/** Ticking "Ns" / "Nm Ns" elapsed label for a running job. Callers supply the
+ *  typography via ``className`` (the tick itself is the shared useNowMs ticker). */
+export function LiveElapsed({ startedAt, className }: { startedAt: string; className?: string }) {
+  const elapsed = useElapsedTime(startedAt)
+  const fmt = elapsed < 60 ? `${elapsed.toFixed(0)}s` : `${Math.floor(elapsed / 60)}m ${Math.floor(elapsed % 60)}s`
+  return <span className={className}>{fmt}</span>
+}
+
+/** Ticking countdown until ``when`` (or "Disabled" when nullish). */
+export function NextRunCountdown({ when }: { when: string | null | undefined }) {
+  const nowMs = useNowMs()
+  if (!when) return <>Disabled</>
+  return <>{formatCompactDuration(Math.floor((toUTCDate(when).getTime() - nowMs) / 1000))}</>
+}
 
 const SEED_KEYS = [queryKeys.syncStatus, queryKeys.lastSync] as const
 

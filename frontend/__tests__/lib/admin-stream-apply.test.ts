@@ -12,7 +12,7 @@
  * @vitest-environment jsdom
  */
 import { QueryClient, QueryObserver } from '@tanstack/react-query'
-import { createTestQueryClient } from '../helpers/query'
+import { createTestQueryClient } from '../helpers/page-smoke'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { applyShare, applySyncStatus, applySystemMetrics, makeCronRunsApplier } from '@/lib/admin-stream-apply'
 

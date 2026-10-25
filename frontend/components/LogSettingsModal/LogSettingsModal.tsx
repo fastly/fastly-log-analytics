@@ -2,9 +2,9 @@
 
 import React, { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useOpenGeneration } from '@/hooks/useDerivedState'
+import { useOpenGeneration } from '@/hooks/useSSE'
 import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import {
   Dialog,
@@ -19,9 +19,9 @@ import { cn, panelDialogContent, panelDialogFooter } from '@/lib/utils';
 import { formatBytes } from '@/lib/format'
 import { useSSE } from '@/hooks/useSSE'
 import { SSEDialogFooter, SSEExecutionSection } from '@/components/SSEModal'
-import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
+import { useLogFieldsCatalog } from '@/hooks/useBootstrap'
 import { CollapsibleGroup, StandardFieldsStep } from './FieldGroups'
-import { CustomFieldsManager } from '@/components/CustomFields/CustomFieldsManager'
+import { CustomFieldsManager } from '@/components/CustomFields/CustomFieldDrawer'
 import {
   estimateLogFieldBytesPerLine,
   evaluateLogFieldPresetSummary,
@@ -31,7 +31,7 @@ import {
   toggleLogFieldOverride,
   toggleLogFieldPreset,
   updateLogFieldLimit,
-} from '@/lib/log-field-config-ops'
+} from '@/lib/query-keys'
 import type { ServiceConfig, LogFieldsConfig, components } from '@/types/api'
 
 interface ReviewStepProps {

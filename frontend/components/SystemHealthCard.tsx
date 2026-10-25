@@ -6,9 +6,9 @@ import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCa
 import { Badge } from '@/components/ui/badge'
 import { Sparkline } from '@/components/Sparkline'
 import { ELAPSED_AGE_COMPACT, formatElapsed } from '@/lib/format'
-import { useMounted } from '@/hooks/useMounted'
+import { useMounted } from '@/hooks/useBootstrap'
 import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import type { components } from '@/types/api.generated'
 import { queryKeys } from '@/lib/query-keys'
 

@@ -5,9 +5,9 @@
  */
 import { renderHook, act } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { useFilterUrlWriteback } from '@/hooks/useFilterUrlWriteback'
-import { useFilterPayload } from '@/hooks/useFilterPayload'
-import { useTimeRange } from '@/hooks/useReportRangeAnchor'
+import { useFilterUrlWriteback } from '@/hooks/useDashboardCards'
+import { useFilterPayload } from '@/hooks/useDashboardCards'
+import { useTimeRange } from '@/hooks/useDashboardCards'
 import { useFilterStore } from '@/stores/filterStore'
 
 let currentPathname = '/dashboard'

@@ -1,9 +1,9 @@
 'use client'
 
 import React from 'react'
-import { useServiceQuery } from '@/hooks/useServiceQuery'
+import { useServiceQuery } from '@/hooks/useDashboardCards'
 import { client, extractApiError } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import { formatBytes, formatCompactCount, formatCount } from '@/lib/format'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'

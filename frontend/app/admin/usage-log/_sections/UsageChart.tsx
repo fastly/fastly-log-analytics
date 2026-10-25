@@ -5,7 +5,7 @@ import { formatCount } from '@/lib/format'
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
-import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
+import { TimeSeriesChart } from '@/components/AnalyticsCard'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   Select,
@@ -15,8 +15,8 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Database, AlertTriangle, Loader2 } from 'lucide-react'
-import { useMounted } from '@/hooks/useMounted'
-import { CHART_COLORS } from '@/lib/chart-builders'
+import { useMounted } from '@/hooks/useBootstrap'
+import { CHART_COLORS } from '@/lib/chart-helpers'
 
 const LOG_ACCOUNTING_PRESETS = [
   { label: 'Last 1h', hours: 1, by: 'hour' as const },

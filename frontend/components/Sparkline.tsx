@@ -3,7 +3,7 @@
 import * as React from 'react'
 
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { useDateFormat } from '@/hooks/useDateFormat'
+import { useDateFormat } from '@/hooks/useSSE'
 
 type Point = { ts: string; value: number }
 

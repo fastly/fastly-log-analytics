@@ -10,9 +10,9 @@ import { ThemeProvider } from "next-themes";
 import { AppLayout } from "@/components/AppLayout";
 import { ServerFooter } from "@/components/ServerFooter";
 import { SIDEBAR_COLLAPSED_COOKIE } from "@/lib/utils";
-import { ErrorBoundaryWithRouteReset } from "@/components/ErrorBoundary";
+import { ErrorBoundaryWithRouteReset } from "@/components/AnalyticsCard";
 import { queryKeys, seedBootstrapDependentCaches } from "@/lib/query-keys";
-import { fetchBootstrapServerSide } from "@/lib/ssr/bootstrap";
+import { fetchBootstrapServerSide } from '@/lib/ssr/upstream';
 import { shouldLoadRumScript } from "@/lib/ssr/upstream";
 
 const inter = Inter({ subsets: ["latin"] });

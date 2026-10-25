@@ -1,25 +1,27 @@
 import React from 'react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
-import { renderWithQuery } from '../helpers/query'
+import { renderWithQuery } from '../helpers/page-smoke'
 import AdminQueuePage from '@/app/admin/queue/page'
 import Loading from '@/app/admin/queue/loading'
 
 const mockGet = vi.fn()
 const mockPost = vi.fn()
 
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api')>()),
   client: {
     GET: (...args: unknown[]) => mockGet(...args),
     POST: (...args: unknown[]) => mockPost(...args),
   },
 }))
 
-vi.mock('@/hooks/useAdminEventStream', () => ({
+vi.mock('@/hooks/useAdminEventStream', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useAdminEventStream')>()),
   useAdminEventStream: () => ({ state: 'open' as const }),
 }))
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/browser-stubs')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/page-smoke')).reactVirtualModuleMock())
 
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/admin/queue'))
 

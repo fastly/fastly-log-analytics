@@ -1,6 +1,8 @@
 import { clsx, type ClassValue } from "clsx"
 import { twMerge } from "tailwind-merge"
 import { formatDate } from '@/lib/date'
+import { useFilterStore } from '@/stores/filterStore'
+import type { FiltersPayload } from '@/types/filters'
 
 
 export function cn(...inputs: ClassValue[]) {
@@ -189,3 +191,458 @@ export const panelDialogHeaderSolid =
 
 export const panelDialogFooter =
   "px-6 py-4 border-t bg-muted/10 shrink-0"
+
+// ---------------------------------------------------------------------------
+// User activity tracking (folded from userActivity.ts)
+// ---------------------------------------------------------------------------
+
+export const ACTIVE_WINDOW_MS = 120_000
+const MOUSE_THROTTLE_MS = 1_000
+
+let lastInteractionAt = typeof window !== 'undefined' ? Date.now() : 0
+let lastThrottledBump = 0
+let listenersAttached = false
+
+function bump() {
+  lastInteractionAt = Date.now()
+}
+
+function bumpThrottled() {
+  const now = Date.now()
+  if (now - lastThrottledBump < MOUSE_THROTTLE_MS) return
+  lastThrottledBump = now
+  lastInteractionAt = now
+}
+
+function ensureListeners() {
+  if (listenersAttached || typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
+  listenersAttached = true
+  window.addEventListener('mousemove', bumpThrottled, { passive: true })
+  window.addEventListener('wheel', bumpThrottled, { passive: true })
+  window.addEventListener('keydown', bump)
+  window.addEventListener('pointerdown', bump, { passive: true })
+  window.addEventListener('touchstart', bump, { passive: true })
+}
+
+ensureListeners()
+
+export function msSinceLastInteraction(): number {
+  if (typeof window === 'undefined') return 0
+  ensureListeners()
+  return Date.now() - lastInteractionAt
+}
+
+export function isUserActive(windowMs: number = ACTIVE_WINDOW_MS): boolean {
+  if (typeof window === 'undefined') return true
+  ensureListeners()
+  return Date.now() - lastInteractionAt < windowMs
+}
+
+export function __resetForTests(at: number = 0): void {
+  lastInteractionAt = at
+  lastThrottledBump = 0
+}
+
+// ---------------------------------------------------------------------------
+// Shared constants (folded from constants.ts)
+// ---------------------------------------------------------------------------
+
+export const INTERVALS = [
+  { label: '1s', value: '1 second' },
+  { label: '1m', value: '1 minute' },
+  { label: '1h', value: '1 hour' },
+  { label: '1d', value: '1 day' },
+] as const
+
+export type ChartInterval = typeof INTERVALS[number]['value']
+
+export const INTERVAL_SECONDS: Record<ChartInterval, number> = {
+  '1 second': 1,
+  '1 minute': 60,
+  '1 hour': 3600,
+  '1 day': 86400,
+}
+
+export const TRENDS = [
+  { label: 'Off', value: 'off' },
+  { label: 'Auto', value: 'auto' },
+  { label: '1m', value: '1m' },
+  { label: '5m', value: '5m' },
+  { label: '1h', value: '1h' },
+  { label: '1d', value: '1d' },
+]
+
+export const CHART_LAYOUT_DEFAULTS = {
+  tickformatstops: [
+    { dtickrange: [0, 1000], value: "%H:%M:%S.%f" },
+    { dtickrange: [1000, 60000], value: "%H:%M:%S" },
+    { dtickrange: [60000, 3600000], value: "%H:%M" },
+    { dtickrange: [3600000, 86400000], value: "%H:%M<br>%b %d" },
+    { dtickrange: [86400000, 604800000], value: "%b %d" },
+    { dtickrange: [604800000, "M1"], value: "%b %d" },
+    { dtickrange: ["M1", "M12"], value: "%b %Y" },
+    { dtickrange: ["M12", null], value: "%Y" }
+  ]
+}
+
+export const SHIELD_MAP: Record<string, string> = {
+  "us-east-1": "iad-va-us",
+  "us-west": "bfi-wa-us",
+  "us-central-1": "chi-il-us",
+  "eu-central-1": "frankfurt-de",
+  "eu-south-1": "mxp-milan-it",
+  "eu-west-1": "mxp-paris-fr",
+  "uk-east-1": "london-uk",
+  "jp-central-1": "nrt-tokyo-jp",
+  "au-east-1": "sydney-au",
+};
+
+export const REGION_LABELS: Record<string, string> = {
+  "us-east-1": "US East (Ashburn)",
+  "us-west": "US West (Seattle)",
+  "us-central-1": "US Central (Chicago)",
+  "eu-central-1": "EU Central (Frankfurt)",
+  "eu-south-1": "EU South (Milan)",
+  "eu-west-1": "EU West (Paris)",
+  "uk-east-1": "UK East (London)",
+  "jp-central-1": "JP Central (Tokyo)",
+  "au-east-1": "AU East (Sydney)",
+};
+
+export const SHIELD_LABELS: Record<string, string> = {
+  none: "None",
+  "iad-va-us": "IAD (Ashburn)",
+  "bfi-wa-us": "BFI (Seattle)",
+  "chi-il-us": "CHI (Chicago)",
+  "frankfurt-de": "FRA (Frankfurt)",
+  "mxp-milan-it": "MXP (Milan)",
+  "mxp-paris-fr": "MXP (Paris)",
+  "london-uk": "LHR (London)",
+  "nrt-tokyo-jp": "NRT (Tokyo)",
+  "sydney-au": "SYD (Sydney)",
+};
+
+export const PERIOD_LABELS: Record<string, string> = {
+  "1": "1 second",
+  "5": "5 seconds",
+  "10": "10 seconds",
+  "20": "20 seconds",
+  "30": "30 seconds",
+  "60": "1 minute",
+  "120": "2 minutes",
+  "300": "5 minutes",
+  "600": "10 minutes",
+  "900": "15 minutes",
+};
+
+export const RETENTION_OPTIONS = [
+  { value: "1", label: "1 day" },
+  { value: "3", label: "3 days" },
+  { value: "7", label: "7 days" },
+  { value: "14", label: "14 days" },
+  { value: "30", label: "30 days" },
+  { value: "90", label: "90 days" },
+  { value: "180", label: "180 days" },
+  { value: "365", label: "365 days" },
+  { value: "0", label: "Forever" },
+] as const;
+
+// ---------------------------------------------------------------------------
+// Dependency-free DOM toast helper (folded from toast.ts)
+// ---------------------------------------------------------------------------
+
+type ToastKind = 'info' | 'success' | 'error' | 'warn'
+
+interface ToastOptions {
+  durationMs?: number
+}
+
+interface ToastActionOptions extends ToastOptions {
+  actionLabel: string
+  onAction: () => void
+  kind?: ToastKind
+}
+
+const PALETTE: Record<ToastKind, { bg: string; border: string; fg: string }> = {
+  info: { bg: '#0f172a', border: '#1e293b', fg: '#e2e8f0' },
+  success: { bg: '#064e3b', border: '#065f46', fg: '#ecfdf5' },
+  error: { bg: '#7f1d1d', border: '#991b1b', fg: '#fef2f2' },
+  warn: { bg: '#78350f', border: '#92400e', fg: '#fffbeb' },
+}
+
+let stackContainer: HTMLDivElement | null = null
+const recentMessages = new Map<string, number>()
+const RECENT_DEDUP_MS = 1500
+
+function ensureContainer(): HTMLDivElement | null {
+  if (typeof document === 'undefined') return null
+  if (stackContainer && document.body.contains(stackContainer)) return stackContainer
+  const el = document.createElement('div')
+  el.setAttribute('role', 'region')
+  el.setAttribute('aria-label', 'Notifications')
+  el.style.cssText =
+    'position:fixed;top:16px;right:16px;z-index:2147483647;display:flex;flex-direction:column;gap:8px;pointer-events:none;max-width:380px'
+  document.body.appendChild(el)
+  stackContainer = el
+  return el
+}
+
+function mountToastNode(
+  kind: ToastKind,
+  durationMs: number,
+  extraCss: string[] = [],
+  setup?: (node: HTMLDivElement, dismiss: () => boolean) => void,
+): void {
+  const root = ensureContainer()
+  if (!root) return
+  const palette = PALETTE[kind]
+  const node = document.createElement('div')
+  node.setAttribute('role', kind === 'error' || kind === 'warn' ? 'alert' : 'status')
+  node.setAttribute('aria-live', kind === 'error' || kind === 'warn' ? 'assertive' : 'polite')
+  node.style.cssText = [
+    `background:${palette.bg}`,
+    `color:${palette.fg}`,
+    `border:1px solid ${palette.border}`,
+    'padding:10px 14px',
+    'border-radius:8px',
+    'font:13px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif',
+    'box-shadow:0 8px 24px rgba(0,0,0,.18)',
+    'pointer-events:auto',
+    'transition:opacity .18s ease,transform .18s ease',
+    'opacity:0',
+    'transform:translateY(-4px)',
+    ...extraCss,
+  ].join(';')
+
+  let dismissed = false
+  const dismiss = (): boolean => {
+    if (dismissed) return false
+    dismissed = true
+    node.style.opacity = '0'
+    node.style.transform = 'translateY(-4px)'
+    setTimeout(() => {
+      node.remove()
+      if (root.childElementCount === 0 && stackContainer) {
+        stackContainer.remove()
+        stackContainer = null
+      }
+    }, 200)
+    return true
+  }
+
+  setup?.(node, dismiss)
+  root.appendChild(node)
+  requestAnimationFrame(() => {
+    node.style.opacity = '1'
+    node.style.transform = 'translateY(0)'
+  })
+  setTimeout(dismiss, durationMs)
+}
+
+export function showToast(message: string, kind: ToastKind = 'info', opts: ToastOptions = {}): void {
+  if (typeof document === 'undefined') return
+  const now = Date.now()
+  if (now - (recentMessages.get(message) || 0) < RECENT_DEDUP_MS) return
+  recentMessages.set(message, now)
+  if (recentMessages.size > 32) {
+    for (const [k, t] of recentMessages) {
+      if (now - t > RECENT_DEDUP_MS * 4) recentMessages.delete(k)
+    }
+  }
+
+  const duration = opts.durationMs ?? (kind === 'error' ? 5500 : 3500)
+  mountToastNode(kind, duration, [], (node, dismiss) => {
+    node.textContent = message
+    node.addEventListener('click', dismiss)
+  })
+}
+
+export function showReadOnlyToast(): void {
+  showToast('Read-only access — that action is unavailable for shared sessions.', 'warn')
+}
+
+export function showBusyToast(): void {
+  showToast('Server busy, retrying…', 'info', { durationMs: 2500 })
+}
+
+export function showToastWithAction(message: string, opts: ToastActionOptions): void {
+  if (typeof document === 'undefined') return
+  const kind: ToastKind = opts.kind ?? 'info'
+  const palette = PALETTE[kind]
+
+  mountToastNode(
+    kind,
+    opts.durationMs ?? 5500,
+    ['display:flex', 'align-items:center', 'gap:12px'],
+    (node, dismiss) => {
+      const label = document.createElement('span')
+      label.textContent = message
+      label.style.cssText = 'flex:1;min-width:0'
+      node.appendChild(label)
+
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.textContent = opts.actionLabel
+      button.style.cssText = `background:transparent;color:${palette.fg};border:1px solid ${palette.fg};border-radius:6px;padding:4px 10px;font:600 12px/1 inherit;cursor:pointer;flex-shrink:0;opacity:.9`
+      button.addEventListener('click', (e) => {
+        e.stopPropagation()
+        if (dismiss()) opts.onAction()
+      })
+      node.appendChild(button)
+    },
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Time-range wire contract & anchor quantization (folded from range-wire.ts)
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_RANGE_TOKEN = '24h'
+
+export interface RangeWireArgs {
+  relativeRange: string | null
+  isAutoRange: boolean
+  startTime: string | null
+  endTime: string | null
+  anchor: string
+}
+
+export interface RangeWire {
+  rangeToken: string | null
+  rangeKey: string
+  rangeBody:
+    | { range_token: string; anchor: string; start_time: string | null; end_time: string | null }
+    | { start_time: string | null; end_time: string | null }
+}
+
+export function resolveRangeWire({
+  relativeRange,
+  isAutoRange,
+  startTime,
+  endTime,
+  anchor,
+}: RangeWireArgs): RangeWire {
+  const rangeToken = relativeRange ?? (isAutoRange ? DEFAULT_RANGE_TOKEN : null)
+  if (rangeToken !== null) {
+    return {
+      rangeToken,
+      rangeKey: rangeToken,
+      rangeBody: { range_token: rangeToken, anchor, start_time: startTime, end_time: endTime },
+    }
+  }
+  return {
+    rangeToken: null,
+    rangeKey: `abs:${startTime ?? ''}|${endTime ?? ''}`,
+    rangeBody: { start_time: startTime, end_time: endTime },
+  }
+}
+
+export const ANCHOR_QUANTUM_SECONDS = 60
+
+function isoZ(ms: number): string {
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z')
+}
+
+export function quantizeAnchor(iso?: string | null, now: Date = new Date()): string {
+  let ms: number
+  if (iso) {
+    const parsed = Date.parse(iso)
+    ms = Number.isFinite(parsed) ? parsed : now.getTime()
+  } else {
+    ms = now.getTime()
+  }
+  const epoch = Math.floor(ms / 1000)
+  const floored = epoch - (epoch % ANCHOR_QUANTUM_SECONDS)
+  return isoZ(floored * 1000)
+}
+
+// ---------------------------------------------------------------------------
+// URL Filter Hydration (folded from urlFilterHydration.ts)
+// ---------------------------------------------------------------------------
+
+let hydrated = false
+
+export function rangeLabelToHours(label: string): number | null {
+  const m = /^(\d+)([mhd])$/.exec(label)
+  if (!m) return null
+  const n = parseInt(m[1], 10)
+  if (!Number.isFinite(n) || n <= 0) return null
+  if (m[2] === 'm') return n / 60
+  return m[2] === 'd' ? n * 24 : n
+}
+
+export function hydrateFilterStoreFromUrl(): void {
+  if (hydrated) return
+  if (typeof window === 'undefined') return
+  hydrated = true
+
+  const params = new URLSearchParams(window.location.search)
+  const qsRange = params.get('range')
+  const qsStart = params.get('start_time')
+  const qsEnd = params.get('end_time')
+  const qsFilters = params.get('filters')
+
+  const store = useFilterStore.getState()
+
+  const rangeHours = qsRange ? rangeLabelToHours(qsRange) : null
+  let touchedRange = false
+  if (qsRange && rangeHours !== null) {
+    const now = new Date()
+    const start = new Date(now.getTime() - rangeHours * 3600 * 1000).toISOString()
+    store.setRelativeRange(qsRange, start, now.toISOString())
+    touchedRange = true
+  } else if (qsStart && qsEnd) {
+    store.setRange(qsStart, qsEnd)
+    touchedRange = true
+  }
+
+  let touchedFilters = false
+  if (qsFilters) {
+    try {
+      const parsed = JSON.parse(qsFilters) as FiltersPayload
+      if (parsed && typeof parsed === 'object') {
+        store.clearFilters()
+        touchedFilters = true
+        for (const [rawCol, spec] of Object.entries(parsed)) {
+          if (!spec || !Array.isArray(spec.values)) continue
+          const col = rawCol.replace(/_\d+$/, '')
+          for (const v of spec.values) {
+            store.addFilter(col, String(v), spec.mode === 'exclude' ? 'exclude' : 'include')
+          }
+        }
+      }
+    } catch {
+      // Malformed ?filters= — ignore silently rather than break the page.
+    }
+  }
+
+  if (!touchedFilters) {
+    let cleared = false
+    params.forEach((value, key) => {
+      if (!key.startsWith('filter_')) return
+      if (!cleared) {
+        store.clearFilters()
+        cleared = true
+        touchedFilters = true
+      }
+      const col = key.substring('filter_'.length).replace(/_\d+$/, '')
+      store.addFilter(col, value, 'include')
+    })
+  }
+
+  if (touchedRange || touchedFilters) {
+    const url = new URL(window.location.href)
+    url.searchParams.delete('range')
+    url.searchParams.delete('start_time')
+    url.searchParams.delete('end_time')
+    url.searchParams.delete('filters')
+    Array.from(url.searchParams.keys()).forEach((key) => {
+      if (key.startsWith('filter_')) url.searchParams.delete(key)
+    })
+    window.history.replaceState({}, '', url.toString())
+  }
+}
+
+export function _resetUrlHydrationFlag(): void {
+  hydrated = false
+}

@@ -25,7 +25,7 @@ import {
   TrendingUp,
   Building2,
 } from 'lucide-react'
-import type { InsightContent, InsightHelpModalProps } from '../shared'
+import type { InsightContent, InsightHelpModalProps } from '@/components/Insights/InsightCard'
 import { getSecurityContent } from './sections/security'
 import { getPerformanceContent } from './sections/performance'
 

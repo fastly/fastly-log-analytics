@@ -4,7 +4,7 @@ import {
   fetchSecurityServerSide,
   SECURITY_SSR_DEFAULTS,
 } from '@/lib/ssr/upstream'
-import { resolvePageServiceId, seedDehydratedState } from '@/lib/ssr/seed'
+import { resolvePageServiceId, seedDehydratedState } from '@/lib/ssr/upstream'
 import SecurityClient from './_sections/SecurityClient'
 
 // Per-request RSC shell for /security. Pre-fetches the DEFAULT security

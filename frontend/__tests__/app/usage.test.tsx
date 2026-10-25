@@ -4,7 +4,7 @@ import UsagePage from '@/app/usage/page'
 import SessionsPage from '@/app/sessions/page'
 import StreamingClient from '@/app/streaming/_sections/StreamingClient'
 import { DEFAULTS, reducer, calculate, type PrefillResponse } from '@/components/CostCalculator/calc'
-import { createTestQueryClient, renderWithQuery } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/page-smoke'
 import React from 'react'
 import { spyOnConsoleError } from '../helpers/page-smoke'
 import { CMCD_FIXTURE } from '../helpers/msw/handlers'
@@ -23,14 +23,16 @@ vi.mock('next-themes', () => ({
   useTheme: vi.fn(() => ({ theme: 'light' })),
 }))
 
-vi.mock('@/hooks/useIsDataReady', () => ({
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
   useIsDataReady: vi.fn(() => true),
 }))
 
 const mockGet = vi.fn()
 const mockPost = vi.fn()
 
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api')>()),
   client: {
     GET: (...args: unknown[]) => mockGet(...args),
     POST: (...args: unknown[]) => mockPost(...args),

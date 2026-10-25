@@ -4,27 +4,25 @@
  *
  * @vitest-environment jsdom
  */
-import { stubIntersectionObserver } from '@/__tests__/helpers/browser-stubs'
+import { setupNextHeadersMock, stubIntersectionObserver } from '@/__tests__/helpers/page-smoke'
 import { render, screen, cleanup, act } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import React from 'react'
 
-let mockHeaders: Record<string, string> = {}
-vi.mock('next/headers', () => ({
-  headers: async () => ({ get: (k: string) => mockHeaders[k.toLowerCase()] ?? null }),
-}))
+const { setHeaders } = setupNextHeadersMock()
 
 const { useNowMsMock } = vi.hoisted(() => ({ useNowMsMock: vi.fn(() => 0) }))
-vi.mock('@/hooks/useNowSeconds', () => ({ useNowMs: useNowMsMock }))
+vi.mock('@/hooks/useSSE', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useSSE')>()), useNowMs: useNowMsMock }))
 vi.mock('@/lib/date', () => ({ formatTimeAgo: (ts: string) => `ago:${ts}` }))
 
-import { DeltaIndicator } from '@/components/Insights/shared'
-import { ErrorBoundary } from '@/components/ErrorBoundary'
+import { DeltaIndicator } from '@/components/Insights/InsightCard'
+import { ErrorBoundary } from '@/components/AnalyticsCard'
 import { HelpDialog } from '@/components/ui/help-dialog'
-import { LazyMount } from '@/components/LazyMount'
+import { LazyMount } from '@/components/AnalyticsCard'
 import { ServerFooter } from '@/components/ServerFooter'
 import { Sparkline } from '@/components/Sparkline'
-import { TimeAgo } from '@/components/TimeAgo'
+import { TimeAgo } from '@/components/SyncStatusBadge/SyncStatusBadge'
 
 afterEach(() => {
   cleanup()
@@ -167,7 +165,7 @@ describe('LazyMount', () => {
 
 describe('ServerFooter', () => {
   beforeEach(() => {
-    mockHeaders = {}
+    setHeaders({})
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => 'secret-instance' }))
     process.env.COMMIT_HASH = 'abc1234'
   })
@@ -182,7 +180,7 @@ describe('ServerFooter', () => {
 
     const fetchSpy = vi.fn()
     vi.stubGlobal('fetch', fetchSpy)
-    mockHeaders = { 'x-proxied-by-caddy': 'true' }
+    setHeaders({ 'x-proxied-by-caddy': 'true' })
     const el2 = await ServerFooter()
     expect(el2).toBeNull()
     expect(fetchSpy).not.toHaveBeenCalled()

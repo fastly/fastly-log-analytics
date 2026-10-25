@@ -4,11 +4,11 @@ import React from 'react'
 import { useSearchParams } from 'next/navigation'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
-import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useIsDataReady'
-import { useIsAnalyst } from '@/hooks/useIsAnalyst'
-import { useDeferredDeleteWithUndo } from '@/hooks/useDeferredDeleteWithUndo'
-import { ReportShell } from '@/components/ReportShell'
+import { unwrapClient } from '@/lib/api'
+import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useBootstrap'
+import { useIsAnalyst } from '@/hooks/useBootstrap'
+import { useDeferredDeleteWithUndo } from '@/hooks/useAdminEventStream'
+import { ReportShell } from '@/components/ReportLayout'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent } from '@/components/ui/card'
@@ -26,7 +26,7 @@ import {
   Loader2,
   Play,
 } from 'lucide-react'
-import { useDateFormat } from '@/hooks/useDateFormat'
+import { useDateFormat } from '@/hooks/useSSE'
 import {
   Dialog,
   DialogContent,
@@ -36,7 +36,7 @@ import {
 } from '@/components/ui/dialog'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
-import { showToast } from '@/lib/toast'
+import { showToast } from '@/lib/utils'
 import { ColumnVisibilityDropdown } from '@/components/DataTable'
 import { VisibilityState } from '@tanstack/react-table'
 import type { components } from '@/types/api.generated'

@@ -6,12 +6,12 @@
  */
 import { renderHook, waitFor } from '@testing-library/react'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
+import { createTestQueryClient, makeQueryWrapper } from '../helpers/page-smoke'
 import { http, HttpResponse } from 'msw'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-import { server } from '@/__tests__/helpers/msw/server'
-import { invalidInput } from '@/__tests__/helpers/partial'
+import { server } from '@/__tests__/helpers/msw/handlers'
+import { invalidInput } from '@/__tests__/helpers/page-smoke'
 import type { components } from '@/types/api.generated'
 
 const API_BASE = 'http://127.0.0.1:8000'
@@ -19,7 +19,8 @@ const SVC = 'svc-test'
 
 const mockServiceState = { activeServiceId: 'svc-test' as string | null }
 
-vi.mock('@/lib/userActivity', () => ({
+vi.mock('@/lib/utils', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/utils')>()),
   isUserActive: vi.fn(() => true),
   ACTIVE_WINDOW_MS: 120_000,
 }))
@@ -44,7 +45,7 @@ vi.mock('@/stores/debugStore', () => {
 })
 
 import { client, extractApiError, customFieldsApi, type CustomField, type VclLintRequest } from '@/lib/api'
-import { isUserActive } from '@/lib/userActivity'
+import { isUserActive } from '@/lib/utils'
 
 function wrapper() {
   const qc = createTestQueryClient({ queries: { gcTime: 0 }, mutations: { retry: false } })

@@ -1,6 +1,8 @@
 "use client";
 
 import React from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -11,6 +13,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { RetentionSelect } from "@/components/ui/retention-select";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { SectionHeader } from "@/components/ui/section-header";
 import { LabelWithInfo } from "@/components/ui/label-with-info";
@@ -19,18 +22,160 @@ import {
   CheckCircle2,
   Database,
   Globe,
+  RefreshCw,
   Search,
   Settings,
+  TriangleAlert,
   Zap,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { client } from "@/lib/api";
+import { unwrapClient } from '@/lib/api';
+import { queryKeys } from "@/lib/query-keys";
+import type { components } from "@/types/api.generated";
 import type { WizardState } from "../useWizardState";
 import {
   PERIOD_LABELS,
   REGION_LABELS,
   SHIELD_LABELS,
-} from "@/lib/constants";
-import { RumVersionPicker } from "../RumVersionPicker";
+} from '@/lib/utils';
+
+type RumVersionsResponse = components["schemas"]["RumVersionsResponse"];
+
+interface RumVersionPickerProps {
+  serviceId: string;
+  value: string | null;
+  onChange: (version: string | null) => void;
+  availableVersions?: string[];
+  currentVersion?: string | null;
+  latestVersion?: string | null;
+}
+
+const INFO_TEXT =
+  "The self-hosted Grafana Faro Web SDK build served from your Object Storage bucket. Pin a version to control exactly which RUM client ships to real users; leave it unpinned and the service self-hosts the default vetted version instead.";
+
+export function RumVersionPicker({
+  serviceId,
+  value,
+  onChange,
+  availableVersions,
+  currentVersion,
+  latestVersion,
+}: RumVersionPickerProps) {
+  const hasPrefetched = availableVersions !== undefined;
+  const { data, isLoading, isError, refetch, isFetching } = useQuery<RumVersionsResponse>({
+    queryKey: queryKeys.rumVersions(serviceId),
+    queryFn: async ({ signal }) =>
+      unwrapClient(
+        client.GET(
+          "/api/services/{service_id}/rum/versions",
+          { params: { path: { service_id: serviceId } }, signal },
+        ),
+      ),
+    enabled: !!serviceId && !hasPrefetched,
+    retry: false,
+    staleTime: Infinity,
+  });
+
+  const available = availableVersions ?? data?.available ?? [];
+  const latest = latestVersion !== undefined ? latestVersion : (data?.latest ?? null);
+  const current = currentVersion !== undefined ? currentVersion : (data?.current ?? null);
+  const degraded = !hasPrefetched && (isError || (!isLoading && available.length === 0));
+
+  const seedLatest = React.useEffectEvent(() => {
+    if (latest && value === null) {
+      onChange(latest);
+    }
+  });
+  React.useEffect(() => {
+    seedLatest();
+  }, [latest]);
+
+  if (!hasPrefetched && isLoading) {
+    return (
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between">
+          <LabelWithInfo label="Faro Web SDK Version" info={INFO_TEXT} />
+          <span className="text-xs text-muted-foreground animate-pulse font-semibold">Release Notes &rarr;</span>
+        </div>
+        <Skeleton className="h-8 w-full" />
+      </div>
+    );
+  }
+
+  if (degraded) {
+    return (
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between">
+          <LabelWithInfo label="Faro Web SDK Version" info={INFO_TEXT} />
+          <a
+            href="https://github.com/grafana/faro-web-sdk/releases"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs text-primary hover:underline flex items-center gap-1 font-semibold"
+          >
+            Release Notes &rarr;
+          </a>
+        </div>
+        <Alert variant="destructive">
+          <TriangleAlert />
+          <AlertTitle>
+            {isError ? "Couldn't reach the npm registry" : "No versions available"}
+          </AlertTitle>
+          <AlertDescription className="flex items-center justify-between gap-2">
+            <span>
+              RUM will provision using the default self-hosted version — you can pin a
+              specific one later from the service&apos;s RUM settings.
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs shrink-0"
+              onClick={() => refetch()}
+              disabled={isFetching}
+            >
+              <RefreshCw className={cn("h-3 w-3 mr-1", isFetching && "animate-spin")} />
+              {isFetching ? "Retrying…" : "Retry"}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between">
+        <LabelWithInfo label="Faro Web SDK Version" info={INFO_TEXT} />
+        <a
+          href="https://github.com/grafana/faro-web-sdk/releases"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-xs text-primary hover:underline flex items-center gap-1 font-semibold"
+        >
+          Release Notes &rarr;
+        </a>
+      </div>
+      <Select value={value ?? undefined} onValueChange={(v) => onChange(v)}>
+        <SelectTrigger className="h-8 text-xs w-full" aria-label="Faro Web SDK Version">
+          <SelectValue placeholder="Select a version" />
+        </SelectTrigger>
+        <SelectContent>
+          {available.map((v) => {
+            const tags = [v === latest && "latest", v === current && "current"].filter(Boolean);
+            return (
+              <SelectItem key={v} value={v} className="text-xs">
+                {v}
+                {tags.length > 0 ? ` (${tags.join(", ")})` : ""}
+              </SelectItem>
+            );
+          })}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
 
 export function StorageStep({ s }: { s: WizardState }) {
   const { config, setConfig, domainStatus, domainMessage, checkDomain } = s;

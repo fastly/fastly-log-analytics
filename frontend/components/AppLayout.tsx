@@ -37,7 +37,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { cn, buildServiceHref, SIDEBAR_COLLAPSED_COOKIE } from '@/lib/utils'
 import { rotatePageLoadId, client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { Button, buttonVariants } from '@/components/ui/button'
 import {
@@ -61,14 +61,14 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { ServiceSwitcher } from '@/components/ServiceSwitcher/ServiceSwitcher'
-import { useFilterUrlWriteback } from '@/hooks/useFilterUrlWriteback'
+import { useFilterUrlWriteback } from '@/hooks/useDashboardCards'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { SyncStatusBadge } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { useDebugStore } from '@/stores/debugStore'
 import { useTimezoneStore } from '@/stores/timezoneStore'
 import { useSessionRoleStore } from '@/stores/sessionRoleStore'
 import { getTimezoneAbbr } from '@/lib/date'
-import { useMounted } from '@/hooks/useMounted'
+import { useMounted } from '@/hooks/useBootstrap'
 import type { BootstrapResponse, ShareBanner } from '@/types/api'
 
 // FilterBar is hidden on /admin, /logs, /insights, /alerts, raw-query mode,
@@ -99,13 +99,13 @@ const DebugPanel = dynamic(
 )
 import { PlotlyPrewarm, MapPrewarm } from '@/components/PlotlyChart'
 
-import { useUrlServiceSync } from '@/hooks/useUrlServiceSync'
+import { useUrlServiceSync } from '@/hooks/useBootstrap'
 import { useBootstrap, useBootstrapSyncEffects } from '@/hooks/useBootstrap'
-import { useIsAnalyst, useEnforceMaskedFilters } from '@/hooks/useIsAnalyst'
+import { useIsAnalyst, useEnforceMaskedFilters } from '@/hooks/useBootstrap'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useRouter } from 'next/navigation'
 import packageJson from '../package.json'
-import { useAnalystHeartbeat, useAnalystLogout } from '@/hooks/useAnalystHeartbeat'
+import { useAnalystHeartbeat, useAnalystLogout } from '@/hooks/useBootstrap'
 
 export function ThemeToggle() {
   const { setTheme } = useTheme()
@@ -486,6 +486,48 @@ function NavLink({ href, icon: Icon, name, isActive, disabled, collapsed, onClic
         {name}
       </TooltipContent>
     </Tooltip>
+  )
+}
+
+function SidebarNavList({
+  items,
+  ariaLabel,
+  pathname,
+  disabled,
+  collapsed,
+  activeServiceId,
+  router,
+  onItemClick,
+  itemClassName,
+  className,
+}: {
+  items: { name: string; href: string; icon: React.ElementType }[]
+  ariaLabel: string
+  pathname: string
+  disabled?: boolean
+  collapsed?: boolean
+  activeServiceId?: string | null
+  router: ReturnType<typeof useRouter>
+  onItemClick?: () => void
+  itemClassName?: string
+  className?: string
+}) {
+  return (
+    <nav className={cn("grid gap-1", className)} aria-label={ariaLabel}>
+      {items.map((item) => (
+        <NavLink
+          key={item.href}
+          {...item}
+          isActive={pathname === item.href}
+          disabled={disabled}
+          collapsed={collapsed}
+          activeServiceId={activeServiceId}
+          router={router}
+          onClick={onItemClick}
+          className={itemClassName}
+        />
+      ))}
+    </nav>
   )
 }
 
@@ -945,33 +987,26 @@ export function AppLayout({
           </Link>
         </div>
         <ScrollArea className="flex-1">
-          <nav className="grid gap-1 p-2" aria-label="Primary">
-            {visibleNav.map((item) => (
-              <NavLink
-                key={item.href}
-                {...item}
-                isActive={pathname === item.href}
-                disabled={!hasServices}
-                collapsed={sidebarCollapsed}
-                activeServiceId={navActiveServiceId}
-                router={router}
-              />
-            ))}
-          </nav>
+          <SidebarNavList
+            items={visibleNav}
+            ariaLabel="Primary"
+            pathname={pathname}
+            disabled={!hasServices}
+            collapsed={sidebarCollapsed}
+            activeServiceId={navActiveServiceId}
+            router={router}
+            className="p-2"
+          />
         </ScrollArea>
         <div className="mt-auto p-2 border-t bg-muted/20">
-          <nav className="grid gap-1" aria-label="System">
-            {visibleSystemNav.map((item) => (
-              <NavLink
-                key={item.href}
-                {...item}
-                isActive={pathname === item.href}
-                collapsed={sidebarCollapsed}
-                activeServiceId={activeServiceId}
-                router={router}
-              />
-            ))}
-          </nav>
+          <SidebarNavList
+            items={visibleSystemNav}
+            ariaLabel="System"
+            pathname={pathname}
+            collapsed={sidebarCollapsed}
+            activeServiceId={activeServiceId}
+            router={router}
+          />
           {!sidebarCollapsed && (
             // text-muted-foreground (no /opacity-step) keeps the version
             // string above WCAG 2.1 AA 4.5:1 at 10px on bg-muted/20.
@@ -982,26 +1017,17 @@ export function AppLayout({
               v{packageJson.version}
             </div>
           )}
-          {!sidebarCollapsed && isAnalyst && (analystEmail || analystName) && (
-            <div
-              data-testid="analyst-watermark"
-              data-analyst-email={analystEmail || ''}
-              data-axe-ignore="true"
-              className="text-[10px] text-muted-foreground text-center mt-1"
-            >
-              Viewing as <span className="font-medium">{analystName || analystEmail}</span>
-            </div>
-          )}
           {/* When collapsed, keep the analyst watermark in the DOM (tests
               and audit hooks key off data-analyst-email) but visually
               hidden — the expanded copy is the user-facing one. */}
-          {sidebarCollapsed && isAnalyst && (analystEmail || analystName) && (
+          {isAnalyst && (analystEmail || analystName) && (
             <div
               data-testid="analyst-watermark"
               data-analyst-email={analystEmail || ''}
-              className="sr-only"
+              data-axe-ignore={sidebarCollapsed ? undefined : 'true'}
+              className={sidebarCollapsed ? 'sr-only' : 'text-[10px] text-muted-foreground text-center mt-1'}
             >
-              Viewing as {analystName || analystEmail}
+              Viewing as <span className="font-medium">{analystName || analystEmail}</span>
             </div>
           )}
           {isAnalyst && (
@@ -1167,36 +1193,29 @@ export function AppLayout({
               </DialogPrimitive.Close>
             </div>
             <ScrollArea className="flex-1">
-              <nav className="grid gap-1 p-2" aria-label="Primary">
-                {visibleNav.map((item) => (
-                  <NavLink
-                    key={item.href}
-                    {...item}
-                    isActive={pathname === item.href}
-                    disabled={!hasServices}
-                    activeServiceId={navActiveServiceId}
-                    router={router}
-                    onClick={closeMobileNav}
-                    className="py-3 min-h-11"
-                  />
-                ))}
-              </nav>
+              <SidebarNavList
+                items={visibleNav}
+                ariaLabel="Primary"
+                pathname={pathname}
+                disabled={!hasServices}
+                activeServiceId={navActiveServiceId}
+                router={router}
+                onItemClick={closeMobileNav}
+                itemClassName="py-3 min-h-11"
+                className="p-2"
+              />
             </ScrollArea>
             {visibleSystemNav.length > 0 && (
               <div className="border-t p-2 bg-muted/20 shrink-0">
-                <nav className="grid gap-1" aria-label="System">
-                  {visibleSystemNav.map((item) => (
-                    <NavLink
-                      key={item.href}
-                      {...item}
-                      isActive={pathname === item.href}
-                      activeServiceId={navActiveServiceId}
-                      router={router}
-                      onClick={closeMobileNav}
-                      className="py-3 min-h-11"
-                    />
-                  ))}
-                </nav>
+                <SidebarNavList
+                  items={visibleSystemNav}
+                  ariaLabel="System"
+                  pathname={pathname}
+                  activeServiceId={navActiveServiceId}
+                  router={router}
+                  onItemClick={closeMobileNav}
+                  itemClassName="py-3 min-h-11"
+                />
               </div>
             )}
             {isAnalyst && (

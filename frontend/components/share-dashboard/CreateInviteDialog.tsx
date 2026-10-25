@@ -23,10 +23,10 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { client, extractApiError } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import { cn, panelDialogContent, panelDialogHeaderSolid } from '@/lib/utils'
 
-import type { ShareStatus } from './sortable'
+import type { ShareStatus } from './SharingControlPanel'
 
 const DURATION_OPTIONS = [
   { label: '1 hour', value: 1 },

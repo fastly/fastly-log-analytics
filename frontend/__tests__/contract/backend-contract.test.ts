@@ -32,7 +32,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import type { paths } from '@/types/api.generated'
 
-import { CONTRACT_API_BASE, startBackend, stopBackend } from '../helpers/setup-backend'
+import { CONTRACT_API_BASE, startBackend, stopBackend } from '../helpers/msw/handlers'
 
 const client = createClient<paths>({ baseUrl: CONTRACT_API_BASE })
 

@@ -16,13 +16,16 @@ Design notes:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import sys as _sys
+import time
 from typing import Any
 
-from backend.celery_queue import (
+from backend.celery_app import (
     KNOWN_QUEUES as KNOWN_QUEUES,
 )
-from backend.celery_queue import (
+from backend.celery_app import (
     celery_queue_depths as celery_queue_depths,
 )
 
@@ -471,3 +474,32 @@ def retry_ingest_ledger_entries(
             logger.debug("[celery_status] best-effort Celery dispatch on ledger retry skipped: %s", e)
 
     return {"ok": True, "affected": affected, "dispatched": dispatched}
+
+
+# ── Cached async sampler for the admin celery-status SSE channel (folded from celery_status_sampler.py) ──
+
+_CACHE_TTL_S = 4.0
+_cache: dict = {"at": 0.0, "value": None}
+_lock = asyncio.Lock()
+
+
+async def sample_celery_status_cached():
+    now = time.monotonic()
+    if _cache["value"] is not None and now - _cache["at"] < _CACHE_TTL_S:
+        return _cache["value"]
+    async with _lock:
+        # Re-check under the lock — a concurrent caller may have refreshed.
+        now = time.monotonic()
+        if _cache["value"] is not None and now - _cache["at"] < _CACHE_TTL_S:
+            return _cache["value"]
+        loop = asyncio.get_running_loop()
+        value = await loop.run_in_executor(None, get_celery_status)
+        _cache["value"] = value
+        _cache["at"] = time.monotonic()
+        return value
+
+
+_self_mod = _sys.modules[__name__]
+_sys.modules["backend.celery_status_sampler"] = _self_mod
+if "backend" in _sys.modules:
+    _sys.modules["backend"].celery_status_sampler = _self_mod  # type: ignore[attr-defined]

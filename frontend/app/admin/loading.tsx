@@ -1,4 +1,4 @@
-import { FormSkeleton } from '@/components/skeletons/PageSkeleton'
+import { FormSkeleton } from '@/components/ReportLayout'
 
 const OVERVIEW_CARD_SLOTS = ['queries', 'ingest-gap', 'slow-queries', 'workers']
 

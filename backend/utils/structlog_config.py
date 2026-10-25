@@ -214,3 +214,128 @@ def bridge_uvicorn_loggers() -> None:
 # etc. Always pass structured kwargs (``actor``, ``target``, identifying
 # ids); never embed the same info in a free-text message.
 audit_log = structlog.get_logger("audit")
+
+
+# ---------------------------------------------------------------------------
+# Atomic file-write utilities (folded from backend.utils.atomic_write)
+# ---------------------------------------------------------------------------
+
+import json  # noqa: E402
+import tempfile  # noqa: E402
+from collections.abc import Callable, Iterator  # noqa: E402
+from contextlib import contextmanager, suppress  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+
+@contextmanager
+def atomic_temp_path(
+    target: str | Path,
+    *,
+    prefix: str | None = None,
+    suffix: str = ".tmp",
+    mode: int | None = None,
+) -> Iterator[Path]:
+    """Yield a sibling temporary file path that is atomically replaced onto ``target`` on exit."""
+    dst = Path(target)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=prefix if prefix is not None else f".{dst.name}.",
+        suffix=suffix,
+        dir=str(dst.parent),
+    )
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        if mode is not None:
+            os.chmod(tmp_path, mode)
+        yield tmp_path
+        if tmp_path.exists():
+            os.replace(tmp_path, dst)
+    finally:
+        with suppress(OSError):
+            if tmp_path.exists():
+                tmp_path.unlink()
+
+
+def atomic_write_bytes(
+    target: str | Path,
+    data: bytes,
+    *,
+    fsync: bool = False,
+    mode: int | None = None,
+    prefix: str | None = None,
+    suffix: str = ".tmp",
+    fallback_in_place_errnos: set[int] | None = None,
+) -> None:
+    """Atomically write ``data`` to ``target`` via a sibling temporary file and ``os.replace``."""
+    dst = Path(target)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=prefix if prefix is not None else f".{dst.name}.",
+        suffix=suffix,
+        dir=str(dst.parent),
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            if fsync:
+                f.flush()
+                os.fsync(f.fileno())
+        if mode is not None:
+            os.chmod(tmp_name, mode)
+        os.replace(tmp_name, dst)
+    except OSError as e:
+        with suppress(OSError):
+            os.unlink(tmp_name)
+        err_msg = str(e).lower()
+        if fallback_in_place_errnos and (
+            e.errno in fallback_in_place_errnos or "busy" in err_msg or "permission" in err_msg
+        ):
+            with open(dst, "wb") as f:
+                f.write(data)
+                if fsync:
+                    f.flush()
+                    os.fsync(f.fileno())
+            return
+        raise
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(tmp_name)
+        raise
+
+
+def atomic_write_json(
+    target: str | Path,
+    data: Any,
+    *,
+    indent: int | None = 2,
+    sort_keys: bool = False,
+    separators: tuple[str, str] | None = None,
+    default: Callable[[Any], Any] | None = None,
+    fsync: bool = False,
+    prefix: str | None = None,
+    suffix: str = ".tmp",
+    fallback_in_place_errnos: set[int] | None = None,
+) -> None:
+    """Serialize ``data`` as UTF-8 JSON and atomically write it to ``target``."""
+    payload = json.dumps(
+        data,
+        indent=indent,
+        sort_keys=sort_keys,
+        separators=separators,
+        default=default,
+    ).encode("utf-8")
+    atomic_write_bytes(
+        target,
+        payload,
+        fsync=fsync,
+        prefix=prefix,
+        suffix=suffix,
+        fallback_in_place_errnos=fallback_in_place_errnos,
+    )
+
+
+sys.modules["backend.utils.atomic_write"] = sys.modules[__name__]
+_utils_pkg = sys.modules.get("backend.utils")
+if _utils_pkg is not None:
+    _utils_pkg.atomic_write = sys.modules[__name__]  # type: ignore[attr-defined]

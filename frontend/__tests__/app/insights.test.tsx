@@ -1,7 +1,7 @@
 import { screen, waitFor, fireEvent } from '@testing-library/react'
 import { expect, test, vi, beforeEach } from 'vitest'
 import InsightsClient from '@/app/insights/_sections/InsightsClient'
-import { createTestQueryClient, renderWithQuery } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/page-smoke'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useSessionRoleStore } from '@/stores/sessionRoleStore'
 
@@ -29,7 +29,8 @@ const { apiGet, apiPost } = vi.hoisted(() => ({
   apiPost: vi.fn<(url: string, opts?: PostOpts) => Promise<ApiResult>>(),
 }))
 
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api')>()),
   client: {
     GET: apiGet,
     POST: apiPost,

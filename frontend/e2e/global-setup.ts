@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { E2E_BACKEND_PORT, E2E_FRONTEND_PORT } from '../playwright.config'
-import { backendTestEnvironment } from '../__tests__/helpers/setup-backend'
+import { backendTestEnvironment } from '../__tests__/helpers/msw/handlers'
 
 const HOST = '127.0.0.1'
 

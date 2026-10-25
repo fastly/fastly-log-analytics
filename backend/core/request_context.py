@@ -34,10 +34,19 @@ insights/views/bootstrap, then defer admin/provision/share to Phase 5.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import json
 import logging
+import os
+import secrets
+import sys
+import threading
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Final, Protocol
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import Depends, HTTPException, Request
 
 from backend.core.request_telemetry import RequestTelemetry
@@ -301,3 +310,107 @@ def _resolve_source(service_id: str) -> dict:
     as a module-local name so existing test patches on
     ``backend.core.request_context._resolve_source`` continue to work."""
     return _resolve_source_or_400(service_id)
+
+
+# ── Opaque AES-GCM session-reference token (formerly backend.core.session_token) ──
+
+NONCE_BYTES: Final[int] = 12
+KEY_BYTES: Final[int] = 32  # AES-256
+GCM_TAG_BYTES: Final[int] = 16
+_ENV_SECRET: Final[str] = "SESSION_TOKEN_SECRET"
+
+
+class SessionTokenError(Exception):
+    """Raised when a session token is malformed, tampered with, minted for a
+    different service, or sealed under a key this process no longer holds (e.g.
+    after a restart with the ephemeral default). Callers treat all of these the
+    same: the reference is stale — ask the client to reload the session list."""
+
+
+_key: bytes | None = None
+_key_lock = threading.Lock()
+
+
+def _resolve_key() -> bytes:
+    """Lazily resolve (and cache) the 32-byte AES key."""
+    global _key
+    if _key is None:
+        with _key_lock:
+            if _key is None:
+                env = os.getenv(_ENV_SECRET, "").strip()
+                _key = hashlib.sha256(env.encode("utf-8")).digest() if env else secrets.token_bytes(KEY_BYTES)
+    return _key
+
+
+def _b64url_encode(data: bytes) -> str:
+    """Base64URL without padding — URL/JSON-safe, RFC 4648 §5."""
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(s: str) -> bytes:
+    pad = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode((s + pad).encode("ascii"))
+
+
+def seal_aes_gcm(key: bytes, payload: object, aad: bytes) -> str:
+    """JSON-serialize and seal ``payload`` with AES-256-GCM + ``aad`` into a base64url token."""
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    nonce = os.urandom(NONCE_BYTES)
+    ciphertext = AESGCM(key).encrypt(nonce, raw, aad)
+    return _b64url_encode(nonce + ciphertext)
+
+
+def unseal_aes_gcm(key: bytes, token: str, aad: bytes, error_cls: type[Exception]) -> object:
+    """Inverse of :func:`seal_aes_gcm`, raising ``error_cls`` on any decode or AEAD error."""
+    try:
+        raw = _b64url_decode(token)
+    except Exception as e:
+        raise error_cls(f"base64url decode failed: {e}") from e
+    if len(raw) < NONCE_BYTES + GCM_TAG_BYTES:
+        raise error_cls(f"token too short: {len(raw)} bytes")
+    nonce, ciphertext = raw[:NONCE_BYTES], raw[NONCE_BYTES:]
+    try:
+        plaintext = AESGCM(key).decrypt(nonce, ciphertext, aad)
+    except InvalidTag as e:
+        raise error_cls("AEAD verification failed") from e
+    try:
+        return json.loads(plaintext)
+    except (ValueError, TypeError) as e:
+        raise error_cls(f"payload decode failed: {e}") from e
+
+
+def seal_session_token(
+    ip: str,
+    ja4: str | None,
+    session_start: str,
+    session_end: str,
+    *,
+    service_id: str,
+) -> str:
+    """Seal a session identity tuple into an opaque token bound to ``service_id``."""
+    return seal_aes_gcm(_resolve_key(), [ip, ja4, session_start, session_end], service_id.encode("utf-8"))
+
+
+def open_session_token(token: str, *, service_id: str) -> tuple[str, str | None, str, str]:
+    """Inverse of :func:`seal_session_token`. Returns ``(ip, ja4, start, end)``."""
+    decoded = unseal_aes_gcm(_resolve_key(), token, service_id.encode("utf-8"), SessionTokenError)
+    if not isinstance(decoded, list) or len(decoded) != 4:
+        raise SessionTokenError("payload decode failed: expected 4 elements")
+    ip, ja4, start, end = decoded
+    return str(ip), (str(ja4) if ja4 is not None else None), str(start), str(end)
+
+
+def verify_session_token(token: str, service_id: str = "") -> tuple[str, str | None] | None:
+    """Compatibility helper returning ``(ip, ja4)`` or ``None`` on invalid token."""
+    try:
+        ip, ja4, _start, _end = open_session_token(token, service_id=service_id)
+        return ip, ja4
+    except SessionTokenError:
+        return None
+
+
+_this_module = sys.modules[__name__]
+sys.modules["backend.core.session_token"] = _this_module
+_core_pkg = sys.modules.get("backend.core")
+if _core_pkg is not None:
+    setattr(_core_pkg, "session_token", _this_module)

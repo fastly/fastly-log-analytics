@@ -13,11 +13,11 @@
  * @vitest-environment jsdom
  */
 import { renderHook, act, waitFor } from '@testing-library/react'
-import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
+import { createTestQueryClient, makeQueryWrapper } from '../helpers/page-smoke'
 import { http, HttpResponse } from 'msw'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
-import { server } from '@/__tests__/helpers/msw/server'
+import { server } from '@/__tests__/helpers/msw/handlers'
 
 const push = vi.fn()
 vi.mock('next/navigation', () => ({

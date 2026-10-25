@@ -6,11 +6,11 @@
  * and `useActiveLogFields` end-to-end against MSW and React Query cache.
  */
 import { renderHook, waitFor } from '@testing-library/react'
-import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
+import { createTestQueryClient, makeQueryWrapper } from '../helpers/page-smoke'
 import { http, HttpResponse } from 'msw'
 import { afterEach, describe, it, expect, beforeEach, vi } from 'vitest'
 
-import { server } from '@/__tests__/helpers/msw/server'
+import { server } from '@/__tests__/helpers/msw/handlers'
 import { queryKeys } from '@/lib/query-keys'
 
 const mockSetServices = vi.fn()
@@ -319,7 +319,7 @@ describe('useLogFieldsCatalog (MSW)', () => {
         }),
       ),
     )
-    const { useLogFieldsCatalog } = await import('@/hooks/useLogFieldsCatalog')
+    const { useLogFieldsCatalog } = await import('@/hooks/useBootstrap')
     const { result } = renderHook(() => useLogFieldsCatalog(), { wrapper: catalogWrapper() })
 
     await waitFor(() => expect(result.current.data).toBeDefined())
@@ -338,7 +338,7 @@ describe('useLogFieldsCatalog (MSW)', () => {
         return HttpResponse.json({ fields: [], custom_fields: [], groups: [], presets: {} })
       }),
     )
-    const { useLogFieldsCatalog } = await import('@/hooks/useLogFieldsCatalog')
+    const { useLogFieldsCatalog } = await import('@/hooks/useBootstrap')
     renderHook(() => useLogFieldsCatalog(), { wrapper: catalogWrapper() })
 
     await waitFor(() => expect(observedSid).not.toBeNull())
@@ -351,7 +351,7 @@ describe('useLogFieldsCatalog (MSW)', () => {
         HttpResponse.json({ error: 'oops' }, { status: 500 }),
       ),
     )
-    const { useLogFieldsCatalog } = await import('@/hooks/useLogFieldsCatalog')
+    const { useLogFieldsCatalog } = await import('@/hooks/useBootstrap')
     const { result } = renderHook(() => useLogFieldsCatalog(), { wrapper: catalogWrapper() })
 
     await waitFor(() => expect(result.current.isError).toBe(true))
@@ -373,7 +373,7 @@ describe('useActiveLogFields', () => {
 
   it('reports not-ready and treats everything as active until bootstrap lands', async () => {
     server.use(http.get(`${API_BASE}/api/bootstrap`, () => new Promise(() => {})))
-    const { useActiveLogFields } = await import('@/hooks/useLogFieldsCatalog')
+    const { useActiveLogFields } = await import('@/hooks/useBootstrap')
     const { result } = renderHook(() => useActiveLogFields(), { wrapper: catalogWrapper(CATALOG) })
     expect(result.current.ready).toBe(false)
     expect(result.current.isFieldActive('ottfb')).toBe(true)
@@ -382,7 +382,7 @@ describe('useActiveLogFields', () => {
   })
 
   it('treats an empty active_log_field_ids list as not-ready (everything active)', async () => {
-    const { useActiveLogFields } = await import('@/hooks/useLogFieldsCatalog')
+    const { useActiveLogFields } = await import('@/hooks/useBootstrap')
     const { result } = renderHook(() => useActiveLogFields(), {
       wrapper: catalogWrapper(CATALOG, { services: [], active_service_id: 'svc-1', active_log_field_ids: [] }),
     })
@@ -391,7 +391,7 @@ describe('useActiveLogFields', () => {
   })
 
   it('honours active_log_field_ids when populated', async () => {
-    const { useActiveLogFields } = await import('@/hooks/useLogFieldsCatalog')
+    const { useActiveLogFields } = await import('@/hooks/useBootstrap')
     const { result } = renderHook(() => useActiveLogFields(), {
       wrapper: catalogWrapper(CATALOG, { services: [], active_service_id: 'svc-1', active_log_field_ids: ['ottfb', 'country'] }),
     })
@@ -401,7 +401,7 @@ describe('useActiveLogFields', () => {
   })
 
   it('isGroupActive is true when ANY field of the group is active', async () => {
-    const { useActiveLogFields } = await import('@/hooks/useLogFieldsCatalog')
+    const { useActiveLogFields } = await import('@/hooks/useBootstrap')
     const { result } = renderHook(() => useActiveLogFields(), {
       wrapper: catalogWrapper(CATALOG, { services: [], active_service_id: 'svc-1', active_log_field_ids: ['country'] }),
     })
@@ -410,7 +410,7 @@ describe('useActiveLogFields', () => {
   })
 
   it('isGroupActive is false for an unknown group id', async () => {
-    const { useActiveLogFields } = await import('@/hooks/useLogFieldsCatalog')
+    const { useActiveLogFields } = await import('@/hooks/useBootstrap')
     const { result } = renderHook(() => useActiveLogFields(), {
       wrapper: catalogWrapper(CATALOG, { services: [], active_service_id: 'svc-1', active_log_field_ids: ['ottfb'] }),
     })
@@ -423,7 +423,7 @@ describe('useActiveLogFields', () => {
         HttpResponse.json({ error: 'missing' }, { status: 500 }),
       ),
     )
-    const { useActiveLogFields } = await import('@/hooks/useLogFieldsCatalog')
+    const { useActiveLogFields } = await import('@/hooks/useBootstrap')
     const { result } = renderHook(() => useActiveLogFields(), {
       wrapper: catalogWrapper(undefined, { services: [], active_service_id: 'svc-1', active_log_field_ids: ['ottfb'] }),
     })

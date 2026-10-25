@@ -2,13 +2,13 @@ import { act, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, test, vi, beforeEach } from 'vitest'
 import QueryPage from '@/app/query/page'
-import { createTestQueryClient, renderWithQuery } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/page-smoke'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useFilterStore } from '@/stores/filterStore'
 import {
   _resetUrlHydrationFlag,
   hydrateFilterStoreFromUrl,
-} from '@/lib/urlFilterHydration'
+} from '@/lib/utils'
 import React from 'react'
 import { withNuqsTestingAdapter, type OnUrlUpdateFunction } from 'nuqs/adapters/testing'
 
@@ -42,10 +42,11 @@ vi.mock('@uiw/react-codemirror', async () => {
   }
 })
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/browser-stubs')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/page-smoke')).reactVirtualModuleMock())
 
 // Mock the API client
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api')>()),
   client: {
     GET: mockGet,
     POST: mockPost,

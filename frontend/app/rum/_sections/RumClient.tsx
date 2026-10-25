@@ -3,25 +3,25 @@
 
 import React, { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery';
+import { useAnalyticsReportQuery } from '@/hooks/useDashboardCards';
 import { AnalyticsCard } from '@/components/AnalyticsCard';
 import { RumStatusPanel, RumFaroVersionCard } from '@/components/Rum/RumStatusPanel';
 import { ReportLayout } from '@/components/ReportLayout';
-import { useIsAnalyst } from '@/hooks/useIsAnalyst';
-import { useReportRangeAnchor } from '@/hooks/useReportRangeAnchor';
+import { useIsAnalyst } from '@/hooks/useBootstrap';
+import { useReportRangeAnchor } from '@/hooks/useDashboardCards';
 import { CopyButton } from '@/components/ui/copy-button';
 
-import { DashboardSkeleton } from '@/components/skeletons/PageSkeleton';
+import { DashboardSkeleton } from '@/components/ReportLayout';
 import { PlotlyChart } from '@/components/PlotlyChart';
-import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart';
-import { useTimezone } from '@/hooks/useDateFormat';
+import { TimeSeriesChart } from '@/components/AnalyticsCard';
+import { useTimezone } from '@/hooks/useSSE';
 import { formatDate } from '@/lib/date';
 import { Terminal, Activity, Monitor, ShieldAlert, Cpu, PieChart, TrendingUp, Eye, Radio, BookOpen } from 'lucide-react';
 import { adminJsonResult } from '@/lib/api';
 import { arrayOrEmpty, recordOrNull } from '@/lib/utils';
 import type { StripIndex, WithRequired, components } from '@/types/api';
 import type { FiltersPayload } from '@/types/filters';
-import type { RangeWireArgs } from '@/lib/range-wire';
+import type { RangeWireArgs } from '@/lib/utils';
 import {
   Dialog,
   DialogContent,
@@ -32,8 +32,8 @@ import {
 import { Button } from '@/components/ui/button';
 import { DataTable, DataTableReadonly } from '@/components/DataTable';
 import { ColumnDef } from '@tanstack/react-table';
-import { useRumStatus } from '@/hooks/useServiceQuery';
-import { CHART_COLORS } from '@/lib/chart-builders'
+import { useRumStatus } from '@/hooks/useDashboardCards';
+import { CHART_COLORS } from '@/lib/chart-helpers'
 
 import { formatCount } from '@/lib/format'
 interface RumClientProps extends Pick<RangeWireArgs, 'relativeRange' | 'isAutoRange' | 'anchor'> {
@@ -84,54 +84,28 @@ type RumLiveEvent = Omit<StripIndex<components['schemas']['RumLiveEventItem']>, 
   raw_log?: RumRawLog;
 }
 
+function worstPageCol(
+  id: string,
+  header: string,
+  size: number,
+  accessorFn: (p: RumWorstPage) => string | number,
+  render: (p: RumWorstPage) => React.ReactNode,
+): ColumnDef<RumWorstPage> {
+  return { id, header, size, accessorFn, cell: ({ row }) => render(row.original) };
+}
+
 const WORST_PAGE_COLUMNS: ColumnDef<RumWorstPage>[] = [
-  {
-    id: 'path',
-    header: 'Path',
-    accessorFn: (p) => p.path,
-    size: 260,
-    cell: ({ row }) => <span className="font-semibold font-mono text-xs">{row.original.path}</span>,
-  },
-  {
-    id: 'views',
-    header: 'Pageviews',
-    accessorFn: (p) => p.views,
-    size: 110,
-    cell: ({ row }) => <span className="block text-right text-sm">{row.original.views}</span>,
-  },
-  {
-    id: 'avg_load_time',
-    header: 'Avg Load (s)',
-    accessorFn: (p) => p.avg_load_time ?? -1,
-    size: 120,
-    cell: ({ row }) => (
-      <span className="block text-right text-sm">
-        {row.original.avg_load_time != null ? `${row.original.avg_load_time.toFixed(1)}s` : '—'}
-      </span>
-    ),
-  },
-  {
-    id: 'lcp_p75',
-    header: 'LCP p75',
-    accessorFn: (p) => p.lcp_p75 ?? -1,
-    size: 100,
-    cell: ({ row }) => (
-      <span className="block text-right text-sm text-amber-500">
-        {row.original.lcp_p75 != null ? `${row.original.lcp_p75.toFixed(2)}s` : '—'}
-      </span>
-    ),
-  },
-  {
-    id: 'cls_p75',
-    header: 'CLS p75',
-    accessorFn: (p) => p.cls_p75 ?? -1,
-    size: 100,
-    cell: ({ row }) => (
-      <span className="block text-right text-sm">
-        {row.original.cls_p75 != null ? row.original.cls_p75.toFixed(2) : '—'}
-      </span>
-    ),
-  },
+  worstPageCol('path', 'Path', 260, (p) => p.path, (p) => <span className="font-semibold font-mono text-xs">{p.path}</span>),
+  worstPageCol('views', 'Pageviews', 110, (p) => p.views, (p) => <span className="block text-right text-sm">{p.views}</span>),
+  worstPageCol('avg_load_time', 'Avg Load (s)', 120, (p) => p.avg_load_time ?? -1, (p) => (
+    <span className="block text-right text-sm">{p.avg_load_time != null ? `${p.avg_load_time.toFixed(1)}s` : '—'}</span>
+  )),
+  worstPageCol('lcp_p75', 'LCP p75', 100, (p) => p.lcp_p75 ?? -1, (p) => (
+    <span className="block text-right text-sm text-amber-500">{p.lcp_p75 != null ? `${p.lcp_p75.toFixed(2)}s` : '—'}</span>
+  )),
+  worstPageCol('cls_p75', 'CLS p75', 100, (p) => p.cls_p75 ?? -1, (p) => (
+    <span className="block text-right text-sm">{p.cls_p75 != null ? p.cls_p75.toFixed(2) : '—'}</span>
+  )),
 ]
 
 function envName(v: string | { name?: string } | null | undefined): string {
@@ -154,18 +128,6 @@ function getThresholdColors(
     return { text: 'text-rose-500', bg: 'bg-rose-500/10', label: 'Poor' };
   }
   return { text: 'text-amber-500', bg: 'bg-amber-500/10', label: 'Needs Improvement' };
-}
-
-function getLcpColors(p75: number | null | undefined): CwvColors {
-  return getThresholdColors(p75, 2.5, 4.0);
-}
-
-function getClsColors(p75: number | null | undefined): CwvColors {
-  return getThresholdColors(p75, 0.1, 0.25);
-}
-
-function getInpColors(p75: number | null | undefined): CwvColors {
-  return getThresholdColors(p75, 200, 500);
 }
 
 function buildEnvPieData(envMap: Record<string, number> | undefined) {
@@ -598,9 +560,9 @@ export function RumClient({
     );
   }
 
-  const lcpColors = getLcpColors(analytics.vitals.lcp.p75);
-  const clsColors = getClsColors(analytics.vitals.cls.p75);
-  const inpColors = getInpColors(analytics.vitals.inp.p75);
+  const lcpColors = getThresholdColors(analytics.vitals.lcp.p75, 2.5, 4.0);
+  const clsColors = getThresholdColors(analytics.vitals.cls.p75, 0.1, 0.25);
+  const inpColors = getThresholdColors(analytics.vitals.inp.p75, 200, 500);
 
   // Distribution helper
   const renderDistributionBar = (distribution: RumCwvDistribution | null) => {

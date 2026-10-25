@@ -12,14 +12,16 @@ const { useFactsMock } = vi.hoisted(() => ({
   useFactsMock: vi.fn(),
 }))
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/browser-stubs')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/page-smoke')).reactVirtualModuleMock())
 
-vi.mock('@/hooks/useIsDataReady', () => ({
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
   useEffectiveServiceId: () => 'service-1',
   useBootstrapResolved: () => true,
 }))
 
-vi.mock('@/hooks/useReportRangeAnchor', () => ({
+vi.mock('@/hooks/useDashboardCards', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useDashboardCards')>()),
   useTimeRange: () => ({
     startTime: '2026-09-11T00:00:00Z',
     endTime: '2026-09-11T01:00:00Z',

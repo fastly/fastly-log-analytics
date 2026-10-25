@@ -1,16 +1,16 @@
 /**
  * StatusPanel contract for Session Scoring prerequisite pragmas.
  */
-import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
-import { stubGetAnimations, stubPointerCaptureAndScroll } from '@/__tests__/helpers/browser-stubs'
+import { stubResizeObserver } from '@/__tests__/helpers/page-smoke'
+import { stubGetAnimations, stubPointerCaptureAndScroll } from '@/__tests__/helpers/page-smoke'
 import * as React from 'react'
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
 import { act, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 
-import { renderWithQuery } from '../../helpers/query'
-import { server } from '@/__tests__/helpers/msw/server'
+import { renderWithQuery } from '../../helpers/page-smoke'
+import { server } from '@/__tests__/helpers/msw/handlers'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { StatusPanel } from '@/components/SessionScoring/StatusPanel'
@@ -18,7 +18,7 @@ import { LabelsTab } from '@/components/SessionScoring/LabelsTab'
 import { AuditLogTab, MatrixVersionsCard } from '@/components/SessionScoring/MatrixVersionsCard'
 import { L2EnforcementCard } from '@/components/SessionScoring/L2EnforcementCard'
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../../helpers/browser-stubs')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../../helpers/page-smoke')).reactVirtualModuleMock())
 
 beforeAll(() => {
   stubResizeObserver()

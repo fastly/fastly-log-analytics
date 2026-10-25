@@ -9,7 +9,7 @@ import {
   type UseQueryOptions,
 } from '@tanstack/react-query'
 import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import type { components } from '@/types/api.generated'
 

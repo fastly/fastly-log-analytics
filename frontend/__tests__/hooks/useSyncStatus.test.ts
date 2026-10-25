@@ -4,11 +4,11 @@
  * @vitest-environment jsdom
  */
 import { renderHook, waitFor } from '@testing-library/react'
-import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
+import { createTestQueryClient, makeQueryWrapper } from '../helpers/page-smoke'
 import { http, HttpResponse } from 'msw'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
-import { server } from '@/__tests__/helpers/msw/server'
+import { server } from '@/__tests__/helpers/msw/handlers'
 import { queryKeys } from '@/lib/query-keys'
 
 let mockState: {
@@ -57,7 +57,7 @@ describe('useSyncStatus (MSW)', () => {
         }),
       ),
     )
-    const { useSyncStatus } = await import('@/hooks/useSyncStatus')
+    const { useSyncStatus } = await import('@/hooks/useEventStream')
     const { result } = renderHook(() => useSyncStatus(), { wrapper: wrapper({ staleSeed: true }) })
 
     await waitFor(() => expect(result.current.data?.local_rows).toBe(12345))
@@ -73,7 +73,7 @@ describe('useSyncStatus (MSW)', () => {
         return HttpResponse.json({ latest_log_at: null, local_rows: 0 })
       }),
     )
-    const { useSyncStatus } = await import('@/hooks/useSyncStatus')
+    const { useSyncStatus } = await import('@/hooks/useEventStream')
     renderHook(() => useSyncStatus(), { wrapper: wrapper({ staleSeed: true }) })
 
     await waitFor(() => expect(observedSkipFos).not.toBeNull())
@@ -92,7 +92,7 @@ describe('useSyncStatus (MSW)', () => {
         return HttpResponse.json({ latest_log_at: null, local_rows: 0 })
       }),
     )
-    const { useSyncStatus } = await import('@/hooks/useSyncStatus')
+    const { useSyncStatus } = await import('@/hooks/useEventStream')
     const { result } = renderHook(() => useSyncStatus(), { wrapper: wrapper({ staleSeed: true }) })
 
     await new Promise((r) => setTimeout(r, 50))
@@ -140,7 +140,7 @@ describe('useLastSync (MSW)', () => {
       }),
     )
 
-    const { useLastSync } = await import('@/hooks/useSyncStatus')
+    const { useLastSync } = await import('@/hooks/useEventStream')
     const { result } = renderHook(() => useLastSync(), { wrapper: wrapper({ staleLastSyncSeed: true }) })
 
     await waitFor(() => expect(result.current.data?.started_at).toBe('2026-06-15T23:37:41Z'))
@@ -159,7 +159,7 @@ describe('useLastSync (MSW)', () => {
       ),
     )
 
-    const { useLastSync } = await import('@/hooks/useSyncStatus')
+    const { useLastSync } = await import('@/hooks/useEventStream')
     const { result } = renderHook(() => useLastSync(), { wrapper: wrapper({ staleLastSyncSeed: true }) })
 
     await waitFor(() => expect(result.current.data).toEqual({ started_at: null, status: null, duration_s: null }))
@@ -179,7 +179,7 @@ describe('useLastSync (MSW)', () => {
       }),
     )
 
-    const { useLastSync } = await import('@/hooks/useSyncStatus')
+    const { useLastSync } = await import('@/hooks/useEventStream')
     const { result } = renderHook(() => useLastSync(), { wrapper: wrapper({ staleLastSyncSeed: true }) })
 
     await new Promise(r => setTimeout(r, 50))
@@ -198,7 +198,7 @@ describe('useIsDataReady', () => {
   })
 
   it('returns false when no service id is set anywhere', async () => {
-    const { useIsDataReady } = await import('@/hooks/useIsDataReady')
+    const { useIsDataReady } = await import('@/hooks/useBootstrap')
     const { result } = renderHook(() => useIsDataReady(), { wrapper: wrapper() })
     expect(result.current).toBe(false)
   })
@@ -208,7 +208,7 @@ describe('useIsDataReady', () => {
       activeServiceId: 'svc-from-store',
       services: [],
     }
-    const { useIsDataReady } = await import('@/hooks/useIsDataReady')
+    const { useIsDataReady } = await import('@/hooks/useBootstrap')
     const { result } = renderHook(() => useIsDataReady(), { wrapper: wrapper() })
     expect(result.current).toBe(true)
   })
@@ -218,7 +218,7 @@ describe('useIsDataReady', () => {
       activeServiceId: null,
       services: [],
     }
-    const { useIsDataReady } = await import('@/hooks/useIsDataReady')
+    const { useIsDataReady } = await import('@/hooks/useBootstrap')
     const { result } = renderHook(() => useIsDataReady(), {
       wrapper: wrapper({ seedKey: 'bootstrap', seedValue: { active_service_id: 'svc-from-bootstrap' } }),
     })

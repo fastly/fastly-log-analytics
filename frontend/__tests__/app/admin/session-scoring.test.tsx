@@ -13,11 +13,11 @@
  */
 import { describe, expect, test, vi, beforeEach } from 'vitest'
 import { fireEvent, screen, waitFor } from '@testing-library/react'
-import { renderWithQuery } from '../../helpers/query'
+import { renderWithQuery } from '../../helpers/page-smoke'
 import { http, HttpResponse } from 'msw'
 import React from 'react'
 
-import { server } from '@/__tests__/helpers/msw/server'
+import { server } from '@/__tests__/helpers/msw/handlers'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import SessionScoringPage from '@/app/admin/session-scoring/page'
@@ -33,12 +33,10 @@ vi.mock('@/components/SessionScoring/RocPrCurves', () => ({
   RocPrCurves: () => null,
   PerReasonAucCard: () => null,
 }))
-vi.mock('@/components/SessionScoring/StackedHourlyBarChart', () => ({
+vi.mock('@/components/SessionScoring/ScorerSeriesCard', () => ({
   ScoreDistChart: () => null,
   ComplianceChart: () => null,
   StackedHourlyBarChart: () => null,
-}))
-vi.mock('@/components/SessionScoring/ScorerSeriesCard', () => ({
   ScorerLatencyChart: () => null,
   ScorerErrorsChart: () => null,
   ScorerSeriesCard: () => null,

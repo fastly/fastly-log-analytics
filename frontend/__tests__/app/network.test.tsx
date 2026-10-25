@@ -1,7 +1,7 @@
 import { screen } from '@testing-library/react'
 import { expect, test, vi, beforeEach, afterEach } from 'vitest'
 import NetworkPage from '@/app/network/page'
-import { createTestQueryClient, renderWithQuery } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/page-smoke'
 import type { ReactNode } from 'react'
 import { spyOnConsoleError } from '../helpers/page-smoke'
 
@@ -17,7 +17,8 @@ type ApiCall = (url: string, opts?: unknown) => Promise<{ data: unknown }>
 const mockPost = vi.fn<ApiCall>()
 const mockGet = vi.fn<ApiCall>()
 
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api')>()),
   client: {
     GET: (url: string, opts?: unknown) => mockGet(url, opts),
     POST: (url: string, opts?: unknown) => mockPost(url, opts),
@@ -27,7 +28,7 @@ vi.mock('@/lib/api', () => ({
   getApiBase: vi.fn(() => 'http://test'),
 }))
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/browser-stubs')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/page-smoke')).reactVirtualModuleMock())
 
 vi.mock('@/components/PlotlyChart', async () => (await import('../helpers/page-smoke')).plotlyChartModuleMock())
 vi.mock('@/components/Map/NetworkMap', () => ({
@@ -45,6 +46,7 @@ vi.mock('@/components/AnalyticsCard', () => ({
       {children}
     </div>
   ),
+  LazyMount: ({ children }: { children?: ReactNode }) => <>{children}</>,
 }))
 
 vi.mock('@/components/ReportLayout', async () =>
@@ -247,7 +249,7 @@ test('transport section displays missing fields banner when optional fields not 
 test('network health queries keep the range-wire key shape and request body after the hook migration', async () => {
   mockPost.mockResolvedValue({ data: { available: false, reason: 'Network fields not enabled' } })
   mockGet.mockResolvedValue({ data: { data: [] } })
-  const { resolveRangeWire, quantizeAnchor } = await import('@/lib/range-wire')
+  const { resolveRangeWire, quantizeAnchor } = await import('@/lib/utils')
 
   renderWithQuery(<NetworkPage />, { queryClient })
   await screen.findByText('Network Metrics Unavailable')

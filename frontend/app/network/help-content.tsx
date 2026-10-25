@@ -1,10 +1,10 @@
 import React from "react";
 import { Badge } from "@/components/ui/badge";
-import { FilterValueCell } from "@/components/FilterValueCell";
-import { PopLabel } from "@/components/PopLabel";
+import { FilterValueCell } from "@/components/DataTable";
+import { PopLabel } from "@/components/DataTable";
 import { cn } from "@/lib/utils";
 import { formatCount } from "@/lib/format";
-import { columnHeader, msCell, numberValue, textValue } from "@/lib/table-utils";
+import { columnHeader, msCell, numberValue, textValue } from '@/components/DataTable';
 import type { ColumnDef } from "@tanstack/react-table";
 import type { components } from '@/types/api.generated'
 import { Activity, AlertCircle, Globe, Zap, Network as NetworkIcon } from "lucide-react";

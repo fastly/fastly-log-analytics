@@ -12,9 +12,9 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from backend.models._base import ClickHouseQueryObservation
 from pydantic import TypeAdapter, ValidationError
 
-from backend.models._base import ClickHouseQueryObservation
 from backend.models.common import FilterSpec
 from backend.models.dashboard import HistoryObservation, ReaderCoverage
 

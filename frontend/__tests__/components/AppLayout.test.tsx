@@ -4,24 +4,24 @@
  *
  * @vitest-environment jsdom
  */
-import { stubSystemTimeZone } from '@/__tests__/helpers/browser-stubs'
+import { stubSystemTimeZone } from '@/__tests__/helpers/page-smoke'
 import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, test, vi, beforeEach, afterEach } from 'vitest'
 import { Server } from 'lucide-react'
-import { renderWithQueryClient } from '../helpers/query'
+import { renderWithQueryClient } from '../helpers/page-smoke'
 import { AppLayout } from '@/components/AppLayout'
-import { ReportShell } from '@/components/ReportShell'
+import { ReportShell } from '@/components/ReportLayout'
 import { ChartIntervalButtons } from '@/components/ReportLayout'
-import { NoServiceSelected } from '@/components/NoServiceSelected'
+import { NoServiceSelected } from '@/components/ReportLayout'
 import { UpdatingBadge } from '@/components/AnalyticsCard'
 import { StoreHydrator, ReloadLoopGuard } from '@/components/QueryProvider'
-import { INTERVALS } from '@/lib/constants'
+import { INTERVALS } from '@/lib/utils'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useTimezoneStore } from '@/stores/timezoneStore'
 import { useDebugStore } from '@/stores/debugStore'
 import { useBootstrap } from '@/hooks/useBootstrap'
-import { partial } from '../helpers/partial'
+import { partial } from '../helpers/page-smoke'
 import type { BootstrapResponse } from '@/types/api'
 import { usePathname, useRouter } from 'next/navigation'
 import React from 'react'
@@ -31,40 +31,35 @@ import React from 'react'
 // <RawQueryModeProbe> consumes inside its Suspense boundary.)
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/dashboard'))
 
-// Mock custom hooks
-vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
-  useBootstrap: vi.fn(),
-}))
-
-vi.mock('@/hooks/useUrlServiceSync', () => ({
-  useUrlServiceSync: vi.fn(),
-}))
-
-vi.mock('@/hooks/useIsAnalyst', () => ({
-  useIsAnalyst: vi.fn(),
-  useMaskIps: () => false,
-  useEnforceMaskedFilters: vi.fn(),
-}))
-
 let mockActiveServiceId: string | null = 'svc-1'
 let mockIsDataReady = true
 let mockBootstrapResolved = true
 
-vi.mock('@/hooks/useIsDataReady', () => ({
+// Mock custom hooks
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
+  useBootstrap: vi.fn(),
+  useUrlServiceSync: vi.fn(),
+  useIsAnalyst: vi.fn(),
+  useMaskIps: () => false,
+  useEnforceMaskedFilters: vi.fn(),
   useEffectiveServiceId: () => mockActiveServiceId,
   useIsDataReady: () => mockIsDataReady,
   useBootstrapResolved: () => mockBootstrapResolved,
 }))
 
-vi.mock('@/components/skeletons/PageSkeleton', () => ({
+vi.mock('@/components/ReportLayout', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/components/ReportLayout')>()),
   DashboardSkeleton: () => <div data-testid="skeleton" />,
 }))
 
 // Mock components
 vi.mock('@/components/ServiceSwitcher/ServiceSwitcher', () => ({ ServiceSwitcher: () => <div>ServiceSwitcher</div> }))
 vi.mock('@/components/FilterBar/FilterBar', () => ({ FilterBar: () => <div>FilterBar</div> }))
-vi.mock('@/components/SyncStatusBadge/SyncStatusBadge', () => ({ SyncStatusBadge: () => <div>SyncStatusBadge</div> }))
+vi.mock('@/components/SyncStatusBadge/SyncStatusBadge', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/components/SyncStatusBadge/SyncStatusBadge')>()),
+  SyncStatusBadge: () => <div>SyncStatusBadge</div>,
+}))
 vi.mock('@/components/DebugPanel', () => ({ DebugPanel: () => <div>DebugPanel</div> }))
 
 // ScrollArea (base-ui) sets up internal layout via ResizeObserver and
@@ -93,7 +88,7 @@ beforeEach(async () => {
     isLoading: false,
   }))
 
-  const { useIsAnalyst } = await import('@/hooks/useIsAnalyst')
+  const { useIsAnalyst } = await import('@/hooks/useBootstrap')
   vi.mocked(useIsAnalyst).mockImplementation(() => {
     const { activeServiceId, services } = useServiceStore.getState()
     const active = services.find((s) => s.id === activeServiceId)
@@ -143,7 +138,7 @@ test('renders analyst watermark when bootstrap reports remote analyst', async ()
     isSuccess: true,
     isLoading: false,
   }))
-  const { useIsAnalyst } = await import('@/hooks/useIsAnalyst')
+  const { useIsAnalyst } = await import('@/hooks/useBootstrap')
   vi.mocked(useIsAnalyst).mockReturnValue(true)
 
   renderWithQueryClient(<AppLayout><div>Content</div></AppLayout>)
@@ -171,7 +166,7 @@ test('keeps anonymous visitors on sign-in before the analyst role hydrates', asy
     isSuccess: true,
     isLoading: false,
   }))
-  const { useIsAnalyst } = await import('@/hooks/useIsAnalyst')
+  const { useIsAnalyst } = await import('@/hooks/useBootstrap')
   vi.mocked(useIsAnalyst).mockReturnValue(false)
 
   renderWithQueryClient(<AppLayout><div>Analyst sign-in</div></AppLayout>)

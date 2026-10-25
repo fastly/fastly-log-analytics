@@ -9,7 +9,7 @@ import {
   Loader2,
 } from 'lucide-react'
 import { useSSE } from '@/hooks/useSSE'
-import { useDateFormat } from '@/hooks/useDateFormat'
+import { useDateFormat } from '@/hooks/useSSE'
 import { cn } from '@/lib/utils'
 import type { CronRun } from '../_state'
 

@@ -4,14 +4,14 @@
  * Tests for useIsAnalyst, useMaskIps, and useEnforceMaskedFilters.
  */
 import { renderHook, waitFor, act } from '@testing-library/react'
-import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
+import { createTestQueryClient, makeQueryWrapper } from '../helpers/page-smoke'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
-import { useIsAnalyst, useMaskIps, useEnforceMaskedFilters } from '@/hooks/useIsAnalyst'
+import { useIsAnalyst, useMaskIps, useEnforceMaskedFilters } from '@/hooks/useBootstrap'
 import { useCardVisibility } from '@/hooks/useDashboardCards'
 import { useHighScaleRequestFacts } from '@/components/high-scale/HighScaleRequestFactsPanel'
 import { client } from '@/lib/api'
-import { postOk } from '@/__tests__/helpers/partial'
+import { postOk } from '@/__tests__/helpers/page-smoke'
 import { queryKeys } from '@/lib/query-keys'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useFilterStore } from '@/stores/filterStore'

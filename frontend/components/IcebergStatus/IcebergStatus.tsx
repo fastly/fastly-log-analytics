@@ -3,7 +3,7 @@
 import React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import {
   Card,
@@ -26,9 +26,9 @@ import {
 import { formatBytes } from '@/lib/format'
 import { formatRelative } from '@/lib/date'
 import { cn } from '@/lib/utils'
-import { useDateFormat } from '@/hooks/useDateFormat'
+import { useDateFormat } from '@/hooks/useSSE'
 import { LabelWithInfo } from '@/components/ui/label-with-info'
-import { CardErrorState } from '@/components/CardErrorState'
+import { CardErrorState } from '@/components/AnalyticsCard'
 import {
   Tooltip,
   TooltipContent,

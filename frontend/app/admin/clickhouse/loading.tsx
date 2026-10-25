@@ -1,5 +1,5 @@
 import { notFound } from 'next/navigation'
-import { BackToAdminLink } from '@/components/BackToAdminLink'
+import { BackToAdminLink } from '@/components/ReportLayout'
 import { PageHeader } from '@/components/ui/page-header'
 import { Activity } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'

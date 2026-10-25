@@ -1,11 +1,236 @@
 'use client'
 
-import React from 'react'
+import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore, type RefObject } from 'react'
+import { usePathname } from 'next/navigation'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
+import { PlotlyChart } from '@/components/PlotlyChart'
+import { makeTimeXAxis, TIME_HOVER_LAYOUT } from '@/lib/chart-helpers'
 import { cn } from '@/lib/utils'
 import { Loader2, HelpCircle, Inbox, Lock } from 'lucide-react'
 import { HelpDialog } from '@/components/ui/help-dialog'
 import { Button } from '@/components/ui/button'
+import type { PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/plotly'
+
+// ─── ErrorBoundary ──────────────────────────────────────────────────────────
+
+interface ErrorBoundaryProps {
+  children: React.ReactNode
+  fallback?: (error: Error, reset: () => void) => React.ReactNode
+}
+
+interface ErrorBoundaryState {
+  error: Error | null
+}
+
+export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  state: ErrorBoundaryState = { error: null }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { error }
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    if (typeof console !== 'undefined') {
+      console.error('[ErrorBoundary] uncaught render error:', error, info?.componentStack)
+    }
+  }
+
+  reset = () => this.setState({ error: null })
+
+  render() {
+    if (this.state.error) {
+      if (this.props.fallback) {
+        return this.props.fallback(this.state.error, this.reset)
+      }
+      return (
+        <div
+          role="alert"
+          className="flex flex-col items-start gap-2 rounded border border-red-300 bg-red-50 p-4 text-sm text-red-900 dark:border-red-700 dark:bg-red-950 dark:text-red-100"
+        >
+          <div className="font-semibold">Something went wrong rendering this view.</div>
+          <div className="font-mono text-xs opacity-80">{this.state.error.message}</div>
+          <button
+            type="button"
+            onClick={this.reset}
+            className="mt-1 rounded border border-red-400 px-2 py-1 text-xs hover:bg-red-100 dark:hover:bg-red-900"
+          >
+            Try again
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+export function ErrorBoundaryWithRouteReset({
+  children,
+  fallback,
+}: ErrorBoundaryProps) {
+  const pathname = usePathname()
+  return (
+    <ErrorBoundary key={pathname ?? '/'} fallback={fallback}>
+      {children}
+    </ErrorBoundary>
+  )
+}
+
+// ─── TimeSeriesChart ────────────────────────────────────────────────────────
+
+interface TimeSeriesChartProps {
+  data: PlotlyTrace[]
+  startTime?: string | null
+  endTime?: string | null
+  timezone: string
+  layout?: PlotlyLayout
+  className?: string
+  height?: number | string
+  onRelayout?: (event: PlotlyRelayoutEvent) => void
+}
+
+function TimeSeriesChartImpl({
+  data,
+  startTime,
+  endTime,
+  timezone,
+  layout,
+  className,
+  height,
+  onRelayout,
+}: TimeSeriesChartProps) {
+  const mergedLayout = useMemo(
+    (): PlotlyLayout => ({
+      ...TIME_HOVER_LAYOUT,
+      xaxis: makeTimeXAxis(startTime, endTime, timezone),
+      ...layout,
+    }),
+    [startTime, endTime, timezone, layout],
+  )
+  return (
+    <ErrorBoundary>
+      <PlotlyChart
+        data={data}
+        layout={mergedLayout}
+        className={className}
+        height={height}
+        onRelayout={onRelayout}
+      />
+    </ErrorBoundary>
+  )
+}
+
+export const TimeSeriesChart = React.memo(TimeSeriesChartImpl)
+
+// ─── CardErrorState / ChartEmptyState ───────────────────────────────────────
+
+export function CardErrorState({
+  icon,
+  title,
+  message,
+  onRetry,
+  variant = 'default',
+}: {
+  icon?: React.ReactNode
+  title: string
+  message: string
+  onRetry?: () => void
+  variant?: 'default' | 'stacked'
+}) {
+  const isStacked = variant === 'stacked'
+  return (
+    <div
+      className={
+        isStacked
+          ? 'flex flex-col items-start gap-3 p-4 border border-destructive/20 bg-destructive/5 rounded-md'
+          : 'border border-destructive/20 bg-destructive/5 rounded-md p-4'
+      }
+    >
+      <div className="flex items-center gap-2 text-destructive">
+        {icon}
+        <span className="text-sm font-medium">{title}</span>
+      </div>
+      <p className={isStacked ? 'text-xs text-muted-foreground' : 'text-xs text-muted-foreground mt-1'}>{message}</p>
+      {onRetry && (
+        <Button size="sm" variant="outline" className={isStacked ? undefined : 'mt-3'} onClick={onRetry}>
+          Retry
+        </Button>
+      )}
+    </div>
+  )
+}
+
+export function ChartEmptyState({ requires }: { requires?: string }) {
+  return (
+    <div className="flex flex-col items-center justify-center h-full text-muted-foreground text-center px-4">
+      <span className="text-sm font-medium mb-1">
+        {requires ? 'No data available' : 'No data in this time range yet'}
+      </span>
+      {requires && <span className="text-[10px] opacity-70">Requires {requires}</span>}
+    </div>
+  )
+}
+
+// ─── LazyMount / useInViewOnce ──────────────────────────────────────────────
+
+const subscribeNever = () => () => {}
+
+interface UseInViewOnceOptions<T extends Element> {
+  rootMargin?: string
+  findRoot?: (node: T) => Element | null
+}
+
+export function useInViewOnce<T extends Element>(
+  ref: RefObject<T | null>,
+  { rootMargin = '0px', findRoot }: UseInViewOnceOptions<T> = {},
+): boolean {
+  const [seen, setSeen] = useState(false)
+  const supported = useSyncExternalStore(
+    subscribeNever,
+    () => typeof IntersectionObserver !== 'undefined',
+    () => true,
+  )
+
+  useEffect(() => {
+    const node = ref.current
+    if (seen || !supported || !node) return
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setSeen(true)
+          observer.disconnect()
+        }
+      },
+      { root: findRoot ? findRoot(node) : null, rootMargin },
+    )
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [ref, seen, supported, rootMargin, findRoot])
+
+  return seen || !supported
+}
+
+interface LazyMountProps {
+  children: React.ReactNode
+  minHeight?: number | string
+  rootMargin?: string
+  className?: string
+}
+
+export function LazyMount({
+  children,
+  minHeight = 300,
+  rootMargin = '600px',
+  className,
+}: LazyMountProps) {
+  const ref = useRef<HTMLDivElement>(null)
+  const visible = useInViewOnce(ref, { rootMargin })
+
+  return (
+    <div ref={ref} className={className} style={visible ? undefined : { minHeight }}>
+      {visible ? children : null}
+    </div>
+  )
+}
 
 export function UpdatingBadge() {
   // text-foreground (not text-primary): primary-coloured text on the

@@ -87,7 +87,8 @@ from datetime import UTC, datetime
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from backend import config as svcconfig
-from backend.core import clickhouse_client, clickhouse_observer, request_telemetry
+from backend.core import clickhouse_client, request_telemetry
+from backend.core import clickhouse_client as clickhouse_observer
 from backend.core import duckdb as _db
 from backend.high_scale import console_access
 from backend.high_scale.registry_bootstrap import (
@@ -1047,20 +1048,19 @@ from backend.routers import (
     control_room,
     dashboard,
     high_scale,
-    insights,
     network,
     origin,
     performance,
     query,
     rum,
     security,
-    sessions,
+    session_scoring,
 )
 
 app.include_router(dashboard.router)
 app.include_router(high_scale.router)
-app.include_router(insights.router)
-app.include_router(sessions.router)
+app.include_router(dashboard.insights_router)
+app.include_router(session_scoring.sessions_router)
 app.include_router(query.router)
 app.include_router(network.router)
 app.include_router(performance.router)
@@ -1076,10 +1076,8 @@ from backend.routers import (  # noqa: E402
     admin,
     admin_queries,
     bootstrap,
-    debug,
     provision,
     services,
-    session_scoring,
     share_admin,
     share_auth,
     share_oauth,
@@ -1097,7 +1095,7 @@ app.include_router(admin_queries.router)
 app.include_router(provision.router)
 app.include_router(share_admin.sharing_domain_router)
 app.include_router(session_scoring.router)
-app.include_router(debug.router)
+app.include_router(bootstrap.debug_router)
 app.include_router(share_auth.router)
 app.include_router(share_oauth.router)
 app.include_router(share_admin.router)

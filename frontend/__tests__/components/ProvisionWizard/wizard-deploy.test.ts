@@ -15,7 +15,7 @@
  * jsdom. The other 5 exports are covered.
  */
 import { API_BASE, FULL_CONFIG, serviceStoreMockFactory } from '@/__tests__/helpers/page-smoke'
-import { without } from '@/__tests__/helpers/partial'
+import { without } from '@/__tests__/helpers/page-smoke'
 import { http, HttpResponse } from 'msw'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 
@@ -28,7 +28,7 @@ import {
   runFetchTerraformPreview,
   runJoin,
 } from '@/components/ProvisionWizard/wizard-deploy'
-import { server } from '@/__tests__/helpers/msw/server'
+import { server } from '@/__tests__/helpers/msw/handlers'
 
 afterEach(() => {
   server.resetHandlers()

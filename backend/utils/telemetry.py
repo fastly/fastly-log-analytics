@@ -716,13 +716,13 @@ class tracked_call:
 
 _MAX_KEYS = 1024
 _last: dict[str, float] = {}
-_lock = threading.Lock()
+_log_once_lock = threading.Lock()
 
 
 def log_once_per(key: str, interval_s: float = 60.0) -> bool:
     """True when ``key`` has not been allowed in the last ``interval_s`` seconds (and records this call)."""
     now = time.monotonic()
-    with _lock:
+    with _log_once_lock:
         prev = _last.get(key)
         if prev is not None and now - prev < interval_s:
             return False
@@ -781,3 +781,149 @@ def run_usage_log_cleanup(service_id: str) -> None:
         purge_usage_log(source)
     except Exception as e:
         logger.warning("[usage_logger] cleanup failed: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Always-on SQLite/Postgres query profiler ring buffer
+# (folded from backend.utils.sqlite_profiler)
+# ---------------------------------------------------------------------------
+
+import itertools  # noqa: E402
+import sys  # noqa: E402
+from collections import deque  # noqa: E402
+from datetime import UTC, datetime  # noqa: E402
+from typing import Any  # noqa: E402
+
+import structlog  # noqa: E402
+
+_BUFFER_CAP = 1000
+_SQL_TRUNCATE = 4096
+
+_buffer: deque[dict[str, Any]] = deque(maxlen=_BUFFER_CAP)
+_seq = itertools.count(1)
+_dropped = 0
+
+
+def _record(sql: str, params: Any, duration_ms: float, rowcount: int, op: str) -> None:
+    """Append one profiled statement to the ring buffer."""
+    global _dropped
+    try:
+        if _buffer.maxlen and len(_buffer) == _buffer.maxlen:
+            _dropped += 1
+        entry = {
+            "seq": next(_seq),
+            "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "sql": _summarize_sql(sql),
+            "params_kind": _describe_params(params),
+            "time_ms": round(duration_ms, 3),
+            "rows": rowcount,
+            "op": op,
+        }
+        _buffer.append(entry)
+        record_sqlite_query(entry)
+    except Exception:
+        logger.debug("sqlite_profiler record failed", exc_info=True)
+
+
+def _summarize_sql(sql: str) -> str:
+    if not isinstance(sql, str):
+        sql = str(sql)
+    if len(sql) > _SQL_TRUNCATE:
+        return sql[:_SQL_TRUNCATE] + f"… [+{len(sql) - _SQL_TRUNCATE} chars]"
+    return sql
+
+
+def _describe_params(params: Any) -> str:
+    if params is None:
+        return "none"
+    if isinstance(params, (list, tuple)):
+        return f"seq[{len(params)}]"
+    if isinstance(params, dict):
+        return f"map[{len(params)}]"
+    return type(params).__name__
+
+
+def _live_register(db_type: str, sql: Any, con: Any) -> int:
+    try:
+        from backend.core.query_registry import query_registry
+
+        service_id = getattr(con, "_service_id", None)
+        qid = query_registry.register(db_type, str(sql), service_id=service_id, con=con)
+        if qid >= 0:
+            structlog.contextvars.bind_contextvars(query_id=qid)
+        return qid
+    except Exception:
+        logger.debug("live-registry register failed", exc_info=True)
+        return -1
+
+
+def _live_deregister(qid: int, error: BaseException | None) -> None:
+    if qid < 0:
+        return
+    try:
+        from backend.core.query_registry import query_registry
+
+        query_registry.deregister(qid, error=error)
+    except Exception:
+        logger.debug("live-registry deregister failed", exc_info=True)
+    finally:
+        try:
+            structlog.contextvars.unbind_contextvars("query_id")
+        except Exception:
+            logger.debug("_live_deregister: structlog.contextvars.unbind_contextvars failed (ignored)", exc_info=True)
+
+
+def get_recent(limit: int = 200, since_seq: int = 0) -> dict[str, Any]:
+    """Return up to ``limit`` most-recent profiled statements."""
+    snapshot = list(_buffer)
+    if since_seq > 0:
+        snapshot = [e for e in snapshot if e["seq"] > since_seq]
+    if limit and len(snapshot) > limit:
+        snapshot = snapshot[-limit:]
+    return {
+        "queries": snapshot,
+        "buffer_size": len(_buffer),
+        "buffer_cap": _BUFFER_CAP,
+        "dropped": _dropped,
+        "last_seq": _buffer[-1]["seq"] if _buffer else 0,
+    }
+
+
+def clear() -> None:
+    """Drain the buffer."""
+    global _dropped
+    _buffer.clear()
+    _dropped = 0
+
+
+def buffer_stats() -> dict[str, int]:
+    """Lightweight stats for telemetry / status pages."""
+    return {
+        "buffer_size": len(_buffer),
+        "buffer_cap": _BUFFER_CAP,
+        "dropped": _dropped,
+    }
+
+
+clear_recent_sqlite_queries = clear
+get_recent_sqlite_queries = get_recent
+get_sqlite_stats = buffer_stats
+
+
+def get_page_telemetry(page_load_id: str | None = None) -> dict[str, Any]:
+    from backend import config as svcconfig
+    from backend.core.metadata import usage_log
+
+    sid = svcconfig.get_active_service_id()
+    if not sid or not page_load_id:
+        return {"queries": [], "sections": [], "calls": []}
+    return usage_log.get_page_telemetry(sid, page_load_id)
+
+
+if "pytest" not in sys.modules:
+    logger.info("sqlite_profiler active — capturing up to %d recent statements", _BUFFER_CAP)
+
+sys.modules["backend.utils.sqlite_profiler"] = sys.modules[__name__]
+_utils_pkg = sys.modules.get("backend.utils")
+if _utils_pkg is not None:
+    _utils_pkg.sqlite_profiler = sys.modules[__name__]  # type: ignore[attr-defined]

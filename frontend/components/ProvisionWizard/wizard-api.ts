@@ -1,7 +1,7 @@
 "use client";
 
 import { client } from "@/lib/api";
-import { unwrapClient } from "@/lib/api-client";
+import { unwrapClient } from '@/lib/api';
 import type { components } from "@/types/api.generated";
 import type {
   FosStatus,

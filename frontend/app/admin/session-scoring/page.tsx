@@ -6,12 +6,12 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Clock, RefreshCw, ShieldCheck } from 'lucide-react'
 
 import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { BackToAdminLink } from '@/components/BackToAdminLink'
+import { BackToAdminLink } from '@/components/ReportLayout'
 import { Button } from '@/components/ui/button'
 import { PageHeader } from '@/components/ui/page-header'
 import {
@@ -23,7 +23,7 @@ import {
 } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { ComplianceChart, ScoreDistChart } from '@/components/SessionScoring/StackedHourlyBarChart'
+import { ComplianceChart, ScoreDistChart } from '@/components/SessionScoring/ScorerSeriesCard'
 import { ExcludeRegexCard } from '@/components/SessionScoring/ExcludeRegexCard'
 import { AuditLogTab, MatrixVersionsCard } from '@/components/SessionScoring/MatrixVersionsCard'
 import { RetrainButton, RotateKeyButton } from '@/components/SessionScoring/RetrainButton'

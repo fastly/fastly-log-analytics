@@ -10,31 +10,74 @@
  *
  * @vitest-environment jsdom
  */
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import React from 'react'
 
+vi.mock('next/dynamic', () => ({
+  default: (loader: () => unknown) => {
+    const Comp = (props: Record<string, unknown>) => {
+      const [C, setC] = React.useState<React.ComponentType<Record<string, unknown>> | null>(null)
+      React.useEffect(() => {
+        let alive = true
+        Promise.resolve(loader()).then((mod) => {
+          if (!alive) return
+          setC(() => (mod as { default?: React.ComponentType<Record<string, unknown>> } | null)?.default ?? (mod as React.ComponentType<Record<string, unknown>>))
+        })
+        return () => {
+          alive = false
+        }
+      }, [])
+      if (!C) return null
+      return React.createElement(C, props)
+    }
+    Comp.displayName = 'DynamicMock'
+    return Comp
+  },
+}))
+
+vi.mock('@/components/Map/ChoroplethMap', () => ({
+  ChoroplethMap: ({ data, onCountryClick }: { data: Array<{ country?: string; name?: string }>; onCountryClick: (c: string) => void }) => (
+    <div data-testid="choropleth-map">
+      <span data-testid="marker-count">{data?.length ?? 0}</span>
+      {(data ?? []).map((row) => (
+        <button
+          key={row.country ?? row.name}
+          type="button"
+          data-testid={`country-${row.country ?? row.name}`}
+          onClick={() => onCountryClick(row.country ?? row.name ?? '')}
+        >
+          {row.country ?? row.name}
+        </button>
+      ))}
+    </div>
+  ),
+}))
+
 // The catalog hook normally fetches via React Query. We swap in a
 // vi.fn() the tests can re-program per case so we can drive the
 // empty-state messaging branches deterministically.
+const { activeFields } = vi.hoisted(() => ({ activeFields: new Set<string>() }))
 const useLogFieldsCatalogMock = vi.fn()
-vi.mock('@/hooks/useLogFieldsCatalog', () => ({
-  useLogFieldsCatalog: () => useLogFieldsCatalogMock(),
-  useFieldValues: () => ({ data: undefined, isLoading: false, isFetching: false }),
-}))
-
-// useMaskIps reads the bootstrap query cache via useQueryClient; mock it so
-// these tests stay free of a QueryClientProvider. Default off; the masking
-// tests re-program it.
 const useMaskIpsMock = vi.fn(() => false)
-vi.mock('@/hooks/useIsAnalyst', () => ({
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
+  useLogFieldsCatalog: () => useLogFieldsCatalogMock(),
+  useFieldLabel: () => (id: string) => id,
+  useFieldValues: () => ({ data: undefined, isLoading: false, isFetching: false }),
+  useActiveLogFields: () => ({
+    ready: true,
+    isFieldActive: (id: string) => activeFields.has(id),
+    isGroupActive: () => false,
+  }),
   useIsAnalyst: () => false,
   useMaskIps: () => useMaskIpsMock(),
   useEnforceMaskedFilters: () => {},
 }))
 
 import { TopTenTable } from '@/components/Dashboard/TopTenTable'
+import { GeoMap } from '@/app/dashboard/_sections/DashboardClient'
 
 const SAMPLE_CATALOG = {
   fields: [
@@ -346,5 +389,116 @@ describe('TopTenTable', () => {
     // TrendingDown for negative — so color-blind users see the trend too.
     expect(container.querySelector('svg.lucide-trending-up')).not.toBeNull()
     expect(container.querySelector('svg.lucide-trending-down')).not.toBeNull()
+  })
+})
+
+const geoCatalog = {
+  fields: [{ id: 'country', label: 'Country', group: 'GEO' }],
+  groups: [{ id: 'GEO', label: 'Geolocation' }],
+}
+
+describe('GeoMap', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    activeFields.clear()
+  })
+
+  it('renders the loading skeleton when aggregates are undefined', () => {
+    render(
+      <GeoMap
+        isReady={false}
+        isFetchingAggs={false}
+        aggregates={undefined}
+        catalog={geoCatalog}
+        onCountryClick={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('Requests by Country')).toBeInTheDocument()
+    expect(screen.getByText('Initializing...')).toBeInTheDocument()
+    expect(screen.queryByTestId('choropleth-map')).toBeNull()
+  })
+
+  it('shows the empty state with the catalog group label when map_data is empty', () => {
+    render(
+      <GeoMap
+        isReady={true}
+        isFetchingAggs={false}
+        aggregates={{ map_data: [] }}
+        catalog={geoCatalog}
+        onCountryClick={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('No data available')).toBeInTheDocument()
+    expect(
+      screen.getByText(/Requires Geolocation fields to be enabled in Fastly logging\./),
+    ).toBeInTheDocument()
+    expect(screen.queryByTestId('choropleth-map')).toBeNull()
+  })
+
+  it('shows a neutral "no data in this range" state when the country field IS active', () => {
+    activeFields.add('country')
+    render(
+      <GeoMap
+        isReady={true}
+        isFetchingAggs={false}
+        aggregates={{ map_data: [] }}
+        catalog={geoCatalog}
+        onCountryClick={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('No data available')).toBeInTheDocument()
+    expect(screen.getByText('No country data in this time range.')).toBeInTheDocument()
+    expect(screen.queryByText(/Requires Geolocation/)).toBeNull()
+    expect(screen.queryByTestId('choropleth-map')).toBeNull()
+  })
+
+  it('renders ChoroplethMap with one marker per map_data row when populated', async () => {
+    const map_data = [
+      { country: 'US', count: 100 },
+      { country: 'DE', count: 40 },
+      { country: 'JP', count: 25 },
+    ]
+    render(
+      <GeoMap
+        isReady={true}
+        isFetchingAggs={false}
+        aggregates={{ map_data }}
+        catalog={geoCatalog}
+        onCountryClick={vi.fn()}
+      />,
+    )
+    await waitFor(() => expect(screen.getByTestId('choropleth-map')).toBeInTheDocument())
+    expect(screen.getByTestId('marker-count').textContent).toBe('3')
+  })
+
+  it('forwards country clicks to onCountryClick', async () => {
+    const onCountryClick = vi.fn()
+    render(
+      <GeoMap
+        isReady={true}
+        isFetchingAggs={false}
+        aggregates={{ map_data: [{ country: 'US', count: 1 }] }}
+        catalog={geoCatalog}
+        onCountryClick={onCountryClick}
+      />,
+    )
+    await waitFor(() => expect(screen.getByTestId('country-US')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('country-US'))
+    expect(onCountryClick).toHaveBeenCalledWith('US')
+  })
+
+  it('falls back to the generic Geolocation hint when catalog is missing', () => {
+    render(
+      <GeoMap
+        isReady={true}
+        isFetchingAggs={false}
+        aggregates={{ map_data: [] }}
+        catalog={undefined}
+        onCountryClick={vi.fn()}
+      />,
+    )
+    expect(
+      screen.getByText('Requires Geolocation fields to be enabled in Fastly logging.'),
+    ).toBeInTheDocument()
   })
 })

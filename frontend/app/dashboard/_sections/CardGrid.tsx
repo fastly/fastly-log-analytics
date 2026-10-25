@@ -2,14 +2,97 @@
 
 import React from 'react'
 import { TopTenTable } from '@/components/Dashboard/TopTenTable'
-import { LazyMount } from '@/components/LazyMount'
-import { CardErrorState } from '@/components/CardErrorState'
+import { LazyMount } from '@/components/AnalyticsCard'
+import { CardErrorState } from '@/components/AnalyticsCard'
 import { ChevronDown, ChevronRight, Bot } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { CARD_CATEGORIES, CATEGORIZED_CARD_IDS, CUSTOM_TINT } from './categories'
-import type { DashboardCard } from '@/hooks/useDashboardCards'
+import { TIME_HOVER_LAYOUT, makeTimeXAxis } from '@/lib/chart-helpers'
+import {
+  CARD_CATEGORIES,
+  CATEGORIZED_CARD_IDS,
+  CUSTOM_TINT,
+  type CardCategory,
+  type CardTint,
+  type DashboardCard,
+  type ReportConfiguration,
+} from '@/hooks/useDashboardCards'
+import type { FiltersPayload } from '@/types/filters'
 import type { components } from '@/types/api.generated'
-import type { DashboardAggregates } from './categories'
+import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
+
+export { CARD_CATEGORIES, CATEGORIZED_CARD_IDS, CUSTOM_TINT, type CardCategory, type CardTint }
+
+type CatalogEntry = components['schemas']['LogFieldCatalogEntry']
+type CatalogGroup = components['schemas']['LogFieldCatalogGroup']
+type Aggregates = components['schemas']['AggregatesResponse']
+
+/** The slice of the log-fields catalog the dashboard cards read. */
+export type DashboardCatalog = {
+  fields?: Pick<CatalogEntry, 'id' | 'label' | 'group' | 'unit' | 'precision'>[] | null
+  groups?: Pick<CatalogGroup, 'id' | 'label'>[] | null
+}
+
+/** The slice of the aggregates payload each dashboard section reads. */
+export type DashboardAggregates = Partial<Pick<Aggregates, 'data' | 'map_data' | 'time_series' | 'metric' | 'interval'>>
+
+export interface DashboardBodyProps {
+  startTime: string | null
+  endTime: string | null
+  timezone: string
+  activeServiceId: string | null
+  filterPayload: FiltersPayload
+  config: ReportConfiguration
+  metric?: string
+  setMetric?: (metric: string) => void
+  trend: string
+  setTrend: (trend: string) => void
+  intervalButtons: React.ReactNode
+  allCards: DashboardCard[]
+  visibleCards: Set<string>
+  relativeRange: string | null
+  isAutoRange: boolean
+  anchor: string
+}
+
+interface BuildChartLayoutParams {
+  trafficData: PlotlyTrace[]
+  aggregates: Pick<DashboardAggregates, 'metric'> | null | undefined
+  metric: string
+  startTime: string | null
+  endTime: string | null
+  timezone: string
+  catalog: DashboardCatalog | null | undefined
+}
+
+export function buildChartLayout({
+  trafficData,
+  aggregates,
+  metric,
+  startTime,
+  endTime,
+  timezone,
+  catalog,
+}: BuildChartLayoutParams): PlotlyLayout {
+  const actualMetric = aggregates?.metric || metric
+  const metricField = catalog?.fields?.find((f) => f.id === actualMetric)
+
+  return {
+    ...TIME_HOVER_LAYOUT,
+    barmode: trafficData.length > 1 && trafficData[0]?.type === 'bar' ? 'stack' : undefined,
+    bargap: 0.1,
+    bargroupgap: 0.05,
+    showlegend: trafficData.some(t => t.showlegend !== false),
+    yaxis: {
+      title: metricField?.unit || (actualMetric === 'requests' ? 'reqs' : ''),
+      ticksuffix: metricField?.unit || '',
+      separatethousands: true,
+      exponentformat: 'none'
+    },
+    xaxis: makeTimeXAxis(startTime, endTime, timezone),
+  }
+}
+
+export const COLLAPSED_SECTIONS_KEY = 'dashboard_collapsed_sections'
 
 type TopBots = components['schemas']['SecurityTopBotsResponse']
 

@@ -8,24 +8,26 @@
  *   - Z-score alerts send zscore_threshold + baseline_period_days and operator ">".
  *   - Legacy webhook URL is omitted when blank.
  */
-import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
-import { stubPointerCaptureAndScroll } from '@/__tests__/helpers/browser-stubs'
+import { stubResizeObserver } from '@/__tests__/helpers/page-smoke'
+import { stubPointerCaptureAndScroll } from '@/__tests__/helpers/page-smoke'
 import * as React from 'react'
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 
-import { renderWithQuery } from '../helpers/query'
-import { server } from '@/__tests__/helpers/msw/server'
+import { renderWithQuery } from '../helpers/page-smoke'
+import { server } from '@/__tests__/helpers/msw/handlers'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { CreateAlertForm } from '@/app/alerts/_sections/AlertEditor'
 import type { components } from '@/types/api.generated'
 
-vi.mock('@/app/alerts/_sections/AlertPreview', () => ({ AlertPreview: () => <div data-testid="alert-preview" /> }))
-vi.mock('@/hooks/useBootstrap', () => ({ useBootstrap: () => ({ data: undefined }) }))
-vi.mock('@/hooks/useIsAnalyst', () => ({ useIsAnalyst: () => false }))
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
+  useBootstrap: () => ({ data: undefined }),
+  useIsAnalyst: () => false,
+}))
 
 const API_BASE = getApiBase()
 const SVC = 'svc-alerts'

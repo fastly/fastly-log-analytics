@@ -5,20 +5,20 @@ import { describe, expect, it, test, vi } from 'vitest'
 // bundle and dehydrates into <DashboardClient />; RTL can't render an async
 // component, so the smoke test targets the client component that owns the
 // title + chart/cards.
-import DashboardClient from '@/app/dashboard/_sections/DashboardClient'
-import { buildChartLayout } from '@/app/dashboard/_sections/categories'
+import DashboardClient, { buildChartLayout } from '@/app/dashboard/_sections/DashboardClient'
 import { densifyBarSeries } from '@/lib/chart-helpers'
 import { buildTrafficData, getIntervalSeconds } from '@/lib/traffic-chart'
-import { createTestQueryClient, renderWithQuery } from '../helpers/query'
+import { createTestQueryClient, renderWithQuery } from '../helpers/page-smoke'
 import * as apiLib from '@/lib/api'
-import { getOk, postOk } from '@/__tests__/helpers/partial'
+import { getOk, postOk } from '@/__tests__/helpers/page-smoke'
 import React from 'react'
 
 vi.mock('@/stores/serviceStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())
 
 vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke')).filterStoreModuleMock())
 
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api')>()),
   client: {
     GET: vi.fn(),
     POST: vi.fn(),
@@ -31,8 +31,14 @@ vi.mock('@/lib/api', () => ({
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/dashboard'))
 
 vi.mock('@/components/PlotlyChart', async () => (await import('../helpers/page-smoke')).plotlyChartModuleMock())
-vi.mock('@/components/charts/TimeSeriesChart', () => ({ TimeSeriesChart: () => <div data-testid="timeseries-chart">TimeSeriesChart</div> }))
-vi.mock('@/components/Map/ChoroplethMap', () => ({ ChoroplethMap: () => <div data-testid="choropleth-map">ChoroplethMap</div> }))
+vi.mock('@/components/AnalyticsCard', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/components/AnalyticsCard')>()),
+  TimeSeriesChart: () => <div data-testid="timeseries-chart">TimeSeriesChart</div>,
+}))
+vi.mock('@/components/Map/ChoroplethMap', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/components/Map/ChoroplethMap')>()),
+  ChoroplethMap: () => <div data-testid="choropleth-map">ChoroplethMap</div>,
+}))
 
 const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
 

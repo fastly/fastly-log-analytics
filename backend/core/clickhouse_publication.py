@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -25,16 +27,19 @@ from backend.core.clickhouse_client import (
     CLICKHOUSE_FACT_COLUMNS,
     ClickHouseClient,
     get_clickhouse_client,
+    record_publication,
 )
-from backend.core.clickhouse_manifest import Artifact, Dataset, PgManifest
-from backend.core.clickhouse_observer import record_publication
-from backend.core.clickhouse_schema import target_identity
 from backend.core.duckdb import _get_fos_client
+from backend.core.metadata import pg_connection
+from backend.core.metadata.pg_schema import CLICKHOUSE_CONTROL_DDL
 from backend.utils.date_utils import ensure_utc, parse_iso_utc
 
 __all__ = [
     "ARTIFACT_SCHEMA",
+    "CLICKHOUSE_FACT_DDL",
+    "CLICKHOUSE_SCHEMA_VERSION",
     "DurableBatch",
+    "FACT_TYPES",
     "FosArtifacts",
     "MAX_ARTIFACT_BYTES",
     "MAX_BATCH_ROWS",
@@ -43,18 +48,164 @@ __all__ = [
     "PAYLOAD_COLUMNS",
     "PublicationResult",
     "ReplayResult",
+    "_record_schema",
     "activate_generation",
     "build_batch_id",
     "canonical_bytes",
     "canonical_row",
+    "create_clickhouse_schema",
     "digest_rows",
     "full_rebuild",
+    "main",
+    "maintain_clickhouse_system_tables",
     "publish_batch",
     "replay_unpublished",
+    "require_postgres",
+    "target_identity",
     "utc",
     "verify_generation",
 ]
 logger = structlog.get_logger(__name__)
+
+CLICKHOUSE_SCHEMA_VERSION = 2
+FACT_TYPES = (
+    ("service_id", "String"),
+    ("batch_id", "String"),
+    ("source_identity", "String"),
+    ("row_ordinal", "UInt64"),
+    ("generation", "String"),
+    ("timestamp", "DateTime64(6, 'UTC')"),
+    ("country", "Nullable(String)"),
+    ("ip", "Nullable(String)"),
+    ("url", "Nullable(String)"),
+    ("conn_requests", "Nullable(Int64)"),
+)
+CLICKHOUSE_FACT_DDL = """
+CREATE TABLE IF NOT EXISTS log_facts (
+    service_id String,
+    batch_id String,
+    source_identity String,
+    row_ordinal UInt64,
+    generation String,
+    timestamp DateTime64(6, 'UTC'),
+    country Nullable(String),
+    ip Nullable(String),
+    url Nullable(String),
+    conn_requests Nullable(Int64)
+) ENGINE = ReplacingMergeTree
+PARTITION BY (service_id, generation)
+ORDER BY (service_id, generation, batch_id, row_ordinal)
+"""
+
+
+def require_postgres() -> None:
+    if not pg_connection.is_postgres():
+        raise RuntimeError("ClickHouse prototype requires Postgres METADATA_DSN; SQLite is unsupported")
+
+
+def target_identity(client: ClickHouseClient) -> str:
+    """Proof of the actual table, not a host name (a replacement volume differs)."""
+    tables = client.execute(
+        "SELECT toString(uuid) AS uuid, engine, sorting_key, partition_key FROM system.tables "
+        "WHERE database = currentDatabase() AND name = 'log_facts'"
+    )
+    if (
+        len(tables) != 1
+        or tables[0].get("engine") != "ReplacingMergeTree"
+        or tables[0].get("sorting_key") != "service_id, generation, batch_id, row_ordinal"
+        or tables[0].get("partition_key") != "(service_id, generation)"
+        or tables[0].get("uuid") in (None, "", "00000000-0000-0000-0000-000000000000")
+    ):
+        raise RuntimeError("ClickHouse fact schema mismatch or missing table identity")
+    columns = client.execute(
+        "SELECT name, type FROM system.columns "
+        "WHERE database = currentDatabase() AND table = 'log_facts' ORDER BY position"
+    )
+    if [(r["name"], r["type"]) for r in columns] != list(FACT_TYPES):
+        raise RuntimeError("ClickHouse fact schema columns mismatch")
+    return tables[0]["uuid"]
+
+
+def _record_schema(identity: str) -> None:
+    require_postgres()
+    # The SQLite-shaped wrapper's commit() is a no-op. Use a real psycopg
+    # transaction even though the underlying pool connections are autocommit.
+    with pg_connection.get_pg_pool().connection() as con, con.transaction():
+        con.execute("SELECT pg_advisory_xact_lock(2080406)")
+        for ddl in CLICKHOUSE_CONTROL_DDL:
+            con.execute(ddl)
+        con.execute(
+            "INSERT INTO clickhouse_schema_state(target_identity, schema_version) VALUES (%s, %s) "
+            "ON CONFLICT (target_identity) DO UPDATE SET "
+            "schema_version = EXCLUDED.schema_version, checked_at = clock_timestamp()",
+            (identity, CLICKHOUSE_SCHEMA_VERSION),
+        )
+
+
+def maintain_clickhouse_system_tables(client: ClickHouseClient) -> None:
+    """Ensure internal system tables do not accumulate unbounded parts and trigger merge OOMs."""
+    log = logging.getLogger(__name__)
+    for profiler_tbl in ("trace_log", "processors_profile_log"):
+        try:
+            client.execute(f"TRUNCATE TABLE IF EXISTS system.{profiler_tbl}")
+        except Exception as e:
+            log.debug("Failed to truncate system.%s: %s", profiler_tbl, e)
+
+    for tbl in ("metric_log", "asynchronous_metric_log", "text_log", "query_log", "part_log", "error_log", "trace_log"):
+        try:
+            client.execute(f"ALTER TABLE system.{tbl} MODIFY TTL event_date + INTERVAL 1 DAY")
+        except Exception as e:
+            log.debug("Failed to alter TTL on system.%s: %s", tbl, e)
+
+
+def create_clickhouse_schema(client: ClickHouseClient) -> None:
+    require_postgres()
+    maintain_clickhouse_system_tables(client)
+    client.execute(CLICKHOUSE_FACT_DDL)
+    _record_schema(target_identity(client))
+
+
+def main() -> None:
+    client = get_clickhouse_client()
+    if client is None:
+        raise RuntimeError("ClickHouse prototype is disabled")
+    try:
+        create_clickhouse_schema(client)
+
+        try:
+            from backend.high_scale.publication import install_clickhouse_schema
+
+            install_clickhouse_schema()
+        except ImportError:
+            pass
+
+        logging.getLogger(__name__).info("ClickHouse schema v%s verified", CLICKHOUSE_SCHEMA_VERSION)
+    finally:
+        client.close()
+        if pg_connection.is_postgres():
+            pg_connection.get_pg_pool().close()
+
+
+sys.modules["backend.core.clickhouse_schema"] = sys.modules[__name__]
+if "backend.core" in sys.modules:
+    setattr(sys.modules["backend.core"], "clickhouse_schema", sys.modules[__name__])
+
+try:
+    from backend.core.clickhouse_manifest import Artifact, Dataset, PgManifest  # noqa: E402
+except ImportError:
+    pass
+
+
+def _ensure_manifest_symbols() -> None:
+    if "PgManifest" not in globals():
+        from backend.core.clickhouse_manifest import Artifact as _A
+        from backend.core.clickhouse_manifest import Dataset as _D
+        from backend.core.clickhouse_manifest import PgManifest as _M
+
+        globals()["Artifact"] = _A
+        globals()["Dataset"] = _D
+        globals()["PgManifest"] = _M
+
 
 MAX_DATASET_ROWS = 1_000_000
 MAX_BATCH_ROWS = 10_000
@@ -146,6 +297,7 @@ class FosArtifacts:
         return key
 
     def put(self, dataset: Dataset, rows: tuple, *, max_bytes: int = MAX_ARTIFACT_BYTES) -> Artifact:
+        _ensure_manifest_symbols()
         table_rows = [dict(zip(PAYLOAD_COLUMNS, (*row[:2], utc(row[2]), *row[3:]), strict=True)) for row in rows]
         table = pa.Table.from_pylist(table_rows, schema=ARTIFACT_SCHEMA)
         sink = pa.BufferOutputStream()
@@ -315,6 +467,7 @@ def _publish_batch(
     store: PgManifest | None,
     client: ClickHouseClient | None,
 ) -> PublicationResult:
+    _ensure_manifest_symbols()
     store = store or PgManifest()
     client = _client(client)
     artifact = store.artifact(service_id, generation, batch.artifact.batch_id)
@@ -394,6 +547,7 @@ def replay_unpublished(
     client: ClickHouseClient | None = None,
 ) -> ReplayResult:
     """Resume this building generation only. Rebuild uses full_rebuild instead."""
+    _ensure_manifest_symbols()
     store = store or PgManifest()
     client = _client(client)
     gen = store.generation(service_id, generation)
@@ -427,6 +581,7 @@ def full_rebuild(
     """Always allocate a new target generation, including previously published rows."""
     if not 1 <= limit <= 1000:
         raise ValueError("limit must be 1..1000")
+    _ensure_manifest_symbols()
     store = store or PgManifest()
     client = _client(client)
     generation = store.begin_generation(service_id, dataset_id, target_identity(client))
@@ -436,4 +591,18 @@ def full_rebuild(
 def __getattr__(name: str):
     if name == "readiness":
         return None
+    if name in ("Artifact", "Dataset", "PgManifest"):
+        _ensure_manifest_symbols()
+        return globals()[name]
     raise AttributeError(name)
+
+
+_this_module = sys.modules[__name__]
+sys.modules["backend.core.clickhouse_schema"] = _this_module
+_core_pkg = sys.modules.get("backend.core")
+if _core_pkg is not None:
+    setattr(_core_pkg, "clickhouse_schema", _this_module)
+
+
+if __name__ == "__main__":
+    main()

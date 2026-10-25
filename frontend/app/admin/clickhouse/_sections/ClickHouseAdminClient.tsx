@@ -18,7 +18,7 @@ import {
 } from 'lucide-react'
 
 import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import { formatElapsed } from '@/lib/format'
 import { queryKeys } from '@/lib/query-keys'
 import { useServiceStore } from '@/stores/serviceStore'

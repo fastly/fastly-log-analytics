@@ -9,19 +9,17 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import React from 'react'
 import type { PlotlyTrace } from '@/types/plotly'
 
-vi.mock('@/components/charts/TimeSeriesChart', () => ({
+vi.mock('@/components/AnalyticsCard', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/components/AnalyticsCard')>()),
   TimeSeriesChart: ({ data }: { data: PlotlyTrace[] }) => (
     <div data-testid="timeseries-chart">
       <span data-testid="trace-count">{data?.length ?? 0}</span>
     </div>
   ),
+  LazyMount: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }))
 
 vi.mock('@/components/PlotlyChart', async () => (await import('@/__tests__/helpers/page-smoke')).plotlyChartModuleMock())
-
-vi.mock('@/components/LazyMount', () => ({
-  LazyMount: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-}))
 
 vi.mock('@/components/Dashboard/TopTenTable', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/components/Dashboard/TopTenTable')>()),
@@ -41,22 +39,23 @@ let __fieldValues: { values: { value: string; count: number; label?: string }[] 
 let __isLoading = false
 
 const { activeFields } = vi.hoisted(() => ({ activeFields: new Set<string>() }))
-vi.mock('@/hooks/useLogFieldsCatalog', async () => {
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/hooks/useBootstrap')>()
   const base = (await import('@/__tests__/helpers/page-smoke')).activeLogFieldsSetModuleMock(activeFields)
   return {
+    ...actual,
     ...base,
     useFieldValues: () => ({ data: __fieldValues, isLoading: __isLoading, isFetching: false }),
   }
 })
 
 import { TrafficChart } from '@/app/dashboard/_sections/TrafficChart'
-import { CardGrid } from '@/app/dashboard/_sections/CardGrid'
-import { CARD_CATEGORIES } from '@/app/dashboard/_sections/categories'
+import { CardGrid, CARD_CATEGORIES } from '@/app/dashboard/_sections/CardGrid'
 import { FieldSearchDialog } from '@/components/Dashboard/TopTenTable'
 import { useFilterStore } from '@/stores/filterStore'
 import { usePopGeoStore } from '@/stores/popGeoStore'
-import type { ReportConfiguration } from '@/hooks/useReportConfig'
-import { partial } from '../../helpers/partial'
+import type { ReportConfiguration } from '@/hooks/useDashboardCards'
+import { partial } from '../../helpers/page-smoke'
 
 afterEach(() => {
   cleanup()

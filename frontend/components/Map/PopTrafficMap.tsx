@@ -6,11 +6,11 @@ import * as maplibregl from 'maplibre-gl'
 maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs')
 import { useTheme } from 'next-themes'
 import { usePopGeoStore } from '@/stores/popGeoStore'
-import { formatPopGeo, type PopGeo } from '@/components/PopLabel'
+import { formatPopGeo, type PopGeo } from '@/components/DataTable'
 import { formatCompactCount, formatCount, resolveCountryName } from '@/lib/format'
-import { countryFill, NORMALIZE_COUNTRY, useMapResize } from '@/components/Map/shared'
-import { addCountryBaseLayer, createBaseMap, removeMapTabStops, updateCountryBaseLayerTheme, type MapFillColor } from '@/components/Map/baseLayers'
-import { CHART_COLORS } from '@/lib/chart-builders'
+import { countryFill, NORMALIZE_COUNTRY, useMapResize } from '@/components/Map/ChoroplethMap'
+import { addCountryBaseLayer, createBaseMap, removeMapTabStops, updateCountryBaseLayerTheme, type MapFillColor } from '@/components/Map/ChoroplethMap'
+import { CHART_COLORS } from '@/lib/chart-helpers'
 
 type CoordTree = number | CoordTree[]
 

@@ -6,7 +6,7 @@ import { formatLocalDateTime } from '@/lib/date'
 import { formatCount } from '@/lib/format'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import type { ColumnDef } from '@tanstack/react-table'
 import { DataTableReadonly } from '@/components/DataTable'
 import { Badge } from '@/components/ui/badge'
@@ -35,132 +35,130 @@ function formatBytes(bytes: number | null | undefined): string | null {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
 }
 
+function makeCol<T>(
+  id: string,
+  header: string,
+  size: number,
+  accessorFn: (row: T) => string | number,
+  render: (row: T) => React.ReactNode,
+  enableSorting = true,
+): ColumnDef<T> {
+  return {
+    id,
+    header,
+    size,
+    accessorFn,
+    enableSorting,
+    cell: ({ row }) => render(row.original),
+  }
+}
+
 const QUEUE_COLUMNS: ColumnDef<QueueDepth>[] = [
-  {
-    id: 'queue',
-    header: 'Queue Name',
-    accessorFn: (q) => q[0],
-    size: 320,
-    cell: ({ row }) => <span className="font-mono text-sm">{row.original[0]}</span>,
-  },
-  {
-    id: 'messages',
-    header: 'Messages',
-    accessorFn: (q) => q[1],
-    size: 140,
-    cell: ({ row }) => <span className="block text-right tabular-nums">{row.original[1]}</span>,
-  },
+  makeCol('queue', 'Queue Name', 320, (q) => q[0], (q) => <span className="font-mono text-sm">{q[0]}</span>),
+  makeCol('messages', 'Pending Messages', 160, (q) => q[1], (q) => <span className="text-sm font-medium">{q[1]}</span>),
 ]
 
 const TASK_COLUMNS: ColumnDef<ActiveTask>[] = [
-  {
-    id: 'id',
-    header: 'ID',
-    accessorFn: (t) => t.id,
-    size: 300,
-    enableSorting: false,
-    cell: ({ row }) => <span className="font-mono text-xs">{row.original.id}</span>,
-  },
-  {
-    id: 'name',
-    header: 'Name',
-    accessorFn: (t) => t.name,
-    size: 260,
-    enableSorting: false,
-    cell: ({ row }) => <span className="text-sm font-medium">{row.original.name}</span>,
-  },
-  {
-    id: 'args',
-    header: 'Args',
-    accessorFn: (t) => JSON.stringify(t.args),
-    size: 240,
-    enableSorting: false,
-    cell: ({ row }) => (
-      <span className="font-mono text-xs text-muted-foreground">{JSON.stringify(row.original.args)}</span>
-    ),
-  },
-  {
-    id: 'start',
-    header: 'Start Time',
-    accessorFn: (t) => t.time_start,
-    size: 200,
-    enableSorting: false,
-    cell: ({ row }) => (
-      <span className="text-xs">{formatLocalDateTime(row.original.time_start * 1000)}</span>
-    ),
-  },
+  makeCol('id', 'ID', 300, (t) => t.id, (t) => <span className="font-mono text-xs">{t.id}</span>, false),
+  makeCol('name', 'Name', 260, (t) => t.name, (t) => <span className="text-sm font-medium">{t.name}</span>, false),
+  makeCol('args', 'Args', 240, (t) => JSON.stringify(t.args), (t) => <span className="font-mono text-xs text-muted-foreground">{JSON.stringify(t.args)}</span>, false),
+  makeCol('start', 'Start Time', 200, (t) => t.time_start, (t) => <span className="text-xs">{formatLocalDateTime(t.time_start * 1000)}</span>, false),
 ]
 
 const INPROCESS_SCHEDULE_COLUMNS: ColumnDef<InProcessScheduleEntry>[] = [
-  {
-    id: 'name',
-    header: 'Job ID',
-    accessorFn: (s) => s.name,
-    size: 320,
-    cell: ({ row }) => <span className="font-mono text-xs font-medium">{row.original.name}</span>,
-  },
-  {
-    id: 'trigger',
-    header: 'Trigger / Cadence',
-    accessorFn: (s) => s.trigger,
-    size: 280,
-    cell: ({ row }) => (
-      <span className="font-mono text-xs text-muted-foreground">{row.original.trigger}</span>
-    ),
-  },
-  {
-    id: 'next_run_at',
-    header: 'Next Scheduled Run',
-    accessorFn: (s) => s.next_run_at ?? 0,
-    size: 240,
-    cell: ({ row }) => (
-      <span className="text-xs tabular-nums">
-        {row.original.next_run_at ? formatLocalDateTime(row.original.next_run_at * 1000) : '—'}
-      </span>
-    ),
-  },
+  makeCol('name', 'Job ID', 320, (s) => s.name, (s) => <span className="font-mono text-xs font-medium">{s.name}</span>),
+  makeCol('trigger', 'Trigger / Cadence', 280, (s) => s.trigger, (s) => <span className="font-mono text-xs text-muted-foreground">{s.trigger}</span>),
+  makeCol('next_run_at', 'Next Scheduled Run', 240, (s) => s.next_run_at ?? 0, (s) => (
+    <span className="text-xs tabular-nums">
+      {s.next_run_at ? formatLocalDateTime(s.next_run_at * 1000) : '—'}
+    </span>
+  )),
 ]
 
 const INPROCESS_ACTIVE_COLUMNS: ColumnDef<InProcessActiveRun>[] = [
-  {
-    id: 'run_id',
-    header: 'Run ID',
-    accessorFn: (r) => r.run_id,
-    size: 140,
-    enableSorting: false,
-    cell: ({ row }) => <span className="font-mono text-xs">#{row.original.run_id}</span>,
-  },
-  {
-    id: 'task',
-    header: 'Task',
-    accessorFn: (r) => r.task ?? '—',
-    size: 260,
-    enableSorting: false,
-    cell: ({ row }) => <span className="font-mono text-xs font-medium">{row.original.task ?? '—'}</span>,
-  },
-  {
-    id: 'service_id',
-    header: 'Service ID',
-    accessorFn: (r) => r.service_id ?? 'global',
-    size: 260,
-    enableSorting: false,
-    cell: ({ row }) => (
-      <span className="font-mono text-xs text-muted-foreground">{row.original.service_id ?? 'global'}</span>
-    ),
-  },
-  {
-    id: 'started_at',
-    header: 'Started At',
-    accessorFn: (r) => r.started_at ?? 0,
-    size: 220,
-    enableSorting: false,
-    cell: ({ row }) => (
-      <span className="text-xs tabular-nums">
-        {row.original.started_at ? formatLocalDateTime(row.original.started_at * 1000) : '—'}
-      </span>
-    ),
-  },
+  makeCol('run_id', 'Run ID', 140, (r) => r.run_id, (r) => <span className="font-mono text-xs">#{r.run_id}</span>, false),
+  makeCol('task', 'Task', 260, (r) => r.task ?? '—', (r) => <span className="font-mono text-xs font-medium">{r.task ?? '—'}</span>, false),
+  makeCol('service_id', 'Service ID', 260, (r) => r.service_id ?? 'global', (r) => <span className="font-mono text-xs text-muted-foreground">{r.service_id ?? 'global'}</span>, false),
+  makeCol('started_at', 'Started At', 220, (r) => r.started_at ?? 0, (r) => (
+    <span className="text-xs tabular-nums">
+      {r.started_at ? formatLocalDateTime(r.started_at * 1000) : '—'}
+    </span>
+  ), false),
 ]
+
+function SummaryStatTile({
+  label,
+  value,
+  sublabel,
+  valueClassName = '',
+}: {
+  label: string
+  value: React.ReactNode
+  sublabel: React.ReactNode
+  valueClassName?: string
+}) {
+  return (
+    <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
+      <div className="text-xs text-muted-foreground uppercase">{label}</div>
+      <div className={`text-2xl font-semibold tabular-nums mt-0.5 ${valueClassName}`}>
+        {value}
+      </div>
+      <div className="text-[11px] text-muted-foreground mt-0.5 truncate">{sublabel}</div>
+    </div>
+  )
+}
+
+function TrendSparklineCard({
+  title,
+  description,
+  label,
+  latestValue,
+  points,
+  isLoading,
+  trendsLoading,
+  isTrendsRefetching,
+  trendsError,
+}: {
+  title: string
+  description: string
+  label: string
+  latestValue: number | null
+  points: React.ComponentProps<typeof Sparkline>['points']
+  isLoading: boolean
+  trendsLoading: boolean
+  isTrendsRefetching: boolean
+  trendsError: unknown
+}) {
+  return (
+    <AnalyticsCard
+      title={title}
+      description={description}
+      className="min-h-[204px]"
+      isLoading={isLoading || trendsLoading}
+      isFetching={isTrendsRefetching}
+      loadingMessage="Loading queue telemetry..."
+      error={trendsError as AnalyticsCardError | null}
+      isEmpty={!isLoading && !trendsLoading && !trendsError && points.length === 0}
+    >
+      <div className="flex items-baseline justify-between mb-1">
+        <div className="text-2xl font-semibold tabular-nums">
+          {latestValue === null ? '–' : latestValue}
+        </div>
+        <div className="text-xs text-muted-foreground">
+          {points.length > 0 ? `${points.length} samples` : 'no samples yet'}
+        </div>
+      </div>
+      <div className="h-[64px] text-foreground/70">
+        <Sparkline
+          points={isLoading ? [] : points}
+          height={64}
+          label={label}
+          formatValue={(v) => String(v)}
+        />
+      </div>
+    </AnalyticsCard>
+  )
+}
 
 export function QueueClient() {
   const queryClient = useQueryClient()
@@ -420,28 +418,17 @@ export function QueueClient() {
               error={error as AnalyticsCardError | null}
             >
               <div className="grid grid-cols-2 gap-4 pt-1 min-h-[100px]" data-testid="admin-queue-standard-ingest-summary">
-                <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
-                  <div className="text-xs text-muted-foreground uppercase">Ingested Files</div>
-                  <div className="text-2xl font-semibold tabular-nums mt-0.5">
-                    {formatCount(standardIngestedFiles)}
-                  </div>
-                  <div className="text-[11px] text-muted-foreground mt-0.5 truncate">
-                    Tracked in PostgreSQL ingested_files
-                  </div>
-                </div>
-                <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
-                  <div className="text-xs text-muted-foreground uppercase">Quarantined Items</div>
-                  <div
-                    className={`text-2xl font-semibold tabular-nums mt-0.5 ${
-                      standardQuarantinedItems > 0 ? 'text-amber-600 dark:text-amber-400' : ''
-                    }`}
-                  >
-                    {formatCount(standardQuarantinedItems)}
-                  </div>
-                  <div className="text-[11px] text-muted-foreground mt-0.5 truncate">
-                    Corrupt files &amp; lines preserved on disk
-                  </div>
-                </div>
+                <SummaryStatTile
+                  label="Ingested Files"
+                  value={formatCount(standardIngestedFiles)}
+                  sublabel="Tracked in PostgreSQL ingested_files"
+                />
+                <SummaryStatTile
+                  label="Quarantined Items"
+                  value={formatCount(standardQuarantinedItems)}
+                  valueClassName={standardQuarantinedItems > 0 ? 'text-amber-600 dark:text-amber-400' : ''}
+                  sublabel="Corrupt files & lines preserved on disk"
+                />
               </div>
             </AnalyticsCard>
 
@@ -456,86 +443,45 @@ export function QueueClient() {
               error={error as AnalyticsCardError | null}
             >
               <div className="grid grid-cols-2 gap-4 pt-1 min-h-[100px]" data-testid="admin-queue-standard-scheduler-summary">
-                <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
-                  <div className="text-xs text-muted-foreground uppercase">Registered Schedules</div>
-                  <div className="text-2xl font-semibold tabular-nums mt-0.5">
-                    {inprocessSchedules.length}
-                  </div>
-                  <div className="text-[11px] text-muted-foreground mt-0.5 truncate">
-                    Active APScheduler jobs
-                  </div>
-                </div>
-                <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
-                  <div className="text-xs text-muted-foreground uppercase">Active Cron Runs</div>
-                  <div className="text-2xl font-semibold tabular-nums mt-0.5">
-                    {inprocessActiveRuns.length}
-                  </div>
-                  <div className="text-[11px] text-muted-foreground mt-0.5 truncate">
-                    Currently executing in-process jobs
-                  </div>
-                </div>
+                <SummaryStatTile
+                  label="Registered Schedules"
+                  value={inprocessSchedules.length}
+                  sublabel="Active APScheduler jobs"
+                />
+                <SummaryStatTile
+                  label="Active Cron Runs"
+                  value={inprocessActiveRuns.length}
+                  sublabel="Currently executing in-process jobs"
+                />
               </div>
             </AnalyticsCard>
           </>
         ) : (
           <>
-            <AnalyticsCard
+            <TrendSparklineCard
               key="celery-queue-depth"
               title="Total Queue Depth (1h)"
               description="Aggregate sum of all Celery queue lengths."
-              className="min-h-[204px]"
-              isLoading={isLoading || trendsLoading}
-              isFetching={isTrendsRefetching}
-              loadingMessage="Loading queue telemetry..."
-              error={trendsError as AnalyticsCardError | null}
-              isEmpty={!isLoading && !trendsLoading && !trendsError && queuePoints.length === 0}
-            >
-              <div className="flex items-baseline justify-between mb-1">
-                <div className="text-2xl font-semibold tabular-nums">
-                  {latestQueue === null ? '–' : latestQueue}
-                </div>
-                <div className="text-xs text-muted-foreground">
-                  {queuePoints.length > 0 ? `${queuePoints.length} samples` : 'no samples yet'}
-                </div>
-              </div>
-              <div className="h-[64px] text-foreground/70">
-                <Sparkline
-                  points={isLoading ? [] : queuePoints}
-                  height={64}
-                  label="Queue Depth"
-                  formatValue={(v) => String(v)}
-                />
-              </div>
-            </AnalyticsCard>
-
-            <AnalyticsCard
+              label="Queue Depth"
+              latestValue={latestQueue}
+              points={queuePoints}
+              isLoading={isLoading}
+              trendsLoading={trendsLoading}
+              isTrendsRefetching={isTrendsRefetching}
+              trendsError={trendsError}
+            />
+            <TrendSparklineCard
               key="celery-active-tasks"
               title="Active Tasks (1h)"
               description="Total actively executing Celery tasks across all workers."
-              className="min-h-[204px]"
-              isLoading={isLoading || trendsLoading}
-              isFetching={isTrendsRefetching}
-              loadingMessage="Loading queue telemetry..."
-              error={trendsError as AnalyticsCardError | null}
-              isEmpty={!isLoading && !trendsLoading && !trendsError && workerPoints.length === 0}
-            >
-              <div className="flex items-baseline justify-between mb-1">
-                <div className="text-2xl font-semibold tabular-nums">
-                  {latestWorker === null ? '–' : latestWorker}
-                </div>
-                <div className="text-xs text-muted-foreground">
-                  {workerPoints.length > 0 ? `${workerPoints.length} samples` : 'no samples yet'}
-                </div>
-              </div>
-              <div className="h-[64px] text-foreground/70">
-                <Sparkline
-                  points={isLoading ? [] : workerPoints}
-                  height={64}
-                  label="Active Tasks"
-                  formatValue={(v) => String(v)}
-                />
-              </div>
-            </AnalyticsCard>
+              label="Active Tasks"
+              latestValue={latestWorker}
+              points={workerPoints}
+              isLoading={isLoading}
+              trendsLoading={trendsLoading}
+              isTrendsRefetching={isTrendsRefetching}
+              trendsError={trendsError}
+            />
           </>
         )}
       </div>

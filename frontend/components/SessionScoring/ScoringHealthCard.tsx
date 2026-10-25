@@ -4,7 +4,7 @@ import { AlertTriangle, Activity, CheckCircle2, Gauge, KeyRound, Lock, ServerCra
 
 import { Skeleton } from '@/components/ui/skeleton'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { CardErrorState } from '@/components/CardErrorState'
+import { CardErrorState } from '@/components/AnalyticsCard'
 import { ScorerFailOpenHelp, ScoringHealthHelp } from '@/components/SessionScoring/help-content'
 import type { components } from '@/types/api.generated'
 

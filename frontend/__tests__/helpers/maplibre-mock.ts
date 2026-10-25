@@ -28,7 +28,7 @@
  */
 
 import type { MapOptions } from 'maplibre-gl'
-import { StubResizeObserver } from './browser-stubs'
+import { StubResizeObserver } from './page-smoke'
 
 export type MockMapEventPayload = Record<string, unknown>
 export type MockMapListener = (e: MockMapEventPayload) => void

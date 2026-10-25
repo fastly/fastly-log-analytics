@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { useOpenGeneration } from '@/hooks/useDerivedState'
+import { useOpenGeneration } from '@/hooks/useSSE'
 import { queryKeys } from '@/lib/query-keys'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'

@@ -19,8 +19,8 @@ import { SyncStatusBadge } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useTimezoneStore } from '@/stores/timezoneStore'
 import { getTimezoneAbbr } from '@/lib/date'
-import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
-import { stubResizeObserver, stubSystemTimeZone } from '../helpers/browser-stubs'
+import { createTestQueryClient, makeQueryWrapper } from '../helpers/page-smoke'
+import { stubResizeObserver, stubSystemTimeZone } from '../helpers/page-smoke'
 
 const mocks = vi.hoisted(() => ({
   status: vi.fn(),
@@ -30,24 +30,30 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('@/components/ui/select', async () => (await import('../helpers/page-smoke')).selectMockFactory())
-vi.mock('@/hooks/useSyncStatus', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/hooks/useSyncStatus')>()),
+vi.mock('@/hooks/useEventStream', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useEventStream')>()),
   useSyncStatus: () => mocks.status(),
   useLastSync: () => mocks.lastSync(),
 }))
-vi.mock('@/hooks/useIsAnalyst', () => ({
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
   useIsAnalyst: () => mocks.analyst(),
+  useBootstrap: () => mocks.bootstrap(),
+  useMounted: () => true,
 }))
-vi.mock('@/hooks/useBootstrap', () => ({ useBootstrap: () => mocks.bootstrap() }))
-vi.mock('@/hooks/useAdminEventStream', () => ({
+vi.mock('@/hooks/useAdminEventStream', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useAdminEventStream')>()),
   useHeaderBadgeStream: () => ({ state: 'idle' }),
   useAdminEventStream: () => ({ state: 'idle' }),
 }))
-vi.mock('@/hooks/useDateFormat', () => ({ useDateFormat: () => ({ full: 'yyyy-MM-dd', abbr: 'HH:mm' }) }))
-vi.mock('@/hooks/useNowSeconds', () => ({ useNowMs: () => Date.parse('2026-09-08T18:00:00Z') }))
-vi.mock('@/hooks/useMounted', () => ({ useMounted: () => true }))
-vi.mock('@/components/TimeAgo', () => ({
-  TimeAgo: ({ timestamp }: { timestamp: string }) => <time dateTime={timestamp}>{timestamp}</time>,
+vi.mock('@/hooks/useSSE', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useSSE')>()),
+  useDateFormat: () => ({ full: 'yyyy-MM-dd', abbr: 'HH:mm' }),
+  useNowMs: () => Date.parse('2026-09-08T18:00:00Z'),
+}))
+vi.mock('@/lib/date', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/date')>()),
+  formatTimeAgo: (timestamp: string) => timestamp,
 }))
 
 // ServiceSwitcher calls useQueryClient() (it invalidates the bootstrap query

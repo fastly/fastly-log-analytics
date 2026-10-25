@@ -1,4 +1,4 @@
-import { EditorSplitSkeleton } from '@/components/skeletons/PageSkeleton'
+import { EditorSplitSkeleton } from '@/components/ReportLayout'
 
 export default function Loading() {
   return <EditorSplitSkeleton />

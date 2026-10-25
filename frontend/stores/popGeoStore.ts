@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-import type { PopGeo } from '@/components/PopLabel'
+import type { PopGeo } from '@/components/DataTable'
 
 // Module-singleton store for the PoP -> {city,region,country} map. Populated
 // once from the bootstrap response (see useBootstrap), read by <PopLabel> via

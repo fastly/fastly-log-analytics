@@ -27,7 +27,7 @@ from backend.high_scale.archive_models import (
     ArchiveState,
     validate_archive_transition,
 )
-from backend.high_scale.source_discovery import INITIAL_SOURCE_CURSOR, RUM_SOURCE_DOMAINS
+from backend.high_scale.orchestration import INITIAL_SOURCE_CURSOR, RUM_SOURCE_DOMAINS
 
 SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS high_scale_ownership (
@@ -1293,15 +1293,8 @@ class PostgresControlPlane:
     def _locked_source(
         connection: Any, service_id: str, object_key: str, *, for_update: bool = True
     ) -> SourceObjectRecord:
-        sql = (
-            """
-            SELECT * FROM high_scale_source_objects
-            WHERE service_id=%s AND object_key=%s
-            FOR UPDATE
-            """
-            if for_update
-            else "SELECT * FROM high_scale_source_objects WHERE service_id=%s AND object_key=%s"
-        )
+        suffix = " FOR UPDATE" if for_update else ""
+        sql = f"SELECT * FROM high_scale_source_objects WHERE service_id=%s AND object_key=%s{suffix}"
         row = connection.execute(sql, (service_id, object_key)).fetchone()
         if row is None:
             raise KeyError(object_key)
@@ -1309,15 +1302,8 @@ class PostgresControlPlane:
 
     @staticmethod
     def _archive_manifest(connection: Any, manifest_id: str, *, for_update: bool = False) -> ArchiveManifestRecord:
-        sql = (
-            """
-            SELECT * FROM high_scale_archive_manifests
-            WHERE manifest_id=%s
-            FOR UPDATE
-            """
-            if for_update
-            else "SELECT * FROM high_scale_archive_manifests WHERE manifest_id=%s"
-        )
+        suffix = " FOR UPDATE" if for_update else ""
+        sql = f"SELECT * FROM high_scale_archive_manifests WHERE manifest_id=%s{suffix}"
         row = connection.execute(sql, (manifest_id,)).fetchone()
         if row is None:
             raise KeyError(manifest_id)

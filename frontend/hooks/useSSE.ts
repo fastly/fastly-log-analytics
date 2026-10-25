@@ -1,32 +1,24 @@
 'use client'
 
-import { useState, useCallback, useRef, useEffect } from 'react'
-import { buildStreamRequest } from '@/lib/streamRequest'
-import { buildServiceHref } from '@/lib/utils'
+import { useState, useCallback, useRef, useEffect, useMemo, useSyncExternalStore, type Dispatch, type SetStateAction } from 'react'
+import type { VisibilityState } from '@tanstack/react-table'
 import { runEventStream } from '@/hooks/useEventStream'
+import { formatDate, formatRelative, formatTimeAgo, getTimezoneAbbr } from '@/lib/date'
+import { buildStreamRequest } from '@/lib/admin-stream-apply'
+import { buildServiceHref } from '@/lib/utils'
 import { useServiceStore } from '@/stores/serviceStore'
+import { useTimezoneStore } from '@/stores/timezoneStore'
 
 export type SSEStatus = 'idle' | 'streaming' | 'done' | 'error'
 
 export interface SSELine {
   type?: string
   message?: string
-  /**
-   * Monotonic per-stream id assigned at append time. Stable React key for
-   * components rendering an append-only / bounded SSE feed (e.g.
-   * CronLiveLog) — index-based keys cause stale-DOM bleed when the array
-   * is sliced for the visible tail.
-   */
   _id?: number
   [key: string]: unknown
 }
 
 interface UseSSEOptions {
-  /**
-   * Keep only the newest N frames. Unset = unbounded (finite wizard/log
-   * streams). Set it for permanent streams (Control Room) so memory and
-   * per-frame array copies stay bounded.
-   */
   maxLines?: number
 }
 
@@ -35,19 +27,12 @@ export function useSSE({ maxLines }: UseSSEOptions = {}) {
   const [status, setStatus] = useState<SSEStatus>('idle')
   const [error, setError] = useState<string | null>(null)
 
-  // AbortController for the active stream — stop()/unmount aborts it, which
-  // cancels the underlying reader inside runEventStream.
   const abortRef = useRef<AbortController | null>(null)
-
-  // Track the current request ID to avoid race conditions from StrictMode
   const requestIdRef = useRef<number>(0)
-  // Track if component is mounted
   const mountedRef = useRef<boolean>(true)
-  // Monotonic line counter for stable React keys (see SSELine._id).
   const lineSeqRef = useRef<number>(0)
 
   const stop = useCallback(() => {
-    // 1. Abort the active connection (cancels the reader in runEventStream)
     if (abortRef.current) {
       try {
         abortRef.current.abort()
@@ -56,7 +41,6 @@ export function useSSE({ maxLines }: UseSSEOptions = {}) {
       }
       abortRef.current = null
     }
-    // 2. Invalidate any pending fetch by incrementing the request ID
     requestIdRef.current++;
 
     if (mountedRef.current) {
@@ -69,7 +53,6 @@ export function useSSE({ maxLines }: UseSSEOptions = {}) {
     body?: Record<string, unknown>,
     extraHeaders?: Record<string, string>,
   ) => {
-    // Stop any existing stream before starting a new one
     stop();
 
     const serviceId = useServiceStore.getState().activeServiceId
@@ -144,9 +127,6 @@ export function useSSE({ maxLines }: UseSSEOptions = {}) {
 
       if (!isActive()) return
 
-      // Stream ended without a 'done' event — if we are still 'streaming',
-      // that means the connection was closed unexpectedly before a terminal
-      // 'done' or 'error' event was sent. This is an error!
       setStatus((prev) => {
         if (prev === 'streaming') {
           setError('Connection closed unexpectedly before completion.')
@@ -155,7 +135,6 @@ export function useSSE({ maxLines }: UseSSEOptions = {}) {
         return prev
       })
     } catch (err) {
-      // If we unmounted or the request was replaced, ignore all errors
       if (!isActive()) return
 
       setStatus('error')
@@ -171,7 +150,6 @@ export function useSSE({ maxLines }: UseSSEOptions = {}) {
     }
   }, [stop, maxLines])
 
-  // Cleanup on unmount
   useEffect(() => {
     mountedRef.current = true
     return () => {
@@ -205,4 +183,169 @@ export function useSSE({ maxLines }: UseSSEOptions = {}) {
     stop,
     reset,
   }
+}
+
+/**
+ * Active timezone (IANA tz string).
+ */
+export function useTimezone(): string {
+  return useTimezoneStore(s => s.timezone)
+}
+
+export function useDateFormat() {
+  const timezone = useTimezoneStore(state => state.timezone)
+
+  const short = useCallback((date: string | Date) => formatDate(date, timezone, 'yyyy-MM-dd h:mm a'), [timezone])
+  const full = useCallback((date: string | Date) => formatDate(date, timezone, 'yyyy-MM-dd h:mm:ss a'), [timezone])
+  const time = useCallback((date: string | Date) => formatDate(date, timezone, 'h:mm a'), [timezone])
+  const timeMs = useCallback((date: string | Date) => formatDate(date, timezone, 'h:mm:ss.SSS a'), [timezone])
+  const abbr = useCallback(() => getTimezoneAbbr(new Date(), timezone), [timezone])
+  const relative = useCallback((date: string | Date) => formatRelative(date), [])
+  const timeAgo = useCallback((date: string | Date) => formatTimeAgo(typeof date === 'string' ? date : date.toISOString()), [])
+  const format = useCallback((date: string | Date, pattern: string) => formatDate(date, timezone, pattern), [timezone])
+
+  return useMemo(() => ({
+    short,
+    full,
+    time,
+    timeMs,
+    abbr,
+    relative,
+    timeAgo,
+    format
+  }), [short, full, time, timeMs, abbr, relative, timeAgo, format])
+}
+
+let _now = Date.now()
+const _listeners = new Set<() => void>()
+let _interval: ReturnType<typeof setInterval> | null = null
+
+function _subscribe(cb: () => void): () => void {
+  if (_listeners.size === 0) {
+    _now = Date.now()
+  }
+  _listeners.add(cb)
+  if (_interval === null) {
+    _interval = setInterval(() => {
+      _now = Date.now()
+      for (const l of _listeners) l()
+    }, 1000)
+  }
+  return () => {
+    _listeners.delete(cb)
+    if (_listeners.size === 0 && _interval !== null) {
+      clearInterval(_interval)
+      _interval = null
+    }
+  }
+}
+
+function _getSnapshot(): number {
+  return _now
+}
+
+function _getServerSnapshot(): number {
+  return 0
+}
+
+const _noopUnsubscribe = () => {}
+function _noopSubscribe(): () => void {
+  return _noopUnsubscribe
+}
+
+/**
+ * Returns Date.now()-equivalent value that updates once per second.
+ */
+export function useNowMs(enabled = true): number {
+  return useSyncExternalStore(
+    enabled ? _subscribe : _noopSubscribe,
+    _getSnapshot,
+    _getServerSnapshot,
+  )
+}
+
+/**
+ * Returns seconds elapsed since `startedAt` using the shared 1-second tick.
+ */
+export function useElapsedTime(startedAt: string | null | undefined): number {
+  const nowMs = useNowMs(Boolean(startedAt))
+  if (!startedAt) return 0
+  return Math.max(0, (nowMs - new Date(startedAt).getTime()) / 1000)
+}
+
+/**
+ * State that starts from `source` and is reset to it whenever `source` changes.
+ */
+export function useDerivedState<T>(source: T): [T, Dispatch<SetStateAction<T>>] {
+  const [state, setState] = useState(source)
+  const [seen, setSeen] = useState(source)
+  if (!Object.is(seen, source)) {
+    setSeen(source)
+    setState(source)
+  }
+  return [state, setState]
+}
+
+/**
+ * Increments a counter each time `open` transitions to `true`.
+ */
+export function useOpenGeneration(open: boolean): number {
+  const [generation, setGeneration] = useState(0)
+  const [wasOpen, setWasOpen] = useState(open)
+  if (open !== wasOpen) {
+    setWasOpen(open)
+    if (open) setGeneration((g) => g + 1)
+  }
+  return generation
+}
+
+export function useColumnVisibility(initial?: VisibilityState) {
+  const [visibility, setVisibility] = useState<VisibilityState>(initial ?? {})
+  const handleChange = useCallback(
+    (id: string, vis: boolean) => setVisibility(prev => ({ ...prev, [id]: vis })),
+    []
+  )
+  return [visibility, setVisibility, handleChange] as const
+}
+
+const storageListeners = new Set<() => void>()
+
+function subscribeStorage(onChange: () => void): () => void {
+  storageListeners.add(onChange)
+  window.addEventListener('storage', onChange)
+  return () => {
+    storageListeners.delete(onChange)
+    window.removeEventListener('storage', onChange)
+  }
+}
+
+function readStorage(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * A localStorage string as external state.
+ */
+export function useLocalStorageString(key: string): readonly [string | null, (value: string) => void] {
+  const value = useSyncExternalStore(
+    subscribeStorage,
+    () => readStorage(key),
+    () => null,
+  )
+  const write = useCallback(
+    (next: string) => {
+      try {
+        window.localStorage.setItem(key, next)
+      } catch {
+        /* ignore quota / private-mode errors */
+      }
+      storageListeners.forEach((notify) => notify())
+    },
+    [key],
+  )
+  return [value, write] as const
 }

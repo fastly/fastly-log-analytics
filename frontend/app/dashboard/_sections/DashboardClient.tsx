@@ -2,19 +2,19 @@
 
 import React from 'react'
 import dynamic from 'next/dynamic'
-import { useReportRangeAnchor } from '@/hooks/useReportRangeAnchor'
+import { useReportRangeAnchor } from '@/hooks/useDashboardCards'
 import { useRouter } from 'next/navigation'
 import { useQuery } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import type { ChartMetric } from '@/types/api'
 import type { components } from '@/types/api.generated'
 import type { FiltersPayload } from '@/types/filters'
-import { STALE_VIEW_RETRY_OPTIONS, throwIfStaleAggregates, isStaleDashboardViewError } from '@/lib/staleViewRetry'
+import { STALE_VIEW_RETRY_OPTIONS, throwIfStaleAggregates, isStaleDashboardViewError } from '@/lib/api'
 import { useFilterStore } from '@/stores/filterStore'
 import { useServiceStore } from '@/stores/serviceStore'
-import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
-import { useIsDataReady } from '@/hooks/useIsDataReady'
+import { useAnalyticsReportQuery } from '@/hooks/useDashboardCards'
+import { useIsDataReady } from '@/hooks/useBootstrap'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -24,16 +24,39 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { LayoutDashboard, ArrowRight, EyeOff } from 'lucide-react'
 import { ReportLayout } from '@/components/ReportLayout'
 import { useShallow } from 'zustand/react/shallow'
-import { useActiveLogFields, useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
+import { useActiveLogFields, useLogFieldsCatalog } from '@/hooks/useBootstrap'
 import { useDashboardCards, useCardVisibility, usePlotlyRangeZoom } from '@/hooks/useDashboardCards'
 import { cn } from '@/lib/utils'
 
 
 import { TrafficChart } from './TrafficChart'
-import { CardGrid } from './CardGrid'
-import { buildChartLayout, COLLAPSED_SECTIONS_KEY, type DashboardAggregates, type DashboardBodyProps, type DashboardCatalog } from './categories'
+import {
+  CardGrid,
+  buildChartLayout,
+  CARD_CATEGORIES,
+  CATEGORIZED_CARD_IDS,
+  CUSTOM_TINT,
+  COLLAPSED_SECTIONS_KEY,
+  type DashboardAggregates,
+  type DashboardBodyProps,
+  type DashboardCatalog,
+  type CardTint,
+  type CardCategory,
+} from './CardGrid'
+export {
+  buildChartLayout,
+  CARD_CATEGORIES,
+  CATEGORIZED_CARD_IDS,
+  CUSTOM_TINT,
+  COLLAPSED_SECTIONS_KEY,
+  type DashboardAggregates,
+  type DashboardBodyProps,
+  type DashboardCatalog,
+  type CardTint,
+  type CardCategory,
+}
 import { buildTrafficData, type BuildTrafficDataParams } from '@/lib/traffic-chart'
-import { useLocalStorageString } from '@/hooks/useDerivedState'
+import { useLocalStorageString } from '@/hooks/useSSE'
 import type { PlotlyTrace } from '@/types/plotly'
 
 const WORKER_THRESHOLD = 2000

@@ -8,7 +8,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { RETENTION_OPTIONS } from '@/lib/constants'
+import { RETENTION_OPTIONS } from '@/lib/utils'
 
 interface RetentionOption {
   readonly value: string

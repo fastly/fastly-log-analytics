@@ -40,11 +40,11 @@ Cross-cutting patterns have one owner each; new code uses them instead of re-der
 | Cron run lifecycle | [`backend/cron/lifecycle.py`](../backend/cron/lifecycle.py) `cron_run`, `record_skip_row`; `CronLeaseHeldError` in [`cron_log.py`](../backend/core/metadata/cron_log.py) | Lease, progress, terminal `cron_runs` row and finalize backstops for every job. A held lease is a clean skip, never an error. |
 | Fastly draft versions | [`backend/provision/draft_version.py`](../backend/provision/draft_version.py) | Clone, mutate, validate, activate, with rollback to the base version on failure. |
 | Service config writes | `backend/config.py` `mutate_config` / `config_lock` / `snapshot_config` / `restore_config` | Cross-process locked read-modify-write, atomic save, write-once cid salt. |
-| SQL literals and identifiers | `utils/sql_validator.escape_sql_literal`, `core/sql_ident`, `core/metric_expressions` | One quote-escaping routine, one bare-identifier validator, byte-identical null-default and metric fragments with golden tests. |
+| SQL literals and identifiers | `utils/sql_validator.escape_sql_literal`, `core/sql_ident`, `core/field_registry` (`core/metric_expressions` alias) | One quote-escaping routine, one bare-identifier validator, byte-identical null-default and metric fragments with golden tests. |
 | Retry | [`backend/core/retry.py`](../backend/core/retry.py) `retry_call` | Bounded exponential backoff with an explicit retryable predicate; mechanics only (see [ADR-09](adr/09-error-handling.md)). |
-| Caches | `utils/bounded_cache` (`BoundedTTLCache`, `CacheRegistry`) | Thread-safe LRU+TTL caches, drained between tests through the registry. |
+| Caches | `utils/time_window` (`BoundedTTLCache`, `CacheRegistry`; `utils/bounded_cache` alias) | Thread-safe LRU+TTL caches, drained between tests through the registry. |
 | Dates | `utils/date_utils` | UTC-aware parsing of ISO strings and `YYYY-MM-DD[-HH]` partition keys; raw parsing is ratcheted by `make dateparse-guard`. |
-| HTTP layer | `utils/router_utils` (`make_error`, `raise_internal`, `require_service_id`), `utils/error_redaction`, `utils/sse.sse_response`, `utils/log_throttle.log_once_per`, `models/_base` (`WireSafeModel`, `PassthroughModel`, `JsonRows`) | Unified error envelope with redaction, 400 `service_id_required`, SSE framing, throttled logging, typed responses with an unchanged wire shape. |
+| HTTP layer | `utils/router_utils` (`make_error`, `raise_internal`, `require_service_id`, `sse_response`), `utils/error_redaction`, `utils/log_throttle.log_once_per`, `models/common` (`WireSafeModel`, `PassthroughModel`, `JsonRows`) | Unified error envelope with redaction, 400 `service_id_required`, SSE framing, throttled logging, typed responses with an unchanged wire shape. |
 
 Ratchet gates keep these honest: `make retry-guard`, `coalesce-guard`, `dateparse-guard` and `urllib-guard` allow only a per-file baseline of pre-existing sites, and the baselines only go down.
 

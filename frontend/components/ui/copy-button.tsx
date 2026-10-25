@@ -3,7 +3,7 @@
 import * as React from 'react'
 import { Check, Copy } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { useCopyToClipboard } from '@/hooks/useAutoFlash'
+import { useCopyToClipboard } from '@/hooks/useAdminEventStream'
 import { cn } from '@/lib/utils'
 
 interface CopyButtonProps {

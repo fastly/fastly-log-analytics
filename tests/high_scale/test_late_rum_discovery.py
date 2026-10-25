@@ -9,11 +9,6 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
-from botocore.stub import Stubber
-from psycopg_pool import ConnectionPool
-
-from backend.high_scale.orchestration import HighScaleWorkerCoordinator
-from backend.high_scale.postgres_control import PostgresControlPlane
 from backend.high_scale.source_discovery import (
     INITIAL_SOURCE_CURSOR,
     RUM_REINSPECTION_INTERVAL,
@@ -23,6 +18,11 @@ from backend.high_scale.source_discovery import (
     SourceObjectMissingError,
     SourceObjectPage,
 )
+from botocore.stub import Stubber
+from psycopg_pool import ConnectionPool
+
+from backend.high_scale.orchestration import HighScaleWorkerCoordinator
+from backend.high_scale.postgres_control import PostgresControlPlane
 
 
 class _Paginator:

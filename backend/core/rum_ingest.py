@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Generator
+from typing import Any
 
 import pyarrow as pa
 
@@ -82,6 +83,19 @@ def extract_metrics_from_faro_payload(payload: dict, log_data: dict) -> list[dic
 
     cid = log_data.get("rum_cid") or log_data.get("cid") or ""
 
+    def _entry(metric_name: str, metric_value: Any, metric_rating: str = "", **extra: Any) -> dict[str, Any]:
+        return {
+            "metric_name": metric_name,
+            "metric_value": metric_value,
+            "metric_rating": metric_rating,
+            "pathname": pathname,
+            "cid": cid,
+            "browser": browser_name,
+            "os": os_name,
+            "device": device_type,
+            **extra,
+        }
+
     # 1. Web Vitals
     measurements = payload.get("measurements") or []
     if isinstance(measurements, list):
@@ -94,18 +108,7 @@ def extract_metrics_from_faro_payload(payload: dict, log_data: dict) -> list[dic
                 for k, v in values.items():
                     if k == "delta":
                         continue
-                    extracted.append(
-                        {
-                            "metric_name": k,
-                            "metric_value": v,
-                            "metric_rating": rating,
-                            "pathname": pathname,
-                            "cid": cid,
-                            "browser": browser_name,
-                            "os": os_name,
-                            "device": device_type,
-                        }
-                    )
+                    extracted.append(_entry(k, v, rating))
 
     # 2. Performance Navigation Timing and Custom Events (Interactions)
     events = payload.get("events") or []
@@ -119,32 +122,10 @@ def extract_metrics_from_faro_payload(payload: dict, log_data: dict) -> list[dic
             if name == "faro.performance.navigation":
                 attrs = e.get("attributes") or e.get("values") or {}
                 for k, v in attrs.items():
-                    extracted.append(
-                        {
-                            "metric_name": k,
-                            "metric_value": v,
-                            "metric_rating": "",
-                            "pathname": pathname,
-                            "cid": cid,
-                            "browser": browser_name,
-                            "os": os_name,
-                            "device": device_type,
-                        }
-                    )
+                    extracted.append(_entry(k, v))
             else:
                 # Custom/interaction event (like user click)
-                extracted.append(
-                    {
-                        "metric_name": f"event_{name}",
-                        "metric_value": 1.0,
-                        "metric_rating": "",
-                        "pathname": pathname,
-                        "cid": cid,
-                        "browser": browser_name,
-                        "os": os_name,
-                        "device": device_type,
-                    }
-                )
+                extracted.append(_entry(f"event_{name}", 1.0))
 
     # 3. Custom logs
     logs = payload.get("logs") or []
@@ -152,18 +133,7 @@ def extract_metrics_from_faro_payload(payload: dict, log_data: dict) -> list[dic
         for log_item in logs:
             if not isinstance(log_item, dict):
                 continue
-            extracted.append(
-                {
-                    "metric_name": "log",
-                    "metric_value": 1.0,
-                    "metric_rating": log_item.get("level") or "info",
-                    "pathname": pathname,
-                    "cid": cid,
-                    "browser": browser_name,
-                    "os": os_name,
-                    "device": device_type,
-                }
-            )
+            extracted.append(_entry("log", 1.0, log_item.get("level") or "info"))
 
     # 3. Exceptions
     exceptions = payload.get("exceptions") or []
@@ -184,36 +154,19 @@ def extract_metrics_from_faro_payload(payload: dict, log_data: dict) -> list[dic
                 err_col = frame.get("colno") or 0
 
             extracted.append(
-                {
-                    "metric_name": "exception",
-                    "metric_value": None,
-                    "metric_rating": "",
-                    "pathname": pathname,
-                    "cid": cid,
-                    "browser": browser_name,
-                    "os": os_name,
-                    "device": device_type,
-                    "error_message": err_msg,
-                    "error_file": err_file,
-                    "error_line": err_line,
-                    "error_col": err_col,
-                }
+                _entry(
+                    "exception",
+                    None,
+                    error_message=err_msg,
+                    error_file=err_file,
+                    error_line=err_line,
+                    error_col=err_col,
+                )
             )
 
     if not extracted:
         # Fallback pageview entry if we got a payload but no specific vitals/events were extracted
-        extracted.append(
-            {
-                "metric_name": "pageview",
-                "metric_value": 1.0,
-                "metric_rating": "",
-                "pathname": pathname,
-                "cid": cid,
-                "browser": browser_name,
-                "os": os_name,
-                "device": device_type,
-            }
-        )
+        extracted.append(_entry("pageview", 1.0))
 
     return extracted
 
@@ -470,29 +423,20 @@ def ingest_rum_logs(
 
             # End of chunk: Write tables to buffers
             buf_filename = _deterministic_buffer_name(chunk)
-            if vitals_batch_records:
-                if chunk_vitals_rows:
-                    metadata_db.record_in_flight(
-                        service_id, buf_filename, vitals_batch_records, table_name="client_vitals"
-                    )
-                    vitals_table = pa.Table.from_pylist(chunk_vitals_rows, schema=CLIENT_VITALS_ARROW_SCHEMA)
-                    iceberg.write_to_buffer(src, vitals_table, buf_filename, table_name="client_vitals")
-                    metadata_db.insert_ingested_files(service_id, vitals_batch_records, table_name="client_vitals")
-                    metadata_db.clear_in_flight(service_id, buf_filename, table_name="client_vitals")
+            for table_name, batch_records, chunk_rows, schema in (
+                ("client_vitals", vitals_batch_records, chunk_vitals_rows, CLIENT_VITALS_ARROW_SCHEMA),
+                ("client_errors", errors_batch_records, chunk_errors_rows, CLIENT_ERRORS_ARROW_SCHEMA),
+            ):
+                if not batch_records:
+                    continue
+                if chunk_rows:
+                    metadata_db.record_in_flight(service_id, buf_filename, batch_records, table_name=table_name)
+                    tbl = pa.Table.from_pylist(chunk_rows, schema=schema)
+                    iceberg.write_to_buffer(src, tbl, buf_filename, table_name=table_name)
+                    metadata_db.insert_ingested_files(service_id, batch_records, table_name=table_name)
+                    metadata_db.clear_in_flight(service_id, buf_filename, table_name=table_name)
                 else:
-                    metadata_db.insert_ingested_files(service_id, vitals_batch_records, table_name="client_vitals")
-
-            if errors_batch_records:
-                if chunk_errors_rows:
-                    metadata_db.record_in_flight(
-                        service_id, buf_filename, errors_batch_records, table_name="client_errors"
-                    )
-                    errors_table = pa.Table.from_pylist(chunk_errors_rows, schema=CLIENT_ERRORS_ARROW_SCHEMA)
-                    iceberg.write_to_buffer(src, errors_table, buf_filename, table_name="client_errors")
-                    metadata_db.insert_ingested_files(service_id, errors_batch_records, table_name="client_errors")
-                    metadata_db.clear_in_flight(service_id, buf_filename, table_name="client_errors")
-                else:
-                    metadata_db.insert_ingested_files(service_id, errors_batch_records, table_name="client_errors")
+                    metadata_db.insert_ingested_files(service_id, batch_records, table_name=table_name)
 
             # Inline deletion per chunk (Gap 2)
             if raw_delete_after:

@@ -1,4 +1,4 @@
-import { TableSkeleton } from '@/components/skeletons/PageSkeleton'
+import { TableSkeleton } from '@/components/ReportLayout'
 
 export default function Loading() {
   return (

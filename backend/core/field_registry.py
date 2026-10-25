@@ -31,11 +31,62 @@ when streaming. Reordering rows here without a coordinated change in
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+import sys
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
+
+# ── Canonical SQL fragment builders (formerly backend.core.metric_expressions) ──
+
+# Cache states that count as an edge hit (SQL ``IN`` tuple literal).
+HIT_STATES = "('HIT', 'HIT-STALE', 'HIT-CLUSTER')"
+
+
+def coalesce(expr: str, default: str) -> str:
+    """Render ``COALESCE(<expr>, <default>)`` byte-for-byte."""
+    return f"COALESCE({expr}, {default})"
+
+
+def sum_or_zero(expr: str, *, zero: str = "0", where: str | None = None) -> str:
+    """Render a NULL-safe sum: ``COALESCE(SUM(<expr>)[ FILTER (WHERE <where>)], <zero>)``."""
+    agg = f"SUM({expr})" if where is None else f"SUM({expr}) FILTER (WHERE {where})"
+    return coalesce(agg, zero)
+
+
+def column_or_default(
+    actual_cols: Collection[str],
+    col: str,
+    default: str,
+    *,
+    cast: str | None = None,
+) -> str:
+    """Return a quoted-column expression with a NULL default, or the bare default."""
+    if col not in actual_cols:
+        return default
+    ref = f'"{col}"' if cast is None else f'CAST("{col}" AS {cast})'
+    return coalesce(ref, default)
+
+
+def origin_latency_us(actual_cols: Collection[str], *, absent: str | None = "NULL") -> str | None:
+    """Return the origin-latency-in-microseconds SQL expression for a schema."""
+    has_ottfb = "ottfb" in actual_cols
+    has_ttfb = "ttfb" in actual_cols
+    if has_ottfb and has_ttfb:
+        return 'COALESCE("ottfb", "ttfb" * 1000000.0)'
+    if has_ottfb:
+        return '"ottfb"'
+    if has_ttfb:
+        return '"ttfb" * 1000000.0'
+    return absent
+
+
+_this_module = sys.modules[__name__]
+sys.modules["backend.core.metric_expressions"] = _this_module
+_core_pkg = sys.modules.get("backend.core")
+if _core_pkg is not None:
+    setattr(_core_pkg, "metric_expressions", _this_module)
 
 # ---------------------------------------------------------------------------
 # Enums (typed counterparts for the stringly-typed columns in the catalog)
@@ -439,6 +490,72 @@ def duckdb_decode_case(col: str, encode: dict[str, str]) -> str:
     return f'CASE {" ".join(clauses)} ELSE "{col}" END'
 
 
+from backend.models._base import MetricType  # noqa: E402
+
+METRIC_DEFINITIONS = {
+    MetricType.REQUESTS.value: {"sql": "count(*)", "label": "Requests"},
+    MetricType.ERRORS_5XX.value: {"sql": "sum(CASE WHEN status >= 500 THEN 1 ELSE 0 END)", "label": "5xx Errors"},
+    "5xx_rate": {
+        "sql": "sum(CASE WHEN status >= 500 THEN 1 ELSE 0 END) * 100.0 / NULLIF(count(*), 0)",
+        "label": "5xx Error Rate",
+    },
+    MetricType.ERRORS_4XX.value: {
+        "sql": "sum(CASE WHEN status BETWEEN 400 AND 499 THEN 1 ELSE 0 END)",
+        "label": "4xx Errors",
+    },
+    "4xx_rate": {
+        "sql": "sum(CASE WHEN status BETWEEN 400 AND 499 THEN 1 ELSE 0 END) * 100.0 / NULLIF(count(*), 0)",
+        "label": "4xx Error Rate",
+    },
+    MetricType.LATENCY_P95.value: {
+        "sql": "PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY CAST(elapsed AS DOUBLE)) / 1000.0",
+        "label": "p95 Latency (s)",
+    },
+    MetricType.HIT_RATE.value: {
+        "sql": "SUM(CASE WHEN cache ILIKE 'HIT%' THEN 1 ELSE 0 END) * 100.0 / NULLIF(count(*), 0)",
+        "label": "Cache Hit Rate",
+    },
+    MetricType.THROUGHPUT.value: {"sql": "sum(resp_bytes)", "label": "Bandwidth"},
+    MetricType.TTFB.value: {
+        "sql": "PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY CAST(ottfb AS DOUBLE)) / 1000.0",
+        "label": "p95 TTFB (s)",
+    },
+    MetricType.REQ_SIZE.value: {"sql": "avg(req_bytes + req_header_bytes)", "label": "Request Size (Bytes)"},
+}
+
+
+def get_metric_sql(metric: str, status_codes: list[int] | None = None, table_name: str | None = None) -> str:
+    """Return the SQL aggregation expression or a full SELECT fragment for a metric."""
+    status_clause = ""
+    if status_codes and isinstance(status_codes, list) and len(status_codes) > 0:
+        codes_str = ", ".join(str(c) for c in status_codes if isinstance(c, int))
+        if codes_str:
+            status_clause = f" AND status IN ({codes_str})"
+
+    if metric == MetricType.SPECIFIC_STATUS.value:
+        agg_sql = f"sum(CASE WHEN 1=1 {status_clause} THEN 1 ELSE 0 END)"
+    elif metric == "specific_status_rate":
+        agg_sql = f"sum(CASE WHEN 1=1 {status_clause} THEN 1 ELSE 0 END) * 100.0 / NULLIF(count(*), 0)"
+    else:
+        agg_sql = METRIC_DEFINITIONS.get(metric, {}).get("sql", "count(*)")
+
+    if table_name:
+        if metric in (MetricType.ERRORS_5XX.value, MetricType.ERRORS_4XX.value, MetricType.SPECIFIC_STATUS.value):
+            # Optimization: use WHERE clause instead of sum(CASE WHEN...) for simple counts
+            if metric == MetricType.ERRORS_5XX.value:
+                return f"SELECT count(*) FROM {table_name} WHERE status >= 500"
+            elif metric == MetricType.ERRORS_4XX.value:
+                return f"SELECT count(*) FROM {table_name} WHERE status BETWEEN 400 AND 499"
+            elif metric == MetricType.SPECIFIC_STATUS.value:
+                return f"SELECT count(*) FROM {table_name} WHERE 1=1 {status_clause}"
+        elif metric == MetricType.TTFB.value:
+            return f"SELECT {agg_sql} FROM {table_name} WHERE ottfb IS NOT NULL"
+
+        return f"SELECT {agg_sql} FROM {table_name}"
+
+    return agg_sql
+
+
 __all__ = (
     "BY_CODE",
     "BY_GROUP",
@@ -446,15 +563,19 @@ __all__ = (
     "DuckType",
     "GROUP_INFO",
     "Group",
+    "HIT_STATES",
     "INSIGHT_DEFINITIONS",
     "LOG_FIELD_CATALOG",
     "LogField",
+    "METRIC_DEFINITIONS",
     "PRESETS",
     "PROXY_DESC_ENCODE",
     "PROXY_TYPE_ENCODE",
     "REGISTRY",
     "VALID_NAME_RE",
     "check_log_line_budget",
+    "coalesce",
+    "column_or_default",
     "derived",
     "duckdb_decode_case",
     "estimate_log_line_bytes",
@@ -464,9 +585,12 @@ __all__ = (
     "get_catalog_for_api",
     "get_groups_for_api",
     "get_lf_config",
+    "get_metric_sql",
     "get_required_edge_headers",
     "in_group",
+    "origin_latency_us",
     "resolve_enabled_fields",
+    "sum_or_zero",
     "try_get",
     "validate_custom_field",
     "vcl_encode_chain",

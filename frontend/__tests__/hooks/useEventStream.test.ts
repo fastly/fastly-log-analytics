@@ -12,8 +12,8 @@ import {
   EventStreamHttpError,
   type EventStreamRequest,
 } from '@/hooks/useEventStream'
-import { makeStreamResponse, makeNeverClosingStreamResponse } from '../helpers/sse-mock'
-import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
+import { makeStreamResponse, makeNeverClosingStreamResponse } from '../helpers/page-smoke'
+import { createTestQueryClient, makeQueryWrapper } from '../helpers/page-smoke'
 
 import { adminStreamHooks } from '@/hooks/useAdminEventStream'
 
@@ -24,7 +24,8 @@ let lastPath: string | undefined
 let lastOpts: Record<string, unknown> | undefined
 
 let bootstrapSettled = true
-vi.mock('@/hooks/useIsDataReady', () => ({
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
   useBootstrapSettled: () => bootstrapSettled,
 }))
 
@@ -39,7 +40,8 @@ vi.mock('@/stores/serviceStore', () => {
 
 const cronApply = vi.fn()
 const cronCleanup = vi.fn()
-vi.mock('@/lib/admin-stream-apply', () => ({
+vi.mock('@/lib/admin-stream-apply', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/admin-stream-apply')>()),
   applyShare: vi.fn(),
   applySyncStatus: vi.fn(),
   applySystemMetrics: vi.fn(),

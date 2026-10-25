@@ -13,20 +13,44 @@
  *   - a 503 from /rum/versions degrades quietly, the dashboard stays usable
  */
 import * as React from 'react'
-import { describe, it, expect, afterEach, vi } from 'vitest'
+import { describe, it, expect, afterEach, beforeEach, beforeAll, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 
-import { createTestQueryClient, makeQueryWrapper } from '../../helpers/query'
-import { server } from '@/__tests__/helpers/msw/server'
+import {
+  createTestQueryClient,
+  makeQueryWrapper,
+  stubResizeObserver,
+  stubPointerCaptureAndScroll,
+  stubGetAnimations,
+  createUseSSEMock,
+} from '../../helpers/page-smoke'
+import { server } from '@/__tests__/helpers/msw/handlers'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import RumPageClient from '@/app/rum/_sections/RumClient'
+import { RumFaroVersionCard } from '@/components/Rum/RumStatusPanel'
+
+beforeAll(() => {
+  stubResizeObserver()
+  stubPointerCaptureAndScroll()
+  stubGetAnimations()
+})
+
+const { state: sseState, start: mockStart } = createUseSSEMock()
+vi.mock('@/hooks/useSSE', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useSSE')>()),
+  useSSE: () => sseState,
+}))
 
 vi.mock('@/components/PlotlyChart', async () => (await import('../../helpers/page-smoke')).plotlyChartModuleMock())
-vi.mock('@/components/charts/TimeSeriesChart', () => ({ TimeSeriesChart: () => <div data-testid="timeseries-chart" /> }))
+vi.mock('@/components/AnalyticsCard', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/components/AnalyticsCard')>()),
+  TimeSeriesChart: () => <div data-testid="timeseries-chart" />,
+}))
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../../helpers/browser-stubs')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../../helpers/page-smoke')).reactVirtualModuleMock())
 
 const API_BASE = getApiBase()
 const SVC = 'svc-rum-client'
@@ -227,5 +251,151 @@ describe('RumClient — range wire', () => {
       .map((q) => q.queryKey as unknown[])
       .find((k) => k[0] === 'rum-analytics')
     expect(key).toEqual(['rum-analytics', SVC, '24h', params?.get('anchor'), {}])
+  })
+})
+
+const SVC_FARO = 'svc-faro-card'
+
+function renderCard(rumEnabled = true) {
+  const qc = createTestQueryClient()
+  server.use(
+    http.get('/api/services/:service_id/rum/status', () =>
+      HttpResponse.json({ enabled: rumEnabled }),
+    ),
+  )
+  return render(<RumFaroVersionCard serviceId={SVC_FARO} />, {
+    wrapper: makeQueryWrapper(qc),
+  })
+}
+
+function faroVersions(overrides: Record<string, unknown> = {}) {
+  return {
+    available: ['1.9.0', '1.8.0', '1.7.0'],
+    current: '1.8.0',
+    latest: '1.9.0',
+    update_available: true,
+    ...overrides,
+  }
+}
+
+describe('RumFaroVersionCard', () => {
+  beforeEach(() => {
+    sseState.status = 'idle'
+    mockStart.mockClear()
+    server.use(
+      http.post('/api/services/:service_id/rum/settings', () =>
+        HttpResponse.json({ ok: true }),
+      ),
+    )
+  })
+
+  it('renders the pinned and latest version', async () => {
+    server.use(
+      http.get(`${API_BASE}/api/services/:service_id/rum/versions`, () =>
+        HttpResponse.json(faroVersions()),
+      ),
+    )
+    renderCard()
+    expect(await screen.findByText('1.8.0')).toBeInTheDocument()
+  })
+
+  it('surfaces the update-available affordance and enables Upgrade', async () => {
+    server.use(
+      http.get(`${API_BASE}/api/services/:service_id/rum/versions`, () =>
+        HttpResponse.json(faroVersions({ current: '1.8.0', latest: '1.9.0', update_available: true })),
+      ),
+    )
+    renderCard()
+    expect(await screen.findByText(/update available/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /rum settings/i })).toBeEnabled()
+  })
+
+  it('allows changing version/re-deploying when already current', async () => {
+    server.use(
+      http.get(`${API_BASE}/api/services/:service_id/rum/versions`, () =>
+        HttpResponse.json(faroVersions({ current: '1.9.0', latest: '1.9.0', update_available: false })),
+      ),
+    )
+    renderCard()
+    expect(await screen.findByRole('button', { name: /rum settings/i })).toBeEnabled()
+  })
+
+  it('degrades gracefully on a registry 503 without breaking the page', async () => {
+    server.use(
+      http.get(`${API_BASE}/api/services/:service_id/rum/versions`, () =>
+        HttpResponse.json({ error: 'faro_registry_unavailable' }, { status: 503 }),
+      ),
+    )
+    renderCard()
+    expect(await screen.findByText(/versions offline/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /retry/i })).toBeEnabled()
+  })
+
+  it('shows an empty-list state distinct from an error', async () => {
+    server.use(
+      http.get(`${API_BASE}/api/services/:service_id/rum/versions`, () =>
+        HttpResponse.json({ available: [], current: null, latest: null, update_available: false }),
+      ),
+    )
+    renderCard()
+    expect(await screen.findByText(/not pinned/i)).toBeInTheDocument()
+    expect(screen.queryByText(/versions offline/i)).not.toBeInTheDocument()
+  })
+
+  it('skips the fetch entirely and does not invite an upgrade when RUM is not enabled', async () => {
+    let called = false
+    server.use(
+      http.get(`${API_BASE}/api/services/:service_id/rum/versions`, () => {
+        called = true
+        return HttpResponse.json(faroVersions())
+      }),
+    )
+    renderCard(false)
+    expect(screen.queryByText(/faro sdk/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /upgrade/i })).not.toBeInTheDocument()
+    expect(called).toBe(false)
+  })
+
+  it('opens the upgrade dialog defaulting the target to latest (Confirm enabled, not a no-op)', async () => {
+    server.use(
+      http.get(`${API_BASE}/api/services/:service_id/rum/versions`, () =>
+        HttpResponse.json(faroVersions({ current: '1.8.0', latest: '1.9.0', update_available: true })),
+      ),
+    )
+    const user = userEvent.setup()
+    renderCard()
+    await user.click(await screen.findByRole('button', { name: /rum settings/i }))
+    expect(await screen.findByText(/rum tracking settings/i)).toBeInTheDocument()
+    expect(await screen.findByText('Core Web Vitals')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /apply settings/i })).toBeEnabled()
+  })
+
+  it('invalidates the versions query once the upgrade stream completes, without a manual reload', async () => {
+    let versionCalls = 0
+    server.use(
+      http.get(`${API_BASE}/api/services/:service_id/rum/versions`, () => {
+        versionCalls += 1
+        return HttpResponse.json(faroVersions({ current: null, latest: '1.9.0', update_available: true }))
+      }),
+    )
+    const user = userEvent.setup()
+    const { rerender } = renderCard()
+
+    await waitFor(() => expect(versionCalls).toBe(1))
+    await user.click(await screen.findByRole('button', { name: /rum settings/i }))
+    await screen.findByText('Core Web Vitals')
+    await user.click(screen.getByRole('button', { name: /apply settings/i }))
+
+    await waitFor(() => {
+      expect(mockStart).toHaveBeenCalledWith(`/api/services/${SVC_FARO}/rum/upgrade`, {
+        version: '1.9.0',
+        activate: true,
+      })
+    })
+
+    sseState.status = 'done'
+    rerender(<RumFaroVersionCard serviceId={SVC_FARO} />)
+
+    await waitFor(() => expect(versionCalls).toBe(2))
   })
 })

@@ -12,7 +12,8 @@ vi.mock('@/stores/filterStore', () => ({
   }),
 }))
 // FilterValueCell now reads useMaskIps (needs a QueryClient). Stub it off.
-vi.mock('@/hooks/useIsAnalyst', () => ({
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
   useIsAnalyst: () => false,
   useMaskIps: () => false,
   useEnforceMaskedFilters: () => {},

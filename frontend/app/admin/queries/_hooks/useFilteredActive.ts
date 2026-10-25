@@ -1,19 +1,140 @@
 'use client'
 
-import { useNowMs } from '@/hooks/useNowSeconds'
+import { useNowMs } from '@/hooks/useSSE'
 import * as React from 'react'
 import { useEffect } from 'react'
 import { createParser, parseAsString, parseAsStringLiteral, useQueryStates } from 'nuqs'
+import type { components } from '@/types/api.generated'
+import type { Expect, WireParity } from '@/types/api'
 
-import type {
-  ActiveOrPromotedRow,
-  AttributionKind,
-  CompletedRow,
-  DbFilter,
-  GroupedCompletedRow,
-  SnapshotResponse,
-  ViewMode,
-} from '../_types'
+export type AttributionKind = 'analyst' | 'admin' | 'cron' | 'system'
+
+export interface Attribution {
+  kind: AttributionKind
+  label: string
+  principal_id: string | null
+  caller_qualname: string
+  caller_file: string
+  request_path: string | null
+  request_id: string | null
+  cron_job: string | null
+  cron_run_id: string | null
+  pool_slot: string | null
+}
+
+export interface ActiveRow {
+  query_id: number
+  db_type: 'DuckDB' | 'Postgres' | 'SQLite'
+  sql_preview: string
+  sql: string | null
+  sql_len: number
+  attribution: Attribution
+  service_id: string | null
+  started_at_utc: number
+  duration_ms: number
+  cancellable: boolean
+  cancelled_at: number | null
+}
+
+export interface CompletedRow extends Omit<ActiveRow, 'cancellable' | 'cancelled_at'> {
+  ended_at_utc: number
+  outcome: 'ok' | 'error' | 'cancelled'
+  error_type: string | null
+  error_message: string | null
+  peak_memory_mb: number | null
+}
+
+export interface SnapshotResponse {
+  last_seq: number
+  active: ActiveRow[]
+  completed: CompletedRow[]
+}
+
+export type SummaryResponse = components['schemas']['SummaryResponse']
+export type CancelResponse = components['schemas']['CancelResponse']
+
+export type _AttributionParity = Expect<WireParity<Attribution, components['schemas']['QueryAttribution']>>
+export type _ActiveRowParity = Expect<WireParity<ActiveRow, components['schemas']['ActiveQueryRow']>>
+export type _CompletedRowParity = Expect<WireParity<CompletedRow, components['schemas']['CompletedQueryRow']>>
+export type _SnapshotParity = Expect<WireParity<SnapshotResponse, components['schemas']['SnapshotResponse']>>
+
+export interface SlowQueriesResult {
+  rows: CompletedRow[]
+  since_hours: number
+  threshold_ms: number
+}
+
+export type _SlowQueriesParity = Expect<WireParity<SlowQueriesResult, components['schemas']['SlowQueriesResponse']>>
+
+export interface MonitorConfig {
+  enabled: boolean
+}
+
+export type ViewMode = 'all' | 'live' | 'past'
+
+export type DbFilter = 'all' | 'DuckDB' | 'Postgres' | 'SQLite'
+
+export type ActiveOrPromotedRow = ActiveRow & {
+  _completed?: CompletedRow
+  _groupedCount?: number
+  _isGroupHead?: boolean
+  _expandedChild?: boolean
+}
+
+export type GroupedCompletedRow = CompletedRow & {
+  _groupedCount?: number
+  _isGroupHead?: boolean
+  _expandedChild?: boolean
+}
+
+export function useDocumentVisible(): boolean {
+  const [visible, setVisible] = React.useState(
+    typeof document !== 'undefined' ? document.visibilityState !== 'hidden' : true,
+  )
+  React.useEffect(() => {
+    const onVis = () => setVisible(document.visibilityState !== 'hidden')
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  }, [])
+  return visible
+}
+
+export function durationColor(ms: number): string {
+  if (ms < 500) return 'text-emerald-600 dark:text-emerald-400'
+  if (ms < 2000) return 'text-amber-600 dark:text-amber-400'
+  if (ms < 10_000) return 'text-orange-600 dark:text-orange-400'
+  return 'text-red-600 dark:text-red-400'
+}
+
+export function formatDurationMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)} ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(2)} s`
+  const mins = Math.floor(ms / 60_000)
+  const secs = Math.round((ms % 60_000) / 1000)
+  return `${mins}m ${secs}s`
+}
+
+export function kindBadgeVariant(
+  kind: AttributionKind,
+): 'default' | 'secondary' | 'destructive' | 'outline' {
+  switch (kind) {
+    case 'analyst':
+      return 'default'
+    case 'admin':
+      return 'secondary'
+    case 'cron':
+      return 'outline'
+    case 'system':
+      return 'outline'
+  }
+}
+
+export function formatMemoryMb(mb: number | null | undefined): string {
+  if (mb === null || mb === undefined) return ''
+  if (mb < 1) return `${Math.round(mb * 1024)} KB`
+  if (mb < 1024) return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`
+  return `${(mb / 1024).toFixed(2)} GB`
+}
 
 /**
  * Bind a small set of keyboard shortcuts to `window`. Designed for an

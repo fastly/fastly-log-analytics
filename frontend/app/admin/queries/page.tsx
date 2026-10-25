@@ -25,7 +25,7 @@ import { adminJson, adminJsonResult } from '@/lib/api'
 import { AlertTriangle, Check, Copy, Group, Keyboard, Pause, Play, RefreshCw, Search } from 'lucide-react'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { BackToAdminLink } from '@/components/BackToAdminLink'
+import { BackToAdminLink } from '@/components/ReportLayout'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -38,10 +38,21 @@ import { extractApiError } from '@/lib/api'
 
 import {
   matchesQueryRowFilters,
+  useDocumentVisible,
   useFilteredActive,
   useKeyboardShortcuts,
   useQueryMonitorUrlState,
+  type ActiveOrPromotedRow,
+  type ActiveRow,
+  type AttributionKind,
+  type CancelResponse,
+  type CompletedRow,
+  type DbFilter,
+  type MonitorConfig,
   type ShortcutBinding,
+  type SlowQueriesResult,
+  type SnapshotResponse,
+  type ViewMode,
 } from './_hooks/useFilteredActive'
 import { ActiveTable, CompletedTable } from './_sections/queryColumns'
 import {
@@ -51,20 +62,7 @@ import {
   ShortcutsHelp,
   SummaryStrip,
 } from './_sections/RowDetailDialog'
-import {
-  useDocumentVisible,
-  type ActiveOrPromotedRow,
-  type ActiveRow,
-  type AttributionKind,
-  type CancelResponse,
-  type CompletedRow,
-  type DbFilter,
-  type MonitorConfig,
-  type SlowQueriesResult,
-  type SnapshotResponse,
-  type ViewMode,
-} from './_types'
-import { useCopyToClipboard } from '@/hooks/useAutoFlash'
+import { useCopyToClipboard } from '@/hooks/useAdminEventStream'
 import { queryKeys } from '@/lib/query-keys'
 
 const DEFAULT_SLOW_THRESHOLD_MS = 500

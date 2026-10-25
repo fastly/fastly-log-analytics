@@ -1,7 +1,7 @@
 'use client'
 
-import { useDebounce } from '@/hooks/useFilterPayload'
-import { useDerivedState } from '@/hooks/useDerivedState'
+import { useDebounce } from '@/hooks/useDashboardCards'
+import { useDerivedState } from '@/hooks/useSSE'
 import * as React from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Check, Loader2, ShieldCheck, ShieldOff, SlidersHorizontal } from 'lucide-react'
@@ -14,7 +14,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Slider } from '@/components/ui/slider'
 import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api-client'
+import { unwrapClient } from '@/lib/api'
 import { formatCount, formatPercent } from '@/lib/format'
 import type { Expect, Simplify, WireParity, WithRequired, WithRequiredNullable, components } from '@/types/api'
 

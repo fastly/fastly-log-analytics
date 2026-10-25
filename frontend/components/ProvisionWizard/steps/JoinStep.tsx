@@ -4,7 +4,7 @@ import React, { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { useAutoFlash } from "@/hooks/useAutoFlash";
+import { useAutoFlash } from "@/hooks/useAdminEventStream";
 import {
   Alert,
   AlertDescription,
@@ -30,7 +30,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { WizardState } from "../useWizardState";
-import { REGION_LABELS } from "@/lib/constants";
+import { REGION_LABELS } from '@/lib/utils';
 import { ANALYST_PATH_A_UNSUPPORTED_REASON } from "../types";
 
 interface JsonImportSectionProps {

@@ -16,7 +16,7 @@
  * requires fake pointer events and is brittle. We focus on rendering
  * invariants, column visibility, and the resize-race guard.
  */
-import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
+import { stubResizeObserver } from '@/__tests__/helpers/page-smoke'
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest'
@@ -24,9 +24,9 @@ import { http, HttpResponse } from 'msw'
 import { axe } from 'vitest-axe'
 import React, { type ReactNode } from 'react'
 import { DataTable, DataTableReadonly, DateTimeCell } from '@/components/DataTable'
-import { makeLatencyColumns, type LatencyRow } from '@/lib/table-utils'
-import { renderWithQuery } from '../helpers/query'
-import { server } from '@/__tests__/helpers/msw/server'
+import { makeLatencyColumns, type LatencyRow } from '@/components/DataTable'
+import { renderWithQuery } from '../helpers/page-smoke'
+import { server } from '@/__tests__/helpers/msw/handlers'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { SchemaTab } from '@/app/logs/_sections/SchemaTab'
@@ -35,19 +35,22 @@ import type { components } from '@/types/api.generated'
 import type { CellContext, ColumnDef } from '@tanstack/react-table'
 
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/origin'))
-vi.mock('@/hooks/useIsAnalyst', () => ({
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
   useIsAnalyst: () => false,
   useMaskIps: () => false,
   useEnforceMaskedFilters: () => {},
 }))
-vi.mock('@tanstack/react-virtual', async () => (await import('@/__tests__/helpers/browser-stubs')).reactVirtualModuleMock())
-vi.mock('@/hooks/useDateFormat', () => ({
+vi.mock('@tanstack/react-virtual', async () => (await import('@/__tests__/helpers/page-smoke')).reactVirtualModuleMock())
+vi.mock('@/hooks/useSSE', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useSSE')>()),
   useDateFormat: () => ({
     full: (iso: string) => `full:${iso}`,
     abbr: () => 'UTC',
   }),
 }))
-vi.mock('@/components/TimeAgo', () => ({
+vi.mock('@/components/SyncStatusBadge/SyncStatusBadge', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/components/SyncStatusBadge/SyncStatusBadge')>()),
   TimeAgo: ({ timestamp }: { timestamp: string }) => `ago:${timestamp}`,
 }))
 

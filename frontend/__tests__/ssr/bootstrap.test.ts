@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import { hydrate, QueryClient } from '@tanstack/react-query'
 
-import { setupNextHeadersMock, withTestHttpServer } from '../helpers/ssr'
-import { resolveRangeWire, quantizeAnchor } from '@/lib/range-wire'
-import { seedDehydratedState } from '@/lib/ssr/seed'
+import { setupNextHeadersMock, withTestHttpServer } from '../helpers/page-smoke'
+import { resolveRangeWire, quantizeAnchor } from '@/lib/utils'
+import { seedDehydratedState } from '@/lib/ssr/upstream'
 import { fetchStreamingServerSide } from '@/lib/ssr/upstream'
 
 const { setHeaders, setCookies } = setupNextHeadersMock({ cookies: 'session=abc123' })
@@ -19,7 +19,7 @@ const { setHeaders, setCookies } = setupNextHeadersMock({ cookies: 'session=abc1
 
 describe('fetchBootstrapServerSide', () => {
   it('returns null when API_PROXY_URL is unset (pure `next dev` outside docker compose)', async () => {
-    const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
+    const { fetchBootstrapServerSide } = await import('@/lib/ssr/upstream')
     const out = await fetchBootstrapServerSide()
     expect(out).toBeNull()
   })
@@ -27,7 +27,7 @@ describe('fetchBootstrapServerSide', () => {
   it('returns null on a non-2xx upstream response', async () => {
     process.env.API_PROXY_URL = 'http://127.0.0.1:1' // refused — guaranteed network failure path
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
+    const { fetchBootstrapServerSide } = await import('@/lib/ssr/upstream')
     const out = await fetchBootstrapServerSide()
     // Either a network error or a 5xx — both must collapse to null,
     // never throw, never leak a partial response.
@@ -45,7 +45,7 @@ describe('fetchBootstrapServerSide', () => {
         res.end('not json {{{')
       },
       async () => {
-        const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
+        const { fetchBootstrapServerSide } = await import('@/lib/ssr/upstream')
         const out = await fetchBootstrapServerSide()
         expect(out).toBeNull()
         expect(warn).toHaveBeenCalled()
@@ -67,7 +67,7 @@ describe('fetchBootstrapServerSide', () => {
         res.end(JSON.stringify({ active_service_id: 'svc-1' }))
       },
       async (srv) => {
-        const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
+        const { fetchBootstrapServerSide } = await import('@/lib/ssr/upstream')
         const out = await fetchBootstrapServerSide()
         expect(out).toEqual({ active_service_id: 'svc-1' })
         // Security-critical assertions: when inbound has the Caddy
@@ -87,7 +87,7 @@ describe('fetchBootstrapServerSide', () => {
     setCookies('')
     setHeaders({ host: 'fastly-log-analytics.global.ssl.fastly.net' })
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
+    const { fetchBootstrapServerSide } = await import('@/lib/ssr/upstream')
     const out = await fetchBootstrapServerSide()
     expect(out).toBeNull()
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('no X-Proxied-By-Caddy marker'))
@@ -104,7 +104,7 @@ describe('fetchBootstrapServerSide', () => {
         res.end(JSON.stringify({ active_service_id: 'svc-1' }))
       },
       async (srv) => {
-        const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
+        const { fetchBootstrapServerSide } = await import('@/lib/ssr/upstream')
         await fetchBootstrapServerSide()
         expect(srv.lastRequest?.headers['x-remote-analyst']).toBeUndefined()
       },
@@ -116,7 +116,7 @@ describe('fetchBootstrapServerSide', () => {
     setCookies('')
     setHeaders({})
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
+    const { fetchBootstrapServerSide } = await import('@/lib/ssr/upstream')
     const out = await fetchBootstrapServerSide()
     expect(out).toBeNull()
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('no X-Proxied-By-Caddy marker'))
@@ -188,7 +188,7 @@ describe('Streaming SSR fixture contract', () => {
 describe('resolveDefaultSsrRangeKey (key-match contract)', () => {
   it('cold load → rangeToken "24h", anchor floored to the 60s grid', async () => {
     const { resolveDefaultSsrRangeKey } = await import('@/lib/ssr/upstream')
-    const { quantizeAnchor: qa } = await import('@/lib/range-wire')
+    const { quantizeAnchor: qa } = await import('@/lib/utils')
 
     const now = new Date('2026-06-29T12:00:37.123Z')
     const got = resolveDefaultSsrRangeKey(now)
