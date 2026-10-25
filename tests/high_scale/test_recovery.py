@@ -808,6 +808,18 @@ def test_scoped_rum_repair_refuses_unretained_event_times(tmp_path) -> None:
         plan_rum_recovery(manifest, archive, owner_epoch=2, read_facts=lambda *_: (), now=NOW + timedelta(days=31))
 
 
+@pytest.mark.parametrize("domain", ["rum_vitals", "rum_errors"])
+def test_scoped_rum_content_normalizes_float64_json_integer_representation(domain) -> None:
+    from backend.high_scale.rum_recovery import _content
+
+    expected = {"event_timestamp": NOW, "ttfb": 25.0, "metric_value": 12.0}
+    # ClickHouse JSON may encode exact integral Float64 values without ".0".
+    # This is the same persisted numeric value, not a changed payload.
+    physical = {"event_timestamp": NOW, "ttfb": 25, "metric_value": 12}
+    assert _content(expected, domain) == _content(physical, domain)
+    assert _content(expected, domain) != _content(dict(physical, ttfb=26), domain)
+
+
 def test_scoped_rum_apply_requires_reviewed_digest_and_verifies_retry(tmp_path) -> None:
     from backend.high_scale.rum_recovery import execute_rum_recovery, plan_rum_recovery
 
@@ -850,6 +862,85 @@ def test_scoped_rum_cli_defaults_to_dryrun_and_redacts_dependency_errors(monkeyp
     run.side_effect = ValueError("private dependency response must not escape")
     assert cli.main(["--manifest-prefix", "a" * 8]) == 1
     assert json.loads(capsys.readouterr().out) == {"status": "blocked", "error_type": "ValueError"}
+
+
+def test_scoped_rum_cli_uses_canonical_source_owner_epoch_column(tmp_path, monkeypatch) -> None:
+    from dataclasses import make_dataclass
+    from types import SimpleNamespace
+
+    import psycopg
+
+    from backend import config
+    from backend.core import clickhouse_client
+    from backend.high_scale import postgres_control, publication, registry_bootstrap, rum_recovery
+    from scripts import recover_high_scale_rum as cli
+
+    manifest, archive = _rum_repair_archive(tmp_path)
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+
+    def execute(query, params=None):
+        cursor = MagicMock()
+        if "FROM high_scale_archive_manifests" in query:
+            cursor.fetchall.return_value = [{}]
+        elif "FROM high_scale_ownership" in query:
+            cursor.fetchone.return_value = {"owner_epoch": 2, "current_owner": "high_scale"}
+        elif "FROM high_scale_source_objects" in query:
+            # These are the canonical high_scale_source_objects columns.
+            # There is no archive_owner_epoch column or migration for one.
+            assert "archive_owner_epoch" not in query
+            assert "archive_manifest_id,owner_epoch" in query
+            cursor.fetchall.return_value = [
+                {
+                    "object_key": source.key,
+                    "status": "source_deleted",
+                    "archive_manifest_id": manifest.manifest_id,
+                    "owner_epoch": 2,
+                }
+                for source in manifest.sources
+            ]
+        return cursor
+
+    connection.execute.side_effect = execute
+    monkeypatch.setenv("METADATA_DSN", "postgresql://unused")
+    monkeypatch.setattr(psycopg, "connect", MagicMock(return_value=connection))
+    monkeypatch.setattr(
+        postgres_control,
+        "_archive_from_row",
+        lambda _: SimpleNamespace(manifest=manifest, state="source_deleted", owner_epoch=2),
+    )
+    monkeypatch.setattr(postgres_control, "PostgresControlPlane", MagicMock())
+    monkeypatch.setattr(registry_bootstrap, "_default_archive_factory", lambda _: archive)
+    settings_type = make_dataclass("RecoveryTestSettings", [("query_timeout_s", int)])
+    monkeypatch.setattr(config, "load_clickhouse_config", lambda: settings_type(5))
+    client = MagicMock()
+    initial_plan = rum_recovery.plan_rum_recovery(manifest, archive, owner_epoch=2, read_facts=lambda *_: (), now=NOW)
+    error_fact = next(fact for fact in initial_plan.expected_facts if fact["_repair_domain"] == "rum_errors")
+
+    def read_clickhouse(query, params=None, *, settings=None):
+        if "high_scale_batch_publications" in query:
+            # Receipt batch IDs contain UUID-formatted text but their canonical
+            # storage/lookup type is String, unlike the physical fact UUID.
+            assert "batch_id={batch_id:String}" in query
+            assert "batch_id:UUID" not in query
+            return [{"publication_state": "visible", "expected_rows": 1, "visible_rows": 1}]
+        if "rum_error_facts" in query:
+            return [dict(error_fact)]
+        return []
+
+    client.execute.side_effect = read_clickhouse
+    monkeypatch.setattr(clickhouse_client, "ClickHouseClient", MagicMock(return_value=client))
+    monkeypatch.setattr(publication, "PostgresBatchManifestStore", MagicMock())
+    serving = MagicMock()
+    monkeypatch.setattr(publication, "ClickHousePublication", MagicMock(return_value=serving))
+    original_plan = rum_recovery.plan_rum_recovery
+    monkeypatch.setattr(rum_recovery, "plan_rum_recovery", lambda *a, **kw: original_plan(*a, **kw, now=NOW))
+
+    report = cli.recover("a" * 8, apply=False, approve_digest=None)
+    assert report["read_only"] is True
+    assert report["candidate_counts"] == {"rum_vitals": 2, "rum_errors": 1}
+    assert report["missing_counts"] == {"rum_vitals": 2, "rum_errors": 0}
+    serving.publish.assert_not_called()
 
 
 def test_scoped_rum_apply_cannot_report_success_on_missing_insert(tmp_path) -> None:

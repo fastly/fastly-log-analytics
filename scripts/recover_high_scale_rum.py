@@ -87,14 +87,14 @@ def recover(manifest_prefix: str, *, apply: bool, approve_digest: str | None) ->
             if owner is None or owner["current_owner"] != "high_scale" or owner["owner_epoch"] != item.owner_epoch:
                 raise ValueError("archive owner epoch is not current")
             ledger = connection.execute(
-                "SELECT object_key,status,archive_manifest_id,archive_owner_epoch FROM high_scale_source_objects "
+                "SELECT object_key,status,archive_manifest_id,owner_epoch FROM high_scale_source_objects "
                 "WHERE service_id=%s AND object_key=ANY(%s)" + suffix,
                 (manifest.service_id, [source.key for source in manifest.sources]),
             ).fetchall()
             if len(ledger) != len(manifest.sources) or any(
                 row["status"] not in {"acknowledged", "source_deleted"}
                 or row["archive_manifest_id"] != manifest.manifest_id
-                or row["archive_owner_epoch"] != item.owner_epoch
+                or row["owner_epoch"] != item.owner_epoch
                 for row in ledger
             ):
                 raise ValueError("source ledger is not terminal for this exact archive/owner")
@@ -119,7 +119,7 @@ def recover(manifest_prefix: str, *, apply: bool, approve_digest: str | None) ->
                         receipt = client.execute(
                             "SELECT publication_state,expected_rows,visible_rows FROM high_scale_batch_publications FINAL "
                             "WHERE service_id={service_id:String} AND domain={domain:String} "
-                            "AND generation={generation:String} AND batch_id={batch_id:UUID} LIMIT 2",
+                            "AND generation={generation:String} AND batch_id={batch_id:String} LIMIT 2",
                             {
                                 "service_id": manifest.service_id,
                                 "domain": domain,

@@ -73,6 +73,10 @@ def _content(row: Mapping[str, Any], domain: str) -> str:
         if name == "event_timestamp" and isinstance(value, str):
             value = datetime.fromisoformat(value.replace("Z", "+00:00"))
             value = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        if name in {"metric_value", "ttfb"} and isinstance(value, (int, float)) and not isinstance(value, bool):
+            # Float64 JSON is allowed to emit integral values as integers.
+            # Normalize representation, never round away numeric differences.
+            value = float(value)
         values[name] = _canonical(value)
     return json.dumps(values, sort_keys=True, separators=(",", ":"))
 
