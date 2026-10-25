@@ -34,6 +34,32 @@ test('absent and unrequested list components are not fabricated', () => {
   }
 });
 
+test('list sidecars retain owner stamps but never promote ancestor reuse', () => {
+  for (const reuse of ['none', 'hit', 'follower']) {
+    const metadata = { state: 'bypass', prewarmer: false };
+    if (reuse === 'hit') metadata.state = 'hit';
+    if (reuse === 'follower') Object.assign(metadata, { state: 'unknown', single_flight: 'follower' });
+    const report = describeResponse({
+      _response_cache: metadata,
+      pop_health: [{ pop: 'PRIVATE_ROW_VALUE' }],
+      _component_observations: {
+        pop_health: {
+          _response_cache: { state: 'bypass', prewarmer: false },
+          _section_timings: [{ section: 'pop_health', time_ms: 3, source: 'live', current_execution: true }],
+        },
+      },
+    });
+    const pop = report.components.find(row => row.component === 'pop_health');
+    assert.equal(pop.cache_state, 'bypass');
+    assert.equal(pop.lookup_current, reuse === 'none');
+    assert.equal(pop.sections[0].current_execution, reuse === 'none');
+    assert.equal(pop.gaps.includes('component_observation_envelope_missing'), false);
+    assert.ok(pop.gaps.includes('reader_coverage_missing'));
+    assert.ok(pop.gaps.includes('history_evidence_missing'));
+    assert.equal(JSON.stringify(report).includes('PRIVATE_ROW_VALUE'), false);
+  }
+});
+
 test('component hits cannot replay historical work as current execution', () => {
   const report = describeResponse({
     aggregates: { _is_cached: true, _section_timings: [{ section: 'top_n_rollup', time_ms: 1700 }] },

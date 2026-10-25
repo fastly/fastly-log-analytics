@@ -446,6 +446,8 @@ def _debug_responses_enabled() -> bool:
 
 # Both spellings of every envelope key: the serialization aliases and the bare field names.
 _DEBUG_ENVELOPE_KEYS = (
+    "_component_observations",
+    "component_observations",
     "_debug_queries",
     "_debug_calls",
     "_debug_sqlite",

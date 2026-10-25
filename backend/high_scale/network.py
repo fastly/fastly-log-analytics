@@ -793,7 +793,9 @@ def get_pop_health(
                 bandwidth_bytes=int(r["bandwidth_bytes"] or 0),
             )
         )
-    return PopHealthListResponse.with_telemetry(data=data, section_timings=trace.timings())
+    return PopHealthListResponse.with_telemetry(
+        **cache_result({}, state="bypass", prewarmer=False), data=data, section_timings=trace.timings()
+    )
 
 
 def get_transport_metrics(
@@ -960,6 +962,7 @@ def network_bundle(
         **cache_result({}, state="bypass", prewarmer=False),
         available=True,
         section_timings=combined_timings,
+        component_observations={"pop_health": pop_response} if pop_response is not None else None,
         health=health_resp,
         quality=quality_resp,
         pop_health=pop_health,

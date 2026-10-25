@@ -1355,6 +1355,13 @@ async def test_get_aggregates_section_timings_populated(in_memory_duckdb, test_s
         assert set(entry.keys()) >= {"section", "time_ms"}
         assert isinstance(entry["section"], str)
         assert isinstance(entry["time_ms"], (int, float))
+        assert entry["current_execution"] is True
+        assert entry["activity"] in {"compute", "overhead", "skipped"}
+    summary_marks = [entry for entry in timings if entry["section"] == "summary"]
+    assert [(entry["source"], entry["outcome"]) for entry in summary_marks] == [
+        ("rollup", "fallback"),
+        ("live", "served"),
+    ]
 
     sections = {entry["section"] for entry in timings}
     # temp_table_create always fires when materialisation runs.

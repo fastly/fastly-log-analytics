@@ -1284,7 +1284,14 @@ async def get_aggregates(
             return
         _ts = _time.perf_counter()
         result = reader()
-        timer.mark(name, _ts)
+        timer.mark(
+            name,
+            _ts,
+            source="rollup",
+            activity="compute" if result is not None else "overhead",
+            current_execution=True,
+            outcome="served" if result is not None else "fallback",
+        )
         if result is not None:
             merged[name] = result
         else:
@@ -1351,7 +1358,9 @@ async def get_aggregates(
     # ABSENT from section_timings. ``origin:temp_skipped`` lets the harness
     # confirm the guard fired. has_data still derives from the summary card.
     if not missed:
-        section_timings.append({"section": "origin:temp_skipped", "time_ms": 0.0})
+        section_timings.append(
+            {"section": "origin:temp_skipped", "time_ms": 0.0, "activity": "skipped", "current_execution": True}
+        )
         summary_card = merged.get("summary") or {}
         # Same envelope as the temp-path return below: only requested sections
         # appear (they're all in ``merged`` here), has_data from the summary
@@ -1366,7 +1375,7 @@ async def get_aggregates(
     _t = _time.perf_counter()
     if not runner.create_temp_table(create_sql, params):
         return {**empty_payload, **runner.telemetry()}
-    timer.mark("temp_table_create", _t)
+    timer.mark("temp_table_create", _t, source="live", activity="compute", current_execution=True, outcome="served")
 
     # Per-branch helpers — each runs on its own runner so they can fan
     # out across connections via ``asyncio.to_thread``. ``SectionTimer``'s
@@ -1387,7 +1396,7 @@ async def get_aggregates(
             return {}
         _ts = _time.perf_counter()
         result = _origin_summary_from_temp(r, temp_table, actual_set)
-        timer.mark("summary", _ts)
+        timer.mark("summary", _ts, source="live", activity="compute", current_execution=True, outcome="served")
         return {"summary": result}
 
     def _branch_slow_urls(r: QueryRunner) -> dict:
@@ -1401,7 +1410,7 @@ async def get_aggregates(
             slow_urls_min_requests,
             slow_urls_limit,
         )
-        timer.mark("slow_urls", _ts)
+        timer.mark("slow_urls", _ts, source="live", activity="compute", current_execution=True, outcome="served")
         return {"slow_urls": result}
 
     def _branch_ts_status_path(r: QueryRunner) -> dict:
@@ -1417,15 +1426,17 @@ async def get_aggregates(
                 timeseries_metric,
                 timeseries_percentile,
             )
-            timer.mark("timeseries", _ts)
+            timer.mark("timeseries", _ts, source="live", activity="compute", current_execution=True, outcome="served")
         if _run("status_codes"):
             _ts = _time.perf_counter()
             out["status_codes"] = _origin_status_codes_from_temp(r, temp_table, actual_set)
-            timer.mark("status_codes", _ts)
+            timer.mark("status_codes", _ts, source="live", activity="compute", current_execution=True, outcome="served")
         if _run("path_breakdown"):
             _ts = _time.perf_counter()
             out["path_breakdown"] = _origin_path_breakdown_from_temp(r, temp_table, actual_set)
-            timer.mark("path_breakdown", _ts)
+            timer.mark(
+                "path_breakdown", _ts, source="live", activity="compute", current_execution=True, outcome="served"
+            )
         return out
 
     def _branch_pop_ip(r: QueryRunner) -> dict:
@@ -1438,7 +1449,7 @@ async def get_aggregates(
                 actual_set,
                 pop_latency_limit,
             )
-            timer.mark("pop_latency", _ts)
+            timer.mark("pop_latency", _ts, source="live", activity="compute", current_execution=True, outcome="served")
         if _run("ip_health"):
             _ts = _time.perf_counter()
             out["ip_health"] = _origin_ip_health_from_temp(
@@ -1447,7 +1458,7 @@ async def get_aggregates(
                 actual_set,
                 ip_health_limit,
             )
-            timer.mark("ip_health", _ts)
+            timer.mark("ip_health", _ts, source="live", activity="compute", current_execution=True, outcome="served")
         return out
 
     # Per-branch occupancy — a branch runs only when it owns at least one

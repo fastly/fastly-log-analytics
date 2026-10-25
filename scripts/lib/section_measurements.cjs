@@ -240,9 +240,9 @@ function describeResponse(payload) {
       const inherit = enclosingHit || (cachedExecution && metadata.scope !== 'self');
       if (isObject(body[name])) visit(body[name], path === 'response' ? name : `${path}.${name}`, inherit);
       else if (Array.isArray(body[name])) {
-        // Keep the unknown owner; list rows are not an observation envelope.
-        visit({}, path === 'response' ? name : `${path}.${name}`, inherit);
-        components[components.length - 1].gaps.push('component_observation_envelope_missing');
+        const sidecar = isObject(body._component_observations) ? body._component_observations[name] : null;
+        visit(isObject(sidecar) ? sidecar : {}, path === 'response' ? name : `${path}.${name}`, inherit);
+        if (!isObject(sidecar)) components[components.length - 1].gaps.push('component_observation_envelope_missing');
       }
     }
   }

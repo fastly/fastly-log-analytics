@@ -691,6 +691,12 @@ uv run pytest tests/perf/test_benchmarks_micro.py \
 
 ### Section-level performance evidence
 
+Network's list-shaped `pop_health` keeps its data shape and exposes owner metadata
+through the debug-gated `_component_observations.pop_health` sidecar. Do not infer
+its cache state from the enclosing bundle or promote historical child timings
+under an ancestor cache hit or single-flight follower. Standard reader-dispatch
+stamps describe actual attempts; they do not establish missing coverage/history.
+
 Standard dashboard counts preserve the raw query's inclusive end. The count
 rollup reader covers half-open, whole-minute windows; partial-minute bounds
 fall back to raw counts. The dashboard adds exact-end rows from the scoped

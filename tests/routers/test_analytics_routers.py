@@ -525,7 +525,8 @@ def test_get_pop_health_returns_data_and_self_heals_on_lake_detach_race(client, 
     assert calls["n"] == 2
 
 
-def test_network_bundle_post_get_selective_and_debug(client, in_memory_duckdb, test_service_source):
+def test_network_bundle_post_get_selective_and_debug(client, in_memory_duckdb, test_service_source, monkeypatch):
+    monkeypatch.setenv("DEBUG_RESPONSES_FORCE_INCLUDE", "0")
     table = _safe_table(test_service_source["name"])
     logs = generate_mock_logs(test_service_source, num_logs=10)
     for i, log in enumerate(logs):
@@ -562,6 +563,7 @@ def test_network_bundle_post_get_selective_and_debug(client, in_memory_duckdb, t
     for sec in ("health", "quality", "pop_health", "transport"):
         assert data.get(sec) is not None
     assert len(data["pop_health"]) == 2
+    assert "_component_observations" not in data
     t = data["transport"]
     assert (
         t["total_requests"],
@@ -594,6 +596,24 @@ def test_network_bundle_post_get_selective_and_debug(client, in_memory_duckdb, t
     assert sel_data["transport"] is not None
     assert (sel_data["health"], sel_data["quality"], sel_data["pop_health"]) == (None, None, None)
     assert len(sel_data["_debug_queries"]) > 0
+    assert sel_data.get("_component_observations") is None
+    payload = {"start_time": st, "end_time": et, "sections": ["pop_health"], "filters": {}}
+    debug_headers = {**_SVC_HEADERS, "x-debug-responses": "1"}
+    pop_resp = client.post("/api/network/bundle", headers=debug_headers, json=payload)
+    assert pop_resp.status_code == 200
+    pop_data = pop_resp.json()
+    assert len(pop_data["pop_health"]) == 2
+    owner = pop_data["_component_observations"]["pop_health"]
+    assert "data" not in owner
+    assert owner["_response_cache"]["state"] == "bypass"
+    assert [(row["source"], row.get("outcome")) for row in owner["_section_timings"]] == [
+        ("rollup", "fallback"),
+        ("live", "served"),
+    ]
+    monkeypatch.setenv("DEBUG_RESPONSES", "0")
+    no_debug = client.post("/api/network/bundle", headers=debug_headers, json=payload)
+    assert no_debug.status_code == 200
+    assert "_component_observations" not in no_debug.json()
     assert any("/api/network/bundle".startswith(prefix) for prefix in _ANALYST_ALLOWED_WRITE_PREFIXES)
 
 

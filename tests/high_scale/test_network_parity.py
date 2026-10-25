@@ -362,6 +362,10 @@ def test_bundle_honors_section_selection():
     assert resp.health is None and resp.quality is None and resp.transport is None
     assert resp.pop_health == []
     assert len(client.calls) == 1
+    observation = resp.component_observations["pop_health"]
+    assert observation.response_cache.state == "bypass"
+    assert observation.section_timings
+    assert observation.section_timings[0].model_extra["source"] == "fact"
 
 
 class _FailingClient:

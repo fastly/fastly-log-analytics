@@ -302,7 +302,7 @@ def _compute_cmcd_aggregates(
 
     _t = _time.perf_counter()
     actual_cols = runner.get_schema_cols()
-    timer.mark("get_schema_cols", _t)
+    timer.mark("get_schema_cols", _t, activity="overhead", current_execution=True)
 
     if not actual_cols or _CMCD_REQUIRED_COL not in actual_cols:
         return {
@@ -327,7 +327,7 @@ def _compute_cmcd_aggregates(
         inline_params=True,
         partition_pruning=True,
     )
-    timer.mark("build_where_clause", _t)
+    timer.mark("build_where_clause", _t, activity="overhead", current_execution=True)
 
     cmcd_where = f"{where_clause} AND cmcd_sid IS NOT NULL AND cmcd_sid != ''"
 
@@ -371,7 +371,14 @@ def _compute_cmcd_aggregates(
 
     _t = _time.perf_counter()
     with runner.temp_table(temp_cols, actual_cols, table_name, cmcd_where, params) as tmp:
-        timer.mark("temp_table_create", _t)
+        timer.mark(
+            "temp_table_create",
+            _t,
+            source="live",
+            activity="compute",
+            current_execution=True,
+            outcome="served" if tmp is not None else "failed",
+        )
         if tmp is None:
             return {
                 "available": False,
@@ -407,7 +414,7 @@ def _compute_cmcd_aggregates(
                     "peak_viewers": row[5] or 0,
                     "avg_session_duration": int(row[6]) if row[6] else None,
                 }
-            timer.mark("overview", _t)
+            timer.mark("overview", _t, source="live", activity="compute", current_execution=True)
 
         # ── Combined time-series scan ─────────────────────────────────────
         want_ts = {
@@ -566,7 +573,7 @@ def _compute_cmcd_aggregates(
                     results["throughput_ts"] = []
                 if want_ts["startup_ts"]:
                     results["startup_ts"] = []
-            timer.mark("timeseries_combined", _t)
+            timer.mark("timeseries_combined", _t, source="live", activity="compute", current_execution=True)
 
         # ── Top Content (single scan, no self-join) ───────────────────────
         if _want("top_content") and has_cid:
@@ -593,7 +600,7 @@ def _compute_cmcd_aggregates(
                 }
                 for r in rows
             ]
-            timer.mark("top_content", _t)
+            timer.mark("top_content", _t, source="live", activity="compute", current_execution=True)
 
         # ── Rebuffer by Country (single scan, no self-join) ───────────────
         if _want("rebuffer_by_country") and has_country and has_bs:
@@ -617,7 +624,7 @@ def _compute_cmcd_aggregates(
                 }
                 for r in rows
             ]
-            timer.mark("rebuffer_by_country", _t)
+            timer.mark("rebuffer_by_country", _t, source="live", activity="compute", current_execution=True)
 
         # ── Rebuffer by ASN (single scan, no self-join) ───────────────────
         if _want("rebuffer_by_asn") and has_asn and has_bs:
@@ -649,7 +656,7 @@ def _compute_cmcd_aggregates(
                 }
                 for r in rows
             ]
-            timer.mark("rebuffer_by_asn", _t)
+            timer.mark("rebuffer_by_asn", _t, source="live", activity="compute", current_execution=True)
 
         # ── Object Type + Streaming Format (combined scan) ────────────────
         want_ot = _want("object_type_dist") and has_ot
@@ -673,7 +680,7 @@ def _compute_cmcd_aggregates(
                 sql = _sql.DIST_SF.format(table=t, where=w)
                 rows = runner.execute(sql).fetchall()
                 results["streaming_format_dist"] = [{"streaming_format": r[0], "session_count": r[1]} for r in rows]
-            timer.mark("distributions", _t)
+            timer.mark("distributions", _t, source="live", activity="compute", current_execution=True)
 
         # ── Session Duration Distribution ─────────────────────────────────────
         if _want("session_duration_dist"):
@@ -681,7 +688,7 @@ def _compute_cmcd_aggregates(
             sql = _sql.SESSION_DURATION_DIST.format(table=t, where=w)
             rows = runner.execute(sql).fetchall()
             results["session_duration_dist"] = [{"duration_bucket": r[0], "session_count": r[2]} for r in rows]
-            timer.mark("session_duration_dist", _t)
+            timer.mark("session_duration_dist", _t, source="live", activity="compute", current_execution=True)
 
     results.update(runner.telemetry())
     results["section_timings"] = section_timings

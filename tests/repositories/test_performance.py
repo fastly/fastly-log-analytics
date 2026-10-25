@@ -331,6 +331,14 @@ def test_performance_aggregates_temp_skipped_when_all_rolled_no_scatter(in_memor
     assert result["ttl_dist"] == [{"bucket": "<1m", "count": 5}]
     assert result["top_urls"][0]["url"] == "/rolled"
     assert result.get("approx") is True
+    for row in result["section_timings"]:
+        assert row["current_execution"] is True
+        if row["section"] in {"top_urls_query_rollup", "top_asns_query_rollup", "ttl_dist_rollup"}:
+            assert row["source"] == "rollup"
+            assert row["activity"] == "compute"
+    labels = [row for row in result["section_timings"] if row["section"] == "performance.asn_labels"]
+    assert len(labels) == 1
+    assert labels[0]["activity"] == "overhead"
 
 
 def test_performance_aggregates_temp_narrowed_when_scatter_forces_temp(in_memory_duckdb, test_service_source):
@@ -444,6 +452,9 @@ def test_rebuffer_by_country_uses_per_session_video_medians(con):
     assert by_country["US"]["median_throughput"] == 650
     assert by_country["GB"]["session_count"] == 1
     assert by_country["GB"]["median_throughput"] is None
+    live = [row for row in result["section_timings"] if row.get("source") == "live"]
+    assert {row["section"] for row in live} == {"temp_table_create", "rebuffer_by_country"}
+    assert all(row["activity"] == "compute" and row["current_execution"] for row in live)
 
 
 def test_rebuffer_by_country_avoids_per_group_approx_quantile(con, monkeypatch):

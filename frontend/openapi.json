@@ -55253,6 +55253,65 @@
         "type": "object",
         "title": "BackupImportResponse"
       },
+      "BaseResponse": {
+        "properties": {
+          "_debug_queries": {
+            "items": {
+              "$ref": "#/components/schemas/DebugQuery"
+            },
+            "type": "array",
+            "title": "Debug Queries"
+          },
+          "_debug_calls": {
+            "items": {
+              "$ref": "#/components/schemas/DebugCall"
+            },
+            "type": "array",
+            "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
+          "_is_cached": {
+            "type": "boolean",
+            "title": "Is Cached",
+            "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "_section_timings": {
+            "items": {
+              "$ref": "#/components/schemas/SectionTimingEntry"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          }
+        },
+        "type": "object",
+        "title": "BaseResponse",
+        "description": "Base response that automatically includes telemetry if present."
+      },
       "Body_backup_import_api_admin_share_backup_import_post": {
         "properties": {
           "file": {
@@ -73976,6 +74035,20 @@
             },
             "type": "array",
             "title": "Section Timings"
+          },
+          "_component_observations": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/BaseResponse"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Component Observations"
           },
           "available": {
             "type": "boolean",
