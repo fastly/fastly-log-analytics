@@ -16,8 +16,17 @@ import {
 } from '@/__tests__/helpers/maplibre-mock'
 import { selectMockFactory } from '@/__tests__/helpers/page-smoke'
 import { formatBucket } from '@/lib/date'
-import type { CityTooltipData, TooltipInfo } from '@/components/Map/NetworkMap/OverlayLayer'
-import type { PlaybackControls as PlaybackControlsComponent } from '@/components/Map/NetworkMap/controls'
+import {
+  NetworkMap,
+  PlaybackControls,
+  METRIC_OPTIONS,
+  SPEED_OPTIONS,
+  STEP_OPTIONS,
+  formatMetricValue,
+  MapTooltip,
+  type CityTooltipData,
+  type TooltipInfo,
+} from '@/components/Map/NetworkMap'
 import type { NetworkMapData } from '@/components/Map/NetworkMap/MapLayer'
 
 vi.mock('next-themes', () => ({
@@ -71,52 +80,10 @@ vi.mock('@/components/Map/NetworkMap/MapLayer', () => ({
   },
 }))
 
-const playbackProps: { current: React.ComponentProps<typeof PlaybackControlsComponent> | null } = { current: null }
-
-vi.mock('@/components/Map/NetworkMap/controls', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/components/Map/NetworkMap/controls')>()
-  return {
-    ...actual,
-    PlaybackControls: (props: React.ComponentProps<typeof PlaybackControlsComponent>) => {
-      playbackProps.current = props
-      return (
-        <div
-          data-testid="playback-controls"
-          data-playing={String(props.playing)}
-          data-bucket-idx={String(props.bucketIdx)}
-          data-buckets-length={String(props.bucketsLength)}
-          data-metric={String(props.metric)}
-          data-current-label={String(props.currentBucketLabel)}
-        />
-      )
-    },
-  }
-})
-
-vi.mock('@/components/Map/NetworkMap/OverlayLayer', () => ({
-  MapTooltip: ({ info, metric }: { info: TooltipInfo | null; metric: string }) => (
-    <div data-testid="map-tooltip" data-metric={metric}>
-      {info?.city ?? ''}
-    </div>
-  ),
-}))
-
-import { NetworkMap } from '@/components/Map/NetworkMap'
-
 const actualMapLayer = await vi.importActual<typeof import('@/components/Map/NetworkMap/MapLayer')>(
   '@/components/Map/NetworkMap/MapLayer',
 )
 const { getScoreColor, useMapInit, useMapData } = actualMapLayer
-
-const actualOverlayLayer = await vi.importActual<typeof import('@/components/Map/NetworkMap/OverlayLayer')>(
-  '@/components/Map/NetworkMap/OverlayLayer',
-)
-const { formatMetricValue, MapTooltip } = actualOverlayLayer
-
-const actualControls = await vi.importActual<typeof import('@/components/Map/NetworkMap/controls')>(
-  '@/components/Map/NetworkMap/controls',
-)
-const { PlaybackControls, METRIC_OPTIONS, SPEED_OPTIONS, STEP_OPTIONS } = actualControls
 
 function baseProps(overrides: Partial<React.ComponentProps<typeof NetworkMap>> = {}) {
   return {
@@ -137,7 +104,6 @@ function baseProps(overrides: Partial<React.ComponentProps<typeof NetworkMap>> =
 beforeEach(() => {
   stubResizeObserver()
   mapDataCalls.length = 0
-  playbackProps.current = null
 })
 
 afterEach(() => {
@@ -197,10 +163,9 @@ describe('NetworkMap auto-play', () => {
     render(<NetworkMap {...baseProps({ data })} />)
 
     expect(screen.getByTestId('playback-controls').getAttribute('data-bucket-idx')).toBe('1')
-    expect(playbackProps.current).not.toBeNull()
 
     act(() => {
-      playbackProps.current!.setPlaying(true)
+      fireEvent.click(screen.getByRole('button', { name: /play map playback/i }))
     })
 
     act(() => {
@@ -253,7 +218,7 @@ describe('NetworkMap tooltip portal', () => {
     const tooltip = screen.getByTestId('map-tooltip')
     expect(tooltip).toBeInTheDocument()
     expect(tooltip.getAttribute('data-metric')).toBe('rtt_med_us')
-    expect(tooltip.textContent).toBe('PortalCity')
+    expect(tooltip.textContent).toContain('PortalCity')
     expect(tooltip.parentElement).toBe(document.body)
 
     act(() => {

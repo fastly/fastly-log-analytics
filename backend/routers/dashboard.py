@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
 from backend.core.request_context import RequestContext, build_request_context
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.dashboard import (
     AggregatesRequest,
     AggregatesResponse,
@@ -21,7 +22,6 @@ from backend.models.dashboard import (
     FieldValuesResponse,
     RawRequest,
 )
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.repositories import dashboard as repo
 from backend.repositories.utils.response_cache import cache_result
 from backend.utils.auth import mask_ips_for

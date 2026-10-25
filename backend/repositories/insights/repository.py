@@ -1594,20 +1594,38 @@ def get_insights(
         except Exception:
             defs_map = {}
 
+        def _build_insight_card(
+            insight_id: str,
+            title: str,
+            description: str,
+            category: str | None,
+            severity: str,
+            summary: str,
+            items: list[dict] | None = None,
+        ) -> dict:
+            return {
+                "id": insight_id,
+                "title": title,
+                "description": description,
+                "category": category,
+                "severity": severity,
+                "summary": summary,
+                "items": items if items is not None else [],
+            }
+
         def check_baseline(insight_id: str) -> dict | None:
             if available_history_hours < baseline_hours:
                 d = defs_map.get(insight_id, {})
                 reg = registry.get(insight_id)
                 avail = max(0.1, round(available_history_hours, 1))
-                return {
-                    "id": insight_id,
-                    "title": d.get("title", insight_id.replace("_", " ").title()),
-                    "description": d.get("description", ""),
-                    "category": str(reg.category) if reg else None,
-                    "severity": "info",
-                    "summary": f"Requires {int(baseline_hours)}h of historical data (only {avail}h available)",
-                    "items": [],
-                }
+                return _build_insight_card(
+                    insight_id=insight_id,
+                    title=str(d.get("title", insight_id.replace("_", " ").title())),
+                    description=str(d.get("description", "")),
+                    category=str(reg.category) if reg else None,
+                    severity="info",
+                    summary=f"Requires {int(baseline_hours)}h of historical data (only {avail}h available)",
+                )
             return None
 
         table_name = temp_table
@@ -1901,15 +1919,15 @@ def get_insights(
                     else:
                         summary = f"No {d.title.lower()} detected"
 
-                    return {
-                        "id": d.id,
-                        "title": d.title,
-                        "description": d.description,
-                        "category": str(d.category),
-                        "severity": severity,
-                        "summary": summary,
-                        "items": items,
-                    }
+                    return _build_insight_card(
+                        insight_id=d.id,
+                        title=d.title,
+                        description=d.description,
+                        category=str(d.category),
+                        severity=severity,
+                        summary=summary,
+                        items=items,
+                    )
 
                 # Tag the closure with the insight id+title so the error-path
                 # below can report which insight failed. Without these, every
@@ -1935,15 +1953,14 @@ def get_insights(
                 insight_id = getattr(fn, "_insight_id", "unknown")
                 insight_title = getattr(fn, "_insight_title", insight_id.replace("_", " ").title())
                 insight_category = getattr(fn, "_insight_category", None)
-                return {
-                    "id": insight_id,
-                    "title": insight_title,
-                    "category": insight_category,
-                    "severity": "error",
-                    "summary": f"Query failed: {str(e)}",
-                    "description": "",
-                    "items": [],
-                }
+                return _build_insight_card(
+                    insight_id=insight_id,
+                    title=insight_title,
+                    description="",
+                    category=insight_category,
+                    severity="error",
+                    summary=f"Query failed: {str(e)}",
+                )
 
         # ThreadPoolExecutor dispatch — DuckDB releases the GIL during
         # query execution, so the remaining per-insight scans overlap on
@@ -2150,6 +2167,6 @@ def get_cache_collapse_detail(
 
 # R-1: register the insights TTL cache so the autouse fixture in
 # tests/conftest.py drains it via CacheRegistry.clear_all().
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("insights._insights_cache", _insights_cache)

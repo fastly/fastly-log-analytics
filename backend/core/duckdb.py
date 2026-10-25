@@ -1311,7 +1311,7 @@ from backend.core._duckdb_status import (  # noqa: E402, F401
 
 # A-3 (CacheRegistry): register module-level caches so the test
 # harness drains them via CacheRegistry.clear_all().
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("duckdb._fos_client_cache", _fos_client_cache)
 _CacheRegistry.register("duckdb._initialized_paths", _initialized_paths)

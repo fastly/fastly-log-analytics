@@ -932,7 +932,7 @@ def is_usage_logging_enabled() -> bool:
     return load_usage_logging_config().get("enabled", False)
 
 
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 
 class _ConfigScalarCaches:

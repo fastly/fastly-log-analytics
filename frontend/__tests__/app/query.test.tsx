@@ -29,17 +29,20 @@ vi.mock('next/navigation', () => ({
   usePathname: () => '/query',
 }))
 
-// Mock complicated components. RawSqlMode dynamic-imports the editor by
-// file path (so /query's initial bundle stays slim), while other consumers
-// may still hit the barrel — stub both so the dynamic loader resolves to
-// the textarea regardless of entry point.
-const MockCodeEditor = ({ value, onChange }: { value: string; onChange: (v: string) => void }) => (
-  <textarea data-testid="mock-editor" value={value} onChange={(e) => onChange(e.target.value)} />
-)
-vi.mock('@/components/CodeEditor', () => ({ CodeEditor: MockCodeEditor }))
-vi.mock('@/components/CodeEditor/CodeEditor', () => ({ CodeEditor: MockCodeEditor }))
+// Mock CodeMirror so CodeEditor renders a simple controlled <textarea>.
+vi.mock('@uiw/react-codemirror', async () => {
+  const React = await import('react')
+  return {
+    default: React.forwardRef(function MockCodeMirror(
+      { value, onChange }: { value: string; onChange: (v: string) => void },
+      _ref: React.Ref<unknown>,
+    ) {
+      return <textarea data-testid="mock-editor" value={value} onChange={(e) => onChange(e.target.value)} />
+    }),
+  }
+})
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/browser-stubs')).reactVirtualModuleMock())
 
 // Mock the API client
 vi.mock('@/lib/api', () => ({

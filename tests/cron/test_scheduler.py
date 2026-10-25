@@ -1600,7 +1600,7 @@ def test_check_buffer_backlog_returns_empty_on_probe_exception():
 
 from unittest.mock import MagicMock
 
-from backend.cron.jobs.duckdb_recycle import run_duckdb_recycle
+from backend.cron.jobs.metadata import run_duckdb_recycle
 from backend.cron.lifecycle import record_skip_row
 from backend.cron.scheduler import Scheduler
 
@@ -1691,7 +1691,7 @@ def test_run_duckdb_recycle_runs_when_threshold_disabled(monkeypatch):
     recycle_once rather than short-circuiting."""
     monkeypatch.setenv("DUCKDB_RECYCLE_RSS_THRESHOLD_MB", "0")
     with patch(
-        "backend.cron.jobs.duckdb_recycle.recycle_once", return_value="interval: recycled 0/0 instance(s), freed ~0MB"
+        "backend.cron.jobs.metadata.recycle_once", return_value="interval: recycled 0/0 instance(s), freed ~0MB"
     ) as mock_recycle:
         detail = run_duckdb_recycle.__wrapped__()
     mock_recycle.assert_called_once_with(reason="interval")

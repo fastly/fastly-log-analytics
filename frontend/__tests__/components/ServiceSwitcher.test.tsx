@@ -14,7 +14,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 import { ServiceSwitcher } from '@/components/ServiceSwitcher/ServiceSwitcher'
-import { TimezoneSwitcher } from '@/components/TimezoneSwitcher/TimezoneSwitcher'
+import { TimezoneSwitcher } from '@/components/AppLayout'
 import { SyncStatusBadge } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useTimezoneStore } from '@/stores/timezoneStore'
@@ -39,8 +39,10 @@ vi.mock('@/hooks/useIsAnalyst', () => ({
   useIsAnalyst: () => mocks.analyst(),
 }))
 vi.mock('@/hooks/useBootstrap', () => ({ useBootstrap: () => mocks.bootstrap() }))
-vi.mock('@/hooks/useHeaderBadgeStream', () => ({ useHeaderBadgeStream: () => ({ state: 'idle' }) }))
-vi.mock('@/hooks/useAdminEventStream', () => ({ useAdminEventStream: () => ({ state: 'idle' }) }))
+vi.mock('@/hooks/useAdminEventStream', () => ({
+  useHeaderBadgeStream: () => ({ state: 'idle' }),
+  useAdminEventStream: () => ({ state: 'idle' }),
+}))
 vi.mock('@/hooks/useDateFormat', () => ({ useDateFormat: () => ({ full: 'yyyy-MM-dd', abbr: 'HH:mm' }) }))
 vi.mock('@/hooks/useNowSeconds', () => ({ useNowMs: () => Date.parse('2026-09-08T18:00:00Z') }))
 vi.mock('@/hooks/useMounted', () => ({ useMounted: () => true }))

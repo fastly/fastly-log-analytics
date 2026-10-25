@@ -24,7 +24,7 @@ import { createTestQueryClient, makeQueryWrapper } from '../../helpers/query'
 import { createUseSSEMock } from '../../helpers/sse-mock'
 import { server } from '@/__tests__/helpers/msw/server'
 import { getApiBase } from '@/lib/api'
-import { RumFaroVersionCard } from '@/components/Rum/RumFaroVersionCard'
+import { RumFaroVersionCard } from '@/components/Rum/RumStatusPanel'
 
 beforeAll(() => {
   // Radix/base-ui Select needs these jsdom shims to open + select an option.

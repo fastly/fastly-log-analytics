@@ -1,9 +1,10 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, cleanup } from '@testing-library/react'
 import { beforeAll, beforeEach, afterEach, describe, expect, it, test, vi } from 'vitest'
-// app/performance/page.tsx is now an async RSC shell that SSR-prefetches and
-// dehydrates into <PerformanceClient />; RTL can't render an async component, so
-// the smoke test targets the client component that owns the title + sections.
+// app/performance/page.tsx and app/origin/page.tsx are async RSC shells that SSR-prefetch and
+// dehydrate into <PerformanceClient /> and <OriginClient />; RTL can't render an async component, so
+// the smoke tests target the client components that own the title + sections.
 import PerformanceClient from '@/app/performance/_sections/PerformanceClient'
+import OriginClient from '@/app/origin/_sections/OriginClient'
 import FastlyValueClient from '@/app/fastly-value/page'
 import IOValueTab from '@/app/fastly-value/_sections/tabs/IOValueTab'
 import type { components } from '@/types/api.generated'
@@ -13,10 +14,10 @@ import React from 'react'
 import { spyOnConsoleError } from '../helpers/page-smoke'
 
 // R-6 (testing_suite_audit_2026-06-14.md): smoke & contract tests — verify
-// the page mounts, renders all 5 cards, contextual loading messages, empty states,
+// the page mounts, renders all cards, contextual loading messages, empty states,
 // and the approximate badge.
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/browser-stubs')).reactVirtualModuleMock())
 vi.mock('@/stores/serviceStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())
 
 vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke')).filterStoreModuleMock())
@@ -37,6 +38,18 @@ vi.mock('@/components/DataTable', async () => (await import('../helpers/page-smo
 vi.mock('@/components/FilterValueCell', () => ({
   FilterValueCell: ({ display }: { display: string }) => <span>{display}</span>,
 }))
+vi.mock('@/hooks/useLogFieldsCatalog', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/hooks/useLogFieldsCatalog')>()
+  return {
+    ...actual,
+    useActiveLogFields: () => ({
+      ready: true,
+      isFieldActive: vi.fn(() => true),
+      isGroupActive: () => true,
+      activeFields: new Set(['ottfb', 'pop', 'oip']),
+    }),
+  }
+})
 
 vi.mock('@/components/ReportLayout', async () =>
   (await import('../helpers/page-smoke')).reportLayoutModuleMock({
@@ -46,7 +59,7 @@ vi.mock('@/components/ReportLayout', async () =>
     filterPayload: {},
     intervalButtons: null,
     bucketSeconds: 3600,
-    config: { effectiveInterval: '1 day', interval: '1 day' },
+    config: { effectiveInterval: '1 day', interval: '1 day', validTrends: new Set(['off', 'auto']) },
     setChartInterval: vi.fn(),
     timezone: 'UTC',
   }),
@@ -68,6 +81,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  cleanup()
   errorSpy.mockRestore()
 })
 
@@ -204,8 +218,7 @@ test('fastly-value page mounts and renders title and tab navigation', () => {
 })
 
 test('fastly-value summary query key keeps its pre-migration shape', async () => {
-  const { resolveRangeWire } = await import('@/lib/range-wire')
-  const { quantizeAnchor } = await import('@/lib/time-window')
+  const { resolveRangeWire, quantizeAnchor } = await import('@/lib/range-wire')
   renderWithQuery(<FastlyValueClient />, { queryClient })
   const anchor = quantizeAnchor('2026-01-01T01:00:00Z')
   const { rangeKey } = resolveRangeWire({
@@ -258,4 +271,113 @@ describe('IOValueTab tables', () => {
     expect(screen.getByText('webp')).toBeTruthy()
     expect(screen.getByText('3.2x')).toBeTruthy()
   })
+})
+
+const MOCK_ORIGIN_DATA = {
+  has_data: true,
+  summary: {
+    total_misses: 450,
+    total_passes: 50,
+    ottfb_p50_ms: 45.2,
+    ottfb_p75_ms: 60.1,
+    ottfb_p95_ms: 120.5,
+    ottfb_p99_ms: 250.0,
+    ottlb_p50_ms: 65.0,
+    ottlb_p95_ms: 160.0,
+    cdn_overhead_p50_ms: 5.2,
+    origin_error_rate: 0.005,
+    obytes_p50: 1024,
+    _approx: false,
+  },
+  timeseries: {
+    has_data: true,
+    series: [
+      { time: '2026-01-01T00:00:00Z', value: 45.2 },
+      { time: '2026-01-01T00:05:00Z', value: 48.1 },
+    ],
+    _approx: false,
+  },
+  slow_urls: {
+    has_data: true,
+    rows: [
+      { url: '/api/v1/slow', requests: 120, p50_ms: 150.0, p95_ms: 320.0, p99_ms: 500.0 },
+    ],
+    _approx: false,
+  },
+  status_codes: {
+    has_data: true,
+    rows: [
+      { status: 200, count: 480 },
+      { status: 500, count: 20 },
+    ],
+  },
+  path_breakdown: {
+    has_data: true,
+    shielding_detected: true,
+    rows: [],
+  },
+  pop_latency: {
+    has_data: true,
+    rows: [
+      { pop: 'SJC', requests: 300, p50_ms: 40.0, p95_ms: 110.0, elevated: false },
+    ],
+    _approx: false,
+  },
+  ip_health: {
+    has_data: true,
+    rows: [
+      { oip: '203.0.113.1', requests: 500, p50_ms: 45.0, p95_ms: 120.0, error_pct: 0.5 },
+    ],
+    _approx: false,
+  },
+}
+
+test('origin page mounts and renders title and all origin card titles with loaded data', async () => {
+  mockPost.mockResolvedValue({ data: MOCK_ORIGIN_DATA })
+
+  renderWithQuery(<OriginClient />, { queryClient })
+
+  expect(screen.getByText('Origin Performance')).toBeInTheDocument()
+  expect(await screen.findByText('Origin TTFB (P50)')).toBeInTheDocument()
+  expect(screen.getByText('Origin TTFB (P95)')).toBeInTheDocument()
+  expect(screen.getByText('Origin Error Rate')).toBeInTheDocument()
+  expect(screen.getByText('Fetch Volume')).toBeInTheDocument()
+  expect(screen.getByText('Origin Latency')).toBeInTheDocument()
+  expect(screen.getByText('Status Code Distribution')).toBeInTheDocument()
+  expect(screen.getByText('Slowest URLs at Origin')).toBeInTheDocument()
+  expect(screen.getByText('Origin Performance by POP')).toBeInTheDocument()
+  expect(screen.getByText('Origin IP Health')).toBeInTheDocument()
+  expect(screen.getByText('Origin Payload Size')).toBeInTheDocument()
+  expect(errorSpy).not.toHaveBeenCalled()
+})
+
+test('origin page displays contextual loading messages while query is pending', () => {
+  // Never-resolving promise simulates active loading state
+  mockPost.mockReturnValue(new Promise(() => {}))
+
+  renderWithQuery(<OriginClient />, { queryClient })
+
+  expect(screen.getByText('Loading Origin TTFB (P50)...')).toBeInTheDocument()
+  expect(screen.getByText('Loading Origin TTFB (P95)...')).toBeInTheDocument()
+  expect(screen.getByText('Loading Origin Error Rate...')).toBeInTheDocument()
+  expect(screen.getByText('Loading Fetch Volume...')).toBeInTheDocument()
+  expect(screen.getByText('Loading origin latency timeseries...')).toBeInTheDocument()
+  expect(screen.getByText('Loading origin status code breakdown...')).toBeInTheDocument()
+  expect(screen.getByText('Loading slowest URLs at origin...')).toBeInTheDocument()
+  expect(screen.getByText('Loading origin performance by POP...')).toBeInTheDocument()
+  expect(screen.getByText('Loading origin IP health...')).toBeInTheDocument()
+  expect(screen.getByText('Loading origin payload size...')).toBeInTheDocument()
+})
+
+test('origin page displays empty states when has_data is false', async () => {
+  mockPost.mockResolvedValue({
+    data: {
+      has_data: false,
+      summary: { has_data: false },
+    },
+  })
+
+  renderWithQuery(<OriginClient />, { queryClient })
+
+  expect(await screen.findByText('No Origin Metrics Yet')).toBeInTheDocument()
 })

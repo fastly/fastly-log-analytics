@@ -1,10 +1,12 @@
+'use client'
+
 import { TrendingUp } from 'lucide-react'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { BackToAdminLink } from '@/components/BackToAdminLink'
 import { Button } from '@/components/ui/button'
 import { PageHeader } from '@/components/ui/page-header'
-import { SERIES_LAYOUT, WINDOWS } from './_sections/trends-config'
+import { SERIES_LAYOUT, WINDOWS } from './_sections/AdminTrendsClient'
 
 export default function Loading() {
   return (

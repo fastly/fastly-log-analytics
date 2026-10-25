@@ -866,10 +866,10 @@ def test_ngwaf_sync_happy_path_streams_page_status_then_done():
         patch("backend.utils.ngwaf.oldest_unenriched_timestamp", return_value="2025-12-01T00:00:00Z"),
         patch("backend.utils.ngwaf.fetch_verified_bots_paged", return_value=iter(pages)),
         patch(
-            "backend.utils.ngwaf_bot_cache.upsert_bots",
+            "backend.utils.ngwaf.upsert_bots",
             side_effect=lambda rows, ws, ts: upsert_calls.append((list(rows), ws, ts)),
         ),
-        patch("backend.utils.ngwaf_bot_cache.cleanup_old_bots", return_value=0),
+        patch("backend.utils.ngwaf.cleanup_old_bots", return_value=0),
     ):
         resp = _client().post("/api/services/svc1/ngwaf-sync")
 

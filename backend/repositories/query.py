@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sys as _sys
 import time
 from typing import Any
 
@@ -11,9 +12,8 @@ import duckdb
 
 from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS, mask_ip_values
 from backend.repositories._base import SectionTimer, _compact_sql_for_debug, _safe_table, record_duckdb_query
-from backend.repositories._sql import query as SQL
 from backend.utils.date_utils import parse_iso_utc
-from backend.utils.error_redaction import register_salt
+from backend.utils.router_utils import register_salt
 from backend.utils.sql_validator import (
     SQLValidationError,
     apply_user_query_limits,
@@ -23,6 +23,76 @@ from backend.utils.sql_validator import (
 from backend.utils.telemetry import get_tracked_calls, log_once_per
 
 logger = logging.getLogger(__name__)
+
+# ── User-query wrappers ───────────────────────────────────────────────────────
+
+EXPLAIN_WRAPPER = "EXPLAIN {sql}"
+"""DuckDB EXPLAIN of an already-validated user SQL statement.
+
+Inputs:
+- ``{sql}`` — the user's SQL, post-``validate_user_sql``. Trusted.
+
+Output: one row per plan line; the caller joins column 1 of each row.
+"""
+
+
+AUTO_LIMIT_WRAPPER = "SELECT * FROM ({inner}) AS _q LIMIT {limit}"
+"""Auto-apply ``LIMIT max_rows+1`` to a simple SELECT.
+
+Inputs:
+- ``{inner}`` — the user's SELECT, trailing semicolon stripped, already
+  validated by ``is_simple_select_statement`` and ``validate_user_sql``.
+- ``{limit}`` — integer literal (``max_rows + 1``). The ``+1`` lets the
+  caller detect truncation without a separate ``COUNT(*)`` pass and lets
+  DuckDB's top-k optimiser kick in on ``ORDER BY ... LIMIT``.
+
+Output: passes through the user query's columns, capped at ``{limit}``
+rows.
+"""
+
+
+# ── Preset library ────────────────────────────────────────────────────────────
+#
+# Three fixed presets surface in the analyst's "Presets" dropdown. Each
+# template substitutes only the trusted table identifier (output of
+# ``_safe_table`` — strict ``[A-Za-z0-9_]+`` regex).
+
+PRESET_SAMPLE_ROWS = "SELECT * FROM {table} LIMIT 100"
+"""Preview 100 raw log rows.
+
+Inputs:
+- ``{table}`` — quoted/safe table identifier (output of ``_safe_table``).
+
+Output: up to 100 rows, no ORDER BY (deliberately — a full sort on a
+1.6M-row table made the preset feel broken, and the ORDER BY text
+leaked into the analyst's textarea where editing ``*`` to ``COUNT(*)``
+produced a Binder error).
+"""
+
+
+PRESET_ROW_COUNT = "SELECT count(*) AS total_rows FROM {table}"
+"""Total number of rows in the log table.
+
+Inputs:
+- ``{table}`` — quoted/safe table identifier.
+
+Output (one row): ``(total_rows: int)``.
+"""
+
+
+PRESET_COLUMN_STATS = "SUMMARIZE {table}"
+"""DuckDB SUMMARIZE — per-column non-null counts, unique counts, etc.
+
+Inputs:
+- ``{table}`` — quoted/safe table identifier.
+
+Output: one row per column with DuckDB's standard SUMMARIZE columns
+(``column_name``, ``column_type``, ``min``, ``max``, ``approx_unique``,
+``avg``, ``std``, ``q25``, ``q50``, ``q75``, ``count``, ``null_percentage``).
+"""
+
+SQL: Any = _sys.modules[__name__]
+_sys.modules.setdefault("backend.repositories._sql.query", _sys.modules[__name__])
 
 # M1: hard ceiling on the number of rows /api/query will materialize, applied
 # as a defense-in-depth re-clamp inside execute_query (the QueryRequest model
@@ -164,7 +234,7 @@ def execute_query(
 
 
 from backend.utils.bounded_cache import BoundedTTLCache
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
 _PII_COLS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=300.0)  # 5 minutes
 _CacheRegistry.register("query._PII_COLS_CACHE", _PII_COLS_CACHE)

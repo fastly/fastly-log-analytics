@@ -435,7 +435,7 @@ def test_custom_field_name_regex_rejects_trailing_newline():
 def test_custom_field_model_rejects_trailing_newline():
     from pydantic import ValidationError
 
-    from backend.models.custom_fields import CustomField
+    from backend.models.services import CustomField
 
     body_cls = CustomField
     base = {

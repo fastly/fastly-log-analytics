@@ -22,18 +22,19 @@ from backend import config as svcconfig
 from backend.core import duckdb as db
 from backend.core import duckdb as duckdb_core
 from backend.core.duckdb import _safe_table_name, get_connection
-from backend.core.ducklake_admission import (
-    DuckLakeAdmissionTimeout,
-    _reset_for_tests,
-    ducklake_write_admission,
-    get_admission_stats,
-)
 from backend.core.iceberg import _ducklake as ducklake
 from backend.core.iceberg import buffer as buffer_mod
 from backend.core.iceberg import manifest as manifest_mod
 from backend.core.iceberg import view
 from backend.core.iceberg import view as view_mod
-from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
+from backend.core.iceberg._ducklake import (
+    DuckLakeAdmissionTimeout,
+    _ducklake_attach,
+    _reset_for_tests,
+    ducklake_table_name,
+    ducklake_write_admission,
+    get_admission_stats,
+)
 from backend.core.iceberg.buffer import _commit_buffer_impl, buffer_files
 from backend.core.iceberg.manifest import ducklake_table_exists, get_snapshot_calendar, get_table_info
 from backend.core.rollups import _common as rollup_common
@@ -1210,7 +1211,7 @@ class TestFastPathSteadyState:
 
 class TestViewSchemaParity:
     def test_view_carries_computed_columns_and_decodes(self, tmp_path):
-        from backend.utils import field_codes as fc
+        from backend.core import field_registry as fc
 
         src = _make_source(tmp_path, f"vp{uuid.uuid4().hex[:8]}")
         ts = datetime(2026, 8, 30, 12, 34, tzinfo=UTC)

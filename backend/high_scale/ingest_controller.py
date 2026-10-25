@@ -25,9 +25,9 @@ from backend.high_scale.publication import (
     HighScaleBatch,
     PublicationResult,
     PublicationStatus,
+    build_batch_id_from_manifest_id,
     row_matches_serving_domain,
 )
-from backend.high_scale.schema import build_batch_id_from_manifest_id
 from backend.high_scale.security import build_security_projection_rows
 from backend.high_scale.source_discovery import SourceObjectDescriptor
 

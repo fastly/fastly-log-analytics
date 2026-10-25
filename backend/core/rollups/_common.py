@@ -12,6 +12,7 @@ import contextvars
 import logging
 import os
 import shutil
+import threading
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
@@ -1466,3 +1467,28 @@ def describe_columns(
             logger.warning("[rollups] %s: %s%s: %s", service_id, label, table_ident, e)
         return None
     return {row[0] for row in rows}
+
+
+# ── Per-service in-process rollup readiness flag ─────────────────────────────
+
+_ready_lock = threading.Lock()
+_ready: set[str] = set()
+
+
+def rollup_coverage_ready(service_id: str) -> bool:
+    with _ready_lock:
+        return service_id in _ready
+
+
+def mark_rollup_coverage_ready(service_id: str) -> None:
+    with _ready_lock:
+        _ready.add(service_id)
+
+
+def reset_rollup_coverage_ready(service_id: str | None = None) -> None:
+    """Test-only: clear one service's flag, or every service's when omitted."""
+    with _ready_lock:
+        if service_id is None:
+            _ready.clear()
+        else:
+            _ready.discard(service_id)

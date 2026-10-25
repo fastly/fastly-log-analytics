@@ -35,16 +35,16 @@ from backend.core import (
 from backend.core import (
     metric_expressions,
     metric_snapshots,
-    operational_metrics,
     request_metrics,
     request_telemetry,
-    web_vitals_store,
 )
+from backend.core import metric_snapshots as operational_metrics
 from backend.core import request_context as rc
+from backend.core import request_telemetry as web_vitals_store
 from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
 from backend.core.metadata import slow_queries, usage_log, usage_log_db
 from backend.core.metadata.usage_log import clear_usage_log
-from backend.core.metrics import METRIC_DEFINITIONS, get_metric_sql
+from backend.core.metric_expressions import METRIC_DEFINITIONS, get_metric_sql
 from backend.core.query_instrumentation import (
     InstrumentedDuckDBConnection,
     _InstrumentedRecordReader,

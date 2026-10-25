@@ -1,8 +1,9 @@
 'use client'
 
 import * as React from 'react'
-import { flexRender, type Header, type ColumnDef, type Table as ReactTable } from '@tanstack/react-table'
-import { ArrowDown, ArrowUp, ArrowUpDown, GripVertical } from 'lucide-react'
+import { flexRender, type Header, type ColumnDef, type Row, type Table as ReactTable, type VisibilityState } from '@tanstack/react-table'
+import type { Virtualizer } from '@tanstack/react-virtual'
+import { ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, GripVertical, Inbox, Settings2 } from 'lucide-react'
 import {
   DndContext,
   KeyboardSensor,
@@ -24,10 +25,18 @@ import { CSS } from '@dnd-kit/utilities'
 
 import {
   Table,
+  TableBody,
+  TableCell,
   TableHead,
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -40,14 +49,239 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { TimeAgo } from '@/components/TimeAgo'
-import { ColumnVisibilityDropdown } from './ColumnVisibilityDropdown'
-import { DataTableBody } from './DataTableBody'
 import { useDataTableState, type DataTableBaseProps } from './useDataTableState'
 import { getApiBase } from '@/lib/api'
 import type { Schema } from '@/types/api'
 import { cn } from '@/lib/utils'
 
-export * from './ColumnVisibilityDropdown'
+// ─── ColumnVisibilityDropdown ────────────────────────────────────────────────
+
+interface BaseColumnVisibilityDropdownProps {
+  className?: string
+  align?: 'start' | 'end'
+  size?: 'sm' | 'default' | 'icon'
+  compact?: boolean
+}
+
+type ColumnVisibilityDropdownProps<TData = unknown> = BaseColumnVisibilityDropdownProps &
+  (
+    | {
+        columns: { id: string; label: string }[]
+        visibility: VisibilityState
+        onChange: (id: string, visible: boolean) => void
+        table?: never
+      }
+    | {
+        table: ReactTable<TData>
+        columns?: never
+        visibility?: never
+        onChange?: never
+      }
+  )
+
+export function ColumnVisibilityDropdown<TData = unknown>(
+  props: ColumnVisibilityDropdownProps<TData>,
+) {
+  const { className, align = 'end', compact = false } = props
+  const size = props.size ?? (compact ? 'sm' : 'sm')
+
+  const items = props.table
+    ? props.table
+        .getAllColumns()
+        .filter((column) => column.getCanHide())
+        .map((column) => ({
+          id: column.id,
+          label:
+            column.columnDef.meta?.label ??
+            (typeof column.columnDef.header === 'string'
+              ? column.columnDef.header
+              : column.id.replace(/_/g, ' ')),
+          visible: column.getIsVisible(),
+          onToggle: (visible: boolean) => column.toggleVisibility(visible),
+        }))
+    : props.columns.map((column) => ({
+        id: column.id,
+        label: column.label,
+        visible: props.visibility[column.id] !== false,
+        onToggle: (visible: boolean) => props.onChange(column.id, visible),
+      }))
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            variant="outline"
+            size={size}
+            className={cn('h-8 gap-2 px-2 text-xs font-normal', className)}
+          />
+        }
+      >
+        {size === 'icon' ? (
+          <Settings2 className="h-4 w-4" />
+        ) : (
+          <>
+            Columns
+            <ChevronDown className="h-3 w-3 opacity-50" />
+          </>
+        )}
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align={align} className="w-auto min-w-[180px]">
+        {items.map((item) => (
+          <DropdownMenuCheckboxItem
+            key={item.id}
+            className="capitalize whitespace-nowrap"
+            checked={item.visible}
+            onCheckedChange={(value) => item.onToggle(!!value)}
+          >
+            {item.label}
+          </DropdownMenuCheckboxItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+// ─── DataTableBody / MemoizedTableRow ────────────────────────────────────────
+
+interface TableRowProps<TData> {
+  row: Row<TData>
+  onRowClick?: (row: TData) => void
+  rowClassName?: string
+  columnVisibility: VisibilityState
+  columnSizing?: Record<string, number>
+}
+
+function TableRowImpl<TData>({ row, onRowClick, rowClassName }: TableRowProps<TData>) {
+  return (
+    <TableRow
+      data-state={row.getIsSelected() && 'selected'}
+      onClick={() => onRowClick?.(row.original)}
+      tabIndex={onRowClick ? 0 : undefined}
+      onKeyDown={
+        onRowClick
+          ? (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                onRowClick(row.original)
+              }
+            }
+          : undefined
+      }
+      className={cn(
+        onRowClick &&
+          'cursor-pointer hover:bg-muted/50 focus-visible:outline-none focus-visible:bg-muted/50 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring',
+        rowClassName,
+      )}
+    >
+      {row.getVisibleCells().map((cell) => {
+        const meta = cell.column.columnDef.meta as { cellClassName?: string } | undefined
+        return (
+          <TableCell
+            key={cell.id}
+            style={{ width: cell.column.getSize(), maxWidth: cell.column.getSize() }}
+            className={cn('truncate', meta?.cellClassName)}
+          >
+            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+          </TableCell>
+        )
+      })}
+    </TableRow>
+  )
+}
+
+export const MemoizedTableRow = React.memo(TableRowImpl) as typeof TableRowImpl
+
+interface DataTableBodyProps<TData, TValue> {
+  table: ReactTable<TData>
+  rows: Row<TData>[]
+  rowVirtualizer: Virtualizer<HTMLDivElement, Element>
+  columns: ColumnDef<TData, TValue>[]
+  columnVisibility: VisibilityState
+  columnSizing?: Record<string, number>
+  isLoading?: boolean
+  onRowClick?: (row: TData) => void
+  getRowClassName?: (row: TData) => string
+  emptyMessage?: string
+  emptyHint?: React.ReactNode
+  onClearFilter?: () => void
+}
+
+export function DataTableBody<TData, TValue>({
+  table,
+  rows,
+  rowVirtualizer,
+  columns,
+  columnVisibility,
+  columnSizing,
+  isLoading,
+  onRowClick,
+  getRowClassName,
+  emptyMessage = 'No results.',
+  emptyHint,
+  onClearFilter,
+}: DataTableBodyProps<TData, TValue>) {
+  return (
+    <TableBody>
+      {isLoading ? (
+        <TableRow>
+          <TableCell
+            colSpan={columns.length}
+            className="h-24 text-center text-muted-foreground"
+          >
+            Loading...
+          </TableCell>
+        </TableRow>
+      ) : table.getRowModel().rows?.length ? (
+        <>
+          {rowVirtualizer.getVirtualItems().length > 0 && rowVirtualizer.getVirtualItems()[0].start > 0 && (
+            <TableRow role="presentation" aria-hidden="true">
+              <TableCell role="none" colSpan={columns.length} style={{ height: rowVirtualizer.getVirtualItems()[0].start, padding: 0, border: 0 }} />
+            </TableRow>
+          )}
+          {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+            const row = rows[virtualRow.index]
+            return (
+              <MemoizedTableRow
+                key={row.id}
+                row={row}
+                onRowClick={onRowClick}
+                rowClassName={getRowClassName ? getRowClassName(row.original) : undefined}
+                columnVisibility={columnVisibility}
+                columnSizing={columnSizing}
+              />
+            )
+          })}
+          {rowVirtualizer.getVirtualItems().length > 0 && rowVirtualizer.getVirtualItems()[rowVirtualizer.getVirtualItems().length - 1].end < rowVirtualizer.getTotalSize() && (
+            <TableRow role="presentation" aria-hidden="true">
+              <TableCell role="none" colSpan={columns.length} style={{ height: rowVirtualizer.getTotalSize() - rowVirtualizer.getVirtualItems()[rowVirtualizer.getVirtualItems().length - 1].end, padding: 0, border: 0 }} />
+            </TableRow>
+          )}
+        </>
+      ) : (
+        <TableRow>
+          <TableCell
+            colSpan={columns.length}
+            className="h-32 text-center text-muted-foreground"
+          >
+            <div className="flex flex-col items-center justify-center gap-2 py-4">
+              <Inbox className="h-7 w-7 opacity-30" aria-hidden="true" />
+              <p className="text-sm font-medium">{emptyMessage}</p>
+              {emptyHint && (
+                <p className="text-xs text-muted-foreground">{emptyHint}</p>
+              )}
+              {onClearFilter && (
+                <Button variant="outline" size="sm" className="mt-1" onClick={onClearFilter}>
+                  Clear filter
+                </Button>
+              )}
+            </div>
+          </TableCell>
+        </TableRow>
+      )}
+    </TableBody>
+  )
+}
 
 // ─── StaticHeader / DraggableTableHeader ─────────────────────────────────────
 
@@ -437,7 +671,7 @@ function DataTableImpl<TData, TValue>({
       )}
     >
       <Table
-        scrollFocusable={!enableColumnReorder}
+        scrollFocusable={false}
         className={tableClassName}
         style={{ tableLayout: 'fixed', width: table.getTotalSize(), minWidth: '100%' }}
       >
@@ -519,105 +753,8 @@ export const DataTable = React.memo(DataTableImpl) as typeof DataTableImpl
 
 export type DataTableReadonlyProps<TData, TValue> = DataTableBaseProps<TData, TValue>
 
-function DataTableReadonlyImpl<TData, TValue>({
-  columns,
-  data,
-  searchKey,
-  isLoading,
-  showPagination = true,
-  sorting: controlledSorting,
-  onSortingChange,
-  initialSorting = [],
-  initialVisibility = {},
-  title,
-  compactToolbar = false,
-  extraToolbarContent,
-  renderToolbar,
-  hideToolbar = false,
-  columnVisibility: controlledVisibility,
-  onColumnVisibilityChange,
-  emptyMessage = 'No results.',
-  emptyHint,
-  onClearFilter,
-  onRowClick,
-  getRowClassName,
-  tableCaption,
-}: DataTableReadonlyProps<TData, TValue>) {
-  const {
-    table,
-    rows,
-    rowVirtualizer,
-    tableContainerRef,
-    columnVisibility,
-    columnSizing,
-  } = useDataTableState({
-    columns,
-    data,
-    showPagination,
-    controlledSorting,
-    onSortingChange,
-    initialSorting,
-    controlledVisibility,
-    onColumnVisibilityChange,
-    initialVisibility,
-  })
-
-  return (
-    <div className="w-full">
-      {!hideToolbar &&
-        (renderToolbar ? (
-          renderToolbar(table)
-        ) : (
-          <DataTableToolbar
-            table={table}
-            title={title}
-            searchKey={searchKey}
-            compactToolbar={compactToolbar}
-            extraToolbarContent={extraToolbarContent}
-          />
-        ))}
-
-      <div
-        ref={tableContainerRef}
-        tabIndex={0}
-        className="rounded-md border overflow-auto max-h-[min(600px,calc(100dvh-200px))] w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        <Table
-          scrollFocusable={false}
-          style={{ tableLayout: 'fixed', width: table.getTotalSize(), minWidth: '100%' }}
-        >
-          <caption className="sr-only">
-            {tableCaption || (typeof title === 'string' ? title : 'Data Table')}
-          </caption>
-          <TableHeader>
-            {table.getHeaderGroups().map((headerGroup) => (
-              <TableRow key={headerGroup.id}>
-                {headerGroup.headers.map((header) => (
-                  <StaticTableHeader key={header.id} header={header} />
-                ))}
-              </TableRow>
-            ))}
-          </TableHeader>
-          <DataTableBody
-            table={table}
-            rows={rows}
-            rowVirtualizer={rowVirtualizer}
-            columns={columns}
-            columnVisibility={columnVisibility}
-            columnSizing={columnSizing}
-            isLoading={isLoading}
-            onRowClick={onRowClick}
-            getRowClassName={getRowClassName}
-            emptyMessage={emptyMessage}
-            emptyHint={emptyHint}
-            onClearFilter={onClearFilter}
-          />
-        </Table>
-      </div>
-
-      {showPagination && <DataTablePagination table={table} />}
-    </div>
-  )
+function DataTableReadonlyImpl<TData, TValue>(props: DataTableReadonlyProps<TData, TValue>) {
+  return <DataTableImpl {...props} enableColumnReorder={false} />
 }
 
 export const DataTableReadonly = React.memo(DataTableReadonlyImpl) as typeof DataTableReadonlyImpl

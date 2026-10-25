@@ -81,7 +81,7 @@ def _lock_cron_run(con: Any, service_id: str, run_id: int) -> None:
 
 def _clear_cron_schedule_cache() -> None:
     try:
-        from backend.utils.cache_registry import CacheRegistry
+        from backend.utils.bounded_cache import CacheRegistry
 
         CacheRegistry.clear("services.core._cron_schedule_cache")
     except Exception:

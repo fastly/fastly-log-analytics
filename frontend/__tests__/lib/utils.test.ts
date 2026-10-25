@@ -14,8 +14,7 @@ import {
 } from '@/lib/userActivity'
 import { showReadOnlyToast, showToast } from '@/lib/toast'
 import { toUTCDate, formatTimeAgo, formatLocalDateTime } from '@/lib/date'
-import { resolveRangeWire, DEFAULT_RANGE_TOKEN } from '@/lib/range-wire'
-import { ANCHOR_QUANTUM_SECONDS, quantizeAnchor } from '@/lib/time-window'
+import { resolveRangeWire, DEFAULT_RANGE_TOKEN, ANCHOR_QUANTUM_SECONDS, quantizeAnchor } from '@/lib/range-wire'
 import { invalidInput } from '../helpers/partial'
 
 describe('formatBytes', () => {

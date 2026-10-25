@@ -27,8 +27,8 @@ from backend.models.security import SecurityAggregatesResponse
 from backend.repositories._base import QueryRunner, _safe_table, _schema_cols_cache
 from backend.utils import bot_sources
 from backend.utils.remote_access import TimeBounds
+from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 from tests.conftest import MOCK_SERVICE_ID, override_request_context
-from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
 
 _SVC_HEADERS = {"x-fastly-service-id": MOCK_SERVICE_ID}
 

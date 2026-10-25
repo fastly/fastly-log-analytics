@@ -6,8 +6,13 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from backend.high_scale._common import format_iso_utc as _iso
-from backend.high_scale._common import parse_time_window, range_value, visible_fact_clauses
-from backend.high_scale._filters import request_filter_clauses
+from backend.high_scale._common import (
+    parse_time_window,
+    range_value,
+    request_filter_clauses,
+    resolve_asn_display_labels,
+    visible_fact_clauses,
+)
 from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.models.dashboard import SessionDetailRequest, SessionsRequest
 from backend.repositories.utils.response_cache import (
@@ -16,7 +21,7 @@ from backend.repositories.utils.response_cache import (
     client_cache_token,
     digest_cache_key,
 )
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
 _memo = ResponseMemo(ttl=30.0, maxsize=128)
 _CacheRegistry.register("high_scale.sessions._response_cache", _memo.cache)
@@ -226,11 +231,7 @@ _FILTERED = """
 """
 
 
-def _asn_label_map(service_id: str, asns: list[int]) -> dict[int, str]:
-    from backend.core import duckdb as _db
-
-    names = _db.get_asn_names(service_id, asns)
-    return {asn: _db.format_asn_label(asn, names.get(asn, "")) for asn in asns}
+_asn_label_map = resolve_asn_display_labels
 
 
 def _as_dt(val: Any) -> datetime | None:

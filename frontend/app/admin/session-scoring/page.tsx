@@ -3,7 +3,7 @@
 import * as React from 'react'
 import dynamic from 'next/dynamic'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { RefreshCw, ShieldCheck } from 'lucide-react'
+import { Clock, RefreshCw, ShieldCheck } from 'lucide-react'
 
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
@@ -14,19 +14,22 @@ import { Alert, AlertDescription } from '@/components/ui/alert'
 import { BackToAdminLink } from '@/components/BackToAdminLink'
 import { Button } from '@/components/ui/button'
 import { PageHeader } from '@/components/ui/page-header'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ComplianceChart, ScoreDistChart } from '@/components/SessionScoring/StackedHourlyBarChart'
 import { ExcludeRegexCard } from '@/components/SessionScoring/ExcludeRegexCard'
-import { MatrixVersionsCard } from '@/components/SessionScoring/MatrixVersionsCard'
-import { PerReasonAucCard } from '@/components/SessionScoring/PerReasonAucCard'
-import { RetrainButton } from '@/components/SessionScoring/RetrainButton'
-import { RocPrCurves } from '@/components/SessionScoring/RocPrCurves'
-import { RotateKeyButton } from '@/components/SessionScoring/RotateKeyButton'
+import { AuditLogTab, MatrixVersionsCard } from '@/components/SessionScoring/MatrixVersionsCard'
+import { RetrainButton, RotateKeyButton } from '@/components/SessionScoring/RetrainButton'
+import { PerReasonAucCard, RocPrCurves } from '@/components/SessionScoring/RocPrCurves'
 import { ScorerLatencyChart, ScorerErrorsChart } from '@/components/SessionScoring/ScorerSeriesCard'
-import { ScorerFailOpenBreakdownCard } from '@/components/SessionScoring/ScorerFailOpenBreakdownCard'
-import { ScoringHealthCard } from '@/components/SessionScoring/ScoringHealthCard'
-import { SinceHoursPicker } from '@/components/SessionScoring/SinceHoursPicker'
+import { ScorerFailOpenBreakdownCard, ScoringHealthCard } from '@/components/SessionScoring/ScoringHealthCard'
 import { StatusPanel } from '@/components/SessionScoring/StatusPanel'
 import { ThresholdSlider } from '@/components/SessionScoring/ThresholdSlider'
 import { L2EnforcementCard } from '@/components/SessionScoring/L2EnforcementCard'
@@ -39,24 +42,53 @@ import {
 import { useServiceStore } from '@/stores/serviceStore'
 import Loading from './loading'
 
+const PRESETS = [
+  { value: 1, label: 'Last 1h', shortLabel: '1h' },
+  { value: 6, label: 'Last 6h', shortLabel: '6h' },
+  { value: 24, label: 'Last 24h', shortLabel: '24h' },
+  { value: 72, label: 'Last 3d', shortLabel: '3d' },
+  { value: 168, label: 'Last 7d', shortLabel: '7d' },
+] as const
+
+interface SinceHoursPickerProps {
+  value: number
+  onChange: (sinceHours: number) => void
+  compact?: boolean
+}
+
+/**
+ * Time-range picker for the session-scoring page. Drives every card
+ * that takes a `sinceHours` prop (ScoringHealthCard, ThresholdSlider,
+ * TopFlaggedTable, ScoreDistChart, ComplianceChart, RocPrCurves).
+ *
+ * Capped at 168h (7d) because the backend's threshold-preview /
+ * health endpoints already enforce `le=168` — going wider needs a
+ * separate "deep history" endpoint that paginates the DuckDB scan.
+ */
+export function SinceHoursPicker({ value, onChange, compact = false }: SinceHoursPickerProps) {
+  return (
+    <Select value={String(value)} onValueChange={(v) => v && onChange(Number(v) || 24)}>
+      <SelectTrigger className={compact ? 'h-7 text-xs w-20' : 'h-8 w-[120px] text-xs'}>
+        {!compact && <Clock className="h-3.5 w-3.5 mr-1 text-muted-foreground" />}
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {PRESETS.map((p) => (
+          <SelectItem key={p.value} value={String(p.value)} className="text-xs">
+            {compact ? p.shortLabel : p.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
+}
+
 // LabelsTab is gated behind the "Labels" tab — most page loads never open
 // it. Lazy-load to keep it out of the overview bundle (~200 LOC plus its
 // Popover/Dialog/Table dependencies). `ssr: false` because the tab uses
 // client-only React Query hooks and there's no SEO value to pre-rendering.
 const LabelsTab = dynamic(
   () => import('@/components/SessionScoring/LabelsTab').then((m) => ({ default: m.LabelsTab })),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="space-y-3" aria-busy="true">
-        <Skeleton className="h-5 w-48" />
-        <Skeleton className="h-32 w-full" />
-      </div>
-    ),
-  },
-)
-const AuditLogTab = dynamic(
-  () => import('@/components/SessionScoring/AuditLogTab').then((m) => ({ default: m.AuditLogTab })),
   {
     ssr: false,
     loading: () => (

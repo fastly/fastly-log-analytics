@@ -31,8 +31,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from backend.core import metric_snapshots
-from backend.core.clickhouse_export import FosArtifacts
-from backend.core.clickhouse_rows import PAYLOAD_COLUMNS
+from backend.core.clickhouse_publication import PAYLOAD_COLUMNS, FosArtifacts
 from backend.core.query_attribution import Attribution, current_attribution
 from backend.core.query_registry import query_registry
 from backend.deps import require_admin

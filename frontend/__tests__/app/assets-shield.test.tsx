@@ -9,7 +9,7 @@ vi.mock('@/stores/serviceStore', async () => (await import('../helpers/page-smok
 
 vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke')).filterStoreModuleMock())
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/browser-stubs')).reactVirtualModuleMock())
 
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/assets-shield'))
 
@@ -237,8 +237,7 @@ test('assets-shield refetches when only the custom range start changes', async (
 })
 
 test('assets-shield first paint hits the SSR-seeded cache entry (no refetch)', async () => {
-  const { resolveRangeWire } = await import('@/lib/range-wire')
-  const { quantizeAnchor } = await import('@/lib/time-window')
+  const { resolveRangeWire, quantizeAnchor } = await import('@/lib/range-wire')
   const anchor = quantizeAnchor('2026-01-01T01:00:00Z')
   const { rangeKey } = resolveRangeWire({
     relativeRange: null,

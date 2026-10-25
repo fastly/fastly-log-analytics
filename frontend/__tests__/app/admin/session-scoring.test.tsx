@@ -29,7 +29,10 @@ vi.mock('next/dynamic', () => ({
   default: () => () => null,
 }))
 
-vi.mock('@/components/SessionScoring/RocPrCurves', () => ({ RocPrCurves: () => null }))
+vi.mock('@/components/SessionScoring/RocPrCurves', () => ({
+  RocPrCurves: () => null,
+  PerReasonAucCard: () => null,
+}))
 vi.mock('@/components/SessionScoring/StackedHourlyBarChart', () => ({
   ScoreDistChart: () => null,
   ComplianceChart: () => null,
@@ -40,10 +43,10 @@ vi.mock('@/components/SessionScoring/ScorerSeriesCard', () => ({
   ScorerErrorsChart: () => null,
   ScorerSeriesCard: () => null,
 }))
-vi.mock('@/components/SessionScoring/ScorerFailOpenBreakdownCard', () => ({
+vi.mock('@/components/SessionScoring/ScoringHealthCard', () => ({
+  ScoringHealthCard: () => null,
   ScorerFailOpenBreakdownCard: () => null,
 }))
-vi.mock('@/components/SessionScoring/ScoringHealthCard', () => ({ ScoringHealthCard: () => null }))
 vi.mock('@/components/SessionScoring/StatusPanel', () => ({
   StatusPanel: ({ serviceId }: { serviceId: string }) => (
     <div data-testid="admin-session-scoring-status-card">Status for {serviceId}</div>
@@ -52,12 +55,15 @@ vi.mock('@/components/SessionScoring/StatusPanel', () => ({
 vi.mock('@/components/SessionScoring/ThresholdSlider', () => ({ ThresholdSlider: () => null }))
 vi.mock('@/components/SessionScoring/L2EnforcementCard', () => ({ L2EnforcementCard: () => null }))
 vi.mock('@/components/SessionScoring/TopFlaggedTable', () => ({ TopFlaggedTable: () => null }))
-vi.mock('@/components/SessionScoring/PerReasonAucCard', () => ({ PerReasonAucCard: () => null }))
-vi.mock('@/components/SessionScoring/MatrixVersionsCard', () => ({ MatrixVersionsCard: () => null }))
+vi.mock('@/components/SessionScoring/MatrixVersionsCard', () => ({
+  MatrixVersionsCard: () => null,
+  AuditLogTab: () => null,
+}))
 vi.mock('@/components/SessionScoring/ExcludeRegexCard', () => ({ ExcludeRegexCard: () => null }))
-vi.mock('@/components/SessionScoring/RetrainButton', () => ({ RetrainButton: () => null }))
-vi.mock('@/components/SessionScoring/RotateKeyButton', () => ({ RotateKeyButton: () => null }))
-vi.mock('@/components/SessionScoring/SinceHoursPicker', () => ({ SinceHoursPicker: () => null }))
+vi.mock('@/components/SessionScoring/RetrainButton', () => ({
+  RetrainButton: () => null,
+  RotateKeyButton: () => null,
+}))
 
 const API_BASE = getApiBase()
 

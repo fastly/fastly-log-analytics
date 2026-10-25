@@ -15,12 +15,11 @@ import time as _t
 from collections.abc import Callable
 from typing import Any
 
-from backend.core.metadata import usage_log_db as _usage_log_db
+from backend.core.metadata import usage_log as _usage_log_db
 from backend.core.metadata.base import get_con, get_con_readonly
 from backend.core.metadata.ingest_log import recompute_ingested_files_summary
 from backend.core.metadata.usage_log import DEFAULT_METADATA_RETENTION
-from backend.utils.bounded_cache import BoundedTTLCache
-from backend.utils.cache_registry import CacheRegistry
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 
 logger = logging.getLogger(__name__)
 

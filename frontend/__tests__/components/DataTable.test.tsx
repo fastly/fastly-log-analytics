@@ -40,7 +40,7 @@ vi.mock('@/hooks/useIsAnalyst', () => ({
   useMaskIps: () => false,
   useEnforceMaskedFilters: () => {},
 }))
-vi.mock('@tanstack/react-virtual', async () => (await import('@/__tests__/helpers/virtual-mock')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('@/__tests__/helpers/browser-stubs')).reactVirtualModuleMock())
 vi.mock('@/hooks/useDateFormat', () => ({
   useDateFormat: () => ({
     full: (iso: string) => `full:${iso}`,

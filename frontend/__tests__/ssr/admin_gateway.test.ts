@@ -445,3 +445,113 @@ describe('fetchUsageLogServerSide (usage-log SSR)', () => {
     )
   })
 })
+
+describe('ssrUpstreamGet — debug-responses cookie propagation', () => {
+  beforeEach(() => {
+    delete process.env.ADMIN_GATEWAY_SECRET
+    delete process.env.ADMIN_GATEWAY_REQUIRED
+  })
+
+  it('cookie=1 + loopback Host (admin branch) → upstream request carries x-debug-responses: 1', async () => {
+    setCookies('fla.debugResponses=1', (k: string) => (k === 'fla.debugResponses' ? { value: '1' } : undefined))
+    inbound({ host: 'localhost:3001' })
+    await withTestHttpServer(
+      (_req, res) => {
+        res.statusCode = 200
+        res.setHeader('Content-Type', 'application/json')
+        res.end('{}')
+      },
+      async (srv) => {
+        const { ssrUpstreamGet } = await import('@/lib/ssr/_transport')
+        const out = await ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 'test' })
+        expect(out).not.toBeNull()
+        expect(srv.lastRequest?.headers['x-debug-responses']).toBe('1')
+      },
+    )
+  })
+
+  it('cookie=1 + Caddy marker (analyst branch) → header NOT sent', async () => {
+    setCookies('fla.debugResponses=1', (k: string) => (k === 'fla.debugResponses' ? { value: '1' } : undefined))
+    inbound({ 'x-proxied-by-caddy': 'true', host: 'fastly-log-analytics.global.ssl.fastly.net' })
+    await withTestHttpServer(
+      (_req, res) => {
+        res.statusCode = 200
+        res.setHeader('Content-Type', 'application/json')
+        res.end('{}')
+      },
+      async (srv) => {
+        const { ssrUpstreamGet } = await import('@/lib/ssr/_transport')
+        const out = await ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 'test' })
+        expect(out).not.toBeNull()
+        expect(srv.lastRequest?.headers['x-debug-responses']).toBeUndefined()
+      },
+    )
+  })
+
+  it('cookie absent → header not sent (unchanged from before this feature existed)', async () => {
+    setCookies('')
+    inbound({ host: 'localhost:3001' })
+    await withTestHttpServer(
+      (_req, res) => {
+        res.statusCode = 200
+        res.setHeader('Content-Type', 'application/json')
+        res.end('{}')
+      },
+      async (srv) => {
+        const { ssrUpstreamGet } = await import('@/lib/ssr/_transport')
+        const out = await ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 'test' })
+        expect(out).not.toBeNull()
+        expect(srv.lastRequest?.headers['x-debug-responses']).toBeUndefined()
+      },
+    )
+  })
+
+  it('cookie=0 → header not sent', async () => {
+    setCookies('fla.debugResponses=0', (k: string) => (k === 'fla.debugResponses' ? { value: '0' } : undefined))
+    inbound({ host: 'localhost:3001' })
+    await withTestHttpServer(
+      (_req, res) => {
+        res.statusCode = 200
+        res.setHeader('Content-Type', 'application/json')
+        res.end('{}')
+      },
+      async (srv) => {
+        const { ssrUpstreamGet } = await import('@/lib/ssr/_transport')
+        const out = await ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 'test' })
+        expect(out).not.toBeNull()
+        expect(srv.lastRequest?.headers['x-debug-responses']).toBeUndefined()
+      },
+    )
+  })
+
+  it('disables keep-alive socket reuse (connection: close) and retries once on ECONNRESET', async () => {
+    let attempts = 0
+    let secondConnHeader: string | string[] | undefined
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    setCookies('')
+    inbound({ host: 'localhost:3001' })
+    await withTestHttpServer(
+      (req, res) => {
+        attempts += 1
+        if (attempts === 1) {
+          req.socket.destroy()
+          return
+        }
+        secondConnHeader = req.headers.connection
+        res.statusCode = 200
+        res.setHeader('Content-Type', 'application/json')
+        res.end('{"recovered":true}')
+      },
+      async () => {
+        const { ssrUpstreamGet } = await import('@/lib/ssr/_transport')
+        const out = await ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 'test' })
+        expect(out).not.toBeNull()
+        expect(out?.statusCode).toBe(200)
+        expect(out?.body).toBe('{"recovered":true}')
+        expect(attempts).toBe(2)
+        expect(secondConnHeader).toBe('close')
+        expect(warnSpy).not.toHaveBeenCalled()
+      },
+    )
+  })
+})

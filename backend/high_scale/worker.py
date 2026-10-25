@@ -17,6 +17,7 @@ from backend import config as app_config
 from backend.core.clickhouse_client import ClickHouseClient
 from backend.core.duckdb import _get_fos_client, get_source_for_service
 from backend.high_scale.aggregate_batch_adapter import AggregateBatchAdapter
+from backend.high_scale.archive_models import from_environment
 from backend.high_scale.archive_publication import ArchivePublication, S3ObjectStore
 from backend.high_scale.deletion import (
     DeletionController,
@@ -24,7 +25,6 @@ from backend.high_scale.deletion import (
     PostgresDeletionLedger,
 )
 from backend.high_scale.ingest_controller import HighScaleIngestController
-from backend.high_scale.models import from_environment
 from backend.high_scale.orchestration import HighScaleWorkerCoordinator, PageRun
 from backend.high_scale.postgres_control import PostgresControlPlane
 from backend.high_scale.publication import ClickHouseBatchAdapter, ClickHousePublication, PostgresBatchManifestStore

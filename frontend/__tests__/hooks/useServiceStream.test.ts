@@ -58,7 +58,7 @@ afterEach(() => {
 
 describe('useServiceStream', () => {
   it('short-circuits when enabled=false (no fetch fired)', async () => {
-    const { useServiceStream } = await import('@/hooks/useServiceStream')
+    const { useServiceStream } = await import('@/hooks/useAdminEventStream')
     renderHook(() => useServiceStream(false, '/api/x', () => {}))
     await new Promise(r => setTimeout(r, 20))
     expect(fetch).not.toHaveBeenCalled()
@@ -66,7 +66,7 @@ describe('useServiceStream', () => {
 
   it('short-circuits when activeServiceId is null (no fetch fired)', async () => {
     mockState = { activeServiceId: null }
-    const { useServiceStream } = await import('@/hooks/useServiceStream')
+    const { useServiceStream } = await import('@/hooks/useAdminEventStream')
     renderHook(() => useServiceStream(true, '/api/x', () => {}))
     await new Promise(r => setTimeout(r, 20))
     expect(fetch).not.toHaveBeenCalled()
@@ -77,7 +77,7 @@ describe('useServiceStream', () => {
       makeStreamResponse(['data: alpha\n\ndata: beta\n\n']),
     )
     const events: string[] = []
-    const { useServiceStream } = await import('@/hooks/useServiceStream')
+    const { useServiceStream } = await import('@/hooks/useAdminEventStream')
     renderHook(() => useServiceStream(true, '/api/x', raw => events.push(raw)))
     await waitFor(() => expect(events).toEqual(['alpha', 'beta']))
   })
@@ -89,7 +89,7 @@ describe('useServiceStream', () => {
       makeStreamResponse(['data: one\r\rdata: two\r\r']),
     )
     const events: string[] = []
-    const { useServiceStream } = await import('@/hooks/useServiceStream')
+    const { useServiceStream } = await import('@/hooks/useAdminEventStream')
     renderHook(() => useServiceStream(true, '/api/x', raw => events.push(raw)))
     await waitFor(() => expect(events).toEqual(['one', 'two']))
   })
@@ -100,7 +100,7 @@ describe('useServiceStream', () => {
       signal = init?.signal as AbortSignal
       return makeNeverClosingStreamResponse()
     })
-    const { useServiceStream } = await import('@/hooks/useServiceStream')
+    const { useServiceStream } = await import('@/hooks/useAdminEventStream')
     const { unmount } = renderHook(() => useServiceStream(true, '/api/x', () => {}))
 
     await waitFor(() => expect(fetch).toHaveBeenCalled())
@@ -118,7 +118,7 @@ describe('useServiceStream', () => {
       ids.push((ri.headers as Record<string, string>)['x-service-id'])
       return makeNeverClosingStreamResponse()
     })
-    const { useServiceStream } = await import('@/hooks/useServiceStream')
+    const { useServiceStream } = await import('@/hooks/useAdminEventStream')
     const { rerender } = renderHook(() => useServiceStream(true, '/api/x', () => {}))
 
     await waitFor(() => expect(signals.length).toBe(1))
@@ -141,7 +141,7 @@ describe('useServiceStream', () => {
       // Always fail — we want to observe the delay BETWEEN retries.
       return new Response('nope', { status: 500 })
     })
-    const { useServiceStream } = await import('@/hooks/useServiceStream')
+    const { useServiceStream } = await import('@/hooks/useAdminEventStream')
     renderHook(() => useServiceStream(true, '/api/x', () => {}))
 
     // Drain microtasks so the first fetch lands and the catch+setTimeout posts.
@@ -193,7 +193,7 @@ describe('useServiceStream', () => {
         headers = init?.headers as Record<string, string>
         return makeNeverClosingStreamResponse()
       })
-      const { useServiceStream } = await import('@/hooks/useServiceStream')
+      const { useServiceStream } = await import('@/hooks/useAdminEventStream')
       renderHook(() => useServiceStream(true, '/api/x', () => {}, { optionalService: true }))
 
       await waitFor(() => expect(fetch).toHaveBeenCalled())
@@ -207,7 +207,7 @@ describe('useServiceStream', () => {
         headers = init?.headers as Record<string, string>
         return makeNeverClosingStreamResponse()
       })
-      const { useServiceStream } = await import('@/hooks/useServiceStream')
+      const { useServiceStream } = await import('@/hooks/useAdminEventStream')
       renderHook(() => useServiceStream(true, '/api/x', () => {}, { optionalService: true }))
 
       await waitFor(() => expect(fetch).toHaveBeenCalled())
@@ -224,7 +224,7 @@ describe('useServiceStream', () => {
         ids.push((ri.headers as Record<string, string>)['x-service-id'])
         return makeNeverClosingStreamResponse()
       })
-      const { useServiceStream } = await import('@/hooks/useServiceStream')
+      const { useServiceStream } = await import('@/hooks/useAdminEventStream')
       const { rerender } = renderHook(() =>
         useServiceStream(true, '/api/x', () => {}, { optionalService: true }),
       )
@@ -255,7 +255,7 @@ describe('useServiceStream', () => {
         ids.push((ri.headers as Record<string, string>)['x-service-id'])
         return makeNeverClosingStreamResponse()
       })
-      const { useServiceStream } = await import('@/hooks/useServiceStream')
+      const { useServiceStream } = await import('@/hooks/useAdminEventStream')
       renderHook(() => useServiceStream(true, '/api/x', () => {}, { optionalService: true }))
 
       // Pre-hydration: nothing connects, so there's no throwaway upstream.
@@ -285,7 +285,7 @@ describe('useServiceStream', () => {
       return new Response('x', { status: 500 })
     })
 
-    const { useServiceStream } = await import('@/hooks/useServiceStream')
+    const { useServiceStream } = await import('@/hooks/useAdminEventStream')
     renderHook(() => useServiceStream(true, '/api/x', () => {}))
 
     // Burn the failed-retry climb (1s, then 2s).

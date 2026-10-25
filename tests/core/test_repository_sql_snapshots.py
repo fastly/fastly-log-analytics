@@ -29,12 +29,12 @@ from __future__ import annotations
 
 import re
 
-from backend.repositories._sql import dashboard as DASH_SQL
+from backend.repositories import dashboard as DASH_SQL
+from backend.repositories import sessions as SESS_SQL
 from backend.repositories._sql import insights as INS_SQL
 from backend.repositories._sql import network as NET_SQL
 from backend.repositories._sql import origin as ORG_SQL
 from backend.repositories._sql import security as SEC_SQL
-from backend.repositories._sql import sessions as SESS_SQL
 
 # Auto-fill stub for any {placeholder} in a SQL template. Each value is
 # a syntactically harmless string that the snapshot text can carry

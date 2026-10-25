@@ -10,8 +10,8 @@ import duckdb
 import pyarrow.parquet as pq
 import pytest
 
-from backend.core import rollup_readiness as rr
 from backend.core import rollups
+from backend.core import rollups as rr
 from backend.core.rollups import day_bundles, rollups_present
 from backend.core.rollups._common import parquet_zstd_target, unlink_quiet, wavg
 from backend.core.rollups.recompute import ADMIN_BACKFILLS, DAY_COMPACTORS
@@ -938,7 +938,7 @@ def test_reader_ignores_stray_tmp_bundle(tmp_path):
 
 from backend.repositories import dashboard, network, security
 from backend.repositories._base import _safe_table
-from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
+from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 
 
 def test_unfiltered_dashboard_queries_hit_rollups_and_skip_raw_scans(in_memory_duckdb, monkeypatch):

@@ -322,7 +322,7 @@ def _to_postgres(sql: str) -> str:
 def pg_schema_statements() -> list[str]:
     """Every DDL statement the Postgres metadata store needs, in order."""
     from backend.core.metadata.base import _SCHEMA
-    from backend.core.metadata.usage_log_db import _SCHEMA as _USAGE_SCHEMA
+    from backend.core.metadata.usage_log import _SCHEMA as _USAGE_SCHEMA
     from backend.core.share_db import _SCHEMA as _SHARE_DB_SCHEMA
     from backend.high_scale.postgres_control import SCHEMA_DDL as HIGH_SCALE_CONTROL_DDL
 

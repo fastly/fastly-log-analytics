@@ -8,8 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from backend.core.request_context import RequestContext, build_request_context
 from backend.deps import ServiceId, get_service_id
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.dashboard import PresetQuery, QueryRequest, QueryResponse, QuerySchemaResponse
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.repositories import query as repo
 from backend.repositories.query import get_cached_presets, set_cached_presets
 from backend.utils.auth import mask_ips_for

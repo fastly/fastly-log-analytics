@@ -10,12 +10,14 @@ celery's .delay()).
 from __future__ import annotations
 
 import gzip
+import io
 import json
 import re
 import shutil
 import sqlite3
 import time
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import duckdb
@@ -48,129 +50,106 @@ from backend.core.rum_ingest import ingest_rum_logs
 from backend.utils.vcl_validator import lint_vcl
 from tests._helpers.ledger import (
     DuckLakeLedgerEnv,
+    attacher,
     clear_ledger,
     download_stub,
     lake_reader,
     ledger_row,
     seed_discovered,
 )
-from tests._helpers.ledger import (
-    attacher as _attacher,
-)
-from tests._helpers.ledger import (
-    clear_ledger as _clear_ledger,
-)
-from tests._helpers.ledger import (
-    download_stub as _download_stub,
-)
-from tests._helpers.ledger import (
-    lake_reader as _lake_reader,
-)
+
+_attacher = attacher
+_clear_ledger = clear_ledger
+_download_stub = download_stub
+_lake_reader = lake_reader
 
 
 # ── Merged from tests/core/test_rum_ingest.py ──
 @pytest.fixture
 def mock_metadata_db(tmp_path):
     """Create a temporary SQLite metadata DB for testing."""
-    db_path = tmp_path / "test_service.metadata.db"
-    con = sqlite3.connect(str(db_path))
+    con = sqlite3.connect(str(tmp_path / "test_service.metadata.db"))
     con.row_factory = sqlite3.Row
-
-    con.execute("""
+    con.executescript("""
         CREATE TABLE IF NOT EXISTS ingested_files (
-            file_name TEXT,
-            source_name TEXT,
-            ingested_at TEXT DEFAULT (datetime('now')),
-            row_count INTEGER,
-            file_size_bytes INTEGER,
-            error_count INTEGER DEFAULT 0,
-            file_date DATE,
-            table_name TEXT NOT NULL DEFAULT 'logs',
+            file_name TEXT, source_name TEXT, ingested_at TEXT DEFAULT (datetime('now')),
+            row_count INTEGER, file_size_bytes INTEGER, error_count INTEGER DEFAULT 0,
+            file_date DATE, table_name TEXT NOT NULL DEFAULT 'logs',
             PRIMARY KEY (file_name, source_name, table_name)
-        )
-    """)
-    con.execute("""
+        );
         CREATE TABLE IF NOT EXISTS ingest_in_flight (
-            buffer_filename TEXT NOT NULL,
-            source_name TEXT NOT NULL,
-            files_json TEXT NOT NULL,
-            started_at TEXT DEFAULT (datetime('now')),
-            table_name TEXT NOT NULL DEFAULT 'logs',
+            buffer_filename TEXT NOT NULL, source_name TEXT NOT NULL, files_json TEXT NOT NULL,
+            started_at TEXT DEFAULT (datetime('now')), table_name TEXT NOT NULL DEFAULT 'logs',
             PRIMARY KEY (buffer_filename, table_name)
-        )
-    """)
-    con.execute("""
+        );
         CREATE TABLE IF NOT EXISTS ingested_files_summary (
-            source_name TEXT PRIMARY KEY,
-            file_count INTEGER NOT NULL DEFAULT 0,
-            total_rows INTEGER NOT NULL DEFAULT 0,
-            total_bytes INTEGER NOT NULL DEFAULT 0,
-            count_with_bytes INTEGER NOT NULL DEFAULT 0,
-            latest_file_name TEXT,
-            last_ingested TEXT
-        )
-    """)
-    con.execute("""
+            source_name TEXT PRIMARY KEY, file_count INTEGER NOT NULL DEFAULT 0,
+            total_rows INTEGER NOT NULL DEFAULT 0, total_bytes INTEGER NOT NULL DEFAULT 0,
+            count_with_bytes INTEGER NOT NULL DEFAULT 0, latest_file_name TEXT, last_ingested TEXT
+        );
         CREATE TABLE IF NOT EXISTS cron_runs (
-            id INTEGER PRIMARY KEY,
-            service_id TEXT,
-            job_name TEXT,
-            duration_seconds REAL,
-            status TEXT,
-            rows_ingested INTEGER,
-            error_message TEXT,
-            started_at TEXT
-        )
+            id INTEGER PRIMARY KEY, service_id TEXT, job_name TEXT, duration_seconds REAL,
+            status TEXT, rows_ingested INTEGER, error_message TEXT, started_at TEXT
+        );
     """)
-    con.commit()
     yield con
     con.close()
 
 
-@patch("backend.core.rum_ingest.get_source_for_service")
-@patch("backend.core.rum_ingest._get_fos_client")
-@patch("backend.core.metadata.get_con")
-@patch("backend.core.metadata.ingest_log.get_con")
-@patch("backend.core.rum_ingest.start_cron_run")
-@patch("backend.core.rum_ingest.log_cron_run")
-@patch("backend.core.rum_ingest.finalize_cron_run_if_running")
-def test_ingest_rum_logs_empty_bucket(
-    mock_finalize,
-    mock_log,
-    mock_start,
-    mock_get_con_ingest,
-    mock_get_con_metadata,
-    mock_get_fos,
-    mock_get_source,
-    mock_metadata_db,
-):
+@pytest.fixture
+def rum_ingest_env(mock_metadata_db):
+    """Standard patch harness for ingest_rum_logs tests."""
+    with (
+        patch("backend.core.rum_ingest.get_source_for_service") as mock_get_source,
+        patch("backend.core.rum_ingest._get_fos_client") as mock_get_fos,
+        patch("backend.core.metadata.get_con", return_value=mock_metadata_db),
+        patch("backend.core.metadata.ingest_log.get_con", return_value=mock_metadata_db),
+        patch("backend.core.rum_ingest.start_cron_run", return_value=123) as mock_start,
+        patch("backend.core.rum_ingest.log_cron_run") as mock_log,
+        patch("backend.core.rum_ingest.finalize_cron_run_if_running") as mock_finalize,
+        patch("backend.core.iceberg.write_to_buffer") as mock_write_buffer,
+    ):
+        mock_s3 = MagicMock()
+        mock_get_fos.return_value = mock_s3
+        mock_get_source.return_value = {
+            "name": "test_service",
+            "service_id": "test_service",
+            "bucket": "test-bucket",
+        }
+
+        def stage_single_object(key: str, content: bytes) -> None:
+            mock_s3.get_paginator.return_value.paginate.return_value = [
+                {"Contents": [{"Key": key, "Size": len(content)}]}
+            ]
+            mock_s3.get_object.return_value = {"Body": io.BytesIO(content)}
+
+        yield SimpleNamespace(
+            db=mock_metadata_db,
+            s3=mock_s3,
+            get_source=mock_get_source,
+            get_fos=mock_get_fos,
+            start=mock_start,
+            log=mock_log,
+            finalize=mock_finalize,
+            write_buffer=mock_write_buffer,
+            stage_single_object=stage_single_object,
+        )
+
+
+def test_ingest_rum_logs_empty_bucket(rum_ingest_env):
     """Test RUM ingest behavior when the bucket contains no new RUM logs."""
     service_id = "test_service"
-    mock_get_con_ingest.return_value = mock_metadata_db
-    mock_get_con_metadata.return_value = mock_metadata_db
-    mock_start.return_value = 123
-    mock_get_source.return_value = {
-        "name": "test_service",
-        "service_id": service_id,
-        "bucket": "test-bucket",
-        "prefix": "test-prefix",
-    }
-
-    # Mock S3 list_objects_v2 paginator returning empty contents
-    mock_s3 = MagicMock()
-    mock_get_fos.return_value = mock_s3
-    mock_paginator = MagicMock()
-    mock_paginator.paginate.return_value = [{}]
-    mock_s3.get_paginator.return_value = mock_paginator
+    rum_ingest_env.get_source.return_value["prefix"] = "test-prefix"
+    rum_ingest_env.s3.get_paginator.return_value.paginate.return_value = [{}]
 
     # Execute ingest generator
     events = list(ingest_rum_logs(service_id))
 
     assert events == [("started", 123), ("done", 0)]
-    mock_log.assert_called_once()
-    assert mock_log.call_args[0][3] == "success"  # Status is success (no logs found is not an error)
-    assert mock_log.call_args[1]["rows_ingested"] == 0
-    mock_finalize.assert_called_once_with(service_id, "rum_sync", 123)
+    rum_ingest_env.log.assert_called_once()
+    assert rum_ingest_env.log.call_args[0][3] == "success"  # Status is success (no logs found is not an error)
+    assert rum_ingest_env.log.call_args[1]["rows_ingested"] == 0
+    rum_ingest_env.finalize.assert_called_once_with(service_id, "rum_sync", 123)
 
 
 @pytest.mark.parametrize(
@@ -221,37 +200,10 @@ def test_ingest_rum_logs_records_discovery_failure_and_finalizes_run():
     finalize.assert_called_once_with(service_id, "rum_sync", 123)
 
 
-@patch("backend.core.rum_ingest.get_source_for_service")
-@patch("backend.core.rum_ingest._get_fos_client")
-@patch("backend.core.metadata.get_con")
-@patch("backend.core.metadata.ingest_log.get_con")
-@patch("backend.core.rum_ingest.start_cron_run")
-@patch("backend.core.rum_ingest.log_cron_run")
-@patch("backend.core.rum_ingest.finalize_cron_run_if_running")
-@patch("backend.core.iceberg.write_to_buffer")
 @pytest.mark.parametrize("capture_failure", [False, True])
-def test_ingest_rum_logs_success(
-    mock_write_buffer,
-    mock_finalize,
-    mock_log,
-    mock_start,
-    mock_get_con_ingest,
-    mock_get_con_metadata,
-    mock_get_fos,
-    mock_get_source,
-    mock_metadata_db,
-    capture_failure,
-):
+def test_ingest_rum_logs_success(rum_ingest_env, capture_failure):
     """Valid rows survive malformed neighbors, which are retained as exact-byte evidence."""
     service_id = "test_service"
-    mock_get_con_ingest.return_value = mock_metadata_db
-    mock_get_con_metadata.return_value = mock_metadata_db
-    mock_start.return_value = 123
-    mock_get_source.return_value = {
-        "name": "test_service",
-        "service_id": service_id,
-        "bucket": "test-bucket",
-    }
 
     # Generate sample RUM log line matching standard Fastly fields (fallback query param format)
     raw_log = {
@@ -265,24 +217,7 @@ def test_ingest_rum_logs_success(
     }
     malformed_line = b'{"timestamp":\n'
     gzipped_content = gzip.compress(json.dumps(raw_log).encode("utf-8") + b"\n" + malformed_line)
-
-    mock_s3 = MagicMock()
-    mock_get_fos.return_value = mock_s3
-    mock_paginator = MagicMock()
-    mock_paginator.paginate.return_value = [
-        {
-            "Contents": [
-                {"Key": "raw/rum/rum_log_0.json.gz", "Size": len(gzipped_content)},
-            ]
-        }
-    ]
-    mock_s3.get_paginator.return_value = mock_paginator
-
-    # Mock s3 get_object response
-    import io
-
-    mock_response = {"Body": io.BytesIO(gzipped_content)}
-    mock_s3.get_object.return_value = mock_response
+    rum_ingest_env.stage_single_object("raw/rum/rum_log_0.json.gz", gzipped_content)
 
     # Execute ingest generator
     if capture_failure:
@@ -300,11 +235,11 @@ def test_ingest_rum_logs_success(
     ]
 
     # Verify write_to_buffer was called with table_name="client_vitals"
-    mock_write_buffer.assert_called_once()
-    assert mock_write_buffer.call_args[1]["table_name"] == "client_vitals"
+    rum_ingest_env.write_buffer.assert_called_once()
+    assert rum_ingest_env.write_buffer.call_args[1]["table_name"] == "client_vitals"
 
     # Verify that file key was successfully registered to ingested_files for both tables
-    ingested = mock_metadata_db.execute("SELECT * FROM ingested_files").fetchall()
+    ingested = rum_ingest_env.db.execute("SELECT * FROM ingested_files").fetchall()
     assert len(ingested) == 2
     table_names = {row["table_name"] for row in ingested}
     assert table_names == {"client_vitals", "client_errors"}
@@ -325,8 +260,8 @@ def test_ingest_rum_logs_success(
         "objects_partial": int(not capture_failure),
         "objects_failed": int(capture_failure),
     }
-    assert mock_log.call_args.kwargs["outcome_counters"] == expected_outcomes
-    assert mock_log.call_args.args[3] == "error"
+    assert rum_ingest_env.log.call_args.kwargs["outcome_counters"] == expected_outcomes
+    assert rum_ingest_env.log.call_args.args[3] == "error"
     if capture_failure:
         assert capture is None
     else:
@@ -334,33 +269,8 @@ def test_ingest_rum_logs_success(
         assert capture.call_args.args[3] == malformed_line
 
 
-@patch("backend.core.rum_ingest.get_source_for_service")
-@patch("backend.core.rum_ingest._get_fos_client")
-@patch("backend.core.metadata.get_con")
-@patch("backend.core.metadata.ingest_log.get_con")
-@patch("backend.core.rum_ingest.start_cron_run")
-@patch("backend.core.rum_ingest.log_cron_run")
-@patch("backend.core.rum_ingest.finalize_cron_run_if_running")
-@patch("backend.core.iceberg.write_to_buffer")
-def test_ingest_rum_logs_preserves_query_metrics_and_exception_context(
-    mock_write_buffer,
-    mock_finalize,
-    mock_log,
-    mock_start,
-    mock_get_con_ingest,
-    mock_get_con_metadata,
-    mock_get_fos,
-    mock_get_source,
-    mock_metadata_db,
-):
-    import io
-
+def test_ingest_rum_logs_preserves_query_metrics_and_exception_context(rum_ingest_env):
     service_id = "test_service"
-    mock_get_con_ingest.return_value = mock_metadata_db
-    mock_get_con_metadata.return_value = mock_metadata_db
-    mock_start.return_value = 123
-    mock_get_source.return_value = {"name": service_id, "service_id": service_id, "bucket": "test-bucket"}
-
     rows = [
         {
             "timestamp": "2026-08-07T03:07:47+00:00",
@@ -378,11 +288,7 @@ def test_ingest_rum_logs_preserves_query_metrics_and_exception_context(
         },
     ]
     payload = gzip.compress(b"\n".join(json.dumps(row).encode() for row in rows) + b"\n")
-    fos = mock_get_fos.return_value
-    fos.get_paginator.return_value.paginate.return_value = [
-        {"Contents": [{"Key": "raw/rum/query-and-error.json.gz", "Size": len(payload)}]}
-    ]
-    fos.get_object.return_value = {"Body": io.BytesIO(payload)}
+    rum_ingest_env.stage_single_object("raw/rum/query-and-error.json.gz", payload)
 
     events = list(ingest_rum_logs(service_id))
 
@@ -391,7 +297,9 @@ def test_ingest_rum_logs_preserves_query_metrics_and_exception_context(
         ("file_done", "query-and-error.json.gz", 2),
         ("done", 2),
     ]
-    written = {call.kwargs["table_name"]: call.args[1].to_pylist() for call in mock_write_buffer.call_args_list}
+    written = {
+        call.kwargs["table_name"]: call.args[1].to_pylist() for call in rum_ingest_env.write_buffer.call_args_list
+    }
     assert len(written["client_vitals"]) == len(written["client_errors"]) == 1
     vital = written["client_vitals"][0]
     assert (vital["metric_name"], vital["metric_value"], vital["metric_rating"]) == ("LCP", 1234.5, "good")
@@ -403,91 +311,43 @@ def test_ingest_rum_logs_preserves_query_metrics_and_exception_context(
         7,
     )
     assert (error["pathname"], error["req_id"]) == ("/deep/path", "request-error")
-    assert mock_log.call_args.args[3] == "success"
-    assert mock_log.call_args.kwargs["outcome_counters"]["valid_records"] == 2
-    mock_finalize.assert_called_once_with(service_id, "rum_sync", 123)
+    assert rum_ingest_env.log.call_args.args[3] == "success"
+    assert rum_ingest_env.log.call_args.kwargs["outcome_counters"]["valid_records"] == 2
+    rum_ingest_env.finalize.assert_called_once_with(service_id, "rum_sync", 123)
 
 
-@patch("backend.core.rum_ingest.get_source_for_service")
-@patch("backend.core.rum_ingest._get_fos_client")
-@patch("backend.core.metadata.get_con")
-@patch("backend.core.metadata.ingest_log.get_con")
-@patch("backend.core.rum_ingest.start_cron_run")
-@patch("backend.core.rum_ingest.log_cron_run")
-@patch("backend.core.rum_ingest.finalize_cron_run_if_running")
 def test_ingest_rum_logs_retains_whole_corrupt_container_and_fails_its_run(
-    mock_finalize,
-    mock_log,
-    mock_start,
-    mock_get_con_ingest,
-    mock_get_con_metadata,
-    mock_get_fos,
-    mock_get_source,
-    mock_metadata_db,
+    rum_ingest_env,
     monkeypatch,
     tmp_path,
 ):
-    import io
-
     service_id = "rum-corrupt-gzip"
     broken_gzip = b"\x1f\x8bnot a valid gzip stream"
     monkeypatch.setattr("backend.config.SERVICES_DATA_DIR", tmp_path)
-    mock_get_con_ingest.return_value = mock_metadata_db
-    mock_get_con_metadata.return_value = mock_metadata_db
-    mock_start.return_value = 124
-    mock_get_source.return_value = {"name": service_id, "service_id": service_id, "bucket": "test-bucket"}
-    fos = mock_get_fos.return_value
-    fos.get_paginator.return_value.paginate.return_value = [
-        {"Contents": [{"Key": "raw/rum/corrupt.json.gz", "Size": len(broken_gzip)}]}
-    ]
-    fos.get_object.return_value = {"Body": io.BytesIO(broken_gzip)}
+    rum_ingest_env.start.return_value = 124
+    rum_ingest_env.get_source.return_value = {"name": service_id, "service_id": service_id, "bucket": "test-bucket"}
+    rum_ingest_env.stage_single_object("raw/rum/corrupt.json.gz", broken_gzip)
 
     events = list(ingest_rum_logs(service_id))
 
     assert events[0] == ("started", 124)
     assert events[1][:2] == ("error", "s3://test-bucket/raw/rum/corrupt.json.gz")
     assert events[-1] == ("done", 0)
-    assert mock_log.call_args.args[3] == "error"
-    assert mock_log.call_args.kwargs["outcome_counters"]["corrupt_containers"] == 1
-    assert mock_log.call_args.kwargs["outcome_counters"]["objects_failed"] == 1
+    assert rum_ingest_env.log.call_args.args[3] == "error"
+    assert rum_ingest_env.log.call_args.kwargs["outcome_counters"]["corrupt_containers"] == 1
+    assert rum_ingest_env.log.call_args.kwargs["outcome_counters"]["objects_failed"] == 1
     evidence = list_quarantine_evidence(service_id)
     assert len(evidence) == 1
     item, evidence_file = quarantine.read_evidence(service_id, evidence[0]["id"])
     with evidence_file:
         assert evidence_file.read() == broken_gzip
     assert item["original_key"] == "raw/rum/corrupt.json.gz"
-    mock_finalize.assert_called_once_with(service_id, "rum_sync", 124)
+    rum_ingest_env.finalize.assert_called_once_with(service_id, "rum_sync", 124)
 
 
-@patch("backend.core.rum_ingest.get_source_for_service")
-@patch("backend.core.rum_ingest._get_fos_client")
-@patch("backend.core.metadata.get_con")
-@patch("backend.core.metadata.ingest_log.get_con")
-@patch("backend.core.rum_ingest.start_cron_run")
-@patch("backend.core.rum_ingest.log_cron_run")
-@patch("backend.core.rum_ingest.finalize_cron_run_if_running")
-@patch("backend.core.iceberg.write_to_buffer")
-def test_ingest_rum_logs_faro_dual_fan_out(
-    mock_write_buffer,
-    mock_finalize,
-    mock_log,
-    mock_start,
-    mock_get_con_ingest,
-    mock_get_con_metadata,
-    mock_get_fos,
-    mock_get_source,
-    mock_metadata_db,
-):
+def test_ingest_rum_logs_faro_dual_fan_out(rum_ingest_env):
     """Test dual-event fan-out under Faro format (vitals & exception in the same beacon payload)."""
     service_id = "test_service"
-    mock_get_con_ingest.return_value = mock_metadata_db
-    mock_get_con_metadata.return_value = mock_metadata_db
-    mock_start.return_value = 123
-    mock_get_source.return_value = {
-        "name": "test_service",
-        "service_id": service_id,
-        "bucket": "test-bucket",
-    }
 
     # Generate Faro format log with both vitals and exceptions
     faro_payload = {
@@ -512,24 +372,7 @@ def test_ingest_rum_logs_faro_dual_fan_out(
         "timestamp": "2026-08-07T03:07:47+00:00",
     }
     gzipped_content = gzip.compress(json.dumps(raw_log).encode("utf-8"))
-
-    mock_s3 = MagicMock()
-    mock_get_fos.return_value = mock_s3
-    mock_paginator = MagicMock()
-    mock_paginator.paginate.return_value = [
-        {
-            "Contents": [
-                {"Key": "raw/rum/rum_log_1.json.gz", "Size": len(gzipped_content)},
-            ]
-        }
-    ]
-    mock_s3.get_paginator.return_value = mock_paginator
-
-    # Mock s3 get_object response
-    import io
-
-    mock_response = {"Body": io.BytesIO(gzipped_content)}
-    mock_s3.get_object.return_value = mock_response
+    rum_ingest_env.stage_single_object("raw/rum/rum_log_1.json.gz", gzipped_content)
 
     # Execute ingest generator
     events = list(ingest_rum_logs(service_id))
@@ -542,12 +385,12 @@ def test_ingest_rum_logs_faro_dual_fan_out(
     ]
 
     # Verify write_to_buffer was called twice (once for vitals, once for errors)
-    assert mock_write_buffer.call_count == 2
-    written_tables = {call.kwargs["table_name"] for call in mock_write_buffer.call_args_list}
+    assert rum_ingest_env.write_buffer.call_count == 2
+    written_tables = {call.kwargs["table_name"] for call in rum_ingest_env.write_buffer.call_args_list}
     assert written_tables == {"client_vitals", "client_errors"}
 
     # Verify that file key was successfully registered to ingested_files for both tables
-    ingested = mock_metadata_db.execute("SELECT * FROM ingested_files").fetchall()
+    ingested = rum_ingest_env.db.execute("SELECT * FROM ingested_files").fetchall()
     assert len(ingested) == 2
     vitals_row = [r for r in ingested if r["table_name"] == "client_vitals"][0]
     errors_row = [r for r in ingested if r["table_name"] == "client_errors"][0]
@@ -555,34 +398,10 @@ def test_ingest_rum_logs_faro_dual_fan_out(
     assert errors_row["row_count"] == 1
 
 
-@patch("backend.core.rum_ingest.get_source_for_service")
-@patch("backend.core.rum_ingest._get_fos_client")
-@patch("backend.core.metadata.get_con")
-@patch("backend.core.metadata.ingest_log.get_con")
-@patch("backend.core.rum_ingest.start_cron_run")
-@patch("backend.core.rum_ingest.log_cron_run")
-@patch("backend.core.rum_ingest.finalize_cron_run_if_running")
-def test_ingest_rum_logs_list_fos_files_error_marks_run_error(
-    mock_finalize,
-    mock_log,
-    mock_start,
-    mock_get_con_ingest,
-    mock_get_con_metadata,
-    mock_get_fos,
-    mock_get_source,
-    mock_metadata_db,
-):
+def test_ingest_rum_logs_list_fos_files_error_marks_run_error(rum_ingest_env):
     """Gap 4: A LIST error from list_fos_files marks the RUM run error, not success with 0 files."""
     service_id = "test_service"
-    mock_get_con_ingest.return_value = mock_metadata_db
-    mock_get_con_metadata.return_value = mock_metadata_db
-    mock_start.return_value = 123
-    mock_get_source.return_value = {
-        "name": "test_service",
-        "service_id": service_id,
-        "bucket": "test-bucket",
-        "prefix": "test-prefix",
-    }
+    rum_ingest_env.get_source.return_value["prefix"] = "test-prefix"
 
     def fake_list_gen(**kwargs):
         yield {"type": "error", "message": "FOS list failed: Access Denied"}
@@ -600,59 +419,32 @@ def test_ingest_rum_logs_list_fos_files_error_marks_run_error(
     assert any(evt[0] == "error" for evt in events), f"Expected error event, got {events}"
 
     # log_cron_run must be called with status='error'
-    assert mock_log.called
-    call_args = mock_log.call_args[0]
-    call_kwargs = mock_log.call_args[1]
+    assert rum_ingest_env.log.called
+    call_args = rum_ingest_env.log.call_args[0]
+    call_kwargs = rum_ingest_env.log.call_args[1]
     status = call_args[3] if len(call_args) > 3 else call_kwargs.get("status")
     assert status == "error", f"Expected cron run status 'error', got {status}"
 
 
-@patch("backend.core.rum_ingest.get_source_for_service")
-@patch("backend.core.rum_ingest._get_fos_client")
-@patch("backend.core.metadata.get_con")
-@patch("backend.core.metadata.ingest_log.get_con")
-@patch("backend.core.rum_ingest.start_cron_run")
-@patch("backend.core.rum_ingest.log_cron_run")
-@patch("backend.core.rum_ingest.finalize_cron_run_if_running")
-def test_ingest_rum_logs_incremental_idle_tick_bounds_list_calls(
-    mock_finalize,
-    mock_log,
-    mock_start,
-    mock_get_con_ingest,
-    mock_get_con_metadata,
-    mock_get_fos,
-    mock_get_source,
-    mock_metadata_db,
-):
+def test_ingest_rum_logs_incremental_idle_tick_bounds_list_calls(rum_ingest_env):
     """Gap 1: Incremental discovery on an idle tick issues <= 5 LIST calls
     against a large mocked raw/rum/ prefix."""
     service_id = "test_service"
-    mock_get_con_ingest.return_value = mock_metadata_db
-    mock_get_con_metadata.return_value = mock_metadata_db
-    mock_start.return_value = 123
-    mock_get_source.return_value = {
-        "name": "test_service",
-        "service_id": service_id,
-        "bucket": "test-bucket",
-    }
 
     # Pre-populate ingested_files with existing v3 RUM files
-    mock_metadata_db.execute(
-        "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, table_name) "
-        "VALUES (?, ?, 10, 100, 'client_vitals')",
-        ("s3://test-bucket/raw/rum/year=2026/month=10/day=07/hour=14/minute=50/file1.json.gz", "test_service"),
-    )
-    mock_metadata_db.execute(
-        "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, table_name) "
-        "VALUES (?, ?, 10, 100, 'client_errors')",
-        ("s3://test-bucket/raw/rum/year=2026/month=10/day=07/hour=14/minute=50/file1.json.gz", "test_service"),
-    )
-    mock_metadata_db.commit()
+    for table_name in ("client_vitals", "client_errors"):
+        rum_ingest_env.db.execute(
+            "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, table_name) "
+            "VALUES (?, ?, 10, 100, ?)",
+            (
+                "s3://test-bucket/raw/rum/year=2026/month=10/day=07/hour=14/minute=50/file1.json.gz",
+                "test_service",
+                table_name,
+            ),
+        )
+    rum_ingest_env.db.commit()
 
     list_calls = []
-    mock_s3 = MagicMock()
-    mock_get_fos.return_value = mock_s3
-    mock_paginator = MagicMock()
 
     def fake_paginate(**kwargs):
         list_calls.append(kwargs)
@@ -673,8 +465,7 @@ def test_ingest_rum_logs_incremental_idle_tick_bounds_list_calls(
         # Minute prefix returns empty (idle tick)
         return [{"Contents": []}]
 
-    mock_paginator.paginate.side_effect = fake_paginate
-    mock_s3.get_paginator.return_value = mock_paginator
+    rum_ingest_env.s3.get_paginator.return_value.paginate.side_effect = fake_paginate
 
     events = list(ingest_rum_logs(service_id))
     assert events == [("started", 123), ("done", 0)]
@@ -687,40 +478,10 @@ def test_ingest_rum_logs_incremental_idle_tick_bounds_list_calls(
     )
 
 
-@patch("backend.core.rum_ingest.get_source_for_service")
-@patch("backend.core.rum_ingest._get_fos_client")
-@patch("backend.core.metadata.get_con")
-@patch("backend.core.metadata.ingest_log.get_con")
-@patch("backend.core.rum_ingest.start_cron_run")
-@patch("backend.core.rum_ingest.log_cron_run")
-@patch("backend.core.rum_ingest.finalize_cron_run_if_running")
-@patch("backend.core.iceberg.write_to_buffer")
-def test_ingest_rum_logs_time_budget_allows_first_chunk_trap_41(
-    mock_write_buffer,
-    mock_finalize,
-    mock_log,
-    mock_start,
-    mock_get_con_ingest,
-    mock_get_con_metadata,
-    mock_get_fos,
-    mock_get_source,
-    mock_metadata_db,
-    monkeypatch,
-):
+def test_ingest_rum_logs_time_budget_allows_first_chunk_trap_41(rum_ingest_env, monkeypatch):
     """Gap 3 & Trap #41: ingest_rum_logs respects max_seconds budget,
     but ALWAYS allows the first chunk to execute even if the budget is expired."""
-    import io
-    import time
-
     service_id = "test_service"
-    mock_get_con_ingest.return_value = mock_metadata_db
-    mock_get_con_metadata.return_value = mock_metadata_db
-    mock_start.return_value = 123
-    mock_get_source.return_value = {
-        "name": "test_service",
-        "service_id": service_id,
-        "bucket": "test-bucket",
-    }
 
     # Generate 100 fake files (2 chunks of 50)
     fake_files = [
@@ -728,10 +489,7 @@ def test_ingest_rum_logs_time_budget_allows_first_chunk_trap_41(
     ]
     valid_line = json.dumps({"timestamp": "2026-10-07T14:50:00Z", "rum_metric_name": "LCP", "rum_metric_value": "120"})
     gz_content = gzip.compress(valid_line.encode("utf-8"))
-
-    mock_s3 = MagicMock()
-    mock_get_fos.return_value = mock_s3
-    mock_s3.get_object.return_value = {"Body": io.BytesIO(gz_content)}
+    rum_ingest_env.s3.get_object.return_value = {"Body": io.BytesIO(gz_content)}
 
     def fake_list_gen(**kwargs):
         if False:
@@ -770,45 +528,16 @@ def test_ingest_rum_logs_time_budget_allows_first_chunk_trap_41(
 
     monkeypatch.setattr(ingest_mod, "_download_chunk_to_local", counting_download)
 
-    events = list(ingest_rum_logs(service_id, max_seconds=20))
+    list(ingest_rum_logs(service_id, max_seconds=20))
 
     # Exactly 1 chunk must have downloaded and processed (50 files), not 2 chunks (100 files)
     assert download_count == 1, f"Expected exactly 1 chunk due to max_seconds bound, got {download_count}"
 
 
-@patch("backend.core.rum_ingest.get_source_for_service")
-@patch("backend.core.rum_ingest._get_fos_client")
-@patch("backend.core.metadata.get_con")
-@patch("backend.core.metadata.ingest_log.get_con")
-@patch("backend.core.rum_ingest.start_cron_run")
-@patch("backend.core.rum_ingest.log_cron_run")
-@patch("backend.core.rum_ingest.finalize_cron_run_if_running")
-@patch("backend.core.iceberg.write_to_buffer")
-def test_ingest_rum_logs_deletes_raw_objects_inline_and_excludes_failures(
-    mock_write_buffer,
-    mock_finalize,
-    mock_log,
-    mock_start,
-    mock_get_con_ingest,
-    mock_get_con_metadata,
-    mock_get_fos,
-    mock_get_source,
-    mock_metadata_db,
-    monkeypatch,
-):
+def test_ingest_rum_logs_deletes_raw_objects_inline_and_excludes_failures(rum_ingest_env, monkeypatch):
     """Gap 2: ingest_rum_logs deletes raw objects inline after buffer write + insert_ingested_files,
     excluding unreadable files and files whose quarantine capture failed."""
-    import io
-
     service_id = "test_service"
-    mock_get_con_ingest.return_value = mock_metadata_db
-    mock_get_con_metadata.return_value = mock_metadata_db
-    mock_start.return_value = 123
-    mock_get_source.return_value = {
-        "name": "test_service",
-        "service_id": service_id,
-        "bucket": "test-bucket",
-    }
 
     file_good = "s3://test-bucket/raw/rum/year=2026/month=10/day=07/hour=14/minute=50/good.json.gz"
     file_bad = "s3://test-bucket/raw/rum/year=2026/month=10/day=07/hour=14/minute=50/bad.json.gz"
@@ -841,20 +570,17 @@ def test_ingest_rum_logs_deletes_raw_objects_inline_and_excludes_failures(
 
     monkeypatch.setattr("backend.core.ingest.list_fos_files", fake_list_gen)
 
-    mock_s3 = MagicMock()
-    mock_get_fos.return_value = mock_s3
-
     def fake_get_object(**kwargs):
         key = kwargs.get("Key")
         if "good.json.gz" in key:
             return {"Body": io.BytesIO(content_good)}
         return {"Body": io.BytesIO(content_bad)}
 
-    mock_s3.get_object.side_effect = fake_get_object
+    rum_ingest_env.s3.get_object.side_effect = fake_get_object
 
     # Simulate quarantine capture failure for bad.json.gz
     with patch("backend.core.ingest._quarantine_rum_corrupt_lines", side_effect=OSError("quarantine unavailable")):
-        events = list(ingest_rum_logs(service_id))
+        list(ingest_rum_logs(service_id))
 
     # The good file's raw object MUST have been deleted inline
     all_deleted_keys = [k for batch in deleted_batches for k in batch]

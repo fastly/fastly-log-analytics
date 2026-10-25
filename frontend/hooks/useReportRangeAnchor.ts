@@ -3,7 +3,7 @@
 import { useMemo } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useMounted } from '@/hooks/useMounted'
-import { quantizeAnchor } from '@/lib/time-window'
+import { quantizeAnchor } from '@/lib/range-wire'
 import { useFilterStore } from '@/stores/filterStore'
 
 /**

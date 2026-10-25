@@ -1159,9 +1159,9 @@ class TestRollupHealContract:
         monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=103))
         monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
         monkeypatch.setattr("backend.config.is_durable_serving_mode", lambda s: True)
-        monkeypatch.setattr("backend.core.rollup_readiness.rollup_coverage_ready", lambda s_id: False)
+        monkeypatch.setattr("backend.core.rollups._common.rollup_coverage_ready", lambda s_id: False)
         mark_ready_mock = MagicMock()
-        monkeypatch.setattr("backend.core.rollup_readiness.mark_rollup_coverage_ready", mark_ready_mock)
+        monkeypatch.setattr("backend.core.rollups._common.mark_rollup_coverage_ready", mark_ready_mock)
 
         # 1. Unverified pass: throttled to max_missing_hours = 1, does not mark ready
         heal_partial = MagicMock(
@@ -1424,7 +1424,7 @@ class TestRollupHealContract:
         monkeypatch.setattr("backend.core.rollups.backfill_missing_hour_bundles", heal_mock)
         monkeypatch.setattr("backend.config.is_durable_serving_mode", lambda s: False)
         mark_mock = MagicMock()
-        monkeypatch.setattr("backend.core.rollup_readiness.mark_rollup_coverage_ready", mark_mock)
+        monkeypatch.setattr("backend.core.rollups._common.mark_rollup_coverage_ready", mark_mock)
 
         _run_rollup_hour_heal.__wrapped__(sid)
 
@@ -1442,7 +1442,7 @@ class TestRollupHealContract:
         )
         monkeypatch.setattr("backend.config.is_durable_serving_mode", lambda s: True)
         mark_mock = MagicMock()
-        monkeypatch.setattr("backend.core.rollup_readiness.mark_rollup_coverage_ready", mark_mock)
+        monkeypatch.setattr("backend.core.rollups._common.mark_rollup_coverage_ready", mark_mock)
 
         _run_rollup_hour_heal.__wrapped__(sid)
 
@@ -1482,7 +1482,7 @@ def test_run_partial_hour_merge_calls_merge_and_does_not_mark_ready(monkeypatch)
             return_value={"hour": "2026-09-09-14", "new_files": 3, "duration_ms": 12.5},
         ) as mock_merge,
         patch("backend.core.rollups.partial_hour.gc_stale_partial_hours", return_value=0),
-        patch("backend.core.rollup_readiness.mark_rollup_coverage_ready") as mock_mark,
+        patch("backend.core.rollups._common.mark_rollup_coverage_ready") as mock_mark,
     ):
         _run_partial_hour_merge("svc-a")
 

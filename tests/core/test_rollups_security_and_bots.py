@@ -22,13 +22,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from backend.repositories._sql.dashboard import CONN_REQUESTS_BUCKET
 from backend.repositories._sql.security import (
     CONN_REUSE_DIST,
     FINGERPRINT_COVERAGE_BULK,
     REQ_HEADER_SIZE_DIST,
     TOP_IPS_BY_MAX_HEADER,
 )
+from backend.repositories.dashboard import CONN_REQUESTS_BUCKET
 from tests._helpers.rollups import (
     build_writer_patches as _build_patches,
 )

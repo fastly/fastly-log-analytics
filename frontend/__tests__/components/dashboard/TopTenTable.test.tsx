@@ -15,21 +15,13 @@ import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import React from 'react'
 
-// FieldSearchDialog pulls in the filter store, debounced field-values
-// hook, and a Radix Dialog. We only care that TopTenTable mounts it when
-// `field` is set, so a leaf stub keeps the assertions tight.
-vi.mock('@/components/Dashboard/FieldSearchDialog', () => ({
-  FieldSearchDialog: ({ field, title }: { field: string; title: string }) => (
-    <div data-testid="field-search-dialog" data-field={field} data-title={title} />
-  ),
-}))
-
 // The catalog hook normally fetches via React Query. We swap in a
 // vi.fn() the tests can re-program per case so we can drive the
 // empty-state messaging branches deterministically.
 const useLogFieldsCatalogMock = vi.fn()
 vi.mock('@/hooks/useLogFieldsCatalog', () => ({
   useLogFieldsCatalog: () => useLogFieldsCatalogMock(),
+  useFieldValues: () => ({ data: undefined, isLoading: false, isFetching: false }),
 }))
 
 // useMaskIps reads the bootstrap query cache via useQueryClient; mock it so
@@ -68,7 +60,7 @@ describe('TopTenTable', () => {
     // No group hint should appear when there's nothing to look up.
     expect(screen.queryByText(/Requires/i)).toBeNull()
     // FieldSearchDialog is only mounted when `field` is set.
-    expect(screen.queryByTestId('field-search-dialog')).toBeNull()
+    expect(screen.queryByRole('button', { name: /search no field/i })).toBeNull()
   })
 
   it('surfaces the catalog group hint when the field belongs to a disabled group', () => {
@@ -196,7 +188,7 @@ describe('TopTenTable', () => {
     expect(screen.getByText('73.217.41.xxx')).toBeInTheDocument()
     // … but the row isn't a filter button, and the field-search dialog is gone.
     expect(screen.queryByRole('button', { name: /filter to/i })).toBeNull()
-    expect(screen.queryByTestId('field-search-dialog')).toBeNull()
+    expect(screen.queryByRole('button', { name: /search top ips/i })).toBeNull()
   })
 
   it('keeps the `oip` card clickable when masking (origin IP is not PII)', () => {
@@ -213,7 +205,7 @@ describe('TopTenTable', () => {
     const row = screen.getByRole('button', { name: /filter to 151.101.1.51/i })
     fireEvent.click(row)
     expect(onRowClick).toHaveBeenCalledWith('oip', '151.101.1.51')
-    expect(screen.getByTestId('field-search-dialog')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /search top origin ips/i })).toBeInTheDocument()
   })
 
   it('activates a row via the Enter key (keyboard reachability)', async () => {

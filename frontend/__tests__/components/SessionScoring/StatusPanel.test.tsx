@@ -14,12 +14,11 @@ import { server } from '@/__tests__/helpers/msw/server'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { StatusPanel } from '@/components/SessionScoring/StatusPanel'
-import { AuditLogTab } from '@/components/SessionScoring/AuditLogTab'
 import { LabelsTab } from '@/components/SessionScoring/LabelsTab'
-import { MatrixVersionsCard } from '@/components/SessionScoring/MatrixVersionsCard'
+import { AuditLogTab, MatrixVersionsCard } from '@/components/SessionScoring/MatrixVersionsCard'
 import { L2EnforcementCard } from '@/components/SessionScoring/L2EnforcementCard'
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../../helpers/virtual-mock')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../../helpers/browser-stubs')).reactVirtualModuleMock())
 
 beforeAll(() => {
   stubResizeObserver()

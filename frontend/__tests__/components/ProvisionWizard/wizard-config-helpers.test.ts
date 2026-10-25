@@ -19,7 +19,7 @@ import {
   mergePersistedConfig,
   saveDraft,
   stripSecretsFromConfig,
-} from '@/components/ProvisionWizard/wizard-draft'
+} from '@/components/ProvisionWizard/useWizardState'
 import {
   INITIAL_CONFIG,
   WIZARD_DRAFT_VERSION,

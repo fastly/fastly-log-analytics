@@ -28,7 +28,7 @@ import time_machine
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from backend.core import web_vitals_store
+from backend.core import request_telemetry as web_vitals_store
 from backend.core.request_context import RequestContext
 from backend.main import app
 from backend.provision.rum_orchestrator_v2 import upgrade_faro_version

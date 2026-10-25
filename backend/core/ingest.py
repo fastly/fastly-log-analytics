@@ -16,6 +16,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from backend.core import field_registry as fc
 from backend.core import iceberg
 from backend.core import metadata as metadata_db
 from backend.core.duckdb import (
@@ -28,7 +29,6 @@ from backend.core.duckdb import (
     _load_httpfs,  # noqa: F401  re-exported for test monkey-patching
 )
 from backend.core.field_registry import LOG_FIELD_CATALOG
-from backend.utils import field_codes as fc
 from backend.utils.active_requests import yield_to_api
 from backend.utils.date_utils import ensure_utc
 from backend.utils.sql_validator import escape_sql_literal
@@ -2113,8 +2113,7 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
     Returns a summary dict of per-outcome counts.
     """
     from backend import config as svcconfig
-    from backend.core.ducklake_admission import ducklake_write_admission
-    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
+    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name, ducklake_write_admission
 
     summary, con_meta, src, claimed_generations, claimed_keys = _claim_and_resolve_batch_source(
         service_id, object_keys, worker_id
@@ -3020,9 +3019,8 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
     commit per file.
     """
     from backend import config as svcconfig
-    from backend.core.ducklake_admission import ducklake_write_admission
     from backend.core.iceberg._core import CLIENT_ERRORS_ARROW_SCHEMA, CLIENT_VITALS_ARROW_SCHEMA
-    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
+    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name, ducklake_write_admission
 
     summary, con_meta, src, claimed_generations, claimed_keys = _claim_and_resolve_batch_source(
         service_id, object_keys, worker_id
@@ -3318,8 +3316,7 @@ def merge_lake_files(service_id: str) -> None:
     import duckdb as _duckdb
 
     from backend.core.duckdb import get_source_for_service
-    from backend.core.ducklake_admission import ducklake_write_admission
-    from backend.core.iceberg._ducklake import _ducklake_attach
+    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_write_admission
 
     src = get_source_for_service(service_id)
     if src is None:

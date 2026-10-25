@@ -255,7 +255,7 @@ def get_system_job_status() -> dict[str, dict]:
 
 # R-1: drain the job-status dict between tests so an earlier test's
 # record_job_run doesn't bleed into the next test's snapshot read.
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("utils.system_jobs._status", _status)
 

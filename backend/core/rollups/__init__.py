@@ -41,7 +41,7 @@ symbol on the right-hand side of an existing
 
 from __future__ import annotations
 
-from . import network, origin_dims, perf_latency, security_dims
+from . import network, origin_dims, perf_latency, security_dims, time_series
 
 # Re-exports — pull every public symbol up so callers continue to use
 # the flat ``backend.core.rollups.X`` path. Order doesn't matter; no
@@ -84,6 +84,9 @@ from ._common import (
     _publish_field_partitions,
     _rollups_root,
     _safe_table_for,
+    mark_rollup_coverage_ready,
+    reset_rollup_coverage_ready,
+    rollup_coverage_ready,
     rollups_present,
 )
 from .day_bundles import (
@@ -136,12 +139,14 @@ from .ngwaf_bots import (
 )
 from .origin_dims import (
     backfill_origin_dims_bundles,
+    backfill_origin_latency_ts_bundles,
     backfill_origin_summary_bundles,
+    backfill_slow_urls_bundles,
     build_origin_dims_bundles,
+    build_origin_latency_ts_bundles,
     build_origin_summary_bundles,
+    build_slow_urls_bundles,
 )
-from .origin_latency_ts import backfill_origin_latency_ts_bundles, build_origin_latency_ts_bundles
-from .overview import backfill_overview_bundles, build_overview_bundles
 from .perf_latency import (
     backfill_perf_dims_bundles,
     backfill_perf_latency_bundles,
@@ -169,9 +174,12 @@ from .security_dims import (
     build_security_proxies_bundles,
     build_verified_bots_ts_bundles,
 )
-from .sessions import build_session_bundles
-from .slow_urls import backfill_slow_urls_bundles, build_slow_urls_bundles
-from .time_series import build_time_series_bundles
+from .time_series import (
+    backfill_overview_bundles,
+    build_overview_bundles,
+    build_session_bundles,
+    build_time_series_bundles,
+)
 from .wellknown_bots import (
     backfill_wellknown_bots_rollup,
     read_wellknown_bots_rollup,
@@ -187,6 +195,10 @@ network_speed = network
 network_summary = network
 pop_health = network
 origin_summary = origin_dims
+origin_latency_ts = origin_dims
+slow_urls = origin_dims
+overview = time_series
+sessions = time_series
 perf_dims = perf_latency
 security_proxies = security_dims
 verified_bots_ts = security_dims
@@ -303,6 +315,9 @@ __all__ = [
     "_rollups_root",
     "_hour_bundled_root",
     "_day_bundled_root",
+    "mark_rollup_coverage_ready",
+    "reset_rollup_coverage_ready",
+    "rollup_coverage_ready",
     "rollups_present",
     "_build_copy_query",
     "_build_virtual_field_copy_query",

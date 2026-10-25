@@ -35,7 +35,7 @@ from backend.core import share_db
 from backend.core.oauth import client as oidc
 from backend.core.oauth import registry as oauth_registry
 from backend.core.oauth.client import OIDCError
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.utils.auth import (
     analyst_cookie_is_secure,
     set_analyst_session_cookies,

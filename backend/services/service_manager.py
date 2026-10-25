@@ -138,7 +138,7 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
 
 # R-1: register the dir-stats TTL cache + in-flight set so the autouse
 # fixture in tests/conftest.py drains them via CacheRegistry.clear_all().
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("services.service_manager._dir_stats_cache", _dir_stats_cache)
 _CacheRegistry.register("services.service_manager._dir_stats_refresh_in_flight", _dir_stats_refresh_in_flight)

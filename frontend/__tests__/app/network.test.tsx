@@ -27,7 +27,7 @@ vi.mock('@/lib/api', () => ({
   getApiBase: vi.fn(() => 'http://test'),
 }))
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/browser-stubs')).reactVirtualModuleMock())
 
 vi.mock('@/components/PlotlyChart', async () => (await import('../helpers/page-smoke')).plotlyChartModuleMock())
 vi.mock('@/components/Map/NetworkMap', () => ({
@@ -247,8 +247,7 @@ test('transport section displays missing fields banner when optional fields not 
 test('network health queries keep the range-wire key shape and request body after the hook migration', async () => {
   mockPost.mockResolvedValue({ data: { available: false, reason: 'Network fields not enabled' } })
   mockGet.mockResolvedValue({ data: { data: [] } })
-  const { resolveRangeWire } = await import('@/lib/range-wire')
-  const { quantizeAnchor } = await import('@/lib/time-window')
+  const { resolveRangeWire, quantizeAnchor } = await import('@/lib/range-wire')
 
   renderWithQuery(<NetworkPage />, { queryClient })
   await screen.findByText('Network Metrics Unavailable')

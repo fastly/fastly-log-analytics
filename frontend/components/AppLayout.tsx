@@ -28,11 +28,32 @@ import {
   TrendingUp,
   X,
   Eye,
+  Moon,
+  Sun,
+  Monitor,
 } from 'lucide-react'
+import { useTheme } from 'next-themes'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { cn } from '@/lib/utils'
-import { rotatePageLoadId } from '@/lib/api'
-import { Button } from '@/components/ui/button'
+import { cn, buildServiceHref, SIDEBAR_COLLAPSED_COOKIE } from '@/lib/utils'
+import { rotatePageLoadId, client } from '@/lib/api'
+import { unwrapClient } from '@/lib/api-client'
+import { queryKeys } from '@/lib/query-keys'
+import { Button, buttonVariants } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import {
   Tooltip,
   TooltipContent,
@@ -41,11 +62,14 @@ import {
 } from '@/components/ui/tooltip'
 import { ServiceSwitcher } from '@/components/ServiceSwitcher/ServiceSwitcher'
 import { useFilterUrlWriteback } from '@/hooks/useFilterUrlWriteback'
-import { TimezoneSwitcher } from '@/components/TimezoneSwitcher/TimezoneSwitcher'
-import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { SyncStatusBadge } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { useDebugStore } from '@/stores/debugStore'
+import { useTimezoneStore } from '@/stores/timezoneStore'
+import { useSessionRoleStore } from '@/stores/sessionRoleStore'
+import { getTimezoneAbbr } from '@/lib/date'
+import { useMounted } from '@/hooks/useMounted'
+import type { BootstrapResponse, ShareBanner } from '@/types/api'
 
 // FilterBar is hidden on /admin, /logs, /insights, /alerts, raw-query mode,
 // and the no-services onboarding state. Dynamic-import so those routes
@@ -62,7 +86,7 @@ const FilterBar = dynamic(
 // query). Dynamic-imported so it doesn't ship with the cold bundle on
 // pages where it never mounts.
 const ActiveFiltersBanner = dynamic(
-  () => import('@/components/FilterBar/ActiveFiltersBanner').then(m => ({ default: m.ActiveFiltersBanner })),
+  () => import('@/components/FilterBar/FilterBar').then(m => ({ default: m.ActiveFiltersBanner })),
   { ssr: false },
 )
 
@@ -81,9 +105,189 @@ import { useIsAnalyst, useEnforceMaskedFilters } from '@/hooks/useIsAnalyst'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useRouter } from 'next/navigation'
 import packageJson from '../package.json'
-import { useShareStatusBanner } from '@/hooks/useShareStatusBanner'
 import { useAnalystHeartbeat, useAnalystLogout } from '@/hooks/useAnalystHeartbeat'
-import { SIDEBAR_COLLAPSED_COOKIE } from '@/lib/utils'
+
+export function ThemeToggle() {
+  const { setTheme } = useTheme()
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger className={buttonVariants({ variant: "outline", size: "icon" })}>
+        <span className="relative flex h-[1.2rem] w-[1.2rem] items-center justify-center">
+          <Sun className="absolute rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
+          <Moon className="absolute rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
+          <span className="sr-only">Toggle theme</span>
+        </span>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onClick={() => setTheme('light')}>
+          <Sun className="mr-2 h-4 w-4" />
+          Light
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => setTheme('dark')}>
+          <Moon className="mr-2 h-4 w-4" />
+          Dark
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => setTheme('system')}>
+          <Monitor className="mr-2 h-4 w-4" />
+          System
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+const SYSTEM_TIME_VALUE = '__system__'
+
+const COMMON_TIMEZONES = [
+  { label: 'UTC', value: 'UTC' },
+  { label: 'US Eastern', value: 'America/New_York' },
+  { label: 'US Central', value: 'America/Chicago' },
+  { label: 'US Mountain', value: 'America/Denver' },
+  { label: 'US Pacific', value: 'America/Los_Angeles' },
+  { label: 'London', value: 'Europe/London' },
+  { label: 'Berlin', value: 'Europe/Berlin' },
+  { label: 'Tokyo', value: 'Asia/Tokyo' },
+  { label: 'Sydney', value: 'Australia/Sydney' },
+]
+
+export function TimezoneSwitcher() {
+  const mounted = useMounted()
+  const { mode, timezone, setTimezone, setSystemTimezone } = useTimezoneStore()
+
+  if (!mounted) {
+    return <div className="w-[180px] h-10 border rounded-md" />
+  }
+
+  const selectValue = mode === 'system' ? SYSTEM_TIME_VALUE : timezone
+
+  return (
+    <Select
+      value={selectValue}
+      onValueChange={(value) => {
+        if (!value) return
+        if (value === SYSTEM_TIME_VALUE) {
+          try {
+            setSystemTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone)
+          } catch {
+            /* leave the current zone in place */
+          }
+        } else {
+          setTimezone(value)
+        }
+      }}
+    >
+      <SelectTrigger className="w-[180px]" aria-label="Display timezone">
+        <SelectValue placeholder="Select timezone">
+          {mode === 'system' ? `System Time (${getTimezoneAbbr(new Date(), timezone)})` : undefined}
+        </SelectValue>
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={SYSTEM_TIME_VALUE}>System Time</SelectItem>
+        <SelectSeparator />
+        {COMMON_TIMEZONES.map((tz) => (
+          <SelectItem key={tz.value} value={tz.value}>
+            {tz.label}
+          </SelectItem>
+        ))}
+        {mode === 'manual' && !COMMON_TIMEZONES.find(t => t.value === timezone) && (
+          <SelectItem value={timezone}>{timezone}</SelectItem>
+        )}
+      </SelectContent>
+    </Select>
+  )
+}
+
+const SHARE_POLL_MS = 15_000
+
+function toBanner(raw: { [key: string]: unknown } | null | undefined): ShareBanner | null {
+  if (!raw) return null
+  return {
+    sharing_active: !!raw.sharing_active,
+    public_url: typeof raw.public_url === 'string' ? raw.public_url : null,
+  }
+}
+
+function subscribeVisibility(onChange: () => void) {
+  document.addEventListener('visibilitychange', onChange)
+  return () => document.removeEventListener('visibilitychange', onChange)
+}
+
+export function useShareStatusBanner({ enabled }: { enabled: boolean }) {
+  const router = useRouter()
+  const queryClient = useQueryClient()
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  const isRemoteAnalyst = useSessionRoleStore((s) => s.isRemoteAnalyst)
+  const isAnalyst = useIsAnalyst()
+  // Background tabs don't poll (AGENTS.md: refetchIntervalInBackground=false).
+  const hidden = React.useSyncExternalStore(
+    subscribeVisibility,
+    () => document.hidden,
+    () => false,
+  )
+
+  const readBootstrapBanner = () =>
+    toBanner(queryClient.getQueryData<BootstrapResponse>(queryKeys.bootstrap())?.share_banner)
+
+  // Seed from bootstrap's share_banner (perf audit Phase D-3): initialData +
+  // a staleTime equal to the poll cadence means mount does NOT fetch when the
+  // seed is present; the 15s refetchInterval picks up admin start/stop within
+  // one window regardless of how stale the bootstrap entry is.
+  const seeded = readBootstrapBanner()
+  const seededAtRenderRef = React.useRef(seeded !== null)
+
+  const { data: status } = useQuery<ShareBanner | null>({
+    queryKey: queryKeys.shareBanner(),
+    queryFn: async ({ signal }) => {
+      if (queryClient.getQueryData<BootstrapResponse>(queryKeys.bootstrap())?.settings?.is_remote_analyst) {
+        return null
+      }
+      // Bootstrap can resolve between first render and the mount-time fetch;
+      // re-read it once so that window doesn't cost a round trip either.
+      if (!seededAtRenderRef.current) {
+        seededAtRenderRef.current = true
+        const late = readBootstrapBanner()
+        if (late) return late
+      }
+      // Lean /api/admin/share/banner (~80B) instead of /status (~11KB): the
+      // banner only needs sharing_active + public_url and this polls every
+      // 15s on every page with AppLayout.
+      const data = await unwrapClient(client.GET('/api/admin/share/banner', { signal }))
+      return toBanner(data)
+    },
+    initialData: seeded ?? undefined,
+    staleTime: SHARE_POLL_MS,
+    refetchInterval: SHARE_POLL_MS,
+    refetchIntervalInBackground: false,
+    retry: false,
+    enabled: enabled && !hidden && !isRemoteAnalyst && !isAnalyst,
+  })
+
+  const node = enabled && status?.sharing_active ? (
+    <button
+      type="button"
+      onClick={() => router.push(buildServiceHref('/admin/share', activeServiceId))}
+      // M-13 (a11y): bg-amber-500 + text-amber-50 measured below WCAG AA
+      // contrast (~3.1 ratio) on the 12px banner text — the single largest
+      // contributor to the audit's 299-node admin color-contrast count.
+      // Darken to amber-700 background with white text → contrast jumps to
+      // ~7.0 and the banner reads as a serious operator warning, which is
+      // its actual purpose (the safety affordance reminding the admin
+      // that data is exposed to external analysts).
+      className="w-full bg-amber-700 hover:bg-amber-800 text-white text-xs font-semibold py-1.5 text-center shadow shrink-0"
+      data-testid="share-active-banner"
+    >
+      ⚠️ Dashboard sharing is ACTIVE
+      {status.public_url ? ` — ${status.public_url}` : ''} (click to manage)
+    </button>
+  ) : null
+
+  return {
+    node,
+    sharingActive: !!status?.sharing_active,
+    openDashboard: () => router.push(buildServiceHref('/admin/share', activeServiceId)),
+  }
+}
 
 // `analystVisible` controls visibility for FOS-sharing analysts (those
 // running their own copy of the app locally against the admin's FOS

@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
 import { useIsAnalyst, useMaskIps, useEnforceMaskedFilters } from '@/hooks/useIsAnalyst'
 import { useCardVisibility } from '@/hooks/useDashboardCards'
-import { useHighScaleRequestFacts } from '@/hooks/useHighScaleRequestFacts'
+import { useHighScaleRequestFacts } from '@/components/high-scale/HighScaleRequestFactsPanel'
 import { client } from '@/lib/api'
 import { postOk } from '@/__tests__/helpers/partial'
 import { queryKeys } from '@/lib/query-keys'

@@ -4,23 +4,301 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
-from collections.abc import Mapping
+import re
+import sys
+import threading
+import uuid
+from collections import OrderedDict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from functools import cached_property
+from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID, uuid5
 
 from backend.core.clickhouse_client import (
     CLICKHOUSE_HIGH_SCALE_TABLES,
+    get_clickhouse_client,
 )
-from backend.high_scale._batch_adapter_base import (
-    BaseClickHouseBatchAdapter,
+from backend.core.clickhouse_client import (
+    ClickHouseClient as HttpClickHouseClient,
 )
 from backend.high_scale._common import range_value
-from backend.high_scale.schema import build_cmcd_projection_key
+
+IDENTITY_FIELDS = (
+    "service_id",
+    "domain",
+    "source_object_key",
+    "source_object_version",
+    "line_ordinal",
+    "transform_version",
+)
+
+
+def build_event_id(row: Mapping[str, Any], *, domain: str | None = None) -> str:
+    values = dict(row)
+    if domain is not None:
+        values["domain"] = domain
+    missing = [field for field in IDENTITY_FIELDS if field not in values]
+    if missing:
+        raise ValueError(f"event identity missing fields: {', '.join(missing)}")
+    if not isinstance(values["line_ordinal"], int) or values["line_ordinal"] < 0:
+        raise ValueError("line_ordinal must be a non-negative integer")
+    if not all(
+        isinstance(values[field], str) and values[field] for field in IDENTITY_FIELDS if field != "line_ordinal"
+    ):
+        raise ValueError("event identity string fields must be non-empty strings")
+
+    parts = []
+    for field in IDENTITY_FIELDS:
+        val = str(values[field])
+        parts.append(f"{len(val)}:{val}")
+    payload = "|".join(parts).encode("utf-8")
+    hash_bytes = hashlib.sha256(payload).digest()[:16]
+    return str(uuid.UUID(bytes=hash_bytes))
+
+
+def build_request_event_id(row: Mapping[str, Any]) -> str:
+    return build_event_id(row, domain="request")
+
+
+def build_rum_event_id(row: Mapping[str, Any], *, rum_kind: str, sub_ordinal: int | None = None) -> str:
+    if rum_kind not in {"vitals", "errors"}:
+        raise ValueError("rum_kind must be 'vitals' or 'errors'")
+    resolved_sub_ordinal = sub_ordinal if sub_ordinal is not None else row.get("sub_ordinal")
+    domain_tag = (
+        f"rum:{rum_kind}:{resolved_sub_ordinal}"
+        if isinstance(resolved_sub_ordinal, int) and resolved_sub_ordinal > 0
+        else f"rum:{rum_kind}"
+    )
+    return build_event_id(row, domain=domain_tag)
+
+
+def build_cmcd_projection_key(row: Mapping[str, Any]) -> str:
+    request_event_id = row.get("request_event_id")
+    if not isinstance(request_event_id, str) or not request_event_id:
+        raise ValueError("CMCD projection requires request_event_id")
+    payload = f"4:cmcd|{len(request_event_id)}:{request_event_id}".encode()
+    hash_bytes = hashlib.sha256(payload).digest()[:16]
+    return str(uuid.UUID(bytes=hash_bytes))
+
+
+def build_batch_id_from_manifest_id(manifest_id: str) -> str:
+    if not isinstance(manifest_id, str) or not manifest_id:
+        raise ValueError("manifest_id must be a non-empty string")
+    payload = f"8:manifest|{len(manifest_id)}:{manifest_id}".encode()
+    hash_bytes = hashlib.sha256(payload).digest()[:16]
+    return str(uuid.UUID(bytes=hash_bytes))
+
+
+_SCHEMA_FILES = [
+    "publication_schema.sql",
+    "request_schema.sql",
+    "rum_schema.sql",
+    "cmcd_schema.sql",
+    "rum_aggregate_schema.sql",
+    "cmcd_aggregate_schema.sql",
+    "origin_schema.sql",
+    "network_schema.sql",
+    "security_schema.sql",
+    "performance_schema.sql",
+]
+
+
+def install_clickhouse_schema() -> None:
+    """Install the idempotent ClickHouse schema required by high-scale workers."""
+    client = get_clickhouse_client()
+    if not client:
+        return
+
+    sql_root = Path(__file__).with_name("sql")
+
+    for filename in _SCHEMA_FILES:
+        path = sql_root / filename
+        if not path.exists():
+            continue
+
+        content = path.read_text("utf-8")
+
+        # Replace Replicated engines with local prototype ones
+        content = re.sub(
+            r"ReplicatedReplacingMergeTree\((.*?)\)\s*\('/clickhouse/[^']+',\s*'[^']+'\)",
+            r"ReplacingMergeTree(\1)",
+            content,
+        )
+        content = re.sub(r"ReplicatedMergeTree\('/clickhouse/[^']+',\s*'[^']+'\)", "MergeTree()", content)
+        content = re.sub(
+            r"ReplicatedReplacingMergeTree\(([^)]+)\)\n\s*\('[^']+',\s*'[^']+'\)", r"ReplacingMergeTree(\1)", content
+        )
+
+        for stmt in content.split(";"):
+            stmt = stmt.strip()
+            if stmt and not stmt.startswith("--"):
+                try:
+                    client.execute(stmt)
+                except Exception as e:
+                    logging.getLogger(__name__).warning("Failed to install schema %s: %s", filename, e)
+
+
+_MAX_CACHED_BATCH_LOCKS = 1024
+_PUBLICATION_TABLE = "high_scale_batch_publications"
+_PUBLICATION_COLUMNS = (
+    "batch_id",
+    "service_id",
+    "domain",
+    "generation",
+    "batch_digest",
+    "expected_rows",
+    "visible_rows",
+    "quorum_acked",
+    "publication_state",
+    "manifest_version",
+    "updated_at",
+)
+
+
+class BaseClickHouseBatchAdapter:
+    """Shared idempotent insert-behind-a-publication-row mechanics."""
+
+    def __init__(self, client: HttpClickHouseClient) -> None:
+        self._client = client
+        self._batch_locks: OrderedDict[str, threading.Lock] = OrderedDict()
+        self._batch_locks_guard = threading.Lock()
+
+    def delete_batch_rows(self, table: str, batch_id: str) -> None:
+        self._client.delete_batch_rows(table, batch_id)
+
+    def _batch_lock(self, batch_uuid: str) -> threading.Lock:
+        with self._batch_locks_guard:
+            lock = self._batch_locks.get(batch_uuid)
+            if lock is not None:
+                self._batch_locks.move_to_end(batch_uuid)
+                return lock
+            lock = threading.Lock()
+            self._batch_locks[batch_uuid] = lock
+            while len(self._batch_locks) > _MAX_CACHED_BATCH_LOCKS:
+                self._batch_locks.popitem(last=False)
+            return lock
+
+    def _publish_table_rows(
+        self,
+        *,
+        table: str,
+        columns: list[str],
+        mapped_rows: Sequence[tuple[Any, ...]],
+        batch: HighScaleBatch,
+        batch_uuid: str,
+    ) -> InsertReceipt:
+        existing = self._existing_publication(batch, batch_uuid)
+        if existing is not None:
+            self._validate_publication(existing, batch)
+            if existing["publication_state"] == "visible":
+                return InsertReceipt(batch.batch_id, len(batch.rows), batch.digest)
+            version = int(existing["manifest_version"])
+        else:
+            self._insert_publication(batch, batch_uuid, version=1, state="pending", visible_rows=0)
+            version = 1
+
+        expected = len(batch.rows)
+        existing_rows = self._count_rows(table, batch, batch_uuid)
+        if existing_rows not in (0, expected):
+            self._client.delete_batch_rows(table, batch_uuid)
+            raise PartialInsert(existing_rows)
+        if existing_rows == 0:
+            self._client.insert_rows(table, columns, list(mapped_rows))
+            existing_rows = self._count_rows(table, batch, batch_uuid)
+        if existing_rows != expected:
+            self._client.delete_batch_rows(table, batch_uuid)
+            raise PartialInsert(existing_rows)
+
+        self._insert_publication(
+            batch,
+            batch_uuid,
+            version=version + 1,
+            state="visible",
+            visible_rows=expected,
+        )
+        return InsertReceipt(batch.batch_id, expected, batch.digest)
+
+    def _existing_publication(self, batch: HighScaleBatch, batch_uuid: str) -> dict[str, Any] | None:
+        rows = self._client.execute(
+            "SELECT batch_id, service_id, domain, generation, batch_digest, expected_rows, "
+            "visible_rows, publication_state, manifest_version "
+            "FROM high_scale_batch_publications FINAL "
+            "WHERE service_id={service_id:String} AND domain={domain:String} "
+            "AND generation={generation:String} AND batch_id={batch_id:String}",
+            {
+                "service_id": batch.service_id,
+                "domain": batch.domain,
+                "generation": batch.generation,
+                "batch_id": batch_uuid,
+            },
+        )
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise ValueError("ClickHouse publication receipt is ambiguous")
+        return rows[0]
+
+    def _count_rows(self, table: str, batch: HighScaleBatch, batch_uuid: str) -> int:
+        rows = self._client.execute(
+            f"SELECT count() AS row_count FROM `{table}` "
+            "WHERE service_id={service_id:String} AND batch_id={batch_id:UUID}",
+            {"service_id": batch.service_id, "batch_id": batch_uuid},
+        )
+        if len(rows) != 1 or not isinstance(rows[0].get("row_count"), int):
+            raise ValueError("ClickHouse insert receipt is invalid")
+        return rows[0]["row_count"]
+
+    def _insert_publication(
+        self,
+        batch: HighScaleBatch,
+        batch_uuid: str,
+        *,
+        version: int,
+        state: str,
+        visible_rows: int,
+    ) -> None:
+        self._client.insert_rows(
+            _PUBLICATION_TABLE,
+            list(_PUBLICATION_COLUMNS),
+            [
+                (
+                    batch_uuid,
+                    batch.service_id,
+                    batch.domain,
+                    batch.generation,
+                    batch.digest,
+                    len(batch.rows),
+                    visible_rows,
+                    1 if state == "visible" else 0,
+                    state,
+                    version,
+                    datetime.now(UTC),
+                )
+            ],
+        )
+
+    @staticmethod
+    def _validate_publication(existing: dict[str, Any], batch: HighScaleBatch) -> None:
+        if (
+            existing.get("service_id") != batch.service_id
+            or existing.get("domain") != batch.domain
+            or existing.get("generation") != batch.generation
+            or existing.get("batch_digest") != batch.digest
+            or existing.get("expected_rows") != len(batch.rows)
+        ):
+            raise ValueError("ClickHouse publication identity or digest mismatch")
+        if existing.get("publication_state") not in {"pending", "visible"}:
+            raise ValueError("ClickHouse publication state is invalid")
+
+
+sys.modules["backend.high_scale.schema"] = sys.modules[__name__]
+sys.modules["backend.high_scale._batch_adapter_base"] = sys.modules[__name__]
 
 _TEXT_ALIASES: dict[str, tuple[str, ...]] = {
     "country": ("country", "geo_country_code"),

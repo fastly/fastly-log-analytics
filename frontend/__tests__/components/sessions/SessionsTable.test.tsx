@@ -1,32 +1,23 @@
 /**
  * @vitest-environment jsdom
  *
- * SessionsTable renders the sessions DataTable with a column-set that
- * depends on the SessionsResponse capability flags (has_rtt, has_ja4,
- * has_edge, has_edge_sid). It's a presentation component — the parent
- * supplies the data and the row-click callback. Tests:
- *   - presence of canonical columns (IP / Country / Requests / 4xx%)
- *   - row count matches data.sessions
- *   - row click fires onRowClick with the SessionRow object
- *   - conditional columns appear only when the matching has_* flag is set
- *
- * We mock @tanstack/react-virtual the same way DataTable.test.tsx does so
- * the virtualizer enumerates every row (jsdom has no layout, so the
- * default measureElement returns 0 and the virtualizer would render
- * nothing).
+ * Consolidated tests for SessionsTable and ScoringControls (which both live in
+ * `@/app/sessions/_sections/SessionsTable`).
  */
 import { stubResizeObserver } from '@/__tests__/helpers/browser-stubs'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest'
 import React from 'react'
 
 import { SessionsTable } from '@/app/sessions/_sections/SessionsTable'
+import { ScoringControls } from '@/app/sessions/page'
 import type { components } from '@/types/api.generated'
 import type { SessionsResponse } from '@/types/api'
 
 type SessionRow = components['schemas']['Session']
 
-vi.mock('@tanstack/react-virtual', async () => (await import('@/__tests__/helpers/virtual-mock')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('@/__tests__/helpers/browser-stubs')).reactVirtualModuleMock())
 
 // FlagSessionPopover ultimately POSTs to the labels endpoint; stub it so
 // the table doesn't try to set up popover state for each row. We
@@ -132,11 +123,6 @@ describe('SessionsTable', () => {
     render(<SessionsTable {...baseProps({ data: makeResponse([row]), onRowClick })} />)
     const detailsBtn = screen.getByRole('button', { name: /details/i })
     fireEvent.click(detailsBtn)
-    // The Details button passes the row to onRowClick AND the click
-    // event bubbles to DataTable's row-level handler — both fire with
-    // the same row object. We assert at least one invocation with the
-    // correct row rather than pinning the exact count to whichever
-    // handler order DataTable picks.
     expect(onRowClick).toHaveBeenCalled()
     expect(onRowClick.mock.calls[0][0]).toMatchObject({ ip: '10.0.0.42' })
   })
@@ -146,7 +132,6 @@ describe('SessionsTable', () => {
     const { container } = render(
       <SessionsTable {...baseProps({ data: makeResponse([row]) })} />,
     )
-    // The flagged span has title="Flagged Session"
     expect(container.querySelector('[title="Flagged Session"]')).toBeInTheDocument()
   })
 
@@ -176,18 +161,152 @@ describe('SessionsTable', () => {
     expect(screen.getByText('JA4')).toBeInTheDocument()
     expect(screen.getByText('Edge / Shield')).toBeInTheDocument()
     expect(screen.getByText('Flag')).toBeInTheDocument()
-    // The FlagSessionPopover stub renders once per edge_sid row.
     expect(screen.getAllByTestId('flag-popover').length).toBeGreaterThan(0)
   })
 
   it('renders the empty state when data has no sessions', () => {
     render(<SessionsTable {...baseProps({ data: makeResponse([]) })} />)
-    // DataTable's default empty-state copy; the table still renders headers.
     expect(screen.getByText('IP Address')).toBeInTheDocument()
   })
 
   it('renders even when data is undefined (initial fetch)', () => {
     render(<SessionsTable {...baseProps({ data: undefined })} />)
     expect(screen.getByText('IP Address')).toBeInTheDocument()
+  })
+})
+
+function controlsBaseProps(overrides: Partial<React.ComponentProps<typeof ScoringControls>> = {}) {
+  return {
+    cmcdEnabled: false,
+    flaggedOnly: false,
+    setFlaggedOnly: vi.fn(),
+    streamingOnly: false,
+    setStreamingOnly: vi.fn(),
+    minReqs: '' as number | '',
+    setMinReqs: vi.fn(),
+    min4xxPct: '' as number | '',
+    setMin4xxPct: vi.fn(),
+    data: { min_reqs_flag: 1000, min_4xx_pct_flag: 20 },
+    isFetching: false,
+    isLoadingInitial: false,
+    refetch: vi.fn(),
+    ...overrides,
+  }
+}
+
+describe('ScoringControls', () => {
+  it('renders the flagged-only switch label and the threshold inputs', () => {
+    render(<ScoringControls {...controlsBaseProps()} />)
+    expect(screen.getByText(/flagged only/i)).toBeInTheDocument()
+    expect(screen.getByText(/min\. requests/i)).toBeInTheDocument()
+    expect(screen.getByText(/min\. 4xx%/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /refresh/i })).toBeInTheDocument()
+  })
+
+  it('uses data.min_reqs_flag / data.min_4xx_pct_flag as placeholder hints', () => {
+    render(
+      <ScoringControls
+        {...controlsBaseProps({ data: { min_reqs_flag: 5000, min_4xx_pct_flag: 35 } })}
+      />,
+    )
+    expect(screen.getByPlaceholderText(/≥\s*5000/)).toBeInTheDocument()
+    expect(screen.getByPlaceholderText(/≥\s*35/)).toBeInTheDocument()
+  })
+
+  it('falls back to default placeholders when data is undefined', () => {
+    render(<ScoringControls {...controlsBaseProps({ data: undefined })} />)
+    expect(screen.getByPlaceholderText(/≥\s*1000/)).toBeInTheDocument()
+    expect(screen.getByPlaceholderText(/≥\s*20/)).toBeInTheDocument()
+  })
+
+  it('fires setMinReqs with a number when the requests input changes', () => {
+    const setMinReqs = vi.fn()
+    render(<ScoringControls {...controlsBaseProps({ setMinReqs })} />)
+    const reqInput = screen.getByPlaceholderText(/≥\s*1000/) as HTMLInputElement
+    fireEvent.change(reqInput, { target: { value: '250' } })
+    expect(setMinReqs).toHaveBeenCalledWith(250)
+  })
+
+  it('fires setMinReqs("") when the requests input is cleared', () => {
+    const setMinReqs = vi.fn()
+    render(<ScoringControls {...controlsBaseProps({ setMinReqs, minReqs: 250 })} />)
+    const reqInput = screen.getByPlaceholderText(/≥\s*1000/) as HTMLInputElement
+    fireEvent.change(reqInput, { target: { value: '' } })
+    expect(setMinReqs).toHaveBeenCalledWith('')
+  })
+
+  it('fires setMin4xxPct with a number when the 4xx input changes', () => {
+    const setMin4xxPct = vi.fn()
+    render(<ScoringControls {...controlsBaseProps({ setMin4xxPct })} />)
+    const pctInput = screen.getByPlaceholderText(/≥\s*20/) as HTMLInputElement
+    fireEvent.change(pctInput, { target: { value: '40' } })
+    expect(setMin4xxPct).toHaveBeenCalledWith(40)
+  })
+
+  it('fires setFlaggedOnly when the switch is toggled', async () => {
+    const setFlaggedOnly = vi.fn()
+    render(<ScoringControls {...controlsBaseProps({ setFlaggedOnly })} />)
+    const sw = screen.getByRole('switch')
+    const user = userEvent.setup()
+    await user.click(sw)
+    expect(setFlaggedOnly).toHaveBeenCalledTimes(1)
+    expect(setFlaggedOnly.mock.calls[0][0]).toBe(true)
+  })
+
+  it('does not show "Clear filters" when no filter is active', () => {
+    render(<ScoringControls {...controlsBaseProps()} />)
+    expect(screen.queryByRole('button', { name: /clear filters/i })).toBeNull()
+  })
+
+  it('shows "Clear filters" once any threshold is set and resets all three on click', () => {
+    const setFlaggedOnly = vi.fn()
+    const setMinReqs = vi.fn()
+    const setMin4xxPct = vi.fn()
+    render(
+      <ScoringControls
+        {...controlsBaseProps({
+          flaggedOnly: true,
+          minReqs: 250,
+          min4xxPct: 40,
+          setFlaggedOnly,
+          setMinReqs,
+          setMin4xxPct,
+        })}
+      />,
+    )
+    const clearBtn = screen.getByRole('button', { name: /clear filters/i })
+    fireEvent.click(clearBtn)
+    expect(setFlaggedOnly).toHaveBeenCalledWith(false)
+    expect(setMinReqs).toHaveBeenCalledWith('')
+    expect(setMin4xxPct).toHaveBeenCalledWith('')
+  })
+
+  it('calls refetch when the Refresh button is clicked', () => {
+    const refetch = vi.fn()
+    render(<ScoringControls {...controlsBaseProps({ refetch })} />)
+    fireEvent.click(screen.getByRole('button', { name: /refresh/i }))
+    expect(refetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('disables the Refresh button while isFetching=true', () => {
+    render(<ScoringControls {...controlsBaseProps({ isFetching: true })} />)
+    expect(screen.getByRole('button', { name: /refresh/i })).toBeDisabled()
+  })
+
+  it('dims the control bar while a background refetch is running', () => {
+    const { container } = render(
+      <ScoringControls {...controlsBaseProps({ isFetching: true, isLoadingInitial: false })} />,
+    )
+    expect(container.querySelector('.opacity-40')).toBeInTheDocument()
+  })
+
+  it('renders the streaming sessions switch when cmcdEnabled is true', () => {
+    render(<ScoringControls {...controlsBaseProps({ cmcdEnabled: true })} />)
+    expect(screen.getByText(/streaming sessions/i)).toBeInTheDocument()
+  })
+
+  it('does not render the streaming sessions switch when cmcdEnabled is false', () => {
+    render(<ScoringControls {...controlsBaseProps({ cmcdEnabled: false })} />)
+    expect(screen.queryByText(/streaming sessions/i)).toBeNull()
   })
 })

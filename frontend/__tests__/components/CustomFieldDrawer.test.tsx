@@ -13,7 +13,7 @@ import type { components } from '@/types/api.generated'
 import { renderWithQuery } from '../helpers/query'
 import { stubMatchMedia, stubPointerCaptureAndScroll } from '../helpers/browser-stubs'
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/browser-stubs')).reactVirtualModuleMock())
 
 // monaco-editor breaks under jsdom; replace with a plain textarea.
 vi.mock('@monaco-editor/react', () => ({

@@ -12,7 +12,7 @@ from backend import config as svcconfig
 from backend.core.metric_expressions import coalesce
 from backend.repositories._base import QueryRunner, _compact_sql_for_debug, _safe_table, record_duckdb_query
 from backend.utils.bounded_cache import BoundedTTLCache
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
 logger = logging.getLogger(__name__)
 

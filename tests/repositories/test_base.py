@@ -539,6 +539,60 @@ class TestExecuteTopNBatchPerFieldLimits:
     (e.g. country=500 for the choropleth) silently widened all ~20 other
     fields' cutoffs too. Now each field's own branch uses its own limit."""
 
+    @staticmethod
+    def _patch_rollup_env(
+        monkeypatch,
+        cache_root,
+        cols: list | tuple = ("country",),
+        *,
+        safe_table: str = "dummy",
+        disable_direct: bool = False,
+        ensure_hour_dir: bool = True,
+    ) -> None:
+        schema_defs: list[dict[str, str]] = [{"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"}]
+        col_names: list[str] = ["timestamp"]
+        for item in cols:
+            if isinstance(item, tuple):
+                col_names.append(item[0])
+                schema_defs.append({"name": item[0], "type": item[1]})
+            elif item != "timestamp":
+                col_names.append(item)
+                schema_defs.append({"name": item, "type": "VARCHAR"})
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: safe_table)
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: list(col_names))
+        monkeypatch.setattr("backend.repositories._base._get_schema", lambda _con, _src: list(schema_defs))
+        if disable_direct:
+            monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
+        if ensure_hour_dir:
+            (cache_root / "rollups" / "hour").mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _seed_partial_hour_country_fixture(tmp_path, active_dt, active_hour: str) -> None:
+        import os
+        from datetime import timedelta
+
+        import duckdb as _duckdb
+
+        hourly_dir = tmp_path / "data" / f"timestamp_hour={active_hour}"
+        hourly_dir.mkdir(parents=True)
+        con = _duckdb.connect(":memory:")
+        try:
+            con.execute("SET TimeZone='UTC';")
+            con.execute("CREATE TABLE t (timestamp TIMESTAMP, country VARCHAR)")
+            con.executemany(
+                "INSERT INTO t VALUES (?, ?)",
+                [
+                    (active_dt + timedelta(minutes=1), "DE"),
+                    (active_dt + timedelta(minutes=1), "DE"),
+                ],
+            )
+            con.execute(f"COPY t TO '{hourly_dir / 'batch1.parquet'}' (FORMAT PARQUET)")
+        finally:
+            con.close()
+        watermark_time = (active_dt + timedelta(minutes=15)).timestamp()
+        os.utime(hourly_dir / "batch1.parquet", (watermark_time, watermark_time))
+
     def test_per_field_limit_overrides_only_the_named_field(self, in_memory_duckdb, test_service_source):
         in_memory_duckdb.execute("CREATE TABLE logs_pfl (country VARCHAR, ua VARCHAR)")
         # 10 distinct values each, so both the base limit (2) and the
@@ -623,18 +677,7 @@ class TestExecuteTopNBatchPerFieldLimits:
             str(cache_root / "buffer" / "batch_test.parquet"),
         )
 
-        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
-        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
-        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
-        monkeypatch.setattr(
-            "backend.repositories._base._get_schema",
-            lambda _con, _src: [
-                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
-                {"name": "country", "type": "VARCHAR"},
-            ],
-        )
-        # Ensure the rollup hour dir exists so we enter execute_top_n_rollups.
-        (cache_root / "rollups" / "hour").mkdir(parents=True)
+        self._patch_rollup_env(monkeypatch, cache_root, ["country"])
 
         # Spy on _create_active_hour_temp_direct to assert it's tried.
         direct_calls = {"n": 0}
@@ -697,22 +740,8 @@ class TestExecuteTopNBatchPerFieldLimits:
             str(cache_root / "buffer" / "batch_test.parquet"),
         )
 
-        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
-        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
         # In real production, get_schema_cols returns view columns including computed timestamp_hour and dt
-        monkeypatch.setattr(
-            QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country", "timestamp_hour", "dt"]
-        )
-        monkeypatch.setattr(
-            "backend.repositories._base._get_schema",
-            lambda _con, _src: [
-                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
-                {"name": "country", "type": "VARCHAR"},
-                {"name": "timestamp_hour", "type": "VARCHAR"},
-                {"name": "dt", "type": "VARCHAR"},
-            ],
-        )
-        (cache_root / "rollups" / "hour").mkdir(parents=True)
+        self._patch_rollup_env(monkeypatch, cache_root, ["country", "timestamp_hour", "dt"])
 
         view_fallback_calls = {"n": 0}
         orig_view = QueryRunner.create_filtered_temp_table
@@ -761,22 +790,11 @@ class TestExecuteTopNBatchPerFieldLimits:
             str(cache_root / "buffer" / "batch_test.parquet"),
         )
 
-        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
-        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
-        monkeypatch.setattr(
-            QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country", "status", "timestamp_hour", "dt"]
+        self._patch_rollup_env(
+            monkeypatch,
+            cache_root,
+            ["country", ("status", "INTEGER"), "timestamp_hour", "dt"],
         )
-        monkeypatch.setattr(
-            "backend.repositories._base._get_schema",
-            lambda _con, _src: [
-                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
-                {"name": "country", "type": "VARCHAR"},
-                {"name": "status", "type": "INTEGER"},
-                {"name": "timestamp_hour", "type": "VARCHAR"},
-                {"name": "dt", "type": "VARCHAR"},
-            ],
-        )
-        (cache_root / "rollups" / "hour").mkdir(parents=True)
         (cache_root / "rollups" / "hour_bundled").mkdir(parents=True)
 
         runner = QueryRunner(in_memory_duckdb, test_service_source)
@@ -847,18 +865,7 @@ class TestExecuteTopNBatchPerFieldLimits:
         cache_root = tmp_path / "cache"
         cache_root.mkdir()
         # Intentionally NO buffer/ or data/timestamp_hour=<active>/ dirs.
-        (cache_root / "rollups" / "hour").mkdir(parents=True)
-
-        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
-        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
-        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
-        monkeypatch.setattr(
-            "backend.repositories._base._get_schema",
-            lambda _con, _src: [
-                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
-                {"name": "country", "type": "VARCHAR"},
-            ],
-        )
+        self._patch_rollup_env(monkeypatch, cache_root, ["country"])
         # Spy: view fallback should NOT fire either (direct returns None
         # meaning "nothing on disk", not "failure" — caller should skip).
         view_fallback_calls = {"n": 0}
@@ -913,18 +920,7 @@ class TestExecuteTopNBatchPerFieldLimits:
             ],
         )
 
-        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
-        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
-        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_liveimport")
-        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
-        monkeypatch.setattr(
-            "backend.repositories._base._get_schema",
-            lambda _con, _src: [
-                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
-                {"name": "country", "type": "VARCHAR"},
-            ],
-        )
-        (tmp_path / "rollups" / "hour").mkdir(parents=True)
+        self._patch_rollup_env(monkeypatch, tmp_path, ["country"], safe_table="logs_liveimport", disable_direct=True)
 
         runner = QueryRunner(in_memory_duckdb, test_service_source)
 
@@ -953,10 +949,8 @@ class TestExecuteTopNBatchPerFieldLimits:
         real per-field hourly parquet fixture (the actual writer), not
         hand-crafted, so this test can't drift from the real writer schema.
         """
-        import os
         from datetime import UTC, datetime, timedelta
 
-        import duckdb as _duckdb
         import time_machine
 
         from backend.core.rollups import partial_hour as ph
@@ -966,52 +960,15 @@ class TestExecuteTopNBatchPerFieldLimits:
         active_dt = datetime(2026, 6, 20, 10, 0, 0, tzinfo=UTC)
         active_hour = "2026-06-20-10"
 
-        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
-        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
-        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_pht")
-        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
-        monkeypatch.setattr(
-            "backend.repositories._base._get_schema",
-            lambda _con, _src: [
-                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
-                {"name": "country", "type": "VARCHAR"},
-            ],
-        )
         # _create_active_hour_temp_direct's hourly-partition branch would
         # otherwise read directly from the SAME cache_dir/data/timestamp_hour=
         # <hour> directory this test writes the partial-hour source fixture
         # into below, conflating "what execute_top_n_rollups' own live scan
         # finds on disk" with "what merge_partial_hour folded into the
-        # partial rollup". Force it to skip (same technique as this task's
-        # Step 1 unit test) so the live scan instead goes through
-        # create_filtered_temp_table against the in-memory logs_pht table,
-        # keeping the two sources cleanly separate for this test's asserts.
-        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda self, *a, **kw: None)
-        (tmp_path / "rollups" / "hour").mkdir(parents=True)
-
-        # Real per-field hourly parquet fixture feeding the actual
-        # merge_partial_hour writer, so the partial rollup this test asserts
-        # on is built the same way the cron job builds it in prod.
-        hourly_dir = tmp_path / "data" / f"timestamp_hour={active_hour}"
-        hourly_dir.mkdir(parents=True)
-        con = _duckdb.connect(":memory:")
-        try:
-            con.execute("SET TimeZone='UTC';")
-            con.execute("CREATE TABLE t (timestamp TIMESTAMP, country VARCHAR)")
-            con.executemany(
-                "INSERT INTO t VALUES (?, ?)",
-                [
-                    (active_dt + timedelta(minutes=1), "DE"),
-                    (active_dt + timedelta(minutes=1), "DE"),
-                ],
-            )
-            con.execute(f"COPY t TO '{hourly_dir / 'batch1.parquet'}' (FORMAT PARQUET)")
-        finally:
-            con.close()
-
-        # Set the modification time of the file deterministically to 10:15 UTC (before frozen_now of 10:20)
-        watermark_time = (active_dt + timedelta(minutes=15)).timestamp()
-        os.utime(hourly_dir / "batch1.parquet", (watermark_time, watermark_time))
+        # partial rollup". Force it to skip so the live scan instead goes through
+        # create_filtered_temp_table against the in-memory logs_pht table.
+        self._patch_rollup_env(monkeypatch, tmp_path, ["country"], safe_table="logs_pht", disable_direct=True)
+        self._seed_partial_hour_country_fixture(tmp_path, active_dt, active_hour)
 
         with time_machine.travel(frozen_now, tick=False):
             stats = ph.merge_partial_hour("svc-a", test_service_source, ["country"])
@@ -1060,10 +1017,8 @@ class TestExecuteTopNBatchPerFieldLimits:
         ``[watermark, live_end)`` and these old-window rows are excluded —
         the field's total then comes ONLY from the partial rollup.
         """
-        import os
         from datetime import UTC, datetime, timedelta
 
-        import duckdb as _duckdb
         import time_machine
 
         from backend.core.rollups import partial_hour as ph
@@ -1073,47 +1028,8 @@ class TestExecuteTopNBatchPerFieldLimits:
         active_dt = datetime(2026, 6, 20, 10, 0, 0, tzinfo=UTC)
         active_hour = "2026-06-20-10"
 
-        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
-        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
-        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_pht_overlap")
-        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
-        monkeypatch.setattr(
-            "backend.repositories._base._get_schema",
-            lambda _con, _src: [
-                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
-                {"name": "country", "type": "VARCHAR"},
-            ],
-        )
-        # Force the direct-read fast path off so the live scan goes through
-        # the create_filtered_temp_table FALLBACK this bug lives in — same
-        # technique as the sibling test above.
-        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda self, *a, **kw: None)
-        (tmp_path / "rollups" / "hour").mkdir(parents=True)
-
-        # Real per-field hourly parquet fixture feeding the actual
-        # merge_partial_hour writer — this is the ONLY source of "DE" rows;
-        # the partial rollup's watermark ends up ~"now" (the fixture file's
-        # real mtime).
-        hourly_dir = tmp_path / "data" / f"timestamp_hour={active_hour}"
-        hourly_dir.mkdir(parents=True)
-        con = _duckdb.connect(":memory:")
-        try:
-            con.execute("SET TimeZone='UTC';")
-            con.execute("CREATE TABLE t (timestamp TIMESTAMP, country VARCHAR)")
-            con.executemany(
-                "INSERT INTO t VALUES (?, ?)",
-                [
-                    (active_dt + timedelta(minutes=1), "DE"),
-                    (active_dt + timedelta(minutes=1), "DE"),
-                ],
-            )
-            con.execute(f"COPY t TO '{hourly_dir / 'batch1.parquet'}' (FORMAT PARQUET)")
-        finally:
-            con.close()
-
-        # Set the modification time of the file deterministically to 10:15 UTC (before frozen_now of 10:20)
-        watermark_time = (active_dt + timedelta(minutes=15)).timestamp()
-        os.utime(hourly_dir / "batch1.parquet", (watermark_time, watermark_time))
+        self._patch_rollup_env(monkeypatch, tmp_path, ["country"], safe_table="logs_pht_overlap", disable_direct=True)
+        self._seed_partial_hour_country_fixture(tmp_path, active_dt, active_hour)
 
         with time_machine.travel(frozen_now, tick=False):
             stats = ph.merge_partial_hour("svc-a", test_service_source, ["country"])
@@ -1183,19 +1099,9 @@ class TestExecuteTopNBatchPerFieldLimits:
             ],
         )
 
-        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
-        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
-        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_liveskip")
-        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country", "rid"])
-        monkeypatch.setattr(
-            "backend.repositories._base._get_schema",
-            lambda _con, _src: [
-                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
-                {"name": "country", "type": "VARCHAR"},
-                {"name": "rid", "type": "VARCHAR"},
-            ],
+        self._patch_rollup_env(
+            monkeypatch, tmp_path, ["country", "rid"], safe_table="logs_liveskip", disable_direct=True
         )
-        (tmp_path / "rollups" / "hour").mkdir(parents=True)
 
         runner = QueryRunner(in_memory_duckdb, test_service_source)
         st = active_dt.isoformat()
@@ -1263,17 +1169,8 @@ class TestExecuteTopNBatchPerFieldLimits:
             [active_dt + timedelta(minutes=5), active_dt + timedelta(minutes=15)],
         )
 
-        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
-        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
-        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_rollupkeep")
-        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country", "rid"])
-        monkeypatch.setattr(
-            "backend.repositories._base._get_schema",
-            lambda _con, _src: [
-                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
-                {"name": "country", "type": "VARCHAR"},
-                {"name": "rid", "type": "VARCHAR"},
-            ],
+        self._patch_rollup_env(
+            monkeypatch, tmp_path, ["country", "rid"], safe_table="logs_rollupkeep", disable_direct=True
         )
 
         runner = QueryRunner(in_memory_duckdb, test_service_source)
@@ -1339,20 +1236,9 @@ class TestExecuteTopNBatchPerFieldLimits:
             [active_dt + timedelta(minutes=5), active_dt + timedelta(minutes=15)],
         )
 
-        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
-        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
-        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_skipwarn")
-        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country", "rid", "status"])
-        monkeypatch.setattr(
-            "backend.repositories._base._get_schema",
-            lambda _con, _src: [
-                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
-                {"name": "country", "type": "VARCHAR"},
-                {"name": "rid", "type": "VARCHAR"},
-                {"name": "status", "type": "VARCHAR"},
-            ],
+        self._patch_rollup_env(
+            monkeypatch, tmp_path, ["country", "rid", "status"], safe_table="logs_skipwarn", disable_direct=True
         )
-        (tmp_path / "rollups" / "hour").mkdir(parents=True)
 
         runner = QueryRunner(in_memory_duckdb, test_service_source)
         st = active_dt.isoformat()
@@ -1459,21 +1345,7 @@ class TestExecuteTopNBatchPerFieldLimits:
 
         # Point the runner at our test table; bypass rollup enumeration
         # by giving it a real but empty rollup dir (forces rolled_res=[]).
-        monkeypatch.setattr("backend.repositories._base._cache_dir", lambda _src: str(tmp_path), raising=False)
-        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
-        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
-        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
-        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_clamp")
-        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
-        monkeypatch.setattr(
-            "backend.repositories._base._get_schema",
-            lambda _con, _src: [
-                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
-                {"name": "country", "type": "VARCHAR"},
-            ],
-        )
-        rollup_hour_dir = tmp_path / "rollups" / "hour"
-        rollup_hour_dir.mkdir(parents=True)
+        self._patch_rollup_env(monkeypatch, tmp_path, ["country"], safe_table="logs_clamp", disable_direct=True)
 
         runner = QueryRunner(in_memory_duckdb, test_service_source)
 
@@ -1578,16 +1450,7 @@ class TestExecuteTopNBatchPerFieldLimits:
         for h in range(0, 18):
             _write_per_hour("edge_score", f"{day_d_plus_1_str}-{h:02d}", [("in_window_val", 1)])
 
-        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
-        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
-        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "edge_score"])
-        monkeypatch.setattr(
-            "backend.repositories._base._get_schema",
-            lambda _con, _src: [
-                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
-                {"name": "edge_score", "type": "VARCHAR"},
-            ],
-        )
+        self._patch_rollup_env(monkeypatch, cache_root, ["edge_score"], ensure_hour_dir=False)
 
         runner = QueryRunner(in_memory_duckdb, test_service_source)
         st = (datetime.combine(day_d, datetime.min.time(), tzinfo=UTC) + timedelta(hours=17, minutes=36)).isoformat()
@@ -1645,16 +1508,7 @@ class TestExecuteTopNBatchPerFieldLimits:
             str(h / f"compacted_{uuid.uuid4().hex[:8]}.parquet"),
         )
 
-        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
-        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
-        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "edge_score"])
-        monkeypatch.setattr(
-            "backend.repositories._base._get_schema",
-            lambda _con, _src: [
-                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
-                {"name": "edge_score", "type": "VARCHAR"},
-            ],
-        )
+        self._patch_rollup_env(monkeypatch, cache_root, ["edge_score"], ensure_hour_dir=False)
 
         runner = QueryRunner(in_memory_duckdb, test_service_source)
         st = f"{day_d_str}T00:00:00+00:00"
@@ -1719,16 +1573,7 @@ class TestExecuteTopNBatchPerFieldLimits:
             str(h / f"compacted_{uuid.uuid4().hex[:8]}.parquet"),
         )
 
-        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
-        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
-        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "edge_score"])
-        monkeypatch.setattr(
-            "backend.repositories._base._get_schema",
-            lambda _con, _src: [
-                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
-                {"name": "edge_score", "type": "VARCHAR"},
-            ],
-        )
+        self._patch_rollup_env(monkeypatch, cache_root, ["edge_score"], ensure_hour_dir=False)
 
         runner = QueryRunner(in_memory_duckdb, test_service_source)
         st = f"{day_d_str}T00:00:00+00:00"
@@ -1779,17 +1624,7 @@ class TestExecuteTopNBatchPerFieldLimits:
             str(bd / "all_fields.parquet"),
         )
 
-        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
-        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
-        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "ua", "country"])
-        monkeypatch.setattr(
-            "backend.repositories._base._get_schema",
-            lambda _con, _src: [
-                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
-                {"name": "ua", "type": "VARCHAR"},
-                {"name": "country", "type": "VARCHAR"},
-            ],
-        )
+        self._patch_rollup_env(monkeypatch, cache_root, ["ua", "country"], ensure_hour_dir=False)
 
         runner = QueryRunner(in_memory_duckdb, test_service_source)
         st = f"{day_d_str}T05:00:00+00:00"
@@ -1865,17 +1700,7 @@ class TestExecuteTopNBatchPerFieldLimits:
                 str(bd / "all_fields.parquet"),
             )
 
-        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
-        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
-        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "field_a", "field_b"])
-        monkeypatch.setattr(
-            "backend.repositories._base._get_schema",
-            lambda _con, _src: [
-                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
-                {"name": "field_a", "type": "VARCHAR"},
-                {"name": "field_b", "type": "VARCHAR"},
-            ],
-        )
+        self._patch_rollup_env(monkeypatch, cache_root, ["field_a", "field_b"], ensure_hour_dir=False)
 
         runner = QueryRunner(in_memory_duckdb, test_service_source)
         st = f"{day_d_str}T00:00:00+00:00"
@@ -1935,17 +1760,7 @@ class TestExecuteTopNBatchPerFieldLimits:
             str(bd / "all_fields.parquet"),
         )
 
-        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
-        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
-        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "ua", "country"])
-        monkeypatch.setattr(
-            "backend.repositories._base._get_schema",
-            lambda _con, _src: [
-                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
-                {"name": "ua", "type": "VARCHAR"},
-                {"name": "country", "type": "VARCHAR"},
-            ],
-        )
+        self._patch_rollup_env(monkeypatch, cache_root, ["ua", "country"], ensure_hour_dir=False)
 
         runner = QueryRunner(in_memory_duckdb, test_service_source)
         captured_queries: list[str] = []

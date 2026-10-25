@@ -34,7 +34,7 @@ from backend.repositories.dashboard import (
     get_raw_df,
 )
 from backend.utils.telemetry import set_page_load_id
-from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
+from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 
 
 # ── Merged from tests/repositories/test_dashboard.py ──

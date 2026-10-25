@@ -21,9 +21,9 @@ from backend.config import list_configs
 from backend.core import share_db
 from backend.core.oauth import registry as oauth_registry
 from backend.deps import require_admin
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.admin_actions import SharePurgeResponse
 from backend.models.common import OkResponse
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.services import OkMessageResponse
 from backend.models.share_admin import (
     BackupExportPayload,
@@ -57,7 +57,7 @@ from backend.models.share_admin import (
     SharingTeardownRequest,
     WordphraseResponse,
 )
-from backend.provision.sharing_domain import delete_remote_frontend, deploy_remote_frontend
+from backend.provision.fastly_api import delete_remote_frontend, deploy_remote_frontend
 from backend.utils.remote_access import client_ip
 from backend.utils.router_utils import make_error
 from backend.utils.tunnel import build_share_live_payload, get_tunnel_manager

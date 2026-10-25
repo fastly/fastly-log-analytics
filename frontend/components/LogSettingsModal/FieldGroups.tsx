@@ -17,7 +17,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { AlertTriangle, ChevronRight, ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { PERIOD_LABELS } from '@/lib/service-config-constants'
+import { PERIOD_LABELS } from '@/lib/constants'
 import { CmcdConfigSection } from '@/components/CmcdConfigSection'
 import type { components } from '@/types/api.generated'
 

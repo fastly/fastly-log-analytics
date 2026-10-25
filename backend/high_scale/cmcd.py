@@ -14,9 +14,9 @@ from typing import Any
 
 from backend.core.high_scale_sections import HighScaleSections
 from backend.high_scale._common import parse_time_window
+from backend.high_scale.publication import build_cmcd_projection_key
 from backend.high_scale.registry_bootstrap import HighScaleService
-from backend.high_scale.schema import build_cmcd_projection_key
-from backend.models.cmcd import CmcdRequest
+from backend.models.performance import CmcdRequest
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
     bucket_time_to_minute,
@@ -24,7 +24,7 @@ from backend.repositories.utils.response_cache import (
     digest_cache_key,
     serialize_filters_for_key,
 )
-from backend.utils.cache_registry import CacheRegistry
+from backend.utils.bounded_cache import CacheRegistry
 
 
 def project_cmcd(request_event: Mapping[str, Any]) -> dict[str, Any] | None:

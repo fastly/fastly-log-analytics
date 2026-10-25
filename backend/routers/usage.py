@@ -14,8 +14,8 @@ from backend.config import get_fastly_api_key
 from backend.core.fastly.mock_fixtures import api_key_or_mock
 from backend.core.fastly.utils import FASTLY_LOG_FIELDS
 from backend.deps import get_source
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
-from backend.models.usage import (
+from backend.models._base import DEFAULT_ERROR_RESPONSES
+from backend.models.admin import (
     CurrentStorageResponse,
     PrefillRatesResponse,
     PrefillResponse,
@@ -40,7 +40,7 @@ router = APIRouter(prefix="/api/usage", tags=["usage"], responses=DEFAULT_ERROR_
 # 60 s staleness window is invisible to the operator and absorbs every
 # burst without changing chart numbers.
 from backend.utils.bounded_cache import BoundedTTLCache
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
 _FASTLY_STATS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60.0)
 _STORAGE_INSPECTION_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_seconds=60.0)
@@ -222,8 +222,7 @@ async def prefill(source: dict = Depends(get_source)):
     # Pull real traffic numbers and live logging config from Fastly Stats API.
     api_key = api_key_or_mock(get_fastly_api_key(source["service_id"]))
     if api_key:
-        from backend.core.fastly.client import fastly
-        from backend.core.fastly.service import find_condition, get_active_version
+        from backend.core.fastly.client import fastly, find_condition, get_active_version
 
         # CDN service for bandwidth stats; logging service for S3 endpoint config lookup
         stats_svc_id = (source.get("cdn_service_id") or get_fastly_logging_service_id() or "").strip()

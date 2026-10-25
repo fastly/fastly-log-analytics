@@ -11,7 +11,8 @@ import duckdb
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
 
 from backend.deps import get_con, get_service_id
-from backend.models.alerts import (
+from backend.models._base import DEFAULT_ERROR_RESPONSES
+from backend.models.common import (
     Alert,
     AlertEvaluateData,
     AlertEvaluateRequest,
@@ -23,10 +24,11 @@ from backend.models.alerts import (
     AlertTestWebhookData,
     AlertTestWebhookRequest,
     AlertTestWebhookResponse,
+    SavedView,
+    SavedViewRecord,
+    ViewSaveResponse,
     _ToggleBody,
 )
-from backend.models.common import SavedView, SavedViewRecord, ViewSaveResponse
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.repositories import alerts as repo
 from backend.utils.auth import analyst_allowed_services as _analyst_allowed_services
 from backend.utils.auth import require_owned_row, require_service_in_scope

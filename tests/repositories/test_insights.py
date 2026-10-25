@@ -9,7 +9,7 @@ import pytest
 from backend.repositories._base import _safe_table
 from backend.repositories.insights import _insights_cache, get_insights
 from backend.utils.date_utils import parse_iso_utc
-from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
+from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 
 # JFK coords: (40.6413, -73.7781). Client at (0, 0) is ~8,880 km away.
 # tcp_rtt=1000 µs → max_km ≈ 200 km — impossible.

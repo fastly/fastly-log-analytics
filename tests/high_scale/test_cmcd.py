@@ -11,7 +11,7 @@ from backend.core.high_scale_sections import current_clickhouse_scope
 from backend.core.query_attribution import Attribution, current_attribution
 from backend.high_scale import cmcd as hs_cmcd
 from backend.high_scale.cmcd import cmcd_aggregates
-from backend.models.cmcd import CmcdAggregatesResponse, CmcdRequest
+from backend.models.performance import CmcdAggregatesResponse, CmcdRequest
 from backend.utils import telemetry
 
 START = "2026-09-14T10:00:00Z"
@@ -364,17 +364,18 @@ import logging
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
+from backend.high_scale.archive_models import ArchiveState
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.ingest_controller import HighScaleIngestController
-from backend.high_scale.models import ArchiveState
 from backend.high_scale.publication import (
     ClickHousePublication,
     HighScaleBatch,
     InMemoryBatchManifestStore,
     InsertReceipt,
     _rows_for_domain,
+    build_batch_id_from_manifest_id,
+    build_cmcd_projection_key,
 )
-from backend.high_scale.schema import build_batch_id_from_manifest_id, build_cmcd_projection_key
 from backend.high_scale.source_discovery import SourceObjectDescriptor
 from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
 

@@ -9,21 +9,96 @@ re-scanning the full table on every request.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from backend.core.metadata import pg_connection
-from backend.core.metadata import usage_log_db as _usage_log_db
-from backend.core.metadata.base import get_con
+from backend.core.metadata.base import (
+    _DATA_DIR,
+    _validate_service_id_or_raise,
+    get_con,
+)
+from backend.core.metadata.base import (
+    close_all_connections as close_all_connections,
+)
+from backend.core.metadata.base import (
+    get_con_readonly as open_readonly,
+)
 from backend.utils.date_utils import iso_z, iso_z_now
 
 logger = logging.getLogger(__name__)
 
 
+def db_path(service_id: str) -> str:
+    """Absolute path to the per-service usage_log SQLite file (legacy helper)."""
+    _validate_service_id_or_raise(service_id)
+    return os.path.join(_DATA_DIR, f"{service_id}.usage_log.db")
+
+
+# ── Schema ────────────────────────────────────────────────────────────────────
+# SQLite-dialect table / index / trigger definitions; ``pg_schema`` rewrites them to
+# Postgres DDL (see the module docstring).
+
+_SCHEMA = [
+    """CREATE TABLE IF NOT EXISTS usage_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT,
+        service_id TEXT,
+        operation_class TEXT,
+        operation_type TEXT,
+        url TEXT,
+        status TEXT,
+        duration_ms REAL,
+        function_name TEXT,
+        process_context TEXT,
+        bytes INTEGER,
+        count INTEGER NOT NULL DEFAULT 1
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_log(timestamp)",
+    "CREATE INDEX IF NOT EXISTS idx_usage_dedup ON usage_log(service_id, function_name, url)",
+    "CREATE INDEX IF NOT EXISTS idx_usage_reconcile ON usage_log(service_id, operation_class, timestamp, function_name, count)",
+    "CREATE INDEX IF NOT EXISTS idx_usage_process_context_ts ON usage_log(process_context, timestamp)",
+    "CREATE INDEX IF NOT EXISTS idx_usage_service_ts ON usage_log(service_id, timestamp, operation_class, count, bytes)",
+    """CREATE TABLE IF NOT EXISTS usage_log_hourly_summary (
+        service_id TEXT NOT NULL,
+        hour TEXT NOT NULL,
+        operation_class TEXT NOT NULL DEFAULT '',
+        operation_type TEXT NOT NULL DEFAULT '',
+        count INTEGER NOT NULL DEFAULT 0,
+        bytes INTEGER NOT NULL DEFAULT 0,
+        last_updated TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (service_id, hour, operation_class, operation_type)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_usage_hourly_svc_hour ON usage_log_hourly_summary(service_id, hour)",
+    """CREATE TABLE IF NOT EXISTS telemetry_queries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        page_load_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        engine TEXT NOT NULL,
+        sql_query TEXT NOT NULL,
+        duration_ms REAL NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_telemetry_queries_page ON telemetry_queries (page_load_id)",
+    "CREATE INDEX IF NOT EXISTS idx_telemetry_queries_ts ON telemetry_queries (timestamp)",
+    """CREATE TABLE IF NOT EXISTS telemetry_sections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        page_load_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        section_name TEXT NOT NULL,
+        duration_ms REAL NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_telemetry_sections_page ON telemetry_sections (page_load_id)",
+    "CREATE INDEX IF NOT EXISTS idx_telemetry_sections_ts ON telemetry_sections (timestamp)",
+]
+
+
 def _ul(service_id: str) -> pg_connection.PgConnectionWrapper:
     """Thread-local RW connection to the per-service usage_log database."""
-    return _usage_log_db.get_con(service_id)
+    return get_con(service_id)
 
 
 # ── sources ───────────────────────────────────────────────────────────────────
@@ -597,7 +672,7 @@ def get_usage_logs(
     rollup_eligible = not process_context and not operation_type
 
     try:
-        con = _usage_log_db.open_readonly(service_id)
+        con = open_readonly(service_id)
     except Exception:
         # File doesn't exist yet (first run before any log_usage_calls).
         return (
@@ -722,7 +797,7 @@ def iter_usage_logs_chunks(
     where, params = _build_usage_log_where(service_id, start, end, usage_type, process_context, operation_type)
 
     try:
-        con = _usage_log_db.open_readonly(service_id)
+        con = open_readonly(service_id)
     except Exception:
         # File doesn't exist (first run before any log_usage_calls).
         return

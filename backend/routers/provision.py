@@ -14,8 +14,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from backend.core.fastly.rum_provisioning import validate_rum_custom_condition
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.admin import ProvisionService
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.provision import (
     CheckFosRequest,
     LakeInfoRequest,
@@ -386,7 +386,7 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                     # the TTL — the provision-teardown e2e races exactly here).
                     # Via the registry, not a bootstrap-router import (routers
                     # must stay import-independent — import-linter R-9).
-                    from backend.utils.cache_registry import CacheRegistry
+                    from backend.utils.bounded_cache import CacheRegistry
 
                     CacheRegistry.clear("routers.bootstrap._bootstrap_cache")
                     yield json.dumps({"type": "status", "message": f"Removed configs/{sid}.json"})
@@ -727,7 +727,7 @@ def provision_execute(req: ProvisionExecuteRequest):
                     # bootstrap cache so /api/bootstrap surfaces it immediately
                     # rather than after the TTL lapses (symmetry with teardown).
                     # Via the registry, not a bootstrap-router import (R-9).
-                    from backend.utils.cache_registry import CacheRegistry
+                    from backend.utils.bounded_cache import CacheRegistry
 
                     CacheRegistry.clear("routers.bootstrap._bootstrap_cache")
 

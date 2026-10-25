@@ -7,12 +7,17 @@ visibility)."""
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from backend.main import app
 from backend.repositories.session_scoring import _SCORING_COLUMN_TYPES
+from backend.routers import session_scoring as _ss
+from backend.routers import session_scoring_admin as _admin
+from backend.scoring import labels as _labels
 from tests._helpers.config_fakes import mutate_via_save
 
 LOG_SVC = "TestScoringRouterSvc"
@@ -26,8 +31,6 @@ def _clear_analytics_cache_between_tests(monkeypatch):
     dependent failures observed locally). Also default-stub
     service_has_scoring_pragmas so router tests with fake tokens don't
     make live Fastly API calls unless a test explicitly patches it."""
-    from backend.routers import session_scoring as _ss
-
     monkeypatch.setattr("backend.provision.fastly_api.service_has_scoring_pragmas", lambda *a, **kw: True)
     _ss._analytics_cache.clear()
     _ss._inflight.clear()
@@ -38,9 +41,6 @@ def _clear_analytics_cache_between_tests(monkeypatch):
     _ss._inflight.clear()
     _ss._scoring_svc_version_cache.clear()
     _ss._scoring_pragma_cache.clear()
-
-
-from contextlib import contextmanager
 
 
 def _parse_sse(resp) -> list[dict]:
@@ -557,8 +557,6 @@ def _assert_analyst_projected(row: dict, *, check_safe: bool = False) -> None:
 
 def test_project_label_for_analyst_strips_pii_fields_only():
     """The helper must strip exactly the PII fields and nothing else."""
-    from backend.routers.session_scoring import _project_label_for_analyst
-
     full = {
         "id": "abc",
         "service_id": "svc",
@@ -572,7 +570,7 @@ def test_project_label_for_analyst_strips_pii_fields_only():
         "sample_ua": "Mozilla/5.0",
         "sample_url": "/admin/super-secret-path",
     }
-    _assert_analyst_projected(_project_label_for_analyst(full), check_safe=True)
+    _assert_analyst_projected(_ss._project_label_for_analyst(full), check_safe=True)
 
 
 def test_labels_list_admin_returns_full_pii(client):
@@ -597,14 +595,7 @@ def test_labels_list_admin_returns_full_pii(client):
 
 
 def test_labels_list_analyst_omits_pii(client, monkeypatch):
-    """Analyst path must get rows without PII / operator-attribution fields.
-
-    Simulate by monkeypatching the analyst-detection helper to flip every
-    request into the analyst branch; this is the same shape the middleware
-    achieves by stamping request.state.analyst_session.
-    """
-    from backend.routers import session_scoring as _ss
-
+    """Analyst path must get rows without PII / operator-attribution fields."""
     _post_label(client, sid="analyst-pii-test", label="bad", notes="n", sample_ip="1.1.1.1")
     monkeypatch.setattr(_ss, "_is_analyst_request", lambda req: True)
     listing = client.get(f"/api/services/{LOG_SVC}/scoring/labels").json()
@@ -614,8 +605,6 @@ def test_labels_list_analyst_omits_pii(client, monkeypatch):
 
 def test_labels_create_response_analyst_omits_pii(client, monkeypatch):
     """POST response (the echoed row) must also be projected for analyst."""
-    from backend.routers import session_scoring as _ss
-
     monkeypatch.setattr(_ss, "_is_analyst_request", lambda req: True)
     r = _post_label(client, sid="analyst-post-test", label="good", notes="n", sample_ip="2.2.2.2")
     assert r.status_code == 200
@@ -624,8 +613,6 @@ def test_labels_create_response_analyst_omits_pii(client, monkeypatch):
 
 def test_labels_patch_response_analyst_omits_pii(client, monkeypatch):
     """PATCH response must also be projected for analyst."""
-    from backend.routers import session_scoring as _ss
-
     created = _post_label(client, sid="analyst-patch-test", label="bad", notes="initial").json()
     monkeypatch.setattr(_ss, "_is_analyst_request", lambda req: True)
     r = _patch_label(client, created["id"], notes="revised")
@@ -636,13 +623,7 @@ def test_labels_patch_response_analyst_omits_pii(client, monkeypatch):
 def test_labels_create_analyst_does_not_persist_pii(client, monkeypatch):
     """Finding 003 (run 80e9f210), defense-in-depth: the WRITE path must
     strip operator-attribution / PII fields for analyst callers, not just
-    the response. (The middleware already blocks analyst writes to this
-    path; this is the belt-and-suspenders router-level gate, mirroring the
-    cross-tenant write gates.) Read the full row back via the labels module
-    to prove the analyst's injected values were never persisted."""
-    from backend.routers import session_scoring as _ss
-    from backend.scoring import labels as _labels
-
+    the response."""
     sid = "analyst-write-pii"
     monkeypatch.setattr(_ss, "_is_analyst_request", lambda req: True)
     r = _post_label(
@@ -669,9 +650,6 @@ def test_labels_create_analyst_does_not_persist_pii(client, monkeypatch):
 def test_labels_patch_analyst_cannot_overwrite_notes(client, monkeypatch):
     """Finding 003 (update path): an analyst PATCH must not modify ``notes``,
     but may still change the label classification."""
-    from backend.routers import session_scoring as _ss
-    from backend.scoring import labels as _labels
-
     sid = "analyst-patch-notes"
     created = _post_label(client, sid=sid, label="bad", notes="admin-original").json()
 
@@ -699,8 +677,6 @@ def _patch_composite_subcalls(monkeypatch, *, eval_raises=False):
     """Stub the six sub-functions the composite calls; raise from the two
     admin-only ones if eval_raises so the test proves we don't even call
     them on the analyst path."""
-    from backend.routers import session_scoring as _ss
-
     monkeypatch.setattr(_ss, "scoring_top_flagged", lambda **kw: {"rows": []})
     monkeypatch.setattr(_ss, "scoring_score_distribution", lambda **kw: {"rows": []})
     monkeypatch.setattr(_ss, "scoring_compliance_breakdown", lambda **kw: {"rows": []})
@@ -712,13 +688,9 @@ def _patch_composite_subcalls(monkeypatch, *, eval_raises=False):
             raise RuntimeError("scoring_evaluation must not be called on the analyst path")
 
         monkeypatch.setattr(_ss, "scoring_evaluation", _boom)
-        import backend.routers.session_scoring_admin as _admin
-
         monkeypatch.setattr(_admin, "scoring_evaluation_per_reason", _boom)
     else:
         monkeypatch.setattr(_ss, "scoring_evaluation", lambda **kw: {"score": 0.5})
-        import backend.routers.session_scoring_admin as _admin
-
         monkeypatch.setattr(_admin, "scoring_evaluation_per_reason", lambda **kw: {"reasons": []})
 
 
@@ -735,8 +707,6 @@ def test_analytics_composite_admin_includes_all_six_keys(client, monkeypatch):
 
 def test_analytics_composite_analyst_omits_evaluation_keys(client, monkeypatch):
     """Analyst path must NOT include evaluation / evaluation_per_reason."""
-    from backend.routers import session_scoring as _ss
-
     _patch_composite_subcalls(monkeypatch)
     monkeypatch.setattr(_ss, "_is_analyst_request", lambda req: True)
     r = client.get(f"/api/services/{LOG_SVC}/scoring/analytics?since_hours=24")
@@ -751,13 +721,9 @@ def test_analytics_composite_analyst_omits_evaluation_keys(client, monkeypatch):
 def test_analytics_composite_analyst_does_not_call_evaluation_subfunctions(client, monkeypatch):
     """Analyst path must SKIP the evaluation sub-calls entirely — not just
     omit them from the response. Pinned via a sub-function that raises."""
-    from backend.routers import session_scoring as _ss
-
     _patch_composite_subcalls(monkeypatch, eval_raises=True)
     monkeypatch.setattr(_ss, "_is_analyst_request", lambda req: True)
     r = client.get(f"/api/services/{LOG_SVC}/scoring/analytics?since_hours=24")
-    # The eval functions are wired to RAISE; if the composite called them
-    # we'd see a 500 here. 200 proves the analyst path never invoked them.
     assert r.status_code == 200, r.text
 
 
@@ -825,13 +791,14 @@ def test_compliance_breakdown_returns_grouped_rows(client):
 # is patched directly so the tests don't need a live DESCRIBE.
 
 
-def test_health_includes_latency_when_columns_present(client, monkeypatch):
-    from backend.routers import session_scoring as _ss
+def _patch_table_columns(monkeypatch, cols: set[str]) -> None:
+    monkeypatch.setattr(_ss, "_table_columns", lambda sid: cols)
 
-    monkeypatch.setattr(
-        _ss,
-        "_table_columns",
-        lambda sid: {
+
+def test_health_includes_latency_when_columns_present(client, monkeypatch):
+    _patch_table_columns(
+        monkeypatch,
+        {
             "edge_score",
             "edge_score_l2",
             "edge_score_reason",
@@ -870,9 +837,7 @@ def test_health_includes_latency_when_columns_present(client, monkeypatch):
 def test_health_omits_latency_when_columns_absent(client, monkeypatch):
     """Older service without the latency columns: latency.available is
     False and the percentile fields are null — no binder error, no 500."""
-    from backend.routers import session_scoring as _ss
-
-    monkeypatch.setattr(_ss, "_table_columns", lambda sid: {"edge_score", "edge_score_reason"})
+    _patch_table_columns(monkeypatch, {"edge_score", "edge_score_reason"})
     canned = [
         _health_row(
             total_edge_rows=10,
@@ -893,13 +858,7 @@ def test_health_omits_latency_when_columns_absent(client, monkeypatch):
 
 
 def test_latency_timeseries_returns_rows_with_latency(client, monkeypatch):
-    from backend.routers import session_scoring as _ss
-
-    monkeypatch.setattr(
-        _ss,
-        "_table_columns",
-        lambda sid: {"edge_score", "edge_score_reason", "edge_score_rtt_us", "edge_score_exec_us"},
-    )
+    _patch_table_columns(monkeypatch, {"edge_score", "edge_score_reason", "edge_score_rtt_us", "edge_score_exec_us"})
     canned = [
         {
             "hour": "2026-06-17 10:00:00",
@@ -926,9 +885,7 @@ def test_latency_timeseries_returns_rows_with_latency(client, monkeypatch):
 def test_latency_timeseries_errors_only_when_columns_absent(client, monkeypatch):
     """Without latency columns the endpoint still returns the fail-open
     series (errors over time) with has_latency=False."""
-    from backend.routers import session_scoring as _ss
-
-    monkeypatch.setattr(_ss, "_table_columns", lambda sid: {"edge_score", "edge_score_reason"})
+    _patch_table_columns(monkeypatch, {"edge_score", "edge_score_reason"})
     canned = [{"hour": "2026-06-17 10:00:00", "scored_count": 500, "fail_open_count": 30, "total_count": 530}]
     with _patch_query_logs(canned):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/latency-timeseries?since_hours=6")
@@ -944,9 +901,7 @@ def test_latency_timeseries_buckets_by_minute_for_1h_window(client, monkeypatch)
     endpoint buckets by MINUTE for since_hours<=1 (granularity='minute') and
     stays hourly for wider windows. Powers the per-minute Scorer errors +
     Scorer latency charts at the 1h range."""
-    from backend.routers import session_scoring as _ss
-
-    monkeypatch.setattr(_ss, "_table_columns", lambda sid: {"edge_score", "edge_score_reason"})
+    _patch_table_columns(monkeypatch, {"edge_score", "edge_score_reason"})
     captured: dict[str, str] = {}
 
     def _fake_query_logs(*args, **kwargs):
@@ -974,8 +929,6 @@ def test_bust_analytics_cache_actually_invalidates_targeted_service():
     The bust was a silent no-op — labels mutations only invalidated via
     the 20s TTL. Fix: match by membership so the service_id at index 1
     triggers the match regardless of key shape."""
-    from backend.routers import session_scoring as _ss
-
     # Seed the cache directly.
     _ss._analytics_cache.clear()
     _ss._analytics_cache[("top-flagged", "svc-a", 24, 50)] = (12345.0, {"rows": [1]})
@@ -992,8 +945,6 @@ def test_bust_analytics_cache_actually_invalidates_targeted_service():
 
 
 def test_bust_analytics_cache_with_none_service_id_clears_everything():
-    from backend.routers import session_scoring as _ss
-
     _ss._analytics_cache.clear()
     _ss._analytics_cache[("top-flagged", "svc-a", 24, 50)] = (12345.0, {"rows": []})
     _ss._analytics_cache[("score-distribution", "svc-b", 24)] = (12345.0, {"rows": []})
@@ -1194,8 +1145,6 @@ def test_threshold_preview_extreme_thresholds(client, with_config):
         patch("backend.repositories.session_scoring.query_logs", side_effect=_route_query),
         _patch_labels([], {"good": 0, "bad": 0, "neutral": 0}),
     ):
-        from backend.routers import session_scoring as _ss
-
         _ss._analytics_cache.clear()
         r_low = client.get(f"/api/services/{LOG_SVC}/scoring/threshold-preview?threshold=0")
         _ss._analytics_cache.clear()
@@ -1461,13 +1410,20 @@ def test_scoring_threshold_get_returns_null_when_unset(client, with_config):
     assert body["enforced"] is False
 
 
+def _capture_cfg_save(monkeypatch) -> dict:
+    saved: dict = {}
+
+    def save_fn(sid, cfg):
+        saved.update(sid=sid, cfg=cfg)
+
+    monkeypatch.setattr("backend.config.save_config", save_fn)
+    monkeypatch.setattr("backend.config.mutate_config", mutate_via_save(save_fn))
+    return saved
+
+
 def test_scoring_threshold_put_persists_value_and_returns_it(client, with_config, monkeypatch):
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
-    saved: dict = {}
-    monkeypatch.setattr("backend.config.save_config", lambda sid, cfg: saved.update(sid=sid, cfg=cfg))
-    monkeypatch.setattr(
-        "backend.config.mutate_config", mutate_via_save(lambda sid, cfg: saved.update(sid=sid, cfg=cfg))
-    )
+    saved = _capture_cfg_save(monkeypatch)
 
     r = client.put(f"/api/services/{LOG_SVC}/scoring/threshold", json={"threshold": 80})
     assert r.status_code == 200
@@ -1489,9 +1445,7 @@ def test_scoring_threshold_put_clears_when_null(client, with_config, monkeypatch
         "service_id": LOG_SVC,
         "scoring": {"enabled": True, "operator_threshold": 80, "operator_threshold_set_at": "2026-01-01"},
     }
-    saved: dict = {}
-    monkeypatch.setattr("backend.config.save_config", lambda sid, cfg: saved.update(cfg=cfg))
-    monkeypatch.setattr("backend.config.mutate_config", mutate_via_save(lambda sid, cfg: saved.update(cfg=cfg)))
+    saved = _capture_cfg_save(monkeypatch)
 
     r = client.put(f"/api/services/{LOG_SVC}/scoring/threshold", json={"threshold": None})
     assert r.status_code == 200
@@ -1580,17 +1534,7 @@ def test_matrix_versions_restore_happy_path(client, with_config, monkeypatch, tm
         "service_id": LOG_SVC,
         "scoring": {"enabled": True, "matrix_version": "2026-06-03-c", "scoring_matrix_store_id": "MATRIX_STORE"},
     }
-    saved: dict = {}
-
-    def _fake_mutate(sid, mutate, **kwargs):
-        cfg = with_config.get(sid)
-        if cfg is None:
-            return None
-        mutate(cfg)
-        saved.update(sid=sid, cfg=cfg)
-        return cfg
-
-    monkeypatch.setattr("backend.config.mutate_config", _fake_mutate)
+    saved = _capture_cfg_save(monkeypatch)
 
     # Create a real on-disk tenant matrix so we can verify it gets
     # unlinked. The endpoint derives matrix_<sid>.json from _MATRIX_PATH
@@ -2412,8 +2356,6 @@ def test_cached_drops_inflight_entry_on_cache_hit():
     so a regression that puts the try/finally back inside the producer
     branch fails this test immediately.
     """
-    from backend.routers import session_scoring as _ss
-
     _ss._analytics_cache.clear()
     _ss._inflight.clear()
     key = ("test_endpoint", "svc-test", 24)
@@ -2455,14 +2397,10 @@ def _fake_request(analyst_session):
     The middleware stamps ``request.state.analyst_session``; ``_scoring_time_window``
     and the ``get_analyst_time_bounds`` dependency only touch that attribute.
     """
-    from types import SimpleNamespace
-
     return SimpleNamespace(state=SimpleNamespace(analyst_session=analyst_session))
 
 
 def test_scoring_time_window_admin_uses_relative_interval():
-    from backend.routers import session_scoring as _ss
-
     pred, disc = _ss._scoring_time_window(_fake_request(None), 24)
     assert pred == "timestamp >= now() - INTERVAL 24 HOUR"
     assert disc is None
@@ -2472,9 +2410,7 @@ def test_scoring_time_window_analyst_clamps_to_invite_window():
     """An analyst scoped to 1h who asks for 168h gets an absolute window
     clamped to ~1h — not the relative 168h interval."""
     import re
-    from types import SimpleNamespace
 
-    from backend.routers import session_scoring as _ss
     from backend.utils.date_utils import parse_iso_utc
 
     session = SimpleNamespace(query_window_hours=1, query_start_time=None, query_end_time=None, pii_policy={})
@@ -2494,10 +2430,6 @@ def test_top_flagged_analyst_clamps_window_and_keeps_ua_url(monkeypatch):
     """End-to-end through the handler: analyst → SQL uses the clamped absolute
     window (not INTERVAL 168), and ua/url stay in the rows (analysts need
     them; ip is masked downstream by the middleware)."""
-    from types import SimpleNamespace
-
-    from backend.routers import session_scoring as _ss
-
     captured: dict = {}
 
     def fake_query_logs(service_id, sql, params=()):
@@ -2518,8 +2450,6 @@ def test_top_flagged_analyst_clamps_window_and_keeps_ua_url(monkeypatch):
 
 
 def test_top_flagged_admin_keeps_full_window(monkeypatch):
-    from backend.routers import session_scoring as _ss
-
     captured: dict = {}
 
     def fake_query_logs(service_id, sql, params=()):
@@ -2537,10 +2467,6 @@ def test_top_flagged_admin_keeps_full_window(monkeypatch):
 def test_session_events_analyst_clamps_window(monkeypatch):
     """The admin events route is analyst-reachable: an analyst gets the
     lookback clamped (a ts_predicate is passed to the repo); ua/url stay."""
-    from types import SimpleNamespace
-
-    from backend.routers import session_scoring_admin as _admin
-
     captured: dict = {}
 
     def fake_fetch(service_id, sids, since_days=30, limit_per_sid=500, *, ts_predicate=None):
@@ -2562,8 +2488,6 @@ def test_session_events_analyst_clamps_window(monkeypatch):
 
 
 def test_session_events_admin_full_window(monkeypatch):
-    from backend.routers import session_scoring_admin as _admin
-
     captured: dict = {}
 
     def fake_fetch(service_id, sids, since_days=30, limit_per_sid=500, *, ts_predicate=None):
@@ -2589,8 +2513,6 @@ def test_session_events_admin_full_window(monkeypatch):
 
 
 def test_scoring_source_passthrough_when_all_present():
-    from backend.routers import session_scoring as _ss
-
     cols = set(_SCORING_COLUMN_TYPES) | {"edge", "timestamp"}
     assert _ss._scoring_source("logs_x", cols) == "logs_x"
 
@@ -2598,14 +2520,10 @@ def test_scoring_source_passthrough_when_all_present():
 def test_scoring_source_passthrough_on_empty_cols():
     """Empty col set = schema unknown / view not ready → don't synthesize
     (avoids a duplicate-column error if a column actually exists)."""
-    from backend.routers import session_scoring as _ss
-
     assert _ss._scoring_source("logs_x", set()) == "logs_x"
 
 
 def test_scoring_source_synthesizes_missing_core_columns():
-    from backend.routers import session_scoring as _ss
-
     # Base-only schema: has `edge` but none of the scoring columns.
     src = _ss._scoring_source("logs_x", {"edge", "timestamp", "ip"})
     assert src.startswith("(SELECT *, ") and src.endswith(" FROM logs_x)")
@@ -2653,8 +2571,6 @@ def test_scoring_endpoints_degrade_when_scoring_never_enabled(_noscore_table):
     """The reported bug: every scoring card showed a DuckDB binder error
     ('Referenced column "edge_score" not found') before scoring was enabled.
     With _scoring_source the endpoints must return 200 empty/zero shapes."""
-    from backend.routers import session_scoring as _ss
-
     svc = _noscore_table
     req = _fake_request(None)  # admin (no analyst session) → relative window
 
@@ -2690,10 +2606,7 @@ def test_per_reason_returns_min_samples_cta_when_under_threshold(client, with_co
     bucketing when the headline AUC isn't even computable."""
     with_config[LOG_SVC] = {"service_id": LOG_SVC, "scoring": {"enabled": True}}
 
-    with (
-        patch("backend.scoring.labels.list_labels", return_value=[]),
-        patch("backend.scoring.labels.counts_by_label", return_value={"good": 2, "bad": 0, "neutral": 0}),
-    ):
+    with _patch_labels([], {"good": 2, "bad": 0, "neutral": 0}):
         r = client.get(f"/api/services/{LOG_SVC}/scoring/evaluation/per-reason")
     assert r.status_code == 200
     body = r.json()

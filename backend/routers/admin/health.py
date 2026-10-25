@@ -40,8 +40,7 @@ from backend.models.admin_status import (
 from backend.utils.date_utils import parse_relative_time_window
 from backend.utils.router_utils import bad_request, make_error, require_service_id
 
-from ._helpers import attach_debug_db_snapshot
-from ._router import router
+from ._helpers import attach_debug_db_snapshot, router
 
 logger = logging.getLogger(__name__)
 
@@ -320,8 +319,10 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
         if _hs_cfg.is_high_scale_mode():
             from dataclasses import asdict
 
-            from backend.high_scale.disk_sampler import disk_snapshot_payload
-            from backend.high_scale.models import topology_from_environment
+            from backend.high_scale.archive_models import (
+                disk_snapshot_payload,
+                topology_from_environment,
+            )
 
             topology: dict | None
             try:

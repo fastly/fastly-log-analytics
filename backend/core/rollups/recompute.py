@@ -16,6 +16,7 @@ import os
 import shutil
 import sys
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -57,18 +58,23 @@ from .network import (  # noqa: F401
     build_pop_health_bundles,
 )
 from .ngwaf_bots import build_ngwaf_bots_bundles, build_ngwaf_bots_ts_bundles  # noqa: F401
-from .origin_dims import build_origin_dims_bundles, build_origin_summary_bundles  # noqa: F401
-from .origin_latency_ts import build_origin_latency_ts_bundles  # noqa: F401
-from .overview import build_overview_bundles  # noqa: F401
+from .origin_dims import (  # noqa: F401
+    build_origin_dims_bundles,
+    build_origin_latency_ts_bundles,
+    build_origin_summary_bundles,
+    build_slow_urls_bundles,
+)
 from .perf_latency import build_perf_dims_bundles, build_perf_latency_bundles  # noqa: F401
 from .security_dims import (  # noqa: F401
     build_security_dims_bundles,
     build_security_proxies_bundles,
     build_verified_bots_ts_bundles,
 )
-from .sessions import build_session_bundles  # noqa: F401
-from .slow_urls import build_slow_urls_bundles  # noqa: F401
-from .time_series import build_time_series_bundles  # noqa: F401
+from .time_series import (  # noqa: F401
+    build_overview_bundles,
+    build_session_bundles,
+    build_time_series_bundles,
+)
 from .wellknown_bots import recompute_wellknown_bots_rollup  # noqa: F401
 
 logger = logging.getLogger(__name__)
@@ -614,6 +620,29 @@ def backfill_missing_hour_ip_spread(
     return {"missing": len(missing), "rebuilt": len(missing)}
 
 
+def _prune_partition_dirs(
+    parent_dir: str,
+    cutoff_str: str,
+    prefix: str,
+    *,
+    should_delete: Callable[[str], bool] | None = None,
+) -> int:
+    """Remove ``<prefix><token>`` child directories under *parent_dir* older than *cutoff_str*."""
+    deleted = 0
+    for entry in os.listdir(parent_dir):
+        if not entry.startswith(prefix):
+            continue
+        token = entry[len(prefix) :]
+        if should_delete(token) if should_delete is not None else token < cutoff_str:
+            target_dir = os.path.join(parent_dir, entry)
+            try:
+                shutil.rmtree(target_dir)
+                deleted += 1
+            except OSError as e:
+                logger.warning("[rollups] could not delete %s: %s", target_dir, e)
+    return deleted
+
+
 def cleanup_old_rollups(
     service_id: str,
     source: dict,
@@ -653,18 +682,7 @@ def cleanup_old_rollups(
                     continue
                 field_dir = os.path.join(root_dir, field_entry)
                 try:
-                    for hour_entry in os.listdir(field_dir):
-                        if not hour_entry.startswith("hour="):
-                            continue
-                        hour = hour_entry[len("hour=") :]
-                        # String compare works because fixed-width YYYY-MM-DD-HH sorts lexicographically
-                        if hour < hour_cutoff:
-                            hour_dir = os.path.join(field_dir, hour_entry)
-                            try:
-                                shutil.rmtree(hour_dir)
-                                deleted += 1
-                            except OSError as e:
-                                logger.warning("[rollups] could not delete %s: %s", hour_dir, e)
+                    deleted += _prune_partition_dirs(field_dir, hour_cutoff, "hour=")
                 except OSError:
                     continue
         except OSError as e:
@@ -674,17 +692,7 @@ def cleanup_old_rollups(
     day_bundled_root = _day_bundled_root(source)
     if os.path.isdir(day_bundled_root):
         try:
-            for day_entry in os.listdir(day_bundled_root):
-                if not day_entry.startswith("day="):
-                    continue
-                day = day_entry[len("day=") :]
-                if day < day_cutoff:
-                    day_dir = os.path.join(day_bundled_root, day_entry)
-                    try:
-                        shutil.rmtree(day_dir)
-                        deleted += 1
-                    except OSError as e:
-                        logger.warning("[rollups] could not delete %s: %s", day_dir, e)
+            deleted += _prune_partition_dirs(day_bundled_root, day_cutoff, "day=")
         except OSError as e:
             logger.warning("[rollups] cleanup walk failed for %s (day_bundled): %s", service_id, e)
 
@@ -697,19 +705,15 @@ def cleanup_old_rollups(
                     continue
                 field_dir = os.path.join(day_root, field_entry)
                 try:
-                    for day_entry in os.listdir(field_dir):
-                        if not day_entry.startswith("day="):
-                            continue
-                        day = day_entry[len("day=") :]
-                        day_bundle_file = os.path.join(day_bundled_root, f"day={day}", "all_fields.parquet")
-                        has_day_bundle = os.path.isfile(day_bundle_file)
-                        if has_day_bundle or day < day_cutoff:
-                            day_dir = os.path.join(field_dir, day_entry)
-                            try:
-                                shutil.rmtree(day_dir)
-                                deleted += 1
-                            except OSError as e:
-                                logger.warning("[rollups] could not delete %s: %s", day_dir, e)
+                    deleted += _prune_partition_dirs(
+                        field_dir,
+                        day_cutoff,
+                        "day=",
+                        should_delete=lambda day: (
+                            os.path.isfile(os.path.join(day_bundled_root, f"day={day}", "all_fields.parquet"))
+                            or day < day_cutoff
+                        ),
+                    )
                 except OSError:
                     continue
         except OSError as e:
@@ -719,20 +723,18 @@ def cleanup_old_rollups(
     hour_bundled_root = _hour_bundled_root(source)
     if os.path.isdir(hour_bundled_root):
         try:
-            for hour_entry in os.listdir(hour_bundled_root):
-                if not hour_entry.startswith("hour="):
-                    continue
-                hour = hour_entry[len("hour=") :]
-                day = hour[:10]
-                day_bundle_file = os.path.join(day_bundled_root, f"day={day}", "all_fields.parquet")
-                has_day_bundle = os.path.isfile(day_bundle_file)
-                if (has_day_bundle and hour < hour_cutoff) or hour < cutoff:
-                    hour_dir = os.path.join(hour_bundled_root, hour_entry)
-                    try:
-                        shutil.rmtree(hour_dir)
-                        deleted += 1
-                    except OSError as e:
-                        logger.warning("[rollups] could not delete %s: %s", hour_dir, e)
+            deleted += _prune_partition_dirs(
+                hour_bundled_root,
+                cutoff,
+                "hour=",
+                should_delete=lambda hour: (
+                    (
+                        os.path.isfile(os.path.join(day_bundled_root, f"day={hour[:10]}", "all_fields.parquet"))
+                        and hour < hour_cutoff
+                    )
+                    or hour < cutoff
+                ),
+            )
         except OSError as e:
             logger.warning("[rollups] cleanup walk failed for %s (hour_bundled): %s", service_id, e)
 

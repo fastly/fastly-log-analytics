@@ -24,8 +24,9 @@ from backend.high_scale.archive_models import (
     ArchiveManifest,
     ArchiveSourceEntry,
     ArchiveSourceObject,
+    ArchiveState,
+    validate_archive_transition,
 )
-from backend.high_scale.models import ArchiveState, validate_archive_transition
 from backend.high_scale.source_discovery import INITIAL_SOURCE_CURSOR
 
 SCHEMA_DDL = """

@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends
 from backend.core.iceberg import execute_with_stale_view_retry
 from backend.core.request_context import RequestContext, build_request_context
 from backend.cron.jobs.insights_prewarmer import record_insights_request
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.insights import (
     CacheCollapseDetailRequest,
     CacheCollapseDetailResponse,

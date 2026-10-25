@@ -12,9 +12,8 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from backend.models._base import JsonAny, JsonDict, WireSafeModel
+from backend.models._base import ErrorDetail, JsonAny, JsonDict, WireSafeModel
 from backend.models.common import BaseResponse
-from backend.models.errors import ErrorDetail
 
 Reference = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")]
 

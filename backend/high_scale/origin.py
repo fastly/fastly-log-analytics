@@ -11,15 +11,10 @@ from backend.core.high_scale_sections import HighScaleSections
 from backend.high_scale._common import (
     _TIMESERIES_METRICS,
     RELATIVE_ERROR,
-    visible_fact_clauses,
+    build_clickhouse_filters,
+    build_published_facts_where,
 )
 from backend.high_scale._common import (
-    range_value as _range_value,
-)
-from backend.high_scale._filters import (
-    build_clickhouse_filters,
-)
-from backend.high_scale._filters import (
     build_published_projection_where as _where,
 )
 from backend.high_scale.registry_bootstrap import HighScaleService
@@ -75,20 +70,10 @@ def _facts_scope(
     service: HighScaleService,
     start_time: str | None,
     end_time: str | None,
-    filter_sql: str,
-    filter_params: Mapping[str, Any],
+    filters: Mapping[str, Any] | None,
 ) -> FactsScope:
-    clauses = [*visible_fact_clauses("request"), filter_sql]
-    params: dict[str, Any] = {"service_id": service.service_id, **filter_params}
-    start = _range_value(start_time)
-    end = _range_value(end_time)
-    if start is not None:
-        clauses.append("event_timestamp >= {start:DateTime64(3)}")
-        params["start"] = start
-    if end is not None:
-        clauses.append("event_timestamp <= {end:DateTime64(3)}")
-        params["end"] = end
-    return FactsScope(f"(SELECT {_BASE_COLUMNS} FROM request_facts WHERE {' AND '.join(clauses)})", params)
+    where_sql, params = build_published_facts_where(service.service_id, start_time, end_time, filters)
+    return FactsScope(f"(SELECT {_BASE_COLUMNS} FROM request_facts WHERE {where_sql})", params)
 
 
 def _sketch_select(alias: str, column: str, quantiles: tuple[float, ...]) -> str:
@@ -492,8 +477,8 @@ def aggregates(
     *,
     sections: set[str] | None,
 ) -> dict[str, Any]:
-    filter_sql, filter_params = build_clickhouse_filters(req.filters)
-    facts = _facts_scope(service, start_time, end_time, filter_sql, filter_params) if filter_sql != "1=1" else None
+    filter_sql, _ = build_clickhouse_filters(req.filters)
+    facts = _facts_scope(service, start_time, end_time, req.filters) if filter_sql != "1=1" else None
     approx = _APPROX if facts is None else _NOT_APPROX
 
     def latency_rows(marker: str, dimension: str, limit: int | None = None, having: str | None = None):

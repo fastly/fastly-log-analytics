@@ -5,8 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
-from backend.high_scale._common import parse_time_window, visible_fact_clauses
-from backend.high_scale._filters import request_filter_clauses
+from backend.high_scale._common import parse_time_window, request_filter_clauses, visible_fact_clauses
 from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.models.performance import AssetsAggregatesResponse, AssetsRequest
 from backend.repositories.utils.response_cache import (
@@ -15,7 +14,7 @@ from backend.repositories.utils.response_cache import (
     digest_cache_key,
     serialize_filters_for_key,
 )
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
 _memo = ResponseMemo(ttl=30.0, maxsize=128)
 _response_cache = _memo.cache

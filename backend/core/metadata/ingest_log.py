@@ -456,7 +456,7 @@ def list_unbackfilled_fastly_edge_files(
     if not rows:
         return []
 
-    from backend.core.metadata import usage_log_db as _usage_log_db
+    from backend.core.metadata import usage_log as _usage_log_db
 
     backfilled: set[str] = set()
     try:
@@ -526,7 +526,7 @@ def get_latest_reconciliation_ts(service_id: str) -> str | None:
     Reconciliation rows live in the per-service usage_log SQLite (since
     the v2.0 cutover); the legacy metadata.db.usage_log table is gone.
     """
-    from backend.core.metadata import usage_log_db as _usage_log_db
+    from backend.core.metadata import usage_log as _usage_log_db
 
     try:
         con = _usage_log_db.open_readonly(service_id)

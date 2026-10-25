@@ -36,7 +36,7 @@ from backend.high_scale.registry_bootstrap import (
     HighScaleServiceRegistryProtocol,
     get_high_scale_service_registry,
 )
-from backend.models.errors import DEFAULT_ERROR_RESPONSES, ErrorEnvelope
+from backend.models._base import DEFAULT_ERROR_RESPONSES, ErrorEnvelope
 from backend.models.high_scale import (
     HighScaleAggregateRequest,
     HighScaleAggregateResponse,
@@ -57,8 +57,7 @@ from backend.models.high_scale import (
 )
 from backend.repositories.utils.filters import _get_utc_date_str, _get_utc_hour_str
 from backend.utils.auth import mask_ips_for
-from backend.utils.bounded_cache import BoundedTTLCache
-from backend.utils.cache_registry import CacheRegistry
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import iso_z, parse_iso_utc
 from backend.utils.router_utils import make_error, query_errors
 from backend.utils.telemetry import track_query

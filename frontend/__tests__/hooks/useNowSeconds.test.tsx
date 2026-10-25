@@ -10,7 +10,7 @@ import { http, HttpResponse } from 'msw'
 import { withNuqsTestingAdapter, type OnUrlUpdateFunction } from 'nuqs/adapters/testing'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { useColumnVisibility } from '@/hooks/useDerivedState'
-import { useDebounce } from '@/hooks/useDebounce'
+import { useDebounce } from '@/hooks/useFilterPayload'
 import { useRumStatus } from '@/hooks/useServiceQuery'
 import { useStreamAggregates } from '@/app/sessions/stream/_sections/useStreamAggregates'
 import { useTimeseriesToTraces, type TimeseriesDataPoint } from '@/lib/chart-builders'
@@ -467,7 +467,7 @@ describe('useViewMetricUrlSync', () => {
   })
 
   it('does nothing when there are no URL params', async () => {
-    const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
+    const { useViewMetricUrlSync } = await import('@/components/ReportLayout')
     renderHook(() => useViewMetricUrlSync({ setMetric: mockSetMetric }), viewMetricAdapter())
     expect(mockAddFilter).not.toHaveBeenCalled()
     expect(mockSetRange).not.toHaveBeenCalled()
@@ -475,13 +475,13 @@ describe('useViewMetricUrlSync', () => {
   })
 
   it('parses metric param and calls setMetric', async () => {
-    const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
+    const { useViewMetricUrlSync } = await import('@/components/ReportLayout')
     renderHook(() => useViewMetricUrlSync({ setMetric: mockSetMetric }), viewMetricAdapter('?metric=bandwidth'))
     expect(mockSetMetric).toHaveBeenCalledWith('bandwidth')
   })
 
   it('strips metric param from URL after processing while leaving unrelated params untouched', async () => {
-    const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
+    const { useViewMetricUrlSync } = await import('@/components/ReportLayout')
     renderHook(() => useViewMetricUrlSync({ setMetric: mockSetMetric }), viewMetricAdapter('?metric=requests&other=keep'))
     await waitFor(() => expect(onUrlUpdate).toHaveBeenCalled())
     const remaining = onUrlUpdate.mock.calls.at(-1)![0].searchParams
@@ -504,7 +504,7 @@ describe('useViewMetricUrlSync', () => {
         ])
       }),
     )
-    const { useViewMetricUrlSync } = await import('@/hooks/useViewMetricUrlSync')
+    const { useViewMetricUrlSync } = await import('@/components/ReportLayout')
     renderHook(() => useViewMetricUrlSync(), viewMetricAdapter('?view=view-123'))
     await waitFor(() => expect(viewsRequested).toBe(true))
     await waitFor(() => expect(mockSetRange).toHaveBeenCalledWith('2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z'))

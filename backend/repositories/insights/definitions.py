@@ -160,16 +160,29 @@ registry.register(
 # ── 4. New Country Traffic ────────────────────────────────────────────────
 
 
-def new_country_traffic_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: ["country", w_cnt, b_cnt]
+def _city_filters(row: tuple) -> dict:
+    return {"city": row[1], "region": row[2] if row[2] else None, "country": row[3]}
+
+
+def _zero_baseline_count_item(label: str, count: int, meta: dict, warn_threshold: int) -> dict:
     return {
-        "label": format_city_label("", row[0]),
-        "current_val": row[1],
+        "label": label,
+        "current_val": count,
         "baseline_val": 0,
         "unit": "requests",
-        "meta": {"filters": {"country": row[0]}},
-        "severity": "warning" if row[1] >= 10 else "info",
+        "meta": meta,
+        "severity": "warning" if count >= warn_threshold else "info",
     }
+
+
+def new_country_traffic_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: ["country", w_cnt, b_cnt]
+    return _zero_baseline_count_item(
+        label=format_city_label("", row[0]),
+        count=row[1],
+        meta={"filters": {"country": row[0]}},
+        warn_threshold=10,
+    )
 
 
 registry.register(
@@ -196,7 +209,7 @@ def city_surges_processor(row: tuple, definition: InsightDefinition, context: di
         "unit": "requests",
         "meta": {
             "spike_ratio": round(float(row[6]), 1),
-            "filters": {"city": row[1], "region": row[2] if row[2] else None, "country": row[3]},
+            "filters": _city_filters(row),
         },
         "severity": "info" if float(row[6]) < 10 else "warning",
     }
@@ -227,7 +240,7 @@ def city_error_spikes_processor(row: tuple, definition: InsightDefinition, conte
         "meta": {
             "requests": row[7],
             "errors": row[6],
-            "filters": {"city": row[1], "region": row[2] if row[2] else None, "country": row[3]},
+            "filters": _city_filters(row),
         },
         "severity": "critical" if (row[4] or 0) >= 0.5 else "warning",
     }
@@ -255,7 +268,7 @@ def city_latency_processor(row: tuple, definition: InsightDefinition, context: d
         row[4],
         row[5],
         row[6],
-        {"city": row[1], "region": row[2] if row[2] else None, "country": row[3]},
+        _city_filters(row),
         reqs_key="requests",
     )
 
@@ -277,14 +290,12 @@ registry.register(
 
 def new_city_traffic_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [label, city, region, country, w_cnt, b_cnt]
-    return {
-        "label": format_city_label(row[1], row[3], row[2]),
-        "current_val": row[4],
-        "baseline_val": 0,
-        "unit": "requests",
-        "meta": {"filters": {"city": row[1], "region": row[2] if row[2] else None, "country": row[3]}},
-        "severity": "info" if row[4] < 50 else "warning",
-    }
+    return _zero_baseline_count_item(
+        label=format_city_label(row[1], row[3], row[2]),
+        count=row[4],
+        meta={"filters": _city_filters(row)},
+        warn_threshold=50,
+    )
 
 
 registry.register(
@@ -1301,15 +1312,13 @@ registry.register(
 
 def new_asn_traffic_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [asn, w_cnt, b_cnt]
-    asn, w_cnt, b_cnt = row
-    return {
-        "label": _fmt_asn_label(asn, context),
-        "current_val": w_cnt,
-        "baseline_val": 0,
-        "unit": "requests",
-        "meta": {"requests": w_cnt, "asn": asn, "filters": {"asn": asn}},
-        "severity": "warning" if w_cnt >= 100 else "info",
-    }
+    asn, w_cnt, _b_cnt = row
+    return _zero_baseline_count_item(
+        label=_fmt_asn_label(asn, context),
+        count=w_cnt,
+        meta={"requests": w_cnt, "asn": asn, "filters": {"asn": asn}},
+        warn_threshold=100,
+    )
 
 
 registry.register(

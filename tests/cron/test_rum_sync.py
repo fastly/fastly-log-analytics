@@ -2009,7 +2009,6 @@ def test_rum_commit_lease_held_is_clean_skip_with_no_row(monkeypatch):
 
 # ── Merged from test_ledger_rum_sweep_contract.py ──────────────────────────────────────────────
 
-import time
 
 from backend.deps import require_admin
 
@@ -2048,62 +2047,50 @@ _RUM_SWEEP_FAKE_SRC = {
 
 def test_manual_trigger_rum_sweep_endpoint_success():
     """POST /api/admin/rum/ledger/sweep/{service_id} returns 200, run_id, and starts job."""
-    app.dependency_overrides[get_source] = lambda: _RUM_SWEEP_FAKE_SRC
-    app.dependency_overrides[get_service_id] = lambda: _RUM_SWEEP_SERVICE_ID
-    try:
-        with (
-            patch("backend.config.load_config", return_value=_RUM_SWEEP_FAKE_CFG),
-            patch("backend.core.duckdb.start_cron_run", return_value="run-rum-sweep-101"),
-            patch("backend.cron_progress.start_progress"),
-            patch("backend.cron.jobs.rum_ledger._run_rum_ledger_sweep"),
-            patch("backend.repositories.dashboard.invalidate_service"),
-        ):
-            client = TestClient(app)
-            resp = client.post(
-                f"/api/admin/rum/ledger/sweep/{_RUM_SWEEP_SERVICE_ID}",
-                headers={"x-fastly-service-id": _RUM_SWEEP_SERVICE_ID},
-            )
+    with (
+        _override_service_deps(_RUM_SWEEP_FAKE_SRC, _RUM_SWEEP_SERVICE_ID) as client,
+        patch("backend.config.load_config", return_value=_RUM_SWEEP_FAKE_CFG),
+        patch("backend.core.duckdb.start_cron_run", return_value="run-rum-sweep-101"),
+        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron.jobs.rum_ledger._run_rum_ledger_sweep"),
+        patch("backend.repositories.dashboard.invalidate_service"),
+    ):
+        resp = client.post(
+            f"/api/admin/rum/ledger/sweep/{_RUM_SWEEP_SERVICE_ID}",
+            headers={"x-fastly-service-id": _RUM_SWEEP_SERVICE_ID},
+        )
 
-        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
-        body = resp.json()
-        assert body["ok"] is True
-        assert body["run_id"] == "run-rum-sweep-101"
-        assert "started" in body["message"].lower()
-    finally:
-        app.dependency_overrides.pop(get_source, None)
-        app.dependency_overrides.pop(get_service_id, None)
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["run_id"] == "run-rum-sweep-101"
+    assert "started" in body["message"].lower()
 
 
 def test_manual_trigger_rum_sweep_endpoint_reentrancy():
     """POST /api/admin/rum/ledger/sweep/{service_id} returns 200 with already running message."""
-    app.dependency_overrides[get_source] = lambda: _RUM_SWEEP_FAKE_SRC
-    app.dependency_overrides[get_service_id] = lambda: _RUM_SWEEP_SERVICE_ID
-    try:
-        with (
-            patch("backend.config.load_config", return_value=_RUM_SWEEP_FAKE_CFG),
-            patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("Already running")),
-            patch(
-                "backend.cron_progress.list_active_runs",
-                return_value=[
-                    {"service_id": _RUM_SWEEP_SERVICE_ID, "task": "ledger_rum_sweep", "run_id": "run-rum-active"}
-                ],
-            ),
-            patch("backend.repositories.dashboard.invalidate_service"),
-        ):
-            client = TestClient(app)
-            resp = client.post(
-                f"/api/admin/rum/ledger/sweep/{_RUM_SWEEP_SERVICE_ID}",
-                headers={"x-fastly-service-id": _RUM_SWEEP_SERVICE_ID},
-            )
+    with (
+        _override_service_deps(_RUM_SWEEP_FAKE_SRC, _RUM_SWEEP_SERVICE_ID) as client,
+        patch("backend.config.load_config", return_value=_RUM_SWEEP_FAKE_CFG),
+        patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("Already running")),
+        patch(
+            "backend.cron_progress.list_active_runs",
+            return_value=[
+                {"service_id": _RUM_SWEEP_SERVICE_ID, "task": "ledger_rum_sweep", "run_id": "run-rum-active"}
+            ],
+        ),
+        patch("backend.repositories.dashboard.invalidate_service"),
+    ):
+        resp = client.post(
+            f"/api/admin/rum/ledger/sweep/{_RUM_SWEEP_SERVICE_ID}",
+            headers={"x-fastly-service-id": _RUM_SWEEP_SERVICE_ID},
+        )
 
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["ok"] is True
-        assert body["run_id"] == "run-rum-active"
-        assert "already running" in body["message"].lower()
-    finally:
-        app.dependency_overrides.pop(get_source, None)
-        app.dependency_overrides.pop(get_service_id, None)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["run_id"] == "run-rum-active"
+    assert "already running" in body["message"].lower()
 
 
 def test_manual_trigger_rum_sweep_endpoint_standard_mode_rejected():
@@ -2119,21 +2106,17 @@ def test_manual_trigger_rum_sweep_endpoint_standard_mode_rejected():
 def test_manual_trigger_rum_sweep_endpoint_rum_disabled_rejected():
     """POST /api/admin/rum/ledger/sweep/{service_id} when RUM is disabled returns 400."""
     no_rum_cfg = {**_RUM_SWEEP_FAKE_CFG, "rum": {"enabled": False}}
-    app.dependency_overrides[get_source] = lambda: _RUM_SWEEP_FAKE_SRC
-    app.dependency_overrides[get_service_id] = lambda: _RUM_SWEEP_SERVICE_ID
-    try:
-        with patch("backend.config.load_config", return_value=no_rum_cfg):
-            client = TestClient(app)
-            resp = client.post(
-                f"/api/admin/rum/ledger/sweep/{_RUM_SWEEP_SERVICE_ID}",
-                headers={"x-fastly-service-id": _RUM_SWEEP_SERVICE_ID},
-            )
-        assert resp.status_code == 400
-        assert resp.json()["detail"]["error"] == "rum_not_enabled"
-        assert "rum is not enabled" in resp.json()["detail"]["message"].lower()
-    finally:
-        app.dependency_overrides.pop(get_source, None)
-        app.dependency_overrides.pop(get_service_id, None)
+    with (
+        _override_service_deps(_RUM_SWEEP_FAKE_SRC, _RUM_SWEEP_SERVICE_ID) as client,
+        patch("backend.config.load_config", return_value=no_rum_cfg),
+    ):
+        resp = client.post(
+            f"/api/admin/rum/ledger/sweep/{_RUM_SWEEP_SERVICE_ID}",
+            headers={"x-fastly-service-id": _RUM_SWEEP_SERVICE_ID},
+        )
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error"] == "rum_not_enabled"
+    assert "rum is not enabled" in resp.json()["detail"]["message"].lower()
 
 
 def test_manual_trigger_rum_sweep_endpoint_read_only_rejected():
@@ -2520,20 +2503,24 @@ def test_run_rum_ledger_sweep_skips_when_config_missing(monkeypatch):
 # -----------------------------------------------------------------------------
 
 
-def test_scheduler_registers_and_reschedules_rum_ledger_sweep():
-    """Scheduler registers ledger_rum_sweep in high-scale mode with RUM and reschedules on interval changes."""
-    sid = "svc-scheduler-rum-sweep"
+def _make_rum_sweep_sched_cfg(
+    sid: str,
+    *,
+    rum_enabled: bool = True,
+    sweep_enabled: bool = True,
+    interval_minutes: int = 15,
+) -> tuple[dict, dict]:
     cfg = {
         "service_id": sid,
         "name": sid,
         "log_period": 60,
         "deployment_mode": "high_scale",
         "access_level": "read_write",
-        "rum": {"enabled": True},
+        "rum": {"enabled": rum_enabled},
         "provisioning": {
             "access_level": "read_write",
             "cron_sync": {"enabled": True},
-            "cron_ledger_rum_sweep": {"enabled": True, "interval_minutes": 15},
+            "cron_ledger_rum_sweep": {"enabled": sweep_enabled, "interval_minutes": interval_minutes},
         },
     }
     src = {
@@ -2543,11 +2530,10 @@ def test_scheduler_registers_and_reschedules_rum_ledger_sweep():
         "access_level": "read_write",
         "deployment_mode": "high_scale",
     }
+    return cfg, src
 
-    s = Scheduler()
-    mock_sched = MagicMock()
-    s._sched = mock_sched
 
+def _sync_rum_sweep_scheduler(s: Scheduler, cfg: dict, src: dict) -> None:
     with (
         patch("backend.config.list_configs", return_value=[cfg]),
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
@@ -2557,6 +2543,17 @@ def test_scheduler_registers_and_reschedules_rum_ledger_sweep():
         patch("backend.core.metadata.count_alerts", return_value=0),
     ):
         s._sync_jobs()
+
+
+def test_scheduler_registers_and_reschedules_rum_ledger_sweep():
+    """Scheduler registers ledger_rum_sweep in high-scale mode with RUM and reschedules on interval changes."""
+    sid = "svc-scheduler-rum-sweep"
+    cfg, src = _make_rum_sweep_sched_cfg(sid, interval_minutes=15)
+
+    s = Scheduler()
+    mock_sched = MagicMock()
+    s._sched = mock_sched
+    _sync_rum_sweep_scheduler(s, cfg, src)
 
     job_id = f"ledger_rum_sweep_{sid}"
     assert job_id in s._job_ids
@@ -2574,98 +2571,32 @@ def test_scheduler_registers_and_reschedules_rum_ledger_sweep():
     cfg["provisioning"]["cron_ledger_rum_sweep"]["interval_minutes"] = 20
     mock_job = MagicMock()
     mock_sched.get_job = MagicMock(side_effect=lambda jid: mock_job if jid == job_id else None)
-    with (
-        patch("backend.config.list_configs", return_value=[cfg]),
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.core.duckdb.is_configured", return_value=True),
-        patch("backend.config.is_high_scale_mode", return_value=True),
-        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
-        patch("backend.core.metadata.count_alerts", return_value=0),
-    ):
-        s._sync_jobs()
-        mock_job.reschedule.assert_called_once_with("interval", minutes=20)
+    _sync_rum_sweep_scheduler(s, cfg, src)
+    mock_job.reschedule.assert_called_once_with("interval", minutes=20)
 
 
 def test_scheduler_skips_rum_ledger_sweep_when_disabled():
     """Scheduler skips ledger_rum_sweep when cron_ledger_rum_sweep.enabled is False."""
     sid = "svc-rum-sweep-disabled"
-    cfg = {
-        "service_id": sid,
-        "name": sid,
-        "log_period": 60,
-        "deployment_mode": "high_scale",
-        "access_level": "read_write",
-        "rum": {"enabled": True},
-        "provisioning": {
-            "access_level": "read_write",
-            "cron_sync": {"enabled": True},
-            "cron_ledger_rum_sweep": {"enabled": False, "interval_minutes": 15},
-        },
-    }
-    src = {
-        "name": sid,
-        "service_id": sid,
-        "bucket": "test-b",
-        "access_level": "read_write",
-        "deployment_mode": "high_scale",
-    }
+    cfg, src = _make_rum_sweep_sched_cfg(sid, sweep_enabled=False)
 
     s = Scheduler()
     s._sched = MagicMock()
+    _sync_rum_sweep_scheduler(s, cfg, src)
 
-    with (
-        patch("backend.config.list_configs", return_value=[cfg]),
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.core.duckdb.is_configured", return_value=True),
-        patch("backend.config.is_high_scale_mode", return_value=True),
-        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
-        patch("backend.core.metadata.count_alerts", return_value=0),
-    ):
-        s._sync_jobs()
-
-    job_id = f"ledger_rum_sweep_{sid}"
-    assert job_id not in s._job_ids
+    assert f"ledger_rum_sweep_{sid}" not in s._job_ids
 
 
 def test_scheduler_skips_rum_ledger_sweep_when_rum_disabled():
     """Scheduler skips ledger_rum_sweep when RUM is disabled."""
     sid = "svc-rum-disabled"
-    cfg = {
-        "service_id": sid,
-        "name": sid,
-        "log_period": 60,
-        "deployment_mode": "high_scale",
-        "access_level": "read_write",
-        "rum": {"enabled": False},
-        "provisioning": {
-            "access_level": "read_write",
-            "cron_sync": {"enabled": True},
-            "cron_ledger_rum_sweep": {"enabled": True, "interval_minutes": 15},
-        },
-    }
-    src = {
-        "name": sid,
-        "service_id": sid,
-        "bucket": "test-b",
-        "access_level": "read_write",
-        "deployment_mode": "high_scale",
-    }
+    cfg, src = _make_rum_sweep_sched_cfg(sid, rum_enabled=False)
 
     s = Scheduler()
     s._sched = MagicMock()
+    _sync_rum_sweep_scheduler(s, cfg, src)
 
-    with (
-        patch("backend.config.list_configs", return_value=[cfg]),
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.core.duckdb.is_configured", return_value=True),
-        patch("backend.config.is_high_scale_mode", return_value=True),
-        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
-        patch("backend.core.metadata.count_alerts", return_value=0),
-    ):
-        s._sync_jobs()
-
-    job_id = f"ledger_rum_sweep_{sid}"
-    assert job_id not in s._job_ids
+    assert f"ledger_rum_sweep_{sid}" not in s._job_ids
 
 
 # -----------------------------------------------------------------------------
@@ -2673,24 +2604,15 @@ def test_scheduler_skips_rum_ledger_sweep_when_rum_disabled():
 # -----------------------------------------------------------------------------
 
 
-def test_sweep_rum_ledger_reclaims_stale_claims_scoped_to_rum(monkeypatch):
-    """sweep_rum_ledger_once reclaims stale claims scoping to raw/rum/% keys."""
-    from backend.core.ingest import LEDGER_RECLAIM_AFTER_S, sweep_rum_ledger_once
-
-    sid = "svc-test-rum-reclaim"
-    rum_key = "raw/rum/2026/08/27/10/05/beacons.json.gz"
-
-    now = time.time()
-    stale_time = now - LEDGER_RECLAIM_AFTER_S - 60
-
-    executed_statements = []
+def _setup_fake_sweep_ledger(monkeypatch, rum_key: str, *, queue_depth: int) -> tuple[list[tuple], MagicMock]:
+    executed_statements: list[tuple] = []
 
     class FakeCursor:
         def execute(self, query, params=None):
             executed_statements.append((query, params))
 
         def fetchall(self):
-            for q, p in executed_statements:
+            for q, _ in executed_statements:
                 if "UPDATE ingest_ledger SET status='discovered'" in q:
                     return [(rum_key,)]
             return []
@@ -2714,9 +2636,19 @@ def test_sweep_rum_ledger_reclaims_stale_claims_scoped_to_rum(monkeypatch):
     monkeypatch.setattr("backend.core.metadata.base.get_con", lambda s: FakeCon())
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda s: {"prefix": "", "bucket": "b"})
     monkeypatch.setattr("backend.core.ingest.discover_rum_prefix", lambda *a, **k: 0)
-    monkeypatch.setattr("backend.celery_status.celery_queue_depths", lambda: ({"q.ingest": 0}, True))
+    monkeypatch.setattr("backend.celery_status.celery_queue_depths", lambda: ({"q.ingest": queue_depth}, True))
     mock_convert = MagicMock()
     monkeypatch.setattr("backend.core.ingest.convert_batch_rum_files.delay", mock_convert)
+    return executed_statements, mock_convert
+
+
+def test_sweep_rum_ledger_reclaims_stale_claims_scoped_to_rum(monkeypatch):
+    """sweep_rum_ledger_once reclaims stale claims scoping to raw/rum/% keys."""
+    from backend.core.ingest import sweep_rum_ledger_once
+
+    sid = "svc-test-rum-reclaim"
+    rum_key = "raw/rum/2026/08/27/10/05/beacons.json.gz"
+    executed_statements, mock_convert = _setup_fake_sweep_ledger(monkeypatch, rum_key, queue_depth=0)
 
     summary = sweep_rum_ledger_once(sid)
 
@@ -2738,37 +2670,7 @@ def test_sweep_rum_ledger_queue_depth_guard(monkeypatch):
 
     sid = "svc-test-rum-depth-guard"
     rum_key = "raw/rum/2026/08/27/10/05/beacons.json.gz"
-
-    class FakeCursor:
-        def execute(self, query, params=None):
-            pass
-
-        def fetchall(self):
-            return [(rum_key,)]
-
-    class FakeCon:
-        def cursor(self):
-            return FakeCursor()
-
-        def commit(self):
-            pass
-
-        def execute(self, query, params=None):
-            mock_res = MagicMock()
-            if "SELECT COUNT(*)" in query:
-                mock_res.fetchone.return_value = (0,)
-            else:
-                mock_res.fetchall.return_value = []
-            return mock_res
-
-    monkeypatch.setattr("backend.core.metadata.base.get_con", lambda s: FakeCon())
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda s: {"prefix": "", "bucket": "b"})
-    monkeypatch.setattr("backend.core.ingest.discover_rum_prefix", lambda *a, **k: 0)
-
-    # Queue depth is 100 while pending is 1 batch -> should skip
-    monkeypatch.setattr("backend.celery_status.celery_queue_depths", lambda: ({"q.ingest": 100}, True))
-    mock_convert = MagicMock()
-    monkeypatch.setattr("backend.core.ingest.convert_batch_rum_files.delay", mock_convert)
+    _, mock_convert = _setup_fake_sweep_ledger(monkeypatch, rum_key, queue_depth=100)
 
     summary = sweep_rum_ledger_once(sid)
 

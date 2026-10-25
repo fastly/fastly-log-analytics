@@ -10,13 +10,14 @@ from typing import Any
 
 from backend.core.high_scale_sections import HighScaleSections
 from backend.high_scale._common import (
+    _column,
     inclusive_minute_end,
+    request_filter_clauses,
     visible_fact_clauses,
 )
 from backend.high_scale._common import (
     range_value as _range_value,
 )
-from backend.high_scale._filters import request_filter_clauses
 from backend.high_scale.aggregate_query import (
     AggregateRequest,
     query_clickhouse_aggregate,
@@ -42,7 +43,7 @@ from backend.repositories.utils.response_cache import (
     digest_cache_key,
     serialize_filters_for_key,
 )
-from backend.utils.cache_registry import CacheRegistry
+from backend.utils.bounded_cache import CacheRegistry
 from backend.utils.date_utils import safe_iso
 
 _HS_DASHBOARD_CACHE_TTL = float(os.getenv("HS_DASHBOARD_CACHE_TTL_SECONDS", "30"))
@@ -102,65 +103,67 @@ def _watermark_extent(value: datetime | None) -> str | None:
     return value.isoformat() if isinstance(value, datetime) else None
 
 
+def _query_source_extents(
+    client: Any,
+    source_id: str,
+    table_name: str,
+    *,
+    domain: str,
+    count_expr: str = "count()",
+    ts_col: str = "event_timestamp",
+) -> tuple[int, str | None, str | None]:
+    rows = client.execute(
+        f"SELECT {count_expr} AS total_rows, min({ts_col}) AS earliest_log_at, max({ts_col}) AS latest_log_at "
+        f"FROM {table_name} "
+        "WHERE service_id={service_id:String} "
+        "AND publication_state = 'visible' "
+        "AND batch_id IN ("
+        "SELECT batch_id FROM high_scale_batch_publications FINAL "
+        "WHERE service_id={service_id:String} AND domain={domain:String} "
+        "AND publication_state = 'visible'"
+        ")",
+        {"service_id": source_id, "domain": domain},
+    )
+    row = rows[0] if rows else {}
+    total_rows = int(row.get("total_rows") or 0)
+    if total_rows == 0:
+        return 0, None, None
+    earliest_value: object = row.get("earliest_log_at")
+    latest_value: object = row.get("latest_log_at")
+    if isinstance(earliest_value, datetime):
+        earliest_value = earliest_value.isoformat()
+    if isinstance(latest_value, datetime):
+        latest_value = latest_value.isoformat()
+    return (
+        total_rows,
+        str(earliest_value) if earliest_value is not None else None,
+        str(latest_value) if latest_value is not None else None,
+    )
+
+
 def header_metrics(service: HighScaleService) -> dict[str, Any]:
     """Return visible ClickHouse row counts and event-time extents for the header."""
     totals: dict[str, int] = {}
     earliest: dict[str, str | None] = {}
     latest: dict[str, str | None] = {}
     for domain, table in _HEADER_TABLES.items():
-        rows = service.client.execute(
-            f"SELECT count() AS total_rows, min(event_timestamp) AS earliest_log_at, max(event_timestamp) AS latest_log_at "
-            f"FROM {table} "
-            "WHERE service_id={service_id:String} "
-            "AND publication_state = 'visible' "
-            "AND batch_id IN ("
-            "SELECT batch_id FROM high_scale_batch_publications FINAL "
-            "WHERE service_id={service_id:String} AND domain={domain:String} "
-            "AND publication_state = 'visible'"
-            ")",
-            {"service_id": service.service_id, "domain": domain},
+        totals[domain], earliest[domain], latest[domain] = _query_source_extents(
+            service.client, service.service_id, table, domain=domain
         )
-        row = rows[0] if rows else {}
-        total_rows = int(row.get("total_rows") or 0)
-        earliest_value: object = row.get("earliest_log_at")
-        latest_value: object = row.get("latest_log_at")
-        if total_rows == 0:
-            earliest_value = None
-            latest_value = None
-        if isinstance(earliest_value, datetime):
-            earliest_value = earliest_value.isoformat()
-        if isinstance(latest_value, datetime):
-            latest_value = latest_value.isoformat()
-        totals[domain] = total_rows
-        earliest[domain] = str(earliest_value) if earliest_value is not None else None
-        latest[domain] = str(latest_value) if latest_value is not None else None
 
     if totals.get("rum_errors", 0) == 0:
-        err_agg_rows = service.client.execute(
-            "SELECT sum(error_count) AS total_rows, min(bucket_start) AS earliest_log_at, max(bucket_start) AS latest_log_at "
-            "FROM rum_error_aggregates "
-            "WHERE service_id={service_id:String} "
-            "AND publication_state = 'visible' "
-            "AND batch_id IN ("
-            "SELECT batch_id FROM high_scale_batch_publications FINAL "
-            "WHERE service_id={service_id:String} AND domain='rum_errors_aggregate' "
-            "AND publication_state = 'visible'"
-            ")",
-            {"service_id": service.service_id},
+        agg_total, agg_earliest, agg_latest = _query_source_extents(
+            service.client,
+            service.service_id,
+            "rum_error_aggregates",
+            domain="rum_errors_aggregate",
+            count_expr="sum(error_count)",
+            ts_col="bucket_start",
         )
-        if err_agg_rows:
-            agg_row = err_agg_rows[0]
-            agg_total = int(agg_row.get("total_rows") or 0)
-            if agg_total > 0:
-                totals["rum_errors"] = agg_total
-                e_val = agg_row.get("earliest_log_at")
-                l_val = agg_row.get("latest_log_at")
-                if isinstance(e_val, datetime):
-                    e_val = e_val.isoformat()
-                if isinstance(l_val, datetime):
-                    l_val = l_val.isoformat()
-                earliest["rum_errors"] = str(e_val) if e_val is not None else None
-                latest["rum_errors"] = str(l_val) if l_val is not None else None
+        if agg_total > 0:
+            totals["rum_errors"] = agg_total
+            earliest["rum_errors"] = agg_earliest
+            latest["rum_errors"] = agg_latest
 
     rum_total = totals["rum_vitals"] + totals["rum_errors"]
     rum_earliest_values = [earliest["rum_vitals"], earliest["rum_errors"]]
@@ -177,16 +180,22 @@ def header_metrics(service: HighScaleService) -> dict[str, Any]:
         from backend.core.metadata.cron_log import latest_cron_per_task
 
         latest_crons = latest_cron_per_task(service.service_id)
-        for t in ("log_discovery", "commit", "ledger_sweep"):
-            if t in latest_crons and latest_crons[t].get("started_at"):
-                ts = str(latest_crons[t]["started_at"])
-                if req_sync is None or ts > req_sync:
-                    req_sync = ts
-        for t in ("rum_discovery", "rum_sync", "ledger_rum_sweep"):
-            if t in latest_crons and latest_crons[t].get("started_at"):
-                ts = str(latest_crons[t]["started_at"])
-                if rum_sync is None or ts > rum_sync:
-                    rum_sync = ts
+        req_sync = max(
+            (
+                str(latest_crons[t]["started_at"])
+                for t in ("log_discovery", "commit", "ledger_sweep")
+                if t in latest_crons and latest_crons[t].get("started_at")
+            ),
+            default=None,
+        )
+        rum_sync = max(
+            (
+                str(latest_crons[t]["started_at"])
+                for t in ("rum_discovery", "rum_sync", "ledger_rum_sweep")
+                if t in latest_crons and latest_crons[t].get("started_at")
+            ),
+            default=None,
+        )
     except Exception:
         pass
 
@@ -670,7 +679,6 @@ def field_values(
     end_time: str | None,
 ) -> FieldValuesResponse:
     """Return top values for a single field in high-scale ClickHouse mode."""
-    from backend.high_scale._filters import _column
     from backend.repositories.utils.filters import normalize_filter_key
 
     clean_field = "".join(ch for ch in req.field if ch.isalnum() or ch == "_")

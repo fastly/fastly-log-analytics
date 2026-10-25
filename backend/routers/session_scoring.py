@@ -28,7 +28,7 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 
 from backend.deps import require_admin
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.session_scoring import (
     ScoringAnalyticsResponse,
     ScoringComplianceBreakdownResponse,
@@ -493,18 +493,13 @@ def scoring_enable(
         }
 
     def _after_done() -> None:
-        from backend.core import metadata as metadata_db
-
-        details = {
-            "scoring_service_id": safe_scoring_state.get("scoring_service_id"),
-            "matrix_version": safe_scoring_state.get("matrix_version"),
-        }
-        metadata_db.record_scoring_audit(service_id, "scoring_enabled", details=details)
-        metadata_db.record_audit(
-            service_id=service_id,
-            event_type="scoring_enabled",
-            details=details,
-            actor="operator",
+        _record_scoring_toggle_audit(
+            service_id,
+            "scoring_enabled",
+            details={
+                "scoring_service_id": safe_scoring_state.get("scoring_service_id"),
+                "matrix_version": safe_scoring_state.get("matrix_version"),
+            },
         )
 
     def _error_event(e: Exception) -> dict:
@@ -527,6 +522,30 @@ def scoring_enable(
         log_label="scoring_enable",
         logger_obj=logger,
     )
+
+
+def _record_scoring_toggle_audit(service_id: str, event_type: str, details: dict | None = None) -> None:
+    from backend.core import metadata as metadata_db
+
+    metadata_db.record_scoring_audit(service_id, event_type, details=details)
+    metadata_db.record_audit(
+        service_id=service_id,
+        event_type=event_type,
+        details=details or {},
+        actor="operator",
+    )
+
+
+def _check_min_samples(n_good: int, n_bad: int, **extra: object) -> dict | None:
+    if n_good < _MIN_LABELS_PER_CLASS or n_bad < _MIN_LABELS_PER_CLASS:
+        return {
+            "has_min_samples": False,
+            "min_per_class": _MIN_LABELS_PER_CLASS,
+            "n_good": n_good,
+            "n_bad": n_bad,
+            **extra,
+        }
+    return None
 
 
 @router.post("/{service_id}/scoring/disable", dependencies=[Depends(require_admin)])
@@ -552,15 +571,7 @@ def scoring_disable(
     svcconfig.mutate_config(service_id, _disable)
 
     def _after_done() -> None:
-        from backend.core import metadata as metadata_db
-
-        metadata_db.record_scoring_audit(service_id, "scoring_disabled")
-        metadata_db.record_audit(
-            service_id=service_id,
-            event_type="scoring_disabled",
-            details={},
-            actor="operator",
-        )
+        _record_scoring_toggle_audit(service_id, "scoring_disabled")
 
     return stream_iac_reconcile(
         service_id,
@@ -700,7 +711,7 @@ def scoring_status(
     if scoring_svc and token:
         info = _scoring_svc_version_cache.get(scoring_svc)
         if info is None:
-            from backend.core.fastly.service import get_active_version_info
+            from backend.core.fastly.client import get_active_version_info
 
             try:
                 info = get_active_version_info(scoring_svc, token)
@@ -1238,15 +1249,9 @@ def scoring_evaluation(
         cfg = load_config(service_id) or {}
         matrix_version = (cfg.get("scoring") or {}).get("matrix_version") or "unknown"
 
-        if n_good < _MIN_LABELS_PER_CLASS or n_bad < _MIN_LABELS_PER_CLASS:
-            return {
-                "has_min_samples": False,
-                "min_per_class": _MIN_LABELS_PER_CLASS,
-                "n_good": n_good,
-                "n_bad": n_bad,
-                "n_neutral": n_neutral,
-                "matrix_version": matrix_version,
-            }
+        min_check = _check_min_samples(n_good, n_bad, n_neutral=n_neutral, matrix_version=matrix_version)
+        if min_check is not None:
+            return min_check
 
         matrix = _load_matrix(service_id)
         if matrix is None:
@@ -1329,13 +1334,9 @@ def scoring_curves(
     n_good, n_bad, _ = _label_counts(service_id)
 
     def _produce() -> dict:
-        if n_good < _MIN_LABELS_PER_CLASS or n_bad < _MIN_LABELS_PER_CLASS:
-            return {
-                "has_min_samples": False,
-                "min_per_class": _MIN_LABELS_PER_CLASS,
-                "n_good": n_good,
-                "n_bad": n_bad,
-            }
+        min_check = _check_min_samples(n_good, n_bad)
+        if min_check is not None:
+            return min_check
 
         label_rows = _labels.list_labels(service_id)
         # Reconstruct labeled sessions and extract their max persisted scores.
@@ -1534,7 +1535,7 @@ from backend.routers import session_scoring_admin  # noqa: F401,E402
 # uncovered — _reconstruct_labeled_sessions_cache especially is a
 # TTL-cached function that defeats per-test patches on
 # reconstruct_labeled_sessions when a prior test populated it first.
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("session_scoring._analytics_cache", _analytics_cache)
 _CacheRegistry.register("session_scoring._inflight", _inflight)

@@ -195,7 +195,7 @@ from backend.deps import get_con
 @pytest.fixture(scope="session", autouse=True)
 def _seed_random():
     """Seed Python's stdlib RNG so unseeded callers (notably
-    ``tests/utils/mock_data.py``) are reproducible.
+    ``tests/_helpers/duckdb_fixtures.py``) are reproducible.
 
     Per-test code that explicitly seeds its own ``random.Random()`` (hypothesis,
     fuzz suites) is unaffected — those create their own Random instances.
@@ -499,12 +499,12 @@ def _reset_module_caches():
     means they no longer have to.
     """
     # A-3: drain every cache registered via
-    # backend.utils.cache_registry.CacheRegistry. The iceberg, duckdb,
+    # backend.utils.bounded_cache.CacheRegistry. The iceberg, duckdb,
     # dashboard, and network modules all register their caches at
     # module load — this single call replaces the long enumeration
     # the R-1 work expanded. New module-level caches that ship with a
     # register() call are picked up automatically.
-    from backend.utils.cache_registry import CacheRegistry
+    from backend.utils.bounded_cache import CacheRegistry
 
     CacheRegistry.clear_all()
 

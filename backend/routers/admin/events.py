@@ -53,7 +53,7 @@ from backend.system_metrics_sampler import sample_system_metrics_cached
 from backend.utils.router_utils import make_error
 from backend.utils.sse import iter_with_disconnect_ping, sse_response
 
-from ._router import router
+from ._helpers import router
 from .sync_status import compute_sync_status_cached
 
 logger = logging.getLogger(__name__)

@@ -13,16 +13,16 @@ from backend.provision import cmcd_fields as orch
 from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES, reconcile_cmcd_custom_fields
 from backend.provision.declarative.generators import generate_consolidated_snippet
 from backend.provision.declarative.state import FeatureState
-from backend.provision.draft_version import draft_version
-from backend.provision.log_paths import (
+from backend.provision.fastly_api import delete_remote_frontend, deploy_remote_frontend
+from backend.provision.utils import (
     ANALYTICS_LOG_LAYOUT,
+    VclBuilder,
     analytics_log_path,
+    draft_version,
     minute_list_prefix,
     rum_log_path,
     rum_minute_list_prefix,
 )
-from backend.provision.sharing_domain import delete_remote_frontend, deploy_remote_frontend
-from backend.provision.utils import VclBuilder
 
 
 # ── Merged from tests/provision/test_vcl_builder.py ──
@@ -305,7 +305,7 @@ def test_failed_rollback_is_logged_at_warning(caplog):
 def test_rollback_to_version_logs_and_swallows_runtime_error(caplog):
     import logging
 
-    from backend.provision.draft_version import rollback_to_version
+    from backend.provision.utils import rollback_to_version
 
     with caplog.at_level(logging.WARNING, logger="backend.provision.draft_version"):
         rollback_to_version(SID, "t", 5, call=_Fastly(rollback_raises=True))
@@ -337,7 +337,7 @@ def test_deploy_remote_frontend_success():
         calls.append((method, path, body))
         return responses.pop(0)
 
-    with patch("backend.provision.sharing_domain.fastly", side_effect=fake_fastly):
+    with patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly):
         res = deploy_remote_frontend(
             service_name=service_name,
             domain_name=domain_name,
@@ -402,7 +402,7 @@ def test_deploy_remote_frontend_failures(step_fail, client_err, expected_step):
             raise RuntimeError(client_err)
         return ok_responses[idx]
 
-    with patch("backend.provision.sharing_domain.fastly", side_effect=fake_fastly):
+    with patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly):
         with pytest.raises(RuntimeError) as exc_info:
             deploy_remote_frontend(
                 service_name="test-service",
@@ -421,7 +421,7 @@ def test_deploy_remote_frontend_failures(step_fail, client_err, expected_step):
 
 def test_deploy_remote_frontend_missing_keys_in_json():
     """Error raised when service_id is missing from the create-service response."""
-    with patch("backend.provision.sharing_domain.fastly", return_value={"not_id": "service123"}):
+    with patch("backend.provision.fastly_api.fastly", return_value={"not_id": "service123"}):
         with pytest.raises(RuntimeError) as exc_info:
             deploy_remote_frontend(
                 service_name="test-service",
@@ -441,7 +441,7 @@ def test_deploy_remote_frontend_missing_version_number():
     def fake_fastly(method, path, body=None, *, token, **kwargs):
         return responses.pop(0)
 
-    with patch("backend.provision.sharing_domain.fastly", side_effect=fake_fastly):
+    with patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly):
         with pytest.raises(RuntimeError) as exc_info:
             deploy_remote_frontend(
                 service_name="test-service",
@@ -477,7 +477,7 @@ def test_deploy_remote_frontend_with_override_host_success():
         calls.append((method, path, body))
         return responses.pop(0)
 
-    with patch("backend.provision.sharing_domain.fastly", side_effect=fake_fastly):
+    with patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly):
         res = deploy_remote_frontend(
             service_name=service_name,
             domain_name=domain_name,
@@ -511,7 +511,7 @@ def test_delete_remote_frontend_deactivates_then_deletes():
         calls.append((method, path))
         return responses.pop(0)
 
-    with patch("backend.provision.sharing_domain.fastly", side_effect=fake_fastly):
+    with patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly):
         delete_remote_frontend(remote_service_id=remote_service_id, token=token)
 
     assert calls == [
@@ -535,7 +535,7 @@ def test_delete_remote_frontend_no_active_versions():
         calls.append((method, path))
         return responses.pop(0)
 
-    with patch("backend.provision.sharing_domain.fastly", side_effect=fake_fastly):
+    with patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly):
         delete_remote_frontend(remote_service_id=remote_service_id, token=token)
 
     assert calls == [
@@ -550,7 +550,7 @@ def test_delete_remote_frontend_tolerates_404():
     def fake_fastly(method, path, body=None, *, token, **kwargs):
         raise RuntimeError("Fastly API error during Get Versions: HTTP 404 GET /service/x/version\n    not found")
 
-    with patch("backend.provision.sharing_domain.fastly", side_effect=fake_fastly):
+    with patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly):
         # Should not raise.
         delete_remote_frontend(remote_service_id="remote123", token="fake-token")
 
@@ -565,7 +565,7 @@ def test_delete_remote_frontend_reraises_non_404():
             raise r
         return r
 
-    with patch("backend.provision.sharing_domain.fastly", side_effect=fake_fastly):
+    with patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly):
         with pytest.raises(RuntimeError) as exc_info:
             delete_remote_frontend(remote_service_id="remote123", token="fake-token")
     assert "500" in str(exc_info.value)

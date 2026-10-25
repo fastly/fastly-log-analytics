@@ -59,7 +59,7 @@ describe('useShareStatusBanner', () => {
         return HttpResponse.json({ sharing_active: false, public_url: null })
       }),
     )
-    const { useShareStatusBanner } = await import('@/hooks/useShareStatusBanner')
+    const { useShareStatusBanner } = await import('@/components/AppLayout')
     const wrapper = wrapperWithSeed({
       share_banner: { sharing_active: true, public_url: 'https://example.test/x' },
     })
@@ -75,7 +75,7 @@ describe('useShareStatusBanner', () => {
   })
 
   it('returns null node when disabled', async () => {
-    const { useShareStatusBanner } = await import('@/hooks/useShareStatusBanner')
+    const { useShareStatusBanner } = await import('@/components/AppLayout')
     const { result } = renderHook(() => useShareStatusBanner({ enabled: false }), {
       wrapper: wrapperWithSeed(),
     })
@@ -91,7 +91,7 @@ describe('useShareStatusBanner', () => {
         return HttpResponse.json({ sharing_active: true, public_url: 'https://later.test' })
       }),
     )
-    const { useShareStatusBanner } = await import('@/hooks/useShareStatusBanner')
+    const { useShareStatusBanner } = await import('@/components/AppLayout')
     const { result } = renderHook(() => useShareStatusBanner({ enabled: true }), {
       wrapper: wrapperWithSeed(),
     })
@@ -110,7 +110,7 @@ describe('useShareStatusBanner', () => {
     )
     Object.defineProperty(document, 'hidden', { configurable: true, value: true })
     try {
-      const { useShareStatusBanner } = await import('@/hooks/useShareStatusBanner')
+      const { useShareStatusBanner } = await import('@/components/AppLayout')
       renderHook(() => useShareStatusBanner({ enabled: true }), { wrapper: wrapperWithSeed() })
       await act(async () => {
         await new Promise(r => setTimeout(r, 50))
@@ -129,7 +129,7 @@ describe('useShareStatusBanner', () => {
         return HttpResponse.json({ sharing_active: false, public_url: null })
       }),
     )
-    const { useShareStatusBanner } = await import('@/hooks/useShareStatusBanner')
+    const { useShareStatusBanner } = await import('@/components/AppLayout')
     const { unmount } = renderHook(() => useShareStatusBanner({ enabled: true }), {
       wrapper: wrapperWithSeed(),
     })
@@ -155,7 +155,7 @@ describe('useShareStatusBanner', () => {
           return HttpResponse.json({ sharing_active: false, public_url: null })
         }),
       )
-      const { useShareStatusBanner } = await import('@/hooks/useShareStatusBanner')
+      const { useShareStatusBanner } = await import('@/components/AppLayout')
       const { result } = renderHook(() => useShareStatusBanner({ enabled: true }), {
         wrapper: wrapperWithSeed({ share_banner: { sharing_active: true, public_url: null } }),
       })
@@ -185,7 +185,7 @@ describe('useShareStatusBanner', () => {
         return HttpResponse.json({ sharing_active: false, public_url: null })
       }),
     )
-    const { useShareStatusBanner } = await import('@/hooks/useShareStatusBanner')
+    const { useShareStatusBanner } = await import('@/components/AppLayout')
     const { unmount } = renderHook(() => useShareStatusBanner({ enabled: true }), {
       wrapper: wrapperWithSeed(),
     })
@@ -204,7 +204,7 @@ describe('useShareStatusBanner', () => {
     )
     Object.defineProperty(document, 'hidden', { configurable: true, value: true })
     try {
-      const { useShareStatusBanner } = await import('@/hooks/useShareStatusBanner')
+      const { useShareStatusBanner } = await import('@/components/AppLayout')
       const { result } = renderHook(() => useShareStatusBanner({ enabled: true }), { wrapper: wrapperWithSeed() })
       await act(async () => {
         await new Promise((r) => setTimeout(r, 50))

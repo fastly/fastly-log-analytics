@@ -1252,6 +1252,6 @@ def _run_gap_heal(
 
 # R-1: drain the gap-heal trigger timestamp dict between tests so an
 # earlier test's last-trigger doesn't suppress a sweep in the next.
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("cron.jobs.sync._GAP_HEAL_LAST_TRIGGER", _GAP_HEAL_LAST_TRIGGER)

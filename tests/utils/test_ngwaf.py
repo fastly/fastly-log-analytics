@@ -15,13 +15,11 @@ from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.utils.ngwaf import (
     _extract_bot_record,
     _get_relative_time_range,
-    fetch_verified_bots_paged,
-    oldest_unenriched_timestamp,
-)
-from backend.utils.ngwaf_bot_cache import (
     cleanup_old_bots,
+    fetch_verified_bots_paged,
     get_cache_stats,
     get_last_timestamp,
+    oldest_unenriched_timestamp,
     upsert_bots,
 )
 

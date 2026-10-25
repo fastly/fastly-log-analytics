@@ -353,7 +353,7 @@ def test_convert_batch_downloads_outside_admission_lock(tmp_path):
         return got, {v: k for k, v in got.items()}
 
     with _batch_env(service_id, tmp_path, _download):
-        with patch("backend.core.ducklake_admission.ducklake_write_admission", _tracking_admission):
+        with patch("backend.core.iceberg._ducklake.ducklake_write_admission", _tracking_admission):
             summary = convert_batch_objects(service_id, keys, "w-dl")
 
     assert summary["committed"] == 4, summary

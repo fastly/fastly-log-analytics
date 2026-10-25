@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.core.request_context import RequestContext, build_request_context
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.network import (
     NetworkBundleRequest,
     NetworkBundleResponse,

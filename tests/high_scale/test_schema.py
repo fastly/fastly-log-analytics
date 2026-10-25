@@ -11,7 +11,7 @@ from backend.high_scale.archive_models import (
     ArchiveSourceObject,
     ServingWatermark,
 )
-from backend.high_scale.schema import (
+from backend.high_scale.publication import (
     build_cmcd_projection_key,
     build_request_event_id,
     build_rum_event_id,
@@ -266,7 +266,7 @@ def test_cmcd_projection_key_deterministic_128_bit() -> None:
 # ── Merged from test_batch_idempotency.py ──
 
 
-from backend.high_scale.schema import build_batch_id_from_manifest_id
+from backend.high_scale.publication import build_batch_id_from_manifest_id
 
 
 def test_batch_id_is_deterministically_derived_from_manifest_id() -> None:

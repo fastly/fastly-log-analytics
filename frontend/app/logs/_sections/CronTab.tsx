@@ -7,7 +7,6 @@ import {
   Trash2,
 } from 'lucide-react'
 import { Button, buttonVariants } from "@/components/ui/button"
-import { ColumnVisibilityDropdown } from '@/components/DataTable/ColumnVisibilityDropdown'
 import {
   Select,
   SelectContent,
@@ -16,7 +15,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { ConfirmDialog } from "@/components/ui/confirm-dialog"
-import { DataTable } from '@/components/DataTable'
+import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { ColumnDef } from '@tanstack/react-table'
 import { cn } from '@/lib/utils'
 import { HelpCircle } from 'lucide-react'

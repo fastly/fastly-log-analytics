@@ -7,7 +7,7 @@ import asyncio
 from fastapi import APIRouter, Depends
 
 from backend.core.request_context import RequestContext, build_request_context
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.origin import (
     OriginAggregatesRequest,
     OriginAggregatesResponse,

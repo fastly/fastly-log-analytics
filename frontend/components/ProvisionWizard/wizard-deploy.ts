@@ -15,7 +15,7 @@ import type {
   Step,
   WizardMode,
 } from "./types";
-import { clearDraft } from "./wizard-draft";
+import { clearDraft } from "./useWizardState";
 
 // ── fetchTerraformPreview ──
 interface FetchTerraformPreviewArgs {

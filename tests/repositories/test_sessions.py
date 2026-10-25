@@ -9,7 +9,7 @@ import pytest
 from backend.core.duckdb import _clear_schema_cache
 from backend.repositories._base import _safe_table
 from backend.repositories.sessions import get_session_detail, get_sessions
-from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
+from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 
 # ── get_sessions ──────────────────────────────────────────────────────────────
 

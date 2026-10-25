@@ -32,13 +32,13 @@ from pathlib import Path
 from typing import Any
 
 from backend import config as svcconfig
-from backend.core.fastly.client import fastly, fastly_raw
-from backend.core.fastly.service import (
+from backend.core.fastly.client import (
     ensure_vcl_snippet,
+    fastly,
+    fastly_raw,
     get_active_version,
     list_vcl_snippets,
 )
-from backend.provision.draft_version import draft_version, rollback_to_version
 from backend.provision.session_scoring_setup import (
     MATRIX_KEY_NAME,
     MATRIX_RESOURCE_LINK_NAME,
@@ -53,7 +53,7 @@ from backend.provision.session_scoring_vcl import (
     generate_scoring_vcl,
     scoring_snippet_names,
 )
-from backend.provision.utils import BOLD, _c, fail, info, ok, warn
+from backend.provision.utils import BOLD, _c, draft_version, fail, info, ok, rollback_to_version, warn
 
 logger = logging.getLogger(__name__)
 
@@ -875,7 +875,7 @@ def disable_scoring(
         if stripped is not None:
             cfg = stripped
 
-        from backend.core.fastly.service import list_s3_endpoints
+        from backend.core.fastly.client import list_s3_endpoints
         from backend.provision.fastly_api import generate_capture_vcl, load_log_format
 
         capture = generate_capture_vcl(cfg.get("log_fields"))

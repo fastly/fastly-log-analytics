@@ -18,7 +18,7 @@ import duckdb
 from backend.core.log_fields import LOG_FIELD_CATALOG
 from backend.repositories._base import _safe_table
 from backend.repositories.insights import get_cache_collapse_detail, get_insights, registry
-from tests.utils.mock_data import generate_mock_records
+from tests._helpers.duckdb_fixtures import generate_mock_records
 
 GOLDEN_SNAPSHOT_PATH = Path(__file__).parent / "fixtures" / "insights_golden_snapshot.json"
 

@@ -14,7 +14,7 @@ from joserfc.jwk import KeySet, OctKey, RSAKey
 
 from backend.core.oauth import client, registry
 from backend.core.oauth.client import OIDCError
-from tests.remote_access import oauth_helpers as H
+from tests.remote_access import conftest as H
 
 
 def _provider(tmp_path, monkeypatch, **kw):

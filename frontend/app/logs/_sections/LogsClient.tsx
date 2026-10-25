@@ -3,9 +3,12 @@
 import React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import dynamic from 'next/dynamic'
-import { client } from '@/lib/api'
+import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api-client'
+import { showToast } from '@/lib/toast'
 import { cronCacheBust } from '@/lib/cron-cache-bust'
+import { queryKeys } from '@/lib/query-keys'
+import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   Database,
@@ -14,6 +17,10 @@ import {
   FileCode,
   Archive,
   ClipboardList,
+  RefreshCw,
+  Download,
+  Bot,
+  Terminal,
 } from 'lucide-react'
 import { NoServiceSelected } from '@/components/NoServiceSelected'
 import { useBootstrapResolved } from '@/hooks/useIsDataReady'
@@ -21,16 +28,168 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { SyncFromCloudModal } from '@/components/SyncFromCloudModal/SyncFromCloudModal'
 import { ingestedFilesColumns } from '@/lib/table-utils'
 import { PageHeader } from '@/components/ui/page-header'
+import type { components } from '@/types/api.generated'
+import type { SyncStatus } from '@/hooks/useSyncStatus'
+import type { useSSE } from '@/hooks/useSSE'
 
-import { useLogsPageState } from '../_state'
+import { useLogsPageState, type CronRun } from '../_state'
 import Loading from '../loading'
 import { useCronColumns } from './CronColumns'
 import { useAuditColumns } from './AuditColumns'
 import { FloatingOperationsDock } from './FloatingOperationsDock'
-import { QuickActionsBar } from './QuickActionsBar'
 import { CronTab } from './CronTab'
 import { ServiceHistoryTab, IngestionTab } from './SchemaTab'
 import { ControlledSSEModal as SSEModal } from '@/components/SSEModal'
+
+type CronRunsResponse = components['schemas']['CronRunsResponse']
+
+export function QuickActionsBar({
+  isAnalyst,
+  status,
+  activeServiceId,
+  recentCrons,
+  cronLogs,
+  setSseTitle,
+  setSseDescription,
+  setIsSSEModalOpen,
+  setIsSyncModalOpen,
+  reset,
+  start,
+  setDisplayedJobs,
+  setSelectedConsoleJobId,
+  setConsoleOpen,
+}: {
+  isAnalyst: boolean
+  status: Partial<SyncStatus> | undefined
+  activeServiceId: string | null | undefined
+  recentCrons: Partial<CronRunsResponse> | undefined
+  cronLogs: Partial<CronRunsResponse> | undefined
+  setSseTitle: (s: string) => void
+  setSseDescription: (s: string) => void
+  setIsSSEModalOpen: (open: boolean) => void
+  setIsSyncModalOpen: (open: boolean) => void
+  reset: () => void
+  start: ReturnType<typeof useSSE>['start']
+  setDisplayedJobs: React.Dispatch<React.SetStateAction<CronRun[]>>
+  setSelectedConsoleJobId: (id: number | string | null) => void
+  setConsoleOpen: (open: boolean) => void
+}) {
+  const queryClient = useQueryClient()
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 bg-muted/30 p-2 rounded-lg border">
+      <div className="text-xs font-bold text-muted-foreground uppercase tracking-wider mx-2">Quick Actions</div>
+      {!isAnalyst ? (
+        <>
+          <Button
+            size="sm"
+            variant="default"
+            className="h-8 text-xs bg-primary text-primary-foreground hover:bg-primary/90"
+            disabled={status?.access_level === 'read_only'}
+            onClick={async () => {
+              try {
+                const data = await unwrapClient(client.POST("/api/admin/ingest-logs", {}))
+                // 200 body is an opaque dict; the run_id keys the SSE stream.
+                const runId = data?.run_id
+                if (!runId) { showToast('No run id returned'); return }
+                setSseTitle('Importing Logs')
+                setSseDescription('Downloading new raw logs from Fastly Object Storage and processing them...')
+                setIsSSEModalOpen(true)
+                reset()
+                start(`/api/cron-runs/${runId}/stream`)
+                cronCacheBust(queryClient, activeServiceId)
+              } catch (e) {
+                showToast(extractApiError(e))
+              }
+            }}
+          >
+            <RefreshCw className="h-3 w-3 mr-1.5" /> Import Logs
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 text-xs bg-background"
+            disabled={status?.access_level === 'read_only'}
+            onClick={() => setIsSyncModalOpen(true)}
+            title="Open the range-picker to backfill a specific historical window (e.g., to close an Ingest Gap)"
+          >
+            <Download className="h-3 w-3 mr-1.5" /> Sync from Cloud
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 text-xs bg-background"
+            disabled={status?.access_level === 'read_only'}
+            onClick={async () => {
+              try {
+                const data = await unwrapClient(client.POST("/api/admin/commit-iceberg", {}))
+                const runId = data?.run_id
+                if (!runId) { showToast('No run id returned'); return }
+                setSseTitle('Committing Buffer')
+                setSseDescription('Flushing local Parquet buffer to the shared Iceberg table in Object Storage...')
+                setIsSSEModalOpen(true)
+                reset()
+                start(`/api/cron-runs/${runId}/stream`)
+                cronCacheBust(queryClient, activeServiceId)
+              } catch (e) {
+                showToast(extractApiError(e))
+              }
+            }}
+          >
+            <Archive className="h-3 w-3 mr-1.5" /> Commit Buffer
+          </Button>
+        </>
+      ) : (
+        <Button
+          size="sm"
+          variant="default"
+          className="h-8 text-xs bg-primary/90 hover:bg-primary"
+          onClick={() => setIsSyncModalOpen(true)}
+        >
+          <Download className="h-3 w-3 mr-1.5" /> Sync from Cloud
+        </Button>
+      )}
+      {!isAnalyst && status?.ngwaf_workspace_id && (
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8 text-xs bg-background"
+          onClick={() => {
+            setSseTitle('NGWAF Bot Sync')
+            setSseDescription('Fetching verified bot records from Fastly NGWAF and caching them locally. Progress is saved after each page — run again if the time budget is reached.')
+            setIsSSEModalOpen(true)
+            reset()
+            start(`/api/services/${activeServiceId}/ngwaf-sync`, {})
+            queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsFor(activeServiceId) })
+          }}
+        >
+          <Bot className="h-3 w-3 mr-1.5" /> NGWAF Bot Sync
+        </Button>
+      )}
+      <Button
+        size="sm"
+        variant="outline"
+        className="h-8 text-xs bg-background"
+        onClick={() => {
+          const latestSync = recentCrons?.entries?.find((e) => e.task === 'log_discovery') ||
+                             cronLogs?.entries?.find((e) => e.task === 'log_discovery')
+          if (latestSync) {
+            setDisplayedJobs(prev => {
+              if (prev.some((j) => j.id === latestSync.id)) return prev
+              return [...prev, { ...latestSync, status: latestSync.status }]
+            })
+            setSelectedConsoleJobId(latestSync.id)
+            setConsoleOpen(true)
+          } else {
+            window.alert("No recent sync run was found for this service.")
+          }
+        }}
+      >
+        <Terminal className="h-3 w-3 mr-1.5" /> View Recent Logs
+      </Button>
+    </div>
+  )
+}
 
 // Lazy-mount the heavy tab content. Cron + ServiceHistory + Ingestion
 // are the default landing tabs; the four below only matter when the

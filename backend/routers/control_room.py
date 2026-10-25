@@ -23,7 +23,7 @@ from backend.core.share_db.validation import mask_ip
 from backend.deps import ServiceId, require_admin, require_service_access
 from backend.high_scale.aggregate_query import AggregateRequest, query_clickhouse_aggregate
 from backend.high_scale.registry_bootstrap import HighScaleServiceRegistryProtocol, get_high_scale_service_registry
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.services import (
     ControlRoomActionResponse,
     ControlRoomTabResponse,

@@ -13,10 +13,10 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from backend.core import web_vitals_store
+from backend.core import request_telemetry as web_vitals_store
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.admin_actions import PageTelemetryResponse
 from backend.models.common import OkResponse, UxEventPayload, WebVitalsPayload
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.services import ClearSqliteResponse, DebugStateResponse, RecentSqliteResponse
 from backend.utils import sqlite_profiler
 from backend.utils.date_utils import iso_z_now

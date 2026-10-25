@@ -30,7 +30,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { WizardState } from "../useWizardState";
-import { REGION_LABELS } from "@/lib/service-config-constants";
+import { REGION_LABELS } from "@/lib/constants";
 import { ANALYST_PATH_A_UNSUPPORTED_REASON } from "../types";
 
 interface JsonImportSectionProps {

@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Users } from 'lucide-react'
+import { AlertTriangle, Clock, Film, Users } from 'lucide-react'
 import dynamic from 'next/dynamic'
 
 import { client, extractApiError } from '@/lib/api'
@@ -14,11 +14,129 @@ import { useServiceStore } from '@/stores/serviceStore'
 import { useServiceSwitchReset } from '@/hooks/useUrlServiceSync'
 import { ReportLayout } from '@/components/ReportLayout'
 import { UpdatingBadge } from '@/components/AnalyticsCard'
+import { Button } from '@/components/ui/button'
+import { Switch } from '@/components/ui/switch'
+import { Label } from '@/components/ui/label'
+import { Input } from '@/components/ui/input'
+import { cn } from '@/lib/utils'
 import type { components } from '@/types/api.generated'
 
-import { ScoringControls } from './_sections/ScoringControls'
 import { SessionsTable } from './_sections/SessionsTable'
 import type { BootstrapResponse, Session, SessionsResponse } from '@/types/api'
+
+interface ScoringControlsProps {
+  cmcdEnabled: boolean
+  flaggedOnly: boolean
+  setFlaggedOnly: (v: boolean) => void
+  streamingOnly: boolean
+  setStreamingOnly: (v: boolean) => void
+  minReqs: number | ''
+  setMinReqs: (v: number | '') => void
+  min4xxPct: number | ''
+  setMin4xxPct: (v: number | '') => void
+  data: Pick<components['schemas']['SessionsResponse'], 'min_reqs_flag' | 'min_4xx_pct_flag'> | undefined
+  isFetching: boolean
+  isLoadingInitial: boolean
+  refetch: () => void
+}
+
+export function ScoringControls({
+  cmcdEnabled,
+  flaggedOnly,
+  setFlaggedOnly,
+  streamingOnly,
+  setStreamingOnly,
+  minReqs,
+  setMinReqs,
+  min4xxPct,
+  setMin4xxPct,
+  data,
+  isFetching,
+  isLoadingInitial,
+  refetch,
+}: ScoringControlsProps) {
+  return (
+    <div
+      data-testid="sessions-scoring-controls"
+      className={cn("flex flex-wrap items-center gap-4 p-3 border rounded-lg bg-muted/30 transition-opacity duration-100", isFetching && !isLoadingInitial && "opacity-40 pointer-events-none")}
+    >
+      <div className="flex items-center gap-2">
+        <Switch
+          id="flagged-only"
+          data-testid="flagged-only-switch"
+          checked={flaggedOnly}
+          onCheckedChange={setFlaggedOnly}
+        />
+        <Label htmlFor="flagged-only" className="text-sm cursor-pointer flex items-center gap-1">
+          <AlertTriangle className="h-3.5 w-3.5 text-yellow-500" /> Flagged only
+        </Label>
+      </div>
+
+      {cmcdEnabled && (
+        <div className="flex items-center gap-2">
+          <Switch
+            id="streaming-only"
+            data-testid="streaming-only-switch"
+            checked={streamingOnly}
+            onCheckedChange={setStreamingOnly}
+          />
+          <Label htmlFor="streaming-only" className="text-sm cursor-pointer flex items-center gap-1">
+            <Film className="h-3.5 w-3.5 text-blue-500" /> Streaming sessions
+          </Label>
+        </div>
+      )}
+
+      <div className="flex items-center gap-2">
+        <Label className="text-xs text-muted-foreground whitespace-nowrap">Min. requests</Label>
+        <Input
+          type="number"
+          min={0}
+          value={minReqs}
+          onChange={e => setMinReqs(e.target.value === '' ? '' : Number(e.target.value))}
+          placeholder={`≥ ${data?.min_reqs_flag ?? 1000}`}
+          data-testid="min-reqs-input"
+          className="h-8 w-24 text-sm text-right"
+        />
+      </div>
+
+      <div className="flex items-center gap-2">
+        <Label className="text-xs text-muted-foreground whitespace-nowrap">Min. 4xx%</Label>
+        <Input
+          type="number"
+          min={0}
+          max={100}
+          value={min4xxPct}
+          onChange={e => setMin4xxPct(e.target.value === '' ? '' : Number(e.target.value))}
+          placeholder={`≥ ${data?.min_4xx_pct_flag ?? 20}`}
+          data-testid="min-4xx-input"
+          className="h-8 w-24 text-sm text-right"
+        />
+      </div>
+
+      {(flaggedOnly || streamingOnly || minReqs !== '' || min4xxPct !== '') && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-8 text-xs ml-auto"
+          onClick={() => { setFlaggedOnly(false); setStreamingOnly(false); setMinReqs(''); setMin4xxPct('') }}
+        >
+          Clear filters
+        </Button>
+      )}
+
+      <Button
+        variant="outline"
+        size="sm"
+        className="h-8 ml-auto"
+        onClick={() => refetch()}
+        disabled={isFetching}
+      >
+        {isFetching ? <Clock className="h-3.5 w-3.5 mr-2 animate-spin" /> : <Clock className="h-3.5 w-3.5 mr-2" />}
+        Refresh
+      </Button>
+    </div>
+  )
+}
 
 function useActiveServiceCmcdEnabled(activeServiceId: string | null): boolean {
   const isInitialized = useServiceStore(s => s.isInitialized)

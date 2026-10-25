@@ -119,7 +119,7 @@ def main() -> None:
         create_clickhouse_schema(client)
 
         try:
-            from backend.high_scale.schema import install_clickhouse_schema
+            from backend.high_scale.publication import install_clickhouse_schema
 
             install_clickhouse_schema()
         except ImportError:

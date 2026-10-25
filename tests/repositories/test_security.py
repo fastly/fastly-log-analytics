@@ -14,7 +14,7 @@ from backend.repositories._base import QueryRunner, _safe_table
 from backend.repositories._sql import security as SQL
 from backend.repositories._sql.security import GET_SECURITY_PROXIES_COMBINED
 from backend.repositories.security import get_security_aggregates, get_top_bots
-from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
+from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 
 
 # ── Merged from tests/repositories/test_security.py ──

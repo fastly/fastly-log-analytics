@@ -329,7 +329,7 @@ def ensure_logging_via_reconciler(state: dict, token: str, status_cb=None) -> in
     Raises:
         RuntimeError: if reconciliation fails.
     """
-    from backend.core.fastly.service import get_active_version
+    from backend.core.fastly.client import get_active_version
     from backend.provision.utils import info, ok
 
     service_id = state.get("logging_service_id")
@@ -916,21 +916,15 @@ def cleanup_local_data(service_id: str, bucket: str = None, remove_data: bool = 
             if service_id
             else os.path.join(os.path.dirname(__file__), "..", "data", "logs.duckdb")
         )
-        if os.path.exists(db_path):
-            os.remove(db_path)
-            wal = db_path + ".wal"
-            if os.path.exists(wal):
-                os.remove(wal)
-            ok(f"Removed local database: {db_path}")
-
-        # Delete RUM DuckDB if it exists
+        # Delete main and RUM DuckDB files (+ WALs) if they exist
         rum_db_path = rum_duckdb_path(db_path)
-        if os.path.exists(rum_db_path):
-            os.remove(rum_db_path)
-            rum_wal = rum_db_path + ".wal"
-            if os.path.exists(rum_wal):
-                os.remove(rum_wal)
-            ok(f"Removed local RUM database: {rum_db_path}")
+        for target_db, label in ((db_path, "local database"), (rum_db_path, "local RUM database")):
+            if os.path.exists(target_db):
+                os.remove(target_db)
+                wal = target_db + ".wal"
+                if os.path.exists(wal):
+                    os.remove(wal)
+                ok(f"Removed {label}: {target_db}")
 
         if service_id:
             try:

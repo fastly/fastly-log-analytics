@@ -1318,6 +1318,6 @@ async def get_aggregates(
 # R-1: register the response TTL cache so the autouse fixture in
 # tests/conftest.py drains it via CacheRegistry.clear_all() — twin of
 # network.py's _response_cache registration.
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("origin._response_cache", _response_cache)

@@ -24,7 +24,6 @@ from backend.high_scale.origin import aggregates as hs_aggregates
 from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.high_scale.security import security_aggregates as hs_security_aggregates
 from backend.high_scale.sessions import sessions_detail as hs_sessions_detail
-from backend.models.cmcd import CmcdAggregatesResponse, CmcdRequest
 from backend.models.common import BaseResponse, DebugCall, DebugQuery
 from backend.models.dashboard import AggregatesResponse, SessionDetailRequest, SessionDetailResponse
 from backend.models.insights import InsightCard, InsightsResponse
@@ -41,13 +40,20 @@ from backend.models.origin import (
     OriginSummaryResponse,
     OriginTimeseriesResponse,
 )
-from backend.models.performance import PerformanceAggregatesResponse
+from backend.models.performance import (
+    CmcdAggregatesResponse,
+    CmcdRequest,
+    IOFormatConversionPair,
+    IOOpportunityRow,
+    PerformanceAggregatesResponse,
+    TopBotRow,
+    WafSignalRow,
+)
 from backend.models.security import (
     SecurityAggregatesRequest,
     SecurityAggregatesResponse,
     SecurityTopBotsResponse,
 )
-from backend.models.value import IOFormatConversionPair, IOOpportunityRow, TopBotRow, WafSignalRow
 from backend.provision.cmcd_fields import _CMCD_CUSTOM_FIELDS
 from backend.repositories import origin as origin_mod
 from backend.repositories._base import _safe_table
@@ -73,6 +79,7 @@ from backend.repositories.security import get_security_aggregates, get_security_
 from backend.repositories.security import get_security_aggregates as sec_aggs
 from backend.repositories.sessions import get_session_detail
 from backend.repositories.value import get_summary as get_value_summary
+from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 from tests._helpers.wire import assert_rows_wire_identical, assert_sections_wire_identical, wire
 from tests.repositories.test_insights import (
     _MOCK_POP_MAP,
@@ -80,7 +87,6 @@ from tests.repositories.test_insights import (
     _seed_network_edge_data,
     _seed_track_c_data,
 )
-from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
 
 
 # ── Merged from tests/models/test_common.py ──

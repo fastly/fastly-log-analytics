@@ -4,7 +4,7 @@ import { useEffect, useRef, MutableRefObject } from 'react'
 import * as maplibregl from 'maplibre-gl'
 import countryMapData from '@/lib/country-codes.json'
 import type { components } from '@/types/api.generated'
-import type { CityTooltipData, TooltipInfo } from './OverlayLayer'
+import type { CityTooltipData, TooltipInfo } from './index'
 
 type NetworkHealth = components['schemas']['NetworkHealthResponse']
 

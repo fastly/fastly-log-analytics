@@ -7,10 +7,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from backend.high_scale.archive_models import ArchiveState
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.deletion import DeletionController
 from backend.high_scale.ingest_controller import HighScaleIngestController
-from backend.high_scale.models import ArchiveState
 from backend.high_scale.publication import (
     ClickHousePublication,
     InMemoryBatchManifestStore,
@@ -661,7 +661,7 @@ import logging
 from unittest.mock import patch
 
 from backend.high_scale import worker
-from backend.high_scale.models import HighScaleConfig, TopologyProfile, from_environment
+from backend.high_scale.archive_models import HighScaleConfig, TopologyProfile, from_environment
 
 
 def _config(profile: str) -> HighScaleConfig:

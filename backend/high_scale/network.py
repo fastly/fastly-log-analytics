@@ -12,6 +12,9 @@ from backend.high_scale._common import (
     bucket as _bucket,
 )
 from backend.high_scale._common import (
+    build_clickhouse_filters as _build_clickhouse_filters,
+)
+from backend.high_scale._common import (
     finite_float as _finite_float,
 )
 from backend.high_scale._common import (
@@ -19,6 +22,7 @@ from backend.high_scale._common import (
 )
 from backend.high_scale._common import (
     parse_time_window,
+    resolve_asn_display_labels,
     visible_publication_fence_sql,
 )
 from backend.high_scale._common import (
@@ -30,7 +34,6 @@ from backend.high_scale._common import (
 from backend.high_scale._common import (
     text as _text,
 )
-from backend.high_scale._filters import build_clickhouse_filters as _build_clickhouse_filters
 from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.models.common import SectionTimingEntry
 from backend.models.network import (
@@ -117,23 +120,6 @@ def _want_core(sections: Any) -> bool:
 
 def _want_shielding(sections: Any) -> bool:
     return not sections or "health" in sections or "shielding_analysis" in sections
-
-
-def _asn_names(service: HighScaleService, asns: list[int]) -> dict[int, str]:
-    if not asns:
-        return {}
-    try:
-        from backend.core import duckdb as _db
-
-        return _db.get_asn_names(service.service_id, asns)
-    except Exception:
-        return {}
-
-
-def _asn_label(asn: int, names: dict[int, str]) -> str:
-    from backend.core import duckdb as _db
-
-    return _db.format_asn_label(asn, names.get(asn) or f"AS{asn}")
 
 
 def _shielding_analysis(service: HighScaleService, start: datetime, end: datetime, filters: Any) -> ShieldingAnalysis:
@@ -371,7 +357,7 @@ def network_health(
         all_asns_seen[asn] = all_asns_seen.get(asn, 0) + int(r["reqs"])
     top_asns = sorted(all_asns_seen, key=lambda a: all_asns_seen[a], reverse=True)[:top_n]
     top_asn_set = set(top_asns)
-    asn_names = _asn_names(service, top_asns)
+    asn_labels = resolve_asn_display_labels(service.service_id, top_asns)
 
     # ── Full bucket axis (no gaps) ──────────────────────────────────────────
     all_buckets: list[str] = []
@@ -444,7 +430,7 @@ def network_health(
         heatmap.append(
             {
                 "asn": asn,
-                "label": _asn_label(asn, asn_names),
+                "label": asn_labels.get(asn, f"AS{asn}"),
                 "total_reqs": all_asns_seen.get(asn, 0),
                 "buckets": list(asn_bucket_data.get(asn, {}).values()),
             }
@@ -585,7 +571,7 @@ def network_health(
         leaderboard.append(
             {
                 "asn": asn,
-                "label": _asn_label(asn, asn_names),
+                "label": asn_labels.get(asn, f"AS{asn}"),
                 "health_score_now": hs_now,
                 "health_score_1h_ago": hs_1h,
                 "health_score_1w_ago": hs_1w,
@@ -729,10 +715,12 @@ def network_quality(
 
     if by_asn:
         # Mirror the standard path: "Name (7922)" label, bare ASN stays the filter key.
-        names = _asn_names(service, [int(row["value"]) for row in by_asn if row["value"].isdigit()])
+        labels = resolve_asn_display_labels(
+            service.service_id, [int(row["value"]) for row in by_asn if row["value"].isdigit()]
+        )
         for row in by_asn:
             if row["value"].isdigit():
-                row["label"] = _asn_label(int(row["value"]), names)
+                row["label"] = labels[int(row["value"])]
 
     countries = sorted({row["value"] for row in by_country})
     scatter = [

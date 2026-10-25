@@ -35,9 +35,11 @@ module without paying for SDK setup.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 import time
@@ -367,3 +369,95 @@ class RequestTelemetry:
                 usage_log.flush_telemetry_buffer()
         except Exception:
             logger.debug("end_request: flush_telemetry_buffer failed (ignored)", exc_info=True)
+
+
+# ── Opt-in JSONL sink for client Web Vitals samples ──────────────────────────
+
+_web_vitals_logger = logging.getLogger("backend.web_vitals")
+
+# Single source of truth for the sink location. Relative to the process
+# CWD (repo root in dev, ``/app`` in the container) — the same convention
+# ``metric_snapshots.py`` uses for ``data/system``. The analyzer script
+# mirrors this path (see scripts/analyze_web_vitals.py).
+LOG_PATH = Path("data") / "system" / "web_vitals.jsonl"
+
+# Default active-file size cap in MB, overridable via WEB_VITALS_MAX_MB.
+DEFAULT_MAX_MB = 200
+
+# Serializes the append (and the rotation it may trigger) so concurrent
+# requests can't interleave a partial line or race the rename.
+_write_lock = threading.Lock()
+
+
+def collection_enabled() -> bool:
+    """True when ``WEB_VITALS_COLLECT`` is set to a truthy value.
+
+    Default off: collection is opt-in, so neither dev nor prod writes
+    anything (and the frontend, which mirrors this flag via
+    ``/api/bootstrap``, sends nothing) until it's explicitly enabled.
+    """
+    return os.environ.get("WEB_VITALS_COLLECT", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def rotated_path(path: Path | None = None) -> Path:
+    """The single rotated-backup path for ``path`` (``…jsonl`` -> ``…jsonl.1``)."""
+    p = path or LOG_PATH
+    return p.with_name(p.name + ".1")
+
+
+def _max_bytes() -> int:
+    """Active-file size cap in bytes from ``WEB_VITALS_MAX_MB``.
+
+    Defaults to ``DEFAULT_MAX_MB``. A value <= 0 (or unparseable) disables
+    the cap entirely (unbounded growth — only for deliberate use).
+    """
+    raw = os.environ.get("WEB_VITALS_MAX_MB")
+    if raw is None or raw.strip() == "":
+        mb: float = DEFAULT_MAX_MB
+    else:
+        try:
+            mb = float(raw)
+        except ValueError:
+            mb = DEFAULT_MAX_MB
+    return int(mb * 1024 * 1024) if mb > 0 else 0
+
+
+def _rotate_if_needed() -> None:
+    """Rotate the active file to a single ``.1`` backup once it hits the cap.
+
+    Caller must hold ``_write_lock``. Keeps at most one rotated segment so
+    the most recent window is always retained (rather than freezing on the
+    oldest data, which a plain drop-when-full would do).
+    """
+    cap = _max_bytes()
+    if cap <= 0:
+        return
+    try:
+        size = LOG_PATH.stat().st_size
+    except FileNotFoundError:
+        return
+    if size < cap:
+        return
+    backup = rotated_path()
+    try:
+        backup.unlink(missing_ok=True)
+        LOG_PATH.replace(backup)  # atomic rename within the same dir
+    except OSError as exc:  # pragma: no cover - defensive
+        _web_vitals_logger.warning("[web_vitals] log rotation failed: %s", exc)
+
+
+def append_sample(sample: dict[str, Any]) -> None:
+    """Append one Web Vitals sample as a single JSON line. Best-effort.
+
+    Telemetry must never break the request that produced it, so any IO
+    error is logged and swallowed rather than propagated.
+    """
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(sample, separators=(",", ":")) + "\n"
+        with _write_lock:
+            _rotate_if_needed()
+            with LOG_PATH.open("a", encoding="utf-8") as fh:
+                fh.write(line)
+    except Exception as exc:  # pragma: no cover - defensive
+        _web_vitals_logger.warning("[web_vitals] sample append failed: %s", exc)

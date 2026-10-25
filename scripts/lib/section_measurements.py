@@ -16,7 +16,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from backend.models._base import ClickHouseQueryObservation
 from backend.models.common import FilterSpec
-from backend.models.reader_coverage import HistoryObservation, ReaderCoverage
+from backend.models.dashboard import HistoryObservation, ReaderCoverage
 
 _FILTERS = TypeAdapter(dict[str, FilterSpec])
 BUDGETS = json.loads(Path(__file__).with_name("performance_budgets.json").read_text())

@@ -1041,7 +1041,7 @@ assert_middleware_order(app)
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 
-from backend.models.errors import DEFAULT_ERROR_RESPONSES  # noqa: E402
+from backend.models._base import DEFAULT_ERROR_RESPONSES  # noqa: E402
 from backend.routers import (
     alerts,
     control_room,

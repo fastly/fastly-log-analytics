@@ -274,7 +274,7 @@ def cleanup_progress():
 # fixture in tests/conftest.py drains them via CacheRegistry.clear_all()
 # rather than hand-clearing each one. _lock is left alone (not a
 # cache, not state).
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("cron_progress._progress", _progress)
 _CacheRegistry.register("cron_progress._last_update", _last_update)

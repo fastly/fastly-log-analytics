@@ -186,7 +186,7 @@ class _VersionsCacheProxy:
         reset_versions_cache()
 
 
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("faro_versions._versions_cache", _VersionsCacheProxy())
 

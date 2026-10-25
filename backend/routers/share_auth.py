@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 
 from backend.core import share_db
 from backend.core.oauth import registry as oauth_registry
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.share_admin import (
     AuthConfigResponse,
     ShareAcknowledgeResponse,

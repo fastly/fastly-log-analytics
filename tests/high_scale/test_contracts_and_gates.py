@@ -6,17 +6,18 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from backend.high_scale.archive_models import ArchiveManifest, ServingWatermark
-from backend.high_scale.exports import ExportManager, ExportState
-from backend.high_scale.models import (
+from backend.high_scale.archive_models import (
+    ArchiveManifest,
     ArchiveState,
     HighScaleConfig,
     ServiceProfile,
+    ServingWatermark,
     StorageProfile,
     build_topology_profile,
     recommend_retention,
     validate_archive_transition,
 )
+from backend.high_scale.exports import ExportManager, ExportState
 from backend.high_scale.postgres_control import PostgresControlPlane
 from backend.high_scale.publication import (
     ClickHousePublication,
@@ -609,8 +610,8 @@ from structlog.testing import capture_logs
 
 from backend.core import metric_snapshots
 from backend.cron.jobs.metric_snapshot import _run_metric_snapshot, _sample_high_scale_disk
-from backend.high_scale import disk_sampler
-from backend.high_scale.disk_sampler import VolumeStats, evaluate_disk_state
+from backend.high_scale import archive_models as disk_sampler
+from backend.high_scale.archive_models import VolumeStats, evaluate_disk_state
 from backend.utils.remote_access import _is_blocked_path
 
 _TB = 1 << 40

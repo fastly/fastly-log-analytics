@@ -6,7 +6,7 @@ import duckdb
 import pytest
 
 from backend.core import metadata as metadata_db
-from backend.models.alerts import Alert
+from backend.models.common import Alert
 from backend.repositories.alerts import (
     delete_alert,
     evaluate_alert,

@@ -484,8 +484,8 @@ def test_ngwaf_bot_name_filter_silently_skipped_when_db_missing(tmp_path, monkey
 
 from backend.repositories._base import _safe_table, _schema_cols_cache  # noqa: E402
 from backend.repositories.dashboard import get_aggregates  # noqa: E402
+from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs  # noqa: E402
 from tests.conftest import MOCK_SERVICE_ID  # noqa: E402
-from tests.utils.mock_data import generate_mock_logs, insert_mock_logs  # noqa: E402
 
 
 def _logs_with_pops(src, n_jfk: int, n_lhr: int) -> list[dict]:

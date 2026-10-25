@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from backend.core import duckdb as _db
 from backend.core import duckdb_pool as _pool
 from backend.core import duckdb_recycle as _recycle
-from backend.cron.jobs.duckdb_recycle import run_duckdb_recycle
+from backend.cron.jobs.metadata import run_duckdb_recycle
 from backend.main import app
 
 
@@ -33,9 +33,9 @@ def test_run_duckdb_recycle_rss_threshold_skip():
     """Recycle is skipped when RSS is below the configured threshold."""
     with (
         patch("backend.core.duckdb_recycle.maybe_graceful_restart", return_value=False),
-        patch("backend.cron.jobs.duckdb_recycle._recycle_rss_threshold_bytes", return_value=500 * 1024 * 1024),
+        patch("backend.cron.jobs.metadata._recycle_rss_threshold_bytes", return_value=500 * 1024 * 1024),
         patch("backend.core.duckdb.current_rss_bytes", return_value=100 * 1024 * 1024),
-        patch("backend.cron.jobs.duckdb_recycle.recycle_once") as mock_recycle,
+        patch("backend.cron.jobs.metadata.recycle_once") as mock_recycle,
     ):
         result = run_duckdb_recycle.__wrapped__()
         assert "skipped" in result
@@ -54,11 +54,11 @@ def test_run_duckdb_recycle_adaptive_expedite():
 
     with (
         patch("backend.core.duckdb_recycle.maybe_graceful_restart", return_value=False),
-        patch("backend.cron.jobs.duckdb_recycle._recycle_rss_threshold_bytes", return_value=1000 * 1024 * 1024),
+        patch("backend.cron.jobs.metadata._recycle_rss_threshold_bytes", return_value=1000 * 1024 * 1024),
         patch("backend.core.duckdb.current_rss_bytes", return_value=850 * 1024 * 1024),
         patch("backend.cron.scheduler.get_scheduler", return_value=mock_sched),
         patch("backend.core.duckdb_recycle.recycle_interval_min", return_value=60.0),
-        patch("backend.cron.jobs.duckdb_recycle.recycle_once") as mock_recycle,
+        patch("backend.cron.jobs.metadata.recycle_once") as mock_recycle,
     ):
         # 850MB is >= 800MB (80% of 1000MB threshold), skips recycle but tightens interval to 2m
         result = run_duckdb_recycle.__wrapped__()
@@ -78,12 +78,12 @@ def test_run_duckdb_recycle_adaptive_incomplete():
 
     with (
         patch("backend.core.duckdb_recycle.maybe_graceful_restart", return_value=False),
-        patch("backend.cron.jobs.duckdb_recycle._recycle_rss_threshold_bytes", return_value=0),
+        patch("backend.cron.jobs.metadata._recycle_rss_threshold_bytes", return_value=0),
         patch("backend.core.duckdb.current_rss_bytes", return_value=200 * 1024 * 1024),
         patch("backend.cron.scheduler.get_scheduler", return_value=mock_sched),
         patch("backend.core.duckdb_recycle.recycle_interval_min", return_value=60.0),
         patch(
-            "backend.cron.jobs.duckdb_recycle.recycle_once",
+            "backend.cron.jobs.metadata.recycle_once",
             return_value="interval: recycled 0/1 instance(s), freed ~0MB (incomplete: 1)",
         ),
     ):
@@ -103,12 +103,12 @@ def test_run_duckdb_recycle_adaptive_relax():
 
     with (
         patch("backend.core.duckdb_recycle.maybe_graceful_restart", return_value=False),
-        patch("backend.cron.jobs.duckdb_recycle._recycle_rss_threshold_bytes", return_value=1000 * 1024 * 1024),
+        patch("backend.cron.jobs.metadata._recycle_rss_threshold_bytes", return_value=1000 * 1024 * 1024),
         patch("backend.core.duckdb.current_rss_bytes", side_effect=[1100 * 1024 * 1024, 400 * 1024 * 1024]),
         patch("backend.cron.scheduler.get_scheduler", return_value=mock_sched),
         patch("backend.core.duckdb_recycle.recycle_interval_min", return_value=60.0),
         patch(
-            "backend.cron.jobs.duckdb_recycle.recycle_once",
+            "backend.cron.jobs.metadata.recycle_once",
             return_value="interval: recycled 1/1 instance(s), freed ~700MB",
         ),
     ):
@@ -778,7 +778,7 @@ def test_metric_snapshot_samples_vitals(monkeypatch):
         lambda: {"active_total": 3},
     )
     monkeypatch.setattr(
-        "backend.core.ducklake_admission.get_admission_stats",
+        "backend.core.iceberg._ducklake.get_admission_stats",
         lambda: {"svc_test": {"acquisitions": 2.0, "wait_ms_total": 40.0, "hold_ms_total": 100.0, "timeouts": 0.0}},
     )
     monkeypatch.setattr(

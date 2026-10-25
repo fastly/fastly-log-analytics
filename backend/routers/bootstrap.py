@@ -12,8 +12,8 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.concurrency import run_in_threadpool
 
 from backend.deps import get_con, get_service_id, get_source
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.common import BootstrapResponse, LogFieldsCatalogResponse
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.services import SchemaResponse
 from backend.repositories import rum as rum_repo
 from backend.repositories import usage as service_stats_repo
@@ -55,7 +55,7 @@ _ANALYST_PATH_A_UNSUPPORTED_REASON = (
     "Use live shared-instance analyst access (Path B)."
 )
 
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("routers.bootstrap._bootstrap_cache", _bootstrap_cache)
 _CacheRegistry.register("routers.bootstrap._bootstrap_inflight", _bootstrap_inflight)
@@ -77,7 +77,7 @@ def _startup_stub_response(request: Request) -> BootstrapResponse:
     ``schema``/``settings``, anything sourced from Iceberg/DuckDB) are withheld
     here — they stay `[]`/`None` until ``startup_complete`` flips.
     """
-    from backend.core.web_vitals_store import collection_enabled as _web_vitals_enabled
+    from backend.core.request_telemetry import collection_enabled as _web_vitals_enabled
 
     return BootstrapResponse.with_telemetry(
         active_service_id=None,
@@ -186,7 +186,7 @@ def _bootstrap_sync(
     # session cookie. The authenticated path below still emits
     # section_timings for the dev/admin perf harness.
     if is_remote and analyst_session is None:
-        from backend.core.web_vitals_store import collection_enabled as _web_vitals_enabled
+        from backend.core.request_telemetry import collection_enabled as _web_vitals_enabled
 
         return BootstrapResponse.with_telemetry(
             active_service_id=None,
@@ -739,7 +739,7 @@ def _bootstrap_sync(
     else:
         access_level = "read_write"
 
-    from backend.core.web_vitals_store import collection_enabled as _web_vitals_collection_enabled
+    from backend.core.request_telemetry import collection_enabled as _web_vitals_collection_enabled
 
     storage_mode = active_src.get("storage_mode", "cloud") if active_src else "cloud"
 

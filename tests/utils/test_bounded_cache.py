@@ -192,7 +192,7 @@ def test_stores_tuple_values_for_legacy_callsites():
 # ── Merged from test_cache_registry.py ──────────────────────────────────────────────
 
 
-from backend.utils.cache_registry import CacheRegistry
+from backend.utils.bounded_cache import CacheRegistry
 
 
 @pytest.fixture(autouse=True)

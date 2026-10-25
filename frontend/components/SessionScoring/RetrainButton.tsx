@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Brain, Loader2 } from 'lucide-react'
+import { Brain, KeyRound, Loader2 } from 'lucide-react'
 
 import {
   Dialog,
@@ -14,16 +14,19 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { useAutoFlash } from '@/hooks/useAutoFlash'
 import { client, extractApiError } from '@/lib/api'
 import type { components } from '@/types/api.generated'
 
 import { formatCount } from '@/lib/format'
 import { useOpenGeneration } from '@/hooks/useDerivedState'
-import { invalidateServiceScoringQueries } from './useScorerTimeseries'
+import { invalidateServiceScoringQueries, scoringConfigCompositeKey } from './useScorerTimeseries'
 type RetrainResult = components['schemas']['ScoringRetrainResponse']
+type RotateKeyResponse = components['schemas']['ScoringRotateKeyResponse']
 
 interface RetrainButtonProps {
   serviceId: string
@@ -234,6 +237,119 @@ function Metric({ label, value, mono = false }: { label: string; value: React.Re
     <div className="p-2 border rounded-md">
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
       <div className={`text-sm ${mono ? 'font-mono' : ''} font-semibold`}>{value}</div>
+    </div>
+  )
+}
+
+interface RotateKeyButtonProps {
+  serviceId: string
+}
+
+/**
+ * Rotate the AES cookie key used to encrypt session scoring cookies.
+ *
+ * The new key becomes 'current'; the previous 'current' key moves to the
+ * 'previous' slot so already-issued cookies stay decodable for one grace
+ * cycle. Two rotations back-to-back will drop the original key entirely
+ * and mark its cookies as 'tampered' at the edge.
+ */
+export function RotateKeyButton({ serviceId }: RotateKeyButtonProps) {
+  const qc = useQueryClient()
+  const [open, setOpen] = React.useState(false)
+  const {
+    value: status,
+    flash: flashStatus,
+    set: setStatus,
+    clear: clearStatus,
+  } = useAutoFlash<{ kind: 'success' | 'error'; message: string }>(4000)
+
+  const mutation = useMutation({
+    mutationFn: async (): Promise<RotateKeyResponse> => {
+      const { data, error: errBody, response } = await client.POST(
+        '/api/services/{service_id}/scoring/rotate-key',
+        {
+          params: { path: { service_id: serviceId } },
+        },
+      )
+      if (!response.ok || !data) {
+        throw new Error(errBody ? extractApiError(errBody) : `status ${response.status}`)
+      }
+      return data
+    },
+    onSuccess: () => {
+      flashStatus({ kind: 'success', message: 'Key rotated; previous slot updated' })
+      setOpen(false)
+      qc.invalidateQueries({ queryKey: ['scoring-status', serviceId] })
+      qc.invalidateQueries({ queryKey: scoringConfigCompositeKey(serviceId) })
+      qc.invalidateQueries({ queryKey: ['scoring-audit', serviceId] })
+    },
+    onError: (err: unknown) => {
+      const message = err instanceof Error ? err.message : 'Failed to rotate key'
+      setStatus({ kind: 'error', message })
+    },
+  })
+
+  return (
+    <div className="inline-flex flex-col items-end gap-1">
+      <Button
+        variant="destructive"
+        size="sm"
+        onClick={() => {
+          clearStatus()
+          setOpen(true)
+        }}
+        disabled={mutation.isPending}
+        title="Rotate the AES key used to encrypt scoring cookies"
+      >
+        {mutation.isPending ? (
+          <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+        ) : (
+          <KeyRound className="h-4 w-4 mr-1" />
+        )}
+        Rotate AES key
+      </Button>
+
+      {status && (
+        <p
+          className={`text-[11px] ${
+            status.kind === 'success' ? 'text-emerald-600' : 'text-destructive'
+          }`}
+          role="status"
+        >
+          {status.message}
+        </p>
+      )}
+
+      <ConfirmDialog
+        open={open}
+        onOpenChange={(o) => {
+          if (!mutation.isPending) setOpen(o)
+        }}
+        isDangerous
+        isPending={mutation.isPending}
+        title="Rotate AES cookie key?"
+        description={
+          <div className="space-y-2 text-sm">
+            <p>
+              Generates a new AES key and promotes it to the <strong>current</strong>{' '}
+              slot. The old current key moves to <strong>previous</strong> and is still
+              accepted for one grace cycle.
+            </p>
+            <ul className="list-disc list-inside space-y-1 text-xs">
+              <li>In-flight sessions keep working — their cookies decode under the previous-slot key.</li>
+              <li>New sessions get cookies encrypted with the new current key.</li>
+              <li>
+                <strong>Warning:</strong> rotating twice in quick succession discards the
+                original key entirely. Cookies issued under it will be treated as{' '}
+                <span className="font-mono">tampered</span> at the edge.
+              </li>
+            </ul>
+          </div>
+        }
+        confirmLabel="Rotate key"
+        cancelLabel="Cancel"
+        onConfirm={() => mutation.mutate()}
+      />
     </div>
   )
 }

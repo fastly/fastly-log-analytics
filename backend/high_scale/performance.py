@@ -5,11 +5,14 @@ from collections.abc import Mapping
 from typing import Any
 
 from backend.core.high_scale_sections import HighScaleSections
-from backend.high_scale._filters import (
+from backend.high_scale._common import (
     build_published_facts_where as _facts_where,
 )
-from backend.high_scale._filters import (
+from backend.high_scale._common import (
     build_published_projection_where as _where,
+)
+from backend.high_scale._common import (
+    resolve_asn_display_labels,
 )
 from backend.high_scale.dashboard import _FIELD_DIMENSIONS
 from backend.high_scale.performance_projection import SCATTER_SAMPLE_SIZE
@@ -22,7 +25,7 @@ from backend.repositories.utils.response_cache import (
     digest_cache_key,
     serialize_filters_for_key,
 )
-from backend.utils.cache_registry import CacheRegistry
+from backend.utils.bounded_cache import CacheRegistry
 
 _HS_PERF_CACHE_TTL = float(os.getenv("HS_PERF_CACHE_TTL_SECONDS", "30"))
 _memo = ResponseMemo(ttl=_HS_PERF_CACHE_TTL, maxsize=128, prewarmer=False)
@@ -160,14 +163,13 @@ def _latency_row(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def _asn_rows(service: HighScaleService, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Attach the same ``label`` the standard path's ``_resolve_asns`` adds."""
-    from backend.core import duckdb as _db
-
-    asn_list = [int(row["value"]) for row in rows if str(row["value"]).isdigit()]
-    asn_names = _db.get_asn_names(service.service_id, asn_list)
+    asn_labels = resolve_asn_display_labels(
+        service.service_id, [int(row["value"]) for row in rows if str(row["value"]).isdigit()]
+    )
     out: list[dict[str, Any]] = []
     for row in rows:
         asn: int | str = int(row["value"]) if str(row["value"]).isdigit() else row["value"]
-        label = _db.format_asn_label(asn, asn_names.get(asn, "")) if isinstance(asn, int) else str(asn)
+        label = asn_labels.get(asn, f"AS{asn}") if isinstance(asn, int) else str(asn)
         out.append({"asn": asn, "label": label, **_latency_row(row)})
     return out
 

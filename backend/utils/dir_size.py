@@ -181,7 +181,7 @@ def walk_dir_stats(path: str) -> tuple[int, int]:
 # R-1: drain the per-path size cache between tests so a previous test's
 # sandbox directory size doesn't bleed into a later test that reuses the
 # same path string.
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("utils.dir_size._DIR_SIZE_CACHE", _DIR_SIZE_CACHE)
 _CacheRegistry.register("utils.dir_size._DIR_STATS_CACHE", _DIR_STATS_CACHE)

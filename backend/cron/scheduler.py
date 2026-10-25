@@ -543,7 +543,7 @@ class Scheduler:
         ``_sync_jobs`` stale-sweep doesn't immediately remove it.
         """
         from backend.core.duckdb_recycle import recycle_interval_min
-        from backend.cron.jobs.duckdb_recycle import run_duckdb_recycle
+        from backend.cron.jobs.metadata import run_duckdb_recycle
 
         recycle_interval = recycle_interval_min()
         if recycle_interval <= 0:
@@ -1384,7 +1384,7 @@ def get_scheduler() -> Scheduler:
 # R-1: drain the heavy-refresh throttle dict between tests so an
 # earlier test's last-tick timestamp doesn't suppress a cron call in
 # the next test that uses the same service_id.
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("cron.scheduler._last_heavy_refresh", _last_heavy_refresh)
 

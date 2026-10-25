@@ -33,7 +33,7 @@ from unittest.mock import patch
 import duckdb
 import pytest
 
-from backend.core import rollup_readiness as rr
+from backend.core import rollups as rr
 from backend.repositories import rollup_coverage
 from backend.repositories._base import QueryRunner
 from backend.utils.date_utils import parse_iso_utc

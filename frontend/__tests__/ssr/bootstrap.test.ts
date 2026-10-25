@@ -2,10 +2,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { hydrate, QueryClient } from '@tanstack/react-query'
 
 import { setupNextHeadersMock, withTestHttpServer } from '../helpers/ssr'
-import { resolveRangeWire } from '@/lib/range-wire'
+import { resolveRangeWire, quantizeAnchor } from '@/lib/range-wire'
 import { seedDehydratedState } from '@/lib/ssr/seed'
 import { fetchStreamingServerSide } from '@/lib/ssr/upstream'
-import { quantizeAnchor } from '@/lib/time-window'
 
 const { setHeaders, setCookies } = setupNextHeadersMock({ cookies: 'session=abc123' })
 
@@ -189,7 +188,7 @@ describe('Streaming SSR fixture contract', () => {
 describe('resolveDefaultSsrRangeKey (key-match contract)', () => {
   it('cold load → rangeToken "24h", anchor floored to the 60s grid', async () => {
     const { resolveDefaultSsrRangeKey } = await import('@/lib/ssr/upstream')
-    const { quantizeAnchor: qa } = await import('@/lib/time-window')
+    const { quantizeAnchor: qa } = await import('@/lib/range-wire')
 
     const now = new Date('2026-06-29T12:00:37.123Z')
     const got = resolveDefaultSsrRangeKey(now)
@@ -428,7 +427,7 @@ describe('fetchSecurityServerSide (security SSR)', () => {
 
 describe('resolveInsightsDefault (key-match contract)', () => {
   it('mirrors useInsightsDefaults: pickInsightsDefault over earliest_log_at', async () => {
-    const { resolveInsightsDefault } = await import('@/lib/ssr/insights')
+    const { resolveInsightsDefault } = await import('@/lib/ssr/upstream')
     const { pickInsightsDefault, historyHoursFromExtents } = await import(
       '@/lib/insights-defaults'
     )
@@ -443,7 +442,7 @@ describe('resolveInsightsDefault (key-match contract)', () => {
   })
 
   it('no extents → STATIC_DEFAULT tokens (matches client no-data path)', async () => {
-    const { resolveInsightsDefault } = await import('@/lib/ssr/insights')
+    const { resolveInsightsDefault } = await import('@/lib/ssr/upstream')
     expect(resolveInsightsDefault(null)).toEqual({
       windowHours: '24',
       baselineHours: '168',
@@ -458,7 +457,7 @@ describe('resolveInsightsDefault (key-match contract)', () => {
 describe('fetchInsightsServerSide (insights SSR)', () => {
   it('returns null without a serviceId (no upstream call)', async () => {
     process.env.API_PROXY_URL = 'http://127.0.0.1:1'
-    const { fetchInsightsServerSide } = await import('@/lib/ssr/insights')
+    const { fetchInsightsServerSide } = await import('@/lib/ssr/upstream')
     expect(await fetchInsightsServerSide(undefined, null)).toBeNull()
   })
 
@@ -509,7 +508,7 @@ describe('fetchInsightsServerSide (insights SSR)', () => {
         res.end('{"insights":[]}')
       },
       async (srv) => {
-        const { fetchInsightsServerSide } = await import('@/lib/ssr/insights')
+        const { fetchInsightsServerSide } = await import('@/lib/ssr/upstream')
         const out = await fetchInsightsServerSide('svc-1', null)
         expect(out).toBeNull()
         expect(srv.requests).toHaveLength(0)
@@ -527,7 +526,7 @@ describe('fetchInsightsServerSide (insights SSR)', () => {
         res.end('{"insights":[1,2,3]}')
       },
       async (srv) => {
-        const { fetchInsightsServerSide } = await import('@/lib/ssr/insights')
+        const { fetchInsightsServerSide } = await import('@/lib/ssr/upstream')
         const earliest = new Date(Date.now() - 10 * 24 * 3600 * 1000).toISOString()
         const out = await fetchInsightsServerSide('svc-1', { earliest_log_at: earliest })
 
@@ -563,7 +562,7 @@ describe('fetchInsightsServerSide (insights SSR)', () => {
         res.end('{"insights":[1]}')
       },
       async (srv) => {
-        const { fetchInsightsServerSide } = await import('@/lib/ssr/insights')
+        const { fetchInsightsServerSide } = await import('@/lib/ssr/upstream')
         const out = await fetchInsightsServerSide('svc-1', null)
         expect(out).not.toBeNull()
         expect(out!.data).toEqual({ insights: [1] })

@@ -80,7 +80,7 @@ describe('useDashboardBundle', () => {
       }),
     )
     const qc = makeClient()
-    const { useDashboardBundle } = await import('@/hooks/useDashboardBundle')
+    const { useDashboardBundle } = await import('@/app/dashboard/_sections/DashboardClient')
     renderHook(() => useDashboardBundle({ ...baseArgs, enabled: false }), {
       wrapper: wrapperFor(qc),
     })
@@ -100,7 +100,7 @@ describe('useDashboardBundle', () => {
       }),
     )
     const qc = makeClient()
-    const { useDashboardBundle } = await import('@/hooks/useDashboardBundle')
+    const { useDashboardBundle } = await import('@/app/dashboard/_sections/DashboardClient')
     const { result } = renderHook(() => useDashboardBundle({ ...baseArgs, enabled: true }), {
       wrapper: wrapperFor(qc),
     })
@@ -121,7 +121,7 @@ describe('useDashboardBundle', () => {
         }),
       )
       const qc = makeClient()
-      const { useDashboardBundle } = await import('@/hooks/useDashboardBundle')
+      const { useDashboardBundle } = await import('@/app/dashboard/_sections/DashboardClient')
       renderHook(() => useDashboardBundle({ ...baseArgs, enabled: true }), {
         wrapper: wrapperFor(qc),
       })
@@ -143,7 +143,7 @@ describe('useDashboardBundle', () => {
       ),
     )
     const qc = makeClient()
-    const { useDashboardBundle } = await import('@/hooks/useDashboardBundle')
+    const { useDashboardBundle } = await import('@/app/dashboard/_sections/DashboardClient')
     const { result } = renderHook(() => useDashboardBundle({ ...baseArgs, enabled: true }), {
       wrapper: wrapperFor(qc),
     })
@@ -171,7 +171,7 @@ describe('useDashboardBundle', () => {
       ),
     )
     const qc = makeClient()
-    const { useDashboardBundle } = await import('@/hooks/useDashboardBundle')
+    const { useDashboardBundle } = await import('@/app/dashboard/_sections/DashboardClient')
     const { result } = renderHook(() => useDashboardBundle({ ...baseArgs, enabled: true }), {
       wrapper: wrapperFor(qc),
     })
@@ -205,7 +205,7 @@ describe('useDashboardBundle', () => {
       }),
     )
     const qc = makeClient()
-    const { useDashboardBundle } = await import('@/hooks/useDashboardBundle')
+    const { useDashboardBundle } = await import('@/app/dashboard/_sections/DashboardClient')
     // relativeRange null + isAutoRange false = the user picked an explicit
     // absolute range (date picker / chart zoom / saved view).
     const { result } = renderHook(
@@ -235,7 +235,7 @@ describe('useDashboardBundle', () => {
       }),
     )
     const qc = makeClient()
-    const { useDashboardBundle } = await import('@/hooks/useDashboardBundle')
+    const { useDashboardBundle } = await import('@/app/dashboard/_sections/DashboardClient')
     const sections = ['core', 'topten', 'bots'] as const
     const { result } = renderHook(
       () => useDashboardBundle({ ...baseArgs, enabled: true, sections: [...sections] }),
@@ -270,7 +270,7 @@ describe('useDashboardBundle', () => {
       }),
     )
     const qc = makeClient()
-    const { useDashboardBundle } = await import('@/hooks/useDashboardBundle')
+    const { useDashboardBundle } = await import('@/app/dashboard/_sections/DashboardClient')
     const { result } = renderHook(() => useDashboardBundle({ ...baseArgs, enabled: true }), {
       wrapper: wrapperFor(qc),
     })

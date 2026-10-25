@@ -26,8 +26,7 @@ from types import SimpleNamespace
 
 import typer
 
-from backend.core.fastly.client import fastly
-from backend.core.fastly.service import find_service_by_name
+from backend.core.fastly.client import fastly, find_service_by_name
 from backend.core.fastly.utils import SHIELD_MAP, parse_period
 from backend.provision.fastly_api import (
     account_has_rate_limiting,

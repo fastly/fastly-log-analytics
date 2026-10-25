@@ -21,7 +21,7 @@ vi.mock('@/components/PlotlyChart', async () =>
   }),
 )
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/browser-stubs')).reactVirtualModuleMock())
 
 vi.mock('@/hooks/useLogFieldsCatalog', () => ({
   useLogFieldsCatalog: vi.fn(() => ({

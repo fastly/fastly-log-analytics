@@ -13,9 +13,8 @@ import duckdb
 
 from backend import config as svcconfig
 from backend.core import metadata as metadata_db
-from backend.core.metrics import get_metric_sql
-from backend.models.alerts import Alert
-from backend.models.common import SavedView
+from backend.core.metric_expressions import get_metric_sql
+from backend.models.common import Alert, SavedView
 from backend.repositories._base import QueryRunner
 from backend.utils.telemetry import track_query
 

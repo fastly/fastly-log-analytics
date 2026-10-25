@@ -229,7 +229,7 @@ def _run_rollup_hour_heal(
 
         durable_mode = svcconfig.is_durable_serving_mode(src)
         if durable_mode:
-            from backend.core.rollup_readiness import rollup_coverage_ready
+            from backend.core.rollups._common import rollup_coverage_ready
 
             coverage_ready = rollup_coverage_ready(service_id)
         else:
@@ -289,7 +289,7 @@ def _run_rollup_hour_heal(
         # next tick.
         if durable_mode and not coverage_ready and heal.get("coverage_verified", False):
             try:
-                from backend.core.rollup_readiness import mark_rollup_coverage_ready
+                from backend.core.rollups._common import mark_rollup_coverage_ready
 
                 mark_rollup_coverage_ready(service_id)
             except Exception as e:

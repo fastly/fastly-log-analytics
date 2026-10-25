@@ -11,13 +11,13 @@ from backend.core.session_token import (
     open_session_token,
     seal_session_token,
 )
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.dashboard import (
     SessionDetailRequest,
     SessionDetailResponse,
     SessionsRequest,
     SessionsResponse,
 )
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.repositories import sessions as repo
 from backend.utils.auth import mask_ips_for
 from backend.utils.date_utils import parse_iso_utc

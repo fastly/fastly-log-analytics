@@ -17,7 +17,7 @@ from backend.repositories.network import (
     get_quality,
 )
 from backend.utils.countries import format_city_label
-from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
+from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 
 
 def test_format_city_label():

@@ -77,7 +77,7 @@ describe('useHeaderBadgeStream', () => {
       makeStreamResponse([`data: ${JSON.stringify(cleared)}\r\n\r\n`]),
     )
     const qc = makeQueryClient(seed)
-    const { useHeaderBadgeStream } = await import('@/hooks/useHeaderBadgeStream')
+    const { useHeaderBadgeStream } = await import('@/hooks/useAdminEventStream')
     renderHook(() => useHeaderBadgeStream(true), { wrapper: wrapperWith(qc) })
     await waitFor(() => {
       expect(qc.getQueryData(['bootstrap'])).toEqual({ ...seed, header_badge: cleared })
@@ -99,7 +99,7 @@ describe('useHeaderBadgeStream', () => {
       makeStreamResponse([`data: ${JSON.stringify(payload)}\r\n\r\n`]),
     )
     const qc = makeQueryClient(seed)
-    const { useHeaderBadgeStream } = await import('@/hooks/useHeaderBadgeStream')
+    const { useHeaderBadgeStream } = await import('@/hooks/useAdminEventStream')
     renderHook(() => useHeaderBadgeStream(true), { wrapper: wrapperWith(qc) })
     await waitFor(() => {
       expect(qc.getQueryData(['bootstrap'])).toEqual({
@@ -121,7 +121,7 @@ describe('useHeaderBadgeStream', () => {
     )
 
     const qc = makeQueryClient(seed)
-    const { useHeaderBadgeStream } = await import('@/hooks/useHeaderBadgeStream')
+    const { useHeaderBadgeStream } = await import('@/hooks/useAdminEventStream')
     renderHook(() => useHeaderBadgeStream(true), { wrapper: wrapperWith(qc) })
 
     await waitFor(() => {
@@ -144,7 +144,7 @@ describe('useHeaderBadgeStream', () => {
     )
 
     const qc = makeQueryClient(/* no seed */)
-    const { useHeaderBadgeStream } = await import('@/hooks/useHeaderBadgeStream')
+    const { useHeaderBadgeStream } = await import('@/hooks/useAdminEventStream')
     renderHook(() => useHeaderBadgeStream(true), { wrapper: wrapperWith(qc) })
 
     // Just give the stream time to drain. With no bootstrap entry,
@@ -161,7 +161,7 @@ describe('useHeaderBadgeStream', () => {
 
   it('does NOT open a connection when disabled is false', async () => {
     const qc = makeQueryClient({})
-    const { useHeaderBadgeStream } = await import('@/hooks/useHeaderBadgeStream')
+    const { useHeaderBadgeStream } = await import('@/hooks/useAdminEventStream')
     renderHook(() => useHeaderBadgeStream(false), { wrapper: wrapperWith(qc) })
     await new Promise(r => setTimeout(r, 30))
     expect(fetch).not.toHaveBeenCalled()
@@ -173,7 +173,7 @@ describe('useHeaderBadgeStream', () => {
     )
 
     const qc = makeQueryClient({})
-    const { useHeaderBadgeStream } = await import('@/hooks/useHeaderBadgeStream')
+    const { useHeaderBadgeStream } = await import('@/hooks/useAdminEventStream')
     renderHook(() => useHeaderBadgeStream(true), { wrapper: wrapperWith(qc) })
 
     await waitFor(() => expect(fetch).toHaveBeenCalled())
@@ -190,7 +190,7 @@ describe('useHeaderBadgeStream', () => {
     })
 
     const qc = makeQueryClient({})
-    const { useHeaderBadgeStream } = await import('@/hooks/useHeaderBadgeStream')
+    const { useHeaderBadgeStream } = await import('@/hooks/useAdminEventStream')
     const { unmount } = renderHook(() => useHeaderBadgeStream(true), { wrapper: wrapperWith(qc) })
 
     await waitFor(() => expect(fetch).toHaveBeenCalled())

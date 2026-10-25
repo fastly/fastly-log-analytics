@@ -29,8 +29,8 @@ from backend.repositories.origin import (
     get_summary,
     get_timeseries,
 )
+from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 from tests._helpers.rollups import noop_lock as _noop_lock
-from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
 
 
 # ── Merged from tests/repositories/test_origin.py ──

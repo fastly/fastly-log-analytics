@@ -6,16 +6,13 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import HighScaleRequestFactsPage from '@/app/high-scale/request-facts/page'
 import HighScaleRequestFactsLoading from '@/app/high-scale/request-facts/loading'
+import { highScaleRequestFactsHooks } from '@/components/high-scale/HighScaleRequestFactsPanel'
 
 const { useFactsMock } = vi.hoisted(() => ({
   useFactsMock: vi.fn(),
 }))
 
-vi.mock('@/hooks/useHighScaleRequestFacts', () => ({
-  useHighScaleRequestFacts: useFactsMock,
-}))
-
-vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/browser-stubs')).reactVirtualModuleMock())
 
 vi.mock('@/hooks/useIsDataReady', () => ({
   useEffectiveServiceId: () => 'service-1',
@@ -52,6 +49,7 @@ const baseMetadata = {
 
 beforeEach(() => {
   useFactsMock.mockReset()
+  vi.spyOn(highScaleRequestFactsHooks, 'useHighScaleRequestFacts').mockImplementation(useFactsMock)
 })
 
 afterEach(() => {

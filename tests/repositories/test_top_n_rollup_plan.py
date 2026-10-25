@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from backend import config as svcconfig
-from backend.core import rollup_readiness as rr
+from backend.core import rollups as rr
 from backend.repositories import rollup_coverage
 from backend.repositories._base import QueryRunner
 from backend.repositories.rollup_coverage import collect_hourly_bundle_paths, heal_where_clause

@@ -1,19 +1,20 @@
 import datetime
 import re
 import shutil
+import sys
 import urllib.parse
+from typing import Any
 
+from backend.core import field_registry as fc
 from backend.core import field_registry as lf
-from backend.core.fastly.client import fastly
-from backend.core.fastly.rum_provisioning import generate_rum_recv_parts
-from backend.core.fastly.service import (
+from backend.core.fastly.client import (
+    fastly,
     get_active_version,
     get_generated_vcl,
     list_s3_endpoints,
 )
-from backend.provision.draft_version import draft_version
-from backend.provision.utils import BOLD, VclBuilder, _c, fail, info, ok, warn
-from backend.utils import field_codes as fc
+from backend.core.fastly.rum_provisioning import generate_rum_recv_parts
+from backend.provision.utils import BOLD, VclBuilder, _c, draft_version, fail, info, ok, warn
 from backend.utils import vcl_utils
 
 # ── VCL Edge Data Mapping ───────────────────────────────────────────────────
@@ -517,6 +518,21 @@ def generate_capture_vcl(
     if group_l or group_m or custom_origin or custom_deliver:
         deliver_lines = []
         if group_l:
+            _l_hdrs = (
+                ("x-of-ttfb", "resp.http.x-of-ttfb"),
+                ("x-of-ttlb", "resp.http.x-of-ttlb"),
+                ("x-of-connect", "resp.http.x-of-connect"),
+                ("x-of-status", "resp.http.x-of-status"),
+                ("x-of-oip", "resp.http.x-of-oip"),
+                ("x-of-oretries", "req.restarts"),
+            )
+            _l_promote = "\n".join(
+                f'if (req.http.{h} == "" && resp.http.{h} != "") {{ set req.http.{h} = {src}; }}' for h, src in _l_hdrs
+            )
+            _l_unset = "\n".join(f"  unset resp.http.{h};" for h, _ in _l_hdrs)
+            _l_forward = "\n".join(
+                f'  if (req.http.{h} != "") {{ set resp.http.{h} = req.http.{h}; }}' for h, _ in _l_hdrs
+            )
             deliver_lines.append(
                 "# [group-L] Record TTLB, capture bytes, strip all internal headers\n"
                 # Skip scoring sub-fetch — don't capture scorer-leg TTLB
@@ -530,76 +546,50 @@ def generate_capture_vcl(
                 "unset resp.http.x-of-start;\n"
                 "\n"
                 "# Promote upstream metrics to req so this node can log them if it didn't generate its own\n"
-                'if (req.http.x-of-ttfb == "" && resp.http.x-of-ttfb != "") { set req.http.x-of-ttfb = resp.http.x-of-ttfb; }\n'
-                'if (req.http.x-of-ttlb == "" && resp.http.x-of-ttlb != "") { set req.http.x-of-ttlb = resp.http.x-of-ttlb; }\n'
-                'if (req.http.x-of-connect == "" && resp.http.x-of-connect != "") { set req.http.x-of-connect = resp.http.x-of-connect; }\n'
-                'if (req.http.x-of-status == "" && resp.http.x-of-status != "") { set req.http.x-of-status = resp.http.x-of-status; }\n'
-                'if (req.http.x-of-oip == "" && resp.http.x-of-oip != "") { set req.http.x-of-oip = resp.http.x-of-oip; }\n'
-                'if (req.http.x-of-oretries == "" && resp.http.x-of-oretries != "") { set req.http.x-of-oretries = req.restarts; }\n'
+                f"{_l_promote}\n"
                 "\n"
                 'if (req.http.x-is-cluster-fetch != "1") {\n'
                 "  # Returning to client: strip internal metrics from response\n"
-                "  unset resp.http.x-of-ttfb;\n"
-                "  unset resp.http.x-of-ttlb;\n"
-                "  unset resp.http.x-of-connect;\n"
-                "  unset resp.http.x-of-status;\n"
-                "  unset resp.http.x-of-oip;\n"
-                "  unset resp.http.x-of-oretries;\n"
+                f"{_l_unset}\n"
                 "} else {\n"
                 "  # Returning to internal cluster node: ensure metrics are attached to response\n"
-                '  if (req.http.x-of-ttfb != "") { set resp.http.x-of-ttfb = req.http.x-of-ttfb; }\n'
-                '  if (req.http.x-of-ttlb != "") { set resp.http.x-of-ttlb = req.http.x-of-ttlb; }\n'
-                '  if (req.http.x-of-connect != "") { set resp.http.x-of-connect = req.http.x-of-connect; }\n'
-                '  if (req.http.x-of-status != "") { set resp.http.x-of-status = req.http.x-of-status; }\n'
-                '  if (req.http.x-of-oip != "") { set resp.http.x-of-oip = req.http.x-of-oip; }\n'
-                '  if (req.http.x-of-oretries != "") { set resp.http.x-of-oretries = req.http.x-of-oretries; }\n'
+                f"{_l_forward}\n"
                 "}\n"
                 "unset resp.http.x-edge-req-id;"
             )
 
         if group_m:
+            _m_stats = (
+                ("ifsz", "[0-9]+"),
+                ("ofsz", "[0-9]+"),
+                ("ifmt", "[a-zA-Z0-9]+"),
+                ("ofmt", "[a-zA-Z0-9]+"),
+            )
+            _m_hdrs = tuple(f"x-fos-io-{s}" for s, _ in _m_stats)
+            _m_promote = "\n".join(
+                f'if (req.http.{h} == "" && resp.http.{h} != "") {{ set req.http.{h} = resp.http.{h}; }}'
+                for h in _m_hdrs
+            )
+            _m_extract = "\n".join(
+                f'  if (resp.http.Fastly-Io-Transform-Stats ~ "{s}=") {{\n'
+                f'    set req.http.x-fos-io-{s} = regsub(resp.http.Fastly-Io-Transform-Stats, ".*{s}=({pat}).*", "\\1");\n'
+                "  }"
+                for s, pat in _m_stats
+            )
+            _m_unset = "\n".join(f"  unset resp.http.{h};" for h in _m_hdrs)
+            _m_forward = "\n".join(
+                f'  if (req.http.{h} != "") {{ set resp.http.{h} = req.http.{h}; }}' for h in _m_hdrs
+            )
             deliver_lines.append(
                 "# [group-M] Extract IO metrics from Fastly-Io-Transform-Stats\n"
-                'if (req.http.x-fos-io-ifsz == "" && resp.http.x-fos-io-ifsz != "") '
-                "{ set req.http.x-fos-io-ifsz = resp.http.x-fos-io-ifsz; }\n"
-                'if (req.http.x-fos-io-ofsz == "" && resp.http.x-fos-io-ofsz != "") '
-                "{ set req.http.x-fos-io-ofsz = resp.http.x-fos-io-ofsz; }\n"
-                'if (req.http.x-fos-io-ifmt == "" && resp.http.x-fos-io-ifmt != "") '
-                "{ set req.http.x-fos-io-ifmt = resp.http.x-fos-io-ifmt; }\n"
-                'if (req.http.x-fos-io-ofmt == "" && resp.http.x-fos-io-ofmt != "") '
-                "{ set req.http.x-fos-io-ofmt = resp.http.x-fos-io-ofmt; }\n"
+                f"{_m_promote}\n"
                 'if (resp.http.Fastly-Io-Transform-Stats != "") {\n'
-                '  if (resp.http.Fastly-Io-Transform-Stats ~ "ifsz=") {\n'
-                "    set req.http.x-fos-io-ifsz = regsub(resp.http.Fastly-Io-Transform-Stats, "
-                '".*ifsz=([0-9]+).*", "\\1");\n'
-                "  }\n"
-                '  if (resp.http.Fastly-Io-Transform-Stats ~ "ofsz=") {\n'
-                "    set req.http.x-fos-io-ofsz = regsub(resp.http.Fastly-Io-Transform-Stats, "
-                '".*ofsz=([0-9]+).*", "\\1");\n'
-                "  }\n"
-                '  if (resp.http.Fastly-Io-Transform-Stats ~ "ifmt=") {\n'
-                "    set req.http.x-fos-io-ifmt = regsub(resp.http.Fastly-Io-Transform-Stats, "
-                '".*ifmt=([a-zA-Z0-9]+).*", "\\1");\n'
-                "  }\n"
-                '  if (resp.http.Fastly-Io-Transform-Stats ~ "ofmt=") {\n'
-                "    set req.http.x-fos-io-ofmt = regsub(resp.http.Fastly-Io-Transform-Stats, "
-                '".*ofmt=([a-zA-Z0-9]+).*", "\\1");\n'
-                "  }\n"
+                f"{_m_extract}\n"
                 "}\n"
                 'if (req.http.x-is-cluster-fetch != "1") {\n'
-                "  unset resp.http.x-fos-io-ifsz;\n"
-                "  unset resp.http.x-fos-io-ofsz;\n"
-                "  unset resp.http.x-fos-io-ifmt;\n"
-                "  unset resp.http.x-fos-io-ofmt;\n"
+                f"{_m_unset}\n"
                 "} else {\n"
-                '  if (req.http.x-fos-io-ifsz != "") '
-                "{ set resp.http.x-fos-io-ifsz = req.http.x-fos-io-ifsz; }\n"
-                '  if (req.http.x-fos-io-ofsz != "") '
-                "{ set resp.http.x-fos-io-ofsz = req.http.x-fos-io-ofsz; }\n"
-                '  if (req.http.x-fos-io-ifmt != "") '
-                "{ set resp.http.x-fos-io-ifmt = req.http.x-fos-io-ifmt; }\n"
-                '  if (req.http.x-fos-io-ofmt != "") '
-                "{ set resp.http.x-fos-io-ofmt = req.http.x-fos-io-ofmt; }\n"
+                f"{_m_forward}\n"
                 "}"
             )
 
@@ -748,6 +738,20 @@ def _validate_log_format_regex(raw: str) -> list[str]:
 _RATELIMIT_OPT_IN_RE = re.compile(r"ratelimit_opt_in\s+true\b")
 
 
+def _fetch_active_generated_vcl(service_id: str, token: str) -> str | None:
+    """Return the active version's compiled VCL for ``service_id``, or ``None``."""
+    if not service_id:
+        return None
+    try:
+        active_ver = get_active_version(service_id, token)
+        if active_ver is None:
+            return None
+        content = get_generated_vcl(service_id, active_ver, token)
+    except Exception:  # noqa: BLE001 — detection is best-effort; never break a deploy
+        return None
+    return content or None
+
+
 def account_has_rate_limiting(token: str, *service_ids: str) -> bool | None:
     """Proactively detect whether the Fastly account has edge rate limiting.
 
@@ -769,15 +773,7 @@ def account_has_rate_limiting(token: str, *service_ids: str) -> bool | None:
     Fully best-effort: any unexpected error on a probe drops to the next id.
     """
     for service_id in service_ids:
-        if not service_id:
-            continue
-        try:
-            active_ver = get_active_version(service_id, token)
-            if active_ver is None:
-                continue
-            content = get_generated_vcl(service_id, active_ver, token)
-        except Exception:  # noqa: BLE001 — detection is best-effort; never break a deploy
-            continue
+        content = _fetch_active_generated_vcl(service_id, token)
         if not content:
             continue
         return bool(_RATELIMIT_OPT_IN_RE.search(content))
@@ -806,13 +802,7 @@ def service_has_scoring_pragmas(service_id: str, token: str) -> bool | None:
     """
     if not service_id or not token:
         return None
-    try:
-        active_ver = get_active_version(service_id, token)
-        if active_ver is None:
-            return None
-        content = get_generated_vcl(service_id, active_ver, token)
-    except Exception:  # noqa: BLE001 — best-effort probe
-        return None
+    content = _fetch_active_generated_vcl(service_id, token)
     if not content:
         return None
     return bool(_FIX_UNSENT_BODY_DRAIN_RE.search(content) and _NO_BODY_IF_BEREQ_GET_OR_HEAD_RE.search(content))
@@ -1383,3 +1373,164 @@ _CDN_SNIPPETS = [
     (_CDN_FETCH_GENERATION_SNIPPET_NAME, "fetch", _CDN_FETCH_GENERATION_SNIPPET, 20),
     (_CDN_NO_CACHE_404_SNIPPET_NAME, "fetch", _CDN_NO_CACHE_404_SNIPPET, 30),
 ]
+
+
+# ── Remote Frontend Sharing Domain (merged from sharing_domain.py) ────────────
+
+
+def _fastly_api_request(
+    method: str,
+    path: str,
+    *,
+    token: str,
+    json_data: Any = None,
+    step: str = "",
+) -> Any:
+    """Perform a request to the Fastly API via the shared client.
+
+    Delegates transport to ``backend.core.fastly.client.fastly`` so this
+    module inherits its retry/backoff, OTel telemetry, and mock-mode support
+    instead of hand-rolling a second ``requests``-based client. ``path`` is a
+    Fastly API path (e.g. ``/service``); the client pins the ``api.fastly.com``
+    base and ``Fastly-Key`` auth. Returns the parsed JSON body (``dict`` or
+    ``list``). Errors are re-raised with the human-readable ``step`` for
+    provisioning diagnostics.
+    """
+    try:
+        return fastly(method, path, body=json_data, token=token)
+    except RuntimeError as exc:
+        raise RuntimeError(f"Fastly API error during {step}: {exc}") from exc
+
+
+def deploy_remote_frontend(
+    service_name: str,
+    domain_name: str,
+    origin_host: str,
+    origin_port: int,
+    use_ssl: bool,
+    token: str,
+    override_host: str | None = None,
+) -> dict[str, Any]:
+    """Deploy a remote frontend service to Fastly.
+
+    Coordinates with the Fastly REST API to register a new proxy/reverse-proxy
+    service pointing to our GCE VM origin.
+
+    Steps executed sequentially:
+    1. Create Service: POST https://api.fastly.com/service
+       with JSON {"name": service_name, "type": "vcl"}
+    2. Verify Draft Version: POST https://api.fastly.com/service/{service_id}/version
+       to generate active draft Version 1. Retrieve the version `number`.
+    3. Attach Domain: POST https://api.fastly.com/service/{service_id}/version/{version}/domain
+       with JSON {"name": domain_name}
+    4. Attach Backend Origin: POST https://api.fastly.com/service/{service_id}/version/{version}/backend
+       with JSON payload {"name": "gce_vm_origin", "address": origin_host, "port": origin_port, "use_ssl": use_ssl, "ssl_check_cert": False}
+    5. Activate Version: PUT https://api.fastly.com/service/{service_id}/version/{version}/activate
+
+    Args:
+        service_name: Name of the service to create.
+        domain_name: Domain name to attach.
+        origin_host: Backend host address.
+        origin_port: Backend port.
+        use_ssl: Whether to use SSL for the backend origin.
+        token: Fastly API token.
+        override_host: Optional host header override for the backend origin.
+
+    Returns:
+        dict: A dictionary containing:
+            - service_id: The ID of the created service.
+            - version: The version number.
+            - domain_name: The domain name.
+            - origin_host: The backend origin host.
+
+    Raises:
+        RuntimeError: If any of the Fastly API calls fail.
+    """
+    # Step 1: Create Service
+    step = "Create Service"
+    service_payload = {"name": service_name, "type": "vcl"}
+    service_data = _fastly_api_request("POST", "/service", token=token, json_data=service_payload, step=step)
+    service_id = service_data.get("id")
+    if not service_id:
+        raise RuntimeError(f"Failed to retrieve service ID from response during {step}")
+
+    # Step 2: Verify Draft Version
+    step = "Verify Draft Version"
+    version_data = _fastly_api_request("POST", f"/service/{service_id}/version", token=token, step=step)
+    version = version_data.get("number")
+    if version is None:
+        raise RuntimeError(f"Failed to retrieve version number from response during {step}")
+
+    # Step 3: Attach Domain
+    step = "Attach Domain"
+    domain_payload = {"name": domain_name}
+    _fastly_api_request(
+        "POST",
+        f"/service/{service_id}/version/{version}/domain",
+        token=token,
+        json_data=domain_payload,
+        step=step,
+    )
+
+    # Step 4: Attach Backend Origin
+    step = "Attach Backend Origin"
+    backend_payload: dict[str, Any] = {
+        "name": "gce_vm_origin",
+        "address": origin_host,
+        "port": origin_port,
+        "use_ssl": use_ssl,
+        "ssl_check_cert": False,
+    }
+    if override_host:
+        backend_payload["override_host"] = override_host
+    if use_ssl:
+        sni_host = override_host or origin_host
+        backend_payload["ssl_sni_hostname"] = sni_host
+        backend_payload["ssl_cert_hostname"] = sni_host
+    _fastly_api_request(
+        "POST",
+        f"/service/{service_id}/version/{version}/backend",
+        token=token,
+        json_data=backend_payload,
+        step=step,
+    )
+
+    # Step 5: Activate Version
+    step = "Activate Version"
+    _fastly_api_request("PUT", f"/service/{service_id}/version/{version}/activate", token=token, step=step)
+
+    return {
+        "service_id": service_id,
+        "version": version,
+        "domain_name": domain_name,
+        "origin_host": origin_host,
+    }
+
+
+def delete_remote_frontend(remote_service_id: str, token: str) -> None:
+    """Deactivate and delete the remote frontend service on Fastly."""
+    # Step 1: Get versions of the service to deactivate any active ones
+    try:
+        versions = _fastly_api_request("GET", f"/service/{remote_service_id}/version", token=token, step="Get Versions")
+        for v in versions:
+            if v.get("active"):
+                ver_num = v["number"]
+                _fastly_api_request(
+                    "PUT",
+                    f"/service/{remote_service_id}/version/{ver_num}/deactivate",
+                    token=token,
+                    step=f"Deactivate Version {ver_num}",
+                )
+    except Exception as exc:
+        if "404" not in str(exc):
+            raise exc
+
+    # Step 2: Delete the service
+    try:
+        _fastly_api_request("DELETE", f"/service/{remote_service_id}", token=token, step="Delete Service")
+    except Exception as exc:
+        if "404" not in str(exc):
+            raise exc
+
+
+sys.modules.setdefault("backend.provision.sharing_domain", sys.modules[__name__])

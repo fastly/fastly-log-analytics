@@ -459,9 +459,8 @@ modules = ["backend.routers.*"]
 # existing wiring. If a future commit adds a new edge, lint-imports
 # fails with a readable diff — fix or whitelist with a why-comment.
 ignore_imports = [
-    # Direct admin re-exports — admin_usage extends the admin router
-    # and bootstrap surfaces an admin helper via the bootstrap route.
-    "backend.routers.admin_usage -> backend.routers.admin",
+    # Direct admin re-exports — bootstrap surfaces an admin helper via
+    # the bootstrap route.
     "backend.routers.bootstrap -> backend.routers.admin",
     # Session scoring's admin variant + user variant share helpers.
     "backend.routers.session_scoring -> backend.routers.session_scoring_admin",

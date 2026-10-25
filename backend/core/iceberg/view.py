@@ -333,7 +333,7 @@ def _finalize_view_sql(
 
     # 2. Storage-code decodes + rounding (logs only).
     if target_table == "logs":
-        from backend.utils import field_codes as fc
+        from backend.core import field_registry as fc
 
         exclude_cols: list[str] = []
         select_extras: list[str] = []

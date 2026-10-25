@@ -26,7 +26,7 @@ from contextvars import ContextVar
 from typing import Literal
 
 from backend.core.metadata import get_con
-from backend.utils.cache_registry import CacheRegistry
+from backend.utils.bounded_cache import CacheRegistry
 
 Label = Literal["good", "bad", "neutral"]
 ALLOWED_LABELS: frozenset[str] = frozenset({"good", "bad", "neutral"})

@@ -960,6 +960,6 @@ def compaction_stats(source: dict, table_name: str = "logs") -> dict[str, Any]:
 
 
 # R-1: drain the per-service compaction stats TTL cache between tests.
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("core.local_compaction._COMPACTION_STATS_CACHE", _COMPACTION_STATS_CACHE)

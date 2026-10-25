@@ -20,8 +20,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
 from backend.repositories.utils.filters import filter_spec_attr
-from backend.utils.bounded_cache import BoundedTTLCache
-from backend.utils.cache_registry import CacheRegistry
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.telemetry import get_queries, get_tracked_calls
 
 if TYPE_CHECKING:

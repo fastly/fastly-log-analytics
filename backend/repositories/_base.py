@@ -20,7 +20,7 @@ from backend.core import metric_expressions
 from backend.core.field_registry import Group, in_group
 from backend.core.retry import retry_call
 from backend.core.rollups._common import quote_path_list
-from backend.models.reader_coverage import (
+from backend.models.dashboard import (
     HistoryObservation,
     ReaderCoverage,
     RollupPathCoverage,
@@ -44,17 +44,17 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from datetime import datetime
 
-from backend.repositories.ip_spread_rollups import build_ip_spread_sql as _build_ip_spread_sql
-from backend.repositories.ip_spread_rollups import fold_sketches as _fold_sketches
-from backend.repositories.ip_spread_rollups import plan_ip_spread_paths as _plan_ip_spread_paths
-from backend.repositories.ip_spread_rollups import spread_meta as _spread_meta
 from backend.repositories.top_n_rollups import SchemaSeeds as _SchemaSeeds
 from backend.repositories.top_n_rollups import TopNWindow as _TopNWindow
+from backend.repositories.top_n_rollups import build_ip_spread_sql as _build_ip_spread_sql
 from backend.repositories.top_n_rollups import build_rolled_sql as _build_rolled_sql
 from backend.repositories.top_n_rollups import find_unrolled_hours as _find_unrolled_hours
 from backend.repositories.top_n_rollups import fold_rows as _fold_rows
+from backend.repositories.top_n_rollups import fold_sketches as _fold_sketches
 from backend.repositories.top_n_rollups import live_topn_fields as _live_topn_fields
+from backend.repositories.top_n_rollups import plan_ip_spread_paths as _plan_ip_spread_paths
 from backend.repositories.top_n_rollups import plan_top_n_paths as _plan_top_n_paths
+from backend.repositories.top_n_rollups import spread_meta as _spread_meta
 from backend.repositories.top_n_rollups import truncate_top_n as _truncate_top_n
 from backend.utils.sql_validator import escape_sql_literal
 from backend.utils.telemetry import log_once_per
@@ -78,6 +78,32 @@ _EMPTY_ROLLUP_WARN_INTERVAL_S = 300.0
 # degrade exactly as they did before the fallback existed) and the warning
 # below tells the operator to run the deep backfill instead.
 _MISSING_HOUR_HEAL_WARN_TS: dict[str, float] = {}
+
+
+def _should_emit_throttled_warn(
+    table: dict[Any, float],
+    key: Any,
+    interval_s: float = _EMPTY_ROLLUP_WARN_INTERVAL_S,
+    max_entries: int = 256,
+) -> bool:
+    """Return True and record the current monotonic timestamp when ``key`` is unthrottled."""
+    now = time.monotonic()
+    last = table.get(key)
+    if last is not None and now - last < interval_s:
+        return False
+    if len(table) >= max_entries and key not in table:
+        table.clear()
+    table[key] = now
+    return True
+
+
+def _active_hour_overlap(st: datetime, et: datetime) -> tuple[datetime, datetime, datetime]:
+    """Return ``(active_dt, live_start, live_end)`` clamping ``[st, et)`` to the current UTC hour."""
+    from datetime import UTC, datetime, timedelta
+
+    active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    return active_dt, max(active_dt, st), min(active_dt + timedelta(hours=1), et)
+
 
 # Clock-skew margin (seconds) for `_create_active_hour_temp_direct`'s buffer
 # mtime pruning: a file finalized before `live_start - margin` cannot hold
@@ -627,6 +653,14 @@ def should_self_heal_stale_view(
     return _latest_log_in_window(latest_log_at, start_time, end_time)
 
 
+def _refresh_stale_view(con: duckdb.DuckDBPyConnection, src: dict) -> None:
+    """Bust cached view SQL (preserving snapshot cache) and force-rebuild the Iceberg view."""
+    from backend.core import iceberg as db_iceberg
+
+    db_iceberg.clear_source_caches(src.get("name", "default"), keep_snapshot_cache=True)
+    db_iceberg.update_iceberg_view(con, src, force=True)
+
+
 def force_rebuild_view(con: duckdb.DuckDBPyConnection, src: dict) -> None:
     """Force ONE synchronous rebuild of the per-service Iceberg view.
 
@@ -638,10 +672,7 @@ def force_rebuild_view(con: duckdb.DuckDBPyConnection, src: dict) -> None:
     existing (empty) path rather than 500ing.
     """
     try:
-        from backend.core import iceberg as db_iceberg
-
-        db_iceberg.clear_source_caches(src.get("name", "default"), keep_snapshot_cache=True)
-        db_iceberg.update_iceberg_view(con, src, force=True)
+        _refresh_stale_view(con, src)
     except Exception:
         _logger.debug("[self-heal] force view rebuild failed", exc_info=True)
 
@@ -776,8 +807,6 @@ class QueryRunner:
             if not _is_stale_view_error(e):
                 raise
             try:
-                from backend.core import iceberg as db_iceberg
-
                 # Bust the cached view SQL FIRST. ``force=True`` below
                 # skips the lock-free fast path, but its lock-acquire
                 # timeout fallback (iceberg.py:2913-2926) re-executes
@@ -803,8 +832,7 @@ class QueryRunner:
                 # missing. The self-heal was firing but the lock was
                 # contended by the every-10s sync cron, so the cached-SQL
                 # fallback fired and re-bound the same stale paths.
-                db_iceberg.clear_source_caches(self.src.get("name", "default"), keep_snapshot_cache=True)
-                db_iceberg.update_iceberg_view(self.con, self.src, force=True)
+                _refresh_stale_view(self.con, self.src)
             except Exception:
                 # Refresh itself failed — surface the ORIGINAL error so
                 # callers see the real symptom, not the rebind side-effect.
@@ -865,8 +893,6 @@ class QueryRunner:
             # write connection's view but the pool's read-only connections
             # were stuck with the pre-delete cached SQL.
             try:
-                from backend.core import iceberg as db_iceberg
-
                 # Mirror execute()'s self-heal: bust the cached view SQL
                 # FIRST so the lock-timeout fallback in update_iceberg_view
                 # (iceberg.py:3306-3312) can't re-execute the SAME stale
@@ -878,8 +904,7 @@ class QueryRunner:
                 # ``keep_snapshot_cache=True`` matches the execute() pattern:
                 # preserves the snapshot/path cache so a transient catalog
                 # blip doesn't collapse the view to "WHERE false".
-                db_iceberg.clear_source_caches(self.src.get("name", "default"), keep_snapshot_cache=True)
-                db_iceberg.update_iceberg_view(self.con, self.src, force=True)
+                _refresh_stale_view(self.con, self.src)
                 actual_cols = [col["name"] for col in _get_schema(self.con, self.src)]
             except Exception:
                 _logger.debug("get_schema_cols: step failed (ignored)", exc_info=True)
@@ -1550,11 +1575,7 @@ class QueryRunner:
             # too) — warning here is a false positive, not a backfill gap.
             if field in _LIVE_TOPN_SKIP_FIELDS:
                 continue
-            _ts_key = (_service_key, field)
-            _now = time.monotonic()
-            _last = _EMPTY_ROLLUP_WARN_TS.get(_ts_key)
-            if _last is None or _now - _last >= _EMPTY_ROLLUP_WARN_INTERVAL_S:
-                _EMPTY_ROLLUP_WARN_TS[_ts_key] = _now
+            if _should_emit_throttled_warn(_EMPTY_ROLLUP_WARN_TS, (_service_key, field)):
                 _logger.debug(
                     "[top_n_rollups] empty result for field=%r (service=%r, window=[%s,%s]) — "
                     "panel will render empty; check rollup backfill coverage if unexpected",
@@ -1716,11 +1737,8 @@ class QueryRunner:
         heal_res: list[tuple] = []
         if observation is not None:
             observation.closed_hour_heal = "unavailable"
-        _now_mono = time.monotonic()
         _svc_key = self.src.get("name") or self.src.get("service_id") or "default"
-        _last_heal_warn = _MISSING_HOUR_HEAL_WARN_TS.get(_svc_key)
-        if _last_heal_warn is None or _now_mono - _last_heal_warn >= _EMPTY_ROLLUP_WARN_INTERVAL_S:
-            _MISSING_HOUR_HEAL_WARN_TS[_svc_key] = _now_mono
+        if _should_emit_throttled_warn(_MISSING_HOUR_HEAL_WARN_TS, _svc_key):
             _logger.warning(
                 "[top_n_rollups] live-healing %d un-rolled closed hour(s) for service=%r "
                 "(%s..%s) — expected when the writer is <1 heal tick behind; persistent "
@@ -1753,11 +1771,7 @@ class QueryRunner:
                         if observation is not None:
                             observation.closed_hour_heal = "used"
                 finally:
-                    try:
-                        self.execute(f'DROP TABLE IF EXISTS "{heal_tmp}"')
-                    except Exception:
-                        if log_once_per("execute_top_n_rollups: DROP TABLE failed (ignored)", 60):
-                            _logger.debug("execute_top_n_rollups: DROP TABLE failed (ignored)", exc_info=True)
+                    _drop_temp_table(self, heal_tmp, "execute_top_n_rollups")
         except duckdb.InterruptException:
             raise
         except Exception:
@@ -1845,7 +1859,7 @@ class QueryRunner:
     ) -> tuple[datetime, datetime, Any] | None:
         from datetime import timedelta
 
-        from backend.repositories._rollup_planner import plan_time_series_rollup_window
+        from backend.repositories.rollup_coverage import plan_time_series_rollup_window
         from backend.utils.date_utils import parse_iso_utc
 
         if not start_time or not end_time:
@@ -2847,7 +2861,7 @@ class QueryRunner:
         ``None`` on any eligibility miss / read error. Percentiles are
         request-weighted approximations across minutes → ``_approx: True``.
         """
-        from datetime import UTC, datetime
+        from datetime import UTC
 
         from backend.core.rollups import ORIGIN_LATENCY_TS_BUNDLE_FILENAME
 
@@ -2908,8 +2922,7 @@ class QueryRunner:
             # First per-MINUTE percentile + count (request-weight unit), then
             # re-bucket to the caller's width — matching the rollup branch's
             # weighting so the outer SUM(num)/SUM(den) composes correctly.
-            active_hour_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-            live_start = max(st, active_hour_start)
+            _active_hour_start, live_start, _ = _active_hour_overlap(st, et)
             live_st_tz = live_start.astimezone(UTC).isoformat()
             live_et_tz = et.astimezone(UTC).isoformat()
 
@@ -3714,7 +3727,6 @@ class QueryRunner:
         ``CONN_REQUESTS_BUCKET`` block produces — or ``None`` on any
         eligibility miss (caller falls back to that live scan).
         """
-        from datetime import UTC, datetime, timedelta
 
         from backend.core.rollups._common import SECURITY_CONN_REUSE_BUNDLE_FILENAME
 
@@ -3780,9 +3792,7 @@ class QueryRunner:
 
         # Live top-up: [active hour ∩ window). Closed hours are all rollup-
         # served (_collect_rollup_paths stops at the active hour).
-        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        live_start = max(active_dt, st)
-        live_end = min(active_dt + timedelta(hours=1), et)
+        _active_dt, live_start, live_end = _active_hour_overlap(st, et)
         observed.live_top_up = "outside_window"
         if live_start < live_end:
             observed.live_start, observed.live_end = live_start.isoformat(), live_end.isoformat()
@@ -3795,7 +3805,7 @@ class QueryRunner:
                     observed.live_top_up = "empty"
                 elif tmp is not None:
                     try:
-                        from backend.repositories._sql import dashboard as _dash_sql
+                        from backend.repositories import dashboard as _dash_sql
 
                         live_q = _dash_sql.CONN_REQUESTS_BUCKET.format(
                             requests_metric=CANONICAL_METRICS["requests"],
@@ -3861,11 +3871,7 @@ class QueryRunner:
         for value, count in rows:
             counts[str(value)] = counts.get(str(value), 0) + int(count or 0)
 
-        from datetime import UTC, datetime, timedelta
-
-        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        live_start = max(active_dt, st)
-        live_end = min(active_dt + timedelta(hours=1), et)
+        _active_dt, live_start, live_end = _active_hour_overlap(st, et)
         if live_start < live_end:
             cols = actual_cols if actual_cols is not None else self.get_schema_cols()
             if backing_col in cols:
@@ -3909,11 +3915,7 @@ class QueryRunner:
         log_tag: str,
         observed: ReaderCoverage | None = None,
     ) -> list[tuple]:
-        from datetime import UTC, datetime, timedelta
-
-        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        live_start = max(active_dt, st)
-        live_end = min(active_dt + timedelta(hours=1), et)
+        _active_dt, live_start, live_end = _active_hour_overlap(st, et)
         if observed is not None:
             observed.live_top_up = "outside_window"
         if live_start >= live_end:
@@ -4734,7 +4736,7 @@ class QueryRunner:
 # tests/conftest.py drains them via CacheRegistry.clear_all(). Both
 # are hot-path memoes that risk cross-test leak when the same source
 # name + temp-table key is reused across tests.
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("repositories._base._schema_cols_cache", _schema_cols_cache)
 # Per-(service, field) warning-throttle timestamps. Without registration

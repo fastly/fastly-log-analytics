@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 
 from backend.core.duckdb import ensure_cid_salt
 from backend.deps import get_service_id, get_source
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.provision import CustomFieldsExportFile, CustomFieldsImportBody, ProvisionLakeInfoResponse
 from backend.models.services import (
     CredentialsUpdateResponse,
@@ -183,18 +183,22 @@ def api_service_cron_settings(request: Request, service_id: str, body: ServiceCr
                 _sync_crontab()
             except Exception as e:
                 yield json.dumps({"type": "status", "message": f"Warning: Cron sync failed: {e}"})
-            try:
-                from backend.core import metadata as metadata_db
-
-                metadata_db.record_audit(service_id=service_id, event_type="cron_settings_update", details=body_payload)
-            except Exception:
-                logger.warning("stream: metadata_db.record_audit failed (ignored)", exc_info=True)
+            _record_audit_best_effort(service_id, "cron_settings_update", body_payload, "stream")
             yield json.dumps({"type": "progress", "current": 4, "total": 4})
             yield json.dumps({"type": "done", "message": "Successfully applied changes."})
         except Exception as e:
             yield json.dumps({"type": "error", "message": str(e)})
 
     return sse_response(stream())
+
+
+def _record_audit_best_effort(service_id: str, event_type: str, details: dict, caller: str) -> None:
+    try:
+        from backend.core import metadata as metadata_db
+
+        metadata_db.record_audit(service_id=service_id, event_type=event_type, details=details)
+    except Exception:
+        logger.warning("%s: metadata_db.record_audit failed (ignored)", caller, exc_info=True)
 
 
 @router.delete(
@@ -218,12 +222,7 @@ def api_service_clear_time_range(service_id: str):
         c.setdefault("provisioning", {}).pop("time_range", None)
 
     mutate_service_config(service_id, _clear)
-    try:
-        from backend.core import metadata as metadata_db
-
-        metadata_db.record_audit(service_id=service_id, event_type="time_range_cleared", details={})
-    except Exception:
-        logger.warning("api_service_clear_time_range: metadata_db.record_audit failed (ignored)", exc_info=True)
+    _record_audit_best_effort(service_id, "time_range_cleared", {}, "api_service_clear_time_range")
     return {"ok": True, "message": "time_range cleared. Cron will now ingest all available data."}
 
 
@@ -465,8 +464,23 @@ def api_service_update_credentials(request: Request, service_id: str, body: Serv
     return {"ok": True, "message": "Credentials updated successfully"}
 
 
-from backend.models.services import LoggingSettingsResponse
+from backend.models.services import CmcdSettingsResponse, LoggingSettingsResponse
 from backend.utils.bounded_cache import BoundedTTLCache
+
+
+def _cmcd_settings_response(
+    cfg: dict,
+    enabled: bool | None = None,
+    mode: str | None = None,
+    version: int | None = None,
+) -> CmcdSettingsResponse:
+    cmcd_block = cfg.get("cmcd") or {}
+    return CmcdSettingsResponse(
+        enabled=bool(enabled) if enabled is not None else bool(cmcd_block.get("enabled")),
+        mode=mode if mode is not None else cmcd_block.get("mode"),
+        version=version if version is not None else cmcd_block.get("version"),
+    )
+
 
 # Process-local response cache for /api/services/{service_id}/logging-settings.
 # The endpoint chains 2-3 Fastly API calls (get_active_version → GET endpoint
@@ -513,8 +527,7 @@ def api_service_logging_settings(service_id: str):
     cfg = load_service_config(service_id)
     token = stored_fastly_token(cfg)
     endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs")
-    from backend.core.fastly.client import fastly
-    from backend.core.fastly.service import find_condition, get_active_version
+    from backend.core.fastly.client import fastly, find_condition, get_active_version
 
     _t = _time.perf_counter()
     active_ver = get_active_version(service_id, token)
@@ -566,9 +579,6 @@ def api_service_logging_settings(service_id: str):
     # debug_calls, section_timings, is_cached) is regenerated per
     # request so the Debug Panel keeps showing per-request data even
     # on cache hits.
-    from backend.models.services import CmcdSettingsResponse
-
-    cmcd_block = cfg.get("cmcd") or {}
     cacheable = {
         "prefix": prefix,
         "period": ep.get("period", 60),
@@ -577,11 +587,7 @@ def api_service_logging_settings(service_id: str):
         "custom_condition": custom_condition,
         "format_match": format_match,
         "version": active_ver,
-        "cmcd": CmcdSettingsResponse(
-            enabled=bool(cmcd_block.get("enabled")),
-            mode=cmcd_block.get("mode"),
-            version=cmcd_block.get("version"),
-        ),
+        "cmcd": _cmcd_settings_response(cfg),
     }
     _logging_settings_cache[service_id] = cacheable
 
@@ -773,7 +779,7 @@ def api_service_update_logging_settings(
         raise HTTPException(status_code=400, detail={"error": "Sample rate must be between 1 and 100"})
     token = stored_fastly_token(cfg)
     endpoint_name = prov.get("endpoint_name", "Fastly Object Storage Logs")
-    from backend.provision.log_paths import analytics_log_path
+    from backend.provision.utils import analytics_log_path
 
     path = analytics_log_path()
 
@@ -810,8 +816,6 @@ def api_service_update_logging_settings(
                     new_ver = int(event.get("version") or 0)
                     if event.get("changed", False):
                         if update_format and new_ver:
-                            from backend.models.services import CmcdSettingsResponse
-
                             _logging_settings_cache[service_id] = {
                                 "prefix": "",
                                 "period": period,
@@ -820,15 +824,7 @@ def api_service_update_logging_settings(
                                 "custom_condition": custom_condition,
                                 "format_match": True,
                                 "version": new_ver,
-                                "cmcd": CmcdSettingsResponse(
-                                    enabled=bool(cmcd_enabled)
-                                    if cmcd_enabled is not None
-                                    else bool((cfg.get("cmcd") or {}).get("enabled")),
-                                    mode=cmcd_mode if cmcd_mode is not None else (cfg.get("cmcd") or {}).get("mode"),
-                                    version=cmcd_version
-                                    if cmcd_version is not None
-                                    else (cfg.get("cmcd") or {}).get("version"),
-                                ),
+                                "cmcd": _cmcd_settings_response(cfg, cmcd_enabled, cmcd_mode, cmcd_version),
                             }
                         else:
                             _logging_settings_cache.pop(service_id, None)
@@ -850,36 +846,27 @@ def api_service_update_logging_settings(
 
                     svcconfig.mutate_config(service_id, _apply_logging_settings)
                     if event.get("changed", False):
-                        try:
-                            _details = {}
-                            if old_period != period:
-                                _details["period"] = {"from": old_period, "to": period}
-                            if old_sample_rate != sample_rate:
-                                _details["sample_rate"] = {"from": old_sample_rate, "to": sample_rate}
-                            if old_prefix != prefix:
-                                _details["prefix"] = {"from": old_prefix, "to": prefix}
-                            if old_edge_only != edge_only:
-                                _details["edge_only"] = {"from": old_edge_only, "to": edge_only}
-                            if old_custom_condition != custom_condition:
-                                _details["custom_condition"] = {"from": old_custom_condition, "to": custom_condition}
-                            if cmcd_enabled is not None:
-                                _details["cmcd_enabled"] = cmcd_enabled
-                            if cmcd_mode is not None:
-                                _details["cmcd_mode"] = cmcd_mode
-                            if cmcd_version is not None:
-                                _details["cmcd_version"] = cmcd_version
-                            if update_format:
-                                _details["log_fields_deployed"] = True
+                        _details = {}
+                        if old_period != period:
+                            _details["period"] = {"from": old_period, "to": period}
+                        if old_sample_rate != sample_rate:
+                            _details["sample_rate"] = {"from": old_sample_rate, "to": sample_rate}
+                        if old_prefix != prefix:
+                            _details["prefix"] = {"from": old_prefix, "to": prefix}
+                        if old_edge_only != edge_only:
+                            _details["edge_only"] = {"from": old_edge_only, "to": edge_only}
+                        if old_custom_condition != custom_condition:
+                            _details["custom_condition"] = {"from": old_custom_condition, "to": custom_condition}
+                        if cmcd_enabled is not None:
+                            _details["cmcd_enabled"] = cmcd_enabled
+                        if cmcd_mode is not None:
+                            _details["cmcd_mode"] = cmcd_mode
+                        if cmcd_version is not None:
+                            _details["cmcd_version"] = cmcd_version
+                        if update_format:
+                            _details["log_fields_deployed"] = True
 
-                            from backend.core import metadata as metadata_db
-
-                            metadata_db.record_audit(
-                                service_id=service_id,
-                                event_type="logging_settings_update",
-                                details=_details,
-                            )
-                        except Exception:
-                            logger.warning("stream: metadata_db.record_audit failed (ignored)", exc_info=True)
+                        _record_audit_best_effort(service_id, "logging_settings_update", _details, "stream")
                     try:
                         from backend.provision import _sync_crontab
 
@@ -924,8 +911,7 @@ def api_ngwaf_sync(service_id: str):
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
     from backend.utils.bot_sources import build_matcher
-    from backend.utils.ngwaf import fetch_verified_bots_paged
-    from backend.utils.ngwaf_bot_cache import cleanup_old_bots, upsert_bots
+    from backend.utils.ngwaf import cleanup_old_bots, fetch_verified_bots_paged, upsert_bots
 
     def stream() -> Iterator[str]:
         cfg = svcconfig.load_config(service_id)
@@ -1025,7 +1011,7 @@ from backend.core.field_registry import (  # noqa: E402
     _filter_user_custom_fields,
     _is_system_field,
 )
-from backend.models.custom_fields import (
+from backend.models.services import (
     CustomFieldCreate,
     CustomFieldResponse,
     CustomFieldsListResponse,
@@ -1524,7 +1510,7 @@ def api_cron_logs_purge(
 # R-1: register the two module caches so the autouse fixture in
 # tests/conftest.py drains them via CacheRegistry.clear_all() instead
 # of hand-clearing.
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("services.core._cron_schedule_cache", _cron_schedule_cache)
 _CacheRegistry.register("services.core._logging_settings_cache", _logging_settings_cache)

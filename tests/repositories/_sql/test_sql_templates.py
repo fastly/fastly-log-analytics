@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from backend.repositories import alerts as alerts_sql
+from backend.repositories import dashboard as dashboard_sql
+from backend.repositories import query as query_sql
+from backend.repositories import sessions as sessions_sql
 from backend.repositories import usage as usage_sql
-from backend.repositories._sql import dashboard as dashboard_sql
 from backend.repositories._sql import insights as insights_sql
 from backend.repositories._sql import network as network_sql
 from backend.repositories._sql import origin as origin_sql
-from backend.repositories._sql import query as query_sql
 from backend.repositories._sql import security as security_sql
-from backend.repositories._sql import sessions as sessions_sql
 from backend.repositories.insights import registry
 
 # ── From test_alerts.py ──
@@ -272,9 +272,9 @@ def test_field_values_native_column_placeholders_pinned():
 
 
 def test_all_templates_exported():
-    """Each template constant must appear in ``__all__`` so the renaming /
-    deletion of a template surfaces as an import error in callers."""
-    assert set(dashboard_sql.__all__) == {
+    """Each template constant must be defined on the dashboard module so the
+    renaming / deletion of a template surfaces as an AttributeError in callers."""
+    for name in (
         "VIRTUAL_FIELD_EXPLODED_TOP_N",
         "CONN_REQUESTS_BUCKET",
         "TIME_SERIES",
@@ -282,7 +282,8 @@ def test_all_templates_exported():
         "FIELD_VALUES_BOT_UA",
         "FIELD_VALUES_VIRTUAL_SIGNALS",
         "FIELD_VALUES_NATIVE_COLUMN",
-    }
+    ):
+        assert isinstance(getattr(dashboard_sql, name, None), str)
 
 
 # ── From test_insights.py ──

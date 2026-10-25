@@ -59,7 +59,7 @@ from backend.core.query_attribution import (
     _capture_caller,
     current_attribution,
 )
-from backend.utils.error_redaction import scrub_secrets
+from backend.utils.router_utils import scrub_secrets
 
 logger = logging.getLogger(__name__)
 

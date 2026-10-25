@@ -1,7 +1,7 @@
 import { HydrationBoundary } from '@tanstack/react-query'
 
 import { fetchBootstrapServerSide } from '@/lib/ssr/bootstrap'
-import { fetchInsightsServerSide } from '@/lib/ssr/insights'
+import { fetchInsightsServerSide } from '@/lib/ssr/upstream'
 import { firstParam, resolveServerServiceId, seedDehydratedState } from '@/lib/ssr/seed'
 import { queryKeys } from '@/lib/query-keys'
 import InsightsClient from './_sections/InsightsClient'

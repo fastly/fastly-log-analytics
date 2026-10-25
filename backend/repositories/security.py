@@ -11,7 +11,7 @@ import duckdb
 
 from backend.core.metric_expressions import coalesce
 from backend.models.common import FiltersDict
-from backend.models.reader_coverage import ReaderCoverage
+from backend.models.dashboard import ReaderCoverage
 from backend.repositories._base import (
     QueryRunner,
     SectionTimer,
@@ -31,7 +31,7 @@ from backend.repositories.utils.response_cache import (
     digest_cache_key,
     serialize_filters_for_key,
 )
-from backend.utils.cache_registry import CacheRegistry
+from backend.utils.bounded_cache import CacheRegistry
 from backend.utils.date_utils import parse_window
 from backend.utils.sql_validator import escape_sql_literal
 
@@ -177,7 +177,7 @@ def _has_rollup_coverage(src: dict, field: str, start_time: str | None, end_time
     ``_build_security_response`` would BinderException — so we MUST
     only drop the column when the rollup serve is virtually guaranteed.
     """
-    from backend.repositories._rollup_planner import enumerate_closed_hour_field_rollups
+    from backend.repositories.rollup_coverage import enumerate_closed_hour_field_rollups
 
     w = enumerate_closed_hour_field_rollups(src, field, start_time, end_time, stop_on_first=True)
     return bool(w and (w.bundled_paths or w.per_field_paths))
@@ -204,7 +204,7 @@ def _ipv6_per_hour_from_rollups(
     from datetime import UTC, datetime
 
     from backend.core.rollups._common import _safe_table_for
-    from backend.repositories._rollup_planner import enumerate_closed_hour_field_rollups
+    from backend.repositories.rollup_coverage import enumerate_closed_hour_field_rollups
 
     w = enumerate_closed_hour_field_rollups(src, "is_ipv6", start_time, end_time)
     if w is None or (not w.bundled_paths and not w.per_field_paths):

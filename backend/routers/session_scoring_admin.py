@@ -428,9 +428,7 @@ def scoring_retrain(
     _bust_analytics_cache(service_id)
 
     # Operator audit: every retrain is attributable + reviewable.
-    from backend.core import metadata as metadata_db
-
-    metadata_db.record_scoring_audit(
+    _record_scoring_audit(
         service_id,
         "matrix_retrained",
         details={
@@ -517,6 +515,12 @@ def scoring_session_events(
         "event_count": len(events),
         "events": events,
     }
+
+
+def _record_scoring_audit(service_id: str, action: str, details: dict) -> None:
+    from backend.core import metadata as metadata_db
+
+    metadata_db.record_scoring_audit(service_id, action, details=details)
 
 
 def _require_scoring_config_store(service_id: str, token: str = "") -> tuple[dict, str, str]:
@@ -615,8 +619,6 @@ def scoring_enforce_threshold_put(
     an accidental click can't silently flip enforcement at the edge."""
     _require_confirm(confirm, "Pass ?confirm=true to actually change enforcement. This affects live edge blocking.")
 
-    from backend.core import metadata as metadata_db
-
     _cfg, config_store_id, resolved_token = _require_scoring_config_store(service_id, token)
 
     threshold = body.threshold
@@ -635,7 +637,7 @@ def scoring_enforce_threshold_put(
     # accurate instead of returning the up-to-30s-old snapshot.
     _enforce_threshold_cache.pop((service_id, config_store_id), None)
 
-    metadata_db.record_scoring_audit(
+    _record_scoring_audit(
         service_id,
         "threshold_enforce_disabled" if threshold is None else "threshold_enforced",
         details={"threshold": threshold},
@@ -716,8 +718,6 @@ def scoring_l2_enforce_put(
 
     import datetime as _dt
 
-    from backend.core import metadata as metadata_db
-
     _cfg, config_store_id, resolved_token = _require_scoring_config_store(service_id, token)
 
     enabled = bool(body.enabled)
@@ -748,7 +748,7 @@ def scoring_l2_enforce_put(
     _l2_enforce_cache.pop((service_id, config_store_id), None)
     _bust_analytics_cache(service_id)
 
-    metadata_db.record_scoring_audit(
+    _record_scoring_audit(
         service_id,
         "l2_enforce_enabled" if enabled else "l2_enforce_disabled",
         details={"enabled": enabled, "l2_enabled_at": l2_enabled_at},
@@ -873,7 +873,6 @@ def scoring_exclude_regex_put(
         confirm, "Pass ?confirm=true to actually apply the change. This re-publishes the active VCL version."
     )
 
-    from backend.core import metadata as metadata_db
     from backend.provision.session_scoring_orchestrator import update_recv_exclusion_regex
     from backend.utils.vcl_validator import RegexValidationError
 
@@ -894,7 +893,7 @@ def scoring_exclude_regex_put(
     except RuntimeError as exc:
         raise_internal(logger, exc, code="exclude_regex_update_failed", status=502)
 
-    metadata_db.record_scoring_audit(
+    _record_scoring_audit(
         service_id,
         "scoring_exclude_regex_changed",
         details={
@@ -1044,7 +1043,6 @@ def scoring_enforce_status_code_put(
         confirm, "Pass ?confirm=true to actually apply the change. This re-publishes the active VCL version."
     )
 
-    from backend.core import metadata as metadata_db
     from backend.provision.session_scoring_orchestrator import update_enforce_status_code
     from backend.provision.session_scoring_vcl import (
         _ENFORCE_STATUS_CODE_MAX,
@@ -1067,7 +1065,7 @@ def scoring_enforce_status_code_put(
     except RuntimeError as exc:
         raise_internal(logger, exc, code="enforce_status_code_update_failed", status=502)
 
-    metadata_db.record_scoring_audit(
+    _record_scoring_audit(
         service_id,
         "scoring_enforce_status_code_changed",
         details={
@@ -1142,7 +1140,6 @@ def scoring_matrix_versions_restore(
     _require_confirm(confirm, "Pass ?confirm=true to actually restore. This will replace the current matrix.")
 
     from backend import config as svcconfig
-    from backend.core import metadata as metadata_db
     from backend.state_sync import restore_scoring_matrix_version
 
     result = restore_scoring_matrix_version(service_id, version)
@@ -1176,7 +1173,7 @@ def scoring_matrix_versions_restore(
 
     _bust_analytics_cache(service_id)
 
-    metadata_db.record_scoring_audit(
+    _record_scoring_audit(
         service_id,
         "matrix_restored",
         details={"restored_version": version, "restored_at": result["restored_at"], "kv_written": kv_written},
@@ -1224,7 +1221,6 @@ def scoring_rotate_key(
     Returns rotation metadata — the new key itself is NOT returned in
     the response (only stored in the Fastly ConfigStore + audit log).
     """
-    from backend.core import metadata as metadata_db
     from backend.provision.session_scoring_setup import rotate_aes_key
 
     load_service_config(service_id)
@@ -1242,7 +1238,7 @@ def scoring_rotate_key(
     result = rotate_aes_key(scoring_keys_store_id, token=resolved_token)
 
     # Record the rotation in the audit log (without the key value).
-    metadata_db.record_scoring_audit(
+    _record_scoring_audit(
         service_id,
         "key_rotated",
         details={
@@ -1361,9 +1357,7 @@ def scoring_threshold_put(
             scoring["operator_threshold_set_at"] = set_at
 
     # Operator audit trail — every threshold change is attributable.
-    from backend.core import metadata as metadata_db
-
-    metadata_db.record_scoring_audit(
+    _record_scoring_audit(
         service_id,
         "threshold_committed" if threshold is not None else "threshold_cleared",
         details={"prior_threshold": prior_threshold, "new_threshold": threshold},
@@ -1572,7 +1566,7 @@ def scoring_dashboard(
 # R-1: register the enforce-threshold TTL cache so the autouse
 # fixture in tests/conftest.py drains it via CacheRegistry.clear_all()
 # instead of hand-clearing.
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("session_scoring_admin._enforce_threshold_cache", _enforce_threshold_cache)
 _CacheRegistry.register("session_scoring_admin._l2_enforce_cache", _l2_enforce_cache)

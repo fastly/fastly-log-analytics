@@ -37,8 +37,8 @@ from backend.routers import session_scoring as _ss
 from backend.routers import session_scoring_admin as _ssa
 from backend.routers.session_scoring import router as scoring_router
 from backend.utils.remote_access import _is_blocked_path
+from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 from tests.conftest import MOCK_SERVICE_ID, override_request_context
-from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
 
 # ── Merged from tests/routers/test_session_scoring_admin.py ──
 SVC = "TestScoringAdminSvc"

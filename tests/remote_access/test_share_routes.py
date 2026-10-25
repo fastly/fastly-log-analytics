@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from backend.core import share_db
 from backend.routers import share_admin, share_auth
-from tests.remote_access import oauth_helpers as H
+from tests.remote_access import conftest as H
 
 
 def _app() -> FastAPI:

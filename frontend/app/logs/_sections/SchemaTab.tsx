@@ -4,8 +4,7 @@ import React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { RefreshCw } from 'lucide-react'
 import type { ColumnDef } from '@tanstack/react-table'
-import { DataTableReadonly } from '@/components/DataTable'
-import { ColumnVisibilityDropdown } from '@/components/DataTable/ColumnVisibilityDropdown'
+import { DataTableReadonly, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { Button } from "@/components/ui/button"
 import { Input } from '@/components/ui/input'
 import {

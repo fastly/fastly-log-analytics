@@ -137,6 +137,6 @@ class _ActiveRequestsResetAdapter:
         _reset_for_tests()
 
 
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("utils.active_requests", _ActiveRequestsResetAdapter())

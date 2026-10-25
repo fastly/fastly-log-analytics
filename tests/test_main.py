@@ -689,7 +689,7 @@ def test_maybe_instrument_asgi_wraps_app_when_otel_enabled():
 # ── Merged from test_main_startup.py ──
 
 
-from backend.core import rollup_readiness as rr
+from backend.core import rollups as rr
 
 
 def test_initialize_service_defers_durable_rollup_catchup():

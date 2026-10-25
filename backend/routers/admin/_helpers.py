@@ -15,6 +15,9 @@ import queue
 import zipfile
 from typing import Any
 
+from fastapi import APIRouter
+
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.utils.sse import (  # noqa: F401
     ClientDisconnected,
     _AbortableQueue,
@@ -22,6 +25,11 @@ from backend.utils.sse import (  # noqa: F401
 )
 
 logger = logging.getLogger(__name__)
+
+# Shared APIRouter instance for the admin package. Lives here so sub-modules
+# can import ``router`` without triggering the package-init's sub-module
+# imports (which would be a circular dependency).
+router: APIRouter = APIRouter(prefix="/api", tags=["admin"], responses=DEFAULT_ERROR_RESPONSES)
 
 
 class _QueueFile:

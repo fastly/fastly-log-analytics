@@ -1,10 +1,11 @@
-"""Compaction + metadata-retention/storage/cleanup admin endpoints."""
+"""Compaction, Iceberg/DuckLake, bot-sources, and metadata-retention/storage/cleanup admin endpoints."""
 
 from __future__ import annotations
 
 import logging
 import os
 from datetime import UTC, datetime
+from typing import Any, Literal
 
 from fastapi import Depends, HTTPException, Query
 
@@ -12,9 +13,11 @@ from backend.core.rollups.time_series import build_time_series_bundles
 from backend.deps import get_source, require_admin
 from backend.models.admin import (
     BackfillBundleRollupsResponse,
+    BotSourcesResponse,
     CompactionStatsResponse,
     ConsolidateRollupsResponse,
     ExpireSnapshotsResponse,
+    IcebergTableInfoResponse,
     LocalCompactNowResponse,
     MetadataRetentionResponse,
     MetadataRetentionUpdate,
@@ -22,17 +25,37 @@ from backend.models.admin import (
     OptimizeNowResponse,
     PartialHourMergeResponse,
     PartialHourStatusResponse,
+    PopLocationsResponse,
     RebuildTimeSeriesRollupsRequest,
     RebuildTimeSeriesRollupsResponse,
+    RefreshPopLocationsRequest,
+    ResetLogsRequest,
     RollupCompactResponse,
     RollupHealResponse,
     RollupStatusResponse,
+    SyncStartResponse,
 )
+from backend.models.admin_actions import (
+    BotSourceRefreshResponse,
+    BotSourcesRefreshResponse,
+    IcebergCalendarResponse,
+    NgwafSyncResponse,
+    RdnsEnrichResponse,
+)
+from backend.models.admin_status import NgwafStatusResponse, RdnsStatsResponse
 from backend.utils.date_utils import parse_day_key_strict, parse_hour_key_strict
-from backend.utils.router_utils import make_error
+from backend.utils.router_utils import (
+    bad_request,
+    load_service_config,
+    make_error,
+    not_found,
+    query_errors,
+    raise_internal,
+    require_json_content_type,
+    validation_failed,
+)
 
-from ._helpers import service_id_from_source
-from ._router import router
+from ._helpers import router, service_id_from_source
 
 logger = logging.getLogger(__name__)
 
@@ -134,8 +157,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         backfill_missing_bundles,
     )
     from backend.core.rollups.recompute import ADMIN_BACKFILLS, DAY_COMPACTORS
-    from backend.core.rollups.sessions import build_session_bundles
-    from backend.core.rollups.time_series import build_time_series_bundles
+    from backend.core.rollups.time_series import build_session_bundles, build_time_series_bundles
 
     sid = service_id_from_source(source)
     n_ts = backfill_missing_bundles(
@@ -739,3 +761,335 @@ def metadata_cleanup_now(
             events.put({"type": "done", "message": summary, "result": result})
 
     return stream_sse_from_worker(worker)
+
+
+# ── Bot-sources admin endpoints (folded from bot_sources.py) ──────────
+
+
+@router.get("/admin/pop-locations", response_model=PopLocationsResponse)
+def get_pop_locations():
+    """Return the cached POP locations (code, name, coordinates)."""
+    from backend.utils.pop_utils import get_pop_locations
+
+    return PopLocationsResponse.with_telemetry(pops=get_pop_locations())
+
+
+@router.post("/admin/pop-locations/refresh", response_model=PopLocationsResponse)
+def refresh_pop_locations(req: RefreshPopLocationsRequest | None = None, token: str | None = Query(default=None)):
+    """Refresh the POP locations cache from the Fastly API."""
+    api_key = ""
+    if req is not None:
+        api_key = req.token.strip()
+
+    if not api_key:
+        if token is None:
+            raise HTTPException(status_code=422, detail=validation_failed("token_required", ["token is required"]))
+        api_key = token.strip()
+        if not api_key:
+            raise HTTPException(status_code=400, detail=bad_request("api_key_required"))
+
+    from backend.utils.pop_utils import fetch_pop_locations, get_pop_locations
+
+    ok = fetch_pop_locations(api_key)
+    if not ok:
+        # Custom envelope: 502 still surfaces a user-friendly toast string
+        # (frontend extractApiError reads detail.error verbatim) alongside
+        # the machine-readable code.
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "Failed to fetch POP data from Fastly API. Check your API key.",
+                "code": "fastly_pop_fetch_failed",
+            },
+        )
+    return PopLocationsResponse.with_telemetry(pops=get_pop_locations())
+
+
+@router.post("/admin/ngwaf/sync/{service_id}", response_model=NgwafSyncResponse, response_model_exclude_unset=True)
+@query_errors(502, code="ngwaf_sync_failed", logger_obj=logger)
+def trigger_ngwaf_sync_endpoint(service_id: str):
+    """Trigger manual NGWAF bot sync for a service."""
+    from backend import config as svcconfig
+    from backend.cron.jobs.metadata import _run_ngwaf_bot_sync
+    from backend.utils.ngwaf import get_cache_stats
+
+    load_service_config(service_id)
+
+    workspace_id = svcconfig.get_ngwaf_workspace_id(service_id)
+    if not workspace_id:
+        raise HTTPException(status_code=400, detail=bad_request("NGWAF workspace not configured for this service"))
+
+    _run_ngwaf_bot_sync(service_id)
+    return {"ok": True, "service_id": service_id, "workspace_id": workspace_id, "stats": get_cache_stats()}
+
+
+@router.get("/admin/ngwaf/status", response_model=NgwafStatusResponse, response_model_exclude_unset=True)
+def get_ngwaf_status_endpoint(service_id: str | None = Query(None, description="Optional service ID")):
+    """Return NGWAF cache statistics and workspace sync watermarks."""
+    from backend import config as svcconfig
+    from backend.utils.ngwaf import get_cache_stats
+
+    stats = get_cache_stats()
+    if service_id:
+        workspace_id = svcconfig.get_ngwaf_workspace_id(service_id)
+        stats["service_workspace_id"] = workspace_id
+        stats["service_configured"] = bool(workspace_id)
+    return {"ok": True, **stats}
+
+
+@router.get("/admin/bot-sources", response_model=BotSourcesResponse)
+def get_bot_sources_endpoint():
+    """Return metadata for all bot sources plus rDNS cache stats."""
+    from backend.utils.bot_sources import get_all_sources_meta
+    from backend.utils.rdns_cache import get_stats as rdns_stats
+
+    return BotSourcesResponse.with_telemetry(sources=get_all_sources_meta(), rdns=rdns_stats())
+
+
+@router.post(
+    "/admin/bot-sources/{source_id}/refresh", response_model=BotSourceRefreshResponse, response_model_exclude_unset=True
+)
+def refresh_bot_source_endpoint(source_id: str):
+    """Fetch and re-cache a single bot source."""
+    from backend.utils.bot_sources import fetch_and_cache_source
+
+    try:
+        meta = fetch_and_cache_source(source_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail=not_found("bot_source_not_found"))
+    except Exception as e:
+        raise_internal(logger, e, code="bot_source_fetch_failed", status=502)
+    return {"ok": True, "source": meta}
+
+
+@router.post("/admin/bot-sources/refresh", response_model=BotSourcesRefreshResponse, response_model_exclude_unset=True)
+@router.post("/admin/bots/refresh", response_model=BotSourcesRefreshResponse, response_model_exclude_unset=True)
+def refresh_all_bot_sources_endpoint():
+    """Fetch and re-cache all enabled bot sources."""
+    from backend.utils.bot_sources import refresh_all_sources
+
+    try:
+        results = refresh_all_sources()
+        failed = [r for r in results if r.get("failed")]
+        succeeded = [r for r in results if not r.get("failed")]
+        return {
+            "ok": len(failed) == 0,
+            "sources": results,
+            "updated_count": len(succeeded),
+            "failed_count": len(failed),
+        }
+    except Exception as e:
+        raise_internal(logger, e, code="bot_sources_refresh_failed", status=502)
+
+
+@router.post("/admin/rdns/enrich", response_model=RdnsEnrichResponse, response_model_exclude_unset=True)
+def trigger_rdns_enrich_endpoint(
+    limit: int | None = Query(None, description="Optional override for batch limit"),
+):
+    """Trigger manual rDNS enrichment batch."""
+    from backend.utils.rdns_cache import enrich_batch
+
+    summary = enrich_batch(limit=limit)
+    return {"ok": True, "summary": summary}
+
+
+@router.get("/admin/rdns/stats", response_model=RdnsStatsResponse, response_model_exclude_unset=True)
+def get_rdns_stats_endpoint():
+    """Return rDNS cache stats."""
+    from backend.utils.rdns_cache import get_stats as rdns_stats
+
+    return {"ok": True, "stats": rdns_stats()}
+
+
+# ── Iceberg admin endpoints (folded from iceberg.py) ──────────────────
+
+
+@router.get("/admin/iceberg-info", response_model=IcebergTableInfoResponse)
+@query_errors(status_code=500)
+def iceberg_info_endpoint(
+    table_name: Literal["logs", "client_vitals", "client_errors"] = "logs",
+    source: dict = Depends(get_source),
+):
+    """Return Iceberg table metadata: snapshots, data files, size, buffer status."""
+    from backend.core import iceberg as db_iceberg
+
+    result = db_iceberg.get_table_info(source, table_name=table_name)
+    return IcebergTableInfoResponse.with_telemetry(**result)
+
+
+@router.get("/admin/iceberg-calendar", response_model=IcebergCalendarResponse, response_model_exclude_unset=True)
+@query_errors(status_code=500)
+def iceberg_calendar_endpoint(
+    table_name: Literal["logs", "client_vitals", "client_errors"] = "logs",
+    source: dict = Depends(get_source),
+):
+    """Return per-date data file counts from Iceberg partition metadata."""
+    from backend.core import iceberg as db_iceberg
+    from backend.utils.telemetry import debug_envelope
+
+    result = db_iceberg.get_snapshot_calendar(source, table_name=table_name)
+    return debug_envelope(result, gated=True, is_cached=None, inject_calls=True)
+
+
+@router.post(
+    "/admin/commit-iceberg",
+    status_code=202,
+    response_model=SyncStartResponse,
+    response_model_exclude_unset=True,
+)
+@router.post(
+    "/admin/commit/{service_id}",
+    status_code=202,
+    response_model=SyncStartResponse,
+    response_model_exclude_unset=True,
+)
+def iceberg_commit_endpoint(
+    service_id: str | None = None,
+    _admin: None = Depends(require_admin),
+    source: dict = Depends(get_source),
+) -> SyncStartResponse:
+    """Manually flush the local buffer to the DuckLake table.
+
+    Returns 202 Accepted — the commit runs asynchronously in a worker
+    thread and the response body carries a ``run_id`` the caller can
+    poll for completion. 200 (the prior status) misled clients that
+    treated it as "done"."""
+    from backend.cron.jobs.commit import _run_commit
+    from backend.utils.router_utils import run_admin_cron_trigger
+
+    return run_admin_cron_trigger(
+        source,
+        "commit",
+        _run_commit,
+        target_kwargs={"force": True},
+        success_msg="Commit started.",
+        in_progress_msg="Commit already running.",
+        readonly_detail=make_error("read_only", "Read-only services cannot run DuckLake commit."),
+        invalidate_cache=False,
+    )
+
+
+@router.post(
+    "/admin/rebuild-local-view", status_code=202, response_model=SyncStartResponse, response_model_exclude_unset=True
+)
+def rebuild_local_view_endpoint(source: dict = Depends(get_source)):
+    """One-button "fix it" for a stuck or stale local DuckDB view.
+
+    Returns 202 Accepted — the rebuild runs asynchronously in a worker
+    thread and the response body carries a ``run_id`` the caller can
+    poll for completion.
+
+    Clears the in-memory + on-disk caches that drive view SQL generation,
+    then triggers a metadata_sync that re-pulls the catalog from the cloud
+    and rebuilds the view. The local raw buffer is NOT touched —
+    un-committed data is safe.
+
+    When to use: after manually editing parquet files, after a catalog
+    schema-mapping desync, or when "Sync All" already ran and the view
+    still looks wrong. This is the nuclear-option version of refresh.
+    """
+    import threading
+
+    from backend.core import iceberg as db_iceberg
+    from backend.core.duckdb import start_cron_run
+    from backend.cron.jobs.metadata import _run_metadata_sync
+    from backend.cron_progress import start_progress
+
+    service_id = source["name"]
+
+    db_iceberg.clear_source_caches(service_id)
+
+    try:
+        # Deliberate divergence from router_utils.start_or_resume_cron: this
+        # path does NOT resume an in-flight run on RuntimeError — it 503s
+        # cron_busy instead. A rebuild is the nuclear "fix it" button, so
+        # piggy-backing on an existing run_id would silently no-op the
+        # cache-clearing the operator explicitly asked for.
+        run_id = start_cron_run(source, "metadata_sync")
+    except RuntimeError as e:
+        logger.warning("cron_busy service_id=%s: %s", service_id, e)
+        raise HTTPException(
+            status_code=503,
+            detail=make_error("cron_busy", "A sync run is already in progress", busy=True),
+        ) from e
+
+    start_progress(run_id, service_id=service_id, task="metadata_sync")
+    t = threading.Thread(target=_run_metadata_sync, args=(service_id,), kwargs={"run_id": run_id}, daemon=True)
+    t.start()
+    return {"ok": True, "message": "Local view rebuild started.", "run_id": run_id}
+
+
+def _stream_reset_sse(
+    body: ResetLogsRequest,
+    source: dict,
+    reset_fn: Any,
+    label: str,
+    **extra_kwargs: Any,
+):
+    from backend.utils.sse import stream_sse_from_worker
+
+    service_id = source["name"]
+    if source.get("access_level") != "read_write":
+        raise HTTPException(status_code=403, detail=make_error("read_only", "This service is read-only."))
+    if body.confirm != service_id:
+        raise HTTPException(
+            status_code=400,
+            detail=make_error("confirm_mismatch", "`confirm` must equal the service id being deleted."),
+        )
+
+    def worker(events):
+        from backend.cron.scheduler import get_scheduler
+
+        try:
+            for event in reset_fn(
+                service_id,
+                delete_raw_logs=body.delete_raw_logs,
+                reload_scheduler=lambda: get_scheduler().reload(),
+                **extra_kwargs,
+            ):
+                events.put(event)
+        except Exception as e:
+            logger.exception("reset_%s_endpoint(%s) failed", label.lower(), service_id)
+            events.put({"type": "error", "message": f"{label} deletion failed: {e}"})
+
+    return stream_sse_from_worker(worker)
+
+
+# response_model intentionally omitted: SSE progress stream (EventSourceResponse),
+# not a JSON body — event shapes are documented in reset_service_logs's docstring.
+@router.post("/admin/reset-logs", dependencies=[Depends(require_json_content_type)])
+def reset_logs_endpoint(body: ResetLogsRequest, source: dict = Depends(get_source)):
+    """Permanently delete this service's log data (cloud + local) over SSE.
+
+    Wipes the cloud Iceberg log table, the local DuckDB file + cache, and
+    the SQLite ingestion ledgers, then re-initializes an empty, queryable
+    0-state. Preserves the service's configuration: saved views, alerts,
+    source registration, audit history, and scoring labels/audit. See
+    ``backend.core.reset.reset_service_logs`` for the full sequence.
+
+    Fails closed before any work starts: 403 if this service isn't
+    read_write (defense-in-depth — ``RemoteAccessMiddleware`` already blocks
+    ``/api/admin/*`` for remote analysts), and 400 if ``confirm`` doesn't
+    match the resolved service id.
+    """
+    from backend.core.reset import reset_service_logs
+
+    return _stream_reset_sse(
+        body,
+        source,
+        reset_service_logs,
+        "Log",
+        preserve_usage_history=body.preserve_usage_history,
+    )
+
+
+@router.post("/admin/reset-rum", dependencies=[Depends(require_json_content_type)])
+def reset_rum_endpoint(body: ResetLogsRequest, source: dict = Depends(get_source)):
+    """Permanently delete this service's RUM telemetry data (cloud + local) over SSE.
+
+    Wipes the cloud Iceberg RUM tables and the local RUM DuckDB file and cache
+    while leaving logs data completely untouched.
+    """
+    from backend.core.reset import reset_service_rum
+
+    return _stream_reset_sse(body, source, reset_service_rum, "RUM")

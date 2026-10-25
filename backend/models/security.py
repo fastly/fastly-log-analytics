@@ -6,7 +6,7 @@ from pydantic import AliasChoices, Field
 
 from backend.models._base import WireSafeModel
 from backend.models.common import BaseResponse, RangeKeyedRequest
-from backend.models.reader_coverage import ReaderCoverage
+from backend.models.dashboard import ReaderCoverage
 
 
 class ActiveClientItem(WireSafeModel):

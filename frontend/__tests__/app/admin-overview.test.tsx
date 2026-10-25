@@ -56,7 +56,7 @@ import { server } from '@/__tests__/helpers/msw/server'
 const API_BASE = getApiBase()
 
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/admin'))
-vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/browser-stubs')).reactVirtualModuleMock())
 
 beforeEach(() => {
   vi.clearAllMocks()

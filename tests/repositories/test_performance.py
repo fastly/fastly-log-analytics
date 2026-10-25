@@ -3,7 +3,7 @@ from unittest.mock import patch
 from backend.models.common import FilterSpec
 from backend.repositories._base import _safe_table
 from backend.repositories.performance import get_performance_aggregates
-from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
+from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 
 
 def _perf_latency_hit(*_a, **kw):

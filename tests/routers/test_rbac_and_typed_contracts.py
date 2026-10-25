@@ -1178,7 +1178,7 @@ def test_ngwaf_sync_matches_producer(client):
         patch("backend.config.load_config", return_value={"service_id": "svc-n"}),
         patch("backend.config.get_ngwaf_workspace_id", return_value="ws-1"),
         patch("backend.cron.jobs.metadata._run_ngwaf_bot_sync"),
-        patch("backend.utils.ngwaf_bot_cache.get_cache_stats", return_value=stats),
+        patch("backend.utils.ngwaf.get_cache_stats", return_value=stats),
     ):
         resp = client.post("/api/admin/ngwaf/sync/svc-n")
     assert _body(resp) == {"ok": True, "service_id": "svc-n", "workspace_id": "ws-1", "stats": stats}
@@ -1365,7 +1365,7 @@ def test_duckdb_status_matches_producer_keys(client):
 
 def test_ngwaf_status_and_rdns_stats(client, monkeypatch):
     stats = {"total_cached_bots": 2, "workspaces": {"w": None, "x": "2026-01-01"}, "top_bots": {"bot": 2}}
-    monkeypatch.setattr("backend.utils.ngwaf_bot_cache.get_cache_stats", lambda: dict(stats))
+    monkeypatch.setattr("backend.utils.ngwaf.get_cache_stats", lambda: dict(stats))
     resp = client.get("/api/admin/ngwaf/status")
     assert resp.status_code == 200
     assert _body(resp) == {"ok": True, **stats}

@@ -38,9 +38,9 @@ from backend.high_scale.origin import aggregates as origin_aggregates
 from backend.high_scale.origin_projection import build_origin_projection_rows
 from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.high_scale.sessions import sessions_endpoint
-from backend.models.cmcd import CmcdRequest
 from backend.models.dashboard import AggregatesRequest, SessionsRequest
 from backend.models.insights import CacheCollapseDetailRequest, InsightsRequest
+from backend.models.performance import CmcdRequest
 from backend.repositories.insights import registry
 
 pytestmark = pytest.mark.skipif(

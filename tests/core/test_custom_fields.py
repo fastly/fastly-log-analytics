@@ -25,8 +25,10 @@ import io
 import json
 import os
 import re
+import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -53,6 +55,77 @@ from backend.core.log_fields import (
 from backend.provision.cmcd_fields import get_cmcd_fields
 from backend.provision.session_scoring_orchestrator import _SCORING_CUSTOM_FIELDS
 from backend.routers.services import core as services_core_router
+
+
+@pytest.fixture
+def custom_field_env(
+    s3_mock: Any, fos_source: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> dict[str, Any]:
+    """Lightweight wrapper around the ingest harness for custom-field suites.
+
+    Sets up moto S3 + a local DuckLake data path + cache, plus the
+    ``_get_fos_client`` monkeypatch for the ingest module namespace and
+    a config loader stub that returns whatever custom fields the test asks for.
+    Returns helpers for seeding gzipped log rows and draining the ingest generator.
+    """
+    unique_id = f"cf{uuid.uuid4().hex[:10]}"
+    fos_source["service_id"] = unique_id
+    fos_source["name"] = unique_id
+    fos_source["duckdb_path"] = str(tmp_path / "e2e.duckdb")
+    cache_path = str(tmp_path / "cache")
+    os.makedirs(cache_path, exist_ok=True)
+
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: cache_path)
+    monkeypatch.setattr("backend.core.duckdb._configure_fos", lambda *a, **kw: None)
+
+    class _CallerHintShim:
+        def __init__(self, client: Any) -> None:
+            self._client = client
+
+        def get_paginator(self, op: str, caller_hint: str | None = None) -> Any:
+            return self._client.get_paginator(op)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._client, name)
+
+    shim = _CallerHintShim(s3_mock)
+    monkeypatch.setattr("backend.core.ingest._get_fos_client", lambda _src: shim)
+
+    from backend.core import iceberg as ice
+
+    if hasattr(ice, "_view_cache"):
+        ice._view_cache.clear()
+
+    def _set_custom_fields(custom_fields: list[dict[str, Any]]) -> None:
+        cfg = {
+            "service_id": fos_source["service_id"],
+            "log_fields": {
+                "schema_version": 2,
+                "groups": ["A"],
+                "custom_fields": custom_fields,
+            },
+        }
+        monkeypatch.setattr("backend.config.load_config", lambda _sid: cfg)
+
+    def _seed_gz(key: str, rows: list[dict[str, Any]]) -> None:
+        body = io.BytesIO()
+        with gzip.GzipFile(fileobj=body, mode="wb") as gz:
+            gz.write(("\n".join(json.dumps(r) for r in rows) + "\n").encode())
+        s3_mock.put_object(Bucket=fos_source["bucket"], Key=key, Body=body.getvalue())
+
+    def _drain_ingest() -> list[Any]:
+        from backend.core import ingest as ing
+
+        return list(ing.ingest(source=fos_source))
+
+    return {
+        "fos_source": fos_source,
+        "cache": cache_path,
+        "set_custom_fields": _set_custom_fields,
+        "seed_gz": _seed_gz,
+        "drain_ingest": _drain_ingest,
+    }
+
 
 # ── Merged from tests/core/test_custom_fields.py ──
 _CFG = {
@@ -787,7 +860,7 @@ def test_custom_field_full_roundtrip_end_to_end(tmp_path, monkeypatch):
     """API add → /log-fields shows it → ingest → view exposes column → SELECT returns value."""
     import backend.core.duckdb as my_duckdb
     from backend import config
-    from backend.models.custom_fields import CustomFieldCreate
+    from backend.models.services import CustomFieldCreate
     from backend.routers import services
     from backend.routers.services import core as services_core
 
@@ -844,7 +917,7 @@ def test_custom_field_full_roundtrip_after_disable_enable_cycle(tmp_path, monkey
     this is the end-to-end ingest-path cross-check."""
     import backend.core.duckdb as my_duckdb
     from backend import config
-    from backend.models.custom_fields import CustomFieldCreate, CustomFieldUpdate
+    from backend.models.services import CustomFieldCreate, CustomFieldUpdate
     from backend.routers import services
     from backend.routers.services import core as services_core
 

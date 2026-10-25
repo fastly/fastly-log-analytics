@@ -13,7 +13,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import { http, HttpResponse } from 'msw'
 import React from 'react'
 import { InsightItemRow } from '@/components/Insights/InsightItemRow'
-import { ScriptedTrafficModal } from '@/components/Insights/ScriptedTrafficModal'
+import { ScriptedTrafficModal } from '@/components/Insights/InsightCard'
 import { CacheCollapseModal } from '@/components/Insights/CacheCollapseModal'
 import type { ScriptedTrafficData } from '@/components/Insights/shared'
 import type { InsightCardData } from '@/types/api'
@@ -22,7 +22,7 @@ import { server } from '@/__tests__/helpers/msw/server'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/virtual-mock')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/browser-stubs')).reactVirtualModuleMock())
 vi.mock('@/components/charts/TimeSeriesChart', () => ({ TimeSeriesChart: () => <div data-testid="timeseries" /> }))
 
 beforeAll(() => {

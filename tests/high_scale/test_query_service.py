@@ -247,7 +247,7 @@ def test_invalid_router_bounds_are_rejected() -> None:
 
 import pytest
 
-from backend.high_scale._filters import request_filter_clauses
+from backend.high_scale._common import request_filter_clauses
 from backend.models.common import FilterSpec
 
 

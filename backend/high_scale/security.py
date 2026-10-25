@@ -33,9 +33,11 @@ from backend.high_scale._common import (
     bucket as _bucket,
 )
 from backend.high_scale._common import (
+    build_clickhouse_filters as _build_clickhouse_filters,
+)
+from backend.high_scale._common import (
     text as _text,
 )
-from backend.high_scale._filters import build_clickhouse_filters as _build_clickhouse_filters
 from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.models.security import (
     SecurityAggregatesResponse,
@@ -54,7 +56,7 @@ from backend.repositories.utils.response_cache import (
     digest_cache_key,
     serialize_filters_for_key,
 )
-from backend.utils.cache_registry import CacheRegistry
+from backend.utils.bounded_cache import CacheRegistry
 from backend.utils.date_utils import safe_iso
 
 _memo = ResponseMemo(ttl=30.0, maxsize=128, prewarmer=False)

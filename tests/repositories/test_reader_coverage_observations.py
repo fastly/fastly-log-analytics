@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 import time_machine
 
-from backend.models.reader_coverage import (
+from backend.models.dashboard import (
     HourlyRollupCoverage,
     ReaderCoverage,
     RollupPathCoverage,
@@ -12,7 +12,7 @@ from backend.models.reader_coverage import (
 )
 from backend.repositories import rollup_coverage
 from backend.repositories import rollup_coverage as coverage
-from backend.repositories._rollup_planner import plan_time_series_rollup_window
+from backend.repositories.rollup_coverage import plan_time_series_rollup_window
 
 # ── Merged from tests/repositories/test_reader_coverage_observations.py ──
 START = datetime(2026, 1, 1, tzinfo=UTC)
@@ -520,7 +520,7 @@ def test_failed_composite_query_does_not_claim_successful_live_top_up(
 
 
 def test_virtual_only_top_n_does_not_claim_a_live_batch_ran(in_memory_duckdb, monkeypatch) -> None:
-    from backend.models.reader_coverage import ReaderCoverage
+    from backend.models.dashboard import ReaderCoverage
     from backend.repositories._base import QueryRunner
     from backend.repositories.top_n_rollups import SchemaSeeds, TopNWindow
 
@@ -546,7 +546,7 @@ def test_virtual_only_top_n_does_not_claim_a_live_batch_ran(in_memory_duckdb, mo
 
 
 def test_top_n_any_field_presence_does_not_claim_all_field_coverage(tmp_path) -> None:
-    from backend.models.reader_coverage import TopNRollupCoverage
+    from backend.models.dashboard import TopNRollupCoverage
     from backend.repositories.top_n_rollups import TopNWindow, find_unrolled_hours, plan_top_n_paths
 
     path = tmp_path / "rollups/hour/field=url/hour=2026-01-01-00/part.parquet"

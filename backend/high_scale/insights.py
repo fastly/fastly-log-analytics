@@ -17,8 +17,7 @@ from typing import Any
 
 from backend.core.clickhouse_client import ClickHouseError
 from backend.core.share_db.validation import mask_ip
-from backend.high_scale._common import visible_fact_clauses
-from backend.high_scale._filters import build_clickhouse_filters
+from backend.high_scale._common import build_clickhouse_filters, visible_fact_clauses
 from backend.high_scale.insight_queries import (
     AUTH_REGEX,
     BOT_UA_REGEX,
@@ -36,7 +35,7 @@ from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.models.insights import CacheCollapseDetailResponse, InsightsResponse
 from backend.repositories.insights import InsightDefinition, registry  # noqa: F401  (registers the detections)
 from backend.utils.bounded_cache import BoundedTTLCache
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.date_utils import parse_iso_utc
 
 _MAX_WORKERS = 12

@@ -1491,8 +1491,8 @@ def test_ngwaf_sync_seeds_watermark_on_first_run(fake_cfg):
         patch("backend.core.duckdb.get_source_for_service", return_value=mock_src),
         patch("backend.core.duckdb.start_cron_run", return_value=1),
         patch("backend.core.duckdb.log_cron_run") as mock_log,
-        patch("backend.utils.ngwaf_bot_cache.get_last_timestamp", return_value=None),
-        patch("backend.utils.ngwaf_bot_cache.update_sync_watermark") as mock_update_wm,
+        patch("backend.utils.ngwaf.get_last_timestamp", return_value=None),
+        patch("backend.utils.ngwaf.update_sync_watermark") as mock_update_wm,
         patch("backend.utils.ngwaf.fetch_verified_bots_paged") as mock_fetch,
     ):
         _run_ngwaf_bot_sync("test_service")
@@ -1523,13 +1523,13 @@ def test_ngwaf_sync_pages_records_and_restores_baseline_interval(fake_cfg):
         patch("backend.core.duckdb.get_source_for_service", return_value=mock_src),
         patch("backend.core.duckdb.start_cron_run", return_value=1),
         patch("backend.core.duckdb.log_cron_run") as mock_log,
-        patch("backend.utils.ngwaf_bot_cache.get_last_timestamp", return_value="2026-09-01T00:00:00Z"),
+        patch("backend.utils.ngwaf.get_last_timestamp", return_value="2026-09-01T00:00:00Z"),
         patch(
             "backend.utils.ngwaf.fetch_verified_bots_paged",
             return_value=[(fake_records, "2026-09-01T01:00:00Z", 2)],
         ),
-        patch("backend.utils.ngwaf_bot_cache.upsert_bots") as mock_upsert,
-        patch("backend.utils.ngwaf_bot_cache.cleanup_old_bots", return_value=0),
+        patch("backend.utils.ngwaf.upsert_bots") as mock_upsert,
+        patch("backend.utils.ngwaf.cleanup_old_bots", return_value=0),
         patch("backend.cron.scheduler.get_scheduler", return_value=mock_sched),
     ):
         _run_ngwaf_bot_sync("test_service")
@@ -1559,13 +1559,13 @@ def test_ngwaf_sync_adaptive_rescheduling_under_heavy_load(fake_cfg):
         patch("backend.core.duckdb.get_source_for_service", return_value=mock_src),
         patch("backend.core.duckdb.start_cron_run", return_value=1),
         patch("backend.core.duckdb.log_cron_run") as mock_log,
-        patch("backend.utils.ngwaf_bot_cache.get_last_timestamp", return_value="2026-09-01T00:00:00Z"),
+        patch("backend.utils.ngwaf.get_last_timestamp", return_value="2026-09-01T00:00:00Z"),
         patch(
             "backend.utils.ngwaf.fetch_verified_bots_paged",
             return_value=[(fake_records, "2026-09-01T01:00:00Z", 500)],
         ),
-        patch("backend.utils.ngwaf_bot_cache.upsert_bots"),
-        patch("backend.utils.ngwaf_bot_cache.cleanup_old_bots", return_value=0),
+        patch("backend.utils.ngwaf.upsert_bots"),
+        patch("backend.utils.ngwaf.cleanup_old_bots", return_value=0),
         patch("backend.cron.scheduler.get_scheduler", return_value=mock_sched),
     ):
         _run_ngwaf_bot_sync("test_service")
@@ -1587,7 +1587,7 @@ def test_ngwaf_sync_classifies_auth_errors(fake_cfg):
         patch("backend.core.duckdb.get_source_for_service", return_value=mock_src),
         patch("backend.core.duckdb.start_cron_run", return_value=1),
         patch("backend.core.duckdb.log_cron_run") as mock_log,
-        patch("backend.utils.ngwaf_bot_cache.get_last_timestamp", return_value="2026-09-01T00:00:00Z"),
+        patch("backend.utils.ngwaf.get_last_timestamp", return_value="2026-09-01T00:00:00Z"),
         patch(
             "backend.utils.ngwaf.fetch_verified_bots_paged",
             side_effect=RuntimeError("Fastly API 401 Unauthorized: invalid_api_key"),
@@ -1610,7 +1610,7 @@ def test_admin_ngwaf_endpoints(fake_cfg):
         patch("backend.config.get_ngwaf_workspace_id", return_value="ws_123"),
         patch("backend.cron.jobs.metadata._run_ngwaf_bot_sync") as mock_run,
         patch(
-            "backend.utils.ngwaf_bot_cache.get_cache_stats",
+            "backend.utils.ngwaf.get_cache_stats",
             return_value={"total_cached_bots": 42, "workspaces": {"ws_123": "2026-09-01T00:00:00Z"}, "top_bots": {}},
         ),
     ):
@@ -1660,13 +1660,13 @@ def test_ngwaf_sync_adaptive_rescheduling_on_budget_exceeded(fake_cfg):
         patch("backend.core.duckdb.get_source_for_service", return_value=mock_src),
         patch("backend.core.duckdb.start_cron_run", return_value=1),
         patch("backend.core.duckdb.log_cron_run") as mock_log,
-        patch("backend.utils.ngwaf_bot_cache.get_last_timestamp", return_value="2026-09-01T00:00:00Z"),
+        patch("backend.utils.ngwaf.get_last_timestamp", return_value="2026-09-01T00:00:00Z"),
         patch(
             "backend.utils.ngwaf.fetch_verified_bots_paged",
             side_effect=fake_fetch_paged,
         ),
-        patch("backend.utils.ngwaf_bot_cache.upsert_bots"),
-        patch("backend.utils.ngwaf_bot_cache.cleanup_old_bots", return_value=0),
+        patch("backend.utils.ngwaf.upsert_bots"),
+        patch("backend.utils.ngwaf.cleanup_old_bots", return_value=0),
         patch("backend.cron.scheduler.get_scheduler", return_value=mock_sched),
         patch("time.time", side_effect=mock_time),
     ):
@@ -1692,13 +1692,13 @@ def test_ngwaf_sync_progress_lifecycle(fake_cfg):
         patch("backend.core.duckdb.get_source_for_service", return_value=mock_src),
         patch("backend.core.duckdb.start_cron_run", return_value=42),
         patch("backend.core.duckdb.log_cron_run"),
-        patch("backend.utils.ngwaf_bot_cache.get_last_timestamp", return_value="2026-09-01T00:00:00Z"),
+        patch("backend.utils.ngwaf.get_last_timestamp", return_value="2026-09-01T00:00:00Z"),
         patch(
             "backend.utils.ngwaf.fetch_verified_bots_paged",
             return_value=[(fake_records, "2026-09-01T01:00:00Z", 1)],
         ),
-        patch("backend.utils.ngwaf_bot_cache.upsert_bots"),
-        patch("backend.utils.ngwaf_bot_cache.cleanup_old_bots", return_value=0),
+        patch("backend.utils.ngwaf.upsert_bots"),
+        patch("backend.utils.ngwaf.cleanup_old_bots", return_value=0),
         patch("backend.cron_progress.start_progress") as mock_start_prog,
         patch("backend.cron_progress.end_progress") as mock_end_prog,
         patch("backend.cron.jobs._common.finalize_cron_duration") as mock_finalize,
@@ -1723,7 +1723,7 @@ def test_ngwaf_sync_guaranteed_cleanup_on_error(fake_cfg):
         patch("backend.core.duckdb.get_source_for_service", return_value=mock_src),
         patch("backend.core.duckdb.start_cron_run", return_value=99),
         patch("backend.core.duckdb.log_cron_run") as mock_log,
-        patch("backend.utils.ngwaf_bot_cache.get_last_timestamp", return_value="2026-09-01T00:00:00Z"),
+        patch("backend.utils.ngwaf.get_last_timestamp", return_value="2026-09-01T00:00:00Z"),
         patch("backend.utils.ngwaf.fetch_verified_bots_paged", side_effect=ValueError("Unexpected fetch failure")),
         patch("backend.cron_progress.end_progress") as mock_end_prog,
         patch("backend.cron.jobs._common.finalize_cron_duration") as mock_finalize,
@@ -1749,8 +1749,8 @@ def test_ngwaf_sync_first_run_watermark_guaranteed_cleanup(fake_cfg):
         patch("backend.core.duckdb.get_source_for_service", return_value=mock_src),
         patch("backend.core.duckdb.start_cron_run", return_value=101),
         patch("backend.core.duckdb.log_cron_run") as mock_log,
-        patch("backend.utils.ngwaf_bot_cache.get_last_timestamp", return_value=None),
-        patch("backend.utils.ngwaf_bot_cache.update_sync_watermark"),
+        patch("backend.utils.ngwaf.get_last_timestamp", return_value=None),
+        patch("backend.utils.ngwaf.update_sync_watermark"),
         patch("backend.cron_progress.end_progress") as mock_end_prog,
         patch("backend.cron.jobs._common.finalize_cron_duration") as mock_finalize,
     ):
@@ -1794,7 +1794,7 @@ def test_ngwaf_sync_error_row_matches_legacy_shape(fake_cfg):
         patch("backend.core.duckdb.get_source_for_service", return_value=mock_src),
         patch("backend.core.duckdb.start_cron_run", return_value=5),
         patch("backend.core.duckdb.log_cron_run") as mock_log,
-        patch("backend.utils.ngwaf_bot_cache.get_last_timestamp", return_value="2026-09-01T00:00:00Z"),
+        patch("backend.utils.ngwaf.get_last_timestamp", return_value="2026-09-01T00:00:00Z"),
         patch("backend.utils.ngwaf.fetch_verified_bots_paged", side_effect=RuntimeError("socket reset")),
     ):
         _run_ngwaf_bot_sync("test_service")

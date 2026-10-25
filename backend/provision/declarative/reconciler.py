@@ -485,7 +485,7 @@ def reconcile_cdn_service_state(
     7. Validate draft version.
     8. Activate draft version & persist state.
     """
-    from backend.core.fastly.service import find_service_by_name
+    from backend.core.fastly.client import find_service_by_name
     from backend.core.fastly.utils import load_vcl, region_endpoint
     from backend.provision.fastly_api import _CDN_SNIPPETS
 
@@ -1124,7 +1124,22 @@ def _apply_diff(
     )
 
     # Step 6.4.5: Ensure unified conditions are present if any of the endpoints/backends references them
-    from backend.core.fastly.service import ensure_condition
+    from backend.core.fastly.client import ensure_condition
+
+    def _ensure_cond_safe(name: str, statement: str, cond_type: str = "RESPONSE") -> None:
+        try:
+            ensure_condition(
+                name=name,
+                statement=statement,
+                type=cond_type,
+                service_id=service_id,
+                version=draft_version,
+                token=token,
+            )
+        except Exception as e:
+            import logging
+
+            logging.warning(f"WARNING: Failed to ensure {name}: {e}")
 
     # 1. log_analytics_condition
     has_main_cond = any(ep.response_condition == "log_analytics_condition" for ep in desired_endpoints)
@@ -1146,19 +1161,7 @@ def _apply_diff(
                 cond_parts.append(f"({desired_state.custom_condition.strip()})")
 
         statement = " && ".join(cond_parts)
-        try:
-            ensure_condition(
-                name="log_analytics_condition",
-                statement=statement,
-                type="RESPONSE",
-                service_id=service_id,
-                version=draft_version,
-                token=token,
-            )
-        except Exception as e:
-            import logging
-
-            logging.warning(f"WARNING: Failed to ensure log_analytics_condition: {e}")
+        _ensure_cond_safe("log_analytics_condition", statement)
 
     # 2. rum_log_condition
     has_rum_cond = any(ep.response_condition == "rum_log_condition" for ep in desired_endpoints)
@@ -1172,19 +1175,7 @@ def _apply_diff(
             and desired_state.rum_custom_condition.strip()
         ):
             statement = f"{statement} && ({desired_state.rum_custom_condition.strip()})"
-        try:
-            ensure_condition(
-                name="rum_log_condition",
-                statement=statement,
-                type="RESPONSE",
-                service_id=service_id,
-                version=draft_version,
-                token=token,
-            )
-        except Exception as e:
-            import logging
-
-            logging.warning(f"WARNING: Failed to ensure rum_log_condition: {e}")
+        _ensure_cond_safe("rum_log_condition", statement)
 
     # 3. fastly_log_analytics_false
     desired_backends_list = desired_backends(desired_state) if desired_state else []
@@ -1194,19 +1185,7 @@ def _apply_diff(
     if has_false_cond:
         if status_cb:
             status_cb("➕ Configuring request condition 'fastly_log_analytics_false'...")
-        try:
-            ensure_condition(
-                name="fastly_log_analytics_false",
-                statement="false",
-                type="REQUEST",
-                service_id=service_id,
-                version=draft_version,
-                token=token,
-            )
-        except Exception as e:
-            import logging
-
-            logging.warning(f"WARNING: Failed to ensure fastly_log_analytics_false: {e}")
+        _ensure_cond_safe("fastly_log_analytics_false", "false", cond_type="REQUEST")
 
     # Step 6.5: Install/update backends
     for backend in diff.backends_to_add + diff.backends_to_update:

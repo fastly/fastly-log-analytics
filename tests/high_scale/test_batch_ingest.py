@@ -5,13 +5,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from backend.high_scale.archive_models import ArchiveState
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.ingest_controller import (
     HIGH_SCALE_PAGE_MAX_BYTES,
     BatchIngestResult,
     HighScaleIngestController,
 )
-from backend.high_scale.models import ArchiveState
 from backend.high_scale.orchestration import HighScaleWorkerCoordinator
 from backend.high_scale.publication import (
     ClickHousePublication,

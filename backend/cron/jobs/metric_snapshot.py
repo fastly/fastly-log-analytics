@@ -45,7 +45,7 @@ def _safe_record(
     except Exception as e:
         logger.debug("[metric_snapshot] record %s failed: %s", metric, e)
     try:
-        from backend.core import operational_metrics
+        from backend.core import metric_snapshots as operational_metrics
 
         if metric in {"celery_active_tasks", "celery_active_workers"}:
             operational_metrics.record(metric, value)
@@ -201,7 +201,7 @@ def _sample_active_queries() -> int:
 def _sample_ducklake_admission() -> int:
     count = 0
     try:
-        from backend.core.ducklake_admission import get_admission_stats
+        from backend.core.iceberg._ducklake import get_admission_stats
 
         for service_id, stats in get_admission_stats().items():
             acquisitions = stats.get("acquisitions", 0.0)
@@ -347,7 +347,7 @@ def _sample_high_scale() -> int:
             present_age = {row["domain"] for row in snapshot["source_age"]}
             present_pub = {row["domain"] for row in snapshot["publications"]}
             try:
-                from backend.core import operational_metrics
+                from backend.core import metric_snapshots as operational_metrics
 
                 for domain in domains:
                     for status in source_statuses:
@@ -440,7 +440,7 @@ def _sample_high_scale_disk() -> int:
     count = 0
     try:
         from backend.core.clickhouse_client import get_clickhouse_client
-        from backend.high_scale.disk_sampler import MODE_LEVELS, sample_disk_state
+        from backend.high_scale.archive_models import MODE_LEVELS, sample_disk_state
 
         client = get_clickhouse_client()
         if client is None:

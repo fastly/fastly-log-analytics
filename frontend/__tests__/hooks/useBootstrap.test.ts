@@ -1,17 +1,9 @@
 /**
  * @vitest-environment jsdom
  *
- * MSW migration (TESTING_PLAN_3 item 9): this test used to
- * ``vi.mock('@/lib/api')`` and ``vi.mock('@tanstack/react-query',
- * { useQuery: mockUseQuery })`` to control what the bootstrap query
- * "returned". That bypassed both the openapi-fetch transport and the
- * react-query state machine — fine for asserting the mapping shape, but
- * blind to any real-world wire-level regression.
- *
- * Now the hook runs end-to-end against an MSW handler. The
- * ``useServiceStore`` is still mocked (it's a Zustand persist store
- * with global state — orthogonal to the network boundary and noisy to
- * leave shared across tests).
+ * MSW migration (TESTING_PLAN_3 item 9) + R-10 (`useLogFieldsCatalog` and
+ * `useActiveLogFields`): exercises `useBootstrap`, `useLogFieldsCatalog`,
+ * and `useActiveLogFields` end-to-end against MSW and React Query cache.
  */
 import { renderHook, waitFor } from '@testing-library/react'
 import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
@@ -19,6 +11,7 @@ import { http, HttpResponse } from 'msw'
 import { afterEach, describe, it, expect, beforeEach, vi } from 'vitest'
 
 import { server } from '@/__tests__/helpers/msw/server'
+import { queryKeys } from '@/lib/query-keys'
 
 const mockSetServices = vi.fn()
 const mockSetInitialized = vi.fn()
@@ -184,11 +177,6 @@ describe('useBootstrap (MSW)', () => {
   })
 
   it('surfaces a fetch error via the openapi-fetch error middleware', async () => {
-    // The error here is *not* asserted via mockSetServices because the
-    // hook's useEffect only runs when query.data is truthy. The point of
-    // this test is to prove MSW exercises the real error path: the
-    // ``onResponse`` middleware in lib/api.ts throws on !response.ok,
-    // useQuery catches it, and the hook does not call setServices.
     server.use(
       http.get(`${API_BASE}/api/bootstrap`, () =>
         HttpResponse.json({ detail: 'boom' }, { status: 500 }),
@@ -197,37 +185,15 @@ describe('useBootstrap (MSW)', () => {
     const { useBootstrap } = await import('@/hooks/useBootstrap')
     const { result } = renderHook(() => useBootstrap(), { wrapper: wrapper() })
 
-    // useBootstrap pins its own retry policy (one retry on 5xx/network,
-    // never on 4xx) to trim the cold-path multiplier during an incident —
-    // this overrides the test client's `retry: false`. A 500 therefore
-    // retries once (~1s default backoff) before settling into the error
-    // state, so give waitFor room past that single retry. See the
-    // 2026-06-23 bootstrap-storm fix.
     await waitFor(() => expect(result.current.isError).toBe(true), { timeout: 3000 })
     expect(mockSetServices).not.toHaveBeenCalled()
     expect(mockSetInitialized).not.toHaveBeenCalled()
   })
 
   describe('reconcile — stale snapshot must not evict a just-selected service', () => {
-    // Regression for the "Switch To a freshly-added service bounces back" bug.
-    // Clicking "Switch To" sets activeServiceId to the new service and soft-
-    // navigates. The bootstrap query is force-dynamic + 5-min staleTime, so a
-    // soft nav serves the CACHED bootstrap — which can predate the new service.
-    // The reconcile effect must NOT revert the just-selected id off that stale
-    // snapshot; it has to wait for the (invalidated/pending) refetch to land a
-    // fresh services list. Otherwise the admin is bounced back to the previous
-    // service and AppLayout then redirects to /admin.
-
-    /**
-     * Seed a STALE bootstrap cache entry (dataUpdatedAt well past the 5-min
-     * staleTime) so query.isStale === true on mount, and hang the network so
-     * no refetch replaces it during the test — isolating the stale window.
-     */
     function staleWrapper(seed: { services: unknown[]; active_service_id: string | null }) {
       const qc = createTestQueryClient({ queries: { gcTime: 0 } })
       qc.setQueryData(['bootstrap'], seed, { updatedAt: Date.now() - 10 * 60 * 1000 })
-      // Hanging handler: the background refetch fires but never resolves, so the
-      // stale snapshot (and isStale === true) persists for the assertion window.
       server.use(
         http.get(`${API_BASE}/api/bootstrap`, () => new Promise(() => {})),
       )
@@ -235,8 +201,6 @@ describe('useBootstrap (MSW)', () => {
     }
 
     it('does NOT revert when the selected service is absent from a STALE snapshot', async () => {
-      // Store holds the just-selected new service; the stale cached bootstrap
-      // only knows the old one. The reconcile must defer, not evict.
       mockServiceState.activeServiceId = 'svc-new'
       const wrap = staleWrapper({
         services: [{ service_id: 'svc-old', name: 'Old', access_level: 'read_write' }],
@@ -246,9 +210,6 @@ describe('useBootstrap (MSW)', () => {
       const { useBootstrap } = await import('@/hooks/useBootstrap')
       renderHook(() => useBootstrap(), { wrapper: wrap })
 
-      // Give the effect ample time to (wrongly) fire. setServices still runs
-      // (it's unconditional on query.data), but the active-service REVERT must
-      // not — specifically it must never be called with the old default.
       await waitFor(() => expect(mockSetServices).toHaveBeenCalled())
       await new Promise((r) => setTimeout(r, 50))
       expect(mockSetActiveServiceId).not.toHaveBeenCalledWith('svc-old')
@@ -256,10 +217,6 @@ describe('useBootstrap (MSW)', () => {
     })
 
     it('STILL reverts a stale-id selection when the snapshot is FRESH', async () => {
-      // Counter-test: a genuinely stale activeServiceId (e.g. a dead id left in
-      // localStorage) must still be corrected once a FRESH bootstrap confirms
-      // it's gone. Here MSW returns a fresh list without the id, so isStale is
-      // false and the revert branch runs.
       mockServiceState.activeServiceId = 'svc-dead'
       server.use(
         http.get(`${API_BASE}/api/bootstrap`, () =>
@@ -284,11 +241,6 @@ describe('useBootstrap — recovery after a deploy', () => {
     mockServiceState.activeServiceId = null
   })
 
-  // A deploy takes the backend away for a few seconds. The `retry` policy is
-  // deliberately capped at ONE attempt (the 2026-06-23 bootstrap-storm guard),
-  // so without a poll an open tab spends that single retry during the outage
-  // and parks on AppLayout's dead-end "Can't reach the server" card until the
-  // user clicks Retry. This asserts the tab heals itself.
   it('recovers on its own once the server returns, with no manual retry', async () => {
     let failing = true
     server.use(
@@ -306,15 +258,12 @@ describe('useBootstrap — recovery after a deploy', () => {
 
     await waitFor(() => expect(result.current.isError).toBe(true), { timeout: 10000 })
 
-    // Server comes back. Nothing clicks anything.
     failing = false
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true), { timeout: 15000 })
     expect(mockSetServices).toHaveBeenCalled()
   }, 30000)
 
-  // The poll must stop once healthy, or every client permanently hammers
-  // /api/bootstrap — which is the fan-out the storm guard exists to prevent.
   it('does not keep polling once the request succeeds', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
@@ -340,4 +289,145 @@ describe('useBootstrap — recovery after a deploy', () => {
       vi.useRealTimers()
     }
   }, 30000)
+})
+
+function catalogWrapper(catalogSeed?: unknown, bootstrapSeed?: unknown) {
+  const qc = createTestQueryClient({ queries: { gcTime: Infinity, staleTime: 0 } })
+  if (catalogSeed !== undefined) {
+    qc.setQueryData(queryKeys.logFieldsCatalog('svc-1'), catalogSeed)
+  }
+  if (bootstrapSeed !== undefined) {
+    qc.setQueryData(queryKeys.bootstrap(), bootstrapSeed)
+  }
+  return makeQueryWrapper(qc)
+}
+
+describe('useLogFieldsCatalog (MSW)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockServiceState.activeServiceId = 'svc-1'
+  })
+
+  it('returns the catalog payload from the API', async () => {
+    server.use(
+      http.get(`${API_BASE}/api/log-fields/catalog`, () =>
+        HttpResponse.json({
+          fields: [{ id: 'status', label: 'HTTP Status' }],
+          custom_fields: [{ name: 'x-edge-ts', duckdb_type: 'VARCHAR' }],
+          groups: [],
+          presets: { default: { columns: ['status'] } },
+        }),
+      ),
+    )
+    const { useLogFieldsCatalog } = await import('@/hooks/useLogFieldsCatalog')
+    const { result } = renderHook(() => useLogFieldsCatalog(), { wrapper: catalogWrapper() })
+
+    await waitFor(() => expect(result.current.data).toBeDefined())
+    expect(result.current.data?.fields).toEqual([{ id: 'status', label: 'HTTP Status' }])
+    expect((result.current.data as { custom_fields?: unknown } | undefined)?.custom_fields).toEqual([
+      { name: 'x-edge-ts', duckdb_type: 'VARCHAR' },
+    ])
+  })
+
+  it('threads the active service id into the query-string', async () => {
+    let observedSid: string | null = null
+    server.use(
+      http.get(`${API_BASE}/api/log-fields/catalog`, ({ request }) => {
+        const url = new URL(request.url)
+        observedSid = url.searchParams.get('service_id')
+        return HttpResponse.json({ fields: [], custom_fields: [], groups: [], presets: {} })
+      }),
+    )
+    const { useLogFieldsCatalog } = await import('@/hooks/useLogFieldsCatalog')
+    renderHook(() => useLogFieldsCatalog(), { wrapper: catalogWrapper() })
+
+    await waitFor(() => expect(observedSid).not.toBeNull())
+    expect(observedSid).toBe('svc-1')
+  })
+
+  it('returns isError when the API 500s', async () => {
+    server.use(
+      http.get(`${API_BASE}/api/log-fields/catalog`, () =>
+        HttpResponse.json({ error: 'oops' }, { status: 500 }),
+      ),
+    )
+    const { useLogFieldsCatalog } = await import('@/hooks/useLogFieldsCatalog')
+    const { result } = renderHook(() => useLogFieldsCatalog(), { wrapper: catalogWrapper() })
+
+    await waitFor(() => expect(result.current.isError).toBe(true))
+  })
+})
+
+const CATALOG = {
+  groups: [
+    { id: 'L', label: 'Origin Metrics', fields: ['ottfb', 'ottlb', 'oip', 'prid'] },
+    { id: 'D', label: 'Geolocation', fields: ['country', 'city', 'region'] },
+  ],
+}
+
+describe('useActiveLogFields', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockServiceState.activeServiceId = 'svc-1'
+  })
+
+  it('reports not-ready and treats everything as active until bootstrap lands', async () => {
+    server.use(http.get(`${API_BASE}/api/bootstrap`, () => new Promise(() => {})))
+    const { useActiveLogFields } = await import('@/hooks/useLogFieldsCatalog')
+    const { result } = renderHook(() => useActiveLogFields(), { wrapper: catalogWrapper(CATALOG) })
+    expect(result.current.ready).toBe(false)
+    expect(result.current.isFieldActive('ottfb')).toBe(true)
+    expect(result.current.isFieldActive('anything')).toBe(true)
+    expect(result.current.isGroupActive('L')).toBe(true)
+  })
+
+  it('treats an empty active_log_field_ids list as not-ready (everything active)', async () => {
+    const { useActiveLogFields } = await import('@/hooks/useLogFieldsCatalog')
+    const { result } = renderHook(() => useActiveLogFields(), {
+      wrapper: catalogWrapper(CATALOG, { services: [], active_service_id: 'svc-1', active_log_field_ids: [] }),
+    })
+    expect(result.current.ready).toBe(false)
+    expect(result.current.isFieldActive('ottfb')).toBe(true)
+  })
+
+  it('honours active_log_field_ids when populated', async () => {
+    const { useActiveLogFields } = await import('@/hooks/useLogFieldsCatalog')
+    const { result } = renderHook(() => useActiveLogFields(), {
+      wrapper: catalogWrapper(CATALOG, { services: [], active_service_id: 'svc-1', active_log_field_ids: ['ottfb', 'country'] }),
+    })
+    expect(result.current.ready).toBe(true)
+    expect(result.current.isFieldActive('ottfb')).toBe(true)
+    expect(result.current.isFieldActive('ja3')).toBe(false)
+  })
+
+  it('isGroupActive is true when ANY field of the group is active', async () => {
+    const { useActiveLogFields } = await import('@/hooks/useLogFieldsCatalog')
+    const { result } = renderHook(() => useActiveLogFields(), {
+      wrapper: catalogWrapper(CATALOG, { services: [], active_service_id: 'svc-1', active_log_field_ids: ['country'] }),
+    })
+    expect(result.current.isGroupActive('D')).toBe(true)
+    expect(result.current.isGroupActive('L')).toBe(false)
+  })
+
+  it('isGroupActive is false for an unknown group id', async () => {
+    const { useActiveLogFields } = await import('@/hooks/useLogFieldsCatalog')
+    const { result } = renderHook(() => useActiveLogFields(), {
+      wrapper: catalogWrapper(CATALOG, { services: [], active_service_id: 'svc-1', active_log_field_ids: ['ottfb'] }),
+    })
+    expect(result.current.isGroupActive('ZZ')).toBe(false)
+  })
+
+  it('does not throw when the catalog is missing (still resolves fields)', async () => {
+    server.use(
+      http.get(`${API_BASE}/api/log-fields/catalog`, () =>
+        HttpResponse.json({ error: 'missing' }, { status: 500 }),
+      ),
+    )
+    const { useActiveLogFields } = await import('@/hooks/useLogFieldsCatalog')
+    const { result } = renderHook(() => useActiveLogFields(), {
+      wrapper: catalogWrapper(undefined, { services: [], active_service_id: 'svc-1', active_log_field_ids: ['ottfb'] }),
+    })
+    expect(result.current.isFieldActive('ottfb')).toBe(true)
+    expect(result.current.isGroupActive('L')).toBe(false)
+  })
 })

@@ -79,15 +79,20 @@ from __future__ import annotations
 
 import logging
 import sys
+from typing import cast
 
 from .. import metric_expressions
 from ._common import (
     ORIGIN_DIMS_BUNDLE_TOP_K,
     ORIGIN_IP_BUNDLE_FILENAME,
     ORIGIN_IP_MIN_REQUESTS_PER_HOUR,
+    ORIGIN_LATENCY_TS_BUNDLE_FILENAME,
     ORIGIN_PATH_BUNDLE_FILENAME,
     ORIGIN_POP_BUNDLE_FILENAME,
     ORIGIN_SUMMARY_BUNDLE_FILENAME,
+    SLOW_URLS_BUNDLE_FILENAME,
+    SLOW_URLS_BUNDLE_MIN_REQUESTS_PER_HOUR,
+    SLOW_URLS_BUNDLE_TOP_K,
     MultiBundleSpec,
     backfill_missing_bundles,
     backfill_multi_spec_bundles,
@@ -365,4 +370,194 @@ def backfill_origin_summary_bundles(service_id: str, source: dict) -> int:
     )
 
 
+def _ttfb_lat_expr(cols: set[str]) -> str | None:
+    """ttfb latency-us expression. Delegates to the canonical catalog
+    (:func:`backend.core.metric_expressions.origin_latency_us`); returns
+    ``None`` when no ttfb-latency column exists.
+    """
+    return metric_expressions.origin_latency_us(cols, absent=None)
+
+
+def build_origin_latency_ts_bundles(service_id: str, source: dict, hours: list[str]) -> int:
+    """Write a per-hour minute-granular origin_latency_ts rollup for each
+    closed hour in ``hours``.
+
+    Skips:
+      - The active UTC hour (still being written).
+      - Services whose schema lacks BOTH ``ottfb`` and ``ttfb`` (no ttfb
+        latency to roll up — nothing to serve).
+      - Hours with no matching data (writes a valid empty parquet).
+
+    When ``ottlb`` is absent the ttlb_* columns are written as a constant
+    ``count=0`` + ``NULL`` percentile block so the schema stays uniform.
+
+    Idempotent — atomic tmp+rename under the per-service iceberg lock.
+    Returns the number of bundles written this call.
+    """
+
+    def eligibility(cols, table_ident):
+        ttfb_lat = _ttfb_lat_expr(set(cols))
+        if ttfb_lat is None:
+            return None
+        ttlb_lat = '"ottlb"' if "ottlb" in cols else None
+        return (ttfb_lat, ttlb_lat)
+
+    def build_copy_sql(ctx: object, table_ident: str, start_iso: str, end_iso: str, tmp_path: str) -> str:
+        ttfb_lat, ttlb_lat = cast("tuple[str, str | None]", ctx)
+        # ttlb may be absent → emit the uniform 0/NULL block so the parquet
+        # schema is identical across services and the reader never references a
+        # column that doesn't exist (matches time_series.py's uniform-shape
+        # posture).
+        if ttlb_lat is not None:
+            ttlb_select = (
+                f"    CAST(COUNT(*) FILTER (WHERE {ttlb_lat} IS NOT NULL) AS BIGINT) AS ttlb_count, "
+                f"    CAST(MEDIAN({ttlb_lat}) AS DOUBLE) AS ttlb_p50_us, "
+                f"    CAST(APPROX_QUANTILE({ttlb_lat}, 0.95) AS DOUBLE) AS ttlb_p95_us, "
+                f"    CAST(APPROX_QUANTILE({ttlb_lat}, 0.99) AS DOUBLE) AS ttlb_p99_us "
+            )
+        else:
+            ttlb_select = (
+                "    CAST(0 AS BIGINT) AS ttlb_count, "
+                "    CAST(NULL AS DOUBLE) AS ttlb_p50_us, "
+                "    CAST(NULL AS DOUBLE) AS ttlb_p95_us, "
+                "    CAST(NULL AS DOUBLE) AS ttlb_p99_us "
+            )
+        return (
+            f"COPY ("
+            f"  SELECT "
+            f"    CAST(date_trunc('minute', timestamp) AS TIMESTAMPTZ) AS bucket_ts, "
+            f"    CAST(COUNT(*) FILTER (WHERE {ttfb_lat} IS NOT NULL) AS BIGINT) AS ttfb_count, "
+            f"    CAST(MEDIAN({ttfb_lat}) AS DOUBLE) AS ttfb_p50_us, "
+            f"    CAST(APPROX_QUANTILE({ttfb_lat}, 0.95) AS DOUBLE) AS ttfb_p95_us, "
+            f"    CAST(APPROX_QUANTILE({ttfb_lat}, 0.99) AS DOUBLE) AS ttfb_p99_us, "
+            f"{ttlb_select}"
+            f"  FROM {table_ident} "
+            f"  WHERE timestamp >= TIMESTAMPTZ '{start_iso}' "
+            f"    AND timestamp <  TIMESTAMPTZ '{end_iso}' "
+            f"  GROUP BY 1"
+            f") {parquet_zstd_target(tmp_path)}"
+        )
+
+    return build_per_hour_bundles(
+        service_id,
+        source,
+        hours,
+        bundle_filename=ORIGIN_LATENCY_TS_BUNDLE_FILENAME,
+        tmp_prefix=".tmp_olts_",
+        label="origin_latency_ts",
+        eligibility=eligibility,
+        build_copy_sql=build_copy_sql,
+        logger=logger,
+    )
+
+
+def backfill_origin_latency_ts_bundles(service_id: str, source: dict) -> int:
+    """Self-heal pass: build origin_latency_ts.parquet for every closed hour
+    that has all_fields.parquet but no origin_latency_ts.parquet yet.
+
+    Mirrors :func:`backfill_verified_bots_ts_bundles`. Idempotent — skips
+    already-built hours. Returns the number of bundles written.
+    """
+    return backfill_missing_bundles(
+        service_id,
+        source,
+        bundle_filename=ORIGIN_LATENCY_TS_BUNDLE_FILENAME,
+        label="origin_latency_ts",
+        builder=build_origin_latency_ts_bundles,
+        logger=logger,
+    )
+
+
+def backfill_slow_urls_bundles(service_id: str, source: dict) -> int:
+    """Self-heal pass: build slow_urls.parquet for every closed hour
+    that already has an ``all_fields.parquet`` (per-field rollup) but
+    no ``slow_urls.parquet`` yet.
+
+    The slow_urls rollup shipped after the count rollup was already
+    backfilled for most services. On a service with months of history,
+    walking every closed hour and (re-)issuing a per-hour COPY is what
+    populates the per-URL p95 panel without waiting weeks for the live
+    cron tick to organically rebuild each hour.
+
+    Idempotent — skips hours whose slow_urls.parquet already exists.
+    Returns the number of bundles written.
+    """
+    # The "all_fields.parquet present" gate the shared driver applies is our
+    # signal the hour was touched by the recompute pipeline at least once;
+    # skipping hours without it avoids materializing rollups for ingest gaps.
+    return backfill_missing_bundles(
+        service_id,
+        source,
+        bundle_filename=SLOW_URLS_BUNDLE_FILENAME,
+        label="slow_urls",
+        builder=build_slow_urls_bundles,
+        logger=logger,
+    )
+
+
+def build_slow_urls_bundles(service_id: str, source: dict, hours: list[str]) -> int:
+    """Write a top-K-by-p95 URLs rollup for each closed hour in ``hours``.
+
+    Skips the active UTC hour (still being written; live SQL serves it
+    when the reader's window includes the active hour). Skips services
+    whose schema lacks ``url`` (the panel has no input). Skips a service
+    whose schema lacks both ``ottfb`` and ``ttfb`` (no latency to rank
+    on).
+
+    Idempotent — atomic tmp + rename. Returns the number of bundles
+    written this call.
+    """
+
+    def eligibility(cols, table_ident):
+        if "url" not in cols:
+            # No URL column → no rows to rank. Don't write empty files;
+            # the reader's "missing closed hour" check will fall back to
+            # raw, which itself returns has_data=False for this service.
+            return None
+        # Latency expression from the canonical catalog; absent=None →
+        # no latency column, no percentile to rank on.
+        return metric_expressions.origin_latency_us(cols, absent=None)
+
+    def build_copy_sql(lat_us_expr, table_ident, start_iso, end_iso, tmp_path):
+        lat_sum = metric_expressions.sum_or_zero("lat_us", zero="0.0")
+        return (
+            f"COPY ("
+            f"  SELECT "
+            f"    url, "
+            f"    CAST(COUNT(*) AS BIGINT) AS requests, "
+            f"    CAST(COUNT(*) FILTER (WHERE lat_us IS NOT NULL) AS BIGINT) AS lat_us_count, "
+            f"    CAST({lat_sum} AS DOUBLE) AS lat_us_sum, "
+            f"    CAST(MEDIAN(lat_us) AS DOUBLE) AS p50_us, "
+            f"    CAST(APPROX_QUANTILE(lat_us, 0.95) AS DOUBLE) AS p95_us, "
+            f"    CAST(APPROX_QUANTILE(lat_us, 0.99) AS DOUBLE) AS p99_us "
+            f"  FROM ("
+            f"    SELECT url, {lat_us_expr} AS lat_us "
+            f"    FROM {table_ident} "
+            f"    WHERE timestamp >= TIMESTAMPTZ '{start_iso}' "
+            f"      AND timestamp <  TIMESTAMPTZ '{end_iso}' "
+            f"      AND url IS NOT NULL"
+            f"  ) "
+            f"  WHERE lat_us IS NOT NULL "
+            f"  GROUP BY url "
+            f"  HAVING COUNT(*) >= {SLOW_URLS_BUNDLE_MIN_REQUESTS_PER_HOUR} "
+            f"  ORDER BY APPROX_QUANTILE(lat_us, 0.95) DESC "
+            f"  LIMIT {SLOW_URLS_BUNDLE_TOP_K}"
+            f") {parquet_zstd_target(tmp_path)}"
+        )
+
+    return build_per_hour_bundles(
+        service_id,
+        source,
+        hours,
+        bundle_filename=SLOW_URLS_BUNDLE_FILENAME,
+        tmp_prefix=".tmp_su_",
+        label="slow_urls",
+        eligibility=eligibility,
+        build_copy_sql=build_copy_sql,
+        logger=logger,
+    )
+
+
 sys.modules["backend.core.rollups.origin_summary"] = sys.modules[__name__]
+sys.modules["backend.core.rollups.origin_latency_ts"] = sys.modules[__name__]
+sys.modules["backend.core.rollups.slow_urls"] = sys.modules[__name__]

@@ -1446,7 +1446,7 @@ def get_transport_metrics(
 
 # A-3 (CacheRegistry): register the network response cache (also
 # pointed at by R-1's tests/conftest.py follow-on).
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("network._response_cache", _response_cache)
 

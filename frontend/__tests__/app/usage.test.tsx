@@ -44,9 +44,6 @@ vi.mock('@/components/PlotlyChart', async () => (await import('../helpers/page-s
 vi.mock('@/components/CostCalculator/CostCalculator', () => ({
   CostCalculator: () => <div data-testid="cost-calculator" />,
 }))
-vi.mock('@/app/sessions/_sections/ScoringControls', () => ({
-  ScoringControls: () => <div data-testid="scoring-controls" />,
-}))
 vi.mock('@/app/sessions/_sections/SessionsTable', () => ({
   SessionsTable: () => <div data-testid="sessions-table" />,
 }))

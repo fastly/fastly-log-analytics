@@ -29,7 +29,7 @@ import {
   PERIOD_LABELS,
   REGION_LABELS,
   SHIELD_LABELS,
-} from "@/lib/service-config-constants";
+} from "@/lib/constants";
 import { RumVersionPicker } from "../RumVersionPicker";
 
 export function StorageStep({ s }: { s: WizardState }) {

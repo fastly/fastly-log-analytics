@@ -15,23 +15,13 @@ import {
 import { makeStreamResponse, makeNeverClosingStreamResponse } from '../helpers/sse-mock'
 import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
 
+import { adminStreamHooks } from '@/hooks/useAdminEventStream'
+
 // Capture what useAdminEventStream registers with useServiceStream.
 let capturedOnEvent: ((raw: string) => void) | null = null
 let lastEnabled: boolean | undefined
 let lastPath: string | undefined
 let lastOpts: Record<string, unknown> | undefined
-
-vi.mock('@/hooks/useServiceStream', () => ({
-  useServiceStream: vi.fn(
-    (enabled: boolean, path: string, onEvent: (raw: string) => void, opts?: Record<string, unknown>) => {
-      lastEnabled = enabled
-      lastPath = path
-      capturedOnEvent = onEvent
-      lastOpts = opts
-      return { state: 'open' }
-    },
-  ),
-}))
 
 let bootstrapSettled = true
 vi.mock('@/hooks/useIsDataReady', () => ({
@@ -245,6 +235,15 @@ describe('useAdminEventStream', () => {
     bootstrapSettled = true
     mockState.activeServiceId = 'svc-1'
     vi.clearAllMocks()
+    vi.spyOn(adminStreamHooks, 'useServiceStream').mockImplementation(
+      (enabled, path, onEvent, opts) => {
+        lastEnabled = enabled
+        lastPath = path
+        capturedOnEvent = onEvent
+        lastOpts = opts as Record<string, unknown> | undefined
+        return { state: 'open' as const }
+      },
+    )
   })
 
   it('connects to /api/admin/events/stream with sorted channels + optionalService opts', async () => {

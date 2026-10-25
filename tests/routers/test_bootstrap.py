@@ -5,8 +5,8 @@ from unittest.mock import patch
 import pytest
 
 from backend.repositories._base import _safe_table
+from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 from tests.conftest import MOCK_SERVICE_ID
-from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
 
 
 def test_log_fields_catalog_endpoint(client):

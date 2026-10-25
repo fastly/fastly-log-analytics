@@ -34,20 +34,23 @@ from backend.core.clickhouse_client import (
     ClickHouseError,
     get_clickhouse_client,
 )
-from backend.core.clickhouse_export import FosArtifacts
 from backend.core.clickhouse_manifest import Artifact, Dataset, PgManifest
 from backend.core.clickhouse_publication import (
+    PAYLOAD_COLUMNS,
     DurableBatch,
+    FosArtifacts,
     activate_generation,
     build_batch_id,
+    canonical_bytes,
+    canonical_row,
+    digest_rows,
     full_rebuild,
     publish_batch,
     readiness,
     replay_unpublished,
     verify_generation,
 )
-from backend.core.clickhouse_rows import PAYLOAD_COLUMNS, canonical_bytes, canonical_row, digest_rows
-from backend.core.clickhouse_rows import build_batch_id as _rows_build_batch_id
+from backend.core.clickhouse_publication import build_batch_id as _rows_build_batch_id
 from backend.core.clickhouse_schema import CLICKHOUSE_SCHEMA_VERSION, create_clickhouse_schema, target_identity
 from backend.core.metadata.pg_schema import pg_schema_statements
 from backend.models.common import DebugQuery

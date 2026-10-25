@@ -25,7 +25,7 @@ import {
   resolveEnabledGroupsWithDeps,
 } from "@/lib/log-field-config-ops";
 import type { WizardState } from "../useWizardState";
-import { REGION_LABELS, SHIELD_LABELS } from "@/lib/service-config-constants";
+import { REGION_LABELS, SHIELD_LABELS } from "@/lib/constants";
 
 export function ExecuteStep({ s }: { s: WizardState }) {
   const { config, catalog, selectedService } = s;

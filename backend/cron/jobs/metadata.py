@@ -22,6 +22,12 @@ import time
 import httpx
 import tenacity
 
+from backend.core import duckdb as _db
+from backend.core.duckdb_recycle import (
+    _recycle_rss_threshold_bytes,
+    maybe_graceful_restart,
+    recycle_once,
+)
 from backend.cron.decorators import cron_task, global_job
 from backend.cron.lifecycle import cron_run, record_skip_row
 from backend.cron.scheduler import (
@@ -353,8 +359,7 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
     from backend.core.duckdb import get_source_for_service
     from backend.cron.decorators import dev_mode_no_crons
     from backend.cron.jobs._common import get_service_display_label
-    from backend.utils.ngwaf import fetch_verified_bots_paged
-    from backend.utils.ngwaf_bot_cache import cleanup_old_bots, upsert_bots
+    from backend.utils.ngwaf import cleanup_old_bots, fetch_verified_bots_paged, upsert_bots
 
     if dev_mode_no_crons():
         logger.info("⏸️  \x1b[36m[ngwaf_sync]\x1b[0m %s: dev_mode_no_crons active, skipping NGWAF sync.", service_id)
@@ -398,7 +403,7 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
         total_records = 0
         try:
             from backend.utils.bot_sources import build_matcher
-            from backend.utils.ngwaf_bot_cache import get_last_timestamp, update_sync_watermark
+            from backend.utils.ngwaf import get_last_timestamp, update_sync_watermark
 
             matcher = build_matcher()
             # Watermark-only resume path. upsert_bots() advances last_timestamp_synced
@@ -896,3 +901,72 @@ def _run_metadata_cleanup(service_id: str) -> None:
             job_name="metadata_cleanup",
             event={"type": "done", "message": summary},
         )
+
+
+# ── run_duckdb_recycle ───────────────────────────────────────────────────────
+
+
+def _maybe_adjust_recycle_schedule(*, expedite: bool) -> None:
+    """Dynamically adjust recycle interval under memory pressure (e.g. tighten to 2m, or relax back to baseline)."""
+    try:
+        from backend.core.duckdb_recycle import recycle_interval_min
+        from backend.cron.scheduler import get_scheduler
+
+        sched = get_scheduler()
+        job = sched.get_job("duckdb_recycle")
+        if not job:
+            return
+
+        baseline_mins = max(1.0, recycle_interval_min() or 60.0)
+        target_mins = min(2.0, baseline_mins) if expedite else baseline_mins
+
+        current_trigger = getattr(job, "trigger", None)
+        current_interval_s = getattr(getattr(current_trigger, "interval", None), "total_seconds", lambda: 0)()
+
+        if int(current_interval_s) != int(target_mins * 60):
+            job.reschedule("interval", minutes=target_mins)
+            logger.info(
+                "⚡ [duckdb_recycle] Dynamically adjusted recycle interval to %.1fm (expedite=%s)",
+                target_mins,
+                expedite,
+            )
+    except Exception as e:
+        logger.debug("[duckdb_recycle] Could not adjust recycle schedule: %s", e)
+
+
+@global_job("duckdb_recycle", color="35", tag="recycle", label="DuckDB recycle")
+def run_duckdb_recycle() -> str:
+    """Scheduler entry: recycle on the interval, gated by the optional RSS
+    threshold (skip when the process is still small — avoids needless cold
+    caches). Wrapped by ``global_job`` for start/end logging + record_job_run.
+    """
+    # Process-level OOM stopgap FIRST and independent of the recycle threshold:
+    # if RSS is already over the restart threshold, a clean self-restart is the
+    # only thing that reliably reclaims it (recycle frees ~0 of the real leak).
+    if maybe_graceful_restart():
+        return "graceful restart triggered (RSS over restart threshold)"
+    threshold = _recycle_rss_threshold_bytes()
+    rss = _db.current_rss_bytes()
+    if threshold > 0 and rss is not None:
+        if rss < threshold:
+            if rss >= int(threshold * 0.8):
+                _maybe_adjust_recycle_schedule(expedite=True)
+            elif rss < int(threshold * 0.5):
+                _maybe_adjust_recycle_schedule(expedite=False)
+            return f"skipped: RSS {rss / (1024 * 1024):.0f}MB < threshold {threshold / (1024 * 1024):.0f}MB"
+
+    res = recycle_once(reason="interval")
+
+    # Evaluate post-recycle memory to adapt schedule for next tick
+    rss_after = _db.current_rss_bytes()
+    if "incomplete" in res:
+        _maybe_adjust_recycle_schedule(expedite=True)
+    elif threshold > 0 and rss_after is not None:
+        if rss_after >= int(threshold * 0.8):
+            _maybe_adjust_recycle_schedule(expedite=True)
+        elif rss_after < int(threshold * 0.5):
+            _maybe_adjust_recycle_schedule(expedite=False)
+    elif threshold == 0:
+        _maybe_adjust_recycle_schedule(expedite=False)
+
+    return res

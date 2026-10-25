@@ -460,22 +460,7 @@ def _fetch_with_temp_cache(source: dict, db_iceberg) -> dict:
             if "iceberg_metadata_location" in source:
                 src["iceberg_metadata_location"] = source["iceberg_metadata_location"]
             try:
-                with db_iceberg.ducklake_session(src):
-                    if not db_iceberg.ducklake_table_exists(src):
-                        return {"ok": True, "table_exists": False, "message": "DuckLake table not found."}
-
-                    info = db_iceberg.get_table_info(src)
-                    if "error" in info:
-                        return {"ok": False, "error": info["error"]}
-                    calendar = db_iceberg.get_snapshot_calendar(src)
-
-                    return {
-                        "ok": True,
-                        "table_exists": True,
-                        "info": info,
-                        "calendar": calendar,
-                        "range": {"start": info.get("min_timestamp"), "end": info.get("max_timestamp")},
-                    }
+                return _fetch_direct(src, db_iceberg)
             finally:
                 db_iceberg.clear_source_caches(src["name"])
     except Exception as e:
@@ -505,6 +490,6 @@ from backend.core.iceberg.view import (  # noqa: F401, E402
 
 # A-3 (CacheRegistry): register every iceberg cache so the test
 # harness can drain them centrally via CacheRegistry.clear_all().
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("iceberg._view_cache", _view_cache)

@@ -81,7 +81,7 @@ from datetime import UTC, datetime
 from backend.cron.decorators import cron_task
 from backend.cron.lifecycle import cron_run
 from backend.cron.scheduler import _display_label
-from backend.utils.cache_registry import CacheRegistry
+from backend.utils.bounded_cache import CacheRegistry
 
 logger = logging.getLogger("backend.scheduler")
 

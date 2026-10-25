@@ -32,6 +32,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from backend.core import metadata as _meta_mod
 from backend.core.query_registry import query_registry
 from backend.deps import get_service_id, require_admin
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.admin_actions import (
     ActiveQueryRow,
     CancelResponse,
@@ -42,7 +43,6 @@ from backend.models.admin_actions import (
     SnapshotResponse,
     SummaryResponse,
 )
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.utils.router_utils import make_error, not_found, require_service_id
 
 logger = logging.getLogger(__name__)
@@ -319,6 +319,6 @@ def query_monitor_config() -> dict:
 
 
 # R-1: drain the per-IP cancel rate-limit deque between tests.
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("routers.admin_queries._cancel_history", _cancel_history)

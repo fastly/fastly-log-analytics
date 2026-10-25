@@ -26,7 +26,7 @@ import RumPageClient from '@/app/rum/_sections/RumClient'
 vi.mock('@/components/PlotlyChart', async () => (await import('../../helpers/page-smoke')).plotlyChartModuleMock())
 vi.mock('@/components/charts/TimeSeriesChart', () => ({ TimeSeriesChart: () => <div data-testid="timeseries-chart" /> }))
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../../helpers/virtual-mock')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../../helpers/browser-stubs')).reactVirtualModuleMock())
 
 const API_BASE = getApiBase()
 const SVC = 'svc-rum-client'

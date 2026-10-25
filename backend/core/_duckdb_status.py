@@ -1445,6 +1445,6 @@ def purge_usage_log(source: dict):
 # R-1: drain the per-source schema cache between tests so a previous
 # test's resolved column list doesn't carry into the next test that
 # reuses the same source name.
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("core._duckdb_status._schema_cache", _schema_cache)

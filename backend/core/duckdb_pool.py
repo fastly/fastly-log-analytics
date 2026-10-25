@@ -1333,6 +1333,6 @@ def get_pool_status() -> dict[str, Any]:
 
 # R-1: drain the per-connection metadata dict between tests so a recycled
 # Python id() doesn't carry an earlier test's pool-slot state forward.
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("core.duckdb_pool._conn_state", _conn_state)

@@ -13,8 +13,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
 from backend.deps import get_service_id, get_source
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.admin import IngestedFilesResponse, LogExtentsResponse, SyncStatusResponse
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.sync_status_publisher import publisher as sync_status_publisher
 from backend.utils.router_utils import make_error, query_errors, raise_internal, require_service_id
 from backend.utils.sse import iter_with_disconnect_ping, sse_response
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 from backend.utils.dir_size import _get_dir_size
 
-from ._router import router
+from ._helpers import router
 
 # Dedicated router for the analyst-safe sync-status siblings (/api/log-extents
 # + /stream). FastAPI MERGES router-level and route-level tags, so a bare

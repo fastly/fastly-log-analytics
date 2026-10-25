@@ -1,5 +1,9 @@
+import {
+  historyHoursFromExtents,
+  pickInsightsDefault,
+} from '@/lib/insights-defaults'
 import type { Schema } from '@/types/api'
-import { quantizeAnchor } from '@/lib/time-window'
+import { quantizeAnchor } from '@/lib/range-wire'
 
 import { parseSsrJson, ssrUpstreamGet } from './_transport'
 
@@ -231,4 +235,87 @@ export async function fetchOriginServerSide(
       sections: ORIGIN_SSR_SECTIONS,
     },
   })
+}
+
+interface InsightsSsrSeed {
+  /** The /api/insights response body to seed into the cache, or null. */
+  data: unknown
+  /** Window token (string, e.g. '1') — must equal the client first-paint key element. */
+  windowHours: string
+  /** Baseline token (string, e.g. '168') — must equal the client first-paint key element. */
+  baselineHours: string
+}
+
+/**
+ * Resolve the default insights window/baseline tokens the same way the client
+ * does on first paint. Exported so the unit test can pin the key-match without
+ * a network round-trip.
+ */
+export function resolveInsightsDefault(
+  earliestLogAt: string | null | undefined,
+): { windowHours: string; baselineHours: string } {
+  const picked = pickInsightsDefault(historyHoursFromExtents(earliestLogAt))
+  return { windowHours: picked.window, baselineHours: picked.baseline }
+}
+
+/**
+ * Pull `earliest_log_at` out of the bootstrap `log_extents` blob (typed as an
+ * open record in the generated schema). Returns undefined when absent →
+ * pickInsightsDefault falls back to STATIC_DEFAULT, matching the client.
+ */
+type LogExtentsLike = Pick<Schema<'LogExtentsResponse'>, 'earliest_log_at'>
+
+function earliestFromLogExtents(
+  logExtents: LogExtentsLike | null | undefined,
+): string | null | undefined {
+  return typeof logExtents?.earliest_log_at === 'string'
+    ? logExtents.earliest_log_at
+    : undefined
+}
+
+/**
+ * SSR-prefetch the default insights selection for the active service.
+ *
+ * @param serviceId    Active service id (from the SSR'd bootstrap). Without it
+ *                     the backend's context resolution 400s — bail to client.
+ * @param logExtents   The bootstrap `log_extents` blob, used to compute the
+ *                     adaptive default window/baseline (server-reproducible).
+ */
+export async function fetchInsightsServerSide(
+  serviceId: string | undefined,
+  logExtents: LogExtentsLike | null | undefined,
+  initialWindow?: string | null,
+  initialBaseline?: string | null,
+): Promise<InsightsSsrSeed | null> {
+  const defaults = resolveInsightsDefault(
+    earliestFromLogExtents(logExtents),
+  )
+  const windowHours = initialWindow || defaults.windowHours
+  const baselineHours = initialBaseline || defaults.baselineHours
+
+  // Without a service id the backend 400s — return the tokens so the page can
+  // still build the (unseeded) client key path, but no data to seed.
+  if (!serviceId) return null
+
+  const data = parseSsrJson(
+    await ssrUpstreamGet({
+      path: '/api/insights',
+      logPrefix: 'ssr/insights',
+      method: 'POST',
+      // Mirror InsightsBody's client request body EXACTLY (app/insights/page.tsx):
+      // parseFloat(windowHours) / parseFloat(baselineHours), empty filters.
+      body: {
+        window_size_hrs: parseFloat(windowHours),
+        baseline_hours: parseFloat(baselineHours),
+        filters: {},
+      },
+      // Mirror the client openapi-fetch middleware, which stamps x-service-id
+      // (lib/api.ts). build_request_context reads x-service-id (backend/deps.py).
+      extraHeaders: { 'x-service-id': serviceId },
+    }),
+    'ssr/insights',
+  )
+
+  if (data == null) return null
+  return { data, windowHours, baselineHours }
 }

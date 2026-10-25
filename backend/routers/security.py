@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 
 from backend.core.iceberg import execute_with_stale_view_retry
 from backend.core.request_context import RequestContext, build_request_context
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.security import (
     SecurityAggregatesRequest,
     SecurityAggregatesResponse,

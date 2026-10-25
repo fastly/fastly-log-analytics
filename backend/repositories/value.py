@@ -23,8 +23,7 @@ from backend.repositories._base import (
 )
 from backend.repositories.rollup_coverage import collect_hourly_bundle_paths
 from backend.repositories.utils.filters import build_where_clause
-from backend.utils.bounded_cache import BoundedTTLCache
-from backend.utils.cache_registry import CacheRegistry
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import parse_window, safe_iso
 from backend.utils.sql_validator import escape_sql_literal
 

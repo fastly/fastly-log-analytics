@@ -9,7 +9,7 @@ const { mockGet, mockDelete, mockPush } = vi.hoisted(() => ({
   mockPush: vi.fn(),
 }))
 
-vi.mock('@tanstack/react-virtual', async () => (await import('../../helpers/virtual-mock')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-virtual', async () => (await import('../../helpers/browser-stubs')).reactVirtualModuleMock())
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({

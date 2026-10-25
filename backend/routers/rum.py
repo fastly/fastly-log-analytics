@@ -35,7 +35,7 @@ from backend.core.faro_versions import DEFAULT_FARO_VERSION, fetch_available_far
 from backend.core.iceberg import execute_with_stale_view_retry
 from backend.core.request_context import RequestContext, build_request_context
 from backend.deps import _ConnectionHolder, get_service_id, require_admin, require_service_access
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.provision import (
     RumDisableRequest,
     RumEnableRequest,
@@ -60,8 +60,7 @@ from backend.provision.rum_orchestrator_v2 import (
 )
 from backend.repositories import rum as rum_repo
 from backend.repositories.utils.response_cache import bucket_time_to_minute, digest_cache_key
-from backend.utils.bounded_cache import BoundedTTLCache
-from backend.utils.cache_registry import CacheRegistry
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import iso_z, parse_iso_utc
 from backend.utils.router_utils import (
     correlation_id,

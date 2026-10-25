@@ -16,11 +16,9 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
-from backend.high_scale._batch_adapter_base import (
-    BaseClickHouseBatchAdapter,
-)
 from backend.high_scale._common import bucket as _bucket
 from backend.high_scale.publication import (
+    BaseClickHouseBatchAdapter,
     HighScaleBatch,
     InsertReceipt,
     _batch_uuid,

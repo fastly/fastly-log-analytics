@@ -1,37 +1,268 @@
 'use client'
 
 import React from 'react'
-import dynamic from 'next/dynamic'
+import type { Dispatch, SetStateAction } from 'react'
+import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
 import { useTimezone } from '@/hooks/useDateFormat'
 import { useColumnVisibility } from '@/hooks/useDerivedState'
-import { useFieldLabel } from '@/hooks/useLogFieldsCatalog'
+import { useActiveLogFields, useFieldLabel } from '@/hooks/useLogFieldsCatalog'
 import { useTimeLayout } from '@/lib/chart-helpers'
+import { CHART_COLORS, useTimeseriesToTraces } from '@/lib/chart-builders'
 import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
 import { useReportRangeAnchor } from '@/hooks/useReportRangeAnchor'
 import { ReportLayout } from '@/components/ReportLayout'
-import { Skeleton } from '@/components/ui/skeleton'
+import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
+import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
+import { PlotlyChart } from '@/components/PlotlyChart'
+import { FilterValueCell } from '@/components/FilterValueCell'
+import { ChartEmptyState } from '@/components/CardErrorState'
+import { formatCountMaybe } from '@/lib/format'
 import { client, extractApiError } from '@/lib/api'
-import { Shield } from 'lucide-react'
-import { BotsSection } from './BotsSection'
+import { Globe, Network, Repeat, Scale, Shield } from 'lucide-react'
+import { BotsSection, SECURITY_INFO, TOP_IP_COLUMN_IDS } from './BotsSection'
 import { ProxyWatchdogSection } from './ProxyWatchdogSection'
 import { ThreatIntelPanel } from '@/components/security/ThreatIntelPanel'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
-// HeaderAnomaliesSection + NetworkSection sit below the first-paint
-// fold (BotsSection is the anchor). They consume their OWN per-section
-// fetch, so deferring their JS parse + React mount until after the first
-// commit lets the bots cards above paint without competing for the main
-// thread on ~2 Plotly mounts each.
-const HeaderAnomaliesSection = dynamic(
-  () => import('./HeaderAnomaliesSection').then(m => ({ default: m.HeaderAnomaliesSection })),
-  { ssr: false, loading: () => <Skeleton className="h-80 w-full" /> },
-)
-const NetworkSection = dynamic(
-  () => import('./NetworkSection').then(m => ({ default: m.NetworkSection })),
-  { ssr: false, loading: () => <Skeleton className="h-80 w-full" /> },
-)
+import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
 import type { components } from '@/types/api.generated'
 
 type SecurityData = components['schemas']['SecurityAggregatesResponse']
+type TopIpHeader = components['schemas']['TopIpHeaderRow']
+
+type HeaderAnomaliesProps = {
+  data: SecurityData | undefined
+  isLoading: boolean
+  isFetching: boolean
+  error: Error | null
+  getFieldLabel: (id: string) => string
+  topIpVisibility: VisibilityState
+  setTopIpVisibility: Dispatch<SetStateAction<VisibilityState>>
+  onTopIpVisChange: (id: string, vis: boolean) => void
+}
+
+export function HeaderAnomaliesSection({
+  data,
+  isLoading,
+  isFetching,
+  error,
+  getFieldLabel,
+  topIpVisibility,
+  setTopIpVisibility,
+  onTopIpVisChange,
+}: HeaderAnomaliesProps) {
+  // Distinguish "field group not enabled" from "enabled but no data yet" so a
+  // low-traffic/fresh service doesn't read as misconfigured.
+  const { isFieldActive } = useActiveLogFields()
+  const headerSizeData = React.useMemo((): PlotlyTrace[] => {
+    const req_size_dist = data?.req_size_dist
+    if (!req_size_dist?.length) return []
+    return [{
+      x: req_size_dist.map((d) => d.bucket ?? d.label ?? null),
+      y: req_size_dist.map((d) => d.count),
+      type: 'bar',
+      marker: { color: '#ec4899' }
+    }]
+  }, [data])
+
+  const topIpHeaderColumns: ColumnDef<TopIpHeader>[] = [
+    {
+      accessorKey: 'ip',
+      header: 'IP Address',
+      cell: ({ row }) => (
+        <FilterValueCell
+          filters={[{ column: 'client_ip', value: row.original.ip ?? '' }]}
+          className="font-mono text-xs"
+        />
+      )
+    },
+    { accessorKey: 'max_header', header: 'Max Header (Bytes)', cell: ({ row }) => formatCountMaybe(row.original.max_header) ?? '—' },
+  ]
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+      <AnalyticsCard
+        title="Request Header Size Distribution"
+        icon={<Scale className="h-4 w-4" />}
+        isLoading={isLoading}
+        isFetching={isFetching}
+        loadingMessage="Loading request header size distribution..."
+        error={error as AnalyticsCardError | null}
+        className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
+        contentClassName="p-2"
+        helpTitle={SECURITY_INFO.req_size.title}
+        helpContent={SECURITY_INFO.req_size.body}
+      >
+        {headerSizeData.length === 0 && !isLoading ? (
+          <ChartEmptyState requires={isFieldActive('req_header_bytes') ? undefined : "Request Identity (Group A) fields to be enabled in Fastly logging."} />
+        ) : (
+          <PlotlyChart
+            data={headerSizeData}
+            layout={{ yaxis: { title: 'Count' } }}
+            height="100%"
+          />
+        )}
+      </AnalyticsCard>
+
+      <AnalyticsCard
+        title="Oversized Request Headers (by IP)"
+        icon={<Shield className="h-4 w-4" />}
+        headerAction={
+          <ColumnVisibilityDropdown
+            columns={TOP_IP_COLUMN_IDS.map(id => ({ id, label: getFieldLabel(id) }))}
+            visibility={topIpVisibility}
+            onChange={onTopIpVisChange}
+          />
+        }
+        isLoading={isLoading}
+        isFetching={isFetching}
+        loadingMessage="Loading oversized request headers..."
+        error={error as AnalyticsCardError | null}
+        className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
+        contentClassName="p-0"
+        helpTitle={SECURITY_INFO.top_ips_header.title}
+        helpContent={SECURITY_INFO.top_ips_header.body}
+      >
+        <DataTable
+          columns={topIpHeaderColumns}
+          data={data?.top_ips_header || []}
+          emptyMessage={isLoading ? "" : (isFieldActive('req_header_bytes') ? "No data in this time range yet." : "Requires Request Identity (Group A) log fields to be enabled in Fastly logging.")}
+          hideToolbar
+          columnVisibility={topIpVisibility}
+          onColumnVisibilityChange={setTopIpVisibility}
+        />
+      </AnalyticsCard>
+    </div>
+  )
+}
+
+type NetworkSectionProps = {
+  data: SecurityData | undefined
+  isLoading: boolean
+  isFetching: boolean
+  error: Error | null
+  timezone: string
+  commonTimeLayout: PlotlyLayout
+}
+
+export function NetworkSection({
+  data,
+  isLoading,
+  isFetching,
+  error,
+  timezone,
+  commonTimeLayout,
+}: NetworkSectionProps) {
+  // Distinguish "field group not enabled" from "enabled but no data yet" so a
+  // low-traffic/fresh service doesn't read as misconfigured.
+  const { isFieldActive } = useActiveLogFields()
+  const ipv6Data = useTimeseriesToTraces(
+    data?.ipv6_adoption,
+    [{ key: 'pct', name: 'IPv6 %', color: '#8b5cf6', fill: 'tozeroy' }],
+    timezone,
+  )
+
+  const proxyData = React.useMemo((): PlotlyTrace[] => {
+    const proxy_dist = data?.proxy_dist
+    if (!proxy_dist?.length) return []
+    return [{
+      values: proxy_dist.map((d) => d.count),
+      labels: proxy_dist.map((d) => d.type ?? null),
+      type: 'pie',
+      hole: 0.4,
+      marker: { colors: [CHART_COLORS.info, CHART_COLORS.success, CHART_COLORS.warning, CHART_COLORS.danger, '#8b5cf6'] }
+    }]
+  }, [data])
+
+  const connReuseData = React.useMemo((): PlotlyTrace[] => {
+    const conn_reuse_dist = data?.conn_reuse_dist
+    if (!conn_reuse_dist?.length) return []
+    return [{
+      x: conn_reuse_dist.map((d) => d.bucket ?? d.label ?? null),
+      y: conn_reuse_dist.map((d) => d.count),
+      type: 'bar',
+      marker: { color: '#06b6d4' }
+    }]
+  }, [data])
+
+  return (
+    <>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+        <AnalyticsCard
+          title="IPv6 Adoption over Time"
+          icon={<Globe className="h-4 w-4" />}
+          isLoading={isLoading}
+          isFetching={isFetching}
+          loadingMessage="Loading IPv6 adoption data..."
+          error={error as AnalyticsCardError | null}
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
+          contentClassName="p-2"
+          helpTitle={SECURITY_INFO.ipv6.title}
+          helpContent={SECURITY_INFO.ipv6.body}
+        >
+          {ipv6Data.length === 0 && !isLoading ? (
+            <ChartEmptyState requires={isFieldActive('is_ipv6') ? undefined : "Infrastructure (Group C) fields to be enabled in Fastly logging."} />
+          ) : (
+            <PlotlyChart
+              data={ipv6Data}
+              layout={{
+                ...commonTimeLayout,
+                yaxis: { title: 'IPv6 %', range: [0, 100] }
+              }}
+              height="100%"
+            />
+          )}
+        </AnalyticsCard>
+
+        <AnalyticsCard
+          title="Proxy/Anonymizer Breakdown"
+          icon={<Network className="h-4 w-4" />}
+          isLoading={isLoading}
+          isFetching={isFetching}
+          loadingMessage="Loading proxy/anonymizer breakdown..."
+          error={error as AnalyticsCardError | null}
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
+          contentClassName="p-2"
+          helpTitle={SECURITY_INFO.proxy.title}
+          helpContent={SECURITY_INFO.proxy.body}
+        >
+          {proxyData.length === 0 && !isLoading ? (
+            <ChartEmptyState requires={isFieldActive('p_type') ? undefined : "Security: Proxy & Anonymization (Group I) fields to be enabled in Fastly logging."} />
+          ) : (
+            <PlotlyChart
+              data={proxyData}
+              height="100%"
+            />
+          )}
+        </AnalyticsCard>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <AnalyticsCard
+          title="Connection Reuse (Requests per Connection)"
+          icon={<Repeat className="h-4 w-4" />}
+          isLoading={isLoading}
+          isFetching={isFetching}
+          loadingMessage="Loading connection reuse distribution..."
+          error={error as AnalyticsCardError | null}
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
+          contentClassName="p-2"
+          helpTitle={SECURITY_INFO.conn_reuse.title}
+          helpContent={SECURITY_INFO.conn_reuse.body}
+        >
+          {connReuseData.length === 0 && !isLoading ? (
+            <ChartEmptyState requires={isFieldActive('conn_requests') ? undefined : "Infrastructure (Group C) fields to be enabled in Fastly logging."} />
+          ) : (
+            <PlotlyChart
+              data={connReuseData}
+              layout={{ yaxis: { title: 'Count' } }}
+              height="100%"
+            />
+          )}
+        </AnalyticsCard>
+      </div>
+    </>
+  )
+}
 
 // Per-section field lists. The backend gates each section block on
 // `sections is None or 'name' in sections`; passing only the names a

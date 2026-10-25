@@ -472,7 +472,7 @@ def test_atomic_write_cache_ensures_atomic_replace_and_cleanup_on_error():
 
 def test_version_cache_registered_in_cache_registry():
     """_version_cache is registered in CacheRegistry and drains on clear."""
-    from backend.utils.cache_registry import CacheRegistry
+    from backend.utils.bounded_cache import CacheRegistry
 
     assert "utils.bot_sources._version_cache" in CacheRegistry.names()
 

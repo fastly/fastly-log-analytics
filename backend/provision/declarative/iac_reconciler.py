@@ -16,7 +16,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from backend.core.fastly.service import find_service_by_name
+from backend.core.fastly.client import find_service_by_name
 from backend.provision.declarative.generators import (
     desired_backends,
     desired_logging_endpoints,

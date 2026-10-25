@@ -10,6 +10,7 @@ from backend.high_scale.archive_models import (
     ArchiveManifest,
     ArchiveSourceEntry,
     ArchiveSourceObject,
+    ArchiveState,
 )
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.deletion import (
@@ -18,7 +19,6 @@ from backend.high_scale.deletion import (
     HighScaleDeletionSweeper,
     PostgresDeletionLedger,
 )
-from backend.high_scale.models import ArchiveState
 from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
 
 

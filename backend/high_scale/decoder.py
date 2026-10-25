@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 from backend.core.field_registry import DuckType, try_get
 from backend.core.rum_ingest import extract_metrics_from_faro_payload
 from backend.high_scale.archive_models import ArchiveSourceObject
-from backend.high_scale.schema import build_event_id, build_request_event_id, build_rum_event_id
+from backend.high_scale.publication import build_event_id, build_request_event_id, build_rum_event_id
 
 
 @dataclass(frozen=True)

@@ -63,7 +63,7 @@ _REAP_INTERVAL_S = 24 * 3600
 _last_reap_monotonic: float | None = None
 
 
-from backend.utils.ip_ranges import (
+from backend.utils.bot_sources import (
     ip_in_ranges,
 )
 

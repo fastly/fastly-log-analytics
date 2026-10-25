@@ -51,7 +51,7 @@ _ducklake_table_metadata_cache: dict[tuple[str, str], tuple[int | None, tuple[in
 _ducklake_table_metadata_cache_lock = threading.Lock()
 _ducklake_session_local = threading.local()
 
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("iceberg._ducklake_table_metadata_cache", _ducklake_table_metadata_cache)
 

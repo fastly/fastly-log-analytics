@@ -65,10 +65,8 @@ def test_format_debug_request_minimal():
 
 
 def test_router_utils_redaction_uses_the_shared_salt_registry():
-    from backend.utils import error_redaction
-
     salt = "test-cid-salt-for-redaction"
-    error_redaction.register_salt(salt)
+    router_utils.register_salt(salt)
 
     assert router_utils.redact_error_text(f"{salt} /app/data/private.db") == ("[redacted] <path>")
 

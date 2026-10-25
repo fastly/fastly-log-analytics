@@ -1,21 +1,25 @@
 /**
- * R-16 audit (testing_suite_audit_2026-06-14.md): every assertion in
- * this file is pure-logic conditional rendering driven by the
- * useServiceStore + useBootstrap mocks (access-level gating, remote-
- * analyst watermark). The Phase 3 Playwright journeys (plotly-chart,
- * maplibre-country-filter, dashboard-card-drag-drop) exercise the
- * mounted DOM of the layout but NOT the prop-driven branching pinned
- * here, so there is no overlap to prune — these tests stay.
+ * Consolidated tests for AppLayout, ReportShell, ChartIntervalButtons,
+ * NoServiceSelected, UpdatingBadge, StoreHydrator, and ReloadLoopGuard.
  *
- * If a future Playwright spec starts asserting on the same conditional
- * branches (e.g. that an analyst session hides "Usage & Cost"), revisit
- * this file and trim the now-redundant JSDOM coverage.
+ * @vitest-environment jsdom
  */
-import { screen, act } from '@testing-library/react'
-import { expect, test, vi, beforeEach } from 'vitest'
+import { stubSystemTimeZone } from '@/__tests__/helpers/browser-stubs'
+import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { describe, expect, it, test, vi, beforeEach, afterEach } from 'vitest'
+import { Server } from 'lucide-react'
 import { renderWithQueryClient } from '../helpers/query'
 import { AppLayout } from '@/components/AppLayout'
+import { ReportShell } from '@/components/ReportShell'
+import { ChartIntervalButtons } from '@/components/ReportLayout'
+import { NoServiceSelected } from '@/components/NoServiceSelected'
+import { UpdatingBadge } from '@/components/AnalyticsCard'
+import { StoreHydrator, ReloadLoopGuard } from '@/components/QueryProvider'
+import { INTERVALS } from '@/lib/constants'
 import { useServiceStore } from '@/stores/serviceStore'
+import { useTimezoneStore } from '@/stores/timezoneStore'
+import { useDebugStore } from '@/stores/debugStore'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import { partial } from '../helpers/partial'
 import type { BootstrapResponse } from '@/types/api'
@@ -37,21 +41,28 @@ vi.mock('@/hooks/useUrlServiceSync', () => ({
   useUrlServiceSync: vi.fn(),
 }))
 
-// useIsAnalyst reads directly from the QueryClient cache (NOT the
-// mocked useBootstrap), so mocking useBootstrap above doesn't reach it.
-// The default implementation honours serviceStore.accessLevel so the
-// "hides restricted items for analysts" test continues to work; the
-// watermark test overrides via vi.mocked(useIsAnalyst).mockReturnValue.
 vi.mock('@/hooks/useIsAnalyst', () => ({
   useIsAnalyst: vi.fn(),
   useMaskIps: () => false,
   useEnforceMaskedFilters: vi.fn(),
 }))
 
+let mockActiveServiceId: string | null = 'svc-1'
+let mockIsDataReady = true
+let mockBootstrapResolved = true
+
+vi.mock('@/hooks/useIsDataReady', () => ({
+  useEffectiveServiceId: () => mockActiveServiceId,
+  useIsDataReady: () => mockIsDataReady,
+  useBootstrapResolved: () => mockBootstrapResolved,
+}))
+
+vi.mock('@/components/skeletons/PageSkeleton', () => ({
+  DashboardSkeleton: () => <div data-testid="skeleton" />,
+}))
+
 // Mock components
 vi.mock('@/components/ServiceSwitcher/ServiceSwitcher', () => ({ ServiceSwitcher: () => <div>ServiceSwitcher</div> }))
-vi.mock('@/components/TimezoneSwitcher/TimezoneSwitcher', () => ({ TimezoneSwitcher: () => <div>TimezoneSwitcher</div> }))
-vi.mock('@/components/ThemeToggle/ThemeToggle', () => ({ ThemeToggle: () => <div>ThemeToggle</div> }))
 vi.mock('@/components/FilterBar/FilterBar', () => ({ FilterBar: () => <div>FilterBar</div> }))
 vi.mock('@/components/SyncStatusBadge/SyncStatusBadge', () => ({ SyncStatusBadge: () => <div>SyncStatusBadge</div> }))
 vi.mock('@/components/DebugPanel', () => ({ DebugPanel: () => <div>DebugPanel</div> }))
@@ -66,6 +77,11 @@ vi.mock('@/components/ui/scroll-area', () => ({
 
 type BootstrapData = BootstrapResponse
 
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
+
 // Real store for the test
 beforeEach(async () => {
   vi.clearAllMocks()
@@ -77,10 +93,6 @@ beforeEach(async () => {
     isLoading: false,
   }))
 
-  // Default useIsAnalyst implementation: mirror the prod hook's
-  // serviceStore-accessLevel branch (the bootstrap-settings branch
-  // requires QueryClient cache seeding that the test isn't doing).
-  // Watermark test overrides via mockReturnValue(true).
   const { useIsAnalyst } = await import('@/hooks/useIsAnalyst')
   vi.mocked(useIsAnalyst).mockImplementation(() => {
     const { activeServiceId, services } = useServiceStore.getState()
@@ -88,9 +100,6 @@ beforeEach(async () => {
     return active?.accessLevel === 'read_only'
   })
 
-  // Wrap in act() — the previous test's component may still have a live
-  // store subscription mid-cleanup, and React 19 warns when a subscriber
-  // is notified outside act().
   act(() => {
     useServiceStore.setState({
       activeServiceId: 'test-svc',
@@ -108,9 +117,6 @@ test('renders AppLayout with standard navigation', () => {
 })
 
 test('hides restricted items for analysts', () => {
-  // Wrap the store mutation in act() — subscribers (the live AppLayout
-  // component the next render mounts) are notified synchronously, and
-  // React 19 warns when that happens outside act().
   act(() => {
     useServiceStore.setState({
       activeServiceId: 'analyst-svc',
@@ -137,9 +143,6 @@ test('renders analyst watermark when bootstrap reports remote analyst', async ()
     isSuccess: true,
     isLoading: false,
   }))
-  // useIsAnalyst reads its own QueryClient cache; flip it true for
-  // this assertion so the watermark render gate (isAnalyst &&
-  // (analystEmail || analystName)) opens.
   const { useIsAnalyst } = await import('@/hooks/useIsAnalyst')
   vi.mocked(useIsAnalyst).mockReturnValue(true)
 
@@ -176,4 +179,335 @@ test('keeps anonymous visitors on sign-in before the analyst role hydrates', asy
   expect(screen.getByText('Analyst sign-in')).toBeInTheDocument()
   expect(replace).not.toHaveBeenCalled()
   expect(screen.queryByText('No services configured yet. Redirecting to the admin setup page.')).not.toBeInTheDocument()
+})
+
+describe('ReportShell', () => {
+  beforeEach(() => {
+    mockActiveServiceId = 'svc-1'
+    mockIsDataReady = true
+    mockBootstrapResolved = true
+  })
+
+  it('renders title + children once the service is selected and data is ready', () => {
+    render(
+      <ReportShell title="My Report" description="A descriptive line" icon={Server}>
+        <div data-testid="content">body</div>
+      </ReportShell>,
+    )
+    expect(screen.getByText('My Report')).toBeInTheDocument()
+    expect(screen.getByTestId('content')).toBeInTheDocument()
+  })
+
+  it('falls back to NoServiceSelected when no active service id is set (requireService default)', () => {
+    mockActiveServiceId = null
+    render(
+      <ReportShell title="Security" icon={Server}>
+        <div data-testid="content">body</div>
+      </ReportShell>,
+    )
+    expect(screen.getByRole('heading', { name: 'No Service Selected' })).toBeInTheDocument()
+    expect(screen.getByText(/select a service/i)).toBeInTheDocument()
+    expect(screen.queryByTestId('content')).not.toBeInTheDocument()
+  })
+
+  it('shows the dashboard skeleton when isDataReady is false and honours isReadyOverride', () => {
+    mockIsDataReady = false
+    const { unmount } = render(
+      <ReportShell title="Logs" icon={Server}>
+        <div data-testid="content">body</div>
+      </ReportShell>,
+    )
+    expect(screen.getByTestId('skeleton')).toBeInTheDocument()
+    expect(screen.queryByTestId('content')).not.toBeInTheDocument()
+    unmount()
+
+    render(
+      <ReportShell title="Logs" icon={Server} isReadyOverride>
+        <div data-testid="content">body</div>
+      </ReportShell>,
+    )
+    expect(screen.getByTestId('content')).toBeInTheDocument()
+    expect(screen.queryByTestId('skeleton')).not.toBeInTheDocument()
+  })
+
+  it('flash defense: bootstrap unresolved AND no active service → skeleton, not NoServiceSelected', () => {
+    mockActiveServiceId = null
+    mockBootstrapResolved = false
+    mockIsDataReady = false
+    render(
+      <ReportShell title="Dashboard" icon={Server}>
+        <div data-testid="content">body</div>
+      </ReportShell>,
+    )
+    expect(screen.queryByRole('heading', { name: 'No Service Selected' })).not.toBeInTheDocument()
+    expect(screen.getByTestId('skeleton')).toBeInTheDocument()
+  })
+
+  it('requireService=false bypasses the NoServiceSelected gate', () => {
+    mockActiveServiceId = null
+    render(
+      <ReportShell title="Insights" icon={Server} requireService={false}>
+        <div data-testid="content">body</div>
+      </ReportShell>,
+    )
+    expect(screen.queryByRole('heading', { name: 'No Service Selected' })).not.toBeInTheDocument()
+    expect(screen.getByTestId('content')).toBeInTheDocument()
+  })
+})
+
+const ALL_VALID = new Set(INTERVALS.map((i) => i.value))
+
+describe('ChartIntervalButtons', () => {
+  it('renders one button per INTERVALS entry and marks effective interval with aria-pressed=true', () => {
+    render(
+      <ChartIntervalButtons
+        effectiveInterval="1 hour"
+        validIntervals={ALL_VALID}
+        onIntervalChange={() => {}}
+      />,
+    )
+    for (const i of INTERVALS) {
+      expect(screen.getByRole('button', { name: `Chart bucket size: ${i.label}` })).toBeInTheDocument()
+    }
+    expect(screen.getByRole('button', { name: 'Chart bucket size: 1h' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: 'Chart bucket size: 1m' })).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('fires onIntervalChange for valid buttons and disables invalid ones', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const { unmount } = render(
+      <ChartIntervalButtons
+        effectiveInterval="1 minute"
+        validIntervals={ALL_VALID}
+        onIntervalChange={onChange}
+      />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Chart bucket size: 1h' }))
+    expect(onChange).toHaveBeenCalledWith('1 hour')
+    unmount()
+
+    const onChangeDisabled = vi.fn()
+    render(
+      <ChartIntervalButtons
+        effectiveInterval="1 minute"
+        validIntervals={new Set(['1 minute'])}
+        onIntervalChange={onChangeDisabled}
+      />,
+    )
+    const hourBtn = screen.getByRole('button', { name: 'Chart bucket size: 1h' })
+    expect(hourBtn).toBeDisabled()
+    await user.click(hourBtn)
+    expect(onChangeDisabled).not.toHaveBeenCalled()
+  })
+})
+
+describe('NoServiceSelected', () => {
+  it('renders the provided message, default/explicit title, and lucide icon', () => {
+    const { container, unmount } = render(
+      <NoServiceSelected icon={Server} message="Pick one from the picker above" />,
+    )
+    expect(screen.getByRole('heading', { name: 'No Service Selected' })).toBeInTheDocument()
+    expect(screen.getByText('Pick one from the picker above')).toBeInTheDocument()
+    const svg = container.querySelector('svg')
+    expect(svg?.classList.contains('text-muted-foreground')).toBe(true)
+    unmount()
+
+    render(<NoServiceSelected icon={Server} message="msg" title="Nothing here yet" />)
+    expect(screen.getByRole('heading', { name: 'Nothing here yet' })).toBeInTheDocument()
+  })
+})
+
+describe('UpdatingBadge', () => {
+  it('renders the "Updating" label text and pulses the decorative dot only', () => {
+    const { container } = render(<UpdatingBadge />)
+    expect(screen.getByText(/updating/i)).toBeInTheDocument()
+    expect(container.children).toHaveLength(1)
+    const root = container.firstChild as HTMLElement
+    expect(root.className).not.toMatch(/animate-pulse/)
+    expect(root.querySelector('span')!.className).toMatch(/animate-pulse/)
+  })
+})
+
+describe('StoreHydrator', () => {
+  beforeEach(() => {
+    window.localStorage.clear()
+    sessionStorage.clear()
+    act(() => {
+      useServiceStore.setState({
+        activeServiceId: null,
+        services: [],
+        isInitialized: false,
+      })
+      useTimezoneStore.setState({ mode: 'system', timezone: 'UTC' })
+      useDebugStore.setState({ enabled: false, apiCallsEnabled: false })
+    })
+  })
+
+  it('renders nothing (null)', () => {
+    const { container } = render(<StoreHydrator />)
+    expect(container.innerHTML).toBe('')
+  })
+
+  it('rehydrates serviceStore from localStorage after mount', async () => {
+    window.localStorage.setItem(
+      'service-storage',
+      JSON.stringify({
+        state: { activeServiceId: 'svc-persisted', services: [{ id: 'svc-persisted', name: 'Persisted' }], isInitialized: true },
+        version: 0,
+      }),
+    )
+
+    render(<StoreHydrator />)
+
+    await waitFor(() => {
+      expect(useServiceStore.getState().activeServiceId).toBe('svc-persisted')
+    })
+  })
+
+  it('rehydrates debugStore from localStorage after mount', async () => {
+    window.localStorage.setItem(
+      'fastly-debug-settings',
+      JSON.stringify({
+        state: { enabled: true, apiCallsEnabled: true },
+        version: 0,
+      }),
+    )
+
+    render(<StoreHydrator />)
+
+    await waitFor(() => {
+      expect(useDebugStore.getState().enabled).toBe(true)
+      expect(useDebugStore.getState().apiCallsEnabled).toBe(true)
+    })
+  })
+
+  it('resolves the live system zone on mount when no zone was ever persisted (default mode: system)', async () => {
+    stubSystemTimeZone('Asia/Tokyo')
+
+    render(<StoreHydrator />)
+
+    await waitFor(() => {
+      expect(useTimezoneStore.getState().timezone).toBe('Asia/Tokyo')
+    })
+    expect(useTimezoneStore.getState().mode).toBe('system')
+  })
+
+  it('re-resolves the live system zone on mount for a persisted system-mode blob', async () => {
+    window.localStorage.setItem(
+      'timezone-storage',
+      JSON.stringify({ state: { timezone: 'UTC', mode: 'system' }, version: 1 }),
+    )
+    stubSystemTimeZone('Europe/Berlin')
+
+    render(<StoreHydrator />)
+
+    await waitFor(() => {
+      expect(useTimezoneStore.getState().timezone).toBe('Europe/Berlin')
+    })
+  })
+
+  it('keeps a persisted manual-mode timezone untouched on mount, even if the system zone differs', async () => {
+    window.localStorage.setItem(
+      'timezone-storage',
+      JSON.stringify({ state: { timezone: 'America/New_York', mode: 'manual' }, version: 1 }),
+    )
+    stubSystemTimeZone('Asia/Tokyo')
+
+    render(<StoreHydrator />)
+
+    await waitFor(() => {
+      expect(useServiceStore.getState().isInitialized).toBe(false)
+    })
+    expect(useTimezoneStore.getState().mode).toBe('manual')
+    expect(useTimezoneStore.getState().timezone).toBe('America/New_York')
+  })
+
+  it('migrates a pre-v1 persisted blob (no mode field) to manual and keeps its zone', async () => {
+    window.localStorage.setItem(
+      'timezone-storage',
+      JSON.stringify({ state: { timezone: 'America/New_York' }, version: 0 }),
+    )
+    stubSystemTimeZone('Asia/Tokyo')
+
+    render(<StoreHydrator />)
+
+    await waitFor(() => {
+      expect(useTimezoneStore.getState().mode).toBe('manual')
+    })
+    expect(useTimezoneStore.getState().timezone).toBe('America/New_York')
+  })
+})
+
+const CHILD = 'app-subtree-rendered'
+
+function loadGuard() {
+  return render(
+    <ReloadLoopGuard>
+      <div>{CHILD}</div>
+    </ReloadLoopGuard>,
+  )
+}
+
+describe('ReloadLoopGuard', () => {
+  beforeEach(() => {
+    window.localStorage.clear()
+    sessionStorage.clear()
+  })
+
+  test('renders the app subtree under the reload threshold', () => {
+    for (let i = 0; i < 5; i++) {
+      const { unmount } = loadGuard()
+      expect(screen.getByText(CHILD)).toBeInTheDocument()
+      unmount()
+    }
+  })
+
+  test('trips after 6 same-path loads in the window — shows recovery prompt, hides app', () => {
+    let last: ReturnType<typeof loadGuard> | null = null
+    for (let i = 0; i < 6; i++) {
+      last?.unmount()
+      last = loadGuard()
+    }
+    expect(screen.queryByText(CHILD)).not.toBeInTheDocument()
+    expect(screen.getByText(/kept reloading/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /refresh now/i })).toBeInTheDocument()
+  })
+
+  test('"Continue anyway" dismisses the prompt and renders the app', () => {
+    let last: ReturnType<typeof loadGuard> | null = null
+    for (let i = 0; i < 6; i++) {
+      last?.unmount()
+      last = loadGuard()
+    }
+    expect(screen.getByText(/kept reloading/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /continue anyway/i }))
+    expect(screen.getByText(CHILD)).toBeInTheDocument()
+    expect(sessionStorage.getItem('__reload_loop_history')).toBeNull()
+  })
+
+  test('"Refresh now" clears history and reloads', () => {
+    const reloadSpy = vi.spyOn(window.location, 'reload').mockImplementation(() => {})
+    let last: ReturnType<typeof loadGuard> | null = null
+    for (let i = 0; i < 6; i++) {
+      last?.unmount()
+      last = loadGuard()
+    }
+    fireEvent.click(screen.getByRole('button', { name: /refresh now/i }))
+    expect(sessionStorage.getItem('__reload_loop_history')).toBeNull()
+    expect(reloadSpy).toHaveBeenCalledTimes(1)
+    reloadSpy.mockRestore()
+  })
+
+  test('does not trip when loads are spread across different paths', () => {
+    const spy = vi.spyOn(window.location, 'pathname', 'get')
+    let last: ReturnType<typeof loadGuard> | null = null
+    for (let i = 0; i < 8; i++) {
+      spy.mockReturnValue(`/page-${i}`)
+      last?.unmount()
+      last = loadGuard()
+      expect(screen.getByText(CHILD)).toBeInTheDocument()
+    }
+    spy.mockRestore()
+  })
 })

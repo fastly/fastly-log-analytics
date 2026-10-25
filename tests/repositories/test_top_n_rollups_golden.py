@@ -34,7 +34,7 @@ import duckdb
 import pytest
 import time_machine
 
-from backend.core import rollup_readiness as rr
+from backend.core import rollups as rr
 from backend.repositories import _base, rollup_coverage
 from backend.repositories._base import QueryRunner
 from tests._helpers.rollups import RollupGoldenLayout as Layout
@@ -511,14 +511,14 @@ def test_first_heal_warning_fires_on_a_freshly_booted_host(tmp_path: Path, monke
 # ── IP spread rollups golden + unit tests (merged from test_ip_spread_rollups_golden.py) ──
 
 from backend.core.rollups._common import IP_SPREAD_BUNDLE_FILENAME  # noqa: E402
-from backend.repositories.ip_spread_rollups import (  # noqa: E402
+from backend.repositories.top_n_rollups import (  # noqa: E402
     IpSpreadPlan,
+    TopNWindow,
     build_ip_spread_sql,
     fold_sketches,
     plan_ip_spread_paths,
     spread_meta,
 )
-from backend.repositories.top_n_rollups import TopNWindow  # noqa: E402
 from backend.utils.hll import HyperLogLog  # noqa: E402
 
 IP_SPREAD_GOLDEN_PATH = Path(__file__).parent / "golden" / "ip_spread_rollups.json"

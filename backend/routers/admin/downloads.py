@@ -13,8 +13,7 @@ from backend.deps import get_source
 from backend.models.admin import TreeResponse
 from backend.utils.router_utils import query_errors, raise_internal, require_service_id
 
-from ._helpers import _fetch_file_to_zip, stream_zip
-from ._router import router
+from ._helpers import _fetch_file_to_zip, router, stream_zip
 
 logger = logging.getLogger(__name__)
 

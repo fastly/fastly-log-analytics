@@ -30,17 +30,12 @@ from types import ModuleType
 
 from backend.core.metadata import base as _base
 from backend.core.metadata import state as _state
+from backend.core.metadata import usage_log as _usage_log
 
-# Alerts CRUD.
-from backend.core.metadata.alerts import (
-    count_alerts,
-    delete_alert,
-    list_alerts,
-    list_alerts_cross_service,
-    save_alert,
-    toggle_alert,
-    update_alert_last_triggered,
-)
+alerts = _state
+asn_cache = _state
+views = _state
+usage_log_db = _usage_log
 
 # Base: connection management, schema, dedup cache, parse helpers.
 from backend.core.metadata.base import (
@@ -125,12 +120,16 @@ from backend.core.metadata.slow_queries import (
     list_slow_queries,
 )
 
-# Audit log, ASN-name cache, and saved-dashboard-view CRUD.
+# Audit log, ASN-name cache, saved-dashboard-view, and alert-rule CRUD.
 from backend.core.metadata.state import (
     asn_ints_for_search,
+    count_alerts,
+    delete_alert,
     delete_view,
     export_audit,
     get_audit_logs,
+    list_alerts,
+    list_alerts_cross_service,
     list_audit,
     list_views,
     lookup_asn_names,
@@ -138,7 +137,10 @@ from backend.core.metadata.state import (
     record_audit,
     replace_audit_for_service,
     replace_views_for_service,
+    save_alert,
     save_view,
+    toggle_alert,
+    update_alert_last_triggered,
     upsert_asn_names,
     upsert_views_for_service,
 )
@@ -183,13 +185,17 @@ class _ShimModule(ModuleType):
     def __setattr__(self, name: str, value) -> None:
         if name in self._MIRRORED_TO_BASE:
             setattr(_base, name, value)
+        if name == "_DATA_DIR":
+            setattr(_usage_log, name, value)
         super().__setattr__(name, value)
 
 
 sys.modules[__name__].__class__ = _ShimModule
-for _sub in ("asn_cache", "views"):
+for _sub in ("alerts", "asn_cache", "views"):
     setattr(sys.modules[__name__], _sub, _state)
     sys.modules[f"{__name__}.{_sub}"] = _state
+setattr(sys.modules[__name__], "usage_log_db", _usage_log)
+sys.modules[f"{__name__}.usage_log_db"] = _usage_log
 
 
 __all__ = [

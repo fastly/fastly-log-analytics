@@ -18,7 +18,7 @@ import {
   WIZARD_DRAFT_KEY,
   saveDraft,
   stripSecretsFromConfig,
-} from '@/components/ProvisionWizard/wizard-draft'
+} from '@/components/ProvisionWizard/useWizardState'
 import {
   ANALYST_PATH_A_UNSUPPORTED_REASON,
   INITIAL_CONFIG,
