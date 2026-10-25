@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
+from backend.high_scale.registry_bootstrap import HighScaleService
 
 from backend.high_scale.network import (
     get_pop_health,
@@ -17,7 +18,6 @@ from backend.high_scale.network import (
     network_health,
     network_quality,
 )
-from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.models.common import FilterSpec
 from backend.models.network import NetworkBundleRequest, NetworkHealthRequest, NetworkQualityRequest
 
@@ -362,6 +362,10 @@ def test_bundle_honors_section_selection():
     assert resp.health is None and resp.quality is None and resp.transport is None
     assert resp.pop_health == []
     assert len(client.calls) == 1
+    observation = resp.component_observations["pop_health"]
+    assert observation.response_cache.state == "bypass"
+    assert observation.section_timings
+    assert observation.section_timings[0].model_extra["source"] == "fact"
 
 
 class _FailingClient:

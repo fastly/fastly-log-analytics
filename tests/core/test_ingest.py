@@ -36,6 +36,7 @@ from hypothesis.stateful import (
     invariant,
     rule,
 )
+from tests._helpers.sources import make_source
 
 from backend.core import duckdb as _ddb
 from backend.core import ingest
@@ -49,7 +50,6 @@ from backend.core.ingest import (
 )
 from backend.core.log_fields import LOG_FIELD_CATALOG
 from backend.core.metadata.base import get_con
-from tests._helpers.sources import make_source
 from tests.core.test_ingest_recovery_and_ledger import (  # reuse fixture helpers
     _install_mock_fos,
     _seed_local,

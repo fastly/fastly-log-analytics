@@ -322,14 +322,15 @@ def describe_response(payload: Any) -> dict[str, Any]:
             child = body.get(name)
             if isinstance(child, (dict, list)):
                 inherit = enclosing_hit or (cached_execution and metadata.get("scope") != "self")
-                # List-shaped components have data, not an observation envelope.
-                # Retain the unknown owner without inspecting or copying its rows.
+                sidecars = body.get("_component_observations")
+                sidecar = sidecars.get(name) if isinstance(sidecars, dict) else None
+                envelope = child if isinstance(child, dict) else sidecar
                 visit(
-                    child if isinstance(child, dict) else {},
+                    envelope if isinstance(envelope, dict) else {},
                     name if path == "response" else f"{path}.{name}",
                     inherit,
                 )
-                if isinstance(child, list):
+                if isinstance(child, list) and not isinstance(sidecar, dict):
                     components[-1]["gaps"].append("component_observation_envelope_missing")
 
     visit(payload, "response")

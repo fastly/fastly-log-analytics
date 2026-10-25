@@ -29,6 +29,7 @@ from backend.repositories.origin import (
     get_summary,
     get_timeseries,
 )
+from scripts.lib.section_measurements import describe_response
 from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 from tests._helpers.rollups import noop_lock as _noop_lock
 
@@ -1355,6 +1356,13 @@ async def test_get_aggregates_section_timings_populated(in_memory_duckdb, test_s
         assert set(entry.keys()) >= {"section", "time_ms"}
         assert isinstance(entry["section"], str)
         assert isinstance(entry["time_ms"], (int, float))
+        assert entry["current_execution"] is True
+        assert entry["activity"] in {"compute", "overhead", "skipped"}
+    summary_marks = [entry for entry in timings if entry["section"] == "summary"]
+    assert [(entry["source"], entry["outcome"]) for entry in summary_marks] == [
+        ("rollup", "fallback"),
+        ("live", "served"),
+    ]
 
     sections = {entry["section"] for entry in timings}
     # temp_table_create always fires when materialisation runs.
@@ -1916,3 +1924,106 @@ def test_timeseries_sql_is_byte_stable(cols, metric, percentile, lat, unit):
 @pytest.mark.usefixtures("_clear_origin_caches")
 def test_timeseries_without_any_latency_column_runs_no_query():
     assert _run(["url"], "ttfb", "p95") is None
+
+
+@pytest.mark.usefixtures("_clear_origin_caches")
+@pytest.mark.parametrize(
+    "endpoint,rows",
+    [
+        ("summary", [(50.0,)]),
+        ("timeseries", [(datetime(2026, 1, 1, tzinfo=UTC), 2, 50.0)]),
+        ("slow_urls", [("/example", 2, 30.0, 50.0, 60.0)]),
+        ("status_codes", [(200, 2, 100.0)]),
+        ("path_breakdown", [(True, 2, 30.0, 50.0)]),
+        ("pop_latency", [("IAD", 2, 30.0, 50.0)]),
+        ("ip_health", [("203.0.113.1", 2, 30.0, 50.0, 0.0)]),
+        ("drilldown", [("example.com", 2, 30.0, 50.0, 60.0, 0.0, 100)]),
+        ("shielding_analysis", []),
+        ("shielding_analysis", [("IAD", "SJC", 2, 30.0, 50.0, 60.0, 1)]),
+    ],
+)
+def test_granular_reader_observations_follow_execution_and_cache_reuse(endpoint, rows, monkeypatch):
+    monkeypatch.setattr("backend.repositories.utils.response_cache.get_queries", lambda: [])
+    monkeypatch.setattr("backend.repositories.utils.response_cache.get_tracked_calls", lambda: [])
+    runner = MagicMock()
+    runner.get_schema_cols.return_value = [
+        "timestamp",
+        "ottfb",
+        "ttfb",
+        "ost",
+        "url",
+        "edge",
+        "pop",
+        "oip",
+        "host",
+        "rid",
+        "prid",
+    ]
+    runner.telemetry.return_value = {}
+    cursor = runner.execute.return_value
+    cursor.fetchall.return_value = rows
+    if endpoint == "summary":
+        columns = [
+            "total_misses",
+            "total_passes",
+            "ottfb_p50_ms",
+            "ottfb_p75_ms",
+            "ottfb_p95_ms",
+            "ottfb_p99_ms",
+            "ottlb_p50_ms",
+            "ottlb_p95_ms",
+            "cdn_overhead_p50_ms",
+            "origin_error_rate",
+            "obytes_p50",
+        ]
+        cursor.description = [(column,) for column in columns]
+        cursor.fetchall.return_value = [(50.0,) * len(columns)]
+    elif endpoint == "shielding_analysis":
+        columns = ["edge_pop", "shield_pop", "requests", "p50_ms", "p95_ms", "p99_ms", "total_routes"]
+        cursor.description = [(column,) for column in columns]
+        monkeypatch.setattr(origin, "_enrich_with_distance", lambda row: row)
+    cursor.fetchone.return_value = None
+    source = {"name": "origin-observation", "service_id": "TestLogSvcABC123"}
+    read = getattr(origin, f"get_{endpoint}")
+    with patch.object(origin, "QueryRunner", return_value=runner):
+        cold = read(MagicMock(), source, None, None, {})
+        presence_probe = endpoint == "shielding_analysis" and not rows
+        assert runner.execute.call_count == (2 if presence_probe else 1)
+        timings = cold["section_timings"]
+        expected_sections = [endpoint]
+        if presence_probe:
+            expected_sections.append("shielding_presence")
+            assert cold["edge_only"] is True
+        else:
+            assert cold["has_data"] is True
+        assert [row["section"] for row in timings] == expected_sections
+        assert all(
+            row["source"] == "live" and row["activity"] == "compute" and row["current_execution"] is True
+            for row in timings
+        )
+        assert cold["_response_cache"]["state"] == "miss"
+        runner.execute.reset_mock()
+        runner.get_schema_cols.reset_mock()
+        warm = read(MagicMock(), source, None, None, {})
+        runner.execute.assert_not_called()
+        runner.get_schema_cols.assert_not_called()
+    assert warm["_response_cache"]["state"] == "hit"
+    assert warm.get("rows") == cold.get("rows")
+    sections = describe_response(warm)["components"][0]["sections"]
+    assert sections
+    assert all(row["current_execution"] is False for row in sections)
+
+
+@pytest.mark.usefixtures("_clear_origin_caches")
+@pytest.mark.parametrize("endpoint", ["status_codes", "timeseries", "shielding_analysis"])
+def test_granular_unavailable_reader_does_not_claim_live_compute(endpoint, monkeypatch):
+    monkeypatch.setattr("backend.repositories.utils.response_cache.get_queries", lambda: [])
+    monkeypatch.setattr("backend.repositories.utils.response_cache.get_tracked_calls", lambda: [])
+    runner = MagicMock()
+    runner.get_schema_cols.return_value = ["timestamp"]
+    runner.telemetry.return_value = {}
+    with patch.object(origin, "QueryRunner", return_value=runner):
+        result = getattr(origin, f"get_{endpoint}")(MagicMock(), {"name": "origin-unavailable"}, None, None, {})
+    assert result["has_data"] is False
+    runner.execute.assert_not_called()
+    assert not any(row.get("activity") == "compute" for row in result.get("section_timings", []))

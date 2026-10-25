@@ -4,6 +4,11 @@ import gzip
 from unittest.mock import MagicMock
 
 import pytest
+from backend.high_scale.source_discovery import (
+    SourceObjectDescriptor,
+    SourceObjectMissingError,
+    SourceObjectPage,
+)
 
 from backend.high_scale.archive_models import ArchiveState
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
@@ -20,11 +25,6 @@ from backend.high_scale.publication import (
     InsertReceipt,
     PublicationResult,
     PublicationStatus,
-)
-from backend.high_scale.source_discovery import (
-    SourceObjectDescriptor,
-    SourceObjectMissingError,
-    SourceObjectPage,
 )
 from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
 
@@ -571,9 +571,10 @@ from collections.abc import Sequence
 from typing import Any
 
 from backend.high_scale.aggregate_batch_adapter import compute_dimension_counts
-from backend.high_scale.network import build_network_projection_rows
 from backend.high_scale.origin_projection import build_origin_projection_rows
 from backend.high_scale.performance_projection import build_performance_projection_rows
+
+from backend.high_scale.network import build_network_projection_rows
 from backend.high_scale.security import build_security_projection_rows
 
 

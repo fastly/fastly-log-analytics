@@ -9,7 +9,6 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
-
 from backend.sync_status_snapshot import compute_sync_status_cached
 
 
@@ -77,8 +76,9 @@ def test_legacy_flat_extent_is_not_a_filename_fallback(snapshot_state, flat_late
 def test_high_scale_snapshot_uses_clickhouse_header_metrics(monkeypatch):
     from datetime import UTC, datetime
 
-    from backend.high_scale.archive_models import ServingWatermark
     from backend.high_scale.registry_bootstrap import HighScaleService
+
+    from backend.high_scale.archive_models import ServingWatermark
 
     class Client:
         def execute(self, sql, params=None):
@@ -138,8 +138,9 @@ def test_high_scale_snapshot_uses_clickhouse_header_metrics(monkeypatch):
 def test_high_scale_log_extents_uses_clickhouse_snapshot(monkeypatch):
     from datetime import UTC, datetime
 
-    from backend.high_scale.archive_models import ServingWatermark
     from backend.high_scale.registry_bootstrap import HighScaleService
+
+    from backend.high_scale.archive_models import ServingWatermark
 
     class Client:
         def execute(self, sql, params=None):
@@ -241,10 +242,10 @@ import threading
 from unittest.mock import patch
 
 import pytest
+from backend.sync_status_publisher import SyncStatusPublisher
 from fastapi.testclient import TestClient
 
 from backend.main import app
-from backend.sync_status_publisher import SyncStatusPublisher
 from tests._helpers.wire import await_until
 
 
@@ -1004,7 +1005,6 @@ def test_concurrent_add_progress_does_not_lose_events():
 
 
 import pytest
-
 from backend.cron_runs_publisher import CronRunsPublisher
 
 # ── Publisher unit tests ────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ import csv
 import io
 import logging
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -59,7 +60,7 @@ from backend.models.network import (
 from backend.repositories import network as repo
 from backend.repositories import origin as origin_repo
 from backend.repositories import security as security_repo
-from backend.repositories._base import _safe_table
+from backend.repositories._base import SectionTimer, _safe_table
 from backend.repositories.utils.response_cache import cache_result
 from backend.utils.auth import mask_ips_for
 from backend.utils.date_utils import parse_iso_utc
@@ -231,16 +232,27 @@ def _fetch_pop_health_data(
     source: dict[str, Any],
     start_time_dt: datetime,
     end_time_dt: datetime,
-) -> tuple[list[PopHealthItem], bool]:
+) -> tuple[list[PopHealthItem], bool, dict[str, Any]]:
     table_name = _safe_table(source["name"])
     from backend.repositories._base import QueryRunner
 
     runner = QueryRunner(con, source)
+    timer = SectionTimer()
+    started = time.perf_counter()
     rolled = runner.try_pop_health_from_rollup(
         start_time_dt.isoformat(),
         end_time_dt.isoformat(),
         has_filters=False,
     )
+    timer.mark(
+        "pop_health_rollup",
+        started,
+        source="rollup",
+        activity="compute" if rolled is not None else "overhead",
+        current_execution=True,
+        outcome="served" if rolled is not None else "fallback",
+    )
+    observation = cache_result({"section_timings": timer.entries}, state="bypass", prewarmer=False)
 
     data = []
     if rolled is not None:
@@ -261,7 +273,7 @@ def _fetch_pop_health_data(
                 )
             )
         data.sort(key=lambda x: x.requests, reverse=True)
-        return data, True
+        return data, True, observation
     else:
         st_param = start_time_dt if start_time_dt.tzinfo is not None else start_time_dt.replace(tzinfo=UTC)
         et_param = end_time_dt if end_time_dt.tzinfo is not None else end_time_dt.replace(tzinfo=UTC)
@@ -282,8 +294,10 @@ def _fetch_pop_health_data(
                 for row in repo.get_pop_health_rows(c, table_name, st_param, et_param)
             ]
 
+        started = time.perf_counter()
         data = execute_with_stale_view_retry(con, source, _run_fallback)
-        return data, False
+        timer.mark("pop_health", started, source="live", activity="compute", current_execution=True, outcome="served")
+        return data, False, observation
 
 
 @router.get("/network/pop-health", response_model=PopHealthListResponse)
@@ -307,8 +321,8 @@ def get_pop_health(
 
     start_time_dt = clamped_start_dt or (datetime.now(UTC) - timedelta(hours=24))
     end_time_dt = clamped_end_dt or datetime.now(UTC)
-    data, is_approx = _fetch_pop_health_data(ctx.con, ctx.source, start_time_dt, end_time_dt)
-    return PopHealthListResponse.with_telemetry(data=data, approximate=is_approx)
+    data, is_approx, observation = _fetch_pop_health_data(ctx.con, ctx.source, start_time_dt, end_time_dt)
+    return PopHealthListResponse.with_telemetry(data=data, approximate=is_approx, **observation)
 
 
 def _network_bundle_impl(
@@ -375,6 +389,7 @@ def _network_bundle_impl(
         # 3. Pop Health
         want_pop_health = sections is None or "pop_health" in sections
         pop_health_items: list[PopHealthItem] | None = None
+        pop_observation = None
         if want_pop_health:
             try:
                 st_dt = (
@@ -388,7 +403,7 @@ def _network_bundle_impl(
                 et_dt = datetime.fromisoformat(end_time.replace("Z", "+00:00")) if end_time else datetime.now(UTC)
             except Exception:
                 et_dt = datetime.now(UTC)
-            pop_health_items, _ = _fetch_pop_health_data(ctx.con, ctx.source, st_dt, et_dt)
+            pop_health_items, _, pop_observation = _fetch_pop_health_data(ctx.con, ctx.source, st_dt, et_dt)
 
         # 4. Transport Metrics
         want_transport = sections is None or "transport" in sections
@@ -408,12 +423,13 @@ def _network_bundle_impl(
         return NetworkBundleResponse.with_telemetry(
             **cache_result({}, state="bypass", prewarmer=False),
             available=True,
+            component_observations={"pop_health": pop_observation} if pop_observation is not None else None,
             health=health_resp,
             quality=quality_resp,
             pop_health=pop_health_items,
             transport=transport_resp,
-            debug_queries=bundle_dq or None,
-            debug_calls=bundle_dc or None,
+            debug_queries=bundle_dq,
+            debug_calls=bundle_dc,
         )
 
 

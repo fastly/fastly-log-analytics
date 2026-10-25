@@ -88,6 +88,35 @@ def test_absent_list_component_is_not_fabricated(child: object) -> None:
     assert [row["component"] for row in describe_response(payload)["components"]] == ["response"]
 
 
+@pytest.mark.parametrize("reuse", ["none", "hit", "follower"])
+def test_list_component_uses_owned_sidecar_without_promoting_reused_execution(reuse: str) -> None:
+    payload = {
+        "_response_cache": {"state": "bypass", "prewarmer": False},
+        "pop_health": [{"pop": "PRIVATE_ROW_VALUE"}],
+        "_component_observations": {
+            "pop_health": {
+                "_response_cache": {"state": "bypass", "prewarmer": False},
+                "_section_timings": [
+                    {"section": "pop_health", "time_ms": 3, "source": "live", "current_execution": True}
+                ],
+            }
+        },
+    }
+    if reuse == "hit":
+        payload["_response_cache"]["state"] = "hit"
+    elif reuse == "follower":
+        payload["_response_cache"].update(state="unknown", single_flight="follower")
+    result = describe_response(payload)
+    pop = next(row for row in result["components"] if row["component"] == "pop_health")
+    assert pop["cache_state"] == "bypass"
+    assert pop["lookup_current"] is (reuse == "none")
+    assert pop["sections"][0]["current_execution"] is (reuse == "none")
+    assert "component_observation_envelope_missing" not in pop["gaps"]
+    assert "reader_coverage_missing" in pop["gaps"]
+    assert "history_evidence_missing" in pop["gaps"]
+    assert "PRIVATE_ROW_VALUE" not in str(result)
+
+
 def test_list_component_prevents_false_composite_cache_pair_success() -> None:
     from scripts.lib.section_measurements import sample_cache_pair
 

@@ -843,8 +843,9 @@ def test_demand_driven_idle_minutes_setting_and_env(monkeypatch, stub_source, st
 async def test_insights_router_records_request_timestamp(monkeypatch):
     """POST /api/insights records the service's request timestamp so the
     demand-driven prewarmer wakes up for that service."""
-    from backend.models.insights import InsightsRequest
     from backend.routers.insights import insights_endpoint
+
+    from backend.models.insights import InsightsRequest
 
     insights_prewarmer._last_insights_request.clear()
     ctx = MagicMock()

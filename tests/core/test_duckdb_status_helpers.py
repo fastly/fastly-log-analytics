@@ -1101,8 +1101,9 @@ def test_schema_cache_is_bounded_ttl_and_clears_in_place():
     """The cache object identity must survive clears: duckdb.py re-exports it
     and repositories/network.py imports it by name, so a rebind would leave
     them reading a stale dict."""
-    from backend.core._duckdb_status import _clear_schema_cache, _schema_cache
     from backend.utils.bounded_cache import BoundedTTLCache
+
+    from backend.core._duckdb_status import _clear_schema_cache, _schema_cache
 
     assert isinstance(_schema_cache, BoundedTTLCache)
     _schema_cache.clear()

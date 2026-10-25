@@ -762,6 +762,7 @@ class HighScaleIngestController:
         sibling_events: list[dict[str, Any]] = []
         total_accepted = 0
         total_quarantined = 0
+        sibling_quarantined = 0
 
         for descriptor, payload in sources_payloads:
             if self._control is None:
@@ -840,8 +841,17 @@ class HighScaleIngestController:
                     transform_version=self._transform_version,
                     domain=sibling,
                 )
+                sibling_quarantined += sibling_decoded.quarantined_rows
                 sibling_events.extend(e for e in sibling_decoded.events if row_matches_serving_domain(sibling, e))
 
+        if sibling_quarantined:
+            # The claimed-domain archive retains these original raw_json lines,
+            # including mixed bodies with a valid exception and invalid metric.
+            # Count rejection under the sibling, not as a claimed-domain row.
+            logger.warning(
+                "high-scale RUM sibling decode rejected retained source records",
+                extra={"domain": _RUM_SIBLING_DOMAIN[domain], "quarantined_rows": sibling_quarantined},
+            )
         total_rows = total_accepted + total_quarantined
         if total_rows > 0 and (total_quarantined / total_rows) > max_dead_letter_ratio:
             raise ValueError(

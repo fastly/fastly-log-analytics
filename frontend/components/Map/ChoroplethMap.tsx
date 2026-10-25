@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useRef, useState, type RefObject } from 'react'
+import React, { useEffect, useRef, useState, useSyncExternalStore, type RefObject } from 'react'
 import * as maplibregl from 'maplibre-gl'
 import type { Map as MapLibreMap, MapOptions } from 'maplibre-gl'
 import type { FeatureCollection } from 'geojson'
@@ -235,6 +235,100 @@ interface TooltipState {
   count: number
 }
 
+function createMapAvailabilityStore() {
+  let unavailable = false
+  const listeners = new Set<() => void>()
+  return {
+    subscribe(listener: () => void) {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    getSnapshot: () => unavailable,
+    getServerSnapshot: () => false,
+    reportUnavailable() {
+      if (unavailable) return
+      unavailable = true
+      listeners.forEach(listener => listener())
+    },
+  }
+}
+
+function focusCountryList(node: HTMLUListElement | null) {
+  node?.focus()
+}
+
+function CountryList({ rows, onPick, onClose }: {
+  rows: DashboardMapData[]
+  onPick: (country: string) => void
+  onClose: () => void
+}) {
+  const [activeIndex, setActiveIndex] = useState(0)
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLUListElement>) => {
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault()
+        setActiveIndex(i => (i + 1) % rows.length)
+        break
+      case 'ArrowUp':
+        e.preventDefault()
+        setActiveIndex(i => (i - 1 + rows.length) % rows.length)
+        break
+      case 'Home':
+        e.preventDefault()
+        setActiveIndex(0)
+        break
+      case 'End':
+        e.preventDefault()
+        setActiveIndex(rows.length - 1)
+        break
+      case 'Escape':
+        e.preventDefault()
+        onClose()
+        break
+      case 'Enter':
+      case ' ':
+        e.preventDefault()
+        onPick(rows[activeIndex].country)
+        break
+    }
+  }
+
+  return (
+    <ul
+      ref={focusCountryList}
+      id="choropleth-country-listbox"
+      role="listbox"
+      tabIndex={0}
+      aria-label="Countries by request count — use arrow keys to navigate, Enter to filter"
+      aria-activedescendant={`choropleth-country-option-${activeIndex}`}
+      onKeyDown={handleKeyDown}
+      onClick={(e) => {
+        const country = (e.target as HTMLElement).closest<HTMLElement>('[role="option"]')?.dataset.country
+        if (country !== undefined) onPick(country)
+      }}
+      className="mt-1 max-h-72 w-64 overflow-y-auto bg-popover/95 backdrop-blur-sm border rounded-md shadow-lg text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      {rows.map((d, i) => (
+        <li
+          key={d.country}
+          id={`choropleth-country-option-${i}`}
+          role="option"
+          aria-selected={i === activeIndex}
+          data-country={d.country}
+          onMouseEnter={() => setActiveIndex(i)}
+          className={`flex items-center justify-between gap-3 px-3 py-1.5 cursor-pointer ${i === activeIndex ? 'bg-accent text-accent-foreground' : ''}`}
+        >
+          <span className="truncate">
+            <span className="text-muted-foreground tabular-nums mr-2">{i + 1}.</span>
+            {resolveCountryName(d.country)}
+          </span>
+          <span className="text-muted-foreground tabular-nums">{formatCount(d.count)}</span>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
 export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className = '', onCountryClick }: ChoroplethMapProps) {
   const mapContainer = useRef<HTMLDivElement>(null)
   const map = useRef<maplibregl.Map | null>(null)
@@ -248,7 +342,13 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
   // created; left unguarded that throw propagates out of the mount effect into
   // the route error boundary (app/error.tsx). The sr-only table + keyboard
   // picker below render the same data, so we degrade to a placeholder instead.
-  const [mapError, setMapError] = useState(false)
+  // MapLibre is an external resource: subscribe to its initialization result
+  // without synchronously setting React state in the mount effect. SSR always
+  // sees the same initial snapshot; only the browser initializes WebGL.
+  const [mapAvailability] = useState(createMapAvailabilityStore)
+  const mapError = useSyncExternalStore(
+    mapAvailability.subscribe, mapAvailability.getSnapshot, mapAvailability.getServerSnapshot,
+  )
   // A-2 (a11y / WCAG 2.1.1 Keyboard): the MapLibre canvas exposes nothing
   // to keyboard users — mousemove tooltips and click-to-filter were
   // mouse-only. The sr-only table (A-1) gives screen-reader users the data;
@@ -256,9 +356,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
   // listbox. Toggle button lives top-left so it stays clear of the Legend
   // (bottom-left) and NavigationControl (top-right).
   const [pickerOpen, setPickerOpen] = useState(false)
-  const [activeIndex, setActiveIndex] = useState(0)
   const pickerToggleRef = useRef<HTMLButtonElement>(null)
-  const pickerListRef = useRef<HTMLUListElement>(null)
   const dataMapRef = useRef<Map<string, number>>(new Map())
   // Reverse lookup: GeoJSON-feature name → alpha-2 country code. Built from
   // the data array (whose .country IS the alpha-2 code), so it stays in sync
@@ -309,8 +407,8 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
             const count = dataMapRef.current.get(name) || 0
 
             setTooltip({
-              x: e.point.x,
-              y: e.point.y,
+              x: Math.min(e.point.x + 15, (mapContainer.current?.clientWidth || 500) - 160),
+              y: Math.min(e.point.y + 15, (mapContainer.current?.clientHeight || 300) - 80),
               name,
               count
             })
@@ -342,7 +440,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
         // table + keyboard picker below still render the data; show a
         // placeholder instead of throwing into the route error boundary.
         map.current = null
-        setMapError(true)
+        mapAvailability.reportUnavailable()
       }
     }
 
@@ -350,7 +448,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
       map.current?.remove()
       map.current = null
     }
-  }, [])
+  }, [mapAvailability])
 
   useEffect(() => {
     if (!map.current) return
@@ -460,63 +558,11 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
   // Shared with the A-2 keyboard picker so both surfaces stay in sync.
   const tableRows = React.useMemo(() => sortedForA11y.slice(0, 50), [sortedForA11y])
 
-  // Reset highlighted row whenever the underlying dataset changes so we
-  // never point past the end of the list after a filter change.
-  useEffect(() => {
-    setActiveIndex(0)
-  }, [tableRows.length])
-
-  // Auto-focus the listbox when opened and restore focus to the toggle on
-  // close (Escape, Enter/Space pick) so keyboard users don't lose context.
-  useEffect(() => {
-    if (pickerOpen) {
-      pickerListRef.current?.focus()
-    }
-  }, [pickerOpen])
-
   const closePicker = () => {
     setPickerOpen(false)
     // requestAnimationFrame lets React's render flush before we move focus,
     // otherwise the toggle button may not be focusable yet on re-render.
     requestAnimationFrame(() => pickerToggleRef.current?.focus())
-  }
-
-  const handlePickerKeyDown = (e: React.KeyboardEvent<HTMLUListElement>) => {
-    if (tableRows.length === 0) return
-    switch (e.key) {
-      case 'ArrowDown':
-        e.preventDefault()
-        setActiveIndex(i => (i + 1) % tableRows.length)
-        break
-      case 'ArrowUp':
-        e.preventDefault()
-        setActiveIndex(i => (i - 1 + tableRows.length) % tableRows.length)
-        break
-      case 'Home':
-        e.preventDefault()
-        setActiveIndex(0)
-        break
-      case 'End':
-        e.preventDefault()
-        setActiveIndex(tableRows.length - 1)
-        break
-      case 'Escape':
-        e.preventDefault()
-        closePicker()
-        break
-      case 'Enter':
-      case ' ': {
-        e.preventDefault()
-        const picked = tableRows[activeIndex]
-        if (picked) {
-          // Same payload shape as the map click handler — alpha-2 code if
-          // available, else the display name as a last-resort fallback.
-          onCountryClickRef.current?.(picked.country)
-          closePicker()
-        }
-        break
-      }
-    }
   }
 
   useMapResize(map, mapContainer)
@@ -587,47 +633,17 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
             {pickerOpen ? 'Hide countries' : 'Browse countries'}
           </button>
           {pickerOpen && (
-            <ul
-              ref={pickerListRef}
-              id="choropleth-country-listbox"
-              role="listbox"
-              tabIndex={0}
-              aria-label="Countries by request count — use arrow keys to navigate, Enter to filter"
-              aria-activedescendant={`choropleth-country-option-${activeIndex}`}
-              onKeyDown={handlePickerKeyDown}
-              onClick={(e) => {
-                // One delegated handler for the options (keyboard activation lives in onKeyDown above).
-                const option = (e.target as HTMLElement).closest<HTMLElement>('[role="option"]')
-                const country = option?.dataset.country
-                if (country === undefined) return
+            <CountryList
+              // A changed row count resets selection before the next paint,
+              // without an effect that can briefly expose an invalid index.
+              key={tableRows.length}
+              rows={tableRows}
+              onPick={(country) => {
                 onCountryClickRef.current?.(country)
                 closePicker()
               }}
-              className="mt-1 max-h-72 w-64 overflow-y-auto bg-popover/95 backdrop-blur-sm border rounded-md shadow-lg text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              {tableRows.map((d, i) => {
-                const isActive = i === activeIndex
-                return (
-                  <li
-                    key={d.country}
-                    id={`choropleth-country-option-${i}`}
-                    role="option"
-                    aria-selected={isActive}
-                    data-country={d.country}
-                    onMouseEnter={() => setActiveIndex(i)}
-                    className={`flex items-center justify-between gap-3 px-3 py-1.5 cursor-pointer ${isActive ? 'bg-accent text-accent-foreground' : ''}`}
-                  >
-                    <span className="truncate">
-                      <span className="text-muted-foreground tabular-nums mr-2">{i + 1}.</span>
-                      {resolveCountryName(d.country)}
-                    </span>
-                    <span className="text-muted-foreground tabular-nums">
-                      {formatCount(d.count)}
-                    </span>
-                  </li>
-                )
-              })}
-            </ul>
+              onClose={closePicker}
+            />
           )}
         </div>
       )}
@@ -637,8 +653,8 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
         <div
           className="absolute z-50 pointer-events-none bg-popover/95 backdrop-blur-sm border shadow-lg rounded-md px-3 py-2 text-sm transition-opacity"
           style={{
-            left: Math.min(tooltip.x + 15, (mapContainer.current?.clientWidth || 500) - 160),
-            top: Math.min(tooltip.y + 15, (mapContainer.current?.clientHeight || 300) - 80)
+            left: tooltip.x,
+            top: tooltip.y
           }}
         >
           <div className="font-semibold text-foreground">{tooltip.name}</div>

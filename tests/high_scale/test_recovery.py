@@ -1,8 +1,10 @@
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from backend.high_scale.replay import replay_performance_projections
 
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.publication import ClickHousePublication, InMemoryBatchManifestStore
@@ -13,7 +15,6 @@ from backend.high_scale.recovery import (
     rebuild_rum_facts_from_fos,
     rebuild_serving_state_from_fos,
 )
-from backend.high_scale.replay import replay_performance_projections
 from tests.high_scale.conftest import (
     InMemoryManifestCatalog,
     make_test_archive_manifest,
@@ -502,9 +503,10 @@ def test_performance_projection_rebuild_backfills_asn_rows_but_never_republishes
 
 # ── Merged from test_replay.py ───────────────────────────────────────
 
+from backend.high_scale.replay import replay_manifest
+
 from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
 from backend.high_scale.publication import InsertReceipt
-from backend.high_scale.replay import replay_manifest
 from tests.high_scale.conftest import (
     ReplayClickHouseClient as ReplayClient,
 )
@@ -677,6 +679,281 @@ from unittest.mock import MagicMock
 from structlog.testing import capture_logs
 
 from backend.high_scale.recovery import RecoveryCapacityMeasurement
+
+
+def _rum_repair_archive(tmp_path, *, faro_body=None):
+    import hashlib
+
+    from backend.high_scale.archive_models import ArchiveSourceObject
+    from backend.high_scale.archive_publication import write_batch_archive_checkpoint
+    from backend.high_scale.decoder import decode_source_object
+
+    source_payload = (
+        "\n"
+        + json.dumps(
+            {
+                "timestamp": "2026-09-14T11:00:00Z",
+                "rum_body": json.dumps(
+                    faro_body or {"measurements": [{"type": "web-vitals", "values": {"lcp": 12, "cls": 0.1}}]}
+                ),
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "timestamp": "2026-09-14T11:00:01Z",
+                "rum_body": json.dumps({"exceptions": [{"value": "boom"}]}),
+            }
+        )
+    ).encode()
+    source = ArchiveSourceObject(
+        "svc", "rum_errors", "raw/rum/repair.gz", hashlib.sha256(source_payload).hexdigest(), len(source_payload), "v1"
+    )
+    decoded = decode_source_object(source, source_payload, transform_version="normalize.v1")
+    rows = [dict(event, _record_kind="event") for event in decoded.events]
+    manifest = write_batch_archive_checkpoint(
+        tmp_path,
+        service_id="svc",
+        domain="rum_errors",
+        source_batches=[(source, rows)],
+        archive_epoch=9,  # Deliberately NOT the owner epoch.
+        schema_version="rum.v1",
+        transform_version="normalize.v1",
+        coverage_start=NOW,
+        coverage_end=NOW,
+    )
+    archive = ArchivePublication(InMemoryObjectStore())
+    archive.publish(manifest, Path(manifest.artifact.uri.removeprefix("file://")).read_bytes())
+    return manifest, archive
+
+
+def test_scoped_rum_repair_uses_actual_standard_faro_event_projections(tmp_path) -> None:
+    from backend.core.rum_ingest import extract_metrics_from_faro_payload
+    from backend.high_scale.rum_recovery import plan_rum_recovery
+
+    body = {
+        "measurements": [{"type": "web-vitals", "values": {"lcp": 12, "cls": 0.1, "delta": 9}}],
+        "events": [
+            {"name": "click"},
+            {"name": "faro.performance.navigation", "attributes": {"domContentLoaded": 40, "loadEvent": 50}},
+        ],
+    }
+    manifest, archive = _rum_repair_archive(tmp_path, faro_body=body)
+    plan = plan_rum_recovery(manifest, archive, owner_epoch=2, read_facts=lambda *_: (), now=NOW)
+    vitals = [row for batch in plan.batches if batch.domain == "rum_vitals" for row in batch.rows]
+    assert [(row["metric_name"], row["metric_value"]) for row in vitals] == [
+        (metric["metric_name"], metric["metric_value"]) for metric in extract_metrics_from_faro_payload(body, {})
+    ]
+    # Two measurement fields, one standard 1.0 custom event, two navigation
+    # attributes. Input entries are NOT one-to-one with projected vital rows.
+    assert plan.candidate_counts == {"rum_vitals": 5, "rum_errors": 1}
+    assert next(row for row in vitals if row["metric_name"] == "event_click")["metric_value"] == 1.0
+    assert all(row["metric_name"] not in {"exception", "delta"} for row in vitals)
+
+
+def test_scoped_rum_repair_checks_other_batches_and_is_idempotent(tmp_path) -> None:
+    from backend.high_scale.rum_recovery import plan_rum_recovery
+
+    manifest, archive = _rum_repair_archive(tmp_path)
+    empty = plan_rum_recovery(manifest, archive, owner_epoch=2, read_facts=lambda *_: (), now=NOW)
+    assert empty.candidate_counts == {"rum_vitals": 2, "rum_errors": 1}
+    assert all(batch.generation == "2" for batch in empty.batches)
+    assert {row["line_ordinal"] for batch in empty.batches for row in batch.rows} == {1, 2}
+
+    # Fact rows are compared across ALL batch IDs, including an earlier regroup.
+    persisted = [dict(row, repair_visible=True) for row in empty.expected_facts]
+    for row in persisted:
+        row["batch_id"] = "00000000-0000-0000-0000-000000000099"
+    errors_only = [row for row in persisted if "error_message" in row]
+    plan = plan_rum_recovery(
+        manifest,
+        archive,
+        owner_epoch=2,
+        read_facts=lambda domain, _: errors_only if domain == "rum_errors" else (),
+        now=NOW,
+    )
+    assert plan.missing_counts == {"rum_vitals": 2, "rum_errors": 0}
+    assert plan.exact_identity_counts == {"rum_vitals": 0, "rum_errors": 1}
+    assert len(plan.batches) == 1
+    assert plan.plan_digest == empty.plan_digest  # Receipt changes cannot broaden the approved cohort.
+    assert plan.batches[0].batch_id == empty.batches[0].batch_id
+    complete = plan_rum_recovery(manifest, archive, owner_epoch=2, read_facts=lambda *_: persisted, now=NOW)
+    assert complete.batches == ()
+    assert complete.missing_counts == {"rum_vitals": 0, "rum_errors": 0}
+
+    # A regroup/retransform cannot authorize a duplicate merely by changing IDs.
+    for index, fact in enumerate(persisted, start=1):
+        fact["event_id"] = f"00000000-0000-0000-0000-{index:012x}"
+        fact["transform_version"] = "older-transform"
+    equivalent = plan_rum_recovery(manifest, archive, owner_epoch=2, read_facts=lambda *_: persisted, now=NOW)
+    assert equivalent.batches == ()
+    assert equivalent.equivalent_identity_counts == {"rum_vitals": 2, "rum_errors": 1}
+
+
+@pytest.mark.parametrize("visible,copies", [(False, 1), (True, 2)])
+def test_scoped_rum_repair_refuses_hidden_or_duplicate_existing_identity(tmp_path, visible, copies) -> None:
+    from backend.high_scale.rum_recovery import plan_rum_recovery
+
+    manifest, archive = _rum_repair_archive(tmp_path)
+    plan = plan_rum_recovery(manifest, archive, owner_epoch=2, read_facts=lambda *_: (), now=NOW)
+    fact = dict(plan.expected_facts[0], repair_visible=visible)
+    with pytest.raises(ValueError, match="ambiguous or unpublished"):
+        plan_rum_recovery(manifest, archive, owner_epoch=2, read_facts=lambda *_: [fact] * copies, now=NOW)
+
+
+def test_scoped_rum_repair_refuses_unretained_event_times(tmp_path) -> None:
+    from backend.high_scale.rum_recovery import plan_rum_recovery
+
+    manifest, archive = _rum_repair_archive(tmp_path)
+    with pytest.raises(ValueError, match="outside retained"):
+        plan_rum_recovery(manifest, archive, owner_epoch=2, read_facts=lambda *_: (), now=NOW + timedelta(days=31))
+
+
+@pytest.mark.parametrize("domain", ["rum_vitals", "rum_errors"])
+def test_scoped_rum_content_normalizes_float64_json_integer_representation(domain) -> None:
+    from backend.high_scale.rum_recovery import _content
+
+    expected = {"event_timestamp": NOW, "ttfb": 25.0, "metric_value": 12.0}
+    # ClickHouse JSON may encode exact integral Float64 values without ".0".
+    # This is the same persisted numeric value, not a changed payload.
+    physical = {"event_timestamp": NOW, "ttfb": 25, "metric_value": 12}
+    assert _content(expected, domain) == _content(physical, domain)
+    assert _content(expected, domain) != _content(dict(physical, ttfb=26), domain)
+
+
+def test_scoped_rum_apply_requires_reviewed_digest_and_verifies_retry(tmp_path) -> None:
+    from backend.high_scale.rum_recovery import execute_rum_recovery, plan_rum_recovery
+
+    manifest, archive = _rum_repair_archive(tmp_path)
+    persisted = []
+
+    def make_plan():
+        return plan_rum_recovery(manifest, archive, owner_epoch=2, read_facts=lambda *_: persisted, now=NOW)
+
+    initial = make_plan()
+    publication = MagicMock()
+    assert execute_rum_recovery(make_plan, publication, apply=False)["applied"] is False
+    publication.publish.assert_not_called()
+    with pytest.raises(ValueError, match="reviewed plan"):
+        execute_rum_recovery(make_plan, publication, apply=True, approve_digest="wrong")
+    publication.publish.assert_not_called()
+
+    def publish(batch):
+        from backend.high_scale.publication import _event_uuid
+
+        ids = {_event_uuid(row["event_id"], field="event_id") for row in batch.rows}
+        persisted.extend(dict(row, repair_visible=True) for row in initial.expected_facts if row["event_id"] in ids)
+
+    publication.publish.side_effect = publish
+    result = execute_rum_recovery(make_plan, publication, apply=True, approve_digest=initial.plan_digest)
+    assert result["remaining_counts"] == {"rum_vitals": 0, "rum_errors": 0}
+    assert publication.publish.call_count == 2
+    execute_rum_recovery(make_plan, publication, apply=True, approve_digest=initial.plan_digest)
+    assert publication.publish.call_count == 2
+
+
+def test_scoped_rum_cli_defaults_to_dryrun_and_redacts_dependency_errors(monkeypatch, capsys) -> None:
+    from scripts import recover_high_scale_rum as cli
+
+    run = MagicMock(return_value={"applied": False, "candidate_counts": {"rum_vitals": 2, "rum_errors": 1}})
+    monkeypatch.setattr(cli, "recover", run)
+    assert cli.main(["--manifest-prefix", "a" * 8]) == 0
+    run.assert_called_once_with("a" * 8, apply=False, approve_digest=None)
+    assert json.loads(capsys.readouterr().out)["applied"] is False
+    run.side_effect = ValueError("private dependency response must not escape")
+    assert cli.main(["--manifest-prefix", "a" * 8]) == 1
+    assert json.loads(capsys.readouterr().out) == {"status": "blocked", "error_type": "ValueError"}
+
+
+def test_scoped_rum_cli_uses_canonical_source_owner_epoch_column(tmp_path, monkeypatch) -> None:
+    from dataclasses import make_dataclass
+    from types import SimpleNamespace
+
+    import psycopg
+
+    from backend import config
+    from backend.core import clickhouse_client
+    from backend.high_scale import postgres_control, publication, registry_bootstrap, rum_recovery
+    from scripts import recover_high_scale_rum as cli
+
+    manifest, archive = _rum_repair_archive(tmp_path)
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+
+    def execute(query, params=None):
+        cursor = MagicMock()
+        if "FROM high_scale_archive_manifests" in query:
+            cursor.fetchall.return_value = [{}]
+        elif "FROM high_scale_ownership" in query:
+            cursor.fetchone.return_value = {"owner_epoch": 2, "current_owner": "high_scale"}
+        elif "FROM high_scale_source_objects" in query:
+            # These are the canonical high_scale_source_objects columns.
+            # There is no archive_owner_epoch column or migration for one.
+            assert "archive_owner_epoch" not in query
+            assert "archive_manifest_id,owner_epoch" in query
+            cursor.fetchall.return_value = [
+                {
+                    "object_key": source.key,
+                    "status": "source_deleted",
+                    "archive_manifest_id": manifest.manifest_id,
+                    "owner_epoch": 2,
+                }
+                for source in manifest.sources
+            ]
+        return cursor
+
+    connection.execute.side_effect = execute
+    monkeypatch.setenv("METADATA_DSN", "postgresql://unused")
+    monkeypatch.setattr(psycopg, "connect", MagicMock(return_value=connection))
+    monkeypatch.setattr(
+        postgres_control,
+        "_archive_from_row",
+        lambda _: SimpleNamespace(manifest=manifest, state="source_deleted", owner_epoch=2),
+    )
+    monkeypatch.setattr(postgres_control, "PostgresControlPlane", MagicMock())
+    monkeypatch.setattr(registry_bootstrap, "_default_archive_factory", lambda _: archive)
+    settings_type = make_dataclass("RecoveryTestSettings", [("query_timeout_s", int)])
+    monkeypatch.setattr(config, "load_clickhouse_config", lambda: settings_type(5))
+    client = MagicMock()
+    initial_plan = rum_recovery.plan_rum_recovery(manifest, archive, owner_epoch=2, read_facts=lambda *_: (), now=NOW)
+    error_fact = next(fact for fact in initial_plan.expected_facts if fact["_repair_domain"] == "rum_errors")
+
+    def read_clickhouse(query, params=None, *, settings=None):
+        if "high_scale_batch_publications" in query:
+            # Receipt batch IDs contain UUID-formatted text but their canonical
+            # storage/lookup type is String, unlike the physical fact UUID.
+            assert "batch_id={batch_id:String}" in query
+            assert "batch_id:UUID" not in query
+            return [{"publication_state": "visible", "expected_rows": 1, "visible_rows": 1}]
+        if "rum_error_facts" in query:
+            return [dict(error_fact)]
+        return []
+
+    client.execute.side_effect = read_clickhouse
+    monkeypatch.setattr(clickhouse_client, "ClickHouseClient", MagicMock(return_value=client))
+    monkeypatch.setattr(publication, "PostgresBatchManifestStore", MagicMock())
+    serving = MagicMock()
+    monkeypatch.setattr(publication, "ClickHousePublication", MagicMock(return_value=serving))
+    original_plan = rum_recovery.plan_rum_recovery
+    monkeypatch.setattr(rum_recovery, "plan_rum_recovery", lambda *a, **kw: original_plan(*a, **kw, now=NOW))
+
+    report = cli.recover("a" * 8, apply=False, approve_digest=None)
+    assert report["read_only"] is True
+    assert report["candidate_counts"] == {"rum_vitals": 2, "rum_errors": 1}
+    assert report["missing_counts"] == {"rum_vitals": 2, "rum_errors": 0}
+    serving.publish.assert_not_called()
+
+
+def test_scoped_rum_apply_cannot_report_success_on_missing_insert(tmp_path) -> None:
+    from backend.high_scale.rum_recovery import execute_rum_recovery, plan_rum_recovery
+
+    manifest, archive = _rum_repair_archive(tmp_path)
+
+    def make_plan():
+        return plan_rum_recovery(manifest, archive, owner_epoch=2, read_facts=lambda *_: (), now=NOW)
+
+    with pytest.raises(ValueError, match="post-apply identity verification"):
+        execute_rum_recovery(make_plan, MagicMock(), apply=True, approve_digest=make_plan().plan_digest)
 
 
 def _measurement(**overrides) -> RecoveryCapacityMeasurement:

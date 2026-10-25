@@ -692,6 +692,12 @@ uv run pytest tests/perf/test_benchmarks_micro.py \
 
 ### Section-level performance evidence
 
+Network's list-shaped `pop_health` keeps its data shape and exposes owner metadata
+through the debug-gated `_component_observations.pop_health` sidecar. Do not infer
+its cache state from the enclosing bundle or promote historical child timings
+under an ancestor cache hit or single-flight follower. Standard reader-dispatch
+stamps describe actual attempts; they do not establish missing coverage/history.
+
 Standard dashboard counts preserve the raw query's inclusive end. The count
 rollup reader covers half-open, whole-minute windows; partial-minute bounds
 fall back to raw counts. The dashboard adds exact-end rows from the scoped
@@ -1297,6 +1303,37 @@ source is acknowledged. Sibling rows are not counted, archived or dead-lettered
 as the claimed domain's rows. Do not "fix" this by giving each domain its own
 ledger row or by resetting cursors. Pinned by
 `test_rum_errors_claim_also_publishes_sibling_vitals_from_the_shared_object`.
+
+**An error-owned archive is not an error-only archive.** Inspect its exact
+`sources_json` slices and deduplicate expanded copies of each `raw_json` by
+source version and original line ordinal before diagnosing loss. Empty
+`error_message` rows can be genuine vitals; archive row counts minus error-fact
+counts do not prove missing errors. Faro's exception discriminator is authoritative,
+not the edge envelope's metric fields or query string. `_rum_kind` prevents an
+exception from becoming a false vital when those fields are repopulated by the
+fallback. Message-less exceptions retain the standard parser's `Unknown error`;
+flat errors need an actual discriminator (stack, file or exception kind), not
+merely a schema column containing an empty string. Invalid metrics and flat
+records with neither kind are dead-lettered with their original bytes.
+Mixed bodies can have a valid claimed-domain row and an invalid sibling;
+count sibling rejections separately rather than silently dropping them.
+Custom Faro events have the standard `event_<name>=1.0` projection, while
+navigation attributes and measurements can expand to multiple metrics.
+Input-event counts alone do not prove valid-vital counts.
+
+For historical repair, `scripts/recover_high_scale_rum.py` defaults to a
+read-only dry run for exactly one unambiguous terminal manifest. Reconstruct
+both domains from retained original lines; preserve version, ordinal and
+transform. Check physical facts across **all** batch IDs and their visible
+publication receipts, including semantic equivalents with changed event IDs.
+Hidden, duplicate, conflicting, expired or unprovable identities block apply.
+Review the plan digest and counts before `--apply --approve-plan`; serialize
+repairs and hold the terminal-source/current-owner fence throughout apply.
+Generation is the manifest's **owner epoch**, not its archive epoch. Stable
+missing-set batch IDs plus pre/post identity checks make retries safe beyond
+ClickHouse's block-dedup window. Never substitute a generic rebuild, blind
+replay, cursor reset or source-ledger edit. The recovery runbook documents the
+bounds and the post-deploy procedure.
 
 ### Bounded ClickHouse diagnostic index (ADR-20)
 

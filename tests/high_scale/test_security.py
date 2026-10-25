@@ -9,11 +9,11 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from backend.high_scale.registry_bootstrap import HighScaleService
 
 from backend.high_scale import dashboard as hs_dashboard
 from backend.high_scale import security as hs
 from backend.high_scale.archive_models import ServingWatermark
-from backend.high_scale.registry_bootstrap import HighScaleService
 
 START = "2026-10-18T00:00:00Z"
 END = "2026-10-19T00:00:00Z"
@@ -418,6 +418,8 @@ def test_dashboard_bundle_serves_real_top_bots():
 import gzip
 from datetime import UTC, datetime, timedelta
 
+from backend.high_scale.source_discovery import SourceObjectDescriptor
+
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.ingest_controller import HighScaleIngestController, _enrich_high_scale_ngwaf_bots
 from backend.high_scale.publication import (
@@ -428,7 +430,6 @@ from backend.high_scale.publication import (
 )
 from backend.high_scale.publication import _extract_custom_fields as persisted_fact_fields
 from backend.high_scale.recovery import rebuild_security_projections_from_fos, replay_security_projections
-from backend.high_scale.source_discovery import SourceObjectDescriptor
 from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
 
 NOW = datetime(2026, 9, 11, 20, 0, tzinfo=UTC)

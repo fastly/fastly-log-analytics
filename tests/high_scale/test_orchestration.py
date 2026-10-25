@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
-
-from backend.high_scale.orchestration import HighScaleWorkerCoordinator
 from backend.high_scale.source_discovery import (
     INITIAL_SOURCE_CURSOR,
     TERMINAL_SOURCE_CURSOR_PREFIX,
@@ -12,6 +10,8 @@ from backend.high_scale.source_discovery import (
     SourceObjectMissingError,
     SourceObjectPage,
 )
+
+from backend.high_scale.orchestration import HighScaleWorkerCoordinator
 from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
 
 

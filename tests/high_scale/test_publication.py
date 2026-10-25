@@ -579,7 +579,6 @@ def test_commit_marker_digest_mismatch_is_not_replayable() -> None:
 
 
 import pytest
-
 from backend.high_scale.archive_writer import write_batch_archive_checkpoint
 
 

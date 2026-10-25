@@ -521,7 +521,7 @@ def get_health(
 
     _t = _time.perf_counter()
     actual_cols = _get_schema_cols_cached(src, table_name, get_runner)
-    timer.mark("get_schema_cols", _t)
+    timer.mark("get_schema_cols", _t, activity="overhead", current_execution=True)
 
     if not {"tcp_rtt", "asn"}.issubset(actual_cols):
         return {
@@ -548,7 +548,7 @@ def get_health(
     params, where_clause = build_where_clause(
         start_time, end_time, effective_filters, list(actual_cols), inline_params=True
     )
-    timer.mark("build_where_clause", _t)
+    timer.mark("build_where_clause", _t, activity="overhead", current_execution=True)
 
     # Floor the heatmap/map bucket width so a 5-second bucket on a
     # 30-day window doesn't synthesise 518k buckets the UI immediately
@@ -602,7 +602,14 @@ def get_health(
             return
         _t0 = _time.perf_counter()
         result = thunk()
-        timer.mark(f"{key}_rollup", _t0)
+        timer.mark(
+            f"{key}_rollup",
+            _t0,
+            source="rollup",
+            activity="compute" if result is not None else "overhead",
+            current_execution=True,
+            outcome="served" if result is not None else "fallback",
+        )
         if result is not None:
             _net_rolled[key] = result
         else:
@@ -625,7 +632,9 @@ def get_health(
 
     if not _net_missed:
         # All requested scan-bound sections hit rollup → skip temp table.
-        section_timings.append({"section": "network:temp_skipped", "time_ms": 0.0})
+        section_timings.append(
+            {"section": "network:temp_skipped", "time_ms": 0.0, "activity": "skipped", "current_execution": True}
+        )
         heatmap_rows: list[Any] = _net_rolled.get("heatmap") or []
         _geo = _net_rolled.get("map_geo")
         map_rows: list[Any] = _geo[0] if _geo else []
@@ -717,7 +726,7 @@ def get_health(
             temp_name = get_runner().create_filtered_temp_table(
                 all_net_cols, list(actual_cols), table_name, where_clause, params
             )
-            timer.mark("temp_table_create", _t0)
+            timer.mark("temp_table_create", _t0, source="live", activity="compute", current_execution=True)
             if temp_name is None:
                 raise _TempTableUnavailable()
             _leader_temp_name[0] = temp_name
@@ -751,7 +760,7 @@ def get_health(
                     )
                     _t1 = _time.perf_counter()
                     heatmap_rows_b = get_runner().execute(heatmap_sql, []).fetchall()
-                    timer.mark("heatmap_query", _t1)
+                    timer.mark("heatmap_query", _t1, source="live", activity="compute", current_execution=True)
 
             map_rows_b: list[Any] = []
             metro_rows_b: list[Any] = []
@@ -808,7 +817,7 @@ def get_health(
                     # twice. ``map_params`` is at most one element (the asn int)
                     # when ``map_asn != "all"``, empty otherwise.
                     map_rows_b = get_runner().execute(map_sql, map_params + map_params).fetchall()
-                    timer.mark("map_query", _t2)
+                    timer.mark("map_query", _t2, source="live", activity="compute", current_execution=True)
 
                 if has_country:
                     # Qualified-for-JOIN variants — same disambiguation pattern
@@ -830,7 +839,7 @@ def get_health(
                     )
                     _t3 = _time.perf_counter()
                     metro_rows_b = get_runner().execute(metro_sql, []).fetchall()
-                    timer.mark("metro_query", _t3)
+                    timer.mark("metro_query", _t3, source="live", activity="compute", current_execution=True)
 
             return countries_b, heatmap_rows_b, map_rows_b, metro_rows_b
 
@@ -847,7 +856,9 @@ def get_health(
             # This request never acquired its own temp table — it borrowed
             # the leader's already-computed rows. Mirrors "network:temp_skipped"
             # above so the perf harness can attribute the coalesced case too.
-            section_timings.append({"section": "network:temp_coalesced", "time_ms": 0.0})
+            section_timings.append(
+                {"section": "network:temp_coalesced", "time_ms": 0.0, "activity": "overhead", "current_execution": True}
+            )
 
         # Leader: real temp-table name — stays alive for the speed/rtt
         # fallback queries below and is dropped by the outer ``finally`` at
@@ -919,7 +930,9 @@ def get_health(
             )
             if rolled_speed is not None:
                 speed_rows = rolled_speed
-                timer.mark("speed_distribution_query_rollup", _t)
+                timer.mark(
+                    "speed_distribution_query_rollup", _t, source="rollup", activity="compute", current_execution=True
+                )
             elif t is not None:
                 placeholders = ",".join(["?"] * len(top_asns))
                 _t = _time.perf_counter()
@@ -935,7 +948,7 @@ def get_health(
                     )
                     .fetchall()
                 )
-                timer.mark("speed_distribution_query", _t)
+                timer.mark("speed_distribution_query", _t, source="live", activity="compute", current_execution=True)
             else:
                 speed_rows = []  # skip-temp path + speed rollup missed → no fallback
             asn_speed_rows: dict[int, list[tuple]] = {}
@@ -1111,7 +1124,9 @@ def get_health(
             )
             if rolled is not None:
                 asn_rtt_pct = rolled
-                timer.mark("rtt_percentiles_query_rollup", _t)
+                timer.mark(
+                    "rtt_percentiles_query_rollup", _t, source="rollup", activity="compute", current_execution=True
+                )
             elif t is not None:
                 placeholders = ",".join(["?"] * len(top_asns))
                 _t = _time.perf_counter()
@@ -1127,7 +1142,7 @@ def get_health(
                     )
                     .fetchall()
                 )
-                timer.mark("rtt_percentiles_query", _t)
+                timer.mark("rtt_percentiles_query", _t, source="live", activity="compute", current_execution=True)
                 for row in pct_rows:
                     asn_rtt_pct[int(row[0])] = {
                         "p95_rtt_us": _opt_float(row[1], 0),
@@ -1315,15 +1330,24 @@ def get_quality(
     rolled = get_runner().try_network_quality_from_rollup(
         start_time, end_time, has_filters=bool(filters), region_country=region_country
     )
+    timer.mark(
+        "network_quality_rollup",
+        _t,
+        source="rollup",
+        activity="compute" if rolled is not None else "overhead",
+        current_execution=True,
+        outcome="served" if rolled is not None else "fallback",
+    )
     if rolled is not None:
-        timer.mark("network_quality_rollup", _t)
         return {
             **rolled,
+            "section_timings": section_timings,
             **get_runner().telemetry(),
         }
 
+    _t = _time.perf_counter()
     actual_cols = _get_schema_cols_cached(src, table_name, get_runner)
-    timer.mark("get_schema_cols", _t)
+    timer.mark("get_schema_cols", _t, activity="overhead", current_execution=True)
 
     if not actual_cols or "tcp_rtt" not in actual_cols:
         return _empty_quality_payload(region_country, get_runner())
@@ -1351,7 +1375,7 @@ def get_quality(
 
     _t0 = _time.perf_counter()
     temp_table = get_runner().create_filtered_temp_table(quality_cols, actual_cols, table_name, where_clause, params)
-    timer.mark("temp_table_create", _t0)
+    timer.mark("temp_table_create", _t0, source="live", activity="compute", current_execution=True)
 
     if temp_table is not None:
         # If temp table successfully created, hit it directly!
@@ -1375,7 +1399,7 @@ def get_quality(
             )
             _t = _time.perf_counter()
             rows = get_runner().execute(sql, query_params + (extra_params or [])).fetchall()
-            timer.mark(f"quality_bar:{group_col}", _t)
+            timer.mark(f"quality_bar:{group_col}", _t, source="live", activity="compute", current_execution=True)
             return [
                 {"value": str(r[0]), "label": str(r[0]), "rtt_ms": round(float(r[1]), 2), "reqs": int(r[2])}
                 for r in rows
@@ -1387,7 +1411,7 @@ def get_quality(
         )
         _t = _time.perf_counter()
         countries = [r[0] for r in get_runner().execute(countries_sql, query_params).fetchall()]
-        timer.mark("countries_distinct", _t)
+        timer.mark("countries_distinct", _t, source="live", activity="compute", current_execution=True)
 
         by_country = run_bar("country")
         by_asn = run_bar("asn") if "asn" in actual_cols else []
@@ -1419,7 +1443,7 @@ def get_quality(
                 {"rtt_ms": round(float(r[0]), 2), "ttfb_ms": round(float(r[1]), 2), "cache": str(r[2])}
                 for r in get_runner().execute(scatter_sql, query_params).fetchall()
             ]
-            timer.mark("scatter_query", _t)
+            timer.mark("scatter_query", _t, source="live", activity="compute", current_execution=True)
 
         return {
             "available": True,
@@ -1527,7 +1551,7 @@ def get_transport_metrics(
     _t0 = _time.perf_counter()
     try:
         row = get_runner().execute(main_sql, params).fetchone()
-        timer.mark("transport_aggregates", _t0)
+        timer.mark("transport_aggregates", _t0, source="live", activity="compute", current_execution=True)
         if row:
             total_requests = int(row[0] or 0)
             bandwidth_bytes = int(row[1] or 0)
@@ -1574,7 +1598,7 @@ def get_transport_metrics(
         """
         try:
             proto_rows = get_runner().execute(proto_sql, params).fetchall()
-            timer.mark("protocol_distribution", _t1)
+            timer.mark("protocol_distribution", _t1, source="live", activity="compute", current_execution=True)
             protocol_distribution = _shape_proto_rows(proto_rows)
         except Exception as e:
             logger.warning("Failed to query protocol distribution: %s", e)
@@ -1591,7 +1615,7 @@ def get_transport_metrics(
         """
         try:
             proto_rows = get_runner().execute(proto_sql, params).fetchall()
-            timer.mark("protocol_distribution", _t1)
+            timer.mark("protocol_distribution", _t1, source="live", activity="compute", current_execution=True)
             protocol_distribution = _shape_proto_rows(proto_rows)
         except Exception:
             logger.debug("get_transport_metrics: step failed (ignored)", exc_info=True)

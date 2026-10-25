@@ -7388,6 +7388,32 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /**
+         * BaseResponse
+         * @description Base response that automatically includes telemetry if present.
+         */
+        BaseResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
+            /** Section Timings */
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
+        };
         /** Body_backup_import_api_admin_share_backup_import_post */
         Body_backup_import_api_admin_share_backup_import_post: {
             /** File */
@@ -13714,6 +13740,10 @@ export interface components {
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: components["schemas"]["SectionTimingEntry"][];
+            /** Component Observations */
+            _component_observations?: {
+                [key: string]: components["schemas"]["BaseResponse"];
+            } | null;
             /**
              * Available
              * @default true

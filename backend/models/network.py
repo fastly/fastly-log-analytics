@@ -313,6 +313,10 @@ class NetworkBundleRequest(NetworkHealthRequest):
 
 
 class NetworkBundleResponse(BaseResponse):
+    component_observations: dict[str, BaseResponse] | None = Field(
+        default=None,
+        serialization_alias="_component_observations",
+    )
     available: bool = True
     reason: str | None = None
     health: NetworkHealthResponse | None = None

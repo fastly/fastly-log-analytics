@@ -470,8 +470,8 @@ class SectionTimer:
     def __init__(self, entries: list[dict] | None = None) -> None:
         self.entries: list[dict] = entries if entries is not None else []
 
-    def mark(self, name: str, t0: float) -> None:
-        self.entries.append({"section": name, "time_ms": round((time.perf_counter() - t0) * 1000, 2)})
+    def mark(self, name: str, t0: float, **observation: Any) -> None:
+        self.entries.append({"section": name, "time_ms": round((time.perf_counter() - t0) * 1000, 2), **observation})
 
     def call(self, name: str, fn):
         t0 = time.perf_counter()

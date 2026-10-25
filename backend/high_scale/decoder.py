@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import gzip
 import json
+import math
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -12,7 +13,12 @@ from urllib.parse import parse_qs, urlparse
 from backend.core.field_registry import DuckType, try_get
 from backend.core.rum_ingest import extract_metrics_from_faro_payload
 from backend.high_scale.archive_models import ArchiveSourceObject
-from backend.high_scale.publication import build_event_id, build_request_event_id, build_rum_event_id
+from backend.high_scale.publication import (
+    build_event_id,
+    build_request_event_id,
+    build_rum_event_id,
+    row_matches_serving_domain,
+)
 
 
 @dataclass(frozen=True)
@@ -86,6 +92,14 @@ def decode_source_object(
                 event = dict(value)
                 event.update(base_meta)
                 _normalize_serving_fields(event, selected_domain)
+                if selected_domain in {"rum_vitals", "rum_errors"} and not row_matches_serving_domain(
+                    selected_domain, event
+                ):
+                    sibling = "rum_errors" if selected_domain == "rum_vitals" else "rum_vitals"
+                    other = dict(value)
+                    _normalize_serving_fields(other, sibling)
+                    if not row_matches_serving_domain(sibling, other):
+                        raise ValueError("RUM record has neither a valid metric nor an error discriminator")
                 event["event_id"] = _event_id(event, selected_domain)
                 events.append(event)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
@@ -219,6 +233,18 @@ def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
     elif domain == "rum_errors":
         event["client_id"] = event.get("rum_cid") or event.get("client_id") or ""
         event["error_message"] = event.get("rum_error_message") or event.get("error_message") or ""
+        if not event["error_message"] and (
+            event.get("_rum_kind") == "errors"
+            or event.get("rum_metric_name", event.get("metric_name")) == "exception"
+            or event.get("rum_error_stack")
+            or event.get("error_stack")
+            or event.get("rum_error_file")
+            or event.get("error_file")
+        ):
+            # Empty messages are valid exceptions; field presence alone is
+            # not a discriminator (the edge schema includes blank error fields
+            # on every vital). Match the standard Faro parser's fallback.
+            event["error_message"] = "Unknown error"
         event["error_file"] = event.get("rum_error_file") or event.get("error_file") or ""
         event["pathname"] = event.get("rum_pathname") or event.get("pathname") or ""
         raw_line = event.get("rum_error_line", event.get("error_line"))
@@ -248,10 +274,10 @@ def _expand_faro_rum_events(log_data: dict[str, Any], domain: str) -> list[dict[
         if isinstance(payload, str):
             payload = json.loads(payload)
         if not isinstance(payload, dict):
-            return []
+            raise ValueError("Faro RUM body must be an object")
         extracted = extract_metrics_from_faro_payload(payload, log_data)
-    except Exception:
-        return []
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError("invalid Faro RUM body") from exc
     if not extracted:
         return []
 
@@ -270,6 +296,7 @@ def _expand_faro_rum_events(log_data: dict[str, Any], domain: str) -> list[dict[
         cid_val = metric.get("cid") or log_data.get("rum_cid") or log_data.get("cid") or ""
         pathname_val = metric.get("pathname") or log_data.get("rum_pathname") or "/"
         base_fields: dict[str, Any] = {
+            "_rum_kind": "errors" if is_exc else "vitals",
             "client_id": cid_val,
             "rum_cid": cid_val,
             "pathname": pathname_val,
@@ -290,6 +317,8 @@ def _expand_faro_rum_events(log_data: dict[str, Any], domain: str) -> list[dict[
             except (ValueError, TypeError):
                 err_col = 0
             err_msg = metric.get("error_message") or "Unknown error"
+            if not isinstance(err_msg, str):
+                raise ValueError("Faro error_message must be text")
             err_file = metric.get("error_file") or "unknown.js"
             base_fields.update(
                 {
@@ -311,10 +340,11 @@ def _expand_faro_rum_events(log_data: dict[str, Any], domain: str) -> list[dict[
             )
         else:
             raw_val = metric.get("metric_value")
-            try:
-                val = float(raw_val) if raw_val is not None and raw_val != "" else 0.0
-            except (ValueError, TypeError):
-                val = 0.0
+            if raw_val is None or raw_val == "" or isinstance(raw_val, bool):
+                raise ValueError("Faro metric_value must be finite")
+            val = float(raw_val)
+            if not math.isfinite(val):
+                raise ValueError("Faro metric_value must be finite")
             m_name = metric.get("metric_name") or "unknown"
             m_rating = metric.get("metric_rating") or ""
             base_fields.update(

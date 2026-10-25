@@ -423,7 +423,6 @@ def test_dashboard_cache_does_not_alias_different_event_windows(filtered: bool, 
 from types import SimpleNamespace
 
 import pytest
-
 from backend.core.high_scale_sections import current_clickhouse_scope
 
 
@@ -515,14 +514,15 @@ def test_network_bundle_keeps_pop_section_identity_without_changing_list_payload
 from threading import Event
 from time import monotonic, sleep
 
+from backend.high_scale.query_router import (
+    QueryIntent,
+    QueryPlan,
+)
+
 from backend.high_scale.historical_jobs import (
     HistoricalJob,
     HistoricalJobManager,
     HistoricalJobState,
-)
-from backend.high_scale.query_router import (
-    QueryIntent,
-    QueryPlan,
 )
 
 

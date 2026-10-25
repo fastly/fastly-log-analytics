@@ -284,6 +284,29 @@ def test_get_quality_returns_bars_grouped_by_country_when_data_present(in_memory
     for r in by_country:
         assert 0 < r["rtt_ms"] < 200
         assert r["reqs"] > 0
+    attempts = [row for row in out["section_timings"] if row["section"] == "network_quality_rollup"]
+    assert len(attempts) == 1
+    assert attempts[0]["outcome"] == "fallback"
+    assert attempts[0]["activity"] == "overhead"
+    assert any(
+        row["source"] == "live" and row["activity"] == "compute" and row["current_execution"]
+        for row in out["section_timings"]
+        if row.get("source") == "live"
+    )
+
+
+def test_get_quality_retains_rollup_dispatch_timings(in_memory_duckdb, test_service_source, monkeypatch):
+    from backend.repositories._base import QueryRunner
+
+    monkeypatch.setattr(
+        QueryRunner,
+        "try_network_quality_from_rollup",
+        lambda self, *args, **kwargs: {"available": True, "by_country": []},
+    )
+    out = get_quality(lambda: in_memory_duckdb, test_service_source, None, None, {})
+    (row,) = out["section_timings"]
+    assert (row["source"], row["activity"], row["outcome"]) == ("rollup", "compute", "served")
+    assert row["current_execution"] is True
 
 
 def test_get_quality_respects_region_country_param(in_memory_duckdb, test_service_source):

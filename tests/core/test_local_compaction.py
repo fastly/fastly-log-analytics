@@ -20,10 +20,10 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from tests._helpers.sources import make_source
 
 from backend.core import local_compaction as lc
 from backend.core.local_compaction import _compact_single_partition
-from tests._helpers.sources import make_source
 
 
 # ── Merged from tests/core/test_local_compaction.py ──

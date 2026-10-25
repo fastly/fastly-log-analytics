@@ -896,7 +896,7 @@ def get_security_aggregates(
 
         _t = _time.perf_counter()
         actual_cols = runner.get_schema_cols()
-        timer.mark("get_schema_cols", _t)
+        timer.mark("get_schema_cols", _t, activity="overhead", current_execution=True)
         if not actual_cols:
             return {
                 "tls_fingerprints": [],
@@ -910,7 +910,7 @@ def get_security_aggregates(
 
         _t = _time.perf_counter()
         params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
-        timer.mark("build_where_clause", _t)
+        timer.mark("build_where_clause", _t, activity="overhead", current_execution=True)
 
         # The catalog temp is built section-aware inside _build_security_response:
         # every section that can serve from a parquet rollup is served WITHOUT
@@ -981,7 +981,7 @@ def _build_security_response(
             results["ngwaf_bots"] = tb.get("ngwaf_bots", [])
         except Exception as e:
             _logger.error("[security] get_top_bots failed in aggregate: %s", e)
-        timer.mark("top_bots", _t0)
+        timer.mark("top_bots", _t0, activity="overhead", scope="subtree", current_execution=True)
 
     results = {**runner.telemetry()}
 
@@ -1124,7 +1124,9 @@ def _build_security_response(
             _t = _time.perf_counter()
             cov_pre = runner.try_security_coverage_from_rollup(start_time, end_time, has_filters=False)
             if cov_pre is not None and cov_pre[1] == 0:
-                timer.mark("fingerprint_coverage_rollup", _t)
+                timer.mark(
+                    "fingerprint_coverage_rollup", _t, source="rollup", activity="compute", current_execution=True
+                )
                 results["tls_fingerprints"] = []
                 rollup_served_fp_cols.add("tls_ciphers_sha")
                 coverage_cols.append("tls_ciphers_sha")
@@ -1143,7 +1145,14 @@ def _build_security_response(
                 per_field_limits={c: 20 for c in schema_eligible_fp_cols},
                 actual_cols=actual_cols,
             )
-            timer.mark("fingerprints_rollup_top_n", _t)
+            timer.mark(
+                "fingerprints_rollup_top_n",
+                _t,
+                source="rollup",
+                activity="compute",
+                current_execution=True,
+                outcome="read",
+            )
 
             # Group top-N by field so we can render per-card lists.
             # __other__ rows (the day-bundle synthetic catch-all) are
@@ -1164,7 +1173,14 @@ def _build_security_response(
                     start_time,
                     end_time,
                 )
-                timer.mark("fingerprints_rollup_ip_spread", _t)
+                timer.mark(
+                    "fingerprints_rollup_ip_spread",
+                    _t,
+                    source="rollup",
+                    activity="compute",
+                    current_execution=True,
+                    outcome="read",
+                )
 
                 for col, result_key in _FP_RESULT_KEYS:
                     if col not in by_field:
@@ -1242,7 +1258,9 @@ def _build_security_response(
             _t = _time.perf_counter()
             cov = runner.try_security_coverage_from_rollup(start_time, end_time, has_filters=bool(filters))
             if cov is not None:
-                timer.mark("fingerprint_coverage_rollup", _t)
+                timer.mark(
+                    "fingerprint_coverage_rollup", _t, source="rollup", activity="compute", current_execution=True
+                )
                 total_rows, tls_populated = cov
                 results["fingerprint_coverage"] = {
                     "tls_ciphers_sha": (tls_populated / total_rows if total_rows > 0 else 0.0)
@@ -1262,8 +1280,15 @@ def _build_security_response(
             return
         _t = _time.perf_counter()
         rolled = reader_fn()
+        timer.mark(
+            timer_label,
+            _t,
+            source="rollup",
+            activity="compute" if rolled is not None else "overhead",
+            current_execution=True,
+            outcome="served" if rolled is not None else "fallback",
+        )
         if rolled is not None:
-            timer.mark(timer_label, _t)
             results[sec_name] = rolled
         else:
             _need(sec_name, need_cols)
@@ -1285,7 +1310,14 @@ def _build_security_response(
         if use_rollup:
             _t = _time.perf_counter()
             rolled = reader_fn()
-            timer.mark(timer_label, _t)
+            timer.mark(
+                timer_label,
+                _t,
+                source="rollup",
+                activity="compute" if rolled is not None else "overhead",
+                current_execution=True,
+                outcome="served" if rolled is not None else "unavailable",
+            )
             if rolled is None:
                 _logger.warning(warn_msg)
                 results[sec_name] = []
@@ -1352,7 +1384,9 @@ def _build_security_response(
             except Exception:
                 _wk_rows = None
             if _wk_rows is not None:
-                timer.mark("wellknown_bots_rollup_read", _t)
+                timer.mark(
+                    "wellknown_bots_rollup_read", _t, source="rollup", activity="compute", current_execution=True
+                )
         if _wk_rows is None:
             _need("wellknown_bots", {"ua", "ip"})
     elif _want("wellknown_bots"):
@@ -1363,7 +1397,7 @@ def _build_security_response(
         be_rows = runner.try_security_bot_efficiency_from_rollup(start_time, end_time, has_filters=bool(filters))
         if be_rows is not None:
             results["bot_efficiency"] = summarize_bot_efficiency_rows(be_rows)
-            timer.mark("bot_efficiency_rollup", _t)
+            timer.mark("bot_efficiency_rollup", _t, source="rollup", activity="compute", current_execution=True)
         else:
             be_cols = {"ua", "ip"}
             if "referer" in actual_cols:
@@ -1397,7 +1431,7 @@ def _build_security_response(
                     mask_ips,
                 )
             )
-            timer.mark("proxies_rollup", _t)
+            timer.mark("proxies_rollup", _t, source="rollup", activity="compute", current_execution=True)
         else:
             _need("proxies", proxy_cols | {"country", "city"})
 
@@ -1421,12 +1455,14 @@ def _build_security_response(
         cols = [c for c in _TEMP_COL_ORDER if c in needed_cols]
         _t = _time.perf_counter()
         temp_table = runner.create_filtered_temp_table(cols, actual_cols, table_name, wc, params)
-        timer.mark("temp_table_create", _t)
+        timer.mark("temp_table_create", _t, source="live", activity="compute", current_execution=True)
         if ngwaf_only:
-            timer.mark("security:temp_ngwaf_narrowed", _time.perf_counter())
+            timer.mark(
+                "security:temp_ngwaf_narrowed", _time.perf_counter(), activity="overhead", current_execution=True
+            )
     else:
         # Every requested section served from a rollup — no temp at all.
-        timer.mark("security:temp_skipped", _time.perf_counter())
+        timer.mark("security:temp_skipped", _time.perf_counter(), activity="skipped", current_execution=True)
 
     # ── Pass 2: live SQL for the missed sections, against the narrowed temp ──
     try:
@@ -1440,12 +1476,21 @@ def _build_security_response(
                 has_filters=bool(filters),
             )
             if rolled_vbts is not None:
-                timer.mark("verified_bots_ts_rollup", _t)
+                timer.mark("verified_bots_ts_rollup", _t, source="rollup", activity="compute", current_execution=True)
                 vbts_rows = rolled_vbts
             else:
+                timer.mark(
+                    "verified_bots_ts_rollup",
+                    _t,
+                    source="rollup",
+                    activity="overhead",
+                    current_execution=True,
+                    outcome="fallback",
+                )
+                _t = _time.perf_counter()
                 q = SQL.VERIFIED_BOTS_TS.format(bucket_seconds=bucket_seconds, temp_table=temp_table)
                 vbts_rows = runner.execute(q).fetchall()
-                timer.mark("verified_bots_ts", _t)
+                timer.mark("verified_bots_ts", _t, source="live", activity="compute", current_execution=True)
             results["verified_bots_ts"] = [{"time": safe_iso(r[0]), "bot_type": r[1], "count": r[2]} for r in vbts_rows]
 
         if (
@@ -1459,7 +1504,7 @@ def _build_security_response(
                     q = SQL.NGWAF_VERIFIED_BOTS.format(temp_table=temp_table)
                     _t = _time.perf_counter()
                     res = runner.execute(q).fetchall()
-                    timer.mark("ngwaf_verified_bots", _t)
+                    timer.mark("ngwaf_verified_bots", _t, source="live", activity="compute", current_execution=True)
                     results["ngwaf_verified_bots"] = [
                         {
                             "bot_name": r[0],
@@ -1475,7 +1520,7 @@ def _build_security_response(
                     q = SQL.NGWAF_VERIFIED_BOTS_TS.format(bucket_seconds=bucket_seconds, temp_table=temp_table)
                     _t = _time.perf_counter()
                     res = runner.execute(q).fetchall()
-                    timer.mark("ngwaf_verified_bots_ts", _t)
+                    timer.mark("ngwaf_verified_bots_ts", _t, source="live", activity="compute", current_execution=True)
                     results["ngwaf_verified_bots_ts"] = [
                         {"time": safe_iso(r[0]), "bot_name": r[1], "count": r[2]} for r in res
                     ]
@@ -1497,7 +1542,7 @@ def _build_security_response(
                 q = SQL.FINGERPRINT_TOP_N.format(col=col, temp_table=temp_table)
                 _t = _time.perf_counter()
                 res = runner.execute(q).fetchall()
-                timer.mark(result_key, _t)
+                timer.mark(result_key, _t, source="live", activity="compute", current_execution=True)
                 results[result_key] = [{"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]} for r in res]
 
         # One scan of the temp populates coverage for every fingerprint card
@@ -1516,7 +1561,7 @@ def _build_security_response(
                 row = runner.execute(
                     SQL.FINGERPRINT_COVERAGE_BULK.format(agg_cols=agg_cols, temp_table=temp_table)
                 ).fetchone()
-                timer.mark("fingerprint_coverage", _t)
+                timer.mark("fingerprint_coverage", _t, source="live", activity="compute", current_execution=True)
                 if row:
                     total = float(row[0]) if row[0] else 0.0
                     for i, c in enumerate(coverage_cols):
@@ -1569,7 +1614,7 @@ def _build_security_response(
                 if _sec in live_sections:
                     _t = _time.perf_counter()
                     res = runner.execute(_sql).fetchall()
-                    timer.mark(_mark, _t)
+                    timer.mark(_mark, _t, source="live", activity="compute", current_execution=True)
                     results[_sec] = [_shape(r) for r in res]
 
         # Well-Known Bots (UA matching + FCrDNS verification). Rows come from
@@ -1589,14 +1634,14 @@ def _build_security_response(
                         prefilter = "WHERE ua IS NOT NULL AND ip IS NOT NULL"
                     q = SQL.WELLKNOWN_BOTS_UA_IP.format(temp_table=temp_table, prefilter=prefilter)
                     _wk_rows = runner.execute(q).fetchall()
-                    timer.mark("wellknown_bots_query", _t)
+                    timer.mark("wellknown_bots_query", _t, source="live", activity="compute", current_execution=True)
 
                 if _wk_rows is None:
                     results["wellknown_bots"] = []
                 else:
                     _t_sum = _time.perf_counter()
                     results["wellknown_bots"] = summarize_wellknown_bot_rows(_wk_rows)
-                    timer.mark("wellknown_bots_summarize", _t_sum)
+                    timer.mark("wellknown_bots_summarize", _t_sum, activity="overhead", current_execution=True)
             except Exception as e:
                 _logger.error("[security] well-known bots query failed: %s", e)
                 results["wellknown_bots"] = []
@@ -1612,7 +1657,7 @@ def _build_security_response(
                     referer_expr=referer_expr,
                 )
                 res = runner.execute(q).fetchall()
-                timer.mark("bot_efficiency", _t)
+                timer.mark("bot_efficiency", _t, source="live", activity="compute", current_execution=True)
                 results["bot_efficiency"] = summarize_bot_efficiency_rows(
                     [(str(r[0] or ""), str(r[1] or ""), int(r[2] or 0), int(r[3] or 0)) for r in res]
                 )
@@ -1641,7 +1686,7 @@ def _build_security_response(
                         results[k] = v
             except Exception as e:
                 _logger.error("[security] get_security_proxies failed in aggregate: %s", e)
-            timer.mark("proxies", _t)
+            timer.mark("proxies", _t, activity="overhead", scope="subtree", current_execution=True)
     finally:
         runner.end_shared_active_hour_temps()
         _drop_temp_table(runner, temp_table, "_build_security_response")

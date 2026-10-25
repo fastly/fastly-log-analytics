@@ -10,24 +10,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from pydantic import AliasChoices
-
-from backend.core.duckdb import _clear_schema_cache
-from backend.core.fastly.client import NgwafWorkspacesResponse, StatsRecord, StatsResponse
-from backend.core.log_fields import LOG_FIELD_CATALOG
-from backend.high_scale import network as hs_network
-from backend.high_scale import performance as hs_performance
-from backend.high_scale.archive_models import ServingWatermark
-from backend.high_scale.cmcd import cmcd_aggregates as hs_cmcd_aggregates
-from backend.high_scale.insights import insights_endpoint as hs_insights_endpoint
-from backend.high_scale.origin import aggregates as hs_aggregates
 from backend.high_scale.registry_bootstrap import HighScaleService
-from backend.high_scale.security import security_aggregates as hs_security_aggregates
-from backend.high_scale.sessions import sessions_detail as hs_sessions_detail
-from backend.models.common import BaseResponse, DebugCall, DebugQuery
-from backend.models.dashboard import AggregatesResponse, SessionDetailRequest, SessionDetailResponse
-from backend.models.insights import InsightCard, InsightsResponse
-from backend.models.network import NetworkHealthResponse, NetworkQualityResponse
 from backend.models.origin import (
     OriginAggregatesResponse,
     OriginDrilldownResponse,
@@ -40,6 +23,30 @@ from backend.models.origin import (
     OriginSummaryResponse,
     OriginTimeseriesResponse,
 )
+from backend.models.security import (
+    SecurityAggregatesRequest,
+    SecurityAggregatesResponse,
+    SecurityTopBotsResponse,
+)
+from pydantic import AliasChoices
+from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
+from tests._helpers.wire import assert_rows_wire_identical, assert_sections_wire_identical, wire
+
+from backend.core.duckdb import _clear_schema_cache
+from backend.core.fastly.client import NgwafWorkspacesResponse, StatsRecord, StatsResponse
+from backend.core.log_fields import LOG_FIELD_CATALOG
+from backend.high_scale import network as hs_network
+from backend.high_scale import performance as hs_performance
+from backend.high_scale.archive_models import ServingWatermark
+from backend.high_scale.cmcd import cmcd_aggregates as hs_cmcd_aggregates
+from backend.high_scale.insights import insights_endpoint as hs_insights_endpoint
+from backend.high_scale.origin import aggregates as hs_aggregates
+from backend.high_scale.security import security_aggregates as hs_security_aggregates
+from backend.high_scale.sessions import sessions_detail as hs_sessions_detail
+from backend.models.common import BaseResponse, DebugCall, DebugQuery
+from backend.models.dashboard import AggregatesResponse, SessionDetailRequest, SessionDetailResponse
+from backend.models.insights import InsightCard, InsightsResponse
+from backend.models.network import NetworkHealthResponse, NetworkQualityResponse
 from backend.models.performance import (
     CmcdAggregatesResponse,
     CmcdRequest,
@@ -48,11 +55,6 @@ from backend.models.performance import (
     PerformanceAggregatesResponse,
     TopBotRow,
     WafSignalRow,
-)
-from backend.models.security import (
-    SecurityAggregatesRequest,
-    SecurityAggregatesResponse,
-    SecurityTopBotsResponse,
 )
 from backend.provision.cmcd_fields import _CMCD_CUSTOM_FIELDS
 from backend.repositories import origin as origin_mod
@@ -79,8 +81,6 @@ from backend.repositories.security import get_security_aggregates, get_security_
 from backend.repositories.security import get_security_aggregates as sec_aggs
 from backend.repositories.sessions import get_session_detail
 from backend.repositories.value import get_summary as get_value_summary
-from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
-from tests._helpers.wire import assert_rows_wire_identical, assert_sections_wire_identical, wire
 from tests.repositories.test_insights import (
     _MOCK_POP_MAP,
     _create_impossible_distance_table,

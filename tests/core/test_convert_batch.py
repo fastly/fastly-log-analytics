@@ -23,14 +23,6 @@ from unittest.mock import MagicMock, patch
 
 import duckdb
 import pytest
-
-from backend.core.ingest import (
-    _quarantine_convert_corrupt_lines,
-    convert_batch_objects,
-    discover_prefix,
-    get_ingest_columns_sql,
-)
-from backend.core.metadata.base import get_con
 from backend.core.metadata.quarantine import list_quarantine_evidence
 from tests._helpers.ledger import (
     DuckLakeLedgerEnv,
@@ -56,6 +48,14 @@ from tests._helpers.ledger import (
 from tests._helpers.ledger import (
     seed_discovered as _seed_discovered,
 )
+
+from backend.core.ingest import (
+    _quarantine_convert_corrupt_lines,
+    convert_batch_objects,
+    discover_prefix,
+    get_ingest_columns_sql,
+)
+from backend.core.metadata.base import get_con
 
 # ── Merged from tests/core/test_convert_batch.py ──
 BUCKET = "test-bucket"

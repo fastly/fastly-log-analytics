@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import sys as _sys
+import time
 from typing import Any
 
 import duckdb
@@ -501,7 +502,11 @@ def get_summary(
     params, where = build_where_clause(start_time, end_time, filters, actual_cols)
     # Unified latency expression: prefer ottfb (micros), fallback to ttfb (seconds).
     lat_val = origin_latency_us_expr(actual_cols)
+    timer = SectionTimer()
+    started = time.perf_counter()
     payload: dict[str, Any] = _shape_summary(runner, table_name, where, params, lat_val, actual_cols)
+    timer.mark("summary", started, source="live", activity="compute", current_execution=True, outcome="served")
+    payload["section_timings"] = timer.entries
     return _store_response_cache(cache_key, payload, runner)
 
 
@@ -664,11 +669,14 @@ def _run_origin_card(
     if use_lat_val:
         fmt_kwargs["lat_val"] = origin_latency_us_expr(actual_cols)
 
+    timer = SectionTimer()
+    started = time.perf_counter()
     rows = runner.execute(
         sql_template.format(**fmt_kwargs),
         params + (extra_params or []),
     ).fetchall()
-    return _store_response_cache(cache_key, shaper(rows), runner)
+    timer.mark(endpoint, started, source="live", activity="compute", current_execution=True, outcome="served")
+    return _store_response_cache(cache_key, {**shaper(rows), "section_timings": timer.entries}, runner)
 
 
 def get_timeseries(
@@ -710,6 +718,8 @@ def get_timeseries(
         return _store_response_cache(cache_key, {"has_data": False, "series": []}, runner)
     lat_expr, unit_conv = resolved
 
+    timer = SectionTimer()
+    started = time.perf_counter()
     payload = _run_timeseries_query(
         runner,
         table_name,
@@ -722,6 +732,8 @@ def get_timeseries(
         split_by_leg=split_by_leg,
         percentile=percentile,
     )
+    timer.mark("timeseries", started, source="live", activity="compute", current_execution=True, outcome="served")
+    payload["section_timings"] = timer.entries
     return _store_response_cache(cache_key, payload, runner)
 
 
@@ -891,6 +903,8 @@ def get_drilldown(
     else:
         bytes_expr = "NULL"
 
+    timer = SectionTimer()
+    started = time.perf_counter()
     rows = runner.execute(
         SQL.DRILLDOWN.format(
             dim_col=dim_col,
@@ -902,9 +916,10 @@ def get_drilldown(
         ),
         params + [limit],
     ).fetchall()
+    timer.mark("drilldown", started, source="live", activity="compute", current_execution=True, outcome="served")
 
     if not rows:
-        payload = {"has_data": False, "dimension": dimension, "rows": []}
+        payload = {"has_data": False, "dimension": dimension, "rows": [], "section_timings": timer.entries}
         return _store_response_cache(cache_key, payload, runner)
 
     rows_out = [
@@ -923,6 +938,7 @@ def get_drilldown(
         "has_data": True,
         "dimension": dimension,
         "rows": rows_out,
+        "section_timings": timer.entries,
     }
     return _store_response_cache(cache_key, payload, runner)
 
@@ -971,6 +987,8 @@ def get_shielding_analysis(
 
     # The query binds two trailing rank cutoffs (top-by-requests OR
     # top-by-overhead) — see SHIELDING_ANALYSIS docstring (M1).
+    timer = SectionTimer()
+    started = time.perf_counter()
     cur = runner.execute(query, params + time_params + [limit, limit])
     # Consume rows via ``cursor.description`` (dict access) rather than
     # positional ``r[0..5]``. A column reorder in SHIELDING_ANALYSIS would
@@ -978,20 +996,27 @@ def get_shielding_analysis(
     # offset-by-N footgun ``_shape_summary`` was already hardened against.
     col_names = [d[0] for d in cur.description]
     raw_rows = [dict(zip(col_names, r, strict=False)) for r in cur.fetchall()]
+    timer.mark(
+        "shielding_analysis", started, source="live", activity="compute", current_execution=True, outcome="served"
+    )
 
     # If the join returned zero rows, distinguish "no shield logs at all" (edge_only)
     # from "shield logs exist but didn't match any edge rid". Old code did a separate
     # shield-existence probe up-front; we fold that into a single cheap check on the
     # already-scanned data instead by re-checking the time window for any shield log.
     if not raw_rows:
+        started = time.perf_counter()
         shield_exists = runner.execute(
             f'SELECT 1 FROM {table_name} WHERE {time_where} AND "edge" = false AND "prid" IS NOT NULL AND "prid" != \'\' LIMIT 1',
             time_params,
         ).fetchone()
+        timer.mark(
+            "shielding_presence", started, source="live", activity="compute", current_execution=True, outcome="served"
+        )
         if shield_exists is None:
-            payload = {"has_data": False, "edge_only": True, "rows": []}
+            payload = {"has_data": False, "edge_only": True, "rows": [], "section_timings": timer.entries}
         else:
-            payload = {"has_data": False, "rows": []}
+            payload = {"has_data": False, "rows": [], "section_timings": timer.entries}
         return _store_response_cache(cache_key, payload, runner)
 
     # ``total_routes`` is a window COUNT(*) OVER () — identical across rows.
@@ -1025,6 +1050,7 @@ def get_shielding_analysis(
         # and flag truncation instead of implying the table is complete.
         "total_routes": total_routes,
         "truncated": total_routes > len(enriched_rows),
+        "section_timings": timer.entries,
     }
     return _store_response_cache(cache_key, payload, runner)
 
@@ -1284,7 +1310,14 @@ async def get_aggregates(
             return
         _ts = _time.perf_counter()
         result = reader()
-        timer.mark(name, _ts)
+        timer.mark(
+            name,
+            _ts,
+            source="rollup",
+            activity="compute" if result is not None else "overhead",
+            current_execution=True,
+            outcome="served" if result is not None else "fallback",
+        )
         if result is not None:
             merged[name] = result
         else:
@@ -1351,7 +1384,9 @@ async def get_aggregates(
     # ABSENT from section_timings. ``origin:temp_skipped`` lets the harness
     # confirm the guard fired. has_data still derives from the summary card.
     if not missed:
-        section_timings.append({"section": "origin:temp_skipped", "time_ms": 0.0})
+        section_timings.append(
+            {"section": "origin:temp_skipped", "time_ms": 0.0, "activity": "skipped", "current_execution": True}
+        )
         summary_card = merged.get("summary") or {}
         # Same envelope as the temp-path return below: only requested sections
         # appear (they're all in ``merged`` here), has_data from the summary
@@ -1366,7 +1401,7 @@ async def get_aggregates(
     _t = _time.perf_counter()
     if not runner.create_temp_table(create_sql, params):
         return {**empty_payload, **runner.telemetry()}
-    timer.mark("temp_table_create", _t)
+    timer.mark("temp_table_create", _t, source="live", activity="compute", current_execution=True, outcome="served")
 
     # Per-branch helpers — each runs on its own runner so they can fan
     # out across connections via ``asyncio.to_thread``. ``SectionTimer``'s
@@ -1387,7 +1422,7 @@ async def get_aggregates(
             return {}
         _ts = _time.perf_counter()
         result = _origin_summary_from_temp(r, temp_table, actual_set)
-        timer.mark("summary", _ts)
+        timer.mark("summary", _ts, source="live", activity="compute", current_execution=True, outcome="served")
         return {"summary": result}
 
     def _branch_slow_urls(r: QueryRunner) -> dict:
@@ -1401,7 +1436,7 @@ async def get_aggregates(
             slow_urls_min_requests,
             slow_urls_limit,
         )
-        timer.mark("slow_urls", _ts)
+        timer.mark("slow_urls", _ts, source="live", activity="compute", current_execution=True, outcome="served")
         return {"slow_urls": result}
 
     def _branch_ts_status_path(r: QueryRunner) -> dict:
@@ -1417,15 +1452,17 @@ async def get_aggregates(
                 timeseries_metric,
                 timeseries_percentile,
             )
-            timer.mark("timeseries", _ts)
+            timer.mark("timeseries", _ts, source="live", activity="compute", current_execution=True, outcome="served")
         if _run("status_codes"):
             _ts = _time.perf_counter()
             out["status_codes"] = _origin_status_codes_from_temp(r, temp_table, actual_set)
-            timer.mark("status_codes", _ts)
+            timer.mark("status_codes", _ts, source="live", activity="compute", current_execution=True, outcome="served")
         if _run("path_breakdown"):
             _ts = _time.perf_counter()
             out["path_breakdown"] = _origin_path_breakdown_from_temp(r, temp_table, actual_set)
-            timer.mark("path_breakdown", _ts)
+            timer.mark(
+                "path_breakdown", _ts, source="live", activity="compute", current_execution=True, outcome="served"
+            )
         return out
 
     def _branch_pop_ip(r: QueryRunner) -> dict:
@@ -1438,7 +1475,7 @@ async def get_aggregates(
                 actual_set,
                 pop_latency_limit,
             )
-            timer.mark("pop_latency", _ts)
+            timer.mark("pop_latency", _ts, source="live", activity="compute", current_execution=True, outcome="served")
         if _run("ip_health"):
             _ts = _time.perf_counter()
             out["ip_health"] = _origin_ip_health_from_temp(
@@ -1447,7 +1484,7 @@ async def get_aggregates(
                 actual_set,
                 ip_health_limit,
             )
-            timer.mark("ip_health", _ts)
+            timer.mark("ip_health", _ts, source="live", activity="compute", current_execution=True, outcome="served")
         return out
 
     # Per-branch occupancy — a branch runs only when it owns at least one

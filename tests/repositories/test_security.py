@@ -14,6 +14,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from backend.models.security import SecurityTopBotsResponse
+from backend.utils.hll import HyperLogLog
 
 from backend.models.common import FilterSpec
 from backend.repositories import security
@@ -21,7 +22,6 @@ from backend.repositories._base import QueryRunner, _safe_table
 from backend.repositories._sql import security as SQL
 from backend.repositories._sql.security import GET_SECURITY_PROXIES_COMBINED
 from backend.repositories.security import get_security_aggregates, get_top_bots
-from backend.utils.hll import HyperLogLog
 from scripts.lib.section_measurements import describe_response
 from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 
@@ -610,6 +610,13 @@ def test_security_aggregates_histogram_rollups_skip_temp(in_memory_duckdb, test_
     assert result["req_size_dist"] == [{"bucket": "0-256B", "count": 5}]
     assert result["conn_reuse_dist"] == [{"bucket": "1 (None)", "count": 3}]
     assert result["top_ips_header"] == [{"ip": "9.9.9.9", "max_header": 900}]
+    reads = [row for row in result["section_timings"] if row.get("outcome") == "served"]
+    assert len(reads) == 3
+    assert all(row["source"] == "rollup" and row["current_execution"] for row in reads)
+    assert (
+        next(row for row in result["section_timings"] if row["section"] == "security:temp_skipped")["activity"]
+        == "skipped"
+    )
 
 
 def test_security_aggregates_coverage_rollup_drops_tls_and_skips_temp(
