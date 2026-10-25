@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useMemo, useCallback } from 'react'
-import { Radio, ArrowRight, AlertTriangle, BarChart3, Gauge, HardDrive, Shield, Network, Settings } from 'lucide-react'
+import { Radio, ArrowRight, AlertTriangle, BarChart3, Gauge, HardDrive, Shield, Network, Settings, HelpCircle } from 'lucide-react'
 import Link from 'next/link'
 import { ReportShell } from '@/components/ReportLayout'
 import type { components } from '@/types/api'
@@ -10,199 +10,212 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { useSSE, type SSELine } from '@/hooks/useSSE'
+import { HelpDialog } from '@/components/ui/confirm-dialog'
+import { PlotlyChart } from '@/components/PlotlyChart'
+import { useSSE, useTimezone, useNowMs, type SSELine } from '@/hooks/useSSE'
 import { adminJson, adminJsonResult, getPageLoadId } from '@/lib/api'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { useServiceStore } from '@/stores/filterStore'
 import { useIsAnalyst } from '@/hooks/useBootstrap'
-import { useTimezone } from '@/hooks/useSSE'
-import { formatDate } from '@/lib/format'
-import { buildServiceHref } from '@/lib/utils'
+import { formatDate, formatCount } from '@/lib/format'
+import { buildServiceHref, cn } from '@/lib/utils'
 import dynamic from 'next/dynamic'
-import { RealtimeMetricCard } from './RealtimeChart'
 import { CHART_COLORS } from '@/lib/chart-helpers'
-import { useNowMs } from '@/hooks/useSSE'
-
-import { formatCount } from '@/lib/format'
 
 export interface MetricsData {
-  requests_per_second: number
-  error_rate: number
-  cache_hit_ratio: number
-  bandwidth_mbps: number
-  total_requests?: number
-  total_hits?: number
-  total_miss?: number
-  total_pass?: number
-  total_errors?: number
-  status_breakdown?: Record<string, number>
-  estimated_cost_usd?: number
-  origin_requests_per_second?: number
-  origin_bandwidth_mbps?: number
-  shield_requests?: number
-  shield_hit_ratio?: number
-  pass_requests?: number
-  synth_requests?: number
-  waf_blocked?: number
-  waf_logged?: number
-  waf_passed?: number
-  pop_count?: number
-  degraded_pops?: string[]
-
-  origin_offload?: number
-
-  hit_latency_ms?: number
-  miss_latency_ms?: number
-  pass_latency_ms?: number
-
-  http2?: number
-  http3?: number
-  ipv6?: number
-  tls_v12?: number
-  tls_v13?: number
-  h2_pct?: number
-  h3_pct?: number
-  ipv6_pct?: number
-  tls12_pct?: number
-  tls13_pct?: number
-
-  ddos_action_blackhole?: number
-  ddos_action_tarpit?: number
-  ddos_action_close?: number
-  ddos_action_downgrade?: number
-  ddos_detect?: number
-  ddos_mitigate?: number
-
-  status_detail?: Record<string, number>
-
-  object_size_distribution?: Record<string, number>
-
-  origin_fetches?: number
-  origin_revalidations?: number
-  origin_cache_fetches?: number
-
-  shield_hit_requests?: number
-  shield_miss_requests?: number
-  shield_revalidations?: number
-  shield_fetch_body_bytes?: number
-
-  request_collapse_usable?: number
-  request_collapse_unusable?: number
-
-  segblock_origin_fetches?: number
-  segblock_shield_fetches?: number
-
-  bot_challenge_starts?: number
-  bot_challenges_issued?: number
-  bot_challenges_succeeded?: number
-  bot_challenges_failed?: number
-  bot_detected?: number
-  bot_verified?: number
-  bot_ai_crawlers?: number
-
-  compute_exec_time_ms?: number
-  compute_req_time_ms?: number
-  compute_ram_used?: number
-  compute_bereq_errors?: number
-  compute_guest_errors?: number
-  compute_resource_exceeded?: number
-
+  requests_per_second: number; error_rate: number; cache_hit_ratio: number; bandwidth_mbps: number
+  total_requests?: number; total_hits?: number; total_miss?: number; total_pass?: number; total_errors?: number
+  status_breakdown?: Record<string, number>; estimated_cost_usd?: number
+  origin_requests_per_second?: number; origin_bandwidth_mbps?: number; origin_offload?: number
+  shield_requests?: number; shield_hit_ratio?: number; pass_requests?: number; synth_requests?: number
+  waf_blocked?: number; waf_logged?: number; waf_passed?: number
+  pop_count?: number; degraded_pops?: string[]
+  hit_latency_ms?: number; miss_latency_ms?: number; pass_latency_ms?: number
+  http2?: number; http3?: number; ipv6?: number; tls_v12?: number; tls_v13?: number
+  h2_pct?: number; h3_pct?: number; ipv6_pct?: number; tls12_pct?: number; tls13_pct?: number
+  ddos_action_blackhole?: number; ddos_action_tarpit?: number; ddos_action_close?: number; ddos_action_downgrade?: number
+  ddos_detect?: number; ddos_mitigate?: number
+  status_detail?: Record<string, number>; object_size_distribution?: Record<string, number>; miss_histogram?: Record<string, number>
+  origin_fetches?: number; origin_revalidations?: number; origin_cache_fetches?: number
+  shield_hit_requests?: number; shield_miss_requests?: number; shield_revalidations?: number; shield_fetch_body_bytes?: number
+  request_collapse_usable?: number; request_collapse_unusable?: number
+  segblock_origin_fetches?: number; segblock_shield_fetches?: number
+  bot_challenge_starts?: number; bot_challenges_issued?: number; bot_challenges_succeeded?: number; bot_challenges_failed?: number
+  bot_detected?: number; bot_verified?: number; bot_ai_crawlers?: number
+  compute_exec_time_ms?: number; compute_req_time_ms?: number; compute_ram_used?: number
+  compute_bereq_errors?: number; compute_guest_errors?: number; compute_resource_exceeded?: number
   restarts?: number
-  vcl_recv_count?: number
-  vcl_recv_time_ms?: number
-  vcl_fetch_count?: number
-  vcl_fetch_time_ms?: number
-  vcl_deliver_count?: number
-  vcl_deliver_time_ms?: number
-  vcl_error_count?: number
-  vcl_error_time_ms?: number
-
-  miss_histogram?: Record<string, number>
-
-  top_pops?: Array<{
-    name: string
-    requests: number
-    errors: number
-    hits: number
-    miss: number
-    hit_ratio: number
-    error_rate: number
-  }>
-
+  vcl_recv_count?: number; vcl_recv_time_ms?: number; vcl_fetch_count?: number; vcl_fetch_time_ms?: number
+  vcl_deliver_count?: number; vcl_deliver_time_ms?: number; vcl_error_count?: number; vcl_error_time_ms?: number
+  top_pops?: Array<{ name: string; requests: number; errors: number; hits: number; miss: number; hit_ratio: number; error_rate: number }>
   all_pops?: Record<string, { r: number; e: number }>
 }
 
 export interface MetricsTick {
-  event: string
-  event_schema_version: number
-  timestamp: string
-  status: 'ok' | 'rt_down'
-  data: MetricsData
-  aggregate_delay?: number
+  event: string; event_schema_version: number; timestamp: string; status: 'ok' | 'rt_down'; data: MetricsData; aggregate_delay?: number
 }
 
-interface TickEntry {
-  timestamp: number
-  data: MetricsData
-}
-
+interface TickEntry { timestamp: number; data: MetricsData }
 const MAX_ENTRIES = 60
-
-const EMPTY_DATA: MetricsData = {
-  requests_per_second: 0,
-  error_rate: 0,
-  cache_hit_ratio: 0,
-  bandwidth_mbps: 0,
-}
+const EMPTY_DATA: MetricsData = { requests_per_second: 0, error_rate: 0, cache_hit_ratio: 0, bandwidth_mbps: 0 }
 
 export function useTickHistory(allTicks: MetricsTick[]) {
   const history = useMemo<TickEntry[]>(() => {
-    const window = allTicks.length > MAX_ENTRIES
-      ? allTicks.slice(allTicks.length - MAX_ENTRIES)
-      : allTicks
-    const entries = window.map((t) => ({
-      timestamp: new Date(t.timestamp).getTime(),
-      data: t.data,
-    }))
+    const window = allTicks.length > MAX_ENTRIES ? allTicks.slice(allTicks.length - MAX_ENTRIES) : allTicks
+    const entries = window.map((t) => ({ timestamp: new Date(t.timestamp).getTime(), data: t.data }))
     if (entries.length < MAX_ENTRIES) {
-      const pad = Array.from({ length: MAX_ENTRIES - entries.length }, () => ({
-        timestamp: 0,
-        data: EMPTY_DATA,
-      }))
+      const pad = Array.from({ length: MAX_ENTRIES - entries.length }, () => ({ timestamp: 0, data: EMPTY_DATA }))
       return [...pad, ...entries]
     }
     return entries
   }, [allTicks])
 
   const prevTick = allTicks.length >= 2 ? allTicks[allTicks.length - 2] : null
-
-  const series = useCallback(
-    (extractor: (d: MetricsData) => number): number[] => {
-      return history.map((e) => extractor(e.data))
-    },
-    [history],
-  )
-
-  const rollingAvg = useCallback(
-    (extractor: (d: MetricsData) => number, windowSize: number): number => {
-      const realEntries = history.filter((e) => e.timestamp > 0)
-      if (realEntries.length === 0) return 0
-      const window = realEntries.slice(-windowSize)
-      return window.reduce((sum, e) => sum + extractor(e.data), 0) / window.length
-    },
-    [history],
-  )
+  const series = useCallback((extractor: (d: MetricsData) => number): number[] => history.map((e) => extractor(e.data)), [history])
+  const rollingAvg = useCallback((extractor: (d: MetricsData) => number, windowSize: number): number => {
+    const realEntries = history.filter((e) => e.timestamp > 0)
+    if (realEntries.length === 0) return 0
+    const window = realEntries.slice(-windowSize)
+    return window.reduce((sum, e) => sum + extractor(e.data), 0) / window.length
+  }, [history])
 
   return { history, prevTick, series, rollingAvg }
 }
-const RealtimeChart = dynamic(() => import('./RealtimeChart').then((m) => m.RealtimeChart), {
-  ssr: false,
-})
 
-const PopTrafficMap = dynamic(
-  () => import('@/components/Map/PopTrafficMap').then((m) => m.PopTrafficMap),
-  { ssr: false },
-)
+interface RealtimeMetricCardProps {
+  title: string
+  value: number
+  suffix?: string
+  rates?: Array<{ label: string; value: number }>
+  thresholds?: { warn: number; critical: number; direction: 'above' | 'below' }
+  dimmed?: boolean
+  helpText?: string
+}
+
+function getThresholdLevel(value: number, thresholds: RealtimeMetricCardProps['thresholds']): 'ok' | 'warn' | 'critical' {
+  if (!thresholds) return 'ok'
+  const { warn, critical, direction } = thresholds
+  if (direction === 'above') return value > critical ? 'critical' : value > warn ? 'warn' : 'ok'
+  return value < critical ? 'critical' : value < warn ? 'warn' : 'ok'
+}
+
+function formatRate(value: number, suffix?: string): string {
+  if (suffix?.includes('%')) return `${value.toFixed(1)}%`
+  if (suffix?.includes('Mbps')) return `${value.toFixed(1)}`
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`
+  return value < 10 ? value.toFixed(1) : Math.round(value).toString()
+}
+
+const LEVEL_CLASSES = { ok: '', warn: 'bg-amber-50 dark:bg-amber-950/20', critical: 'bg-red-50 dark:bg-red-950/20' } as const
+
+export function RealtimeMetricCard({ title, value, suffix, rates, thresholds, dimmed, helpText }: RealtimeMetricCardProps) {
+  const [helpOpen, setHelpOpen] = useState(false)
+  const level = getThresholdLevel(value, thresholds)
+
+  return (
+    <Card className={cn('relative overflow-hidden transition-colors', LEVEL_CLASSES[level], dimmed && 'border-dashed border-muted-foreground/40 bg-muted/5')}>
+      <CardHeader className="relative px-4 pt-4 pb-0">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-xs font-medium tracking-wide text-muted-foreground uppercase">{title}</CardTitle>
+          {helpText && (
+            <Button variant="ghost" size="icon" aria-label={`About ${title}`} className="h-6 w-6 text-muted-foreground hover:text-foreground" onClick={() => setHelpOpen(true)}>
+              <HelpCircle className="h-3.5 w-3.5" />
+            </Button>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent className="relative px-4 pb-4 pt-0">
+        <div className="flex items-baseline">
+          <span className="text-3xl font-bold tabular-nums">{value}</span>
+          {suffix && <span className="text-lg font-normal text-muted-foreground ml-1">{suffix.trim()}</span>}
+        </div>
+        {rates && rates.length > 0 && (
+          <div className="mt-1 text-xs text-muted-foreground tabular-nums">
+            {rates.map((r, i) => (
+              <span key={r.label}>
+                {i > 0 && <span className="mx-1">&middot;</span>}
+                {r.label}: {formatRate(r.value, suffix)}
+              </span>
+            ))}
+          </div>
+        )}
+      </CardContent>
+      {helpText && <HelpDialog open={helpOpen} onOpenChange={setHelpOpen} title={title}><p>{helpText}</p></HelpDialog>}
+    </Card>
+  )
+}
+
+interface RealtimeChartProps {
+  title: string
+  traces: Array<{ y: number[]; name: string; color?: string; yaxis?: 'y' | 'y2' }>
+  height?: number
+  className?: string
+  stacked?: boolean
+  dualYAxis?: boolean
+  helpText?: string
+  yAxisSuffix?: string
+  y2AxisSuffix?: string
+}
+
+const CHART_WINDOW = 60
+const STATIC_CONFIG = { displayModeBar: false, responsive: true }
+
+function makeTimeLabels(count: number): string[] {
+  const now = new Date()
+  return Array.from({ length: count }, (_, i) => {
+    const d = new Date(now.getTime() - (count - 1 - i) * 1000)
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
+  })
+}
+
+export function RealtimeChart({ title, traces, height = 180, className, stacked, dualYAxis, helpText, yAxisSuffix, y2AxisSuffix }: RealtimeChartProps) {
+  const [helpOpen, setHelpOpen] = useState(false)
+  const pointCount = traces[0]?.y.length ?? CHART_WINDOW
+  const labels = useMemo(() => makeTimeLabels(pointCount), [traces, pointCount])
+  const data = useMemo(() => traces.map((trace) => ({
+    type: 'bar' as const, x: labels, y: trace.y, name: trace.name,
+    marker: { color: trace.color }, yaxis: trace.yaxis || 'y',
+    hovertemplate: `%{x} · %{y:,.4~g}<extra>${trace.name}</extra>`,
+  })), [traces, labels])
+
+  const hasLegend = traces.length > 1
+  const layout = useMemo(() => {
+    const l: Record<string, unknown> = {
+      xaxis: { type: 'category', tickangle: -45, nticks: 6, tickfont: { size: 9 }, range: [-0.5, CHART_WINDOW - 0.5] },
+      yaxis: { showgrid: true, gridcolor: 'rgba(128,128,128,0.15)', zeroline: false, autorange: true, rangemode: 'tozero', exponentformat: 'SI', ...(yAxisSuffix ? { ticksuffix: yAxisSuffix } : {}) },
+      barmode: stacked ? 'stack' : 'group', bargap: 0.02,
+      margin: { l: yAxisSuffix ? 55 : 42, r: dualYAxis ? (y2AxisSuffix ? 55 : 42) : 15, t: hasLegend ? 32 : 8, b: 32 },
+      plot_bgcolor: 'transparent', paper_bgcolor: 'transparent', showlegend: hasLegend,
+      legend: { orientation: 'h', y: 1.05, x: 0.5, xanchor: 'center', yanchor: 'bottom', font: { size: 9.5 }, bgcolor: 'transparent' },
+      uirevision: 'stable', font: { size: 11 }, hovermode: 'x unified',
+    }
+    if (dualYAxis) {
+      l.yaxis2 = { side: 'right', overlaying: 'y', showgrid: false, zeroline: false, autorange: true, rangemode: 'tozero', exponentformat: 'SI', ...(y2AxisSuffix ? { ticksuffix: y2AxisSuffix } : {}) }
+    }
+    return l
+  }, [stacked, dualYAxis, hasLegend, yAxisSuffix, y2AxisSuffix])
+
+  return (
+    <Card className={className}>
+      <CardHeader className="px-4 pt-4 pb-0">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-xs font-medium tracking-wide text-muted-foreground uppercase">{title}</CardTitle>
+          {helpText && (
+            <Button variant="ghost" size="icon" aria-label={`About ${title}`} className="h-6 w-6 text-muted-foreground hover:text-foreground" onClick={() => setHelpOpen(true)}>
+              <HelpCircle className="h-3.5 w-3.5" />
+            </Button>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent className="px-4 pb-4 pt-0">
+        <PlotlyChart data={data} layout={layout} config={STATIC_CONFIG} height={height} a11yTitle={title} />
+      </CardContent>
+      {helpText && <HelpDialog open={helpOpen} onOpenChange={setHelpOpen} title={title}><p>{helpText}</p></HelpDialog>}
+    </Card>
+  )
+}
+
+const PopTrafficMap = dynamic(() => import('@/components/Map/PopTrafficMap').then((m) => m.PopTrafficMap), { ssr: false })
 
 // ---------------------------------------------------------------------------
 // Tab definitions
@@ -224,20 +237,11 @@ type TabId = (typeof TABS)[number]['id']
 // ---------------------------------------------------------------------------
 
 interface RealtimeStreamState {
-  connected: boolean
-  lastTickTime: Date | null
-  latestTick: MetricsTick | null
-  allTicks: MetricsTick[]
-  rtDown: boolean
+  connected: boolean; lastTickTime: Date | null; latestTick: MetricsTick | null; allTicks: MetricsTick[]; rtDown: boolean
 }
 
 interface ErrorEvent {
-  event_id: string
-  timestamp: string
-  status: number
-  url: string
-  pop: string
-  client_ip: string
+  event_id: string; timestamp: string; status: number; url: string; pop: string; client_ip: string
 }
 
 function parseErrorEvent(line: SSELine): ErrorEvent | null {
@@ -245,17 +249,9 @@ function parseErrorEvent(line: SSELine): ErrorEvent | null {
   const data = line.data
   if (!data || typeof data !== 'object') return null
   const value = data as Partial<ErrorEvent>
-  if (
-    typeof value.event_id !== 'string' ||
-    typeof value.timestamp !== 'string' ||
-    typeof value.status !== 'number'
-  ) {
-    return null
-  }
+  if (typeof value.event_id !== 'string' || typeof value.timestamp !== 'string' || typeof value.status !== 'number') return null
   return {
-    event_id: value.event_id,
-    timestamp: value.timestamp,
-    status: value.status,
+    event_id: value.event_id, timestamp: value.timestamp, status: value.status,
     url: typeof value.url === 'string' ? value.url : '',
     pop: typeof value.pop === 'string' ? value.pop : '',
     client_ip: typeof value.client_ip === 'string' ? value.client_ip : '',
@@ -274,11 +270,7 @@ function useErrorStream(): { connected: boolean; events: ErrorEvent[] } {
   useEffect(() => {
     if (!activeServiceId) return
     const pageLoadId = getPageLoadId()
-    start(
-      `/api/services/${activeServiceId}/control-room/error-stream`,
-      undefined,
-      pageLoadId ? { 'X-Page-Load-ID': pageLoadId } : undefined,
-    )
+    start(`/api/services/${activeServiceId}/control-room/error-stream`, undefined, pageLoadId ? { 'X-Page-Load-ID': pageLoadId } : undefined)
     return () => reset()
   }, [activeServiceId, start, reset])
 
@@ -321,10 +313,7 @@ function isTick(t: unknown): t is MetricsTick {
 function useRealtimeStream(): RealtimeStreamState {
   const { lines, status, start, reset } = useSSE({ maxLines: REALTIME_STREAM_MAX_LINES })
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
-  const [seed, setSeed] = useState<{ ticks: MetricsTick[]; timestamps: Set<string> }>({
-    ticks: [],
-    timestamps: new Set(),
-  })
+  const [seed, setSeed] = useState<{ ticks: MetricsTick[]; timestamps: Set<string> }>({ ticks: [], timestamps: new Set() })
 
   useEffect(() => {
     if (!activeServiceId) return
@@ -332,19 +321,11 @@ function useRealtimeStream(): RealtimeStreamState {
     const pageLoadId = getPageLoadId()
     // Start SSE stream immediately in parallel with realtime-seed so the
     // first live metrics_tick is not blocked by the 150ms–1,200ms seed fetch.
-    start(
-      `/api/services/${activeServiceId}/realtime-stream`,
-      undefined,
-      pageLoadId ? { 'X-Page-Load-ID': pageLoadId } : undefined,
-    )
+    start(`/api/services/${activeServiceId}/realtime-stream`, undefined, pageLoadId ? { 'X-Page-Load-ID': pageLoadId } : undefined)
     ;(async () => {
       let seedTicks: MetricsTick[] = []
       try {
-        const res = await adminJsonResult(
-          '/api/services/{service_id}/realtime-seed',
-          `/api/services/${activeServiceId}/realtime-seed`,
-          { signal: ac.signal },
-        )
+        const res = await adminJsonResult('/api/services/{service_id}/realtime-seed', `/api/services/${activeServiceId}/realtime-seed`, { signal: ac.signal })
         if (res.ok) {
           const rawTicks: unknown[] = res.data.ticks ?? []
           seedTicks = rawTicks.filter(isTick)
@@ -364,27 +345,18 @@ function useRealtimeStream(): RealtimeStreamState {
   }, [activeServiceId, start, reset])
 
   const allTicks = useMemo(() => {
-    const sseTicks = lines
-      .map(parseMetricsTick)
-      .filter((t): t is MetricsTick => t !== null)
-      .filter((t) => !seed.timestamps.has(t.timestamp))
+    const sseTicks = lines.map(parseMetricsTick).filter((t): t is MetricsTick => t !== null).filter((t) => !seed.timestamps.has(t.timestamp))
     return [...seed.ticks, ...sseTicks]
   }, [lines, seed])
 
   const latestTick = allTicks.length > 0 ? allTicks[allTicks.length - 1] : null
   const lastTickTime = latestTick ? new Date(latestTick.timestamp) : null
 
-  return {
-    connected: status === 'streaming',
-    lastTickTime,
-    latestTick,
-    allTicks,
-    rtDown: latestTick?.status === 'rt_down',
-  }
+  return { connected: status === 'streaming', lastTickTime, latestTick, allTicks, rtDown: latestTick?.status === 'rt_down' }
 }
 
 // ---------------------------------------------------------------------------
-// Freshness helpers
+// Freshness helpers & Status indicators
 // ---------------------------------------------------------------------------
 
 type FreshnessLevel = 'fresh' | 'stale' | 'expired'
@@ -392,34 +364,15 @@ type FreshnessLevel = 'fresh' | 'stale' | 'expired'
 function getFreshnessLevel(lastTick: Date | null): FreshnessLevel {
   if (!lastTick) return 'expired'
   const ageMs = Date.now() - lastTick.getTime()
-  if (ageMs < 10_000) return 'fresh'
-  if (ageMs < 30_000) return 'stale'
-  return 'expired'
+  return ageMs < 10_000 ? 'fresh' : ageMs < 30_000 ? 'stale' : 'expired'
 }
 
-function freshnessVariant(level: FreshnessLevel) {
-  switch (level) {
-    case 'fresh':
-      return 'success' as const
-    case 'stale':
-      return 'warning' as const
-    case 'expired':
-      return 'destructive' as const
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Status indicators
-// ---------------------------------------------------------------------------
+const FRESHNESS_VARIANTS = { fresh: 'success', stale: 'warning', expired: 'destructive' } as const
 
 function ConnectionBadge({ connected }: { connected: boolean }) {
   return (
     <Badge variant={connected ? 'success' : 'destructive'} className="gap-1.5">
-      <span
-        className={`inline-block h-2 w-2 rounded-full ${
-          connected ? 'bg-emerald-500 dark:bg-emerald-400' : 'bg-red-500 dark:bg-red-400'
-        }`}
-      />
+      <span className={`inline-block h-2 w-2 rounded-full ${connected ? 'bg-emerald-500 dark:bg-emerald-400' : 'bg-red-500 dark:bg-red-400'}`} />
       {connected ? 'Connected' : 'Disconnected'}
     </Badge>
   )
@@ -428,30 +381,19 @@ function ConnectionBadge({ connected }: { connected: boolean }) {
 function FreshnessBadge({ lastTickTime, timezone }: { lastTickTime: Date | null; timezone: string }) {
   // Subscribe to the shared 1 Hz ticker so the freshness level re-evaluates.
   useNowMs()
-
   const level = getFreshnessLevel(lastTickTime)
-  const label = lastTickTime
-    ? `Fresh as of ${formatDate(lastTickTime, timezone, 'h:mm:ss a')}`
-    : 'No data yet'
-
   return (
-    <Badge variant={freshnessVariant(level)} className="gap-1.5">
-      {label}
+    <Badge variant={FRESHNESS_VARIANTS[level]} className="gap-1.5">
+      {lastTickTime ? `Fresh as of ${formatDate(lastTickTime, timezone, 'h:mm:ss a')}` : 'No data yet'}
     </Badge>
   )
 }
-
-// ---------------------------------------------------------------------------
-// RT Down banner
-// ---------------------------------------------------------------------------
 
 function RtDownBanner() {
   return (
     <Alert variant="destructive" className="mb-4">
       <AlertTriangle className="h-4 w-4" />
-      <AlertDescription>
-        Fastly RT unavailable — showing last-known-good values.
-      </AlertDescription>
+      <AlertDescription>Fastly RT unavailable — showing last-known-good values.</AlertDescription>
     </Alert>
   )
 }
@@ -1203,43 +1145,19 @@ function SecurityTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCo
   return (
     <TabPanelShell rtDown={rtDown} historicalHref={historicalHref} historicalLabel="security">
       <MetricCardGrid
-        data={data}
-        rollingAvg={rollingAvg}
-        dimmed={rtDown}
+        data={data} rollingAvg={rollingAvg} dimmed={rtDown}
         cards={[
-          {
-            title: 'WAF Blocked',
-            suffix: ' req',
-            rateFn: (d) => d.waf_blocked ?? 0,
-            helpText: 'Requests blocked by the Web Application Firewall. These matched a WAF rule configured to block — the request never reached your origin.',
-          },
-          {
-            title: 'WAF Logged',
-            suffix: ' req',
-            rateFn: (d) => d.waf_logged ?? 0,
-            helpText: 'Requests that triggered a WAF rule in logging mode — suspicious but allowed through. Use logged events to tune rules before switching them to block mode.',
-          },
-          {
-            title: '4xx Responses',
-            suffix: ' req',
-            rateFn: (d) => d.status_breakdown?.status_4xx ?? 0,
-            helpText: 'Client error responses (400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found, 429 Rate Limited). Spikes may indicate scanning activity, broken links, or auth issues.',
-          },
-          {
-            title: '5xx Responses',
-            suffix: ' req',
-            rateFn: (d) => d.status_breakdown?.status_5xx ?? 0,
-            thresholds: { warn: 1, critical: 10, direction: 'above' },
-            helpText: 'Server error responses. 502/503 typically indicate origin unreachable or overloaded. 500 indicates an application error. Any sustained 5xx traffic warrants immediate investigation.',
-          },
+          { title: 'WAF Blocked', suffix: ' req', rateFn: (d) => d.waf_blocked ?? 0, helpText: 'Requests blocked by the Web Application Firewall. These matched a WAF rule configured to block — the request never reached your origin.' },
+          { title: 'WAF Logged', suffix: ' req', rateFn: (d) => d.waf_logged ?? 0, helpText: 'Requests that triggered a WAF rule in logging mode — suspicious but allowed through. Use logged events to tune rules before switching them to block mode.' },
+          { title: '4xx Responses', suffix: ' req', rateFn: (d) => d.status_breakdown?.status_4xx ?? 0, helpText: 'Client error responses (400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found, 429 Rate Limited). Spikes may indicate scanning activity, broken links, or auth issues.' },
+          { title: '5xx Responses', suffix: ' req', rateFn: (d) => d.status_breakdown?.status_5xx ?? 0, thresholds: { warn: 1, critical: 10, direction: 'above' }, helpText: 'Server error responses. 502/503 typically indicate origin unreachable or overloaded. 500 indicates an application error. Any sustained 5xx traffic warrants immediate investigation.' },
         ]}
       />
       <div className="grid gap-6 md:grid-cols-2">
         <RealtimeChart
           title="WAF Events"
           helpText="Blocked = attack prevented at the edge. Logged = suspicious traffic allowed through for monitoring. Passed = clean traffic that matched no WAF rules."
-          yAxisSuffix=" req/s"
-          stacked
+          yAxisSuffix=" req/s" stacked
           traces={seriesTraces(series, [
             ['Blocked', CHART_COLORS.danger, (d) => d.waf_blocked ?? 0],
             ['Logged', '#eab308', (d) => d.waf_logged ?? 0],
@@ -1268,8 +1186,7 @@ function SecurityTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCo
         ]}
       />
       <MetricCardGrid
-        cols={3}
-        dimmed={rtDown}
+        cols={3} dimmed={rtDown}
         cards={[
           { title: 'Bots Detected', value: data?.bot_detected ?? 0, suffix: ' req', helpText: "Requests classified as bot traffic by Fastly's bot detection engine, based on behavioral fingerprinting and reputation data." },
           { title: 'Verified Bots', value: data?.bot_verified ?? 0, suffix: ' req', helpText: 'Verified legitimate bots like Googlebot, Bingbot, and other search engine crawlers that have been authenticated via reverse DNS or IP verification.' },
@@ -1279,8 +1196,7 @@ function SecurityTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCo
       <RealtimeChart
         title="Bot Challenge Pipeline"
         helpText="Bot management funnel. Passed = completed challenge (likely human). Failed = failed challenge (likely bot). Detected = classified as bot by fingerprinting. AI Crawlers = identified AI training crawlers."
-        yAxisSuffix=" req/s"
-        stacked
+        yAxisSuffix=" req/s" stacked
         traces={seriesTraces(series, [
           ['Passed', '#22c55e', (d) => d.bot_challenges_succeeded ?? 0],
           ['Failed', CHART_COLORS.danger, (d) => d.bot_challenges_failed ?? 0],
@@ -1291,8 +1207,7 @@ function SecurityTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCo
 
       <SectionHeading>DDoS Protection</SectionHeading>
       <MetricCardGrid
-        cols={2}
-        dimmed={rtDown}
+        cols={2} dimmed={rtDown}
         cards={[
           { title: 'DDoS Detected', value: data?.ddos_detect ?? 0, suffix: ' req', helpText: "Requests classified as distributed denial-of-service by Fastly's automatic DDoS protection. Detection is always on — no configuration required." },
           { title: 'DDoS Mitigated', value: data?.ddos_mitigate ?? 0, suffix: ' req', helpText: 'DDoS requests that were actively mitigated (blackholed, tarpitted, closed, or downgraded). The gap between detected and mitigated indicates requests still under analysis.' },
@@ -1301,8 +1216,7 @@ function SecurityTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCo
       <RealtimeChart
         title="DDoS Mitigation Actions"
         helpText="Blackhole = all traffic dropped. Tarpit = connections intentionally slowed. Close = connections terminated. Downgrade = service quality reduced. Any non-zero values indicate active DDoS mitigation."
-        yAxisSuffix=" req/s"
-        stacked
+        yAxisSuffix=" req/s" stacked
         traces={seriesTraces(series, [
           ['Blackhole', '#1e293b', (d) => d.ddos_action_blackhole ?? 0],
           ['Tarpit', '#7c3aed', (d) => d.ddos_action_tarpit ?? 0],
@@ -1312,17 +1226,13 @@ function SecurityTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCo
       />
 
       <SectionHeading>WAF Signal Classification</SectionHeading>
-      <Card>
-        <CardContent className="pt-4">
-          <CorrelatorLeaderboard dimension="waf_sig" serviceId={activeServiceId} limit={5} />
-        </CardContent>
-      </Card>
+      <Card><CardContent className="pt-4"><CorrelatorLeaderboard dimension="waf_sig" serviceId={activeServiceId} limit={5} /></CardContent></Card>
     </TabPanelShell>
   )
 }
 
 // ---------------------------------------------------------------------------
-// Network tab
+// Network tab & Admin Health tab
 // ---------------------------------------------------------------------------
 
 function NetworkTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCommonProps) {
@@ -1331,76 +1241,38 @@ function NetworkTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCom
   return (
     <TabPanelShell rtDown={rtDown} historicalHref={historicalHref} historicalLabel="network">
       <MetricCardGrid
-        cols={3}
-        data={data}
-        rollingAvg={rollingAvg}
-        dimmed={rtDown}
+        cols={3} data={data} rollingAvg={rollingAvg} dimmed={rtDown}
         cards={[
-          {
-            title: 'Active PoPs',
-            rateFn: (d) => d.pop_count ?? 0,
-            helpText: 'Number of Fastly Points of Presence actively serving traffic for this service. Each PoP is a data center location worldwide.',
-          },
-          {
-            title: 'Healthy PoPs',
-            rateFn: (d) => (d.pop_count ?? 0) - (d.degraded_pops?.length ?? 0),
-            helpText: 'PoPs with error rates below the degradation threshold. A sudden drop may indicate a regional issue.',
-          },
-          {
-            title: 'Degraded PoPs',
-            thresholds: { warn: 1, critical: 3, direction: 'above' },
-            rateFn: (d) => d.degraded_pops?.length ?? 0,
-            helpText: 'PoPs with elevated error rates. Low-traffic PoPs may appear degraded during traffic lulls.',
-          },
+          { title: 'Active PoPs', rateFn: (d) => d.pop_count ?? 0, helpText: 'Number of Fastly Points of Presence actively serving traffic for this service. Each PoP is a data center location worldwide.' },
+          { title: 'Healthy PoPs', rateFn: (d) => (d.pop_count ?? 0) - (d.degraded_pops?.length ?? 0), helpText: 'PoPs with error rates below the degradation threshold. A sudden drop may indicate a regional issue.' },
+          { title: 'Degraded PoPs', thresholds: { warn: 1, critical: 3, direction: 'above' }, rateFn: (d) => d.degraded_pops?.length ?? 0, helpText: 'PoPs with elevated error rates. Low-traffic PoPs may appear degraded during traffic lulls.' },
         ]}
       />
       {degradedCount > 0 && !rtDown && (
         <Alert variant="destructive">
           <AlertTriangle className="h-4 w-4" />
-          <AlertDescription>
-            {degradedCount} PoP(s) showing elevated errors: {data?.degraded_pops?.join(', ')}
-          </AlertDescription>
+          <AlertDescription>{degradedCount} PoP(s) showing elevated errors: {data?.degraded_pops?.join(', ')}</AlertDescription>
         </Alert>
       )}
       <RealtimeChart
-        title="PoP Count"
-        yAxisSuffix=" PoPs"
-        traces={seriesTraces(series, [
-          ['Active PoPs', CHART_COLORS.info, (d) => d.pop_count ?? 0],
-          ['Degraded', CHART_COLORS.danger, (d) => d.degraded_pops?.length ?? 0],
-        ])}
+        title="PoP Count" yAxisSuffix=" PoPs"
+        traces={seriesTraces(series, [['Active PoPs', CHART_COLORS.info, (d) => d.pop_count ?? 0], ['Degraded', CHART_COLORS.danger, (d) => d.degraded_pops?.length ?? 0]])}
       />
 
       <SectionHeading>Traffic Distribution</SectionHeading>
-      <Card>
-        <CardContent className="pt-4">
-          <PopTrafficMap allPops={data?.all_pops ?? {}} className="h-[420px]" />
-        </CardContent>
-      </Card>
+      <Card><CardContent className="pt-4"><PopTrafficMap allPops={data?.all_pops ?? {}} className="h-[420px]" /></CardContent></Card>
 
       <SectionHeading>Protocol Adoption</SectionHeading>
       <MetricCardGrid
-        cols={5}
-        dimmed={rtDown}
-        cards={(
-          [
-            ['HTTP/2', data?.h2_pct],
-            ['HTTP/3', data?.h3_pct],
-            ['IPv6', data?.ipv6_pct],
-            ['TLS 1.2', data?.tls12_pct],
-            ['TLS 1.3', data?.tls13_pct],
-          ] as const
-        ).map(([title, pct]) => ({
-          title,
-          value: Number((pct ?? 0).toFixed(1)),
-          suffix: '%',
+        cols={5} dimmed={rtDown}
+        cards={([['HTTP/2', data?.h2_pct], ['HTTP/3', data?.h3_pct], ['IPv6', data?.ipv6_pct], ['TLS 1.2', data?.tls12_pct], ['TLS 1.3', data?.tls13_pct]] as const).map(([title, pct]) => ({
+          title, value: Number((pct ?? 0).toFixed(1)), suffix: '%',
         }))}
       />
       <RealtimeChart
         title="Protocol Distribution"
         helpText="HTTP/2 uses multiplexed TCP streams. HTTP/3 uses QUIC (UDP-based) for better performance on lossy networks. 'Other' includes HTTP/1.1 and legacy protocols."
-        yAxisSuffix=" req/s"
-        stacked
+        yAxisSuffix=" req/s" stacked
         traces={seriesTraces(series, [
           ['HTTP/2', CHART_COLORS.info, (d) => d.http2 ?? 0],
           ['HTTP/3', '#22c55e', (d) => d.http3 ?? 0],
@@ -1411,32 +1283,17 @@ function NetworkTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCom
   )
 }
 
-// ---------------------------------------------------------------------------
-// Admin Health tab
-// ---------------------------------------------------------------------------
-
-function AdminHealthTab({
-  tick,
-  rtDown,
-  connected,
-  series,
-  rollingAvg,
-}: Omit<TabCommonProps, 'historicalHref'> & { connected: boolean }) {
+function AdminHealthTab({ tick, rtDown, connected, series, rollingAvg }: Omit<TabCommonProps, 'historicalHref'> & { connected: boolean }) {
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const data = tick?.data
   return (
     <TabPanelShell rtDown={rtDown}>
       <MetricCardGrid
-        cols={3}
-        data={data}
-        rollingAvg={rollingAvg}
-        dimmed={rtDown}
+        cols={3} data={data} rollingAvg={rollingAvg} dimmed={rtDown}
         prefix={
           <Card>
             <CardHeader className="pb-0">
-              <CardTitle className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                RT Stream
-              </CardTitle>
+              <CardTitle className="text-xs font-medium tracking-wide text-muted-foreground uppercase">RT Stream</CardTitle>
             </CardHeader>
             <CardContent>
               <div className={`text-3xl font-bold tabular-nums ${!connected ? 'opacity-50' : ''}`}>
@@ -1453,51 +1310,14 @@ function AdminHealthTab({
 
       <SectionHeading>Scorer Health (Compute@Edge)</SectionHeading>
       <MetricCardGrid
-        cols={3}
-        data={data}
-        rollingAvg={rollingAvg}
-        dimmed={rtDown}
+        cols={3} data={data} rollingAvg={rollingAvg} dimmed={rtDown}
         cards={[
-          {
-            title: 'Execution Time',
-            decimals: 1,
-            suffix: ' ms',
-            thresholds: { warn: 50, critical: 200, direction: 'above' },
-            rateFn: (d) => d.compute_exec_time_ms ?? 0,
-            helpText: 'Compute@Edge Wasm execution time (CPU-only, excludes I/O waits). The scorer is cold on every request — watch for execution time creep after code changes.',
-          },
-          {
-            title: 'Request Time',
-            decimals: 1,
-            suffix: ' ms',
-            thresholds: { warn: 100, critical: 500, direction: 'above' },
-            rateFn: (d) => d.compute_req_time_ms ?? 0,
-            helpText: 'Total Compute@Edge request time including I/O (backend fetches, KV lookups). The gap between this and execution time is I/O wait.',
-          },
-          {
-            title: 'RAM Used',
-            value: Number(((data?.compute_ram_used ?? 0) / 1_048_576).toFixed(1)),
-            suffix: ' MB',
-            helpText: 'Peak memory usage of the Compute@Edge scorer per request. The Wasm runtime allocates a fresh heap per request — if this climbs toward the limit, the scorer may start hitting Resource Exceeded errors.',
-          },
-          {
-            title: 'Backend Errors',
-            value: data?.compute_bereq_errors ?? 0,
-            thresholds: { warn: 1, critical: 10, direction: 'above' },
-            helpText: 'Failed backend requests from the Compute scorer (e.g., origin unreachable). The scorer fails open on these — sessions are passed without scoring.',
-          },
-          {
-            title: 'Guest Errors',
-            value: data?.compute_guest_errors ?? 0,
-            thresholds: { warn: 1, critical: 5, direction: 'above' },
-            helpText: 'Wasm runtime errors in the scorer (panics, traps, invalid memory access). Any non-zero value warrants investigation — it means the scorer code is hitting an unhandled edge case.',
-          },
-          {
-            title: 'Resource Exceeded',
-            value: data?.compute_resource_exceeded ?? 0,
-            thresholds: { warn: 1, critical: 5, direction: 'above' },
-            helpText: 'Requests where the scorer exceeded its CPU or memory allocation. The scorer is cold on every request — if this grows, the scorer binary may need optimization or wasm-opt tuning.',
-          },
+          { title: 'Execution Time', decimals: 1, suffix: ' ms', thresholds: { warn: 50, critical: 200, direction: 'above' }, rateFn: (d) => d.compute_exec_time_ms ?? 0, helpText: 'Compute@Edge Wasm execution time (CPU-only, excludes I/O waits). The scorer is cold on every request — watch for execution time creep after code changes.' },
+          { title: 'Request Time', decimals: 1, suffix: ' ms', thresholds: { warn: 100, critical: 500, direction: 'above' }, rateFn: (d) => d.compute_req_time_ms ?? 0, helpText: 'Total Compute@Edge request time including I/O (backend fetches, KV lookups). The gap between this and execution time is I/O wait.' },
+          { title: 'RAM Used', value: Number(((data?.compute_ram_used ?? 0) / 1_048_576).toFixed(1)), suffix: ' MB', helpText: 'Peak memory usage of the Compute@Edge scorer per request. The Wasm runtime allocates a fresh heap per request — if this climbs toward the limit, the scorer may start hitting Resource Exceeded errors.' },
+          { title: 'Backend Errors', value: data?.compute_bereq_errors ?? 0, thresholds: { warn: 1, critical: 10, direction: 'above' }, helpText: 'Failed backend requests from the Compute scorer (e.g., origin unreachable). The scorer fails open on these — sessions are passed without scoring.' },
+          { title: 'Guest Errors', value: data?.compute_guest_errors ?? 0, thresholds: { warn: 1, critical: 5, direction: 'above' }, helpText: 'Wasm runtime errors in the scorer (panics, traps, invalid memory access). Any non-zero value warrants investigation — it means the scorer code is hitting an unhandled edge case.' },
+          { title: 'Resource Exceeded', value: data?.compute_resource_exceeded ?? 0, thresholds: { warn: 1, critical: 5, direction: 'above' }, helpText: 'Requests where the scorer exceeded its CPU or memory allocation. The scorer is cold on every request — if this grows, the scorer binary may need optimization or wasm-opt tuning.' },
         ]}
       />
       <div className="grid gap-6 md:grid-cols-2">
@@ -1505,16 +1325,12 @@ function AdminHealthTab({
           title="Compute Latency (ms)"
           helpText="Execution = Wasm CPU time only. Request = total time including I/O waits. The gap between them is I/O wait (backend fetches, KV lookups). Watch for execution time creep after scorer code changes."
           yAxisSuffix=" ms"
-          traces={seriesTraces(series, [
-            ['Execution', CHART_COLORS.info, (d) => d.compute_exec_time_ms ?? 0],
-            ['Request', '#f97316', (d) => d.compute_req_time_ms ?? 0],
-          ])}
+          traces={seriesTraces(series, [['Execution', CHART_COLORS.info, (d) => d.compute_exec_time_ms ?? 0], ['Request', '#f97316', (d) => d.compute_req_time_ms ?? 0]])}
         />
         <RealtimeChart
           title="Compute Errors"
           helpText="Backend = origin request failures. Guest = Wasm runtime panics/traps. Resource Limit = CPU or memory exceeded. Any sustained non-zero errors mean the scorer is degraded and sessions are failing open."
-          yAxisSuffix=" err/s"
-          stacked
+          yAxisSuffix=" err/s" stacked
           traces={seriesTraces(series, [
             ['Backend', CHART_COLORS.danger, (d) => d.compute_bereq_errors ?? 0],
             ['Guest', '#eab308', (d) => d.compute_guest_errors ?? 0],
@@ -1525,10 +1341,7 @@ function AdminHealthTab({
 
       <SectionHeading>VCL Execution</SectionHeading>
       <MetricCardGrid
-        cols={5}
-        data={data}
-        rollingAvg={rollingAvg}
-        dimmed={rtDown}
+        cols={5} data={data} rollingAvg={rollingAvg} dimmed={rtDown}
         cards={[
           { title: 'Restarts', suffix: '/s', rateFn: (d) => d.restarts ?? 0, thresholds: { warn: 1, critical: 10, direction: 'above' }, helpText: 'VCL restart count per second. Restarts re-enter vcl_recv with modified state — used for routing fallbacks but expensive. High rates indicate a misconfigured restart loop.' },
           { title: 'vcl_recv', value: Number((data?.vcl_recv_time_ms ?? 0).toFixed(1)), suffix: ' ms', helpText: 'Time in vcl_recv — request routing, ACL checks, header manipulation. High values may indicate complex routing logic or excessive table lookups.' },
@@ -1541,8 +1354,7 @@ function AdminHealthTab({
         <RealtimeChart
           title="VCL Subroutine Time (ms)"
           helpText="Time spent in each VCL subroutine per request. recv = request handling, fetch = origin response processing, deliver = client response, error = error page generation. High recv time may indicate complex routing logic."
-          yAxisSuffix=" ms"
-          stacked
+          yAxisSuffix=" ms" stacked
           traces={seriesTraces(series, [
             ['recv', CHART_COLORS.info, (d) => d.vcl_recv_time_ms ?? 0],
             ['fetch', '#f97316', (d) => d.vcl_fetch_time_ms ?? 0],
@@ -1553,8 +1365,7 @@ function AdminHealthTab({
         <RealtimeChart
           title="VCL Subroutine Calls"
           helpText="Number of times each VCL subroutine was invoked. Call count × time per call = total VCL overhead. A high error count means many requests are hitting synthetic error responses."
-          yAxisSuffix=" calls/s"
-          stacked
+          yAxisSuffix=" calls/s" stacked
           traces={seriesTraces(series, [
             ['recv', CHART_COLORS.info, (d) => d.vcl_recv_count ?? 0],
             ['fetch', '#f97316', (d) => d.vcl_fetch_count ?? 0],
@@ -1576,10 +1387,6 @@ function AdminHealthTab({
   )
 }
 
-// ---------------------------------------------------------------------------
-// Historical link helper
-// ---------------------------------------------------------------------------
-
 function HistoricalLink({ href, label }: { href: string; label: string }) {
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   return (
@@ -1594,70 +1401,29 @@ function HistoricalLink({ href, label }: { href: string; label: string }) {
   )
 }
 
-// ---------------------------------------------------------------------------
-// Tab content router
-// ---------------------------------------------------------------------------
-
 function TabContent({
-  tabId,
-  historicalHref,
-  tick,
-  rtDown,
-  connected,
-  series,
-  rollingAvg,
-  errorEvents,
-  errorsConnected,
-  timezone,
+  tabId, historicalHref, tick, rtDown, connected, series, rollingAvg, errorEvents, errorsConnected, timezone,
 }: {
-  tabId: string
-  historicalHref: string | null
-  tick: MetricsTick | null
-  rtDown: boolean
-  connected: boolean
+  tabId: string; historicalHref: string | null; tick: MetricsTick | null; rtDown: boolean; connected: boolean
   series: (extractor: (d: MetricsData) => number) => number[]
   rollingAvg: (extractor: (d: MetricsData) => number, windowSize: number) => number
-  errorEvents: ErrorEvent[]
-  errorsConnected: boolean
-  timezone: string
+  errorEvents: ErrorEvent[]; errorsConnected: boolean; timezone: string
 }) {
   const commonProps = { tick, rtDown, series, rollingAvg }
   switch (tabId) {
     case 'overview':
-      return (
-        <OverviewTab
-          {...commonProps}
-          historicalHref={historicalHref ?? '/dashboard'}
-          errorEvents={errorEvents}
-          errorsConnected={errorsConnected}
-          timezone={timezone}
-        />
-      )
-    case 'performance':
-      return <PerformanceTab {...commonProps} historicalHref={historicalHref ?? '/performance'} />
-    case 'origin':
-      return <OriginTab {...commonProps} historicalHref={historicalHref ?? '/origin'} />
-    case 'security':
-      return <SecurityTab {...commonProps} historicalHref={historicalHref ?? '/security'} />
-    case 'network':
-      return <NetworkTab {...commonProps} historicalHref={historicalHref ?? '/network'} />
-    case 'admin':
-      return <AdminHealthTab {...commonProps} connected={connected} />
-    default:
-      return null
+      return <OverviewTab {...commonProps} historicalHref={historicalHref ?? '/dashboard'} errorEvents={errorEvents} errorsConnected={errorsConnected} timezone={timezone} />
+    case 'performance': return <PerformanceTab {...commonProps} historicalHref={historicalHref ?? '/performance'} />
+    case 'origin': return <OriginTab {...commonProps} historicalHref={historicalHref ?? '/origin'} />
+    case 'security': return <SecurityTab {...commonProps} historicalHref={historicalHref ?? '/security'} />
+    case 'network': return <NetworkTab {...commonProps} historicalHref={historicalHref ?? '/network'} />
+    case 'admin': return <AdminHealthTab {...commonProps} connected={connected} />
+    default: return null
   }
 }
 
-// ---------------------------------------------------------------------------
-// Mobile overview (stripped-down for < 768px)
-// ---------------------------------------------------------------------------
-
 function MobileOverview({ connected, lastTickTime, timezone, tick, rtDown }: {
-  connected: boolean
-  lastTickTime: Date | null
-  timezone: string
-  tick: MetricsTick | null
-  rtDown: boolean
+  connected: boolean; lastTickTime: Date | null; timezone: string; tick: MetricsTick | null; rtDown: boolean
 }) {
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const data = tick?.data
@@ -1669,39 +1435,17 @@ function MobileOverview({ connected, lastTickTime, timezone, tick, rtDown }: {
       </div>
       {rtDown && <RtDownBanner />}
       <Card>
-        <CardHeader>
-          <CardTitle>Live Overview</CardTitle>
-        </CardHeader>
+        <CardHeader><CardTitle>Live Overview</CardTitle></CardHeader>
         <CardContent>
           {data ? (
             <div className={`grid grid-cols-2 gap-3 ${rtDown ? 'opacity-50' : ''}`}>
-              <RealtimeMetricCard
-                title="Requests/s"
-                value={data.requests_per_second}
-                suffix=" req/s"
-              />
-              <RealtimeMetricCard
-                title="Error Rate"
-                value={Number((data.error_rate * 100).toFixed(2))}
-                suffix="%"
-                thresholds={{ warn: 1, critical: 5, direction: 'above' }}
-              />
-              <RealtimeMetricCard
-                title="Cache Hit"
-                value={Number((data.cache_hit_ratio * 100).toFixed(1))}
-                suffix="%"
-                thresholds={{ warn: 90, critical: 50, direction: 'below' }}
-              />
-              <RealtimeMetricCard
-                title="Bandwidth"
-                value={Number(data.bandwidth_mbps.toFixed(2))}
-                suffix=" Mbps"
-              />
+              <RealtimeMetricCard title="Requests/s" value={data.requests_per_second} suffix=" req/s" />
+              <RealtimeMetricCard title="Error Rate" value={Number((data.error_rate * 100).toFixed(2))} suffix="%" thresholds={{ warn: 1, critical: 5, direction: 'above' }} />
+              <RealtimeMetricCard title="Cache Hit" value={Number((data.cache_hit_ratio * 100).toFixed(1))} suffix="%" thresholds={{ warn: 90, critical: 50, direction: 'below' }} />
+              <RealtimeMetricCard title="Bandwidth" value={Number(data.bandwidth_mbps.toFixed(2))} suffix=" Mbps" />
             </div>
           ) : (
-            <p className="text-muted-foreground text-sm">
-              Waiting for metrics stream...
-            </p>
+            <p className="text-muted-foreground text-sm">Waiting for metrics stream...</p>
           )}
         </CardContent>
       </Card>
@@ -1715,10 +1459,6 @@ function MobileOverview({ connected, lastTickTime, timezone, tick, rtDown }: {
   )
 }
 
-// ---------------------------------------------------------------------------
-// Main component
-// ---------------------------------------------------------------------------
-
 export default function ControlRoomClient() {
   const [activeTab, setActiveTab] = useState<TabId>('overview')
   const isAnalyst = useIsAnalyst()
@@ -1727,10 +1467,7 @@ export default function ControlRoomClient() {
   const { connected: errorsConnected, events: errorEvents } = useErrorStream()
   const { series, rollingAvg } = useTickHistory(allTicks)
 
-  const visibleTabs = useMemo(
-    () => TABS.filter((tab) => !('adminOnly' in tab && tab.adminOnly) || !isAnalyst),
-    [isAnalyst],
-  )
+  const visibleTabs = useMemo(() => TABS.filter((tab) => !('adminOnly' in tab && tab.adminOnly) || !isAnalyst), [isAnalyst])
 
   const headerActions = (
     <div className="flex items-center gap-2 flex-wrap">
@@ -1740,28 +1477,10 @@ export default function ControlRoomClient() {
   )
 
   return (
-    <ReportShell
-      title="Control Room"
-      icon={Radio}
-      description="Real-time SRE monitoring"
-      headerActions={headerActions}
-    >
-      {/* Mobile: show stripped-down overview only */}
-      <MobileOverview
-        connected={connected}
-        lastTickTime={lastTickTime}
-        timezone={timezone}
-        tick={latestTick}
-        rtDown={rtDown}
-      />
-
-      {/* Desktop: full tabbed interface */}
+    <ReportShell title="Control Room" icon={Radio} description="Real-time SRE monitoring" headerActions={headerActions}>
+      <MobileOverview connected={connected} lastTickTime={lastTickTime} timezone={timezone} tick={latestTick} rtDown={rtDown} />
       <div className="hidden md:block">
-        <Tabs
-          defaultValue="overview"
-          value={activeTab}
-          onValueChange={(v) => setActiveTab(v as TabId)}
-        >
+        <Tabs defaultValue="overview" value={activeTab} onValueChange={(v) => setActiveTab(v as TabId)}>
           <TabsList className="mb-4 flex-wrap">
             {visibleTabs.map((tab) => (
               <TabsTrigger key={tab.id} value={tab.id}>

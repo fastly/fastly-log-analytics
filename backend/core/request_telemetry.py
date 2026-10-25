@@ -45,6 +45,7 @@ from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 from uuid import uuid4
@@ -58,10 +59,240 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 from opentelemetry.trace import Span, Tracer
 
-from backend.core.query_attribution import current_attribution
 from backend.utils.telemetry import get_page_load_id
 
 logger = logging.getLogger(__name__)
+
+
+# ── Query Attribution (folded from backend.core.query_attribution) ───────────
+
+# Files that are part of the instrumentation/driver layer — skipped when
+# walking the stack to find the application caller. Match by substring so
+# both editable installs and packaged paths work.
+_INSTRUMENTATION_PREFIXES: tuple[str, ...] = (
+    "backend/core/query_registry",
+    "backend/core/query_attribution",
+    "backend/core/request_telemetry",
+    "backend/core/query_instrumentation",
+    "backend/utils/sqlite_profiler",
+    "backend/core/duckdb_pool",  # _instrument() helper
+    # stdlib + driver frames we'd skip past anyway
+    "/sqlite3/",
+    "/duckdb/",
+)
+
+
+def _capture_caller(skip_frames: int = 2) -> tuple[str, str]:
+    """Walk up the stack and return ``(qualname, "<rel-path>:<lineno>")`` of
+    the first frame outside the instrumentation/driver layer.
+
+    Returns ``("<unknown>", "<unknown>")`` if no application frame is found.
+    Cost: ~5-10us per call (frame walks are cheap and we stop early). Safe
+    to call from the SQL hot path.
+    """
+    try:
+        frame: Any = sys._getframe(skip_frames)
+    except ValueError:
+        return ("<unknown>", "<unknown>")
+    while frame is not None:
+        path = frame.f_code.co_filename
+        if not any(p in path for p in _INSTRUMENTATION_PREFIXES):
+            qual = getattr(frame.f_code, "co_qualname", frame.f_code.co_name)
+            # Trim to project-relative path when possible.
+            display_path = path
+            for marker in ("backend/", "frontend/"):
+                idx = path.rfind(marker)
+                if idx != -1:
+                    display_path = path[idx:]
+                    break
+            return (qual, f"{display_path}:{frame.f_lineno}")
+        frame = frame.f_back
+    return ("<unknown>", "<unknown>")
+
+
+@dataclass(slots=True)
+class Attribution:
+    """Structured attribution for a single in-flight or completed query.
+
+    Exactly one of ``analyst_id`` / ``admin_id`` / ``cron_job`` is populated
+    based on ``kind``. ``caller_qualname`` and ``caller_file`` are always
+    set (fall back to ``"<unknown>"`` only when the stack walk fails).
+    """
+
+    # WHO — exactly one of these is populated per kind
+    kind: str  # "analyst" | "admin" | "cron" | "system"
+    analyst_id: str | None = None
+    analyst_name: str | None = None
+    admin_id: str | None = None
+    cron_job: str | None = None
+    cron_run_id: str | None = None
+
+    # WHAT — always populated (captured at register time via _capture_caller)
+    caller_qualname: str = "<unknown>"
+    caller_file: str = "<unknown>"
+    request_path: str | None = None
+    request_id: str | None = None
+    # Unique per HTTP request (request_id can be shared: it is the OTel trace id when one is propagated). Lets the
+    # request's queries be interrupted if the client disconnects, without touching a sibling request's queries.
+    cancel_key: str | None = None
+
+    # Per-connection pool slot (DuckDB only) — filled by the registry when
+    # the connection is known. Helps ops correlate with duckdb_pool stats.
+    pool_slot: str | None = None
+
+    @classmethod
+    def analyst(
+        cls,
+        *,
+        analyst_id: str,
+        analyst_name: str | None,
+        request_path: str | None,
+        request_id: str | None,
+        cancel_key: str | None = None,
+    ) -> Attribution:
+        return cls(
+            kind="analyst",
+            analyst_id=analyst_id,
+            analyst_name=analyst_name,
+            request_path=request_path,
+            request_id=request_id,
+            cancel_key=cancel_key,
+        )
+
+    @classmethod
+    def admin(
+        cls,
+        *,
+        admin_id: str,
+        request_path: str | None,
+        request_id: str | None,
+        cancel_key: str | None = None,
+    ) -> Attribution:
+        return cls(
+            kind="admin",
+            admin_id=admin_id,
+            request_path=request_path,
+            request_id=request_id,
+            cancel_key=cancel_key,
+        )
+
+    @classmethod
+    def cron(cls, *, cron_job: str, cron_run_id: str | None = None) -> Attribution:
+        return cls(kind="cron", cron_job=cron_job, cron_run_id=cron_run_id)
+
+    @classmethod
+    def system(cls, *, hint: str | None = None) -> Attribution:
+        """Fallback when no request/cron context is active. The thread name
+        is folded into the caller_qualname so an admin can still tell
+        startup/pool-warmer/migration work apart."""
+        thread_name = threading.current_thread().name
+        return cls(
+            kind="system",
+            caller_qualname=hint or f"thread:{thread_name}",
+            caller_file="<system>",
+        )
+
+    def principal_id(self) -> str | None:
+        """The single ID that identifies who triggered this query. Used by
+        the audit log + by frontend grouping."""
+        if self.kind == "analyst":
+            return self.analyst_id
+        if self.kind == "admin":
+            return self.admin_id
+        if self.kind == "cron":
+            return self.cron_run_id or self.cron_job
+        return None
+
+    def display_label(self) -> str:
+        """Single-line label for the live monitor row."""
+        if self.kind == "analyst":
+            who = self.analyst_name or (f"Guest ({self.analyst_id[-4:] if self.analyst_id else '?'})")
+            tail = f" — {self.request_path}" if self.request_path else ""
+            return f"Analyst: {who}{tail}"
+        if self.kind == "admin":
+            tail = f" — {self.request_path}" if self.request_path else ""
+            who = self.admin_id or "admin"
+            return f"Admin: {who}{tail}"
+        if self.kind == "cron":
+            run = f" (run {self.cron_run_id})" if self.cron_run_id else ""
+            return f"Cron: {self.cron_job}{run}"
+        return f"System: {self.caller_qualname}"
+
+    def with_caller(self, qualname: str, file_line: str) -> Attribution:
+        """Return a copy with the caller frame filled in. Used by the
+        registry after :func:`_capture_caller`."""
+        new = Attribution(
+            kind=self.kind,
+            analyst_id=self.analyst_id,
+            analyst_name=self.analyst_name,
+            admin_id=self.admin_id,
+            cron_job=self.cron_job,
+            cron_run_id=self.cron_run_id,
+            caller_qualname=qualname,
+            caller_file=file_line,
+            request_path=self.request_path,
+            request_id=self.request_id,
+            cancel_key=self.cancel_key,
+            pool_slot=self.pool_slot,
+        )
+        return new
+
+    def with_pool_slot(self, slot: str | None) -> Attribution:
+        if slot is None or self.pool_slot == slot:
+            return self
+        return Attribution(
+            kind=self.kind,
+            analyst_id=self.analyst_id,
+            analyst_name=self.analyst_name,
+            admin_id=self.admin_id,
+            cron_job=self.cron_job,
+            cron_run_id=self.cron_run_id,
+            caller_qualname=self.caller_qualname,
+            caller_file=self.caller_file,
+            request_path=self.request_path,
+            request_id=self.request_id,
+            cancel_key=self.cancel_key,
+            pool_slot=slot,
+        )
+
+
+# Process-wide ContextVar set by request/cron entrypoints. ``None`` means
+# "fall back to a synthesised system attribution" — covers boot-time work,
+# pool warmers, and any thread that bypasses the entrypoint setters.
+current_attribution: ContextVar[Attribution | None] = ContextVar("current_attribution", default=None)
+
+
+def derive_from_process_context(process_ctx: str | None) -> Attribution | None:
+    """Build a best-effort :class:`Attribution` from the legacy
+    ``_PROCESS_CONTEXT`` string used by :mod:`backend.utils.telemetry`.
+
+    The process_context string takes shapes like ``"cron:sync_svc1"``,
+    ``"api:GET /admin/download-zip:..."``, ``"startup:init_service:svc1"``.
+
+    Returns an attribution only for ``cron:`` / ``startup:`` / ``shutdown:``
+    contexts. ``api:`` is INTENTIONALLY ignored — the telemetry middleware
+    sets ``process_context_scope("api:...")`` on every HTTP request, but
+    HTTP attribution belongs to
+    :func:`backend.core.request_context._build_attribution_from_request`
+    which has the real principal (analyst session or client IP). Returning
+    an admin attribution here would shadow the proper one in scenarios
+    where the SQL execution thread inherits the middleware's Context but
+    the per-request RequestContext value didn't propagate (sync deps on
+    the thread pool, fsspec iothread, etc.).
+    """
+    if not process_ctx:
+        return None
+    head, _, tail = process_ctx.partition(":")
+    if head == "cron":
+        return Attribution.cron(cron_job=tail or process_ctx)
+    if head in ("startup", "shutdown"):
+        return Attribution.system(hint=process_ctx)
+    # "api:..." and anything else → defer to RequestContext / synthesised system.
+    return None
+
+
+sys.modules["backend.core.query_attribution"] = sys.modules[__name__]
+
 
 _SERVICE_NAME = "fastly-log-analytics"
 _TRACER_NAME = "backend.core.request_telemetry"
@@ -616,8 +847,313 @@ class HighScaleSections:
             return result
 
 
+# ── Request Metrics & Observer (folded from backend.core.request_metrics) ───
+
+from backend import config  # noqa: E402
+from backend.celery_app import publisher  # noqa: E402
+from backend.utils.date_utils import parse_iso_utc  # noqa: E402
+
+
+def compute_sync_status_cached(*args: Any, **kwargs: Any) -> Any:
+    from backend.cron_progress import compute_sync_status_cached as _compute
+
+    return _compute(*args, **kwargs)
+
+
+def get_high_scale_service_registry(*args: Any, **kwargs: Any) -> Any:
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry as _get_registry
+
+    return _get_registry(*args, **kwargs)
+
+
+QUERY_TIMEOUT_S = 30.0
+RECONCILE_INTERVAL_S = 15.0
+STOP_TIMEOUT_S = 5.0
+FAILURE_BACKOFF_BASE_S = 15.0
+FAILURE_BACKOFF_MAX_S = 300.0
+
+_refresh_lock = threading.Lock()
+_query_lock = threading.Lock()
+_active_query: Any | None = None
+_cancelled = threading.Event()
+
+
+def _read_durable_rum_metrics(con: Any, source: dict) -> dict[str, Any] | None:
+    """Read RUM extents from the same durable serving connection as requests."""
+    from backend.core.iceberg._ducklake import ducklake_table_name
+
+    tables: list[str] = []
+    for table_name in (
+        ducklake_table_name(source, "client_vitals"),
+        ducklake_table_name(source, "client_errors"),
+    ):
+        try:
+            con.execute(f'SELECT 1 FROM lake."{table_name}" LIMIT 0')
+        except Exception:
+            continue
+        tables.append(table_name)
+    if not tables:
+        return None
+
+    union_sql = " UNION ALL ".join(f'SELECT req_id, cid, timestamp FROM lake."{table}"' for table in tables)
+    row = con.execute(
+        "SELECT COUNT(DISTINCT COALESCE(NULLIF(req_id, ''), "
+        "concat(cid, '_', CAST(epoch(timestamp) AS BIGINT)))), "
+        f"MAX(timestamp) FROM ({union_sql}) AS rum_rows"
+    ).fetchone()
+    return {
+        "latest_log_at": row[1].isoformat() if row and row[1] is not None else None,
+        "total_rows": int(row[0] or 0) if row else 0,
+    }
+
+
+def interrupt_request_metrics() -> None:
+    """Interrupt only this observer's dedicated connection, never a reader."""
+    with _query_lock:
+        if _active_query is not None:
+            _cancelled.set()
+            _active_query.interrupt()
+
+
+def _interrupt_until_finished(finished: threading.Event) -> None:
+    # An interrupt arriving just before execute() starts need not cancel that
+    # future statement. Repeat after the deadline until the owning pass exits.
+    while not finished.is_set():
+        interrupt_request_metrics()
+        finished.wait(0.1)
+
+
+def refresh_durable_request_metrics(
+    source: dict, *, stop_event: threading.Event | None = None, extra_status: dict | None = None
+) -> dict | None:
+    """Read one current count/min/max, then persist; failures never write zeros.
+
+    Concurrent callers coalesce instead of queueing scans. The status refresh
+    and the lifespan observer share this seam, so neither can overwrite a newer
+    request observation with local-file estimates. RUM retains its own extent.
+    """
+    global _active_query
+    if not config.is_durable_serving_mode(source):
+        raise ValueError("request metrics observation requires durable serving mode")
+    if not _refresh_lock.acquire(blocking=False):
+        return None
+    con = None
+    timer = None
+    finished = threading.Event()
+    try:
+        from backend.core.duckdb import _safe_table_name, open_serving_connection
+        from backend.core.metadata.cron_log import latest_cron_per_task
+        from backend.core.query_instrumentation import InstrumentedDuckDBConnection
+        from backend.utils.telemetry import process_context_scope
+
+        service_id = source["name"]
+        with process_context_scope("request_metrics_observer"):
+            if stop_event is not None and stop_event.is_set():
+                return None
+            # Same fresh, read-only, durable-only view as analytics. In
+            # particular do NOT use get_sync_status's local parquet fast path.
+            con = open_serving_connection(source, max_wait=5, skip_view_update=False)
+            if stop_event is not None and stop_event.is_set():
+                return None
+            with _query_lock:
+                _cancelled.clear()
+                _active_query = con
+            timer = threading.Timer(QUERY_TIMEOUT_S, _interrupt_until_finished, args=(finished,))
+            timer.daemon = True
+            timer.start()
+            row = (
+                InstrumentedDuckDBConnection(con, service_id=service_id)
+                .execute(f'SELECT count(*), min(timestamp), max(timestamp) FROM lake."{_safe_table_name(service_id)}"')
+                .fetchone()
+            )
+            if row is None:
+                raise RuntimeError("request metrics aggregate returned no result")
+            if _cancelled.is_set() or (stop_event is not None and stop_event.is_set()):
+                raise InterruptedError("request metrics observation cancelled")
+            cron = latest_cron_per_task(service_id)
+            current = config.get_status(service_id) or {}
+            rum = _read_durable_rum_metrics(con, source)
+            if rum is None:
+                rum = (extra_status or {}).get("rum", current.get("rum"))
+            rum = dict(rum or {})
+            rum.setdefault("last_sync_at", None)
+            rum_cron_times: list[str] = []
+            for task in (
+                cron.get("rum_discovery", {}),
+                cron.get("rum_sync", {}),
+                cron.get("ledger_rum_sweep", {}),
+            ):
+                started_at = task.get("started_at")
+                if isinstance(started_at, str):
+                    rum_cron_times.append(started_at)
+            if rum_cron_times:
+
+                def cron_timestamp(value: str) -> float:
+                    parsed = parse_iso_utc(value)
+                    return parsed.timestamp() if parsed is not None else float("-inf")
+
+                latest_rum_cron = max(
+                    rum_cron_times,
+                    key=cron_timestamp,
+                )
+                current_rum_sync = rum.get("last_sync_at")
+                current_rum_dt = parse_iso_utc(current_rum_sync) if current_rum_sync else None
+                latest_rum_cron_dt = parse_iso_utc(latest_rum_cron)
+                if current_rum_dt is None or (latest_rum_cron_dt is not None and latest_rum_cron_dt > current_rum_dt):
+                    rum["last_sync_at"] = latest_rum_cron
+            rum_rows = (rum or {}).get("total_rows") or 0
+            earliest = row[1].isoformat() if row[1] is not None else None
+            latest = row[2].isoformat() if row[2] is not None else None
+            observation = {
+                "earliest_log_at": earliest,
+                "latest_log_at": latest,
+                "local_rows": int(row[0]) + rum_rows,
+                "rum": rum,
+                "request": {
+                    "latest_log_at": latest,
+                    "total_rows": int(row[0]),
+                    "last_sync_at": cron.get("log_discovery", {}).get("started_at")
+                    or cron.get("sync", {}).get("started_at"),
+                },
+            }
+            if _cancelled.is_set() or (stop_event is not None and stop_event.is_set()):
+                raise InterruptedError("request metrics observation cancelled")
+            # Heavy refresh extras (RUM/schema/etc.) are merged under this same
+            # lock; a competing config read-modify-write cannot restore an old
+            # request snapshot after the observer has persisted a new one.
+            config.update_status(service_id, {**(extra_status or {}), **observation})
+            # Include RUM in change detection without overwriting its producer.
+            return {**observation, "rum": rum}
+    finally:
+        finished.set()
+        if timer is not None:
+            timer.cancel()
+            timer.join()
+        with _query_lock:
+            _active_query = None
+        try:
+            if con is not None:
+                con.close()
+        finally:
+            _refresh_lock.release()
+
+
+class RequestMetricsObserver:
+    def __init__(self) -> None:
+        self._stop = threading.Event()
+        self._pass_lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._published: dict[str, dict] = {}
+        self._failure_backoff_s: dict[str, float] = {}
+        self._next_attempt_mono: dict[str, float] = {}
+
+    def reconcile(self) -> None:
+        if not self._pass_lock.acquire(blocking=False):
+            return
+        try:
+            for cfg in config.list_configs():
+                if self._stop.is_set():
+                    break
+                source = config.config_to_source(cfg)
+                if not config.is_durable_serving_mode(source):
+                    continue
+                service_id = source["name"]
+                if get_high_scale_service_registry().resolve(service_id) is not None:
+                    continue
+                if time.monotonic() < self._next_attempt_mono.get(service_id, 0.0):
+                    continue
+                try:
+                    observed = refresh_durable_request_metrics(source, stop_event=self._stop)
+                    if observed is None:
+                        continue
+                    self._failure_backoff_s.pop(service_id, None)
+                    self._next_attempt_mono.pop(service_id, None)
+                    if observed == self._published.get(service_id):
+                        continue
+                    snapshot = compute_sync_status_cached(service_id)
+                    if snapshot is not None and not self._stop.is_set():
+                        # The shared refresh has already persisted this success.
+                        publisher.publish(service_id, snapshot)
+                        self._published[service_id] = observed
+                        logger.info(
+                            "request_metrics.published service=%s rows=%s",
+                            service_id,
+                            observed["request"]["total_rows"],
+                        )
+                except Exception:
+                    delay = min(
+                        self._failure_backoff_s.get(service_id, FAILURE_BACKOFF_BASE_S),
+                        FAILURE_BACKOFF_MAX_S,
+                    )
+                    self._failure_backoff_s[service_id] = min(delay * 2, FAILURE_BACKOFF_MAX_S)
+                    self._next_attempt_mono[service_id] = time.monotonic() + delay
+                    logger.warning("request_metrics.refresh_failed service=%s", service_id, exc_info=True)
+        finally:
+            self._pass_lock.release()
+
+    def _run(self) -> None:
+        try:
+            while not self._stop.is_set():
+                try:
+                    self.reconcile()
+                except Exception:
+                    logger.warning("request_metrics.reconcile_failed", exc_info=True)
+                # No queued ticks: a slow pass coalesces all intervening batches.
+                self._stop.wait(RECONCILE_INTERVAL_S)
+        finally:
+            from backend.core.metadata.base import release_thread_connection
+
+            release_thread_connection()
+
+    def start(self) -> None:
+        if not config.is_durable_serving_mode():
+            return
+        with self._lifecycle_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._published.clear()
+            self._failure_backoff_s.clear()
+            self._next_attempt_mono.clear()
+            self._thread = threading.Thread(target=self._run, name="request-metrics-observer", daemon=True)
+            self._thread.start()
+
+    def stop(self) -> None:
+        with self._lifecycle_lock:
+            self._stop.set()
+            interrupt_request_metrics()
+            if self._thread is not None:
+                self._thread.join(timeout=STOP_TIMEOUT_S)
+                if self._thread.is_alive():
+                    # Keep the handle: start() must not create an overlapping
+                    # observer while a dependency is still unwinding.
+                    logger.warning("request_metrics.stop_timeout")
+                else:
+                    self._thread = None
+
+
+observer = RequestMetricsObserver()
+
+
 _this_module = sys.modules[__name__]
 sys.modules["backend.core.high_scale_sections"] = _this_module
+sys.modules["backend.core.query_attribution"] = _this_module
+sys.modules["backend.core.request_metrics"] = _this_module
+sys.modules["backend.request_metrics_observer"] = _this_module
 _core_pkg = sys.modules.get("backend.core")
 if _core_pkg is not None:
     setattr(_core_pkg, "high_scale_sections", _this_module)
+    setattr(_core_pkg, "query_attribution", _this_module)
+    setattr(_core_pkg, "request_metrics", _this_module)
+_backend_pkg = sys.modules.get("backend")
+if _backend_pkg is not None:
+    setattr(_backend_pkg, "request_metrics_observer", _this_module)
+    if hasattr(_backend_pkg, "_MODULE_ALIASES"):
+        _backend_pkg._MODULE_ALIASES.update(
+            {
+                "backend.core.query_attribution": "backend.core.request_telemetry",
+                "backend.core.request_metrics": "backend.core.request_telemetry",
+                "backend.request_metrics_observer": "backend.core.request_telemetry",
+            }
+        )

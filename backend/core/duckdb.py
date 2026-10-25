@@ -1405,3 +1405,6 @@ def get_or_generate_cid_salt(service_id: str) -> str:
         # Config vanished between read and lock; nothing to persist into.
         return get_or_generate_cid_salt(service_id)
     return saved["rum"]["cid_salt"]
+
+
+from backend.utils.telemetry import HyperLogLog as HyperLogLog  # noqa: E402,F401

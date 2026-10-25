@@ -664,17 +664,11 @@ def scoring_config_composite(
     Granular endpoints unchanged so the frontend can keep using them
     individually during a rollback.
     """
-    from backend.routers.session_scoring_admin import (
-        scoring_enforce_status_code_get,
-        scoring_exclude_regex_get,
-        scoring_threshold_get,
-    )
+    from backend.routers.session_scoring_admin import _build_scoring_config_bundle
 
     return {
         "status": scoring_status(service_id),
-        "threshold": scoring_threshold_get(service_id),
-        "exclude_regex": scoring_exclude_regex_get(service_id),
-        "enforce_status_code": scoring_enforce_status_code_get(service_id),
+        **_build_scoring_config_bundle(service_id),
     }
 
 

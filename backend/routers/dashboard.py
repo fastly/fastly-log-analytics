@@ -11,12 +11,13 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from backend.core.iceberg import execute_with_stale_view_retry
 from backend.core.request_context import RequestContext, build_request_context
 from backend.cron.jobs.insights_prewarmer import record_insights_request
+from backend.deps import ServiceId, get_service_id
 from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.dashboard import (
     AggregatesRequest,
@@ -25,6 +26,10 @@ from backend.models.dashboard import (
     DashboardSectionName,
     FieldValuesRequest,
     FieldValuesResponse,
+    PresetQuery,
+    QueryRequest,
+    QueryResponse,
+    QuerySchemaResponse,
     RawRequest,
 )
 from backend.models.insights import (
@@ -35,15 +40,24 @@ from backend.models.insights import (
 )
 from backend.repositories import dashboard as repo
 from backend.repositories import insights as insights_repo
+from backend.repositories import query as query_repo
+from backend.repositories.query import get_cached_presets, set_cached_presets
 from backend.repositories.utils.response_cache import cache_result
 from backend.utils.auth import mask_ips_for
 from backend.utils.remote_access import analyst_clamp_cache_key
-from backend.utils.router_utils import make_section_expander, query_errors, run_cached_repo_endpoint
+from backend.utils.router_utils import (
+    make_error,
+    make_section_expander,
+    query_errors,
+    redact_error_text,
+    run_cached_repo_endpoint,
+)
 from backend.utils.telemetry import get_sqlite_queries
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/dashboard", tags=["dashboard"], responses=DEFAULT_ERROR_RESPONSES)
+router = APIRouter()
+dashboard_router = APIRouter(prefix="/api/dashboard", tags=["dashboard"], responses=DEFAULT_ERROR_RESPONSES)
 
 # No coupling — every dashboard section is independent.
 _expand_sections = make_section_expander(DashboardSectionName)
@@ -77,7 +91,7 @@ def _resolve_aggregate_flags(
     return (want_core, want_core, want_core, want_topten)
 
 
-@router.post("/aggregates", response_model=AggregatesResponse)
+@dashboard_router.post("/aggregates", response_model=AggregatesResponse)
 @query_errors()
 def dashboard_aggregates(
     req: AggregatesRequest,
@@ -112,7 +126,7 @@ def dashboard_aggregates(
     )
 
 
-@router.post("/bundle", response_model=BundleResponse)
+@dashboard_router.post("/bundle", response_model=BundleResponse)
 @query_errors()
 async def dashboard_bundle(
     req: AggregatesRequest,
@@ -408,7 +422,7 @@ def _assemble_dashboard_bundle_response(
     }
 
 
-@router.post("/raw/csv")
+@dashboard_router.post("/raw/csv")
 @query_errors()
 def dashboard_raw_csv(
     req: RawRequest,
@@ -479,7 +493,7 @@ def dashboard_raw_csv(
     )
 
 
-@router.post("/field-values", response_model=FieldValuesResponse)
+@dashboard_router.post("/field-values", response_model=FieldValuesResponse)
 @query_errors()
 def dashboard_field_values(
     req: FieldValuesRequest,
@@ -648,6 +662,229 @@ def cache_collapse_detail_endpoint(
     return execute_with_stale_view_retry(ctx.con, ctx.source, _run_detail)
 
 
-sys.modules["backend.routers.insights"] = sys.modules[__name__]
+# ── Query endpoints (folded from backend.routers.query) ─────────────────────
+
+query_router = APIRouter(prefix="/api", tags=["query"], responses=DEFAULT_ERROR_RESPONSES)
+
+
+def _redact_paths(msg: str) -> str:
+    return redact_error_text(msg)
+
+
+def _console_masked(analyst_session: object) -> bool:
+    """Masked identity unless the invite's policy EXPLICITLY sets ``mask_ips`` to false."""
+    policy = getattr(analyst_session, "pii_policy", None)
+    return not (isinstance(policy, dict) and policy.get("mask_ips") is False)
+
+
+@query_router.post("/query", response_model=QueryResponse, response_model_exclude_unset=True)
+def query_endpoint(
+    req: QueryRequest,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    sql = req.sql.strip()
+    if not sql:
+        raise HTTPException(status_code=400, detail=make_error("empty_sql", "No SQL provided"))
+
+    analyst_session = ctx.analyst_session
+    audit_session_id = getattr(analyst_session, "session_id", "admin") if analyst_session else "admin"
+
+    start_time, end_time = ctx.clamp(None, None)
+    time_filter = (start_time, end_time) if start_time and end_time else None
+    mask_ips = mask_ips_for(analyst_session)
+
+    high_scale_service = ctx.high_scale
+    if high_scale_service is not None:
+        query_client = None
+        query_tables = None
+        if analyst_session is not None:
+            from backend.high_scale.console_access import get_console_clients
+
+            try:
+                console = get_console_clients().client_for(
+                    high_scale_service.service_id, masked=_console_masked(analyst_session)
+                )
+            except Exception:
+                logger.warning(
+                    "analyst console identity unavailable for %s", high_scale_service.service_id, exc_info=True
+                )
+                console = None
+            if console is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail=make_error(
+                        "console_unavailable_for_analysts",
+                        "The SQL console is not available to analysts on this high-scale deployment.",
+                    ),
+                )
+            query_client, query_tables = console.client, console.tables
+        from backend.high_scale.query import query_endpoint as hs_query
+
+        try:
+            return hs_query(
+                high_scale_service,
+                req,
+                start_time,
+                end_time,
+                mask_ips,
+                session_id=audit_session_id,
+                client=query_client,
+                tables=query_tables,
+            )
+        except PermissionError as e:
+            raise HTTPException(status_code=403, detail=make_error("sql_not_permitted", _redact_paths(str(e))))
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=make_error("query_failed", _redact_paths(str(e))),
+            )
+
+    from backend.core.iceberg import execute_with_stale_view_retry as _exec_stale_retry
+
+    def _run_with_compaction_retry(con, src: dict, fn, *, table_name: str):
+        for attempt in (1, 2):
+            try:
+                return _exec_stale_retry(con, src, fn, table_name=table_name)
+            except PermissionError as e:
+                raise HTTPException(status_code=403, detail=make_error("sql_not_permitted", _redact_paths(str(e))))
+            except Exception as e:
+                msg = str(e)
+                if attempt == 1 and "Cannot open file" in msg:
+                    continue
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error("query_failed", _redact_paths(msg)),
+                )
+
+    if req.dataset != "logs":
+        from backend.core.duckdb import rum_source_for
+        from backend.deps import _ConnectionHolder
+
+        rum_source = rum_source_for(ctx.source)
+        holder = _ConnectionHolder(rum_source, read_only=True)
+        try:
+            with holder as con:
+
+                def _run_rum(c):
+                    return query_repo.execute_query(
+                        con=c,
+                        src=rum_source,
+                        sql=sql,
+                        max_rows=req.max_rows,
+                        want_explain=req.explain,
+                        session_id=audit_session_id,
+                        service_id=ctx.service_id,
+                        time_filter=time_filter,
+                        mask_ips=mask_ips,
+                        dataset=req.dataset,
+                    )
+
+                return _run_with_compaction_retry(con, rum_source, _run_rum, table_name=req.dataset)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=make_error("query_failed", _redact_paths(str(e))),
+            )
+    else:
+
+        def _run(con):
+            return query_repo.execute_query(
+                con=con,
+                src=ctx.source,
+                sql=sql,
+                max_rows=req.max_rows,
+                want_explain=req.explain,
+                session_id=audit_session_id,
+                service_id=ctx.service_id,
+                time_filter=time_filter,
+                mask_ips=mask_ips,
+                dataset="logs",
+            )
+
+        return _run_with_compaction_retry(ctx.con, ctx.source, _run, table_name="logs")
+
+
+_FALLBACK_SCHEMA_COLUMNS: list[dict[str, str]] = [
+    {"column": "timestamp", "type": "TIMESTAMPTZ"},
+    {"column": "ip", "type": "VARCHAR"},
+    {"column": "url", "type": "VARCHAR"},
+    {"column": "host", "type": "VARCHAR"},
+    {"column": "method", "type": "VARCHAR"},
+    {"column": "status", "type": "INTEGER"},
+    {"column": "cache", "type": "VARCHAR"},
+    {"column": "country", "type": "VARCHAR"},
+    {"column": "pop", "type": "VARCHAR"},
+    {"column": "asn", "type": "INTEGER"},
+    {"column": "ua", "type": "VARCHAR"},
+]
+
+
+@query_router.get("/query/schema/{service_id}", response_model=QuerySchemaResponse)
+def query_schema_endpoint(
+    service_id: ServiceId,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    """Reflect schema columns and types for the active service."""
+    del service_id
+    from backend import config as svcconfig
+    from backend.core import duckdb as _db
+    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
+
+    name = ctx.source["name"]
+    status = svcconfig.get_status(name) or {}
+    schema = status.get("schema")
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if not schema and high_scale_service is None:
+        try:
+            schema = _db.get_schema(ctx.con, ctx.source)
+        except Exception as exc:
+            logger.debug("[query_schema] live schema fetch failed for %s: %s", name, exc)
+            schema = []
+
+    if not schema:
+        schema = list(_FALLBACK_SCHEMA_COLUMNS)
+
+    if mask_ips_for(ctx.analyst_session):
+        schema = [col for col in schema if col.get("column") != "cookie_session"]
+
+    return {
+        "source": name,
+        "schema": schema,
+        "debug_queries": [],
+        "debug_calls": [],
+    }
+
+
+@query_router.get("/presets", response_model=list[PresetQuery], response_model_exclude_unset=True)
+def presets_endpoint(service_id: str | None = Depends(get_service_id)):
+    from backend.core import duckdb as _db
+
+    if not service_id:
+        return []
+
+    src = _db.get_source_for_service(service_id)
+    if not src:
+        return []
+
+    format_hash = (src.get("log_fields") or {}).get("format_hash")
+    cached = get_cached_presets(service_id, format_hash)
+    if cached is not None:
+        return cached
+
+    result = query_repo.get_presets(src=src)
+    set_cached_presets(service_id, format_hash, result)
+    return result
+
+
+router.include_router(dashboard_router)
+router.include_router(query_router)
+
+_self_mod = sys.modules[__name__]
+sys.modules["backend.routers.insights"] = _self_mod
+sys.modules["backend.routers.query"] = _self_mod
 if "backend.routers" in sys.modules:
-    setattr(sys.modules["backend.routers"], "insights", sys.modules[__name__])
+    setattr(sys.modules["backend.routers"], "insights", _self_mod)
+    setattr(sys.modules["backend.routers"], "query", _self_mod)

@@ -593,7 +593,7 @@ from backend.models.admin import (  # noqa: E402
     ShareHeaderBadgeResponse,
     SyncStatusResponse,
 )
-from backend.models.admin_actions import (  # noqa: E402
+from backend.models.analytics import (  # noqa: E402
     SlowQueriesCountResponse,
     SummaryResponse,
 )
@@ -912,7 +912,7 @@ def __getattr__(name: str) -> Any:
 
         return _svc_models.ClearSqliteResponse
     if name == "PageTelemetryResponse":
-        from backend.models import admin_actions as _admin_act_models
+        from backend.models import analytics as _admin_act_models
 
         return _admin_act_models.PageTelemetryResponse
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

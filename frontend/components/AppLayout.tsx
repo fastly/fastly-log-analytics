@@ -6,31 +6,9 @@ import Link from 'next/link'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { Dialog as DialogPrimitive } from '@base-ui/react/dialog'
 import {
-  LayoutDashboard,
-  Network,
-  Users,
-  Settings,
-  Database,
-  Search,
-  Activity,
-  Menu,
-  Sparkles,
-  Timer,
-  Shield,
-  Bell,
-  Server,
-  PanelLeftClose,
-  PanelLeftOpen,
-  Loader2,
-  LogOut,
-  Radio,
-  Play,
-  TrendingUp,
-  X,
-  Eye,
-  Moon,
-  Sun,
-  Monitor,
+  LayoutDashboard, Network, Users, Settings, Database, Search, Activity, Menu, Sparkles,
+  Timer, Shield, Bell, Server, PanelLeftClose, PanelLeftOpen, Loader2, LogOut, Radio,
+  Play, TrendingUp, X, Eye, Moon, Sun, Monitor,
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -39,71 +17,31 @@ import { cn, buildServiceHref, SIDEBAR_COLLAPSED_COOKIE } from '@/lib/utils'
 import { rotatePageLoadId, client, unwrapClient } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { Button, buttonVariants } from '@/components/ui/button'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectSeparator,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@/components/ui/tooltip'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { useFilterUrlWriteback } from '@/hooks/useDashboardCards'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { ServiceSwitcher, SyncStatusBadge } from '@/components/SyncStatusBadge/SyncStatusBadge'
-import {
-  useDebugStore,
-  useTimezoneStore,
-  useSessionRoleStore,
-  useServiceStore,
-} from '@/stores/filterStore'
+import { useDebugStore, useTimezoneStore, useSessionRoleStore, useServiceStore } from '@/stores/filterStore'
 import { getTimezoneAbbr } from '@/lib/format'
 import {
-  useMounted,
-  useUrlServiceSync,
-  useBootstrap,
-  useBootstrapSyncEffects,
-  useIsAnalyst,
-  useEnforceMaskedFilters,
-  useAnalystHeartbeat,
-  useAnalystLogout,
+  useMounted, useUrlServiceSync, useBootstrap, useBootstrapSyncEffects, useIsAnalyst,
+  useEnforceMaskedFilters, useAnalystHeartbeat, useAnalystLogout,
 } from '@/hooks/useBootstrap'
 import type { BootstrapResponse, ShareBanner } from '@/types/api'
 import { PlotlyPrewarm, MapPrewarm } from '@/components/PlotlyChart'
 import packageJson from '../package.json'
 
-const FilterBar = dynamic(
-  () => import('@/components/FilterBar/FilterBar').then(m => ({ default: m.FilterBar })),
-)
-const ActiveFiltersBanner = dynamic(
-  () => import('@/components/FilterBar/FilterBar').then(m => ({ default: m.ActiveFiltersBanner })),
-  { ssr: false },
-)
-const DebugPanel = dynamic(
-  () => import('@/components/DebugPanel').then(m => ({ default: m.DebugPanel })),
-  { ssr: false },
-)
+const FilterBar = dynamic(() => import('@/components/FilterBar/FilterBar').then(m => ({ default: m.FilterBar })))
+const ActiveFiltersBanner = dynamic(() => import('@/components/FilterBar/FilterBar').then(m => ({ default: m.ActiveFiltersBanner })), { ssr: false })
+const DebugPanel = dynamic(() => import('@/components/DebugPanel').then(m => ({ default: m.DebugPanel })), { ssr: false })
 
 const matchesPrefix = (pathname: string, prefixes: readonly string[]) =>
   prefixes.some((p) => pathname.startsWith(p))
 
 function SrLiveRegion({ children }: { children: React.ReactNode }) {
-  return (
-    <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
-      {children}
-    </div>
-  )
+  return <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">{children}</div>
 }
 
 function CenteredSpinner({ label }: { label: string }) {
@@ -117,7 +55,6 @@ function CenteredSpinner({ label }: { label: string }) {
 
 export function ThemeToggle() {
   const { setTheme } = useTheme()
-
   return (
     <DropdownMenu>
       <DropdownMenuTrigger className={buttonVariants({ variant: "outline", size: "icon" })}>
@@ -128,25 +65,15 @@ export function ThemeToggle() {
         </span>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        <DropdownMenuItem onClick={() => setTheme('light')}>
-          <Sun className="mr-2 h-4 w-4" />
-          Light
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => setTheme('dark')}>
-          <Moon className="mr-2 h-4 w-4" />
-          Dark
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => setTheme('system')}>
-          <Monitor className="mr-2 h-4 w-4" />
-          System
-        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => setTheme('light')}><Sun className="mr-2 h-4 w-4" />Light</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => setTheme('dark')}><Moon className="mr-2 h-4 w-4" />Dark</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => setTheme('system')}><Monitor className="mr-2 h-4 w-4" />System</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   )
 }
 
 const SYSTEM_TIME_VALUE = '__system__'
-
 const COMMON_TIMEZONES = [
   { label: 'UTC', value: 'UTC' },
   { label: 'US Eastern', value: 'America/New_York' },
@@ -162,11 +89,7 @@ const COMMON_TIMEZONES = [
 export function TimezoneSwitcher() {
   const mounted = useMounted()
   const { mode, timezone, setTimezone, setSystemTimezone } = useTimezoneStore()
-
-  if (!mounted) {
-    return <div className="w-[180px] h-10 border rounded-md" />
-  }
-
+  if (!mounted) return <div className="w-[180px] h-10 border rounded-md" />
   const selectValue = mode === 'system' ? SYSTEM_TIME_VALUE : timezone
 
   return (
@@ -175,11 +98,8 @@ export function TimezoneSwitcher() {
       onValueChange={(value) => {
         if (!value) return
         if (value === SYSTEM_TIME_VALUE) {
-          try {
-            setSystemTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone)
-          } catch {
-            /* leave the current zone in place */
-          }
+          try { setSystemTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone) }
+          catch { /* leave the current zone in place */ }
         } else {
           setTimezone(value)
         }
@@ -193,11 +113,7 @@ export function TimezoneSwitcher() {
       <SelectContent>
         <SelectItem value={SYSTEM_TIME_VALUE}>System Time</SelectItem>
         <SelectSeparator />
-        {COMMON_TIMEZONES.map((tz) => (
-          <SelectItem key={tz.value} value={tz.value}>
-            {tz.label}
-          </SelectItem>
-        ))}
+        {COMMON_TIMEZONES.map((tz) => <SelectItem key={tz.value} value={tz.value}>{tz.label}</SelectItem>)}
         {mode === 'manual' && !COMMON_TIMEZONES.find(t => t.value === timezone) && (
           <SelectItem value={timezone}>{timezone}</SelectItem>
         )}
@@ -210,10 +126,7 @@ const SHARE_POLL_MS = 15_000
 
 function toBanner(raw: { [key: string]: unknown } | null | undefined): ShareBanner | null {
   if (!raw) return null
-  return {
-    sharing_active: !!raw.sharing_active,
-    public_url: typeof raw.public_url === 'string' ? raw.public_url : null,
-  }
+  return { sharing_active: !!raw.sharing_active, public_url: typeof raw.public_url === 'string' ? raw.public_url : null }
 }
 
 function subscribeVisibility(onChange: () => void) {
@@ -228,11 +141,7 @@ export function useShareStatusBanner({ enabled }: { enabled: boolean }) {
   const isRemoteAnalyst = useSessionRoleStore((s) => s.isRemoteAnalyst)
   const isAnalyst = useIsAnalyst()
   // Background tabs don't poll (AGENTS.md: refetchIntervalInBackground=false).
-  const hidden = React.useSyncExternalStore(
-    subscribeVisibility,
-    () => document.hidden,
-    () => false,
-  )
+  const hidden = React.useSyncExternalStore(subscribeVisibility, () => document.hidden, () => false)
 
   const readBootstrapBanner = () =>
     toBanner(queryClient.getQueryData<BootstrapResponse>(queryKeys.bootstrap())?.share_banner)
@@ -247,9 +156,7 @@ export function useShareStatusBanner({ enabled }: { enabled: boolean }) {
   const { data: status } = useQuery<ShareBanner | null>({
     queryKey: queryKeys.shareBanner(),
     queryFn: async ({ signal }) => {
-      if (queryClient.getQueryData<BootstrapResponse>(queryKeys.bootstrap())?.settings?.is_remote_analyst) {
-        return null
-      }
+      if (queryClient.getQueryData<BootstrapResponse>(queryKeys.bootstrap())?.settings?.is_remote_analyst) return null
       // Bootstrap can resolve between first render and the mount-time fetch;
       // re-read it once so that window doesn't cost a round trip either.
       if (!seededAtRenderRef.current) {
@@ -306,13 +213,8 @@ export function useShareStatusBanner({ enabled }: { enabled: boolean }) {
 // Data Management exposes ingestion logs / cron health — useful for an
 // analyst who runs their own ingestion, leak-y for an invited viewer.
 interface ServiceNavItem {
-  name: string
-  href: string
-  icon: React.ComponentType<{ className?: string }>
-  analystVisible: boolean
-  shareAnalystVisible?: boolean
-  requiresCmcd?: boolean
-  requiresRum?: boolean
+  name: string; href: string; icon: React.ComponentType<{ className?: string }>
+  analystVisible: boolean; shareAnalystVisible?: boolean; requiresCmcd?: boolean; requiresRum?: boolean
 }
 
 const SERVICE_NAVIGATION: ServiceNavItem[] = [
@@ -333,9 +235,7 @@ const SERVICE_NAVIGATION: ServiceNavItem[] = [
   { name: 'Data Management', href: '/logs', icon: Database, analystVisible: true, shareAnalystVisible: false },
 ]
 
-const SYSTEM_NAVIGATION = [
-  { name: 'Admin', href: '/admin', icon: Settings },
-]
+const SYSTEM_NAVIGATION = [{ name: 'Admin', href: '/admin', icon: Settings }]
 
 function UrlServiceSync() {
   useUrlServiceSync()
@@ -356,23 +256,11 @@ function UrlServiceSync() {
 // browser already focuses the document root and re-focusing would
 // override any deep-link hash target or skip-to-content interaction.
 const ROUTE_FRIENDLY_NAMES: Record<string, string> = {
-  '/dashboard': 'Dashboard',
-  '/control-room': 'Control Room',
-  '/fastly-value': 'Service Summary',
-  '/security': 'Security',
-  '/network': 'Network',
-  '/streaming': 'Streaming',
-  '/origin': 'Origin',
-  '/performance': 'Performance',
-  '/sessions': 'Sessions',
-  '/insights': 'Insights',
-  '/query': 'Query',
-  '/charts': 'Charts',
-  '/alerts': 'Alerts',
-  '/logs': 'Data Management',
-  '/usage': 'Usage and Cost',
-  '/admin': 'Admin',
-  '/share-login': 'Sign in',
+  '/dashboard': 'Dashboard', '/control-room': 'Control Room', '/fastly-value': 'Service Summary',
+  '/security': 'Security', '/network': 'Network', '/streaming': 'Streaming', '/origin': 'Origin',
+  '/performance': 'Performance', '/sessions': 'Sessions', '/insights': 'Insights', '/query': 'Query',
+  '/charts': 'Charts', '/alerts': 'Alerts', '/logs': 'Data Management', '/usage': 'Usage and Cost',
+  '/admin': 'Admin', '/share-login': 'Sign in',
 }
 
 function friendlyPageName(pathname: string): string {
@@ -380,9 +268,7 @@ function friendlyPageName(pathname: string): string {
   // /admin/queries to "Admin", etc.
   let best = ''
   for (const key of Object.keys(ROUTE_FRIENDLY_NAMES)) {
-    if ((pathname === key || pathname.startsWith(key + '/')) && key.length > best.length) {
-      best = key
-    }
+    if ((pathname === key || pathname.startsWith(key + '/')) && key.length > best.length) best = key
   }
   return best ? ROUTE_FRIENDLY_NAMES[best] : 'Page'
 }
@@ -403,9 +289,7 @@ function RouteFocus() {
     // programmatic-only focus target — it doesn't get inserted into the
     // tab order.
     const main = typeof document !== 'undefined' ? document.getElementById('main') : null
-    if (main) {
-      main.focus({ preventScroll: true })
-    }
+    if (main) main.focus({ preventScroll: true })
     setAnnouncement(`Loaded: ${friendlyPageName(pathname)}`)
   }, [pathname])
 
@@ -420,27 +304,17 @@ function RouteFocus() {
 function RawQueryModeProbe({ onChange }: { onChange: (isRaw: boolean) => void }) {
   const searchParams = useSearchParams()
   const isRaw = searchParams.get('mode') === 'raw'
-  React.useEffect(() => {
-    onChange(isRaw)
-  }, [isRaw, onChange])
+  React.useEffect(() => { onChange(isRaw) }, [isRaw, onChange])
   return null
 }
 
 interface NavLinkProps {
-  href: string
-  icon: React.ElementType
-  name: string
-  isActive: boolean
-  disabled?: boolean
-  collapsed?: boolean
-  onClick?: () => void
-  className?: string
+  href: string; icon: React.ElementType; name: string; isActive: boolean
+  disabled?: boolean; collapsed?: boolean; onClick?: () => void; className?: string
 }
 
 function NavLink({ href, icon: Icon, name, isActive, disabled, collapsed, onClick, className, activeServiceId, router }: NavLinkProps & { activeServiceId?: string | null; router: ReturnType<typeof useRouter> }) {
-  const finalHref = activeServiceId
-    ? `${href}?service=${activeServiceId}`
-    : href
+  const finalHref = activeServiceId ? `${href}?service=${activeServiceId}` : href
 
   // Viewport-entry prefetch is disabled (prefetch={false}) — with ~12
   // sidebar items, auto-prefetch fires 30-60 RSC requests per page load
@@ -482,53 +356,29 @@ function NavLink({ href, icon: Icon, name, isActive, disabled, collapsed, onClic
   )
 
   if (!collapsed) return link
-
   return (
     <Tooltip>
       <TooltipTrigger render={link} />
-      <TooltipContent side="right" className="text-xs font-medium">
-        {name}
-      </TooltipContent>
+      <TooltipContent side="right" className="text-xs font-medium">{name}</TooltipContent>
     </Tooltip>
   )
 }
 
 function SidebarNavList({
-  items,
-  ariaLabel,
-  pathname,
-  disabled,
-  collapsed,
-  activeServiceId,
-  router,
-  onItemClick,
-  itemClassName,
-  className,
+  items, ariaLabel, pathname, disabled, collapsed, activeServiceId, router, onItemClick, itemClassName, className,
 }: {
   items: { name: string; href: string; icon: React.ElementType }[]
-  ariaLabel: string
-  pathname: string
-  disabled?: boolean
-  collapsed?: boolean
-  activeServiceId?: string | null
-  router: ReturnType<typeof useRouter>
-  onItemClick?: () => void
-  itemClassName?: string
-  className?: string
+  ariaLabel: string; pathname: string; disabled?: boolean; collapsed?: boolean
+  activeServiceId?: string | null; router: ReturnType<typeof useRouter>
+  onItemClick?: () => void; itemClassName?: string; className?: string
 }) {
   return (
     <nav className={cn("grid gap-1", className)} aria-label={ariaLabel}>
       {items.map((item) => (
         <NavLink
-          key={item.href}
-          {...item}
-          isActive={pathname === item.href}
-          disabled={disabled}
-          collapsed={collapsed}
-          activeServiceId={activeServiceId}
-          router={router}
-          onClick={onItemClick}
-          className={itemClassName}
+          key={item.href} {...item} isActive={pathname === item.href} disabled={disabled}
+          collapsed={collapsed} activeServiceId={activeServiceId} router={router}
+          onClick={onItemClick} className={itemClassName}
         />
       ))}
     </nav>
@@ -873,25 +723,15 @@ export function AppLayout({
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-background">
-      {needsGeoPreload && (
-        <link
-          rel="prefetch"
-          href="/geo/world.topo.json"
-          as="fetch"
-        />
-      )}
+      {needsGeoPreload && <link rel="prefetch" href="/geo/world.topo.json" as="fetch" />}
       {shareBanner.node}
       <div className="flex flex-1 overflow-hidden min-h-0">
       {isAnalyst && disconnected && (
-        <div
-          data-testid="connection-interrupted-overlay"
-          className="fixed inset-0 z-[100] bg-background/90 backdrop-blur-sm flex items-center justify-center"
-        >
+        <div data-testid="connection-interrupted-overlay" className="fixed inset-0 z-[100] bg-background/90 backdrop-blur-sm flex items-center justify-center">
           <div className="max-w-sm text-center space-y-3 p-6 rounded-lg border bg-card shadow-lg">
             <h2 className="text-lg font-semibold">Connection interrupted</h2>
             <p className="text-sm text-muted-foreground">
-              We can&apos;t reach the dashboard. We&apos;ll keep trying — your view will
-              resume automatically when the connection returns.
+              We can&apos;t reach the dashboard. We&apos;ll keep trying — your view will resume automatically when the connection returns.
             </p>
           </div>
         </div>
@@ -927,10 +767,7 @@ export function AppLayout({
       <aside
         id="app-sidebar"
         data-collapsed={sidebarCollapsed || undefined}
-        className={cn(
-          "hidden md:flex flex-col border-r bg-muted/40 transition-[width] duration-200 ease-out",
-          sidebarCollapsed ? "w-14" : "w-64"
-        )}
+        className={cn("hidden md:flex flex-col border-r bg-muted/40 transition-[width] duration-200 ease-out", sidebarCollapsed ? "w-14" : "w-64")}
       >
         <div className="flex h-14 items-center justify-center border-b px-2 py-2 shrink-0">
           <Link
@@ -939,39 +776,15 @@ export function AppLayout({
             className="flex flex-col items-center justify-center hover:opacity-80 transition-opacity mt-1"
             aria-label="Fastly Log Analytics — home"
           >
-             <img
-               src="/fastly.svg"
-               alt="Fastly"
-               width={52}
-               height={20}
-               className={cn("dark:invert transition-[height] duration-200 w-auto", sidebarCollapsed ? "h-4" : "h-5")}
-             />
-             {!sidebarCollapsed && (
-               <span className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground mt-0.5">Log Analytics</span>
-             )}
+             <img src="/fastly.svg" alt="Fastly" width={52} height={20} className={cn("dark:invert transition-[height] duration-200 w-auto", sidebarCollapsed ? "h-4" : "h-5")} />
+             {!sidebarCollapsed && <span className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground mt-0.5">Log Analytics</span>}
           </Link>
         </div>
         <ScrollArea className="flex-1">
-          <SidebarNavList
-            items={visibleNav}
-            ariaLabel="Primary"
-            pathname={pathname}
-            disabled={!hasServices}
-            collapsed={sidebarCollapsed}
-            activeServiceId={navActiveServiceId}
-            router={router}
-            className="p-2"
-          />
+          <SidebarNavList items={visibleNav} ariaLabel="Primary" pathname={pathname} disabled={!hasServices} collapsed={sidebarCollapsed} activeServiceId={navActiveServiceId} router={router} className="p-2" />
         </ScrollArea>
         <div className="mt-auto p-2 border-t bg-muted/20">
-          <SidebarNavList
-            items={visibleSystemNav}
-            ariaLabel="System"
-            pathname={pathname}
-            collapsed={sidebarCollapsed}
-            activeServiceId={activeServiceId}
-            router={router}
-          />
+          <SidebarNavList items={visibleSystemNav} ariaLabel="System" pathname={pathname} collapsed={sidebarCollapsed} activeServiceId={activeServiceId} router={router} />
           {!sidebarCollapsed && (
             // text-muted-foreground (no /opacity-step) keeps the version
             // string above WCAG 2.1 AA 4.5:1 at 10px on bg-muted/20.
@@ -1000,32 +813,17 @@ export function AppLayout({
               <Tooltip>
                 <TooltipTrigger render={
                   <button
-                    type="button"
-                    data-testid="analyst-signout"
-                    onClick={() => { void logout() }}
-                    disabled={isLoggingOut}
-                    aria-label="Sign out"
+                    type="button" data-testid="analyst-signout" onClick={() => { void logout() }} disabled={isLoggingOut} aria-label="Sign out"
                     className="mt-2 flex items-center justify-center h-9 w-9 mx-auto rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors disabled:opacity-50"
                   />
                 }>
-                  {isLoggingOut
-                    ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                    : <LogOut className="h-4 w-4" aria-hidden="true" />}
+                  {isLoggingOut ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <LogOut className="h-4 w-4" aria-hidden="true" />}
                 </TooltipTrigger>
                 <TooltipContent side="right" className="text-xs font-medium">Sign out</TooltipContent>
               </Tooltip>
             ) : (
-              <Button
-                variant="ghost"
-                size="sm"
-                data-testid="analyst-signout"
-                onClick={() => { void logout() }}
-                disabled={isLoggingOut}
-                className="mt-2 w-full justify-start gap-3 px-3 text-muted-foreground hover:text-accent-foreground"
-              >
-                {isLoggingOut
-                  ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                  : <LogOut className="h-4 w-4" aria-hidden="true" />}
+              <Button variant="ghost" size="sm" data-testid="analyst-signout" onClick={() => { void logout() }} disabled={isLoggingOut} className="mt-2 w-full justify-start gap-3 px-3 text-muted-foreground hover:text-accent-foreground">
+                {isLoggingOut ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <LogOut className="h-4 w-4" aria-hidden="true" />}
                 Sign out
               </Button>
             )
@@ -1040,11 +838,7 @@ export function AppLayout({
               desktop sidebar below md. Opens the slide-in mobile nav
               rendered at the bottom of the layout tree. */}
           <button
-            type="button"
-            onClick={() => setMobileNavOpen(true)}
-            aria-label="Open navigation menu"
-            aria-controls="mobile-nav"
-            aria-expanded={mobileNavOpen}
+            type="button" onClick={() => setMobileNavOpen(true)} aria-label="Open navigation menu" aria-controls="mobile-nav" aria-expanded={mobileNavOpen}
             className="md:hidden flex items-center justify-center h-10 w-10 -ml-2 rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
           >
             <Menu className="h-5 w-5" aria-hidden="true" />
@@ -1056,18 +850,12 @@ export function AppLayout({
           <Tooltip>
             <TooltipTrigger render={
               <button
-                type="button"
-                onClick={toggleSidebar}
-                aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-                aria-expanded={!sidebarCollapsed}
-                aria-controls="app-sidebar"
-                aria-keyshortcuts="Control+B Meta+B"
+                type="button" onClick={toggleSidebar} aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+                aria-expanded={!sidebarCollapsed} aria-controls="app-sidebar" aria-keyshortcuts="Control+B Meta+B"
                 className="hidden md:flex items-center justify-center h-8 w-8 rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors -ml-1 mr-1"
               />
             }>
-              {sidebarCollapsed
-                ? <PanelLeftOpen className="h-4 w-4" aria-hidden="true" />
-                : <PanelLeftClose className="h-4 w-4" aria-hidden="true" />}
+              {sidebarCollapsed ? <PanelLeftOpen className="h-4 w-4" aria-hidden="true" /> : <PanelLeftClose className="h-4 w-4" aria-hidden="true" />}
             </TooltipTrigger>
             <TooltipContent side="bottom" className="text-xs font-medium">
               {sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
@@ -1094,11 +882,7 @@ export function AppLayout({
             target and keyboard-accessible scrollable region (WCAG 2.1 AA
             scrollable-region-focusable). outline-none avoids an intrusive
             focus ring on the landmark itself. */}
-        <main
-          id="main"
-          tabIndex={0}
-          className="flex-1 overflow-auto p-4 md:p-6 outline-none"
-        >
+        <main id="main" tabIndex={0} className="flex-1 overflow-auto p-4 md:p-6 outline-none">
           {/* Render children IMMEDIATELY on navigation. The previous
               ``isLoading ? <Spinner /> : children`` gate held every
               route hostage to /api/bootstrap, which has no staleTime —
@@ -1129,52 +913,26 @@ export function AppLayout({
           pathname effect above). */}
       <DialogPrimitive.Root open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
         <DialogPrimitive.Portal>
-          <DialogPrimitive.Backdrop
-            className="fixed inset-0 z-50 bg-black/40 md:hidden data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0"
-          />
+          <DialogPrimitive.Backdrop className="fixed inset-0 z-50 bg-black/40 md:hidden data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0" />
           <DialogPrimitive.Popup
-            id="mobile-nav"
-            aria-label="Primary navigation"
+            id="mobile-nav" aria-label="Primary navigation"
             className="fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] flex flex-col bg-background border-r shadow-xl md:hidden outline-none data-open:animate-in data-open:slide-in-from-left data-closed:animate-out data-closed:slide-out-to-left duration-200"
           >
             <div className="flex h-14 items-center justify-between border-b px-4 shrink-0">
               <DialogPrimitive.Title className="flex items-center gap-2">
                 <img src="/fastly.svg" alt="Fastly" width={52} height={20} className="dark:invert h-5 w-auto" />
-                <span className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground">
-                  Log Analytics
-                </span>
+                <span className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground">Log Analytics</span>
               </DialogPrimitive.Title>
-              <DialogPrimitive.Close
-                aria-label="Close navigation menu"
-                className="flex items-center justify-center h-10 w-10 -mr-2 rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
-              >
+              <DialogPrimitive.Close aria-label="Close navigation menu" className="flex items-center justify-center h-10 w-10 -mr-2 rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors">
                 <X className="h-5 w-5" aria-hidden="true" />
               </DialogPrimitive.Close>
             </div>
             <ScrollArea className="flex-1">
-              <SidebarNavList
-                items={visibleNav}
-                ariaLabel="Primary"
-                pathname={pathname}
-                disabled={!hasServices}
-                activeServiceId={navActiveServiceId}
-                router={router}
-                onItemClick={closeMobileNav}
-                itemClassName="py-3 min-h-11"
-                className="p-2"
-              />
+              <SidebarNavList items={visibleNav} ariaLabel="Primary" pathname={pathname} disabled={!hasServices} activeServiceId={navActiveServiceId} router={router} onItemClick={closeMobileNav} itemClassName="py-3 min-h-11" className="p-2" />
             </ScrollArea>
             {visibleSystemNav.length > 0 && (
               <div className="border-t p-2 bg-muted/20 shrink-0">
-                <SidebarNavList
-                  items={visibleSystemNav}
-                  ariaLabel="System"
-                  pathname={pathname}
-                  activeServiceId={navActiveServiceId}
-                  router={router}
-                  onItemClick={closeMobileNav}
-                  itemClassName="py-3 min-h-11"
-                />
+                <SidebarNavList items={visibleSystemNav} ariaLabel="System" pathname={pathname} activeServiceId={navActiveServiceId} router={router} onItemClick={closeMobileNav} itemClassName="py-3 min-h-11" />
               </div>
             )}
             {isAnalyst && (
@@ -1185,15 +943,10 @@ export function AppLayout({
                   </div>
                 )}
                 <button
-                  type="button"
-                  data-testid="analyst-signout-mobile"
-                  onClick={() => { closeMobileNav(); void logout() }}
-                  disabled={isLoggingOut}
+                  type="button" data-testid="analyst-signout-mobile" onClick={() => { closeMobileNav(); void logout() }} disabled={isLoggingOut}
                   className="flex w-full items-center gap-3 rounded-md px-3 py-3 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors min-h-11 disabled:opacity-50"
                 >
-                  {isLoggingOut
-                    ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden="true" />
-                    : <LogOut className="h-4 w-4 shrink-0" aria-hidden="true" />}
+                  {isLoggingOut ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden="true" /> : <LogOut className="h-4 w-4 shrink-0" aria-hidden="true" />}
                   <span>Sign out</span>
                 </button>
               </div>

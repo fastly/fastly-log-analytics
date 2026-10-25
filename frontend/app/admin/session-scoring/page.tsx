@@ -27,10 +27,9 @@ import { ComplianceChart, ScoreDistChart } from '@/components/SessionScoring/Sco
 import { ExcludeRegexCard } from '@/components/SessionScoring/ExcludeRegexCard'
 import { AuditLogTab, MatrixVersionsCard } from '@/components/SessionScoring/MatrixVersionsCard'
 import { RetrainButton, RotateKeyButton } from '@/components/SessionScoring/RetrainButton'
-import { PerReasonAucCard, RocPrCurves } from '@/components/SessionScoring/RocPrCurves'
 import { ScorerLatencyChart, ScorerErrorsChart } from '@/components/SessionScoring/ScorerSeriesCard'
 import { ScorerFailOpenBreakdownCard, ScoringHealthCard } from '@/components/SessionScoring/ScoringHealthCard'
-import { StatusPanel, L2EnforcementCard } from '@/components/SessionScoring/StatusPanel'
+import { StatusPanel, L2EnforcementCard, PerReasonAucCard, RocPrCurves } from '@/components/SessionScoring/StatusPanel'
 import { ThresholdSlider } from '@/components/SessionScoring/ThresholdSlider'
 import { TopFlaggedTable } from '@/components/SessionScoring/TopFlaggedTable'
 import {

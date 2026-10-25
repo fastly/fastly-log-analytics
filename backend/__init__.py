@@ -23,7 +23,7 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.celery_status_sampler": "backend.celery_status",
     "backend.cron_runs_publisher": "backend.cron_progress",
     "backend.sync_status_snapshot": "backend.cron_progress",
-    "backend.request_metrics_observer": "backend.core.request_metrics",
+    "backend.request_metrics_observer": "backend.core.request_telemetry",
     # Round 15 Group 2 — backend/core/
     "backend.core.clickhouse_schema": "backend.core.clickhouse_publication",
     "backend.core.clickhouse_observer": "backend.core.clickhouse_client",
@@ -93,6 +93,28 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.high_scale.replay": "backend.high_scale.historical_jobs",
     "backend.models.security": "backend.models.dashboard",
     "backend.routers.security": "backend.routers.network",
+    # Round 25 — Backend <300-Line Module Consolidation
+    "backend.core.query_attribution": "backend.core.request_telemetry",
+    "backend.core.request_metrics": "backend.core.request_telemetry",
+    "backend.core.metric_snapshots": "backend.cron.jobs.metadata",
+    "backend.core.duckdb_recycle": "backend.cron.jobs.metadata",
+    "backend.cron.jobs.duckdb_recycle": "backend.cron.jobs.metadata",
+    "backend.core.metadata.slow_queries": "backend.core.metadata.usage_log",
+    "backend.cron.decorators": "backend.cron.scheduler",
+    "backend.cron.jobs.rum_commit": "backend.cron.jobs.rum_sync",
+    "backend.scoring.labels": "backend.scoring.features",
+    "backend.scoring.fixtures": "backend.scoring.features",
+    "backend.scoring.matrix": "backend.scoring.evaluate",
+    "backend.utils.vcl_validator": "backend.utils.vcl_utils",
+    "backend.utils.hll": "backend.utils.telemetry",
+    "backend.high_scale.aggregate_batch_adapter": "backend.high_scale.ingest_controller",
+    "backend.high_scale.registry_bootstrap": "backend.high_scale.ingest_controller",
+    "backend.models.admin_actions": "backend.models.analytics",
+    "backend.models.origin": "backend.models.analytics",
+    "backend.routers.origin": "backend.routers.network",
+    "backend.routers.query": "backend.routers.dashboard",
+    "backend.repositories.usage": "backend.repositories.assets",
+    "backend.repositories.utils.response_cache": "backend.repositories._base",
 }
 
 

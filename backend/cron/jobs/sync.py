@@ -218,6 +218,52 @@ def apply_time_range_pinning(
     return start_time, end_time
 
 
+_INGEST_ERROR_OUTCOME_KEYS = (
+    "malformed_records",
+    "corrupt_containers",
+    "quarantine_capture_failures",
+    "source_delete_failures",
+    "objects_failed",
+)
+
+
+def _has_ingest_outcome_errors(outcome_counters: dict | None, corrupt_rows: int = 0) -> bool:
+    return bool(
+        corrupt_rows > 0
+        or (outcome_counters and any(outcome_counters.get(key, 0) for key in _INGEST_ERROR_OUTCOME_KEYS))
+    )
+
+
+def _finish_post_ingest_view_and_rollups(
+    src: dict,
+    service_id: str,
+    run_id: int | None,
+    job_name: str,
+    done_event: dict,
+    elapsed_fn: Callable[[], str],
+    *,
+    already_published: bool = False,
+) -> None:
+    if done_event.get("rows_inserted", 0) > 0 and not already_published:
+        from backend.utils.active_requests import yield_to_api
+
+        yield_to_api()
+        refresh_view_and_warm_pool(
+            src,
+            service_id,
+            log_prefix=f"{elapsed_fn()} ",
+            progress_log=lambda ev: _log_and_add_progress(run_id, service_id, job_name=job_name, event=ev),
+        )
+    if touched_hours := done_event.get("touched_hours", []):
+        schedule_post_ingest_rollups(service_id, src, set(touched_hours))
+        _log_and_add_progress(
+            run_id,
+            service_id,
+            job_name=job_name,
+            event={"type": "status", "message": f"{elapsed_fn()} Rollups queued for {len(touched_hours)} hour(s)"},
+        )
+
+
 def _ingest_with_adaptive_followups(
     ingest_fn: Callable[..., Iterator[dict]],
     *,
@@ -613,19 +659,7 @@ def _run_log_discovery_cron(
                             corrupt_details = done_event.get("corrupt_details", [])
                             corrupt_message = "\n".join(corrupt_details) if corrupt_details else None
                             outcome_counters = done_event.get("outcome_counters")
-                            has_ingest_errors = bool(
-                                outcome_counters
-                                and any(
-                                    outcome_counters.get(key, 0)
-                                    for key in (
-                                        "malformed_records",
-                                        "corrupt_containers",
-                                        "quarantine_capture_failures",
-                                        "source_delete_failures",
-                                        "objects_failed",
-                                    )
-                                )
-                            )
+                            has_ingest_errors = _has_ingest_outcome_errors(outcome_counters)
 
                             run.record(
                                 "error" if has_ingest_errors else "success",
@@ -638,36 +672,19 @@ def _run_log_discovery_cron(
                                 outcome_counters=outcome_counters,
                             )
 
-                            # Republish the persistent DuckDB view so dashboard reads pick
-                            # up the buffer parquets we just wrote. Dashboard reads use
-                            # read_only=True + skip_view_update=True (commit 19dfffc) and
-                            # never refresh the view themselves. The only other writer-side
-                            # update_iceberg_view caller is metadata_sync, which runs right
-                            # after commit_buffer drains the buffer — so without this hop,
-                            # the view is always republished buffer-less and dashboard lag
-                            # is bounded by commit_interval_mins instead of the sync
-                            # cadence. CREATE OR REPLACE VIEW is metadata-only (no cloud
-                            # reads), so this is cheap.
+                            # Republish the persistent DuckDB view so dashboard reads (read_only + skip_view_update)
+                            # pick up the new buffer parquets immediately without waiting for commit_interval_mins.
                             already_published = bool(
                                 published_pass_rows > 0 and published_pass_rows == done_event.get("rows_inserted", 0)
                             )
                             if done_event.get("rows_inserted", 0) > 0 and not already_published:
-                                from backend.utils.active_requests import yield_to_api
-
-                                # Cooperative yield before each post-ingest CPU stage
-                                # so a concurrent dashboard query gets a chance to
-                                # finish. Each stage (view refresh, rollup recompute,
-                                # bot rollup) is CPU-bound and would otherwise pile
-                                # straight onto whatever sync just spent in ingest.
-                                yield_to_api()
-
-                                refresh_view_and_warm_pool(
+                                _finish_post_ingest_view_and_rollups(
                                     src,
                                     service_id,
-                                    log_prefix=f"{elapsed()} ",
-                                    progress_log=lambda ev: _log_and_add_progress(
-                                        run_id, service_id, job_name="log_discovery", event=ev
-                                    ),
+                                    run_id,
+                                    "log_discovery",
+                                    {**done_event, "touched_hours": []},
+                                    elapsed,
                                 )
 
                             if done_event.get("new_files", 0) > 1:
@@ -677,7 +694,6 @@ def _run_log_discovery_cron(
                                     try:
                                         from backend.core import local_compaction as _lc
 
-                                        # Compact active hour since new files just landed there
                                         res = _lc.compact_local_partitions(src, compact_active_hour=True)
                                         if res.get("files_merged", 0) > 0:
                                             refresh_view_and_warm_pool(src, service_id, log_prefix="[compact-on-sync] ")
@@ -692,20 +708,15 @@ def _run_log_discovery_cron(
                                     daemon=True,
                                 ).start()
 
-                            touched_hours = done_event.get("touched_hours", [])
-                            if touched_hours:
-                                # Off-thread: closed-hour rollups take minutes on a
-                                # busy service, and holding this max_instances=1
-                                # job that long backs up FOS discovery (request lag).
-                                schedule_post_ingest_rollups(service_id, src, set(touched_hours))
-                                _log_and_add_progress(
-                                    run_id,
+                            if done_event.get("touched_hours"):
+                                _finish_post_ingest_view_and_rollups(
+                                    src,
                                     service_id,
-                                    job_name="log_discovery",
-                                    event={
-                                        "type": "status",
-                                        "message": f"{elapsed()} Rollups queued for {len(touched_hours)} hour(s)",
-                                    },
+                                    run_id,
+                                    "log_discovery",
+                                    done_event,
+                                    elapsed,
+                                    already_published=True,
                                 )
 
             except Exception as e:
@@ -845,61 +856,33 @@ def _run_log_discovery_cron(
         from backend.core.duckdb import backfill_fastly_edge_writes, reconcile_fastly_stats
         from backend.utils.telemetry import run_usage_log_cleanup
 
-        try:
-            inserted = backfill_fastly_edge_writes(src)
-            if inserted:
-                if run_id is not None:
-                    _log_and_add_progress(
-                        run_id,
-                        service_id,
-                        job_name="usage_log",
-                        event={"type": "status", "message": f"Backfilled {inserted} Fastly-edge PUTs to usage log"},
-                    )
-                else:
-                    logger.info("[usage_log] %s: backfilled %d Fastly-edge PUTs", service_id, inserted)
-        except Exception as e:
-            logger.warning("[usage_log] backfill failed for %s: %s", service_id, e)
+        def _run_usage_step(fn: Callable[[], int], msg_fn: Callable[[int], str], log_label: str) -> None:
+            try:
+                count = fn()
+                if count:
+                    if run_id is not None:
+                        _log_and_add_progress(
+                            run_id, service_id, job_name="usage_log", event={"type": "status", "message": msg_fn(count)}
+                        )
+                    else:
+                        logger.info("[usage_log] %s: %s", service_id, msg_fn(count))
+            except Exception as e:
+                logger.warning("[usage_log] %s failed for %s: %s", log_label, service_id, e)
 
-        # Pull Fastly /stats/aggregate to reconcile per-hour op counts. Closes
-        # the multipart-upload + bookkeeping gap that backfill_fastly_edge_writes
-        # cannot observe (it counts 1 op per file; Fastly emits ~3+). Writes one
-        # compact row per hour/class gap via SUM(count) aggregation.
-        # Window is 26h so the Usage Log page's 24h view always shows fully
-        # reconciled data (and survives a small clock-skew buffer). One
-        # Fastly API call covers the whole window regardless of hours_back.
-        try:
-            written = reconcile_fastly_stats(src, hours_back=26)
-            if written:
-                if run_id is not None:
-                    _log_and_add_progress(
-                        run_id,
-                        service_id,
-                        job_name="usage_log",
-                        event={"type": "status", "message": f"Reconciled {written} hourly Fastly stats gap(s)"},
-                    )
-                else:
-                    logger.info("[usage_log] %s: reconciled %d hourly stats gap(s)", service_id, written)
-        except Exception as e:
-            logger.warning("[usage_log] Fastly stats reconciliation failed for %s: %s", service_id, e)
-
+        _run_usage_step(
+            lambda: backfill_fastly_edge_writes(src),
+            lambda n: f"Backfilled {n} Fastly-edge PUTs to usage log",
+            "backfill",
+        )
+        # Reconcile per-hour op counts over a 26h window so the 24h Usage Log view stays fully reconciled.
+        _run_usage_step(
+            lambda: reconcile_fastly_stats(src, hours_back=26),
+            lambda n: f"Reconciled {n} hourly Fastly stats gap(s)",
+            "Fastly stats reconciliation",
+        )
         run_usage_log_cleanup(service_id)
 
-    # Run _usage_log_phase inline. Pre-fix this was wrapped in a NESTED
-    # ThreadPoolExecutor — but ``_run_service_cron`` is itself already
-    # running inside the ``@cron_task`` executor (one layer up). On the
-    # 30s timeout path the old code called ``shutdown(wait=False)``,
-    # which abandons the worker thread + everything it pinned (DuckDB
-    # connections, aiohttp sessions, Fastly API state). On a 50-service
-    # deployment with reconcile_fastly_stats hitting the API in lockstep,
-    # the inner timeout fired routinely and each leak orphaned an 8-12MB
-    # stack plus whatever Python state was live. Over hours: multi-GB
-    # unbounded growth — a confirmed contributor to the recurring host
-    # OOM-kills.
-    #
-    # Running inline drops the leak and matches every other phase in
-    # this cron body. If a per-phase timeout is needed in the future,
-    # use a cooperative cancel token through the I/O layer rather than
-    # abandoning a thread.
+    # Run _usage_log_phase inline inside the @cron_task executor to avoid leaked threads on timeout.
     if do_heavy_refresh:
         _t0 = time.time()
         try:
@@ -1115,22 +1098,7 @@ def _run_full_sweep(
             corrupt_details = done_event.get("corrupt_details", [])
             corrupt_message = "\n".join(corrupt_details) if corrupt_details else None
             outcome_counters = done_event.get("outcome_counters")
-            has_ingest_errors = bool(
-                (corrupt_rows_cnt > 0)
-                or (
-                    outcome_counters
-                    and any(
-                        outcome_counters.get(key, 0)
-                        for key in (
-                            "malformed_records",
-                            "corrupt_containers",
-                            "quarantine_capture_failures",
-                            "source_delete_failures",
-                            "objects_failed",
-                        )
-                    )
-                )
-            )
+            has_ingest_errors = _has_ingest_outcome_errors(outcome_counters, corrupt_rows_cnt)
             # full_sync is the whole-bucket backstop for the stranded-delete reconcile,
             # so it can reclaim strands of any age; record + surface that count too.
             reclaimed = done_event.get("deleted_files", 0)
@@ -1155,30 +1123,7 @@ def _run_full_sweep(
                 outcome_counters=outcome_counters,
             )
             _log_and_add_progress(run_id, service_id, job_name="full_sync", event={"type": "done", "message": summary})
-
-            if done_event.get("rows_inserted", 0) > 0:
-                from backend.utils.active_requests import yield_to_api
-
-                yield_to_api()
-                refresh_view_and_warm_pool(
-                    src,
-                    service_id,
-                    log_prefix=f"{elapsed()} ",
-                    progress_log=lambda ev: _log_and_add_progress(run_id, service_id, job_name="full_sync", event=ev),
-                )
-
-            touched_hours = done_event.get("touched_hours", [])
-            if touched_hours:
-                schedule_post_ingest_rollups(service_id, src, set(touched_hours))
-                _log_and_add_progress(
-                    run_id,
-                    service_id,
-                    job_name="full_sync",
-                    event={
-                        "type": "status",
-                        "message": f"{elapsed()} Rollups queued for {len(touched_hours)} hour(s)",
-                    },
-                )
+            _finish_post_ingest_view_and_rollups(src, service_id, run_id, "full_sync", done_event, elapsed)
         except Exception as e:
             run.fail(
                 "Full-sweep crashed",

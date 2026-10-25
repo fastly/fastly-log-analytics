@@ -24,7 +24,7 @@ import logging
 import os
 import shutil
 
-from backend.core import metric_snapshots
+from backend.cron.jobs import metadata as metric_snapshots
 
 logger = logging.getLogger("backend.scheduler")
 
@@ -45,7 +45,7 @@ def _safe_record(
     except Exception as e:
         logger.debug("[metric_snapshot] record %s failed: %s", metric, e)
     try:
-        from backend.core import metric_snapshots as operational_metrics
+        from backend.cron.jobs import metadata as operational_metrics
 
         if metric in {"celery_active_tasks", "celery_active_workers"}:
             operational_metrics.record(metric, value)
@@ -347,7 +347,7 @@ def _sample_high_scale() -> int:
             present_age = {row["domain"] for row in snapshot["source_age"]}
             present_pub = {row["domain"] for row in snapshot["publications"]}
             try:
-                from backend.core import metric_snapshots as operational_metrics
+                from backend.cron.jobs import metadata as operational_metrics
 
                 for domain in domains:
                     for status in source_statuses:

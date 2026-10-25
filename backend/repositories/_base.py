@@ -8,11 +8,17 @@ Import from here instead of redefining in each file:
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import itertools
+import json
 import logging
 import os
 import re
+import sys as _sys
+import threading
 import time
 import uuid as _uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -115,18 +121,247 @@ from backend.repositories.top_n_rollups import (
 from backend.repositories.top_n_rollups import (
     truncate_top_n as _truncate_top_n,
 )
+from backend.repositories.utils.filters import filter_spec_attr
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import (
     parse_hour_key_strict,
     parse_iso_utc,
     safe_iso,  # noqa: F401 — re-export
 )
 from backend.utils.sql_validator import escape_sql_literal
-from backend.utils.telemetry import log_once_per
+from backend.utils.telemetry import get_queries, get_tracked_calls, log_once_per
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Iterable
+
+    from backend.models.common import FiltersDict
 
 _logger = logging.getLogger(__name__)
+
+# ── Shared response-memo cache & single-flight helpers (folded from response_cache.py) ──
+
+_CLIENT_TOKEN_COUNTER = itertools.count(1)
+_MEMO_COUNTER = itertools.count(1)
+
+_registry_lock = threading.Lock()
+_registry: dict[str, _InFlight] = {}
+
+
+class _InFlight[T]:
+    __slots__ = ("event", "result", "error")
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.result: T | None = None
+        self.error: BaseException | None = None
+
+
+def coalesce[T](key: str, build: Callable[[], T]) -> tuple[T, bool]:
+    """Run ``build()`` for ``key``, sharing the result with concurrent callers."""
+    with _registry_lock:
+        existing = _registry.get(key)
+        if existing is not None:
+            slot = existing
+            is_leader = False
+        else:
+            slot = _InFlight()
+            _registry[key] = slot
+            is_leader = True
+
+    if not is_leader:
+        slot.event.wait()
+        if slot.error is not None:
+            if type(slot.error).__name__ == "InterruptException":
+                return coalesce(key, build)
+            raise slot.error
+        return slot.result, False  # type: ignore[return-value]
+
+    try:
+        result = build()
+        slot.result = result
+        return result, True
+    except BaseException as e:
+        slot.error = e
+        raise
+    finally:
+        with _registry_lock:
+            if _registry.get(key) is slot:
+                del _registry[key]
+        slot.event.set()
+
+
+class SingleFlightGroup:
+    """Compatibility wrapper around module-level :func:`coalesce`."""
+
+    def coalesce[T](self, key: str, build: Callable[[], T]) -> tuple[T, bool]:
+        return coalesce(key, build)
+
+
+_analytics_compute_group = SingleFlightGroup()
+
+
+def get_analytics_compute_group() -> SingleFlightGroup:
+    return _analytics_compute_group
+
+
+def client_cache_token(client: Any) -> int:
+    """Return a monotonic instance token for ``client`` immune to GC ``id()`` reuse."""
+    if client is None:
+        return 0
+    tok = getattr(client, "_hs_cache_token", None)
+    if tok is None:
+        tok = next(_CLIENT_TOKEN_COUNTER)
+        try:
+            object.__setattr__(client, "_hs_cache_token", tok)
+        except Exception:
+            tok = id(client)
+    return int(tok)
+
+
+_NEVER_CACHE = ("debug_queries", "debug_calls", "is_cached", "_is_cached", "response_cache", "_response_cache")
+
+
+def cache_result(
+    payload: dict,
+    *,
+    state: Literal["hit", "miss", "bypass", "unknown"],
+    ttl_seconds: float | None = None,
+    prewarmer: bool | None = None,
+    single_flight_role: Literal["leader", "follower"] | None = None,
+    wait_ms: float | None = None,
+) -> dict:
+    observation: dict[str, Any] = {"state": state}
+    if ttl_seconds is not None:
+        observation["ttl_seconds"] = float(ttl_seconds)
+    observation["prewarmer"] = prewarmer
+    if single_flight_role is not None:
+        observation["single_flight"] = single_flight_role
+    if wait_ms is not None:
+        observation["wait_ms"] = float(wait_ms)
+    result = {key: value for key, value in payload.items() if key not in {"response_cache", "_is_cached"}}
+    return {**result, "is_cached": state == "hit", "_response_cache": observation}
+
+
+def coalesced_cache_result(
+    key: str, build: Callable[[], dict], *, ttl_seconds: float, prewarmer: bool | None = None
+) -> dict:
+    started = time.perf_counter()
+    payload, leader = coalesce(key, build)
+    if not leader:
+        return cache_result(
+            payload,
+            state="unknown",
+            ttl_seconds=ttl_seconds,
+            prewarmer=prewarmer,
+            single_flight_role="follower",
+            wait_ms=(time.perf_counter() - started) * 1000,
+        )
+    state: Literal["hit", "miss"] = (
+        "hit" if payload.get("is_cached") is True or payload.get("_is_cached") is True else "miss"
+    )
+    return cache_result(payload, state=state, ttl_seconds=ttl_seconds, prewarmer=prewarmer, single_flight_role="leader")
+
+
+def serialize_filters_for_key(filters: FiltersDict | None) -> dict[str, tuple[Any, list[str]]]:
+    """Render a filter spec into the deterministic ``(mode, sorted-values)`` shape."""
+    return {
+        k: (filter_spec_attr(v, "mode"), sorted(str(x) for x in (filter_spec_attr(v, "values") or [])))
+        for k, v in sorted((filters or {}).items())
+    }
+
+
+def digest_cache_key(payload: dict, src: dict) -> str:
+    """Hash a per-endpoint ``payload`` dict plus the service identity into a response-cache key."""
+    body = json.dumps(payload, separators=(",", ":"), default=str)
+    svc = src.get("name") or src.get("service_id") or ""
+    return hashlib.sha256(f"{body}:{svc}".encode()).hexdigest()
+
+
+def bucket_time_to_minute(ts: str | None) -> str | None:
+    """Truncate an ISO timestamp to minute precision for cache-key bucketing."""
+    if not ts or len(ts) < 16:
+        return ts
+    return ts[:16]
+
+
+def cache_get(cache: BoundedTTLCache, key: str, *, prewarmer: bool | None = None) -> dict | None:
+    """Return a copy of the cached payload with the cache-hit marker stamped, or ``None`` on a miss."""
+    cached = cache.get(key)
+    if cached is None:
+        return None
+    return cache_result(cached, state="hit", ttl_seconds=cache.ttl, prewarmer=prewarmer)
+
+
+def cache_put(cache: BoundedTTLCache, key: str, value: dict, *, strip: tuple[str, ...] = ()) -> None:
+    """Persist ``value`` under ``key``, dropping per-request telemetry and the cache-hit marker."""
+    drop = set(_NEVER_CACHE) | set(strip)
+    cache[key] = {k: v for k, v in value.items() if k not in drop}
+
+
+class ResponseMemo:
+    """Short-TTL memo for one repository's full-response payloads."""
+
+    def __init__(self, *, ttl: float = 30.0, maxsize: int = 256, prewarmer: bool | None = None) -> None:
+        self.cache: BoundedTTLCache = BoundedTTLCache(maxsize=maxsize, ttl_seconds=ttl)
+        self._telemetry_cache: BoundedTTLCache = BoundedTTLCache(maxsize=maxsize, ttl_seconds=ttl)
+        CacheRegistry.register(f"response_memo.telemetry.{next(_MEMO_COUNTER)}", self._telemetry_cache)
+        self.prewarmer = prewarmer
+
+    def get(self, key: str) -> dict | None:
+        return cache_get(self.cache, key, prewarmer=self.prewarmer)
+
+    def coalesce(self, key: str, build: Callable[[], dict]) -> dict:
+        return coalesced_cache_result(key, build, ttl_seconds=self.cache.ttl, prewarmer=self.prewarmer)
+
+    def result(self, payload: dict, *, state: Literal["miss", "bypass"]) -> dict:
+        return cache_result(
+            payload, state=state, ttl_seconds=self.cache.ttl if state == "miss" else None, prewarmer=self.prewarmer
+        )
+
+    def get_with_telemetry(self, key: str) -> dict | None:
+        """Return a copy of the cached payload with cached query/call attribution restored."""
+        cached = self.get(key)
+        if cached is None:
+            return None
+        telem = self._telemetry_cache.get(key)
+        if telem:
+            cached["debug_queries"] = [q.copy() if isinstance(q, dict) else q for q in telem.get("debug_queries", [])]
+            cached["debug_calls"] = [c.copy() if isinstance(c, dict) else c for c in telem.get("debug_calls", [])]
+        return cached
+
+    def put(self, key: str, value: dict, *, strip: tuple[str, ...] = ()) -> None:
+        cache_put(self.cache, key, value, strip=strip)
+        dq = value.get("debug_queries")
+        dc = value.get("debug_calls")
+        if dq is None and dc is None:
+            dq = get_queries()
+            dc = get_tracked_calls()
+        if dq or dc:
+            cached_queries = [{**q, "is_cached": True} if isinstance(q, dict) else q for q in (dq or [])]
+            self._telemetry_cache[key] = {
+                "debug_queries": cached_queries,
+                "debug_calls": list(dc or []),
+            }
+        else:
+            self._telemetry_cache.pop(key, None)
+
+    def check(self, key: str, runner: QueryRunner) -> dict | None:
+        """Cached payload with this request's telemetry merged in, or ``None`` on a miss."""
+        cached = self.get(key)
+        if cached is None:
+            return None
+        return {**cached, **runner.telemetry(), "is_cached": True}
+
+    def store(self, key: str, payload: dict, runner: QueryRunner) -> dict:
+        """Persist ``payload`` and return it with this request's telemetry merged in."""
+        self.put(key, payload)
+        return self.result({**payload, **runner.telemetry()}, state="miss")
+
+
+_sys.modules.setdefault("backend.repositories.utils.response_cache", _sys.modules[__name__])
+_repo_utils_pkg = _sys.modules.get("backend.repositories.utils")
+if _repo_utils_pkg is not None:
+    _repo_utils_pkg.response_cache = _sys.modules[__name__]  # type: ignore[attr-defined]
 
 
 # Rate-limit table for empty-rollup warnings — (service_id, field) → monotonic
@@ -3630,6 +3865,43 @@ class QueryRunner:
     }
     _CONN_REQUESTS_BUCKET_ORDER: tuple[str, ...] = ("1", "2–5", "6–20", "21+")
 
+    def _begin_observed_rollup_window(
+        self,
+        reader_name: Literal[
+            "dashboard.conn_requests_histogram",
+            "dashboard.ngwaf_bots",
+            "dashboard.count",
+            "dashboard.time_series",
+            "dashboard.top_n",
+            "dashboard.ua_bots",
+        ],
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+        min_hours: int | None = 2,
+    ) -> tuple[ReaderCoverage, tuple[datetime, datetime] | None]:
+        observed = ReaderCoverage(reader=reader_name, minimum_window_hours=min_hours)
+        self.reader_coverage.append(observed)
+        win = self._eligible_rollup_window(
+            start_time, end_time, has_filters=has_filters, min_hours=min_hours, observation=observed
+        )
+        if win is None:
+            observed.outcome = "ineligible"
+        return observed, win
+
+    def _collect_observed_rollup_paths(
+        self,
+        observed: ReaderCoverage,
+        st: datetime,
+        et: datetime,
+        bundle_name: Literal["security_conn_reuse", "all_fields", "ngwaf_bots"],
+        filename: str,
+    ) -> list[str] | None:
+        attempt = RollupPathCoverage(bundle=bundle_name)
+        observed.attempts.append(attempt)
+        return self._collect_rollup_paths(st, et, filename, observation=attempt)
+
     def try_conn_requests_hist_from_rollup(
         self,
         start_time: str | None,
@@ -3668,24 +3940,19 @@ class QueryRunner:
         ``CONN_REQUESTS_BUCKET`` block produces — or ``None`` on any
         eligibility miss (caller falls back to that live scan).
         """
-        observed = ReaderCoverage(reader="dashboard.conn_requests_histogram", minimum_window_hours=2)
-        self.reader_coverage.append(observed)
-        win = self._eligible_rollup_window(
-            start_time, end_time, has_filters=has_filters, min_hours=2, observation=observed
+        observed, win = self._begin_observed_rollup_window(
+            "dashboard.conn_requests_histogram", start_time, end_time, has_filters=has_filters, min_hours=2
         )
         if win is None:
-            observed.outcome = "ineligible"
             return None
         st, et = win
 
-        attempt = RollupPathCoverage(bundle="security_conn_reuse")
-        observed.attempts.append(attempt)
-        rollup_paths = self._collect_rollup_paths(st, et, SECURITY_CONN_REUSE_BUNDLE_FILENAME, observation=attempt)
+        rollup_paths = self._collect_observed_rollup_paths(
+            observed, st, et, "security_conn_reuse", SECURITY_CONN_REUSE_BUNDLE_FILENAME
+        )
         use_all_fields = rollup_paths is None
         if use_all_fields:
-            attempt = RollupPathCoverage(bundle="all_fields")
-            observed.attempts.append(attempt)
-            rollup_paths = self._collect_rollup_paths(st, et, DAY_BUNDLE_FILENAME, observation=attempt)
+            rollup_paths = self._collect_observed_rollup_paths(observed, st, et, "all_fields", DAY_BUNDLE_FILENAME)
             if rollup_paths is None:
                 observed.outcome = "no_coverage"
                 return None
@@ -3923,6 +4190,14 @@ class QueryRunner:
             ),
         ]
 
+    @staticmethod
+    def _accumulate_row_counts(rows: list[tuple], key_fn: Callable[[tuple], Any]) -> dict[Any, int]:
+        counts: dict[Any, int] = {}
+        for row in rows:
+            key = key_fn(row)
+            counts[key] = counts.get(key, 0) + int(row[-1] or 0)
+        return counts
+
     def try_ngwaf_top_bots_from_rollup(
         self,
         start_time: str | None,
@@ -3934,19 +4209,14 @@ class QueryRunner:
         """Serve ``get_top_bots``' ``ngwaf_bots`` panel from the per-hour/
         per-day ``ngwaf_bots`` parquets + a live active-hour top-up.
         """
-        observed = ReaderCoverage(reader="dashboard.ngwaf_bots", minimum_window_hours=2)
-        self.reader_coverage.append(observed)
-        win = self._eligible_rollup_window(
-            start_time, end_time, has_filters=has_filters, min_hours=2, observation=observed
+        observed, win = self._begin_observed_rollup_window(
+            "dashboard.ngwaf_bots", start_time, end_time, has_filters=has_filters, min_hours=2
         )
         if win is None:
-            observed.outcome = "ineligible"
             return None
         st, et = win
 
-        attempt = RollupPathCoverage(bundle="ngwaf_bots")
-        observed.attempts.append(attempt)
-        rollup_paths = self._collect_rollup_paths(st, et, NGWAF_BOTS_BUNDLE_FILENAME, observation=attempt)
+        rollup_paths = self._collect_observed_rollup_paths(observed, st, et, "ngwaf_bots", NGWAF_BOTS_BUNDLE_FILENAME)
         if rollup_paths is None:
             observed.outcome = "no_coverage"
             return None
@@ -3970,10 +4240,7 @@ class QueryRunner:
         if combined is None:
             return None
 
-        counts: dict[tuple[str, str], int] = {}
-        for bot_name, category, cnt in combined:
-            counts[(bot_name, category)] = counts.get((bot_name, category), 0) + int(cnt or 0)
-
+        counts = self._accumulate_row_counts(combined, lambda r: (r[0], r[1]))
         ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[: max(0, int(n))]
         observed.outcome = "served"
         return [{"name": bn, "category": cat, "request_count": c} for (bn, cat), c in ranked]
@@ -4025,11 +4292,7 @@ class QueryRunner:
         if combined is None:
             return None
 
-        counts: dict[tuple[str | None, str | None, str | None], int] = {}
-        for row in combined:
-            key = (row[0], row[1], row[2])
-            counts[key] = counts.get(key, 0) + int(row[3] or 0)
-
+        counts = self._accumulate_row_counts(combined, lambda r: (r[0], r[1], r[2]))
         ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
         return [
             {
@@ -4081,11 +4344,7 @@ class QueryRunner:
         if combined is None:
             return None
 
-        counts: dict[tuple[Any, str], int] = {}
-        for bucket, bot_name, cnt in combined:
-            key = (bucket, str(bot_name))
-            counts[key] = counts.get(key, 0) + int(cnt or 0)
-
+        counts = self._accumulate_row_counts(combined, lambda r: (r[0], str(r[1])))
         return [(b, bn, c) for (b, bn), c in sorted(counts.items())]
 
     def try_security_top_ips_from_rollup(

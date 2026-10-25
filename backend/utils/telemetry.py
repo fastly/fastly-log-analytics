@@ -1115,3 +1115,144 @@ class ValkeyPublisher:
 sys.modules["backend.utils.valkey_publisher"] = sys.modules[__name__]
 if _utils_pkg is not None:
     _utils_pkg.valkey_publisher = sys.modules[__name__]  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# Minimal HyperLogLog for cross-hour distinct-IP counts in the rollup tree
+# (folded from backend.utils.hll)
+# ---------------------------------------------------------------------------
+
+import hashlib  # noqa: E402
+import math  # noqa: E402
+import struct  # noqa: E402
+from collections.abc import Iterable  # noqa: E402
+
+DEFAULT_PRECISION = 8
+SERIALIZATION_VERSION = 1
+_HASH_BITS = 64
+
+
+def _alpha(m: int) -> float:
+    """Bias-correction constant α_m from the Flajolet paper, table 4."""
+    if m == 16:
+        return 0.673
+    if m == 32:
+        return 0.697
+    if m == 64:
+        return 0.709
+    return 0.7213 / (1.0 + 1.079 / m)
+
+
+def _hash64(item: str | bytes) -> int:
+    """Stable 64-bit hash of an item."""
+    if isinstance(item, str):
+        item = item.encode("utf-8")
+    digest = hashlib.md5(item, usedforsecurity=False).digest()  # noqa: S324
+    return struct.unpack("<Q", digest[:8])[0]
+
+
+def _leading_zero_count(value: int, width_bits: int) -> int:
+    """Return ``min(width_bits, leading_zero_count(value) + 1)``."""
+    if value == 0:
+        return width_bits
+    rank = 1
+    msb = 1 << (width_bits - 1)
+    while (value & msb) == 0 and rank < width_bits:
+        rank += 1
+        value <<= 1
+    return rank
+
+
+class HyperLogLog:
+    """A small, mergeable HyperLogLog sketch."""
+
+    __slots__ = ("_p", "_m", "_buckets")
+
+    def __init__(self, precision: int = DEFAULT_PRECISION) -> None:
+        if not 4 <= precision <= 16:
+            raise ValueError(f"precision must be in [4, 16], got {precision}")
+        self._p = precision
+        self._m = 1 << precision
+        self._buckets = bytearray(self._m)
+
+    @property
+    def precision(self) -> int:
+        return self._p
+
+    @property
+    def m(self) -> int:
+        return self._m
+
+    def add(self, item: str | bytes) -> None:
+        """Insert one item into the sketch."""
+        h = _hash64(item)
+        bucket = h >> (_HASH_BITS - self._p)
+        observed = h & ((1 << (_HASH_BITS - self._p)) - 1)
+        rank = _leading_zero_count(observed, _HASH_BITS - self._p)
+        if rank > self._buckets[bucket]:
+            self._buckets[bucket] = rank
+
+    def update(self, items: Iterable[str | bytes]) -> None:
+        """Bulk-insert from an iterable."""
+        for item in items:
+            self.add(item)
+
+    def count(self) -> int:
+        """Return the cardinality estimate."""
+        m = self._m
+        alpha = _alpha(m)
+        raw_sum = sum(2.0**-b for b in self._buckets)
+        if raw_sum == 0.0:
+            return m
+        estimate = alpha * m * m / raw_sum
+
+        if estimate <= 2.5 * m:
+            zeros = sum(1 for b in self._buckets if b == 0)
+            if zeros > 0:
+                estimate = m * math.log(m / zeros)
+
+        if estimate > (1 << 64) / 30.0:
+            estimate = -(1 << 64) * math.log(1 - estimate / (1 << 64))
+
+        return int(round(estimate))
+
+    def merge(self, other: HyperLogLog) -> None:
+        """Union ``other`` into ``self`` in-place."""
+        if other._p != self._p:
+            raise ValueError(f"merge precision mismatch: self.p={self._p} vs other.p={other._p}")
+        for i in range(self._m):
+            if other._buckets[i] > self._buckets[i]:
+                self._buckets[i] = other._buckets[i]
+
+    def to_bytes(self) -> bytes:
+        """Serialize to a compact ``bytes`` payload."""
+        return bytes([SERIALIZATION_VERSION, self._p]) + bytes(self._buckets)
+
+    @classmethod
+    def from_bytes(cls, blob: bytes | bytearray) -> HyperLogLog:
+        """Deserialize a sketch previously produced by :meth:`to_bytes`."""
+        if len(blob) < 2:
+            raise ValueError(f"sketch blob too short: {len(blob)} bytes")
+        version = blob[0]
+        if version != SERIALIZATION_VERSION:
+            raise ValueError(f"unknown HLL serialization version {version}; expected {SERIALIZATION_VERSION}")
+        precision = blob[1]
+        if not 4 <= precision <= 16:
+            raise ValueError(f"invalid precision in blob: {precision}")
+        expected_len = 2 + (1 << precision)
+        if len(blob) != expected_len:
+            raise ValueError(f"sketch blob length mismatch: got {len(blob)}, expected {expected_len}")
+        sketch = cls(precision=precision)
+        sketch._buckets = bytearray(blob[2:])
+        return sketch
+
+    def __len__(self) -> int:
+        return self.count()
+
+    def __repr__(self) -> str:  # pragma: no cover - cosmetic only
+        return f"HyperLogLog(p={self._p}, estimate≈{self.count()})"
+
+
+sys.modules["backend.utils.hll"] = sys.modules[__name__]
+if _utils_pkg is not None:
+    _utils_pkg.hll = sys.modules[__name__]  # type: ignore[attr-defined]

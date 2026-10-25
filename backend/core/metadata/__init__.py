@@ -107,17 +107,6 @@ from backend.core.metadata.reconciliation import (
     is_ingested_files_dedup_active,
 )
 
-# Persistent slow-SQL history (extends the in-memory query_registry ring
-# buffer with durable per-service storage so the Notable Slow Queries
-# panel can show history beyond the 2000-entry / restart window).
-from backend.core.metadata.slow_queries import (
-    clear_slow_queries,
-    count_slow_queries,
-    flush_slow_query_buffer,
-    insert_slow_query,
-    list_slow_queries,
-)
-
 # Audit log, ASN-name cache, saved-dashboard-view, and alert-rule CRUD.
 from backend.core.metadata.state import (
     asn_ints_for_search,
@@ -143,13 +132,18 @@ from backend.core.metadata.state import (
     upsert_views_for_service,
 )
 
-# Source registry + usage telemetry.
+# Source registry + usage telemetry + persistent slow-SQL history.
 from backend.core.metadata.usage_log import (
     DEFAULT_METADATA_RETENTION,
     _query_usage_log_aggregate_rollup,
+    clear_slow_queries,
     clear_usage_log,
+    count_slow_queries,
+    flush_slow_query_buffer,
     get_usage_logs,
+    insert_slow_query,
     iter_usage_logs_chunks,
+    list_slow_queries,
     log_synthetic_usage,
     log_usage_calls,
     purge_usage_log,
@@ -192,10 +186,26 @@ sys.modules[__name__].__class__ = _ShimModule
 for _sub in ("alerts", "asn_cache", "views"):
     setattr(sys.modules[__name__], _sub, _state)
     sys.modules[f"{__name__}.{_sub}"] = _state
-setattr(sys.modules[__name__], "usage_log_db", _usage_log)
-sys.modules[f"{__name__}.usage_log_db"] = _usage_log
+for _sub in ("usage_log_db", "slow_queries"):
+    setattr(sys.modules[__name__], _sub, _usage_log)
+    sys.modules[f"{__name__}.{_sub}"] = _usage_log
 setattr(sys.modules[__name__], "quarantine", _ingest_log)
 sys.modules[f"{__name__}.quarantine"] = _ingest_log
+_backend_pkg = sys.modules.get("backend")
+if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
+    _backend_pkg._MODULE_ALIASES.update(
+        {
+            "backend.core.query_attribution": "backend.core.request_telemetry",
+            "backend.core.request_metrics": "backend.core.request_telemetry",
+            "backend.request_metrics_observer": "backend.core.request_telemetry",
+            "backend.core.metric_snapshots": "backend.cron.jobs.metadata",
+            "backend.core.duckdb_recycle": "backend.cron.jobs.metadata",
+            "backend.cron.jobs.duckdb_recycle": "backend.cron.jobs.metadata",
+            "backend.core.metadata.slow_queries": "backend.core.metadata.usage_log",
+            "backend.cron.decorators": "backend.cron.scheduler",
+            "backend.cron.jobs.rum_commit": "backend.cron.jobs.rum_sync",
+        }
+    )
 
 
 __all__ = [

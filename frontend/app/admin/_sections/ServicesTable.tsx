@@ -36,11 +36,273 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog'
-import { cn, panelDialogContent, panelDialogHeaderSolid, panelDialogFooter } from '@/lib/utils'
-import { AlertCircle, Bot, Plus } from 'lucide-react'
-
-import { buildServiceColumns } from './ServicesTableColumns'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { Badge } from '@/components/ui/badge'
+import { cn, downloadBlob, panelDialogContent, panelDialogHeaderSolid, panelDialogFooter } from '@/lib/utils'
+import { formatBytes, formatCount } from '@/lib/format'
+import { adminFetch } from '@/lib/api'
+import {
+  AlertCircle,
+  Bot,
+  ChevronDown,
+  CloudDownload,
+  Eraser,
+  ExternalLink,
+  Eye,
+  KeyRound,
+  Play,
+  Plus,
+  Settings,
+  Settings2,
+  Trash2,
+  UserPlus,
+} from 'lucide-react'
+import type { ColumnDef } from '@tanstack/react-table'
 import type { ServiceConfig } from '@/types/api'
+
+interface ServiceColumnDeps {
+  activeServiceId: string | null
+  switchToService: (id: string) => void
+  servicesLength: number
+  setCronService: (s: ServiceConfig) => void
+  setSettingsService: (s: ServiceConfig) => void
+  setDeleteDataService: (s: ServiceConfig) => void
+  setTeardownService: (s: ServiceConfig) => void
+  setInviteService: (s: ServiceConfig) => void
+  openNgwaf: (s: ServiceConfig) => void
+  openRum?: (s: ServiceConfig) => void
+  openCredentials: (s: ServiceConfig) => void
+}
+
+export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceConfig>[] {
+  const {
+    activeServiceId,
+    switchToService,
+    servicesLength,
+    setCronService,
+    setSettingsService,
+    setDeleteDataService,
+    setTeardownService,
+    setInviteService,
+    openNgwaf,
+    openRum,
+    openCredentials,
+  } = deps
+
+  return [
+    {
+      accessorKey: 'name',
+      header: 'Service Name',
+      size: 200,
+      cell: ({ row }) => (
+        <div className="flex items-center gap-2 font-medium">
+          {row.original.service_id === activeServiceId && (
+            <Badge variant="default" className="h-5 px-1.5 text-[10px] uppercase font-bold bg-blue-600 hover:bg-blue-700 shadow-none border-none">Active</Badge>
+          )}
+          {row.getValue('name')}
+        </div>
+      ),
+    },
+    {
+      accessorKey: 'service_id',
+      header: 'ID',
+      size: 160,
+      cell: ({ row }) => {
+        const id = row.getValue('service_id') as string
+        return (
+          <div className="flex items-center gap-1.5">
+            <span className="font-mono text-xs text-muted-foreground">{id}</span>
+            <a
+              href={`https://manage.fastly.com/configure/services/${id}`}
+              target="_blank"
+              rel="noreferrer"
+              className="text-muted-foreground hover:text-foreground opacity-50 hover:opacity-100 transition-opacity"
+              title="View Service in Fastly"
+            >
+              <ExternalLink className="h-3 w-3" />
+            </a>
+          </div>
+        )
+      },
+    },
+    {
+      accessorKey: 'fos_bucket',
+      header: 'FOS Bucket',
+      size: 180,
+      cell: ({ row }) => {
+        const bucket = row.getValue('fos_bucket') as string
+        return (
+          <div className="flex items-center gap-1.5">
+            <span className="font-mono text-xs text-muted-foreground">{bucket}</span>
+            <a
+              href="https://manage.fastly.com/resources/object-storage/buckets"
+              target="_blank"
+              rel="noreferrer"
+              className="text-muted-foreground hover:text-foreground opacity-50 hover:opacity-100 transition-opacity"
+              title="View Object Storage in Fastly"
+            >
+              <ExternalLink className="h-3 w-3" />
+            </a>
+          </div>
+        )
+      },
+    },
+    {
+      id: 'local_cache',
+      accessorFn: (row) => row.duckdb_size_bytes,
+      header: 'Local Cache',
+      size: 180,
+      cell: ({ row }) => {
+        const size = row.original.duckdb_size_bytes
+        const files = row.original.cache_file_count || 0
+        const rows = row.original.log_row_count || 0
+
+        return size ? (
+          <div className="flex flex-col gap-0.5">
+            <span className="font-mono text-xs tabular-nums text-muted-foreground">{formatBytes(size)}</span>
+            <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+              <span className="flex items-center gap-1">
+                {formatCount(files)} file{files === 1 ? '' : 's'}
+                {files > 0 && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Download local cache as ZIP"
+                    className="h-4 w-4 p-0 ml-0.5 hover:bg-transparent text-muted-foreground hover:text-primary transition-colors"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      const sid = row.original.service_id
+                      void adminFetch(`/api/download-all?service_id=${encodeURIComponent(sid)}&include=local`).then(
+                        async (res) => {
+                          if (res.ok) downloadBlob(await res.blob(), `${sid}_local_cache.zip`)
+                        },
+                      )
+                    }}
+                    title="Download local cache as ZIP"
+                  >
+                    <CloudDownload className="h-3 w-3" />
+                  </Button>
+                )}
+              </span>
+              <span>•</span>
+              <span>{formatCount(rows)} rows</span>
+            </div>
+          </div>
+        ) : (
+          <span className="text-xs text-muted-foreground italic">No cache</span>
+        )
+      },
+    },
+    {
+      id: 'status',
+      accessorFn: (row) => (row.cron_sync?.enabled ? 1 : 0),
+      header: 'Cron Sync',
+      size: 140,
+      cell: ({ row }) => {
+        const service = row.original
+        const cron = service.cron_sync
+        return (
+          <div className="flex items-center gap-2">
+            {cron?.enabled ? (
+              <Badge variant="success" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">Enabled</Badge>
+            ) : (
+              <Badge variant="secondary" className="px-1.5 py-0 shadow-none uppercase text-[10px] font-bold">Disabled</Badge>
+            )}
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Cron sync settings"
+              className="h-6 w-6 hover:bg-muted cursor-pointer"
+              onClick={() => setCronService(service)}
+              title="Cron Sync Settings"
+            >
+              <Settings className="h-3 w-3 text-muted-foreground" />
+            </Button>
+          </div>
+        )
+      },
+    },
+    {
+      id: 'actions',
+      header: 'Actions',
+      size: servicesLength > 0 ? 220 : 120,
+      cell: ({ row }) => {
+        const service = row.original
+        const isActive = service.service_id === activeServiceId
+
+        return (
+          <div className="flex items-center gap-2">
+            <DropdownMenu>
+              <DropdownMenuTrigger render={
+                <Button variant="outline" size="sm" className="h-8 gap-1.5 px-3 font-bold uppercase text-[10px] tracking-wider">
+                  Manage <ChevronDown className="h-3.5 w-3.5" />
+                </Button>
+              } />
+              <DropdownMenuContent align="end" className="w-52">
+                {isActive && (
+                  <DropdownMenuItem disabled>
+                    <Play className="mr-2 h-4 w-4" /> Active Service
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem onClick={() => setSettingsService(service)}>
+                  <Settings2 className="mr-2 h-4 w-4" /> Log Settings
+                </DropdownMenuItem>
+                {openRum && (
+                  <DropdownMenuItem onClick={() => openRum(service)}>
+                    <Eye className="mr-2 h-4 w-4" /> RUM Configuration
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem onClick={() => openNgwaf(service)}>
+                  <Bot className="mr-2 h-4 w-4" /> NGWAF Config
+                </DropdownMenuItem>
+                {service.access_level === 'read_write' && service.analyst_path_a_supported && (
+                  <DropdownMenuItem onClick={() => setInviteService(service)}>
+                    <UserPlus className="mr-2 h-4 w-4" /> Invite User
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem onClick={() => openCredentials(service)}>
+                  <KeyRound className="mr-2 h-4 w-4" /> Rotate Key
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                {service.access_level === 'read_write' && (
+                  <DropdownMenuItem
+                    className="text-destructive focus:text-destructive focus:bg-destructive/10"
+                    onClick={() => setDeleteDataService(service)}
+                  >
+                    <Eraser className="mr-2 h-4 w-4" /> Delete Data
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem
+                  className="text-destructive focus:text-destructive focus:bg-destructive/10"
+                  onClick={() => setTeardownService(service)}
+                >
+                  <Trash2 className="mr-2 h-4 w-4" /> Teardown Service
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+
+            {!isActive && (
+              <Button
+                variant="default"
+                size="sm"
+                className="h-8 px-3 text-[11px] font-bold uppercase tracking-tight bg-primary hover:bg-primary/90"
+                onClick={() => switchToService(service.service_id)}
+              >
+                <Play className="h-3 w-3 mr-1.5 fill-current" /> Switch to
+              </Button>
+            )}
+          </div>
+        )
+      },
+    },
+  ]
+}
 
 interface CredentialsDialogProps {
   service: ServiceConfig | null

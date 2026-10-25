@@ -17,6 +17,7 @@ import duckdb
 import pytest
 from backend.core.metadata.quarantine import list_quarantine_evidence
 from backend.core.quarantine import read_evidence
+from backend.utils.vcl_validator import lint_vcl
 from tests._helpers.ledger import (
     DuckLakeLedgerEnv,
     attacher,
@@ -49,7 +50,6 @@ from backend.core.ingest import (
     sweep_rum_ledger_once,
 )
 from backend.core.rum_ingest import ingest_rum_logs
-from backend.utils.vcl_validator import lint_vcl
 
 SERVICE_ID = "test-rum-ledger-edges"
 BUCKET = "test-bucket"

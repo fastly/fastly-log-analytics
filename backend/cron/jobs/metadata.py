@@ -23,11 +23,6 @@ import httpx
 import tenacity
 
 from backend.core import duckdb as _db
-from backend.core.duckdb_recycle import (
-    _recycle_rss_threshold_bytes,
-    maybe_graceful_restart,
-    recycle_once,
-)
 from backend.cron.decorators import cron_task, global_job
 from backend.cron.lifecycle import cron_run, record_skip_row
 from backend.cron.scheduler import (
@@ -885,9 +880,7 @@ def _run_metadata_cleanup(service_id: str) -> None:
         # nothing to do. 30-day window matches the in-app Trends tab range
         # (1h / 24h / 7d) plus a buffer.
         try:
-            from backend.core import metric_snapshots
-
-            metric_snapshots.purge_old(retention_days=30)
+            purge_old(retention_days=30)
         except Exception as e:
             logger.debug("[metadata_cleanup] metric_snapshots purge failed: %s", e)
 
@@ -903,13 +896,491 @@ def _run_metadata_cleanup(service_id: str) -> None:
         )
 
 
+# ── Metric Snapshots (folded from backend.core.metric_snapshots) ─────────────
+
+import gc  # noqa: E402
+import os  # noqa: E402
+import signal  # noqa: E402
+import sys as _sys  # noqa: E402
+from contextlib import closing  # noqa: E402
+from datetime import UTC, datetime, timedelta  # noqa: E402
+from typing import Any  # noqa: E402
+
+from opentelemetry.metrics import CallbackOptions, Observation  # noqa: E402
+
+from backend import config as svcconfig  # noqa: E402
+from backend.core import duckdb_pool as _pool  # noqa: E402
+from backend.core.request_telemetry import get_meter  # noqa: E402
+from backend.utils.date_utils import iso_z, iso_z_now, parse_relative_time_window  # noqa: E402
+
+_EMPTY = ""
+
+
+def _pg_connection():
+    from backend.core.metadata.pg_connection import get_pg_readonly_connection
+
+    return get_pg_readonly_connection()
+
+
+def _pg_write_connection():
+    from backend.core.metadata.pg_connection import get_pg_thread_connection
+
+    return get_pg_thread_connection()
+
+
+# ── Write path ───────────────────────────────────────────────────────────────
+
+
+def record_snapshot(
+    metric: str,
+    value: float,
+    *,
+    service_id: str | None = None,
+    task: str | None = None,
+    ts: str | None = None,
+) -> None:
+    """Insert one metric sample. Idempotent on ``(metric, service_id, task, ts)``."""
+    if not metric:
+        raise ValueError("metric is required")
+    ts_str = ts or iso_z_now()
+    try:
+        con = _pg_write_connection()
+        con.execute(
+            """
+            INSERT INTO metric_snapshots (ts, metric, service_id, task, value)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (metric, service_id, task, ts)
+            DO UPDATE SET value = EXCLUDED.value
+            """,
+            (ts_str, metric, service_id or _EMPTY, task or _EMPTY, float(value)),
+        )
+    except Exception as e:
+        logger.warning("[metric_snapshots] Postgres insert failed for %s: %s", metric, e)
+
+
+# ── Read path ────────────────────────────────────────────────────────────────
+
+
+def get_batch(*, since: datetime | str) -> dict:
+    """Return every series newer than ``since``, grouped by series key.
+
+    Series key shape: ``"{metric}"`` for global, ``"{metric}|{service_id}"``
+    for per-service, ``"{metric}|{service_id}|{task}"`` for per-task. The
+    admin Trends page does one round-trip; the frontend partitions
+    by metric prefix.
+    """
+    if isinstance(since, str):
+        since = parse_relative_time_window(since)
+    try:
+        with closing(_pg_connection()) as con:
+            rows = con.execute(
+                """
+                SELECT metric, service_id, task, ts, value
+                FROM metric_snapshots
+                WHERE ts >= %s
+                ORDER BY ts ASC
+                """,
+                (iso_z(since),),
+            ).fetchall()
+        return _group_batch_rows(rows)
+    except Exception as e:
+        logger.warning("[metric_snapshots] Postgres batch read failed: %s", e)
+        return {}
+
+
+# ── Liveness ─────────────────────────────────────────────────────────────────
+
+
+def last_snapshot_age_s() -> float | None:
+    """Seconds since the most recent metric_snapshots row, or ``None`` if empty.
+
+    SRE-06: the minute-cadence sampler (:mod:`backend.cron.jobs.metric_snapshot`)
+    is a *global* APScheduler interval job, so a stale ``max(ts)`` is a direct
+    witness that the scheduler thread has stopped ticking.
+    """
+    try:
+        with closing(_pg_connection()) as con:
+            row = con.execute("SELECT max(ts) AS latest FROM metric_snapshots").fetchone()
+    except Exception as e:
+        logger.warning("[metric_snapshots] Postgres liveness read failed: %s", e)
+        return None
+    latest = row["latest"] if row else None
+    if not latest:
+        return None
+    from backend.utils.date_utils import parse_iso_utc
+
+    dt = parse_iso_utc(latest)
+    if dt is None:
+        return None
+    return max(0.0, (datetime.now(UTC) - dt).total_seconds())
+
+
+# ── Retention ────────────────────────────────────────────────────────────────
+
+
+def purge_old(retention_days: int = 30) -> int:
+    """Delete rows older than ``retention_days``. Returns the row count."""
+    if retention_days <= 0:
+        return 0
+    cutoff = iso_z(datetime.now(UTC) - timedelta(days=retention_days))
+    try:
+        con = _pg_write_connection()
+        cur = con.execute("DELETE FROM metric_snapshots WHERE ts < %s", (cutoff,))
+        return cur.rowcount or 0
+    except Exception as e:
+        logger.warning("[metric_snapshots] Postgres purge failed: %s", e)
+        return 0
+
+
+# ── Test / teardown helpers ──────────────────────────────────────────────────
+
+
+def close_all_connections() -> None:
+    """Close any thread-local connection (no-op under Postgres)."""
+    pass
+
+
+_MAX_BATCH_POINTS_PER_SERIES = 240
+
+
+def _downsample_rows(series_rows: list, max_points: int = _MAX_BATCH_POINTS_PER_SERIES) -> list[dict]:
+    n = len(series_rows)
+    if n <= max_points or max_points < 4:
+        return [{"ts": r["ts"], "value": r["value"]} for r in series_rows]
+    step = (n - 1) / float(max_points - 3)
+    indices = {int(round(i * step)) for i in range(max_points - 2)}
+    indices.add(0)
+    indices.add(n - 1)
+    min_idx = min(range(n), key=lambda idx: series_rows[idx]["value"])
+    max_idx = max(range(n), key=lambda idx: series_rows[idx]["value"])
+    indices.add(min_idx)
+    indices.add(max_idx)
+    return [{"ts": series_rows[idx]["ts"], "value": series_rows[idx]["value"]} for idx in sorted(indices)]
+
+
+def _group_batch_rows(rows) -> dict[str, list[dict]]:
+    raw_grouped: dict[str, list] = {}
+    for r in rows:
+        key = r["metric"]
+        svc = r["service_id"]
+        if svc:
+            key = f"{key}|{svc}"
+            task = r["task"]
+            if task:
+                key = f"{key}|{task}"
+        raw_grouped.setdefault(key, []).append(r)
+    return {key: _downsample_rows(series_rows) for key, series_rows in raw_grouped.items()}
+
+
+def teardown() -> None:
+    """Clean up snapshots for test isolation."""
+    try:
+        con = _pg_write_connection()
+        con.execute("TRUNCATE TABLE metric_snapshots")
+    except Exception:
+        logger.debug("teardown: con.execute failed (ignored)", exc_info=True)
+
+
+# ── Latest operational samples exported through the configured OTel meter ────
+
+_lock = threading.Lock()
+_values: dict[str, dict[tuple[tuple[str, str], ...], float]] = {}
+_instruments: dict[str, Any] = {}
+
+_METRICS = {
+    "celery_queue_depth": ("Celery broker queue depth", "{messages}"),
+    "celery_broker_reachable": ("Celery broker reachability", "1"),
+    "celery_active_workers": ("Active Celery workers", "{workers}"),
+    "celery_active_tasks": ("Active Celery tasks", "{tasks}"),
+    "ingest_ledger_rows": ("Ingest ledger rows by state", "{rows}"),
+    "high_scale_source_objects": ("High-scale source objects by state", "{objects}"),
+    "high_scale_oldest_active_age_seconds": ("Age of the oldest active high-scale source object", "s"),
+    "high_scale_publication_lag_seconds": ("Age of the oldest pending high-scale publication", "s"),
+    "high_scale_pending_manifests": ("Pending high-scale publication manifests", "{manifests}"),
+    "high_scale_rows_published_total": ("High-scale rows published", "{rows}"),
+    "high_scale_disk_mode_level": ("High-scale serving-volume disk mode (0 normal .. 3 emergency)", "1"),
+    "high_scale_disk_free_fraction": ("High-scale serving-volume free-space fraction", "1"),
+}
+
+
+def _instrument(metric: str) -> Any:
+    instrument = _instruments.get(metric)
+    if instrument is not None:
+        return instrument
+
+    description, unit = _METRICS[metric]
+
+    def callback(_options: CallbackOptions, metric_name: str = metric) -> list[Observation]:
+        with _lock:
+            samples = dict(_values.get(metric_name, {}))
+        return [Observation(value, dict(attributes)) for attributes, value in samples.items()]
+
+    instrument = get_meter().create_observable_gauge(
+        name=f"fla_{metric}",
+        callbacks=[callback],
+        description=description,
+        unit=unit,
+    )
+    _instruments[metric] = instrument
+    return instrument
+
+
+def record(metric: str, value: float, **attributes: str) -> None:
+    """Publish the latest value for an operational metric and its labels."""
+    if metric not in _METRICS:
+        raise ValueError(f"unsupported operational metric: {metric}")
+    key = tuple(sorted((name, str(value)) for name, value in attributes.items()))
+    with _lock:
+        _values.setdefault(metric, {})[key] = float(value)
+    _instrument(metric)
+
+
+def reset_for_tests() -> None:
+    """Clear cached samples and instruments between isolated unit tests."""
+    with _lock:
+        _values.clear()
+        _instruments.clear()
+
+
+# ── DuckDB Recycle (folded from backend.core.duckdb_recycle) ─────────────────
+
+
+def recycle_interval_min() -> float:
+    """Interval (minutes) between recycles. 0 = disabled (the scheduler then
+    never registers the job). Default 0."""
+    raw = os.getenv("DUCKDB_RECYCLE_INTERVAL_MIN", "0")
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _recycle_rss_threshold_bytes() -> int:
+    """Only recycle when current RSS exceeds this (MB → bytes); 0 = always
+    recycle on the interval. Lets a quiet process skip needless cache drops."""
+    raw = os.getenv("DUCKDB_RECYCLE_RSS_THRESHOLD_MB", "0")
+    try:
+        return max(0, int(raw)) * 1024 * 1024
+    except (TypeError, ValueError):
+        return 0
+
+
+def _recycle_drain_timeout_s() -> float:
+    raw = os.getenv("DUCKDB_RECYCLE_DRAIN_TIMEOUT_MS", "5000")
+    try:
+        return max(0.1, float(raw) / 1000.0)
+    except (TypeError, ValueError):
+        return 5.0
+
+
+def _recycle_grace_s() -> float:
+    raw = os.getenv("DUCKDB_RECYCLE_GRACE_MS", "3000")
+    try:
+        return max(0.0, float(raw) / 1000.0)
+    except (TypeError, ValueError):
+        return 3.0
+
+
+def _recycle_lock_timeout_s() -> float:
+    raw = os.getenv("DUCKDB_RECYCLE_LOCK_TIMEOUT_MS", "2000")
+    try:
+        return max(0.0, float(raw) / 1000.0)
+    except (TypeError, ValueError):
+        return 2.0
+
+
+def _sources_by_db_path() -> dict[str, list[dict]]:
+    """Group every configured service's source dict by its abspath DuckDB file.
+
+    Services sharing a db file share the DuckDB instance + its object cache, so
+    they must be drained together for the instance to be destroyed.
+    """
+    groups: dict[str, list[dict]] = {}
+    for cfg in svcconfig.list_configs():
+        try:
+            src = _db._source_from_config(cfg)
+        except Exception:
+            continue
+        groups.setdefault(_db.db_path_for_source(src), []).append(src)
+
+        rum_cfg = cfg.get("rum")
+        rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
+        rum_enabled = svcconfig.is_rum_enabled(cfg)
+        if rum_enabled:
+            try:
+                from backend.core.duckdb import rum_source_for
+
+                rum_src = rum_source_for(src)
+                groups.setdefault(_db.db_path_for_source(rum_src), []).append(rum_src)
+            except Exception:
+                logger.debug("_sources_by_db_path: groups.setdefault failed (ignored)", exc_info=True)
+    return groups
+
+
+def _service_key(src: dict) -> str:
+    return src.get("name") or src.get("service_id") or "default"
+
+
+def _lock_key(src: dict) -> str:
+    # Matches iceberg.view._get_service_lock keying (source.get("name", "default")).
+    return src.get("name", "default")
+
+
+def _trim_memory() -> None:
+    """Trigger Python GC and C allocator memory trim (glibc malloc_trim) if available."""
+    gc.collect()
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        logger.debug("_trim_memory: ctypes.CDLL failed (ignored)", exc_info=True)
+
+
+def _recycle_db_path(db_path: str, sources: list[dict]) -> dict:
+    """Recycle the DuckDB instance for one db file. Returns a status dict."""
+    from backend.core.iceberg.view import _get_service_lock
+
+    drain_timeout = _recycle_drain_timeout_s()
+    grace = _recycle_grace_s()
+    lock_timeout = _recycle_lock_timeout_s()
+    service_keys = [_service_key(s) for s in sources]
+
+    # Acquire write/rebind locks in a deterministic global order (sorted lock
+    # keys) so recycle can never deadlock against a writer holding one of them.
+    lock_keys = sorted({_lock_key(s) for s in sources})
+    acquired: list = []
+    rss_before = _db.current_rss_bytes()
+    try:
+        for lk in lock_keys:
+            lock = _get_service_lock(lk)
+            if not lock.acquire(timeout=lock_timeout):
+                logger.info(
+                    "[recycle] %s: skip — write lock %r busy (a sync/commit is in flight)",
+                    db_path,
+                    lk,
+                )
+                return {"db_path": db_path, "status": "skipped_locked", "lock": lk}
+            acquired.append(lock)
+
+        # Locks held → raise the barrier so no NEW connection opens for this file.
+        _db.set_recycle_barrier(db_path, True)
+        retired_pools = {}
+        try:
+            retired_pools = _pool.begin_drain_pools(service_keys)
+            drained = _pool.wait_pools_drained(retired_pools, drain_timeout)
+
+            # gc so closed-but-not-yet-collected conn wrappers leave the WeakSet.
+            _trim_memory()
+            deadline = time.monotonic() + grace
+            while _db.live_connection_count(db_path) > 0 and time.monotonic() < deadline:
+                time.sleep(0.05)
+                _trim_memory()
+            live = _db.live_connection_count(db_path)
+        finally:
+            _pool.end_drain_pools(retired_pools or service_keys)
+            _db.set_recycle_barrier(db_path, False)
+    finally:
+        for lock in reversed(acquired):
+            try:
+                lock.release()
+            except RuntimeError:
+                pass
+
+    _trim_memory()
+    rss_after = _db.current_rss_bytes()
+    freed = (rss_before - rss_after) if (rss_before is not None and rss_after is not None) else None
+    status = "recycled" if (drained and live == 0) else "incomplete"
+    result = {
+        "db_path": db_path,
+        "status": status,
+        "drained": drained,
+        "live_after": live,
+        "rss_before": rss_before,
+        "rss_after": rss_after,
+        "freed_bytes": freed,
+    }
+    freed_mb = f"{freed / 1e6:.0f}MB" if freed is not None else "n/a"
+    logger.info(
+        "[recycle] %s: %s (drained=%s live_after=%d freed=%s)",
+        db_path,
+        status,
+        drained,
+        live,
+        freed_mb,
+    )
+    return result
+
+
+def recycle_once(reason: str = "interval") -> str:
+    """Recycle every distinct DuckDB instance once. Returns a one-line detail.
+
+    Never raises — each db file is recycled independently and abort-safe.
+    """
+    groups = _sources_by_db_path()
+    if not groups:
+        return "no services configured"
+    results = []
+    for db_path, sources in groups.items():
+        try:
+            results.append(_recycle_db_path(db_path, sources))
+        except Exception as e:  # defensive — a recycle must never crash the job
+            logger.warning("[recycle] %s: errored: %s", db_path, e, exc_info=True)
+            results.append({"db_path": db_path, "status": "error", "error": str(e)})
+    recycled = sum(1 for r in results if r.get("status") == "recycled")
+    freed = sum(r.get("freed_bytes") or 0 for r in results if (r.get("freed_bytes") or 0) > 0)
+    incomplete = sum(1 for r in results if r.get("status") in ("incomplete", "skipped_locked", "error"))
+    extra = f" (incomplete: {incomplete})" if incomplete else ""
+    return f"{reason}: recycled {recycled}/{len(results)} instance(s), freed ~{freed / 1e6:.0f}MB{extra}"
+
+
+def graceful_restart_rss_threshold_bytes() -> int:
+    """Restart threshold (``BACKEND_GRACEFUL_RESTART_RSS_MB``, MB→bytes).
+
+    0 (default) disables the guard entirely.
+    """
+    raw = os.getenv("BACKEND_GRACEFUL_RESTART_RSS_MB", "0")
+    try:
+        return max(0, int(raw)) * 1024 * 1024
+    except (TypeError, ValueError):
+        return 0
+
+
+def maybe_graceful_restart() -> bool:
+    """SIGTERM self for a clean docker restart if RSS is at/over the threshold.
+
+    Returns True iff a restart was triggered. Never raises — a guard that
+    crashes the scheduler tick would defeat its purpose.
+    """
+    threshold = graceful_restart_rss_threshold_bytes()
+    if threshold <= 0:
+        return False
+    try:
+        from backend.core.duckdb import current_rss_bytes
+
+        rss = current_rss_bytes()
+    except Exception:
+        return False
+    if rss is None or rss < threshold:
+        return False
+    logger.warning(
+        "\U0001f501 [memguard] RSS %.0fMB >= %.0fMB restart threshold — sending "
+        "SIGTERM for a graceful restart (uvicorn drains + exits 0; docker "
+        "restart:unless-stopped brings up a fresh process). STOPGAP for the "
+        "unresolved memory growth; see backend-oom-restart-loop.",
+        rss / 1e6,
+        threshold / 1e6,
+    )
+    os.kill(os.getpid(), signal.SIGTERM)
+    return True
+
+
 # ── run_duckdb_recycle ───────────────────────────────────────────────────────
 
 
 def _maybe_adjust_recycle_schedule(*, expedite: bool) -> None:
     """Dynamically adjust recycle interval under memory pressure (e.g. tighten to 2m, or relax back to baseline)."""
     try:
-        from backend.core.duckdb_recycle import recycle_interval_min
         from backend.cron.scheduler import get_scheduler
 
         sched = get_scheduler()
@@ -970,3 +1441,28 @@ def run_duckdb_recycle() -> str:
         _maybe_adjust_recycle_schedule(expedite=False)
 
     return res
+
+
+_self_mod = _sys.modules[__name__]
+for _alias in (
+    "backend.core.metric_snapshots",
+    "backend.core.duckdb_recycle",
+    "backend.cron.jobs.duckdb_recycle",
+):
+    _sys.modules[_alias] = _self_mod
+_core_pkg = _sys.modules.get("backend.core")
+if _core_pkg is not None:
+    setattr(_core_pkg, "metric_snapshots", _self_mod)
+    setattr(_core_pkg, "duckdb_recycle", _self_mod)
+_jobs_pkg = _sys.modules.get("backend.cron.jobs")
+if _jobs_pkg is not None:
+    setattr(_jobs_pkg, "duckdb_recycle", _self_mod)
+_backend_pkg = _sys.modules.get("backend")
+if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
+    _backend_pkg._MODULE_ALIASES.update(
+        {
+            "backend.core.metric_snapshots": "backend.cron.jobs.metadata",
+            "backend.core.duckdb_recycle": "backend.cron.jobs.metadata",
+            "backend.cron.jobs.duckdb_recycle": "backend.cron.jobs.metadata",
+        }
+    )

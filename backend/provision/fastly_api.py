@@ -122,13 +122,16 @@ EDGE_DATA_MAPPING = {
 }
 
 
-def get_scrub_vcl_statements(log_fields_config: dict | None) -> list[str]:
-    """Generate pure VCL statements to strip client-supplied internal headers."""
-    log_fields_config = log_fields_config or {}
-    enabled_custom = sorted(
-        [cf for cf in log_fields_config.get("custom_fields", []) if cf.get("enabled", True)],
+def _resolve_enabled_custom_fields(log_fields_config: dict | None) -> list[dict]:
+    return sorted(
+        [cf for cf in (log_fields_config or {}).get("custom_fields", []) if cf.get("enabled", True)],
         key=lambda x: x["name"],
     )
+
+
+def get_scrub_vcl_statements(log_fields_config: dict | None) -> list[str]:
+    """Generate pure VCL statements to strip client-supplied internal headers."""
+    enabled_custom = _resolve_enabled_custom_fields(log_fields_config)
     lines = [
         "unset req.http.x-is-cluster-fetch;",
         "unset req.http.x-fos-edge-data;",
@@ -175,10 +178,7 @@ def get_capture_vcl_statements(log_fields_config: dict | None) -> list[str]:
     required.discard("ip")
     group_l = "L" in (log_fields_config.get("groups") or [])
     limits = log_fields_config.get("field_limits") or {}
-    enabled_custom = sorted(
-        [cf for cf in log_fields_config.get("custom_fields", []) if cf.get("enabled", True)],
-        key=lambda x: x["name"],
-    )
+    enabled_custom = _resolve_enabled_custom_fields(log_fields_config)
     custom_edge = [cf for cf in enabled_custom if cf.get("collection_stage", "edge") == "edge"]
 
     lines = [
@@ -235,10 +235,7 @@ def generate_capture_vcl(
     group_m = "M" in (log_fields_config.get("groups") or [])
     limits = log_fields_config.get("field_limits") or {}
 
-    enabled_custom = sorted(
-        [cf for cf in (log_fields_config or {}).get("custom_fields", []) if cf.get("enabled", True)],
-        key=lambda x: x["name"],
-    )
+    enabled_custom = _resolve_enabled_custom_fields(log_fields_config)
 
     custom_edge = [cf for cf in enabled_custom if cf.get("collection_stage", "edge") == "edge"]
     custom_origin = [cf for cf in enabled_custom if cf.get("collection_stage", "edge") == "origin"]

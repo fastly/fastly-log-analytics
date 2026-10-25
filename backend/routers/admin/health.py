@@ -25,9 +25,9 @@ from backend.celery_status import (
 )
 from backend.core import duckdb as _db
 from backend.core import duckdb_pool as _pool
-from backend.core import duckdb_recycle as _recycle
-from backend.core import metric_snapshots
 from backend.core.share_db.settings import get_setting, set_setting
+from backend.cron.jobs import metadata as _recycle
+from backend.cron.jobs import metadata as metric_snapshots
 from backend.deps import get_service_id, get_source, require_admin
 from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.admin import (
@@ -358,7 +358,7 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
     # "no crons running because the scheduler thread died". None = fresh
     # boot with no samples yet (the card renders "unknown", not an alarm).
     try:
-        from backend.core import metric_snapshots as _ms
+        from backend.cron.jobs import metadata as _ms
 
         out["scheduler_last_tick_age_s"] = _ms.last_snapshot_age_s()
     except Exception:

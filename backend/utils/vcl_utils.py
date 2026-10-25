@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -333,13 +334,128 @@ def lint_log_format(format_str: str, snippets: dict[str, str] | None = None) -> 
 
 
 # ---------------------------------------------------------------------------
+# VCL static analysis + user-input validation for scoring snippets
+# (folded from backend.utils.vcl_validator)
+# ---------------------------------------------------------------------------
+
+MAX_REGEX_BYTES = 2048
+
+
+class RegexValidationError(ValueError):
+    """Raised when an operator-supplied URL exclusion regex fails policy."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.message = message
+
+
+def validate_url_exclusion_regex(value: str) -> str:
+    """Cheap input policing on a user-typed regex before VCL interpolation."""
+    if not isinstance(value, str):
+        raise RegexValidationError("type", f"regex must be a string, got {type(value).__name__}")
+    cleaned = value.strip()
+    if not cleaned:
+        return ""
+    if len(cleaned.encode("utf-8")) > MAX_REGEX_BYTES:
+        raise RegexValidationError(
+            "too_long",
+            f"regex exceeds {MAX_REGEX_BYTES}-byte limit (got {len(cleaned.encode('utf-8'))})",
+        )
+    try:
+        validate_quoted_literal(cleaned, allow_backslash=True, field="regex")
+    except VclSafetyError:
+        m = _FORBIDDEN_ALLOW_BACKSLASH.search(cleaned)
+        ch = m.group(0) if m else "?"
+        raise RegexValidationError(
+            "disallowed_char",
+            f"regex contains disallowed character (codepoint U+{ord(ch):04X}): "
+            "double-quotes and control characters are not permitted because they "
+            "would break the surrounding VCL string literal",
+        )
+    try:
+        re.compile(cleaned)
+    except re.error as exc:
+        raise RegexValidationError(
+            "invalid_regex", f"regex failed to compile: {exc.msg} at position {exc.pos}"
+        ) from exc
+    return cleaned
+
+
+def _falco_binary() -> str | None:
+    """Return the falco binary path, or None if unavailable."""
+    return shutil.which("falco")
+
+
+def lint_vcl(
+    snippet: str,
+    *,
+    snippet_name: str = "scoring_snippet",
+    wrap_subroutine: str | None = "vcl_recv",
+) -> LintResult:
+    """Run ``falco lint`` over a VCL snippet body."""
+    falco_bin = _falco_binary()
+    if falco_bin is None:
+        logger.warning(
+            "[vcl_validator] falco binary not on PATH; static analysis skipped for %s "
+            "(production should install falco via the backend Dockerfile)",
+            snippet_name,
+        )
+        return LintResult(ok=True, errors=[], warnings=[], skipped=True, skipped_reason="falco binary not found")
+
+    if wrap_subroutine:
+        stage = wrap_subroutine.removeprefix("vcl_") if wrap_subroutine.startswith("vcl_") else wrap_subroutine
+        full_vcl = (
+            "backend F_origin_0 {\n"
+            '  .host = "example.com";\n'
+            '  .port = "80";\n'
+            "}\n"
+            "backend F_session_scorer {\n"
+            '  .host = "scorer.edgecompute.app";\n'
+            '  .port = "443";\n'
+            "}\n\n"
+            f"sub {wrap_subroutine} {{\n"
+            f"  #FASTLY {stage}\n"
+            "  declare local var.fastly_req_do_shield BOOL;\n"
+            f"{snippet}\n"
+            '  if (req.http.X-Lint-Sentinel == "lint-only-never-fires") {\n'
+            "    set req.backend = F_origin_0;\n"
+            "    set req.backend = F_session_scorer;\n"
+            "    set var.fastly_req_do_shield = false;\n"
+            "  }\n"
+            "}\n"
+        )
+    else:
+        full_vcl = snippet
+
+    return lint_document(full_vcl, falco_bin=falco_bin, snippet_name=snippet_name, timeout=10, verbose=True)
+
+
+def validate_recv_exclusion_regex_with_lint(
+    user_regex: str,
+    *,
+    build_full_snippet: Callable[[str], str],
+    require_falco: bool = True,
+) -> tuple[str, LintResult]:
+    """One-call validation: input policy → assemble snippet → falco lint."""
+    cleaned = validate_url_exclusion_regex(user_regex)
+    full_snippet = build_full_snippet(cleaned)
+    lint = lint_vcl(full_snippet, snippet_name="scoring_recv")
+    if lint.skipped and require_falco:
+        raise RegexValidationError(
+            "falco_unavailable",
+            f"VCL static-analysis tool unavailable: {lint.skipped_reason}. Refusing to ship unchecked VCL.",
+        )
+    if not lint.ok:
+        joined = "\n".join(lint.errors[:5])
+        raise RegexValidationError("vcl_lint", f"falco lint failed:\n{joined}")
+    return cleaned, lint
+
+
+# ---------------------------------------------------------------------------
 # Caller-supplied Fastly token validation for destructive operations
 # (folded from backend.utils.fastly_auth)
 # ---------------------------------------------------------------------------
-
-import logging  # noqa: E402
-
-logger = logging.getLogger(__name__)
 
 _DESTRUCTIVE_SCOPE = "global"
 
@@ -478,7 +594,9 @@ def validate_destructive_token(token: str, *, service_id: str) -> dict[str, Any]
 
 sys.modules["backend.utils.fastly_auth"] = sys.modules[__name__]
 sys.modules["backend.utils.vcl_safety"] = sys.modules[__name__]
+sys.modules["backend.utils.vcl_validator"] = sys.modules[__name__]
 _utils_pkg = sys.modules.get("backend.utils")
 if _utils_pkg is not None:
     _utils_pkg.fastly_auth = sys.modules[__name__]  # type: ignore[attr-defined]
     _utils_pkg.vcl_safety = sys.modules[__name__]  # type: ignore[attr-defined]
+    _utils_pkg.vcl_validator = sys.modules[__name__]  # type: ignore[attr-defined]

@@ -25,7 +25,7 @@ from backend.models.admin import (
     UsageOperationsResponse,
     UsageRumBreakdownResponse,
 )
-from backend.repositories import usage as repo
+from backend.repositories import assets as repo
 from backend.repositories._base import SectionTimer
 from backend.utils.date_utils import window_to_epoch
 from backend.utils.router_utils import query_errors, raise_internal

@@ -3,68 +3,25 @@
 import * as React from 'react'
 import { usePathname } from 'next/navigation'
 import {
-  flexRender,
-  type Header,
-  type ColumnDef,
-  type ColumnFiltersState,
-  type ColumnOrderState,
-  type SortingState,
-  type Row,
-  type Table as ReactTable,
-  type VisibilityState,
-  getCoreRowModel,
-  getFilteredRowModel,
-  getPaginationRowModel,
-  getSortedRowModel,
-  useReactTable,
+  flexRender, type Header, type ColumnDef, type ColumnFiltersState, type ColumnOrderState,
+  type SortingState, type Row, type Table as ReactTable, type VisibilityState,
+  getCoreRowModel, getFilteredRowModel, getPaginationRowModel, getSortedRowModel, useReactTable,
 } from '@tanstack/react-table'
 import { useVirtualizer, type Virtualizer } from '@tanstack/react-virtual'
 import { ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, Copy, ExternalLink, Filter, GripVertical, Inbox, Settings2 } from 'lucide-react'
-import {
-  DndContext,
-  KeyboardSensor,
-  MouseSensor,
-  TouchSensor,
-  closestCenter,
-  useSensor,
-  useSensors,
-  DragEndEvent,
-} from '@dnd-kit/core'
+import { DndContext, KeyboardSensor, MouseSensor, TouchSensor, closestCenter, useSensor, useSensors, DragEndEvent } from '@dnd-kit/core'
 import { restrictToHorizontalAxis } from '@dnd-kit/modifiers'
-import {
-  arrayMove,
-  SortableContext,
-  horizontalListSortingStrategy,
-  useSortable,
-} from '@dnd-kit/sortable'
+import { arrayMove, SortableContext, horizontalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { formatBytes, formatCount, formatCountMaybe } from '@/lib/format'
-
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
-import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuShortcut,
-  DropdownMenuTrigger,
+  DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent,
+  DropdownMenuItem, DropdownMenuShortcut, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useDateFormat } from '@/hooks/useSSE'
 import { useMaskIps } from '@/hooks/useBootstrap'
@@ -76,56 +33,25 @@ import { cn, copyToClipboard, isIpFamilyField } from '@/lib/utils'
 import { useFilterStore, usePopGeoStore } from '@/stores/filterStore'
 
 export interface DataTableBaseProps<TData, TValue> {
-  columns: ColumnDef<TData, TValue>[]
-  data: TData[]
-  searchKey?: string
-  isLoading?: boolean
-  showPagination?: boolean
-  sorting?: SortingState
-  onSortingChange?: (sorting: SortingState) => void
-  initialSorting?: SortingState
-  initialVisibility?: VisibilityState
-  title?: React.ReactNode
-  compactToolbar?: boolean
-  extraToolbarContent?: React.ReactNode
-  renderToolbar?: (table: ReactTable<TData>) => React.ReactNode
-  hideToolbar?: boolean
-  columnVisibility?: VisibilityState
-  onColumnVisibilityChange?: (visibility: VisibilityState) => void
-  emptyMessage?: string
-  emptyHint?: React.ReactNode
-  onClearFilter?: () => void
-  onRowClick?: (row: TData) => void
-  getRowClassName?: (row: TData) => string
-  tableCaption?: string
+  columns: ColumnDef<TData, TValue>[]; data: TData[]; searchKey?: string; isLoading?: boolean; showPagination?: boolean
+  sorting?: SortingState; onSortingChange?: (sorting: SortingState) => void; initialSorting?: SortingState; initialVisibility?: VisibilityState
+  title?: React.ReactNode; compactToolbar?: boolean; extraToolbarContent?: React.ReactNode
+  renderToolbar?: (table: ReactTable<TData>) => React.ReactNode; hideToolbar?: boolean
+  columnVisibility?: VisibilityState; onColumnVisibilityChange?: (visibility: VisibilityState) => void
+  emptyMessage?: string; emptyHint?: React.ReactNode; onClearFilter?: () => void
+  onRowClick?: (row: TData) => void; getRowClassName?: (row: TData) => string; tableCaption?: string
 }
 
 interface UseDataTableStateArgs<TData, TValue> {
-  columns: ColumnDef<TData, TValue>[]
-  data?: TData[]
-  showPagination?: boolean
-  controlledSorting?: SortingState
-  onSortingChange?: (sorting: SortingState) => void
-  initialSorting?: SortingState
-  controlledVisibility?: VisibilityState
-  onColumnVisibilityChange?: (visibility: VisibilityState) => void
-  initialVisibility?: VisibilityState
-  initialColumnOrder?: string[]
-  enableColumnOrder?: boolean
+  columns: ColumnDef<TData, TValue>[]; data?: TData[]; showPagination?: boolean
+  controlledSorting?: SortingState; onSortingChange?: (sorting: SortingState) => void; initialSorting?: SortingState
+  controlledVisibility?: VisibilityState; onColumnVisibilityChange?: (visibility: VisibilityState) => void; initialVisibility?: VisibilityState
+  initialColumnOrder?: string[]; enableColumnOrder?: boolean
 }
 
 export function useDataTableState<TData, TValue>({
-  columns,
-  data = [],
-  showPagination = true,
-  controlledSorting,
-  onSortingChange,
-  initialSorting = [],
-  controlledVisibility,
-  onColumnVisibilityChange,
-  initialVisibility = {},
-  initialColumnOrder,
-  enableColumnOrder = false,
+  columns, data = [], showPagination = true, controlledSorting, onSortingChange, initialSorting = [],
+  controlledVisibility, onColumnVisibilityChange, initialVisibility = {}, initialColumnOrder, enableColumnOrder = false,
 }: UseDataTableStateArgs<TData, TValue>) {
   const isControlled = controlledVisibility !== undefined
   const isSortingControlled = controlledSorting !== undefined
@@ -137,8 +63,7 @@ export function useDataTableState<TData, TValue>({
   const setColumnVisibility = React.useCallback(
     (updater: VisibilityState | ((prev: VisibilityState) => VisibilityState)) => {
       if (isControlled) {
-        const next = typeof updater === 'function' ? updater(controlledVisibility!) : updater
-        onColumnVisibilityChange?.(next)
+        onColumnVisibilityChange?.(typeof updater === 'function' ? updater(controlledVisibility!) : updater)
       } else {
         setInternalVisibility(updater)
       }
@@ -147,33 +72,21 @@ export function useDataTableState<TData, TValue>({
   )
 
   const [stableData, setStableData] = React.useState<TData[]>(data)
-  const isSameData =
-    stableData === data ||
-    (Array.isArray(stableData) &&
-      Array.isArray(data) &&
-      stableData.length === data.length &&
-      stableData.every((row, i) => row === data[i]))
-  if (!isSameData) {
-    setStableData(data)
-  }
+  const isSameData = stableData === data || (Array.isArray(stableData) && Array.isArray(data) && stableData.length === data.length && stableData.every((row, i) => row === data[i]))
+  if (!isSameData) setStableData(data)
   const tableData = isSameData ? stableData : data
 
   const nextVisibilityJson = JSON.stringify(initialVisibility)
   const [prevInitialVisibilityJson, setPrevInitialVisibilityJson] = React.useState(nextVisibilityJson)
   if (nextVisibilityJson !== prevInitialVisibilityJson) {
     setPrevInitialVisibilityJson(nextVisibilityJson)
-    if (!isControlled && Object.keys(initialVisibility).length > 0) {
-      setInternalVisibility(initialVisibility)
-    }
+    if (!isControlled && Object.keys(initialVisibility).length > 0) setInternalVisibility(initialVisibility)
   }
 
   const handleSortingChange = (updater: SortingState | ((prev: SortingState) => SortingState)) => {
     const next = typeof updater === 'function' ? updater(sorting) : updater
-    if (isSortingControlled) {
-      onSortingChange?.(next)
-    } else {
-      setInternalSorting(next)
-    }
+    if (isSortingControlled) onSortingChange?.(next)
+    else setInternalSorting(next)
   }
 
   const defaultColumnOrder = React.useMemo<ColumnOrderState>(() => {
@@ -181,20 +94,16 @@ export function useDataTableState<TData, TValue>({
     const allIds = columns.map(columnIdOf)
     if (initialColumnOrder && initialColumnOrder.length > 0) {
       const validInitial = initialColumnOrder.filter((id) => allIds.includes(id))
-      const remaining = allIds.filter((id) => !validInitial.includes(id))
-      return [...validInitial, ...remaining]
+      return [...validInitial, ...allIds.filter((id) => !validInitial.includes(id))]
     }
     return allIds
   }, [columns, initialColumnOrder, enableColumnOrder])
 
   const [userColumnOrder, setUserColumnOrder] = React.useState<ColumnOrderState | null>(null)
-
   const columnOrder = React.useMemo<ColumnOrderState>(() => {
     if (!userColumnOrder || userColumnOrder.length !== defaultColumnOrder.length) return defaultColumnOrder
     const userSet = new Set(userColumnOrder)
-    for (const id of defaultColumnOrder) {
-      if (!userSet.has(id)) return defaultColumnOrder
-    }
+    for (const id of defaultColumnOrder) if (!userSet.has(id)) return defaultColumnOrder
     return userColumnOrder
   }, [userColumnOrder, defaultColumnOrder])
 
@@ -212,58 +121,34 @@ export function useDataTableState<TData, TValue>({
   const tableColumns = React.useMemo(() => columns, [columns])
 
   const table = useReactTable({
-    data: tableData,
-    columns: tableColumns,
-    onSortingChange: handleSortingChange,
-    manualSorting: isSortingControlled,
-    onColumnFiltersChange: setColumnFilters,
-    onPaginationChange: setPagination,
+    data: tableData, columns: tableColumns, onSortingChange: handleSortingChange, manualSorting: isSortingControlled,
+    onColumnFiltersChange: setColumnFilters, onPaginationChange: setPagination,
     ...(enableColumnOrder ? { onColumnOrderChange: setColumnOrder } : {}),
     getCoreRowModel: getCoreRowModel(),
     getPaginationRowModel: showPagination ? getPaginationRowModel() : undefined,
     getSortedRowModel: isSortingControlled ? undefined : getSortedRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
-    onColumnVisibilityChange: setColumnVisibility,
-    onRowSelectionChange: setRowSelection,
-    columnResizeMode: 'onChange',
-    onColumnSizingChange: setColumnSizing,
+    onColumnVisibilityChange: setColumnVisibility, onRowSelectionChange: setRowSelection,
+    columnResizeMode: 'onChange', onColumnSizingChange: setColumnSizing,
     state: {
-      sorting,
-      columnFilters,
-      columnVisibility,
+      sorting, columnFilters, columnVisibility,
       ...(enableColumnOrder ? { columnOrder } : {}),
-      rowSelection,
-      pagination,
-      columnSizing,
+      rowSelection, pagination, columnSizing,
     },
   })
 
   const tableContainerRef = React.useRef<HTMLDivElement>(null)
   const { rows } = table.getRowModel()
-
   const rowVirtualizer = useVirtualizer({
-    count: rows.length,
-    getScrollElement: () => tableContainerRef.current,
-    estimateSize: () => 40,
-    overscan: 10,
+    count: rows.length, getScrollElement: () => tableContainerRef.current, estimateSize: () => 40, overscan: 10,
   })
 
-  return {
-    table,
-    rows,
-    rowVirtualizer,
-    tableContainerRef,
-    columnVisibility,
-    columnSizing,
-    columnOrder,
-    setColumnOrder,
-  }
+  return { table, rows, rowVirtualizer, tableContainerRef, columnVisibility, columnSizing, columnOrder, setColumnOrder }
 }
 
 // ─── PopLabel & PopGeo ───────────────────────────────────────────────────────
 
 export type PopGeo = components['schemas']['BootstrapPopGeo']
-
 const COUNTRY_ABBR: Record<string, string> = { us: 'USA', uk: 'UK', gb: 'UK' }
 
 export function formatPopGeo(geo?: PopGeo | null): string {
@@ -274,17 +159,12 @@ export function formatPopGeo(geo?: PopGeo | null): string {
   const cc = (geo.country ?? '').toLowerCase()
   const country = COUNTRY_ABBR[cc] ?? cc.toUpperCase()
   const norm = (s: string) => s.replace(/[^a-z]/gi, '').toUpperCase()
-  const showRegion = region && norm(region) !== norm(city)
-  const locality = showRegion ? `${city}, ${region}` : city
+  const locality = region && norm(region) !== norm(city) ? `${city}, ${region}` : city
   return country ? `${locality} - ${country}` : locality
 }
 
-function usePopGeoMap(): Record<string, PopGeo> {
-  return usePopGeoStore((s) => s.map)
-}
-
 export function usePopGeo(code?: string | null): string {
-  const map = usePopGeoMap()
+  const map = usePopGeoStore((s) => s.map)
   if (!code || !map) return ''
   return formatPopGeo(map[String(code).toUpperCase()])
 }
@@ -304,28 +184,14 @@ export function PopLabel({ code, className }: { code?: string | null; className?
 
 // ─── FilterValueCell ─────────────────────────────────────────────────────────
 
-interface FilterValueCellFilter {
-  column: string
-  value: string
-}
-
+interface FilterValueCellFilter { column: string; value: string }
 interface FilterValueCellProps {
-  filters: FilterValueCellFilter[]
-  display?: React.ReactNode
-  className?: string
-  containerClassName?: string
+  filters: FilterValueCellFilter[]; display?: React.ReactNode; className?: string; containerClassName?: string
 }
 
 const PAGE_LABELS: Record<string, string> = {
-  '/dashboard': 'dashboard',
-  '/origin': 'origin',
-  '/performance': 'performance',
-  '/security': 'security',
-  '/network': 'network',
-  '/sessions': 'sessions',
-  '/charts': 'charts',
-  '/usage': 'usage',
-  '/query': 'query',
+  '/dashboard': 'dashboard', '/origin': 'origin', '/performance': 'performance', '/security': 'security',
+  '/network': 'network', '/sessions': 'sessions', '/charts': 'charts', '/usage': 'usage', '/query': 'query',
 }
 
 function pageLabelFor(pathname: string | null): string {
@@ -337,18 +203,10 @@ function pageLabelFor(pathname: string | null): string {
 }
 
 export function buildDashboardFilterUrl(filters: FilterValueCellFilter[]): string {
-  const qs = filters
-    .map(f => `filter_${f.column}=${encodeURIComponent(f.value)}`)
-    .join('&')
-  return `/dashboard?${qs}`
+  return `/dashboard?${filters.map(f => `filter_${f.column}=${encodeURIComponent(f.value)}`).join('&')}`
 }
 
-export function FilterValueCell({
-  filters,
-  display,
-  className,
-  containerClassName,
-}: FilterValueCellProps) {
+export function FilterValueCell({ filters, display, className, containerClassName }: FilterValueCellProps) {
   const pathname = usePathname()
   const addFilter = useFilterStore(state => state.addFilter)
   const maskIps = useMaskIps()
@@ -372,17 +230,15 @@ export function FilterValueCell({
   }, [filters])
 
   const skipNextOpenRef = React.useRef(false)
-  const handleMouseDown = React.useCallback(
-    (e: React.MouseEvent) => {
-      if (e.metaKey || e.ctrlKey) {
-        e.preventDefault()
-        e.stopPropagation()
-        skipNextOpenRef.current = true
-        handleFilterHere()
-      }
-    },
-    [handleFilterHere],
-  )
+  const handleMouseDown = React.useCallback((e: React.MouseEvent) => {
+    if (e.metaKey || e.ctrlKey) {
+      e.preventDefault()
+      e.stopPropagation()
+      skipNextOpenRef.current = true
+      handleFilterHere()
+    }
+  }, [handleFilterHere])
+
   const handleOpenChange = React.useCallback((next: boolean) => {
     if (next && skipNextOpenRef.current) {
       skipNextOpenRef.current = false
@@ -416,10 +272,7 @@ export function FilterValueCell({
         }
       >
         <span className={cn('truncate block flex-1', className)}>{shownValue}</span>
-        <ChevronDown
-          className="h-3 w-3 opacity-0 group-hover:opacity-70 data-[popup-open]:opacity-100 shrink-0 text-muted-foreground transition-opacity"
-          aria-hidden="true"
-        />
+        <ChevronDown className="h-3 w-3 opacity-0 group-hover:opacity-70 data-[popup-open]:opacity-100 shrink-0 text-muted-foreground transition-opacity" aria-hidden="true" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" sideOffset={2} className="min-w-[200px]">
         <DropdownMenuItem onClick={handleFilterHere}>
@@ -445,74 +298,37 @@ export function FilterValueCell({
 // ─── ColumnVisibilityDropdown ────────────────────────────────────────────────
 
 interface BaseColumnVisibilityDropdownProps {
-  className?: string
-  align?: 'start' | 'end'
-  size?: 'sm' | 'default' | 'icon'
-  compact?: boolean
+  className?: string; align?: 'start' | 'end'; size?: 'sm' | 'default' | 'icon'; compact?: boolean
 }
 
 type ColumnVisibilityDropdownProps<TData = unknown> = BaseColumnVisibilityDropdownProps &
   (
-    | {
-        columns: { id: string; label: string }[]
-        visibility: VisibilityState
-        onChange: (id: string, visible: boolean) => void
-        table?: never
-      }
-    | {
-        table: ReactTable<TData>
-        columns?: never
-        visibility?: never
-        onChange?: never
-      }
+    | { columns: { id: string; label: string }[]; visibility: VisibilityState; onChange: (id: string, visible: boolean) => void; table?: never }
+    | { table: ReactTable<TData>; columns?: never; visibility?: never; onChange?: never }
   )
 
-export function ColumnVisibilityDropdown<TData = unknown>(
-  props: ColumnVisibilityDropdownProps<TData>,
-) {
+export function ColumnVisibilityDropdown<TData = unknown>(props: ColumnVisibilityDropdownProps<TData>) {
   const { className, align = 'end', compact = false } = props
   const size = props.size ?? (compact ? 'sm' : 'sm')
 
   const items = props.table
-    ? props.table
-        .getAllColumns()
-        .filter((column) => column.getCanHide())
-        .map((column) => ({
-          id: column.id,
-          label:
-            column.columnDef.meta?.label ??
-            (typeof column.columnDef.header === 'string'
-              ? column.columnDef.header
-              : column.id.replace(/_/g, ' ')),
-          visible: column.getIsVisible(),
-          onToggle: (visible: boolean) => column.toggleVisibility(visible),
-        }))
-    : props.columns.map((column) => ({
+    ? props.table.getAllColumns().filter((column) => column.getCanHide()).map((column) => ({
         id: column.id,
-        label: column.label,
-        visible: props.visibility[column.id] !== false,
+        label: column.columnDef.meta?.label ?? (typeof column.columnDef.header === 'string' ? column.columnDef.header : column.id.replace(/_/g, ' ')),
+        visible: column.getIsVisible(),
+        onToggle: (visible: boolean) => column.toggleVisibility(visible),
+      }))
+    : props.columns.map((column) => ({
+        id: column.id, label: column.label, visible: props.visibility[column.id] !== false,
         onToggle: (visible: boolean) => props.onChange(column.id, visible),
       }))
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
-        render={
-          <Button
-            variant="outline"
-            size={size}
-            className={cn('h-8 gap-2 px-2 text-xs font-normal', className)}
-          />
-        }
+        render={<Button variant="outline" size={size} className={cn('h-8 gap-2 px-2 text-xs font-normal', className)} />}
       >
-        {size === 'icon' ? (
-          <Settings2 className="h-4 w-4" />
-        ) : (
-          <>
-            Columns
-            <ChevronDown className="h-3 w-3 opacity-50" />
-          </>
-        )}
+        {size === 'icon' ? <Settings2 className="h-4 w-4" /> : <>Columns<ChevronDown className="h-3 w-3 opacity-50" /></>}
       </DropdownMenuTrigger>
       <DropdownMenuContent align={align} className="w-auto min-w-[180px]">
         {items.map((item) => (
@@ -533,11 +349,8 @@ export function ColumnVisibilityDropdown<TData = unknown>(
 // ─── DataTableBody / MemoizedTableRow ────────────────────────────────────────
 
 interface TableRowProps<TData> {
-  row: Row<TData>
-  onRowClick?: (row: TData) => void
-  rowClassName?: string
-  columnVisibility: VisibilityState
-  columnSizing?: Record<string, number>
+  row: Row<TData>; onRowClick?: (row: TData) => void; rowClassName?: string
+  columnVisibility: VisibilityState; columnSizing?: Record<string, number>
 }
 
 function TableRowImpl<TData>({ row, onRowClick, rowClassName }: TableRowProps<TData>) {
@@ -546,19 +359,14 @@ function TableRowImpl<TData>({ row, onRowClick, rowClassName }: TableRowProps<TD
       data-state={row.getIsSelected() && 'selected'}
       onClick={() => onRowClick?.(row.original)}
       tabIndex={onRowClick ? 0 : undefined}
-      onKeyDown={
-        onRowClick
-          ? (e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault()
-                onRowClick(row.original)
-              }
-            }
-          : undefined
-      }
+      onKeyDown={onRowClick ? (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onRowClick(row.original)
+        }
+      } : undefined}
       className={cn(
-        onRowClick &&
-          'cursor-pointer hover:bg-muted/50 focus-visible:outline-none focus-visible:bg-muted/50 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring',
+        onRowClick && 'cursor-pointer hover:bg-muted/50 focus-visible:outline-none focus-visible:bg-muted/50 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring',
         rowClassName,
       )}
     >
@@ -581,18 +389,10 @@ function TableRowImpl<TData>({ row, onRowClick, rowClassName }: TableRowProps<TD
 export const MemoizedTableRow = React.memo(TableRowImpl) as typeof TableRowImpl
 
 interface DataTableBodyProps<TData, TValue> {
-  table: ReactTable<TData>
-  rows: Row<TData>[]
-  rowVirtualizer: Virtualizer<HTMLDivElement, Element>
-  columns: ColumnDef<TData, TValue>[]
-  columnVisibility: VisibilityState
-  columnSizing?: Record<string, number>
-  isLoading?: boolean
-  onRowClick?: (row: TData) => void
-  getRowClassName?: (row: TData) => string
-  emptyMessage?: string
-  emptyHint?: React.ReactNode
-  onClearFilter?: () => void
+  table: ReactTable<TData>; rows: Row<TData>[]; rowVirtualizer: Virtualizer<HTMLDivElement, Element>
+  columns: ColumnDef<TData, TValue>[]; columnVisibility: VisibilityState; columnSizing?: Record<string, number>
+  isLoading?: boolean; onRowClick?: (row: TData) => void; getRowClassName?: (row: TData) => string
+  emptyMessage?: string; emptyHint?: React.ReactNode; onClearFilter?: () => void
 }
 
 function VirtualSpacerRow({ colSpan, height }: { colSpan: number; height: number }) {
@@ -605,36 +405,18 @@ function VirtualSpacerRow({ colSpan, height }: { colSpan: number; height: number
 }
 
 export function DataTableBody<TData, TValue>({
-  table,
-  rows,
-  rowVirtualizer,
-  columns,
-  columnVisibility,
-  columnSizing,
-  isLoading,
-  onRowClick,
-  getRowClassName,
-  emptyMessage = 'No results.',
-  emptyHint,
-  onClearFilter,
+  table, rows, rowVirtualizer, columns, columnVisibility, columnSizing, isLoading,
+  onRowClick, getRowClassName, emptyMessage = 'No results.', emptyHint, onClearFilter,
 }: DataTableBodyProps<TData, TValue>) {
   const virtualItems = rowVirtualizer.getVirtualItems()
   const topPad = virtualItems.length > 0 ? virtualItems[0].start : 0
-  const bottomPad =
-    virtualItems.length > 0
-      ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end
-      : 0
+  const bottomPad = virtualItems.length > 0 ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0
 
   return (
     <TableBody>
       {isLoading ? (
         <TableRow>
-          <TableCell
-            colSpan={columns.length}
-            className="h-24 text-center text-muted-foreground"
-          >
-            Loading...
-          </TableCell>
+          <TableCell colSpan={columns.length} className="h-24 text-center text-muted-foreground">Loading...</TableCell>
         </TableRow>
       ) : table.getRowModel().rows?.length ? (
         <>
@@ -656,20 +438,13 @@ export function DataTableBody<TData, TValue>({
         </>
       ) : (
         <TableRow>
-          <TableCell
-            colSpan={columns.length}
-            className="h-32 text-center text-muted-foreground"
-          >
+          <TableCell colSpan={columns.length} className="h-32 text-center text-muted-foreground">
             <div className="flex flex-col items-center justify-center gap-2 py-4">
               <Inbox className="h-7 w-7 opacity-30" aria-hidden="true" />
               <p className="text-sm font-medium">{emptyMessage}</p>
-              {emptyHint && (
-                <p className="text-xs text-muted-foreground">{emptyHint}</p>
-              )}
+              {emptyHint && <p className="text-xs text-muted-foreground">{emptyHint}</p>}
               {onClearFilter && (
-                <Button variant="outline" size="sm" className="mt-1" onClick={onClearFilter}>
-                  Clear filter
-                </Button>
+                <Button variant="outline" size="sm" className="mt-1" onClick={onClearFilter}>Clear filter</Button>
               )}
             </div>
           </TableCell>
@@ -681,21 +456,13 @@ export function DataTableBody<TData, TValue>({
 
 // ─── StaticHeader / DraggableTableHeader ─────────────────────────────────────
 
-export function getHeaderAriaSort<TData>(
-  header: Header<TData, unknown>,
-): 'ascending' | 'descending' | 'none' | undefined {
+export function getHeaderAriaSort<TData>(header: Header<TData, unknown>): 'ascending' | 'descending' | 'none' | undefined {
   if (!header.column.getCanSort()) return undefined
   const sorted = header.column.getIsSorted()
   return sorted === 'asc' ? 'ascending' : sorted === 'desc' ? 'descending' : 'none'
 }
 
-export function HeaderCellContent<TData>({
-  header,
-  dragHandle,
-}: {
-  header: Header<TData, unknown>
-  dragHandle?: React.ReactNode
-}) {
+export function HeaderCellContent<TData>({ header, dragHandle }: { header: Header<TData, unknown>; dragHandle?: React.ReactNode }) {
   return (
     <div className="flex items-center justify-between gap-1 w-full h-full pl-3 pr-2 overflow-hidden">
       {header.column.getCanSort() && !header.isPlaceholder ? (
@@ -704,36 +471,23 @@ export function HeaderCellContent<TData>({
           className="flex-1 flex items-center hover:text-foreground transition-colors overflow-hidden cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm text-left bg-transparent border-0 p-0 font-inherit"
           onClick={header.column.getToggleSortingHandler()}
         >
-          <span className="truncate">
-            {flexRender(header.column.columnDef.header, header.getContext())}
-          </span>
+          <span className="truncate">{flexRender(header.column.columnDef.header, header.getContext())}</span>
           <span className="ml-2 flex items-center shrink-0">
-            {{
-              asc: <ArrowUp className="w-3.5 h-3.5" />,
-              desc: <ArrowDown className="w-3.5 h-3.5" />,
-            }[header.column.getIsSorted() as string] ?? (
+            {{ asc: <ArrowUp className="w-3.5 h-3.5" />, desc: <ArrowDown className="w-3.5 h-3.5" /> }[header.column.getIsSorted() as string] ?? (
               <ArrowUpDown className="w-3.5 h-3.5 opacity-0 group-hover:opacity-50 transition-opacity" />
             )}
           </span>
         </button>
       ) : (
         <div className="flex-1 flex items-center overflow-hidden">
-          <span className="truncate">
-            {header.isPlaceholder
-              ? null
-              : flexRender(header.column.columnDef.header, header.getContext())}
-          </span>
+          <span className="truncate">{header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}</span>
         </div>
       )}
       {dragHandle}
       <div
         role="presentation"
-        onMouseDown={(e) => {
-          try { header.getResizeHandler()(e) } catch { /* stale header */ }
-        }}
-        onTouchStart={(e) => {
-          try { header.getResizeHandler()(e) } catch { /* stale header */ }
-        }}
+        onMouseDown={(e) => { try { header.getResizeHandler()(e) } catch { /* stale header */ } }}
+        onTouchStart={(e) => { try { header.getResizeHandler()(e) } catch { /* stale header */ } }}
         className={cn(
           'absolute right-0 top-0 h-full w-2 cursor-col-resize hover:bg-primary/30 transition-colors z-10 touch-none',
           header.column.getIsResizing() ? 'bg-primary opacity-100' : 'opacity-0 group-hover:opacity-100',
@@ -754,18 +508,10 @@ export const StaticTableHeader = <TData,>({ header }: { header: Header<TData, un
 )
 
 export const DraggableTableHeader = <TData,>({ header }: { header: Header<TData, unknown> }) => {
-  const { attributes, isDragging, listeners, setNodeRef, transform, transition } = useSortable({
-    id: header.column.id,
-  })
-
+  const { attributes, isDragging, listeners, setNodeRef, transform, transition } = useSortable({ id: header.column.id })
   const style: React.CSSProperties = {
-    opacity: isDragging ? 0.8 : 1,
-    position: 'relative',
-    transform: CSS.Translate.toString(transform),
-    transition,
-    whiteSpace: 'nowrap',
-    width: header.column.getSize(),
-    zIndex: isDragging ? 1 : 0,
+    opacity: isDragging ? 0.8 : 1, position: 'relative', transform: CSS.Translate.toString(transform),
+    transition, whiteSpace: 'nowrap', width: header.column.getSize(), zIndex: isDragging ? 1 : 0,
   }
 
   return (
@@ -773,20 +519,12 @@ export const DraggableTableHeader = <TData,>({ header }: { header: Header<TData,
       ref={setNodeRef}
       style={style}
       aria-sort={getHeaderAriaSort(header)}
-      className={cn(
-        'relative group select-none border-r last:border-r-0 px-0',
-        isDragging && 'bg-muted shadow-md z-10',
-      )}
+      className={cn('relative group select-none border-r last:border-r-0 px-0', isDragging && 'bg-muted shadow-md z-10')}
     >
       <HeaderCellContent
         header={header}
         dragHandle={
-          <div
-            {...attributes}
-            {...listeners}
-            className="opacity-0 group-hover:opacity-50 hover:!opacity-100 cursor-grab active:cursor-grabbing p-1 rounded"
-            title="Drag to reorder"
-          >
+          <div {...attributes} {...listeners} className="opacity-0 group-hover:opacity-50 hover:!opacity-100 cursor-grab active:cursor-grabbing p-1 rounded" title="Drag to reorder">
             <GripVertical className="w-3.5 h-3.5" />
           </div>
         }
@@ -797,11 +535,7 @@ export const DraggableTableHeader = <TData,>({ header }: { header: Header<TData,
 
 // ─── DateTimeCell ────────────────────────────────────────────────────────────
 
-interface DateTimeCellProps {
-  iso: string | null | undefined
-  className?: string
-  emptyFallback?: React.ReactNode
-}
+interface DateTimeCellProps { iso: string | null | undefined; className?: string; emptyFallback?: React.ReactNode }
 
 export function DateTimeCell({ iso, className, emptyFallback }: DateTimeCellProps) {
   // Absolute time (tooltip content) is static; the relative "X ago" trigger
@@ -811,21 +545,10 @@ export function DateTimeCell({ iso, className, emptyFallback }: DateTimeCellProp
   if (!iso) return <>{emptyFallback ?? <span className="text-muted-foreground/40">—</span>}</>
   return (
     <Tooltip>
-      <TooltipTrigger
-        render={
-          <span
-            className={
-              className ??
-              'text-muted-foreground whitespace-nowrap border-b border-dotted border-muted-foreground/30'
-            }
-          />
-        }
-      >
+      <TooltipTrigger render={<span className={className ?? 'text-muted-foreground whitespace-nowrap border-b border-dotted border-muted-foreground/30'} />}>
         <TimeAgo timestamp={iso} />
       </TooltipTrigger>
-      <TooltipContent className="text-xs">
-        {full(iso)} {abbr()}
-      </TooltipContent>
+      <TooltipContent className="text-xs">{full(iso)} {abbr()}</TooltipContent>
     </Tooltip>
   )
 }
@@ -833,46 +556,26 @@ export function DateTimeCell({ iso, className, emptyFallback }: DateTimeCellProp
 // ─── DataTable ───────────────────────────────────────────────────────────────
 
 interface DataTableToolbarProps<TData> {
-  table: ReactTable<TData>
-  title?: React.ReactNode
-  searchKey?: string
-  compactToolbar?: boolean
-  extraToolbarContent?: React.ReactNode
+  table: ReactTable<TData>; title?: React.ReactNode; searchKey?: string; compactToolbar?: boolean; extraToolbarContent?: React.ReactNode
 }
 
-export const DataTableToolbar = <TData,>({
-  table,
-  title,
-  searchKey,
-  compactToolbar = false,
-  extraToolbarContent,
-}: DataTableToolbarProps<TData>) => {
-  return (
-    <div className={cn("flex items-center gap-4", compactToolbar ? "mb-2" : "py-4 px-4")}>
-      {title && (
-        <div className="flex-1">{title}</div>
-      )}
-      {searchKey && (
-        <Input
-          placeholder={`Filter ${searchKey}...`}
-          value={(table.getColumn(searchKey)?.getFilterValue() as string) ?? ""}
-          onChange={(event) =>
-            table.getColumn(searchKey)?.setFilterValue(event.target.value)
-          }
-          className="max-w-sm h-8"
-        />
-      )}
-      {extraToolbarContent && (
-        <div className="flex items-center gap-2">
-          {extraToolbarContent}
-        </div>
-      )}
-      <div className="ml-auto flex items-center gap-2">
-        <ColumnVisibilityDropdown table={table} compact={compactToolbar} />
-      </div>
+export const DataTableToolbar = <TData,>({ table, title, searchKey, compactToolbar = false, extraToolbarContent }: DataTableToolbarProps<TData>) => (
+  <div className={cn("flex items-center gap-4", compactToolbar ? "mb-2" : "py-4 px-4")}>
+    {title && <div className="flex-1">{title}</div>}
+    {searchKey && (
+      <Input
+        placeholder={`Filter ${searchKey}...`}
+        value={(table.getColumn(searchKey)?.getFilterValue() as string) ?? ""}
+        onChange={(event) => table.getColumn(searchKey)?.setFilterValue(event.target.value)}
+        className="max-w-sm h-8"
+      />
+    )}
+    {extraToolbarContent && <div className="flex items-center gap-2">{extraToolbarContent}</div>}
+    <div className="ml-auto flex items-center gap-2">
+      <ColumnVisibilityDropdown table={table} compact={compactToolbar} />
     </div>
-  )
-}
+  </div>
+)
 
 /**
  * Pagination footer shared by DataTable + DataTableReadonly.
@@ -886,45 +589,23 @@ export function DataTablePagination<TData>({ table }: { table: ReactTable<TData>
       <div className="flex items-center space-x-6 lg:space-x-8">
         <div className="flex items-center space-x-2">
           <p className="text-sm font-medium">Rows per page</p>
-          <Select
-            value={`${table.getState().pagination.pageSize}`}
-            onValueChange={(value) => {
-              table.setPageSize(Number(value))
-            }}
-          >
+          <Select value={`${table.getState().pagination.pageSize}`} onValueChange={(value) => table.setPageSize(Number(value))}>
             <SelectTrigger className="h-8 w-[70px]">
               <SelectValue placeholder={table.getState().pagination.pageSize} />
             </SelectTrigger>
             <SelectContent side="top">
               {[10, 20, 50, 100, 500].map((pageSize) => (
-                <SelectItem key={pageSize} value={`${pageSize}`}>
-                  {pageSize}
-                </SelectItem>
+                <SelectItem key={pageSize} value={`${pageSize}`}>{pageSize}</SelectItem>
               ))}
             </SelectContent>
           </Select>
         </div>
         <div className="flex w-[100px] items-center justify-center text-sm font-medium">
-          Page {table.getState().pagination.pageIndex + 1} of{' '}
-          {table.getPageCount() || 1}
+          Page {table.getState().pagination.pageIndex + 1} of {table.getPageCount() || 1}
         </div>
         <div className="flex items-center space-x-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => table.previousPage()}
-            disabled={!table.getCanPreviousPage()}
-          >
-            Previous
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => table.nextPage()}
-            disabled={!table.getCanNextPage()}
-          >
-            Next
-          </Button>
+          <Button variant="outline" size="sm" onClick={() => table.previousPage()} disabled={!table.getCanPreviousPage()}>Previous</Button>
+          <Button variant="outline" size="sm" onClick={() => table.nextPage()} disabled={!table.getCanNextPage()}>Next</Button>
         </div>
       </div>
     </div>
@@ -932,12 +613,7 @@ export function DataTablePagination<TData>({ table }: { table: ReactTable<TData>
 }
 
 export function columnIdOf<TData, TValue>(c: ColumnDef<TData, TValue>): string {
-  return (
-    c.id ||
-    (typeof (c as { accessorKey?: string }).accessorKey === 'string'
-      ? (c as { accessorKey: string }).accessorKey
-      : '')
-  )
+  return c.id || (typeof (c as { accessorKey?: string }).accessorKey === 'string' ? (c as { accessorKey: string }).accessorKey : '')
 }
 
 type UxEvent = Schema<'UxEventPayload'>
@@ -946,93 +622,42 @@ export function reportUxEvent(evt: UxEvent): void {
   if (typeof window === 'undefined') return
   try {
     const pathname = evt.pathname ?? window.location.pathname
-    const body = JSON.stringify({
-      event: evt.event,
-      pathname,
-      component_id: evt.component_id,
-      details: evt.details ?? {},
-    })
+    const body = JSON.stringify({ event: evt.event, pathname, component_id: evt.component_id, details: evt.details ?? {} })
     const url = `${getApiBase()}/api/ux-events`
-
     if (typeof navigator !== 'undefined' && 'sendBeacon' in navigator) {
       const blob = new Blob([body], { type: 'application/json' })
       if (navigator.sendBeacon(url, blob)) return
     }
-    void fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-      keepalive: true,
-    })
+    void fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true })
   } catch {
     // Swallow — telemetry never breaks the page.
   }
 }
 
 export interface DataTableProps<TData, TValue> extends DataTableBaseProps<TData, TValue> {
-  tableContainerClassName?: string
-  tableClassName?: string
-  headerRowClassName?: string
-  initialColumnOrder?: string[]
-  enableColumnReorder?: boolean
+  tableContainerClassName?: string; tableClassName?: string; headerRowClassName?: string
+  initialColumnOrder?: string[]; enableColumnReorder?: boolean
 }
 
 function DataTableImpl<TData, TValue>({
-  tableContainerClassName,
-  tableClassName,
-  headerRowClassName,
-  columns,
-  data,
-  searchKey,
-  isLoading,
-  showPagination = true,
-  sorting: controlledSorting,
-  onSortingChange,
-  initialSorting = [],
-  initialVisibility = {},
-  initialColumnOrder,
-  enableColumnReorder = true,
-  title,
-  compactToolbar = false,
-  extraToolbarContent,
-  renderToolbar,
-  hideToolbar = false,
-  columnVisibility: controlledVisibility,
-  onColumnVisibilityChange,
-  emptyMessage = "No results.",
-  emptyHint,
-  onClearFilter,
-  onRowClick,
-  getRowClassName,
-  tableCaption
+  tableContainerClassName, tableClassName, headerRowClassName, columns, data, searchKey, isLoading,
+  showPagination = true, sorting: controlledSorting, onSortingChange, initialSorting = [],
+  initialVisibility = {}, initialColumnOrder, enableColumnReorder = true, title, compactToolbar = false,
+  extraToolbarContent, renderToolbar, hideToolbar = false, columnVisibility: controlledVisibility,
+  onColumnVisibilityChange, emptyMessage = "No results.", emptyHint, onClearFilter, onRowClick,
+  getRowClassName, tableCaption,
 }: DataTableProps<TData, TValue>) {
   const {
-    table,
-    rows,
-    rowVirtualizer,
-    tableContainerRef,
-    columnVisibility,
-    columnSizing,
-    columnOrder,
-    setColumnOrder,
+    table, rows, rowVirtualizer, tableContainerRef, columnVisibility, columnSizing, columnOrder, setColumnOrder,
   } = useDataTableState({
-    columns,
-    data,
-    showPagination,
-    controlledSorting,
-    onSortingChange,
-    initialSorting,
-    controlledVisibility,
-    onColumnVisibilityChange,
-    initialVisibility,
-    initialColumnOrder,
-    enableColumnOrder: enableColumnReorder,
+    columns, data, showPagination, controlledSorting, onSortingChange, initialSorting,
+    controlledVisibility, onColumnVisibilityChange, initialVisibility, initialColumnOrder, enableColumnOrder: enableColumnReorder,
   })
 
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: { distance: 5 } }),
     useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 5 } }),
-    useSensor(KeyboardSensor)
+    useSensor(KeyboardSensor),
   )
 
   const handleDragEnd = (event: DragEndEvent) => {
@@ -1044,14 +669,8 @@ function DataTableImpl<TData, TValue>({
       setColumnOrder(arrayMove(columnOrder, oldIndex, newIndex))
       reportUxEvent({
         event: 'column_reordered',
-        component_id:
-          tableCaption ?? (typeof title === 'string' ? title : 'unnamed'),
-        details: {
-          column_id: String(active.id),
-          from_index: oldIndex,
-          to_index: newIndex,
-          column_count: columnOrder.length,
-        },
+        component_id: tableCaption ?? (typeof title === 'string' ? title : 'unnamed'),
+        details: { column_id: String(active.id), from_index: oldIndex, to_index: newIndex, column_count: columnOrder.length },
       })
     }
   }
@@ -1066,47 +685,26 @@ function DataTableImpl<TData, TValue>({
         tableContainerClassName || "max-h-[min(600px,calc(100dvh-200px))]",
       )}
     >
-      <Table
-        scrollFocusable={false}
-        className={tableClassName}
-        style={{ tableLayout: 'fixed', width: table.getTotalSize(), minWidth: '100%' }}
-      >
-        <caption className="sr-only">
-          {tableCaption || (typeof title === 'string' ? title : 'Data Table')}
-        </caption>
+      <Table scrollFocusable={false} className={tableClassName} style={{ tableLayout: 'fixed', width: table.getTotalSize(), minWidth: '100%' }}>
+        <caption className="sr-only">{tableCaption || (typeof title === 'string' ? title : 'Data Table')}</caption>
         <TableHeader>
           {table.getHeaderGroups().map((headerGroup) => (
             <TableRow key={headerGroup.id} className={headerRowClassName}>
               {enableColumnReorder ? (
-                <SortableContext
-                  items={columnOrder}
-                  strategy={horizontalListSortingStrategy}
-                >
-                  {headerGroup.headers.map((header) => (
-                    <DraggableTableHeader key={header.id} header={header} />
-                  ))}
+                <SortableContext items={columnOrder} strategy={horizontalListSortingStrategy}>
+                  {headerGroup.headers.map((header) => <DraggableTableHeader key={header.id} header={header} />)}
                 </SortableContext>
               ) : (
-                headerGroup.headers.map((header) => (
-                  <StaticTableHeader key={header.id} header={header} />
-                ))
+                headerGroup.headers.map((header) => <StaticTableHeader key={header.id} header={header} />)
               )}
             </TableRow>
           ))}
         </TableHeader>
         <DataTableBody
-          table={table}
-          rows={rows}
-          rowVirtualizer={rowVirtualizer}
-          columns={columns}
-          columnVisibility={columnVisibility}
-          columnSizing={columnSizing}
-          isLoading={isLoading}
-          onRowClick={onRowClick}
-          getRowClassName={getRowClassName}
-          emptyMessage={emptyMessage}
-          emptyHint={emptyHint}
-          onClearFilter={onClearFilter}
+          table={table} rows={rows} rowVirtualizer={rowVirtualizer} columns={columns}
+          columnVisibility={columnVisibility} columnSizing={columnSizing} isLoading={isLoading}
+          onRowClick={onRowClick} getRowClassName={getRowClassName} emptyMessage={emptyMessage}
+          emptyHint={emptyHint} onClearFilter={onClearFilter}
         />
       </Table>
     </div>
@@ -1114,87 +712,40 @@ function DataTableImpl<TData, TValue>({
 
   return (
     <div className="w-full">
-      {!hideToolbar && (renderToolbar ? (
-        renderToolbar(table)
-      ) : (
-        <DataTableToolbar
-          table={table}
-          title={title}
-          searchKey={searchKey}
-          compactToolbar={compactToolbar}
-          extraToolbarContent={extraToolbarContent}
-        />
+      {!hideToolbar && (renderToolbar ? renderToolbar(table) : (
+        <DataTableToolbar table={table} title={title} searchKey={searchKey} compactToolbar={compactToolbar} extraToolbarContent={extraToolbarContent} />
       ))}
-
       {enableColumnReorder ? (
-        <DndContext
-          id="data-table-dnd"
-          collisionDetection={closestCenter}
-          modifiers={[restrictToHorizontalAxis]}
-          onDragEnd={handleDragEnd}
-          sensors={sensors}
-        >
+        <DndContext id="data-table-dnd" collisionDetection={closestCenter} modifiers={[restrictToHorizontalAxis]} onDragEnd={handleDragEnd} sensors={sensors}>
           {tableContainer}
         </DndContext>
-      ) : (
-        tableContainer
-      )}
-
+      ) : tableContainer}
       {showPagination && <DataTablePagination table={table} />}
     </div>
   )
 }
 
 export const DataTable = React.memo(DataTableImpl) as typeof DataTableImpl
-
 export type DataTableReadonlyProps<TData, TValue> = DataTableBaseProps<TData, TValue>
-
 function DataTableReadonlyImpl<TData, TValue>(props: DataTableReadonlyProps<TData, TValue>) {
   return <DataTableImpl {...props} enableColumnReorder={false} />
 }
-
 export const DataTableReadonly = React.memo(DataTableReadonlyImpl) as typeof DataTableReadonlyImpl
 
 // ─── Shared Table Column Builders (folded from lib/table-utils.tsx) ──────────
 
 export const ingestedFilesColumns: ColumnDef<components['schemas']['IngestedFile']>[] = [
+  { accessorKey: 'file_name', id: 'file_name', meta: { label: 'File Name' }, header: 'File Name', cell: ({ row }) => <span className="font-mono text-xs">{row.original.file_name}</span> },
+  { accessorKey: 'ingested_at', id: 'ingested_at', meta: { label: 'Ingested At' }, header: 'Ingested At', cell: ({ row }) => <DateTimeCell iso={row.original.ingested_at} /> },
   {
-    accessorKey: 'file_name',
-    id: 'file_name',
-    meta: { label: 'File Name' },
-    header: 'File Name',
-    cell: ({ row }) => <span className="font-mono text-xs">{row.original.file_name}</span>,
+    accessorKey: 'row_count', id: 'row_count', meta: { label: 'Rows' }, header: 'Rows',
+    cell: ({ row }) => <span className="font-mono text-muted-foreground tabular-nums text-xs">{formatCount(row.original.row_count || 0)}</span>,
   },
   {
-    accessorKey: 'ingested_at',
-    id: 'ingested_at',
-    meta: { label: 'Ingested At' },
-    header: 'Ingested At',
-    cell: ({ row }) => <DateTimeCell iso={row.original.ingested_at} />,
-  },
-  {
-    accessorKey: 'row_count',
-    id: 'row_count',
-    meta: { label: 'Rows' },
-    header: 'Rows',
-    cell: ({ row }) => (
-      <span className="font-mono text-muted-foreground tabular-nums text-xs">
-        {formatCount(row.original.row_count || 0)}
-      </span>
-    ),
-  },
-  {
-    accessorKey: 'file_size_bytes',
-    id: 'file_size_bytes',
-    meta: { label: 'Size' },
-    header: 'Size',
+    accessorKey: 'file_size_bytes', id: 'file_size_bytes', meta: { label: 'Size' }, header: 'Size',
     cell: ({ row }) => {
       const bytes = row.original.file_size_bytes
-      return (
-        <span className="font-mono text-muted-foreground tabular-nums text-xs">
-          {bytes ? formatBytes(bytes) : '—'}
-        </span>
-      )
+      return <span className="font-mono text-muted-foreground tabular-nums text-xs">{bytes ? formatBytes(bytes) : '—'}</span>
     },
   },
 ]
@@ -1206,11 +757,7 @@ export const columnHeader = (label: string) =>
 
 /** The numeric columns a latency table reads off each row. */
 export interface LatencyRow {
-  requests?: number | null
-  avg?: number | null
-  p50?: number | null
-  p95?: number | null
-  p99?: number | null
+  requests?: number | null; avg?: number | null; p50?: number | null; p95?: number | null; p99?: number | null
 }
 
 export const textValue = (v: unknown): string => (typeof v === 'string' ? v : '')
@@ -1234,9 +781,7 @@ export const makeLatencyColumns = <TRow extends LatencyRow>(
       const val: unknown = info.row.original[filterField]
       const rawDisplay = info.getValue()
       const displayVal = typeof rawDisplay === 'string' || typeof rawDisplay === 'number' ? rawDisplay : null
-      if (val == null) {
-        return <span className="font-mono text-xs truncate block max-w-[300px]">{displayVal}</span>
-      }
+      if (val == null) return <span className="font-mono text-xs truncate block max-w-[300px]">{displayVal}</span>
       return (
         <FilterValueCell
           filters={[{ column: filterField, value: String(val) }]}
@@ -1245,7 +790,7 @@ export const makeLatencyColumns = <TRow extends LatencyRow>(
           containerClassName="max-w-[300px]"
         />
       )
-    }
+    },
   },
   { accessorKey: 'requests', header: columnHeader('Reqs'), cell: (info) => formatCountMaybe(numberValue(info.getValue())) ?? '0' },
   { accessorKey: 'avg', header: columnHeader('Avg (ms)'), cell: ms2Cell },

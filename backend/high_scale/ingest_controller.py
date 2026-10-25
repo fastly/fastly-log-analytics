@@ -1,37 +1,596 @@
-"""Fenced source-object controller for the high-scale ingestion boundary."""
+"""Fenced source-object controller, aggregate batch adapter, and service registry for high-scale."""
 
 from __future__ import annotations
 
 import inspect
 import logging
+import os
+import sys
 import tempfile
-from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from backend.high_scale.aggregate_batch_adapter import compute_dimension_counts
-from backend.high_scale.archive_models import ArchiveManifest, ArchiveSourceObject, ArchiveState
+from backend.high_scale._common import ArchiveManifestCatalog
+from backend.high_scale._common import bucket as _bucket
+from backend.high_scale.archive_models import (
+    ArchiveManifest,
+    ArchiveSourceObject,
+    ArchiveState,
+    ServingWatermark,
+)
 from backend.high_scale.archive_publication import ArchivePublication
 from backend.high_scale.archive_writer import write_batch_archive_checkpoint
-from backend.high_scale.cmcd import project_cmcd
 from backend.high_scale.decoder import DecodeResult, decode_source_object
-from backend.high_scale.network import build_network_projection_rows
-from backend.high_scale.origin import build_origin_projection_rows
-from backend.high_scale.performance_projection import build_performance_projection_rows
 from backend.high_scale.publication import (
+    BaseClickHouseBatchAdapter,
     ClickHousePublication,
     HighScaleBatch,
+    InsertReceipt,
     PublicationResult,
     PublicationStatus,
+    _batch_uuid,
     build_batch_id_from_manifest_id,
     row_matches_serving_domain,
 )
-from backend.high_scale.security import build_security_projection_rows
-from backend.high_scale.source_discovery import SourceObjectDescriptor
+from backend.high_scale.query_service import QueryClient
+
+if TYPE_CHECKING:
+    from backend.high_scale.source_discovery import SourceObjectDescriptor
 
 logger = logging.getLogger(__name__)
+
+
+# ── Registry Bootstrap (folded from registry_bootstrap.py) ────────────────────
+
+
+@dataclass(frozen=True)
+class HighScaleService:
+    service_id: str
+    client: QueryClient
+    cursor_secret: bytes
+    request_watermark: ServingWatermark | Callable[[], ServingWatermark]
+    rum_watermarks: Mapping[str, ServingWatermark | Callable[[], ServingWatermark]] = field(default_factory=dict)
+    cmcd_watermark: ServingWatermark | Callable[[], ServingWatermark] | None = None
+    # Cold-tier (beyond ClickHouse warm retention) raw-row queries scan the FOS
+    # archive directly and are opt-in: a service with neither configured simply
+    # cannot serve QueryTier.COLD_JOB, and the /queries endpoint reports that
+    # explicitly rather than silently falling back to an unbounded scan.
+    manifest_catalog: ArchiveManifestCatalog | None = None
+    archive: ArchivePublication | None = None
+
+    def watermark(self) -> ServingWatermark:
+        value = self.request_watermark() if callable(self.request_watermark) else self.request_watermark
+        value.validate()
+        return value
+
+    def watermark_for(self, domain: str) -> ServingWatermark:
+        if domain == "request":
+            return self.watermark()
+        cmcd_watermark = self.cmcd_watermark
+        if domain == "cmcd" and cmcd_watermark is not None:
+            cmcd_value = cmcd_watermark
+            watermark = cmcd_value() if callable(cmcd_value) else cmcd_value
+            watermark.validate()
+            return watermark
+        value = self.rum_watermarks.get(domain)
+        if value is None:
+            raise KeyError(domain)
+        watermark = value() if callable(value) else value
+        watermark.validate()
+        return watermark
+
+
+class HighScaleServiceRegistryProtocol(Protocol):
+    def resolve(self, service_id: str) -> HighScaleService | None: ...
+
+
+class HighScaleServiceRegistry:
+    """Small injectable registry; services opt in by explicit registration."""
+
+    def __init__(self, services: Mapping[str, HighScaleService] | None = None) -> None:
+        self._services = dict(services or {})
+
+    def register(self, service: HighScaleService) -> None:
+        if not service.service_id:
+            raise ValueError("high-scale service id is required")
+        if not service.cursor_secret:
+            raise ValueError("high-scale cursor secret is required")
+        self._services[service.service_id] = service
+
+    def resolve(self, service_id: str) -> HighScaleService | None:
+        service = self._services.get(service_id)
+        if service is None or service.service_id != service_id:
+            return None
+        return service
+
+
+_registry = HighScaleServiceRegistry()
+
+
+def get_high_scale_service_registry() -> HighScaleServiceRegistry:
+    """FastAPI dependency for explicit high-scale service bindings."""
+    return _registry
+
+
+class ServingClient(Protocol):
+    def execute(
+        self, sql: str, params: dict[str, Any] | None = None, *, settings: Mapping[str, str] | None = None
+    ) -> list[dict[str, Any]]: ...
+
+
+_WATERMARK_TABLES = {
+    "request": "request_facts",
+    "rum_vitals": "rum_vitals_facts",
+    "rum_errors": "rum_error_facts",
+    "cmcd": "cmcd_projection_facts",
+}
+
+
+def register_high_scale_services(
+    registry: HighScaleServiceRegistry,
+    *,
+    client: ServingClient,
+    service_ids: Iterable[str],
+    cursor_secret: bytes,
+    owner_epoch: int = 1,
+    manifest_catalog: ArchiveManifestCatalog | None = None,
+    archive_for: Callable[[str], ArchivePublication | None] | None = None,
+) -> None:
+    if not cursor_secret:
+        raise ValueError("high-scale cursor secret is required")
+    if owner_epoch < 0:
+        raise ValueError("high-scale owner epoch must be non-negative")
+
+    for service_id in service_ids:
+        if not service_id:
+            raise ValueError("high-scale service id is required")
+
+        def _watermark_for(domain: str, bound_service_id: str = service_id) -> Callable[[], ServingWatermark]:
+            return lambda: _watermark(client, bound_service_id, domain, owner_epoch=owner_epoch)
+
+        watermarks = {domain: _watermark_for(domain) for domain in _WATERMARK_TABLES}
+        # Cold-tier raw queries require BOTH a manifest catalog and an
+        # archive reader for this specific service; a service missing
+        # either gets neither, so the /queries endpoint reports it as
+        # explicitly unconfigured rather than half-wiring a capability that
+        # can never actually serve a cold-tier plan.
+        archive = archive_for(service_id) if archive_for is not None else None
+        registry.register(
+            HighScaleService(
+                service_id=service_id,
+                client=client,
+                cursor_secret=cursor_secret,
+                request_watermark=watermarks["request"],
+                rum_watermarks={
+                    "rum_vitals": watermarks["rum_vitals"],
+                    "rum_errors": watermarks["rum_errors"],
+                },
+                cmcd_watermark=watermarks["cmcd"],
+                manifest_catalog=manifest_catalog if archive is not None else None,
+                archive=archive,
+            )
+        )
+
+
+def register_high_scale_services_from_environment(
+    registry: HighScaleServiceRegistry,
+    *,
+    client: ServingClient | None,
+    control_factory: Callable[[], ArchiveManifestCatalog] | None = None,
+    archive_factory: Callable[[str], ArchivePublication | None] | None = None,
+) -> tuple[str, ...]:
+    enabled = os.getenv("HIGH_SCALE_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return ()
+    if client is None:
+        raise RuntimeError("high-scale mode requires a ClickHouse client")
+    service_ids = tuple(
+        service_id.strip() for service_id in os.getenv("HIGH_SCALE_SERVICE_IDS", "").split(",") if service_id.strip()
+    )
+    if not service_ids:
+        from backend import config as app_config
+
+        service_ids = tuple(
+            cfg["service_id"] for cfg in app_config.list_configs() if isinstance(cfg, dict) and cfg.get("service_id")
+        )
+    if not service_ids:
+        raise ValueError("HIGH_SCALE_SERVICE_IDS must contain at least one service id (none found in configs/)")
+    cursor_secret = os.getenv("HIGH_SCALE_CURSOR_SECRET", "").encode("utf-8")
+
+    # Cold-tier wiring is best-effort: the control plane is the same
+    # Postgres dependency the isolated worker already hard-requires when
+    # HIGH_SCALE_ENABLED=1 (see worker.py's build_worker_from_environment),
+    # so a failure here is as fatal as it already is for the worker. A
+    # per-service archive/FOS lookup failure is NOT fatal — it degrades
+    # that one service to cold-tier-unconfigured (a 404, never a crash of
+    # every other high-scale endpoint) via register_high_scale_services'
+    # archive_for contract.
+    manifest_catalog = (control_factory or _default_control_factory)()
+
+    def _archive_for(service_id: str) -> ArchivePublication | None:
+        try:
+            return (archive_factory or _default_archive_factory)(service_id)
+        except Exception:
+            logger.warning("high-scale cold-tier archive wiring failed for %s", service_id, exc_info=True)
+            return None
+
+    register_high_scale_services(
+        registry,
+        client=client,
+        service_ids=service_ids,
+        cursor_secret=cursor_secret,
+        owner_epoch=int(os.getenv("HIGH_SCALE_OWNER_EPOCH", "1")),
+        manifest_catalog=manifest_catalog,
+        archive_for=_archive_for,
+    )
+    return service_ids
+
+
+def _default_control_factory() -> ArchiveManifestCatalog:
+    from backend.high_scale.postgres_control import PostgresControlPlane
+
+    return PostgresControlPlane()
+
+
+def _default_archive_factory(service_id: str) -> ArchivePublication | None:
+    from backend.core.duckdb import _get_fos_client, get_source_for_service
+    from backend.high_scale.archive_publication import S3ObjectStore
+
+    source = get_source_for_service(service_id)
+    if source is None:
+        return None
+    bucket = source.get("bucket")
+    if not isinstance(bucket, str) or not bucket:
+        return None
+    fos_client = _get_fos_client(source)
+    archive_prefix = os.getenv("HIGH_SCALE_ARCHIVE_PREFIX", "high-scale/archive")
+    return ArchivePublication(S3ObjectStore(fos_client, bucket=bucket, prefix=archive_prefix))
+
+
+def _watermark(
+    client: ServingClient,
+    service_id: str,
+    domain: str,
+    *,
+    owner_epoch: int,
+) -> ServingWatermark:
+    from backend.high_scale._common import visible_publication_fence_sql
+
+    table = _WATERMARK_TABLES[domain]
+    fence_sql = visible_publication_fence_sql(domain)
+    event_id_column = "projection_key" if domain == "cmcd" else "event_id"
+    rows = client.execute(
+        f"SELECT min(event_timestamp) AS coverage_start, "
+        f"max(event_timestamp) AS coverage_end "
+        f"FROM {table} "
+        f"WHERE service_id={{service_id:String}} AND {fence_sql}",
+        {"service_id": service_id},
+    )
+    row = rows[0] if rows else {}
+    coverage_end = _datetime_or_none(row.get("coverage_end"))
+    last_visible_event_id: str | None = None
+    if coverage_end is not None:
+        latest_rows = client.execute(
+            f"SELECT toString({event_id_column}) AS last_visible_event_id "
+            f"FROM {table} "
+            "WHERE service_id={service_id:String} "
+            f"AND {fence_sql} "
+            "AND event_timestamp={coverage_end:DateTime64(3)} "
+            f"ORDER BY {event_id_column} DESC LIMIT 1",
+            {"service_id": service_id, "coverage_end": coverage_end},
+        )
+        latest_row = latest_rows[0] if latest_rows else {}
+        last_visible_event_id = _string_or_none(latest_row.get("last_visible_event_id"))
+    return ServingWatermark(
+        service_id=service_id,
+        domain=domain,
+        owner_epoch=owner_epoch,
+        coverage_start=_datetime_or_none(row.get("coverage_start")),
+        coverage_end=coverage_end,
+        last_accepted_cursor=None,
+        last_archived_event_id=None,
+        last_visible_event_id=last_visible_event_id,
+        exact=True,
+    )
+
+
+def _datetime_or_none(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    if isinstance(value, str):
+        normalized = value.replace(" ", "T", 1)
+        if not normalized.endswith(("Z", "+00:00")):
+            normalized += "+00:00"
+        try:
+            return datetime.fromisoformat(normalized).astimezone(UTC)
+        except ValueError:
+            return None
+    return None
+
+
+def _string_or_none(value: Any) -> str | None:
+    return None if value is None else str(value)
+
+
+# ── Aggregate Batch Adapter (folded from aggregate_batch_adapter.py) ──────────
+
+DIMENSIONS_BY_DOMAIN: dict[str, tuple[str, ...]] = {
+    "request": (
+        "url",
+        "country",
+        "client_ip",
+        "asn",
+        "host",
+        "method",
+        "status",
+        "cache",
+        "proto",
+        "ua",
+        "referer",
+        "cookie_session",
+        "resp_header_content_encoding",
+        "ttl",
+        "age",
+        "hits",
+        "digest",
+        "city",
+        "region",
+        "metro",
+        "transport",
+        "c_speed",
+        "c_type",
+        "pop",
+        "backend",
+        "edge",
+        "server_region",
+        "tls",
+        "is_ipv6",
+        "conn_requests",
+        "waf",
+        "waf_resp",
+        "waf_ms",
+        "p_type",
+        "p_desc",
+        "ja3",
+        "ja4",
+        "tls_ciphers_sha",
+        "io_input_format",
+        "io_output_format",
+    ),
+    "rum_vitals": ("metric_name",),
+    "rum_errors": ("error_message",),
+    "cmcd": ("cmcd_session",),
+}
+_SOURCE_FIELD_OVERRIDES: dict[str, str] = {
+    "client_ip": "ip",
+    "cmcd_session": "sid",
+}
+
+
+def compute_dimension_counts(
+    domain: str,
+    rows: tuple[Mapping[str, Any], ...],
+) -> tuple[dict[str, Any], ...]:
+    """Count occurrences of each configured dimension's value, per minute bucket."""
+    if domain not in DIMENSIONS_BY_DOMAIN:
+        raise ValueError(f"unsupported aggregate write domain: {domain}")
+    dimensions = DIMENSIONS_BY_DOMAIN[domain]
+    counts: Counter[tuple[str, str, datetime]] = Counter()
+    for row in rows:
+        bucket = _bucket(row.get("timestamp"))
+        if bucket is None:
+            continue
+        for dimension in dimensions:
+            field_name = _SOURCE_FIELD_OVERRIDES.get(dimension, dimension)
+            value = str(row.get(field_name, ""))
+            counts[(dimension, value, bucket)] += 1
+    return tuple(
+        {"dimension": dimension, "value": value, "bucket_start": bucket.isoformat(), "count": count}
+        for (dimension, value, bucket), count in counts.items()
+    )
+
+
+_AGGREGATE_TABLES: dict[str, tuple[str, str]] = {
+    "request_aggregate": ("request_aggregates", "request_count"),
+    "rum_vitals_aggregate": ("rum_vitals_aggregates", "event_count"),
+    "rum_errors_aggregate": ("rum_error_aggregates", "error_count"),
+    "cmcd_aggregate": ("cmcd_aggregates", "event_count"),
+}
+_ORIGIN_COLUMNS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "origin_summary": (
+        "origin_minute_summary",
+        (
+            "requests",
+            "misses",
+            "passes",
+            "origin_5xx",
+            "status_count",
+            "origin_bytes",
+            "latency_count",
+            "ttlb_count",
+            "overhead_count",
+            "origin_bytes_count",
+            "latency_p50_us",
+            "latency_p75_us",
+            "latency_p95_us",
+            "latency_p99_us",
+            "ttlb_p50_us",
+            "ttlb_p95_us",
+            "cdn_overhead_p50_us",
+            "origin_bytes_p50",
+            "latency_sk_v",
+            "latency_sk_w",
+            "ttlb_sk_v",
+            "ttlb_sk_w",
+            "overhead_sk_v",
+            "overhead_sk_w",
+            "origin_bytes_sk_v",
+            "origin_bytes_sk_w",
+        ),
+    ),
+    "origin_dimensions": (
+        "origin_minute_dimensions",
+        (
+            "dimension",
+            "value",
+            "requests",
+            "origin_5xx",
+            "origin_bytes",
+            "latency_count",
+            "latency_p50_us",
+            "latency_p95_us",
+            "latency_p99_us",
+            "latency_sk_v",
+            "latency_sk_w",
+        ),
+    ),
+    "performance_dimensions": (
+        "performance_minute_dimensions",
+        (
+            "dimension",
+            "value",
+            "requests",
+            "latency_count",
+            "latency_sum_ms",
+            "latency_p50_ms",
+            "latency_p95_ms",
+            "latency_p99_ms",
+        ),
+    ),
+    "performance_summary": (
+        "performance_minute_summary",
+        (
+            "component_count",
+            "edge_processing_sum_ms",
+            "origin_wait_sum_ms",
+            "origin_download_sum_ms",
+            "client_download_sum_ms",
+        ),
+    ),
+    "performance_scatter": (
+        "performance_scatter_samples",
+        ("sample_key", "origin_ms", "edge_ms", "cache"),
+    ),
+    "security_dimensions": (
+        "security_minute_dimensions",
+        (
+            "dimension",
+            "value",
+            "requests",
+            "wellknown_bot_name",
+            "bot_category",
+            "verified_count",
+            "impersonator_count",
+            "unverified_count",
+        ),
+    ),
+    "network_dimensions": (
+        "network_minute_dimensions",
+        (
+            "dimension",
+            "value",
+            "c_speed",
+            "requests",
+            "errors",
+            "tcp_rtt_count",
+            "tcp_rtt_sum",
+            "tcp_rtt_p50_us",
+            "tcp_rtt_p95_us",
+            "tcp_rtt_p99_us",
+            "ploss_sum",
+            "ploss_count",
+            "ttfb_p50_us",
+            "ttfb_p95_us",
+        ),
+    ),
+}
+
+
+def _bucket_start(value: Any) -> datetime:
+    """Batch rows carry bucket_start as an ISO string (HighScaleBatch.digest
+    requires JSON-serializable row values) — parse back for the insert."""
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value))
+
+
+class AggregateBatchAdapter(BaseClickHouseBatchAdapter):
+    def insert(self, batch: HighScaleBatch) -> InsertReceipt:
+        if batch.domain not in _AGGREGATE_TABLES and batch.domain not in _ORIGIN_COLUMNS:
+            raise ValueError(f"unsupported aggregate domain: {batch.domain}")
+        if not batch.rows:
+            raise ValueError("aggregate batch must contain at least one row")
+        batch_uuid = _batch_uuid(batch)
+        with self._batch_lock(batch_uuid):
+            return self._insert_locked(batch, batch_uuid)
+
+    def _insert_locked(self, batch: HighScaleBatch, batch_uuid: str) -> InsertReceipt:
+        if batch.domain in _ORIGIN_COLUMNS:
+            table, metric_columns = _ORIGIN_COLUMNS[batch.domain]
+            columns = ["service_id", "bucket_start", *metric_columns, "batch_id", "publication_state"]
+            mapped_rows = [
+                (
+                    batch.service_id,
+                    _bucket_start(row["bucket_start"]),
+                    *(row[column] for column in metric_columns),
+                    batch_uuid,
+                    "visible",
+                )
+                for row in batch.rows
+            ]
+        else:
+            table, metric_column = _AGGREGATE_TABLES[batch.domain]
+            columns = [
+                "service_id",
+                "bucket_start",
+                "dimension",
+                "value",
+                metric_column,
+                "batch_id",
+                "publication_state",
+            ]
+            mapped_rows = [
+                (
+                    batch.service_id,
+                    _bucket_start(row["bucket_start"]),
+                    str(row["dimension"]),
+                    str(row["value"]),
+                    int(row["count"]),
+                    batch_uuid,
+                    "visible",
+                )
+                for row in batch.rows
+            ]
+
+        return self._publish_table_rows(
+            table=table,
+            columns=columns,
+            mapped_rows=mapped_rows,
+            batch=batch,
+            batch_uuid=batch_uuid,
+        )
+
+
+# Register sys.modules aliases BEFORE importing projection builders that depend on HighScaleService
+_self_mod = sys.modules[__name__]
+sys.modules["backend.high_scale.registry_bootstrap"] = _self_mod
+sys.modules["backend.high_scale.aggregate_batch_adapter"] = _self_mod
+_hs_pkg = sys.modules.get("backend.high_scale")
+if _hs_pkg is not None:
+    setattr(_hs_pkg, "registry_bootstrap", _self_mod)
+    setattr(_hs_pkg, "aggregate_batch_adapter", _self_mod)
+
+from backend.high_scale.cmcd import project_cmcd  # noqa: E402
+from backend.high_scale.network import build_network_projection_rows  # noqa: E402
+from backend.high_scale.origin import build_origin_projection_rows  # noqa: E402
+from backend.high_scale.performance_projection import build_performance_projection_rows  # noqa: E402
+from backend.high_scale.security import build_security_projection_rows  # noqa: E402
+
+# ── Ingest Controller ─────────────────────────────────────────────────────────
 
 HIGH_SCALE_PAGE_MAX_BYTES = 64 * 1024 * 1024  # 64 MB in-flight byte guard
 HIGH_SCALE_MAX_DEAD_LETTER_RATIO = 0.05  # 5% dead-letter limit
@@ -275,10 +834,6 @@ class HighScaleIngestController:
             all_events.extend(decoded.events)
             sibling = _RUM_SIBLING_DOMAIN.get(domain)
             if sibling is not None:
-                # Both RUM domains list the shared raw/rum/ prefix and the
-                # ledger lets only the first discoverer own an object, so the
-                # sibling domain's rows must be published from this claim or
-                # they are lost when the raw object is deleted.
                 sibling_decoded = decode_source_object(
                     replace(archive_source, domain=sibling),
                     payload,
@@ -486,13 +1041,7 @@ class HighScaleIngestController:
         owner_epoch: int,
         events: Sequence[dict[str, Any]],
     ) -> None:
-        """Best-effort CMCD projection of request events carrying CMCD fields.
-
-        Layered on the facts path like the aggregates: a failure here must
-        never fail, retry, or duplicate the request ingest. The batch id is
-        derived from the request manifest/object, so a replay is idempotent,
-        and the archive remains the recovery source for any projection gap.
-        """
+        """Best-effort CMCD projection of request events carrying CMCD fields."""
         try:
             rows: list[dict[str, Any]] = []
             skipped = 0
@@ -606,3 +1155,6 @@ def _enrich_high_scale_ngwaf_bots(events: tuple[dict[str, Any], ...]) -> None:
                     e["ngwaf_wellknown_bot"] = bot["wk"]
     except Exception:
         logger.warning("high-scale NGWAF bot enrichment failed", exc_info=True)
+
+
+from backend.high_scale.source_discovery import SourceObjectDescriptor  # noqa: E402, F401

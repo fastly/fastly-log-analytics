@@ -2260,13 +2260,38 @@ def _p95_latency_item(
     )
 
 
+def _traffic_share_rates(w_cnt: Any, w_total: Any, b_cnt: Any, b_total: Any) -> tuple[float, float]:
+    w_rate = float(w_cnt * 100.0 / w_total) if w_total else 0.0
+    b_rate = float(b_cnt * 100.0 / b_total) if b_total else 0.0
+    return w_rate, b_rate
+
+
+def _error_rate_spike_item(
+    label: str,
+    w_rate: Any,
+    b_rate: Any,
+    w_errors: Any,
+    w_total: Any,
+    unit: str,
+    filters: dict[str, Any],
+) -> dict[str, Any]:
+    return _item(
+        label,
+        float(w_rate or 0) * 100,
+        float(b_rate or 0) * 100,
+        unit,
+        {"requests": w_total, "errors": w_errors, "filters": filters},
+        "critical" if (w_rate or 0) >= 0.5 else "warning",
+    )
+
+
 def _monoculture_processor(row: tuple, filter_key: str) -> dict:
     val, w_cnt, b_cnt, b_total, w_total = row
-    w_rate = float(w_cnt * 100.0 / w_total) if w_total else 0.0
+    w_rate, b_rate = _traffic_share_rates(w_cnt, w_total, b_cnt, b_total)
     return _item(
         val or "(empty)",
         w_rate,
-        float(b_cnt * 100.0 / b_total) if b_total else 0.0,
+        b_rate,
         "% of traffic",
         {"requests": w_cnt, "filters": {filter_key: val}},
         "critical" if w_rate >= 50 else "warning",
@@ -2312,14 +2337,7 @@ def _ip_max_vs_p95_processor(
 def error_spikes_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     """Process a row from the error_spikes query."""
     # row schema: [url, w_rate, b_rate, w_errors, w_total, b_total]
-    return _item(
-        row[0] or "(empty)",
-        float(row[1] or 0) * 100,
-        float(row[2] or 0) * 100,
-        "% 5xx",
-        {"requests": row[4], "errors": row[3], "filters": {"url": row[0]}},
-        "critical" if (row[1] or 0) >= 0.5 else "warning",
-    )
+    return _error_rate_spike_item(row[0] or "(empty)", row[1], row[2], row[3], row[4], "% 5xx", {"url": row[0]})
 
 
 _reg(
@@ -2415,13 +2433,8 @@ _reg(
 
 def city_error_spikes_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [label, city, region, country, w_rate, b_rate, w_errors, w_total, b_total]
-    return _item(
-        format_city_label(row[1], row[3], row[2]),
-        float(row[4] or 0) * 100,
-        float(row[5] or 0) * 100,
-        "% error",
-        {"requests": row[7], "errors": row[6], "filters": _city_filters(row)},
-        "critical" if (row[4] or 0) >= 0.5 else "warning",
+    return _error_rate_spike_item(
+        format_city_label(row[1], row[3], row[2]), row[4], row[5], row[6], row[7], "% error", _city_filters(row)
     )
 
 
@@ -2587,11 +2600,11 @@ _reg(
 def asn_concentration_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [asn, w_cnt, b_cnt, b_total, w_total]
     asn, w_cnt, b_cnt, b_total, w_total = row
-    w_rate = float(w_cnt * 100.0 / w_total) if w_total else 0.0
+    w_rate, b_rate = _traffic_share_rates(w_cnt, w_total, b_cnt, b_total)
     return _item(
         _fmt_asn_label(asn, context),
         w_rate,
-        float(b_cnt * 100.0 / b_total) if b_total else 0.0,
+        b_rate,
         "% of traffic",
         {"requests": w_cnt, "asn": asn, "filters": {"asn": asn}},
         "critical" if w_rate >= 50 else "warning",
@@ -3332,8 +3345,7 @@ _reg(
 def method_drift_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [method, w_cnt, b_cnt, w_total, b_total]
     method, w_cnt, b_cnt, w_total, b_total = row
-    w_rate = float(w_cnt * 100.0 / w_total) if w_total else 0.0
-    b_rate = float(b_cnt * 100.0 / b_total) if b_total else 0.0
+    w_rate, b_rate = _traffic_share_rates(w_cnt, w_total, b_cnt, b_total)
     return _item(
         method or "(unknown)",
         w_rate,
@@ -3445,8 +3457,7 @@ _reg(
 def connection_type_mix_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [c_type, c_speed, w_cnt, b_cnt, w_total, b_total]
     c_type, c_speed, w_cnt, b_cnt, w_total, b_total = row
-    w_rate = float(w_cnt * 100.0 / w_total) if w_total else 0.0
-    b_rate = float(b_cnt * 100.0 / b_total) if b_total else 0.0
+    w_rate, b_rate = _traffic_share_rates(w_cnt, w_total, b_cnt, b_total)
     return _item(
         f"{c_type or '?'} / {c_speed or '?'}",
         w_rate,

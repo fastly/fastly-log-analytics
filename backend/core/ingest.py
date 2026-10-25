@@ -15,6 +15,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import backend.core as _core_pkg
 from backend.core import field_registry as fc
@@ -169,20 +170,39 @@ def _record_raw_delete_failure(service_id: str, object_key: str) -> None:
 
 
 def _capture_corrupt_container(
-    service_id: str, source_type: str, object_key: str, local_file: str, error: BaseException
+    service_id: str,
+    source_type: str,
+    object_key: str,
+    local_file: str,
+    error: BaseException,
+    *,
+    full_outcome: bool = True,
 ) -> dict[str, int]:
     from backend.core.quarantine import capture_evidence
 
-    with open(local_file, "rb") as raw:
-        payload = raw.read()
-    result = capture_evidence(
-        service_id, source_type, object_key, payload,
-        line_ordinal=None, byte_offset=None, error_category="corrupt_container", error_text=str(error)[:2_000],
-    )  # fmt: skip
+    try:
+        with open(local_file, "rb") as raw:
+            payload = raw.read()
+        result = capture_evidence(
+            service_id, source_type, object_key, payload,
+            line_ordinal=None, byte_offset=None, error_category="corrupt_container", error_text=str(error)[:2_000],
+        )  # fmt: skip
+    except OSError:
+        result = {"cap_evictions": 0, "quarantine_capture_failures": 1}
+    cap_evictions = int(result.get("cap_evictions", 0))
+    capture_failures = int(result.get("quarantine_capture_failures", 0))
+    if not full_outcome:
+        return {
+            "valid_records": 0,
+            "malformed_records": 0,
+            "corrupt_containers": 1,
+            "cap_evictions": cap_evictions,
+            "quarantine_capture_failures": capture_failures,
+        }
     counters = _failed_object_outcome()
     counters["corrupt_containers"] = 1
-    counters["cap_evictions"] = int(result.get("cap_evictions", 0))
-    counters["quarantine_capture_failures"] = int(result.get("quarantine_capture_failures", 0))
+    counters["cap_evictions"] = cap_evictions
+    counters["quarantine_capture_failures"] = capture_failures
     return counters
 
 
@@ -301,26 +321,11 @@ def _build_column_select_exprs(
 
 
 _FASTLY_FNAME_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}[-:]\d{2}[-:]\d{2})")
+_EMPTY_VALUE_RE = re.compile(r":(?=[,}])")
 
 
 def _parse_fastly_filename_dt(fname: str) -> datetime | None:
-    """Parse the leading ``YYYY-MM-DDTHH-MM-SS`` of a Fastly raw log filename.
-
-    Returns a UTC-aware datetime, or None if the filename doesn't match
-    (e.g. an unrelated key that ends in ``.gz``). Used by the ingest
-    discovery loop for both per-file range filtering and end-of-page
-    early-stop.
-
-    Example: ``2026-05-04T18-30-00.svc.gz`` → 2026-05-04 18:30:00+00:00
-
-    Historical note: the previous inline implementation built the ISO
-    string with ``.replace("-", ":", 2)`` which replaced dashes in the
-    DATE half (``2026:05:04T18-30-00``), not the time half. The result
-    failed ``fromisoformat`` and was silently swallowed by an outer
-    ``try/except Exception``. The range-filter code path that depended
-    on this never actually filtered. We split on ``T`` so only the time
-    half's dashes become colons.
-    """
+    """Parse the leading ``YYYY-MM-DDTHH-MM-SS`` of a Fastly raw log filename into a UTC datetime."""
     m = _FASTLY_FNAME_TS_RE.match(fname)
     if not m:
         return None
@@ -737,6 +742,14 @@ def list_fos_files(
             scan_batches.append(kwargs)
 
         seen_keys: set[str] = set()
+        exclude_prefix = (
+            (f"{prefix_path}/{exclude_prefix_subpath}" if prefix_path else exclude_prefix_subpath)
+            if exclude_prefix_subpath
+            else None
+        )
+        et_bound = (et_dt + timedelta(hours=1)) if et_dt else None
+        st_bound = (st_dt - timedelta(hours=1)) if st_dt else None
+        s3_bucket_prefix = f"s3://{src['bucket']}/"
 
         def _process_contents(contents: list[dict[str, Any]]):
             nonlocal total_listed, skipped_already
@@ -745,29 +758,21 @@ def list_fos_files(
                 if key in seen_keys:
                     continue
                 seen_keys.add(key)
-                if not key.endswith(".gz"):
+                if not key.endswith(".gz") or (exclude_prefix and key.startswith(exclude_prefix)):
                     continue
-
-                if exclude_prefix_subpath:
-                    exclude_prefix = (
-                        f"{prefix_path}/{exclude_prefix_subpath}" if prefix_path else exclude_prefix_subpath
-                    )
-                    if key.startswith(exclude_prefix):
-                        continue
 
                 total_listed += 1
                 if total_listed % 10000 == 0:
                     yield {"type": "status", "message": f"{elapsed_fn()} Discovered {total_listed:,} new files..."}
 
-                fname = key.split("/")[-1]
-                file_dt = _parse_fastly_filename_dt(fname)
-                if file_dt is not None:
-                    if et_dt and file_dt > (et_dt + timedelta(hours=1)):
-                        continue
-                    if st_dt and file_dt < (st_dt - timedelta(hours=1)):
+                if et_bound is not None or st_bound is not None:
+                    file_dt = _parse_fastly_filename_dt(key.rsplit("/", 1)[-1])
+                    if file_dt is not None and (
+                        (et_bound is not None and file_dt > et_bound) or (st_bound is not None and file_dt < st_bound)
+                    ):
                         continue
 
-                full_path = f"s3://{src['bucket']}/{key}"
+                full_path = f"{s3_bucket_prefix}{key}"
                 if full_path not in already:
                     new_files.append(full_path)
                     file_sizes[full_path] = obj["Size"]
@@ -1241,7 +1246,6 @@ def ingest(
                                 )
                                 bad_rows = _scan_invalid_gzip_lines(corrupt_read_paths)
 
-                            _EMPTY_VALUE_RE = re.compile(r":(?=[,}])")
                             repaired_by_fname: dict[str, list] = {}
                             truly_corrupt: list[tuple[str, str, str]] = []
                             for fname, raw_line in bad_rows:
@@ -2056,6 +2060,81 @@ def _finalize_batch_convert(
     return summary
 
 
+def _run_batch_convert_common(
+    service_id: str,
+    object_keys: list[str],
+    worker_id: str,
+    *,
+    cleanup_label: str,
+    log_label: str = "",
+    process_batch_fn: Any,
+) -> dict[str, int]:
+    """Shared claim -> download -> process -> finalize scaffolding for request and RUM batch conversion."""
+    from backend import config as svcconfig
+    from backend.core.duckdb import get_memory_connection
+    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_write_admission
+
+    summary, con_meta, src, claimed_generations, claimed_keys = _claim_and_resolve_batch_source(
+        service_id, object_keys, worker_id
+    )
+    if not claimed_keys or src is None:
+        return summary
+
+    bucket = src.get("bucket", "")
+    active: list[str] = list(claimed_keys)
+    outcomes: dict[str, dict[str, int]] = {}
+    batch_outcomes: dict[str, dict[str, int]] = {}
+    duckdb_con = None
+    admission_cm = ducklake_write_admission(service_id)
+    admission_entered = False
+
+    def _enter_write_admission() -> None:
+        nonlocal admission_entered
+        admission_cm.__enter__()
+        admission_entered = True
+        if not _ducklake_attach(duckdb_con, src, read_only=False):
+            raise RuntimeError("DuckLake read-write attach failed")
+
+    try:
+        fos = boto3_client_hot() if svcconfig.HOT_S3_ENDPOINT else _get_fos_client(src)
+        duckdb_con = get_memory_connection(src)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = _download_and_classify_batch_files(
+                fos,
+                con_meta,
+                service_id,
+                bucket,
+                claimed_keys,
+                claimed_generations,
+                tmpdir,
+                active,
+                summary,
+                batch_outcomes,
+                log_label=log_label,
+            )
+            if not files:
+                _record_ledger_batch_outcomes(service_id, batch_outcomes)
+                return summary
+
+            process_batch_fn(
+                src=src,
+                fos=fos,
+                duckdb_con=duckdb_con,
+                files=files,
+                outcomes=outcomes,
+                enter_write_admission=_enter_write_admission,
+            )
+    except Exception as e:
+        return _handle_batch_convert_exception(
+            con_meta, service_id, active, claimed_generations, batch_outcomes, summary, e
+        )
+    finally:
+        _cleanup_batch_resources(admission_cm, admission_entered, duckdb_con, service_id, cleanup_label)
+
+    return _finalize_batch_convert(con_meta, service_id, active, claimed_generations, outcomes, batch_outcomes, summary)
+
+
 def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: str) -> dict:
     """Batched sibling of ``convert_object``: claim N ledger rows, download
     them all, and land every row in ONE DuckLake transaction — one catalog
@@ -2076,177 +2155,132 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
     Returns a summary dict of per-outcome counts.
     """
     from backend import config as svcconfig
-    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name, ducklake_write_admission
+    from backend.core.iceberg._ducklake import ducklake_table_name
 
-    summary, con_meta, src, claimed_generations, claimed_keys = _claim_and_resolve_batch_source(
-        service_id, object_keys, worker_id
-    )
-    if not claimed_keys or src is None:
-        return summary
-
-    bucket = src.get("bucket", "")
-    # Keys this batch still owns. A key removed here has already been given
-    # its own terminal ledger status, so the batch-failure path below must
-    # not touch it again.
-    active: list[str] = list(claimed_keys)
-    outcomes: dict[str, dict[str, int]] = {}
-    batch_outcomes: dict[str, dict[str, int]] = {}
-    duckdb_con = None
-    admission_cm = ducklake_write_admission(service_id)
-    admission_entered = False
-    try:
-        fos = boto3_client_hot() if svcconfig.HOT_S3_ENDPOINT else _get_fos_client(src)
-        from backend.core.duckdb import get_memory_connection
-
-        duckdb_con = get_memory_connection(src)
+    def _process_request_batch(*, src, fos, duckdb_con, files, outcomes, enter_write_admission) -> None:
         table = ducklake_table_name(src)
+        # Acquire the per-service write lock only now — for the DuckLake
+        # attach + INSERT below, never across the FOS download above
+        # (which touches no catalog state). Holding it across network I/O
+        # made batches exceed the admission timeout and starve concurrent
+        # converts (test_convert_batch_downloads_outside_admission_lock).
+        enter_write_admission()
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            files = _download_and_classify_batch_files(
-                fos,
-                con_meta,
-                service_id,
-                bucket,
-                claimed_keys,
-                claimed_generations,
-                tmpdir,
-                active,
-                summary,
-                batch_outcomes,
-            )
-            if not files:
-                _record_ledger_batch_outcomes(service_id, batch_outcomes)
-                return summary
+        log_fields_config = (svcconfig.load_config(service_id) or {}).get("log_fields")
+        columns_sql = get_ingest_columns_sql(log_fields_config)
+        local_files = [lf for lf, _s3, _k in files]
+        file_list_sql = "[" + ", ".join(f"'{escape_sql_literal(lf)}'" for lf in local_files) + "]"
+        # filename=true is the linchpin: it gives per-ROW source
+        # attribution from a single statement over the whole file list,
+        # which is what makes one transaction for N files possible.
+        read_expr = _read_json_auto_sql(file_list_sql, columns_sql, filename=True)
 
-            # Acquire the per-service write lock only now — for the DuckLake
-            # attach + INSERT below, never across the FOS download above
-            # (which touches no catalog state). Holding it across network I/O
-            # made batches exceed the admission timeout and starve concurrent
-            # converts (test_convert_batch_downloads_outside_admission_lock).
-            admission_cm.__enter__()
-            admission_entered = True
-            if not _ducklake_attach(duckdb_con, src, read_only=False):
-                raise RuntimeError("DuckLake read-write attach failed")
-
-            log_fields_config = (svcconfig.load_config(service_id) or {}).get("log_fields")
-            columns_sql = get_ingest_columns_sql(log_fields_config)
-            local_files = [lf for lf, _s3, _k in files]
-            file_list_sql = "[" + ", ".join(f"'{escape_sql_literal(lf)}'" for lf in local_files) + "]"
-            # filename=true is the linchpin: it gives per-ROW source
-            # attribution from a single statement over the whole file list,
-            # which is what makes one transaction for N files possible.
-            read_expr = _read_json_auto_sql(file_list_sql, columns_sql, filename=True)
-
-            # TEMP tables are per-connection so this cannot collide across
-            # workers, but a reused connection could still carry a stale one.
-            duckdb_con.execute("DROP TABLE IF EXISTS temp.srcmap")
-            duckdb_con.execute("CREATE TEMP TABLE srcmap(local VARCHAR, s3 VARCHAR)")
-            duckdb_con.execute(
-                "INSERT INTO temp.srcmap VALUES "
-                + ", ".join(f"('{escape_sql_literal(lf)}', '{escape_sql_literal(s3)}')" for lf, s3, _k in files)
-            )
-
-            # Per-file valid/corrupt counts, computed BEFORE the transaction
-            # so the same numbers drive both the ingested_files bookkeeping
-            # (which must be per file, not the batch total, or log-line
-            # accounting reconciliation goes wrong) and the per-file
-            # quarantine pass. Reading the same immutable local files twice
-            # yields the same answer.
-            stats = duckdb_con.execute(
-                "SELECT filename, count(*) FILTER (timestamp IS NOT NULL), count(*) FILTER (timestamp IS NULL) "
-                f"FROM {read_expr} GROUP BY filename"
-            ).fetchall()
-            valid_by_local = {r[0]: r[1] for r in stats}
-            corrupt_by_local = {r[0]: r[2] for r in stats}
-            unmapped = set(valid_by_local) - set(local_files)
-            if unmapped:
-                # DuckDB attributed rows to a path absent from srcmap, so
-                # the JOIN below would silently drop them while their ledger
-                # rows went 'committed'. Fail the batch instead of losing
-                # rows without a trace.
-                raise RuntimeError(f"read_json_auto returned unmapped filename(s): {sorted(unmapped)[:3]}")
-
-            # WHERE timestamp IS NOT NULL: ignore_errors=true does NOT drop a
-            # malformed line, it inserts a row with every field NULL, and
-            # that garbage would land straight in the queryable lake table.
-            clean_batch_expr = (
-                f"(SELECT {', '.join(_build_column_select_exprs(src, log_fields_config))}, filename "
-                f"FROM {read_expr} WHERE timestamp IS NOT NULL)"
-            )
-            select_sql = (
-                "SELECT r.* EXCLUDE (filename), m.s3 AS _source_file "
-                f"FROM {clean_batch_expr} r JOIN temp.srcmap m ON m.local = r.filename"
-            )
-
-            table_exists = _ducklake_table_exists(duckdb_con, table)
-
-            needs_insert = True
-            if not table_exists:
-                try:
-                    duckdb_con.execute(f"CREATE TABLE lake.{table} AS {select_sql}")
-                    needs_insert = False  # created + inserted in one step
-                except Exception as e:
-                    if "already exists" not in str(e):
-                        raise
-                    # Lost a create race — fall through to the insert path.
-
-            if needs_insert:
-                # Widen the table for any new (custom-field) columns first,
-                # over the UNION of columns across the WHOLE batch so a
-                # custom field present in only one file still widens.
-                try:
-                    existing_cols = {r[0] for r in duckdb_con.execute(f"DESCRIBE lake.{table}").fetchall()}
-                    for p_col, p_type, *_ in duckdb_con.execute(
-                        f"DESCRIBE SELECT * FROM {read_expr} LIMIT 0"
-                    ).fetchall():
-                        if p_col == "filename" or p_col in existing_cols:
-                            continue  # filename is synthetic — never a lake column
-                        safe_col = p_col.replace('"', '""')
-                        duckdb_con.execute(f'ALTER TABLE lake.{table} ADD COLUMN "{safe_col}" {p_type}')
-                except Exception as e:
-                    logger.warning("[ledger] %s: batch schema sync failed (%d file(s)): %s", service_id, len(files), e)
-
-                _ducklake_replace_source_rows(
-                    duckdb_con, table, "SELECT s3 FROM temp.srcmap", select_sql, "convert_batch_objects"
-                )
-
-            file_sizes_by_local = {local_file: os.path.getsize(local_file) for local_file, _s3_path, _k in files}
-            for local_file, _s3_path, object_key in files:
-                outcome = _new_object_outcome()
-                outcome["valid_records"] = int(valid_by_local.get(local_file, 0))
-                try:
-                    if corrupt_by_local.get(local_file):
-                        single_read_expr = _read_json_auto_sql(f"'{escape_sql_literal(local_file)}'", columns_sql)
-                        outcome.update(
-                            _quarantine_convert_corrupt_lines(
-                                duckdb_con, fos, src, single_read_expr, local_file, object_key
-                            )
-                        )
-                except Exception:
-                    logger.exception("[ledger] %s: quarantine check failed for %s", service_id, object_key)
-                    outcome["quarantine_capture_failures"] = max(1, outcome["quarantine_capture_failures"])
-                outcomes[object_key] = _finalize_object_outcome(outcome)
-
-            try:
-                metadata_db.insert_ingested_files(
-                    service_id,
-                    [
-                        (object_key, valid_by_local.get(local_file, 0), file_sizes_by_local[local_file])
-                        for local_file, _s3_path, object_key in files
-                    ],
-                )
-            except Exception as ie:
-                logger.warning(
-                    "[ledger] %s: ingested_files bookkeeping failed for %d file(s): %s", service_id, len(files), ie
-                )
-    except Exception as e:
-        return _handle_batch_convert_exception(
-            con_meta, service_id, active, claimed_generations, batch_outcomes, summary, e
+        # TEMP tables are per-connection so this cannot collide across
+        # workers, but a reused connection could still carry a stale one.
+        duckdb_con.execute("DROP TABLE IF EXISTS temp.srcmap")
+        duckdb_con.execute("CREATE TEMP TABLE srcmap(local VARCHAR, s3 VARCHAR)")
+        duckdb_con.execute(
+            "INSERT INTO temp.srcmap VALUES "
+            + ", ".join(f"('{escape_sql_literal(lf)}', '{escape_sql_literal(s3)}')" for lf, s3, _k in files)
         )
-    finally:
-        _cleanup_batch_resources(admission_cm, admission_entered, duckdb_con, service_id, "convert_batch_objects")
 
-    return _finalize_batch_convert(con_meta, service_id, active, claimed_generations, outcomes, batch_outcomes, summary)
+        # Per-file valid/corrupt counts, computed BEFORE the transaction
+        # so the same numbers drive both the ingested_files bookkeeping
+        # (which must be per file, not the batch total, or log-line
+        # accounting reconciliation goes wrong) and the per-file
+        # quarantine pass. Reading the same immutable local files twice
+        # yields the same answer.
+        stats = duckdb_con.execute(
+            "SELECT filename, count(*) FILTER (timestamp IS NOT NULL), count(*) FILTER (timestamp IS NULL) "
+            f"FROM {read_expr} GROUP BY filename"
+        ).fetchall()
+        valid_by_local = {r[0]: r[1] for r in stats}
+        corrupt_by_local = {r[0]: r[2] for r in stats}
+        unmapped = set(valid_by_local) - set(local_files)
+        if unmapped:
+            # DuckDB attributed rows to a path absent from srcmap, so
+            # the JOIN below would silently drop them while their ledger
+            # rows went 'committed'. Fail the batch instead of losing
+            # rows without a trace.
+            raise RuntimeError(f"read_json_auto returned unmapped filename(s): {sorted(unmapped)[:3]}")
+
+        # WHERE timestamp IS NOT NULL: ignore_errors=true does NOT drop a
+        # malformed line, it inserts a row with every field NULL, and
+        # that garbage would land straight in the queryable lake table.
+        clean_batch_expr = (
+            f"(SELECT {', '.join(_build_column_select_exprs(src, log_fields_config))}, filename "
+            f"FROM {read_expr} WHERE timestamp IS NOT NULL)"
+        )
+        select_sql = (
+            "SELECT r.* EXCLUDE (filename), m.s3 AS _source_file "
+            f"FROM {clean_batch_expr} r JOIN temp.srcmap m ON m.local = r.filename"
+        )
+
+        needs_insert = True
+        if not _ducklake_table_exists(duckdb_con, table):
+            try:
+                duckdb_con.execute(f"CREATE TABLE lake.{table} AS {select_sql}")
+                needs_insert = False  # created + inserted in one step
+            except Exception as e:
+                if "already exists" not in str(e):
+                    raise
+                # Lost a create race — fall through to the insert path.
+
+        if needs_insert:
+            # Widen the table for any new (custom-field) columns first,
+            # over the UNION of columns across the WHOLE batch so a
+            # custom field present in only one file still widens.
+            try:
+                existing_cols = {r[0] for r in duckdb_con.execute(f"DESCRIBE lake.{table}").fetchall()}
+                for p_col, p_type, *_ in duckdb_con.execute(f"DESCRIBE SELECT * FROM {read_expr} LIMIT 0").fetchall():
+                    if p_col == "filename" or p_col in existing_cols:
+                        continue  # filename is synthetic — never a lake column
+                    safe_col = p_col.replace('"', '""')
+                    duckdb_con.execute(f'ALTER TABLE lake.{table} ADD COLUMN "{safe_col}" {p_type}')
+            except Exception as e:
+                logger.warning("[ledger] %s: batch schema sync failed (%d file(s)): %s", service_id, len(files), e)
+
+            _ducklake_replace_source_rows(
+                duckdb_con, table, "SELECT s3 FROM temp.srcmap", select_sql, "convert_batch_objects"
+            )
+
+        file_sizes_by_local = {local_file: os.path.getsize(local_file) for local_file, _s3_path, _k in files}
+        for local_file, _s3_path, object_key in files:
+            outcome = _new_object_outcome()
+            outcome["valid_records"] = int(valid_by_local.get(local_file, 0))
+            try:
+                if corrupt_by_local.get(local_file):
+                    single_read_expr = _read_json_auto_sql(f"'{escape_sql_literal(local_file)}'", columns_sql)
+                    outcome.update(
+                        _quarantine_convert_corrupt_lines(
+                            duckdb_con, fos, src, single_read_expr, local_file, object_key
+                        )
+                    )
+            except Exception:
+                logger.exception("[ledger] %s: quarantine check failed for %s", service_id, object_key)
+                outcome["quarantine_capture_failures"] = max(1, outcome["quarantine_capture_failures"])
+            outcomes[object_key] = _finalize_object_outcome(outcome)
+
+        try:
+            metadata_db.insert_ingested_files(
+                service_id,
+                [
+                    (object_key, valid_by_local.get(local_file, 0), file_sizes_by_local[local_file])
+                    for local_file, _s3_path, object_key in files
+                ],
+            )
+        except Exception as ie:
+            logger.warning(
+                "[ledger] %s: ingested_files bookkeeping failed for %d file(s): %s", service_id, len(files), ie
+            )
+
+    return _run_batch_convert_common(
+        service_id,
+        object_keys,
+        worker_id,
+        cleanup_label="convert_batch_objects",
+        process_batch_fn=_process_request_batch,
+    )
 
 
 def _quarantine_convert_corrupt_lines(
@@ -2323,28 +2357,7 @@ def _quarantine_convert_corrupt_lines(
                     )
     except (gzip.BadGzipFile, EOFError, OSError) as exc:
         logger.warning("[ledger] %s: malformed request gzip %s: %s", service_id, object_key, exc)
-        try:
-            payload = open(local_file, "rb").read()
-            evidence_results.append(
-                capture_evidence(
-                    service_id,
-                    "request",
-                    object_key,
-                    payload,
-                    line_ordinal=None,
-                    byte_offset=None,
-                    error_category="corrupt_container",
-                    error_text=str(exc)[:2000],
-                )
-            )
-        except OSError:
-            evidence_results.append({"cap_evictions": 0, "quarantine_capture_failures": 1})
-        return {
-            "valid_records": 0,
-            "malformed_records": 0,
-            "corrupt_containers": 1,
-            **_sum_evidence_counts(evidence_results),
-        }
+        return _capture_corrupt_container(service_id, "request", object_key, local_file, exc, full_outcome=False)
 
     if len(evidence_results) != int(corrupt_count or 0):
         logger.error(
@@ -2619,8 +2632,6 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
     (``extract_metrics_from_faro_payload``, ``safe_int``, ``safe_float``)
     to avoid duplicating the Faro-payload extraction logic itself.
     """
-    from urllib.parse import parse_qs, urlparse
-
     from backend.core.rum_ingest import extract_metrics_from_faro_payload, safe_float, safe_int
 
     # Multi-tenant routing: not corruption, so caller must not count as valid or corrupt
@@ -2948,129 +2959,83 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
     table (``client_vitals``, ``client_errors``) instead of one ATTACH +
     commit per file.
     """
-    from backend import config as svcconfig
     from backend.core.iceberg._core import CLIENT_ERRORS_ARROW_SCHEMA, CLIENT_VITALS_ARROW_SCHEMA
-    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name, ducklake_write_admission
+    from backend.core.iceberg._ducklake import ducklake_table_name
 
-    summary, con_meta, src, claimed_generations, claimed_keys = _claim_and_resolve_batch_source(
-        service_id, object_keys, worker_id
-    )
-    if not claimed_keys or src is None:
-        return summary
-
-    bucket = src.get("bucket", "")
-    active: list[str] = list(claimed_keys)
-    outcomes: dict[str, dict[str, int]] = {}
-    batch_outcomes: dict[str, dict[str, int]] = {}
-    duckdb_con = None
-    admission_cm = ducklake_write_admission(service_id)
-    admission_entered = False
-    try:
-        fos = boto3_client_hot() if svcconfig.HOT_S3_ENDPOINT else _get_fos_client(src)
-        from backend.core.duckdb import get_memory_connection
-
-        duckdb_con = get_memory_connection(src)
-
+    def _process_rum_batch(*, src, fos, duckdb_con, files, outcomes, enter_write_admission) -> None:
         vitals_table = ducklake_table_name(src, table_name="client_vitals")
         errors_table = ducklake_table_name(src, table_name="client_errors")
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            files = _download_and_classify_batch_files(
-                fos,
-                con_meta,
-                service_id,
-                bucket,
-                claimed_keys,
-                claimed_generations,
-                tmpdir,
-                active,
-                summary,
-                batch_outcomes,
-                log_label="RUM ",
-            )
-            if not files:
-                _record_ledger_batch_outcomes(service_id, batch_outcomes)
-                return summary
-
-            all_vitals: list[dict] = []
-            vitals_sources: list[str] = []
-            all_errors: list[dict] = []
-            errors_sources: list[str] = []
-            source_files: list[str] = []
-            file_sizes: dict[str, int] = {}
-            per_file_counts: dict[str, tuple[int, int]] = {}
-            for local_file, s3_path, object_key in files:
-                vitals_rows, errors_rows, corrupt_lines = _parse_rum_beacon_file(local_file, service_id)
-                all_vitals.extend(vitals_rows)
-                vitals_sources.extend([s3_path] * len(vitals_rows))
-                all_errors.extend(errors_rows)
-                errors_sources.extend([s3_path] * len(errors_rows))
-                source_files.append(s3_path)
-                file_sizes[object_key] = os.path.getsize(local_file)
-                per_file_counts[object_key] = (len(vitals_rows), len(errors_rows))
-                outcome = _new_object_outcome()
-                outcome["valid_records"] = len(vitals_rows) + len(errors_rows)
-                if corrupt_lines:
-                    try:
-                        outcome.update(
-                            _quarantine_rum_corrupt_lines(
-                                fos,
-                                src,
-                                object_key,
-                                corrupt_lines,
-                                len(vitals_rows) + len(errors_rows),
-                                local_file=local_file,
-                            )
+        all_vitals: list[dict] = []
+        vitals_sources: list[str] = []
+        all_errors: list[dict] = []
+        errors_sources: list[str] = []
+        source_files: list[str] = []
+        file_sizes: dict[str, int] = {}
+        per_file_counts: dict[str, tuple[int, int]] = {}
+        for local_file, s3_path, object_key in files:
+            vitals_rows, errors_rows, corrupt_lines = _parse_rum_beacon_file(local_file, service_id)
+            all_vitals.extend(vitals_rows)
+            vitals_sources.extend([s3_path] * len(vitals_rows))
+            all_errors.extend(errors_rows)
+            errors_sources.extend([s3_path] * len(errors_rows))
+            source_files.append(s3_path)
+            file_sizes[object_key] = os.path.getsize(local_file)
+            per_file_counts[object_key] = (len(vitals_rows), len(errors_rows))
+            outcome = _new_object_outcome()
+            outcome["valid_records"] = len(vitals_rows) + len(errors_rows)
+            if corrupt_lines:
+                try:
+                    outcome.update(
+                        _quarantine_rum_corrupt_lines(
+                            fos,
+                            src,
+                            object_key,
+                            corrupt_lines,
+                            len(vitals_rows) + len(errors_rows),
+                            local_file=local_file,
                         )
-                    except Exception:
-                        logger.exception("[ledger] %s: RUM evidence processing failed for %s", service_id, object_key)
-                        outcome["malformed_records"] = len(corrupt_lines)
-                        outcome["quarantine_capture_failures"] = len(corrupt_lines)
-                outcomes[object_key] = _finalize_object_outcome(outcome)
+                    )
+                except Exception:
+                    logger.exception("[ledger] %s: RUM evidence processing failed for %s", service_id, object_key)
+                    outcome["malformed_records"] = len(corrupt_lines)
+                    outcome["quarantine_capture_failures"] = len(corrupt_lines)
+            outcomes[object_key] = _finalize_object_outcome(outcome)
 
-            source_files_sql = ", ".join(f"'{escape_sql_literal(s)}'" for s in source_files)
+        source_files_sql = ", ".join(f"'{escape_sql_literal(s)}'" for s in source_files)
 
-            admission_cm.__enter__()
-            admission_entered = True
-            if not _ducklake_attach(duckdb_con, src, read_only=False):
-                raise RuntimeError("DuckLake read-write attach failed")
+        enter_write_admission()
 
-            _write_rum_arrow_table_batch(
-                duckdb_con, vitals_table, all_vitals, vitals_sources, source_files_sql, CLIENT_VITALS_ARROW_SCHEMA
-            )
-            _write_rum_arrow_table_batch(
-                duckdb_con, errors_table, all_errors, errors_sources, source_files_sql, CLIENT_ERRORS_ARROW_SCHEMA
-            )
-
-            try:
-                metadata_db.insert_ingested_files(
-                    service_id,
-                    [
-                        (object_key, per_file_counts.get(object_key, (0, 0))[0], file_sizes.get(object_key, 0))
-                        for _lf, _sp, object_key in files
-                    ],
-                    table_name="client_vitals",
-                )
-                metadata_db.insert_ingested_files(
-                    service_id,
-                    [
-                        (object_key, per_file_counts.get(object_key, (0, 0))[1], file_sizes.get(object_key, 0))
-                        for _lf, _sp, object_key in files
-                    ],
-                    table_name="client_errors",
-                )
-            except Exception as ie:
-                logger.warning(
-                    "[ledger] %s: RUM ingested_files bookkeeping failed for %d file(s): %s", service_id, len(files), ie
-                )
-    except Exception as e:
-        return _handle_batch_convert_exception(
-            con_meta, service_id, active, claimed_generations, batch_outcomes, summary, e
+        _write_rum_arrow_table_batch(
+            duckdb_con, vitals_table, all_vitals, vitals_sources, source_files_sql, CLIENT_VITALS_ARROW_SCHEMA
         )
-    finally:
-        _cleanup_batch_resources(admission_cm, admission_entered, duckdb_con, service_id, "convert_batch_rum_objects")
+        _write_rum_arrow_table_batch(
+            duckdb_con, errors_table, all_errors, errors_sources, source_files_sql, CLIENT_ERRORS_ARROW_SCHEMA
+        )
 
-    return _finalize_batch_convert(con_meta, service_id, active, claimed_generations, outcomes, batch_outcomes, summary)
+        try:
+            for count_idx, table_name in ((0, "client_vitals"), (1, "client_errors")):
+                metadata_db.insert_ingested_files(
+                    service_id,
+                    [
+                        (object_key, per_file_counts.get(object_key, (0, 0))[count_idx], file_sizes.get(object_key, 0))
+                        for _lf, _sp, object_key in files
+                    ],
+                    table_name=table_name,
+                )
+        except Exception as ie:
+            logger.warning(
+                "[ledger] %s: RUM ingested_files bookkeeping failed for %d file(s): %s", service_id, len(files), ie
+            )
+
+    return _run_batch_convert_common(
+        service_id,
+        object_keys,
+        worker_id,
+        cleanup_label="convert_batch_rum_objects",
+        log_label="RUM ",
+        process_batch_fn=_process_rum_batch,
+    )
 
 
 def sweep_rum_ledger_once(service_id: str, lookback_hours: int = 4, run_id: int | None = None) -> dict:

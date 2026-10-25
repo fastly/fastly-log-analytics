@@ -558,24 +558,14 @@ def reconcile_vcl_state(
             if diff.is_empty():
                 if desired_state.rum_enabled:
                     _upload_rum_tracker_best_effort(service_id, token, status_cb)
-                try:
-                    result.activated_version = _fetch_active_version(service_id, token)
-                except RuntimeError:
-                    result.activated_version = None
-                result.duration_ms = int((time.time() - start_time) * 1000)
-                return result
+                return _finalize_reconcile_early_exit(result, service_id, token, start_time)
 
             if dry_run:
                 # Nothing is applied in a dry run, so the tracker must NOT
                 # be published here — the route it depends on doesn't exist
                 # until a real reconcile activates it.
                 result.changes_applied = diff.summary()
-                try:
-                    result.activated_version = _fetch_active_version(service_id, token)
-                except RuntimeError:
-                    result.activated_version = None
-                result.duration_ms = int((time.time() - start_time) * 1000)
-                return result
+                return _finalize_reconcile_early_exit(result, service_id, token, start_time)
 
             draft_version = None
             try:
@@ -660,6 +650,26 @@ def reconcile_vcl_state(
     finally:
         result.duration_ms = int((time.time() - start_time) * 1000)
 
+    return result
+
+
+def _finalize_reconcile_early_exit(
+    result: ReconciliationResult,
+    service_id: str,
+    token: str,
+    start_time: float,
+    *,
+    active_ver: int | None = None,
+    lookup_active: bool = True,
+) -> ReconciliationResult:
+    if lookup_active:
+        try:
+            result.activated_version = _fetch_active_version(service_id, token)
+        except RuntimeError:
+            result.activated_version = None
+    else:
+        result.activated_version = active_ver
+    result.duration_ms = int((time.time() - start_time) * 1000)
     return result
 
 
@@ -892,16 +902,16 @@ def reconcile_cdn_service_state(
             if diff.is_empty() and not vcl_needs_update:
                 if status_cb:
                     status_cb("✓ CDN service configuration is up-to-date and matches desired state. No changes needed.")
-                result.activated_version = active_ver
-                result.duration_ms = int((time.time() - start_time) * 1000)
-                return result
+                return _finalize_reconcile_early_exit(
+                    result, cdn_service_id, token, start_time, active_ver=active_ver, lookup_active=False
+                )
 
             if dry_run:
                 result.changes_applied = diff.summary()
                 result.changes_applied["main_vcl_updated"] = vcl_needs_update
-                result.activated_version = active_ver
-                result.duration_ms = int((time.time() - start_time) * 1000)
-                return result
+                return _finalize_reconcile_early_exit(
+                    result, cdn_service_id, token, start_time, active_ver=active_ver, lookup_active=False
+                )
 
             draft_version = None
             try:

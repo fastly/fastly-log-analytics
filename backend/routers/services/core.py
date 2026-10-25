@@ -26,7 +26,7 @@ from backend.models.services import (
     ServiceCronSettingsBody,
     ServicesListResponse,
 )
-from backend.repositories import usage as service_stats_repo
+from backend.repositories import assets as service_stats_repo
 from backend.repositories._base import SectionTimer
 from backend.utils.auth import require_service_in_scope
 from backend.utils.router_utils import (
@@ -1174,19 +1174,29 @@ def _load_modifiable_custom_fields(
     return cfg, lf, lf.get("custom_fields", [])
 
 
+def _split_custom_field_warnings(items: list[str], *, strip_prefix: bool = False) -> tuple[list[str], list[str]]:
+    hard_errors: list[str] = []
+    warnings: list[str] = []
+    for item in items:
+        if item.startswith("WARN"):
+            warnings.append(item.removeprefix("WARN: ") if strip_prefix else item)
+        else:
+            hard_errors.append(item)
+    return hard_errors, warnings
+
+
 def _validate_and_save_custom_field(
     service_id: str, cfg: dict, lf: dict, field_dict: dict, other_names: list[str], new_custom: list[dict], now: str
 ) -> dict:
     from backend.core import field_registry as lf_module
 
-    errors = lf_module.validate_custom_field(field_dict, other_names)
-    hard_errors = [e for e in errors if not e.startswith("WARN:")]
+    hard_errors, warnings = _split_custom_field_warnings(lf_module.validate_custom_field(field_dict, other_names))
     if hard_errors:
         raise HTTPException(status_code=422, detail={"errors": hard_errors})
     candidate_lf = {**lf, "custom_fields": new_custom}
     _validate_log_format_version(candidate_lf)
     _persist_custom_fields_change(service_id, cfg, lf, new_custom, candidate_lf, now)
-    return {"ok": True, "field": field_dict, "warnings": [e for e in errors if e.startswith("WARN:")]}
+    return {"ok": True, "field": field_dict, "warnings": warnings}
 
 
 @router.post("/services/{service_id}/custom-fields", response_model=CustomFieldResponse)
@@ -1284,18 +1294,12 @@ def api_validate_custom_vcl(request: Request, service_id: str, body: VclLintRequ
         "bytes_estimate": 20,
         "enabled": True,
     }
-    errors = []
-    warnings = []
-    expr_errors = lf_module.validate_custom_field(candidate, [])
-    for e in expr_errors:
-        warnings.append(e.removeprefix("WARN: ")) if e.startswith("WARN:") else errors.append(e)
-    if body.log_fields_config:
-        candidate_lf = {**body.log_fields_config, "custom_fields": lf.get("custom_fields", []) + [candidate]}
-    else:
-        candidate_lf = {**lf, "custom_fields": lf.get("custom_fields", []) + [candidate]}
-    fmt_errors = provision.validate_log_format(candidate_lf)
-    for e in fmt_errors:
-        warnings.append(e) if e.startswith("WARN") else errors.append(e)
+    errors, warnings = _split_custom_field_warnings(lf_module.validate_custom_field(candidate, []), strip_prefix=True)
+    base_lf = body.log_fields_config if body.log_fields_config else lf
+    candidate_lf = {**base_lf, "custom_fields": lf.get("custom_fields", []) + [candidate]}
+    fmt_hard_errors, fmt_warnings = _split_custom_field_warnings(provision.validate_log_format(candidate_lf))
+    errors.extend(fmt_hard_errors)
+    warnings.extend(fmt_warnings)
     fmt = provision.load_log_format(candidate_lf) if not errors else None
     return VclLintResponse(
         valid=len(errors) == 0,

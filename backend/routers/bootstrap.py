@@ -29,8 +29,8 @@ from backend.models.services import (
     RecentSqliteResponse,
     SchemaResponse,
 )
+from backend.repositories import assets as service_stats_repo
 from backend.repositories import rum as rum_repo
-from backend.repositories import usage as service_stats_repo
 from backend.repositories._base import SectionTimer
 from backend.utils import sqlite_profiler
 from backend.utils.auth import mask_ips_for, require_service_in_scope

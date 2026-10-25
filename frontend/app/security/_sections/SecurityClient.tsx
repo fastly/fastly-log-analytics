@@ -8,26 +8,265 @@ import { useColumnVisibility } from '@/hooks/useSSE'
 import { useActiveLogFields, useFieldLabel } from '@/hooks/useBootstrap'
 import { useTimeLayout } from '@/lib/chart-helpers'
 import { CHART_COLORS, useTimeseriesToTraces } from '@/lib/chart-helpers'
-import { useAnalyticsReportQuery } from '@/hooks/useDashboardCards'
-import { useReportRangeAnchor } from '@/hooks/useDashboardCards'
+import { useAnalyticsReportQuery, useReportRangeAnchor, useServiceQuery } from '@/hooks/useDashboardCards'
 import { ReportLayout } from '@/components/ReportLayout'
-import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
-import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
+import { AnalyticsCard, ChartEmptyState, type AnalyticsCardError } from '@/components/AnalyticsCard'
+import { DataTable, ColumnVisibilityDropdown, FilterValueCell } from '@/components/DataTable'
 import { PlotlyChart } from '@/components/PlotlyChart'
-import { FilterValueCell } from '@/components/DataTable'
-import { ChartEmptyState } from '@/components/AnalyticsCard'
-import { formatCountMaybe } from '@/lib/format'
+import { formatCount, formatCountMaybe } from '@/lib/format'
 import { client, extractApiError } from '@/lib/api'
-import { Globe, Network, Repeat, Scale, Shield } from 'lucide-react'
+import { Activity, Cpu, Globe, HelpCircle, Network, Repeat, Scale, Shield, ShieldAlert } from 'lucide-react'
 import { BotsSection, SECURITY_INFO, TOP_IP_COLUMN_IDS } from './BotsSection'
 import { ProxyWatchdogSection } from './ProxyWatchdogSection'
-import { ThreatIntelPanel } from '@/components/security/ThreatIntelPanel'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
+import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { HelpDialog } from '@/components/ui/confirm-dialog'
 import type { PlotlyLayout, PlotlyTrace } from '@/types/api'
 import type { components } from '@/types/api.generated'
 
 type SecurityData = components['schemas']['SecurityAggregatesResponse']
 type TopIpHeader = components['schemas']['TopIpHeaderRow']
+type ThreatIntelItem = components['schemas']['ThreatIntelItem']
+
+export function ThreatIntelPanel({
+  serviceId,
+  startTime,
+  endTime,
+}: {
+  serviceId: string | null
+  startTime: string | null
+  endTime: string | null
+}) {
+  const [isHelpOpen, React_useState] = React.useState(false)
+
+  const { data, isLoading, error } = useServiceQuery<ThreatIntelItem[]>(
+    ['security', 'threat-intel', serviceId, startTime, endTime],
+    async ({ signal }) => {
+      if (!serviceId) return []
+      const { data: res, error: reqErr } = await client.GET('/api/security/threat-intel', {
+        signal,
+        params: {
+          query: {
+            start_time: startTime ?? undefined,
+            end_time: endTime ?? undefined,
+          },
+        },
+      })
+      if (reqErr) throw new Error(extractApiError(reqErr))
+      return res?.data || []
+    },
+    { enabled: !!serviceId },
+  )
+
+  const columns = React.useMemo<ColumnDef<ThreatIntelItem>[]>(() => [
+    {
+      accessorKey: 'tls_fingerprint',
+      header: 'TLS Fingerprint (JA3/JA4)',
+      cell: ({ row }) => {
+        const val = row.original.tls_fingerprint
+        const filterKey = val.includes('_') ? 'ja4' : 'ja3'
+        return (
+          <div className="font-mono text-xs font-semibold select-all w-full max-w-[320px] truncate">
+            <FilterValueCell filters={[{ column: filterKey, value: val }]} display={val} />
+          </div>
+        )
+      },
+    },
+    {
+      accessorKey: 'requests',
+      header: 'Requests',
+      cell: ({ row }) => (
+        <span className="font-semibold font-mono text-xs text-foreground/80 tabular-nums">
+          {formatCount(row.original.requests)}
+        </span>
+      ),
+    },
+    {
+      accessorKey: 'top_country',
+      header: 'Top Country',
+      cell: ({ row }) => {
+        const country = row.original.top_country || 'Unknown'
+        return (
+          <div className="flex items-center gap-1.5 text-xs font-medium text-foreground/80">
+            <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+            <FilterValueCell filters={[{ column: 'country', value: country }]} display={country} />
+          </div>
+        )
+      },
+    },
+    {
+      accessorKey: 'matched_waf_rules_count',
+      header: 'Matched WAF Rules',
+      cell: ({ row }) => {
+        const count = row.original.matched_waf_rules_count
+        return count > 0 ? (
+          <Badge variant="outline" className="font-mono bg-destructive/10 text-destructive border-destructive/20 hover:bg-destructive/15">
+            {formatCount(count)} triggers
+          </Badge>
+        ) : (
+          <span className="text-xs text-muted-foreground font-medium">None</span>
+        )
+      },
+    },
+    {
+      accessorKey: 'bot_percentage',
+      header: 'Bot Percentage',
+      cell: ({ row }) => {
+        const pct = row.original.bot_percentage
+        return pct > 0 ? (
+          <div className="flex items-center gap-1.5">
+            <Cpu className="h-3.5 w-3.5 text-orange-500" />
+            <span className="font-mono font-bold text-xs text-orange-500">{pct.toFixed(1)}%</span>
+          </div>
+        ) : (
+          <span className="text-xs text-muted-foreground font-medium">0.0%</span>
+        )
+      },
+    },
+    {
+      accessorKey: 'is_anonymized_proxy',
+      header: 'Anonymity Category',
+      cell: ({ row }) =>
+        row.original.is_anonymized_proxy ? (
+          <Badge
+            variant="outline"
+            className="font-semibold text-[10px] uppercase tracking-wider px-2 py-0.5 bg-red-500/10 text-red-500 border-red-500/20 hover:bg-red-500/15 border shadow-none"
+          >
+            VPN / Proxy / Tor
+          </Badge>
+        ) : (
+          <Badge
+            variant="secondary"
+            className="font-semibold text-[10px] uppercase tracking-wider px-2 py-0.5 bg-emerald-500/10 text-emerald-500 border-emerald-500/20 hover:bg-emerald-500/15 border shadow-none"
+          >
+            Residential
+          </Badge>
+        ),
+    },
+  ], [])
+
+  if (isLoading) {
+    return (
+      <Card className="col-span-12 border-muted/50 bg-background/50 backdrop-blur-xs">
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
+          <div className="space-y-1">
+            <CardTitle className="text-lg font-semibold tracking-tight flex items-center gap-2">
+              <Shield className="h-5 w-5 text-primary animate-pulse" />
+              Client TLS Fingerprints & Threat Intelligence
+            </CardTitle>
+          </div>
+        </CardHeader>
+        <CardContent className="h-64 flex flex-col items-center justify-center space-y-4">
+          <div className="relative flex h-10 w-10 items-center justify-center">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/20 opacity-75"></span>
+            <Activity className="h-5 w-5 text-primary animate-pulse" />
+          </div>
+          <span className="text-sm font-medium text-muted-foreground animate-pulse">Aggregating real-time threat telemetry...</span>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  if (error) {
+    return (
+      <Card className="col-span-12 border-destructive/20 bg-destructive/5">
+        <CardContent className="py-10 flex flex-col items-center justify-center text-center space-y-3">
+          <ShieldAlert className="h-10 w-10 text-destructive" />
+          <h3 className="text-base font-semibold text-destructive">Threat Intelligence Analysis Failed</h3>
+          <p className="text-sm text-muted-foreground max-w-md">{error.message || "An unexpected error occurred while analyzing telemetry."}</p>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  return (
+    <>
+      <Card className="col-span-12 border-muted/40 shadow-sm bg-card p-0">
+        <DataTable
+          columns={columns}
+          data={data || []}
+          isLoading={isLoading}
+          searchKey="tls_fingerprint"
+          initialSorting={[{ id: 'requests', desc: true }]}
+          title={
+            <div className="space-y-1 py-1">
+              <div className="flex items-center gap-2">
+                <Shield className="h-5 w-5 text-primary" />
+                <span className="text-base font-bold tracking-tight">
+                  Client TLS Fingerprints & Threat Intelligence
+                </span>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 text-muted-foreground hover:text-foreground shrink-0 rounded-full"
+                  onClick={() => React_useState(true)}
+                  title="Learn more about Threat Intelligence"
+                >
+                  <HelpCircle className="h-4 w-4" />
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground font-normal">
+                Correlated TLS fingerprinting (JA3/JA4) with active WAF signals, proxy routes, and automated client behavior.
+              </p>
+            </div>
+          }
+        />
+      </Card>
+
+      <HelpDialog
+        open={isHelpOpen}
+        onOpenChange={React_useState}
+        title="Client TLS Fingerprints & Threat Intelligence Guide"
+        icon={<Shield className="h-5 w-5 text-primary" />}
+        size="xl"
+      >
+        <div className="space-y-4 text-sm text-muted-foreground">
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-foreground mb-1">
+              How This Data Works
+            </h4>
+            <p className="leading-relaxed">
+              This panel correlates client <strong className="font-semibold text-foreground">TLS Fingerprints (JA3/JA4)</strong> with active <strong className="font-semibold text-foreground">WAF rule triggers</strong>, <strong className="font-semibold text-foreground">automated bot percentage</strong>, and <strong className="font-semibold text-foreground">network anonymity</strong> attributes. Rather than relying on easily spoofable HTTP User-Agents, TLS fingerprinting analyzes the unique cryptographic handshake parameters (SSL version, cipher suites, extension details) sent by the client&apos;s socket library.
+            </p>
+          </div>
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-foreground mb-1">
+              Anonymity Categories
+            </h4>
+            <ul className="space-y-3 mt-2">
+              <li className="flex gap-2.5 items-start">
+                <Badge
+                  variant="outline"
+                  className="font-semibold text-[9px] uppercase tracking-wider px-1.5 py-0.5 bg-red-500/10 text-red-500 border-red-500/20 shrink-0 select-none shadow-none mt-0.5"
+                >
+                  VPN / Proxy / Tor
+                </Badge>
+                <div>
+                  <strong className="text-foreground font-medium block text-xs">Anonymized / Proxy Traffic</strong>
+                  Indicates the connection originates from a commercial VPN provider, public or private proxy, Tor Exit Node, or hosting data center.
+                </div>
+              </li>
+              <li className="flex gap-2.5 items-start">
+                <Badge
+                  variant="secondary"
+                  className="font-semibold text-[9px] uppercase tracking-wider px-1.5 py-0.5 bg-emerald-500/10 text-emerald-500 border-emerald-500/20 shrink-0 select-none shadow-none mt-0.5"
+                >
+                  Residential
+                </Badge>
+                <div>
+                  <strong className="text-foreground font-medium block text-xs">Residential Broadband & Mobile</strong>
+                  Indicates standard consumer broadband, home Wi-Fi, or cellular networks.
+                </div>
+              </li>
+            </ul>
+          </div>
+        </div>
+      </HelpDialog>
+    </>
+  )
+}
 
 type HeaderAnomaliesProps = {
   data: SecurityData | undefined

@@ -596,6 +596,12 @@ def scoring_enforce_threshold_get(
     return result
 
 
+def _validate_threshold_0_100(threshold: int | None) -> int | None:
+    if threshold is not None and not 0 <= threshold <= 100:
+        raise HTTPException(status_code=400, detail={"error": "threshold must be 0-100"})
+    return threshold
+
+
 @router.put(
     "/{service_id}/scoring/enforce-threshold",
     response_model=ScoringEnforceThresholdPutResponse,
@@ -621,9 +627,7 @@ def scoring_enforce_threshold_put(
 
     _cfg, config_store_id, resolved_token = _require_scoring_config_store(service_id, token)
 
-    threshold = body.threshold
-    if threshold is not None and not 0 <= threshold <= 100:
-        raise HTTPException(status_code=400, detail={"error": "threshold must be 0-100"})
+    threshold = _validate_threshold_0_100(body.threshold)
 
     # Upsert: PATCH the item, falling back to POST if it doesn't exist
     # yet (first time enforcement is set for this service).
@@ -1339,9 +1343,7 @@ def scoring_threshold_put(
 
     from backend import config as svcconfig
 
-    threshold = body.threshold
-    if threshold is not None and not 0 <= threshold <= 100:
-        raise HTTPException(status_code=400, detail={"error": "threshold must be 0-100"})
+    threshold = _validate_threshold_0_100(body.threshold)
 
     cfg = load_service_config(service_id)
     prior_threshold = cfg.get("scoring", {}).get("operator_threshold")
@@ -1437,6 +1439,14 @@ def scoring_evaluation_per_reason(
 # mounted with their current cache-key contracts and TTL behavior. The
 # frontend can opt in by calling /scoring/dashboard instead of the 8
 # individual queries, or keep fanning out for now.
+
+
+def _build_scoring_config_bundle(service_id: str) -> dict:
+    return {
+        "threshold": scoring_threshold_get(service_id),
+        "exclude_regex": scoring_exclude_regex_get(service_id),
+        "enforce_status_code": scoring_enforce_status_code_get(service_id),
+    }
 
 
 @router.get(
@@ -1555,9 +1565,10 @@ def scoring_dashboard(
             # cutoff fed into threshold_preview). The config block
             # mirrors /scoring/config's shape so the frontend can read
             # the persisted operator preferences off the same payload.
-            "config_threshold": scoring_threshold_get(service_id),
-            "exclude_regex": scoring_exclude_regex_get(service_id),
-            "enforce_status_code": scoring_enforce_status_code_get(service_id),
+            **{
+                ("config_threshold" if k == "threshold" else k): v
+                for k, v in _build_scoring_config_bundle(service_id).items()
+            },
         }
 
     return _cached(cache_key, _produce)

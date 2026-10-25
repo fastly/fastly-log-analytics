@@ -1049,9 +1049,7 @@ from backend.routers import (
     dashboard,
     high_scale,
     network,
-    origin,
     performance,
-    query,
     rum,
     session_scoring,
 )
@@ -1060,12 +1058,11 @@ app.include_router(dashboard.router)
 app.include_router(high_scale.router)
 app.include_router(dashboard.insights_router)
 app.include_router(session_scoring.sessions_router)
-app.include_router(query.router)
 app.include_router(network.router)
 app.include_router(performance.router)
 app.include_router(alerts.views_router)
 app.include_router(alerts.router)
-app.include_router(origin.router)
+app.include_router(network.origin_router)
 app.include_router(control_room.router)
 app.include_router(rum.router)
 app.include_router(rum.asset_router)

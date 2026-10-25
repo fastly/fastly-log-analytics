@@ -24,10 +24,202 @@ from typing import Any
 logger = logging.getLogger("backend.scheduler")
 
 
-# ── Helpers / shared state ────────────────────────────────────────────────────
+# ── Helpers / shared state & Decorators (folded from backend.cron.decorators) ─
+
+import concurrent.futures  # noqa: E402
+from functools import wraps  # noqa: E402
+from types import TracebackType  # noqa: E402
+
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.date_utils import iso_z_now  # noqa: E402
+
+DEFAULT_INTERVAL_S = 10.0
+_JOIN_TIMEOUT_S = 1.0
 
 
-from backend.cron.decorators import dev_mode_no_crons  # noqa: F401
+class CronHeartbeat:
+    """Refresh ``job_runs.heartbeat_at`` for ``(service_id, job_name)`` while the block runs.
+
+    Only the job's own lease is refreshed: an unscoped refresh would keep every running lease for
+    the service alive, so a wedged job whose own heartbeat died would never be reaped while any
+    healthy job kept ticking (the orphaned-sync-row ingestion stall). With no ``job_name`` the
+    loop refreshes nothing.
+    """
+
+    def __init__(self, service_id: str, job_name: str | None, *, interval_s: float | None = None) -> None:
+        self._service_id = service_id
+        self._job_name = job_name
+        self._interval_s = DEFAULT_INTERVAL_S if interval_s is None else interval_s
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True, name=f"cron-heartbeat-{service_id}")
+
+    def __enter__(self) -> CronHeartbeat:
+        self._thread.start()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self._stop.set()
+        self._thread.join(timeout=_JOIN_TIMEOUT_S)
+
+    def _run(self) -> None:
+        from backend.core.metadata.base import get_con, release_thread_connection
+
+        try:
+            while self._job_name and not self._stop.wait(self._interval_s):
+                try:
+                    con = get_con(self._service_id)
+                    con.execute(
+                        "UPDATE job_runs SET heartbeat_at = ? "
+                        "WHERE service_id = ? AND job_name = ? AND status = 'running'",
+                        (time.time(), self._service_id, self._job_name),
+                    )
+                    con.commit()
+                except Exception:
+                    logger.debug("cron heartbeat refresh failed for %s", self._service_id, exc_info=True)
+        finally:
+            release_thread_connection()
+
+
+def dev_mode_no_crons() -> bool:
+    """Kill switch for local-dev runs: never schedule or execute cron work.
+
+    Evaluates FLA_DEV_NO_CRONS environment variable.
+    """
+    return os.environ.get("FLA_DEV_NO_CRONS", "").lower() in ("1", "true", "yes")
+
+
+# Watchdog threshold for reporting an overlong invocation. The wrapped body is
+# still allowed to finish before the APScheduler worker is released: Python
+# cannot safely kill a thread that owns DuckDB/FOS resources, and abandoning it
+# leaves those resources active while the next tick starts.
+_CRON_HARD_CAP_S = 300
+
+# Shared watchdog executor (see _watchdog_executor below). Sized >= APScheduler's
+# default pool (10) so concurrent cron bodies never queue behind each other here;
+# each job is max_instances=1 and the global_job crons don't use this path.
+_WATCHDOG_MAX_WORKERS = 12
+_watchdog_lock = threading.Lock()
+_watchdog_executor: concurrent.futures.ThreadPoolExecutor | None = None
+
+
+def _get_watchdog_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """Lazily build the process-shared cron watchdog executor."""
+    global _watchdog_executor
+    with _watchdog_lock:
+        if _watchdog_executor is None:
+            _watchdog_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=_WATCHDOG_MAX_WORKERS, thread_name_prefix="cron-watchdog"
+            )
+        return _watchdog_executor
+
+
+def cron_task(name: str, job_name: str | None = None):
+    """Wraps a cron handler with telemetry + usage-log flush + a hard watchdog."""
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(service_id: str, *args, **kwargs):
+            def _body():
+                from backend.utils.telemetry import (
+                    flush_usage_log,
+                    process_context_scope,
+                    start_call_tracking,
+                )
+
+                with process_context_scope(name):
+                    start_call_tracking()
+                    try:
+                        return func(service_id, *args, **kwargs)
+                    finally:
+                        flush_usage_log(service_id)
+
+            cap = _CRON_HARD_CAP_S
+
+            with CronHeartbeat(service_id, job_name):
+                fut = _get_watchdog_executor().submit(_body)
+                try:
+                    return fut.result(timeout=cap)
+                except concurrent.futures.TimeoutError:
+                    logger.error(
+                        "[scheduler] %s/%s exceeded %ds watchdog threshold — waiting "
+                        "for worker cleanup before releasing the scheduler slot",
+                        name,
+                        service_id,
+                        cap,
+                    )
+                    return fut.result()
+
+        return wrapper
+
+    return decorator
+
+
+def global_job(job_id: str, *, color: str, tag: str, label: str):
+    """Wrap a global (non-service) cron callable with the start/end-log +
+    record_job_run boilerplate the three util jobs share.
+    """
+
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper() -> None:
+            from backend.utils.telemetry import process_context_scope
+
+            prefix = f"\x1b[{color}m[{tag}]\x1b[0m"
+            logger.info("🏎️  %s %s job started.", prefix, label)
+            start = time.monotonic()
+            try:
+                with process_context_scope(f"cron:{job_id}"):
+                    result = fn()
+                if isinstance(result, tuple) and len(result) == 2:
+                    status, detail = result
+                else:
+                    status, detail = "success", str(result or "")
+                record_job_run(job_id, status, time.monotonic() - start, detail)
+            except Exception as e:
+                record_job_run(job_id, "error", time.monotonic() - start, str(e))
+                logger.error("[%s] Failed: %s", job_id, e)
+            logger.info("🏁  %s %s job finished.", prefix, label)
+
+        return wrapper
+
+    return decorator
+
+
+_status_lock = threading.Lock()
+_status: dict[str, dict] = {}
+
+
+def record_job_run(job_id: str, status: str, duration_s: float, detail: str = "") -> None:
+    """Record the outcome of a completed global job run."""
+    with _status_lock:
+        _status[job_id] = {
+            "last_run_at": iso_z_now(),
+            "status": status,
+            "duration_s": round(duration_s, 2),
+            "detail": detail,
+        }
+
+
+def get_system_job_status() -> dict[str, dict]:
+    """Return a snapshot of all recorded job statuses."""
+    with _status_lock:
+        return dict(_status)
+
+
+_CacheRegistry.register("utils.system_jobs._status", _status)
+
+sys.modules["backend.cron.decorators"] = sys.modules[__name__]
+_cron_pkg = sys.modules.get("backend.cron")
+if _cron_pkg is not None:
+    setattr(_cron_pkg, "decorators", sys.modules[__name__])
+_backend_pkg = sys.modules.get("backend")
+if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
+    _backend_pkg._MODULE_ALIASES["backend.cron.decorators"] = "backend.cron.scheduler"
 
 
 def partial_hour_merge_enabled() -> bool:
@@ -764,8 +956,7 @@ class Scheduler:
             _run_rdns_enrichment,
             _run_share_audit_purge,
         )
-        from backend.cron.jobs.rum_commit import _run_rum_commit
-        from backend.cron.jobs.rum_sync import _run_rum_sync
+        from backend.cron.jobs.rum_sync import _run_rum_commit, _run_rum_sync
         from backend.cron.jobs.sync import _run_commit, _run_full_sweep, _run_gap_heal
         from backend.cron.jobs.sync import _run_log_discovery_cron as _run_service_cron
 

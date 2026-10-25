@@ -10,6 +10,7 @@ from __future__ import annotations
 import sys as _sys
 
 from backend.repositories import alerts as _alerts_repo
+from backend.repositories import assets as _usage_repo
 from backend.repositories import cmcd as _cmcd_repo
 from backend.repositories import dashboard as _dashboard_repo
 from backend.repositories import network as _network_repo
@@ -19,7 +20,6 @@ from backend.repositories import query as _query_repo
 from backend.repositories import rum as _rum_repo
 from backend.repositories import session_scoring as _session_scoring_repo
 from backend.repositories import sessions as _sessions_repo
-from backend.repositories import usage as _usage_repo
 from backend.repositories.insights import definitions as _insights_defs
 
 _sys.modules[f"{__name__}.alerts"] = _alerts_repo

@@ -738,7 +738,7 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
             status["edge_ratio"] = cached_status.get("edge_ratio")
         else:
             try:
-                from backend.repositories import usage as _usage_repo
+                from backend.repositories import assets as _usage_repo
 
                 ratio, _ = _usage_repo.get_edge_ratio(con, source)
                 if ratio is not None:

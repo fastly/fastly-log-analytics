@@ -1,6 +1,6 @@
 'use client'
 
-import React, { Suspense } from 'react'
+import React, { Suspense, useMemo } from 'react'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import { useQuery } from '@tanstack/react-query'
@@ -9,12 +9,10 @@ import {
   ArrowUp, ArrowDown, ArrowLeft, Activity, Layers,
 } from 'lucide-react'
 
-import { client, extractApiError } from '@/lib/api'
-import { unwrapClient } from '@/lib/api'
+import { client, extractApiError, unwrapClient } from '@/lib/api'
 import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useBootstrap'
 import { NoServiceSelected } from '@/components/ReportLayout'
-import { PageHeader } from '@/components/ui/confirm-dialog'
-import { StatCard } from '@/components/ui/confirm-dialog'
+import { PageHeader, StatCard } from '@/components/ui/confirm-dialog'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { DataTable } from '@/components/DataTable'
@@ -22,11 +20,273 @@ import { Badge } from '@/components/ui/badge'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-
-import { useStreamAggregates, type TimelinePoint } from './_sections/useStreamAggregates'
+import { OBJECT_TYPE_LABELS } from '@/app/streaming/_sections/StreamingClient'
 
 import { formatDuration } from '@/lib/format'
 import { CHART_COLORS } from '@/lib/chart-helpers'
+
+type Row = Record<string, unknown>
+
+function num(v: unknown): number | null {
+  if (v == null) return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
+function str(v: unknown): string | null {
+  if (v == null) return null
+  return String(v)
+}
+
+function bool(v: unknown): boolean {
+  return v === true || v === 1 || v === '1' || v === 'true'
+}
+
+export interface StreamSummary {
+  durationSeconds: number | null
+  avgBitrate: number | null
+  topBitrate: number | null
+  utilization: number | null
+  rebufferCount: number
+  startupTimeMs: number | null
+  bufferHealthPct: number | null
+  totalRequests: number
+  videoRequests: number
+}
+
+export interface TimelinePoint {
+  timestamp: string
+  bitrate: number | null
+  buffer: number | null
+  throughput: number | null
+  isRebuffer: boolean
+  isStartup: boolean
+}
+
+export interface BitrateTier {
+  bitrate: number
+  count: number
+  pct: number
+}
+
+export interface BitrateShifts {
+  upshifts: number
+  downshifts: number
+}
+
+export interface BufferBucket {
+  label: string
+  count: number
+  pct: number
+}
+
+export interface StarvationEvent {
+  timestamp: string
+  bitrate: number | null
+  buffer: number | null
+  throughput: number | null
+  url: string | null
+}
+
+export interface ObjectTypeDist {
+  type: string
+  label: string
+  count: number
+  pct: number
+}
+
+export interface NetworkPoint {
+  timestamp: string
+  throughput: number | null
+  rtt: number | null
+}
+
+export interface StreamAggregates {
+  summary: StreamSummary
+  timeline: TimelinePoint[]
+  bitrateTiers: BitrateTier[]
+  bitrateShifts: BitrateShifts
+  bufferBuckets: BufferBucket[]
+  starvationEvents: StarvationEvent[]
+  objectTypeDist: ObjectTypeDist[]
+  networkTimeline: NetworkPoint[]
+  pops: string[]
+  contentIds: { id: string; count: number }[]
+}
+
+function computeAggregates(rows: Row[]): StreamAggregates {
+  const sorted = [...rows].sort((a, b) => {
+    const ta = str(a.timestamp) ?? ''
+    const tb = str(b.timestamp) ?? ''
+    return ta < tb ? -1 : ta > tb ? 1 : 0
+  })
+
+  const explicitVideo = sorted.filter(r => {
+    const ot = str(r.cmcd_ot)
+    return ot === 'v' || ot === 'av'
+  })
+  const videoRows = explicitVideo.length > 0
+    ? explicitVideo
+    : sorted.filter(r => num(r.cmcd_br) !== null || num(r.cmcd_bl) !== null)
+
+  const timestamps = sorted.map(r => str(r.timestamp)).filter(Boolean) as string[]
+  let durationSeconds: number | null = null
+  if (timestamps.length >= 2) {
+    const first = new Date(timestamps[0]).getTime()
+    const last = new Date(timestamps[timestamps.length - 1]).getTime()
+    durationSeconds = (last - first) / 1000
+  }
+
+  const videoBitrates = videoRows.map(r => num(r.cmcd_br)).filter((v): v is number => v !== null)
+  const avgBitrate = videoBitrates.length ? videoBitrates.reduce((a, b) => a + b, 0) / videoBitrates.length : null
+
+  const videoTopBitrates = videoRows.map(r => num(r.cmcd_tb)).filter((v): v is number => v !== null)
+  const topBitrate = videoTopBitrates.length
+    ? Math.max(...videoTopBitrates)
+    : (videoBitrates.length ? Math.max(...videoBitrates) : null)
+
+  const utilization = avgBitrate != null && topBitrate != null && topBitrate > 0
+    ? avgBitrate / topBitrate
+    : null
+
+  const rebufferCount = sorted.filter(r => bool(r.cmcd_bs)).length
+
+  let startupTimeMs: number | null = null
+  if (sorted.length > 0) {
+    const firstTs = new Date(str(sorted[0].timestamp) ?? '').getTime()
+    const firstNonStartup = sorted.find(r => !bool(r.cmcd_su) && (str(r.cmcd_ot) === 'v' || str(r.cmcd_ot) === 'av' || num(r.cmcd_br) !== null))
+    if (firstNonStartup) {
+      const nsTs = new Date(str(firstNonStartup.timestamp) ?? '').getTime()
+      startupTimeMs = nsTs - firstTs
+    }
+  }
+
+  const videoBuffers = videoRows.map(r => num(r.cmcd_bl)).filter((v): v is number => v !== null)
+  const bufferHealthPct = videoBuffers.length
+    ? (videoBuffers.filter(b => b > 0).length / videoBuffers.length) * 100
+    : null
+
+  const summary: StreamSummary = {
+    durationSeconds,
+    avgBitrate,
+    topBitrate,
+    utilization,
+    rebufferCount,
+    startupTimeMs,
+    bufferHealthPct,
+    totalRequests: sorted.length,
+    videoRequests: videoRows.length,
+  }
+
+  const timeline: TimelinePoint[] = videoRows.map(r => ({
+    timestamp: str(r.timestamp) ?? '',
+    bitrate: num(r.cmcd_br),
+    buffer: num(r.cmcd_bl),
+    throughput: num(r.cmcd_mtp),
+    isRebuffer: bool(r.cmcd_bs),
+    isStartup: bool(r.cmcd_su),
+  }))
+
+  const tierCounts = new Map<number, number>()
+  for (const br of videoBitrates) tierCounts.set(br, (tierCounts.get(br) ?? 0) + 1)
+  const bitrateTiers: BitrateTier[] = [...tierCounts.entries()]
+    .sort((a, b) => b[0] - a[0])
+    .map(([bitrate, count]) => ({
+      bitrate,
+      count,
+      pct: videoBitrates.length ? (count / videoBitrates.length) * 100 : 0,
+    }))
+
+  let upshifts = 0
+  let downshifts = 0
+  for (let i = 1; i < videoBitrates.length; i++) {
+    if (videoBitrates[i] > videoBitrates[i - 1]) upshifts++
+    else if (videoBitrates[i] < videoBitrates[i - 1]) downshifts++
+  }
+
+  const bucketDefs: [string, (v: number) => boolean][] = [
+    ['0 (empty)', v => v === 0],
+    ['< 2s', v => v > 0 && v < 2000],
+    ['2–10s', v => v >= 2000 && v < 10000],
+    ['10–30s', v => v >= 10000 && v < 30000],
+    ['30s+', v => v >= 30000],
+  ]
+  const bufferBuckets: BufferBucket[] = bucketDefs.map(([label, pred]) => {
+    const count = videoBuffers.filter(pred).length
+    return {
+      label,
+      count,
+      pct: videoBuffers.length ? (count / videoBuffers.length) * 100 : 0,
+    }
+  })
+
+  const starvationEvents: StarvationEvent[] = sorted
+    .filter(r => bool(r.cmcd_bs))
+    .map(r => ({
+      timestamp: str(r.timestamp) ?? '',
+      bitrate: num(r.cmcd_br),
+      buffer: num(r.cmcd_bl),
+      throughput: num(r.cmcd_mtp),
+      url: str(r.url),
+    }))
+
+  const otCounts = new Map<string, number>()
+  for (const r of sorted) {
+    const ot = str(r.cmcd_ot) ?? 'unknown'
+    otCounts.set(ot, (otCounts.get(ot) ?? 0) + 1)
+  }
+  const objectTypeDist: ObjectTypeDist[] = [...otCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([type, count]) => ({
+      type,
+      label: OBJECT_TYPE_LABELS[type] ?? type,
+      count,
+      pct: sorted.length ? (count / sorted.length) * 100 : 0,
+    }))
+
+  const networkTimeline: NetworkPoint[] = sorted
+    .filter(r => num(r.cmcd_mtp) !== null || num(r.tcp_rtt) !== null)
+    .map(r => ({
+      timestamp: str(r.timestamp) ?? '',
+      throughput: num(r.cmcd_mtp),
+      rtt: num(r.tcp_rtt),
+    }))
+
+  const popSet = new Set<string>()
+  for (const r of sorted) {
+    const p = str(r.pop)
+    if (p) popSet.add(p)
+  }
+
+  const cidCounts = new Map<string, number>()
+  for (const r of sorted) {
+    const cid = str(r.cmcd_cid)
+    if (cid) cidCounts.set(cid, (cidCounts.get(cid) ?? 0) + 1)
+  }
+  const contentIds = [...cidCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([id, count]) => ({ id, count }))
+
+  return {
+    summary,
+    timeline,
+    bitrateTiers,
+    bitrateShifts: { upshifts, downshifts },
+    bufferBuckets,
+    starvationEvents,
+    objectTypeDist,
+    networkTimeline,
+    pops: [...popSet],
+    contentIds,
+  }
+}
+
+export function useStreamAggregates(rows: Row[] | undefined): StreamAggregates | null {
+  return useMemo(() => {
+    if (!rows?.length) return null
+    return computeAggregates(rows)
+  }, [rows])
+}
 
 const TIMELINE_LAYOUT = {
   yaxis: { title: { text: 'kbps' } },

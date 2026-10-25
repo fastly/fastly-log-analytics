@@ -46,10 +46,6 @@ vi.mock('next/dynamic', () => ({
   default: () => () => null,
 }))
 
-vi.mock('@/components/SessionScoring/RocPrCurves', () => ({
-  RocPrCurves: () => null,
-  PerReasonAucCard: () => null,
-}))
 vi.mock('@/components/SessionScoring/ScorerSeriesCard', () => ({
   ScoreDistChart: () => null,
   ComplianceChart: () => null,
@@ -67,6 +63,8 @@ vi.mock('@/components/SessionScoring/StatusPanel', () => ({
     <div data-testid="admin-session-scoring-status-card">Status for {serviceId}</div>
   ),
   L2EnforcementCard: () => null,
+  RocPrCurves: () => null,
+  PerReasonAucCard: () => null,
 }))
 vi.mock('@/components/SessionScoring/ThresholdSlider', () => ({ ThresholdSlider: () => null }))
 vi.mock('@/components/SessionScoring/TopFlaggedTable', () => ({ TopFlaggedTable: () => null }))

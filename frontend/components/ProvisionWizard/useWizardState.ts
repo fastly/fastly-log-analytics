@@ -1,75 +1,165 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { client, extractApiError } from "@/lib/api";
-import { unwrapClient } from '@/lib/api';
+import React, { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { client, extractApiError, unwrapClient } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
-import { useServiceStore } from "@/stores/filterStore";
-import { useTimezoneStore } from "@/stores/filterStore";
+import { useServiceStore, useTimezoneStore } from "@/stores/filterStore";
 import { useSSE } from "@/hooks/useSSE";
-import { showToast } from '@/lib/utils';
+import { SHIELD_MAP, showToast } from '@/lib/utils';
 import type { Schema } from "@/types/api";
 import {
-  INITIAL_CONFIG,
-  WIZARD_DRAFT_VERSION,
-  ANALYST_PATH_A_UNSUPPORTED_REASON,
-  getStepsForMode,
-  type DomainStatus,
-  type FosStatus,
-  type JoinPhase,
-  type LakeInfo,
-  type PersistedConfig,
-  type ProvisionConfig,
-  type ProvisionService,
-  type Step,
-  type TokenInfo,
-  type WizardDraft,
-  type WizardMode,
-  type WizardState,
+  INITIAL_CONFIG, WIZARD_DRAFT_VERSION, ANALYST_PATH_A_UNSUPPORTED_REASON, getStepsForMode,
+  type DomainStatus, type FosStatus, type JoinPhase, type LakeInfo, type PersistedConfig,
+  type ProvisionConfig, type ProvisionService, type Step, type TokenInfo, type WizardDraft,
+  type WizardMode, type WizardState,
 } from "./types";
-import { useJoinCompletionEffect, useWizardEffects } from "./wizard-effects";
 import type { components } from "@/types/api.generated";
 import {
-  buildHandleModalClose,
-  runAdminIngest,
-  runDeploy,
-  runExportTerraform,
-  runFetchTerraformPreview,
-  runJoin,
+  buildHandleModalClose, runAdminIngest, runDeploy, runExportTerraform, runFetchTerraformPreview, runJoin,
 } from "./wizard-deploy";
 import {
-  estimateLogFieldBytesPerLine,
-  isLogFieldPresetActive,
-  toggleLogFieldGroup,
-  toggleLogFieldOverride,
-  toggleLogFieldPreset,
-  updateLogFieldLimit,
+  estimateLogFieldBytesPerLine, isLogFieldPresetActive, toggleLogFieldGroup,
+  toggleLogFieldOverride, toggleLogFieldPreset, updateLogFieldLimit,
 } from '@/lib/query-keys';
+
+interface WizardEffectsArgs {
+  open: boolean; step: Step; config: ProvisionConfig;
+  setConfig: React.Dispatch<React.SetStateAction<ProvisionConfig>>;
+  fosStatus: FosStatus; setFosStatus: (s: FosStatus) => void; setFosError: (s: string) => void;
+  setStep: (s: Step) => void; setMode: (m: WizardMode) => void; setSearch: (s: string) => void;
+  setSelectedService: (s: ProvisionService | null) => void; setIsDeploying: (b: boolean) => void;
+  reset: () => void; resetConfig: () => void; joinPhase: JoinPhase; isAnalyzing: boolean;
+  handleAnalyzeLake: () => void; selectedService: ProvisionService | null; token: string;
+  setNgwafWorkspaces: (w: { id: string; name: string }[]) => void;
+  setNgwafFetchError: (s: string) => void; setNgwafDebugRaw: (s: string) => void;
+  setNgwafFetching: (b: boolean) => void; isDone: boolean;
+  checkDomain: (prefix: string) => void; pendingDraft?: WizardDraft | null;
+}
+
+export function useWizardEffects(args: WizardEffectsArgs) {
+  const {
+    open, step, config, setConfig, fosStatus, setFosStatus, setFosError,
+    setStep, setMode, setSearch, setSelectedService, setIsDeploying,
+    reset, resetConfig, joinPhase, isAnalyzing, handleAnalyzeLake,
+    selectedService, token, setNgwafWorkspaces, setNgwafFetchError,
+    setNgwafDebugRaw, setNgwafFetching, isDone, checkDomain, pendingDraft,
+  } = args;
+
+  useEffect(() => {
+    const shield = SHIELD_MAP[config.fos_region];
+    if (shield && shield !== config.cdn_shield) setConfig((prev) => ({ ...prev, cdn_shield: shield }));
+  }, [config.fos_region]);
+
+  useEffect(() => {
+    if (open && !pendingDraft) {
+      setStep("mode"); setMode(null); setSearch(""); setSelectedService(null);
+      setIsDeploying(false); setFosStatus("idle"); setFosError("");
+      reset(); resetConfig();
+    }
+  }, [open, reset, pendingDraft]);
+
+  useEffect(() => {
+    if (step === "storage" && config.cdn_prefix) {
+      const timer = setTimeout(() => checkDomain(config.cdn_prefix), 500);
+      return () => clearTimeout(timer);
+    }
+  }, [config.cdn_prefix, step]);
+
+  useEffect(() => {
+    if (fosStatus !== "idle" && fosStatus !== "checking") {
+      setFosStatus("idle"); setFosError("");
+    }
+  }, [config.fos_bucket_name, config.fos_region, config.fos_access_key, config.fos_secret_key]);
+
+  const autoAnalyzeLake = useEffectEvent(() => {
+    if (fosStatus === "success" && step === "join" && joinPhase === "form" && config.endpoint_name && config.cdn_service_name && !isAnalyzing) {
+      handleAnalyzeLake();
+    }
+  });
+  useEffect(() => { autoAnalyzeLake(); }, [fosStatus]);
+
+  useEffect(() => {
+    if (step !== "ngwaf" || !selectedService?.id) return;
+    setNgwafWorkspaces([]); setNgwafFetchError(""); setNgwafDebugRaw(""); setNgwafFetching(true);
+    client
+      .GET("/api/provision/ngwaf-workspaces", { params: { query: { service_id: selectedService.id, token: token || undefined } } })
+      .then((r) => {
+        if (r.error) {
+          setNgwafFetchError(extractApiError(r.error) || "Could not load workspaces");
+        } else {
+          const data = r.data;
+          setNgwafWorkspaces((data?.workspaces || []).flatMap((w) => (w.id && w.name ? [{ id: w.id, name: w.name }] : [])));
+          if (data?._debug_raw) setNgwafDebugRaw(data._debug_raw);
+          if (data?.error_hint) setNgwafFetchError(data.error_hint);
+        }
+      })
+      .catch((e: unknown) => setNgwafFetchError(extractApiError(e) || "Could not load workspaces"))
+      .finally(() => setNgwafFetching(false));
+  }, [step, selectedService?.id, token]);
+
+  const persistNgwafWorkspace = useEffectEvent(() => {
+    if (isDone && step === "execute" && config.ngwaf_workspace_id && selectedService?.id) {
+      client
+        .PATCH("/api/provision/services/{service_id}/ngwaf-workspace", {
+          params: { path: { service_id: selectedService.id } },
+          headers: { Authorization: `Bearer ${token}` },
+          body: { ngwaf_workspace_id: config.ngwaf_workspace_id },
+        })
+        .then((r) => { if (r?.error) console.error("[wizard] failed to persist ngwaf_workspace_id:", r.error); })
+        .catch((e: unknown) => console.error("[wizard] failed to persist ngwaf_workspace_id:", e));
+    }
+  });
+  useEffect(() => { persistNgwafWorkspace(); }, [isDone]);
+}
+
+interface JoinCompletionEffectArgs {
+  joinPhase: JoinPhase; status: string; config: ProvisionConfig;
+  setIsDeploying: (b: boolean) => void; setJoinedServiceId: (id: string) => void;
+  setActiveServiceId: (id: string) => void;
+  services: { id: string; name: string; accessLevel?: string }[];
+  setServices: (s: { id: string; name: string; accessLevel?: string }[]) => void;
+  queryClient: Pick<QueryClient, "invalidateQueries">;
+  setJoinPhase: (p: JoinPhase) => void; reset: () => void;
+}
+
+export function useJoinCompletionEffect(args: JoinCompletionEffectArgs) {
+  const {
+    joinPhase, status, config, setIsDeploying, setJoinedServiceId,
+    setActiveServiceId, services, setServices, queryClient, setJoinPhase, reset,
+  } = args;
+  useEffect(() => {
+    if (joinPhase !== "connecting") return;
+    if (status === "done") {
+      setIsDeploying(false);
+      setJoinedServiceId(config.cdn_service_name);
+      if (config.cdn_service_name) {
+        setActiveServiceId(config.cdn_service_name);
+        if (!services.some((s) => s.id === config.cdn_service_name)) {
+          setServices([...services, { id: config.cdn_service_name, name: config.cdn_service_name, accessLevel: "read_only" }]);
+        }
+      }
+      queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() });
+      setJoinPhase("done");
+    } else if (status === "error") {
+      setIsDeploying(false); setJoinPhase("form"); reset();
+    }
+  }, [joinPhase, status, config.cdn_service_name, setActiveServiceId, setServices, services, queryClient, reset]);
+}
 
 type ValidateResponse = components["schemas"]["ProvisionValidateResponse"];
 
 // ── validate mutation factory ──
 interface ValidateMutationDeps {
   token: string;
-  setTokenInfo: (info: {
-    id: string;
-    name: string;
-    type: "user" | "automation";
-  }) => void;
+  setTokenInfo: (info: { id: string; name: string; type: "user" | "automation" }) => void;
   setConfig: (updater: (prev: ProvisionConfig) => ProvisionConfig) => void;
   setStep: (s: Step) => void;
   mode: string | null;
 }
 
-export const validateMutationFn = (token: string) =>
-  async (serviceId: string) => {
-    return await unwrapClient(
-      client.POST("/api/provision/validate", {
-        body: { token, service_id: serviceId },
-      }),
-    );
-  };
+export const validateMutationFn = (token: string) => async (serviceId: string) =>
+  await unwrapClient(client.POST("/api/provision/validate", { body: { token, service_id: serviceId } }));
 
 export function buildValidateOnSuccess(deps: ValidateMutationDeps) {
   return (data: ValidateResponse | undefined) => {
@@ -85,57 +175,32 @@ export function buildValidateOnSuccess(deps: ValidateMutationDeps) {
         fos_region: defaults.fos_region || "us-east-1",
         fos_bucket_name: defaults.fos_bucket_name?.toLowerCase() || "",
         fos_prefix: defaults.fos_prefix || "",
-        cdn_service_name:
-          defaults.cdn_service_name || `${data.service_name} (CDN)`,
+        cdn_service_name: defaults.cdn_service_name || `${data.service_name} (CDN)`,
         cdn_prefix: (
           defaults.cdn_prefix ||
-          (defaults.fos_bucket_name
-            ? `fos-${defaults.fos_bucket_name.split("-").slice(0, 2).join("-")}`
-            : "")
+          (defaults.fos_bucket_name ? `fos-${defaults.fos_bucket_name.split("-").slice(0, 2).join("-")}` : "")
         ).toLowerCase(),
       }));
     }
-    deps.setStep(
-      deps.mode === "join" || deps.mode === "ingest" ? "join" : "features",
-    );
+    deps.setStep(deps.mode === "join" || deps.mode === "ingest" ? "join" : "features");
   };
 }
 
 // ── handleCheckConfig ──
 interface CheckConfigArgs {
-  token: string;
-  selectedService: ProvisionService | null;
-  selectedCdnService: ProvisionService | null;
-  config: ProvisionConfig;
-  setIsCheckingConfig: (b: boolean) => void;
-  setConfigStatus: (
-    s: components["schemas"]["ProvisionCheckConfigResponse"] | null,
-  ) => void;
+  token: string; selectedService: ProvisionService | null; selectedCdnService: ProvisionService | null;
+  config: ProvisionConfig; setIsCheckingConfig: (b: boolean) => void;
+  setConfigStatus: (s: components["schemas"]["ProvisionCheckConfigResponse"] | null) => void;
 }
 
 export async function runCheckConfig(args: CheckConfigArgs) {
-  const {
-    token,
-    selectedService,
-    selectedCdnService,
-    config,
-    setIsCheckingConfig,
-    setConfigStatus,
-  } = args;
-  if (!selectedService || !selectedCdnService || !config.fos_bucket_name)
-    return;
+  const { token, selectedService, selectedCdnService, config, setIsCheckingConfig, setConfigStatus } = args;
+  if (!selectedService || !selectedCdnService || !config.fos_bucket_name) return;
   setIsCheckingConfig(true);
   try {
     const data = await unwrapClient(
       client.GET("/api/provision/check-config", {
-        params: {
-          query: {
-            token,
-            service_id: selectedService.id,
-            cdn_service_id: selectedCdnService.id,
-            bucket: config.fos_bucket_name,
-          },
-        },
+        params: { query: { token, service_id: selectedService.id, cdn_service_id: selectedCdnService.id, bucket: config.fos_bucket_name } },
       }),
     );
     if (data) setConfigStatus(data);
@@ -148,15 +213,8 @@ export async function runCheckConfig(args: CheckConfigArgs) {
 
 // ── handleCheckFos ──
 interface CheckFosArgs {
-  vals?: {
-    bucket?: string;
-    region?: string;
-    access_key?: string;
-    secret_key?: string;
-  };
-  config: ProvisionConfig;
-  setFosStatus: (s: FosStatus) => void;
-  setFosError: (s: string) => void;
+  vals?: { bucket?: string; region?: string; access_key?: string; secret_key?: string };
+  config: ProvisionConfig; setFosStatus: (s: FosStatus) => void; setFosError: (s: string) => void;
 }
 
 export async function runCheckFos(args: CheckFosArgs) {
@@ -166,32 +224,23 @@ export async function runCheckFos(args: CheckFosArgs) {
   const access_key = vals?.access_key ?? config.fos_access_key;
   const secret_key = vals?.secret_key ?? config.fos_secret_key;
   if (!bucket || !region || !access_key || !secret_key) return;
-  setFosStatus("checking");
-  setFosError("");
+  setFosStatus("checking"); setFosError("");
   try {
-    const data = await unwrapClient(
-      client.POST("/api/provision/check-fos", {
-        body: { bucket, region, access_key, secret_key },
-      }),
-    );
+    const data = await unwrapClient(client.POST("/api/provision/check-fos", { body: { bucket, region, access_key, secret_key } }));
     if (data?.ok) {
       setFosStatus("success");
     } else {
-      setFosStatus("error");
-      setFosError(data?.error || "Failed to connect.");
+      setFosStatus("error"); setFosError(data?.error || "Failed to connect.");
     }
   } catch (err) {
-    setFosStatus("error");
-    setFosError(err instanceof Error && err.message ? err.message : "An error occurred.");
+    setFosStatus("error"); setFosError(err instanceof Error && err.message ? err.message : "An error occurred.");
   }
 }
 
 // ── checkDomain ──
 interface CheckDomainArgs {
   prefix: string;
-  setDomainStatus: (
-    s: "idle" | "checking" | "available" | "taken" | "error",
-  ) => void;
+  setDomainStatus: (s: "idle" | "checking" | "available" | "taken" | "error") => void;
   setDomainMessage: (m: string) => void;
 }
 
@@ -200,17 +249,11 @@ export async function runCheckDomain(args: CheckDomainArgs) {
   if (!prefix || prefix.length < 3) return;
   setDomainStatus("checking");
   try {
-    const data = await unwrapClient(
-      client.GET("/api/provision/check-domain", {
-        params: { query: { prefix } },
-      }),
-    );
+    const data = await unwrapClient(client.GET("/api/provision/check-domain", { params: { query: { prefix } } }));
     if (data?.available) {
-      setDomainStatus("available");
-      setDomainMessage("Domain available!");
+      setDomainStatus("available"); setDomainMessage("Domain available!");
     } else {
-      setDomainStatus("taken");
-      setDomainMessage("This domain prefix is already in use.");
+      setDomainStatus("taken"); setDomainMessage("This domain prefix is already in use.");
     }
   } catch {
     setDomainStatus("error");
@@ -219,58 +262,33 @@ export async function runCheckDomain(args: CheckDomainArgs) {
 
 // ── handleAnalyzeLake ──
 interface AnalyzeLakeArgs {
-  config: ProvisionConfig;
-  icebergMetadataLocation: string;
-  setIsAnalyzing: (b: boolean) => void;
-  setLakeInfo: (l: LakeInfo) => void;
-  setImportRange: (r: { start: string; end: string }) => void;
-  setStep: (s: Step) => void;
-  setFosStatus: (s: FosStatus) => void;
-  setFosError: (s: string) => void;
+  config: ProvisionConfig; icebergMetadataLocation: string; setIsAnalyzing: (b: boolean) => void;
+  setLakeInfo: (l: LakeInfo) => void; setImportRange: (r: { start: string; end: string }) => void;
+  setStep: (s: Step) => void; setFosStatus: (s: FosStatus) => void; setFosError: (s: string) => void;
 }
 
 export async function runAnalyzeLake(args: AnalyzeLakeArgs) {
-  const {
-    config,
-    icebergMetadataLocation,
-    setIsAnalyzing,
-    setLakeInfo,
-    setImportRange,
-    setStep,
-    setFosStatus,
-    setFosError,
-  } = args;
+  const { config, icebergMetadataLocation, setIsAnalyzing, setLakeInfo, setImportRange, setStep, setFosStatus, setFosError } = args;
   setIsAnalyzing(true);
   try {
     const data = await unwrapClient(
       client.POST("/api/provision/lake-info", {
         body: {
-          bucket: config.fos_bucket_name,
-          region: config.fos_region,
-          access_key: config.fos_access_key,
-          secret_key: config.fos_secret_key,
-          prefix: config.fos_prefix,
-          endpoint: config.fos_endpoint || undefined,
-          iceberg_metadata_location: icebergMetadataLocation || undefined,
+          bucket: config.fos_bucket_name, region: config.fos_region, access_key: config.fos_access_key,
+          secret_key: config.fos_secret_key, prefix: config.fos_prefix,
+          endpoint: config.fos_endpoint || undefined, iceberg_metadata_location: icebergMetadataLocation || undefined,
         },
       }),
     );
     if (data?.ok) {
       setLakeInfo(data);
-      if (data.range?.start && data.range?.end) {
-        setImportRange({
-          start: data.range.start,
-          end: data.range.end,
-        });
-      }
+      if (data.range?.start && data.range?.end) setImportRange({ start: data.range.start, end: data.range.end });
       setStep("analyze");
     } else {
-      setFosStatus("error");
-      setFosError(data?.error || "Failed to analyze data lake.");
+      setFosStatus("error"); setFosError(data?.error || "Failed to analyze data lake.");
     }
   } catch (e) {
-    setFosStatus("error");
-    setFosError(e instanceof Error ? e.message : String(e));
+    setFosStatus("error"); setFosError(e instanceof Error ? e.message : String(e));
   } finally {
     setIsAnalyzing(false);
   }
@@ -793,64 +811,20 @@ export function useWizardState(
   const STEPS = getStepsForMode(mode, config, step);
 
   useWizardEffects({
-    open,
-    step,
-    config,
-    setConfig,
-    fosStatus,
-    setFosStatus,
-    setFosError,
-    setStep,
-    setMode,
-    setSearch,
-    setSelectedService,
-    setIsDeploying,
-    reset,
-    resetConfig: () => setConfig({ ...INITIAL_CONFIG }),
-    joinPhase,
-    isAnalyzing,
-    handleAnalyzeLake,
-    selectedService,
-    token,
-    setNgwafWorkspaces,
-    setNgwafFetchError,
-    setNgwafDebugRaw,
-    setNgwafFetching,
-    isDone,
-    checkDomain,
-    pendingDraft,
+    open, step, config, setConfig, fosStatus, setFosStatus, setFosError, setStep, setMode, setSearch,
+    setSelectedService, setIsDeploying, reset, resetConfig: () => setConfig({ ...INITIAL_CONFIG }),
+    joinPhase, isAnalyzing, handleAnalyzeLake, selectedService, token, setNgwafWorkspaces,
+    setNgwafFetchError, setNgwafDebugRaw, setNgwafFetching, isDone, checkDomain, pendingDraft,
   });
 
-  const handleDeploy = () =>
-    runDeploy({ token, selectedService, config, setIsDeploying, start });
-
+  const handleDeploy = () => runDeploy({ token, selectedService, config, setIsDeploying, start });
   const fetchTerraformPreview = () =>
-    runFetchTerraformPreview({
-      token,
-      selectedService,
-      config,
-      setIsFetchingTerraform,
-      setTerraformFiles,
-      setSelectedTfFile,
-    });
-
-  const handleExportTerraform = () =>
-    runExportTerraform({ token, selectedService, config });
-
+    runFetchTerraformPreview({ token, selectedService, config, setIsFetchingTerraform, setTerraformFiles, setSelectedTfFile });
+  const handleExportTerraform = () => runExportTerraform({ token, selectedService, config });
   const handleAdminIngest = () =>
     runAdminIngest({
-      token,
-      selectedService,
-      selectedCdnService,
-      config,
-      services,
-      setIsDeploying,
-      setJoinedServiceId,
-      setActiveServiceId,
-      setServices,
-      queryClient,
-      setJoinPhase,
-      setStep,
+      token, selectedService, selectedCdnService, config, services, setIsDeploying,
+      setJoinedServiceId, setActiveServiceId, setServices, queryClient, setJoinPhase, setStep,
     });
 
   // The saved draft is loaded when the wizard opens and dropped when it closes (adjusted during
@@ -862,53 +836,26 @@ export function useWizardState(
   }
 
   useEffect(() => {
-    if (!open) return;
-    if (!mode || step === "mode") return;
-    if (pendingDraft) return;
+    if (!open || !mode || step === "mode" || pendingDraft) return;
     const timer = setTimeout(() => {
       if (!draftIdRef.current) draftIdRef.current = makeDraftId();
-      if (!draftCreatedAtRef.current) {
-        draftCreatedAtRef.current = new Date().toISOString();
-      }
+      if (!draftCreatedAtRef.current) draftCreatedAtRef.current = new Date().toISOString();
       const draft: WizardDraft = {
-        version: WIZARD_DRAFT_VERSION,
-        draftId: draftIdRef.current,
-        mode: mode as Exclude<WizardMode, null>,
-        step,
-        currentStep: step,
-        selectedServiceId: selectedService?.id ?? null,
-        selectedServiceName: selectedService?.name ?? null,
-        selectedCdnServiceId: selectedCdnService?.id ?? null,
-        selectedCdnServiceName: selectedCdnService?.name ?? null,
-        tokenInfo,
-        config: stripSecretsFromConfig(config),
-        importMode,
-        importRange,
-        syncEnabled,
-        syncIntervalMins,
-        icebergMetadataLocation,
-        updatedAt: new Date().toISOString(),
-        createdAt: draftCreatedAtRef.current,
+        version: WIZARD_DRAFT_VERSION, draftId: draftIdRef.current,
+        mode: mode as Exclude<WizardMode, null>, step, currentStep: step,
+        selectedServiceId: selectedService?.id ?? null, selectedServiceName: selectedService?.name ?? null,
+        selectedCdnServiceId: selectedCdnService?.id ?? null, selectedCdnServiceName: selectedCdnService?.name ?? null,
+        tokenInfo, config: stripSecretsFromConfig(config), importMode, importRange,
+        syncEnabled, syncIntervalMins, icebergMetadataLocation,
+        updatedAt: new Date().toISOString(), createdAt: draftCreatedAtRef.current,
       };
       saveDraft(draft);
     }, 500);
     return () => clearTimeout(timer);
   }, [
-    open,
-    pendingDraft,
-    step,
-    mode,
-    selectedService?.id,
-    selectedService?.name,
-    selectedCdnService?.id,
-    selectedCdnService?.name,
-    tokenInfo,
-    config,
-    importMode,
-    importRange,
-    syncEnabled,
-    syncIntervalMins,
-    icebergMetadataLocation,
+    open, pendingDraft, step, mode, selectedService?.id, selectedService?.name,
+    selectedCdnService?.id, selectedCdnService?.name, tokenInfo, config,
+    importMode, importRange, syncEnabled, syncIntervalMins, icebergMetadataLocation,
   ]);
 
   useEffect(() => {
@@ -916,10 +863,7 @@ export function useWizardState(
     return subscribeDraft((next) => {
       if (!next) return;
       if (draftIdRef.current && next.draftId !== draftIdRef.current) {
-        showToast(
-          "Wizard updated in another tab. Close and reopen to load latest.",
-          "warn",
-        );
+        showToast("Wizard updated in another tab. Close and reopen to load latest.", "warn");
       }
     });
   }, [open]);
@@ -929,106 +873,29 @@ export function useWizardState(
       clearDraft();
       draftIdRef.current = null;
       draftCreatedAtRef.current = null;
-      queryClient.invalidateQueries({ queryKey: queryKeys.services() })
+      queryClient.invalidateQueries({ queryKey: queryKeys.services() });
     }
   }, [status, isDone, queryClient]);
 
   const filteredServices = Array.isArray(servicesData)
-    ? servicesData.filter(
-        (s) =>
-          s.name.toLowerCase().includes(search.toLowerCase()) ||
-          s.id.toLowerCase().includes(search.toLowerCase()),
-      )
+    ? servicesData.filter((s) => s.name.toLowerCase().includes(search.toLowerCase()) || s.id.toLowerCase().includes(search.toLowerCase()))
     : [];
 
   return {
-    setActiveServiceId,
-    setServices,
-    services,
-    timezone,
-    queryClient,
-    step,
-    setStep,
-    mode,
-    setMode,
-    token,
-    setToken,
-    tokenInfo,
-    search,
-    setSearch,
-    selectedService,
-    setSelectedService,
-    selectedCdnService,
-    setSelectedCdnService,
-    isDeploying,
-    fosStatus,
-    fosError,
-    terraformFiles,
-    selectedTfFile,
-    setSelectedTfFile,
-    isFetchingTerraform,
-    configStatus,
-    isCheckingConfig,
-    handleCheckConfig,
-    ngwafWorkspaces,
-    ngwafFetching,
-    ngwafFetchError,
-    ngwafDebugRaw,
-    lakeInfo,
-    isAnalyzing,
-    analystPathASupported,
-    analystPathAReason,
-    importMode,
-    setImportMode,
-    importRange,
-    setImportRange,
-    syncEnabled,
-    setSyncEnabled,
-    lines,
-    status,
-    isDone,
-    sseError,
-    stop,
-    handleModalClose,
-    onOpenChange,
-    config,
-    setConfig,
-    catalog,
-    isLoadingCatalog,
-    toggleGroup,
-    toggleField,
-    updateFieldLimit,
-    togglePreset,
-    isPresetActive,
-    estimatedBytes,
-    servicesData,
-    servicesError,
-    isLoadingServices,
-    filteredServices,
-    handleTokenSubmit,
-    validateMutation,
-    handleServiceSelect,
-    handleCheckFos,
-    checkDomain,
-    domainStatus,
-    domainMessage,
-    joinPhase,
-    joinedServiceId,
-    syncIntervalMins,
-    setSyncIntervalMins,
-    icebergMetadataLocation,
-    setIcebergMetadataLocation,
-    estimatedImportSize,
-    handleAnalyzeLake,
-    handleJoin,
-    handleFinishJoin,
-    handleDeploy,
-    fetchTerraformPreview,
-    handleExportTerraform,
-    handleAdminIngest,
-    STEPS,
-    pendingDraft,
-    resumeDraft,
-    discardDraft,
+    setActiveServiceId, setServices, services, timezone, queryClient, step, setStep, mode, setMode,
+    token, setToken, tokenInfo, search, setSearch, selectedService, setSelectedService,
+    selectedCdnService, setSelectedCdnService, isDeploying, fosStatus, fosError, terraformFiles,
+    selectedTfFile, setSelectedTfFile, isFetchingTerraform, configStatus, isCheckingConfig,
+    handleCheckConfig, ngwafWorkspaces, ngwafFetching, ngwafFetchError, ngwafDebugRaw,
+    lakeInfo, isAnalyzing, analystPathASupported, analystPathAReason, importMode, setImportMode,
+    importRange, setImportRange, syncEnabled, setSyncEnabled, lines, status, isDone, sseError,
+    stop, handleModalClose, onOpenChange, config, setConfig, catalog, isLoadingCatalog,
+    toggleGroup, toggleField, updateFieldLimit, togglePreset, isPresetActive, estimatedBytes,
+    servicesData, servicesError, isLoadingServices, filteredServices, handleTokenSubmit,
+    validateMutation, handleServiceSelect, handleCheckFos, checkDomain, domainStatus,
+    domainMessage, joinPhase, joinedServiceId, syncIntervalMins, setSyncIntervalMins,
+    icebergMetadataLocation, setIcebergMetadataLocation, estimatedImportSize, handleAnalyzeLake,
+    handleJoin, handleFinishJoin, handleDeploy, fetchTerraformPreview, handleExportTerraform,
+    handleAdminIngest, STEPS, pendingDraft, resumeDraft, discardDraft,
   };
 }
