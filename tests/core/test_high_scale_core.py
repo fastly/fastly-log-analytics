@@ -8,9 +8,10 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
+from backend.core.high_scale_sections import HighScaleSections, current_clickhouse_scope
+from backend.high_scale.source_discovery import INITIAL_SOURCE_CURSOR
 from psycopg_pool import ConnectionPool
 
-from backend.core.high_scale_sections import HighScaleSections, current_clickhouse_scope
 from backend.core.query_attribution import Attribution, current_attribution
 from backend.high_scale.archive_models import (
     ArchiveArtifact,
@@ -19,7 +20,6 @@ from backend.high_scale.archive_models import (
     ArchiveState,
 )
 from backend.high_scale.postgres_control import PostgresControlPlane
-from backend.high_scale.source_discovery import INITIAL_SOURCE_CURSOR
 
 
 # ── Merged from tests/core/test_high_scale_postgres_control.py ──

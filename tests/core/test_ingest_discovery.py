@@ -21,6 +21,7 @@ from functools import partial
 from unittest.mock import patch
 
 import pytest
+from tests._helpers.sources import make_source
 
 import backend.core.ingest as ingest_mod
 from backend.core.ingest import (
@@ -28,7 +29,6 @@ from backend.core.ingest import (
     _parse_fastly_filename_dt,
     ingest,
 )
-from tests._helpers.sources import make_source
 
 # ── _parse_fastly_filename_dt ────────────────────────────────────────────────
 

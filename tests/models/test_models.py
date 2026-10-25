@@ -10,7 +10,14 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from backend.models.security import (
+    SecurityAggregatesRequest,
+    SecurityAggregatesResponse,
+    SecurityTopBotsResponse,
+)
 from pydantic import AliasChoices
+from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
+from tests._helpers.wire import assert_rows_wire_identical, assert_sections_wire_identical, wire
 
 from backend.core.duckdb import _clear_schema_cache
 from backend.core.fastly.client import NgwafWorkspacesResponse, StatsRecord, StatsResponse
@@ -49,11 +56,6 @@ from backend.models.performance import (
     TopBotRow,
     WafSignalRow,
 )
-from backend.models.security import (
-    SecurityAggregatesRequest,
-    SecurityAggregatesResponse,
-    SecurityTopBotsResponse,
-)
 from backend.provision.cmcd_fields import _CMCD_CUSTOM_FIELDS
 from backend.repositories import origin as origin_mod
 from backend.repositories._base import _safe_table
@@ -79,8 +81,6 @@ from backend.repositories.security import get_security_aggregates, get_security_
 from backend.repositories.security import get_security_aggregates as sec_aggs
 from backend.repositories.sessions import get_session_detail
 from backend.repositories.value import get_summary as get_value_summary
-from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
-from tests._helpers.wire import assert_rows_wire_identical, assert_sections_wire_identical, wire
 from tests.repositories.test_insights import (
     _MOCK_POP_MAP,
     _create_impossible_distance_table,

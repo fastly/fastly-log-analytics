@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from backend.high_scale.replay import replay_performance_projections
 
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.publication import ClickHousePublication, InMemoryBatchManifestStore
@@ -14,7 +15,6 @@ from backend.high_scale.recovery import (
     rebuild_rum_facts_from_fos,
     rebuild_serving_state_from_fos,
 )
-from backend.high_scale.replay import replay_performance_projections
 from tests.high_scale.conftest import (
     InMemoryManifestCatalog,
     make_test_archive_manifest,
@@ -503,9 +503,10 @@ def test_performance_projection_rebuild_backfills_asn_rows_but_never_republishes
 
 # ── Merged from test_replay.py ───────────────────────────────────────
 
+from backend.high_scale.replay import replay_manifest
+
 from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
 from backend.high_scale.publication import InsertReceipt
-from backend.high_scale.replay import replay_manifest
 from tests.high_scale.conftest import (
     ReplayClickHouseClient as ReplayClient,
 )

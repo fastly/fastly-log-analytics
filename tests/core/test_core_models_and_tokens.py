@@ -23,12 +23,12 @@ from unittest.mock import MagicMock, patch
 
 import duckdb
 import pytest
+from backend.core.session_token import SessionTokenError, open_session_token, seal_session_token
+from backend.utils.bounded_cache import CacheRegistry
 
 from backend.core import session_token as st
-from backend.core.session_token import SessionTokenError, open_session_token, seal_session_token
 from backend.models.common import FilterSpec
 from backend.repositories.utils.filters import build_where_clause
-from backend.utils.bounded_cache import CacheRegistry
 
 
 # ── Merged from tests/core/test_common_models.py ──

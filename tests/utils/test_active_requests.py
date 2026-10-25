@@ -7,8 +7,6 @@ import threading
 import time
 
 import pytest
-
-from backend.utils import active_requests
 from backend.utils.active_requests import (
     _reset_for_tests,
     active_request_count,
@@ -17,6 +15,8 @@ from backend.utils.active_requests import (
     should_defer_cron,
     yield_to_api,
 )
+
+from backend.utils import active_requests
 
 
 @pytest.fixture(autouse=True)

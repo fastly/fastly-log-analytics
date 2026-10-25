@@ -21,6 +21,8 @@ from uuid import UUID, uuid4
 import duckdb
 import httpx
 import pytest
+from backend.core.clickhouse_schema import CLICKHOUSE_SCHEMA_VERSION, create_clickhouse_schema, target_identity
+from tests._helpers.sources import TinyFos
 
 from backend import config
 from backend.core import clickhouse_client as ch
@@ -51,13 +53,11 @@ from backend.core.clickhouse_publication import (
     verify_generation,
 )
 from backend.core.clickhouse_publication import build_batch_id as _rows_build_batch_id
-from backend.core.clickhouse_schema import CLICKHOUSE_SCHEMA_VERSION, create_clickhouse_schema, target_identity
 from backend.core.metadata.pg_schema import pg_schema_statements
 from backend.models.common import DebugQuery
 from backend.utils import telemetry
 from scripts import clickhouse_replay
 from scripts.clickhouse_replay import parser, run
-from tests._helpers.sources import TinyFos
 
 
 # ── Merged from tests/core/test_clickhouse_publication.py ──
@@ -603,6 +603,7 @@ def test_statistics_are_recorded_without_values(clients, monkeypatch):
 
 def test_client_phases_and_section_identity_are_measured_at_existing_seams(clients, monkeypatch):
     from backend.core.high_scale_sections import HighScaleSections
+
     from backend.core.query_attribution import Attribution, current_attribution
 
     clock = [0.0]

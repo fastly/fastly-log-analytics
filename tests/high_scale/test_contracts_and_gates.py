@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
+from backend.high_scale.exports import ExportManager, ExportState
 
 from backend.high_scale.archive_models import (
     ArchiveManifest,
@@ -17,7 +18,6 @@ from backend.high_scale.archive_models import (
     recommend_retention,
     validate_archive_transition,
 )
-from backend.high_scale.exports import ExportManager, ExportState
 from backend.high_scale.postgres_control import PostgresControlPlane
 from backend.high_scale.publication import (
     ClickHousePublication,

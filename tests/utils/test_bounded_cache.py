@@ -6,7 +6,6 @@ import threading
 import time
 
 import pytest
-
 from backend.utils.bounded_cache import BoundedTTLCache
 
 

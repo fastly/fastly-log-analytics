@@ -27,6 +27,15 @@ from unittest.mock import MagicMock, patch
 import botocore.exceptions
 import duckdb
 import pytest
+from tests._helpers.ledger import (
+    DuckLakeLedgerEnv,
+    clear_ledger,
+    lake_reader,
+)
+from tests._helpers.ledger import attacher as _attacher
+from tests._helpers.ledger import (
+    clear_ledger as _clear_ledger,
+)
 
 from backend.core import iceberg as ice
 from backend.core import ingest as ing
@@ -43,15 +52,6 @@ from backend.core.ingest import (
     ingest,
     merge_lake_files,
     sweep_ledger_once,
-)
-from tests._helpers.ledger import (
-    DuckLakeLedgerEnv,
-    clear_ledger,
-    lake_reader,
-)
-from tests._helpers.ledger import attacher as _attacher
-from tests._helpers.ledger import (
-    clear_ledger as _clear_ledger,
 )
 
 

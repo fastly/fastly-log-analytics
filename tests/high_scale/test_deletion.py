@@ -366,6 +366,8 @@ from pathlib import Path
 from typing import Any
 
 from backend.high_scale.archive_writer import write_batch_archive_checkpoint
+from backend.high_scale.replay import replay_manifest, replay_origin_projections
+
 from backend.high_scale.publication import (
     ClickHousePublication,
     HighScaleBatch,
@@ -377,7 +379,6 @@ from backend.high_scale.recovery import (
     rebuild_origin_projections_from_fos,
     rebuild_serving_state_from_fos,
 )
-from backend.high_scale.replay import replay_manifest, replay_origin_projections
 
 
 class _MockClickHouseClient:

@@ -473,10 +473,10 @@ def test_token_resolution_never_logs_the_secret(configs, caplog) -> None:
 
 from collections.abc import AsyncIterator
 
+from backend.utils.sse import sse_response
 from sse_starlette.sse import EventSourceResponse
 
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS
-from backend.utils.sse import sse_response
 
 
 async def _stream() -> AsyncIterator[str]:
@@ -522,7 +522,6 @@ def test_routers_build_sse_only_via_sse_response():
 from types import SimpleNamespace
 
 import pytest
-
 from backend.utils.auth import analyst_allowed_services, mask_ips_for, require_owned_row
 
 
@@ -661,10 +660,10 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from backend.utils.valkey_publisher import ValkeyPublisher
 
 from backend.utils import valkey_publisher as vp
 from backend.utils.telemetry import _last as _last_error_log
-from backend.utils.valkey_publisher import ValkeyPublisher
 
 
 @pytest.fixture(autouse=True)

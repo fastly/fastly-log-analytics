@@ -418,6 +418,8 @@ def test_dashboard_bundle_serves_real_top_bots():
 import gzip
 from datetime import UTC, datetime, timedelta
 
+from backend.high_scale.source_discovery import SourceObjectDescriptor
+
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.ingest_controller import HighScaleIngestController, _enrich_high_scale_ngwaf_bots
 from backend.high_scale.publication import (
@@ -428,7 +430,6 @@ from backend.high_scale.publication import (
 )
 from backend.high_scale.publication import _extract_custom_fields as persisted_fact_fields
 from backend.high_scale.recovery import rebuild_security_projections_from_fos, replay_security_projections
-from backend.high_scale.source_discovery import SourceObjectDescriptor
 from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
 
 NOW = datetime(2026, 9, 11, 20, 0, tzinfo=UTC)

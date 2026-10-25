@@ -9,7 +9,6 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
-
 from backend.sync_status_snapshot import compute_sync_status_cached
 
 
@@ -241,10 +240,10 @@ import threading
 from unittest.mock import patch
 
 import pytest
+from backend.sync_status_publisher import SyncStatusPublisher
 from fastapi.testclient import TestClient
 
 from backend.main import app
-from backend.sync_status_publisher import SyncStatusPublisher
 from tests._helpers.wire import await_until
 
 
@@ -1004,7 +1003,6 @@ def test_concurrent_add_progress_does_not_lose_events():
 
 
 import pytest
-
 from backend.cron_runs_publisher import CronRunsPublisher
 
 # ── Publisher unit tests ────────────────────────────────────────────────────

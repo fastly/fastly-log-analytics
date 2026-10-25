@@ -20,12 +20,15 @@ from unittest.mock import MagicMock, patch
 
 import duckdb
 import pytest
+from backend.core.metric_expressions import METRIC_DEFINITIONS, get_metric_sql
+from backend.models._base import MetricType
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from tests._helpers.config_fakes import fetch_metric_snapshot_history as _get_history
 
 from backend import config
 from backend import config as svcconfig
@@ -44,7 +47,6 @@ from backend.core import request_telemetry as web_vitals_store
 from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
 from backend.core.metadata import slow_queries, usage_log, usage_log_db
 from backend.core.metadata.usage_log import clear_usage_log
-from backend.core.metric_expressions import METRIC_DEFINITIONS, get_metric_sql
 from backend.core.query_instrumentation import (
     InstrumentedDuckDBConnection,
     _InstrumentedRecordReader,
@@ -54,12 +56,10 @@ from backend.core.query_instrumentation import (
 )
 from backend.core.request_context import RequestContext, _enforce_service_access
 from backend.main import app
-from backend.models._base import MetricType
 from backend.utils.date_utils import iso_z
 from backend.utils.remote_access import TimeBounds
 from backend.utils.telemetry import get_page_load_id
 from backend.utils.time_window import resolve_window
-from tests._helpers.config_fakes import fetch_metric_snapshot_history as _get_history
 from tests.conftest import make_test_request_context
 
 

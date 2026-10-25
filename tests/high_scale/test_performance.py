@@ -164,6 +164,7 @@ def test_asn_enrichment_is_disjoint_overhead_and_cache_reuse_is_historical(
     monkeypatch: pytest.MonkeyPatch, filtered: bool
 ) -> None:
     from backend.core.high_scale_sections import current_clickhouse_scope
+
     from backend.core.query_attribution import Attribution, current_attribution
     from backend.utils.telemetry import get_page_load_id, set_page_load_id
 

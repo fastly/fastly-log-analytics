@@ -31,11 +31,11 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from tests._helpers.sources import make_source
 
 from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.core.rollups import partial_hour as ph
 from tests._helpers.rollups import noop_lock as _noop_lock
-from tests._helpers.sources import make_source
 
 
 # ── Merged from tests/core/test_rollups_compaction.py ──
