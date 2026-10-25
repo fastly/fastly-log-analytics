@@ -322,13 +322,15 @@ def send_edge_rum_probe(cdn_domain: str, marker: str, idx: int) -> int:
         return 0
 
 
-def send_correlated_probe(url: str, stream: str) -> int:
+def send_correlated_probe(url: str, stream: str, probe_value: float | str | None = None) -> int:
+    # RUM rows are built from the body first, so the unique correlation value
+    # must be in the body as well as the querystring fallback.
     body = None
     if stream != "request":
         body = (
-            {"measurements": [{"type": "web-vitals", "values": {"LCP": 1250.0}}]}
+            {"measurements": [{"type": "web-vitals", "values": {"LCP": float(probe_value or 1250.0)}}]}
             if stream == "vitals"
-            else {"exceptions": [{"type": "FreshnessProbe", "value": "freshness probe"}]}
+            else {"exceptions": [{"type": "FreshnessProbe", "value": str(probe_value or "freshness probe")}]}
         )
     request = urllib.request.Request(
         url,
@@ -351,17 +353,35 @@ class _NoProbeRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _normalize_probe_key(value: Any, stream: str) -> Any:
+    if stream != "vitals" or isinstance(value, bool):
+        return value
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return value
+    return str(int(number)) if number.is_integer() else value
+
+
+def correlated_vitals_value(marker: str, idx: int) -> int:
+    """Unrealistically large, integral LCP value unique to this run and probe."""
+    return 10_000_000 + (int(marker[:6], 16) % 1_000_000) * 100 + idx
+
+
 def poll_correlated_stream(
     backend_url: str, service_id: str, stream: str, probes: list[dict[str, Any]], high_scale: bool = False
 ) -> dict[str, Any]:
+    # Client ids are pseudonymised at ingest, so RUM probes correlate on a
+    # unique metric value (vitals) or error message (errors) instead.
     dataset, column = {
         "request": ("logs", "url"),
-        "vitals": ("client_vitals", "cid"),
-        "errors": ("client_errors", "cid"),
+        "vitals": ("client_vitals", "metric_value"),
+        "errors": ("client_errors", "error_message"),
     }[stream]
-    if high_scale and stream != "request":
-        column = "client_id"
-    keys = ", ".join(f"'{escape_sql_literal(p['key'])}'" for p in probes)
+    if stream == "vitals":
+        keys = ", ".join(str(int(p["key"])) for p in probes)
+    else:
+        keys = ", ".join(f"'{escape_sql_literal(p['key'])}'" for p in probes)
     metric = " AND metric_name = 'LCP'" if stream == "vitals" else ""
     sql = (
         f"SELECT {column} AS probe_key, MIN(timestamp) AS timestamp, COUNT(*) AS matches "
@@ -386,6 +406,8 @@ def poll_correlated_stream(
     expected = {p["key"] for p in probes}
     found = {}
     for row in rows:
+        if isinstance(row, dict):
+            row = {**row, "probe_key": _normalize_probe_key(row.get("probe_key"), stream)}
         if (
             not isinstance(row, dict)
             or not isinstance(row.get("probe_key"), str)
@@ -536,18 +558,17 @@ def measure_correlated_freshness(
                 query = urllib.parse.urlencode([*urllib.parse.parse_qsl(parsed.query), ("probe", marker), ("seq", idx)])
                 url = urllib.parse.urlunsplit(parsed._replace(path=parsed.path or "/", query=query))
                 key = urllib.parse.urlsplit(url).path + "?" + query
-            else:
-                query = urllib.parse.urlencode(
-                    {
-                        "cid": cid,
-                        "rum_metric_name": "LCP" if stream == "vitals" else "exception",
-                        "rum_metric_value": 1250,
-                    }
-                )
+            elif stream == "vitals":
+                value = correlated_vitals_value(marker, idx)
+                query = urllib.parse.urlencode({"cid": cid, "rum_metric_name": "LCP", "rum_metric_value": value})
                 url = urllib.parse.urlunsplit(parsed._replace(path="/rum-beacon", query=query))
-                key = cid
+                key = str(value)
+            else:
+                key = f"fla-probe-{cid}"
+                query = urllib.parse.urlencode({"cid": cid, "rum_error_message": key})
+                url = urllib.parse.urlunsplit(parsed._replace(path="/rum-beacon", query=query))
             sent = time.monotonic()
-            status = send_correlated_probe(url, stream)
+            status = send_correlated_probe(url, stream, None if stream == "request" else key)
             probes.append(
                 {"stream": stream, "key": key, "sent": sent, "response": time.monotonic(), "http_status": status}
             )

@@ -420,6 +420,17 @@ def test_compute_lag_statistics_filters_pre_traffic_and_computes_stats():
     assert stats["dashboard_lag"]["p95"] == 22.0
 
 
+def test_correlated_vitals_keys_normalise_numeric_engine_values(monkeypatch):
+    from scripts.dev import measure_e2e_freshness as freshness
+
+    probe = {"key": "10000001", "sent": 0.0}
+    rows = [{"probe_key": 10000001.0, "timestamp": "2026-10-22T00:00:00Z", "matches": 1}]
+    monkeypatch.setattr(freshness, "http_post", lambda *a, **kw: (200, {"data": rows, "truncated": False}))
+    result = freshness.poll_correlated_stream("https://admin.example.test", "svc", "vitals", [probe])
+    assert result["error"] is None
+    assert "first_visible" in probe
+
+
 def test_correlated_query_rejects_unrelated_and_duplicate_rows(monkeypatch):
     from scripts.dev import measure_e2e_freshness as freshness
 
@@ -474,7 +485,7 @@ def test_correlated_sender_separates_payloads_and_never_supplies_request_id(monk
 def test_correlated_query_failure_is_not_negative_visibility(monkeypatch, status, payload):
     from scripts.dev import measure_e2e_freshness as freshness
 
-    probe = {"key": "owned", "sent": 0.0}
+    probe = {"key": "10000001", "sent": 0.0}
     monkeypatch.setattr(freshness, "http_post", lambda *a, **kw: (status, payload))
     result = freshness.poll_correlated_stream("https://admin.example.test", "svc", "vitals", [probe])
     assert result["error"] == "query_failed_or_incomplete"
@@ -495,13 +506,16 @@ def test_correlated_query_uses_exact_safe_literals_and_separate_datasets(monkeyp
     monkeypatch.setattr(freshness, "http_post", post)
     for high_scale in (False, True):
         for stream in ("request", "vitals", "errors"):
-            probe = {"key": "/?customer=O'Brien&probe=owned", "sent": 0.0}
+            key = "10000001" if stream == "vitals" else "/?customer=O'Brien&probe=owned"
+            probe = {"key": key, "sent": 0.0}
             result = freshness.poll_correlated_stream("https://admin.example.test", "svc", stream, [probe], high_scale)
             assert result["error"] is None
             assert "last_absent" in probe
             body = calls[-1]
-            column = "url" if stream == "request" else "client_id" if high_scale else "cid"
-            assert f"{column} IN ('/?customer=O''Brien&probe=owned')" in body["sql"]
+            column = {"request": "url", "vitals": "metric_value", "errors": "error_message"}[stream]
+            literal = "10000001" if stream == "vitals" else "'/?customer=O''Brien&probe=owned'"
+            assert f"{column} IN ({literal})" in body["sql"]
+            assert "cid" not in body["sql"] and "client_id" not in body["sql"]
             assert body["dataset"] == {"request": "logs", "vitals": "client_vitals", "errors": "client_errors"}[stream]
             assert "LIMIT 100" in body["sql"]
             assert "INTERVAL 1 HOUR" in body["sql"]
@@ -617,8 +631,8 @@ def test_correlated_runner_uses_approved_path_and_separate_paced_beacons(monkeyp
         lambda *a, **kw: (200, {"services": [{"service_id": "svc", "rum_enabled": True}]}),
     )
 
-    def send(url, stream):
-        sends.append((now[0], stream, url))
+    def send(url, stream, value=None):
+        sends.append((now[0], stream, url, value))
         return 204 if stream != "request" else 200
 
     def post(url, body, headers, **kwargs):
@@ -641,6 +655,11 @@ def test_correlated_runner_uses_approved_path_and_separate_paced_beacons(monkeyp
     assert request_url.path == "/"
     assert parse_qs(request_url.query)["existing"] == ["keep"]
     assert parse_qs(sends[1][2].split("?", 1)[1])["cid"] != parse_qs(sends[2][2].split("?", 1)[1])["cid"]
+    vitals_qs = parse_qs(sends[1][2].split("?", 1)[1])
+    assert vitals_qs["rum_metric_value"] == [sends[1][3]] and int(sends[1][3]) >= 10_000_000
+    errors_qs = parse_qs(sends[2][2].split("?", 1)[1])
+    assert errors_qs["rum_error_message"] == [sends[2][3]] and sends[2][3].startswith("fla-probe-")
+    assert sends[0][3] is None
     for dataset in ("logs", "client_vitals", "client_errors"):
         times = [t for t, d in polls if d == dataset]
         assert all(b - a >= 10 for a, b in zip(times, times[1:]))
