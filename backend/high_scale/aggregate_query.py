@@ -126,6 +126,12 @@ def _is_partial_minute_window(start: datetime | None, end: datetime | None) -> b
     return any(value.astimezone(UTC).second != 0 or value.astimezone(UTC).microsecond != 0 for value in (start, end))
 
 
+def _require_window_bounds(start: datetime | None, end: datetime | None) -> tuple[datetime, datetime]:
+    if start is None or end is None:
+        raise ValueError("aggregate fact query requires both range bounds")
+    return start, end
+
+
 def _query_fact_aggregates(
     client: AggregateQueryClient,
     *,
@@ -209,7 +215,6 @@ def query_clickhouse_aggregate(
     if partial_minute_window:
         if dimension not in _FACT_DIMENSION_EXPRESSIONS[request.domain]:
             raise ValueError("aggregate dimension cannot be read exactly from event-time facts")
-        assert request.start is not None and request.end is not None
     elif request.start is not None and request.end is not None:
         start = request.start.astimezone(UTC)
         end = request.end.astimezone(UTC)
@@ -221,14 +226,14 @@ def query_clickhouse_aggregate(
 
     try:
         if partial_minute_window:
-            assert request.start is not None and request.end is not None
+            start, end = _require_window_bounds(request.start, request.end)
             totals, rows = _query_fact_aggregates(
                 client,
                 service_id=request.service_id,
                 domain=request.domain,
                 dimensions=[dimension],
-                start=request.start,
-                end=request.end,
+                start=start,
+                end=end,
             )
         else:
             totals = client.execute(
@@ -313,7 +318,7 @@ def query_clickhouse_aggregates_batch(
         params[key] = dim
 
     if partial_minute_window:
-        assert start is not None and end is not None
+        start, end = _require_window_bounds(start, end)
 
         try:
             totals_rows, top_rows = _query_fact_aggregates(
