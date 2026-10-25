@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { TIME_HOVER_LAYOUT, makeTimeXAxis, denseTimeGrid } from '@/lib/chart-helpers'
 import { denseBarTrace, lineTrace, secondaryYAxis, withSecondaryAxis } from '@/lib/chart-builders'
-import { buildTrafficData, buildTrafficDataAsync, type BuildTrafficDataParams } from '@/lib/traffic-chart'
+import { buildTrafficData, type BuildTrafficDataParams } from '@/lib/traffic-chart'
+import { buildTrafficDataAsync } from '@/app/dashboard/_sections/DashboardClient'
 
 describe('TIME_HOVER_LAYOUT', () => {
   it('exposes the hover + legend keys callers spread into Plotly layouts', () => {

@@ -32,9 +32,46 @@ import { cn } from '@/lib/utils'
 import { TrafficChart } from './TrafficChart'
 import { CardGrid } from './CardGrid'
 import { buildChartLayout, COLLAPSED_SECTIONS_KEY, type DashboardAggregates, type DashboardBodyProps, type DashboardCatalog } from './categories'
-import { buildTrafficData, buildTrafficDataAsync } from '@/lib/traffic-chart'
+import { buildTrafficData, type BuildTrafficDataParams } from '@/lib/traffic-chart'
 import { useLocalStorageString } from '@/hooks/useDerivedState'
 import type { PlotlyTrace } from '@/types/plotly'
+
+const WORKER_THRESHOLD = 2000
+
+export function buildTrafficDataAsync(params: BuildTrafficDataParams): Promise<PlotlyTrace[]> {
+  const n = params.aggregates?.time_series?.length ?? 0
+
+  if (typeof window === 'undefined' || process.env.NODE_ENV === 'test' || n < WORKER_THRESHOLD) {
+    return Promise.resolve(buildTrafficData(params))
+  }
+
+  return new Promise((resolve, reject) => {
+    let worker: Worker
+    try {
+      worker = new Worker(new URL('../../../lib/workers/chartDataWorker.ts', import.meta.url))
+    } catch {
+      resolve(buildTrafficData(params))
+      return
+    }
+    worker.onmessage = (event) => {
+      worker.terminate()
+      if (event.data?.success) {
+        resolve(event.data.data)
+      } else {
+        reject(new Error(event.data?.error ?? 'chartDataWorker failed'))
+      }
+    }
+    worker.onerror = () => {
+      worker.terminate()
+      try {
+        resolve(buildTrafficData(params))
+      } catch (sync) {
+        reject(sync)
+      }
+    }
+    worker.postMessage(params)
+  })
+}
 
 /**
  * Composite dashboard fetch — /api/dashboard/bundle returns the two
