@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -284,7 +285,14 @@ def test_cmcd_facts_queries_configured_domain(client, test_service_source):
     from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     service = _service()
-    app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(service)
+    watermark_scopes = []
+
+    def watermark():
+        watermark_scopes.append(current_clickhouse_scope())
+        return service.cmcd_watermark
+
+    scoped_service = replace(service, cmcd_watermark=watermark)
+    app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(scoped_service)
     response = client.post(
         f"/api/high-scale/services/{test_service_source['service_id']}/cmcd-facts",
         json={"start_time": "2026-09-11T20:00:00Z", "end_time": "2026-09-11T21:00:00Z"},
@@ -293,7 +301,12 @@ def test_cmcd_facts_queries_configured_domain(client, test_service_source):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["metadata"]["watermark"]["domain"] == "cmcd"
-    timing = body["_section_timings"][0]
+    watermark_timing, timing = body["_section_timings"]
+    assert watermark_timing["section"] == watermark_scopes[0]["section"] == "cmcd.watermark"
+    assert watermark_timing["section_id"] == watermark_scopes[0]["section_id"]
+    assert watermark_timing["source"] == watermark_scopes[0]["source"] == "projected_fact"
+    assert watermark_timing["activity"] == "overhead"
+    assert watermark_timing["section_id"] != timing["section_id"]
     scope = service.client.scopes[0]
     assert timing["section"] == "cmcd.facts"
     assert timing["source"] == scope["source"] == "projected_fact"

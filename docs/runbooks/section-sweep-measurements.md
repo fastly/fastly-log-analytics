@@ -38,6 +38,11 @@ Actual client HTTP traffic is capped at **2,500 RPS aggregate** to protect the C
 
 The explicit metadata parser is not a claim that all current server paths emit that metadata. Missing server instrumentation remains visible as gaps.
 
+The CMCD facts route attributes its coverage and last-visible-event lookups to
+`cmcd.watermark` (`projected_fact`, `activity="overhead"`), separately from
+`cmcd.facts` computation. Both use the existing request correlation and debug
+policy. Their durations are client wall observations, not server CPU.
+
 ### Cache-owner observation contract
 
 Cache observations are stamped at the component's owner, not inferred from request order. `_response_cache` carries `state`, configured `ttl_seconds` when applicable, and `prewarmer` (`null` when not established). A second lookup that hits after an earlier miss reports a hit. Request-specific observations are excluded from stored payloads.

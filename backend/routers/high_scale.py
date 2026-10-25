@@ -733,14 +733,19 @@ def cmcd_facts(
 ):
     service = _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=False)
     start, end = _clamp_and_parse_window(ctx, req.start_time, req.end_time)
+    trace = HighScaleSections(ctx.service_id, "cmcd")
     try:
-        watermark = service.watermark_for("cmcd")
+        watermark = trace.run(
+            "watermark",
+            lambda: service.watermark_for("cmcd"),
+            source="projected_fact",
+            activity="overhead",
+        )
     except KeyError:
         raise HTTPException(
             status_code=404,
             detail=make_error("high_scale_domain_not_configured", "CMCD is not configured for this service"),
         ) from None
-    trace = HighScaleSections(ctx.service_id, "cmcd")
     page = trace.run(
         "facts",
         lambda: query_cmcd_facts(
