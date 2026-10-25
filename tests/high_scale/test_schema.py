@@ -855,3 +855,12 @@ def test_flat_rum_record_without_any_metric_or_error_is_quarantined(domain) -> N
     assert result.accepted_rows == 0
     assert result.quarantined_rows == 1
     assert result.dead_letters[0].raw_line == payload
+
+
+def test_faro_exception_with_nontext_message_is_quarantined() -> None:
+    source = ArchiveSourceObject("svc", "rum_errors", "raw/rum/invalid-error.gz", "sha256:source", 100, "v1")
+    payload = json.dumps({"rum_body": json.dumps({"exceptions": [{"value": 42}]})}).encode()
+    result = decode_source_object(source, payload, transform_version="normalize.v1")
+    assert result.accepted_rows == 0
+    assert result.quarantined_rows == 1
+    assert result.dead_letters[0].raw_line == payload

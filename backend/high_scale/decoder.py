@@ -317,6 +317,8 @@ def _expand_faro_rum_events(log_data: dict[str, Any], domain: str) -> list[dict[
             except (ValueError, TypeError):
                 err_col = 0
             err_msg = metric.get("error_message") or "Unknown error"
+            if not isinstance(err_msg, str):
+                raise ValueError("Faro error_message must be text")
             err_file = metric.get("error_file") or "unknown.js"
             base_fields.update(
                 {

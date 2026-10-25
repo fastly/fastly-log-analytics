@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 from datetime import UTC, datetime, timedelta
 
 import pyarrow as pa
@@ -378,6 +379,46 @@ def test_empty_message_exception_is_visible_before_ack_and_invalid_record_is_arc
     assert [row["_record_kind"] for row in archived] == ["event", "dead_letter"]
     assert archived[1]["line_ordinal"] == 1
     assert control.calls[-1] == "acknowledged"
+
+
+def test_invalid_sibling_metric_is_counted_while_valid_exception_is_retained(caplog) -> None:
+    ownership = OwnershipStore()
+    ledger = HighScaleLedger()
+    clickhouse = _ClickHouse()
+    ownership.initialize("svc", owner="high_scale", source_cursor="cursor-0")
+    archive = ArchivePublication(InMemoryObjectStore())
+    controller = HighScaleIngestController(
+        ownership=ownership,
+        ledger=ledger,
+        archive=archive,
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
+        worker_id="worker-1",
+    )
+    record = {
+        "timestamp": "2026-09-14T20:00:01Z",
+        "rum_body": json.dumps(
+            {
+                "exceptions": [{"value": "boom"}],
+                "measurements": [{"type": "web-vitals", "values": {"lcp": "invalid"}}],
+            }
+        ),
+    }
+    result = _ingest_one(
+        controller,
+        service_id="svc",
+        domain="rum_errors",
+        object_key="raw/rum/invalid-sibling.gz",
+        checksum="sha256:invalid-sibling",
+        payload=json.dumps(record).encode(),
+        version="v1",
+    )
+    assert [batch.domain for batch in clickhouse.batches] == ["rum_errors"]
+    archived = pq.read_table(pa.BufferReader(archive.read_artifact(result.manifest))).to_pylist()
+    assert archived[0]["raw_json"] == json.dumps(record)
+    assert any(
+        getattr(item, "domain", None) == "rum_vitals" and getattr(item, "quarantined_rows", None) == 1
+        for item in caplog.records
+    )
 
 
 def test_pure_vitals_object_publishes_no_sibling_error_rows() -> None:

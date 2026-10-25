@@ -81,9 +81,95 @@ an object first owns it. One beacon can carry both vitals and errors. The
 ingest controller therefore also decodes the sibling domain from the claimed
 payload and publishes the rows that pass `row_matches_serving_domain` under a
 distinct batch id (`{manifest_id}:{sibling}`), before acknowledging the source.
-Before this fix, the sibling's rows were dropped and the raw object was later
-deleted. Those historical rows are lost; recover them only from archived
-`raw_json` with a scoped, duplicate-checked repair, never a cursor reset.
+Before this fix, the sibling's rows were dropped from serving and the raw object
+was later deleted. Retained archive `raw_json` can still recover those rows;
+use a scoped, duplicate-checked repair, never a cursor reset.
+
+### Diagnose mixed RUM archives before repairing them
+
+The claimed domain describes source ownership, not every archived row's kind.
+An error-owned manifest can contain vitals, including sources with no errors at
+all. Subtracting error-fact counts from its archive count does not establish
+error loss. Verify the artifact checksum, commit marker and canonical digest;
+inspect each `sources_json` slice and the archive's recorded owner epoch.
+Expanded rows can repeat the same original beacon. Reconstruct it once per
+source version and line ordinal, preserving gaps in the original line numbers.
+
+Compare the shared Faro parser's actual exceptions and measurements with both
+fact tables. Empty-message exceptions are valid and use `Unknown error`.
+Blank error columns on a vital are not an exception discriminator. The decoded
+`_rum_kind` wins over the edge envelope's metric fields and query string, which
+can otherwise fabricate a vital from an exception. Invalid metrics are
+quarantined, not replaced with zero; unclassifiable flat records retain their
+original bytes in dead letters. These changes affect only RUM decoding and
+publication classification, not request ingestion.
+Malformed sibling-domain records are counted separately even when the claimed
+domain has a valid projection; the archive retains the original mixed beacon.
+Do not turn an invalid exception message into an accepted, invisible row.
+
+Validate Faro event semantics, not just an empty error column. The shared
+standard extractor projects custom events as `event_<name>` with value `1.0`;
+navigation events project their actual numeric attributes, and web-vitals
+measurements can produce multiple metrics (excluding `delta`). An event-input
+count is therefore not automatically a valid-vital row count. Review the
+reconstructed actual projections; genuine exceptions never become zero/default
+vitals.
+
+### Recover one proven missing retained cohort
+
+Deploy the decoder correction through the canonical deployment procedure first.
+Then run this command **inside the configured High-Scale backend**, with an
+operator-selected unique archive-manifest prefix:
+
+```bash
+python -m scripts.recover_high_scale_rum --manifest-prefix "$MANIFEST_PREFIX"
+```
+
+Dry-run is the default. It performs no publication, cursor, source-ledger or
+archive writes. Output contains hashes and counts only. Keep it in private
+operator evidence and review the domain-specific candidate, exact-match,
+semantic-equivalent and missing counts. The plan digest binds the immutable
+archive, decoded candidate contents and recorded owner epoch, not a claim that
+all those candidates are missing.
+
+This tool is deliberately small: one committed terminal RUM manifest, at most
+100 sources, 1,000 archived/expanded/existing rows and a 32 MiB artifact. Fact
+and receipt reads retain a 100,000-row scan cap and at most five seconds per
+query. It checks service/source identities across **all batch IDs**, compares
+persisted content even when a transform changed event IDs, and verifies each
+matched batch's service/domain/generation publication receipt with a full-key
+lookup. Facts are plain MergeTree tables: do not use `FINAL` on them.
+Publication receipts use `FINAL`. An older/different generation that cannot be
+verified under the archive owner epoch blocks repair; it is not treated as
+missing. Do not widen scan bounds to make an ambiguous cohort pass.
+
+After reviewing the saved dry run, apply the same immutable candidate scope:
+
+```bash
+python -m scripts.recover_high_scale_rum \
+  --manifest-prefix "$MANIFEST_PREFIX" \
+  --apply --approve-plan "$REVIEWED_PLAN_DIGEST"
+```
+
+Serialize operational repair/rebuild commands; do not run a generic replay
+concurrently. Apply takes a per-service PostgreSQL advisory lock and holds
+shared locks on the current owner and exact terminal source rows. A changed
+owner epoch, ledger lineage, digest, hidden fact, duplicate identity, content
+conflict, expired event or unreconstructable source aborts the operation.
+The serving generation is the recorded **owner epoch**, never `archive_epoch`.
+Only the presently missing identity set is published under a deterministic
+repair batch ID. Ordinary durable publication receipts still fence inserts;
+pre/post cross-batch identity checks provide idempotency beyond block dedup.
+An interrupted/ambiguous insert remains an explicit blocker, not permission
+for a new random rebuild ID.
+
+Successful apply requires a fresh plan with zero remaining missing rows.
+Repeat the dry run independently and verify exact counts, publication visibility
+and unchanged error/request populations before closing the repair. A rerun
+with the same reviewed digest skips identities already present. This repairs
+facts only; it neither resets discovery nor rebuilds additive aggregates.
+No throughput, freshness or complete-history qualification follows from a
+successful scoped repair.
 
 ## Capacity profiles
 
