@@ -143,6 +143,17 @@ Publication receipts use `FINAL`. An older/different generation that cannot be
 verified under the archive owner epoch blocks repair; it is not treated as
 missing. Do not widen scan bounds to make an ambiguous cohort pass.
 
+Repair publication uses a recovery-only global batch verifier, not a
+candidate-time-only count. It inventories every active partition (at most 32),
+groups them into at most six reads weighted below 90,000 physical rows, and
+reads every target-batch fact across those groups under the same 100,000-row
+per-query cap. It verifies exact identities and payloads, including rows on
+other dates or from unexpected sources, then rechecks the complete partition
+set. Metadata weights never prove absence. Oversized/changing inventories,
+partial batches, duplicates, conflicting/out-of-scope facts and query failures
+abort; they are never skipped, guessed empty, or deleted for a blind retry.
+The normal request-ingest publication adapter is unchanged.
+
 After reviewing the saved dry run, apply the same immutable candidate scope:
 
 ```bash
