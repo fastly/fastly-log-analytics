@@ -9,6 +9,10 @@ and monitors how long until:
   4. Other analytics pages reflect the live state (/api/performance, /api/security, etc.)
 
 Modes:
+  - Correlated (--correlated --url <approved-edge-url>): Exact URL/cid lookups,
+    at most one edge send/second and one query/stream every ten seconds.
+    Reports monotonic event-to-queryable upper bounds, never clock-point latency
+    or peak-load qualification. Evidence is owner-only; no cache manipulation.
   - Active Continuous Traffic (--active, default): Streams edge requests in background
     threads (e.g. 10 RPS) for --duration seconds while polling serving APIs every 2s,
     calculating Min, Max, Avg, and P95 lag across the active window.
@@ -48,6 +52,7 @@ from typing import Any
 # Direct path invocation and python -m share the same explicit repo root.
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from backend.utils.sql_validator import escape_sql_literal  # noqa: E402
 from scripts.lib.admin_tls import admin_origin, admin_urlopen, validate_admin_tls_config  # noqa: E402
 from scripts.lib.environments import parse_iso_utc  # noqa: E402
 from scripts.lib.section_measurements import BUDGETS  # noqa: E402
@@ -315,6 +320,301 @@ def send_edge_rum_probe(cdn_domain: str, marker: str, idx: int) -> int:
         return e.code
     except Exception:
         return 0
+
+
+def send_correlated_probe(url: str, stream: str) -> int:
+    body = None
+    if stream != "request":
+        body = (
+            {"measurements": [{"type": "web-vitals", "values": {"LCP": 1250.0}}]}
+            if stream == "vitals"
+            else {"exceptions": [{"type": "FreshnessProbe", "value": "freshness probe"}]}
+        )
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"User-Agent": "FLA-FreshnessProbe/1.0", "Content-Type": "application/json"},
+    )
+    try:
+        # Do not follow redirects to an origin/path the operator did not approve.
+        opener = urllib.request.build_opener(_NoProbeRedirect())
+        with opener.open(request, timeout=5) as response:
+            return response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+    except Exception:
+        return 0
+
+
+class _NoProbeRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        return None
+
+
+def poll_correlated_stream(
+    backend_url: str, service_id: str, stream: str, probes: list[dict[str, Any]], high_scale: bool = False
+) -> dict[str, Any]:
+    dataset, column = {
+        "request": ("logs", "url"),
+        "vitals": ("client_vitals", "cid"),
+        "errors": ("client_errors", "cid"),
+    }[stream]
+    if high_scale and stream != "request":
+        column = "client_id"
+    keys = ", ".join(f"'{escape_sql_literal(p['key'])}'" for p in probes)
+    metric = " AND metric_name = 'LCP'" if stream == "vitals" else ""
+    sql = (
+        f"SELECT {column} AS probe_key, MIN(timestamp) AS timestamp, COUNT(*) AS matches "
+        f"FROM {dataset} WHERE {column} IN ({keys}) "
+        "AND timestamp >= CURRENT_TIMESTAMP - INTERVAL 1 HOUR "
+        f"AND timestamp <= CURRENT_TIMESTAMP + INTERVAL 1 MINUTE{metric} "
+        f"GROUP BY {column} LIMIT 100"
+    )
+    started = time.monotonic()
+    status, payload = http_post(
+        f"{backend_url.rstrip('/')}/api/query?{urllib.parse.urlencode({'service_id': service_id})}",
+        {"sql": sql, "dataset": dataset, "max_rows": 100},
+        {"x-fastly-service-id": service_id},
+        timeout=5,
+    )
+    ended = time.monotonic()
+    observation = {"stream": stream, "started": started, "ended": ended, "http_status": status, "error": None}
+    rows = payload.get("data") if isinstance(payload, dict) else None
+    if status != 200 or not isinstance(rows, list) or payload.get("truncated") is not False:
+        observation["error"] = "query_failed_or_incomplete"
+        return observation
+    expected = {p["key"] for p in probes}
+    found = {}
+    for row in rows:
+        if (
+            not isinstance(row, dict)
+            or not isinstance(row.get("probe_key"), str)
+            or row.get("probe_key") not in expected
+            or row["probe_key"] in found
+            or row.get("matches") != 1
+            or parse_iso_utc(row.get("timestamp")) is None
+        ):
+            observation["error"] = "invalid_or_ambiguous_correlation"
+            return observation
+        found[row["probe_key"]] = row
+    for probe in probes:
+        row = found.get(probe["key"])
+        if row is None:
+            probe["last_absent"] = started
+        else:
+            probe["first_visible"] = ended
+            probe["source_timestamp"] = row["timestamp"]
+            probe["first_positive_query_started"] = started
+    return observation
+
+
+def summarize_correlated(probes: list[dict[str, Any]], ended: float) -> dict[str, Any]:
+    streams = {}
+    for stream in ("request", "vitals", "errors"):
+        population = [p for p in probes if p["stream"] == stream]
+        visible = [p for p in population if p.get("first_visible") is not None and 200 <= p["http_status"] < 300]
+        bounds = sorted(p["first_visible"] - p["sent"] for p in visible)
+        count = len(bounds)
+        complete = bool(population) and count == len(population)
+        p95 = bounds[math.ceil(count * 0.95) - 1] if count else None
+        streams[stream] = {
+            "sent": len(population),
+            "correlated": sum(p.get("first_visible") is not None for p in population),
+            "observed": count,
+            "right_censored": sum(p.get("first_visible") is None for p in population),
+            "http_errors": sum(not 200 <= p["http_status"] < 300 for p in population),
+            "left_censored": sum(p.get("last_absent") is None for p in visible),
+            "complete": complete,
+            "p95_sample_floor": BUDGETS["minimum_samples_per_state"],
+            "p95_population_sufficient": complete and count >= BUDGETS["minimum_samples_per_state"],
+            "upper_bound_s": {
+                "p95": p95,
+                "p99": bounds[math.ceil(count * 0.99) - 1] if count else None,
+                "max": max(bounds) if count else None,
+            },
+            "p99_population_sufficient": complete and count >= 100,
+            "target_assessment": (
+                "within_target_upper_bound"
+                if complete
+                and count >= BUDGETS["minimum_samples_per_state"]
+                and p95 <= BUDGETS["peak_freshness_p95_ms"] / 1000
+                else "incomplete_not_proven_failure"
+            ),
+            "samples": [
+                {
+                    "http_status": p["http_status"],
+                    "send_to_response_s": p["response"] - p["sent"],
+                    "followup_duration_s": ended - p["sent"],
+                    "source_timestamp": p.get("source_timestamp"),
+                    "event_to_queryable_upper_bound_s": (
+                        p["first_visible"] - p["sent"] if p.get("first_visible") is not None else None
+                    ),
+                    # This interval brackets send-to-visibility, not event-clock latency.
+                    "send_to_queryable_interval_s": [
+                        p["last_absent"] - p["sent"] if p.get("last_absent") is not None else 0,
+                        p["first_visible"] - p["sent"] if p.get("first_visible") is not None else None,
+                    ],
+                    "right_censored": p.get("first_visible") is None,
+                    "left_censored": p.get("first_visible") is not None and p.get("last_absent") is None,
+                }
+                for p in population
+            ],
+        }
+    return streams
+
+
+def measure_correlated_freshness(
+    env_info: dict[str, str],
+    edge_url: str,
+    num_requests: int = 10,
+    num_rum: int = 5,
+    num_errors: int = 0,
+    poll_interval_s: float = 10,
+    max_wait_s: float = 120,
+) -> dict[str, Any]:
+    parsed = urllib.parse.urlsplit(edge_url)
+    counts = (num_requests, num_rum, num_errors)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+        or any(k in {"probe", "seq"} for k, _ in urllib.parse.parse_qsl(parsed.query))
+    ):
+        raise ValueError("--url must be the approved absolute edge target, without credentials, fragment or probe keys")
+    if (
+        any(n < 0 for n in counts)
+        or not 1 <= sum(counts) <= 100
+        or not math.isfinite(poll_interval_s)
+        or poll_interval_s < 10
+        or not math.isfinite(max_wait_s)
+        or not sum(counts) + poll_interval_s <= max_wait_s <= 600
+    ):
+        raise ValueError(
+            "Require 1–100 total probes, polling >=10s, and timeout between total probes + interval and 600s"
+        )
+    marker = uuid.uuid4().hex
+    status, settings = http_get(
+        f"{env_info['backend_url'].rstrip('/')}/api/services?"
+        f"{urllib.parse.urlencode({'service_id': env_info['service_id']})}",
+        {"x-fastly-service-id": env_info["service_id"]},
+        timeout=5,
+    )
+    services = settings.get("services") if isinstance(settings, dict) else None
+    service = next(
+        (
+            s
+            for s in (services if isinstance(services, list) else [])
+            if isinstance(s, dict) and s.get("service_id") == env_info["service_id"]
+        ),
+        None,
+    )
+    if status != 200 or service is None:
+        raise ValueError(f"correlated preflight failed (HTTP {status}); no traffic sent")
+    high_scale = bool(service.get("is_high_scale"))
+    if (num_rum or num_errors) and not service.get("rum_enabled"):
+        raise ValueError("RUM is not enabled; no traffic sent")
+    queue = [
+        (stream, idx)
+        for idx in range(max(counts))
+        for stream, count in zip(("request", "vitals", "errors"), counts, strict=True)
+        if idx < count
+    ]
+    probes: list[dict[str, Any]] = []
+    queries = []
+    started = time.monotonic()
+    deadline = started + max_wait_s
+    next_send = started
+    next_poll = started + poll_interval_s
+    while time.monotonic() < deadline:
+        now = time.monotonic()
+        if queue and now >= next_send:
+            stream, idx = queue.pop(0)
+            cid = f"{marker}-{stream}-{idx}"
+            if stream == "request":
+                query = urllib.parse.urlencode([*urllib.parse.parse_qsl(parsed.query), ("probe", marker), ("seq", idx)])
+                url = urllib.parse.urlunsplit(parsed._replace(path=parsed.path or "/", query=query))
+                key = urllib.parse.urlsplit(url).path + "?" + query
+            else:
+                query = urllib.parse.urlencode(
+                    {
+                        "cid": cid,
+                        "rum_metric_name": "LCP" if stream == "vitals" else "exception",
+                        "rum_metric_value": 1250,
+                    }
+                )
+                url = urllib.parse.urlunsplit(parsed._replace(path="/rum-beacon", query=query))
+                key = cid
+            sent = time.monotonic()
+            status = send_correlated_probe(url, stream)
+            probes.append(
+                {"stream": stream, "key": key, "sent": sent, "response": time.monotonic(), "http_status": status}
+            )
+            next_send = time.monotonic() + 1
+        if time.monotonic() >= next_poll:
+            for stream in ("request", "vitals", "errors"):
+                pending = [p for p in probes if p["stream"] == stream and p.get("first_visible") is None]
+                if pending and time.monotonic() + 5 <= deadline:
+                    queries.append(
+                        poll_correlated_stream(
+                            env_info["backend_url"], env_info["service_id"], stream, pending, high_scale
+                        )
+                    )
+            next_poll = time.monotonic() + poll_interval_s
+        if not queue and all(p.get("first_visible") is not None for p in probes):
+            break
+        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+    ended = time.monotonic()
+    streams = summarize_correlated(probes, ended)
+    for stream, requested in zip(("request", "vitals", "errors"), counts, strict=True):
+        if streams[stream]["sent"] != requested:
+            streams[stream].update(
+                complete=False,
+                p95_population_sufficient=False,
+                p99_population_sufficient=False,
+                target_assessment="incomplete_not_proven_failure",
+            )
+    return {
+        "qualification": "incomplete",
+        "qualification_gaps": [
+            "peak_conditions_not_verified",
+            *[
+                f"{stream}_population_incomplete_or_below_floor"
+                for stream, s in streams.items()
+                if not s["p95_population_sufficient"]
+            ],
+            *(["query_errors_observed"] if any(q["error"] is not None for q in queries) else []),
+        ],
+        "measurement_contract": {
+            "correlated_to_probe_marker": True,
+            "measure": "monotonic_send_to_first_correlated_query_response_upper_bound",
+            "source_timestamp": "Fastly time.start (request timestamp / RUM log_data.timestamp)",
+            "event_clock_point_latency_s": None,
+            "clock_uncertainty_s": None,
+            "poll_interval_s": poll_interval_s,
+            "poll_resolution": "minimum interval after sweep; actual per-query start/end bounds recorded",
+            "query_window": "server now - 1 hour through server now + 1 minute",
+            "query_timeout_s": 5,
+            "query_row_cap": 100,
+            "high_scale": high_scale,
+            "aggregate_send_rps_cap": 1,
+            "target_p95_s": BUDGETS["peak_freshness_p95_ms"] / 1000,
+        },
+        "unknowns": [
+            "peak_load_not_verified",
+            "event_clock_point_latency_unknown",
+            "source_clock_window_clipping_unknown",
+        ],
+        "unsent": len(queue),
+        "requested": dict(zip(("request", "vitals", "errors"), counts, strict=True)),
+        "preflight_request_count": 1,
+        "elapsed_s": ended - started,
+        "query_count": len(queries),
+        "query_errors": sum(q["error"] is not None for q in queries),
+        "queries": [{**q, "started": q["started"] - started, "ended": q["ended"] - started} for q in queries],
+        "streams": streams,
+    }
 
 
 class ActiveTrafficStreamer:
@@ -1081,6 +1381,10 @@ def main():
     parser.add_argument("--requests", type=int, default=10, help="Number of edge requests to send (burst mode)")
     parser.add_argument("--rum-beacons", type=int, default=5, help="Number of RUM beacons to send (burst mode)")
     parser.add_argument("--timeout", type=float, default=45.0, help="Max wait seconds for ingest (burst mode)")
+    parser.add_argument("--correlated", action="store_true", help="Bounded exact URL/cid freshness upper bounds")
+    parser.add_argument("--url", help="Approved edge target URL, including its existing path (correlated mode)")
+    parser.add_argument("--rum-errors", type=int, default=0, help="Separate exception beacons (correlated mode)")
+    parser.add_argument("--correlated-interval", type=float, default=10, help="Correlated poll interval, >=10 seconds")
     parser.add_argument("--output", type=str, default="reports/deploys/current/relics/e2e_freshness_report.json")
     args = parser.parse_args()
     _load_persisted_deploy_env()
@@ -1092,7 +1396,21 @@ def main():
     else:
         targets = [args.env]
 
-    if args.burst:
+    if args.correlated:
+        if len(targets) != 1 or not args.url or args.burst:
+            parser.error("--correlated requires exactly one --env and an explicit approved --url, without --burst")
+        results = [
+            measure_correlated_freshness(
+                load_environment_config(targets[0]),
+                args.url,
+                args.requests,
+                args.rum_beacons,
+                args.rum_errors,
+                args.correlated_interval,
+                args.timeout,
+            )
+        ]
+    elif args.burst:
         print(f"\n{'#' * 80}", flush=True)
         print("# FASTLY LOG ANALYTICS — SINGLE-BURST VISIBILITY DELAY BENCHMARK", flush=True)
         print(f"# Targets: {targets}", flush=True)
@@ -1124,7 +1442,10 @@ def main():
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w") as f:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+    fd = os.open(out_path, flags, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as f:
         json.dump(results, f, indent=2, default=str)
     print(f"✅ Full benchmark report written to {out_path}\n", flush=True)
 

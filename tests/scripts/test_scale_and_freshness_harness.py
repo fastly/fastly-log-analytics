@@ -420,6 +420,254 @@ def test_compute_lag_statistics_filters_pre_traffic_and_computes_stats():
     assert stats["dashboard_lag"]["p95"] == 22.0
 
 
+def test_correlated_query_rejects_unrelated_and_duplicate_rows(monkeypatch):
+    from scripts.dev import measure_e2e_freshness as freshness
+
+    probe = {"key": "/?probe=owned&seq=0", "sent": 0.0}
+    for rows in (
+        [{"probe_key": "/unrelated", "timestamp": "2026-10-22T00:00:00Z", "matches": 1}],
+        [{"probe_key": probe["key"], "timestamp": "2026-10-22T00:00:00Z", "matches": 2}],
+        [{"probe_key": probe["key"], "timestamp": None, "matches": 1}],
+    ):
+        monkeypatch.setattr(freshness, "http_post", lambda *a, **kw: (200, {"data": rows, "truncated": False}))
+        result = freshness.poll_correlated_stream("https://admin.example.test", "svc", "request", [probe])
+        assert result["error"] == "invalid_or_ambiguous_correlation"
+        assert "first_visible" not in probe
+        assert "last_absent" not in probe
+
+
+def test_correlated_sender_separates_payloads_and_never_supplies_request_id(monkeypatch):
+    from scripts.dev import measure_e2e_freshness as freshness
+
+    requests = []
+
+    class Response:
+        status = 204
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class Opener:
+        def open(self, request, **kwargs):
+            requests.append(request)
+            return Response()
+
+    def build(handler):
+        assert handler.redirect_request(None, None, 302, "", {}, "https://unapproved.example.test") is None
+        return Opener()
+
+    monkeypatch.setattr(freshness.urllib.request, "build_opener", build)
+    for stream in ("request", "vitals", "errors"):
+        assert freshness.send_correlated_probe("https://edge.example.test/", stream) == 204
+    assert requests[0].data is None
+    assert "measurements" in json.loads(requests[1].data)
+    assert "exceptions" not in json.loads(requests[1].data)
+    assert "exceptions" in json.loads(requests[2].data)
+    assert "measurements" not in json.loads(requests[2].data)
+    assert all(not req.has_header("Fastly-request-id") for req in requests)
+
+
+@pytest.mark.parametrize(("status", "payload"), [(503, {}), (0, "private failure"), (200, {"data": []})])
+def test_correlated_query_failure_is_not_negative_visibility(monkeypatch, status, payload):
+    from scripts.dev import measure_e2e_freshness as freshness
+
+    probe = {"key": "owned", "sent": 0.0}
+    monkeypatch.setattr(freshness, "http_post", lambda *a, **kw: (status, payload))
+    result = freshness.poll_correlated_stream("https://admin.example.test", "svc", "vitals", [probe])
+    assert result["error"] == "query_failed_or_incomplete"
+    assert "last_absent" not in probe
+    assert "first_visible" not in probe
+    assert "private failure" not in str(result)
+
+
+def test_correlated_query_uses_exact_safe_literals_and_separate_datasets(monkeypatch):
+    from scripts.dev import measure_e2e_freshness as freshness
+
+    calls = []
+
+    def post(url, body, headers, **kwargs):
+        calls.append(body)
+        return 200, {"data": [], "truncated": False}
+
+    monkeypatch.setattr(freshness, "http_post", post)
+    for high_scale in (False, True):
+        for stream in ("request", "vitals", "errors"):
+            probe = {"key": "/?customer=O'Brien&probe=owned", "sent": 0.0}
+            result = freshness.poll_correlated_stream("https://admin.example.test", "svc", stream, [probe], high_scale)
+            assert result["error"] is None
+            assert "last_absent" in probe
+            body = calls[-1]
+            column = "url" if stream == "request" else "client_id" if high_scale else "cid"
+            assert f"{column} IN ('/?customer=O''Brien&probe=owned')" in body["sql"]
+            assert body["dataset"] == {"request": "logs", "vitals": "client_vitals", "errors": "client_errors"}[stream]
+            assert "LIMIT 100" in body["sql"]
+            assert "INTERVAL 1 HOUR" in body["sql"]
+            assert body["max_rows"] == 100
+            assert ("metric_name = 'LCP'" in body["sql"]) == (stream == "vitals")
+
+
+def test_correlated_upper_bound_does_not_use_source_clock_or_prove_failure(monkeypatch):
+    from scripts.dev import measure_e2e_freshness as freshness
+
+    times = iter([112.0, 115.0, 130.0, 136.0])
+    monkeypatch.setattr(freshness.time, "monotonic", lambda: next(times))
+    source_time = "2099-01-01T00:00:00Z"
+    probe = {"stream": "request", "key": "owned", "sent": 100.0, "response": 101.0, "http_status": 200}
+    responses = iter(
+        [
+            (200, {"data": [], "truncated": False}),
+            (200, {"data": [{"probe_key": "owned", "timestamp": source_time, "matches": 1}], "truncated": False}),
+        ]
+    )
+    monkeypatch.setattr(freshness, "http_post", lambda *a, **kw: next(responses))
+    freshness.poll_correlated_stream("https://admin.example.test", "svc", "request", [probe])
+    freshness.poll_correlated_stream("https://admin.example.test", "svc", "request", [probe])
+    report = freshness.summarize_correlated([probe], ended=140)
+    sample = report["request"]["samples"][0]
+    assert sample["event_to_queryable_upper_bound_s"] == 36
+    assert sample["send_to_queryable_interval_s"] == [12, 36]
+    assert sample["source_timestamp"] == source_time
+    assert sample["left_censored"] is False
+    assert report["request"]["target_assessment"] == "incomplete_not_proven_failure"
+    assert report["vitals"]["observed"] == 0
+    assert report["errors"]["complete"] is False
+
+
+def test_correlated_sql_finds_only_exact_recent_events(monkeypatch):
+    import duckdb
+
+    from scripts.dev import measure_e2e_freshness as freshness
+
+    key = "/approved/O'Brien?probe=owned&seq=0"
+    with duckdb.connect(":memory:") as connection:
+        connection.execute("CREATE TABLE logs(url VARCHAR, timestamp TIMESTAMPTZ)")
+        connection.execute(
+            "INSERT INTO logs VALUES (?, CURRENT_TIMESTAMP), (?, CURRENT_TIMESTAMP), "
+            "(?, CURRENT_TIMESTAMP - INTERVAL 2 HOUR)",
+            [key, key + "unrelated", "/old?probe=owned"],
+        )
+
+        def post(url, body, headers, **kwargs):
+            result = connection.execute(body["sql"])
+            columns = [col[0] for col in result.description]
+            rows = [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+            for row in rows:
+                row["timestamp"] = row["timestamp"].isoformat()
+            return 200, {"data": rows, "truncated": False}
+
+        monkeypatch.setattr(freshness, "http_post", post)
+        probes = [
+            {"stream": "request", "key": k, "sent": 0, "response": 1, "http_status": 200}
+            for k in (key, "/old?probe=owned", "/absent?probe=owned")
+        ]
+        result = freshness.poll_correlated_stream("https://admin.example.test", "svc", "request", probes)
+        assert result["error"] is None
+        assert "first_visible" in probes[0]
+        assert all("first_visible" not in p and "last_absent" in p for p in probes[1:])
+
+
+def test_correlated_missing_and_http_failed_probes_never_pass():
+    from scripts.dev import measure_e2e_freshness as freshness
+
+    probes = [
+        {"stream": "vitals", "key": "quiet", "sent": 1, "response": 2, "http_status": 204},
+        {"stream": "errors", "key": "bad", "sent": 3, "response": 4, "http_status": 503, "first_visible": 5},
+    ]
+    report = freshness.summarize_correlated(probes, ended=30)
+    assert report["vitals"]["right_censored"] == 1
+    assert report["vitals"]["upper_bound_s"]["p95"] is None
+    assert report["vitals"]["samples"][0]["send_to_queryable_interval_s"] == [0, None]
+    assert report["vitals"]["samples"][0]["followup_duration_s"] == 29
+    assert report["errors"]["http_errors"] == 1
+    assert report["errors"]["observed"] == 0
+    assert report["errors"]["complete"] is False
+
+
+def test_correlated_tail_population_floor_and_left_censoring():
+    from scripts.dev import measure_e2e_freshness as freshness
+
+    def report(n):
+        probes = [
+            {"stream": "request", "key": str(i), "sent": 0, "response": 1, "http_status": 200, "first_visible": 15}
+            for i in range(n)
+        ]
+        return freshness.summarize_correlated(probes, ended=20)["request"]
+
+    assert report(29)["p95_population_sufficient"] is False
+    sufficient = report(30)
+    assert sufficient["p95_population_sufficient"] is True
+    assert sufficient["p99_population_sufficient"] is False
+    assert sufficient["left_censored"] == 30
+    assert sufficient["target_assessment"] == "within_target_upper_bound"
+
+
+def test_correlated_runner_uses_approved_path_and_separate_paced_beacons(monkeypatch):
+    from scripts.dev import measure_e2e_freshness as freshness
+
+    now = [100.0]
+    sends, polls = [], []
+    monkeypatch.setattr(freshness.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(freshness.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+    monkeypatch.setattr(
+        freshness,
+        "http_get",
+        lambda *a, **kw: (200, {"services": [{"service_id": "svc", "rum_enabled": True}]}),
+    )
+
+    def send(url, stream):
+        sends.append((now[0], stream, url))
+        return 204 if stream != "request" else 200
+
+    def post(url, body, headers, **kwargs):
+        polls.append((now[0], body["dataset"]))
+        return 200, {"data": [], "truncated": False}
+
+    monkeypatch.setattr(freshness, "send_correlated_probe", send)
+    monkeypatch.setattr(freshness, "http_post", post)
+    report = freshness.measure_correlated_freshness(
+        {"service_id": "svc", "backend_url": "https://admin.example.test"},
+        "https://edge.example.test/?existing=keep",
+        num_requests=1,
+        num_rum=1,
+        num_errors=1,
+        max_wait_s=25,
+    )
+    assert [s[1] for s in sends] == ["request", "vitals", "errors"]
+    assert all(b[0] - a[0] >= 1 for a, b in zip(sends, sends[1:]))
+    request_url = urlparse(sends[0][2])
+    assert request_url.path == "/"
+    assert parse_qs(request_url.query)["existing"] == ["keep"]
+    assert parse_qs(sends[1][2].split("?", 1)[1])["cid"] != parse_qs(sends[2][2].split("?", 1)[1])["cid"]
+    for dataset in ("logs", "client_vitals", "client_errors"):
+        times = [t for t, d in polls if d == dataset]
+        assert all(b - a >= 10 for a, b in zip(times, times[1:]))
+    assert report["qualification"] == "incomplete"
+    assert "peak_conditions_not_verified" in report["qualification_gaps"]
+    assert "request_population_incomplete_or_below_floor" in report["qualification_gaps"]
+    assert report["measurement_contract"]["event_clock_point_latency_s"] is None
+    assert report["streams"]["request"]["right_censored"] == 1
+    assert "probe=" not in json.dumps(report)
+
+
+@pytest.mark.parametrize("kwargs", [{"poll_interval_s": 9}, {"num_requests": 101}, {"max_wait_s": 601}])
+def test_correlated_runner_rejects_unsafe_limits_before_io(monkeypatch, kwargs):
+    from scripts.dev import measure_e2e_freshness as freshness
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("unsafe configuration reached I/O")
+
+    monkeypatch.setattr(freshness, "http_get", unexpected)
+    with pytest.raises(ValueError):
+        freshness.measure_correlated_freshness(
+            {"service_id": "svc", "backend_url": "https://admin.example.test"},
+            "https://edge.example.test/",
+            **kwargs,
+        )
+
+
 # ── Merged from test_scale_harness.py ──────────────────────────────────────────────────────
 
 from datetime import UTC, datetime
