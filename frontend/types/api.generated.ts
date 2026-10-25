@@ -2522,7 +2522,7 @@ export interface paths {
         put?: never;
         /**
          * Rebuild Time Series Rollups
-         * @description Rebuild only the explicitly requested closed UTC time-series bundles.
+         * @description Rebuild selected closed UTC hours and raw-backed, complete daily bundles.
          */
         post: operations["rebuild_time_series_rollups_api_admin_rebuild_time_series_rollups_post"];
         delete?: never;
@@ -17121,11 +17121,13 @@ export interface components {
         };
         /**
          * RebuildTimeSeriesRollupsRequest
-         * @description Explicit closed UTC hours whose request-count bundles should be rebuilt.
+         * @description Explicit closed UTC hours/days whose time-series bundles need repair.
          */
         RebuildTimeSeriesRollupsRequest: {
             /** Hours */
-            hours: string[];
+            hours?: string[];
+            /** Days */
+            days?: string[];
         };
         /**
          * RebuildTimeSeriesRollupsResponse
@@ -17138,6 +17140,10 @@ export interface components {
             requested_hours: string[];
             /** Rebuilt */
             rebuilt: number;
+            /** Requested Days */
+            requested_days?: string[];
+            /** Rebuilt Days */
+            rebuilt_days?: number | null;
         } & {
             [key: string]: unknown;
         };

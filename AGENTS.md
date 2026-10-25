@@ -1274,6 +1274,13 @@ a transaction or lock across rollup execution, or unlink buffers early.
 freshness on the next checkout. Previously corrupted bundles still require an
 explicit operational rebuild; changing the view does not repair them.
 
+Daily derivatives need independent repair when a reader selects the daily tier.
+Never rebuild a daily file from whichever hourly files remain after retirement:
+that can replace a complete day with a partial day. A scoped day repair must
+recompute all 24 closed UTC hours from retained events and publish the daily
+replacement only after complete success. Keep intermediate repair outputs away
+from the normal compactor; a failed repair must leave the existing day intact.
+
 ### Bounded ClickHouse diagnostic index (ADR-20)
 
 `backend/core/clickhouse_{schema,manifest,publication,rows,export}.py` implements

@@ -685,9 +685,9 @@ def _recent_range_token() -> str:
 
 
 def _recent_range_reference_count() -> int:
-    """How many ``range`` checks use the shared ``RECENT_RANGE`` constant."""
+    """How many absolute-window checks use the shared ``RECENT_RANGE``."""
     src = _VERIFY_JS.read_text()
-    return len(re.findall(r'"range",\s*RECENT_RANGE\b', src))
+    return len(re.findall(r"getRecentWindow\([^,\n]+,\s*RECENT_RANGE\b", src))
 
 
 def _minutes(token: str) -> int:
@@ -706,7 +706,7 @@ def test_recency_window_is_symmetric_across_requests_and_rum() -> None:
     # A single shared constant is symmetric by construction, but assert there
     # is no stray literal minute window that would reintroduce asymmetry.
     src = _VERIFY_JS.read_text()
-    stray = re.findall(r'"range",\s*"(\d+m)"', src)
+    stray = re.findall(r'(?:getRecentWindow\([^,\n]+,|"range",)\s*"(\d+m)"', src)
     assert not stray, (
         "recency windows must flow through the shared RECENT_RANGE constant; "
         f"found hardcoded minute window(s) {stray!r}"
@@ -927,3 +927,432 @@ def test_verify_js_uses_shared_classifier() -> None:
         "verify_dashboard.js must import isTransientConsoleBlip from the shared "
         "scripts/lib/console_blip.js module (single source of truth)"
     )
+
+
+def _verify_node(script: str) -> dict:
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def _frontend_node_runtime() -> str:
+    # Transpile/read the real store, URL hydrator, range resolver and date
+    # formatter in memory. No frontend source edits, browser, server or network.
+    return r"""
+const frontendFs = require('node:fs'), frontendPath = require('node:path'), frontendVm = require('node:vm');
+const frontendRoot = frontendPath.resolve('frontend');
+const frontendRequire = require('node:module').createRequire(frontendPath.join(frontendRoot, 'package.json'));
+const ts = frontendRequire('typescript'), modules = new Map();
+let now = Date.parse('2026-10-24T23:39:18.378Z');
+class Clock extends Date {
+  constructor(...args) { super(...(args.length ? args : [now])); }
+  static now() { return now; }
+}
+const frontendWindow = {
+  location: {}, history: {replaceState(_state, _title, href) {
+    frontendWindow.location = {href, search: new URL(href).search};
+  }},
+};
+function loadFrontend(relativePath) {
+  const filename = frontendPath.resolve(frontendRoot, relativePath);
+  if (modules.has(filename)) return modules.get(filename).exports;
+  const module = {exports: {}};
+  modules.set(filename, module);
+  const code = ts.transpileModule(frontendFs.readFileSync(filename, 'utf8'), {
+    compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022},
+    fileName: filename,
+  }).outputText;
+  frontendVm.runInNewContext(code, {
+    module, exports: module.exports, Date: Clock, window: frontendWindow, URL, URLSearchParams, console,
+    require(name) {
+      if (name.startsWith('@/')) return loadFrontend(name.slice(2) + '.ts');
+      return frontendRequire(name);
+    },
+  }, {filename});
+  return module.exports;
+}
+function resolveNavigation(href) {
+  frontendWindow.location = {href, search: new URL(href).search};
+  const {useFilterStore} = loadFrontend('stores/filterStore.ts');
+  const hydration = loadFrontend('lib/urlFilterHydration.ts');
+  useFilterStore.getState().resetAll();
+  hydration._resetUrlHydrationFlag();
+  hydration.hydrateFilterStoreFromUrl();
+  const state = useFilterStore.getState();
+  return loadFrontend('lib/range-wire.ts').resolveRangeWire({...state, anchor: state.endTime});
+}
+"""
+
+
+@pytest.mark.parametrize("stream", ["REQUEST", "RUM"])
+@pytest.mark.parametrize(
+    ("age", "fresh"),
+    [
+        ("0s ago", True),
+        ("59s ago", True),
+        ("1m 0s ago", True),
+        ("14m 59s ago", True),
+        ("15m 0s ago", False),
+        ("6h 26m ago", False),
+        ("6h 26m 1s ago", False),
+        ("1d 0h 0m ago", False),
+        ("Never", False),
+        ("—", False),
+        ("-", False),
+        ("", False),
+        ("just now", False),
+        ("tomorrow", False),
+        ("ago", False),
+    ],
+)
+def test_verify_header_requires_bounded_event_age(stream: str, age: str, fresh: bool) -> None:
+    source = _src()
+    helpers = source[source.index("function assertRecentHeader(") : source.index("function isRecentRequestResponse(")]
+    header = f"{stream}\nlatest:\n{age}\ntotal: 999999"
+    result = _verify_node(
+        'const RECENT_RANGE = "15m"; const messages = [];'
+        "const console = {log: msg => messages.push(msg)};\n"
+        + helpers
+        + f"\nlet fresh = true; try {{ assertRecentHeader({json.dumps(header)}, {json.dumps(stream)}); }}"
+        + " catch { fresh = false; } process.stdout.write(JSON.stringify({fresh, messages}));"
+    )
+    assert result["fresh"] is fresh
+    assert bool(result["messages"]) is fresh
+    assert not any("updating!" in message for message in result["messages"])
+
+
+@pytest.mark.parametrize("stream", ["REQUEST", "RUM"])
+@pytest.mark.parametrize(
+    ("age_seconds", "expected_age", "fresh"),
+    [
+        (0, "0s ago", True),
+        (59, "59s ago", True),
+        (60, "1m 0s ago", True),
+        (899, "14m 59s ago", True),
+        (900, "15m 0s ago", False),
+        (3600, "1h 0m 0s ago", False),
+        (23161, "6h 26m 1s ago", False),
+        (86400, "1d 0h 0m ago", False),
+        (-1, "just now", False),
+    ],
+)
+def test_verify_header_accepts_real_ui_duration_shapes(
+    stream: str, age_seconds: int, expected_age: str, fresh: bool
+) -> None:
+    source = _src()
+    helper = source[source.index("function assertRecentHeader(") : source.index("function getRecentWindow(")]
+    result = _verify_node(
+        _frontend_node_runtime()
+        + '\nconst RECENT_RANGE = "15m";\n'
+        + helper
+        + f"\nconst age = loadFrontend('lib/date.ts').formatTimeAgo(new Clock(now - {age_seconds} * 1000));"
+        + "\nlet fresh = true; const originalLog = console.log; console.log = () => {};"
+        + f"\ntry {{ assertRecentHeader({json.dumps(stream)} + '\\nlatest:\\n' + age, {json.dumps(stream)}); }}"
+        + " catch { fresh = false; } console.log = originalLog;"
+        + "process.stdout.write(JSON.stringify({age, fresh}));"
+    )
+    assert result == {"age": expected_age, "fresh": fresh}
+
+
+@pytest.mark.parametrize("route", ["/dashboard", "/rum"])
+def test_verify_absolute_url_resolves_to_exact_frontend_request(route: str) -> None:
+    source = _src()
+    helper = source[source.index("function getRecentWindow(") : source.index("function hasRecentWindow(")]
+    result = _verify_node(
+        _frontend_node_runtime()
+        + "\nconst recentWindow = frontendVm.runInNewContext("
+        + json.dumps(
+            helper
+            + f"\ngetRecentWindow('https://test.invalid{route}?range=24h&start_time=old&end_time=old&view=kept', '15m')"
+        )
+        + ", {Date: Clock, URL});"
+        + "\nconst wire = resolveNavigation(recentWindow.url);"
+        + "\nprocess.stdout.write(JSON.stringify({recentWindow, wire}));"
+    )
+    window, wire = result["recentWindow"], result["wire"]
+    assert parse_qs(urlparse(window["url"]).query) == {
+        "start_time": ["2026-10-24T23:24:18.378Z"],
+        "end_time": ["2026-10-24T23:39:18.378Z"],
+        "view": ["kept"],
+    }
+    assert wire["rangeToken"] is None
+    assert wire["rangeBody"] == {"start_time": window["start_time"], "end_time": window["end_time"]}
+    assert wire["rangeKey"] == f"abs:{window['start_time']}|{window['end_time']}"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "accepted"),
+    [
+        ({}, True),
+        ({"path": "/api/dashboard/aggregates"}, True),
+        ({"range": "24h"}, False),
+        ({"range": "15m"}, False),
+        ({"range": "auto"}, False),
+        ({"start": None}, False),
+        ({"end": None}, False),
+        ({"start": "invalid"}, False),
+        ({"start": "2020-01-01T00:00:00Z"}, False),
+        ({"end": "2099-01-01T00:00:00Z"}, False),
+        ({"offset": 86400000}, False),
+        ({"duration": 86400000}, False),
+        ({"offset": 1001}, False),  # another equally recent 15m window is not this attempt
+        ({"expected": None}, False),
+        ({"path": "/api/admin/sync-status"}, False),
+        ({"origin": "https://other.invalid"}, False),
+        ({"method": "GET"}, False),
+        ({"ok": False}, False),
+    ],
+)
+def test_verify_request_evidence_requires_actual_recent_window(overrides: dict, accepted: bool) -> None:
+    source = _src()
+    helpers = source[source.index("function hasRecentWindow(") : source.index("// Helper to append")]
+    result = _verify_node(
+        'const RECENT_RANGE = "15m"; const baseUrl = "https://test.invalid/dashboard";\n'
+        + helpers
+        + """
+const opts = Object.assign({
+  path: '/api/dashboard/bundle', origin: 'https://test.invalid',
+  range: null, duration: 900000, offset: 1000, method: 'POST', ok: true,
+}, """
+        + json.dumps(overrides)
+        + """);
+const selectedEnd = Date.now() - 1000;
+const expectedWindow = Object.hasOwn(opts, 'expected') ? opts.expected : {
+  start_time: new Date(selectedEnd - 900000).toISOString(), end_time: new Date(selectedEnd).toISOString(),
+};
+const end = selectedEnd + 1000 - opts.offset;
+const body = {
+  range_token: opts.range,
+  start_time: Object.hasOwn(opts, 'start') ? opts.start : new Date(end - opts.duration).toISOString(),
+  end_time: Object.hasOwn(opts, 'end') ? opts.end : new Date(end).toISOString(),
+};
+const response = {
+  url: () => opts.origin + opts.path, ok: () => opts.ok,
+  request: () => ({method: () => opts.method, postDataJSON: () => body}),
+};
+const query = new URLSearchParams(Object.entries(body).filter(([, value]) => value !== null));
+const rumResponse = {
+  ...response, url: () => opts.origin + '/api/services/test/rum/analytics?' + query,
+  request: () => ({method: () => opts.method === 'POST' ? 'GET' : 'POST'}),
+};
+process.stdout.write(JSON.stringify({
+  accepted: isRecentRequestResponse(response, expectedWindow), rumAccepted: isRecentRumResponse(rumResponse, expectedWindow),
+}));
+"""
+    )
+    assert result["accepted"] is accepted
+    if "path" not in overrides:
+        assert result["rumAccepted"] is accepted
+
+
+@pytest.mark.parametrize("count", [0, 149, 150, 999, None, "999", -1, 1.5, True])
+def test_verify_window_count_never_uses_lifetime_total(count: object) -> None:
+    source = _src()
+    helpers = source[source.index("async function recentRequestCount(") : source.index("// Helper to append")]
+    result = _verify_node(
+        helpers
+        + "\n(async () => { const count = "
+        + json.dumps(count)
+        + """;
+const values = await Promise.all([
+  recentRequestCount(null),
+  recentRequestCount({url: () => 'https://test.invalid/api/dashboard/bundle',
+    json: async () => ({total_rows: 999999, aggregates: {total_rows: count}})}),
+  recentRequestCount({url: () => 'https://test.invalid/api/dashboard/aggregates',
+    json: async () => ({total_rows: count})}),
+]);
+process.stdout.write(JSON.stringify({values}));
+})();
+"""
+    )
+    expected = count if type(count) is int and count >= 0 else None
+    assert result["values"] == [None, expected, expected]
+
+
+@pytest.mark.parametrize(
+    ("flags", "request_count", "beacons", "age", "charts", "exit_code"),
+    [
+        (["--no-traffic"], None, 0, "6h 26m ago", True, 0),
+        (["--no-traffic"], None, 0, "Never", False, 1),
+        (["--no-traffic"], None, 0, "6h 26m ago", "/rum", 1),
+        (["--no-traffic"], None, 0, "6h 26m ago", "/streaming", 1),
+        ([], None, 100, "1s ago", True, 1),
+        ([], 149, 100, "1s ago", True, 1),
+        ([], 150, 49, "1s ago", True, 1),
+        ([], 150, 50, "6h 26m ago", True, 1),
+        ([], 150, 50, {"REQUEST": "1s ago", "RUM": "6h 26m ago"}, True, 1),
+        ([], 150, 50, "1s ago", True, 0),
+        ([], [149, 150], [49, 50], "1s ago", True, 0),
+        (["--no-trafic"], 150, 50, "1s ago", True, 1),
+    ],
+)
+def test_verify_script_modes_without_browser_or_network(
+    flags: list[str],
+    request_count: int | list[int] | None,
+    beacons: int | list[int],
+    age: str | dict,
+    charts: bool | str,
+    exit_code: int,
+) -> None:
+    # Execute the actual CLI entrypoint and every stage with an in-process
+    # Playwright stand-in. No browsers, app processes, credentials, or traffic.
+    options = {"flags": flags, "requestCount": request_count, "beacons": beacons, "age": age, "charts": charts}
+    result = _verify_node(
+        _frontend_node_runtime()
+        + "\nconst vm = require('node:vm'); const source = "
+        + json.dumps(_src())
+        + "; const opts = "
+        + json.dumps(options)
+        + r""";
+const visits = [], logs = [], resolvedRequests = [];
+const chart = {data: [{y: [100]}], getBoundingClientRect: () => ({width: 500, height: 300})};
+let currentUrl = '', pendingResponse = null, displayedBeacons = 1000;
+const attempts = {};
+const hasCharts = () => opts.charts !== false
+  && (typeof opts.charts !== 'string' || new URL(currentUrl).pathname !== opts.charts);
+const document = {
+  body: {get innerText() {
+    const age = stream => typeof opts.age === 'string' ? opts.age : opts.age[stream];
+    return `REQUEST\nlatest:\n${age('REQUEST')}\ntotal: 999,999\nRUM\nlatest:\n${age('RUM')}\ntotal: 999,999\n`
+      + `TOTAL BEACONS\n${displayedBeacons}\n`
+      + 'Largest Contentful Paint GOOD Global Health Total Sessions Traffic Quality Breakdown Origin Error Rate Slowest URLs';
+  }},
+  querySelector: selector => selector === 'footer' ? {innerText: 'commit:test standard local'} : hasCharts() ? chart : null,
+  querySelectorAll: () => hasCharts() ? [chart] : [],
+};
+const page = {
+  on() {}, async goto(url) {
+    currentUrl = url; visits.push(url); now += 1000; displayedBeacons = 1000;
+    if (pendingResponse) {
+      const pending = pendingResponse; pendingResponse = null;
+      // Resolve what the app would actually send from THIS emitted URL:
+      // actual URL hydrator -> actual Zustand store -> actual range resolver.
+      const wire = resolveNavigation(url), body = wire.rangeBody;
+      const rum = new URL(url).pathname === '/rum';
+      const key = rum ? 'rum' : 'dashboard', attempt = attempts[key] || 0;
+      attempts[key] = attempt + 1;
+      const counts = rum ? opts.beacons : opts.requestCount;
+      const count = Array.isArray(counts) ? counts[Math.min(attempt, counts.length - 1)] : counts;
+      if (rum) displayedBeacons = count;
+      const response = {
+        url: () => 'https://test.invalid' + (rum
+          ? '/api/services/test/rum/analytics?' + new URLSearchParams(body)
+          : '/api/dashboard/bundle'),
+        ok: () => true,
+        request: () => ({method: () => rum ? 'GET' : 'POST', postDataJSON: () => body}),
+        json: async () => rum ? {beacon_count: count} : {aggregates: {total_rows: count}},
+      };
+      const accepted = pending.predicate(response);
+      resolvedRequests.push({navigation: url, body, rangeToken: wire.rangeToken, accepted});
+      if (count !== null && accepted) pending.resolve(response);
+      else pending.reject(Error('no window evidence'));
+    }
+    return {ok: () => true};
+  },
+  async waitForSelector() {}, async waitForTimeout(ms) { now += ms; },
+  async waitForFunction(fn) { if (!fn()) throw Error('predicate not satisfied'); },
+  waitForResponse(predicate) { return new Promise((resolve, reject) => { pendingResponse = {predicate, resolve, reject}; }); },
+  locator: () => ({first: () => ({waitFor: async () => { if (!hasCharts()) throw Error('no chart'); }})}),
+  async evaluate(fn) { if (fn.toString().includes('performance.getEntries')) return {}; return fn(); },
+  async close() {}, async screenshot() {},
+};
+const context = {
+  newPage: async () => page, close: async () => {},
+  request: {get: async () => ({ok: () => false})},
+};
+const browser = {newContext: async () => context, close: async () => {}};
+const dependencies = {
+  playwright: {chromium: {launch: async () => browser}},
+  path: require('node:path'), child_process: {},
+  './lib/admin_gateway_client.cjs': {adminGatewayContextOptions: () => ({})},
+  './lib/section_measurements.cjs': {
+    collectResponseMeasurements: () => ({snapshot: async () => [], gaps: () => [], close() {}}), budgets: {},
+  },
+  './lib/console_blip': {isTransientConsoleBlip: () => false},
+};
+new Promise(resolve => {
+  const execution = vm.runInNewContext(source, {
+    require(name) { if (!(name in dependencies)) throw Error('unexpected dependency: ' + name); return dependencies[name]; },
+    process: {argv: ['node', 'verify_dashboard.js', 'https://test.invalid/dashboard', 'test', 'standard', 'local', ...opts.flags],
+      exit(code) { resolve(code); throw Error('exit:' + code); }},
+    console: Object.fromEntries(['log', 'warn', 'error'].map(level => [level, (...args) => logs.push(args.join(' '))])),
+    URL, URLSearchParams, Date: Clock, document, __dirname: '/scripts',
+  });
+  execution?.catch(error => { if (!error.message.startsWith('exit:')) throw error; });
+}).then(code => process.stdout.write(JSON.stringify({code, visits, resolvedRequests, logs})));
+"""
+    )
+    assert result["code"] == exit_code
+    messages = "\n".join(result["logs"])
+    assert "Header request count and page metrics are consistent!" not in messages
+    if flags == ["--no-traffic"]:
+        assert result["resolvedRequests"] == []
+        assert all("start_time" not in url for url in result["visits"])
+        assert "[Dashboard 15m] NOT RUN" in messages
+        assert "latest event age" not in messages
+        if exit_code == 0:
+            assert "[RUM 15m] NOT RUN" in messages
+            assert {urlparse(url).path for url in result["visits"]} == {
+                "/dashboard",
+                "/rum",
+                "/network",
+                "/streaming",
+                "/security",
+                "/origin",
+                "/performance",
+            }
+    elif not flags:
+        assert result["resolvedRequests"]
+        for request in result["resolvedRequests"]:
+            query = parse_qs(urlparse(request["navigation"]).query)
+            assert "range" not in query
+            assert request["rangeToken"] is None
+            assert request["body"] == {
+                "start_time": query["start_time"][0],
+                "end_time": query["end_time"][0],
+            }
+            assert request["accepted"] is True
+            start, end = (datetime.fromisoformat(request["body"][key]) for key in ("start_time", "end_time"))
+            assert (end - start).total_seconds() == 900
+        if isinstance(request_count, list):
+            for route in ("/dashboard", "/rum"):
+                bounds = [
+                    request["body"]["end_time"]
+                    for request in result["resolvedRequests"]
+                    if urlparse(request["navigation"]).path == route
+                ]
+                assert len(bounds) == 2
+                assert bounds[0] < bounds[1]  # each retry advances the absolute selection
+        assert "NOT RUN" not in messages
+        if request_count is None:
+            assert "UNVERIFIED" in messages
+            assert "requested-window aggregate contains" not in messages
+
+
+@pytest.mark.parametrize("no_traffic", ["0", "1"])
+def test_verify_canonical_runner_propagates_no_traffic(no_traffic: str) -> None:
+    runner = _VERIFY_JS.parent / "dev" / "deploy_test_all.sh"
+    if not runner.exists():
+        pytest.skip("Canonical deployment runner is operator-local and gitignored")
+    source = runner.read_text()
+    start = source.index("    local verify_flags=()")
+    end = source.index('\n  } >"$9"', start)
+    # Execute only the argument construction/call, with node replaced by a
+    # recorder. Never source or run the deployment pipeline itself.
+    script = (
+        "node() { printf '%s\\n' \"$@\"; }\n"
+        "validate_env() {\nlocal NO_TRAFFIC=$1 COMMIT_HASH=test\n"
+        "set -- label x x x x https://test.invalid/dashboard standard local\n"
+        + source[start:end]
+        + "\n}\nvalidate_env "
+        + no_traffic
+    )
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True, timeout=10)
+    assert result.stdout.splitlines() == [
+        "../scripts/verify_dashboard.js",
+        "https://test.invalid/dashboard",
+        "test",
+        "standard",
+        "local",
+        *(["--no-traffic"] if no_traffic == "1" else []),
+    ]

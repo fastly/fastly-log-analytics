@@ -168,15 +168,20 @@ def publish_temp_parquet(
     lock_key: str,
     *,
     after_replace_under_lock: Callable[[], None] | None = None,
-) -> None:
+    before_replace_under_lock: Callable[[], bool] | None = None,
+) -> bool:
     """Atomically replace ``tmp_path`` onto ``dst_path`` under the service iceberg lock."""
     from backend.core.iceberg.view import _get_service_lock
 
     try:
         with _get_service_lock(lock_key):
+            if before_replace_under_lock is not None and not before_replace_under_lock():
+                unlink_quiet(tmp_path)
+                return False
             os.replace(tmp_path, dst_path)
             if after_replace_under_lock is not None:
                 after_replace_under_lock()
+            return True
     except BaseException:
         unlink_quiet(tmp_path)
         raise
@@ -988,8 +993,10 @@ def compact_closed_days(
                     continue
                 day_dir = os.path.join(day_root, f"day={day}")
                 day_file = os.path.join(day_dir, bundle_filename)
+                day_stat = None
                 try:
-                    day_mtime = os.path.getmtime(day_file)
+                    day_stat = os.stat(day_file)
+                    day_mtime = day_stat.st_mtime
                     max_hour_mtime = max(os.path.getmtime(p) for p in input_paths)
                     if day_mtime >= max_hour_mtime:
                         continue
@@ -1014,8 +1021,21 @@ def compact_closed_days(
                     continue
 
                 try:
-                    publish_temp_parquet(tmp_file, day_file, lock_key)
-                    rebuilt += 1
+
+                    def day_unchanged() -> bool:
+                        # A repair/another compactor may publish while COPY runs.
+                        # Compare under the same lock as replacement, not before it.
+                        try:
+                            current = os.stat(day_file)
+                        except FileNotFoundError:
+                            return day_stat is None
+                        return day_stat is not None and (current.st_ino, current.st_mtime_ns) == (
+                            day_stat.st_ino,
+                            day_stat.st_mtime_ns,
+                        )
+
+                    if publish_temp_parquet(tmp_file, day_file, lock_key, before_replace_under_lock=day_unchanged):
+                        rebuilt += 1
                 except OSError as e:
                     logger.warning(
                         "[rollups] %s: %s day rename to %s failed: %s",
@@ -1042,6 +1062,7 @@ def build_per_hour_bundles(
     build_copy_sql: Callable[[object, str, str, str, str], str],
     describe_label: str | None = None,
     logger: logging.Logger = logger,
+    output_root: str | None = None,
 ) -> int:
     """Shared per-hour bundle writer — the writer-side mirror of
     :func:`compact_closed_days`.
@@ -1051,7 +1072,8 @@ def build_per_hour_bundles(
     read-only connection, describe its columns, then for each closed hour
     write a temp parquet via ``build_copy_sql`` and atomically rename it into
     ``hour=H/<bundle_filename>`` under the per-service iceberg lock (cleaning
-    up the temp file on any failure).
+    up the temp file on any failure). ``output_root`` optionally directs all
+    outputs to private staging without changing the source or its connection.
 
     Per-feature logic lives in two callbacks:
 
@@ -1091,7 +1113,7 @@ def build_per_hour_bundles(
     if not table_ident:
         return 0
 
-    bundled_root = _hour_bundled_root(source)
+    bundled_root = output_root if output_root is not None else _hour_bundled_root(source)
     os.makedirs(bundled_root, exist_ok=True)
     lock_key = source.get("name", "default")
 

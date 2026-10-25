@@ -28,7 +28,7 @@ from backend.models.admin import (
     RollupHealResponse,
     RollupStatusResponse,
 )
-from backend.utils.date_utils import parse_hour_key_strict
+from backend.utils.date_utils import parse_day_key_strict, parse_hour_key_strict
 from backend.utils.router_utils import make_error
 
 from ._helpers import service_id_from_source
@@ -199,32 +199,57 @@ def rebuild_time_series_rollups(
     _admin: None = Depends(require_admin),
     source: dict = Depends(get_source),
 ) -> RebuildTimeSeriesRollupsResponse:
-    """Rebuild only the explicitly requested closed UTC time-series bundles."""
+    """Rebuild selected closed UTC hours and raw-backed, complete daily bundles."""
+    from backend.core.rollups.day_bundles import rebuild_time_series_days
+
     if len(set(payload.hours)) != len(payload.hours):
         raise HTTPException(status_code=400, detail=make_error("duplicate_rollup_hours"))
+    if len(set(payload.days)) != len(payload.days):
+        raise HTTPException(status_code=400, detail=make_error("duplicate_rollup_days"))
 
     try:
         hour_starts = [parse_hour_key_strict(hour) for hour in payload.hours]
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=make_error("invalid_rollup_hour")) from exc
 
+    try:
+        day_starts = [parse_day_key_strict(day) for day in payload.days]
+        if any(start.strftime("%Y-%m-%d") != day for day, start in zip(payload.days, day_starts, strict=True)):
+            raise ValueError("invalid rollup day")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=make_error("invalid_rollup_day")) from exc
+
     active_hour = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     if any(hour_start >= active_hour for hour_start in hour_starts):
         raise HTTPException(status_code=400, detail=make_error("rollup_hour_not_closed"))
+    if any(day_start >= active_hour.replace(hour=0) for day_start in day_starts):
+        raise HTTPException(status_code=400, detail=make_error("rollup_day_not_closed"))
 
     sid = service_id_from_source(source)
-    rebuilt = build_time_series_bundles(sid, source, payload.hours)
+    rebuilt = build_time_series_bundles(sid, source, payload.hours) if payload.hours else 0
+    rebuilt_days = 0
+    if payload.days:
+        try:
+            rebuilt_days = rebuild_time_series_days(sid, source, payload.days)
+        except RuntimeError as exc:
+            logger.error("time_series_day_rebuild_failed", exc_info=True)
+            raise HTTPException(status_code=500, detail=make_error("time_series_day_rebuild_failed")) from exc
     logger.info(
-        "time_series_rollup_rebuild service_id=%s requested_hours=%s rebuilt=%d",
+        "time_series_rollup_rebuild service_id=%s requested_hours=%s rebuilt=%d rebuilt_days=%d",
         sid,
         payload.hours,
         rebuilt,
+        rebuilt_days,
     )
-    return RebuildTimeSeriesRollupsResponse(
+    result = RebuildTimeSeriesRollupsResponse(
         service_id=sid,
         requested_hours=payload.hours,
         rebuilt=rebuilt,
     )
+    if payload.days:
+        result.requested_days = payload.days
+        result.rebuilt_days = rebuilt_days
+    return result
 
 
 @router.post(

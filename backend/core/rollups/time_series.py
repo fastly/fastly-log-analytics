@@ -13,7 +13,9 @@ from ._common import (
 logger = logging.getLogger(__name__)
 
 
-def build_time_series_bundles(service_id: str, source: dict, hours: list[str]) -> int:
+def build_time_series_bundles(
+    service_id: str, source: dict, hours: list[str], *, output_root: str | None = None
+) -> int:
     """Write a 1-minute time_series rollup for each closed hour in ``hours``.
 
     Output: ``rollups/hour_bundled/hour=H/time_series.parquet`` with one row
@@ -39,8 +41,9 @@ def build_time_series_bundles(service_id: str, source: dict, hours: list[str]) -
     Skips the active UTC hour — that hour is still being written and the
     dashboard serves it live off the base table.
 
-    Idempotent (atomic tmp + rename). Returns the number of bundles
-    written this call.
+    Idempotent (atomic tmp + rename). ``output_root`` overrides only the
+    destination for private day-repair staging. All hours share one source
+    connection. Returns the number of bundles written this call.
     """
 
     def eligibility(cols: set[str], table_ident: str) -> str | None:
@@ -108,4 +111,5 @@ def build_time_series_bundles(service_id: str, source: dict, hours: list[str]) -
         eligibility=eligibility,
         build_copy_sql=build_copy_sql,
         logger=logger,
+        output_root=output_root,
     )

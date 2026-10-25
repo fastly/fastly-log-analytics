@@ -10,7 +10,7 @@ import os
 import shutil
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from backend.utils.date_utils import parse_day_key_strict
@@ -908,6 +908,54 @@ def _time_series_copy_sql(paths_sql: str, tmp_file: str) -> str:
 compact_time_series_closed_days_to_daily = _make_day_compactor(
     [(TIME_SERIES_BUNDLE_FILENAME, ".tmp_ts_day_", _time_series_copy_sql)]
 )
+
+
+def rebuild_time_series_days(service_id: str, source: dict, days: list[str]) -> int:
+    """Repair only selected days from raw, including hours retired from disk.
+
+    All 24 hour writes (including empty hours) use one pinned source connection
+    and private staging, invisible to ordinary compactors. Publish only the
+    completed day; leave official hourly files untouched. Requires retained raw
+    history; this does not reconstruct expired request events.
+    """
+    from contextlib import closing
+    from tempfile import TemporaryDirectory
+
+    import duckdb
+
+    from backend.core.duckdb import get_memory_connection
+
+    from .time_series import build_time_series_bundles
+
+    starts = [parse_day_key_strict(day) for day in days]
+    if any(start.strftime("%Y-%m-%d") != day for day, start in zip(days, starts, strict=True)):
+        raise ValueError("invalid rollup day")
+    if len(set(days)) != len(days):
+        raise ValueError("duplicate rollup days")
+    active_day = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    if any(start >= active_day for start in starts):
+        raise ValueError("rollup day is not closed")
+
+    rebuilt = 0
+    for day, start in zip(days, starts, strict=True):
+        hours = [(start + timedelta(hours=h)).strftime("%Y-%m-%d-%H") for h in range(24)]
+        day_dir = os.path.join(_day_bundled_root(source), f"day={day}")
+        os.makedirs(day_dir, exist_ok=True)
+        day_file = os.path.join(day_dir, TIME_SERIES_BUNDLE_FILENAME)
+        try:
+            with TemporaryDirectory(prefix=".tmp_ts_repair_", dir=day_dir) as staging:
+                if build_time_series_bundles(service_id, source, hours, output_root=staging) != 24:
+                    raise RuntimeError("incomplete hourly recompute; existing day preserved")
+                paths = [os.path.join(staging, f"hour={hour}", TIME_SERIES_BUNDLE_FILENAME) for hour in hours]
+                tmp_file = os.path.join(staging, TIME_SERIES_BUNDLE_FILENAME)
+                with closing(get_memory_connection()) as con:
+                    con.execute(_time_series_copy_sql(quote_path_list(paths), tmp_file))
+                publish_temp_parquet(tmp_file, day_file, source.get("name", "default"))
+        except (duckdb.Error, OSError) as exc:
+            raise RuntimeError("time-series day rebuild failed; existing day preserved") from exc
+        rebuilt += 1
+    logger.info("[rollups] %s: repaired %d selected time_series day(s)", service_id, rebuilt)
+    return rebuilt
 
 
 def _pop_health_copy_sql(paths_sql: str, tmp_file: str) -> str:

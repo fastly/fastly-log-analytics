@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_serializer
+from pydantic import BaseModel, Field, model_serializer, model_validator
 
 from backend.models._base import PassthroughModel, WireSafeModel
 from backend.models.common import BaseResponse, LogExtentsMixin
@@ -610,9 +610,16 @@ class BackfillBundleRollupsResponse(PassthroughModel):
 
 
 class RebuildTimeSeriesRollupsRequest(BaseModel):
-    """Explicit closed UTC hours whose request-count bundles should be rebuilt."""
+    """Explicit closed UTC hours/days whose time-series bundles need repair."""
 
-    hours: list[str] = Field(min_length=1, max_length=24)
+    hours: list[str] = Field(default_factory=list, max_length=24)
+    days: list[str] = Field(default_factory=list, max_length=7)
+
+    @model_validator(mode="after")
+    def require_scope(self) -> RebuildTimeSeriesRollupsRequest:
+        if not self.hours and not self.days:
+            raise ValueError("at least one rollup hour or day is required")
+        return self
 
 
 class RebuildTimeSeriesRollupsResponse(PassthroughModel):
@@ -621,6 +628,8 @@ class RebuildTimeSeriesRollupsResponse(PassthroughModel):
     service_id: str
     requested_hours: list[str]
     rebuilt: int
+    requested_days: list[str] = Field(default_factory=list)
+    rebuilt_days: int | None = None
 
 
 class ConsolidateRollupsResponse(PassthroughModel):

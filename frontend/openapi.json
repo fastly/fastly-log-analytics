@@ -24754,7 +24754,7 @@
           "admin"
         ],
         "summary": "Rebuild Time Series Rollups",
-        "description": "Rebuild only the explicitly requested closed UTC time-series bundles.",
+        "description": "Rebuild selected closed UTC hours and raw-backed, complete daily bundles.",
         "operationId": "rebuild_time_series_rollups_api_admin_rebuild_time_series_rollups_post",
         "parameters": [
           {
@@ -82990,16 +82990,20 @@
             },
             "type": "array",
             "maxItems": 24,
-            "minItems": 1,
             "title": "Hours"
+          },
+          "days": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 7,
+            "title": "Days"
           }
         },
         "type": "object",
-        "required": [
-          "hours"
-        ],
         "title": "RebuildTimeSeriesRollupsRequest",
-        "description": "Explicit closed UTC hours whose request-count bundles should be rebuilt."
+        "description": "Explicit closed UTC hours/days whose time-series bundles need repair."
       },
       "RebuildTimeSeriesRollupsResponse": {
         "properties": {
@@ -83017,6 +83021,24 @@
           "rebuilt": {
             "type": "integer",
             "title": "Rebuilt"
+          },
+          "requested_days": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Requested Days"
+          },
+          "rebuilt_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rebuilt Days"
           }
         },
         "additionalProperties": true,

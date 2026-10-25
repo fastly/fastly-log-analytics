@@ -3,10 +3,17 @@ const path = require('path');
 const { adminGatewayContextOptions } = require('./lib/admin_gateway_client.cjs');
 const { collectResponseMeasurements, budgets } = require('./lib/section_measurements.cjs');
 const { execSync } = require('child_process');
+// Usage: node verify_dashboard.js URL COMMIT ARCH ENV [--no-traffic]
 const baseUrl = process.argv[2];
 const expectedCommit = process.argv[3];
 const expectedArch = process.argv[4];
 const expectedEnv = process.argv[5];
+const verificationFlags = process.argv.slice(6);
+if (verificationFlags.some(flag => flag !== '--no-traffic')) {
+  console.error(`Unknown verification option (only --no-traffic is supported).`);
+  process.exit(1);
+}
+const noTraffic = verificationFlags.includes('--no-traffic');
 
 if (!baseUrl) {
   console.error("Please provide a target URL.");
@@ -30,6 +37,96 @@ if (!actualExpectedCommit || actualExpectedCommit === 'unknown') {
 // delivery batching + verify-phase CPU spikes — NOT a pipeline latency floor.
 // Requests and RUM share ONE pipeline, so both use the same symmetric window.
 const RECENT_RANGE = "15m";
+
+if (noTraffic) {
+  console.log('[Mode --no-traffic] Read-only historical/chart verification. Recent injected request/RUM counts and header freshness: NOT RUN.');
+}
+
+async function runTrafficChecks(readOnly, label, check) {
+  if (readOnly) {
+    console.log(`[${label} ${RECENT_RANGE}] NOT RUN: recent injected traffic count and header freshness requirements (--no-traffic); historical/chart checks remain enabled.`);
+    return;
+  }
+  await check();
+}
+
+function assertRecentHeader(bodyText, stream) {
+  const match = bodyText.match(new RegExp(`${stream}[\\s\\n]*latest:[\\s\\n]*([^\\n]+)`, 'i'));
+  const age = match?.[1].trim();
+  // Match the UI's relative duration, not merely any non-placeholder text.
+  // "just now" is also ambiguous (the UI uses it for future timestamps).
+  const duration = age?.match(/^(?:(\d+)d\s+)?(?:(\d+)h\s+)?(?:(\d+)m\s+)?(?:(\d+)s\s+)?ago$/i);
+  // The UI emits seconds/minutes/hours with seconds, but days without them.
+  const seconds = duration && duration.slice(1).some(value => value !== undefined)
+    ? Number(duration[1] || 0) * 86400 + Number(duration[2] || 0) * 3600
+      + Number(duration[3] || 0) * 60 + Number(duration[4] || 0)
+    : NaN;
+  if (!Number.isFinite(seconds) || seconds >= parseInt(RECENT_RANGE, 10) * 60) {
+    throw new Error(`[Header] ${stream} latest event age is missing, unrecognized, or outside ${RECENT_RANGE}: "${age ?? 'missing'}"`);
+  }
+  console.log(`[Header] Verified: ${stream} latest event age "${age}" is within ${RECENT_RANGE} (snapshot only; advancement not measured).`);
+}
+
+function getRecentWindow(url, range) {
+  // Canonical frontend absolute mode: start_time/end_time WITHOUT range.
+  // Capture now once so navigation and response matching share exact bounds.
+  const end = Date.now();
+  const start_time = new Date(end - parseInt(range, 10) * 60000).toISOString();
+  const end_time = new Date(end).toISOString();
+  const target = new URL(url);
+  target.searchParams.delete('range');
+  target.searchParams.set('start_time', start_time);
+  target.searchParams.set('end_time', end_time);
+  return { url: target.toString(), start_time, end_time };
+}
+
+function hasRecentWindow(body, expectedWindow) {
+  // Reject preset/default/all-time requests, and even another recent window:
+  // evidence must resolve to this attempt's exact absolute selection.
+  if (!body || !expectedWindow || body.range_token) return false;
+  const start = typeof body.start_time === 'string' ? Date.parse(body.start_time) : NaN;
+  const end = typeof body.end_time === 'string' ? Date.parse(body.end_time) : NaN;
+  const now = Date.now();
+  return Number.isFinite(start) && Number.isFinite(end)
+    && start === Date.parse(expectedWindow.start_time) && end === Date.parse(expectedWindow.end_time)
+    && end - start === parseInt(RECENT_RANGE, 10) * 60000
+    && end <= now && now - end <= 120000;
+}
+
+function isRecentRequestResponse(response, expectedWindow) {
+  try {
+    const url = new URL(response.url());
+    if (url.origin !== new URL(baseUrl).origin
+      || !['/api/dashboard/bundle', '/api/dashboard/aggregates'].includes(url.pathname)
+      || !response.ok() || response.request().method() !== 'POST') return false;
+    const body = response.request().postDataJSON();
+    // The URL range alone proves nothing: the actual aggregate request must
+    // select the requested absolute window, not auto/default/all-time.
+    return hasRecentWindow(body, expectedWindow);
+  } catch {
+    return false;
+  }
+}
+
+function isRecentRumResponse(response, expectedWindow) {
+  try {
+    const url = new URL(response.url());
+    return url.origin === new URL(baseUrl).origin
+      && /^\/api\/services\/[^/]+\/rum\/analytics$/.test(url.pathname)
+      && response.ok() && response.request().method() === 'GET'
+      && hasRecentWindow(Object.fromEntries(url.searchParams), expectedWindow);
+  } catch {
+    return false;
+  }
+}
+
+async function recentRequestCount(response) {
+  if (!response) return null;
+  const payload = await response.json();
+  const count = new URL(response.url()).pathname === '/api/dashboard/bundle'
+    ? payload?.aggregates?.total_rows : payload?.total_rows;
+  return Number.isSafeInteger(count) && count >= 0 ? count : null;
+}
 
 // Helper to append query parameters cleanly
 function getUrlWithParam(url, key, value) {
@@ -548,64 +645,59 @@ async function logPagePerf(page, name, responseMeasurements = [], measurementGap
       }
       break;
     }
-    console.log(`[Dashboard 24h] Verified: 24h data is active with ${totalMatch24h[1]} total rows.`);
+    console.log(`[Dashboard 24h] Verified: service header is populated (${totalMatch24h[1]} lifetime rows; NOT a 24h count).`);
 
-    // 1.2. Verify recent-window Range with ROBUST POLLING (At least 150 rows)
-    const url5m = getUrlWithParam(baseUrl, "range", RECENT_RANGE);
-    console.log(`[Dashboard ${RECENT_RANGE}] Checking ${url5m} with active polling...`);
+    let response;
+    await runTrafficChecks(noTraffic, 'Dashboard', async () => {
+      // 1.2. Verify recent-window Range with ROBUST POLLING (At least 150 rows)
+      let recentCount = null;
+      const MIN_RECENT_REQUESTS = 150; // Safe minimum for standard traffic seeding
+      let recentBodyText = "";
 
-    let count5m = 0;
-    const MIN_REQ_5M = 150; // Safe minimum for standard traffic seeding
-    let bodyText5m = "";
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        recentCount = null;
+        try {
+          const recentWindow = getRecentWindow(baseUrl, RECENT_RANGE);
+          console.log(`[Dashboard ${RECENT_RANGE}] Checking ${recentWindow.url} with active polling...`);
+          // Observe only this navigation's requested-window response. SSR-only
+          // or unscoped data is insufficient evidence: fail closed, never fall
+          // back to the lifetime header total.
+          const windowResponse = page.waitForResponse(
+            response => isRecentRequestResponse(response, recentWindow), { timeout: 15000 }
+          ).catch(() => null);
+          response = await page.goto(recentWindow.url, { timeout: 15000 });
+          if (response && response.ok()) {
+            await page.waitForSelector('main', { timeout: 10000 });
+            await page.waitForTimeout(4000);
+            recentBodyText = await page.evaluate(() => document.body.innerText);
+            recentCount = await recentRequestCount(await windowResponse);
 
-    for (let attempt = 1; attempt <= 4; attempt++) {
-      try {
-        response = await page.goto(url5m, { timeout: 15000 });
-        if (response && response.ok()) {
-          await page.waitForSelector('main', { timeout: 10000 });
-          await page.waitForTimeout(4000);
-          bodyText5m = await page.evaluate(() => document.body.innerText);
-          const totalMatch5m = bodyText5m.match(/total:\s*([\d,]+)/i);
-          count5m = totalMatch5m ? parseInt(totalMatch5m[1].replace(/,/g, ''), 10) : 0;
-
-          if (count5m >= MIN_REQ_5M) {
-            break;
+            if (recentCount !== null && recentCount >= MIN_RECENT_REQUESTS) {
+              break;
+            }
           }
+        } catch (err) {
+          console.log(`[Dashboard ${RECENT_RANGE}] Navigation warning (attempt ${attempt}): ${err.message}`);
         }
-      } catch (err) {
-        console.log(`[Dashboard ${RECENT_RANGE}] Navigation warning (attempt ${attempt}): ${err.message}`);
+        console.log(`[Dashboard ${RECENT_RANGE}] Attempt ${attempt}/4: Standard request count is ${recentCount ?? 'UNVERIFIED'}/${MIN_RECENT_REQUESTS}. Waiting 8s for background ingestion...`);
+        await page.waitForTimeout(8000);
       }
-      console.log(`[Dashboard ${RECENT_RANGE}] Attempt ${attempt}/4: Standard request count is ${count5m}/${MIN_REQ_5M}. Waiting 8s for background ingestion...`);
-      await page.waitForTimeout(8000);
-    }
 
-    if (count5m < MIN_REQ_5M) {
-      console.error(`[Dashboard ${RECENT_RANGE}] Verification Failed: Recent ${RECENT_RANGE} data count is only ${count5m} (expected at least ${MIN_REQ_5M} from our recent edge load-test!). Ingestion did not complete.`);
-      console.error(`Body text sample:\n${bodyText5m.slice(0, 1000)}`);
-      await browser.close();
-      process.exit(1);
-    }
-    console.log(`[Dashboard ${RECENT_RANGE}] Verified: ${RECENT_RANGE} data contains ${count5m} rows (greater than load-test minimum of ${MIN_REQ_5M} rows).`);
+      if (recentCount === null || recentCount < MIN_RECENT_REQUESTS) {
+        console.error(`[Dashboard ${RECENT_RANGE}] Verification Failed: Requested-window aggregate count is ${recentCount ?? 'UNVERIFIED'} (expected at least ${MIN_RECENT_REQUESTS} from recent edge load-test). Missing evidence is not proof of completed ingestion.`);
+        console.error(`Body text sample:\n${recentBodyText.slice(0, 1000)}`);
+        await browser.close();
+        process.exit(1);
+      }
+      console.log(`[Dashboard ${RECENT_RANGE}] Verified: requested-window aggregate contains ${recentCount} rows (at least ${MIN_RECENT_REQUESTS}).`);
 
-    // 1.3. Validate Header Liveness (REQUEST)
-    const reqLatestMatch = bodyText5m.match(/REQUEST[\s\n]*latest:[\s\n]*([^\n]+)/i);
-    if (!reqLatestMatch) {
-      console.error(`[Header] Verification Failed: REQUEST block not found in the global header.`);
-      await browser.close();
-      process.exit(1);
-    }
-    const reqLatestTime = reqLatestMatch[1].trim();
-    console.log(`[Header] REQUEST Latest Time: "${reqLatestTime}"`);
-    if (reqLatestTime.includes("Never") || reqLatestTime.includes("—") || reqLatestTime.includes("-")) {
-      console.error(`[Header] Verification Failed: REQUEST latest time is unpopulated/stale: "${reqLatestTime}"`);
-      await browser.close();
-      process.exit(1);
-    }
-    console.log(`[Header] Verified: REQUEST latest header time is fully active and updating!`);
+      // 1.3. Validate Header Liveness (REQUEST)
+      assertRecentHeader(recentBodyText, 'REQUEST');
+    });
 
-    // 1.4. Validate 30d Data Consistency: Header Total vs. Page Total
+    // 1.4. Validate 30d historical data and the lifetime header
     const url30d = getUrlWithParam(baseUrl, "range", "30d");
-    console.log(`[Dashboard 30d] Checking data consistency on ${url30d} ...`);
+    console.log(`[Dashboard 30d] Checking historical panels and lifetime header on ${url30d} ...`);
     // Use the bounded retry helper (like RUM 30d / Network 30d) so a transient
     // K8s port-forward drop the healer is re-establishing doesn't hard-fail the
     // run on the first blip; a genuinely dead page still exhausts retries.
@@ -640,26 +732,16 @@ async function logPagePerf(page, name, responseMeasurements = [], measurementGap
 
     const bodyText30d = await page.evaluate(() => document.body.innerText);
 
-    // Extract Page Request Total (from request metrics card)
-    const pageReqMatch = bodyText30d.match(/total:\s*([\d,]+)/i);
-    const pageReqTotal = pageReqMatch ? parseInt(pageReqMatch[1].replace(/,/g, ''), 10) : 0;
-
-    // Extract Header Request Total
+    // This badge is a lifetime service total, NOT a 30d metrics card.
+    // Comparing the first "total:" with this same badge was a tautology.
     const headerReqMatch = bodyText30d.match(/REQUEST[\s\n]*latest:[\s\n]*[\s\S]*?total:\s*([\d,]+)/i);
-    let headerReqTotal = pageReqTotal;
-    if (headerReqMatch) {
-      headerReqTotal = parseInt(headerReqMatch[1].replace(/,/g, ''), 10);
-    } else {
-      console.log(`⚠️ [Dashboard 30d] Warning: REQUEST total count not found in global header. Falling back to page metrics total.`);
-    }
-
-    console.log(`[Dashboard 30d Consistency] Header REQUEST Total: ${headerReqTotal} │ Page Metrics Total: ${pageReqTotal}`);
-    if (pageReqTotal > headerReqTotal * 1.20 || pageReqTotal === 0) {
-      console.error(`[Dashboard 30d Consistency] Verification Failed: Page request count (${pageReqTotal}) is invalid, zero, or exceeds lifetime header count (${headerReqTotal})!`);
+    const headerReqTotal = headerReqMatch ? parseInt(headerReqMatch[1].replace(/,/g, ''), 10) : 0;
+    if (headerReqTotal === 0) {
+      console.error(`[Dashboard 30d] Verification Failed: REQUEST lifetime header total is missing or zero.`);
       await browser.close();
       process.exit(1);
     }
-    console.log(`[Dashboard 30d Consistency] Verified: Header request count and page metrics are consistent!`);
+    console.log(`[Dashboard 30d] REQUEST lifetime total: ${headerReqTotal}; window-count consistency NOT VERIFIED (no independent page count).`);
 
     // Strict Panel Loading Verification: Assert that panels have successfully finished loading and contain real data
     if (bodyText30d.includes("Crunching logs") || bodyText30d.includes("Initializing")) {
@@ -674,11 +756,6 @@ async function logPagePerf(page, name, responseMeasurements = [], measurementGap
     }
     if (bodyText30d.includes("No data available") || bodyText30d.includes("No data in this time range yet")) {
       console.error(`❌ [Playwright Panel Verification] Verification Failed: Dashboard panels successfully loaded but have no data ("No data available")!`);
-      await browser.close();
-      process.exit(1);
-    }
-    if (pageReqTotal === 0) {
-      console.error(`❌ [Playwright Panel Verification] Verification Failed: Dashboard metrics card has 0 total requests!`);
       await browser.close();
       process.exit(1);
     }
@@ -794,68 +871,66 @@ async function logPagePerf(page, name, responseMeasurements = [], measurementGap
     }
     console.log(`[RUM 24h] Verified: 24h RUM data is active and charts/ratings successfully populated.`);
 
-    // 2.2. Verify recent-window RUM Range with active polling (At least 50 beacons)
-    const rumUrl5m = getUrlWithParam(rumBaseUrl, "range", RECENT_RANGE);
-    console.log(`[RUM ${RECENT_RANGE}] Checking ${rumUrl5m} with active polling...`);
+    await runTrafficChecks(noTraffic, 'RUM', async () => {
+      // 2.2. Verify recent-window RUM Range with active polling (At least 50 beacons)
+      let recentBeaconCount = 0;
+      const MIN_RECENT_BEACONS = 50; // Safe threshold allowing for global edge S3 streaming latency
+      let recentRumBodyText = "";
 
-    let beaconCount5m = 0;
-    const MIN_BEACONS_5M = 50; // Safe threshold allowing for global edge S3 streaming latency
-    let rumBodyText5m = "";
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        recentBeaconCount = 0;
+        try {
+          const recentWindow = getRecentWindow(rumBaseUrl, RECENT_RANGE);
+          console.log(`[RUM ${RECENT_RANGE}] Checking ${recentWindow.url} with active polling...`);
+          const windowResponse = rumPage.waitForResponse(
+            response => isRecentRumResponse(response, recentWindow), { timeout: 35000 }
+          ).catch(() => null);
+          response = await rumPage.goto(recentWindow.url, { timeout: 35000 });
+          if (response && response.ok()) {
+            await rumPage.waitForSelector('main', { timeout: 10000 });
+            // Poll for the beacon card to paint (returns immediately once rendered)
+            // so a slow render under load doesn't read 0 and waste the attempt.
+            try {
+              await rumPage.waitForFunction(() => document.body.innerText.includes("TOTAL BEACONS"), undefined, { timeout: RUM_RENDER_SETTLE_MS });
+            } catch (e) {
+              // Fall through; the outer attempt loop retries for ingestion/render.
+            }
+            recentRumBodyText = await rumPage.evaluate(() => document.body.innerText);
+            const evidence = await windowResponse;
+            const observedCount = evidence ? (await evidence.json())?.beacon_count : null;
 
-    for (let attempt = 1; attempt <= 4; attempt++) {
-      try {
-        response = await rumPage.goto(rumUrl5m, { timeout: 35000 });
-        if (response && response.ok()) {
-          await rumPage.waitForSelector('main', { timeout: 10000 });
-          // Poll for the beacon card to paint (returns immediately once rendered)
-          // so a slow render under load doesn't read 0 and waste the attempt.
-          try {
-            await rumPage.waitForFunction(() => document.body.innerText.includes("TOTAL BEACONS"), undefined, { timeout: RUM_RENDER_SETTLE_MS });
-          } catch (e) {
-            // Fall through; the outer attempt loop retries for ingestion/render.
-          }
-          rumBodyText5m = await rumPage.evaluate(() => document.body.innerText);
+            if (recentRumBodyText.includes("TOTAL BEACONS")) {
+              const beaconMatch = recentRumBodyText.match(/TOTAL BEACONS\s*([\d,]+)/i);
+              const displayedCount = beaconMatch ? parseInt(beaconMatch[1].replace(/,/g, ''), 10) : 0;
+              if (Number.isSafeInteger(observedCount) && observedCount >= 0 && observedCount === displayedCount) {
+                recentBeaconCount = observedCount;
+              } else {
+                console.log(`[RUM ${RECENT_RANGE}] Requested-window beacon count UNVERIFIED or differs from the rendered card.`);
+              }
 
-          if (rumBodyText5m.includes("TOTAL BEACONS")) {
-            const beaconMatch = rumBodyText5m.match(/TOTAL BEACONS\s*([\d,]+)/i);
-            beaconCount5m = beaconMatch ? parseInt(beaconMatch[1].replace(/,/g, ''), 10) : 0;
-
-            if (beaconCount5m >= MIN_BEACONS_5M) {
-              break;
+              if (recentBeaconCount >= MIN_RECENT_BEACONS) {
+                break;
+              }
             }
           }
+        } catch (err) {
+          console.log(`[RUM ${RECENT_RANGE}] Navigation warning (attempt ${attempt}): ${err.message}`);
         }
-      } catch (err) {
-        console.log(`[RUM ${RECENT_RANGE}] Navigation warning (attempt ${attempt}): ${err.message}`);
+        console.log(`[RUM ${RECENT_RANGE}] Attempt ${attempt}/4: Beacon count is ${recentBeaconCount}/${MIN_RECENT_BEACONS}. Waiting 8s for background ingestion...`);
+        await rumPage.waitForTimeout(8000);
       }
-      console.log(`[RUM ${RECENT_RANGE}] Attempt ${attempt}/4: Beacon count is ${beaconCount5m}/${MIN_BEACONS_5M}. Waiting 8s for background ingestion...`);
-      await rumPage.waitForTimeout(8000);
-    }
 
-    if (beaconCount5m < MIN_BEACONS_5M) {
-      console.error(`[RUM ${RECENT_RANGE}] Verification Failed: Recent ${RECENT_RANGE} RUM beacon count is only ${beaconCount5m} (expected at least ${MIN_BEACONS_5M} from our recent edge load-test!). Ingestion did not complete.`);
-      console.error(`Body text sample:\n${rumBodyText5m.slice(0, 1000)}`);
-      await browser.close();
-      process.exit(1);
-    }
-    console.log(`[RUM ${RECENT_RANGE}] Verified: ${RECENT_RANGE} RUM data contains ${beaconCount5m} beacons (greater than load-test minimum of ${MIN_BEACONS_5M} beacons).`);
-    console.log(`[RUM ${RECENT_RANGE}] Verified: Web Vitals metrics are active in the ${RECENT_RANGE} window.`);
+      if (recentBeaconCount < MIN_RECENT_BEACONS) {
+        console.error(`[RUM ${RECENT_RANGE}] Verification Failed: Recent ${RECENT_RANGE} RUM beacon count is only ${recentBeaconCount} (expected at least ${MIN_RECENT_BEACONS} from our recent edge load-test!). Ingestion did not complete.`);
+        console.error(`Body text sample:\n${recentRumBodyText.slice(0, 1000)}`);
+        await browser.close();
+        process.exit(1);
+      }
+      console.log(`[RUM ${RECENT_RANGE}] Verified: ${RECENT_RANGE} RUM data contains ${recentBeaconCount} beacons (at least ${MIN_RECENT_BEACONS}).`);
 
-    // 2.3. Validate Header Liveness (RUM)
-    const rumLatestMatch = rumBodyText5m.match(/RUM[\s\n]*latest:[\s\n]*([^\n]+)/i);
-    if (!rumLatestMatch) {
-      console.error(`[Header] Verification Failed: RUM block not found in the global header.`);
-      await browser.close();
-      process.exit(1);
-    }
-    const rumLatestTime = rumLatestMatch[1].trim();
-    console.log(`[Header] RUM Latest Time: "${rumLatestTime}"`);
-    if (rumLatestTime.includes("Never") || rumLatestTime.includes("—") || rumLatestTime.includes("-")) {
-      console.error(`[Header] Verification Failed: RUM latest time is unpopulated/stale: "${rumLatestTime}"`);
-      await browser.close();
-      process.exit(1);
-    }
-    console.log(`[Header] Verified: RUM latest header time is fully active and updating!`);
+      // 2.3. Validate Header Liveness (RUM)
+      assertRecentHeader(recentRumBodyText, 'RUM');
+    });
 
     // 2.4. Validate 30d RUM Consistency: Header RUM Total vs. Page RUM Total
     const rumUrl30d = getUrlWithParam(rumBaseUrl, "range", "30d");

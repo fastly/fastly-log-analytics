@@ -106,12 +106,17 @@ prerequisite gate remains closed.
 When a matched raw-versus-rollup comparison proves that specific closed UTC
 hour bundles are wrong, an administrator can rebuild only those hours with
 `POST /api/admin/rebuild-time-series-rollups` and `{"hours":["YYYY-MM-DD-HH"]}`.
-The endpoint accepts 1–24 unique, valid, closed UTC hours and atomically
+The endpoint accepts up to 24 unique, valid, closed UTC hours and atomically
 replaces only their `time_series.parquet` files from the current serving view.
 It does not clear caches, rebuild other rollups, or fill missing event history.
-It also does not rebuild daily time-series derivatives; readers selecting a
-day-bundled tier will not see this hourly repair until that derivative is
-separately rebuilt and verified.
+For a proven daily-tier discrepancy, send `{"days":["YYYY-MM-DD"]}` instead
+(up to seven unique closed UTC days). At least one hour or day is required.
+Each selected day recomputes all 24 hours from retained events into private
+staging through one source connection, then atomically replaces only that
+daily time-series derivative. Retired or partial official hourly inputs are
+not used or rewritten. Incomplete recomputation leaves the existing daily
+file intact. Verify retained source history before repair; this operation
+cannot recover expired events.
 After the normal aggregate response-cache TTL expires and a computed miss is
 confirmed, compare the same half-open raw event-time bounds and minute buckets
 again; do not flush shared caches, and do not treat a reported write count
@@ -253,6 +258,13 @@ After the entire gate is genuinely verified, the required order is Remote Standa
 [`scripts/verify_dashboard.js`](../../scripts/verify_dashboard.js) now collects both aggregate and bundle responses. It preserves repeat responses rather than overwriting each endpoint with its last result, drains the response cohort before reporting, and prints component cache/source metadata and explicit unknowns on the `PERF` line.
 
 This is diagnostic reporting, not page certification. The verifier still reports missing history, coverage, attribution, page-ready and interaction evidence. A populated chart and a short request duration cannot clear those gaps. Its existing deployment/authentication behavior is unchanged; do not run the deployment verifier merely to obtain benchmark samples.
+
+The canonical runner forwards `--no-traffic` to the browser verifier when traffic
+generation is disabled. Historical charts and deployment checks still run;
+recent injected request/RUM counts and header freshness are explicitly not run.
+In ordinary mode, recent counts require responses matching the selected absolute
+15-minute bounds. Lifetime header totals are not window counts, and a recent
+header snapshot does not prove advancement or event-correlated freshness.
 
 ### Painted action observations
 
