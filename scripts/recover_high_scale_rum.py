@@ -29,12 +29,11 @@ def recover(manifest_prefix: str, *, apply: bool, approve_digest: str | None) ->
     from backend.high_scale.publication import (
         _DOMAIN_COLUMNS,
         _DOMAIN_TABLES,
-        ClickHouseBatchAdapter,
         ClickHousePublication,
         PostgresBatchManifestStore,
     )
     from backend.high_scale.registry_bootstrap import _default_archive_factory
-    from backend.high_scale.rum_recovery import execute_rum_recovery, plan_rum_recovery
+    from backend.high_scale.rum_recovery import RumRecoveryBatchAdapter, execute_rum_recovery, plan_rum_recovery
 
     if not re.fullmatch(r"[0-9a-f]{8,64}", manifest_prefix):
         raise ValueError("manifest prefix must be 8-64 lowercase hexadecimal characters")
@@ -141,7 +140,7 @@ def recover(manifest_prefix: str, *, apply: bool, approve_digest: str | None) ->
 
             # Constructing these adapters performs no writes. Dry-run never calls publish.
             publication = ClickHousePublication(
-                PostgresBatchManifestStore(PostgresControlPlane()), ClickHouseBatchAdapter(client)
+                PostgresBatchManifestStore(PostgresControlPlane()), RumRecoveryBatchAdapter(client)
             )
             report = execute_rum_recovery(make_plan, publication, apply=apply, approve_digest=approve_digest)
             return {**report, "read_only": not apply, "duration_ms": round((time.perf_counter() - started) * 1000, 2)}

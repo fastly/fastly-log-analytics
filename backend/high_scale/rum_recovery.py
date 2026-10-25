@@ -19,8 +19,12 @@ from backend.high_scale.archive_publication import ArchivePublication
 from backend.high_scale.decoder import decode_source_object
 from backend.high_scale.publication import (
     _DOMAIN_COLUMNS,
+    _DOMAIN_TABLES,
+    ClickHouseBatchAdapter,
     ClickHousePublication,
     HighScaleBatch,
+    PartialInsert,
+    _batch_uuid,
     _rows_for_domain,
     row_matches_serving_domain,
 )
@@ -28,6 +32,122 @@ from backend.high_scale.replay import _read_manifest_rows
 
 _DOMAINS = ("rum_vitals", "rum_errors")
 _IGNORED_CONTENT = {"event_id", "transform_version", "ingest_timestamp", "batch_id", "publication_state"}
+_READ_LIMITS = {
+    "max_rows_to_read": "100000",
+    "read_overflow_mode": "throw",
+    "max_result_rows": "1001",
+    "result_overflow_mode": "throw",
+}
+
+
+class RumRecoveryBatchAdapter(ClickHouseBatchAdapter):
+    """Recovery-only GLOBAL batch verification without one unbounded scan.
+
+    Every active partition is covered, including dates outside the candidate
+    window. Metadata weights only group reads; they never establish absence.
+    All physical target rows are read and compared, not just counted. Any
+    incomplete inventory, changing partition set, cap failure or partial/
+    conflicting payload aborts. No delete-and-retry path is taken.
+    """
+
+    def _inventory(self, table: str) -> dict[str, int]:
+        rows = self._client.execute(
+            "SELECT partition_id,sum(rows) AS partition_rows FROM system.parts "
+            "WHERE database=currentDatabase() AND table={table:String} AND active "
+            "GROUP BY partition_id LIMIT 33",
+            {"table": table},
+            settings=_READ_LIMITS,
+        )
+        if len(rows) > 32:
+            raise ValueError("RUM repair global partition inventory exceeds bound")
+        result: dict[str, int] = {}
+        for row in rows:
+            key, weight = row["partition_id"], row["partition_rows"]
+            if (
+                not isinstance(key, str)
+                or not key
+                or key in result
+                or not isinstance(weight, int)
+                or isinstance(weight, bool)
+                or not 0 <= weight <= 90_000
+            ):
+                raise ValueError("RUM repair partition cannot be proved under read cap")
+            result[key] = weight
+        return result
+
+    def _count_rows(self, table: str, batch: HighScaleBatch, batch_uuid: str) -> int:
+        if batch.domain not in _DOMAINS or table != _DOMAIN_TABLES[batch.domain] or not 0 < len(batch.rows) <= 1000:
+            raise ValueError("RUM repair batch verification scope is invalid")
+        inventory = self._inventory(table)
+        groups: list[tuple[list[str], int]] = []
+        for key, weight in sorted(inventory.items(), key=lambda item: (-item[1], item[0])):
+            for index, (keys, total) in enumerate(groups):
+                if total + weight <= 90_000:
+                    keys.append(key)
+                    groups[index] = (keys, total + weight)
+                    break
+            else:
+                groups.append(([key], weight))
+        if len(groups) > 6:
+            raise ValueError("RUM repair global partition read groups exceed bound")
+        expected = [
+            dict(zip(_DOMAIN_COLUMNS[batch.domain], values, strict=True))
+            for values in _rows_for_domain(batch, batch_uuid)
+        ]
+        expected_by_id = {str(row["event_id"]): row for row in expected}
+        if len(expected_by_id) != len(expected):
+            raise ValueError("RUM repair batch candidate identities are ambiguous")
+        present: list[dict[str, Any]] = []
+        for keys, _ in groups:
+            placeholders = ",".join("{part" + str(index) + ":String}" for index in range(len(keys)))
+            rows = self._client.execute(
+                f"SELECT {','.join(_DOMAIN_COLUMNS[batch.domain])} FROM {table} "
+                "WHERE service_id={service_id:String} AND batch_id={batch_id:UUID} "
+                "AND _partition_id IN (" + placeholders + ") LIMIT 1001",
+                {
+                    "service_id": batch.service_id,
+                    "batch_id": batch_uuid,
+                    **{f"part{index}": key for index, key in enumerate(keys)},
+                },
+                settings=_READ_LIMITS,
+            )
+            present.extend(rows)
+            if len(present) > 1000:
+                raise ValueError("RUM repair global batch facts exceed row bound")
+        if set(self._inventory(table)) != set(inventory):
+            raise ValueError("RUM repair global partition inventory changed")
+        seen: set[str] = set()
+        for row in present:
+            identity = str(row["event_id"])
+            wanted = expected_by_id.get(identity)
+            if (
+                identity in seen
+                or wanted is None
+                or str(row["batch_id"]) != batch_uuid
+                or _content(row, batch.domain) != _content(wanted, batch.domain)
+                or row["transform_version"] != wanted["transform_version"]
+                or row["publication_state"] != "visible"
+            ):
+                raise ValueError("RUM repair existing batch facts are duplicate, conflicting or out of scope")
+            seen.add(identity)
+        if len(present) not in (0, len(expected)):
+            raise PartialInsert(len(present))
+        return len(present)
+
+    def inspect_batch(self, batch: HighScaleBatch) -> tuple[int, dict[str, Any] | None]:
+        """Read-only preflight: exact global physical proof plus full-key receipt."""
+        batch_uuid = _batch_uuid(batch)
+        count = self._count_rows(_DOMAIN_TABLES[batch.domain], batch, batch_uuid)
+        existing = super()._existing_publication(batch, batch_uuid)
+        if existing is not None:
+            self._validate_publication(existing, batch)
+            if existing["publication_state"] == "visible" and count != len(batch.rows):
+                raise PartialInsert(count)
+        return count, existing
+
+    def _existing_publication(self, batch: HighScaleBatch, batch_uuid: str) -> dict[str, Any] | None:
+        # Validate physical rows even on the parent's visible-receipt fast path.
+        return self.inspect_batch(batch)[1]
 
 
 @dataclass(frozen=True)
