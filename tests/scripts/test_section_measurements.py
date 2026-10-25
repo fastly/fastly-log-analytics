@@ -66,6 +66,48 @@ def _component(state: str, **extra: object) -> dict:
     return {"_response_cache": {"state": state, "ttl_seconds": 15, "prewarmer": False, **extra}}
 
 
+@pytest.mark.parametrize("rows", [[], [{"pop": "PRIVATE_ROW_VALUE", "requests": 7}]])
+@pytest.mark.parametrize("state", ["bypass", "hit"])
+def test_list_component_remains_unknown_without_copying_rows(rows: list[dict], state: str) -> None:
+    result = describe_response({"_response_cache": {"state": state}, "pop_health": rows})
+    components = {row["component"]: row for row in result["components"]}
+    pop = components["pop_health"]
+    assert pop["cache_state"] == "unknown"
+    assert pop["sections"] == []
+    assert pop["reader_coverage"] == []
+    assert pop["history"] is None
+    assert "component_observation_envelope_missing" in pop["gaps"]
+    assert "response_cache_unknown" in pop["gaps"]
+    assert pop["execution_reused"] is (state == "hit")
+    assert "PRIVATE_ROW_VALUE" not in str(result)
+
+
+@pytest.mark.parametrize("child", [None, "absent"])
+def test_absent_list_component_is_not_fabricated(child: object) -> None:
+    payload = {"pop_health": child} if child is None else {}
+    assert [row["component"] for row in describe_response(payload)["components"]] == ["response"]
+
+
+def test_list_component_prevents_false_composite_cache_pair_success() -> None:
+    from scripts.lib.section_measurements import sample_cache_pair
+
+    clock = _Clock()
+    answers = iter(["hit", "miss", "hit"])
+
+    def request(body: dict, timeout: float) -> dict:
+        return {
+            "_response_cache": {"state": "bypass", "prewarmer": False},
+            "health": _component(next(answers)),
+            "pop_health": [],
+        }
+
+    result = sample_cache_pair(request, {}, max_seconds=60, monotonic=clock.monotonic, sleep=clock.sleep)
+    assert result["status"] == "incomplete"
+    assert result["components"]["health"]["status"] == "observed"
+    assert result["components"]["pop_health"]["status"] == "incomplete"
+    assert "miss_hit_pair_unobserved" in result["gaps"]
+
+
 def test_expiry_sampler_keeps_payload_exact_and_requires_miss_then_hit() -> None:
     from scripts.lib.section_measurements import sample_cache_pair
 

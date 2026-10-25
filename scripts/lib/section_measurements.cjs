@@ -219,7 +219,7 @@ function describeResponse(payload) {
     const raw = Object.hasOwn(body, '_section_timings') ? body._section_timings : body.section_timings;
     const sections = (Array.isArray(raw) ? raw : []).filter(row => isObject(row) && typeof row.section === 'string').map(row => describeSection(row, cachedExecution ? 'hit' : state));
     const prewarmer = typeof metadata.prewarmer === 'boolean' ? metadata.prewarmer : null;
-    const wrapper = componentNames.some(name => isObject(body[name]));
+    const wrapper = componentNames.some(name => isObject(body[name]) || Array.isArray(body[name]));
     const rawReaders = Object.hasOwn(body, '_reader_coverage') ? body._reader_coverage : body.reader_coverage;
     const readers = rawReaders == null && wrapper
       ? { observations: [], gaps: [] }
@@ -239,6 +239,11 @@ function describeResponse(payload) {
     for (const name of componentNames) {
       const inherit = enclosingHit || (cachedExecution && metadata.scope !== 'self');
       if (isObject(body[name])) visit(body[name], path === 'response' ? name : `${path}.${name}`, inherit);
+      else if (Array.isArray(body[name])) {
+        // Keep the unknown owner; list rows are not an observation envelope.
+        visit({}, path === 'response' ? name : `${path}.${name}`, inherit);
+        components[components.length - 1].gaps.push('component_observation_envelope_missing');
+      }
     }
   }
   visit(payload, 'response');

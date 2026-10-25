@@ -272,7 +272,7 @@ def describe_response(payload: Any) -> dict[str, Any]:
             for row in (raw if isinstance(raw, list) else [])
             if isinstance(row, dict) and isinstance(row.get("section"), str)
         ]
-        wrapper = any(isinstance(body.get(name), dict) for name in COMPONENTS)
+        wrapper = any(isinstance(body.get(name), (dict, list)) for name in COMPONENTS)
         raw_readers = body.get("_reader_coverage", body.get("reader_coverage"))
         readers: list[dict[str, Any]]
         reader_gaps: list[str]
@@ -320,9 +320,17 @@ def describe_response(payload: Any) -> dict[str, Any]:
         )
         for name in COMPONENTS:
             child = body.get(name)
-            if isinstance(child, dict):
+            if isinstance(child, (dict, list)):
                 inherit = enclosing_hit or (cached_execution and metadata.get("scope") != "self")
-                visit(child, name if path == "response" else f"{path}.{name}", inherit)
+                # List-shaped components have data, not an observation envelope.
+                # Retain the unknown owner without inspecting or copying its rows.
+                visit(
+                    child if isinstance(child, dict) else {},
+                    name if path == "response" else f"{path}.{name}",
+                    inherit,
+                )
+                if isinstance(child, list):
+                    components[-1]["gaps"].append("component_observation_envelope_missing")
 
     visit(payload, "response")
     gaps = {gap for component in components for gap in component["gaps"]}

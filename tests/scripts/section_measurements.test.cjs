@@ -10,6 +10,30 @@ test('default false does not establish miss and missing timing is explicit', () 
   assert.ok(report.gaps.includes('section_timings_missing'));
 });
 
+test('list-shaped components remain explicit unknowns without exposing rows', () => {
+  for (const state of ['bypass', 'hit']) {
+    for (const rows of [[], [{ pop: 'PRIVATE_ROW_VALUE', requests: 7 }]]) {
+      const report = describeResponse({ _response_cache: { state }, pop_health: rows });
+      const pop = report.components.find(row => row.component === 'pop_health');
+      assert.ok(pop);
+      assert.equal(pop.cache_state, 'unknown');
+      assert.deepEqual(pop.sections, []);
+      assert.deepEqual(pop.reader_coverage, []);
+      assert.equal(pop.history, null);
+      assert.ok(pop.gaps.includes('component_observation_envelope_missing'));
+      assert.ok(pop.gaps.includes('response_cache_unknown'));
+      assert.equal(pop.execution_reused, state === 'hit');
+      assert.equal(JSON.stringify(report).includes('PRIVATE_ROW_VALUE'), false);
+    }
+  }
+});
+
+test('absent and unrequested list components are not fabricated', () => {
+  for (const payload of [{}, { pop_health: null }]) {
+    assert.deepEqual(describeResponse(payload).components.map(row => row.component), ['response']);
+  }
+});
+
 test('component hits cannot replay historical work as current execution', () => {
   const report = describeResponse({
     aggregates: { _is_cached: true, _section_timings: [{ section: 'top_n_rollup', time_ms: 1700 }] },
