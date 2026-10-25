@@ -1283,6 +1283,20 @@ recompute all 24 closed UTC hours from retained events and publish the daily
 replacement only after complete success. Keep intermediate repair outputs away
 from the normal compactor; a failed repair must leave the existing day intact.
 
+### 48. A shared `raw/rum/` object belongs to one domain but carries both
+
+High-scale `rum_vitals` and `rum_errors` discovery both list `raw/rum/`. The
+source ledger is `UNIQUE(service_id, object_key)`, so the first domain to see an
+object claims it. Decoding only the claimed domain silently dropped the other
+domain's rows, and the raw object was then deleted. `ingest_controller.py` now
+decodes the sibling domain from the same payload, keeps only rows passing
+`row_matches_serving_domain`, and publishes them under
+`build_batch_id_from_manifest_id(f"{manifest_id}:{sibling}")` before the
+source is acknowledged. Sibling rows are not counted, archived or dead-lettered
+as the claimed domain's rows. Do not "fix" this by giving each domain its own
+ledger row or by resetting cursors. Pinned by
+`test_rum_errors_claim_also_publishes_sibling_vitals_from_the_shared_object`.
+
 ### Bounded ClickHouse diagnostic index (ADR-20)
 
 `backend/core/clickhouse_{schema,manifest,publication,rows,export}.py` implements

@@ -75,6 +75,16 @@ either discovery cursor or replaying unrelated objects. Verify the resulting
 source-ledger and serving/archive records before declaring the reconciliation
 complete; do not reset or rewind a shared cursor for a key-specific repair.
 
+`rum_vitals` and `rum_errors` list the same `raw/rum/` objects, and the source
+ledger is unique per `(service_id, object_key)`, so whichever domain discovers
+an object first owns it. One beacon can carry both vitals and errors. The
+ingest controller therefore also decodes the sibling domain from the claimed
+payload and publishes the rows that pass `row_matches_serving_domain` under a
+distinct batch id (`{manifest_id}:{sibling}`), before acknowledging the source.
+Before this fix, the sibling's rows were dropped and the raw object was later
+deleted. Those historical rows are lost; recover them only from archived
+`raw_json` with a scoped, duplicate-checked repair, never a cursor reset.
+
 ## Capacity profiles
 
 The portable production profile uses two ClickHouse replicas per shard and

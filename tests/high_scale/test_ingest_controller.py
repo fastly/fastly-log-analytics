@@ -293,13 +293,79 @@ def test_ingest_filters_out_sibling_domain_rows_before_publishing() -> None:
     )
 
     assert result.total_events == 2
-    assert len(clickhouse.batches) == 1
+    assert [batch.domain for batch in clickhouse.batches] == ["rum_vitals", "rum_errors"]
     assert len(clickhouse.batches[0].rows) == 1
     assert clickhouse.batches[0].rows[0]["metric_name"] == "LCP"
+    assert len(clickhouse.batches[1].rows) == 1
+    assert clickhouse.batches[1].rows[0]["error_message"] == "boom"
     assert result.publication.rows_visible == 1
 
 
-def test_ingest_publishes_nothing_when_every_row_belongs_to_a_sibling_domain() -> None:
+def test_rum_errors_claim_also_publishes_sibling_vitals_from_the_shared_object() -> None:
+    ownership = OwnershipStore()
+    ledger = HighScaleLedger()
+    clickhouse = _ClickHouse()
+    ownership.initialize("svc", owner="high_scale", source_cursor="cursor-0")
+    controller = HighScaleIngestController(
+        ownership=ownership,
+        ledger=ledger,
+        archive=ArchivePublication(InMemoryObjectStore()),
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
+        worker_id="worker-1",
+    )
+    payload = gzip.compress(
+        b'{"event_id":"error-1","timestamp":"2026-09-14T20:00:01Z","error_message":"boom"}\n'
+        b'{"event_id":"vital-1","timestamp":"2026-09-14T20:00:00Z","metric_name":"LCP","metric_value":1.25}\n'
+        b'{"event_id":"vital-2","timestamp":"2026-09-14T20:00:02Z","metric_name":"CLS","metric_value":0.1}\n'
+    )
+
+    _ingest_one(
+        controller,
+        service_id="svc",
+        domain="rum_errors",
+        object_key="raw/rum/mixed-errors-first.gz",
+        checksum="sha256:mixed-errors-first",
+        payload=payload,
+        version="v1",
+    )
+
+    by_domain = {batch.domain: batch for batch in clickhouse.batches}
+    assert sorted(by_domain) == ["rum_errors", "rum_vitals"]
+    assert [row["error_message"] for row in by_domain["rum_errors"].rows] == ["boom"]
+    assert sorted(row["metric_name"] for row in by_domain["rum_vitals"].rows) == ["CLS", "LCP"]
+    assert len({batch.batch_id for batch in clickhouse.batches}) == 2
+
+
+def test_pure_vitals_object_publishes_no_sibling_error_rows() -> None:
+    ownership = OwnershipStore()
+    ledger = HighScaleLedger()
+    clickhouse = _ClickHouse()
+    ownership.initialize("svc", owner="high_scale", source_cursor="cursor-0")
+    controller = HighScaleIngestController(
+        ownership=ownership,
+        ledger=ledger,
+        archive=ArchivePublication(InMemoryObjectStore()),
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
+        worker_id="worker-1",
+    )
+    payload = gzip.compress(
+        b'{"event_id":"vital-1","timestamp":"2026-09-14T20:00:00Z","metric_name":"LCP","metric_value":1.25}\n'
+    )
+
+    _ingest_one(
+        controller,
+        service_id="svc",
+        domain="rum_vitals",
+        object_key="raw/rum/pure-vitals.gz",
+        checksum="sha256:pure-vitals",
+        payload=payload,
+        version="v1",
+    )
+
+    assert [batch.domain for batch in clickhouse.batches] == ["rum_vitals"]
+
+
+def test_ingest_publishes_only_sibling_rows_when_every_row_belongs_to_the_sibling() -> None:
     ownership = OwnershipStore()
     ledger = HighScaleLedger()
     objects = InMemoryObjectStore()
@@ -325,7 +391,8 @@ def test_ingest_publishes_nothing_when_every_row_belongs_to_a_sibling_domain() -
     )
 
     assert result.total_events == 1
-    assert len(clickhouse.batches) == 0
+    assert [batch.domain for batch in clickhouse.batches] == ["rum_errors"]
+    assert clickhouse.batches[0].rows[0]["error_message"] == "boom"
     assert result.publication.rows_visible == 0
 
 

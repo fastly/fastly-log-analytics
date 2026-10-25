@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 HIGH_SCALE_PAGE_MAX_BYTES = 64 * 1024 * 1024  # 64 MB in-flight byte guard
 HIGH_SCALE_MAX_DEAD_LETTER_RATIO = 0.05  # 5% dead-letter limit
+_RUM_SIBLING_DOMAIN = {"rum_vitals": "rum_errors", "rum_errors": "rum_vitals"}
 
 
 @dataclass(frozen=True)
@@ -199,6 +200,7 @@ class HighScaleIngestController:
 
         decoded_sources: list[tuple[SourceObjectDescriptor, DecodeResult, list[dict[str, Any]]]] = []
         all_events: list[dict[str, Any]] = []
+        sibling_events: list[dict[str, Any]] = []
         total_accepted = 0
         total_quarantined = 0
 
@@ -271,6 +273,19 @@ class HighScaleIngestController:
 
             decoded_sources.append((descriptor, decoded, archive_rows))
             all_events.extend(decoded.events)
+            sibling = _RUM_SIBLING_DOMAIN.get(domain)
+            if sibling is not None:
+                # Both RUM domains list the shared raw/rum/ prefix and the
+                # ledger lets only the first discoverer own an object, so the
+                # sibling domain's rows must be published from this claim or
+                # they are lost when the raw object is deleted.
+                sibling_decoded = decode_source_object(
+                    replace(archive_source, domain=sibling),
+                    payload,
+                    transform_version=self._transform_version,
+                    domain=sibling,
+                )
+                sibling_events.extend(e for e in sibling_decoded.events if row_matches_serving_domain(sibling, e))
 
         total_rows = total_accepted + total_quarantined
         if total_rows > 0 and (total_quarantined / total_rows) > max_dead_letter_ratio:
@@ -362,6 +377,19 @@ class HighScaleIngestController:
                 owner.owner_epoch,
                 all_events,
             )
+
+        sibling = _RUM_SIBLING_DOMAIN.get(domain)
+        if sibling is not None and sibling_events:
+            self._serving.publish(
+                HighScaleBatch(
+                    batch_id=build_batch_id_from_manifest_id(f"{manifest.manifest_id}:{sibling}"),
+                    service_id=service_id,
+                    domain=sibling,
+                    generation=str(owner.owner_epoch),
+                    rows=tuple(sibling_events),
+                )
+            )
+            self._publish_aggregates_batch(service_id, sibling, manifest.manifest_id, owner.owner_epoch, sibling_events)
 
         object_keys = tuple(desc.object_key for desc, _ in sources_payloads)
         if self._control is not None:
