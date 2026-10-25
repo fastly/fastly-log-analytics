@@ -31,7 +31,7 @@ from backend import config as svcconfig
 from backend.config import SERVICE_ID_PATTERN
 from backend.core import duckdb as db
 from backend.core.duckdb import DBBusyError, get_connection
-from backend.utils.router_utils import redact_error_text
+from backend.utils.error_redaction import redact_error_text
 
 ServiceId = Annotated[str, Path(pattern=SERVICE_ID_PATTERN)]
 
