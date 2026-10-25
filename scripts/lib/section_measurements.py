@@ -185,6 +185,10 @@ def _history(raw: Any, reused: bool, state: str) -> tuple[dict[str, Any] | None,
         or not parsed.get("latest_event_at")
     ):
         gaps.append("history_extent_unverified")
+    if parsed.get("raw_extent_reaches_window_start") is False:
+        gaps.append("history_raw_prefix_uncovered")
+    if parsed.get("raw_extent_reaches_window_start") is None:
+        gaps.append("history_raw_prefix_unverified")
     if parsed.get("window_count_source") not in {"raw", "filtered_temp"} or parsed.get("window_rows") is None:
         gaps.append("history_window_rows_unverified")
     if parsed.get("window_rows") == 0:

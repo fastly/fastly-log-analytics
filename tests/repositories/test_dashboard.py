@@ -64,6 +64,7 @@ def test_filtered_dashboard_records_the_outer_rollup_refusal_and_actual_count(in
     assert result["history"]["window_rows"] == result["total_rows"]
     assert result["history"]["window_count_source"] == "filtered_temp"
     assert result["history"]["filters_requested"] is True
+    assert result["history"]["raw_extent_reaches_window_start"] is None
 
 
 def test_get_aggregates_empty_table(in_memory_duckdb):
@@ -788,6 +789,20 @@ def test_get_field_values_filters_by_search_substring(in_memory_duckdb, test_ser
     # Country search also maps the search term against COUNTRY_MAP
     values = {v["value"] for v in out["values"]}
     assert "US" in values
+
+
+@pytest.mark.parametrize(
+    ("window_start", "earliest_event_at", "expected"),
+    [
+        ("2026-10-01T00:00:00Z", "2026-09-25T05:38:42Z", True),
+        ("2026-10-01T00:00:00Z", "2026-10-01T00:00:01Z", False),
+        ("2026-10-01T00:00:00Z", None, None),
+    ],
+)
+def test_raw_extent_start_coverage_is_nullable_and_boundary_aware(window_start, earliest_event_at, expected):
+    from backend.repositories.dashboard import _raw_extent_reaches_window_start
+
+    assert _raw_extent_reaches_window_start(window_start, earliest_event_at) is expected
 
 
 def test_get_field_values_country_search_resolves_full_names(in_memory_duckdb, test_service_source):

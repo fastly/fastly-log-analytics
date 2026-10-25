@@ -62,6 +62,24 @@ test('reader observations stay component-owned and inherited hits are historical
   assert.equal(observation.attempts[0].path, 'PRIVATE');
 });
 
+test('history report flags an uncovered raw prefix without certifying continuity', () => {
+  const report = describeResponse({
+    _response_cache: { state: 'miss' },
+    _history: {
+      extent_source: 'live_query',
+      extent_rows: 5,
+      window_rows: 5,
+      window_count_source: 'rollup',
+      window_start: '2026-09-25T05:00:00+00:00',
+      earliest_event_at: '2026-09-25T05:38:42+00:00',
+      raw_extent_reaches_window_start: false,
+    },
+  });
+  assert.ok(report.gaps.includes('history_raw_prefix_uncovered'));
+  assert.ok(report.gaps.includes('history_continuity_unverified'));
+  assert.equal(report.components[0].history.observation.raw_extent_reaches_window_start, false);
+});
+
 test('malformed reader observations cannot become current coverage or leak arbitrary timestamps', () => {
   for (const raw of [
     [{ reader: 'dashboard.ngwaf_bots', minimum_window_hours: true }],

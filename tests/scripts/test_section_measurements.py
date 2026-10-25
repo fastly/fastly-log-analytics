@@ -674,6 +674,27 @@ def test_history_retains_provenance_without_certifying_cached_or_rolled_counts()
             assert "history_extent_unverified" in report["gaps"]
 
 
+def test_history_reports_when_raw_extent_starts_after_requested_window() -> None:
+    report = describe_response(
+        {
+            "_response_cache": {"state": "miss"},
+            "_history": {
+                "extent_source": "live_query",
+                "extent_rows": 5,
+                "window_rows": 5,
+                "window_count_source": "rollup",
+                "window_start": "2026-09-25T05:00:00+00:00",
+                "earliest_event_at": "2026-09-25T05:38:42+00:00",
+                "raw_extent_reaches_window_start": False,
+            },
+        }
+    )
+
+    assert "history_raw_prefix_uncovered" in report["gaps"]
+    assert "history_continuity_unverified" in report["gaps"]
+    assert report["components"][0]["history"]["observation"]["raw_extent_reaches_window_start"] is False
+
+
 def test_reader_observation_limit_does_not_truncate_normal_multi_reader_payload() -> None:
     rows = [
         {"reader": reader, "minimum_window_hours": None}

@@ -19,6 +19,14 @@
   - `rum_retention_days` (0 = retain forever).
   - `cache_retention_days` (default: 90 days).
   - `rollup_retention_months` (default: 12 months).
+
+`data_retention_days` governs raw request-log rows in DuckLake; the separate
+`rollup_retention_months` setting governs local rollup parquet cleanup. A
+rollup may therefore outlive the raw event rows represented by its aggregates.
+Rollup counts are not evidence that the corresponding raw records remain
+available, and an observed later raw extent does not by itself identify
+retention as the cause.
+
 - **Jitter & Misfire Policy:**
   - Jitter: 60 seconds.
   - `max_instances=1`, `coalesce=True`, `misfire_grace_time=3600s`.

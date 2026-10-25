@@ -86,6 +86,7 @@ const historyFields = {
   extent_source: enumValue(['unknown', 'status_cache', 'live_query', 'count_only_query', 'unavailable']),
   extent_rows: nullable(count), earliest_event_at: timestamp, latest_event_at: timestamp,
   window_start: timestamp, window_end: timestamp, filters_requested: nullable(value => typeof value === 'boolean'),
+  raw_extent_reaches_window_start: nullable(value => typeof value === 'boolean'),
   window_rows: nullable(count), window_count_source: enumValue(['unknown', 'rollup', 'raw', 'filtered_temp']),
 };
 
@@ -160,6 +161,8 @@ function describeHistory(raw, reused, state) {
   const gaps = ['history_continuity_unverified'];
   if (current !== true) gaps.push('history_historical_or_unknown');
   if (parsed.extent_source !== 'live_query' || !parsed.earliest_event_at || !parsed.latest_event_at) gaps.push('history_extent_unverified');
+  if (parsed.raw_extent_reaches_window_start === false) gaps.push('history_raw_prefix_uncovered');
+  if (parsed.raw_extent_reaches_window_start == null) gaps.push('history_raw_prefix_unverified');
   if (!['raw', 'filtered_temp'].includes(parsed.window_count_source) || parsed.window_rows == null) gaps.push('history_window_rows_unverified');
   if (parsed.window_rows === 0) gaps.push('history_empty_window');
   return { observation: { observation: parsed, current_observation: current }, gaps };

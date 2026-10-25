@@ -10817,6 +10817,8 @@ export interface components {
             window_start?: string | null;
             /** Window End */
             window_end?: string | null;
+            /** Raw Extent Reaches Window Start */
+            raw_extent_reaches_window_start?: boolean | null;
             /** Filters Requested */
             filters_requested?: boolean | null;
             /** Window Rows */

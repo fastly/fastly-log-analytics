@@ -64573,6 +64573,17 @@
             ],
             "title": "Window End"
           },
+          "raw_extent_reaches_window_start": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Extent Reaches Window Start"
+          },
           "filters_requested": {
             "anyOf": [
               {

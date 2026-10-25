@@ -97,9 +97,18 @@ Optional `_history` records reuse the existing extent/count work and distinguish
 status-cache extents, live count/min/max, count-only fallback and unavailable
 observations. Failed observations retain null counts even where a legacy response
 returns zero. Window rows identify raw, materialized-temp or rollup provenance.
-Cached extents and rolled counts do not establish current exact history; even a
-live extent query does not establish continuous retained coverage. No new scan
-is added merely to populate these fields.
+`raw_extent_reaches_window_start` compares the requested start with the earliest
+observed raw event: false means the observed extent begins after the requested
+start, true means it reaches that boundary, and null means the comparison is
+unavailable. False is an explicit incomplete-prefix warning for raw-versus-rollup
+comparisons; true does not prove continuous coverage, exact rollup contents, or
+why an extent begins where it does. In particular, an observed extent is not
+proof that retention caused a gap. Raw-log `data_retention_days` and local
+rollup `rollup_retention_months` are separate horizons; retained aggregates can
+outlive the raw events needed to prove their contents. Cached extents and rolled
+counts do not establish current exact history; even a live extent query does not
+establish continuous retained coverage. No new scan is added merely to populate
+these fields.
 
 Skipped/filtered branches that do not invoke a rollup reader have no rollup
 observation; absence is not evidence of eligibility or coverage. These are

@@ -92,6 +92,7 @@ class HistoryObservation(BaseModel):
     latest_event_at: str | None = None
     window_start: str | None = None
     window_end: str | None = None
+    raw_extent_reaches_window_start: bool | None = None
     filters_requested: bool | None = None
     window_rows: int | None = Field(default=None, ge=0)
     window_count_source: Literal["unknown", "rollup", "raw", "filtered_temp"] = "unknown"

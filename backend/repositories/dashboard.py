@@ -553,6 +553,21 @@ def get_aggregates(
     )
 
 
+def _raw_extent_reaches_window_start(
+    window_start: str | None,
+    earliest_event_at: str | None,
+) -> bool | None:
+    """Compare the requested start with the earliest observed raw event.
+
+    This does not prove continuity or explain why an extent begins later.
+    """
+    requested_start = parse_iso_utc(window_start)
+    earliest = parse_iso_utc(earliest_event_at)
+    if requested_start is None or earliest is None:
+        return None
+    return earliest <= requested_start
+
+
 def _compute_dashboard_aggregates(
     con: duckdb.DuckDBPyConnection | Callable[[], duckdb.DuckDBPyConnection],
     src: dict,
@@ -909,6 +924,9 @@ def _compute_dashboard_aggregates(
 
         total_rows_total, earliest_log_at, latest_log_at = timer.call(
             "source_extent", lambda: get_source_extent(runner, src, orig_table_name)
+        )
+        history.raw_extent_reaches_window_start = _raw_extent_reaches_window_start(
+            history.window_start, earliest_log_at
         )
 
         # ── View-lag self-heal ────────────────────────────────────────────
