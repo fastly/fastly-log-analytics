@@ -30,12 +30,13 @@ vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
 }))
 
 const mockState = { activeServiceId: 'svc-1' as string | null }
-vi.mock('@/stores/serviceStore', () => {
+vi.mock('@/stores/filterStore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/filterStore')>()
   const useServiceStore = Object.assign(
     vi.fn((selector?: (s: typeof mockState) => unknown) => (selector ? selector(mockState) : mockState)),
     { getState: () => mockState },
   )
-  return { useServiceStore }
+  return { ...actual, useServiceStore }
 })
 
 const cronApply = vi.fn()

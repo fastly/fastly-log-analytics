@@ -2,11 +2,9 @@
 
 import * as React from 'react'
 import { Info, LineChart, ListChecks } from 'lucide-react'
-import { useScoringQuery } from './useScorerTimeseries'
-
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { CardErrorState } from '@/components/AnalyticsCard'
-import { PerReasonAucHelp, RocPrCurvesHelp } from '@/components/SessionScoring/help-content'
+import { PerReasonAucHelp, RocPrCurvesHelp, useScoringQuery } from '@/components/SessionScoring/help-content'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'

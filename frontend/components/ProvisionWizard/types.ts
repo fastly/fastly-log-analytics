@@ -1,6 +1,6 @@
 import type React from "react";
 import type { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Service } from "@/stores/serviceStore";
+import type { Service } from "@/stores/filterStore";
 import type { SSELine, SSEStatus } from "@/hooks/useSSE";
 import type { Schema } from "@/types/api";
 

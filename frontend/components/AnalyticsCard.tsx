@@ -7,9 +7,9 @@ import { PlotlyChart } from '@/components/PlotlyChart'
 import { makeTimeXAxis, TIME_HOVER_LAYOUT } from '@/lib/chart-helpers'
 import { cn } from '@/lib/utils'
 import { Loader2, HelpCircle, Inbox, Lock } from 'lucide-react'
-import { HelpDialog } from '@/components/ui/help-dialog'
+import { HelpDialog } from '@/components/ui/confirm-dialog'
 import { Button } from '@/components/ui/button'
-import type { PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/plotly'
+import type { PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/api'
 
 // ─── ErrorBoundary ──────────────────────────────────────────────────────────
 

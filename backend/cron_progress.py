@@ -274,7 +274,7 @@ class CronRunsPublisher(_InProcessPublisher):
 
 publisher: Any
 if SSE_BACKPLANE == "valkey":
-    from backend.utils.valkey_publisher import ValkeyPublisher
+    from backend.utils.telemetry import ValkeyPublisher
 
     publisher = ValkeyPublisher("cron-runs")
 else:

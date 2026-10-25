@@ -5,7 +5,7 @@ import { adminFetch, client } from "@/lib/api";
 import { unwrapClient } from '@/lib/api';
 import { queryKeys } from "@/lib/query-keys";
 import { downloadBlob } from "@/lib/utils";
-import type { Service } from "@/stores/serviceStore";
+import type { Service } from "@/stores/filterStore";
 import type {
   FosStatus,
   JoinPhase,

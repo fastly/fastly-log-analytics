@@ -2,10 +2,10 @@
 
 import React, { useEffect, useRef, useState } from 'react'
 import { usePathname } from 'next/navigation'
-import { useDebugStore } from '@/stores/debugStore'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useDebugStore } from '@/stores/filterStore'
+import { useServiceStore } from '@/stores/filterStore'
 import { Button } from '@/components/ui/button'
-import { CopyButton } from '@/components/ui/copy-button'
+import { CopyButton } from '@/components/ui/confirm-dialog'
 import { ChevronDown, ChevronUp, Database, HardDrive, Network, Trash2 } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge } from '@/components/ui/badge'

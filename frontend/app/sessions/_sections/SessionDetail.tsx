@@ -9,7 +9,7 @@ import { AlertTriangle, Clock, ExternalLink, Film, Globe, Shield, Users } from '
 import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api'
 import { DataTable } from '@/components/DataTable'
-import { FlagSessionPopover } from '@/components/SessionScoring/FlagSessionPopover'
+import { FlagSessionPopover } from '@/components/SessionScoring/TopFlaggedTable'
 import { Badge } from '@/components/ui/badge'
 import {
   Dialog,
@@ -44,9 +44,9 @@ import {
 } from '@/components/ui/tooltip'
 import { useDateFormat } from '@/hooks/useSSE'
 import { useFieldLabel } from '@/hooks/useBootstrap'
-import type { LabelRow, LabelValue } from '@/components/SessionScoring/useScorerTimeseries'
+import type { LabelRow, LabelValue } from '@/components/SessionScoring/help-content'
 import { buildSessionDashboardUrl, buildStreamDetailUrl } from '@/lib/utils'
-import { OBJECT_TYPE_LABELS, STREAM_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from '@/app/streaming/_sections/streamingInfo'
+import { OBJECT_TYPE_LABELS, STREAM_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from '@/app/streaming/_sections/StreamingClient'
 import type { Session, SessionDetailResponse, SessionsResponse } from '@/types/api'
 
 import { formatCount, formatCountMaybe } from '@/lib/format'

@@ -26,6 +26,7 @@ from typing import Any
 from backend.cron.decorators import cron_task
 from backend.cron.lifecycle import cron_run
 from backend.cron.scheduler import (
+    _check_buffer_backlog,
     _check_disk_space,
     _claim_heavy_refresh,
     _display_label,
@@ -35,6 +36,186 @@ from backend.cron.scheduler import (
 )
 
 logger = logging.getLogger("backend.scheduler")
+
+
+# ── Shared cron job helpers (formerly backend.cron.jobs._common) ─────────────
+
+
+def refresh_view_and_warm_pool(
+    source: dict,
+    service_id: str,
+    *,
+    log_prefix: str,
+    progress_log: Callable[[dict], None] | None = None,
+) -> None:
+    """Force-refresh the Iceberg DuckDB view and warm the connection pool.
+
+    Called on the cron writer thread after a commit or a sync tick so the
+    next request-path checkout finds a pre-bound view (avoiding the
+    slow-path rebuild under the per-service lock).
+
+    Emits a single status message via ``progress_log`` ON SUCCESS ONLY.
+    Failures are logged at WARNING through this module's logger; the
+    progress feed stays quiet because the prior shape (sync.py) put the
+    success message OUTSIDE the try/except and so reported "View refresh +
+    warm: Xms" even when the work raised. Fixes that latent mis-log.
+    """
+    t0 = time.time()
+    try:
+        from backend.core import iceberg as _ice
+        from backend.core.duckdb import get_connection as _get_conn
+        from backend.core.duckdb_pool import warm_pool_for_service as _warm
+
+        con_v = _get_conn(source=source, read_only=True)
+        try:
+            _ice.update_iceberg_view(con_v, source, force=True)
+            _warm(service_id, source)
+        finally:
+            con_v.close()
+        if progress_log is not None:
+            progress_log(
+                {"type": "status", "message": f"{log_prefix}View refresh + warm: {int((time.time() - t0) * 1000)}ms"}
+            )
+    except Exception as e:
+        logger.warning("[scheduler] %s: post-%s view refresh failed: %s", service_id, log_prefix.strip(": "), e)
+
+
+def finalize_cron_duration(
+    src: dict,
+    run_id: int | None,
+    t_start: float,
+    *,
+    log_output: str | None = None,
+    silent: bool = True,
+    clock: Callable[[], float] = time.time,
+) -> None:
+    """Update the cron-run row's ``duration_s`` (and optionally ``log_output``)."""
+    if run_id is None:
+        return
+    try:
+        elapsed = clock() - t_start
+        from backend.core.duckdb import update_cron_duration
+
+        if log_output is not None:
+            update_cron_duration(src, run_id, elapsed, log_output=log_output)
+        else:
+            update_cron_duration(src, run_id, elapsed)
+    except Exception as e:
+        if not silent:
+            logger.warning("Failed to update full cron duration: %s", e)
+
+
+def get_service_display_label(service_id: str, cfg: dict | None = None) -> str:
+    """Return ``"{name} ({service_id})"`` when the service name differs from ``service_id``."""
+    if cfg is None:
+        from backend import config as svcconfig
+
+        cfg = svcconfig.load_config(service_id)
+    svc_name = (cfg.get("service_name") or cfg.get("name") or service_id) if cfg else service_id
+    return f"{svc_name} ({service_id})" if svc_name and svc_name != service_id else service_id
+
+
+def has_sufficient_disk_space(
+    path: str,
+    job_label: str,
+    service_id: str,
+    *,
+    min_free_bytes: int = 50 * 1024 * 1024,
+) -> tuple[bool, str]:
+    """Return ``(ok, msg)`` checking that ``path`` (or ``.``) has at least ``min_free_bytes`` free."""
+    import shutil
+
+    check_dir = path if os.path.isdir(path) else "."
+    try:
+        free_bytes = shutil.disk_usage(check_dir).free
+        if free_bytes < min_free_bytes:
+            msg = f"Disk space critically low (< {min_free_bytes // (1024 * 1024)}MB free: {free_bytes / (1024 * 1024):.1f}MB)"
+            logger.warning("⚠️  [%s] %s: %s", job_label, service_id, msg)
+            return False, msg
+    except Exception as e:
+        logger.warning("[%s] %s: failed to check disk space: %s", job_label, service_id, e)
+    return True, ""
+
+
+def publish_sync_status_safe(service_id: str, log_label: str = "scheduler") -> None:
+    """Compute and publish the cached sync-status SSE snapshot for ``service_id`` (best-effort)."""
+    try:
+        from backend.sync_status_publisher import publisher as _sync_status_publisher
+        from backend.sync_status_snapshot import compute_sync_status_cached
+
+        snapshot = compute_sync_status_cached(service_id)
+        if snapshot is not None:
+            _sync_status_publisher.publish(service_id, snapshot)
+    except Exception:
+        logger.exception("[%s] %s: sync-status SSE publish failed", log_label, service_id)
+
+
+def _buffer_result_error(result: dict, default_error: str | None = None) -> str | None:
+    """Extract combined error and quarantined-file message from a ``commit_buffer`` result dict."""
+    parts: list[str] = []
+    if result.get("error"):
+        parts.append(str(result["error"]))
+    quarantined = int(result.get("quarantined_files", 0) or 0)
+    if quarantined:
+        parts.append(f"{quarantined} unreadable buffer file(s) quarantined")
+    return "; ".join(parts) if parts else default_error
+
+
+def apply_time_range_pinning(
+    service_id: str,
+    cfg: dict,
+    src: dict,
+    *,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    is_manual: bool = False,
+    fallback_to_created_at: bool = False,
+    pin_explicit_range: bool = False,
+    get_scheduler_fn: Callable | None = None,
+) -> tuple[str | None, str | None]:
+    """Resolve and persist provisioning ``time_range`` bounds for sync/metadata jobs."""
+    from backend import config as svcconfig
+
+    prov = cfg.get("provisioning", {})
+    should_pin = False
+    if not start_time and not is_manual:
+        tr = prov.get("time_range")
+        if tr and tr.get("start"):
+            start_time = tr["start"]
+            logger.info("[scheduler] %s: Using configured start_time limit: %s", service_id, start_time)
+            should_pin = pin_explicit_range
+        elif fallback_to_created_at and cfg.get("created_at"):
+            start_time = cfg["created_at"]
+            logger.info(
+                "[scheduler] %s: Fallback to service creation time as start_time limit: %s", service_id, start_time
+            )
+            should_pin = True
+    elif pin_explicit_range and (start_time or end_time):
+        should_pin = True
+
+    if should_pin and (start_time or end_time):
+
+        def _pin_time_range(c: dict) -> None:
+            time_range = c.setdefault("provisioning", {}).setdefault("time_range", {})
+            if start_time:
+                time_range["start"] = start_time
+            if end_time:
+                time_range["end"] = end_time
+
+        _pin_time_range(cfg)
+        svcconfig.mutate_config(service_id, _pin_time_range)
+        src["time_range"] = cfg["provisioning"]["time_range"]
+        if fallback_to_created_at:
+            logger.info("[scheduler] %s: Saved service creation time as start_time limit to config.", service_id)
+    elif is_manual and not start_time and not end_time:
+        if "time_range" in prov:
+            del prov["time_range"]
+            cfg["provisioning"] = prov
+            svcconfig.mutate_config(service_id, lambda c: c.get("provisioning", {}).pop("time_range", None))
+            src["time_range"] = None
+            logger.info("[scheduler] %s: Manual sync-all, cleared time_range limit.", service_id)
+
+    return start_time, end_time
 
 
 def _ingest_with_adaptive_followups(
@@ -215,8 +396,6 @@ def _run_log_discovery_cron(
 
     delete_after = svcconfig.resolve_raw_delete_after(cfg, delete_after)
 
-    from backend.cron.jobs._common import apply_time_range_pinning, get_service_display_label
-
     _display = get_service_display_label(service_id, cfg)
 
     # ── 1. Ingest ─────────────────────────────────────────────────────────────
@@ -343,7 +522,6 @@ def _run_log_discovery_cron(
 
             def _publish_pass_rows() -> None:
                 nonlocal published_pass_rows
-                from backend.cron.jobs._common import publish_sync_status_safe, refresh_view_and_warm_pool
 
                 def _progress(ev: dict) -> None:
                     _log_and_add_progress(run_id, service_id, job_name="log_discovery", event=ev)
@@ -474,7 +652,6 @@ def _run_log_discovery_cron(
                                 published_pass_rows > 0 and published_pass_rows == done_event.get("rows_inserted", 0)
                             )
                             if done_event.get("rows_inserted", 0) > 0 and not already_published:
-                                from backend.cron.jobs._common import refresh_view_and_warm_pool
                                 from backend.utils.active_requests import yield_to_api
 
                                 # Cooperative yield before each post-ingest CPU stage
@@ -585,8 +762,6 @@ def _run_log_discovery_cron(
         # Filename metadata cannot stand in for MAX(timestamp); publishing before
         # this refresh leaves connected browsers one ingest behind indefinitely.
         # No additional scan is needed and header polls remain cached-only.
-        from backend.cron.jobs._common import publish_sync_status_safe
-
         publish_sync_status_safe(service_id, "scheduler")
 
         if run_id is not None:
@@ -749,8 +924,6 @@ def _run_log_discovery_cron(
     # so a failed update surfaces in the log stream (other cron jobs swallow,
     # but sync is the high-frequency tick where divergence matters).
     if sync_enabled or force:
-        from backend.cron.jobs._common import finalize_cron_duration
-
         finalize_cron_duration(
             src,
             run_id,
@@ -984,7 +1157,6 @@ def _run_full_sweep(
             _log_and_add_progress(run_id, service_id, job_name="full_sync", event={"type": "done", "message": summary})
 
             if done_event.get("rows_inserted", 0) > 0:
-                from backend.cron.jobs._common import refresh_view_and_warm_pool
                 from backend.utils.active_requests import yield_to_api
 
                 yield_to_api()
@@ -1255,3 +1427,209 @@ def _run_gap_heal(
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("cron.jobs.sync._GAP_HEAL_LAST_TRIGGER", _GAP_HEAL_LAST_TRIGGER)
+
+
+# ── _run_commit (formerly backend.cron.jobs.commit) ──────────────────────────
+
+
+@cron_task("cron_commit", job_name="commit")
+def _run_commit(service_id: str, force: bool = False, run_id: int | None = None) -> None:
+    """Commit the local buffer to the shared Iceberg table in FOS.
+
+    Runs on its own cadence (commit_interval_mins) — independent of how often
+    raw files are ingested. This lets the user control cloud data freshness
+    without changing the Fastly logging endpoint period.
+    """
+    from backend import config as svcconfig
+    from backend.core.duckdb import get_source_for_service
+
+    cfg = svcconfig.load_config(service_id)
+    if not cfg:
+        return
+
+    src = get_source_for_service(service_id)
+    if src is None:
+        return
+
+    if src.get("access_level") == "read_only" and not force:
+        return
+
+    prov = cfg.get("provisioning", {})
+    sync_cfg = prov.get("cron_sync", {})
+    if not sync_cfg.get("enabled", True) and not force:
+        return
+
+    _display = get_service_display_label(service_id, cfg)
+    with cron_run(
+        service_id,
+        "commit",
+        source=src,
+        run_id=run_id,
+        error_summary="Buffer commit failed",
+        finalize_duration=True,
+        skip_log_prefix="commit",
+    ) as run:
+        if not run.ok:
+            return
+        run_id = run.run_id
+        if svcconfig.is_high_scale_mode(src):
+            # Celery/ledger data plane: converts commit to DuckLake per insert, so
+            # this job's role is adjacent-small-file compaction. Run it INLINE
+            # (this job already executes on a worker in external mode) so the
+            # cron_runs lease is held for the duration — a dispatch-and-forget
+            # released the mutual-exclusion lease before the merge ran, letting
+            # overlapping ticks run concurrent merges — and the row records the
+            # real outcome instead of a fake instant success.
+            from backend.core.ingest import finalize_committed_raw, merge_lake_files
+            from backend.core.metadata.base import get_con
+
+            run.include_log_output = False
+            try:
+                merge_lake_files(service_id)
+
+                # Honest per-run counts for the cron row: how many files the
+                # convert workers landed since the previous commit tick, and
+                # how many durable raw .gz files we deleted (delete_after).
+                meta_con = get_con(service_id)
+                prev = meta_con.execute(
+                    "SELECT started_at FROM cron_runs WHERE service_id = ? AND task = 'commit' "
+                    "AND status != 'running' ORDER BY started_at DESC, id DESC LIMIT 1",
+                    (service_id,),
+                ).fetchone()
+                since_epoch = 0.0
+                if prev and prev["started_at"]:
+                    from backend.utils.date_utils import parse_iso_utc
+
+                    prev_dt = parse_iso_utc(prev["started_at"])
+                    if prev_dt is not None:
+                        since_epoch = prev_dt.timestamp()
+                files_ingested = meta_con.execute(
+                    "SELECT count(*) FROM ingest_ledger WHERE service_id = ? AND committed_at >= ?",
+                    (service_id, since_epoch),
+                ).fetchone()[0]
+
+                raw = finalize_committed_raw(service_id)
+
+                summary = f"Ingested {files_ingested} file(s); merged small lake files"
+                if raw["delete_after"]:
+                    summary += f"; deleted {raw['deleted']} raw file(s)"
+                else:
+                    summary += "; raw deletion disabled (delete_after=false)"
+                run.success(summary, files_downloaded=files_ingested, files_deleted_fos=raw["deleted"])
+            except Exception as e:
+                run.fail("DuckLake merge / raw finalization failed", error_message=str(e))
+                logger.exception("[ledger] %s: DuckLake merge / raw finalization failed", service_id)
+            return
+
+        # Disk pre-check: commits write manifest cache + cloud-staged parquet
+        # locally before upload. A full disk during commit can corrupt the
+        # iceberg state midway, which is much worse than refusing to start.
+        from backend.core.duckdb import _cache_dir as _commit_cache_dir
+
+        ok, disk_msg = _check_disk_space(_commit_cache_dir(src), service_id, "commit")
+        if not ok:
+            run.include_log_output = False
+            run.fail(f"Commit aborted: {disk_msg}", error_message=disk_msg)
+            return
+
+        logger.info("🏎️  \x1b[95m[commit]\x1b[0m %s: Commit job started.", _display)
+        _log_and_add_progress(
+            run_id,
+            service_id,
+            job_name="commit",
+            event={"type": "status", "message": "Committing local buffer to Iceberg snapshot..."},
+        )
+
+        try:
+            from backend.core import iceberg as db_iceberg
+
+            def _commit_progress(type, msg):
+                _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": type, "message": msg})
+
+            result = db_iceberg.commit_buffer(src, progress_callback=_commit_progress)
+            quarantined = int(result.get("quarantined_files", 0) or 0)
+            quarantine_suffix = f" ⚠ quarantined {quarantined} unreadable file(s)" if quarantined else ""
+            commit_error = _buffer_result_error(result, "") or ""
+            incomplete_suffix = f"; commit incomplete: {commit_error}" if commit_error else ""
+            # Post-commit backlog probe: if anything is still in the buffer after a
+            # successful commit, the next commit was racing with a fresh ingest OR
+            # the drain is genuinely stuck (catalog perms, schema mismatch, etc.).
+            # The threshold scales with commit_interval_mins so "stuck" means
+            # "older than what a single commit cycle could reasonably leave behind."
+            backlog_suffix = _check_buffer_backlog(
+                src, service_id, commit_interval_mins=int(sync_cfg.get("commit_interval_mins", 5))
+            )
+            if result.get("files_committed", 0) > 0:
+                summary = (
+                    f"Committed {result['files_committed']} buffer file(s) "
+                    f"({result['rows_committed']} rows) → snapshot {result.get('snapshot_id')}.{quarantine_suffix}"
+                    f"{incomplete_suffix}{backlog_suffix}"
+                )
+                run.record(
+                    "error" if commit_error else "success",
+                    summary=summary,
+                    error_message=commit_error or None,
+                    rows_ingested=result["rows_committed"],
+                )
+                _log_and_add_progress(
+                    run_id,
+                    service_id,
+                    job_name="commit",
+                    event={"type": "error" if commit_error else "done", "message": summary},
+                )
+
+                # ── Post-commit view refresh + pool warm ──
+                refresh_view_and_warm_pool(
+                    src,
+                    service_id,
+                    log_prefix="",
+                    progress_log=lambda ev: _log_and_add_progress(run_id, service_id, job_name="commit", event=ev),
+                )
+
+                # ── On-demand metadata sync ──
+                try:
+                    from backend.cron.jobs import metadata as _metadata_jobs
+
+                    _metadata_jobs.dispatch_post_commit_metadata_sync(service_id)
+                except Exception as e:
+                    _log_and_add_progress(
+                        run_id, service_id, job_name="commit", event={"type": "warning", "message": e}
+                    )
+
+                # ── Compact-on-sync ──
+                try:
+                    import threading as _t
+
+                    from backend.core import local_compaction as _lc
+
+                    _t.Thread(
+                        target=lambda: _lc.compact_local_partitions(src),
+                        name=f"local-compact-on-sync:{service_id}",
+                        daemon=True,
+                    ).start()
+                except Exception as e:
+                    logger.warning("[scheduler] %s: post-sync local compaction failed to launch: %s", service_id, e)
+            else:
+                summary_start = "No buffer files committed" if commit_error else "No new data to commit"
+                summary = summary_start + quarantine_suffix + incomplete_suffix + backlog_suffix
+                run.record("error" if commit_error else "success", summary=summary, error_message=commit_error or None)
+                _log_and_add_progress(
+                    run_id,
+                    service_id,
+                    job_name="commit",
+                    event={"type": "error" if commit_error else "done", "message": summary},
+                )
+        except Exception as e:
+            run.fail("Buffer commit failed", error_message=str(e))
+            _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": "error", "message": str(e)})
+            logger.exception("[scheduler] %s: buffer commit failed: %s", service_id, e)
+
+    publish_sync_status_safe(service_id, "scheduler")
+
+    logger.info("🏁  \x1b[95m[commit]\x1b[0m %s: Commit job finished.", _display)
+
+
+import sys as _sys  # noqa: E402
+
+_sys.modules.setdefault("backend.cron.jobs._common", _sys.modules[__name__])
+_sys.modules.setdefault("backend.cron.jobs.commit", _sys.modules[__name__])

@@ -17,7 +17,7 @@ from fastapi import Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 
 from backend.config import service_id_from_source
-from backend.core.fastly.mock_fixtures import api_key_or_mock
+from backend.core.fastly.client import api_key_or_mock
 from backend.deps import get_source, require_admin
 from backend.models.admin import (
     LogAccountingBucket,
@@ -37,7 +37,7 @@ from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.router_utils import raise_internal
 from backend.utils.telemetry import track_query
 
-from ._helpers import router
+from .high_scale import router
 
 logger = logging.getLogger(__name__)
 

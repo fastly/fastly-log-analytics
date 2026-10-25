@@ -7,9 +7,7 @@ import { spyOnConsoleError } from '../helpers/page-smoke'
 
 // R-6: render-smoke for the network analytics page.
 
-vi.mock('@/stores/serviceStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())
-
-vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke')).filterStoreModuleMock())
+vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())
 
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/network'))
 

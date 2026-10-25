@@ -4,7 +4,7 @@ import React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useServiceStore } from '@/stores/filterStore'
 import {
   Card,
   CardContent,
@@ -24,10 +24,10 @@ import {
   Loader2
 } from 'lucide-react'
 import { formatBytes } from '@/lib/format'
-import { formatRelative } from '@/lib/date'
+import { formatRelative } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { useDateFormat } from '@/hooks/useSSE'
-import { LabelWithInfo } from '@/components/ui/label-with-info'
+import { LabelWithInfo } from '@/components/ui/confirm-dialog'
 import { CardErrorState } from '@/components/AnalyticsCard'
 import {
   Tooltip,

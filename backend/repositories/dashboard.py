@@ -406,6 +406,20 @@ def _dashboard_cache_key(
     return f"{hashlib.sha256(_key_payload.encode()).hexdigest()}:{source_name}"
 
 
+def _lookup_dashboard_cache(cache_key: str) -> dict | None:
+    cached_entry = _dashboard_cache.get(cache_key)
+    if cached_entry is not None:
+        _, cached_res = cached_entry
+        # Pydantic field name is ``is_cached``; the response model renames
+        # it to ``_is_cached`` on serialization via serialization_alias
+        # (mirrors the section_timings pattern below at line 654). Passing
+        # ``_is_cached`` here gets dropped because Pydantic only matches
+        # the unaliased name — the cached response was silently returning
+        # ``"_is_cached": false`` in JSON, masking every cache hit.
+        return cache_result(cached_res.copy(), state="hit", ttl_seconds=_dashboard_cache.ttl, prewarmer=False)
+    return None
+
+
 def peek_aggregates(
     src: dict,
     start_time: str | None,
@@ -423,25 +437,21 @@ def peek_aggregates(
     """Return a cached dashboard aggregates response without acquiring a DuckDB connection."""
     if DASHBOARD_CACHE_TTL <= 0:
         return None
-    cache_key = _dashboard_cache_key(
-        src,
-        start_time,
-        end_time,
-        filters,
-        chart_interval,
-        chart_metric,
-        fields_filter,
-        include_time_series=include_time_series,
-        include_conn_requests=include_conn_requests,
-        include_map_data=include_map_data,
-        include_top_n=include_top_n,
+    return _lookup_dashboard_cache(
+        _dashboard_cache_key(
+            src,
+            start_time,
+            end_time,
+            filters,
+            chart_interval,
+            chart_metric,
+            fields_filter,
+            include_time_series=include_time_series,
+            include_conn_requests=include_conn_requests,
+            include_map_data=include_map_data,
+            include_top_n=include_top_n,
+        )
     )
-    cached_entry = _dashboard_cache.get(cache_key)
-    if cached_entry is not None:
-        _, cached_res = cached_entry
-        cached_res = cached_res.copy()
-        return cache_result(cached_res, state="hit", ttl_seconds=_dashboard_cache.ttl, prewarmer=False)
-    return None
 
 
 def get_aggregates(
@@ -502,25 +512,12 @@ def get_aggregates(
         # BoundedTTLCache's ``__contains__`` / ``[]`` already enforce TTL
         # internally, so an entry that reads as present is by definition
         # still fresh — no need for the legacy ``now - cached_at`` check.
-        cached_entry = _dashboard_cache.get(cache_key)
-        if cached_entry is not None:
-            cached_at, cached_res = cached_entry
-            cached_res = cached_res.copy()
-            # Pydantic field name is ``is_cached``; the response model renames
-            # it to ``_is_cached`` on serialization via serialization_alias
-            # (mirrors the section_timings pattern below at line 654). Passing
-            # ``_is_cached`` here gets dropped because Pydantic only matches
-            # the unaliased name — the cached response was silently returning
-            # ``"_is_cached": false`` in JSON, masking every cache hit.
-            return cache_result(cached_res, state="hit", ttl_seconds=_dashboard_cache.ttl, prewarmer=False)
+        if (hit := _lookup_dashboard_cache(cache_key)) is not None:
+            return hit
 
     def _compute() -> dict:
-        if cache_key is not None:
-            cached_inner = _dashboard_cache.get(cache_key)
-            if cached_inner is not None:
-                _, cr = cached_inner
-                cr = cr.copy()
-                return cache_result(cr, state="hit", ttl_seconds=_dashboard_cache.ttl, prewarmer=False)
+        if cache_key is not None and (hit := _lookup_dashboard_cache(cache_key)) is not None:
+            return hit
         return _compute_dashboard_aggregates(
             con=con,
             src=src,
@@ -909,10 +906,14 @@ def _compute_dashboard_aggregates(
             ),
         )
 
-        if table_name == orig_table_name:
-            total_rows = _compute_count(table_name, count_where_clause, count_params)
-        else:
-            total_rows = _compute_count(table_name, where_clause, params)
+        def _count_for_target() -> int:
+            return (
+                _compute_count(table_name, count_where_clause, count_params)
+                if table_name == orig_table_name
+                else _compute_count(table_name, where_clause, params)
+            )
+
+        total_rows = _count_for_target()
 
         if _selected_aggregates is not None and (
             sum(point["value"] for point in _selected_aggregates["time_series"]) != total_rows
@@ -973,10 +974,7 @@ def _compute_dashboard_aggregates(
             rebuilt = _build_query_target()
             if rebuilt is not None:
                 table_name, where_clause, params, temp_table = rebuilt
-                if table_name == orig_table_name:
-                    total_rows = _compute_count(table_name, count_where_clause, count_params)
-                else:
-                    total_rows = _compute_count(table_name, where_clause, params)
+                total_rows = _count_for_target()
 
         schema_types = timer.call(
             "schema_types", lambda: {col["name"]: col["type"] for col in _get_schema(runner.con, src)}
@@ -1579,21 +1577,11 @@ def get_field_values(
     else:
         search_cond = ""
         if search:
+            extra_matches: list[str] = []
             if clean_field == "country":
                 from backend.utils.countries import COUNTRY_MAP
 
-                codes = [c for c, name in COUNTRY_MAP.items() if search.lower() in name.lower()]
-                if codes:
-                    placeholders = ",".join(["?"] * len(codes))
-                    search_cond = (
-                        f'AND (CAST("{clean_field}" AS VARCHAR) ILIKE ? '
-                        f'OR CAST("{clean_field}" AS VARCHAR) IN ({placeholders}))'
-                    )
-                    search_params.append(f"%{search}%")
-                    search_params.extend(codes)
-                else:
-                    search_cond = f'AND CAST("{clean_field}" AS VARCHAR) ILIKE ?'
-                    search_params.append(f"%{search}%")
+                extra_matches = [c for c, name in COUNTRY_MAP.items() if search.lower() in name.lower()]
             elif clean_field == "asn":
                 # ASN-name search: pre-fetch matching ASN ints from per-service
                 # SQLite metadata, then inline them as a parameterised IN list.
@@ -1601,23 +1589,19 @@ def get_field_values(
                 from backend.core import metadata as metadata_db
 
                 try:
-                    matching_asns = metadata_db.asn_ints_for_search(src["name"], f"%{search}%")
+                    extra_matches = [str(a) for a in metadata_db.asn_ints_for_search(src["name"], f"%{search}%")]
                 except Exception:
-                    matching_asns = []
-                if matching_asns:
-                    in_placeholders = ",".join(["?"] * len(matching_asns))
-                    search_cond = (
-                        f'AND (CAST("{clean_field}" AS VARCHAR) ILIKE ? '
-                        f'OR CAST("{clean_field}" AS VARCHAR) IN ({in_placeholders}))'
-                    )
-                    search_params.append(f"%{search}%")
-                    search_params.extend([str(a) for a in matching_asns])
-                else:
-                    search_cond = f'AND CAST("{clean_field}" AS VARCHAR) ILIKE ?'
-                    search_params.append(f"%{search}%")
+                    extra_matches = []
+            search_params.append(f"%{search}%")
+            if extra_matches:
+                placeholders = ",".join(["?"] * len(extra_matches))
+                search_cond = (
+                    f'AND (CAST("{clean_field}" AS VARCHAR) ILIKE ? '
+                    f'OR CAST("{clean_field}" AS VARCHAR) IN ({placeholders}))'
+                )
+                search_params.extend(extra_matches)
             else:
                 search_cond = f'AND CAST("{clean_field}" AS VARCHAR) ILIKE ?'
-                search_params.append(f"%{search}%")
 
         q = SQL.FIELD_VALUES_NATIVE_COLUMN.format(
             clean_field=clean_field,

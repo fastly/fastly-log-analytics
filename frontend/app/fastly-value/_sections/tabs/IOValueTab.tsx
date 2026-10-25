@@ -3,7 +3,7 @@
 import React from 'react'
 import { ImageIcon, Activity, DollarSign, Sparkles, TrendingDown, ArrowRight, Zap } from 'lucide-react'
 import { Skeleton } from '@/components/ui/skeleton'
-import { StatCard } from '@/components/ui/stat-card'
+import { StatCard } from '@/components/ui/confirm-dialog'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { formatCompactCount, formatBytes, formatCurrency } from '@/lib/format'

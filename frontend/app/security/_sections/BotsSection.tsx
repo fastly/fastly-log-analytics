@@ -6,10 +6,10 @@ import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCa
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { FilterValueCell } from '@/components/DataTable'
-import { formatDate } from '@/lib/date'
+import { formatDate } from '@/lib/format'
 import { formatBytes, formatCount, formatCountMaybe } from '@/lib/format'
 import { useActiveLogFields } from '@/hooks/useBootstrap'
-import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
+import type { PlotlyLayout, PlotlyTrace } from '@/types/api'
 import type { components } from '@/types/api.generated'
 
 export const FINGERPRINT_COLUMN_IDS = ['fingerprint', 'ip_count', 'request_count']

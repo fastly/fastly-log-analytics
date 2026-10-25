@@ -44,13 +44,14 @@ vi.mock('../../playwright.config', () => ({
   E2E_FRONTEND_PORT: 13004,
 }))
 
-vi.mock('@/stores/serviceStore', () => {
+vi.mock('@/stores/filterStore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/filterStore')>()
   const state = { activeServiceId: 'test-svc' }
   const useServiceStore = Object.assign(
     vi.fn((selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state)),
     { getState: () => state },
   )
-  return { useServiceStore }
+  return { ...actual, useServiceStore }
 })
 
 const API_BASE = 'http://127.0.0.1:8000'

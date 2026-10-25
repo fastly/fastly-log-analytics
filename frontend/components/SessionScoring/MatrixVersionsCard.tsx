@@ -3,14 +3,12 @@
 import * as React from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { History, Info, RotateCcw, ScrollText } from 'lucide-react'
-import { invalidateServiceScoringQueries, useScoringQuery } from './useScorerTimeseries'
-
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { CardErrorState } from '@/components/AnalyticsCard'
-import { AuditLogHelp, MatrixHistoryHelp } from '@/components/SessionScoring/help-content'
+import { AuditLogHelp, MatrixHistoryHelp, invalidateServiceScoringQueries, useScoringQuery } from '@/components/SessionScoring/help-content'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { CopyButton } from '@/components/ui/copy-button'
+import { CopyButton } from '@/components/ui/confirm-dialog'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import type { ColumnDef } from '@tanstack/react-table'
 import { DataTableReadonly } from '@/components/DataTable'
@@ -26,7 +24,7 @@ type MatrixVersion = components['schemas']['ScoringMatrixVersion']
 type AuditRow = components['schemas']['ScoringAuditRow']
 
 import { formatBytes } from '@/lib/format'
-import { formatDeterministicUTC, formatTimeAgo } from '@/lib/date'
+import { formatDeterministicUTC, formatTimeAgo } from '@/lib/format'
 import { SkeletonGrid } from '@/components/ui/skeleton'
 
 export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {

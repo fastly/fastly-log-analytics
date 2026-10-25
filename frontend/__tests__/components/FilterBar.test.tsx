@@ -9,12 +9,11 @@ import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeEach, beforeAll, afterEach } from 'vitest'
 import { axe } from 'vitest-axe'
 import React from 'react'
-import { FilterBar, ActiveFiltersBanner } from '@/components/FilterBar/FilterBar'
-import { AddFilterDialogContent } from '@/components/FilterBar/AddFilterDialog'
+import { FilterBar, ActiveFiltersBanner, AddFilterDialogContent } from '@/components/FilterBar/FilterBar'
 import { FilterValueCell, buildDashboardFilterUrl } from '@/components/DataTable'
 import { Dialog } from '@/components/ui/dialog'
 import { useFilterStore } from '@/stores/filterStore'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useServiceStore } from '@/stores/filterStore'
 import { usePathname } from 'next/navigation'
 
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/dashboard'))
@@ -56,14 +55,6 @@ vi.mock('@/hooks/useDashboardCards', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/hooks/useDashboardCards')>()),
   useDebounce: (v: string) => v,
 }))
-
-vi.mock('@/components/FilterBar/AddFilterDialog', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/components/FilterBar/AddFilterDialog')>()
-  return {
-    ...actual,
-    AddFilterDialog: () => <button data-testid="add-filter-stub">Add Filter</button>,
-  }
-})
 
 beforeAll(() => {
   stubResizeObserver()

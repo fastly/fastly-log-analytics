@@ -21,7 +21,7 @@ import { cn } from '@/lib/utils'
 import { useSearchParams } from 'next/navigation'
 import type { Simplify, WithRequired, WithRequiredNullable } from '@/types/api'
 import type { components } from '@/types/api.generated'
-import { formatDeterministicUTC, formatDuration } from '@/lib/date'
+import { formatDeterministicUTC, formatDuration } from '@/lib/format'
 
 export function useShareMutation(
   onError: (msg: string) => void,

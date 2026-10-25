@@ -79,6 +79,11 @@ class SlidingWindowLimiter:
             events.popleft()
         return events
 
+    def _prune_now(self, key: str) -> tuple[float, float, deque[tuple[float, int]]]:
+        now = self._now()
+        cutoff = now - self.window_s
+        return now, cutoff, self._prune_key(key, cutoff)
+
     def _store(self, key: str, events: deque[tuple[float, int]], cutoff: float) -> None:
         self._events[key] = events
         self._events.move_to_end(key)
@@ -100,9 +105,7 @@ class SlidingWindowLimiter:
     ) -> bool:
         """Admit one event if the key is under ``max_events`` in the window."""
         with self._lock:
-            now = self._now()
-            cutoff = now - self.window_s
-            events = self._prune_key(key, cutoff)
+            now, cutoff, events = self._prune_now(key)
             if max_events is not None and len(events) >= max_events:
                 self._store(key, events, cutoff)
                 return False
@@ -113,9 +116,7 @@ class SlidingWindowLimiter:
     def strike(self, key: str, *, threshold: int, lockout_s: float, max_locks: int | None = None) -> bool:
         """Record one failure; return True iff this call starts a NEW lockout."""
         with self._lock:
-            now = self._now()
-            cutoff = now - self.window_s
-            events = self._prune_key(key, cutoff)
+            now, cutoff, events = self._prune_now(key)
             events.append((now, 1))
             self._store(key, events, cutoff)
             if len(events) >= threshold and key not in self._locks:
@@ -703,23 +704,26 @@ def client_ip(request: Request, *, default: str = "0.0.0.0") -> str:
     return request.client.host if request.client else default
 
 
-def _local_host_allowed(host_header: str) -> bool:
-    if not host_header:
-        return False
-    base = host_header.split(":")[0].lower()
-    if _is_private_or_loopback(base):
-        return True
+def _host_base(host_header: str) -> str:
+    return host_header.split(":")[0].lower() if host_header else ""
+
+
+def _in_local_allowlist(base: str) -> bool:
     return "*" in _LOCAL_HOST_ALLOWLIST or base in _LOCAL_HOST_ALLOWLIST
 
 
+def _local_host_allowed(host_header: str) -> bool:
+    base = _host_base(host_header)
+    return bool(base) and (_is_private_or_loopback(base) or _in_local_allowlist(base))
+
+
 def _allowed_remote_hosts() -> list[str]:
-    mgr = get_tunnel_manager()
-    state = mgr.state
+    state = get_tunnel_manager().state
     candidates: list[str] = []
     if state.public_endpoint:
-        pe = urlparse(state.public_endpoint)
-        if pe.hostname:
-            candidates.append(pe.hostname.lower())
+        hostname = urlparse(state.public_endpoint).hostname
+        if hostname:
+            candidates.append(hostname.lower())
 
     try:
         from backend import config
@@ -727,10 +731,11 @@ def _allowed_remote_hosts() -> list[str]:
         for cfg in config.list_configs():
             rf = cfg.get("remote_frontend")
             if isinstance(rf, dict):
-                for k in ("domain_name", "origin_host", "override_host"):
-                    val = rf.get(k)
-                    if val and isinstance(val, str):
-                        candidates.append(val.strip().lower())
+                candidates.extend(
+                    val.strip().lower()
+                    for k in ("domain_name", "origin_host", "override_host")
+                    if isinstance(val := rf.get(k), str) and val
+                )
     except Exception:
         logger.debug("_allowed_remote_hosts: step failed (ignored)", exc_info=True)
 
@@ -738,21 +743,13 @@ def _allowed_remote_hosts() -> list[str]:
 
 
 def _remote_host_allowed(host_header: str) -> bool:
-    if not host_header:
-        return False
-    base = host_header.split(":")[0].lower()
-    if "*" in _LOCAL_HOST_ALLOWLIST or base in _LOCAL_HOST_ALLOWLIST:
-        return True
-    return any(base == c for c in _allowed_remote_hosts())
+    base = _host_base(host_header)
+    return bool(base) and (_in_local_allowlist(base) or base in _allowed_remote_hosts())
 
 
 def _origin_allowed(origin: str) -> bool:
-    if not origin:
-        return False
-    host = (urlparse(origin).hostname or "").lower()
-    if not host:
-        return False
-    return any(host == c for c in _allowed_remote_hosts())
+    host = (urlparse(origin).hostname or "").lower() if origin else ""
+    return bool(host) and host in _allowed_remote_hosts()
 
 
 def _is_blocked_path(path: str) -> bool:
@@ -829,32 +826,24 @@ def _path_service_ids(request: Request) -> list[str]:
     vulnerabilities, we leverage Starlette's actual router definitions to match the
     request scope and extract any path parameters that identify the service.
     """
-    out: list[str] = []
-
     # 1. Primary robust approach: match request scope against the application's actual router routes
-    app = getattr(request, "app", None)
-    if app and hasattr(app, "router") and hasattr(app.router, "routes"):
+    routes = getattr(getattr(getattr(request, "app", None), "router", None), "routes", None)
+    if routes:
         from starlette.routing import Match
 
-        for route in app.router.routes:
+        for route in routes:
             match, child_scope = route.matches(request.scope)
             if match == Match.FULL:
                 path_params = child_scope.get("path_params", {})
-                for k in ("service_id", "service"):
-                    if k in path_params:
-                        out.append(path_params[k])
+                out = [path_params[k] for k in ("service_id", "service") if k in path_params]
+                if out:
+                    return out
                 break
 
     # 2. Resilient fallback: regex-based path matching for backwards-compatibility or cases
     # where routing details aren't populated/available on request.app
-    if not out:
-        path = request.url.path
-        for pat in _PATH_SERVICE_PATTERNS:
-            m = pat.match(path)
-            if m:
-                out.append(m.group(1))
-
-    return out
+    path = request.url.path
+    return [m.group(1) for pat in _PATH_SERVICE_PATTERNS if (m := pat.match(path))]
 
 
 def _is_sse_route(path: str) -> bool:
@@ -952,6 +941,13 @@ def analyst_debug_visibility(request: Request | None = None) -> tuple[bool, bool
     return res
 
 
+def _rebuild_response(response: Response, content: bytes, media_type: str, *, update_length: bool = False) -> Response:
+    headers = dict(response.headers)
+    if update_length:
+        headers["content-length"] = str(len(content))
+    return Response(content=content, status_code=response.status_code, headers=headers, media_type=media_type)
+
+
 async def _strip_analyst_envelope(
     response: Response,
     analyst_session: object | None = None,
@@ -968,11 +964,8 @@ async def _strip_analyst_envelope(
     if "application/json" not in ct:
         return response
 
-    pii_policy: dict | None = None
-    if analyst_session is not None:
-        raw_policy = getattr(analyst_session, "pii_policy", None)
-        if isinstance(raw_policy, dict) and raw_policy.get("mask_ips"):
-            pii_policy = raw_policy
+    raw_policy = getattr(analyst_session, "pii_policy", None) if analyst_session is not None else None
+    pii_policy = raw_policy if isinstance(raw_policy, dict) and raw_policy.get("mask_ips") else None
 
     body = b""
     async for chunk in response.body_iterator:  # type: ignore[attr-defined]
@@ -980,28 +973,21 @@ async def _strip_analyst_envelope(
     try:
         data = json.loads(body)
     except (json.JSONDecodeError, ValueError):
-        return Response(
-            content=body,
-            status_code=response.status_code,
-            headers=dict(response.headers),
-            media_type=ct,
-        )
+        return _rebuild_response(response, body, ct)
     changed = False
     if isinstance(data, dict):
         if request is not None and "_debug_queries" in data and "_debug_calls" in data:
             request.state._analyst_envelope_complete = True
         analyst_query_enabled, analyst_api_enabled = analyst_debug_visibility(request)
-        to_strip: list[str] = []
         from backend.models.common import _debug_responses_enabled
 
         if not _debug_responses_enabled():
-            to_strip.extend((*_QUERY_DEBUG_KEYS, *_API_DEBUG_KEYS))
+            to_strip = (*_QUERY_DEBUG_KEYS, *_API_DEBUG_KEYS)
         else:
-            if not analyst_query_enabled:
-                to_strip.extend(_QUERY_DEBUG_KEYS)
-            if not analyst_api_enabled:
-                to_strip.extend(_API_DEBUG_KEYS)
-
+            to_strip = (
+                *(_QUERY_DEBUG_KEYS if not analyst_query_enabled else ()),
+                *(_API_DEBUG_KEYS if not analyst_api_enabled else ()),
+            )
         for k in to_strip:
             if k in data:
                 data.pop(k)
@@ -1014,21 +1000,9 @@ async def _strip_analyst_envelope(
             data = masked
             changed = True
     if not changed:
-        return Response(
-            content=body,
-            status_code=response.status_code,
-            headers=dict(response.headers),
-            media_type=ct,
-        )
+        return _rebuild_response(response, body, ct)
     new_body = json.dumps(data, separators=(",", ":")).encode()
-    new_headers = dict(response.headers)
-    new_headers["content-length"] = str(len(new_body))
-    return Response(
-        content=new_body,
-        status_code=response.status_code,
-        headers=new_headers,
-        media_type=ct,
-    )
+    return _rebuild_response(response, new_body, ct, update_length=True)
 
 
 _BODY_INSPECT_UNSET = object()
@@ -1147,21 +1121,12 @@ async def _body_service_ids(request: Request) -> list[str]:
     match the analyst's authorized services. Closes M-3 (silent fallback
     on ``POST /api/dashboard/aggregates`` when the body service_id mismatches).
     """
-    body = await _inspect_request_body(request)
-    if not isinstance(body, dict):
-        return []
-    out: list[str] = []
-    for k in ("service_id", "service"):
-        v = body.get(k)
-        # Accept str AND int: downstream FastAPI/Pydantic coerces
-        # ``{"service_id": 12345}`` into the str field ``"12345"`` and would
-        # execute the request for service 12345 — so the scope check has to
-        # see the same coerced string or a forged-id-as-int bypasses it.
-        if isinstance(v, (str, int)):
-            v_str = str(v)
-            if v_str:
-                out.append(v_str)
-    return out
+    body = await _inspect_request_body(request) or {}
+    # Accept str AND int: downstream FastAPI/Pydantic coerces
+    # ``{"service_id": 12345}`` into the str field ``"12345"`` and would
+    # execute the request for service 12345 — so the scope check has to
+    # see the same coerced string or a forged-id-as-int bypasses it.
+    return [str(v) for k in ("service_id", "service") if isinstance(v := body.get(k), (str, int)) and str(v)]
 
 
 # Columns a masking analyst must never be able to filter on — the same PII
@@ -1183,13 +1148,9 @@ async def _body_filter_keys(request: Request) -> list[str]:
     filters on an IP-family column. Returns [] when there is no JSON body or
     no ``filters`` object.
     """
-    body = await _inspect_request_body(request)
-    if not isinstance(body, dict):
-        return []
+    body = await _inspect_request_body(request) or {}
     filters = body.get("filters")
-    if not isinstance(filters, dict):
-        return []
-    return [str(k) for k in filters]
+    return [str(k) for k in filters] if isinstance(filters, dict) else []
 
 
 async def _body_field_param(request: Request) -> str | None:
@@ -1203,9 +1164,7 @@ async def _body_field_param(request: Request) -> str | None:
     there is no JSON body or no string ``field``. Body is already drained +
     cached by the earlier service-scope check, so this is a dict read.
     """
-    body = await _inspect_request_body(request)
-    if not isinstance(body, dict):
-        return None
+    body = await _inspect_request_body(request) or {}
     field = body.get("field")
     return field if isinstance(field, str) else None
 
@@ -1261,6 +1220,101 @@ def _new_request_id() -> str:
     return secrets.token_hex(8)
 
 
+def _error_json(status_code: int, error: str, **extra: object) -> JSONResponse:
+    return JSONResponse(status_code=status_code, content={"error": error, **extra})
+
+
+def _log_access(logger_name: str, fmt: str, *args: object) -> None:
+    try:
+        logging.getLogger(logger_name).info(fmt, *args)
+    except Exception:
+        logger.debug("dispatch: logging.getLogger failed (ignored)", exc_info=True)
+
+
+def _check_rate_limit(request: Request, path: str) -> JSONResponse | None:
+    content_len = int(request.headers.get("content-length") or "0")
+    # Static-asset rate limit.
+    if path.startswith(("/_next/", "/static/")):
+        if not _static_limiter.check(client_ip(request), content_len):
+            return _error_json(429, "rate_limited")
+    # L6: per-IP request-rate limit on analyst API calls (the static
+    # limiter above covered only /_next/ + /static/). Backstops M1/M2 —
+    # repeated compute-heavy /api/query or /api/insights from one source.
+    # Only genuinely remote source IPs are limited: SSR-forwarded fetches
+    # arrive over loopback (127.0.0.1) and would otherwise all share one
+    # bucket and throttle server-rendering under load.
+    elif path.startswith("/api/"):
+        ip = client_ip(request)
+        if not _is_private_or_loopback(ip) and not _analyst_api_limiter.check(ip, content_len):
+            return _error_json(429, "rate_limited")
+    return None
+
+
+async def _enforce_service_and_pii_scope(request: Request, session) -> JSONResponse | None:
+    from backend import config as svcconfig
+
+    raw_candidates: list[str] = list(_path_service_ids(request))
+    for src in (
+        request.query_params.get("service"),
+        request.query_params.get("service_id"),
+        request.headers.get("x-fastly-service-id"),
+        request.headers.get("x-service-id"),
+    ):
+        if src:
+            raw_candidates.append(src)
+    # M-3: a forged service_id in the JSON body was silently ignored
+    # before, with the handler falling back to the session-authorized
+    # service. Promote it to a candidate so the scope check below
+    # rejects mismatched bodies with the same 403 we'd return for
+    # query/path mismatches.
+    raw_candidates.extend(await _body_service_ids(request))
+
+    cdn_map = svcconfig.get_cdn_service_id_map() if raw_candidates else {}
+    resolved_candidates = [cand if svcconfig.load_config(cand) else cdn_map.get(cand, cand) for cand in raw_candidates]
+    if not resolved_candidates:
+        # No explicit service in the request — fall back to the active
+        # default (preserves pre-fix behavior for analyst-facing GET
+        # /api/dashboard etc. where the active service comes from the
+        # session config).
+        fallback = svcconfig.get_active_service_id()
+        if fallback:
+            resolved_candidates.append(fallback)
+
+    allowed_services = set(session.service_ids or [])
+    if not resolved_candidates:
+        # No candidate could be derived — fail closed.
+        return _error_json(403, "service_not_authorized", service="")
+    for eff in resolved_candidates:
+        if not eff or eff not in allowed_services:
+            return _error_json(403, "service_not_authorized", service=eff or "")
+
+    # PII lock: a masking analyst must never filter by an IP-family
+    # column. Display masking is response-side only, so an un-blocked
+    # `ip` filter would let an analyst probe for a specific real IP (a
+    # presence oracle) or dead-end on zero rows. Reject at the boundary
+    # — the frontend also hides the affordances, but THIS is the actual
+    # guarantee. Reuses the SAME key normalization as the SQL WHERE
+    # builder so prefixed / dedup-suffixed variants (filter_ip, ip_2,
+    # xfilter_client_ip, …) can't slip past. Body is already drained +
+    # cached by the service-scope check above, so this is a dict read.
+    if session.pii_policy.get("mask_ips"):
+        from backend.repositories.utils.filters import normalize_filter_key
+
+        # Same lock for the field-values ENUMERATION dimension
+        # (POST /api/dashboard/field-values {"field": "ip"}): enumerating
+        # a PII column's distinct values — even masked — leaks per-value
+        # counts + a search-prefix oracle, so reject it exactly like a
+        # PII filter key. normalize_filter_key resolves junk-suffixed
+        # variants ("ip.", "cookie_session ") to the real column.
+        dim = await _body_field_param(request)
+        raw_keys = [*(await _body_filter_keys(request)), *((dim,) if dim is not None else ())]
+        for raw_key in raw_keys:
+            col = normalize_filter_key(raw_key)
+            if col in _PII_FORBIDDEN_FILTER_COLS:
+                return _error_json(403, "pii_policy_violation", field=col)
+    return None
+
+
 class RemoteAccessMiddleware(BaseHTTPMiddleware):
     """Top-level firewall for remote-analyst traffic.
 
@@ -1277,7 +1331,7 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         gateway_authenticated = authenticated_admin_gateway(request)
         if ADMIN_GATEWAY_HEADER in request.headers and not gateway_authenticated:
             logger.warning("[remote_access] rejected invalid admin gateway credential")
-            return JSONResponse(status_code=401, content={"error": "admin_gateway_invalid"})
+            return _error_json(401, "admin_gateway_invalid")
         request.state.admin_gateway_authenticated = gateway_authenticated
         if gateway_authenticated:
             request.scope["headers"] = [
@@ -1302,11 +1356,10 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         # DNS-rebinding gate. Always enforced — even when sharing is off the
         # local admin surface is exposed on 127.0.0.1, and a rebinding-shaped
         # Host header is never legitimate.
-        if is_remote:
-            if not _remote_host_allowed(host_header):
-                return JSONResponse(status_code=400, content={"error": "host_not_allowed", "host": host_header})
-        elif host_header and not _local_host_allowed(host_header):
-            return JSONResponse(status_code=400, content={"error": "host_not_allowed", "host": host_header})
+        if (is_remote and not _remote_host_allowed(host_header)) or (
+            not is_remote and host_header and not _local_host_allowed(host_header)
+        ):
+            return _error_json(400, "host_not_allowed", host=host_header)
 
         if gateway_authenticated:
             origin = request.headers.get("origin")
@@ -1318,7 +1371,7 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
             )
             if cross_site or unsafe_origin:
                 logger.warning("[remote_access] rejected cross-origin admin gateway request")
-                return JSONResponse(status_code=403, content={"error": "admin_origin_not_allowed"})
+                return _error_json(403, "admin_origin_not_allowed")
 
         if not is_remote:
             # Pure-local request — no analyst gating. Hardening headers still
@@ -1336,64 +1389,38 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
             # correlation id (rid=) so a slow line here joins to its
             # slow_queries rows, and the latency (dur_ms) so the slow
             # request is identifiable from `docker logs` in the first place.
-            try:
-                peer = client_ip(request, default="127.0.0.1")
-                logging.getLogger("backend.access.admin").info(
-                    "[admin] [%s] rid=%s %s %s -> %d (%.1fms)",
-                    peer,
-                    getattr(request.state, "request_id", "-"),
-                    method,
-                    path,
-                    response.status_code,
-                    _dur_ms,
-                )
-            except Exception:
-                logger.debug("dispatch: logging.getLogger failed (ignored)", exc_info=True)
+            _log_access(
+                "backend.access.admin",
+                "[admin] [%s] rid=%s %s %s -> %d (%.1fms)",
+                client_ip(request, default="127.0.0.1"),
+                getattr(request.state, "request_id", "-"),
+                method,
+                path,
+                response.status_code,
+                _dur_ms,
+            )
             return apply_response_hardening(response)
 
         # ── From here down, we're on the analyst path. ──
 
-        # Static-asset rate limit.
-        if path.startswith("/_next/") or path.startswith("/static/"):
-            ip = client_ip(request)
-            if not _static_limiter.check(ip, int(request.headers.get("content-length") or "0")):
-                return JSONResponse(status_code=429, content={"error": "rate_limited"})
-        # L6: per-IP request-rate limit on analyst API calls (the static
-        # limiter above covered only /_next/ + /static/). Backstops M1/M2 —
-        # repeated compute-heavy /api/query or /api/insights from one source.
-        # Only genuinely remote source IPs are limited: SSR-forwarded fetches
-        # arrive over loopback (127.0.0.1) and would otherwise all share one
-        # bucket and throttle server-rendering under load.
-        elif path.startswith("/api/"):
-            ip = client_ip(request)
-            if not _is_private_or_loopback(ip) and not _analyst_api_limiter.check(
-                ip, int(request.headers.get("content-length") or "0")
-            ):
-                return JSONResponse(status_code=429, content={"error": "rate_limited"})
+        if (rate_err := _check_rate_limit(request, path)) is not None:
+            return rate_err
 
         # Origin gate for non-GET/HEAD writes.  Telemetry beacons
         # (sendBeacon) may arrive without an Origin header through CDN;
         # they're fire-and-forget, no mutation, no data return — CSRF
         # protection adds no value.
-        if method not in ("GET", "HEAD") and not any(path.startswith(p) for p in _TELEMETRY_IDLE_EXEMPT_PREFIXES):
+        if method not in ("GET", "HEAD") and not path.startswith(_TELEMETRY_IDLE_EXEMPT_PREFIXES):
             origin = request.headers.get("origin", "")
             if not _origin_allowed(origin):
-                return JSONResponse(
-                    status_code=403,
-                    content={"error": "origin_not_allowed", "origin": origin},
-                )
+                return _error_json(403, "origin_not_allowed", origin=origin)
 
         # Unauthenticated paths (login, heartbeat, health). The OAuth handshake
         # routes (/api/share/oauth/authorize + /callback) carry NO analyst
         # session cookie during the handshake — they ARE the pre-auth login
         # step — so they must be exempted here or they'd 401 before the handler
         # runs (design §3.4). They set the session cookie themselves on success.
-        if (
-            path in _UNAUTH_ANALYST_PATHS
-            or path.startswith("/api/share/claim/")
-            or path.startswith("/api/share/oauth/")
-            or path.startswith("/js/")
-        ):
+        if path in _UNAUTH_ANALYST_PATHS or path.startswith(("/api/share/claim/", "/api/share/oauth/", "/js/")):
             response = await call_next(request)
             # /api/bootstrap is in _UNAUTH_ANALYST_PATHS so it short-circuits
             # here, BEFORE the analyst-envelope strip applied on the
@@ -1404,18 +1431,17 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
             # bootstrap so the cookie-setting /api/share/* responses (whose
             # Set-Cookie headers must survive verbatim) are left untouched.
             if path == "/api/bootstrap":
-                sid_boot = request.cookies.get("analyst_session_id")
+                sid_boot = request.cookies.get(ANALYST_SESSION_COOKIE)
                 boot_session = mgr.validate_session(sid_boot) if sid_boot else None
                 response = await _strip_analyst_envelope(response, analyst_session=boot_session, request=request)
             return apply_response_hardening(response)
 
         # All other analyst paths require a valid session.
-        sid = request.cookies.get("analyst_session_id")
-        session = mgr.validate_session(sid)
+        session = mgr.validate_session(request.cookies.get(ANALYST_SESSION_COOKIE))
         if session is None:
-            return JSONResponse(status_code=401, content={"error": "unauthenticated"})
+            return _error_json(401, "unauthenticated")
         if getattr(session, "tos_pending", False):
-            return JSONResponse(status_code=403, content={"error": "tos_pending"})
+            return _error_json(403, "tos_pending")
 
         # SRE-08: as soon as the session is resolved, attribute the rest of
         # this analyst request's __global_share__ SQLite (the fingerprint-
@@ -1448,11 +1474,11 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
                 ip_address=client_ip(request),
                 details=f"path={path}",
             )
-            return JSONResponse(status_code=401, content={"error": "fingerprint_mismatch"})
+            return _error_json(401, "fingerprint_mismatch")
 
         # Block admin / provision / debug surfaces.
         if _is_blocked_path(path):
-            return JSONResponse(status_code=403, content={"error": "admin_only"})
+            return _error_json(403, "admin_only")
 
         # SSE allowlist gate. Entries match either an exact path
         # (non-parameterized routes, e.g. "/api/log-extents/stream") or a
@@ -1465,16 +1491,16 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
             or (allowed.startswith("/api/") and path.startswith(f"{allowed}/"))
             for allowed in _ANALYST_SSE_ALLOWLIST
         ):
-            return JSONResponse(status_code=403, content={"error": "sse_blocked"})
+            return _error_json(403, "sse_blocked")
 
         # Read-only gate: refuse mutating verbs except on routes confirmed to
         # be read-only-via-POST (most dashboard/security/etc. queries POST
         # JSON filter bodies). See _ANALYST_ALLOWED_WRITE_PREFIXES for the
         # allowlist rationale.
-        if method in ("PUT", "PATCH", "DELETE"):
-            return JSONResponse(status_code=403, content={"error": "read_only"})
-        if method == "POST" and not any(path.startswith(p) for p in _ANALYST_ALLOWED_WRITE_PREFIXES):
-            return JSONResponse(status_code=403, content={"error": "read_only"})
+        if method in ("PUT", "PATCH", "DELETE") or (
+            method == "POST" and not path.startswith(_ANALYST_ALLOWED_WRITE_PREFIXES)
+        ):
+            return _error_json(403, "read_only")
 
         # Service-scope gate (skipped for system/session paths and
         # fire-and-forget telemetry beacons that carry no service context).
@@ -1488,90 +1514,9 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         # with the analyst's allowed service in the query string and a different
         # service in the path was previously accepted because only the query
         # value was checked, and the route handler then used the path value.
-        _skip_scope = path.startswith("/api/share/") or any(path.startswith(p) for p in _TELEMETRY_IDLE_EXEMPT_PREFIXES)
-        if not _skip_scope:
-            from backend import config as svcconfig
-
-            raw_candidates: list[str] = list(_path_service_ids(request))
-            for src in (
-                request.query_params.get("service"),
-                request.query_params.get("service_id"),
-                request.headers.get("x-fastly-service-id"),
-                request.headers.get("x-service-id"),
-            ):
-                if src:
-                    raw_candidates.append(src)
-            # M-3: a forged service_id in the JSON body was silently ignored
-            # before, with the handler falling back to the session-authorized
-            # service. Promote it to a candidate so the scope check below
-            # rejects mismatched bodies with the same 403 we'd return for
-            # query/path mismatches.
-            raw_candidates.extend(await _body_service_ids(request))
-
-            cdn_map = svcconfig.get_cdn_service_id_map() if raw_candidates else {}
-            resolved_candidates: list[str] = []
-            for cand in raw_candidates:
-                if svcconfig.load_config(cand):
-                    resolved_candidates.append(cand)
-                else:
-                    resolved_candidates.append(cdn_map.get(cand, cand))
-
-            if not resolved_candidates:
-                # No explicit service in the request — fall back to the active
-                # default (preserves pre-fix behavior for analyst-facing GET
-                # /api/dashboard etc. where the active service comes from the
-                # session config).
-                fallback = svcconfig.get_active_service_id()
-                if fallback:
-                    resolved_candidates.append(fallback)
-
-            allowed_services = set(session.service_ids or [])
-            for eff in resolved_candidates:
-                if not eff or eff not in allowed_services:
-                    return JSONResponse(
-                        status_code=403,
-                        content={"error": "service_not_authorized", "service": eff or ""},
-                    )
-            if not resolved_candidates:
-                # No candidate could be derived — fail closed.
-                return JSONResponse(
-                    status_code=403,
-                    content={"error": "service_not_authorized", "service": ""},
-                )
-
-            # PII lock: a masking analyst must never filter by an IP-family
-            # column. Display masking is response-side only, so an un-blocked
-            # `ip` filter would let an analyst probe for a specific real IP (a
-            # presence oracle) or dead-end on zero rows. Reject at the boundary
-            # — the frontend also hides the affordances, but THIS is the actual
-            # guarantee. Reuses the SAME key normalization as the SQL WHERE
-            # builder so prefixed / dedup-suffixed variants (filter_ip, ip_2,
-            # xfilter_client_ip, …) can't slip past. Body is already drained +
-            # cached by the service-scope check above, so this is a dict read.
-            if session.pii_policy.get("mask_ips"):
-                from backend.repositories.utils.filters import normalize_filter_key
-
-                for raw_key in await _body_filter_keys(request):
-                    col = normalize_filter_key(raw_key)
-                    if col in _PII_FORBIDDEN_FILTER_COLS:
-                        return JSONResponse(
-                            status_code=403,
-                            content={"error": "pii_policy_violation", "field": col},
-                        )
-                # Same lock for the field-values ENUMERATION dimension
-                # (POST /api/dashboard/field-values {"field": "ip"}): enumerating
-                # a PII column's distinct values — even masked — leaks per-value
-                # counts + a search-prefix oracle, so reject it exactly like a
-                # PII filter key. normalize_filter_key resolves junk-suffixed
-                # variants ("ip.", "cookie_session ") to the real column.
-                dim = await _body_field_param(request)
-                if dim is not None:
-                    dim_col = normalize_filter_key(dim)
-                    if dim_col in _PII_FORBIDDEN_FILTER_COLS:
-                        return JSONResponse(
-                            status_code=403,
-                            content={"error": "pii_policy_violation", "field": dim_col},
-                        )
+        if not (path.startswith("/api/share/") or path.startswith(_TELEMETRY_IDLE_EXEMPT_PREFIXES)):
+            if (scope_err := await _enforce_service_and_pii_scope(request, session)) is not None:
+                return scope_err
 
         # IP-roaming: update without booting if whitelist still passes. This is
         # NOT user activity — bump_active=False so it doesn't reset the idle
@@ -1585,7 +1530,7 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
             if invite and share_db.ip_in_whitelist(current_ip, invite.get("ip_whitelist")):
                 mgr.touch_session(session.session_id, new_ip=current_ip, bump_active=False)
             else:
-                return JSONResponse(status_code=403, content={"error": "ip_not_whitelisted"})
+                return _error_json(403, "ip_not_whitelisted")
 
         # Stamp the session into request.state for downstream code.
         request.state.analyst_session = session
@@ -1606,7 +1551,7 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         #     bumps the timer (back-compat: an old bundle keeps today's
         #     behavior); only an explicit "0" suppresses.
         # Only genuine user-initiated requests bump last_active_time.
-        _idle_exempt = any(path.startswith(p) for p in _TELEMETRY_IDLE_EXEMPT_PREFIXES) or _is_sse_route(path)
+        _idle_exempt = path.startswith(_TELEMETRY_IDLE_EXEMPT_PREFIXES) or _is_sse_route(path)
         _active_hdr = request.headers.get("x-user-active")  # "1" | "0" | None (old bundle)
         _touched_idle = not _idle_exempt and _active_hdr != "0"
         if _touched_idle:
@@ -1627,23 +1572,20 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         # SRE-02: rid= correlation id + (dur_ms) latency so a slow analyst
         # request is both findable in `docker logs` and joinable to the
         # slow_queries rows it spawned.
-        try:
-            analyst_peer = client_ip(request)
-            logging.getLogger("backend.access.analyst").info(
-                "[analyst] %s (%s) [%s] rid=%s %s %s -> %d (%.1fms) act=%s idle_touch=%d",
-                session.email,
-                session.name or "no-name",
-                analyst_peer,
-                getattr(request.state, "request_id", "-"),
-                method,
-                path,
-                response.status_code,
-                _dur_ms,
-                _active_hdr or "-",
-                int(_touched_idle),
-            )
-        except Exception:
-            logger.debug("dispatch: logging.getLogger failed (ignored)", exc_info=True)
+        _log_access(
+            "backend.access.analyst",
+            "[analyst] %s (%s) [%s] rid=%s %s %s -> %d (%.1fms) act=%s idle_touch=%d",
+            session.email,
+            session.name or "no-name",
+            client_ip(request),
+            getattr(request.state, "request_id", "-"),
+            method,
+            path,
+            response.status_code,
+            _dur_ms,
+            _active_hdr or "-",
+            int(_touched_idle),
+        )
 
         # N-1 + N-10: strip server-internal telemetry envelope from analyst
         # responses (success AND error bodies). The handler-side
@@ -1706,25 +1648,15 @@ class TimeBounds:
         path passes this (see ``clamp_or_400``); admin requests are uncapped.
         """
         # Lower bound: max of (request start, session start, -inf).
-        candidates = [c for c in (req_start, self.start) if c is not None]
-        eff_start = max(candidates) if candidates else None
-        candidates = [c for c in (req_end, self.end) if c is not None]
-        eff_end = min(candidates) if candidates else None
+        candidates_s = [c for c in (req_start, self.start) if c is not None]
+        candidates_e = [c for c in (req_end, self.end) if c is not None]
+        eff_start = max(candidates_s) if candidates_s else None
+        eff_end = min(candidates_e) if candidates_e else None
         # Anchor to wall-clock floor if the caller passed nothing.
-        if eff_start is None and eff_end is None:
-            now = datetime.now(UTC)
-            eff_start = now - timedelta(hours=1)
-            eff_end = now
-        elif eff_start is None:
-            # narrowed by `not (start is None and end is None)` above
-            if eff_end is None:
-                raise RuntimeError("eff_end is unexpectedly None")
-            eff_start = eff_end - timedelta(hours=1)
-        elif eff_end is None:
+        if eff_end is None:
             eff_end = datetime.now(UTC)
-        # narrowed by the branches above
-        if eff_start is None or eff_end is None:
-            raise RuntimeError("eff_start / eff_end is unexpectedly None")
+        if eff_start is None:
+            eff_start = eff_end - timedelta(hours=1)
         # L5: cap the maximum span (keep the most-recent ``max_span`` slice).
         if max_span is not None and (eff_end - eff_start) > max_span:
             eff_start = eff_end - max_span

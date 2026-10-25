@@ -1,30 +1,26 @@
 /**
- * Tests for the AppLayout share-banner poller. The hook reads
- * /api/admin/share/banner every 15s, optionally seeded from
- * bootstrap's share_banner field. Two regressions live in this
- * path:
- *   1. The bootstrap seed must skip the immediate fetch (perf audit D-3);
- *      without it the cold-load page renders the banner from a stale
- *      RTT instead of from the bootstrap response already in cache.
- *   2. Polling must keep firing every 15s even when seeded — admin
- *      starting / stopping sharing must reflect in the banner within
- *      one window.
+ * Tests for the AppLayout share-banner poller (`useShareStatusBanner`) and
+ * analyst heartbeat (`useAnalystHeartbeat`).
  *
  * @vitest-environment jsdom
  */
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { createTestQueryClient, makeQueryWrapper } from '../helpers/page-smoke'
 import { http, HttpResponse } from 'msw'
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
 import { server } from '@/__tests__/helpers/msw/handlers'
+import { useAnalystHeartbeat } from '@/hooks/useBootstrap'
+import { __resetForTests } from '@/lib/utils'
 
 const push = vi.fn()
+const replace = vi.fn()
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push }),
+  useRouter: () => ({ push, replace }),
 }))
 
-vi.mock('@/stores/serviceStore', () => {
+vi.mock('@/stores/filterStore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/filterStore')>()
   const state = {
     activeServiceId: 'svc-default',
     setActiveServiceId: vi.fn(),
@@ -35,7 +31,7 @@ vi.mock('@/stores/serviceStore', () => {
     vi.fn((selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state)),
     { getState: () => state },
   )
-  return { useServiceStore }
+  return { ...actual, useServiceStore }
 })
 
 const API_BASE = 'http://127.0.0.1:8000'
@@ -65,11 +61,8 @@ describe('useShareStatusBanner', () => {
     })
     const { result } = renderHook(() => useShareStatusBanner({ enabled: true }), { wrapper })
 
-    // Bootstrap seed should populate state synchronously — no need to wait
-    // for a fetch.
     expect(result.current.sharingActive).toBe(true)
     expect(result.current.node).not.toBeNull()
-    // Allow microtasks to flush; the seeded path should not have fetched.
     await Promise.resolve()
     expect(bannerHits).toBe(0)
   })
@@ -137,8 +130,6 @@ describe('useShareStatusBanner', () => {
     const after = bannerHits
 
     unmount()
-    // Give the (now-cancelled) interval ~50ms of wall clock to fire — it
-    // shouldn't, but if cleanup was broken we'd see the count climb.
     await act(async () => {
       await new Promise(r => setTimeout(r, 50))
     })
@@ -220,5 +211,200 @@ describe('useShareStatusBanner', () => {
     } finally {
       Object.defineProperty(document, 'hidden', { configurable: true, value: false })
     }
+  })
+})
+
+const IDLE = 1_000
+const INTERVAL = 5_000
+
+function setLastActivityPast(ms: number) {
+  vi.setSystemTime(Date.now() + ms)
+}
+
+describe('useAnalystHeartbeat', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: false })
+    vi.setSystemTime(new Date('2026-05-27T00:00:00Z'))
+    __resetForTests(Date.now())
+    replace.mockReset()
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('does not poll while the user is active inside the idle window', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    )
+    renderHook(() =>
+      useAnalystHeartbeat({ enabled: true, idleAfterMs: IDLE, intervalMs: INTERVAL }),
+    )
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(INTERVAL - 1)
+        window.dispatchEvent(new Event('mousemove'))
+        await vi.advanceTimersByTimeAsync(1)
+      })
+    }
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('treats touch input as activity (touch-only analysts are not idle)', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    )
+    renderHook(() =>
+      useAnalystHeartbeat({ enabled: true, idleAfterMs: IDLE, intervalMs: INTERVAL }),
+    )
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(INTERVAL - 1)
+        window.dispatchEvent(new Event('touchstart'))
+        await vi.advanceTimersByTimeAsync(1)
+      })
+    }
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('shows the disconnect overlay after two consecutive failures', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('network down'))
+
+    const { result } = renderHook(() =>
+      useAnalystHeartbeat({
+        enabled: true,
+        idleAfterMs: IDLE,
+        intervalMs: INTERVAL,
+        failuresBeforeOverlay: 2,
+      }),
+    )
+
+    expect(result.current.disconnected).toBe(false)
+
+    setLastActivityPast(IDLE + 1)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INTERVAL)
+    })
+    expect(result.current.disconnected).toBe(false)
+
+    setLastActivityPast(IDLE + 1)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INTERVAL)
+    })
+    expect(result.current.disconnected).toBe(true)
+  })
+
+  it('clears the overlay after a successful tick following failures', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    fetchSpy.mockRejectedValueOnce(new Error('blip'))
+    fetchSpy.mockRejectedValueOnce(new Error('blip'))
+    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+
+    const { result } = renderHook(() =>
+      useAnalystHeartbeat({
+        enabled: true,
+        idleAfterMs: IDLE,
+        intervalMs: INTERVAL,
+        failuresBeforeOverlay: 2,
+      }),
+    )
+
+    setLastActivityPast(IDLE + 1)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INTERVAL)
+    })
+    setLastActivityPast(IDLE + 1)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INTERVAL)
+    })
+    expect(result.current.disconnected).toBe(true)
+
+    setLastActivityPast(IDLE + 1)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INTERVAL)
+    })
+    expect(result.current.disconnected).toBe(false)
+  })
+
+  it('redirects to /share-login on a 401 response', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ error: 'unauthenticated' }), { status: 401 }),
+    )
+    renderHook(() =>
+      useAnalystHeartbeat({ enabled: true, idleAfterMs: IDLE, intervalMs: INTERVAL }),
+    )
+    setLastActivityPast(IDLE + 1)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INTERVAL)
+    })
+    expect(replace).toHaveBeenCalledWith('/share-login')
+  })
+
+  it('does not call fetch when enabled=false (even after multiple intervals)', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    )
+    renderHook(() =>
+      useAnalystHeartbeat({ enabled: false, idleAfterMs: IDLE, intervalMs: INTERVAL }),
+    )
+
+    await act(async () => {
+      vi.setSystemTime(Date.now() + INTERVAL * 5)
+      await vi.advanceTimersByTimeAsync(INTERVAL * 5)
+    })
+
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('stops polling after unmount', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    )
+    const { unmount } = renderHook(() =>
+      useAnalystHeartbeat({ enabled: true, idleAfterMs: IDLE, intervalMs: INTERVAL }),
+    )
+
+    await act(async () => {
+      vi.setSystemTime(Date.now() + IDLE + 1)
+      await vi.advanceTimersByTimeAsync(INTERVAL)
+    })
+    const callsBeforeUnmount = fetchSpy.mock.calls.length
+
+    unmount()
+
+    await act(async () => {
+      vi.setSystemTime(Date.now() + INTERVAL * 5)
+      await vi.advanceTimersByTimeAsync(INTERVAL * 5)
+    })
+
+    expect(fetchSpy.mock.calls.length).toBe(callsBeforeUnmount)
+  })
+
+  it('swallows fetch errors silently (no unhandled rejection)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('boom'))
+    const unhandled = vi.fn()
+    process.on('unhandledRejection', unhandled)
+
+    const { result } = renderHook(() =>
+      useAnalystHeartbeat({
+        enabled: true,
+        idleAfterMs: IDLE,
+        intervalMs: INTERVAL,
+        failuresBeforeOverlay: 999,
+      }),
+    )
+
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        vi.setSystemTime(Date.now() + IDLE + 1)
+        await vi.advanceTimersByTimeAsync(INTERVAL)
+      })
+    }
+
+    expect(result.current.disconnected).toBe(false)
+    expect(unhandled).not.toHaveBeenCalled()
+    process.off('unhandledRejection', unhandled)
   })
 })

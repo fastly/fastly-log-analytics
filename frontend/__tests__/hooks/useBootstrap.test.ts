@@ -28,7 +28,8 @@ const mockServiceState = {
   setInitialized: mockSetInitialized,
 }
 
-vi.mock('@/stores/serviceStore', () => {
+vi.mock('@/stores/filterStore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/filterStore')>()
   // The selector form is what React components use.
   // ``useServiceStore.getState()`` is what lib/api.ts's middleware uses;
   // without it the openapi-fetch request middleware throws on every
@@ -39,7 +40,7 @@ vi.mock('@/stores/serviceStore', () => {
     ),
     { getState: () => mockServiceState },
   )
-  return { useServiceStore }
+  return { ...actual, useServiceStore }
 })
 
 const API_BASE = 'http://127.0.0.1:8000'

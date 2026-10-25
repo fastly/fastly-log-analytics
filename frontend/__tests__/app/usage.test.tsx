@@ -11,11 +11,9 @@ import { CMCD_FIXTURE } from '../helpers/msw/handlers'
 
 // Consolidated render-smoke + contract tests for the Usage, Sessions, and Streaming pages.
 
-vi.mock('@/stores/serviceStore', async () =>
+vi.mock('@/stores/filterStore', async () =>
   (await import('../helpers/page-smoke')).serviceStoreModuleMock({ accessLevel: 'read_write' }),
 )
-
-vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke')).filterStoreModuleMock())
 
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/usage'))
 
@@ -46,8 +44,8 @@ vi.mock('@/components/PlotlyChart', async () => (await import('../helpers/page-s
 vi.mock('@/components/CostCalculator/CostCalculator', () => ({
   CostCalculator: () => <div data-testid="cost-calculator" />,
 }))
-vi.mock('@/app/sessions/_sections/SessionsTable', () => ({
-  SessionsTable: () => <div data-testid="sessions-table" />,
+vi.mock('@/components/DataTable', () => ({
+  DataTable: () => <div data-testid="sessions-table" />,
 }))
 
 vi.mock('@/components/ReportLayout', async () =>

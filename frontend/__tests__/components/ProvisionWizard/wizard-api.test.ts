@@ -20,7 +20,7 @@ import { API_BASE, serviceStoreMockFactory } from '@/__tests__/helpers/page-smok
 import { http, HttpResponse } from 'msw'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 
-vi.mock('@/stores/serviceStore', () => serviceStoreMockFactory())
+vi.mock('@/stores/filterStore', () => serviceStoreMockFactory())
 
 import {
   buildValidateOnSuccess,
@@ -29,9 +29,9 @@ import {
   runCheckFos,
   runAnalyzeLake,
   validateMutationFn,
-} from '@/components/ProvisionWizard/wizard-api'
+} from '@/components/ProvisionWizard/useWizardState'
 import { INITIAL_CONFIG } from '@/components/ProvisionWizard/types'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useServiceStore } from '@/stores/filterStore'
 import { server } from '@/__tests__/helpers/msw/handlers'
 
 afterEach(() => {

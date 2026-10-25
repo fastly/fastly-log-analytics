@@ -1221,6 +1221,7 @@ const frontendWindow = {
   }},
 };
 function loadFrontend(relativePath) {
+  if (relativePath === 'lib/date.ts') relativePath = 'lib/format.ts';
   const filename = frontendPath.resolve(frontendRoot, relativePath);
   if (modules.has(filename)) return modules.get(filename).exports;
   const module = {exports: {}};

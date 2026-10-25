@@ -372,7 +372,7 @@ def test_retry_guard_exempts_retry_module_and_tests(tmp_path: Path) -> None:
 
 
 def test_retry_guard_flags_count_above_baseline(tmp_path: Path) -> None:
-    root = _repo(tmp_path, {"backend/utils/valkey_publisher.py": RETRY_LOOP + RETRY_LOOP.replace("def f", "def g")})
+    root = _repo(tmp_path, {"backend/utils/telemetry.py": RETRY_LOOP + RETRY_LOOP.replace("def f", "def g")})
     assert _run(root, RETRY).returncode == 1
 
 

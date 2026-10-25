@@ -13,7 +13,7 @@ import { cn } from '@/lib/utils'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { BackToAdminLink } from '@/components/ReportLayout'
 import { Button } from '@/components/ui/button'
-import { PageHeader } from '@/components/ui/page-header'
+import { PageHeader } from '@/components/ui/confirm-dialog'
 import {
   Select,
   SelectContent,
@@ -30,16 +30,15 @@ import { RetrainButton, RotateKeyButton } from '@/components/SessionScoring/Retr
 import { PerReasonAucCard, RocPrCurves } from '@/components/SessionScoring/RocPrCurves'
 import { ScorerLatencyChart, ScorerErrorsChart } from '@/components/SessionScoring/ScorerSeriesCard'
 import { ScorerFailOpenBreakdownCard, ScoringHealthCard } from '@/components/SessionScoring/ScoringHealthCard'
-import { StatusPanel } from '@/components/SessionScoring/StatusPanel'
+import { StatusPanel, L2EnforcementCard } from '@/components/SessionScoring/StatusPanel'
 import { ThresholdSlider } from '@/components/SessionScoring/ThresholdSlider'
-import { L2EnforcementCard } from '@/components/SessionScoring/L2EnforcementCard'
 import { TopFlaggedTable } from '@/components/SessionScoring/TopFlaggedTable'
 import {
   invalidateServiceScoringQueries,
   scoringAnalyticsCompositeOptions,
   scoringConfigCompositeOptions,
-} from '@/components/SessionScoring/useScorerTimeseries'
-import { useServiceStore } from '@/stores/serviceStore'
+} from '@/components/SessionScoring/help-content'
+import { useServiceStore } from '@/stores/filterStore'
 import Loading from './loading'
 
 const PRESETS = [

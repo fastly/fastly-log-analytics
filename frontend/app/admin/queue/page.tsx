@@ -1,5 +1,5 @@
 import React from 'react'
-import { PageHeader } from '@/components/ui/page-header'
+import { PageHeader } from '@/components/ui/confirm-dialog'
 import { BackToAdminLink } from '@/components/ReportLayout'
 import { QueueClient } from './_sections/QueueClient'
 

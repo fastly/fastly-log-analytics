@@ -22,12 +22,14 @@ const { plotlyMock, dataTableMock, activeFields } = vi.hoisted(() => ({
   dataTableMock: vi.fn<(props: InteractiveDataTableMockProps) => void>(),
   activeFields: new Set<string>(),
 }))
-vi.mock('@/stores/serviceStore', async () => (await import('../../helpers/page-smoke')).serviceStoreModuleMock())
-vi.mock('@/stores/filterStore', async () => (await import('../../helpers/page-smoke')).filterStoreModuleMock())
+vi.mock('@/stores/filterStore', async () => (await import('../../helpers/page-smoke')).serviceStoreModuleMock())
 vi.mock('next/navigation', async () => (await import('../../helpers/page-smoke')).navigationModuleMock('/security'))
 vi.mock('@/components/PlotlyChart', async () => (await import('../../helpers/page-smoke')).plotlyChartModuleMock(plotlyMock))
 vi.mock('@/components/DataTable', async () => (await import('../../helpers/page-smoke')).interactiveDataTableModuleMock(dataTableMock))
-vi.mock('@/lib/date', () => ({ formatDate: (t: string) => t }))
+vi.mock('@/lib/format', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/format')>()),
+  formatDate: (t: string) => t,
+}))
 vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
   ...(await import('../../helpers/page-smoke')).activeLogFieldsSetModuleMock(activeFields),

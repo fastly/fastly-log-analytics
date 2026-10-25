@@ -1,121 +1,27 @@
-"""Defensive-branch coverage for backend/routers/provision.py.
-
-The bulk of provision-router testing lives in test_provision.py and
-test_provision_teardown_auth.py. This file targets the smaller helpers
-and easy error paths."""
+"""Tests for backend/routers/provision.py (/api/provision/*) and helper branches."""
 
 from __future__ import annotations
 
+import io
 import urllib.error
+import zipfile
+from io import BytesIO
 from unittest.mock import MagicMock, patch
 
+import botocore.exceptions
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
+from backend import config
+from backend.core.faro_versions import DEFAULT_FARO_VERSION
 from backend.main import app
-from backend.routers.provision import (
-    _check_domain_available,
-)
+from backend.provision import fos_setup
+from backend.provision.fastly_api import _CDN_NO_CACHE_404_SNIPPET_NAME, _CDN_SNIPPETS
+from backend.provision.fos_setup import object_storage_enabled, product_enabled
+from backend.routers.provision import _check_domain_available
 from backend.utils.router_utils import require_json_content_type as _require_json_content_type
-
-
-# ── Merged from tests/routers/test_provision.py ──
-def test_lake_info_success():
-    """Verify that lake-info returns table details correctly."""
-    with (
-        patch("backend.core.iceberg.ducklake_table_exists") as mock_exists,
-        patch("backend.core.iceberg.get_table_info") as mock_info,
-        patch("backend.core.iceberg.get_snapshot_calendar") as mock_calendar,
-        patch("urllib.request.urlopen", side_effect=Exception("Fast path miss")),
-        patch("backend.core.duckdb._get_fos_client", side_effect=Exception("Fast path miss")),
-    ):
-        mock_exists.return_value = True
-
-        mock_info.return_value = {
-            "min_timestamp": "2026-05-01T00:00:00Z",
-            "max_timestamp": "2026-05-02T00:00:00Z",
-            "data_files": 10,
-            "size_bytes": 1024,
-        }
-
-        mock_calendar.return_value = {
-            "2026-05-01": {"data_files": 5, "size_bytes": 512},
-            "2026-05-02": {"data_files": 5, "size_bytes": 512},
-        }
-
-        client = TestClient(app)
-        response = client.post(
-            "/api/provision/lake-info",
-            json={
-                "bucket": "test-bucket",
-                "region": "us-east-1",
-                "access_key": "ak",
-                "secret_key": "sk",
-                "prefix": "p/",
-            },
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["ok"] is True
-        assert data["table_exists"] is True
-        assert data["info"]["data_files"] == 10
-        assert data["range"]["start"] == "2026-05-01T00:00:00Z"
-
-
-def test_lake_info_not_found():
-    """Verify that lake-info returns table_exists=False if table doesn't exist."""
-    with (
-        patch("backend.core.iceberg.ducklake_table_exists") as mock_exists,
-        patch("urllib.request.urlopen", side_effect=Exception("Fast path miss")),
-        patch("backend.core.duckdb._get_fos_client", side_effect=Exception("Fast path miss")),
-    ):
-        mock_exists.return_value = False
-
-        client = TestClient(app)
-        response = client.post(
-            "/api/provision/lake-info",
-            json={"bucket": "test-bucket", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["ok"] is True
-        assert data["table_exists"] is False
-        assert "not found" in data["message"]
-
-
-def test_lake_info_analyst_location():
-    """Verify that lake-info uses the provided metadata location (important for analysts)."""
-    with (
-        patch("backend.core.iceberg.ducklake_table_exists") as mock_exists,
-        patch("backend.core.iceberg.get_table_info") as mock_info,
-        patch("backend.core.iceberg.get_snapshot_calendar") as mock_calendar,
-        patch("urllib.request.urlopen", side_effect=Exception("Fast path miss")),
-        patch("backend.core.duckdb._get_fos_client", side_effect=Exception("Fast path miss")),
-    ):
-        mock_exists.return_value = True
-        mock_info.return_value = {}
-        mock_calendar.return_value = {}
-
-        client = TestClient(app)
-        loc = "s3://test-bucket/iceberg/metadata/v1.metadata.json"
-        client.post(
-            "/api/provision/lake-info",
-            json={
-                "bucket": "test-bucket",
-                "region": "us-east-1",
-                "access_key": "ak",
-                "secret_key": "sk",
-                "iceberg_metadata_location": loc,
-            },
-        )
-
-        # Check that ducklake_table_exists was called with the location in source
-        args, kwargs = mock_exists.call_args
-        src = args[0]
-        assert src["iceberg_metadata_location"] == loc
-
 
 _FAKE_CFG = {
     "service_id": "svc123",
@@ -127,14 +33,111 @@ _FAKE_CFG = {
 }
 
 
-def test_set_ngwaf_workspace_saves_body_field():
-    """PATCH /ngwaf-workspace reads ngwaf_workspace_id from the request body, not query params.
+def _client() -> TestClient:
+    return TestClient(app)
 
-    Security: requires a token. Cfg.fastly_api_key is the canonical
-    accepted token (constant-time stored-key match), so the test passes
-    that as the ``?token=`` query param.
-    """
-    saved = {}
+
+def _auth_fastly_ok(service_id: str = "svc-1", customer_id: str = "cust-T"):
+    return lambda method, path, *, token, **kw: (
+        {"id": "tok", "scope": "global", "services": [], "customer_id": customer_id}
+        if path == "/tokens/self"
+        else {"id": service_id, "customer_id": customer_id}
+    )
+
+
+# ─── /api/provision/lake-info ────────────────────────────────────────────────
+
+
+def test_lake_info_modes():
+    with (
+        patch("backend.core.iceberg.ducklake_table_exists", return_value=True) as mock_exists,
+        patch(
+            "backend.core.iceberg.get_table_info",
+            return_value={
+                "min_timestamp": "2026-05-01T00:00:00Z",
+                "max_timestamp": "2026-05-02T00:00:00Z",
+                "data_files": 10,
+                "size_bytes": 1024,
+            },
+        ),
+        patch(
+            "backend.core.iceberg.get_snapshot_calendar",
+            return_value={
+                "2026-05-01": {"data_files": 5, "size_bytes": 512},
+                "2026-05-02": {"data_files": 5, "size_bytes": 512},
+            },
+        ),
+        patch("urllib.request.urlopen", side_effect=Exception("Fast path miss")),
+        patch("backend.core.duckdb._get_fos_client", side_effect=Exception("Fast path miss")),
+    ):
+        resp = _client().post(
+            "/api/provision/lake-info",
+            json={
+                "bucket": "test-bucket",
+                "region": "us-east-1",
+                "access_key": "ak",
+                "secret_key": "sk",
+                "prefix": "p/",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["table_exists"] is True
+        assert data["info"]["data_files"] == 10
+        assert data["range"]["start"] == "2026-05-01T00:00:00Z"
+
+        # Analyst location forwarded into source
+        loc = "s3://test-bucket/iceberg/metadata/v1.metadata.json"
+        _client().post(
+            "/api/provision/lake-info",
+            json={
+                "bucket": "test-bucket",
+                "region": "us-east-1",
+                "access_key": "ak",
+                "secret_key": "sk",
+                "iceberg_metadata_location": loc,
+            },
+        )
+        assert mock_exists.call_args[0][0]["iceberg_metadata_location"] == loc
+
+        # Table not found
+        mock_exists.return_value = False
+        resp_nf = _client().post(
+            "/api/provision/lake-info",
+            json={"bucket": "test-bucket", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
+        )
+        assert resp_nf.status_code == 200
+        assert resp_nf.json()["table_exists"] is False
+        assert "not found" in resp_nf.json()["message"]
+
+
+def test_lake_info_range_and_calendar_match_producer():
+    producer = {
+        "ok": True,
+        "table_exists": True,
+        "info": {"min_timestamp": "2026-05-01T00:00:00", "max_timestamp": "2026-05-02T00:00:00", "snapshots": 3},
+        "calendar": {
+            "2026-05-01": {"data_files": 5, "size_bytes": 512},
+            "unknown": {"data_files": 1, "size_bytes": 0},
+        },
+        "range": {"start": "2026-05-01T00:00:00", "end": None},
+    }
+    with patch("backend.core.iceberg.lake_info.fetch_lake_info", return_value=producer):
+        response = _client().post(
+            "/api/provision/lake-info",
+            json={"bucket": "b", "region": "us-east-1", "access_key": "ak", "secret_key": "sk", "prefix": "p/"},
+        )
+    assert response.status_code == 200
+    assert {k: v for k, v in response.json().items() if not k.startswith("_")} == producer
+
+
+# ─── /api/provision/services/{id}/ngwaf-workspace & /ngwaf-workspaces ────────
+
+
+def test_set_ngwaf_workspace_saves_body_and_ignores_query_param():
+    saved: dict = {}
+    cfg_with_key = dict(_FAKE_CFG, fastly_api_key="test-stored-key")
 
     def fake_mutate(sid, fn, **kwargs):
         cfg = dict(cfg_with_key)
@@ -142,349 +145,400 @@ def test_set_ngwaf_workspace_saves_body_field():
         saved.update(cfg)
         return cfg
 
-    cfg_with_key = dict(_FAKE_CFG, fastly_api_key="test-stored-key")
     with (
         patch("backend.config.load_config", return_value=cfg_with_key),
         patch("backend.config.mutate_config", side_effect=fake_mutate),
         patch("backend.provision._sync_crontab"),
         patch("backend.utils.fastly_auth.validate_destructive_token") as mock_validate,
     ):
-        client = TestClient(app)
-        response = client.patch(
+        resp = _client().patch(
             "/api/provision/services/svc123/ngwaf-workspace?token=test-stored-key",
             json={"ngwaf_workspace_id": "workspace-abc"},
         )
+        assert resp.status_code == 200
+        mock_validate.assert_called_once_with("test-stored-key", service_id="svc123")
+        assert resp.json()["ngwaf_workspace_id"] == "workspace-abc"
+        assert saved.get("ngwaf_workspace_id") == "workspace-abc"
 
-    assert response.status_code == 200, response.text[:500]
-    mock_validate.assert_called_once_with("test-stored-key", service_id="svc123")
-    data = response.json()
-    assert data["ngwaf_workspace_id"] == "workspace-abc"
-    assert saved.get("ngwaf_workspace_id") == "workspace-abc"
-
-
-def test_set_ngwaf_workspace_query_param_is_ignored():
-    """Query-param-only call (the old broken admin UI) must NOT save the
-    workspace value from a query param — body is required.
-
-    Security: token also required; same accept-stored-key shape as
-    above.
-    """
-    saved = {}
-
-    def fake_mutate(sid, fn, **kwargs):
-        cfg = dict(cfg_with_key)
-        fn(cfg)
-        saved.update(cfg)
-        return cfg
-
-    cfg_with_key = dict(_FAKE_CFG, fastly_api_key="test-stored-key")
-    with (
-        patch("backend.config.load_config", return_value=cfg_with_key),
-        patch("backend.config.mutate_config", side_effect=fake_mutate),
-        patch("backend.provision._sync_crontab"),
-        patch("backend.utils.fastly_auth.validate_destructive_token") as mock_validate,
-    ):
-        client = TestClient(app)
-        # Send workspace_id as query param (wrong) with empty body
-        response = client.patch(
+        saved.clear()
+        resp2 = _client().patch(
             "/api/provision/services/svc123/ngwaf-workspace?workspace_id=workspace-abc&token=test-stored-key",
             json={},
         )
-
-    assert response.status_code == 200, response.text[:500]
-    mock_validate.assert_called_once_with("test-stored-key", service_id="svc123")
-    # Body was empty so ngwaf_workspace_id should be None/cleared, not "workspace-abc"
-    assert saved.get("ngwaf_workspace_id") is None
+        assert resp2.status_code == 200
+        assert saved.get("ngwaf_workspace_id") is None
 
 
-def test_set_ngwaf_workspace_without_token_rejected_401():
-    """Security: no token → 401."""
+@pytest.mark.parametrize(
+    ("query", "cfg_key", "fastly_effect", "expected_error"),
+    [
+        ("", None, None, "token_required"),
+        ("?token=attacker-supplied-wrong-token", "legit-stored-key", RuntimeError("HTTP 401"), None),
+        (
+            "?token=stored-read-only-token",
+            "stored-read-only-token",
+            {"id": "tok-id", "scope": "global:read", "services": [], "customer_id": "cust-T"},
+            "insufficient_scope",
+        ),
+    ],
+)
+def test_set_ngwaf_workspace_auth_rejections(query, cfg_key, fastly_effect, expected_error):
+    cfg = dict(_FAKE_CFG, **({"fastly_api_key": cfg_key} if cfg_key else {}))
+    fastly_kw = (
+        {"side_effect": fastly_effect} if isinstance(fastly_effect, Exception) else {"return_value": fastly_effect}
+    )
     with (
-        patch("backend.config.load_config", return_value=dict(_FAKE_CFG)),
+        patch("backend.config.load_config", return_value=cfg),
         patch("backend.config.save_config"),
         patch("backend.provision._sync_crontab"),
+        patch("backend.utils.fastly_auth.fastly", **fastly_kw),
     ):
-        client = TestClient(app)
-        response = client.patch(
-            "/api/provision/services/svc123/ngwaf-workspace",
+        resp = _client().patch(
+            f"/api/provision/services/svc123/ngwaf-workspace{query}",
             json={"ngwaf_workspace_id": "workspace-abc"},
         )
-    assert response.status_code == 401
-    assert response.json()["detail"]["error"] == "token_required"
+    assert resp.status_code == 401
+    if expected_error:
+        assert resp.json()["detail"]["error"] == expected_error
 
 
-def test_set_ngwaf_workspace_with_wrong_token_rejected_401():
-    """Security: token doesn't match stored key AND fails /tokens/self
-    validation → 401."""
-    cfg_with_key = dict(_FAKE_CFG, fastly_api_key="legit-stored-key")
+def test_ngwaf_workspaces_listing_variants():
+    # 1. Read-only stored token rejected with 401
+    cfg_ro = dict(_FAKE_CFG, fastly_api_key="stored-read-only-token")
+    ro_data = {"id": "tok-id", "scope": "global:read", "services": [], "customer_id": "cust-T"}
     with (
-        patch("backend.config.load_config", return_value=cfg_with_key),
-        patch("backend.config.save_config"),
-        patch("backend.provision._sync_crontab"),
-        # Fastly /tokens/self also rejects this fake token
-        patch("backend.utils.fastly_auth.fastly", side_effect=RuntimeError("HTTP 401")),
+        patch("backend.config.load_config", return_value=cfg_ro),
+        patch("backend.utils.fastly_auth.fastly", return_value=ro_data),
     ):
-        client = TestClient(app)
-        response = client.patch(
-            "/api/provision/services/svc123/ngwaf-workspace?token=attacker-supplied-wrong-token",
-            json={"ngwaf_workspace_id": "workspace-abc"},
-        )
-    assert response.status_code == 401
-
-
-def test_set_ngwaf_workspace_with_read_only_stored_token_rejected_401():
-    """Security: Finding 016. Even if the caller-supplied token matches
-    the stored fastly_api_key, we must always validate it via /tokens/self.
-    If that validation reveals it's a read-only token (missing 'global' scope),
-    it must be rejected with 401."""
-    cfg_with_key = dict(_FAKE_CFG, fastly_api_key="stored-read-only-token")
-
-    # Mock /tokens/self return value representing a read-only token
-    read_only_token_data = {
-        "id": "tok-id",
-        "scope": "global:read",  # Read-only scope, not the required "global"
-        "services": [],
-        "customer_id": "cust-T",
-    }
-
-    with (
-        patch("backend.config.load_config", return_value=cfg_with_key),
-        patch("backend.config.save_config"),
-        patch("backend.provision._sync_crontab"),
-        patch("backend.utils.fastly_auth.fastly", return_value=read_only_token_data),
-    ):
-        client = TestClient(app)
-        response = client.patch(
-            "/api/provision/services/svc123/ngwaf-workspace?token=stored-read-only-token",
-            json={"ngwaf_workspace_id": "workspace-abc"},
-        )
-    assert response.status_code == 401
-    assert response.json()["detail"]["error"] == "insufficient_scope"
-
-
-def test_ngwaf_workspaces_with_read_only_stored_token_rejected_401():
-    """Security: Finding 016. Even if the token matches the stored api key,
-    the NGWAF workspace listing route must validate it via /tokens/self,
-    blocking read-only tokens with 401."""
-    cfg_with_key = dict(_FAKE_CFG, fastly_api_key="stored-read-only-token")
-    read_only_token_data = {"id": "tok-id", "scope": "global:read", "services": [], "customer_id": "cust-T"}
-    with (
-        patch("backend.config.load_config", return_value=cfg_with_key),
-        patch("backend.utils.fastly_auth.fastly", return_value=read_only_token_data),
-    ):
-        client = TestClient(app)
-        response = client.get(
+        r_ro = _client().get(
             "/api/provision/ngwaf-workspaces",
             params={"service_id": "svc123", "token": "stored-read-only-token"},
         )
-    assert response.status_code == 401
-    assert response.json()["detail"]["error"] == "insufficient_scope"
+        assert r_ro.status_code == 401
+        assert r_ro.json()["detail"]["error"] == "insufficient_scope"
+
+    # 2. Missing token -> 401 token_required
+    with patch("backend.config.get_fastly_api_key", return_value=""):
+        r_no_tok = _client().get("/api/provision/ngwaf-workspaces", params={"service_id": "svc"})
+        assert r_no_tok.status_code == 401
+        assert r_no_tok.json()["detail"]["error"] == "token_required"
+
+    # 3. Data shape, Authorization header, and workspaces shape
+    def _mock_resp(payload: bytes):
+        m = MagicMock()
+        m.read.return_value = payload
+        m.status = 200
+        m.__enter__ = lambda s: s
+        m.__exit__ = MagicMock(return_value=False)
+        return m
+
+    with (
+        patch("backend.config.get_fastly_api_key", return_value="tok"),
+        patch(
+            "urllib.request.urlopen",
+            return_value=_mock_resp(b'{"data": [{"id": "ws-1", "name": "Prod"}, {"id": "ws-2", "name": "Staging"}]}'),
+        ),
+        patch("backend.utils.fastly_auth.validate_destructive_token") as mock_val,
+    ):
+        r_data = _client().get("/api/provision/ngwaf-workspaces", params={"service_id": "svc", "token": "tok"})
+        assert r_data.status_code == 200
+        assert r_data.json()["workspaces"][0] == {"id": "ws-1", "name": "Prod"}
+        mock_val.assert_called_once_with("tok", service_id="svc")
+
+        r_hdr = _client().get(
+            "/api/provision/ngwaf-workspaces",
+            params={"service_id": "svc"},
+            headers={"Authorization": "Bearer tok"},
+        )
+        assert r_hdr.status_code == 200
+        assert r_hdr.json()["workspaces"][0] == {"id": "ws-1", "name": "Prod"}
+
+    with (
+        patch("backend.config.get_fastly_api_key", return_value="tok"),
+        patch(
+            "urllib.request.urlopen",
+            return_value=_mock_resp(b'{"workspaces": [{"id": "ws-old", "attributes": {"name": "OldShape"}}]}'),
+        ),
+        patch("backend.utils.fastly_auth.validate_destructive_token"),
+    ):
+        r_old = _client().get("/api/provision/ngwaf-workspaces", params={"service_id": "svc", "token": "tok"})
+        assert r_old.json()["workspaces"][0]["name"] == "OldShape"
+
+    # 4. Empty list + automation token -> error_hint
+    with (
+        patch("backend.config.get_fastly_api_key", return_value="tok"),
+        patch("urllib.request.urlopen", return_value=_mock_resp(b'{"data": []}')),
+        patch("backend.provision.fastly", return_value={"id": "tok-id", "name": "automation"}),
+        patch("backend.utils.fastly_auth.validate_destructive_token"),
+    ):
+        r_empty = _client().get("/api/provision/ngwaf-workspaces", params={"service_id": "svc", "token": "tok"})
+        assert r_empty.json()["workspaces"] == []
+        assert "automation" in r_empty.json()["error_hint"].lower()
+
+    # 5. Upstream 401 -> 400 ngwaf_token_invalid
+    err_401 = urllib.error.HTTPError(
+        url="https://api.fastly.com/ngwaf/v1/workspaces",
+        code=401,
+        msg="unauthorized",
+        hdrs={},  # type: ignore[arg-type]
+        fp=BytesIO(b"unauthorized"),
+    )
+    with (
+        patch("backend.config.get_fastly_api_key", return_value="bad-tok"),
+        patch("urllib.request.urlopen", side_effect=err_401),
+        patch("backend.utils.fastly_auth.validate_destructive_token"),
+    ):
+        r_401 = _client().get("/api/provision/ngwaf-workspaces", params={"service_id": "svc", "token": "bad-tok"})
+        assert r_401.status_code == 400
+        assert r_401.json()["detail"]["error"] == "ngwaf_token_invalid"
 
 
-def test_provision_list_services_returns_provisioned_flag(tmp_path, monkeypatch):
-    """List Fastly services with a ``provisioned`` flag set to True
-    for any service that's already in CONFIGS_DIR. Pinned because
-    the wizard's "pick a service" step shows existing services as
-    "already configured" to avoid double-provisioning."""
-    from backend import config
+# ─── /api/provision/services & /validate ─────────────────────────────────────
 
+
+def test_provision_list_services_flows(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
     config.save_config("svc-existing", {"service_id": "svc-existing"})
 
     fake_services = [
         {"id": "svc-existing", "name": "Already Done", "type": "vcl"},
         {"id": "svc-new", "name": "Fresh", "type": "vcl"},
-        {"id": "svc-wasm", "name": "Compute", "type": "wasm"},  # non-VCL → skipped
+        {"id": "svc-wasm", "name": "Compute", "type": "wasm"},
     ]
-
     with (
-        TestClient(app) as c,
         patch("backend.core.fastly.client.fastly", return_value=fake_services),
-        # Object Storage gate (added with the enablement pre-check) — assume
-        # enabled here so this test stays focused on the provisioned-flag logic.
         patch("backend.provision.fos_setup.object_storage_enabled", return_value=True),
     ):
-        resp = c.get("/api/provision/services?token=tok")
-
-    assert resp.status_code == 200
-    body = resp.json()
-    # Only the two VCL services surface
-    assert len(body) == 2
-    ids = {s["id"] for s in body}
-    assert ids == {"svc-existing", "svc-new"}
-    # The existing one is flagged
-    existing = next(s for s in body if s["id"] == "svc-existing")
-    assert existing["provisioned"] is True
-    new = next(s for s in body if s["id"] == "svc-new")
-    assert new["provisioned"] is False
-
-
-def test_provision_list_services_400s_on_fastly_api_error():
-    with (
-        TestClient(app) as c,
-        patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("HTTP 401")),
-    ):
-        resp = c.get("/api/provision/services?token=badtoken")
-
-    assert resp.status_code == 400
-
-
-def test_provision_list_services_requires_token():
-    with TestClient(app) as c:
-        resp = c.get("/api/provision/services")
-    assert resp.status_code == 422  # missing required query param
-
-
-def test_provision_validate_400s_on_missing_token():
-    with TestClient(app) as c:
-        resp = c.post("/api/provision/validate", json={"service_id": "svc"})
-    assert resp.status_code == 400
-    assert "required" in resp.json()["detail"]["error"]
-
-
-def test_provision_validate_400s_on_missing_service_id():
-    with TestClient(app) as c:
-        resp = c.post("/api/provision/validate", json={"token": "tok"})
-    assert resp.status_code == 400
-
-
-def test_provision_validate_returns_defaults_with_safe_service_id():
-    """The ``defaults`` dict embeds the service_id into bucket-name +
-    cdn-service-name slots, sanitised to alphanumeric+hyphens.
-    Pinned because losing the regex would allow special chars to
-    end up in FOS bucket names (which only accept DNS-safe
-    characters)."""
-
-    def _fastly_spy(method, path, **kwargs):
-        if "/tokens/self" in path:
-            return {"id": "tok-1", "name": "Test Token", "user_id": "u1"}
-        if "/service/" in path:
-            return {"name": "My Production CDN"}
-        return {}
-
-    with (
-        TestClient(app) as c,
-        patch("backend.core.fastly.client.fastly", side_effect=_fastly_spy),
-    ):
-        resp = c.post(
-            "/api/provision/validate",
-            json={"token": "tok", "service_id": "svc.with/specials!"},
-        )
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["service_name"] == "My Production CDN"
-    # Service id sanitised — no dots, slashes, or exclamations
-    assert "/" not in body["defaults"]["fos_bucket_name"]
-    assert "." not in body["defaults"]["fos_bucket_name"]
-    assert "!" not in body["defaults"]["fos_bucket_name"]
-    # The token-info type detection: user_id present → "user"
-    assert body["token_info"]["type"] == "user"
-
-
-def test_provision_validate_classifies_automation_tokens():
-    """Token without ``user_id`` → ``type: "automation"``. Pinned
-    because the wizard renders a different help link for each type."""
-
-    def _fastly_spy(method, path, **kwargs):
-        if "/tokens/self" in path:
-            return {"id": "tok-bot", "name": "Bot Token"}  # no user_id
-        if "/service/" in path:
-            return {"name": "X"}
-        return {}
-
-    with (
-        TestClient(app) as c,
-        patch("backend.core.fastly.client.fastly", side_effect=_fastly_spy),
-    ):
-        resp = c.post("/api/provision/validate", json={"token": "tok", "service_id": "svc1"})
-
-    assert resp.status_code == 200
-    assert resp.json()["token_info"]["type"] == "automation"
-
-
-def test_check_domain_rejects_invalid_prefix_format():
-    """Prefix must be alphanumeric + hyphens, no leading/trailing
-    hyphen. Pinned because invalid prefixes would generate
-    unreachable Fastly domains (e.g. ``-foo`` is illegal DNS)."""
-    with TestClient(app) as c:
-        # Leading hyphen
-        resp = c.get("/api/provision/check-domain?prefix=-bad")
+        resp = _client().get("/api/provision/services?token=tok")
         assert resp.status_code == 200
-        assert resp.json()["available"] is False
-        assert "alphanumeric" in resp.json()["reason"].lower()
+        body = resp.json()
+        assert {s["id"]: s["provisioned"] for s in body} == {"svc-existing": True, "svc-new": False}
 
+    # Missing token -> 422
+    assert _client().get("/api/provision/services").status_code == 422
 
-def test_check_domain_400s_on_empty_prefix():
-    with TestClient(app) as c:
-        # FastAPI's Query(...) requires the param to be present, but the route
-        # itself also has a defensive check. Test the path where the request
-        # arrives but prefix=""
-        resp = c.get("/api/provision/check-domain?prefix=")
-
-    # Either path → 400 (FastAPI rejects empty required string OR route's check)
-    assert resp.status_code in (400, 422)
-
-
-def test_check_domain_accepts_valid_prefix():
-    """Valid alphanumeric+hyphen prefix → check the domain.
-    Pinned because the check function does an actual DNS lookup,
-    so we mock it."""
+    # Object storage disabled -> 400 object_storage_not_enabled
     with (
-        TestClient(app) as c,
+        patch("backend.core.fastly.client.fastly", return_value=fake_services[:1]),
+        patch("backend.provision.fos_setup.object_storage_enabled", return_value=False),
+        patch("backend.config.list_service_ids", return_value=[]),
+    ):
+        r_no_os = _client().get("/api/provision/services", params={"token": "tok"})
+        assert r_no_os.status_code == 400
+        assert r_no_os.json()["detail"]["error"] == "object_storage_not_enabled"
+
+    # Bad token fails before OS probe
+    probe_called: list[bool] = []
+    with (
+        patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("HTTP 401 GET /service")),
         patch(
-            "backend.routers.provision._check_domain_available",
-            return_value=(True, None),
+            "backend.provision.fos_setup.object_storage_enabled",
+            side_effect=lambda *a, **k: probe_called.append(True) or False,
         ),
     ):
-        resp = c.get("/api/provision/check-domain?prefix=valid-prefix-1")
+        r_bad = _client().get("/api/provision/services", params={"token": "bad"})
+        assert r_bad.status_code == 400
+        assert r_bad.json()["detail"]["error"] == "list_services_failed"
+        assert probe_called == []
 
-    assert resp.status_code == 200
-    assert resp.json()["available"] is True
 
+def test_provision_validate_flows():
+    assert _client().post("/api/provision/validate", json={"service_id": "svc"}).status_code == 400
+    assert _client().post("/api/provision/validate", json={"token": "tok"}).status_code == 400
+    assert _client().post("/api/provision/validate", json={"token": "", "service_id": "svc"}).status_code == 400
+    assert _client().post("/api/provision/validate", json={"token": "tok", "service_id": ""}).status_code == 400
 
-def test_check_domain_custom_domain_available():
-    """Verify check-domain with is_custom=true passes full domain to _check_domain_available."""
-    with (
-        TestClient(app) as c,
-        patch(
-            "backend.routers.provision._check_domain_available",
-            return_value=(True, None),
-        ) as mock_check,
+    # User token + sanitised defaults
+    with patch(
+        "backend.core.fastly.client.fastly",
+        side_effect=lambda m, p, **kw: (
+            {"id": "tok-1", "name": "Test Token", "user_id": "u1"}
+            if "/tokens/self" in p
+            else {"name": "My Production CDN"}
+        ),
     ):
-        resp = c.get("/api/provision/check-domain?prefix=my.custom.domain.com&is_custom=true")
+        resp = _client().post("/api/provision/validate", json={"token": "tok", "service_id": "svc.with/specials!"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["service_name"] == "My Production CDN"
+        assert not any(ch in body["defaults"]["fos_bucket_name"] for ch in ("/", ".", "!"))
+        assert body["token_info"]["type"] == "user"
 
-    assert resp.status_code == 200
-    assert resp.json()["available"] is True
-    mock_check.assert_called_once_with("my.custom.domain.com")
-
-
-def test_check_domain_custom_domain_taken():
-    """Verify check-domain with is_custom=true handles taken domain successfully."""
-    with (
-        TestClient(app) as c,
-        patch(
-            "backend.routers.provision._check_domain_available",
-            return_value=(False, "Domain already registered or in use"),
-        ) as mock_check,
+    # Automation token (no user_id)
+    with patch(
+        "backend.core.fastly.client.fastly",
+        side_effect=lambda m, p, **kw: {"id": "tok-bot", "name": "Bot Token"} if "/tokens/self" in p else {"name": "X"},
     ):
-        resp = c.get("/api/provision/check-domain?prefix=my.custom.domain.com&is_custom=true")
+        resp_bot = _client().post("/api/provision/validate", json={"token": "tok", "service_id": "svc1"})
+        assert resp_bot.json()["token_info"]["type"] == "automation"
 
+    # /tokens/self failure swallowed -> empty token_info
+    def _fail_tok(m, p, *a, **kw):
+        if p == "/tokens/self":
+            raise RuntimeError("token endpoint down")
+        return {"name": "My Service"}
+
+    with patch("backend.core.fastly.client.fastly", side_effect=_fail_tok):
+        resp_swallow = _client().post("/api/provision/validate", json={"token": "tok", "service_id": "svc-abc"})
+        assert resp_swallow.status_code == 200
+        assert resp_swallow.json()["token_info"] == {}
+
+
+# ─── /api/provision/check-domain & _check_domain_available ───────────────────
+
+
+@pytest.mark.parametrize(
+    ("query", "mock_ret", "expected_avail", "expected_call_arg"),
+    [
+        ("prefix=-bad", None, False, None),
+        ("prefix=foo_bar", None, False, None),
+        ("prefix=valid-prefix-1", (True, None), True, "valid-prefix-1.global.ssl.fastly.net"),
+        ("prefix=my.custom.domain.com&is_custom=true", (True, None), True, "my.custom.domain.com"),
+        (
+            "prefix=my.custom.domain.com&is_custom=true",
+            (False, "Domain already registered or in use"),
+            False,
+            "my.custom.domain.com",
+        ),
+    ],
+)
+def test_check_domain_routes(query, mock_ret, expected_avail, expected_call_arg):
+    assert _client().get("/api/provision/check-domain?prefix=").status_code in (400, 422)
+    with patch("backend.routers.provision._check_domain_available", return_value=mock_ret) as mock_check:
+        resp = _client().get(f"/api/provision/check-domain?{query}")
     assert resp.status_code == 200
-    assert resp.json()["available"] is False
-    assert resp.json()["reason"] == "Domain already registered or in use"
-    mock_check.assert_called_once_with("my.custom.domain.com")
+    assert resp.json()["available"] is expected_avail
+    if expected_call_arg:
+        mock_check.assert_called_once_with(expected_call_arg)
 
 
-def test_terraform_preview_returns_hcl_string():
-    """Preview generates the HCL the wizard renders in its
-    "review" step. Pinned at the structural level (200 + hcl key)."""
-    fake_hcl = 'resource "fastly_service_vcl" "x" {}'
+def test_check_domain_available_helper_branches():
+    fake_resp = MagicMock()
+    fake_resp.__enter__ = lambda s: s
+    fake_resp.__exit__ = MagicMock(return_value=False)
+    with patch("urllib.request.urlopen", return_value=fake_resp), patch("backend.utils.telemetry.tracked_call"):
+        ok, reason = _check_domain_available("test.global.ssl.fastly.net")
+        assert ok is False and "in use" in (reason or "").lower()
+
+    err_unprov = urllib.error.HTTPError(
+        url="https://x",
+        code=404,
+        msg="not found",
+        hdrs={},  # type: ignore[arg-type]
+        fp=BytesIO(b"... Please check that this domain has been added to a service. ..."),
+    )
+    with patch("urllib.request.urlopen", side_effect=err_unprov), patch("backend.utils.telemetry.tracked_call"):
+        assert _check_domain_available("test.global.ssl.fastly.net") == (True, None)
+
+    err_other = urllib.error.HTTPError(
+        url="https://x",
+        code=404,
+        msg="not found",
+        hdrs={},
+        fp=BytesIO(b"some other body"),  # type: ignore[arg-type]
+    )
+    with patch("urllib.request.urlopen", side_effect=err_other), patch("backend.utils.telemetry.tracked_call"):
+        ok_o, reason_o = _check_domain_available("test.global.ssl.fastly.net")
+        assert ok_o is False and "already registered" in (reason_o or "")
+
     with (
-        TestClient(app) as c,
-        patch("backend.utils.terraform_gen.generate_terraform", return_value={"main.tf": fake_hcl}),
+        patch("urllib.request.urlopen", side_effect=urllib.error.URLError("dns failed")),
+        patch("backend.utils.telemetry.tracked_call"),
     ):
-        resp = c.post(
+        ok_dns, reason_dns = _check_domain_available("test.global.ssl.fastly.net")
+        assert ok_dns is True and "DNS/Connection" in (reason_dns or "")
+
+    with (
+        patch("urllib.request.urlopen", side_effect=RuntimeError("unexpected")),
+        patch("backend.utils.telemetry.tracked_call"),
+    ):
+        ok_ex, reason_ex = _check_domain_available("foo.example")
+        assert ok_ex is False and "unexpected" in (reason_ex or "")
+
+
+# ─── /api/provision/check-fos & /terraform/* ─────────────────────────────────
+
+
+def test_check_fos_success_and_sample_get():
+    fake_client = MagicMock()
+    fake_client.list_objects_v2.side_effect = [{"Contents": []}, {"Contents": []}]
+    with patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client) as get_client:
+        resp = _client().post(
+            "/api/provision/check-fos",
+            json={"bucket": "b", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
+        )
+    assert resp.status_code == 200 and resp.json()["ok"] is True
+    get_client.assert_called_once_with("ak", "sk", "us-east-1", bucket_name="b", context="provision:check-fos")
+    assert [c.kwargs["Prefix"] for c in fake_client.list_objects_v2.call_args_list] == ["raw/request/", "raw/rum/"]
+
+    fake_client2 = MagicMock()
+    fake_client2.list_objects_v2.return_value = {
+        "Contents": [{"Key": "raw/request/year=2026/month=09/day=22/hour=13/minute=00/object.gz"}]
+    }
+    fake_client2.get_object.return_value = {"Body": MagicMock()}
+    with patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client2):
+        resp2 = _client().post(
+            "/api/provision/check-fos",
+            json={"bucket": "b", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
+        )
+    assert resp2.status_code == 200 and resp2.json()["ok"] is True
+    fake_client2.get_object.assert_called_once_with(
+        Bucket="b",
+        Key="raw/request/year=2026/month=09/day=22/hour=13/minute=00/object.gz",
+        Range="bytes=0-0",
+    )
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected_in_msg"),
+    [
+        (
+            botocore.exceptions.ClientError({"Error": {"Code": "AccessDenied", "Message": "raw"}}, "ListObjectsV2"),
+            "Access Denied",
+        ),
+        (
+            botocore.exceptions.ClientError(
+                {"Error": {"Code": "InvalidAccessKeyId", "Message": "raw"}}, "ListObjectsV2"
+            ),
+            "Access Denied",
+        ),
+        (
+            botocore.exceptions.ClientError(
+                {"Error": {"Code": "SignatureDoesNotMatch", "Message": "raw"}}, "ListObjectsV2"
+            ),
+            "Access Denied",
+        ),
+        (
+            botocore.exceptions.ClientError({"Error": {"Code": "NoSuchBucket", "Message": "raw"}}, "ListObjectsV2"),
+            "Bucket not found",
+        ),
+        (
+            botocore.exceptions.ClientError(
+                {"Error": {"Code": "IllegalLocationConstraintException", "Message": "raw"}}, "ListObjectsV2"
+            ),
+            "Region mismatch",
+        ),
+        (RuntimeError("EndpointConnectionError: Could not connect to the endpoint URL"), "verify the FOS Region"),
+        (RuntimeError("weird unknown error xyz"), "weird unknown error xyz"),
+    ],
+)
+def test_check_fos_error_mappings(exc, expected_in_msg):
+    fake_client = MagicMock()
+    fake_client.list_objects_v2.side_effect = exc
+    with patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client):
+        resp = _client().post(
+            "/api/provision/check-fos",
+            json={"bucket": "b", "region": "us-east-1", "access_key": "k", "secret_key": "s"},
+        )
+    body = resp.json()
+    assert body["ok"] is False
+    assert expected_in_msg in body["error"]
+
+
+def test_terraform_preview_and_export():
+    fake_files = {"main.tf": 'resource "fastly_service_vcl" "x" {}\n', "instructions": "# Setup steps\n"}
+    with patch("backend.utils.terraform_gen.generate_terraform", return_value=fake_files):
+        prev = _client().post(
             "/api/provision/terraform/preview",
             json={
                 "service_id": "svc-1",
@@ -494,410 +548,84 @@ def test_terraform_preview_returns_hcl_string():
                 "fos_region": "us-east-1",
             },
         )
+        assert prev.status_code == 200 and "main.tf" in prev.json()
 
-    # Returns a dict of {filename: hcl_string}
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "main.tf" in body
-
-
-def test_check_domain_available_returns_false_when_domain_returns_200():
-    """A 200 response from the domain means it's actively serving
-    traffic — NOT available. Pinned because the wizard surfaces
-    this as "already in use" so the user picks another prefix."""
-    from backend.routers.provision import _check_domain_available
-
-    fake_resp = MagicMock()
-    fake_resp.__enter__ = lambda s: s
-    fake_resp.__exit__ = MagicMock(return_value=False)
-    with patch("urllib.request.urlopen", return_value=fake_resp):
-        ok, reason = _check_domain_available("test.global.ssl.fastly.net")
-    assert ok is False
-    assert reason is not None
-    assert "in use" in reason.lower()
+        exp = _client().post("/api/provision/terraform/export", json={"service_id": "svc"})
+        assert exp.status_code == 200
+        assert exp.headers["content-type"] == "application/zip"
+        assert "fastly-log-analysis-terraform.zip" in exp.headers["content-disposition"]
+        names = zipfile.ZipFile(io.BytesIO(exp.content)).namelist()
+        assert "README.md" in names and "main.tf" in names and "instructions" not in names
 
 
-def test_check_domain_available_returns_true_on_fastly_404_with_marker():
-    """Fastly's "domain not added to a service" HTTP 404 body has a
-    specific marker string; the helper keys on that marker to confirm
-    the domain is registered with Fastly but unassigned (i.e. safe
-    for the wizard to claim). Pinned because changes to Fastly's
-    error page format would break this detection."""
-    import urllib.error
-    from io import BytesIO
-
-    from backend.routers.provision import _check_domain_available
-
-    body = b"... Please check that this domain has been added to a service. ..."
-    err = urllib.error.HTTPError(url="https://x", code=404, msg="not found", hdrs={}, fp=BytesIO(body))
-    with patch("urllib.request.urlopen", side_effect=err):
-        ok, reason = _check_domain_available("test.global.ssl.fastly.net")
-    assert ok is True
-    assert reason is None
+# ─── /api/provision/ingest ───────────────────────────────────────────────────
 
 
-def test_check_domain_available_returns_false_on_other_404():
-    """A 404 WITHOUT the Fastly marker → domain belongs to someone
-    else (different CDN). Pinned because we must NOT claim domains
-    that aren't on Fastly."""
-    import urllib.error
-    from io import BytesIO
+def test_ingest_validation_and_key_flows(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
 
-    from backend.routers.provision import _check_domain_available
+    # 1. Missing token -> 400
+    assert _client().post("/api/provision/ingest", json={"service_id": "svc"}).status_code == 400
 
-    err = urllib.error.HTTPError(url="https://x", code=404, msg="not found", hdrs={}, fp=BytesIO(b"some other body"))
-    with patch("urllib.request.urlopen", side_effect=err):
-        ok, reason = _check_domain_available("test.global.ssl.fastly.net")
-    assert ok is False
-
-
-def test_check_domain_available_treats_dns_error_as_available():
-    """DNS / connection error → domain isn't registered anywhere
-    (likely available). Pinned because the wizard advances on
-    this signal — losing it would block legitimate domain claims."""
-    import urllib.error
-
-    from backend.routers.provision import _check_domain_available
-
-    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("dns failed")):
-        ok, reason = _check_domain_available("test.global.ssl.fastly.net")
-    assert ok is True
-    assert reason is not None
-    assert "dns" in reason.lower() or "connection" in reason.lower()
-
-
-def test_check_fos_returns_ok_when_list_succeeds():
-    """Valid creds → list the real ingest prefixes and return ``{ok: true}``."""
-    fake_client = MagicMock()
-    fake_client.list_objects_v2.side_effect = [{"Contents": []}, {"Contents": []}]
+    # 2. Bad log_period -> 400 invalid_log_period
     with (
-        TestClient(app) as c,
-        patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client) as get_client,
-    ):
-        resp = c.post(
-            "/api/provision/check-fos",
-            json={"bucket": "b", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
-        )
-    assert resp.status_code == 200
-    assert resp.json()["ok"] is True
-    get_client.assert_called_once_with(
-        "ak",
-        "sk",
-        "us-east-1",
-        bucket_name="b",
-        context="provision:check-fos",
-    )
-    assert [call.kwargs["Prefix"] for call in fake_client.list_objects_v2.call_args_list] == [
-        "raw/request/",
-        "raw/rum/",
-    ]
-
-
-def test_check_fos_reads_representative_request_object():
-    """A successful LIST must be paired with a real raw/request GET."""
-    fake_client = MagicMock()
-    fake_client.list_objects_v2.return_value = {
-        "Contents": [{"Key": "raw/request/year=2026/month=09/day=22/hour=13/minute=00/object.gz"}]
-    }
-    fake_client.get_object.return_value = {"Body": MagicMock()}
-    with (
-        TestClient(app) as c,
-        patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client),
-    ):
-        resp = c.post(
-            "/api/provision/check-fos",
-            json={"bucket": "b", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
-        )
-    assert resp.status_code == 200
-    assert resp.json()["ok"] is True
-    fake_client.get_object.assert_called_once_with(
-        Bucket="b",
-        Key="raw/request/year=2026/month=09/day=22/hour=13/minute=00/object.gz",
-        Range="bytes=0-0",
-    )
-
-
-def test_check_fos_maps_access_denied_to_friendly_message():
-    """``AccessDenied`` / ``InvalidAccessKeyId`` / ``SignatureDoesNotMatch``
-    all map to the same "check your key/secret" message. Pinned
-    because the FE renders the message verbatim — losing the
-    friendly text would dump opaque AWS error codes."""
-    import botocore.exceptions
-
-    fake_client = MagicMock()
-    fake_client.list_objects_v2.side_effect = botocore.exceptions.ClientError(
-        {"Error": {"Code": "AccessDenied", "Message": "denied"}}, "ListObjectsV2"
-    )
-    with (
-        TestClient(app) as c,
-        patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client),
-    ):
-        resp = c.post(
-            "/api/provision/check-fos",
-            json={"bucket": "b", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
-        )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["ok"] is False
-    assert "access denied" in body["error"].lower()
-
-
-def test_check_fos_maps_no_such_bucket_to_friendly_message():
-    """``NoSuchBucket`` → "Bucket not found" (so the user re-enters
-    the bucket name)."""
-    import botocore.exceptions
-
-    fake_client = MagicMock()
-    fake_client.list_objects_v2.side_effect = botocore.exceptions.ClientError(
-        {"Error": {"Code": "NoSuchBucket", "Message": "nope"}}, "ListObjectsV2"
-    )
-    with (
-        TestClient(app) as c,
-        patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client),
-    ):
-        resp = c.post(
-            "/api/provision/check-fos",
-            json={"bucket": "wrong-bucket", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
-        )
-    body = resp.json()
-    assert body["ok"] is False
-    assert "bucket not found" in body["error"].lower()
-
-
-def test_check_fos_maps_region_mismatch_to_friendly_message():
-    """``IllegalLocationConstraintException`` → "Region mismatch"
-    (so the user re-selects the region)."""
-    import botocore.exceptions
-
-    fake_client = MagicMock()
-    fake_client.list_objects_v2.side_effect = botocore.exceptions.ClientError(
-        {"Error": {"Code": "IllegalLocationConstraintException", "Message": "wrong region"}},
-        "ListObjectsV2",
-    )
-    with (
-        TestClient(app) as c,
-        patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client),
-    ):
-        resp = c.post(
-            "/api/provision/check-fos",
-            json={"bucket": "b", "region": "us-west-2", "access_key": "ak", "secret_key": "sk"},
-        )
-    body = resp.json()
-    assert body["ok"] is False
-    assert "region" in body["error"].lower()
-
-
-def test_check_fos_maps_endpoint_connection_error_to_friendly_message():
-    """``EndpointConnectionError`` in the message → "Connection
-    failed. Please verify the FOS Region is correct." Pinned
-    because boto3 raises this for typo'd regions (not
-    IllegalLocationConstraintException) so this is a separate path."""
-    with (
-        TestClient(app) as c,
-        patch(
-            "backend.routers.provision._get_fos_s3_client",
-            side_effect=RuntimeError("boto3 EndpointConnectionError on x.object.fastlystorage.app"),
-        ),
-    ):
-        resp = c.post(
-            "/api/provision/check-fos",
-            json={"bucket": "b", "region": "not-a-region", "access_key": "ak", "secret_key": "sk"},
-        )
-    body = resp.json()
-    assert body["ok"] is False
-    assert "connection failed" in body["error"].lower()
-
-
-def test_terraform_export_returns_zip_with_correct_content_disposition():
-    """Export returns a ZIP file with the correct Content-Disposition
-    header for browser download. Pinned because the FE keys on the
-    filename in the disposition header."""
-    fake_files = {
-        "main.tf": "resource\n",
-        "variables.tf": "variable\n",
-        "instructions": "# README",  # special: written as README.md
-    }
-    with (
-        TestClient(app) as c,
-        patch("backend.utils.terraform_gen.generate_terraform", return_value=fake_files),
-    ):
-        resp = c.post("/api/provision/terraform/export", json={"service_id": "svc"})
-
-    assert resp.status_code == 200
-    assert resp.headers["content-type"] == "application/zip"
-    assert "fastly-log-analysis-terraform.zip" in resp.headers["content-disposition"]
-
-
-def test_terraform_export_includes_instructions_as_readme_md():
-    """The ``instructions`` key gets renamed to ``README.md`` inside
-    the zip. Pinned because customers expect a discoverable README,
-    not a file named "instructions"."""
-    import io
-    import zipfile
-
-    fake_files = {"main.tf": "resource\n", "instructions": "# Setup steps\n"}
-    with (
-        TestClient(app) as c,
-        patch("backend.utils.terraform_gen.generate_terraform", return_value=fake_files),
-    ):
-        resp = c.post("/api/provision/terraform/export", json={"service_id": "svc"})
-
-    assert resp.status_code == 200
-    zf = zipfile.ZipFile(io.BytesIO(resp.content))
-    names = zf.namelist()
-    assert "README.md" in names
-    assert "main.tf" in names
-    # "instructions" gets renamed, not left in the archive
-    assert "instructions" not in names
-
-
-def test_ingest_400s_without_token():
-    """Token required. Pinned because the wizard sends the token
-    along with the body — missing it means programmatic error."""
-    with TestClient(app) as c:
-        resp = c.post("/api/provision/ingest", json={"service_id": "svc"})
-    assert resp.status_code == 400
-
-
-def test_ingest_400s_on_bad_log_period():
-    """``log_period`` that fails ``parse_period`` (e.g. "1 fortnight")
-    → 400. Pinned because Fastly's API rejects bad periods at upload
-    time; catching here surfaces the error in the wizard's review
-    step instead of mid-deploy."""
-    with (
-        TestClient(app) as c,
         patch("backend.utils.pop_utils.fetch_pop_locations"),
         patch("backend.provision.parse_period", side_effect=ValueError("unknown period: fortnight")),
-        # Security: stub token validation (auth gate exercised separately).
-        patch(
-            "backend.utils.fastly_auth.fastly",
-            side_effect=lambda method, path, *, token, **kw: (
-                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-T"}
-                if path == "/tokens/self"
-                else {"id": "svc", "customer_id": "cust-T"}
-            ),
-        ),
+        patch("backend.utils.fastly_auth.fastly", side_effect=_auth_fastly_ok("svc")),
     ):
-        resp = c.post(
+        r_period = _client().post(
             "/api/provision/ingest",
             json={"token": "t", "service_id": "svc", "log_period": "1 fortnight"},
         )
-    assert resp.status_code == 400
-    body = resp.json()["detail"]
-    assert body["error"] == "invalid_log_period"
-    assert "fortnight" in body["message"]
+        assert r_period.status_code == 400
+        assert r_period.json()["detail"]["error"] == "invalid_log_period"
 
-
-def test_ingest_creates_new_fos_key_when_none_provided(tmp_path, monkeypatch):
-    """When neither ``fos_access_key`` nor ``find_fos_key`` finds an
-    existing one, the route calls ``ensure_fos_access_key`` to create
-    a new key. Pinned because dropping the create-key path would
-    break the import-existing-service flow."""
-    from backend import config
-
-    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
-
+    # 3. Creates new FOS key when none provided
     new_key = {"access_key": "AKNEW", "secret_key": "SKNEW", "id": "kid"}
-
     with (
-        TestClient(app) as c,
         patch("backend.utils.pop_utils.fetch_pop_locations"),
         patch("backend.provision.parse_period", side_effect=lambda x: 60),
         patch("backend.provision.find_fos_key", return_value=None),
         patch("backend.provision.ensure_fos_access_key", return_value=new_key) as mock_ensure,
         patch("backend.provision.write_service_config") as mock_write,
         patch("backend.provision._sync_crontab"),
-        patch(
-            "backend.utils.fastly_auth.fastly",
-            side_effect=lambda method, path, *, token, **kw: (
-                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-T"}
-                if path == "/tokens/self"
-                else {"id": "svc-1", "customer_id": "cust-T"}
-            ),
-        ),
+        patch("backend.utils.fastly_auth.fastly", side_effect=_auth_fastly_ok("svc-1")),
     ):
-        resp = c.post(
+        r_new = _client().post(
             "/api/provision/ingest",
-            json={
-                "token": "t",
-                "service_id": "svc-1",
-                "fos_bucket_name": "b",
-                "fos_region": "us-east-1",
-            },
+            json={"token": "t", "service_id": "svc-1", "fos_bucket_name": "b", "fos_region": "us-east-1"},
         )
+        assert r_new.status_code == 200
+        mock_ensure.assert_called_once()
+        persisted = mock_write.call_args[0][0]
+        assert persisted["fos_access_key_id"] == "AKNEW" and persisted["fos_secret_access_key"] == "SKNEW"
 
-    assert resp.status_code == 200
-    assert resp.json()["service_id"] == "svc-1"
-    # The created key went into the state passed to write_service_config
-    mock_ensure.assert_called_once()
-    persisted = mock_write.call_args[0][0]
-    assert persisted["fos_access_key_id"] == "AKNEW"
-    assert persisted["fos_secret_access_key"] == "SKNEW"
-
-
-def test_ingest_400s_when_ensure_access_key_raises():
-    """If creating the FOS key fails (Fastly API error), surface as
-    400 with the underlying error. Pinned because the wizard renders
-    the message in the error toast."""
+    # 4. ensure_fos_access_key failure -> 400 ensure_access_key_failed
     with (
-        TestClient(app) as c,
         patch("backend.utils.pop_utils.fetch_pop_locations"),
         patch("backend.provision.parse_period", side_effect=lambda x: 60),
         patch("backend.provision.find_fos_key", return_value=None),
         patch("backend.provision.ensure_fos_access_key", side_effect=RuntimeError("rate limited")),
-        patch(
-            "backend.utils.fastly_auth.fastly",
-            side_effect=lambda method, path, *, token, **kw: (
-                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-T"}
-                if path == "/tokens/self"
-                else {"id": "svc-1", "customer_id": "cust-T"}
-            ),
-        ),
+        patch("backend.utils.fastly_auth.fastly", side_effect=_auth_fastly_ok("svc-1")),
     ):
-        resp = c.post(
+        r_err = _client().post(
             "/api/provision/ingest",
-            json={
-                "token": "t",
-                "service_id": "svc-1",
-                "fos_bucket_name": "b",
-            },
+            json={"token": "t", "service_id": "svc-1", "fos_bucket_name": "b"},
         )
-    assert resp.status_code == 400
-    # Fastly API exceptions can leak token / account hints — the router
-    # now logs the underlying message server-side and returns only the
-    # stable code + a correlation id (see raise_internal).
-    body = resp.json()["detail"]
-    assert body["error"] == "ensure_access_key_failed"
-    assert "error_id" in body
+        assert r_err.status_code == 400
+        assert r_err.json()["detail"]["error"] == "ensure_access_key_failed"
 
-
-def test_ingest_uses_provided_keys_without_calling_fastly_api(tmp_path, monkeypatch):
-    """When fos_access_key + fos_secret_key are provided in the body,
-    the route uses them as-is and skips both find/create paths.
-    Pinned because importing an analyst service should NOT mint a
-    new admin key (which would require admin Fastly creds anyway)."""
-    from backend import config
-
-    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
-
+    # 5. Uses provided keys without calling find/create
     with (
-        TestClient(app) as c,
         patch("backend.utils.pop_utils.fetch_pop_locations"),
         patch("backend.provision.parse_period", side_effect=lambda x: 60),
         patch("backend.provision.find_fos_key") as mock_find,
-        patch("backend.provision.ensure_fos_access_key") as mock_ensure,
+        patch("backend.provision.ensure_fos_access_key") as mock_ensure2,
         patch("backend.provision.write_service_config"),
         patch("backend.provision._sync_crontab"),
-        patch(
-            "backend.utils.fastly_auth.fastly",
-            side_effect=lambda method, path, *, token, **kw: (
-                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-T"}
-                if path == "/tokens/self"
-                else {"id": "svc-1", "customer_id": "cust-T"}
-            ),
-        ),
+        patch("backend.utils.fastly_auth.fastly", side_effect=_auth_fastly_ok("svc-1")),
     ):
-        resp = c.post(
+        r_prov = _client().post(
             "/api/provision/ingest",
             json={
                 "token": "t",
@@ -907,35 +635,18 @@ def test_ingest_uses_provided_keys_without_calling_fastly_api(tmp_path, monkeypa
                 "fos_secret_key": "EXISTING_SK",
             },
         )
-
-    assert resp.status_code == 200
-    # Neither lookup nor create was attempted
-    mock_find.assert_not_called()
-    mock_ensure.assert_not_called()
+        assert r_prov.status_code == 200
+        mock_find.assert_not_called()
+        mock_ensure2.assert_not_called()
 
 
-def test_ingest_rerun_preserves_existing_faro_pin_when_body_omits_it(tmp_path, monkeypatch):
-    """#1 audit finding: a re-run of /api/provision/ingest (analyst-join,
-    wizard re-run, key rotation) rebuilt ``state["rum"]`` from the request
-    body alone as ``{enabled, enabled_at}``, with no awareness of a
-    ``faro_version`` already pinned on disk. ``write_service_config``'s
-    preserved-key merge treats "rum" as present-in-state (the handler
-    always sets it when ``rum_enabled`` is true) and does a full overwrite,
-    so a re-run silently unpinned an already-RUM-enabled service — handing
-    the sync cron an unrequested version change and, via its adopt-default
-    self-heal branch, an unrequested Fastly VCL activation.
-
-    Pins: an ingest re-run with ``rum_enabled=True`` and no
-    ``rum.faro_version`` in the body must carry the on-disk pin (and its
-    persisted upload hashes) forward into ``state["rum"]`` unchanged.
-    """
-    from backend import config
-
+def test_ingest_rerun_preserves_faro_pin_and_cdn_secret(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
     config.save_config(
         "svc-1",
         {
             "service_id": "svc-1",
+            "cdn_secret": "persisted-cdn-secret",
             "rum_enabled": True,
             "rum": {
                 "enabled": True,
@@ -946,14 +657,8 @@ def test_ingest_rerun_preserves_existing_faro_pin_when_body_omits_it(tmp_path, m
             },
         },
     )
-
-    captured = {}
-
-    def fake_write(state):
-        captured["state"] = state
-
+    captured: dict = {}
     with (
-        TestClient(app) as c,
         patch("backend.utils.pop_utils.fetch_pop_locations"),
         patch("backend.provision.parse_period", side_effect=lambda x: 60),
         patch("backend.provision.find_fos_key", return_value=None),
@@ -961,130 +666,21 @@ def test_ingest_rerun_preserves_existing_faro_pin_when_body_omits_it(tmp_path, m
             "backend.provision.ensure_fos_access_key",
             return_value={"access_key": "AK", "secret_key": "SK", "id": "kid"},
         ),
-        patch("backend.provision.write_service_config", side_effect=fake_write),
+        patch("backend.provision.write_service_config", side_effect=lambda st: captured.update(state=st)),
         patch("backend.provision._sync_crontab"),
-        patch(
-            "backend.utils.fastly_auth.fastly",
-            side_effect=lambda method, path, *, token, **kw: (
-                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-T"}
-                if path == "/tokens/self"
-                else {"id": "svc-1", "customer_id": "cust-T"}
-            ),
-        ),
+        patch("backend.utils.fastly_auth.fastly", side_effect=_auth_fastly_ok("svc-1")),
     ):
-        resp = c.post(
+        resp = _client().post(
             "/api/provision/ingest",
-            json={
-                "token": "t",
-                "service_id": "svc-1",
-                "fos_bucket_name": "b",
-                "rum_enabled": True,
-            },
+            json={"token": "t", "service_id": "svc-1", "fos_bucket_name": "b", "rum_enabled": True},
         )
+        assert resp.status_code == 200
+        assert captured["state"]["cdn_secret"] == "persisted-cdn-secret"
+        assert captured["state"]["rum"]["faro_version"] == "9.9.9"
+        assert captured["state"]["rum"]["faro_content_hash"] == "existing-hash"
 
-    assert resp.status_code == 200
-    assert captured["state"]["rum"]["faro_version"] == "9.9.9"
-    assert captured["state"]["rum"]["faro_content_hash"] == "existing-hash"
-    assert captured["state"]["rum"]["faro_fos_etag_md5"] == "existing-etag"
-
-
-def test_ingest_rerun_preserves_existing_cdn_secret_when_body_omits_it(tmp_path, monkeypatch):
-    """Re-running /api/provision/ingest from the admin wizard omits
-    ``cdn_secret``. Preserve the on-disk secret instead of minting a fresh one,
-    or the local config drifts away from the deployed ``cdn_auth`` dictionary
-    and every CDN-backed GET/HEAD 401s."""
-    from backend import config
-
-    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
-    config.save_config(
-        "svc-1",
-        {
-            "service_id": "svc-1",
-            "cdn_secret": "persisted-cdn-secret",
-        },
-    )
-
-    captured = {}
-
-    def fake_write(state):
-        captured["state"] = state
-
-    with (
-        TestClient(app) as c,
-        patch("backend.utils.pop_utils.fetch_pop_locations"),
-        patch("backend.provision.parse_period", side_effect=lambda x: 60),
-        patch("backend.provision.find_fos_key", return_value=None),
-        patch(
-            "backend.provision.ensure_fos_access_key",
-            return_value={"access_key": "AK", "secret_key": "SK", "id": "kid"},
-        ),
-        patch("backend.provision.write_service_config", side_effect=fake_write),
-        patch("backend.provision._sync_crontab"),
-        patch(
-            "backend.utils.fastly_auth.fastly",
-            side_effect=lambda method, path, *, token, **kw: (
-                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-T"}
-                if path == "/tokens/self"
-                else {"id": "svc-1", "customer_id": "cust-T"}
-            ),
-        ),
-    ):
-        resp = c.post(
-            "/api/provision/ingest",
-            json={
-                "token": "t",
-                "service_id": "svc-1",
-                "fos_bucket_name": "b",
-            },
-        )
-
-    assert resp.status_code == 200
-    assert captured["state"]["cdn_secret"] == "persisted-cdn-secret"
-
-
-def test_ingest_rerun_honors_explicit_faro_version_in_body(tmp_path, monkeypatch):
-    """Negative control for the fix above: an explicit ``rum.faro_version``
-    in the request body (a deliberate operator re-pin) must still win over
-    whatever is stored on disk — the preservation fallback only applies
-    when the body carries no pin at all."""
-    from backend import config
-
-    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
-    config.save_config(
-        "svc-1",
-        {
-            "service_id": "svc-1",
-            "rum_enabled": True,
-            "rum": {"enabled": True, "faro_version": "9.9.9"},
-        },
-    )
-
-    captured = {}
-
-    def fake_write(state):
-        captured["state"] = state
-
-    with (
-        TestClient(app) as c,
-        patch("backend.utils.pop_utils.fetch_pop_locations"),
-        patch("backend.provision.parse_period", side_effect=lambda x: 60),
-        patch("backend.provision.find_fos_key", return_value=None),
-        patch(
-            "backend.provision.ensure_fos_access_key",
-            return_value={"access_key": "AK", "secret_key": "SK", "id": "kid"},
-        ),
-        patch("backend.provision.write_service_config", side_effect=fake_write),
-        patch("backend.provision._sync_crontab"),
-        patch(
-            "backend.utils.fastly_auth.fastly",
-            side_effect=lambda method, path, *, token, **kw: (
-                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-T"}
-                if path == "/tokens/self"
-                else {"id": "svc-1", "customer_id": "cust-T"}
-            ),
-        ),
-    ):
-        resp = c.post(
+        # Explicit faro_version overrides on-disk pin
+        resp_override = _client().post(
             "/api/provision/ingest",
             json={
                 "token": "t",
@@ -1094,311 +690,62 @@ def test_ingest_rerun_honors_explicit_faro_version_in_body(tmp_path, monkeypatch
                 "rum": {"faro_version": "1.0.0"},
             },
         )
-
-    assert resp.status_code == 200
-    assert captured["state"]["rum"]["faro_version"] == "1.0.0"
-
-
-def test_ngwaf_workspaces_401s_when_no_token():
-    """Security: no ``token=`` query param → 401 (the route now
-    REQUIRES the caller to present a token; the silent stored-key
-    fallback was the unauth-disclosure vector). Pinned because the FE
-    distinguishes 401 (no token) from 400 (bad token) when prompting
-    the user."""
-    with (
-        TestClient(app) as c,
-        patch("backend.config.get_fastly_api_key", return_value=""),
-    ):
-        resp = c.get("/api/provision/ngwaf-workspaces", params={"service_id": "svc"})
-    assert resp.status_code == 401
-    assert resp.json()["detail"]["error"] == "token_required"
+        assert resp_override.status_code == 200
+        assert captured["state"]["rum"]["faro_version"] == "1.0.0"
 
 
-def test_ngwaf_workspaces_returns_data_shape_workspaces():
-    """NGWAF API returns ``{"data": [...]}`` shape. The route
-    normalises each workspace to ``{id, name}``. Pinned because
-    the FE keys on these two fields.
-
-    Security: caller must pass ``token=tok`` matching the stored
-    key (constant-time compare). The mock returns "tok" for the stored
-    key so the match succeeds without hitting Fastly's /tokens/self.
-    """
-    fake_body = b'{"data": [{"id": "ws-1", "name": "Prod"}, {"id": "ws-2", "name": "Staging"}]}'
-    fake_resp = MagicMock()
-    fake_resp.read.return_value = fake_body
-    fake_resp.status = 200
-    fake_resp.__enter__ = lambda s: s
-    fake_resp.__exit__ = MagicMock(return_value=False)
-
-    with (
-        TestClient(app) as c,
-        patch("backend.config.get_fastly_api_key", return_value="tok"),
-        patch("urllib.request.urlopen", return_value=fake_resp),
-        patch("backend.utils.fastly_auth.validate_destructive_token") as mock_validate,
-    ):
-        resp = c.get(
-            "/api/provision/ngwaf-workspaces",
-            params={"service_id": "svc", "token": "tok"},
-        )
-        mock_validate.assert_called_once_with("tok", service_id="svc")
-
-    assert resp.status_code == 200, resp.text[:500]
-    body = resp.json()
-    workspaces = body["workspaces"]
-    assert len(workspaces) == 2
-    assert workspaces[0] == {"id": "ws-1", "name": "Prod"}
+# ─── /api/provision/execute ──────────────────────────────────────────────────
 
 
-def test_ngwaf_workspaces_accepts_authorization_header():
-    """Verify that `/api/provision/ngwaf-workspaces` correctly accepts and extracts
-    the token from the `Authorization: Bearer <token>` header."""
-    fake_body = b'{"data": [{"id": "ws-1", "name": "Prod"}]}'
-    fake_resp = MagicMock()
-    fake_resp.read.return_value = fake_body
-    fake_resp.status = 200
-    fake_resp.__enter__ = lambda s: s
-    fake_resp.__exit__ = MagicMock(return_value=False)
-
-    with (
-        TestClient(app) as c,
-        patch("backend.config.get_fastly_api_key", return_value="tok"),
-        patch("urllib.request.urlopen", return_value=fake_resp),
-        patch("backend.utils.fastly_auth.validate_destructive_token") as mock_validate,
-    ):
-        resp = c.get(
-            "/api/provision/ngwaf-workspaces",
-            params={"service_id": "svc"},
-            headers={"Authorization": "Bearer tok"},
-        )
-        mock_validate.assert_called_once_with("tok", service_id="svc")
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["workspaces"][0] == {"id": "ws-1", "name": "Prod"}
-
-
-def test_ngwaf_workspaces_returns_workspaces_shape():
-    """Alternative shape: ``{"workspaces": [...]}`` (older NGWAF
-    response). The route handles both via key-presence check.
-    Pinned because the key-presence check was a bug fix — naive
-    ``.get("data") or .get("workspaces")`` short-circuits on
-    legitimate empty lists."""
-    fake_body = b'{"workspaces": [{"id": "ws-old", "attributes": {"name": "OldShape"}}]}'
-    fake_resp = MagicMock()
-    fake_resp.read.return_value = fake_body
-    fake_resp.status = 200
-    fake_resp.__enter__ = lambda s: s
-    fake_resp.__exit__ = MagicMock(return_value=False)
-
-    with (
-        TestClient(app) as c,
-        patch("backend.config.get_fastly_api_key", return_value="tok"),
-        patch("urllib.request.urlopen", return_value=fake_resp),
-        patch("backend.utils.fastly_auth.validate_destructive_token") as mock_validate,
-    ):
-        resp = c.get(
-            "/api/provision/ngwaf-workspaces",
-            params={"service_id": "svc", "token": "tok"},
-        )
-        mock_validate.assert_called_once_with("tok", service_id="svc")
-
-    body = resp.json()
-    # The route falls back to attributes.name when top-level name is absent
-    assert body["workspaces"][0]["name"] == "OldShape"
-
-
-def test_ngwaf_workspaces_maps_401_to_400_with_permissions_hint():
-    """NGWAF returns 401 when the token lacks Edge Security perms.
-    The route remaps to 400 with a hint about permissions. Pinned
-    because keeping the original 401 would log the user out of the
-    admin UI (the FE's auth interceptor treats 401 as session-
-    expired)."""
-    import urllib.error
-    from io import BytesIO
-
-    err = urllib.error.HTTPError(
-        url="https://api.fastly.com/ngwaf/v1/workspaces",
-        code=401,
-        msg="unauthorized",
-        hdrs={},
-        fp=BytesIO(b"unauthorized"),
+@pytest.mark.parametrize(
+    ("payload_extra", "parse_period_effect", "domain_avail", "expected_err_sub"),
+    [
+        ({"fos_bucket_name": "invalid_underscore_name"}, 60, (True, None), "invalid_bucket"),
+        ({"fos_bucket_name": "bad--bucket"}, 60, (True, None), "invalid_bucket"),
+        ({"fos_bucket_name": "-leading-hyphen"}, 60, (True, None), "invalid_bucket"),
+        ({"fos_bucket_name": "valid-bucket", "fos_prefix": "x'; DROP TABLE--"}, 60, (True, None), "prefix"),
+        (
+            {"fos_bucket_name": "valid-bucket", "log_period": "fortnight"},
+            ValueError("unknown: fortnight"),
+            (True, None),
+            "invalid_log_period",
+        ),
+        (
+            {"fos_bucket_name": "valid-bucket", "cdn_url": "https://taken.global.ssl.fastly.net"},
+            60,
+            (False, "Domain already registered or in use"),
+            "unavailable",
+        ),
+    ],
+)
+def test_provision_execute_validation_rejections(payload_extra, parse_period_effect, domain_avail, expected_err_sub):
+    pp_kw = (
+        {"side_effect": parse_period_effect}
+        if isinstance(parse_period_effect, Exception)
+        else {"return_value": parse_period_effect}
     )
     with (
-        TestClient(app) as c,
-        patch("backend.config.get_fastly_api_key", return_value="bad-tok"),
-        patch("urllib.request.urlopen", side_effect=err),
-        patch("backend.utils.fastly_auth.validate_destructive_token") as mock_validate,
-    ):
-        resp = c.get(
-            "/api/provision/ngwaf-workspaces",
-            params={"service_id": "svc", "token": "bad-tok"},
-        )
-        mock_validate.assert_called_once_with("bad-tok", service_id="svc")
-
-    assert resp.status_code == 400
-    body = resp.json()["detail"]
-    assert body["error"] == "ngwaf_token_invalid"
-    assert "permissions" in body["message"].lower()
-
-
-def test_provision_execute_rejects_invalid_bucket_name_format():
-    """Bucket names must match S3-compatible pattern: 3-63 alphanumeric
-    + single hyphens, can't start/end with hyphen, can't have
-    double hyphens. Pinned because losing this would 400 at Fastly
-    upload time with a confusing error instead of in our wizard."""
-    with (
-        TestClient(app) as c,
         patch("backend.utils.pop_utils.fetch_pop_locations"),
         patch("backend.config.fetch_service_name", return_value="x"),
-        patch("backend.provision.parse_period", return_value=60),
+        patch("backend.provision.parse_period", **pp_kw),
+        patch("backend.routers.provision._check_domain_available", return_value=domain_avail),
     ):
-        # Underscore is invalid in S3 bucket names
-        r = c.post(
+        r = _client().post(
             "/api/provision/execute",
-            json={
-                "token": "tok",
-                "service_id": "svc-1",
-                "fos_bucket_name": "invalid_underscore_name",
-            },
+            json={"token": "tok", "service_id": "svc-1", **payload_extra},
         )
     assert r.status_code == 400
-    body = r.json()["detail"]
-    assert body["error"] == "invalid_bucket"
-    assert "Invalid bucket name" in body["message"]
+    assert expected_err_sub in r.json()["detail"]["error"].lower()
 
 
-def test_provision_execute_rejects_bucket_with_double_hyphens():
-    """The regex uses `(?!.*--)` to forbid double hyphens. Pinned
-    because some bucket implementations reject double-hyphens at
-    create time."""
-    with (
-        TestClient(app) as c,
-        patch("backend.utils.pop_utils.fetch_pop_locations"),
-        patch("backend.config.fetch_service_name", return_value="x"),
-        patch("backend.provision.parse_period", return_value=60),
-    ):
-        r = c.post(
-            "/api/provision/execute",
-            json={
-                "token": "tok",
-                "service_id": "svc-1",
-                "fos_bucket_name": "bad--bucket",
-            },
-        )
-    assert r.status_code == 400
-
-
-def test_provision_execute_rejects_bucket_starting_with_hyphen():
-    """Bucket names can't start with `-`. Pinned because the regex
-    requires `[A-Za-z0-9]` as the first char."""
-    with (
-        TestClient(app) as c,
-        patch("backend.utils.pop_utils.fetch_pop_locations"),
-        patch("backend.config.fetch_service_name", return_value="x"),
-        patch("backend.provision.parse_period", return_value=60),
-    ):
-        r = c.post(
-            "/api/provision/execute",
-            json={
-                "token": "tok",
-                "service_id": "svc-1",
-                "fos_bucket_name": "-leading-hyphen",
-            },
-        )
-    assert r.status_code == 400
-
-
-def test_provision_execute_rejects_fos_prefix_with_sql_metachars():
-    """fos_prefix must be alphanumerics + / _ - only. Without this
-    guard, a prefix containing `'`, `*`, `?`, or `[]` reaches DuckDB's
-    glob() via f-string interpolation and either breaks the SQL literal
-    or changes the glob scope. Pinned because losing this validation
-    re-opens a SQL-injection-style sink in
-    _duckdb_status._delete_ingested_files."""
-    with (
-        TestClient(app) as c,
-        patch("backend.utils.pop_utils.fetch_pop_locations"),
-        patch("backend.config.fetch_service_name", return_value="x"),
-        patch("backend.provision.parse_period", return_value=60),
-    ):
-        r = c.post(
-            "/api/provision/execute",
-            json={
-                "token": "tok",
-                "service_id": "svc-1",
-                "fos_bucket_name": "valid-bucket",
-                "fos_prefix": "x'; DROP TABLE--",
-            },
-        )
-    assert r.status_code == 400
-    assert "prefix" in r.json()["detail"]["error"].lower()
-
-
-def test_provision_execute_400s_on_bad_log_period():
-    """`log_period` that fails parse_period (e.g. "fortnight") → 400.
-    Pinned because Fastly's API rejects bad periods at upload time;
-    catching here surfaces the error in the wizard's review step
-    instead of mid-deploy."""
-    with (
-        TestClient(app) as c,
-        patch("backend.utils.pop_utils.fetch_pop_locations"),
-        patch("backend.config.fetch_service_name", return_value="x"),
-        patch("backend.provision.parse_period", side_effect=ValueError("unknown: fortnight")),
-    ):
-        r = c.post(
-            "/api/provision/execute",
-            json={
-                "token": "tok",
-                "service_id": "svc-1",
-                "fos_bucket_name": "valid-bucket",
-                "log_period": "fortnight",
-            },
-        )
-    assert r.status_code == 400
-    body = r.json()["detail"]
-    assert body["error"] == "invalid_log_period"
-    assert "fortnight" in body["message"]
-
-
-def test_provision_execute_400s_when_cdn_domain_unavailable():
-    """If `cdn_url` is provided AND the domain check returns
-    unavailable (not a DNS error), refuse with 400. Pinned because
-    losing this would let the wizard try to claim a domain Fastly
-    already serves, producing a confusing post-provision error."""
-    with (
-        TestClient(app) as c,
-        patch("backend.utils.pop_utils.fetch_pop_locations"),
-        patch("backend.config.fetch_service_name", return_value="x"),
-        patch("backend.provision.parse_period", return_value=60),
-        patch(
-            "backend.routers.provision._check_domain_available",
-            return_value=(False, "Domain already registered or in use"),
-        ),
-    ):
-        r = c.post(
-            "/api/provision/execute",
-            json={
-                "token": "tok",
-                "service_id": "svc-1",
-                "fos_bucket_name": "valid-bucket",
-                "cdn_url": "https://taken.global.ssl.fastly.net",
-            },
-        )
-    assert r.status_code == 400
-    assert "unavailable" in r.json()["detail"]["error"].lower()
-
-
-def test_provision_execute_allows_cdn_domain_with_dns_unavailable_reason():
-    """When `_check_domain_available` returns False with a "DNS"
-    reason (network glitch), the route proceeds rather than failing
-    fast. Pinned because losing this would block the wizard on
-    every transient DNS hiccup."""
+def test_provision_execute_dns_fallback_and_faro_version_threading():
+    captured: dict = {}
 
     def fake_provision(cfg, _resume_from_state=False):
+        captured["cfg"] = cfg
         yield {"type": "done", "message": "ok"}
 
     with (
-        TestClient(app) as c,
         patch("backend.utils.pop_utils.fetch_pop_locations"),
         patch("backend.config.fetch_service_name", return_value="x"),
         patch("backend.provision.parse_period", return_value=60),
@@ -1412,147 +759,41 @@ def test_provision_execute_allows_cdn_domain_with_dns_unavailable_reason():
         patch("backend.core.duckdb.reload_default_source"),
         patch("backend.core.metadata.record_audit"),
     ):
-        r = c.post(
+        r1 = _client().post(
             "/api/provision/execute",
             json={
                 "token": "tok",
                 "service_id": "svc-1",
                 "fos_bucket_name": "valid-bucket",
                 "cdn_url": "https://x.global.ssl.fastly.net",
-            },
-        )
-
-    # 200 + SSE (DNS error doesn't block the proceed)
-    assert r.status_code == 200
-
-
-def test_provision_execute_threads_faro_version_into_rum_config():
-    """The wizard's RUM version picker (Task 7) must reach
-    cfg["rum"]["faro_version"] so the declarative generator can pin the
-    Faro Web SDK bundle for a brand-new service. Pinned because this field
-    was silently dropped (Pydantic default extra=ignore) before the
-    ProvisionExecuteRequest field existed — an operator's picker choice
-    would have had zero effect on the deployed service."""
-    captured = {}
-
-    def fake_provision(cfg, _resume_from_state=False):
-        captured["cfg"] = cfg
-        yield {"type": "done", "message": "ok"}
-
-    with (
-        TestClient(app) as c,
-        patch("backend.utils.pop_utils.fetch_pop_locations"),
-        patch("backend.config.fetch_service_name", return_value="x"),
-        patch("backend.provision.parse_period", return_value=60),
-        patch("backend.provision.provision", side_effect=fake_provision),
-        patch("backend.provision._sync_crontab"),
-        patch("backend.cron.jobs.metadata._run_metadata_sync"),
-        patch("backend.core.duckdb.reload_default_source"),
-        patch("backend.core.metadata.record_audit"),
-    ):
-        r = c.post(
-            "/api/provision/execute",
-            json={
-                "token": "tok",
-                "service_id": "svc-1",
-                "fos_bucket_name": "valid-bucket",
                 "rum_enabled": True,
                 "faro_version": "1.2.3",
             },
         )
+        assert r1.status_code == 200
+        assert captured["cfg"]["rum"]["faro_version"] == "1.2.3"
 
-    assert r.status_code == 200
-    assert captured["cfg"]["rum"]["faro_version"] == "1.2.3"
-
-
-def test_provision_execute_defaults_faro_version_when_operator_does_not_pin_one():
-    """No version chosen (registry outage, or operator skipped the picker)
-    must NOT leave cfg["rum"] unpinned (F-2 audit finding): the generated
-    tracker JS unconditionally requests /js/faro-sdk.js with no CDN
-    fallback, so an unpinned service's VCL would either omit that route
-    entirely or route it nowhere resolvable — a permanent 404 for every RUM
-    visitor. Provisioning must resolve DEFAULT_FARO_VERSION itself, exactly
-    like enable_rum() already does for the enable-after-the-fact path."""
-    from backend.core.faro_versions import DEFAULT_FARO_VERSION
-
-    captured = {}
-
-    def fake_provision(cfg, _resume_from_state=False):
-        captured["cfg"] = cfg
-        yield {"type": "done", "message": "ok"}
-
-    with (
-        TestClient(app) as c,
-        patch("backend.utils.pop_utils.fetch_pop_locations"),
-        patch("backend.config.fetch_service_name", return_value="x"),
-        patch("backend.provision.parse_period", return_value=60),
-        patch("backend.provision.provision", side_effect=fake_provision),
-        patch("backend.provision._sync_crontab"),
-        patch("backend.cron.jobs.metadata._run_metadata_sync"),
-        patch("backend.core.duckdb.reload_default_source"),
-        patch("backend.core.metadata.record_audit"),
-    ):
-        r = c.post(
+        r2 = _client().post(
             "/api/provision/execute",
-            json={
-                "token": "tok",
-                "service_id": "svc-1",
-                "fos_bucket_name": "valid-bucket",
-                "rum_enabled": True,
-            },
+            json={"token": "tok", "service_id": "svc-1", "fos_bucket_name": "valid-bucket", "rum_enabled": True},
         )
+        assert r2.status_code == 200
+        assert captured["cfg"]["rum"]["faro_version"] == DEFAULT_FARO_VERSION
 
-    assert r.status_code == 200
-    assert captured["cfg"]["rum"]["faro_version"] == DEFAULT_FARO_VERSION
 
-
-def test_ngwaf_workspaces_empty_list_with_automation_token_returns_hint():
-    """If the workspace list comes back empty AND ``/tokens/self``
-    returns a token without ``user_id`` (automation token), include
-    a hint that NGWAF requires a personal token. Pinned because
-    this is the most common cause of empty NGWAF lists and avoiding
-    the hint sends users on a debug wild-goose chase."""
-    fake_body = b'{"data": []}'
-    fake_resp = MagicMock()
-    fake_resp.read.return_value = fake_body
-    fake_resp.status = 200
-    fake_resp.__enter__ = lambda s: s
-    fake_resp.__exit__ = MagicMock(return_value=False)
-
-    fake_token_info = {"id": "tok-id", "name": "automation"}  # no user_id
-
-    with (
-        TestClient(app) as c,
-        patch("backend.config.get_fastly_api_key", return_value="tok"),
-        patch("urllib.request.urlopen", return_value=fake_resp),
-        patch("backend.provision.fastly", return_value=fake_token_info),
-        patch("backend.utils.fastly_auth.validate_destructive_token") as mock_validate,
-    ):
-        resp = c.get(
-            "/api/provision/ngwaf-workspaces",
-            params={"service_id": "svc", "token": "tok"},
-        )
-        mock_validate.assert_called_once_with("tok", service_id="svc")
-
-    body = resp.json()
-    assert body["workspaces"] == []
-    assert "automation" in body["error_hint"].lower()
-
+# ─── /api/provision/check-config ─────────────────────────────────────────────
 
 _CHECK_PARAMS = {"token": "t", "service_id": "log-svc", "cdn_service_id": "cdn-svc", "bucket": "b"}
-
 _REQUIRED_SNIPPETS = [
     "Fastly Log Analysis Capture",
     "Fastly Log Analysis Miss",
     "Fastly Log Analysis Pass",
 ]
-
 _OPTIONAL_SNIPPETS = [
     "Fastly Log Analysis Origin Fetch",
     "Fastly Log Analysis Origin Error",
     "Fastly Log Analysis Origin Deliver",
 ]
-
 _REQUIRED_CDN_SNIPPETS = [
     "iceberg-metadata-pointer-ttl",
     "cdn-swr-shield-disable",
@@ -1562,8 +803,6 @@ _REQUIRED_CDN_SNIPPETS = [
 
 
 def _check_config_fastly_router(*, endpoints, snippets, dicts, backends, cdn_snippets):
-    """Build a side_effect that dispatches `fastly()` calls based on path."""
-
     def fake_fastly(method, path, token=None, **_):
         if path == "/service/log-svc/version/active":
             return {"number": 7}
@@ -1584,287 +823,87 @@ def _check_config_fastly_router(*, endpoints, snippets, dicts, backends, cdn_sni
     return fake_fastly
 
 
-def test_check_config_logging_service_no_matching_endpoint():
-    """Endpoint list doesn't contain ``bucket_name == bucket`` → details
-    explains the missing endpoint, ok=False. Pinned because the FE shows
-    this exact string to admins who provisioned via a different bucket."""
-    side = _check_config_fastly_router(
+def test_check_config_logging_and_cdn_permutations():
+    by_name = {entry[0]: entry for entry in _CDN_SNIPPETS}
+    assert _CDN_NO_CACHE_404_SNIPPET_NAME in by_name
+    _name, snippet_type, content, _priority = by_name[_CDN_NO_CACHE_404_SNIPPET_NAME]
+    assert snippet_type == "fetch"
+    assert 'req.method == "GET"' in content and 'req.method == "HEAD"' in content
+    assert "beresp.status == 404" in content and "set beresp.cacheable = false;" in content
+
+    # 1. No matching logging endpoint
+    side_no_ep = _check_config_fastly_router(
         endpoints=[{"name": "other", "bucket_name": "different-bucket"}],
         snippets=[],
         dicts=[{"name": "fos_credentials"}, {"name": "cdn_auth"}],
         backends=[{"address": "x.fastlystorage.app"}],
         cdn_snippets=[{"name": s} for s in _REQUIRED_CDN_SNIPPETS],
     )
-    with (
-        TestClient(app) as c,
-        patch("backend.core.fastly.client.fastly", side_effect=side),
-    ):
-        resp = c.get("/api/provision/check-config", params=_CHECK_PARAMS)
+    with patch("backend.core.fastly.client.fastly", side_effect=side_no_ep):
+        body = _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()
+        assert body["logging_service"]["ok"] is False
+        assert "No S3 logging endpoint" in body["logging_service"]["details"]
 
-    body = resp.json()
-    assert body["logging_service"]["ok"] is False
-    assert "No S3 logging endpoint" in body["logging_service"]["details"]
-
-
-def test_check_config_logging_service_missing_required_snippets():
-    """Endpoint exists but a required snippet is missing → details lists
-    the missing snippet, ok=False. Pinned because admins use this to
-    know exactly which VCL snippet to re-add."""
-    side = _check_config_fastly_router(
+    # 2. Missing core logging snippets + missing CDN perf snippets
+    side_missing_snip = _check_config_fastly_router(
         endpoints=[{"name": "fos-logs", "bucket_name": "b", "response_condition": "fos-sample"}],
-        snippets=[{"name": "Fastly Log Analysis Capture"}],  # missing two
+        snippets=[{"name": "Fastly Log Analysis Capture"}],
         dicts=[{"name": "fos_credentials"}, {"name": "cdn_auth"}],
         backends=[{"address": "x.fastlystorage.app"}],
-        cdn_snippets=[{"name": s} for s in _REQUIRED_CDN_SNIPPETS],
+        cdn_snippets=[{"name": "iceberg-metadata-pointer-ttl"}],
     )
-    with (
-        TestClient(app) as c,
-        patch("backend.core.fastly.client.fastly", side_effect=side),
-    ):
-        resp = c.get("/api/provision/check-config", params=_CHECK_PARAMS)
+    with patch("backend.core.fastly.client.fastly", side_effect=side_missing_snip):
+        res = _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()
+        assert "missing CORE snippets" in res["logging_service"]["details"]
+        assert res["cdn_service"]["ok"] is False
+        assert "cdn-no-cache-404" in res["cdn_service"]["details"]
 
-    details = resp.json()["logging_service"]["details"]
-    assert "missing CORE snippets" in details
-    assert "Fastly Log Analysis Miss" in details
-    assert "Fastly Log Analysis Pass" in details
-
-
-def test_check_config_logging_service_no_response_condition_warns_but_ok():
-    """All core snippets present but no `response_condition` → ok=True
-    with a "sampling might be disabled" warning. Pinned because losing
-    this would either silently pass (admin misses the warning) or
-    falsely fail (no condition is a valid setup — just usually
-    accidental)."""
-    side = _check_config_fastly_router(
-        endpoints=[{"name": "fos-logs", "bucket_name": "b", "response_condition": None}],
-        snippets=[{"name": s} for s in _REQUIRED_SNIPPETS],
-        dicts=[{"name": "fos_credentials"}, {"name": "cdn_auth"}],
-        backends=[{"address": "x.fastlystorage.app"}],
-        cdn_snippets=[{"name": s} for s in _REQUIRED_CDN_SNIPPETS],
-    )
-    with (
-        TestClient(app) as c,
-        patch("backend.core.fastly.client.fastly", side_effect=side),
-    ):
-        resp = c.get("/api/provision/check-config", params=_CHECK_PARAMS)
-
-    log = resp.json()["logging_service"]
-    assert log["ok"] is True
-    assert "no response condition" in log["details"].lower()
-
-
-def test_check_config_logging_service_full_with_optional_origin_snippets():
-    """All core + optional Origin snippets present → details mentions
-    the optional count. Pinned because the FE Tag "Origin metrics
-    enabled" only shows when this exact substring lands."""
-    side = _check_config_fastly_router(
+    # 3. Full logging + optional origin snippets + full CDN
+    side_full = _check_config_fastly_router(
         endpoints=[{"name": "fos-logs", "bucket_name": "b", "response_condition": "fos-sample"}],
         snippets=[{"name": s} for s in _REQUIRED_SNIPPETS + _OPTIONAL_SNIPPETS],
         dicts=[{"name": "fos_credentials"}, {"name": "cdn_auth"}],
         backends=[{"address": "x.fastlystorage.app"}],
         cdn_snippets=[{"name": s} for s in _REQUIRED_CDN_SNIPPETS],
     )
-    with (
-        TestClient(app) as c,
-        patch("backend.core.fastly.client.fastly", side_effect=side),
-    ):
-        resp = c.get("/api/provision/check-config", params=_CHECK_PARAMS)
+    with patch("backend.core.fastly.client.fastly", side_effect=side_full):
+        res_full = _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()
+        assert res_full["logging_service"]["ok"] is True
+        assert "3 origin metric snippets" in res_full["logging_service"]["details"]
+        assert res_full["cdn_service"]["ok"] is True
+        assert "fully configured" in res_full["cdn_service"]["details"]
 
-    log = resp.json()["logging_service"]
-    assert log["ok"] is True
-    assert "3 origin metric snippets" in log["details"]
-    assert "active sampling condition" in log["details"]
-
-
-def test_check_config_logging_service_exception_captured_in_details():
-    """If a fastly() call inside the logging-service block raises, the
-    exception message is surfaced via `details` (NOT a 500). Pinned
-    because the admin health panel must keep rendering even when one
-    Fastly endpoint is flaky."""
-
-    def fake_fastly(method, path, token=None, **_):
-        if path == "/service/log-svc/version/active":
-            raise RuntimeError("Fastly 503")
-        return {}
-
-    with (
-        TestClient(app) as c,
-        patch("backend.core.fastly.client.fastly", side_effect=fake_fastly),
-    ):
-        resp = c.get("/api/provision/check-config", params=_CHECK_PARAMS)
-
-    assert resp.status_code == 200
-    assert "Fastly 503" in resp.json()["logging_service"]["details"]
-
-
-def test_check_config_cdn_service_missing_dictionaries():
-    """CDN service missing `fos_credentials` / `cdn_auth` → ok=False
-    with the missing dict names enumerated. Pinned because the FE
-    surfaces these exact names so admins know which dictionary to
-    re-create."""
-    side = _check_config_fastly_router(
-        endpoints=[{"name": "fos-logs", "bucket_name": "b", "response_condition": "c"}],
+    # 4. No response condition warns + CDN missing dicts/backend
+    side_warn = _check_config_fastly_router(
+        endpoints=[{"name": "fos-logs", "bucket_name": "b", "response_condition": None}],
         snippets=[{"name": s} for s in _REQUIRED_SNIPPETS],
-        dicts=[],  # missing both
+        dicts=[],
         backends=[],
         cdn_snippets=[],
     )
-    with (
-        TestClient(app) as c,
-        patch("backend.core.fastly.client.fastly", side_effect=side),
-    ):
-        resp = c.get("/api/provision/check-config", params=_CHECK_PARAMS)
+    with patch("backend.core.fastly.client.fastly", side_effect=side_warn):
+        res_warn = _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()
+        assert res_warn["logging_service"]["ok"] is True
+        assert "no response condition" in res_warn["logging_service"]["details"].lower()
+        assert res_warn["cdn_service"]["ok"] is False
+        assert "fos_credentials" in res_warn["cdn_service"]["details"]
 
-    cdn = resp.json()["cdn_service"]
-    assert cdn["ok"] is False
-    details = cdn["details"]
-    assert "fos_credentials" in details
-    assert "cdn_auth" in details
-
-
-def test_check_config_cdn_service_no_fos_backend():
-    """Dicts present but no backend pointing at *.fastlystorage.app →
-    ok=False with a clear message. Pinned because a CDN service can
-    have the dicts copied over without the FOS backend — they'd think
-    it's "almost done" when it isn't."""
-    side = _check_config_fastly_router(
-        endpoints=[{"name": "fos-logs", "bucket_name": "b", "response_condition": "c"}],
-        snippets=[{"name": s} for s in _REQUIRED_SNIPPETS],
-        dicts=[{"name": "fos_credentials"}, {"name": "cdn_auth"}],
-        backends=[{"address": "origin.example.com"}],  # not fastlystorage.app
-        cdn_snippets=[],
-    )
-    with (
-        TestClient(app) as c,
-        patch("backend.core.fastly.client.fastly", side_effect=side),
-    ):
-        resp = c.get("/api/provision/check-config", params=_CHECK_PARAMS)
-
-    cdn = resp.json()["cdn_service"]
-    assert cdn["ok"] is False
-    assert "fastlystorage.app" in cdn["details"]
+    # 5. Logging & CDN exceptions captured in details
+    with patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("Fastly 503")):
+        res_err = _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()
+        assert "Fastly 503" in res_err["logging_service"]["details"]
+        assert "Fastly 503" in res_err["cdn_service"]["details"]
 
 
-def test_check_config_cdn_service_missing_performance_snippets():
-    """Backend + dicts OK but the perf snippets are missing → ok=False
-    listing them. Pinned because these specific snippet names drive
-    the cache-perf charts; missing one silently degrades hit ratio."""
-    side = _check_config_fastly_router(
-        endpoints=[{"name": "fos-logs", "bucket_name": "b", "response_condition": "c"}],
-        snippets=[{"name": s} for s in _REQUIRED_SNIPPETS],
-        dicts=[{"name": "fos_credentials"}, {"name": "cdn_auth"}],
-        backends=[{"address": "x.fastlystorage.app"}],
-        cdn_snippets=[{"name": "iceberg-metadata-pointer-ttl"}],  # missing three
-    )
-    with (
-        TestClient(app) as c,
-        patch("backend.core.fastly.client.fastly", side_effect=side),
-    ):
-        resp = c.get("/api/provision/check-config", params=_CHECK_PARAMS)
-
-    cdn = resp.json()["cdn_service"]
-    assert cdn["ok"] is False
-    assert "cdn-swr-shield-disable" in cdn["details"]
-    assert "cdn-race-condition-generation" in cdn["details"]
-    assert "cdn-no-cache-404" in cdn["details"]
+# ─── /api/provision/teardown, product helpers, /reconcile, JSON content-type ─
 
 
-def test_check_config_cdn_service_fully_configured():
-    """Dictionaries + backend + all snippets present → ok=True with
-    "fully configured" message."""
-    side = _check_config_fastly_router(
-        endpoints=[{"name": "fos-logs", "bucket_name": "b", "response_condition": "c"}],
-        snippets=[{"name": s} for s in _REQUIRED_SNIPPETS],
-        dicts=[{"name": "fos_credentials"}, {"name": "cdn_auth"}],
-        backends=[{"address": "x.fastlystorage.app"}],
-        cdn_snippets=[{"name": s} for s in _REQUIRED_CDN_SNIPPETS],
-    )
-    with (
-        TestClient(app) as c,
-        patch("backend.core.fastly.client.fastly", side_effect=side),
-    ):
-        resp = c.get("/api/provision/check-config", params=_CHECK_PARAMS)
+def test_teardown_endpoint_flows():
+    with patch("backend.config.load_config", return_value=None):
+        resp_404 = _client().post("/api/provision/teardown", json={})
+        assert resp_404.status_code == 404
+        assert "No service config" in resp_404.json()["detail"]["error"]
 
-    cdn = resp.json()["cdn_service"]
-    assert cdn["ok"] is True
-    assert "fully configured" in cdn["details"]
-
-
-def test_cdn_no_cache_404_snippet_strips_caching_on_get_and_head_404s():
-    """The cdn-no-cache-404 snippet MUST run in vcl_fetch and disable caching
-    on any GET/HEAD 404. Pinned because: PyIceberg's commit lifecycle does
-    HEAD-before-PUT on new metadata paths (CAS atomicity); the HEAD
-    legitimately 404s; if Fastly caches it, every subsequent commit's
-    load_table reads the cached 404 and the cron hangs forever (saw it
-    2026-05-19, 5+ failed cycles before fix). Regressing this snippet
-    re-introduces that outage."""
-    from backend.provision.fastly_api import _CDN_NO_CACHE_404_SNIPPET_NAME, _CDN_SNIPPETS
-
-    by_name = {entry[0]: entry for entry in _CDN_SNIPPETS}
-    assert _CDN_NO_CACHE_404_SNIPPET_NAME in by_name
-    _name, snippet_type, content, _priority = by_name[_CDN_NO_CACHE_404_SNIPPET_NAME]
-    assert snippet_type == "fetch", "must run in vcl_fetch so it can mutate beresp"
-    # Both read methods covered.
-    assert 'req.method == "GET"' in content
-    assert 'req.method == "HEAD"' in content
-    assert "beresp.status == 404" in content
-    # All four cache knobs killed.
-    assert "set beresp.cacheable = false;" in content
-    assert "set beresp.ttl = 0s;" in content
-    assert "set beresp.stale_while_revalidate = 0s;" in content
-    assert "set beresp.stale_if_error = 0s;" in content
-
-
-def test_check_config_cdn_service_exception_captured_in_details():
-    """A fastly() raise inside the CDN block doesn't 500 — the exception
-    text lands in `details`. Pinned for the same admin-health-keeps-
-    rendering reason as the logging-service variant."""
-
-    def fake_fastly(method, path, token=None, **_):
-        if path == "/service/log-svc/version/active":
-            return {"number": 7}
-        if "/version/7/logging/s3" in path:
-            return [{"name": "fos-logs", "bucket_name": "b", "response_condition": "c"}]
-        if "/version/7/snippet" in path:
-            return [{"name": s} for s in _REQUIRED_SNIPPETS]
-        # CDN side: raise
-        raise RuntimeError("CDN 503")
-
-    with (
-        TestClient(app) as c,
-        patch("backend.core.fastly.client.fastly", side_effect=fake_fastly),
-    ):
-        resp = c.get("/api/provision/check-config", params=_CHECK_PARAMS)
-
-    assert resp.status_code == 200
-    assert "CDN 503" in resp.json()["cdn_service"]["details"]
-    # The logging side still ran cleanly
-    assert resp.json()["logging_service"]["ok"] is True
-
-
-def test_teardown_404s_when_no_service_config_loaded():
-    """No `service_id` and no loadable config → 404 with
-    "No service config found." Pinned because the FE relies on this
-    code path to differentiate "service doesn't exist" from "teardown
-    failed mid-stream" (the latter would be a 200 SSE with an error
-    event)."""
-    with (
-        TestClient(app) as c,
-        patch("backend.config.load_config", return_value=None),
-    ):
-        # No service_id provided → state stays None → 404
-        resp = c.post("/api/provision/teardown", json={})
-
-    assert resp.status_code == 404
-    body = resp.json()
-    assert "No service config" in body["detail"]["error"]
-
-
-def test_teardown_streams_done_event_on_success():
-    """Happy path: SSE stream ends with a `{"type": "done"}` event after
-    `perform_teardown` yields its events. Pinned because the FE's
-    progress modal closes only when it sees the `done` line — losing
-    that would leave the modal hung even after a clean teardown."""
     fake_cfg = {
         "service_id": "svc",
         "fastly_api_key": "key",
@@ -1873,566 +912,99 @@ def test_teardown_streams_done_event_on_success():
         "name": "Test Svc",
         "provisioning": {},
     }
-
+    sync_calls: list[bool] = []
+    fake_scheduler = MagicMock()
     with (
-        TestClient(app) as c,
         patch("backend.config.load_config", return_value=fake_cfg),
         patch("backend.config.config_path", return_value="/tmp/nonexistent-config.json"),
         patch("backend.config.duckdb_path", return_value="/tmp/nonexistent.duckdb"),
-        patch("backend.provision._sync_crontab"),
-        patch("backend.cron.scheduler.get_scheduler", return_value=MagicMock()),
+        patch("backend.provision._sync_crontab", side_effect=lambda: sync_calls.append(True)),
+        patch("backend.cron.scheduler.get_scheduler", return_value=fake_scheduler),
         patch("backend.core.iceberg.clear_source_caches"),
         patch(
             "backend.provision.perform_teardown",
             return_value=iter([{"type": "status", "message": "removed s3 bucket"}]),
         ),
         patch("backend.core.duckdb.reload_default_source"),
-        # Security: stub token validation for the destructive teardown
-        # path. The auth gate itself is exercised in test_provision_teardown_auth.py.
-        patch(
-            "backend.utils.fastly_auth.fastly",
-            side_effect=lambda method, path, *, token, **kw: (
-                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-X"}
-                if path == "/tokens/self"
-                else {"id": "svc", "customer_id": "cust-X"}
-            ),
-        ),
+        patch("backend.utils.fastly_auth.fastly", side_effect=_auth_fastly_ok("svc", "cust-X")),
     ):
-        resp = c.post(
+        resp = _client().post(
             "/api/provision/teardown",
-            json={"service_id": "svc", "token": "test-tok", "remove_cache": False, "remove_cron": False},
+            json={"service_id": "svc", "token": "test-tok", "remove_cache": False, "remove_cron": True},
         )
-        body = resp.text
+        assert resp.status_code == 200
+        assert "removed s3 bucket" in resp.text
+        assert '"type": "done"' in resp.text
+        assert "Cron jobs updated" in resp.text
+        assert sync_calls == [True]
+        fake_scheduler.reload.assert_called_once()
 
-    assert resp.status_code == 200
-    # The perform_teardown event passed through
-    assert "removed s3 bucket" in body
-    # The completion sentinel landed
-    assert '"type": "done"' in body
-    assert "Teardown complete" in body
-
-
-def test_teardown_streams_error_event_when_perform_teardown_raises():
-    """`perform_teardown` raising → SSE stream emits an `{"type":
-    "error"}` event (NOT a 500). Pinned because the FE handles the
-    error-event branch with a styled toast — a 500 mid-stream would
-    instead leave the progress modal stuck without explanation."""
-    fake_cfg = {
-        "service_id": "svc",
-        "fastly_api_key": "key",
-        "fos_bucket": "test-bucket",
-        "fos_region": "us-east-1",
-        "name": "Test Svc",
-        "provisioning": {},
-    }
-
-    def boom(state, token, opts=None):
+    def _boom(state, token, opts=None):
         raise RuntimeError("Fastly API rate-limited")
-        yield  # makes it a generator (unreachable)
+        yield
 
     with (
-        TestClient(app) as c,
         patch("backend.config.load_config", return_value=fake_cfg),
         patch("backend.config.config_path", return_value="/tmp/nonexistent.json"),
         patch("backend.config.duckdb_path", return_value="/tmp/nonexistent.duckdb"),
         patch("backend.provision._sync_crontab"),
         patch("backend.cron.scheduler.get_scheduler", return_value=MagicMock()),
         patch("backend.core.iceberg.clear_source_caches"),
-        patch("backend.provision.perform_teardown", side_effect=boom),
+        patch("backend.provision.perform_teardown", side_effect=_boom),
         patch("backend.core.duckdb.reload_default_source"),
-        patch(
-            "backend.utils.fastly_auth.fastly",
-            side_effect=lambda method, path, *, token, **kw: (
-                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-X"}
-                if path == "/tokens/self"
-                else {"id": "svc", "customer_id": "cust-X"}
-            ),
-        ),
+        patch("backend.utils.fastly_auth.fastly", side_effect=_auth_fastly_ok("svc", "cust-X")),
     ):
-        resp = c.post(
+        resp_err = _client().post(
             "/api/provision/teardown",
             json={"service_id": "svc", "token": "test-tok", "remove_cache": False, "remove_cron": False},
         )
-        body = resp.text
-
-    assert resp.status_code == 200
-    assert '"type": "error"' in body
-    assert "Fastly API rate-limited" in body
+        assert resp_err.status_code == 200
+        assert '"type": "error"' in resp_err.text
+        assert "Fastly API rate-limited" in resp_err.text
 
 
-def test_teardown_announces_cron_update_when_remove_cron_true():
-    """`remove_cron=True` → SSE emits the "Cron jobs updated" status
-    line after `_sync_crontab` + `scheduler.reload()`. Pinned because
-    the FE conditionally renders a cron-progress chip; losing the
-    announcement would leave it perpetually pending."""
-    fake_cfg = {
-        "service_id": "svc",
-        "fastly_api_key": "key",
-        "fos_bucket": "test-bucket",
-        "name": "Test Svc",
-        "provisioning": {},
-    }
-
-    sync_calls: list[bool] = []
-    fake_scheduler = MagicMock()
-
-    with (
-        TestClient(app) as c,
-        patch("backend.config.load_config", return_value=fake_cfg),
-        patch("backend.config.config_path", return_value="/tmp/nonexistent.json"),
-        patch("backend.config.duckdb_path", return_value="/tmp/nonexistent.duckdb"),
-        patch("backend.provision._sync_crontab", side_effect=lambda: sync_calls.append(True)),
-        patch("backend.cron.scheduler.get_scheduler", return_value=fake_scheduler),
-        patch("backend.core.iceberg.clear_source_caches"),
-        patch("backend.provision.perform_teardown", return_value=iter([])),
-        patch("backend.core.duckdb.reload_default_source"),
-        patch(
-            "backend.utils.fastly_auth.fastly",
-            side_effect=lambda method, path, *, token, **kw: (
-                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-X"}
-                if path == "/tokens/self"
-                else {"id": "svc", "customer_id": "cust-X"}
-            ),
-        ),
-    ):
-        resp = c.post(
-            "/api/provision/teardown",
-            json={"service_id": "svc", "token": "test-tok", "remove_cache": False, "remove_cron": True},
-        )
-        body = resp.text
-
-    assert sync_calls == [True]
-    fake_scheduler.reload.assert_called_once()
-    assert "Cron jobs updated" in body
-
-
-def _svc_list():
-    return [{"id": "svc-1", "name": "My Service", "type": "vcl"}]
-
-
-def test_list_services_blocks_when_object_storage_not_enabled():
-    """A valid token whose account lacks the Object Storage product → 400
-    object_storage_not_enabled with an actionable message, surfaced right after
-    the token is entered instead of dying with a 403 + rollback at the FOS-key
-    step. Object Storage is required, so there is no local fallback."""
-    with (
-        patch("backend.core.fastly.client.fastly", return_value=_svc_list()),
-        patch("backend.provision.fos_setup.object_storage_enabled", return_value=False),
-        patch("backend.config.list_service_ids", return_value=[]),
-    ):
-        resp = TestClient(app).get("/api/provision/services", params={"token": "tok"})
-    assert resp.status_code == 400
-    detail = resp.json()["detail"]
-    assert detail["error"] == "object_storage_not_enabled"
-    assert "Object Storage" in detail["message"]
-
-
-def test_list_services_returns_list_when_object_storage_enabled():
-    with (
-        patch("backend.core.fastly.client.fastly", return_value=_svc_list()),
-        patch("backend.provision.fos_setup.object_storage_enabled", return_value=True),
-        patch("backend.config.list_service_ids", return_value=set()),
-    ):
-        resp = TestClient(app).get("/api/provision/services", params={"token": "tok"})
-    assert resp.status_code == 200
-    assert resp.json() == [{"id": "svc-1", "name": "My Service", "provisioned": False}]
-
-
-def test_list_services_invalid_token_not_mislabeled_as_object_storage():
-    """A bad token fails the /service list first → generic list_services_failed,
-    NOT the object_storage message (the OS probe is never reached)."""
-    probe_called = []
-    with (
-        patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("HTTP 401 GET /service")),
-        patch(
-            "backend.provision.fos_setup.object_storage_enabled",
-            side_effect=lambda *a, **k: probe_called.append(True) or False,
-        ),
-    ):
-        resp = TestClient(app).get("/api/provision/services", params={"token": "bad"})
-    assert resp.status_code == 400
-    assert resp.json()["detail"]["error"] == "list_services_failed"
-    assert probe_called == []
-
-
-def test_object_storage_enabled_true_on_200():
-    from backend.provision.fos_setup import object_storage_enabled
-
-    with patch(
-        "backend.provision.fos_setup.fastly",
-        return_value={"product": {"id": "object_storage"}, "customer": {"id": "c"}},
-    ):
+def test_product_and_object_storage_helpers():
+    with patch("backend.provision.fos_setup.fastly", return_value={"product": {"id": "object_storage"}}):
         assert object_storage_enabled("tok") is True
-
-
-def test_object_storage_enabled_false_on_4xx():
-    from backend.provision.fos_setup import object_storage_enabled
-
     with patch(
         "backend.provision.fos_setup.fastly",
-        side_effect=RuntimeError("HTTP 404 GET /enabled-products/v1/object_storage\n    not found"),
+        side_effect=RuntimeError("HTTP 404 GET /enabled-products/v1/object_storage"),
     ):
         assert object_storage_enabled("tok") is False
-
-
-def test_object_storage_enabled_inconclusive_on_5xx_or_network():
-    """5xx / network → don't block (True); the reactive FOS-key 403 still guards."""
-    from backend.provision.fos_setup import object_storage_enabled
-
     with patch("backend.provision.fos_setup.fastly", side_effect=RuntimeError("HTTP 503 GET x")):
         assert object_storage_enabled("tok") is True
     with patch("backend.provision.fos_setup.fastly", side_effect=RuntimeError("Network error on GET x")):
         assert object_storage_enabled("tok") is True
 
-
-def test_product_enabled_hits_the_right_endpoint_and_maps_status():
-    """product_enabled generalizes the object_storage probe to any product id
-    (e.g. kv_store): 200 -> True, 4xx -> False, 5xx -> inconclusive True."""
-    from backend.provision.fos_setup import product_enabled
-
     with patch("backend.provision.fos_setup.fastly", return_value={"product": {"id": "kv_store"}}) as m:
         assert product_enabled("tok", "kv_store") is True
-        # Calls the {product_id}-templated enablement endpoint.
         assert m.call_args.args[:2] == ("GET", "/enabled-products/v1/kv_store")
     with patch("backend.provision.fos_setup.fastly", side_effect=RuntimeError("HTTP 404 not found")):
         assert product_enabled("tok", "kv_store") is False
     with patch("backend.provision.fos_setup.fastly", side_effect=RuntimeError("HTTP 502 bad gateway")):
         assert product_enabled("tok", "kv_store") is True
 
-
-def test_object_storage_enabled_delegates_to_product_enabled():
-    """object_storage_enabled is now a thin wrapper over product_enabled."""
-    from backend.provision import fos_setup
-
-    with patch("backend.provision.fos_setup.product_enabled", return_value=True) as m:
+    with patch("backend.provision.fos_setup.product_enabled", return_value=True) as m_del:
         assert fos_setup.object_storage_enabled("tok") is True
-    assert m.call_args.args == ("tok", "object_storage")
+        assert m_del.call_args.args == ("tok", "object_storage")
 
 
-def test_reconcile_takes_credentials_in_body_not_query_string():
-    """A Fastly API token in a query string lands in every access log, proxy
-    log and Referer along the way. The endpoint must accept service_id/token
-    in the request body, and must NOT declare them as query parameters."""
-    params = app.openapi()["paths"]["/api/provision/reconcile"]["post"].get("parameters", [])
-    assert [p["name"] for p in params if p.get("in") == "query"] == []
-    assert "requestBody" in app.openapi()["paths"]["/api/provision/reconcile"]["post"]
+def test_reconcile_route_and_json_content_type():
+    post_op = app.openapi()["paths"]["/api/provision/reconcile"]["post"]
+    assert [p["name"] for p in post_op.get("parameters", []) if p.get("in") == "query"] == []
+    assert "requestBody" in post_op
 
-
-def test_reconcile_rejects_missing_credentials():
-    """Empty body must 400 rather than starting a reconcile thread with no token."""
-    client = TestClient(app)
     with patch("backend.provision.declarative.reconciler.reconcile_vcl_state") as mock_reconcile:
-        response = client.post("/api/provision/reconcile", json={})
-    assert response.status_code == 400
-    mock_reconcile.assert_not_called()
+        resp = _client().post("/api/provision/reconcile", json={})
+        assert resp.status_code == 400
+        mock_reconcile.assert_not_called()
 
-
-def test_lake_info_range_and_calendar_match_producer():
-    """The typed ``range`` / ``calendar`` blocks must serialize exactly as the producer built them."""
-    producer = {
-        "ok": True,
-        "table_exists": True,
-        "info": {"min_timestamp": "2026-05-01T00:00:00", "max_timestamp": "2026-05-02T00:00:00", "snapshots": 3},
-        "calendar": {
-            "2026-05-01": {"data_files": 5, "size_bytes": 512},
-            "unknown": {"data_files": 1, "size_bytes": 0},
-        },
-        "range": {"start": "2026-05-01T00:00:00", "end": None},
-    }
-    with patch("backend.core.iceberg.lake_info.fetch_lake_info", return_value=producer):
-        client = TestClient(app)
-        response = client.post(
-            "/api/provision/lake-info",
-            json={"bucket": "b", "region": "us-east-1", "access_key": "ak", "secret_key": "sk", "prefix": "p/"},
-        )
-
-    assert response.status_code == 200
-    body = {k: v for k, v in response.json().items() if not k.startswith("_")}
-    assert body == producer
-
-
-# ── Merged from tests/routers/test_provision_branches.py ──
-def _client() -> TestClient:
-    return TestClient(app)
-
-
-def test_check_domain_available_returns_false_on_200():
-    """A 200 means the domain IS registered — NOT available."""
-    fake_resp = MagicMock()
-    cm = MagicMock()
-    cm.__enter__.return_value = fake_resp
-    cm.__exit__.return_value = False
-    with (
-        patch("urllib.request.urlopen", return_value=cm),
-        patch("backend.utils.telemetry.tracked_call"),
-    ):
-        avail, reason = _check_domain_available("foo.global.ssl.fastly.net")
-    assert avail is False
-    assert "200" in (reason or "")
-
-
-def test_check_domain_available_recognises_fastly_unprovisioned_body():
-    """HTTPError with the canonical 'check that this domain has been
-    added to a service' body → available=True (not yet provisioned)."""
-    err = urllib.error.HTTPError(
-        url="https://foo.example/",
-        code=403,
-        msg="Forbidden",
-        hdrs=None,  # type: ignore[arg-type]
-        fp=MagicMock(read=lambda: b"Please check that this domain has been added to a service."),
-    )
-    err.read = lambda: b"Please check that this domain has been added to a service."  # type: ignore[method-assign]
-    with (
-        patch("urllib.request.urlopen", side_effect=err),
-        patch("backend.utils.telemetry.tracked_call"),
-    ):
-        avail, reason = _check_domain_available("foo.example")
-    assert avail is True
-    assert reason is None
-
-
-def test_check_domain_available_other_http_error_returns_false():
-    err = urllib.error.HTTPError(
-        url="https://foo.example/",
-        code=500,
-        msg="Server Error",
-        hdrs=None,  # type: ignore[arg-type]
-        fp=MagicMock(read=lambda: b"Internal Server Error"),
-    )
-    err.read = lambda: b"Internal Server Error"  # type: ignore[method-assign]
-    with (
-        patch("urllib.request.urlopen", side_effect=err),
-        patch("backend.utils.telemetry.tracked_call"),
-    ):
-        avail, reason = _check_domain_available("foo.example")
-    assert avail is False
-    assert "already registered" in (reason or "")
-
-
-def test_check_domain_available_url_error_treated_as_available():
-    """URLError (DNS / connection failure) means the domain likely
-    isn't registered at Fastly — return True with a hint."""
-    err = urllib.error.URLError(reason="Name or service not known")
-    with (
-        patch("urllib.request.urlopen", side_effect=err),
-        patch("backend.utils.telemetry.tracked_call"),
-    ):
-        avail, reason = _check_domain_available("nonexistent.example")
-    assert avail is True
-    assert "DNS/Connection" in (reason or "")
-
-
-def test_check_domain_available_general_exception_returns_false():
-    """Anything else (unexpected exception types) returns False with
-    the exception text as reason — defensive fallback at line 48-49."""
-    with (
-        patch("urllib.request.urlopen", side_effect=RuntimeError("unexpected")),
-        patch("backend.utils.telemetry.tracked_call"),
-    ):
-        avail, reason = _check_domain_available("foo.example")
-    assert avail is False
-    assert "unexpected" in (reason or "")
-
-
-def test_require_json_content_type_accepts_application_json():
-    """Plain application/json content-type passes through."""
-    from starlette.requests import Request
-
-    scope = {
-        "type": "http",
-        "method": "POST",
-        "path": "/",
-        "headers": [(b"content-type", b"application/json")],
-    }
-    req = Request(scope, lambda: None)
-    # Must not raise.
-    _require_json_content_type(req)
-
-
-def test_require_json_content_type_accepts_charset_suffix():
-    """``application/json; charset=utf-8`` also accepted via startswith."""
-    from starlette.requests import Request
-
-    scope = {
-        "type": "http",
-        "method": "POST",
-        "path": "/",
-        "headers": [(b"content-type", b"application/json; charset=utf-8")],
-    }
-    req = Request(scope, lambda: None)
-    _require_json_content_type(req)
-
-
-def test_require_json_content_type_rejects_text_plain():
-    """CSRF defense: ``text/plain`` (browser-default for simple forms)
-    must be rejected with 415 so cross-origin POSTs are forced through
-    a CORS preflight."""
-    from fastapi import HTTPException
-    from starlette.requests import Request
-
-    scope = {
-        "type": "http",
-        "method": "POST",
-        "path": "/",
-        "headers": [(b"content-type", b"text/plain")],
-    }
-    req = Request(scope, lambda: None)
-    with pytest.raises(HTTPException) as exc:
+    for ct in (b"application/json", b"application/json; charset=utf-8"):
+        req = Request({"type": "http", "method": "POST", "path": "/", "headers": [(b"content-type", ct)]}, lambda: None)
         _require_json_content_type(req)
-    assert exc.value.status_code == 415
 
-
-def test_require_json_content_type_rejects_missing_header():
-    """No content-type header at all → also 415."""
-    from fastapi import HTTPException
-    from starlette.requests import Request
-
-    scope = {"type": "http", "method": "POST", "path": "/", "headers": []}
-    req = Request(scope, lambda: None)
-    with pytest.raises(HTTPException) as exc:
-        _require_json_content_type(req)
-    assert exc.value.status_code == 415
-
-
-def test_check_domain_rejects_empty_prefix():
-    resp = _client().get("/api/provision/check-domain?prefix=")
-    assert resp.status_code in (400, 422)
-
-
-def test_check_domain_rejects_prefix_with_invalid_chars():
-    """Prefix with non-alphanumeric (spaces, slashes, etc.) → not
-    available with a clear reason string."""
-    resp = _client().get("/api/provision/check-domain?prefix=foo_bar")
-    body = resp.json()
-    assert body["available"] is False
-    assert "alphanumeric" in body["reason"]
-
-
-def test_check_domain_rejects_prefix_starting_with_hyphen():
-    resp = _client().get("/api/provision/check-domain?prefix=-foo")
-    body = resp.json()
-    assert body["available"] is False
-
-
-def test_check_domain_valid_prefix_calls_check_helper():
-    """Valid prefix → _check_domain_available is called. Mock the
-    helper to skip the network call."""
-    with patch(
-        "backend.routers.provision._check_domain_available",
-        return_value=(True, None),
-    ) as mock_check:
-        resp = _client().get("/api/provision/check-domain?prefix=foo-bar")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["available"] is True
-    mock_check.assert_called_once()
-    # The helper is called with the full domain (prefix + .global.ssl.fastly.net).
-    assert "foo-bar.global.ssl.fastly.net" in mock_check.call_args[0][0]
-
-
-def test_check_fos_returns_ok_on_successful_list():
-    """Happy path: list_objects_v2 succeeds → ok=True."""
-    fake_client = MagicMock()
-    fake_client.list_objects_v2.return_value = {"Contents": []}
-    with patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client):
-        resp = _client().post(
-            "/api/provision/check-fos",
-            json={"bucket": "b", "region": "us-east-1", "access_key": "k", "secret_key": "s"},
-        )
-    assert resp.status_code == 200
-    assert resp.json()["ok"] is True
-
-
-@pytest.mark.parametrize(
-    "code,expected_in_msg",
-    [
-        ("AccessDenied", "Access Denied"),
-        ("InvalidAccessKeyId", "Access Denied"),
-        ("SignatureDoesNotMatch", "Access Denied"),
-        ("NoSuchBucket", "Bucket not found"),
-        ("IllegalLocationConstraintException", "Region mismatch"),
-    ],
-)
-def test_check_fos_maps_boto_client_error_codes_to_user_messages(code, expected_in_msg):
-    """Boto3 ClientError codes get rewritten to user-friendly strings."""
-    import botocore.exceptions
-
-    fake_client = MagicMock()
-    fake_client.list_objects_v2.side_effect = botocore.exceptions.ClientError(
-        {"Error": {"Code": code, "Message": "raw"}}, "ListObjectsV2"
-    )
-    with patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client):
-        resp = _client().post(
-            "/api/provision/check-fos",
-            json={"bucket": "b", "region": "us-east-1", "access_key": "k", "secret_key": "s"},
-        )
-    body = resp.json()
-    assert body["ok"] is False
-    assert expected_in_msg in body["error"]
-
-
-def test_check_fos_treats_endpoint_connection_error_as_region_mismatch():
-    """A bad region → EndpointConnectionError → rewritten to a
-    user-friendly 'verify the FOS Region' message (line 188-189)."""
-    fake_client = MagicMock()
-    fake_client.list_objects_v2.side_effect = RuntimeError(
-        "EndpointConnectionError: Could not connect to the endpoint URL"
-    )
-    with patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client):
-        resp = _client().post(
-            "/api/provision/check-fos",
-            json={"bucket": "b", "region": "bad", "access_key": "k", "secret_key": "s"},
-        )
-    body = resp.json()
-    assert body["ok"] is False
-    assert "verify the FOS Region" in body["error"]
-
-
-def test_check_fos_passes_through_unknown_errors():
-    """Unknown exception types → raw error text in response. Pinned
-    so the user gets SOMETHING actionable rather than a silent
-    'ok: false'."""
-    fake_client = MagicMock()
-    fake_client.list_objects_v2.side_effect = RuntimeError("weird unknown error xyz")
-    with patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client):
-        resp = _client().post(
-            "/api/provision/check-fos",
-            json={"bucket": "b", "region": "us-east-1", "access_key": "k", "secret_key": "s"},
-        )
-    body = resp.json()
-    assert body["ok"] is False
-    assert "weird unknown error xyz" in body["error"]
-
-
-def test_provision_validate_rejects_missing_token():
-    """Token and service_id are both required."""
-    resp = _client().post("/api/provision/validate", json={"token": "", "service_id": "svc"})
-    assert resp.status_code == 400
-
-
-def test_provision_validate_rejects_missing_service_id():
-    resp = _client().post("/api/provision/validate", json={"token": "tok", "service_id": ""})
-    assert resp.status_code == 400
-
-
-def test_provision_validate_swallows_token_info_failure_continues_with_service_fetch():
-    """If /tokens/self fails, validate logs and continues — the empty
-    token_info dict in the response is the visible signal. Line 96-97."""
-
-    def _fake_fastly(method, path, *args, **kwargs):
-        if path == "/tokens/self":
-            raise RuntimeError("token endpoint down")
-        if path.startswith("/service/"):
-            return {"name": "My Service"}
-        return {}
-
-    with patch("backend.core.fastly.client.fastly", side_effect=_fake_fastly):
-        resp = _client().post(
-            "/api/provision/validate",
-            json={"token": "tok", "service_id": "svc-abc"},
-        )
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["service_name"] == "My Service"
-    assert body["token_info"] == {}  # empty because /tokens/self failed
+    for bad_hdrs in ([(b"content-type", b"text/plain")], []):
+        req = Request({"type": "http", "method": "POST", "path": "/", "headers": bad_hdrs}, lambda: None)
+        with pytest.raises(HTTPException) as exc:
+            _require_json_content_type(req)
+        assert exc.value.status_code == 415

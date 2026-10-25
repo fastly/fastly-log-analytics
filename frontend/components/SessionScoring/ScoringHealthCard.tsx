@@ -5,10 +5,8 @@ import { AlertTriangle, Activity, CheckCircle2, Gauge, KeyRound, Lock, ServerCra
 import { Skeleton } from '@/components/ui/skeleton'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { CardErrorState } from '@/components/AnalyticsCard'
-import { ScorerFailOpenHelp, ScoringHealthHelp } from '@/components/SessionScoring/help-content'
+import { ScorerFailOpenHelp, ScoringHealthHelp, useScoringQuery } from '@/components/SessionScoring/help-content'
 import type { components } from '@/types/api.generated'
-
-import { useScoringQuery } from './useScorerTimeseries'
 import { client } from '@/lib/api'
 
 import { formatCount } from '@/lib/format'

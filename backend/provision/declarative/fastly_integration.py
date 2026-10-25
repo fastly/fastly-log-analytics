@@ -10,7 +10,7 @@ from __future__ import annotations
 import urllib.parse
 
 from backend.core.fastly.client import fastly
-from backend.provision.declarative.diff import Backend, LoggingEndpoint, ServiceDictionary, VCLSnippet
+from backend.provision.declarative.reconciler import Backend, LoggingEndpoint, ServiceDictionary, VCLSnippet
 
 # ============================================================================
 # Fetch Current State (Read-Only)

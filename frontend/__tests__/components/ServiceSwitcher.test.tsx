@@ -13,12 +13,11 @@ import { describe, it, expect, beforeEach, beforeAll, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
-import { ServiceSwitcher } from '@/components/ServiceSwitcher/ServiceSwitcher'
 import { TimezoneSwitcher } from '@/components/AppLayout'
-import { SyncStatusBadge } from '@/components/SyncStatusBadge/SyncStatusBadge'
-import { useServiceStore } from '@/stores/serviceStore'
-import { useTimezoneStore } from '@/stores/timezoneStore'
-import { getTimezoneAbbr } from '@/lib/date'
+import { ServiceSwitcher, SyncStatusBadge } from '@/components/SyncStatusBadge/SyncStatusBadge'
+import { useServiceStore } from '@/stores/filterStore'
+import { useTimezoneStore } from '@/stores/filterStore'
+import { getTimezoneAbbr } from '@/lib/format'
 import { createTestQueryClient, makeQueryWrapper } from '../helpers/page-smoke'
 import { stubResizeObserver, stubSystemTimeZone } from '../helpers/page-smoke'
 
@@ -51,8 +50,8 @@ vi.mock('@/hooks/useSSE', async (importOriginal) => ({
   useDateFormat: () => ({ full: 'yyyy-MM-dd', abbr: 'HH:mm' }),
   useNowMs: () => Date.parse('2026-09-08T18:00:00Z'),
 }))
-vi.mock('@/lib/date', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/lib/date')>()),
+vi.mock('@/lib/format', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/format')>()),
   formatTimeAgo: (timestamp: string) => timestamp,
 }))
 

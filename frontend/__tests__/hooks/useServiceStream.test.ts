@@ -27,7 +27,8 @@ let mockState: { activeServiceId: string | null } = { activeServiceId: 'svc-1' }
 let mockHydrated = true
 let finishHydrationCb: (() => void) | null = null
 
-vi.mock('@/stores/serviceStore', () => {
+vi.mock('@/stores/filterStore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/filterStore')>()
   const useServiceStore = Object.assign(
     vi.fn((selector?: (s: typeof mockState) => unknown) => (selector ? selector(mockState) : mockState)),
     {
@@ -42,7 +43,7 @@ vi.mock('@/stores/serviceStore', () => {
       },
     },
   )
-  return { useServiceStore }
+  return { ...actual, useServiceStore }
 })
 
 beforeEach(() => {

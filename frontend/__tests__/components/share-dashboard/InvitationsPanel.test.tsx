@@ -6,7 +6,7 @@ import React from 'react'
 
 import { server } from '@/__tests__/helpers/msw/handlers'
 import { createTestQueryClient, makeQueryWrapper } from '@/__tests__/helpers/page-smoke'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useServiceStore } from '@/stores/filterStore'
 import { InviteAnalystDialog } from '@/components/InviteAnalystDialog'
 import { InvitationsPanel } from '@/components/share-dashboard/InvitationsPanel'
 import { CreateInviteDialog } from '@/components/share-dashboard/CreateInviteDialog'

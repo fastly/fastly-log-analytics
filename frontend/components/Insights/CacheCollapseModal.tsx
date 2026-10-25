@@ -12,7 +12,7 @@ import {
 import { useQuery } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useServiceStore } from '@/stores/filterStore'
 import { TimeSeriesChart } from '@/components/AnalyticsCard'
 import { useDateFormat } from '@/hooks/useSSE'
 import { AlertCircle, Loader2, Clock, Activity, ShieldAlert, FileText, CheckCircle2 } from 'lucide-react'

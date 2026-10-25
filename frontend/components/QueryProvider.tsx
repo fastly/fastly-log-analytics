@@ -11,9 +11,9 @@ import { NuqsAdapter } from 'nuqs/adapters/next/app'
 import { hydrateFilterStoreFromUrl } from '@/lib/utils'
 import { getApiBase } from '@/lib/api'
 import { useBootstrap } from '@/hooks/useBootstrap'
-import { useServiceStore } from '@/stores/serviceStore'
-import { useTimezoneStore } from '@/stores/timezoneStore'
-import { useDebugStore } from '@/stores/debugStore'
+import { useServiceStore } from '@/stores/filterStore'
+import { useTimezoneStore } from '@/stores/filterStore'
+import { useDebugStore } from '@/stores/filterStore'
 import { setActiveServiceCookie } from '@/lib/utils'
 
 // Reload-loop breaker (defense-in-depth).

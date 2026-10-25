@@ -40,17 +40,15 @@ from backend.utils.dir_size import _DIR_SIZE_CACHE, _get_dir_size  # noqa: F401
 # state the endpoints rely on. Endpoint sub-modules then bind their
 # routes onto the shared router instance.
 from . import (  # noqa: F401
-    _helpers,
-    clickhouse,
     compaction,
     downloads,
-    events,
     health,
+    high_scale,
     ingest,
     log_accounting,
-    sync_status,
 )
-from ._helpers import (  # noqa: F401
+from .health import compute_sync_status_cached  # noqa: F401
+from .high_scale import (  # noqa: F401
     ClientDisconnected,
     _AbortableQueue,
     _fetch_file_to_zip,
@@ -63,18 +61,27 @@ from .log_accounting import (  # noqa: F401
     LOG_ACCOUNTING_MIN_RUN,
     compute_log_accounting,
 )
-from .sync_status import compute_sync_status_cached  # noqa: F401
 
 # Back-compat submodule aliases for callers/tests patching legacy module paths.
-_router = _helpers
+_helpers = high_scale
+_router = high_scale
+clickhouse = high_scale
+events = high_scale
+sync_status = health
 bot_sources = compaction
 iceberg = compaction
 quarantine = ingest
-_sys.modules.setdefault(f"{__name__}._router", _helpers)
+_sys.modules.setdefault(f"{__name__}._helpers", high_scale)
+_sys.modules.setdefault(f"{__name__}._router", high_scale)
+_sys.modules.setdefault(f"{__name__}.clickhouse", high_scale)
+_sys.modules.setdefault(f"{__name__}.events", high_scale)
+_sys.modules.setdefault(f"{__name__}.sync_status", health)
 _sys.modules.setdefault(f"{__name__}.bot_sources", compaction)
 _sys.modules.setdefault(f"{__name__}.iceberg", compaction)
 _sys.modules.setdefault(f"{__name__}.quarantine", ingest)
 _sys.modules.setdefault("backend.routers.admin_usage", log_accounting)
+_sys.modules.setdefault("backend.system_metrics_sampler", health)
+
 
 __all__ = [
     "router",

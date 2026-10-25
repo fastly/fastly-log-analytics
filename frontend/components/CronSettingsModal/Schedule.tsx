@@ -12,7 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { RetentionSelect } from '@/components/ui/retention-select'
+import { RetentionSelect } from '@/components/ui/confirm-dialog'
 
 export const SYNC_INTERVAL_OPTIONS = [
   { value: '1', label: 'Every 1 minute' },

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import logging
 import sys as _sys
+import time as _time
 from collections.abc import Callable
 from datetime import UTC
+from datetime import datetime as _datetime
 from typing import Any
 
 import duckdb
@@ -326,6 +328,15 @@ def _response_cache_key(
     #   * ``sec`` (sorted sections tuple) makes the three live FE shapes
     #     (core / map / shielding) each cache distinctly, instead of the cache
     #     only being reachable for the dead ``sections is None`` shape.
+    common_tail = {
+        "f": serialize_filters_for_key(filters),
+        "metric": metric,
+        "bs": bucket_seconds,
+        "tn": top_n,
+        "ma": map_asn,
+        "sec": sorted(sections) if sections is not None else None,
+        "mi": int(mask_ips),
+    }
     if range_token is not None:
         stable_payload = {
             # ``k`` namespaces this as the stable shape so a stable key can
@@ -334,25 +345,13 @@ def _response_cache_key(
             "rt": range_token,
             "qa": quantized_anchor,
             "icf": invite_clamp_fingerprint,
-            "f": serialize_filters_for_key(filters),
-            "metric": metric,
-            "bs": bucket_seconds,
-            "tn": top_n,
-            "ma": map_asn,
-            "sec": sorted(sections) if sections is not None else None,
-            "mi": int(mask_ips),
+            **common_tail,
         }
         return digest_cache_key(stable_payload, src)
     payload = {
         "s": bucket_time_to_minute(start_time),
         "e": bucket_time_to_minute(end_time),
-        "f": serialize_filters_for_key(filters),
-        "metric": metric,
-        "bs": bucket_seconds,
-        "tn": top_n,
-        "ma": map_asn,
-        "sec": sorted(sections) if sections is not None else None,
-        "mi": int(mask_ips),
+        **common_tail,
     }
     return digest_cache_key(payload, src)
 
@@ -405,6 +404,26 @@ def _rtt_congestion_expr() -> str:
     return "APPROX_QUANTILE(CAST(COALESCE(tcp_rtt, 0) AS BIGINT) - CAST(COALESCE(rtt_min, 0) AS BIGINT), 0.5)"
 
 
+def _bucket_str(val: Any) -> str:
+    return val.isoformat().replace("+00:00", "") if hasattr(val, "isoformat") else str(val)
+
+
+def _opt_float(val: Any, ndigits: int | None = None) -> float | None:
+    if val is None:
+        return None
+    f = float(val)
+    return round(f, ndigits) if ndigits is not None else f
+
+
+def _get_schema_cols_cached(src: dict, table_name: str, get_runner: Callable[[], QueryRunner]) -> set[str]:
+    from backend.core._duckdb_status import _schema_cache
+
+    cached_schema = _schema_cache.get((src["name"], table_name, True))
+    if cached_schema is not None:
+        return {c["name"] for c in cached_schema}
+    return set(get_runner().get_schema_cols())
+
+
 def get_health(
     con_factory: Callable[[], duckdb.DuckDBPyConnection],
     src: dict,
@@ -440,7 +459,6 @@ def get_health(
     resolved bounds) is used — unchanged for explicit user ranges / deep-links.
     SECURITY: the bounds drive the scan; the token/anchor only stabilize the key.
     """
-    import time as _time
 
     def _want(name: str) -> bool:
         return sections is None or name in sections
@@ -502,13 +520,7 @@ def get_health(
         return _runner
 
     _t = _time.perf_counter()
-    from backend.core._duckdb_status import _schema_cache
-
-    _cached_schema = _schema_cache.get((src["name"], table_name, True))
-    if _cached_schema is not None:
-        actual_cols = set(c["name"] for c in _cached_schema)
-    else:
-        actual_cols = set(get_runner().get_schema_cols())
+    actual_cols = _get_schema_cols_cached(src, table_name, get_runner)
     timer.mark("get_schema_cols", _t)
 
     if not {"tcp_rtt", "asn"}.issubset(actual_cols):
@@ -748,20 +760,20 @@ def get_health(
                 map_rows_b = _geo[0] if _geo else []
                 metro_rows_b = _geo[1] if _geo else []
             else:
+
+                def _qual_col(col: str, present: bool, default: str) -> tuple[str, str]:
+                    return (col, f"{temp_name}.{col}") if present else (default, default)
+
                 if _want_map_query and has_country:
-                    lat_col = "lat" if has_lat else "NULL"
-                    lon_col = "lon" if has_lat else "NULL"
-                    metro_col = "metro" if has_metro else "NULL"
-                    city_col = "city" if "city" in actual_cols else "''"
                     # Qualified-for-JOIN variants. The 2-pass CTE's ON clause
                     # references the same columns by name on both sides, so
                     # bare ``city`` / ``lat`` etc. are ambiguous to DuckDB's
                     # binder. Prefix with the temp-table name when the column
                     # really exists; keep the NULL / '' literal otherwise.
-                    join_city_col = f"{temp_name}.city" if "city" in actual_cols else "''"
-                    join_lat_col = f"{temp_name}.lat" if has_lat else "NULL"
-                    join_lon_col = f"{temp_name}.lon" if has_lat else "NULL"
-                    join_metro_col = f"{temp_name}.metro" if has_metro else "NULL"
+                    lat_col, join_lat_col = _qual_col("lat", has_lat, "NULL")
+                    lon_col, join_lon_col = _qual_col("lon", has_lat, "NULL")
+                    metro_col, join_metro_col = _qual_col("metro", has_metro, "NULL")
+                    city_col, join_city_col = _qual_col("city", "city" in actual_cols, "''")
 
                     map_where = "1=1"
                     map_params: list[Any] = []
@@ -799,15 +811,12 @@ def get_health(
                     timer.mark("map_query", _t2)
 
                 if has_country:
-                    metro_col_m = "metro" if has_metro else "NULL"
-                    city_col = "city" if "city" in actual_cols else "''"
-                    region_col = "region" if "region" in actual_cols else "''"
                     # Qualified-for-JOIN variants — same disambiguation pattern
                     # as map_query. The 2-pass CTE re-aliases these names on the
                     # top_cells side, so the JOIN ON needs table-qualified refs.
-                    join_metro_col = f"{temp_name}.metro" if has_metro else "NULL"
-                    join_city_col = f"{temp_name}.city" if "city" in actual_cols else "''"
-                    join_region_col = f"{temp_name}.region" if "region" in actual_cols else "''"
+                    metro_col_m, join_metro_col = _qual_col("metro", has_metro, "NULL")
+                    city_col, join_city_col = _qual_col("city", "city" in actual_cols, "''")
+                    region_col, join_region_col = _qual_col("region", "region" in actual_cols, "''")
                     metro_sql = SQL.METRO_LEADERBOARD.format(
                         city_col=city_col,
                         region_col=region_col,
@@ -853,8 +862,6 @@ def get_health(
 
     try:
         # ── Derive top ASNs ────────────────────────────────────────────────
-        from datetime import datetime as _datetime
-
         all_asns_seen: dict[int, int] = {}
         for r in heatmap_rows:
             asn = int(r[0])
@@ -879,19 +886,14 @@ def get_health(
 
         if not all_buckets_list:
             # Fallback to sparse buckets present in the query results
-            all_buckets_set: set[str] = set()
-            for r in heatmap_rows:
-                bucket = r[1].isoformat().replace("+00:00", "") if hasattr(r[1], "isoformat") else str(r[1])
-                all_buckets_set.add(bucket)
+            all_buckets_set: set[str] = {_bucket_str(r[1]) for r in heatmap_rows}
 
             # Selector callers that ask for map_buckets/cities WITHOUT heatmap skip
             # the heatmap query, but the map-bucket assembly still needs the
             # sorted bucket axis for positional bucket_idx; pull bucket times
             # from map_rows in that case so the per-bucket map cells survive.
             if not heatmap_rows and map_rows:
-                for r in map_rows:
-                    bucket = r[5].isoformat().replace("+00:00", "") if hasattr(r[5], "isoformat") else str(r[5])
-                    all_buckets_set.add(bucket)
+                all_buckets_set.update(_bucket_str(r[5]) for r in map_rows)
 
             all_buckets = sorted(all_buckets_set)
         else:
@@ -938,11 +940,9 @@ def get_health(
                 speed_rows = []  # skip-temp path + speed rollup missed → no fallback
             asn_speed_rows: dict[int, list[tuple]] = {}
             for r in speed_rows:
-                asn_v = int(r[0])
-                if asn_v not in asn_speed_rows:
-                    asn_speed_rows[asn_v] = []
-                if len(asn_speed_rows[asn_v]) < 5:
-                    asn_speed_rows[asn_v].append((r[1], r[2]))
+                rows_for_asn = asn_speed_rows.setdefault(int(r[0]), [])
+                if len(rows_for_asn) < 5:
+                    rows_for_asn.append((r[1], r[2]))
             for asn_v, rows in asn_speed_rows.items():
                 total = sum(cnt for _, cnt in rows)
                 if total > 0:
@@ -956,26 +956,20 @@ def get_health(
             asn = int(r[0])
             if asn not in top_asn_set:
                 continue
-            bucket = r[1].isoformat().replace("+00:00", "") if hasattr(r[1], "isoformat") else str(r[1])
-            tp = float(r[2]) if r[2] is not None else None
-            rtt = float(r[3]) if r[3] is not None else None
-            rtt_base = float(r[4]) if r[4] is not None else None
-            rtt_cong = float(r[5]) if r[5] is not None else None
-            pkt = float(r[6]) if r[6] is not None else None
-            jitter = float(r[7]) if r[7] is not None else None
-            err = float(r[8]) if r[8] is not None else None
+            bucket = _bucket_str(r[1])
+            tp, rtt, rtt_base, rtt_cong, pkt, jitter, err = (_opt_float(v) for v in r[2:9])
             reqs = int(r[9])
             hs = _health_score(tp, rtt_cong, pkt, jitter, err)
             asn_bucket_data.setdefault(asn, {})[bucket] = {
                 "bucket_idx": bucket_idx[bucket],
                 "bucket": bucket,
-                "throughput_bps": round(tp, 0) if tp is not None else None,
-                "rtt_med_us": round(rtt, 0) if rtt is not None else None,
-                "rtt_baseline_us": round(rtt_base, 0) if rtt_base is not None else None,
-                "rtt_congestion_us": round(rtt_cong, 0) if rtt_cong is not None else None,
-                "avg_ploss": round(pkt, 5) if pkt is not None else None,
-                "rtt_jitter_us": round(jitter, 0) if jitter is not None else None,
-                "error_pct": round(err, 2) if err is not None else None,
+                "throughput_bps": _opt_float(tp, 0),
+                "rtt_med_us": _opt_float(rtt, 0),
+                "rtt_baseline_us": _opt_float(rtt_base, 0),
+                "rtt_congestion_us": _opt_float(rtt_cong, 0),
+                "avg_ploss": _opt_float(pkt, 5),
+                "rtt_jitter_us": _opt_float(jitter, 0),
+                "error_pct": _opt_float(err, 2),
                 "health_score": hs,
                 "reqs": reqs,
             }
@@ -1019,19 +1013,16 @@ def get_health(
                 cities_index[key] = idx
             return idx
 
+        dma_map = _db._get_dma_map() if has_metro and (map_rows or metro_rows) else {}
         if map_rows:
-            dma_map = _db._get_dma_map() if has_metro else {}
             map_by_bucket: dict[str, list[dict]] = {}
             for r in map_rows:
                 ctry = r[0]
                 city = r[1] or ""
-                lat = float(r[2]) if r[2] is not None else None
-                lon = float(r[3]) if r[3] is not None else None
+                lat, lon = _opt_float(r[2]), _opt_float(r[3])
                 metro_raw = r[4]
-                bucket = r[5].isoformat().replace("+00:00", "") if hasattr(r[5], "isoformat") else str(r[5])
-                rtt = float(r[6]) if r[6] is not None else None
-                pkt = float(r[7]) if r[7] is not None else None
-                err = float(r[8]) if r[8] is not None else None
+                bucket = _bucket_str(r[5])
+                rtt, pkt, err = _opt_float(r[6]), _opt_float(r[7]), _opt_float(r[8])
                 reqs = int(r[9])
                 hs = _health_score(None, None, pkt, None, err)
                 metro_code = _parse_metro_code(metro_raw)
@@ -1048,32 +1039,26 @@ def get_health(
                         "metro_code": metro_code,
                         "rtt_med_us": rtt,
                         "avg_ploss": pkt,
-                        "error_pct": round(err, 2) if err is not None else None,
+                        "error_pct": _opt_float(err, 2),
                         "health_score": hs,
                         "reqs": reqs,
                     }
                 )
 
-            for i, bucket in enumerate(all_buckets):
-                map_buckets.append(
-                    {
-                        "bucket_idx": i,
-                        "bucket": bucket,
-                        "cities": map_by_bucket.get(bucket, []),
-                    }
-                )
+            map_buckets = [
+                {"bucket_idx": i, "bucket": bucket, "cities": map_by_bucket.get(bucket, [])}
+                for i, bucket in enumerate(all_buckets)
+            ]
 
         # ── Metro leaderboard ──────────────────────────────────────────────
         metro_leaderboard: list[dict] = []
         if metro_rows:
-            dma_map = _db._get_dma_map() if has_metro else {}
             for r in metro_rows:
                 ctry = r[0]
                 city = r[1] or ""
                 region = r[2] or ""
                 metro_raw = r[3]
-                pkt = float(r[5]) if r[5] is not None else None
-                err = float(r[6]) if r[6] is not None else None
+                pkt, err = _opt_float(r[5]), _opt_float(r[6])
                 hs = _health_score(None, None, pkt, None, err)
                 metro_code = _parse_metro_code(metro_raw)
                 city_for_label = (
@@ -1144,10 +1129,9 @@ def get_health(
                 )
                 timer.mark("rtt_percentiles_query", _t)
                 for row in pct_rows:
-                    asn_v = int(row[0])
-                    asn_rtt_pct[asn_v] = {
-                        "p95_rtt_us": round(float(row[1]), 0) if row[1] is not None else None,
-                        "p99_rtt_us": round(float(row[2]), 0) if row[2] is not None else None,
+                    asn_rtt_pct[int(row[0])] = {
+                        "p95_rtt_us": _opt_float(row[1], 0),
+                        "p99_rtt_us": _opt_float(row[2], 0),
                     }
             # else: skip-temp path + RTT rollup missed → leave asn_rtt_pct empty
 
@@ -1314,8 +1298,6 @@ def get_quality(
     region_country: str = "US",
 ) -> dict[str, Any]:
     """Return TCP RTT metrics aggregated by country, ASN, region, PoP, and a scatter sample."""
-    import time as _time
-
     timer = SectionTimer()
     section_timings = timer.entries
 
@@ -1340,13 +1322,7 @@ def get_quality(
             **get_runner().telemetry(),
         }
 
-    from backend.core._duckdb_status import _schema_cache
-
-    _cached_schema = _schema_cache.get((src["name"], table_name, True))
-    if _cached_schema is not None:
-        actual_cols = set(c["name"] for c in _cached_schema)
-    else:
-        actual_cols = set(get_runner().get_schema_cols())
+    actual_cols = _get_schema_cols_cached(src, table_name, get_runner)
     timer.mark("get_schema_cols", _t)
 
     if not actual_cols or "tcp_rtt" not in actual_cols:
@@ -1381,14 +1357,10 @@ def get_quality(
         # If temp table successfully created, hit it directly!
         # The temp table already contains ONLY the filtered rows, so we don't
         # need start_time / end_time / other filter parameters in the sub-queries.
-        query_table = temp_table
-        query_where = "1=1"
-        query_params = []
+        query_table, query_where, query_params = temp_table, "1=1", []
     else:
         # Fallback to the slow direct path on catalog exception or uuid collision (unlikely)
-        query_table = table_name
-        query_where = where_clause
-        query_params = params
+        query_table, query_where, query_params = table_name, where_clause, params
 
     rtt_filter = f"{query_where} AND tcp_rtt IS NOT NULL AND tcp_rtt > 0"
 
@@ -1474,8 +1446,6 @@ def get_transport_metrics(
     end_time: str | None,
     filters: FiltersDict | None = None,
 ) -> dict[str, Any]:
-    import time as _time
-
     timer = SectionTimer()
     table_name = _safe_table(src["name"])
     runner: QueryRunner | None = None
@@ -1527,17 +1497,14 @@ def get_transport_metrics(
     else:
         select_parts.append("0 AS total_bytes")
 
+    _rtt_quants = (("0.50", "rtt_p50"), ("0.90", "rtt_p90"), ("0.95", "rtt_p95"), ("0.99", "rtt_p99"))
     if "tcp_rtt" in actual_cols:
         select_parts.extend(
-            [
-                "approx_quantile(CAST(tcp_rtt AS DOUBLE), 0.50) FILTER (WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0) / 1000.0 AS rtt_p50",
-                "approx_quantile(CAST(tcp_rtt AS DOUBLE), 0.90) FILTER (WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0) / 1000.0 AS rtt_p90",
-                "approx_quantile(CAST(tcp_rtt AS DOUBLE), 0.95) FILTER (WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0) / 1000.0 AS rtt_p95",
-                "approx_quantile(CAST(tcp_rtt AS DOUBLE), 0.99) FILTER (WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0) / 1000.0 AS rtt_p99",
-            ]
+            f"approx_quantile(CAST(tcp_rtt AS DOUBLE), {q}) FILTER (WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0) / 1000.0 AS {alias}"
+            for q, alias in _rtt_quants
         )
     else:
-        select_parts.extend(["NULL AS rtt_p50", "NULL AS rtt_p90", "NULL AS rtt_p95", "NULL AS rtt_p99"])
+        select_parts.extend(f"NULL AS {alias}" for _, alias in _rtt_quants)
 
     if "retrans" in actual_cols:
         select_parts.append("AVG(CAST(retrans AS DOUBLE)) FILTER (WHERE retrans IS NOT NULL) AS avg_retrans")
@@ -1564,16 +1531,11 @@ def get_transport_metrics(
         if row:
             total_requests = int(row[0] or 0)
             bandwidth_bytes = int(row[1] or 0)
-            tcp_rtt_p50 = round(float(row[2]), 2) if row[2] is not None else None
-            tcp_rtt_p90 = round(float(row[3]), 2) if row[3] is not None else None
-            tcp_rtt_p95 = round(float(row[4]), 2) if row[4] is not None else None
-            tcp_rtt_p99 = round(float(row[5]), 2) if row[5] is not None else None
-            retrans_rate = round(float(row[6]), 3) if row[6] is not None else None
-            packet_loss = round(float(row[7]), 3) if row[7] is not None else None
-            delivery_rate = round(float(row[8]), 2) if row[8] is not None else None
+            tcp_rtt_p50, tcp_rtt_p90, tcp_rtt_p95, tcp_rtt_p99 = (_opt_float(v, 2) for v in row[2:6])
+            retrans_rate, packet_loss = _opt_float(row[6], 3), _opt_float(row[7], 3)
+            delivery_rate = _opt_float(row[8], 2)
         else:
-            total_requests = 0
-            bandwidth_bytes = 0
+            total_requests = bandwidth_bytes = 0
             tcp_rtt_p50 = tcp_rtt_p90 = tcp_rtt_p95 = tcp_rtt_p99 = None
             retrans_rate = packet_loss = delivery_rate = None
     except Exception as e:
@@ -1635,7 +1597,7 @@ def get_transport_metrics(
             logger.debug("get_transport_metrics: step failed (ignored)", exc_info=True)
 
     return {
-        "has_transport_data": has_transport_data,
+        **default_resp,
         "tcp_rtt_p50_ms": tcp_rtt_p50,
         "tcp_rtt_p90_ms": tcp_rtt_p90,
         "tcp_rtt_p95_ms": tcp_rtt_p95,
@@ -1646,8 +1608,6 @@ def get_transport_metrics(
         "bandwidth_bytes": bandwidth_bytes,
         "total_requests": total_requests,
         "protocol_distribution": protocol_distribution,
-        "missing_fields": missing_fields,
-        "section_timings": timer.entries,
         **get_runner().telemetry(),
     }
 

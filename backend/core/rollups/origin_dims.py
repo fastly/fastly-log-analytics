@@ -90,6 +90,12 @@ from ._common import (
     ORIGIN_PATH_BUNDLE_FILENAME,
     ORIGIN_POP_BUNDLE_FILENAME,
     ORIGIN_SUMMARY_BUNDLE_FILENAME,
+    PERF_ASNS_MIN_REQUESTS_PER_HOUR,
+    PERF_LATENCY_BUNDLE_TOP_K,
+    PERF_TOP_ASNS_BUNDLE_FILENAME,
+    PERF_TOP_URLS_BUNDLE_FILENAME,
+    PERF_TTL_DIST_BUNDLE_FILENAME,
+    PERF_URLS_MIN_REQUESTS_PER_HOUR,
     SLOW_URLS_BUNDLE_FILENAME,
     SLOW_URLS_BUNDLE_MIN_REQUESTS_PER_HOUR,
     SLOW_URLS_BUNDLE_TOP_K,
@@ -558,6 +564,150 @@ def build_slow_urls_bundles(service_id: str, source: dict, hours: list[str]) -> 
     )
 
 
+def _make_perf_latency_copy_sql(col: str, min_req: int):
+    def build_copy_sql(ctx: object, table_ident: str, start_iso: str, end_iso: str, tmp_path: str) -> str:
+        return (
+            f"COPY ("
+            f"  SELECT value, "
+            f"    CAST(COUNT(*) AS BIGINT) AS requests, "
+            f"    CAST(COUNT(*) FILTER (WHERE elapsed IS NOT NULL) AS BIGINT) AS elapsed_count, "
+            f"    CAST(COALESCE(SUM(elapsed), 0.0) AS DOUBLE) AS elapsed_sum, "
+            f"    CAST(MEDIAN(elapsed) AS DOUBLE) AS p50_us, "
+            f"    CAST(APPROX_QUANTILE(elapsed, 0.95) AS DOUBLE) AS p95_us, "
+            f"    CAST(APPROX_QUANTILE(elapsed, 0.99) AS DOUBLE) AS p99_us "
+            f"  FROM ("
+            f'    SELECT CAST("{col}" AS VARCHAR) AS value, CAST(elapsed AS DOUBLE) AS elapsed '
+            f"    FROM {table_ident} "
+            f"    WHERE timestamp >= TIMESTAMPTZ '{start_iso}' "
+            f"      AND timestamp <  TIMESTAMPTZ '{end_iso}' "
+            f'      AND "{col}" IS NOT NULL'
+            f"  ) "
+            f"  WHERE elapsed IS NOT NULL "
+            f"  GROUP BY value "
+            f"  HAVING COUNT(*) >= {min_req} "
+            f"  ORDER BY APPROX_QUANTILE(elapsed, 0.99) DESC "
+            f"  LIMIT {PERF_LATENCY_BUNDLE_TOP_K}"
+            f") {parquet_zstd_target(tmp_path)}"
+        )
+
+    return build_copy_sql
+
+
+_PERF_DIMS: tuple[MultiBundleSpec, ...] = (
+    (
+        "url",
+        PERF_TOP_URLS_BUNDLE_FILENAME,
+        ("elapsed", "url"),
+        _make_perf_latency_copy_sql("url", PERF_URLS_MIN_REQUESTS_PER_HOUR),
+    ),
+    (
+        "asn",
+        PERF_TOP_ASNS_BUNDLE_FILENAME,
+        ("elapsed", "asn"),
+        _make_perf_latency_copy_sql("asn", PERF_ASNS_MIN_REQUESTS_PER_HOUR),
+    ),
+)
+
+
+def build_perf_latency_bundles(service_id: str, source: dict, hours: list[str]) -> int:
+    """Write the perf_top_urls + perf_top_asns rollups for each closed hour."""
+    return build_multi_spec_bundles(
+        service_id,
+        source,
+        hours,
+        specs=_PERF_DIMS,
+        group_label="perf_latency",
+        tmp_prefix=".tmp_pl_",
+        logger=logger,
+        driver=build_per_hour_bundles,
+    )
+
+
+def backfill_perf_latency_bundles(service_id: str, source: dict) -> int:
+    """Self-heal pass: build perf_latency rollups for every closed hour that
+    has all_fields.parquet but no perf_top_urls.parquet yet.
+    """
+    return backfill_missing_bundles(
+        service_id,
+        source,
+        bundle_filename=PERF_TOP_URLS_BUNDLE_FILENAME,
+        label="perf_latency",
+        builder=build_perf_latency_bundles,
+        logger=logger,
+    )
+
+
+def _build_ttl_dist_copy_sql(ctx: object, table_ident: str, start_iso: str, end_iso: str, tmp_path: str) -> str:
+    return (
+        f"COPY ("
+        f"  SELECT "
+        f"    CASE "
+        f"        WHEN ttl <= 0 THEN '0s' "
+        f"        WHEN ttl <= 10 THEN '<10s' "
+        f"        WHEN ttl <= 30 THEN '<30s' "
+        f"        WHEN ttl <= 60 THEN '<1m' "
+        f"        WHEN ttl <= 300 THEN '<5m' "
+        f"        WHEN ttl <= 600 THEN '<10m' "
+        f"        WHEN ttl <= 1800 THEN '<30m' "
+        f"        WHEN ttl <= 3600 THEN '<1h' "
+        f"        WHEN ttl <= 10800 THEN '<3h' "
+        f"        WHEN ttl <= 21600 THEN '<6h' "
+        f"        WHEN ttl <= 43200 THEN '<12h' "
+        f"        WHEN ttl <= 86400 THEN '<1d' "
+        f"        WHEN ttl <= 259200 THEN '<3d' "
+        f"        WHEN ttl <= 604800 THEN '<1w' "
+        f"        WHEN ttl <= 1209600 THEN '<2w' "
+        f"        WHEN ttl <= 2592000 THEN '<30d' "
+        f"        WHEN ttl <= 7776000 THEN '<90d' "
+        f"        WHEN ttl <= 31536000 THEN '<1y' "
+        f"        ELSE '>1y' "
+        f"    END AS bucket, "
+        f"    CAST(COUNT(*) AS BIGINT) AS count, "
+        f"    CAST(MIN(ttl) AS BIGINT) AS min_ttl "
+        f"  FROM {table_ident} "
+        f"  WHERE timestamp >= TIMESTAMPTZ '{start_iso}' "
+        f"    AND timestamp <  TIMESTAMPTZ '{end_iso}' "
+        f"    AND ttl IS NOT NULL "
+        f"  GROUP BY 1"
+        f") {parquet_zstd_target(tmp_path)}"
+    )
+
+
+_PERF_TTL_DIMS: tuple[MultiBundleSpec, ...] = (
+    ("ttl_dist", PERF_TTL_DIST_BUNDLE_FILENAME, ("ttl",), _build_ttl_dist_copy_sql),
+)
+
+
+def build_perf_dims_bundles(service_id: str, source: dict, hours: list[str]) -> int:
+    """Write the perf_ttl_dist rollup for each closed hour in ``hours``."""
+    return build_multi_spec_bundles(
+        service_id,
+        source,
+        hours,
+        specs=_PERF_TTL_DIMS,
+        group_label="perf_dims",
+        tmp_prefix=".tmp_pd_",
+        logger=logger,
+        driver=build_per_hour_bundles,
+    )
+
+
+def backfill_perf_dims_bundles(service_id: str, source: dict) -> int:
+    """Self-heal pass: build the perf_dims rollup for every closed hour that
+    has ``all_fields.parquet`` but is missing the perf_ttl_dist file."""
+    return backfill_multi_spec_bundles(
+        service_id,
+        source,
+        specs=_PERF_TTL_DIMS,
+        group_label="perf_dims",
+        tmp_prefix=".tmp_pd_",
+        logger=logger,
+        driver=build_per_hour_bundles,
+    )
+
+
 sys.modules["backend.core.rollups.origin_summary"] = sys.modules[__name__]
 sys.modules["backend.core.rollups.origin_latency_ts"] = sys.modules[__name__]
 sys.modules["backend.core.rollups.slow_urls"] = sys.modules[__name__]
+sys.modules["backend.core.rollups.perf_latency"] = sys.modules[__name__]
+sys.modules["backend.core.rollups.perf_dims"] = sys.modules[__name__]

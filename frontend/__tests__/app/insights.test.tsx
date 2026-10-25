@@ -2,8 +2,8 @@ import { screen, waitFor, fireEvent } from '@testing-library/react'
 import { expect, test, vi, beforeEach } from 'vitest'
 import InsightsClient from '@/app/insights/_sections/InsightsClient'
 import { createTestQueryClient, renderWithQuery } from '../helpers/page-smoke'
-import { useServiceStore } from '@/stores/serviceStore'
-import { useSessionRoleStore } from '@/stores/sessionRoleStore'
+import { useServiceStore } from '@/stores/filterStore'
+import { useSessionRoleStore } from '@/stores/filterStore'
 
 // Mock complicated components. SEVERITY_BADGE_CLASS is a real named export of
 // this module (the section-header severity chips reuse it), so the mock must

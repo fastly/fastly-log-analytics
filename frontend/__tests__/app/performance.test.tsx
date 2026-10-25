@@ -18,9 +18,7 @@ import { spyOnConsoleError } from '../helpers/page-smoke'
 // and the approximate badge.
 
 vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/page-smoke')).reactVirtualModuleMock())
-vi.mock('@/stores/serviceStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())
-
-vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke')).filterStoreModuleMock())
+vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())
 
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/performance'))
 

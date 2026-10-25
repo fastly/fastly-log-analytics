@@ -5,7 +5,7 @@ import { TrendingUp } from 'lucide-react'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { BackToAdminLink } from '@/components/ReportLayout'
 import { Button } from '@/components/ui/button'
-import { PageHeader } from '@/components/ui/page-header'
+import { PageHeader } from '@/components/ui/confirm-dialog'
 import { SERIES_LAYOUT, WINDOWS } from '../_sections/OperationsOverview'
 
 export default function Loading() {

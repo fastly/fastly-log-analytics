@@ -189,7 +189,7 @@ def _run_rollup_hour_heal(
 
     # ENOSPC safety check (< 50MB free disk space)
     from backend.core.rollups._common import _hour_bundled_root
-    from backend.cron.jobs._common import has_sufficient_disk_space
+    from backend.cron.jobs.sync import has_sufficient_disk_space
 
     hour_root = _hour_bundled_root(src)
     ok_disk, msg = has_sufficient_disk_space(hour_root, "rollup-heal", service_id)
@@ -340,7 +340,7 @@ def _run_rollup_compact_daily(
     )
     from backend.core.rollups._common import _day_bundled_root
     from backend.core.rollups.recompute import DAY_COMPACTORS, cleanup_old_rollups
-    from backend.cron.jobs._common import has_sufficient_disk_space
+    from backend.cron.jobs.sync import has_sufficient_disk_space
     from backend.cron.lifecycle import cron_run, record_skip_row
     from backend.utils.active_requests import should_defer_cron
 
@@ -689,7 +689,7 @@ def _run_optimize(service_id: str, manual: bool = False) -> dict | None:
     if run.result is not None:
         outcome = run.result
 
-    from backend.cron.jobs._common import publish_sync_status_safe
+    from backend.cron.jobs.sync import publish_sync_status_safe
 
     publish_sync_status_safe(service_id, "scheduler")
 

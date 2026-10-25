@@ -13,8 +13,8 @@ import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api'
 import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useBootstrap'
 import { NoServiceSelected } from '@/components/ReportLayout'
-import { PageHeader } from '@/components/ui/page-header'
-import { StatCard } from '@/components/ui/stat-card'
+import { PageHeader } from '@/components/ui/confirm-dialog'
+import { StatCard } from '@/components/ui/confirm-dialog'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { DataTable } from '@/components/DataTable'
@@ -25,7 +25,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 
 import { useStreamAggregates, type TimelinePoint } from './_sections/useStreamAggregates'
 
-import { formatDuration } from '@/lib/date'
+import { formatDuration } from '@/lib/format'
 import { CHART_COLORS } from '@/lib/chart-helpers'
 
 const TIMELINE_LAYOUT = {

@@ -3,25 +3,19 @@
 
 import React, { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { useAnalyticsReportQuery } from '@/hooks/useDashboardCards';
-import { AnalyticsCard } from '@/components/AnalyticsCard';
+import { useAnalyticsReportQuery, useReportRangeAnchor, useRumStatus } from '@/hooks/useDashboardCards';
+import { AnalyticsCard, TimeSeriesChart } from '@/components/AnalyticsCard';
 import { RumStatusPanel, RumFaroVersionCard } from '@/components/Rum/RumStatusPanel';
-import { ReportLayout } from '@/components/ReportLayout';
+import { ReportLayout, DashboardSkeleton } from '@/components/ReportLayout';
 import { useIsAnalyst } from '@/hooks/useBootstrap';
-import { useReportRangeAnchor } from '@/hooks/useDashboardCards';
-import { CopyButton } from '@/components/ui/copy-button';
-
-import { DashboardSkeleton } from '@/components/ReportLayout';
+import { CopyButton } from '@/components/ui/confirm-dialog';
 import { PlotlyChart } from '@/components/PlotlyChart';
-import { TimeSeriesChart } from '@/components/AnalyticsCard';
 import { useTimezone } from '@/hooks/useSSE';
-import { formatDate } from '@/lib/date';
+import { formatDate, formatCount } from '@/lib/format';
 import { Terminal, Activity, Monitor, ShieldAlert, Cpu, PieChart, TrendingUp, Eye, Radio, BookOpen } from 'lucide-react';
 import { adminJsonResult } from '@/lib/api';
-import { arrayOrEmpty, recordOrNull } from '@/lib/utils';
-import type { StripIndex, WithRequired, components } from '@/types/api';
-import type { FiltersPayload } from '@/types/filters';
-import type { RangeWireArgs } from '@/lib/utils';
+import { arrayOrEmpty, recordOrNull, type RangeWireArgs } from '@/lib/utils';
+import type { StripIndex, WithRequired, components, FiltersPayload } from '@/types/api';
 import {
   Dialog,
   DialogContent,
@@ -32,10 +26,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { DataTable, DataTableReadonly } from '@/components/DataTable';
 import { ColumnDef } from '@tanstack/react-table';
-import { useRumStatus } from '@/hooks/useDashboardCards';
-import { CHART_COLORS } from '@/lib/chart-helpers'
-
-import { formatCount } from '@/lib/format'
+import { CHART_COLORS } from '@/lib/chart-helpers';
 interface RumClientProps extends Pick<RangeWireArgs, 'relativeRange' | 'isAutoRange' | 'anchor'> {
   serviceId: string | null;
   startTime: string | null;
@@ -361,18 +352,8 @@ export function RumClient({
   );
 
   const stackedBarLayout = React.useMemo(
-    () => ({
-      barmode: 'stack' as const,
-      margin: { t: 30, b: 40, l: 30, r: 10 },
-      legend: {
-        orientation: 'h' as const,
-        y: 1.08,
-        x: 0.5,
-        xanchor: 'center' as const,
-        yanchor: 'bottom' as const,
-      },
-    }),
-    [],
+    () => ({ ...trendChartLayout, barmode: 'stack' as const }),
+    [trendChartLayout],
   );
 
   const donutChartLayout = React.useMemo(

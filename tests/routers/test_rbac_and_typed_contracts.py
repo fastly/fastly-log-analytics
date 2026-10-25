@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import starlette.datastructures
 from backend.core.share_db.settings import get_setting, set_setting
+from backend.models.security import SecurityBotRow
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
@@ -42,7 +43,6 @@ from backend.models.provision import (
     ProvisionLakeInfoResponse,
     ProvisionValidateResponse,
 )
-from backend.models.security import SecurityBotRow
 from backend.models.services import (
     AuditLogsResponse,
     CorrelateResponse,

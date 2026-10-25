@@ -2,19 +2,27 @@
 
 import React from 'react'
 import dynamic from 'next/dynamic'
-import { useReportRangeAnchor } from '@/hooks/useDashboardCards'
 import { useRouter } from 'next/navigation'
 import { useQuery } from '@tanstack/react-query'
-import { client, extractApiError } from '@/lib/api'
-import { unwrapClient } from '@/lib/api'
-import type { ChartMetric } from '@/types/api'
+import {
+  client,
+  extractApiError,
+  unwrapClient,
+  STALE_VIEW_RETRY_OPTIONS,
+  throwIfStaleAggregates,
+  isStaleDashboardViewError,
+} from '@/lib/api'
+import type { ChartMetric, FiltersPayload, PlotlyTrace } from '@/types/api'
 import type { components } from '@/types/api.generated'
-import type { FiltersPayload } from '@/types/filters'
-import { STALE_VIEW_RETRY_OPTIONS, throwIfStaleAggregates, isStaleDashboardViewError } from '@/lib/api'
-import { useFilterStore } from '@/stores/filterStore'
-import { useServiceStore } from '@/stores/serviceStore'
-import { useAnalyticsReportQuery } from '@/hooks/useDashboardCards'
-import { useIsDataReady } from '@/hooks/useBootstrap'
+import { useFilterStore, useServiceStore } from '@/stores/filterStore'
+import {
+  useReportRangeAnchor,
+  useAnalyticsReportQuery,
+  useDashboardCards,
+  useCardVisibility,
+  usePlotlyRangeZoom,
+} from '@/hooks/useDashboardCards'
+import { useIsDataReady, useActiveLogFields, useLogFieldsCatalog } from '@/hooks/useBootstrap'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -24,10 +32,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { LayoutDashboard, ArrowRight, EyeOff } from 'lucide-react'
 import { ReportLayout } from '@/components/ReportLayout'
 import { useShallow } from 'zustand/react/shallow'
-import { useActiveLogFields, useLogFieldsCatalog } from '@/hooks/useBootstrap'
-import { useDashboardCards, useCardVisibility, usePlotlyRangeZoom } from '@/hooks/useDashboardCards'
-import { cn } from '@/lib/utils'
-
+import { cn, buildTrafficData, type BuildTrafficDataParams } from '@/lib/utils'
+import { useLocalStorageString } from '@/hooks/useSSE'
 
 import { TrafficChart } from './TrafficChart'
 import {
@@ -55,9 +61,6 @@ export {
   type CardTint,
   type CardCategory,
 }
-import { buildTrafficData, type BuildTrafficDataParams } from '@/lib/traffic-chart'
-import { useLocalStorageString } from '@/hooks/useSSE'
-import type { PlotlyTrace } from '@/types/plotly'
 
 const WORKER_THRESHOLD = 2000
 
@@ -849,17 +852,7 @@ export default function DashboardClient({ nowServerStr }: { nowServerStr?: strin
     >
       {(ctx) => (
         <DashboardBody
-          startTime={ctx.startTime}
-          endTime={ctx.endTime}
-          timezone={ctx.timezone}
-          activeServiceId={ctx.activeServiceId}
-          filterPayload={ctx.filterPayload}
-          config={ctx.config}
-          metric={ctx.metric}
-          setMetric={ctx.setMetric}
-          trend={ctx.trend}
-          setTrend={ctx.setTrend}
-          intervalButtons={ctx.intervalButtons}
+          {...ctx}
           allCards={allCards}
           visibleCards={visibleCards}
           relativeRange={relativeRange}

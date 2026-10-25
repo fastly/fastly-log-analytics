@@ -4,11 +4,11 @@ import React, { useEffect, useMemo, useReducer } from 'react'
 import { useRouter } from 'next/navigation'
 import { cn, buildServiceHref } from '@/lib/utils'
 import { formatBytes, formatUSD } from '@/lib/format'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useServiceStore } from '@/stores/filterStore'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
-import { LabelWithInfo } from '@/components/ui/label-with-info'
+import { LabelWithInfo } from '@/components/ui/confirm-dialog'
 import {
   Tooltip,
   TooltipContent,

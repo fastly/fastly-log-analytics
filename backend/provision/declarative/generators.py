@@ -16,7 +16,7 @@ from backend.core.fastly.rum_provisioning import (
     generate_rum_vcl,
 )
 from backend.provision import utils as log_paths
-from backend.provision.declarative.diff import Backend, LoggingEndpoint, ServiceDictionary, VCLSnippet
+from backend.provision.declarative.reconciler import Backend, LoggingEndpoint, ServiceDictionary, VCLSnippet
 from backend.provision.declarative.state import FeatureState
 from backend.provision.fastly_api import generate_capture_vcl
 from backend.provision.session_scoring_vcl import (

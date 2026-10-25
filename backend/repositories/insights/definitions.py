@@ -2213,6 +2213,10 @@ def _fmt_metro_label(metro: Any, context: dict) -> str:
     return context.get("dma_map", {}).get(str(metro)) or f"DMA {metro}"
 
 
+def _scale_baseline(val: Any, context: dict) -> float:
+    return float(val) / max(context["baseline_hours"], 1) * context["window_hours"]
+
+
 def _item(
     label: Any,
     current_val: Any,
@@ -2245,8 +2249,7 @@ def _p95_latency_item(
     *,
     reqs_key: str = "window_requests",
 ) -> dict[str, Any]:
-    w_f = float(w_p95 or 0)
-    b_f = float(b_p95 or 0)
+    w_f, b_f = float(w_p95 or 0), float(b_p95 or 0)
     return _item(
         label,
         w_f,
@@ -2291,9 +2294,7 @@ def _ip_max_vs_p95_processor(
     crit_thresh: int,
 ) -> dict:
     ip = _mask_ip_if_needed(row[0], context)
-    max_val = int(row[1] or 0)
-    avg_val = int(row[2] or 0)
-    b_p95 = int(row[4] or 0)
+    max_val, avg_val, b_p95 = int(row[1] or 0), int(row[2] or 0), int(row[4] or 0)
     return _item(
         ip or "(unknown)",
         max_val,
@@ -2371,12 +2372,7 @@ def _zero_baseline_count_item(label: str, count: int, meta: dict, warn_threshold
 
 def new_country_traffic_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: ["country", w_cnt, b_cnt]
-    return _zero_baseline_count_item(
-        label=format_city_label("", row[0]),
-        count=row[1],
-        meta={"filters": {"country": row[0]}},
-        warn_threshold=10,
-    )
+    return _zero_baseline_count_item(format_city_label("", row[0]), row[1], {"filters": {"country": row[0]}}, 10)
 
 
 _reg(
@@ -2397,7 +2393,7 @@ def city_surges_processor(row: tuple, definition: InsightDefinition, context: di
     return _item(
         format_city_label(row[1], row[3], row[2]),
         row[4],
-        float(row[5]) / max(context["baseline_hours"], 1) * context["window_hours"],
+        _scale_baseline(row[5], context),
         "requests",
         {"spike_ratio": round(float(row[6]), 1), "filters": _city_filters(row)},
         "info" if float(row[6]) < 10 else "warning",
@@ -2445,12 +2441,7 @@ _reg(
 def city_latency_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [label, city, region, country, w_p95, b_p95, w_total, b_total]
     return _p95_latency_item(
-        format_city_label(row[1], row[3], row[2]),
-        row[4],
-        row[5],
-        row[6],
-        _city_filters(row),
-        reqs_key="requests",
+        format_city_label(row[1], row[3], row[2]), row[4], row[5], row[6], _city_filters(row), reqs_key="requests"
     )
 
 
@@ -2470,10 +2461,7 @@ _reg(
 def new_city_traffic_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [label, city, region, country, w_cnt, b_cnt]
     return _zero_baseline_count_item(
-        label=format_city_label(row[1], row[3], row[2]),
-        count=row[4],
-        meta={"filters": _city_filters(row)},
-        warn_threshold=50,
+        format_city_label(row[1], row[3], row[2]), row[4], {"filters": _city_filters(row)}, 50
     )
 
 
@@ -2510,14 +2498,14 @@ _reg(
 
 def new_probe_urls_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [url, w_cnt, b_cnt, w_error_pct]
-    return {
-        "label": row[0],
-        "current_val": row[1],
-        "baseline_val": None,
-        "unit": "requests",
-        "meta": {"error_pct": float(row[3]) if row[3] is not None else 0, "filters": {"url": row[0]}},
-        "severity": "critical" if row[1] >= 5 else "warning",
-    }
+    return _item(
+        row[0],
+        row[1],
+        None,
+        "requests",
+        {"error_pct": float(row[3]) if row[3] is not None else 0, "filters": {"url": row[0]}},
+        "critical" if row[1] >= 5 else "warning",
+    )
 
 
 _reg(
@@ -2535,14 +2523,14 @@ _reg(
 
 def waf_signal_spikes_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [signal, w_cnt, b_cnt, spike_ratio]
-    return {
-        "label": row[0],
-        "current_val": row[1],
-        "baseline_val": float(row[2]) / max(context["baseline_hours"], 1) * context["window_hours"],
-        "unit": "hits",
-        "meta": {"spike_ratio": float(row[3]), "filters": {"waf_sig_ind": row[0]}},
-        "severity": "critical" if float(row[3]) >= 10 else "warning",
-    }
+    return _item(
+        row[0],
+        row[1],
+        _scale_baseline(row[2], context),
+        "hits",
+        {"spike_ratio": float(row[3]), "filters": {"waf_sig_ind": row[0]}},
+        "critical" if float(row[3]) >= 10 else "warning",
+    )
 
 
 _reg(
@@ -2567,15 +2555,15 @@ _reg(
 
 def proxy_surge_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [p_type, w_cnt, b_cnt, w_total_all, b_total_all]
-    p_type, w_cnt, b_cnt, w_total_all, b_total_all = row
-    return {
-        "label": p_type,
-        "current_val": round(w_cnt * 100.0 / max(w_total_all, 1), 1),
-        "baseline_val": None,
-        "unit": "% of traffic",
-        "meta": {"requests": w_cnt, "filters": {"p_type": p_type}},
-        "severity": "warning",
-    }
+    p_type, w_cnt, _b_cnt, w_total_all, _b_total_all = row
+    return _item(
+        p_type,
+        round(w_cnt * 100.0 / max(w_total_all, 1), 1),
+        None,
+        "% of traffic",
+        {"requests": w_cnt, "filters": {"p_type": p_type}},
+        "warning",
+    )
 
 
 def proxy_surge_severity(items: list[dict]) -> str:
@@ -2600,14 +2588,14 @@ def asn_concentration_processor(row: tuple, definition: InsightDefinition, conte
     # row schema: [asn, w_cnt, b_cnt, b_total, w_total]
     asn, w_cnt, b_cnt, b_total, w_total = row
     w_rate = float(w_cnt * 100.0 / w_total) if w_total else 0.0
-    return {
-        "label": _fmt_asn_label(asn, context),
-        "current_val": w_rate,
-        "baseline_val": float(b_cnt * 100.0 / b_total) if b_total else 0.0,
-        "unit": "% of traffic",
-        "meta": {"requests": w_cnt, "asn": asn, "filters": {"asn": asn}},
-        "severity": "critical" if w_rate >= 50 else "warning",
-    }
+    return _item(
+        _fmt_asn_label(asn, context),
+        w_rate,
+        float(b_cnt * 100.0 / b_total) if b_total else 0.0,
+        "% of traffic",
+        {"requests": w_cnt, "asn": asn, "filters": {"asn": asn}},
+        "critical" if w_rate >= 50 else "warning",
+    )
 
 
 _reg(
@@ -2625,19 +2613,19 @@ _reg(
 
 def asn_metro_performance_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [asn, metro, w_med, b_med, w_total, b_total]
-    asn = row[0]
-    return {
-        "label": f"{_fmt_asn_label(asn, context)} in {_fmt_metro_label(row[1], context)}",
-        "current_val": float(row[2] or 0),
-        "baseline_val": float(row[3] or 0),
-        "unit": "ms RTT",
-        "meta": {
+    asn, w_f, b_f = row[0], float(row[2] or 0), float(row[3] or 0)
+    return _item(
+        f"{_fmt_asn_label(asn, context)} in {_fmt_metro_label(row[1], context)}",
+        w_f,
+        b_f,
+        "ms RTT",
+        {
             "regression_ratio": float(row[2] / row[3]) if row[3] else 0,
             "requests": row[4],
             "filters": {"asn": asn, "country": "US"},
         },
-        "severity": "critical" if float(row[2] or 0) >= float(row[3] or 0) + 100 else "warning",
-    }
+        "critical" if w_f >= b_f + 100 else "warning",
+    )
 
 
 _reg(
@@ -2718,13 +2706,12 @@ _reg(
 def impossible_distance_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [fp, hits, worst_excess_km, max_dist_km, min_allowed_km, pop, sample_ip, client_lat, client_lon, pop_lat, pop_lon, tcp_rtt, country, city]
     sample_ip = _mask_ip_if_needed(row[6], context)
-    return {
-        "label": row[0],
-        "current_val": round(float(row[3]), 0),
-        "baseline_val": round(float(row[4]), 0),
-        "baseline_label": "max allowed",
-        "unit": "km",
-        "meta": {
+    return _item(
+        row[0],
+        round(float(row[3]), 0),
+        round(float(row[4]), 0),
+        "km",
+        {
             "hits": row[1],
             "excess_km": round(float(row[2]), 0),
             "pop": row[5],
@@ -2738,8 +2725,9 @@ def impossible_distance_processor(row: tuple, definition: InsightDefinition, con
             "city": row[13],
             "filters": {context.get("fp_col", "ja3"): row[0]},
         },
-        "severity": "critical" if float(row[2]) > 5000 else "warning",
-    }
+        "critical" if float(row[2]) > 5000 else "warning",
+        baseline_label="max allowed",
+    )
 
 
 # NOTE: impossible_distance needs special hydration for {pop_values} and
@@ -2760,21 +2748,16 @@ _reg(
 
 def tail_latency_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [url, p99_ms, p50_ms, ratio, total]
-    return {
-        "label": row[0] or "(empty)",
-        "current_val": float(row[1]),
-        "baseline_val": float(row[2]),
-        "baseline_label": "P50",
-        "unit": "ms (P99 vs P50)",
-        "meta": {
-            "p99_ms": float(row[1]),
-            "p50_ms": float(row[2]),
-            "ratio": float(row[3]),
-            "requests": row[4],
-            "filters": {"url": row[0]},
-        },
-        "severity": "critical" if float(row[3]) > 10 else "warning",
-    }
+    p99, p50, ratio = float(row[1]), float(row[2]), float(row[3])
+    return _item(
+        row[0] or "(empty)",
+        p99,
+        p50,
+        "ms (P99 vs P50)",
+        {"p99_ms": p99, "p50_ms": p50, "ratio": ratio, "requests": row[4], "filters": {"url": row[0]}},
+        "critical" if ratio > 10 else "warning",
+        baseline_label="P50",
+    )
 
 
 _reg(
@@ -2792,19 +2775,15 @@ _reg(
 
 def cipher_spread_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [tls_ciphers_sha, w_ips, w_reqs, b_ips]
-    return {
-        "label": (row[0] or "")[:12] + "…" if row[0] and len(row[0]) > 12 else (row[0] or "(unknown)"),
-        "current_val": row[1],
-        "baseline_val": round(row[3] / max(context["baseline_hours"], 1) * context["window_hours"], 1),
-        "unit": "distinct IPs",
-        "meta": {
-            "requests": row[2],
-            "baseline_total_ips": row[3],
-            "sha": row[0],
-            "filters": {"tls_ciphers_sha": row[0]},
-        },
-        "severity": "critical" if row[1] >= 50 else "warning",
-    }
+    label = (row[0] or "")[:12] + "…" if row[0] and len(row[0]) > 12 else (row[0] or "(unknown)")
+    return _item(
+        label,
+        row[1],
+        round(_scale_baseline(row[3], context), 1),
+        "distinct IPs",
+        {"requests": row[2], "baseline_total_ips": row[3], "sha": row[0], "filters": {"tls_ciphers_sha": row[0]}},
+        "critical" if row[1] >= 50 else "warning",
+    )
 
 
 _reg(
@@ -2883,20 +2862,20 @@ _reg(
 
 def cache_ttl_mismatch_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [label, avg_ttl, avg_hits, avg_age, sample_count]
-    return {
-        "label": str(row[0] or "(unknown)"),
-        "current_val": float(row[2]),
-        "baseline_val": None,
-        "unit": "avg hits",
-        "meta": {
+    return _item(
+        str(row[0] or "(unknown)"),
+        float(row[2]),
+        None,
+        "avg hits",
+        {
             "avg_ttl_s": float(row[1]),
             "avg_hits": float(row[2]),
             "avg_age_s": float(row[3]),
             "samples": row[4],
             "filters": {"url": row[0]},
         },
-        "severity": "warning",
-    }
+        "warning",
+    )
 
 
 _reg(
@@ -2920,19 +2899,19 @@ def image_optimization_processor(row: tuple, definition: InsightDefinition, cont
         if total_bytes > 1024 * 1024 * 10 or avg_kb > 1024
         else ("warning" if total_bytes > 1024 * 1024 * 2 or (mob_ratio and mob_ratio > 0.5) else "info")
     )
-    return {
-        "label": url,
-        "current_val": avg_kb,
-        "baseline_val": None,
-        "unit": "KB avg",
-        "meta": {
+    return _item(
+        url,
+        avg_kb,
+        None,
+        "KB avg",
+        {
             "requests": req_count,
             "total_mb": round(total_bytes / (1024 * 1024), 2),
             "mobile_ratio": round(float(mob_ratio), 2) if mob_ratio is not None else 0,
             "filters": {"url": url},
         },
-        "severity": severity,
-    }
+        severity,
+    )
 
 
 _reg(
@@ -2951,14 +2930,14 @@ _reg(
 def origin_latency_spike_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [url, p95_ms, w_p95, b_p95, requests]
     url, p95_ms, w_p95, b_p95, requests = row
-    return {
-        "label": url or "(unknown)",
-        "current_val": float(p95_ms),
-        "baseline_val": round(b_p95, 1),
-        "unit": "ms P95",
-        "meta": {"requests": requests, "filters": {"url": url}},
-        "severity": "critical" if float(p95_ms) > b_p95 * 5 else "warning",
-    }
+    return _item(
+        url or "(unknown)",
+        float(p95_ms),
+        round(b_p95, 1),
+        "ms P95",
+        {"requests": requests, "filters": {"url": url}},
+        "critical" if float(p95_ms) > b_p95 * 5 else "warning",
+    )
 
 
 _reg(
@@ -2978,14 +2957,14 @@ def origin_error_rate_processor(row: tuple, definition: InsightDefinition, conte
     # row schema: [status, w_cnt, w_total, b_total, w_5xx, b_5xx]
     status, w_cnt, w_total, b_total, w_5xx, b_5xx = row
     w_rate = w_5xx * 100.0 / w_total
-    return {
-        "label": f"HTTP {status}",
-        "current_val": round(w_cnt * 100.0 / w_total, 1),
-        "baseline_val": None,
-        "unit": "%",
-        "meta": {"filters": {"ost": status}},
-        "severity": "critical" if w_rate > 5 else "warning",
-    }
+    return _item(
+        f"HTTP {status}",
+        round(w_cnt * 100.0 / w_total, 1),
+        None,
+        "%",
+        {"filters": {"ost": status}},
+        "critical" if w_rate > 5 else "warning",
+    )
 
 
 _reg(
@@ -3003,14 +2982,14 @@ _reg(
 
 def origin_retries_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [url, requests, avg_retries, max_retries]
-    return {
-        "label": row[0] or "(unknown)",
-        "current_val": float(row[2]),
-        "baseline_val": None,
-        "unit": "avg retries",
-        "meta": {"max_retries": int(row[3]), "filters": {"url": row[0]}},
-        "severity": "warning",
-    }
+    return _item(
+        row[0] or "(unknown)",
+        float(row[2]),
+        None,
+        "avg retries",
+        {"max_retries": int(row[3]), "filters": {"url": row[0]}},
+        "warning",
+    )
 
 
 _reg(
@@ -3028,14 +3007,14 @@ _reg(
 
 def origin_ip_failure_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [oip, requests, error_pct, median_rate]
-    return {
-        "label": row[0],
-        "current_val": float(row[2]),
-        "baseline_val": round(float(row[3]), 1),
-        "unit": "% errors",
-        "meta": {"requests": row[1], "filters": {"oip": row[0]}},
-        "severity": "critical" if float(row[2]) > 20 else "warning",
-    }
+    return _item(
+        row[0],
+        float(row[2]),
+        round(float(row[3]), 1),
+        "% errors",
+        {"requests": row[1], "filters": {"oip": row[0]}},
+        "critical" if float(row[2]) > 20 else "warning",
+    )
 
 
 _reg(
@@ -3055,15 +3034,14 @@ def shield_path_degradation_processor(row: tuple, definition: InsightDefinition,
     # row schema: [edge_pop, shield_pop, w_p50, b_p50, w_cnt]
     edge_pop, shield_pop, cur_p50, base_p50, reqs = row
     ratio = cur_p50 / base_p50 if base_p50 else 0
-
-    return {
-        "label": f"{edge_pop} → {shield_pop}",
-        "current_val": float(cur_p50),
-        "baseline_val": float(base_p50),
-        "unit": "ms P50",
-        "severity": "critical" if ratio >= 3.0 else "warning",
-        "meta": {"ratio": float(ratio), "requests": reqs},
-    }
+    return _item(
+        f"{edge_pop} → {shield_pop}",
+        float(cur_p50),
+        float(base_p50),
+        "ms P50",
+        {"ratio": float(ratio), "requests": reqs},
+        "critical" if ratio >= 3.0 else "warning",
+    )
 
 
 _reg(
@@ -3080,23 +3058,13 @@ _reg(
 
 
 def _process_repeated_patterns(
-    row: tuple,
-    *,
-    key_field: str,
-    diversity_key: str,
-    mask_key: bool,
-    context: dict,
+    row: tuple, *, key_field: str, diversity_key: str, mask_key: bool, context: dict
 ) -> dict:
     entity = _mask_ip_if_needed(row[0], context) if mask_key else row[0]
-
-    n_gaps = int(row[1] or 0)
-    n_events = int(row[2] or 0)
-    mean_interval = float(row[3] or 0)
-    stddev = float(row[4] or 0)
-    cv = float(row[5] or 0)
-    modal_frac = float(row[6] or 0)
-    diversity_val = int(row[7] or 0)
-    span_s = int(row[8] or 0)
+    n_gaps, n_events = int(row[1] or 0), int(row[2] or 0)
+    mean_interval, stddev = float(row[3] or 0), float(row[4] or 0)
+    cv, modal_frac = float(row[5] or 0), float(row[6] or 0)
+    diversity_val, span_s = int(row[7] or 0), int(row[8] or 0)
     mode_gap = int(row[9]) if row[9] is not None else None
     rps = round(n_events / span_s, 4) if span_s else 0.0
 
@@ -3109,20 +3077,13 @@ def _process_repeated_patterns(
 
     # Soft framing: this is a security *accusation* surfaced to a user, so prefer
     # false negatives. critical only when dense AND near-perfectly regular.
-    if score >= 90 and n_events >= 30:
-        severity = "critical"
-    elif score >= 70:
-        severity = "warning"
-    else:
-        severity = "info"
-
-    return {
-        "label": entity or "(unknown)",
-        "current_val": mean_interval,
-        "baseline_val": stddev,
-        "baseline_label": "jitter (σ)",
-        "unit": "s interval",
-        "meta": {
+    severity = "critical" if (score >= 90 and n_events >= 30) else ("warning" if score >= 70 else "info")
+    return _item(
+        entity or "(unknown)",
+        mean_interval,
+        stddev,
+        "s interval",
+        {
             "score": score,
             "cv": cv,
             "modal_frac": modal_frac,
@@ -3136,20 +3097,15 @@ def _process_repeated_patterns(
             diversity_key: diversity_val,
             "filters": {key_field: entity},
         },
-        "severity": severity,
-    }
+        severity,
+        baseline_label="jitter (σ)",
+    )
 
 
 def repeated_patterns_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [ip, n_gaps, n_events, avg_interval, stddev_interval, cv_corr,
     #              modal_frac, distinct_ua, span_s, mode_gap]
-    return _process_repeated_patterns(
-        row,
-        key_field="ip",
-        diversity_key="distinct_ua",
-        mask_key=True,
-        context=context,
-    )
+    return _process_repeated_patterns(row, key_field="ip", diversity_key="distinct_ua", mask_key=True, context=context)
 
 
 def repeated_patterns_severity(items: list[dict]) -> str:
@@ -3157,9 +3113,7 @@ def repeated_patterns_severity(items: list[dict]) -> str:
         return "clean"
     if any(i.get("severity") == "critical" for i in items):
         return "critical"
-    if any(i.get("severity") == "warning" for i in items):
-        return "warning"
-    return "info"
+    return "warning" if any(i.get("severity") == "warning" for i in items) else "info"
 
 
 _reg(
@@ -3184,11 +3138,7 @@ def repeated_patterns_fp_processor(row: tuple, definition: InsightDefinition, co
     #              cv_corr, modal_frac, distinct_ip, span_s, mode_gap]
     fp_col = context.get("fp_col", "ja4")
     return _process_repeated_patterns(
-        row,
-        key_field=fp_col,
-        diversity_key="distinct_ip",
-        mask_key=False,
-        context=context,
+        row, key_field=fp_col, diversity_key="distinct_ip", mask_key=False, context=context
     )
 
 
@@ -3214,24 +3164,15 @@ _reg(
 def low_and_slow_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [ip, hits, distinct_paths, span_s, rps]
     ip = _mask_ip_if_needed(row[0], context)
-    hits = int(row[1] or 0)
-    distinct_paths = int(row[2] or 0)
-    span_s = int(row[3] or 0)
-    rps = float(row[4] or 0)
-    return {
-        "label": ip or "(unknown)",
-        "current_val": distinct_paths,
-        "baseline_val": None,
-        "unit": "sensitive paths",
-        "meta": {
-            "hits": hits,
-            "distinct_paths": distinct_paths,
-            "span_s": span_s,
-            "rps": rps,
-            "filters": {"ip": ip},
-        },
-        "severity": "critical" if distinct_paths >= 10 else "warning",
-    }
+    hits, distinct_paths, span_s, rps = int(row[1] or 0), int(row[2] or 0), int(row[3] or 0), float(row[4] or 0)
+    return _item(
+        ip or "(unknown)",
+        distinct_paths,
+        None,
+        "sensitive paths",
+        {"hits": hits, "distinct_paths": distinct_paths, "span_s": span_s, "rps": rps, "filters": {"ip": ip}},
+        "critical" if distinct_paths >= 10 else "warning",
+    )
 
 
 _reg(
@@ -3253,26 +3194,23 @@ _reg(
 def credential_enumeration_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [ip, w_denied, w_attempts, w_paths, b_denied]
     ip = _mask_ip_if_needed(row[0], context)
-    w_denied = int(row[1] or 0)
-    w_attempts = int(row[2] or 0)
-    w_paths = int(row[3] or 0)
-    b_denied = int(row[4] or 0)
+    w_denied, w_attempts, w_paths, b_denied = int(row[1] or 0), int(row[2] or 0), int(row[3] or 0), int(row[4] or 0)
     fail_rate = round(w_denied * 100.0 / w_attempts, 1) if w_attempts else 0.0
-    return {
-        "label": ip or "(unknown)",
-        "current_val": w_denied,
-        "baseline_val": b_denied,
-        "baseline_label": "baseline denied",
-        "unit": "denied (401/403)",
-        "meta": {
+    return _item(
+        ip or "(unknown)",
+        w_denied,
+        b_denied,
+        "denied (401/403)",
+        {
             "attempts": w_attempts,
             "denied": w_denied,
             "fail_rate_pct": fail_rate,
             "distinct_paths": w_paths,
             "filters": {"ip": ip},
         },
-        "severity": "critical" if w_denied >= 100 else "warning",
-    }
+        "critical" if w_denied >= 100 else "warning",
+        baseline_label="baseline denied",
+    )
 
 
 _reg(
@@ -3295,20 +3233,16 @@ _reg(
 def network_asn_health_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [asn, w_ploss, b_ploss, w_jitter, b_jitter, w_retrans, b_retrans, w_total, b_total]
     asn = row[0]
-    w_ploss = float(row[1] or 0)
-    b_ploss = float(row[2] or 0)
-    w_jitter = float(row[3] or 0)
-    b_jitter = float(row[4] or 0)
-    w_retrans = float(row[5] or 0)
-    b_retrans = float(row[6] or 0)
+    w_ploss, b_ploss = float(row[1] or 0), float(row[2] or 0)
+    w_jitter, b_jitter = float(row[3] or 0), float(row[4] or 0)
+    w_retrans, b_retrans = float(row[5] or 0), float(row[6] or 0)
     w_total = int(row[7] or 0)
-
-    return {
-        "label": _fmt_asn_label(asn, context),
-        "current_val": round(w_ploss * 100, 2),
-        "baseline_val": round(b_ploss * 100, 2),
-        "unit": "% packet loss",
-        "meta": {
+    return _item(
+        _fmt_asn_label(asn, context),
+        round(w_ploss * 100, 2),
+        round(b_ploss * 100, 2),
+        "% packet loss",
+        {
             "window_packet_loss_pct": round(w_ploss * 100, 2),
             "baseline_packet_loss_pct": round(b_ploss * 100, 2),
             "window_jitter_ms": round(w_jitter / 1000.0, 1),
@@ -3319,8 +3253,8 @@ def network_asn_health_processor(row: tuple, definition: InsightDefinition, cont
             "asn": asn,
             "filters": {"asn": asn},
         },
-        "severity": "critical" if w_ploss >= 0.05 else "warning",
-    }
+        "critical" if w_ploss >= 0.05 else "warning",
+    )
 
 
 _reg(
@@ -3340,26 +3274,23 @@ _reg(
 def content_discovery_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [ip, w_404, w_total, distinct_404, b_404]
     ip = _mask_ip_if_needed(row[0], context)
-    w_404 = int(row[1] or 0)
-    w_total = int(row[2] or 0)
-    distinct_404 = int(row[3] or 0)
-    b_404 = int(row[4] or 0)
+    w_404, w_total, distinct_404, b_404 = int(row[1] or 0), int(row[2] or 0), int(row[3] or 0), int(row[4] or 0)
     ratio = round(w_404 * 100.0 / w_total, 1) if w_total else 0.0
-    return {
-        "label": ip or "(unknown)",
-        "current_val": w_404,
-        "baseline_val": b_404,
-        "baseline_label": "baseline 404s",
-        "unit": "404s",
-        "meta": {
+    return _item(
+        ip or "(unknown)",
+        w_404,
+        b_404,
+        "404s",
+        {
             "requests": w_total,
             "not_found": w_404,
             "not_found_rate_pct": ratio,
             "distinct_404_urls": distinct_404,
             "filters": {"ip": ip},
         },
-        "severity": "critical" if w_404 >= 100 else "warning",
-    }
+        "critical" if w_404 >= 100 else "warning",
+        baseline_label="baseline 404s",
+    )
 
 
 _reg(
@@ -3403,14 +3334,14 @@ def method_drift_processor(row: tuple, definition: InsightDefinition, context: d
     method, w_cnt, b_cnt, w_total, b_total = row
     w_rate = float(w_cnt * 100.0 / w_total) if w_total else 0.0
     b_rate = float(b_cnt * 100.0 / b_total) if b_total else 0.0
-    return {
-        "label": method or "(unknown)",
-        "current_val": w_rate,
-        "baseline_val": b_rate,
-        "unit": "% of traffic",
-        "meta": {"requests": w_cnt, "method": method, "filters": {"method": method}},
-        "severity": "critical" if w_rate >= 25 else "warning",
-    }
+    return _item(
+        method or "(unknown)",
+        w_rate,
+        b_rate,
+        "% of traffic",
+        {"requests": w_cnt, "method": method, "filters": {"method": method}},
+        "critical" if w_rate >= 25 else "warning",
+    )
 
 
 _reg(
@@ -3457,19 +3388,14 @@ def asn_hosting_shift_processor(row: tuple, definition: InsightDefinition, conte
     asn, w_hosting, w_total, b_hosting, b_total = row
     w_ratio = round(float(w_hosting * 100.0 / w_total), 1) if w_total else 0.0
     b_ratio = round(float(b_hosting * 100.0 / b_total), 1) if b_total else 0.0
-    return {
-        "label": _fmt_asn_label(asn, context),
-        "current_val": w_ratio,
-        "baseline_val": b_ratio,
-        "unit": "% hosting",
-        "meta": {
-            "window_hosting": w_hosting,
-            "window_total": w_total,
-            "asn": asn,
-            "filters": {"asn": asn},
-        },
-        "severity": "critical" if w_ratio >= 60 else "warning",
-    }
+    return _item(
+        _fmt_asn_label(asn, context),
+        w_ratio,
+        b_ratio,
+        "% hosting",
+        {"window_hosting": w_hosting, "window_total": w_total, "asn": asn, "filters": {"asn": asn}},
+        "critical" if w_ratio >= 60 else "warning",
+    )
 
 
 _reg(
@@ -3492,19 +3418,14 @@ def metro_delivery_degradation_processor(row: tuple, definition: InsightDefiniti
     # delivery_rate is bytes/sec; present as Mbps (×8 / 1e6).
     w_mbps = round(float(row[1] or 0) * 8 / 1e6, 1)
     b_mbps = round(float(row[2] or 0) * 8 / 1e6, 1)
-    return {
-        "label": _fmt_metro_label(metro, context),
-        "current_val": w_mbps,
-        "baseline_val": b_mbps,
-        "unit": "Mbps (median)",
-        "meta": {
-            "window_requests": row[3],
-            "window_mbps": w_mbps,
-            "baseline_mbps": b_mbps,
-            "filters": {"metro": metro},
-        },
-        "severity": "critical" if b_mbps > 0 and w_mbps <= b_mbps * 0.25 else "warning",
-    }
+    return _item(
+        _fmt_metro_label(metro, context),
+        w_mbps,
+        b_mbps,
+        "Mbps (median)",
+        {"window_requests": row[3], "window_mbps": w_mbps, "baseline_mbps": b_mbps, "filters": {"metro": metro}},
+        "critical" if b_mbps > 0 and w_mbps <= b_mbps * 0.25 else "warning",
+    )
 
 
 _reg(
@@ -3526,19 +3447,14 @@ def connection_type_mix_processor(row: tuple, definition: InsightDefinition, con
     c_type, c_speed, w_cnt, b_cnt, w_total, b_total = row
     w_rate = float(w_cnt * 100.0 / w_total) if w_total else 0.0
     b_rate = float(b_cnt * 100.0 / b_total) if b_total else 0.0
-    return {
-        "label": f"{c_type or '?'} / {c_speed or '?'}",
-        "current_val": w_rate,
-        "baseline_val": b_rate,
-        "unit": "% of typed traffic",
-        "meta": {
-            "requests": w_cnt,
-            "c_type": c_type,
-            "c_speed": c_speed,
-            "filters": {"c_type": c_type, "c_speed": c_speed},
-        },
-        "severity": "warning",
-    }
+    return _item(
+        f"{c_type or '?'} / {c_speed or '?'}",
+        w_rate,
+        b_rate,
+        "% of typed traffic",
+        {"requests": w_cnt, "c_type": c_type, "c_speed": c_speed, "filters": {"c_type": c_type, "c_speed": c_speed}},
+        "warning",
+    )
 
 
 _reg(
@@ -3579,20 +3495,20 @@ def http3_fallback_processor(row: tuple, definition: InsightDefinition, context:
     w_quic, w_total, b_quic, b_total = row
     w_share = round(w_quic * 100.0 / w_total, 1) if w_total else 0.0
     b_share = round(b_quic * 100.0 / b_total, 1) if b_total else 0.0
-    return {
-        "label": "HTTP/3 (QUIC) adoption",
-        "current_val": w_share,
-        "baseline_val": b_share,
-        "baseline_label": "baseline QUIC share",
-        "unit": "% QUIC",
-        "meta": {
+    return _item(
+        "HTTP/3 (QUIC) adoption",
+        w_share,
+        b_share,
+        "% QUIC",
+        {
             "window_quic": int(w_quic or 0),
             "window_total": int(w_total or 0),
             "share_drop_pts": round(b_share - w_share, 1),
             "filters": {"transport": "tcp"},
         },
-        "severity": "critical" if (b_share - w_share) >= 40 else "warning",
-    }
+        "critical" if (b_share - w_share) >= 40 else "warning",
+        baseline_label="baseline QUIC share",
+    )
 
 
 _reg(
@@ -3614,18 +3530,18 @@ def cache_hit_cliff_processor(row: tuple, definition: InsightDefinition, context
     w_hits, w_cacheable, b_hits, b_cacheable = row
     w_rate = round(w_hits * 100.0 / w_cacheable, 1) if w_cacheable else 0.0
     b_rate = round(b_hits * 100.0 / b_cacheable, 1) if b_cacheable else 0.0
-    return {
-        "label": "Service-wide cache HIT ratio",
-        "current_val": w_rate,
-        "baseline_val": b_rate,
-        "unit": "% HIT",
-        "meta": {
+    return _item(
+        "Service-wide cache HIT ratio",
+        w_rate,
+        b_rate,
+        "% HIT",
+        {
             "window_cacheable": int(w_cacheable or 0),
             "baseline_cacheable": int(b_cacheable or 0),
             "drop_pts": round(b_rate - w_rate, 1),
         },
-        "severity": "critical" if (b_rate - w_rate) >= 30 else "warning",
-    }
+        "critical" if (b_rate - w_rate) >= 30 else "warning",
+    )
 
 
 _reg(
@@ -3668,23 +3584,21 @@ _reg(
 def session_harvesting_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [ip, w_sessions, w_reqs, b_sessions]
     ip = _mask_ip_if_needed(row[0], context)
-    w_sessions = int(row[1] or 0)
-    w_reqs = int(row[2] or 0)
-    b_sessions = int(row[3] or 0)
-    return {
-        "label": ip or "(unknown)",
-        "current_val": w_sessions,
-        "baseline_val": b_sessions,
-        "baseline_label": "baseline sessions",
-        "unit": "distinct sessions",
-        "meta": {
+    w_sessions, w_reqs, b_sessions = int(row[1] or 0), int(row[2] or 0), int(row[3] or 0)
+    return _item(
+        ip or "(unknown)",
+        w_sessions,
+        b_sessions,
+        "distinct sessions",
+        {
             "requests": w_reqs,
             "distinct_sessions": w_sessions,
             "baseline_distinct_sessions": b_sessions,
             "filters": {"ip": ip},
         },
-        "severity": "critical" if w_sessions >= 100 else "warning",
-    }
+        "critical" if w_sessions >= 100 else "warning",
+        baseline_label="baseline sessions",
+    )
 
 
 _reg(
@@ -3702,10 +3616,7 @@ _reg(
 
 def timeout_split_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [w_conn, b_conn, w_read, b_read, w_total, b_total]  (ms P95)
-    w_conn = float(row[0] or 0)
-    b_conn = float(row[1] or 0)
-    w_read = float(row[2] or 0)
-    b_read = float(row[3] or 0)
+    w_conn, b_conn, w_read, b_read = float(row[0] or 0), float(row[1] or 0), float(row[2] or 0), float(row[3] or 0)
     conn_regressed = w_conn >= b_conn * 2 and (w_conn - b_conn) >= 50
     read_regressed = w_read >= b_read * 2 and (w_read - b_read) >= 100
     # Surface the dominant phase (larger absolute regression) as the headline.
@@ -3713,12 +3624,12 @@ def timeout_split_processor(row: tuple, definition: InsightDefinition, context: 
         phase, cur, base = "connect", round(w_conn, 1), round(b_conn, 1)
     else:
         phase, cur, base = "read", round(w_read, 1), round(b_read, 1)
-    return {
-        "label": f"Origin {phase} P95",
-        "current_val": cur,
-        "baseline_val": base,
-        "unit": "ms (P95)",
-        "meta": {
+    return _item(
+        f"Origin {phase} P95",
+        cur,
+        base,
+        "ms (P95)",
+        {
             "phase": phase,
             "connect_p95_ms": round(w_conn, 1),
             "baseline_connect_p95_ms": round(b_conn, 1),
@@ -3726,8 +3637,8 @@ def timeout_split_processor(row: tuple, definition: InsightDefinition, context: 
             "baseline_read_p95_ms": round(b_read, 1),
             "window_requests": int(row[4] or 0),
         },
-        "severity": "critical" if base > 0 and cur >= base * 3 else "warning",
-    }
+        "critical" if base > 0 and cur >= base * 3 else "warning",
+    )
 
 
 _reg(
@@ -3751,28 +3662,21 @@ def crawler_disparity_processor(row: tuple, definition: InsightDefinition, conte
     from backend.utils.bot_sources import resolve_bot_display_name
 
     brand = resolve_bot_display_name(row[0], default="Other Bot")
-    w_crawls = int(row[1] or 0)
-    w_referrals = int(row[2] or 0)
+    w_crawls, w_referrals = int(row[1] or 0), int(row[2] or 0)
     if len(row) >= 8:
-        w_bytes = int(row[3] or 0)
-        c_per_r = float(row[4] or 0)
-        b_c_per_r = float(row[5] or 0)
-        bytes_per_r = float(row[6] or 0)
-        b_bytes_per_r = float(row[7] or 0)
+        w_bytes, c_per_r, b_c_per_r = int(row[3] or 0), float(row[4] or 0), float(row[5] or 0)
+        bytes_per_r, b_bytes_per_r = float(row[6] or 0), float(row[7] or 0)
         bw_pct = round(float(row[8] or 0), 2) if len(row) >= 9 else 0.0
     else:
-        w_bytes = 0
-        c_per_r = float(row[3] or 0)
-        b_c_per_r = float(row[4] or 0)
-        bytes_per_r = 0.0
-        b_bytes_per_r = 0.0
-        bw_pct = 0.0
-    return {
-        "label": brand,
-        "current_val": c_per_r,
-        "baseline_val": b_c_per_r,
-        "unit": "crawls/referral",
-        "meta": {
+        w_bytes, c_per_r, b_c_per_r = 0, float(row[3] or 0), float(row[4] or 0)
+        bytes_per_r = b_bytes_per_r = bw_pct = 0.0
+    is_crit = c_per_r >= 5000 or w_bytes >= 500_000_000 or (bw_pct >= 10.0 and w_referrals == 0)
+    return _item(
+        brand,
+        c_per_r,
+        b_c_per_r,
+        "crawls/referral",
+        {
             "crawls": w_crawls,
             "referrals": w_referrals,
             "w_bytes": w_bytes,
@@ -3782,10 +3686,8 @@ def crawler_disparity_processor(row: tuple, definition: InsightDefinition, conte
             "bytes_per_referral": bytes_per_r,
             "baseline_bytes_per_referral": b_bytes_per_r,
         },
-        "severity": "critical"
-        if c_per_r >= 5000 or w_bytes >= 500_000_000 or (bw_pct >= 10.0 and w_referrals == 0)
-        else "warning",
-    }
+        "critical" if is_crit else "warning",
+    )
 
 
 _reg(
@@ -3804,23 +3706,16 @@ _reg(
 
 def stale_browser_version_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [label, w_reqs, w_ips, surge_ratio]
-    label = row[0] or "Unknown Chrome"
-    w_reqs = int(row[1] or 0)
-    w_ips = int(row[2] or 0)
-    surge = float(row[3] or 0)
-    return {
-        "label": label,
-        "current_val": w_reqs,
-        "baseline_val": w_ips,
-        "baseline_label": "distinct IPs",
-        "unit": "requests",
-        "meta": {
-            "requests": w_reqs,
-            "ips": w_ips,
-            "surge_ratio": surge,
-        },
-        "severity": "critical" if surge >= 5.0 else "warning",
-    }
+    label, w_reqs, w_ips, surge = row[0] or "Unknown Chrome", int(row[1] or 0), int(row[2] or 0), float(row[3] or 0)
+    return _item(
+        label,
+        w_reqs,
+        w_ips,
+        "requests",
+        {"requests": w_reqs, "ips": w_ips, "surge_ratio": surge},
+        "critical" if surge >= 5.0 else "warning",
+        baseline_label="distinct IPs",
+    )
 
 
 _reg(
@@ -3840,25 +3735,22 @@ _reg(
 def orphaned_deep_crawl_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [ip, w_reqs, w_distinct_urls, b_reqs, requests_per_url, surge_ratio]
     ip = _mask_ip_if_needed(row[0], context)
-    w_reqs = int(row[1] or 0)
-    w_distinct = int(row[2] or 0)
-    b_reqs = int(row[3] or 0)
-    reqs_per_url = float(row[4] or 0)
-    surge = float(row[5] or 0)
-    return {
-        "label": ip or "(unknown)",
-        "current_val": w_reqs,
-        "baseline_val": b_reqs,
-        "unit": "requests",
-        "meta": {
+    w_reqs, w_distinct, b_reqs = int(row[1] or 0), int(row[2] or 0), int(row[3] or 0)
+    reqs_per_url, surge = float(row[4] or 0), float(row[5] or 0)
+    return _item(
+        ip or "(unknown)",
+        w_reqs,
+        b_reqs,
+        "requests",
+        {
             "requests": w_reqs,
             "distinct_urls": w_distinct,
             "requests_per_url": reqs_per_url,
             "surge_ratio": surge,
             "filters": {"ip": ip},
         },
-        "severity": "critical" if reqs_per_url >= 20.0 else "warning",
-    }
+        "critical" if reqs_per_url >= 20.0 else "warning",
+    )
 
 
 _reg(
@@ -3878,26 +3770,17 @@ _reg(
 def residential_fingerprint_dispersion_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [ja4, w_ips, w_asns, w_requests, b_ips, asn_expansion_ratio]
     ja4 = row[0] or "(empty)"
-    w_ips = int(row[1] or 0)
-    w_asns = int(row[2] or 0)
-    w_requests = int(row[3] or 0)
-    b_ips = int(row[4] or 0)
-    asn_expansion = float(row[5] or 0)
-    return {
-        "label": ja4,
-        "current_val": w_asns,
-        "baseline_val": b_ips,
-        "baseline_label": "baseline IPs",
-        "unit": "ASNs",
-        "meta": {
-            "ja4": ja4,
-            "ips": w_ips,
-            "asns": w_asns,
-            "requests": w_requests,
-            "asn_expansion_ratio": asn_expansion,
-        },
-        "severity": "critical" if asn_expansion >= 3.0 else "warning",
-    }
+    w_ips, w_asns, w_requests = int(row[1] or 0), int(row[2] or 0), int(row[3] or 0)
+    b_ips, asn_expansion = int(row[4] or 0), float(row[5] or 0)
+    return _item(
+        ja4,
+        w_asns,
+        b_ips,
+        "ASNs",
+        {"ja4": ja4, "ips": w_ips, "asns": w_asns, "requests": w_requests, "asn_expansion_ratio": asn_expansion},
+        "critical" if asn_expansion >= 3.0 else "warning",
+        baseline_label="baseline IPs",
+    )
 
 
 _reg(

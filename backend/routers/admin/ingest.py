@@ -7,8 +7,8 @@ from collections.abc import Iterator
 from fastapi import Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from backend.core import quarantine
-from backend.core.metadata.quarantine import (
+from backend.core.metadata import ingest_log as quarantine
+from backend.core.metadata.ingest_log import (
     count_quarantine_evidence,
     get_quarantine_evidence,
     get_quarantine_evidence_summary,
@@ -24,7 +24,7 @@ from backend.models.admin import (
 )
 from backend.utils.router_utils import load_service_config, make_error, require_service_id, run_admin_cron_trigger
 
-from ._helpers import router
+from .high_scale import router
 
 
 @router.post(
@@ -111,7 +111,7 @@ def ledger_sweep_service(
     _admin: None = Depends(require_admin),
     source: dict = Depends(get_source),
 ) -> SyncStartResponse:
-    from backend.cron.jobs.rum_ledger import _run_ledger_sweep
+    from backend.cron.jobs.rum_sync import _run_ledger_sweep
 
     return run_admin_cron_trigger(
         source,
@@ -157,7 +157,7 @@ def rum_discovery_service(
     _admin: None = Depends(require_admin),
     source: dict = Depends(get_source),
 ) -> SyncStartResponse:
-    from backend.cron.jobs.rum_ledger import _run_rum_discovery_cron
+    from backend.cron.jobs.rum_sync import _run_rum_discovery_cron
 
     return run_admin_cron_trigger(
         source,
@@ -182,7 +182,7 @@ def rum_ledger_sweep_service(
     source: dict = Depends(get_source),
 ) -> SyncStartResponse:
     from backend import config as svcconfig
-    from backend.cron.jobs.rum_ledger import _run_rum_ledger_sweep
+    from backend.cron.jobs.rum_sync import _run_rum_ledger_sweep
 
     def _precheck() -> None:
         try:

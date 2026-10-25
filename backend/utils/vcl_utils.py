@@ -1,11 +1,138 @@
+from __future__ import annotations
+
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+from dataclasses import dataclass
+from typing import Any
 
-from backend.utils.vcl_safety import validate_log_format_macro
+from fastapi import HTTPException
+
+from backend.core.fastly.client import fastly
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Unified VCL safety validation (folded from backend.utils.vcl_safety)
+# ---------------------------------------------------------------------------
+
+
+class VclSafetyError(ValueError):
+    """Raised when a value can't be safely embedded in generated VCL.
+
+    Subclasses :class:`ValueError` so existing ``except ValueError``
+    handlers at legacy call sites keep catching it.
+    """
+
+
+_FORBIDDEN_STRICT = re.compile(r'["\\\x00-\x1f\x7f]')
+_FORBIDDEN_ALLOW_BACKSLASH = re.compile(r'["\x00-\x1f\x7f]')
+
+
+def validate_quoted_literal(value: str, *, allow_backslash: bool = False, field: str = "value") -> str:
+    """Validate a value destined for a VCL double-quoted string literal."""
+    pattern = _FORBIDDEN_ALLOW_BACKSLASH if allow_backslash else _FORBIDDEN_STRICT
+    m = pattern.search(value)
+    if m is not None:
+        raise VclSafetyError(
+            f"{field} contains a character unsafe to embed in a VCL string literal at offset "
+            f"{m.start()} ({value[m.start()]!r}); refusing to generate VCL "
+            "(values are validated upstream + Fastly /validate-gated, so this "
+            "indicates a caller that bypassed those checks)."
+        )
+    return value
+
+
+def validate_log_format_macro(macro: str) -> str:
+    """Validate the inline-VCL payload of a Fastly ``%{...}V`` log macro."""
+    if ";" in macro or "/*" in macro or "//" in macro or re.search(r"(?<!\\)[{}]", macro):
+        raise VclSafetyError("VCL macro contains invalid characters (;, /*, //, unescaped {, unescaped })")
+    return macro
+
+
+@dataclass
+class LintResult:
+    """Outcome of running falco on a VCL document."""
+
+    ok: bool
+    errors: list[str]
+    warnings: list[str]
+    skipped: bool = False
+    skipped_reason: str = ""
+
+
+def _parse_falco_output(returncode: int, out: str, err: str) -> tuple[list[str], list[str], int | None]:
+    """Parse falco ``-v`` output into (errors, warnings, summary_error_count)."""
+    out = out.strip()
+    err = err.strip()
+    combined = "\n".join(filter(None, [out, err]))
+
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    summary_re = re.compile(r"(\d+)\s+errors?\s*,\s*(\d+)\s+warnings?")
+    summary_match = None
+    for line in combined.splitlines():
+        if "errors" in line and "warnings" in line and summary_re.search(line):
+            summary_match = summary_re.search(line)
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if "[ERROR]" in stripped or "🔥 [ERROR]" in stripped:
+            errors.append(stripped)
+        elif "[WARNING]" in stripped or "❗ [WARNING]" in stripped:
+            warnings.append(stripped)
+        elif "[INFO]" in stripped or "🔈 [INFO]" in stripped:
+            warnings.append(stripped)
+
+    summary_errors = int(summary_match.group(1)) if summary_match else None
+    return errors, warnings, summary_errors
+
+
+def lint_document(
+    vcl_text: str,
+    *,
+    falco_bin: str | None = None,
+    snippet_name: str = "vcl_document",
+    timeout: int = 10,
+    verbose: bool = True,
+) -> LintResult:
+    """Run ``falco lint`` over a COMPLETE VCL document."""
+    if falco_bin is None:
+        falco_bin = shutil.which("falco")
+    if falco_bin is None:
+        logger.warning(
+            "[vcl_safety] falco binary not on PATH; static analysis skipped for %s "
+            "(production should install falco via the backend Dockerfile)",
+            snippet_name,
+        )
+        return LintResult(ok=True, errors=[], warnings=[], skipped=True, skipped_reason="falco binary not found")
+
+    try:
+        returncode, out, err = _run_falco_lint(falco_bin, vcl_text, timeout=timeout, verbose=verbose)
+    except subprocess.TimeoutExpired:
+        return LintResult(
+            ok=False,
+            errors=[f"falco lint timed out after {timeout}s for {snippet_name!r}"],
+            warnings=[],
+        )
+
+    errors, warnings, summary_errors = _parse_falco_output(returncode, out, err)
+    ok = summary_errors == 0 if summary_errors is not None else (returncode == 0 and not errors)
+
+    if summary_errors and summary_errors > 0 and not errors:
+        errors.append(
+            f"falco reported {summary_errors} error(s) but no parseable diagnostics; stdout={out.strip()[:200]!r}"
+        )
+
+    return LintResult(ok=ok, errors=errors, warnings=warnings)
 
 
 def _run_falco_lint(
@@ -211,12 +338,6 @@ def lint_log_format(format_str: str, snippets: dict[str, str] | None = None) -> 
 # ---------------------------------------------------------------------------
 
 import logging  # noqa: E402
-import sys  # noqa: E402
-from typing import Any  # noqa: E402
-
-from fastapi import HTTPException  # noqa: E402
-
-from backend.core.fastly.client import fastly  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -356,6 +477,8 @@ def validate_destructive_token(token: str, *, service_id: str) -> dict[str, Any]
 
 
 sys.modules["backend.utils.fastly_auth"] = sys.modules[__name__]
+sys.modules["backend.utils.vcl_safety"] = sys.modules[__name__]
 _utils_pkg = sys.modules.get("backend.utils")
 if _utils_pkg is not None:
     _utils_pkg.fastly_auth = sys.modules[__name__]  # type: ignore[attr-defined]
+    _utils_pkg.vcl_safety = sys.modules[__name__]  # type: ignore[attr-defined]

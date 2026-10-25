@@ -2,7 +2,7 @@ import { Suspense } from 'react'
 import type { Metadata } from 'next'
 import { notFound } from 'next/navigation'
 import { BackToAdminLink } from '@/components/ReportLayout'
-import { PageHeader } from '@/components/ui/page-header'
+import { PageHeader } from '@/components/ui/confirm-dialog'
 import ClickHouseAdminClient from './_sections/ClickHouseAdminClient'
 import { ClickHousePanelFallback } from './loading'
 

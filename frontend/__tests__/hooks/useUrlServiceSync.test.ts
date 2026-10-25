@@ -38,12 +38,13 @@ let mockState = {
   setActiveServiceId: mockSetActiveServiceId,
 }
 
-vi.mock('@/stores/serviceStore', () => {
+vi.mock('@/stores/filterStore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/filterStore')>()
   const useServiceStore = Object.assign(
     vi.fn((selector?: (s: typeof mockState) => unknown) => (selector ? selector(mockState) : mockState)),
     { getState: () => mockState },
   )
-  return { useServiceStore }
+  return { ...actual, useServiceStore }
 })
 
 beforeEach(() => {

@@ -22,7 +22,7 @@ source "$SCRIPT_DIR/lib/ratchet_common.sh"
 # Files allowed to use raw urllib.request/urlopen, each for a documented reason:
 #   - core/fastly/client.py          the central client itself (the sanctioned urllib user)
 #   - routers/provision.py           SSRF-safe domain probe only (Fastly-host calls go through fastly())
-#   - routers/admin/_helpers.py      pinned CDN download helper
+#   - routers/admin/high_scale.py    pinned CDN download helper
 #   - routers/admin/downloads.py     streaming CDN log download (not a Fastly API call)
 #   - core/iceberg/lake_info.py      pinned FOS/CDN fetch
 #   - core/iceberg/sync.py           pinned FOS/CDN fetch
@@ -30,7 +30,7 @@ source "$SCRIPT_DIR/lib/ratchet_common.sh"
 ALLOWLIST=(
   "backend/core/fastly/client.py"
   "backend/routers/provision.py"
-  "backend/routers/admin/_helpers.py"
+  "backend/routers/admin/high_scale.py"
   "backend/routers/admin/downloads.py"
   "backend/core/iceberg/lake_info.py"
   "backend/core/iceberg/sync.py"

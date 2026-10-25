@@ -31,15 +31,13 @@ import { createUseSSEMock } from '../../helpers/page-smoke'
 import { server } from '@/__tests__/helpers/msw/handlers'
 import { getApiBase } from '@/lib/api'
 
-vi.mock('@/stores/serviceStore', () => ({
+vi.mock('@/stores/filterStore', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/stores/filterStore')>()),
   useServiceStore: () => ({
     setActiveServiceId: vi.fn(),
     setServices: vi.fn(),
     services: [],
   }),
-}))
-
-vi.mock('@/stores/timezoneStore', () => ({
   useTimezoneStore: () => ({
     timezone: 'UTC',
   }),

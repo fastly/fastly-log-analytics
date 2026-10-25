@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { expect, test, vi, beforeEach } from 'vitest'
 import QueryPage from '@/app/query/page'
 import { createTestQueryClient, renderWithQuery } from '../helpers/page-smoke'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useServiceStore } from '@/stores/filterStore'
 import { useFilterStore } from '@/stores/filterStore'
 import {
   _resetUrlHydrationFlag,

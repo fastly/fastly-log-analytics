@@ -10,7 +10,7 @@ import type { components } from '@/types/api.generated'
 import { ColumnDef } from '@tanstack/react-table'
 import { FilterValueCell } from '@/components/DataTable'
 import { DataTable } from '@/components/DataTable'
-import { HelpDialog } from '@/components/ui/help-dialog'
+import { HelpDialog } from '@/components/ui/confirm-dialog'
 import { Button } from '@/components/ui/button'
 
 import { formatCount } from '@/lib/format'

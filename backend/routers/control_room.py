@@ -343,8 +343,8 @@ async def realtime_seed(
     _access: str | None = Depends(require_service_access),
 ):
     """Return the last 60 metrics ticks for instant chart hydration."""
-    from backend.core.realtime.poller import poller
     from backend.core.realtime.publisher import publisher as rt_publisher
+    from backend.core.realtime.transform import poller
 
     # Sync Redis I/O in valkey-backplane mode — keep it off the event loop.
     ticks = await asyncio.to_thread(rt_publisher.get_recent_ticks, service_id, 60)
@@ -372,8 +372,8 @@ async def realtime_stream(
     Emits ``metrics_tick`` events with live counters. The poller starts
     on first subscriber connect and suspends when all subscribers disconnect.
     """
-    from backend.core.realtime.poller import poller
     from backend.core.realtime.publisher import publisher as rt_publisher
+    from backend.core.realtime.transform import poller
     from backend.utils.sse import iter_with_disconnect_ping
 
     poller.ensure_polling(service_id)

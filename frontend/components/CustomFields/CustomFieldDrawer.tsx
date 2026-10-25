@@ -24,7 +24,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { LabelWithInfo } from '@/components/ui/label-with-info'
+import { LabelWithInfo } from '@/components/ui/confirm-dialog'
 import { extractApiError, customFieldsApi, type CustomField, type VclLintResult } from '@/lib/api'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, CheckCircle2, Loader2, Activity, Plus, Edit, Trash2, Download, Upload } from 'lucide-react'

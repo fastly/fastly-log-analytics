@@ -13,10 +13,10 @@ import { Alert, AlertDescription } from '@/components/ui/alert'
 import { useSSE, type SSELine } from '@/hooks/useSSE'
 import { adminJson, adminJsonResult, getPageLoadId } from '@/lib/api'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useServiceStore } from '@/stores/filterStore'
 import { useIsAnalyst } from '@/hooks/useBootstrap'
 import { useTimezone } from '@/hooks/useSSE'
-import { formatDate } from '@/lib/date'
+import { formatDate } from '@/lib/format'
 import { buildServiceHref } from '@/lib/utils'
 import dynamic from 'next/dynamic'
 import { RealtimeMetricCard } from './RealtimeChart'
@@ -551,7 +551,8 @@ interface TabCommonProps {
 
 interface MetricCardSpec {
   title: string
-  value: number
+  value?: number
+  decimals?: number
   suffix?: string
   rateFn?: (d: MetricsData) => number
   rates?: Array<{ label: string; value: number }>
@@ -574,8 +575,21 @@ function makeRates(rollingAvg: RollingAvgFn, fn: (d: MetricsData) => number) {
   ]
 }
 
+function seriesTraces(
+  series: SeriesFn,
+  specs: ReadonlyArray<readonly [name: string, color: string, fn: (d: MetricsData) => number, yaxis?: 'y' | 'y2']>,
+) {
+  return specs.map(([name, color, fn, yaxis]) => ({
+    y: series(fn),
+    name,
+    color,
+    ...(yaxis ? { yaxis } : {}),
+  }))
+}
+
 function MetricCardGrid({
   cols = 4,
+  data,
   items,
   cards,
   rollingAvg,
@@ -584,6 +598,7 @@ function MetricCardGrid({
   prefix,
 }: {
   cols?: 2 | 3 | 4 | 5
+  data?: MetricsData
   items?: MetricCardSpec[]
   cards?: MetricCardSpec[]
   rollingAvg?: RollingAvgFn
@@ -596,22 +611,26 @@ function MetricCardGrid({
   return (
     <div className={GRID_COL_CLASSES[cols]}>
       {prefix}
-      {list.map((item) => (
-        <RealtimeMetricCard
-          key={item.title}
-          title={item.title}
-          value={item.value}
-          suffix={item.suffix}
-          rates={item.rates ?? (item.rateFn && rollingAvg ? makeRates(rollingAvg, item.rateFn) : undefined)}
-          thresholds={item.thresholds ? {
-            warn: item.thresholds.warn,
-            critical: item.thresholds.critical,
-            direction: (item.thresholds.direction as 'above' | 'below' | undefined) ?? 'above',
-          } : undefined}
-          dimmed={isDimmed}
-          helpText={item.helpText}
-        />
-      ))}
+      {list.map((item) => {
+        const rawVal = item.value ?? (data && item.rateFn ? item.rateFn(data) : 0)
+        const val = item.decimals !== undefined ? Number(rawVal.toFixed(item.decimals)) : rawVal
+        return (
+          <RealtimeMetricCard
+            key={item.title}
+            title={item.title}
+            value={val}
+            suffix={item.suffix}
+            rates={item.rates ?? (item.rateFn && rollingAvg ? makeRates(rollingAvg, item.rateFn) : undefined)}
+            thresholds={item.thresholds ? {
+              warn: item.thresholds.warn,
+              critical: item.thresholds.critical,
+              direction: (item.thresholds.direction as 'above' | 'below' | undefined) ?? 'above',
+            } : undefined}
+            dimmed={isDimmed}
+            helpText={item.helpText}
+          />
+        )
+      })}
     </div>
   )
 }
@@ -665,19 +684,19 @@ function OverviewTab({
   return (
     <TabPanelShell rtDown={rtDown} historicalHref={historicalHref} historicalLabel="overview">
       <MetricCardGrid
+        data={data}
         rollingAvg={rollingAvg}
         rtDown={rtDown}
         items={[
           {
             title: 'Requests/s',
-            value: data?.requests_per_second ?? 0,
             suffix: ' req/s',
             rateFn: (d) => d.requests_per_second,
             helpText: 'Total HTTP requests per second across all Fastly edge PoPs. Rolling averages smooth out per-second spikes — the 60s average is most representative of sustained load.',
           },
           {
             title: 'Error Rate',
-            value: Number(((data?.error_rate ?? 0) * 100).toFixed(2)),
+            decimals: 2,
             suffix: '%',
             rateFn: (d) => d.error_rate * 100,
             thresholds: { warn: 1, critical: 5, direction: 'above' },
@@ -685,7 +704,7 @@ function OverviewTab({
           },
           {
             title: 'Cache Hit Ratio',
-            value: Number(((data?.cache_hit_ratio ?? 0) * 100).toFixed(1)),
+            decimals: 1,
             suffix: '%',
             rateFn: (d) => d.cache_hit_ratio * 100,
             thresholds: { warn: 90, critical: 50, direction: 'below' },
@@ -693,7 +712,7 @@ function OverviewTab({
           },
           {
             title: 'Bandwidth',
-            value: Number((data?.bandwidth_mbps ?? 0).toFixed(2)),
+            decimals: 2,
             suffix: ' Mbps',
             rateFn: (d) => d.bandwidth_mbps,
             helpText: 'Total bandwidth delivered across all PoPs in megabits per second, including both cached and origin-fetched content.',
@@ -706,26 +725,22 @@ function OverviewTab({
           title="Total Requests"
           helpText="Per-second request count across all PoPs. Sudden spikes may indicate traffic surges, bot activity, or DDoS events."
           yAxisSuffix=" req/s"
-          traces={[
-            {
-              y: series((d) => d.total_requests ?? d.requests_per_second),
-              name: 'Requests',
-              color: CHART_COLORS.info,
-            },
-          ]}
+          traces={seriesTraces(series, [
+            ['Requests', CHART_COLORS.info, (d) => d.total_requests ?? d.requests_per_second],
+          ])}
         />
         <RealtimeChart
           title="Status Code Breakdown"
           helpText="Per-second breakdown by HTTP status class. 2xx = success, 3xx = redirects, 4xx = client errors (broken links, auth failures), 5xx = origin/server errors."
           yAxisSuffix=" req/s"
           stacked
-          traces={[
-            { y: series((d) => d.status_breakdown?.status_1xx ?? 0), name: '1xx', color: CHART_COLORS.neutral },
-            { y: series((d) => d.status_breakdown?.status_2xx ?? 0), name: '2xx', color: '#22c55e' },
-            { y: series((d) => d.status_breakdown?.status_3xx ?? 0), name: '3xx', color: CHART_COLORS.info },
-            { y: series((d) => d.status_breakdown?.status_4xx ?? 0), name: '4xx', color: '#eab308' },
-            { y: series((d) => d.status_breakdown?.status_5xx ?? 0), name: '5xx', color: CHART_COLORS.danger },
-          ]}
+          traces={seriesTraces(series, [
+            ['1xx', CHART_COLORS.neutral, (d) => d.status_breakdown?.status_1xx ?? 0],
+            ['2xx', '#22c55e', (d) => d.status_breakdown?.status_2xx ?? 0],
+            ['3xx', CHART_COLORS.info, (d) => d.status_breakdown?.status_3xx ?? 0],
+            ['4xx', '#eab308', (d) => d.status_breakdown?.status_4xx ?? 0],
+            ['5xx', CHART_COLORS.danger, (d) => d.status_breakdown?.status_5xx ?? 0],
+          ])}
         />
       </div>
 
@@ -735,11 +750,11 @@ function OverviewTab({
           helpText="Hit = served from edge cache, Miss = fetched from origin and cached, Pass = bypassed cache entirely (uncacheable or VCL pass rules). A growing Pass ratio may indicate misconfigured cache rules."
           yAxisSuffix=" req/s"
           stacked
-          traces={[
-            { y: series((d) => d.total_hits ?? 0), name: 'Hit', color: '#22c55e' },
-            { y: series((d) => d.total_miss ?? 0), name: 'Miss', color: '#f97316' },
-            { y: series((d) => d.total_pass ?? 0), name: 'Pass', color: CHART_COLORS.neutral },
-          ]}
+          traces={seriesTraces(series, [
+            ['Hit', '#22c55e', (d) => d.total_hits ?? 0],
+            ['Miss', '#f97316', (d) => d.total_miss ?? 0],
+            ['Pass', CHART_COLORS.neutral, (d) => d.total_pass ?? 0],
+          ])}
         />
         <RealtimeChart
           title="Origin Load"
@@ -747,19 +762,10 @@ function OverviewTab({
           dualYAxis
           yAxisSuffix=" req/s"
           y2AxisSuffix="%"
-          traces={[
-            {
-              y: series((d) => d.origin_requests_per_second ?? 0),
-              name: 'Origin req/s',
-              color: CHART_COLORS.info,
-            },
-            {
-              y: series((d) => (d.cache_hit_ratio ?? 0) * 100),
-              name: 'Cache Hit %',
-              color: '#22c55e',
-              yaxis: 'y2',
-            },
-          ]}
+          traces={seriesTraces(series, [
+            ['Origin req/s', CHART_COLORS.info, (d) => d.origin_requests_per_second ?? 0],
+            ['Cache Hit %', '#22c55e', (d) => (d.cache_hit_ratio ?? 0) * 100, 'y2'],
+          ])}
         />
       </div>
 
@@ -768,29 +774,39 @@ function OverviewTab({
           title="2xx/3xx Status Codes"
           yAxisSuffix=" req/s"
           stacked
-          traces={[
-            { y: series((d) => d.status_detail?.["200"] ?? 0), name: '200', color: '#22c55e' },
-            { y: series((d) => d.status_detail?.["204"] ?? 0), name: '204', color: '#86efac' },
-            { y: series((d) => d.status_detail?.["301"] ?? 0), name: '301', color: CHART_COLORS.info },
-            { y: series((d) => d.status_detail?.["302"] ?? 0), name: '302', color: '#93c5fd' },
-            { y: series((d) => d.status_detail?.["304"] ?? 0), name: '304', color: '#6366f1' },
-          ]}
+          traces={seriesTraces(
+            series,
+            (
+              [
+                ['200', '#22c55e'],
+                ['204', '#86efac'],
+                ['301', CHART_COLORS.info],
+                ['302', '#93c5fd'],
+                ['304', '#6366f1'],
+              ] as const
+            ).map(([code, color]) => [code, color, (d: MetricsData) => d.status_detail?.[code] ?? 0]),
+          )}
         />
         <RealtimeChart
           title="4xx/5xx Status Codes"
           yAxisSuffix=" req/s"
           stacked
-          traces={[
-            { y: series((d) => d.status_detail?.["400"] ?? 0), name: '400', color: '#eab308' },
-            { y: series((d) => d.status_detail?.["401"] ?? 0), name: '401', color: CHART_COLORS.warning },
-            { y: series((d) => d.status_detail?.["403"] ?? 0), name: '403', color: '#f97316' },
-            { y: series((d) => d.status_detail?.["404"] ?? 0), name: '404', color: '#fb923c' },
-            { y: series((d) => d.status_detail?.["429"] ?? 0), name: '429', color: CHART_COLORS.danger },
-            { y: series((d) => d.status_detail?.["500"] ?? 0), name: '500', color: '#dc2626' },
-            { y: series((d) => d.status_detail?.["502"] ?? 0), name: '502', color: '#b91c1c' },
-            { y: series((d) => d.status_detail?.["503"] ?? 0), name: '503', color: '#991b1b' },
-            { y: series((d) => d.status_detail?.["504"] ?? 0), name: '504', color: '#7f1d1d' },
-          ]}
+          traces={seriesTraces(
+            series,
+            (
+              [
+                ['400', '#eab308'],
+                ['401', CHART_COLORS.warning],
+                ['403', '#f97316'],
+                ['404', '#fb923c'],
+                ['429', CHART_COLORS.danger],
+                ['500', '#dc2626'],
+                ['502', '#b91c1c'],
+                ['503', '#991b1b'],
+                ['504', '#7f1d1d'],
+              ] as const
+            ).map(([code, color]) => [code, color, (d: MetricsData) => d.status_detail?.[code] ?? 0]),
+          )}
         />
       </div>
 
@@ -897,12 +913,13 @@ function PerformanceTab({ tick, rtDown, historicalHref, series, rollingAvg }: Ta
   return (
     <TabPanelShell rtDown={rtDown} historicalHref={historicalHref} historicalLabel="performance">
       <MetricCardGrid
+        data={data}
         rollingAvg={rollingAvg}
         rtDown={rtDown}
         items={[
           {
             title: 'Cache Hit Ratio',
-            value: Number(((data?.cache_hit_ratio ?? 0) * 100).toFixed(1)),
+            decimals: 1,
             suffix: '%',
             rateFn: (d) => d.cache_hit_ratio * 100,
             thresholds: { warn: 90, critical: 50, direction: 'below' },
@@ -910,14 +927,13 @@ function PerformanceTab({ tick, rtDown, historicalHref, series, rollingAvg }: Ta
           },
           {
             title: 'Origin Requests/s',
-            value: data?.origin_requests_per_second ?? 0,
             suffix: ' req/s',
             rateFn: (d) => d.origin_requests_per_second ?? 0,
             helpText: "Requests that reached your origin server per second. Lower is better — it means more traffic is being served from Fastly's edge cache.",
           },
           {
             title: 'Bandwidth Offload',
-            value: Number(((data?.origin_offload ?? 0) * 100).toFixed(1)),
+            decimals: 1,
             suffix: '%',
             thresholds: { warn: 80, critical: 50, direction: 'below' },
             rateFn: (d) => (d.origin_offload ?? 0) * 100,
@@ -925,7 +941,6 @@ function PerformanceTab({ tick, rtDown, historicalHref, series, rollingAvg }: Ta
           },
           {
             title: 'Pass-through',
-            value: data?.pass_requests ?? 0,
             suffix: ' req',
             rateFn: (d) => d.pass_requests ?? 0,
             helpText: 'Requests that bypassed cache entirely — either uncacheable content types or explicit VCL pass rules. Every pass request hits your origin.',
@@ -933,33 +948,30 @@ function PerformanceTab({ tick, rtDown, historicalHref, series, rollingAvg }: Ta
         ]}
       />
       <MetricCardGrid
+        data={data}
         rollingAvg={rollingAvg}
         rtDown={rtDown}
         items={[
           {
             title: 'Collapse Usable',
-            value: data?.request_collapse_usable ?? 0,
             suffix: ' req',
             rateFn: (d) => d.request_collapse_usable ?? 0,
             helpText: 'Requests eligible for request collapsing — multiple identical requests are collapsed into a single origin fetch. Higher counts mean more origin load reduction.',
           },
           {
             title: 'Collapse Unusable',
-            value: data?.request_collapse_unusable ?? 0,
             suffix: ' req',
             rateFn: (d) => d.request_collapse_unusable ?? 0,
             helpText: 'Requests that could not be collapsed (e.g., different Vary headers, POST requests). High unusable counts may indicate opportunities to improve cache key design.',
           },
           {
             title: 'Segment Origin Fetches',
-            value: data?.segblock_origin_fetches ?? 0,
             suffix: ' req',
             rateFn: (d) => d.segblock_origin_fetches ?? 0,
             helpText: 'Segment block fetches to origin for large objects. Fastly breaks large files into segments cached independently, enabling range requests and parallel fetching.',
           },
           {
             title: 'Segment Shield Fetches',
-            value: data?.segblock_shield_fetches ?? 0,
             suffix: ' req',
             rateFn: (d) => d.segblock_shield_fetches ?? 0,
             helpText: 'Segment block fetches handled at the shield PoP. When these are high relative to origin fetches, segmented caching is working well.',
@@ -970,32 +982,28 @@ function PerformanceTab({ tick, rtDown, historicalHref, series, rollingAvg }: Ta
         <RealtimeChart
           title="Cache Hit Ratio"
           yAxisSuffix="%"
-          traces={[
-            {
-              y: series((d) => d.cache_hit_ratio * 100),
-              name: 'Hit Ratio %',
-              color: '#22c55e',
-              },
-          ]}
+          traces={seriesTraces(series, [
+            ['Hit Ratio %', '#22c55e', (d) => d.cache_hit_ratio * 100],
+          ])}
         />
         <RealtimeChart
           title="Origin Latency Breakdown"
           yAxisSuffix=" req/s"
-          traces={[
-            { y: series((d) => d.origin_requests_per_second ?? 0), name: 'Origin req/s', color: CHART_COLORS.info },
-            { y: series((d) => d.pass_requests ?? 0), name: 'Pass', color: '#f97316' },
-          ]}
+          traces={seriesTraces(series, [
+            ['Origin req/s', CHART_COLORS.info, (d) => d.origin_requests_per_second ?? 0],
+            ['Pass', '#f97316', (d) => d.pass_requests ?? 0],
+          ])}
         />
       </div>
       <RealtimeChart
         title="Cache Path Latency (ms)"
         helpText="Time-to-first-byte by cache path. Hit latency is edge-only (fast). Miss includes origin round-trip plus caching. Pass includes origin round-trip with no caching overhead."
         yAxisSuffix=" ms"
-        traces={[
-          { y: series((d) => d.hit_latency_ms ?? 0), name: 'Hit', color: '#22c55e' },
-          { y: series((d) => d.miss_latency_ms ?? 0), name: 'Miss', color: '#f97316' },
-          { y: series((d) => d.pass_latency_ms ?? 0), name: 'Pass', color: CHART_COLORS.neutral },
-        ]}
+        traces={seriesTraces(series, [
+          ['Hit', '#22c55e', (d) => d.hit_latency_ms ?? 0],
+          ['Miss', '#f97316', (d) => d.miss_latency_ms ?? 0],
+          ['Pass', CHART_COLORS.neutral, (d) => d.pass_latency_ms ?? 0],
+        ])}
       />
       <div className="grid gap-6 md:grid-cols-2">
         <RealtimeChart
@@ -1003,37 +1011,50 @@ function PerformanceTab({ tick, rtDown, historicalHref, series, rollingAvg }: Ta
           helpText="Distribution of response body sizes. Large objects may benefit from segmented caching; many small objects benefit from request collapsing."
           yAxisSuffix=" req/s"
           stacked
-          traces={[
-            { y: series((d) => d.object_size_distribution?.["1k"] ?? 0), name: '<1KB', color: CHART_COLORS.neutral },
-            { y: series((d) => d.object_size_distribution?.["10k"] ?? 0), name: '1-10KB', color: CHART_COLORS.info },
-            { y: series((d) => d.object_size_distribution?.["100k"] ?? 0), name: '10-100KB', color: '#22c55e' },
-            { y: series((d) => d.object_size_distribution?.["1m"] ?? 0), name: '100KB-1MB', color: '#eab308' },
-            { y: series((d) => d.object_size_distribution?.["10m"] ?? 0), name: '1-10MB', color: '#f97316' },
-            { y: series((d) => d.object_size_distribution?.["100m"] ?? 0), name: '10-100MB', color: CHART_COLORS.danger },
-            { y: series((d) => d.object_size_distribution?.["1g"] ?? 0), name: '100MB-1GB', color: '#8b5cf6' },
-            { y: series((d) => d.object_size_distribution?.["other"] ?? 0), name: 'Other', color: '#6b7280' },
-          ]}
+          traces={seriesTraces(
+            series,
+            (
+              [
+                ['<1KB', CHART_COLORS.neutral, '1k'],
+                ['1-10KB', CHART_COLORS.info, '10k'],
+                ['10-100KB', '#22c55e', '100k'],
+                ['100KB-1MB', '#eab308', '1m'],
+                ['1-10MB', '#f97316', '10m'],
+                ['10-100MB', CHART_COLORS.danger, '100m'],
+                ['100MB-1GB', '#8b5cf6', '1g'],
+                ['Other', '#6b7280', 'other'],
+              ] as const
+            ).map(([name, color, k]) => [name, color, (d: MetricsData) => d.object_size_distribution?.[k] ?? 0]),
+          )}
         />
         <RealtimeChart
           title="Origin Response Time (ms)"
           helpText="Histogram of origin response times for cache misses. A shift toward higher buckets (>250ms) signals origin degradation or upstream latency."
           yAxisSuffix=" req/s"
           stacked
-          traces={[
-            { y: series((d) => d.miss_histogram?.["10"] ?? 0), name: '<10ms', color: '#22c55e' },
-            { y: series((d) => d.miss_histogram?.["20"] ?? 0), name: '10-20ms', color: '#86efac' },
-            { y: series((d) => d.miss_histogram?.["30"] ?? 0), name: '20-30ms', color: CHART_COLORS.info },
-            { y: series((d) => d.miss_histogram?.["60"] ?? 0), name: '30-60ms', color: '#93c5fd' },
-            { y: series((d) => d.miss_histogram?.["120"] ?? 0), name: '60-120ms', color: '#eab308' },
-            { y: series((d) => d.miss_histogram?.["250"] ?? 0), name: '120-250ms', color: '#f97316' },
-            { y: series((d) => d.miss_histogram?.["500"] ?? 0), name: '250-500ms', color: CHART_COLORS.danger },
-            { y: series((d) => d.miss_histogram?.["1000"] ?? 0), name: '500ms-1s', color: '#dc2626' },
-            { y: series((d) => {
-              const h = d.miss_histogram ?? {}
-              const known = ["10","20","30","60","120","250","500","1000"]
-              return Object.entries(h).reduce((sum, [k, v]) => known.includes(k) ? sum : sum + v, 0)
-            }), name: '>1s', color: '#7f1d1d' },
-          ]}
+          traces={seriesTraces(series, [
+            ...(
+              [
+                ['<10ms', '#22c55e', '10'],
+                ['10-20ms', '#86efac', '20'],
+                ['20-30ms', CHART_COLORS.info, '30'],
+                ['30-60ms', '#93c5fd', '60'],
+                ['60-120ms', '#eab308', '120'],
+                ['120-250ms', '#f97316', '250'],
+                ['250-500ms', CHART_COLORS.danger, '500'],
+                ['500ms-1s', '#dc2626', '1000'],
+              ] as const
+            ).map(([name, color, k]) => [name, color, (d: MetricsData) => d.miss_histogram?.[k] ?? 0] as const),
+            [
+              '>1s',
+              '#7f1d1d',
+              (d: MetricsData) => {
+                const h = d.miss_histogram ?? {}
+                const known = ['10', '20', '30', '60', '120', '250', '500', '1000']
+                return Object.entries(h).reduce((sum, [k, v]) => (known.includes(k) ? sum : sum + v), 0)
+              },
+            ],
+          ])}
         />
       </div>
     </TabPanelShell>
@@ -1046,59 +1067,55 @@ function PerformanceTab({ tick, rtDown, historicalHref, series, rollingAvg }: Ta
 
 function OriginTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCommonProps) {
   const data = tick?.data
-  const rates = (fn: (d: MetricsData) => number) => makeRates(rollingAvg, fn)
   return (
     <TabPanelShell rtDown={rtDown} historicalHref={historicalHref} historicalLabel="origin">
       <MetricCardGrid
+        data={data}
+        rollingAvg={rollingAvg}
         dimmed={rtDown}
         cards={[
           {
             title: 'Origin Requests/s',
-            value: data?.origin_requests_per_second ?? 0,
             suffix: ' req/s',
-            rates: rates((d) => d.origin_requests_per_second ?? 0),
+            rateFn: (d) => d.origin_requests_per_second ?? 0,
             helpText: 'Requests per second reaching your origin server. Lower is better — cache and shield should absorb most traffic before it gets here.',
           },
           {
             title: 'Origin Bandwidth',
-            value: Number((data?.origin_bandwidth_mbps ?? 0).toFixed(2)),
+            decimals: 2,
             suffix: ' Mbps',
-            rates: rates((d) => d.origin_bandwidth_mbps ?? 0),
+            rateFn: (d) => d.origin_bandwidth_mbps ?? 0,
             helpText: 'Bandwidth transferred from your origin server to Fastly. This is your origin egress — lower means better cache offload.',
           },
           {
             title: 'Shield Requests',
-            value: data?.shield_requests ?? 0,
             suffix: ' req',
-            rates: rates((d) => d.shield_requests ?? 0),
+            rateFn: (d) => d.shield_requests ?? 0,
             helpText: 'Requests routed through the shield PoP — a mid-tier cache between edge PoPs and your origin. The shield absorbs duplicate misses from multiple edge PoPs.',
           },
           {
             title: 'Shield Hit Ratio',
-            value: Number(((data?.shield_hit_ratio ?? 0) * 100).toFixed(1)),
+            decimals: 1,
             suffix: '%',
-            rates: rates((d) => (d.shield_hit_ratio ?? 0) * 100),
+            rateFn: (d) => (d.shield_hit_ratio ?? 0) * 100,
             helpText: 'Percentage of shield requests served from the shield cache. Higher means fewer requests reach your origin.',
           },
           {
             title: 'Origin Fetches',
-            value: data?.origin_fetches ?? 0,
             suffix: ' req',
-            rates: rates((d) => d.origin_fetches ?? 0),
+            rateFn: (d) => d.origin_fetches ?? 0,
             helpText: 'Total fetch requests sent from Fastly to your origin. Includes full fetches, revalidations, and cache-eligible fetches. This is the broadest measure of origin load.',
           },
           {
             title: 'Revalidations',
-            value: data?.origin_revalidations ?? 0,
             suffix: ' req',
-            rates: rates((d) => d.origin_revalidations ?? 0),
+            rateFn: (d) => d.origin_revalidations ?? 0,
             helpText: 'Conditional requests (If-Modified-Since/If-None-Match) sent to your origin. When the origin returns 304 Not Modified, Fastly reuses the cached copy — cheaper than a full fetch.',
           },
           {
             title: 'Cache Fetches',
-            value: data?.origin_cache_fetches ?? 0,
             suffix: ' req',
-            rates: rates((d) => d.origin_cache_fetches ?? 0),
+            rateFn: (d) => d.origin_cache_fetches ?? 0,
             helpText: 'Origin fetches that returned a cacheable response (the response will be stored and served to future requests). A low ratio of cache fetches to total fetches may indicate your origin is sending too many no-cache/private headers.',
           },
         ]}
@@ -1108,50 +1125,49 @@ function OriginTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabComm
         dualYAxis
         yAxisSuffix=" req/s"
         y2AxisSuffix="%"
-        traces={[
-          { y: series((d) => d.origin_requests_per_second ?? 0), name: 'Origin req/s', color: CHART_COLORS.info },
-          { y: series((d) => (d.shield_hit_ratio ?? 0) * 100), name: 'Shield Hit %', color: '#22c55e', yaxis: 'y2' },
-        ]}
+        traces={seriesTraces(series, [
+          ['Origin req/s', CHART_COLORS.info, (d) => d.origin_requests_per_second ?? 0],
+          ['Shield Hit %', '#22c55e', (d) => (d.shield_hit_ratio ?? 0) * 100, 'y2'],
+        ])}
       />
       <RealtimeChart
         title="Origin Fetch Breakdown"
         helpText="Fetches = full origin requests. Revalidations = conditional requests (If-Modified-Since/ETag) that are cheaper than full fetches. Cache Fetches = requests to origin that resulted in a cacheable response."
         yAxisSuffix=" req/s"
         stacked
-        traces={[
-          { y: series((d) => d.origin_fetches ?? 0), name: 'Fetches', color: CHART_COLORS.info },
-          { y: series((d) => d.origin_revalidations ?? 0), name: 'Revalidations', color: '#22c55e' },
-          { y: series((d) => d.origin_cache_fetches ?? 0), name: 'Cache Fetches', color: '#eab308' },
-        ]}
+        traces={seriesTraces(series, [
+          ['Fetches', CHART_COLORS.info, (d) => d.origin_fetches ?? 0],
+          ['Revalidations', '#22c55e', (d) => d.origin_revalidations ?? 0],
+          ['Cache Fetches', '#eab308', (d) => d.origin_cache_fetches ?? 0],
+        ])}
       />
 
       <SectionHeading>Shield Efficiency</SectionHeading>
       <MetricCardGrid
+        data={data}
+        rollingAvg={rollingAvg}
         dimmed={rtDown}
         cards={[
           {
             title: 'Shield Hits',
-            value: data?.shield_hit_requests ?? 0,
-            rates: rates((d) => d.shield_hit_requests ?? 0),
+            rateFn: (d) => d.shield_hit_requests ?? 0,
             helpText: "Requests served from the shield PoP's cache, preventing duplicate origin fetches from multiple edge PoPs.",
           },
           {
             title: 'Shield Misses',
-            value: data?.shield_miss_requests ?? 0,
-            rates: rates((d) => d.shield_miss_requests ?? 0),
+            rateFn: (d) => d.shield_miss_requests ?? 0,
             helpText: 'Requests that missed the shield cache and were forwarded to your origin. Every shield miss becomes an origin fetch.',
           },
           {
             title: 'Shield Revalidations',
-            value: data?.shield_revalidations ?? 0,
-            rates: rates((d) => d.shield_revalidations ?? 0),
+            rateFn: (d) => d.shield_revalidations ?? 0,
             helpText: 'Conditional requests at the shield tier — the shield checks with origin whether stale content is still valid. A 304 response avoids transferring the full object.',
           },
           {
             title: 'Shield Fetch Bytes',
-            value: Number(((data?.shield_fetch_body_bytes ?? 0) / 1_000_000).toFixed(2)),
+            decimals: 2,
             suffix: ' MB',
-            rates: rates((d) => (d.shield_fetch_body_bytes ?? 0) / 1_000_000),
+            rateFn: (d) => (d.shield_fetch_body_bytes ?? 0) / 1_000_000,
             helpText: 'Total bytes fetched through the shield tier from origin. This represents the bandwidth your origin actually serves — compare against total edge bandwidth to measure offload efficiency.',
           },
         ]}
@@ -1161,11 +1177,11 @@ function OriginTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabComm
         helpText="Shield-tier cache breakdown. Hits = served from shield cache. Misses = forwarded to origin. Revalidations = conditional requests (304 responses) that avoid full origin fetches."
         yAxisSuffix=" req/s"
         stacked
-        traces={[
-          { y: series((d) => d.shield_hit_requests ?? 0), name: 'Hits', color: '#22c55e' },
-          { y: series((d) => d.shield_miss_requests ?? 0), name: 'Misses', color: '#f97316' },
-          { y: series((d) => d.shield_revalidations ?? 0), name: 'Revalidations', color: CHART_COLORS.info },
-        ]}
+        traces={seriesTraces(series, [
+          ['Hits', '#22c55e', (d) => d.shield_hit_requests ?? 0],
+          ['Misses', '#f97316', (d) => d.shield_miss_requests ?? 0],
+          ['Revalidations', CHART_COLORS.info, (d) => d.shield_revalidations ?? 0],
+        ])}
       />
     </TabPanelShell>
   )
@@ -1178,7 +1194,6 @@ function OriginTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabComm
 function SecurityTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCommonProps) {
   const data = tick?.data
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
-  const rates = (fn: (d: MetricsData) => number) => makeRates(rollingAvg, fn)
 
   const issued = data?.bot_challenges_issued ?? 0
   const succeeded = data?.bot_challenges_succeeded ?? 0
@@ -1188,34 +1203,32 @@ function SecurityTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCo
   return (
     <TabPanelShell rtDown={rtDown} historicalHref={historicalHref} historicalLabel="security">
       <MetricCardGrid
+        data={data}
+        rollingAvg={rollingAvg}
         dimmed={rtDown}
         cards={[
           {
             title: 'WAF Blocked',
-            value: data?.waf_blocked ?? 0,
             suffix: ' req',
-            rates: rates((d) => d.waf_blocked ?? 0),
+            rateFn: (d) => d.waf_blocked ?? 0,
             helpText: 'Requests blocked by the Web Application Firewall. These matched a WAF rule configured to block — the request never reached your origin.',
           },
           {
             title: 'WAF Logged',
-            value: data?.waf_logged ?? 0,
             suffix: ' req',
-            rates: rates((d) => d.waf_logged ?? 0),
+            rateFn: (d) => d.waf_logged ?? 0,
             helpText: 'Requests that triggered a WAF rule in logging mode — suspicious but allowed through. Use logged events to tune rules before switching them to block mode.',
           },
           {
             title: '4xx Responses',
-            value: data?.status_breakdown?.status_4xx ?? 0,
             suffix: ' req',
-            rates: rates((d) => d.status_breakdown?.status_4xx ?? 0),
+            rateFn: (d) => d.status_breakdown?.status_4xx ?? 0,
             helpText: 'Client error responses (400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found, 429 Rate Limited). Spikes may indicate scanning activity, broken links, or auth issues.',
           },
           {
             title: '5xx Responses',
-            value: data?.status_breakdown?.status_5xx ?? 0,
             suffix: ' req',
-            rates: rates((d) => d.status_breakdown?.status_5xx ?? 0),
+            rateFn: (d) => d.status_breakdown?.status_5xx ?? 0,
             thresholds: { warn: 1, critical: 10, direction: 'above' },
             helpText: 'Server error responses. 502/503 typically indicate origin unreachable or overloaded. 500 indicates an application error. Any sustained 5xx traffic warrants immediate investigation.',
           },
@@ -1227,20 +1240,20 @@ function SecurityTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCo
           helpText="Blocked = attack prevented at the edge. Logged = suspicious traffic allowed through for monitoring. Passed = clean traffic that matched no WAF rules."
           yAxisSuffix=" req/s"
           stacked
-          traces={[
-            { y: series((d) => d.waf_blocked ?? 0), name: 'Blocked', color: CHART_COLORS.danger },
-            { y: series((d) => d.waf_logged ?? 0), name: 'Logged', color: '#eab308' },
-            { y: series((d) => d.waf_passed ?? 0), name: 'Passed', color: '#22c55e' },
-          ]}
+          traces={seriesTraces(series, [
+            ['Blocked', CHART_COLORS.danger, (d) => d.waf_blocked ?? 0],
+            ['Logged', '#eab308', (d) => d.waf_logged ?? 0],
+            ['Passed', '#22c55e', (d) => d.waf_passed ?? 0],
+          ])}
         />
         <RealtimeChart
           title="Error Codes"
           helpText="4xx errors are client-side (bad requests, auth failures, not found). 5xx errors are server-side (origin errors, timeouts). Correlated spikes suggest an incident."
           yAxisSuffix=" req/s"
-          traces={[
-            { y: series((d) => d.status_breakdown?.status_4xx ?? 0), name: '4xx', color: '#eab308' },
-            { y: series((d) => d.status_breakdown?.status_5xx ?? 0), name: '5xx', color: CHART_COLORS.danger },
-          ]}
+          traces={seriesTraces(series, [
+            ['4xx', '#eab308', (d) => d.status_breakdown?.status_4xx ?? 0],
+            ['5xx', CHART_COLORS.danger, (d) => d.status_breakdown?.status_5xx ?? 0],
+          ])}
         />
       </div>
 
@@ -1268,12 +1281,12 @@ function SecurityTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCo
         helpText="Bot management funnel. Passed = completed challenge (likely human). Failed = failed challenge (likely bot). Detected = classified as bot by fingerprinting. AI Crawlers = identified AI training crawlers."
         yAxisSuffix=" req/s"
         stacked
-        traces={[
-          { y: series((d) => d.bot_challenges_succeeded ?? 0), name: 'Passed', color: '#22c55e' },
-          { y: series((d) => d.bot_challenges_failed ?? 0), name: 'Failed', color: CHART_COLORS.danger },
-          { y: series((d) => d.bot_detected ?? 0), name: 'Detected', color: '#eab308' },
-          { y: series((d) => d.bot_ai_crawlers ?? 0), name: 'AI Crawlers', color: '#8b5cf6' },
-        ]}
+        traces={seriesTraces(series, [
+          ['Passed', '#22c55e', (d) => d.bot_challenges_succeeded ?? 0],
+          ['Failed', CHART_COLORS.danger, (d) => d.bot_challenges_failed ?? 0],
+          ['Detected', '#eab308', (d) => d.bot_detected ?? 0],
+          ['AI Crawlers', '#8b5cf6', (d) => d.bot_ai_crawlers ?? 0],
+        ])}
       />
 
       <SectionHeading>DDoS Protection</SectionHeading>
@@ -1290,12 +1303,12 @@ function SecurityTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCo
         helpText="Blackhole = all traffic dropped. Tarpit = connections intentionally slowed. Close = connections terminated. Downgrade = service quality reduced. Any non-zero values indicate active DDoS mitigation."
         yAxisSuffix=" req/s"
         stacked
-        traces={[
-          { y: series((d) => d.ddos_action_blackhole ?? 0), name: 'Blackhole', color: '#1e293b' },
-          { y: series((d) => d.ddos_action_tarpit ?? 0), name: 'Tarpit', color: '#7c3aed' },
-          { y: series((d) => d.ddos_action_close ?? 0), name: 'Close', color: CHART_COLORS.danger },
-          { y: series((d) => d.ddos_action_downgrade ?? 0), name: 'Downgrade', color: '#eab308' },
-        ]}
+        traces={seriesTraces(series, [
+          ['Blackhole', '#1e293b', (d) => d.ddos_action_blackhole ?? 0],
+          ['Tarpit', '#7c3aed', (d) => d.ddos_action_tarpit ?? 0],
+          ['Close', CHART_COLORS.danger, (d) => d.ddos_action_close ?? 0],
+          ['Downgrade', '#eab308', (d) => d.ddos_action_downgrade ?? 0],
+        ])}
       />
 
       <SectionHeading>WAF Signal Classification</SectionHeading>
@@ -1315,32 +1328,28 @@ function SecurityTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCo
 function NetworkTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCommonProps) {
   const data = tick?.data
   const degradedCount = data?.degraded_pops?.length ?? 0
-  const popCount = data?.pop_count ?? 0
-  const healthyCount = popCount - degradedCount
-  const rates = (fn: (d: MetricsData) => number) => makeRates(rollingAvg, fn)
   return (
     <TabPanelShell rtDown={rtDown} historicalHref={historicalHref} historicalLabel="network">
       <MetricCardGrid
         cols={3}
+        data={data}
+        rollingAvg={rollingAvg}
         dimmed={rtDown}
         cards={[
           {
             title: 'Active PoPs',
-            value: popCount,
-            rates: rates((d) => d.pop_count ?? 0),
+            rateFn: (d) => d.pop_count ?? 0,
             helpText: 'Number of Fastly Points of Presence actively serving traffic for this service. Each PoP is a data center location worldwide.',
           },
           {
             title: 'Healthy PoPs',
-            value: healthyCount,
-            rates: rates((d) => (d.pop_count ?? 0) - (d.degraded_pops?.length ?? 0)),
+            rateFn: (d) => (d.pop_count ?? 0) - (d.degraded_pops?.length ?? 0),
             helpText: 'PoPs with error rates below the degradation threshold. A sudden drop may indicate a regional issue.',
           },
           {
             title: 'Degraded PoPs',
-            value: degradedCount,
             thresholds: { warn: 1, critical: 3, direction: 'above' },
-            rates: rates((d) => d.degraded_pops?.length ?? 0),
+            rateFn: (d) => d.degraded_pops?.length ?? 0,
             helpText: 'PoPs with elevated error rates. Low-traffic PoPs may appear degraded during traffic lulls.',
           },
         ]}
@@ -1356,10 +1365,10 @@ function NetworkTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCom
       <RealtimeChart
         title="PoP Count"
         yAxisSuffix=" PoPs"
-        traces={[
-          { y: series((d) => d.pop_count ?? 0), name: 'Active PoPs', color: CHART_COLORS.info },
-          { y: series((d) => d.degraded_pops?.length ?? 0), name: 'Degraded', color: CHART_COLORS.danger },
-        ]}
+        traces={seriesTraces(series, [
+          ['Active PoPs', CHART_COLORS.info, (d) => d.pop_count ?? 0],
+          ['Degraded', CHART_COLORS.danger, (d) => d.degraded_pops?.length ?? 0],
+        ])}
       />
 
       <SectionHeading>Traffic Distribution</SectionHeading>
@@ -1392,11 +1401,11 @@ function NetworkTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCom
         helpText="HTTP/2 uses multiplexed TCP streams. HTTP/3 uses QUIC (UDP-based) for better performance on lossy networks. 'Other' includes HTTP/1.1 and legacy protocols."
         yAxisSuffix=" req/s"
         stacked
-        traces={[
-          { y: series((d) => d.http2 ?? 0), name: 'HTTP/2', color: CHART_COLORS.info },
-          { y: series((d) => d.http3 ?? 0), name: 'HTTP/3', color: '#22c55e' },
-          { y: series((d) => Math.max(0, (d.total_requests ?? 0) - (d.http2 ?? 0) - (d.http3 ?? 0))), name: 'Other', color: CHART_COLORS.neutral },
-        ]}
+        traces={seriesTraces(series, [
+          ['HTTP/2', CHART_COLORS.info, (d) => d.http2 ?? 0],
+          ['HTTP/3', '#22c55e', (d) => d.http3 ?? 0],
+          ['Other', CHART_COLORS.neutral, (d) => Math.max(0, (d.total_requests ?? 0) - (d.http2 ?? 0) - (d.http3 ?? 0))],
+        ])}
       />
     </TabPanelShell>
   )
@@ -1415,56 +1424,54 @@ function AdminHealthTab({
 }: Omit<TabCommonProps, 'historicalHref'> & { connected: boolean }) {
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const data = tick?.data
-  const rates = (fn: (d: MetricsData) => number) => makeRates(rollingAvg, fn)
   return (
     <TabPanelShell rtDown={rtDown}>
-      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-        <Card>
-          <CardHeader className="pb-0">
-            <CardTitle className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-              RT Stream
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className={`text-3xl font-bold tabular-nums ${!connected ? 'opacity-50' : ''}`}>
-              {connected ? (rtDown ? 'Degraded' : 'Healthy') : 'Disconnected'}
-            </div>
-          </CardContent>
-        </Card>
-        <RealtimeMetricCard
-          title="Active PoPs"
-          value={data?.pop_count ?? 0}
-          rates={rates((d) => d.pop_count ?? 0)}
-          dimmed={rtDown}
-        />
-        <RealtimeMetricCard
-          title="Degraded PoPs"
-          value={data?.degraded_pops?.length ?? 0}
-          thresholds={{ warn: 1, critical: 3, direction: 'above' }}
-          rates={rates((d) => d.degraded_pops?.length ?? 0)}
-          dimmed={rtDown}
-        />
-      </div>
+      <MetricCardGrid
+        cols={3}
+        data={data}
+        rollingAvg={rollingAvg}
+        dimmed={rtDown}
+        prefix={
+          <Card>
+            <CardHeader className="pb-0">
+              <CardTitle className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                RT Stream
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className={`text-3xl font-bold tabular-nums ${!connected ? 'opacity-50' : ''}`}>
+                {connected ? (rtDown ? 'Degraded' : 'Healthy') : 'Disconnected'}
+              </div>
+            </CardContent>
+          </Card>
+        }
+        cards={[
+          { title: 'Active PoPs', rateFn: (d) => d.pop_count ?? 0 },
+          { title: 'Degraded PoPs', rateFn: (d) => d.degraded_pops?.length ?? 0, thresholds: { warn: 1, critical: 3, direction: 'above' } },
+        ]}
+      />
 
       <SectionHeading>Scorer Health (Compute@Edge)</SectionHeading>
       <MetricCardGrid
         cols={3}
+        data={data}
+        rollingAvg={rollingAvg}
         dimmed={rtDown}
         cards={[
           {
             title: 'Execution Time',
-            value: Number((data?.compute_exec_time_ms ?? 0).toFixed(1)),
+            decimals: 1,
             suffix: ' ms',
             thresholds: { warn: 50, critical: 200, direction: 'above' },
-            rates: rates((d) => d.compute_exec_time_ms ?? 0),
+            rateFn: (d) => d.compute_exec_time_ms ?? 0,
             helpText: 'Compute@Edge Wasm execution time (CPU-only, excludes I/O waits). The scorer is cold on every request — watch for execution time creep after code changes.',
           },
           {
             title: 'Request Time',
-            value: Number((data?.compute_req_time_ms ?? 0).toFixed(1)),
+            decimals: 1,
             suffix: ' ms',
             thresholds: { warn: 100, critical: 500, direction: 'above' },
-            rates: rates((d) => d.compute_req_time_ms ?? 0),
+            rateFn: (d) => d.compute_req_time_ms ?? 0,
             helpText: 'Total Compute@Edge request time including I/O (backend fetches, KV lookups). The gap between this and execution time is I/O wait.',
           },
           {
@@ -1498,30 +1505,32 @@ function AdminHealthTab({
           title="Compute Latency (ms)"
           helpText="Execution = Wasm CPU time only. Request = total time including I/O waits. The gap between them is I/O wait (backend fetches, KV lookups). Watch for execution time creep after scorer code changes."
           yAxisSuffix=" ms"
-          traces={[
-            { y: series((d) => d.compute_exec_time_ms ?? 0), name: 'Execution', color: CHART_COLORS.info },
-            { y: series((d) => d.compute_req_time_ms ?? 0), name: 'Request', color: '#f97316' },
-          ]}
+          traces={seriesTraces(series, [
+            ['Execution', CHART_COLORS.info, (d) => d.compute_exec_time_ms ?? 0],
+            ['Request', '#f97316', (d) => d.compute_req_time_ms ?? 0],
+          ])}
         />
         <RealtimeChart
           title="Compute Errors"
           helpText="Backend = origin request failures. Guest = Wasm runtime panics/traps. Resource Limit = CPU or memory exceeded. Any sustained non-zero errors mean the scorer is degraded and sessions are failing open."
           yAxisSuffix=" err/s"
           stacked
-          traces={[
-            { y: series((d) => d.compute_bereq_errors ?? 0), name: 'Backend', color: CHART_COLORS.danger },
-            { y: series((d) => d.compute_guest_errors ?? 0), name: 'Guest', color: '#eab308' },
-            { y: series((d) => d.compute_resource_exceeded ?? 0), name: 'Resource Limit', color: '#8b5cf6' },
-          ]}
+          traces={seriesTraces(series, [
+            ['Backend', CHART_COLORS.danger, (d) => d.compute_bereq_errors ?? 0],
+            ['Guest', '#eab308', (d) => d.compute_guest_errors ?? 0],
+            ['Resource Limit', '#8b5cf6', (d) => d.compute_resource_exceeded ?? 0],
+          ])}
         />
       </div>
 
       <SectionHeading>VCL Execution</SectionHeading>
       <MetricCardGrid
         cols={5}
+        data={data}
+        rollingAvg={rollingAvg}
         dimmed={rtDown}
         cards={[
-          { title: 'Restarts', value: data?.restarts ?? 0, suffix: '/s', rates: rates((d) => d.restarts ?? 0), thresholds: { warn: 1, critical: 10, direction: 'above' }, helpText: 'VCL restart count per second. Restarts re-enter vcl_recv with modified state — used for routing fallbacks but expensive. High rates indicate a misconfigured restart loop.' },
+          { title: 'Restarts', suffix: '/s', rateFn: (d) => d.restarts ?? 0, thresholds: { warn: 1, critical: 10, direction: 'above' }, helpText: 'VCL restart count per second. Restarts re-enter vcl_recv with modified state — used for routing fallbacks but expensive. High rates indicate a misconfigured restart loop.' },
           { title: 'vcl_recv', value: Number((data?.vcl_recv_time_ms ?? 0).toFixed(1)), suffix: ' ms', helpText: 'Time in vcl_recv — request routing, ACL checks, header manipulation. High values may indicate complex routing logic or excessive table lookups.' },
           { title: 'vcl_fetch', value: Number((data?.vcl_fetch_time_ms ?? 0).toFixed(1)), suffix: ' ms', helpText: 'Time in vcl_fetch — origin response processing, cache TTL setting, header rewriting. Only runs on cache misses.' },
           { title: 'vcl_deliver', value: Number((data?.vcl_deliver_time_ms ?? 0).toFixed(1)), suffix: ' ms', helpText: 'Time in vcl_deliver — final response modification before sending to the client. Runs on every request (hits and misses).' },
@@ -1534,24 +1543,24 @@ function AdminHealthTab({
           helpText="Time spent in each VCL subroutine per request. recv = request handling, fetch = origin response processing, deliver = client response, error = error page generation. High recv time may indicate complex routing logic."
           yAxisSuffix=" ms"
           stacked
-          traces={[
-            { y: series((d) => d.vcl_recv_time_ms ?? 0), name: 'recv', color: CHART_COLORS.info },
-            { y: series((d) => d.vcl_fetch_time_ms ?? 0), name: 'fetch', color: '#f97316' },
-            { y: series((d) => d.vcl_deliver_time_ms ?? 0), name: 'deliver', color: '#22c55e' },
-            { y: series((d) => d.vcl_error_time_ms ?? 0), name: 'error', color: CHART_COLORS.danger },
-          ]}
+          traces={seriesTraces(series, [
+            ['recv', CHART_COLORS.info, (d) => d.vcl_recv_time_ms ?? 0],
+            ['fetch', '#f97316', (d) => d.vcl_fetch_time_ms ?? 0],
+            ['deliver', '#22c55e', (d) => d.vcl_deliver_time_ms ?? 0],
+            ['error', CHART_COLORS.danger, (d) => d.vcl_error_time_ms ?? 0],
+          ])}
         />
         <RealtimeChart
           title="VCL Subroutine Calls"
           helpText="Number of times each VCL subroutine was invoked. Call count × time per call = total VCL overhead. A high error count means many requests are hitting synthetic error responses."
           yAxisSuffix=" calls/s"
           stacked
-          traces={[
-            { y: series((d) => d.vcl_recv_count ?? 0), name: 'recv', color: CHART_COLORS.info },
-            { y: series((d) => d.vcl_fetch_count ?? 0), name: 'fetch', color: '#f97316' },
-            { y: series((d) => d.vcl_deliver_count ?? 0), name: 'deliver', color: '#22c55e' },
-            { y: series((d) => d.vcl_error_count ?? 0), name: 'error', color: CHART_COLORS.danger },
-          ]}
+          traces={seriesTraces(series, [
+            ['recv', CHART_COLORS.info, (d) => d.vcl_recv_count ?? 0],
+            ['fetch', '#f97316', (d) => d.vcl_fetch_count ?? 0],
+            ['deliver', '#22c55e', (d) => d.vcl_deliver_count ?? 0],
+            ['error', CHART_COLORS.danger, (d) => d.vcl_error_count ?? 0],
+          ])}
         />
       </div>
 

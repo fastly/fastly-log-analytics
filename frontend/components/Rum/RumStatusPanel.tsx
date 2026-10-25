@@ -8,17 +8,16 @@ import { AnalyticsCard } from '@/components/AnalyticsCard';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
-import { useServiceStore } from '@/stores/serviceStore';
+import { useServiceStore } from '@/stores/filterStore';
 import { useIsAnalyst } from '@/hooks/useBootstrap';
 import { adminJsonResult, client } from '@/lib/api';
 import { unwrapClient } from '@/lib/api';
 import { queryKeys } from '@/lib/query-keys';
 import { cn } from '@/lib/utils';
 import type { components } from '@/types/api.generated';
-import { DisableRumDialog, EnableRumDialog } from './EnableRumDialog';
-import { RumSettingsDialog } from './RumSettingsDialog';
+import { DisableRumDialog, EnableRumDialog, RumSettingsDialog } from './RumSettingsDialog';
 import { useRumStatus } from '@/hooks/useDashboardCards';
-import { formatLocalDateTime } from '@/lib/date';
+import { formatLocalDateTime } from '@/lib/format';
 
 type RumVersionsResponse = components['schemas']['RumVersionsResponse'];
 

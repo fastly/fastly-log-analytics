@@ -15,7 +15,7 @@ import React from 'react'
 
 import { TimeSeriesChart } from '@/components/AnalyticsCard'
 import type { PlotlyChart } from '@/components/PlotlyChart'
-import type { PlotlyTrace, PlotlyLayout } from '@/types/plotly'
+import type { PlotlyTrace, PlotlyLayout } from '@/types/api'
 
 // Loosely-typed view of Plotly objects for assertions.
 type Loose = { [k: string]: any } // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -43,8 +43,8 @@ vi.mock('@/components/PlotlyChart', () => ({
   PlotlyChart: (props: PlotlyChartProps) => renderMockPlotly(props),
 }))
 
-vi.mock('@/components/SessionScoring/useScorerTimeseries', async (orig) => {
-  const actual = await orig<typeof import('@/components/SessionScoring/useScorerTimeseries')>()
+vi.mock('@/components/SessionScoring/help-content', async (orig) => {
+  const actual = await orig<typeof import('@/components/SessionScoring/help-content')>()
   return {
     ...actual,
     useScorerTimeseries: () => ({

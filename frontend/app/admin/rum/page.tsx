@@ -10,7 +10,7 @@
 import { Suspense } from 'react';
 import { Metadata } from 'next';
 import { BackToAdminLink } from '@/components/ReportLayout';
-import { PageHeader } from '@/components/ui/page-header';
+import { PageHeader } from '@/components/ui/confirm-dialog';
 import { RumStatusPanel } from '@/components/Rum/RumStatusPanel';
 import { RumPanelFallback } from './loading';
 

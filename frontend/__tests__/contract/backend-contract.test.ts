@@ -224,4 +224,30 @@ describe('frontend → backend HTTP contract', () => {
     expect(typeof data?.passcode_enabled).toBe('boolean')
     expect(Array.isArray(data?.providers)).toBe(true)
   })
+
+  it('GET /api/share/tos rejects unauthenticated callers with 401 and /api/admin/share/tos returns active ToS', async () => {
+    const { error, response } = await client.GET('/api/share/tos')
+    expect(response.status).toBe(401)
+    expect((error as { detail?: { error?: string } } | undefined)?.detail?.error).toBe('unauthenticated')
+
+    const adminTos = await client.GET('/api/admin/share/tos')
+    expect(adminTos.error).toBeUndefined()
+    expect(adminTos.response.status).toBe(200)
+  })
+
+  // ── Admin slow-queries / quarantine / insight-availability ───────
+  it('GET /api/admin/slow-queries is callable; reachable on the wire', async () => {
+    const { response } = await client.GET('/api/admin/slow-queries')
+    expect([200, 400].includes(response.status)).toBe(true)
+  })
+
+  it('GET /api/admin/quarantine is callable; reachable on the wire', async () => {
+    const { response } = await client.GET('/api/admin/quarantine')
+    expect([200, 400].includes(response.status)).toBe(true)
+  })
+
+  it('GET /api/insight-availability is callable; reachable on the wire', async () => {
+    const { response } = await client.GET('/api/insight-availability')
+    expect([200, 400].includes(response.status)).toBe(true)
+  })
 })

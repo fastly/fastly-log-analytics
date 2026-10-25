@@ -36,7 +36,7 @@ vi.mock('@/lib/admin-stream-apply', async (importOriginal) => ({
   cronCacheBust: vi.fn(),
 }))
 
-vi.mock('@/stores/serviceStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())
+vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/logs'))
 
 vi.mock('@/lib/api', async (importOriginal) => ({
@@ -110,11 +110,6 @@ vi.mock('@/app/logs/_sections/CronTab', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/app/logs/_sections/CronTab')>()),
   CronTab: () => <div data-testid="cron-tab" />,
 }))
-vi.mock('@/app/logs/_sections/SchemaTab', () => ({
-  SchemaTab: () => null,
-  ServiceHistoryTab: () => null,
-  IngestionTab: () => null,
-}))
 vi.mock('@/components/SSEModal', () => ({
   ControlledSSEModal: () => null,
   SSEModal: () => null,
@@ -122,7 +117,8 @@ vi.mock('@/components/SSEModal', () => ({
   SSEExecutionSection: () => null,
   SSEDialogFooter: () => null,
 }))
-vi.mock('@/components/SyncFromCloudModal/SyncFromCloudModal', () => ({
+vi.mock('@/components/SyncStatusBadge/SyncStatusBadge', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/components/SyncStatusBadge/SyncStatusBadge')>()),
   SyncFromCloudModal: () => null,
 }))
 vi.mock('@/components/ReportLayout', async (importOriginal) => ({

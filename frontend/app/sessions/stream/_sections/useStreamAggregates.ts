@@ -90,7 +90,7 @@ interface StreamAggregates {
   contentIds: { id: string; count: number }[]
 }
 
-import { OBJECT_TYPE_LABELS } from '@/app/streaming/_sections/streamingInfo'
+import { OBJECT_TYPE_LABELS } from '@/app/streaming/_sections/StreamingClient'
 
 function computeAggregates(rows: Row[]): StreamAggregates {
   const sorted = [...rows].sort((a, b) => {

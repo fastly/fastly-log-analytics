@@ -18,8 +18,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { SSEProgressView } from "@/components/SSEModal";
-import { SectionHeader } from "@/components/ui/section-header";
-import { LabelWithInfo } from "@/components/ui/label-with-info";
+import { SectionHeader } from "@/components/ui/confirm-dialog";
+import { LabelWithInfo } from "@/components/ui/confirm-dialog";
 import {
   CheckCircle2,
   Database,

@@ -17,9 +17,9 @@ import { NoServiceSelected } from '@/components/ReportLayout'
 import { UpdatingBadge } from '@/components/AnalyticsCard'
 import { StoreHydrator, ReloadLoopGuard } from '@/components/QueryProvider'
 import { INTERVALS } from '@/lib/utils'
-import { useServiceStore } from '@/stores/serviceStore'
-import { useTimezoneStore } from '@/stores/timezoneStore'
-import { useDebugStore } from '@/stores/debugStore'
+import { useServiceStore } from '@/stores/filterStore'
+import { useTimezoneStore } from '@/stores/filterStore'
+import { useDebugStore } from '@/stores/filterStore'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import { partial } from '../helpers/page-smoke'
 import type { BootstrapResponse } from '@/types/api'
@@ -54,10 +54,10 @@ vi.mock('@/components/ReportLayout', async (importOriginal) => ({
 }))
 
 // Mock components
-vi.mock('@/components/ServiceSwitcher/ServiceSwitcher', () => ({ ServiceSwitcher: () => <div>ServiceSwitcher</div> }))
 vi.mock('@/components/FilterBar/FilterBar', () => ({ FilterBar: () => <div>FilterBar</div> }))
 vi.mock('@/components/SyncStatusBadge/SyncStatusBadge', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/components/SyncStatusBadge/SyncStatusBadge')>()),
+  ServiceSwitcher: () => <div>ServiceSwitcher</div>,
   SyncStatusBadge: () => <div>SyncStatusBadge</div>,
 }))
 vi.mock('@/components/DebugPanel', () => ({ DebugPanel: () => <div>DebugPanel</div> }))

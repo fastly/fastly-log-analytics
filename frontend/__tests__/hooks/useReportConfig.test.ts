@@ -13,8 +13,10 @@ let mockState = {
   endTime: '',
 }
 
-vi.mock('@/stores/filterStore', () => {
+vi.mock('@/stores/filterStore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/filterStore')>()
   return {
+    ...actual,
     useFilterStore: vi.fn((selector) => selector(mockState))
   }
 })

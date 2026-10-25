@@ -9,8 +9,7 @@ logger = logging.getLogger(__name__)
 from backend.core import field_registry as lf
 from backend.core.duckdb import rum_duckdb_path
 from backend.core.faro_versions import DEFAULT_FARO_VERSION
-from backend.core.fastly.client import fastly
-from backend.core.fastly.mock_fixtures import is_mock_mode
+from backend.core.fastly.client import fastly, is_mock_mode
 from backend.core.fastly.utils import (
     region_endpoint,
 )

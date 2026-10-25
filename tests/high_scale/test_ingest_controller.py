@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from backend.high_scale.replay import replay_manifest
+from backend.high_scale.source_discovery import SourceObjectDescriptor
 
 from backend.high_scale.archive_models import ArchiveState
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
@@ -16,8 +18,6 @@ from backend.high_scale.publication import (
     InMemoryBatchManifestStore,
     InsertReceipt,
 )
-from backend.high_scale.replay import replay_manifest
-from backend.high_scale.source_discovery import SourceObjectDescriptor
 from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
 
 

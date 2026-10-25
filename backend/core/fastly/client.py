@@ -1,5 +1,8 @@
 import json
 import logging
+import os
+import re
+import sys as _sys
 import time
 import urllib.error
 import urllib.parse
@@ -11,6 +14,131 @@ import tenacity
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
 
 logger = logging.getLogger(__name__)
+
+
+# ── Canned Fastly API responses for E2E (formerly backend.core.fastly.mock_fixtures) ──
+
+
+def is_mock_mode() -> bool:
+    """Single-source check the gated callers read on every request."""
+    return os.environ.get("FASTLY_MOCK_MODE") == "1"
+
+
+def api_key_or_mock(key: str) -> str:
+    """``key`` unchanged, or a placeholder in FASTLY_MOCK_MODE when it is empty."""
+    return key or ("mock-api-key" if is_mock_mode() else key)
+
+
+def _service_id_from_path(path: str) -> str:
+    m = re.match(r"^/service/([^/]+)", path)
+    return m.group(1) if m else "mock-svc-id"
+
+
+def _version_from_path(path: str) -> int:
+    m = re.search(r"/version/(\d+)", path)
+    return int(m.group(1)) if m else 1
+
+
+def mock_response(method: str, path: str, body: dict | None = None) -> Any:
+    """Return a canned response for the given Fastly endpoint."""
+    if path == "/tokens/self" and method == "GET":
+        return {
+            "id": "mock-token-id",
+            "user_id": "mock-user",
+            "scope": "global",
+            "customer_id": "mock-customer",
+            "services": [],
+        }
+
+    if path == "/service" and method == "POST":
+        return {"id": "mock-svc-id", "name": (body or {}).get("name", "mock"), "version": 1}
+
+    if path == "/service" and method == "GET":
+        return []
+
+    if re.fullmatch(r"/service/[^/]+", path) and method in ("GET", "PUT", "DELETE"):
+        return {
+            "id": _service_id_from_path(path),
+            "version": 1,
+            "customer_id": "mock-customer",
+        }
+
+    if method == "GET" and re.search(r"^/service/[^/]+/version$", path):
+        return [{"number": 1, "active": True}]
+
+    if method == "GET" and re.search(r"^/service/[^/]+/version/active$", path):
+        return {"number": 1, "active": True}
+
+    if method == "GET" and "/version/" in path:
+        if path.endswith("/logging/s3"):
+            return []
+        if path.endswith("/snippet"):
+            return []
+        if path.endswith("/condition"):
+            return []
+        if path.endswith("/domain"):
+            return []
+        if path.endswith("/backend"):
+            return []
+        if path.endswith("/vcl"):
+            return []
+
+    if "/version/" in path and "/activate" in path:
+        return {"number": _version_from_path(path), "active": True}
+
+    if "/version/" in path and "/validate" in path:
+        return {"status": "ok", "errors": []}
+
+    if "/version/" in path and path.endswith("/clone"):
+        return {"number": _version_from_path(path) + 1}
+
+    if "/domain" in path:
+        return {"name": (body or {}).get("name", "mock.example"), "service_id": _service_id_from_path(path)}
+
+    if "/backend" in path:
+        return {"name": (body or {}).get("name", "fos_origin"), "address": "mock.example"}
+
+    if "/snippet" in path:
+        return {"id": "mock-snippet-id", "name": (body or {}).get("name", "mock_snippet")}
+
+    if "/logging/" in path:
+        return {"name": (body or {}).get("name", "mock-logger"), "version": _version_from_path(path)}
+
+    if "/dictionary" in path:
+        return {"id": "mock-dict-id", "name": (body or {}).get("name", "mock_dict")}
+
+    if "/acl" in path:
+        return {"id": "mock-acl-id", "name": (body or {}).get("name", "mock_acl")}
+
+    if "/condition" in path:
+        return {"name": (body or {}).get("name", "mock_condition"), "statement": (body or {}).get("statement", "")}
+
+    if "/vcl" in path:
+        return {"name": (body or {}).get("name", "main"), "content": (body or {}).get("content", "")}
+
+    if re.search(r"/version(?:/\d+)?$", path) and method == "POST":
+        return {"number": _version_from_path(path)}
+
+    if "/object-storage/access-keys" in path:
+        if method == "POST":
+            return {
+                "access_key": "AKIA_MOCK",
+                "secret_key": "SECRET_MOCK",  # gitleaks:allow — canned mock secret, not real
+                "description": (body or {}).get("description", "fos-log-analysis-mock"),
+            }
+        if method == "DELETE":
+            return {}
+        if method == "GET":
+            return {"data": []}
+
+    if "/object-storage/buckets" in path:
+        if method == "POST":
+            return {"data": {"id": "mock-bucket-id", "attributes": {"name": (body or {}).get("name", "mock-bucket")}}}
+        if method == "GET":
+            return {"data": []}
+
+    return {"ok": True}
+
 
 API_BASE = "https://api.fastly.com"
 RT_BASE = "https://rt.fastly.com"
@@ -124,8 +252,6 @@ def _request(method, path, *, data, headers, expect_empty, max_retries, timeout,
 
 def fastly(method, path, body=None, *, token, expect_empty=False, max_retries=3, timeout=30):
     """Make a Fastly API request and return parsed JSON."""
-    from backend.core.fastly.mock_fixtures import is_mock_mode, mock_response
-
     if is_mock_mode():
         return mock_response(method, path, body)
 
@@ -167,8 +293,6 @@ def fastly_raw(
     typically 200 with an empty body). ``timeout`` defaults higher than
     ``fastly()`` because a multi-MB upload can outlast the 30s default.
     """
-    from backend.core.fastly.mock_fixtures import is_mock_mode, mock_response
-
     if is_mock_mode():
         try:
             body = json.loads(data.decode()) if data else None
@@ -194,8 +318,6 @@ def fastly_rt(path, *, token, max_retries=0, timeout=10):
 
     Same transport, telemetry and mock-mode shape as ``fastly()``; only the base host differs.
     """
-    from backend.core.fastly.mock_fixtures import is_mock_mode, mock_response
-
     if is_mock_mode():
         return mock_response("GET", path, None)
 
@@ -525,3 +647,6 @@ def ensure_vcl_snippet(
 
     payload = {"name": name, "type": type, "content": content, "priority": priority, "dynamic": 0}
     return fastly("POST", f"/service/{service_id}/version/{version}/snippet", payload, token=token)
+
+
+_sys.modules.setdefault("backend.core.fastly.mock_fixtures", _sys.modules[__name__])

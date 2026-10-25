@@ -12,11 +12,10 @@ import { http, HttpResponse } from 'msw'
 import { renderWithQuery } from '../../helpers/page-smoke'
 import { server } from '@/__tests__/helpers/msw/handlers'
 import { getApiBase } from '@/lib/api'
-import { useServiceStore } from '@/stores/serviceStore'
-import { StatusPanel } from '@/components/SessionScoring/StatusPanel'
+import { useServiceStore } from '@/stores/filterStore'
+import { StatusPanel, L2EnforcementCard } from '@/components/SessionScoring/StatusPanel'
 import { LabelsTab } from '@/components/SessionScoring/LabelsTab'
 import { AuditLogTab, MatrixVersionsCard } from '@/components/SessionScoring/MatrixVersionsCard'
-import { L2EnforcementCard } from '@/components/SessionScoring/L2EnforcementCard'
 
 vi.mock('@tanstack/react-virtual', async () => (await import('../../helpers/page-smoke')).reactVirtualModuleMock())
 

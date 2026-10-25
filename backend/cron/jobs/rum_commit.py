@@ -65,7 +65,7 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
         try:
             logger.info(f"RUM commit starting for {service_id}")
 
-            from backend.cron.jobs._common import _buffer_result_error
+            from backend.cron.jobs.sync import _buffer_result_error
 
             total_committed_vitals = 0
             total_committed_errors = 0
@@ -263,7 +263,7 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
             )
             logger.info("RUM commit complete: %s", summary)
 
-            from backend.cron.jobs._common import publish_sync_status_safe
+            from backend.cron.jobs.sync import publish_sync_status_safe
 
             publish_sync_status_safe(service_id, "rum_commit")
 

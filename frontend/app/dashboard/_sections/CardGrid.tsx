@@ -16,9 +16,9 @@ import {
   type DashboardCard,
   type ReportConfiguration,
 } from '@/hooks/useDashboardCards'
-import type { FiltersPayload } from '@/types/filters'
+import type { FiltersPayload } from '@/types/api'
 import type { components } from '@/types/api.generated'
-import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
+import type { PlotlyLayout, PlotlyTrace } from '@/types/api'
 
 export { CARD_CATEGORIES, CATEGORIZED_CARD_IDS, CUSTOM_TINT, type CardCategory, type CardTint }
 

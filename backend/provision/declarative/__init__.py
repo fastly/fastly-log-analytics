@@ -6,13 +6,14 @@ Public API for the core declarative reconciliation system:
 - DiffResult: Computed diff between current and desired state
 """
 
-from backend.provision.declarative.diff import DiffResult, compute_diff
-from backend.provision.declarative.reconciler import reconcile_vcl_state
+from backend.provision.declarative import reconciler as diff
+from backend.provision.declarative.reconciler import DiffResult, compute_diff, reconcile_vcl_state
 from backend.provision.declarative.state import FeatureState
 
 __all__ = [
     "FeatureState",
     "DiffResult",
     "compute_diff",
+    "diff",
     "reconcile_vcl_state",
 ]

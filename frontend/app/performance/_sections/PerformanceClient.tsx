@@ -16,8 +16,8 @@ import { ColumnVisibilityDropdown } from '@/components/DataTable'
 import { makeLatencyColumns } from '@/components/DataTable'
 import { useFieldLabel } from '@/hooks/useBootstrap';
 import { CHART_COLORS } from '@/lib/chart-helpers'
-import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
-import type { FiltersPayload } from '@/types/filters'
+import type { PlotlyLayout, PlotlyTrace } from '@/types/api'
+import type { FiltersPayload } from '@/types/api'
 
 export const SlowestUrlsHelp = () => (
   <div className="space-y-4">

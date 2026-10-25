@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 import re
-from datetime import UTC, datetime
+import sys
+import time
+from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from sse_starlette.sse import EventSourceResponse
 
 from backend.celery_status import (
     get_celery_status,
@@ -22,12 +28,16 @@ from backend.core import duckdb_pool as _pool
 from backend.core import duckdb_recycle as _recycle
 from backend.core import metric_snapshots
 from backend.core.share_db.settings import get_setting, set_setting
-from backend.deps import require_admin
+from backend.deps import get_service_id, get_source, require_admin
+from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.admin import (
     DebugSettingsResponse,
     DebugSettingsUpdateBody,
     HealthSnapshotResponse,
+    IngestedFilesResponse,
+    LogExtentsResponse,
     MetricHistoryBatchResponse,
+    SyncStatusResponse,
 )
 from backend.models.admin_actions import DuckdbRecycleResponse, VclHealthResponse
 from backend.models.admin_status import (
@@ -37,12 +47,174 @@ from backend.models.admin_status import (
     IngestLedgerActionResponse,
     IngestLedgerListResponse,
 )
+from backend.sync_status_publisher import publisher as sync_status_publisher
+from backend.sync_status_snapshot import compute_sync_status_cached  # noqa: F401
 from backend.utils.date_utils import parse_relative_time_window
-from backend.utils.router_utils import bad_request, make_error, require_service_id
-
-from ._helpers import attach_debug_db_snapshot, router
+from backend.utils.dir_size import _get_dir_size
+from backend.utils.router_utils import (
+    bad_request,
+    iter_with_disconnect_ping,
+    make_error,
+    query_errors,
+    raise_internal,
+    require_service_id,
+    sse_response,
+)
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# System-metrics sampler (folded from backend.system_metrics_sampler)
+# ---------------------------------------------------------------------------
+
+_CACHE_TTL_SECONDS = 10.0
+_cache: dict[str | None, tuple[float, dict[str, Any]]] = {}
+_locks: dict[str | None, asyncio.Lock] = {}
+
+
+async def sample_system_metrics_cached(service_id: str | None) -> dict[str, Any]:
+    """Short-TTL, deduped wrapper around :func:`sample_system_metrics`."""
+    now = time.monotonic()
+    cached = _cache.get(service_id)
+    if cached is not None and now - cached[0] < _CACHE_TTL_SECONDS:
+        return cached[1]
+
+    lock = _locks.setdefault(service_id, asyncio.Lock())
+    async with lock:
+        cached = _cache.get(service_id)
+        if cached is not None and time.monotonic() - cached[0] < _CACHE_TTL_SECONDS:
+            return cached[1]
+        payload = await asyncio.to_thread(sample_system_metrics, service_id)
+        _cache[service_id] = (time.monotonic(), payload)
+        return payload
+
+
+def reset_metrics_cache() -> None:
+    """Clear the dedup cache + per-key locks."""
+    _cache.clear()
+    _locks.clear()
+
+
+def sample_system_metrics(service_id: str | None) -> dict[str, Any]:
+    """Snapshot every admin-overview metric for ``service_id``."""
+    return {
+        "health_snapshot": _safe(_sample_health_snapshot),
+        "metric_history_1h": _safe(_sample_metric_history),
+        "queries_summary": _safe(_sample_queries_summary),
+        "slow_queries_count": _safe(lambda: _sample_slow_queries_count(service_id)),
+        "log_accounting": _safe(lambda: _sample_log_accounting(service_id)),
+        "metadata_storage": _safe(lambda: _sample_metadata_storage(service_id)),
+        "system_jobs": _safe(_sample_system_jobs),
+    }
+
+
+def _safe(fn: Callable[[], Any]) -> Any:
+    try:
+        return fn()
+    except Exception:
+        logger.debug("system-metrics sampler component failed", exc_info=True)
+        return None
+
+
+def _sample_health_snapshot() -> dict[str, Any]:
+    return health_snapshot()
+
+
+def _sample_metric_history() -> dict[str, Any]:
+    cutoff = datetime.now(UTC) - timedelta(hours=1)
+    return {"series": metric_snapshots.get_batch(since=cutoff)}
+
+
+def _sample_queries_summary() -> dict[str, Any] | None:
+    from backend.core.query_registry import query_registry
+    from backend.routers.admin_queries import _ensure_enabled
+
+    _ensure_enabled()
+    return query_registry.summary()
+
+
+def _sample_slow_queries_count(service_id: str | None) -> dict[str, Any] | None:
+    if not service_id:
+        return None
+    from backend.core import metadata as _meta_mod
+    from backend.routers.admin_queries import _ensure_enabled
+
+    _ensure_enabled()
+    since_utc = time.time() - 24 * 3600
+    return {
+        "count": _meta_mod.count_slow_queries(service_id, since_utc=since_utc, threshold_ms=1000.0),
+        "since_hours": 24,
+        "threshold_ms": 1000.0,
+    }
+
+
+def _sample_log_accounting(service_id: str | None) -> dict[str, Any] | None:
+    if not service_id:
+        return None
+    src = _db.get_source_for_service(service_id)
+    if not src:
+        return None
+    from backend.models.admin import LogAccountingResponse
+    from backend.routers.admin.log_accounting import compute_log_accounting
+
+    result = compute_log_accounting(src, hours=24, by="hour")
+    dumped: dict[str, Any] = LogAccountingResponse.with_telemetry(**result).model_dump(mode="json")
+    return dumped
+
+
+def _sample_metadata_storage(service_id: str | None) -> dict[str, Any] | None:
+    if not service_id:
+        return None
+    from backend import config as svcconfig
+    from backend.core.metadata import (
+        DEFAULT_METADATA_RETENTION,
+        get_metadata_storage_stats,
+        is_ingested_files_dedup_active,
+    )
+
+    stats = get_metadata_storage_stats(service_id)
+    cfg = svcconfig.load_config(service_id) or {}
+    retention = {**DEFAULT_METADATA_RETENTION, **(cfg.get("metadata_retention") or {})}
+    ingested_files_locked = not is_ingested_files_dedup_active(service_id)
+    return {**stats, "retention": retention, "ingested_files_locked": ingested_files_locked}
+
+
+def _sample_system_jobs() -> dict[str, Any]:
+    from backend.cron.decorators import get_system_job_status
+    from backend.cron.scheduler import get_scheduler
+
+    statuses = get_system_job_status()
+    job_labels = {
+        "bot_data_refresh": "Bot Data Refresh",
+        "rdns_enrichment": "rDNS Enrichment",
+        "share_audit_purge": "Share Audit Purge",
+    }
+    sched = get_scheduler()
+    result: list[dict[str, Any]] = []
+    for job_id, label in job_labels.items():
+        entry: dict[str, Any] = {
+            "id": job_id,
+            "name": label,
+            "next_run_at": None,
+            **statuses.get(job_id, {"last_run_at": None, "status": None, "duration_s": None, "detail": ""}),
+        }
+        if sched is not None:
+            try:
+                job = sched.get_job(job_id)
+            except Exception:
+                job = None
+            next_run = getattr(job, "next_run_time", None) if job else None
+            if next_run:
+                from backend.utils.date_utils import iso_z
+
+                entry["next_run_at"] = iso_z(next_run)
+        result.append(entry)
+    return {"jobs": result}
+
+
+from .high_scale import attach_debug_db_snapshot, router  # noqa: E402
+
+meta_router = APIRouter(prefix="/api", tags=["meta"], responses=DEFAULT_ERROR_RESPONSES)
 
 _MAX_LOOKBACK_DAYS = 30
 _VALID_WINDOW_RE = re.compile(r"^[1-9]\d*[mhd]\Z", re.IGNORECASE)
@@ -603,3 +775,158 @@ def api_celery_ledger_purge(body: IngestLedgerActionRequest) -> dict[str, Any]:
     """Delete ``dead_letter`` / ``quarantined`` entries from ``ingest_ledger``."""
     items = [item.model_dump() for item in body.items] if body.items else None
     return purge_ingest_ledger_entries(items=items, status=body.status, service_id=body.service_id)
+
+
+# ---------------------------------------------------------------------------
+# Sync-status & log-extents surface (folded from backend.routers.admin.sync_status)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/admin/sync-status", response_model=SyncStatusResponse)
+@router.get("/sync-status", response_model=SyncStatusResponse)
+def sync_status(
+    service_id: str | None = Depends(get_service_id),
+    skip_fos: bool = Query(default=False),
+    force: bool = Query(default=False),
+) -> SyncStatusResponse:
+    from backend import config as svcconfig
+    from backend.core.duckdb import get_connection, get_sync_status
+    from backend.utils.telemetry import clear_queries
+
+    clear_queries()
+
+    src: dict[str, Any] | None = None
+    if service_id:
+        src = _db.get_source_for_service(service_id)
+    if not src or not service_id:
+        resp_empty: SyncStatusResponse = SyncStatusResponse.with_telemetry(configured=False)
+        return resp_empty
+
+    try:
+        from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
+
+        high_scale_service = get_high_scale_service_registry().resolve(service_id)
+        if high_scale_service is not None:
+            cached = compute_sync_status_cached(service_id)
+            if cached is not None:
+                high_scale_response: SyncStatusResponse = SyncStatusResponse.with_telemetry(**cached)
+                return high_scale_response
+
+        if skip_fos and not force:
+            cached = compute_sync_status_cached(service_id)
+            if cached is not None:
+                resp_cached: SyncStatusResponse = SyncStatusResponse.with_telemetry(**cached)
+                return resp_cached
+
+        is_durable = svcconfig.is_durable_serving_mode(src)
+        _con = get_connection(source=src, max_wait=5, skip_view_update=True, read_only=is_durable)
+        try:
+            status = get_sync_status(_con, src, skip_fos=skip_fos, force=force)
+        finally:
+            _con.close()
+
+        db_path = src.get("duckdb_path") or svcconfig.duckdb_path(service_id)
+        db_exists = os.path.exists(db_path)
+        db_size = os.path.getsize(db_path) if db_exists else 0
+
+        cache_size = _get_dir_size(_db._cache_dir(src))
+
+        status["duckdb_size_bytes"] = db_size + cache_size
+        status["duckdb_exists"] = db_exists
+
+        from backend.cron_progress import get_latest_progress_for_service
+
+        active_run = get_latest_progress_for_service(service_id)
+        if active_run:
+            status["active_run"] = active_run
+            status["busy"] = True
+
+        cfg = svcconfig.load_config(service_id) or {}
+        status["ngwaf_workspace_id"] = cfg.get("ngwaf_workspace_id")
+
+        resp: SyncStatusResponse = SyncStatusResponse.with_telemetry(**status)
+        return resp
+    except _db.DBBusyError as e:
+        logger.warning("db_busy service_id=%s: %s", service_id, e)
+        raise HTTPException(
+            status_code=503,
+            detail=make_error("db_busy", "Database is busy; retry shortly", busy=True),
+        ) from e
+    except Exception as e:
+        raise_internal(logger, e, code="sync_status_failed")
+
+
+@meta_router.get("/log-extents", response_model=LogExtentsResponse)
+def log_extents(service_id: str | None = Depends(get_service_id)) -> LogExtentsResponse:
+    """Return only the earliest/latest log timestamps for the FilterBar."""
+    from backend import config as svcconfig
+
+    if not service_id:
+        empty1: LogExtentsResponse = LogExtentsResponse.with_telemetry(configured=False)
+        return empty1
+    src = _db.get_source_for_service(service_id)
+    if not src:
+        empty2: LogExtentsResponse = LogExtentsResponse.with_telemetry(configured=False)
+        return empty2
+
+    try:
+        cached = compute_sync_status_cached(service_id)
+        if not cached:
+            cached = svcconfig.get_status(src["name"]) or {}
+    except Exception:
+        cached = svcconfig.get_status(src["name"]) or {}
+    request_status = cached.get("request")
+    latest = request_status.get("latest_log_at") if isinstance(request_status, dict) else cached.get("latest_log_at")
+    resp: LogExtentsResponse = LogExtentsResponse.with_telemetry(
+        configured=True,
+        earliest_log_at=cached.get("earliest_log_at"),
+        latest_log_at=latest,
+    )
+    return resp
+
+
+@meta_router.get("/log-extents/stream")
+async def log_extents_stream(
+    request: Request,
+    service_id: str | None = Depends(get_service_id),
+) -> EventSourceResponse:
+    """Analyst-safe SSE projection of the cached sync-status snapshot."""
+    service_id = require_service_id(service_id)
+
+    def _project(snap: dict[str, Any] | None) -> dict[str, Any] | None:
+        if snap is None:
+            return None
+        return {
+            "latest_log_at": snap.get("latest_log_at"),
+            "local_rows": snap.get("local_rows"),
+            "rum": snap.get("rum"),
+            "request": snap.get("request"),
+        }
+
+    async def stream() -> AsyncIterator[str]:
+        initial = _project(await asyncio.to_thread(compute_sync_status_cached, service_id))
+        if initial is not None:
+            yield json.dumps(initial)
+
+        async for payload in iter_with_disconnect_ping(
+            sync_status_publisher.subscribe(service_id), request, ping_seconds=15
+        ):
+            projected = _project(payload)
+            if projected is not None:
+                yield json.dumps(projected)
+
+    return sse_response(stream())
+
+
+@router.get("/admin/ingested-files", response_model=IngestedFilesResponse)
+@query_errors(status_code=500)
+def ingested_files(source: dict[str, Any] = Depends(get_source)) -> IngestedFilesResponse:
+    from backend.core.duckdb import get_ingested_files
+
+    res = get_ingested_files(None, source)
+    response: IngestedFilesResponse = IngestedFilesResponse.with_telemetry(files=res)
+    return response
+
+
+sys.modules["backend.system_metrics_sampler"] = sys.modules[__name__]
+sys.modules["backend.routers.admin.sync_status"] = sys.modules[__name__]

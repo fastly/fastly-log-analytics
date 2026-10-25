@@ -7,15 +7,13 @@ import { describe, expect, it, test, vi } from 'vitest'
 // title + chart/cards.
 import DashboardClient, { buildChartLayout } from '@/app/dashboard/_sections/DashboardClient'
 import { densifyBarSeries } from '@/lib/chart-helpers'
-import { buildTrafficData, getIntervalSeconds } from '@/lib/traffic-chart'
+import { buildTrafficData, getIntervalSeconds } from '@/lib/utils'
 import { createTestQueryClient, renderWithQuery } from '../helpers/page-smoke'
 import * as apiLib from '@/lib/api'
 import { getOk, postOk } from '@/__tests__/helpers/page-smoke'
 import React from 'react'
 
-vi.mock('@/stores/serviceStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())
-
-vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke')).filterStoreModuleMock())
+vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())
 
 vi.mock('@/lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),

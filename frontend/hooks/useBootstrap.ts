@@ -11,13 +11,13 @@ import { getPageLoadId, unwrapClient } from '@/lib/api'
 import { queryKeys, seedBootstrapDependentCaches } from '@/lib/query-keys'
 import { isUserActive, msSinceLastInteraction } from '@/lib/utils'
 import { DEBUG_RESPONSES_COOKIE, isIpFamilyField } from '@/lib/utils'
-import { useDebugStore } from '@/stores/debugStore'
+import { useDebugStore } from '@/stores/filterStore'
 import { useFilterStore } from '@/stores/filterStore'
-import { usePopGeoStore } from '@/stores/popGeoStore'
-import { useServiceStore } from '@/stores/serviceStore'
-import { useSessionRoleStore } from '@/stores/sessionRoleStore'
+import { usePopGeoStore } from '@/stores/filterStore'
+import { useServiceStore } from '@/stores/filterStore'
+import { useSessionRoleStore } from '@/stores/filterStore'
 import { toService } from '@/types/api'
-import { buildFiltersPayload, type FiltersPayload } from '@/types/filters'
+import { buildFiltersPayload, type FiltersPayload } from '@/types/api'
 
 /** Returns a debounced copy of value that only updates after delay ms of silence. */
 export function useDebounce<T>(value: T, delay = 300): T {

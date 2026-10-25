@@ -1,8 +1,11 @@
 import { clsx, type ClassValue } from "clsx"
 import { twMerge } from "tailwind-merge"
-import { formatDate } from '@/lib/date'
+import { ShieldAlert, ServerCrash, Zap, Network, Globe, LayoutGrid, type LucideIcon } from 'lucide-react'
+import { formatDate, toUTCDate } from '@/lib/format'
+import { CHART_COLORS, densifyBarSeries, type BarSeriesPoint } from '@/lib/chart-helpers'
 import { useFilterStore } from '@/stores/filterStore'
-import type { FiltersPayload } from '@/types/filters'
+import type { components } from '@/types/api.generated'
+import type { FiltersPayload, PlotlyTrace } from '@/types/api'
 
 
 export function cn(...inputs: ClassValue[]) {
@@ -645,4 +648,384 @@ export function hydrateFilterStoreFromUrl(): void {
 
 export function _resetUrlHydrationFlag(): void {
   hydrated = false
+}
+
+// ---------------------------------------------------------------------------
+// Anomaly Detection (/insights) thematic sectioning (folded from insight-sections.ts)
+// ---------------------------------------------------------------------------
+
+interface InsightSection {
+  /** Stable machine key. Matches the backend `category` enum value. */
+  key: string
+  label: string
+  description: string
+  icon: LucideIcon
+}
+
+const ALL_SECTION: InsightSection = {
+  key: 'all',
+  label: 'All Categories',
+  description: 'All automated insights and detected anomalies across every category.',
+  icon: LayoutGrid,
+}
+
+export const INSIGHT_SECTIONS: readonly InsightSection[] = [
+  {
+    key: 'security',
+    label: 'Security & Threat Detection',
+    description: 'Suspicious signatures, scanning, spoofing, proxy/abuse, and WAF activity.',
+    icon: ShieldAlert,
+  },
+  {
+    key: 'origin',
+    label: 'Origin Health & Stability',
+    description: 'Origin 5xx, latency/timeouts, retries, per-IP failures, and the shield path.',
+    icon: ServerCrash,
+  },
+  {
+    key: 'edge',
+    label: 'Edge & Delivery Performance',
+    description: 'Cache efficiency, edge/regional latency and tail, and delivery quality.',
+    icon: Zap,
+  },
+  {
+    key: 'network',
+    label: 'Network & Routing Path',
+    description: 'ISP / ASN reachability, RTT and packet loss, and metro/region delivery quality.',
+    icon: Network,
+  },
+  {
+    key: 'traffic',
+    label: 'Traffic & Volumetrics',
+    description: 'Volume swings, geography, composition, and automation.',
+    icon: Globe,
+  },
+] as const
+
+export const SECTION_LOADING_MESSAGES: Record<string, string> = {
+  all: 'Evaluating detector baseline comparisons…',
+  security: 'Analyzing security signatures & JA3 patterns…',
+  origin: 'Evaluating origin 5xx errors & latency shifts…',
+  edge: 'Measuring cache collapse & delivery performance…',
+  network: 'Checking ISP latency & routing packet loss…',
+  traffic: 'Scanning traffic surges & botnet clustering…',
+  other: 'Evaluating anomaly detector results…',
+}
+
+export function normalizeTabKey(tab: string | null | undefined): string {
+  if (!tab) return 'all'
+  const lower = tab.toLowerCase().trim()
+  if (lower === 'performance') return 'edge'
+  if (lower === 'routing') return 'network'
+  return lower
+}
+
+export const OTHER_SECTION: InsightSection = {
+  key: 'other',
+  label: 'Other',
+  description: 'Insights not yet assigned to a section.',
+  icon: LayoutGrid,
+}
+
+const SECTION_BY_KEY = new Map<string, InsightSection>(INSIGHT_SECTIONS.map((s) => [s.key, s]))
+
+export function categoryToSection(category: string | null | undefined): InsightSection {
+  if (category) {
+    const section = SECTION_BY_KEY.get(category)
+    if (section) return section
+  }
+  return OTHER_SECTION
+}
+
+const SEVERITY_ORDER = ['critical', 'error', 'warning', 'info', 'clean'] as const
+const SEVERITY_RANK: Record<string, number> = Object.fromEntries(
+  SEVERITY_ORDER.map((sev, i) => [sev, i]),
+)
+
+export interface SectionableInsight {
+  category?: string | null
+  severity?: string | null
+  title?: string | null
+}
+
+export function sortInsights<T extends SectionableInsight>(cards: readonly T[]): T[] {
+  return [...cards].sort((a, b) => {
+    const ra = SEVERITY_RANK[a.severity ?? ''] ?? 99
+    const rb = SEVERITY_RANK[b.severity ?? ''] ?? 99
+    if (ra !== rb) return ra - rb
+    return (a.title ?? '').localeCompare(b.title ?? '')
+  })
+}
+
+export interface SeveritySummary {
+  severity: string
+  count: number
+}
+
+export function summarizeSeverities(cards: readonly SectionableInsight[]): SeveritySummary[] {
+  const counts = new Map<string, number>()
+  for (const card of cards) {
+    const sev = card.severity
+    if (sev && sev in SEVERITY_RANK) {
+      counts.set(sev, (counts.get(sev) ?? 0) + 1)
+    }
+  }
+  return SEVERITY_ORDER.flatMap((severity) => {
+    const count = counts.get(severity)
+    return count ? [{ severity, count }] : []
+  })
+}
+
+export interface InsightSectionGroup<T> {
+  section: InsightSection
+  cards: T[]
+}
+
+export function groupInsightsBySection<T extends SectionableInsight>(
+  cards: readonly T[],
+  options?: { includeAll?: boolean; includeEmptySections?: boolean },
+): InsightSectionGroup<T>[] {
+  const buckets = new Map<string, T[]>()
+  for (const card of cards) {
+    const key = categoryToSection(card.category).key
+    const bucket = buckets.get(key)
+    if (bucket) bucket.push(card)
+    else buckets.set(key, [card])
+  }
+
+  const groups: InsightSectionGroup<T>[] = []
+  if (options?.includeAll) {
+    groups.push({ section: ALL_SECTION, cards: sortInsights(cards) })
+  }
+
+  for (const section of [...INSIGHT_SECTIONS, OTHER_SECTION]) {
+    const bucket = buckets.get(section.key)
+    if (bucket && bucket.length > 0) {
+      groups.push({ section, cards: sortInsights(bucket) })
+    } else if (options?.includeEmptySections && section.key !== OTHER_SECTION.key) {
+      groups.push({ section, cards: [] })
+    }
+  }
+  return groups
+}
+
+// ---------------------------------------------------------------------------
+// Traffic Chart Trace Builder (folded from traffic-chart.ts)
+// ---------------------------------------------------------------------------
+
+type Aggregates = Partial<Pick<components['schemas']['AggregatesResponse'], 'metric' | 'interval' | 'time_series'>>
+type Catalog = {
+  fields?: Pick<components['schemas']['LogFieldCatalogEntry'], 'id' | 'label' | 'unit' | 'precision'>[] | null
+}
+
+export interface BuildTrafficDataParams {
+  aggregates: Aggregates | null | undefined
+  compareAggregates: Aggregates | null | undefined
+  compareMode: boolean
+  compareStartTime: string | null | undefined
+  startTime: string | null
+  endTime: string | null
+  trend: string
+  timezone: string
+  metric: string
+  effectiveInterval: string
+  hiddenCategories: ReadonlySet<string>
+  catalog: Catalog | null | undefined
+}
+
+export function getIntervalSeconds(intervalStr?: string | null): number | undefined {
+  if (!intervalStr) return undefined
+  const str = intervalStr.trim().toLowerCase()
+  if (INTERVAL_SECONDS[str as keyof typeof INTERVAL_SECONDS] !== undefined) {
+    return INTERVAL_SECONDS[str as keyof typeof INTERVAL_SECONDS]
+  }
+  if (str === '1s' || str === '1 seconds' || str === 'second' || str === 'seconds') return 1
+  if (str === '1m' || str === '1 minutes' || str === 'minute' || str === 'minutes') return 60
+  if (str === '5m' || str === '5 minute' || str === '5 minutes') return 300
+  if (str === '1h' || str === '1 hours' || str === 'hour' || str === 'hours') return 3600
+  if (str === '1d' || str === '1 days' || str === 'day' || str === 'days') return 86400
+
+  const match = str.match(/^(\d+)\s*(s|sec|second|seconds|m|min|minute|minutes|h|hr|hour|hours|d|day|days)$/)
+  if (match) {
+    const num = parseInt(match[1], 10)
+    const unit = match[2]
+    if (unit.startsWith('s')) return num
+    if (unit.startsWith('m')) return num * 60
+    if (unit.startsWith('h')) return num * 3600
+    if (unit.startsWith('d')) return num * 86400
+  }
+  return undefined
+}
+
+export function buildTrafficData({
+  aggregates,
+  compareAggregates,
+  compareMode,
+  compareStartTime,
+  startTime,
+  endTime,
+  trend,
+  timezone,
+  metric,
+  effectiveInterval,
+  hiddenCategories,
+  catalog,
+}: BuildTrafficDataParams): PlotlyTrace[] {
+  const time_series = aggregates?.time_series
+  if (!time_series?.length) return []
+
+  const actualMetric = aggregates?.metric || metric
+  const isBar = actualMetric === 'requests' || actualMetric === '5xx' || actualMetric === '4xx'
+
+  const metricField = catalog?.fields?.find((f) => f.id === actualMetric)
+  const unit = metricField?.unit || ''
+  const precision = metricField?.precision ?? (actualMetric === 'requests' ? 0 : 1)
+
+  const getHoverTemplate = (_m: string, label?: string) => {
+    const pre = label ? `${label}: ` : ''
+    const format = precision > 0 ? `.${precision}f` : ','
+    return `${pre}%{y:${format}}${unit}<extra></extra>`
+  }
+
+  const hasCategories = time_series.some((d) => d.category != null)
+
+  const actualInterval = aggregates?.interval || effectiveInterval
+  const intervalSeconds = getIntervalSeconds(actualInterval)
+  const barSeries: BarSeriesPoint[] = isBar
+    ? densifyBarSeries(time_series, intervalSeconds, hasCategories, startTime, endTime)
+    : time_series
+
+  let tsXValues: string[] | null = null
+  const getTsXValues = (): string[] => {
+    if (!tsXValues) {
+      tsXValues = time_series.map((d) => formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss"))
+    }
+    return tsXValues
+  }
+
+  let traces: PlotlyTrace[] = []
+
+  if (hasCategories) {
+    const catMap: Record<string, { x: string[], y: number[] }> = {}
+    barSeries.forEach((d) => {
+      const cat = d.category || 'Other'
+      if (!catMap[cat]) catMap[cat] = { x: [], y: [] }
+      catMap[cat].x.push(formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss"))
+      catMap[cat].y.push(d.value)
+    })
+
+    const colorMap: Record<string, string> = {
+      '400': '#fbbf24', '401': CHART_COLORS.warning, '403': '#d97706', '404': '#b45309',
+      '500': CHART_COLORS.danger, '502': '#dc2626', '503': '#b91c1c', '504': '#991b1b'
+    }
+
+    traces = Object.entries(catMap).map(([cat, data], i) => ({
+      x: data.x,
+      y: data.y,
+      type: 'bar', width: intervalSeconds ? intervalSeconds * 1000 * 0.9 : undefined,
+      name: cat,
+      showlegend: false,
+      visible: hiddenCategories.has(cat) ? 'legendonly' : true,
+      hovertemplate: `Status ${cat}: %{y:,}<extra></extra>`,
+      marker: { color: colorMap[cat] || `hsl(${(i * 50) % 360}, 70%, 50%)` }
+    }))
+  } else {
+    const xValues = barSeries === time_series
+      ? getTsXValues()
+      : barSeries.map((d) => formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss"))
+    const yValues = barSeries.map((d) => d.value)
+
+    traces = [{
+      x: xValues,
+      y: yValues,
+      type: isBar ? 'bar' : 'scatter', width: isBar && intervalSeconds ? intervalSeconds * 1000 * 0.9 : undefined,
+      mode: isBar ? undefined : 'lines+markers',
+      name: compareMode ? 'Primary Range' : (metricField?.label || actualMetric),
+      showlegend: compareMode,
+      hovertemplate: getHoverTemplate(actualMetric, compareMode ? 'Primary' : undefined),
+      marker: { color: CHART_COLORS.info }
+    }]
+  }
+
+  if (compareMode && compareAggregates?.time_series?.length && !hasCategories && startTime && compareStartTime) {
+    const currentStart = new Date(startTime).getTime()
+    const compareStart = new Date(compareStartTime).getTime()
+    const shift = currentStart - compareStart
+
+    const compX = compareAggregates.time_series.map((d) => {
+      const t = toUTCDate(d.time).getTime() + shift
+      return formatDate(new Date(t).toISOString(), timezone, "yyyy-MM-dd HH:mm:ss")
+    })
+    const compY = compareAggregates.time_series.map((d) => d.value)
+
+    traces.push({
+      x: compX,
+      y: compY,
+      type: 'scatter',
+      mode: 'lines',
+      name: 'Comparison Range',
+      line: { color: '#f97316', dash: 'dash', width: 2 },
+      hovertemplate: getHoverTemplate(actualMetric, 'Comparison')
+    })
+  }
+
+  if (!hasCategories && time_series.some((d) => d.baseline != null)) {
+    traces.push({
+      x: getTsXValues(),
+      y: time_series.map((d) => d.baseline),
+      type: 'scatter', mode: 'lines',
+      name: 'Baseline (7d prior)',
+      hovertemplate: getHoverTemplate(actualMetric, 'Baseline'),
+      line: { color: '#a1a1aa', dash: 'dot', width: 2 }
+    })
+  }
+
+  if (!hasCategories && trend !== 'off') {
+    const xValues = getTsXValues()
+    const yValues = time_series.map((d) => d.value)
+    const n = yValues.length
+    let windowSize = 0
+    if (trend === 'auto') {
+      if (n > 1000) windowSize = Math.floor(n / 20)
+      else if (n > 100) windowSize = Math.floor(n / 10)
+      else windowSize = Math.floor(n / 5)
+    } else {
+      const trendMap: Record<string, number> = { '1m': 60, '5m': 300, '1h': 3600, '1d': 86400 }
+      const actualInterval = aggregates?.interval || effectiveInterval
+      const sec = getIntervalSeconds(actualInterval) ?? 60
+      windowSize = Math.floor((trendMap[trend] ?? 0) / sec)
+    }
+    if (windowSize > 1) {
+      const trendY: (number | null)[] = new Array(n).fill(null)
+      if (n >= windowSize) {
+        let runningSum = 0
+        let runningCount = 0
+        for (let i = 0; i < n; i++) {
+          const enterVal = yValues[i]
+          if (enterVal != null) {
+            runningSum += enterVal
+            runningCount++
+          }
+          if (i >= windowSize) {
+            const exitVal = yValues[i - windowSize]
+            if (exitVal != null) {
+              runningSum -= exitVal
+              runningCount--
+            }
+          }
+          if (i >= windowSize - 1) {
+            trendY[i] = runningCount > 0 ? runningSum / runningCount : null
+          }
+        }
+      }
+      traces.push({
+        x: xValues, y: trendY,
+        type: 'scatter', mode: 'lines',
+        name: `${trend === 'auto' ? 'Auto ' : ''}Trend`,
+        hovertemplate: getHoverTemplate(actualMetric),
+        line: { color: '#f97316', width: 3 }
+      })
+    }
+  }
+  return traces
 }

@@ -23,7 +23,7 @@ import { BotsSection, SECURITY_INFO, TOP_IP_COLUMN_IDS } from './BotsSection'
 import { ProxyWatchdogSection } from './ProxyWatchdogSection'
 import { ThreatIntelPanel } from '@/components/security/ThreatIntelPanel'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
-import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
+import type { PlotlyLayout, PlotlyTrace } from '@/types/api'
 import type { components } from '@/types/api.generated'
 
 type SecurityData = components['schemas']['SecurityAggregatesResponse']

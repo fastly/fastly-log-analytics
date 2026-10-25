@@ -1,14 +1,20 @@
 'use client'
 
 import * as React from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
-import { Activity, ChevronRight } from 'lucide-react'
+import { Activity, ChevronRight, Flag, Loader2, X } from 'lucide-react'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { TopFlaggedHelp } from '@/components/SessionScoring/help-content'
+import {
+  TopFlaggedHelp,
+  useScoringQuery,
+  useScoringLabels,
+  type LabelValue,
+} from '@/components/SessionScoring/help-content'
 import { DataTable, ColumnVisibilityDropdown, DateTimeCell, columnIdOf } from '@/components/DataTable'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import {
   Dialog,
   DialogContent,
@@ -17,6 +23,12 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover'
 import {
   Select,
   SelectContent,
@@ -25,13 +37,214 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { SkeletonGrid } from '@/components/ui/skeleton'
-import { FlagSessionPopover } from './FlagSessionPopover'
-import { useScoringQuery, useScoringLabels } from './useScorerTimeseries'
-import { client } from '@/lib/api'
-import { formatLocalDateTime } from '@/lib/date'
+import { Textarea } from '@/components/ui/textarea'
+import { client, extractApiError, unwrapClient } from '@/lib/api'
+import { formatLocalDateTime } from '@/lib/format'
 import { queryKeys } from '@/lib/query-keys'
 import { keyByOccurrence } from '@/lib/utils'
 import type { components } from '@/types/api.generated'
+
+interface FlagSessionPopoverProps {
+  serviceId: string
+  // ``null`` for a cookieless request — the popover renders disabled.
+  sid: string | null
+  // Optional metadata captured at flag time — denormalized into the label
+  // row so the Labels tab can show "what this session looked like" without
+  // re-querying the logs.
+  sampleIp?: string | null
+  sampleUa?: string | null
+  sampleUrl?: string | null
+  // Currently-applied label (from the labels API). Undefined means we
+  // don't know / haven't checked.
+  currentLabel?: LabelValue | null
+  // Id of the currently-applied label row, required to issue the DELETE
+  // that un-flags the session. Optional — when absent the "Clear Label"
+  // affordance is hidden.
+  currentLabelId?: string | null
+  trigger?: React.ReactNode
+  onFlagged?: () => void
+}
+
+const LABEL_STYLES: Record<LabelValue, string> = {
+  good: 'border-emerald-500 text-emerald-700 hover:bg-emerald-50',
+  bad: 'border-rose-500 text-rose-700 hover:bg-rose-50',
+  neutral: 'border-slate-400 text-slate-700 hover:bg-slate-50',
+}
+
+/**
+ * Reusable popover for labeling a session as good / bad / neutral. Used
+ * from both the SessionScoring admin page's TopFlaggedTable and from the
+ * dashboard raw-logs table's Flag column.
+ *
+ * Always posts to /api/services/{serviceId}/scoring/labels, which upserts
+ * on (service_id, sid), so re-flagging the same session overwrites
+ * cleanly. The `currentLabel` prop is purely cosmetic (visual hint of
+ * existing state) — the upsert semantics on the backend mean we never
+ * need to choose between POST and PATCH from the client.
+ */
+export function FlagSessionPopover({
+  serviceId,
+  sid,
+  sampleIp = '',
+  sampleUa = '',
+  sampleUrl = '',
+  currentLabel,
+  currentLabelId,
+  trigger,
+  onFlagged,
+}: FlagSessionPopoverProps) {
+  const [open, setOpen] = React.useState(false)
+  const [notes, setNotes] = React.useState('')
+  const [error, setError] = React.useState('')
+
+  const disabled = !sid
+
+  const submitMutation = useMutation({
+    mutationFn: async (label: LabelValue) => {
+      await unwrapClient(
+        client.POST('/api/services/{service_id}/scoring/labels', {
+          params: { path: { service_id: serviceId } },
+          body: {
+            sid: sid!,
+            label,
+            notes,
+            flagged_by: 'admin',
+            sample_ip: sampleIp ?? '',
+            sample_ua: sampleUa ?? '',
+            sample_url: sampleUrl ?? '',
+          },
+        }),
+      )
+    },
+    onMutate: () => {
+      setError('')
+    },
+    onSuccess: () => {
+      setOpen(false)
+      setNotes('')
+      onFlagged?.()
+    },
+    onError: (e) => {
+      setError(extractApiError(e) || 'Failed to save label')
+    },
+  })
+  const busy = submitMutation.isPending ? (submitMutation.variables ?? null) : null
+  const submit = (label: LabelValue) => {
+    if (!sid) return
+    submitMutation.mutate(label)
+  }
+
+  const clearMutation = useMutation({
+    mutationFn: async () => {
+      await unwrapClient(
+        client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}', {
+          params: { path: { service_id: serviceId, label_id: currentLabelId! } },
+        }),
+      )
+    },
+    onMutate: () => {
+      setError('')
+    },
+    onSuccess: () => {
+      setOpen(false)
+      onFlagged?.()
+    },
+    onError: (e) => {
+      setError(extractApiError(e) || 'Failed to clear label')
+    },
+  })
+  const clearing = clearMutation.isPending
+  const handleClearLabel = () => {
+    if (!currentLabelId) return
+    clearMutation.mutate()
+  }
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger
+        render={(props: React.ComponentPropsWithRef<'button'>) =>
+          trigger ? (
+            <button {...props}>{trigger}</button>
+          ) : (
+            <Button
+              {...props}
+              variant="ghost"
+              size="icon"
+              aria-label={disabled ? 'No session id (cookieless request)' : 'Flag this session'}
+              className="h-7 w-7"
+              disabled={disabled}
+              title={disabled ? 'No session id (cookieless request)' : 'Flag this session'}
+            >
+              <Flag
+                className={
+                  currentLabel === 'bad'
+                    ? 'h-3.5 w-3.5 text-rose-600 fill-rose-600'
+                    : currentLabel === 'good'
+                    ? 'h-3.5 w-3.5 text-emerald-600 fill-emerald-600'
+                    : currentLabel === 'neutral'
+                    ? 'h-3.5 w-3.5 text-slate-500 fill-slate-500'
+                    : 'h-3.5 w-3.5 text-muted-foreground'
+                }
+              />
+            </Button>
+          )
+        }
+      />
+      <PopoverContent className="w-80" align="end">
+        <div className="space-y-3">
+          <div>
+            <p className="text-sm font-medium">Label session</p>
+            <p className="text-xs text-muted-foreground font-mono break-all mt-0.5">sid: {sid || '(none)'}</p>
+            {currentLabel && (
+              <p className="text-xs text-muted-foreground mt-1">
+                Currently: <span className="font-medium">{currentLabel}</span> · re-flagging overwrites
+              </p>
+            )}
+          </div>
+          <Textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder="Notes (optional) — why this session?"
+            className="text-xs min-h-[60px]"
+            disabled={!!busy}
+          />
+          {error && <p className="text-xs text-rose-600">{error}</p>}
+          <div className="grid grid-cols-3 gap-2">
+            {(['good', 'neutral', 'bad'] as const).map((lbl) => (
+              <Button
+                key={lbl}
+                variant="outline"
+                size="sm"
+                className={`text-xs ${LABEL_STYLES[lbl]}`}
+                disabled={disabled || !!busy || clearing}
+                onClick={() => submit(lbl)}
+              >
+                {busy === lbl ? <Loader2 className="h-3 w-3 animate-spin" /> : lbl}
+              </Button>
+            ))}
+          </div>
+          {currentLabel && currentLabelId && (
+            <div className="pt-1 border-t">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="w-full text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50"
+                disabled={!!busy || clearing}
+                onClick={handleClearLabel}
+              >
+                {clearing ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  'Clear Label (Un-flag)'
+                )}
+              </Button>
+            </div>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
 
 type SessionEvent = components['schemas']['ScoringSessionEvent']
 

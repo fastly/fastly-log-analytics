@@ -14,3 +14,14 @@ package contains:
 See the session-scoring runbook (``docs/session_scoring_runbook.md``)
 for operational guidance.
 """
+
+from __future__ import annotations
+
+import sys as _sys
+
+from backend.scoring import features
+
+normalize = features
+scorer = features
+_sys.modules.setdefault("backend.scoring.normalize", features)
+_sys.modules.setdefault("backend.scoring.scorer", features)

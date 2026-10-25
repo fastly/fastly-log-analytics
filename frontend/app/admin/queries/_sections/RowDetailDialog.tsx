@@ -21,7 +21,7 @@ import { adminJson } from '@/lib/api'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { CopyButton } from '@/components/ui/copy-button'
+import { CopyButton } from '@/components/ui/confirm-dialog'
 import {
   Dialog,
   DialogContent,
@@ -30,7 +30,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { HelpDialog } from '@/components/ui/help-dialog'
+import { HelpDialog } from '@/components/ui/confirm-dialog'
 
 import {
   durationColor,

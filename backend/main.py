@@ -1053,7 +1053,6 @@ from backend.routers import (
     performance,
     query,
     rum,
-    security,
     session_scoring,
 )
 
@@ -1064,7 +1063,6 @@ app.include_router(session_scoring.sessions_router)
 app.include_router(query.router)
 app.include_router(network.router)
 app.include_router(performance.router)
-app.include_router(security.router)
 app.include_router(alerts.views_router)
 app.include_router(alerts.router)
 app.include_router(origin.router)

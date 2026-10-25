@@ -1,6 +1,6 @@
 import React from 'react'
 import { SystemHealthCard } from "@/components/SystemHealthCard"
-import { PageHeader } from '@/components/ui/page-header'
+import { PageHeader } from '@/components/ui/confirm-dialog'
 
 import { ServicesTable } from './_sections/ServicesTable'
 import { GlobalSettings, PricingSettings } from './_sections/GlobalSettings'

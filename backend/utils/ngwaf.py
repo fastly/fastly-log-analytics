@@ -42,7 +42,7 @@ def fetch_verified_bots_paged(
 
     Pagination stops when meta.next_cursor is "" (empty string, not null).
     """
-    from backend.core.fastly.mock_fixtures import is_mock_mode
+    from backend.core.fastly.client import is_mock_mode
 
     if is_mock_mode():
         yield [], None, 0

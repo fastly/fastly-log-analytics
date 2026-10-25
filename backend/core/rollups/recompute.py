@@ -62,9 +62,10 @@ from .origin_dims import (  # noqa: F401
     build_origin_dims_bundles,
     build_origin_latency_ts_bundles,
     build_origin_summary_bundles,
+    build_perf_dims_bundles,
+    build_perf_latency_bundles,
     build_slow_urls_bundles,
 )
-from .perf_latency import build_perf_dims_bundles, build_perf_latency_bundles  # noqa: F401
 from .security_dims import (  # noqa: F401
     build_security_dims_bundles,
     build_security_proxies_bundles,

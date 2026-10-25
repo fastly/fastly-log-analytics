@@ -7,7 +7,7 @@ import { unwrapClient } from '@/lib/api'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import { useDerivedState } from '@/hooks/useSSE'
 import { useMounted } from '@/hooks/useBootstrap'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useServiceStore } from '@/stores/filterStore'
 import {
   buildServiceHref,
   cn,

@@ -49,7 +49,7 @@ vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
 // Virtualizer needs to enumerate every row for jsdom layout-free tests.
 vi.mock('@tanstack/react-virtual', async () => (await import('@/__tests__/helpers/page-smoke')).reactVirtualModuleMock())
 
-vi.mock('@/components/SessionScoring/FlagSessionPopover', () => ({
+vi.mock('@/components/SessionScoring/TopFlaggedTable', () => ({
   FlagSessionPopover: () => <span data-testid="flag-popover" />,
 }))
 

@@ -41,7 +41,9 @@ symbol on the right-hand side of an existing
 
 from __future__ import annotations
 
-from . import network, origin_dims, perf_latency, security_dims, time_series
+from . import network, origin_dims, security_dims, time_series
+
+perf_latency = origin_dims
 
 # Re-exports — pull every public symbol up so callers continue to use
 # the flat ``backend.core.rollups.X`` path. Order doesn't matter; no
@@ -141,17 +143,15 @@ from .origin_dims import (
     backfill_origin_dims_bundles,
     backfill_origin_latency_ts_bundles,
     backfill_origin_summary_bundles,
+    backfill_perf_dims_bundles,
+    backfill_perf_latency_bundles,
     backfill_slow_urls_bundles,
     build_origin_dims_bundles,
     build_origin_latency_ts_bundles,
     build_origin_summary_bundles,
-    build_slow_urls_bundles,
-)
-from .perf_latency import (
-    backfill_perf_dims_bundles,
-    backfill_perf_latency_bundles,
     build_perf_dims_bundles,
     build_perf_latency_bundles,
+    build_slow_urls_bundles,
 )
 from .recompute import (
     ADMIN_BACKFILLS,

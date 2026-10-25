@@ -5,7 +5,7 @@ import * as maplibregl from 'maplibre-gl'
 
 maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs')
 import { useTheme } from 'next-themes'
-import { usePopGeoStore } from '@/stores/popGeoStore'
+import { usePopGeoStore } from '@/stores/filterStore'
 import { formatPopGeo, type PopGeo } from '@/components/DataTable'
 import { formatCompactCount, formatCount, resolveCountryName } from '@/lib/format'
 import { countryFill, NORMALIZE_COUNTRY, useMapResize } from '@/components/Map/ChoroplethMap'

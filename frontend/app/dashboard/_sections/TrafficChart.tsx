@@ -14,7 +14,7 @@ import { ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { TRENDS } from '@/lib/utils'
 import { useActiveLogFields } from '@/hooks/useBootstrap'
-import type { PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/plotly'
+import type { PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/api'
 import type { ReportConfiguration } from '@/hooks/useDashboardCards'
 import type { DashboardAggregates, DashboardCatalog } from './CardGrid'
 

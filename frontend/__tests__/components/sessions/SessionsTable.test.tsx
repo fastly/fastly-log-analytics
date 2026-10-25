@@ -10,8 +10,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest'
 import React from 'react'
 
-import { SessionsTable } from '@/app/sessions/_sections/SessionsTable'
-import { ScoringControls } from '@/app/sessions/page'
+import { SessionsTable, ScoringControls } from '@/app/sessions/page'
 import type { components } from '@/types/api.generated'
 import type { SessionsResponse } from '@/types/api'
 
@@ -23,7 +22,7 @@ vi.mock('@tanstack/react-virtual', async () => (await import('@/__tests__/helper
 // the table doesn't try to set up popover state for each row. We
 // deliberately avoid the literal text "Flag" here so it doesn't collide
 // with the column header of the same name.
-vi.mock('@/components/SessionScoring/FlagSessionPopover', () => ({
+vi.mock('@/components/SessionScoring/TopFlaggedTable', () => ({
   FlagSessionPopover: () => <span data-testid="flag-popover" />,
 }))
 

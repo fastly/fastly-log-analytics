@@ -13,7 +13,7 @@ import type {
   PlotlyLayout,
   PlotlyRelayoutEvent,
   PlotlyTrace,
-} from '@/types/plotly'
+} from '@/types/api'
 
 // ─── tracesToTable ──────────────────────────────────────────────────────────
 

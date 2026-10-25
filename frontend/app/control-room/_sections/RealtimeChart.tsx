@@ -4,7 +4,7 @@ import { useMemo, useState } from 'react'
 import { HelpCircle } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { HelpDialog } from '@/components/ui/help-dialog'
+import { HelpDialog } from '@/components/ui/confirm-dialog'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { cn } from '@/lib/utils'
 

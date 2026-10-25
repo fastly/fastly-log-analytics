@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib as _hashlib
+import json as _json
 import logging
 import os
+import re
+import time as _time
 from collections.abc import Callable
+from contextlib import nullcontext
+from datetime import UTC, datetime
 from typing import Any
 
 import duckdb
 
+from backend import config as svcconfig
 from backend.core.metric_expressions import coalesce
 from backend.models.common import FiltersDict
 from backend.models.dashboard import ReaderCoverage
@@ -201,8 +208,6 @@ def _ipv6_per_hour_from_rollups(
     Returns ``None`` when start/end is missing, no in-window closed-
     hour rollups exist, or a read raises (caller falls back to live SQL).
     """
-    from datetime import UTC, datetime
-
     from backend.core.rollups._common import _safe_table_for
     from backend.repositories.rollup_coverage import enumerate_closed_hour_field_rollups
 
@@ -214,24 +219,20 @@ def _ipv6_per_hour_from_rollups(
     st_dt, et_dt = w.st_dt, w.et_dt
     active_dt, active_end_dt = w.active_dt, w.active_end_dt
 
-    branches: list[str] = []
-    if bundled_paths:
-        # hive_partitioning=1 is load-bearing: the bundled all_fields.parquet
-        # body carries only (field, value, count) — `hour` lives ONLY in
-        # the path segment ``hour=YYYY-MM-DD-HH``. With hive_partitioning=0,
-        # selecting `hour` raises BinderException, the try/except swallows
-        # it, and the IPv6 card renders empty on every closed-hour-bundled
-        # service. Caught by session-9 adversarial review and pinned by
-        # ``test_security_aggregates_ipv6_serves_from_bundled_hour_when_per_field_swept``.
-        ps = ", ".join("'" + escape_sql_literal(p) + "'" for p in bundled_paths)
-        branches.append(
-            f"SELECT hour, value, count FROM read_parquet([{ps}], hive_partitioning=1) WHERE field = 'is_ipv6'"
-        )
-    if per_field_paths:
-        ps = ", ".join("'" + escape_sql_literal(p) + "'" for p in per_field_paths)
-        branches.append(
-            f"SELECT hour, value, count FROM read_parquet([{ps}], hive_partitioning=1) WHERE field = 'is_ipv6'"
-        )
+    # hive_partitioning=1 is load-bearing: the bundled all_fields.parquet
+    # body carries only (field, value, count) — `hour` lives ONLY in
+    # the path segment ``hour=YYYY-MM-DD-HH``. With hive_partitioning=0,
+    # selecting `hour` raises BinderException, the try/except swallows
+    # it, and the IPv6 card renders empty on every closed-hour-bundled
+    # service. Caught by session-9 adversarial review and pinned by
+    # ``test_security_aggregates_ipv6_serves_from_bundled_hour_when_per_field_swept``.
+    branches = [
+        "SELECT hour, value, count FROM read_parquet(["
+        + ", ".join("'" + escape_sql_literal(p) + "'" for p in paths)
+        + "], hive_partitioning=1) WHERE field = 'is_ipv6'"
+        for paths in (bundled_paths, per_field_paths)
+        if paths
+    ]
 
     q = "SELECT hour, value, SUM(count) AS c FROM (" + " UNION ALL ".join(branches) + ") GROUP BY hour, value"
     try:
@@ -272,20 +273,20 @@ def _ipv6_per_hour_from_rollups(
                         tmp = runner._create_active_hour_temp_direct(["is_ipv6"], cols_for_tmp, live_start, live_end)
                     if tmp == "__empty__":
                         rows_live = []
-                    elif tmp is not None:
-                        q_live = (
-                            f"SELECT strftime(timestamp, '%Y-%m-%d-%H') AS hour, "
-                            f"SUM(CASE WHEN is_ipv6 THEN 1 ELSE 0 END) AS true_c, "
-                            f'count(*) AS total_c FROM "{tmp}" GROUP BY 1'
-                        )
-                        rows_live = runner.execute(q_live).fetchall()
                     else:
+                        live_from = (
+                            f'"{tmp}"'
+                            if tmp is not None
+                            else (
+                                f'"{base_table}" '
+                                f"WHERE timestamp >= '{live_start.isoformat()}' "
+                                f"AND timestamp < '{live_end.isoformat()}'"
+                            )
+                        )
                         q_live = (
                             f"SELECT strftime(timestamp, '%Y-%m-%d-%H') AS hour, "
                             f"SUM(CASE WHEN is_ipv6 THEN 1 ELSE 0 END) AS true_c, "
-                            f'count(*) AS total_c FROM "{base_table}" '
-                            f"WHERE timestamp >= '{live_start.isoformat()}' "
-                            f"AND timestamp < '{live_end.isoformat()}' GROUP BY 1"
+                            f"count(*) AS total_c FROM {live_from} GROUP BY 1"
                         )
                         rows_live = runner.execute(q_live).fetchall()
                     for hour, true_c, total_c in rows_live:
@@ -488,6 +489,12 @@ def _stems_match(bot_stem: str, ref_stem: str) -> bool:
     return len(bot_stem) >= 3 and len(ref_stem) >= 3 and (bot_stem in ref_stem or ref_stem in bot_stem)
 
 
+_GENERIC_BOT_RE = re.compile(
+    r"([a-z0-9_.-]*(?:bot|crawler|spider|slurp|archiver|scraper|externalagent|extended)[a-z0-9_.-]*)",
+    re.IGNORECASE,
+)
+
+
 def summarize_bot_efficiency_rows(
     rows: list[tuple[str, str, int, int]],
 ) -> list[dict[str, Any]]:
@@ -496,19 +503,12 @@ def summarize_bot_efficiency_rows(
     Uses `well-known-bots.json` via `build_matcher()` and `extract_entry_referral_stems()`
     plus generic bot token extraction — zero hardcoded bot or vendor names.
     """
-    import re
-
     from backend.utils.bot_sources import (
         _BOT_TOKEN_SUFFIX_RE,
         build_well_known_bots_matcher,
         extract_entry_referral_stems,
         load_well_known_bots_catalog,
         resolve_bot_display_name,
-    )
-
-    generic_bot_re = re.compile(
-        r"([a-z0-9_.-]*(?:bot|crawler|spider|slurp|archiver|scraper|externalagent|extended)[a-z0-9_.-]*)",
-        re.IGNORECASE,
     )
 
     matcher = build_well_known_bots_matcher()
@@ -547,7 +547,7 @@ def summarize_bot_efficiency_rows(
             vid = bot_id.split("-")[0].lower()
             stems = set(extract_entry_referral_stems(matched_entry)) | vendor_stems.get(vid, set())
         else:
-            m = generic_bot_re.search(ua.lower())
+            m = _GENERIC_BOT_RE.search(ua.lower())
             if not m:
                 continue
             raw_tok = m.group(1)
@@ -607,10 +607,6 @@ def get_top_bots(
     parent_runner: QueryRunner | None = None,
 ) -> dict:
     """Return top N bots from UA matching and (if available) the NGWAF bot cache."""
-    import hashlib as _hashlib
-    import json as _json
-    import time as _time
-
     from backend.repositories import dashboard as _dashboard_repo
 
     timer = SectionTimer()
@@ -714,13 +710,10 @@ def get_top_bots(
                 _logger.warning("[security] UA rollup read failed, falling back: %s", e)
                 ua_rollup_rows = None
 
-        def _classify(rows: list[tuple[str, int]]) -> list[dict]:
-            return classify_ua_counts(rows, n)
-
         if ua_rollup_rows is not None:
             _t = _time.perf_counter()
             try:
-                arcjet_bots = _classify(ua_rollup_rows)
+                arcjet_bots = classify_ua_counts(ua_rollup_rows, n)
             except Exception as e:
                 _logger.error("[security] arcjet rollup match failed: %s", e)
             timer.mark("top_bots:arcjet_match", _t)
@@ -745,6 +738,23 @@ def get_top_bots(
             cols_needed.append("ua")
         if ngwaf_attached and "waf_req_id" in actual_cols:
             cols_needed.append("waf_req_id")
+
+        def _run_ngwaf_join(q: str, q_params: list | None, mark_label: str) -> list[dict]:
+            _t0 = _time.perf_counter()
+            join_outcome = "error"
+            try:
+                res = (runner.execute(q, q_params) if q_params is not None else runner.execute(q)).fetchall()
+                out = [{"name": r[0], "category": r[1], "request_count": r[2]} for r in res]
+                join_outcome = "success"
+                return out
+            except Exception as e:
+                _logger.error("[security] NGWAF top bots failed: %s", e)
+                return []
+            finally:
+                timer.mark(mark_label, _t0)
+                timer.entries[-1].update(
+                    source="live", activity="compute", current_execution=True, outcome=join_outcome
+                )
 
         if cols_needed == ["waf_req_id"]:
             # The UA branch was rollup-served, so the NGWAF join would be the
@@ -792,24 +802,13 @@ def get_top_bots(
             if rolled_ngwaf is not None:
                 ngwaf_bots = rolled_ngwaf
             else:
-                _t = _time.perf_counter()
-                join_outcome = "error"
-                try:
-                    q = SQL.NGWAF_TOP_BOTS_JOIN_DIRECT.format(table_name=table_name, where_clause=where_clause, n=n)
-                    res = runner.execute(q, params).fetchall()
-                    ngwaf_bots = [{"name": r[0], "category": r[1], "request_count": r[2]} for r in res]
-                    join_outcome = "success"
-                except Exception as e:
-                    _logger.error("[security] NGWAF top bots failed: %s", e)
-                finally:
-                    timer.mark("top_bots:ngwaf_join_direct", _t)
-                    timer.entries[-1].update(
-                        source="live", activity="compute", current_execution=True, outcome=join_outcome
-                    )
+                ngwaf_bots = _run_ngwaf_join(
+                    SQL.NGWAF_TOP_BOTS_JOIN_DIRECT.format(table_name=table_name, where_clause=where_clause, n=n),
+                    params,
+                    "top_bots:ngwaf_join_direct",
+                )
         elif cols_needed:
             _t = _time.perf_counter()
-            from contextlib import nullcontext
-
             ctx = (
                 nullcontext(shared_temp_table)
                 if shared_temp_table
@@ -831,26 +830,17 @@ def get_top_bots(
                         rows = runner.execute(q).fetchall()
                         timer.mark("top_bots:top_uas_query", _t)
                         _t = _time.perf_counter()
-                        arcjet_bots = _classify(rows)
+                        arcjet_bots = classify_ua_counts(rows, n)
                         timer.mark("top_bots:arcjet_match", _t)
                     except Exception as e:
                         _logger.error("[security] arcjet top bots failed: %s", e)
 
                 if ngwaf_attached:
-                    _t = _time.perf_counter()
-                    join_outcome = "error"
-                    try:
-                        q = SQL.NGWAF_TOP_BOTS_JOIN.format(temp_table=temp_table, n=n)
-                        res = runner.execute(q).fetchall()
-                        ngwaf_bots = [{"name": r[0], "category": r[1], "request_count": r[2]} for r in res]
-                        join_outcome = "success"
-                    except Exception as e:
-                        _logger.error("[security] NGWAF top bots failed: %s", e)
-                    finally:
-                        timer.mark("top_bots:ngwaf_join", _t)
-                        timer.entries[-1].update(
-                            source="live", activity="compute", current_execution=True, outcome=join_outcome
-                        )
+                    ngwaf_bots = _run_ngwaf_join(
+                        SQL.NGWAF_TOP_BOTS_JOIN.format(temp_table=temp_table, n=n),
+                        None,
+                        "top_bots:ngwaf_join",
+                    )
     finally:
         if use_rollups:
             runner.end_shared_active_hour_temps()
@@ -881,8 +871,6 @@ def get_security_aggregates(
     sections: set[str] | None = None,
     mask_ips: bool = False,
 ) -> dict:
-    import time as _time
-
     memo_key: str | None = None
     if _SECURITY_CACHE_TTL > 0 and start_time is not None and end_time is not None:
         memo_key = _security_memo_key(src, start_time, end_time, filters, bucket_seconds, sections, mask_ips)
@@ -971,13 +959,29 @@ def _build_security_response(
     sections: set[str] | None = None,
     mask_ips: bool = False,
 ) -> dict:
-    import time as _time
-
     timer = SectionTimer(section_timings)
     section_timings = timer.entries
 
     def _want(name: str) -> bool:
         return sections is None or name in sections
+
+    def _populate_top_bots(shared_tmp: str | None = None) -> None:
+        _t0 = _time.perf_counter()
+        try:
+            tb = get_top_bots(
+                runner.con,
+                src,
+                start_time,
+                end_time,
+                filters or {},
+                shared_temp_table=shared_tmp,
+                parent_runner=runner,
+            )
+            results["bots"] = tb.get("bots", [])
+            results["ngwaf_bots"] = tb.get("ngwaf_bots", [])
+        except Exception as e:
+            _logger.error("[security] get_top_bots failed in aggregate: %s", e)
+        timer.mark("top_bots", _t0)
 
     results = {**runner.telemetry()}
 
@@ -1026,8 +1030,6 @@ def _build_security_response(
     _want_ngwaf_bots = _want("ngwaf_verified_bots") or _want("ngwaf_verified_bots_ts")
     if _want_ngwaf_bots:
         try:
-            from backend import config as svcconfig
-
             results["ngwaf_configured"] = bool(svcconfig.get_ngwaf_workspace_id(src.get("service_id", "")))
         except Exception:
             results["ngwaf_configured"] = False
@@ -1374,14 +1376,7 @@ def _build_security_response(
 
     if _want("top_bots"):
         if use_top_bots_rollup:
-            _t = _time.perf_counter()
-            try:
-                tb = get_top_bots(runner.con, src, start_time, end_time, filters or {}, parent_runner=runner)
-                results["bots"] = tb.get("bots", [])
-                results["ngwaf_bots"] = tb.get("ngwaf_bots", [])
-            except Exception as e:
-                _logger.error("[security] get_top_bots failed in aggregate: %s", e)
-            timer.mark("top_bots", _t)
+            _populate_top_bots()
         else:
             _need("top_bots", {"ua", "waf_req_id"})
 
@@ -1446,14 +1441,12 @@ def _build_security_response(
             )
             if rolled_vbts is not None:
                 timer.mark("verified_bots_ts_rollup", _t)
-                results["verified_bots_ts"] = [
-                    {"time": safe_iso(r[0]), "bot_type": r[1], "count": r[2]} for r in rolled_vbts
-                ]
+                vbts_rows = rolled_vbts
             else:
                 q = SQL.VERIFIED_BOTS_TS.format(bucket_seconds=bucket_seconds, temp_table=temp_table)
-                res = runner.execute(q).fetchall()
+                vbts_rows = runner.execute(q).fetchall()
                 timer.mark("verified_bots_ts", _t)
-                results["verified_bots_ts"] = [{"time": safe_iso(r[0]), "bot_type": r[1], "count": r[2]} for r in res]
+            results["verified_bots_ts"] = [{"time": safe_iso(r[0]), "bot_type": r[1], "count": r[2]} for r in vbts_rows]
 
         if (
             _ngwaf_attached
@@ -1628,22 +1621,7 @@ def _build_security_response(
                 results["bot_efficiency"] = []
 
         if "top_bots" in live_sections and temp_table:
-            _t = _time.perf_counter()
-            try:
-                tb = get_top_bots(
-                    runner.con,
-                    src,
-                    start_time,
-                    end_time,
-                    filters or {},
-                    shared_temp_table=temp_table,
-                    parent_runner=runner,
-                )
-                results["bots"] = tb.get("bots", [])
-                results["ngwaf_bots"] = tb.get("ngwaf_bots", [])
-            except Exception as e:
-                _logger.error("[security] get_top_bots failed in aggregate: %s", e)
-            timer.mark("top_bots", _t)
+            _populate_top_bots(shared_tmp=temp_table)
 
         if "proxies" in live_sections and temp_table:
             _t = _time.perf_counter()
@@ -1659,7 +1637,7 @@ def _build_security_response(
                     parent_runner=runner,
                 )
                 for k, v in px.items():
-                    if k not in ["section_timings", "debug_calls", "debug_queries"]:
+                    if k not in ("section_timings", "debug_calls", "debug_queries"):
                         results[k] = v
             except Exception as e:
                 _logger.error("[security] get_security_proxies failed in aggregate: %s", e)
@@ -1676,10 +1654,8 @@ def _build_security_response(
             results[name] = [] if is_list else {}
 
     if _want("top_bots"):
-        if "bots" not in results:
-            results["bots"] = []
-        if "ngwaf_bots" not in results:
-            results["ngwaf_bots"] = []
+        results.setdefault("bots", [])
+        results.setdefault("ngwaf_bots", [])
 
     if _want("proxies") and "active_proxies_count" not in results:
         results.update(_empty_proxies_payload())
@@ -1756,12 +1732,12 @@ def _finish_proxies(
     ]
 
     active_clients = []
+    if mask_ips:
+        from backend.core.share_db.validation import mask_ip
     for row in raw_clients:
         asn_int = _parse_asn_int(row.get("asn"))
         client_item = {**row}
         if mask_ips and client_item.get("ip"):
-            from backend.core.share_db.validation import mask_ip
-
             client_item["ip"] = mask_ip(str(client_item["ip"]))
         client_item["asn_name"] = _asn_display(asn_int)
         client_item.pop("asn", None)
@@ -1786,10 +1762,6 @@ def get_security_proxies(
     mask_ips: bool = False,
     parent_runner: QueryRunner | None = None,
 ) -> dict[str, Any]:
-    from backend.repositories._base import QueryRunner, _safe_table
-    from backend.repositories._sql import security as SQL
-    from backend.repositories.utils.filters import build_where_clause
-
     source_name = src["name"]
     table_name = _safe_table(source_name)
     runner = parent_runner if parent_runner is not None else QueryRunner(con, src)
@@ -1804,8 +1776,6 @@ def get_security_proxies(
     optional = ["country", "city"]
     cols_needed = [c for c in required + optional if c in actual_cols]
 
-    from contextlib import nullcontext
-
     ctx = (
         nullcontext(shared_temp_table)
         if shared_temp_table
@@ -1815,16 +1785,10 @@ def get_security_proxies(
         if temp_table is None:
             return _empty_proxies_payload()
 
-        select_country_city_inner = ""
-        if "country" in cols_needed:
-            select_country_city_inner += ",\n            country"
-        else:
-            select_country_city_inner += ",\n            CAST(NULL AS VARCHAR) AS country"
-        if "city" in cols_needed:
-            select_country_city_inner += ",\n            city"
-        else:
-            select_country_city_inner += ",\n            CAST(NULL AS VARCHAR) AS city"
-
+        select_country_city_inner = "".join(
+            f",\n            {col}" if col in cols_needed else f",\n            CAST(NULL AS VARCHAR) AS {col}"
+            for col in optional
+        )
         select_country_city_outer = ",\n                country,\n                city"
 
         combined_rows = runner.execute(

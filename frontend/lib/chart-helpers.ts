@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
-import { formatDate, toUTCDate } from '@/lib/date'
+import { formatDate, toUTCDate } from '@/lib/format'
 import { CHART_LAYOUT_DEFAULTS } from '@/lib/utils'
-import type { PlotlyTrace } from '@/types/plotly'
+import type { PlotlyTrace } from '@/types/api'
 
 /**
  * Returns the standard Plotly xaxis config for a time-series chart bounded

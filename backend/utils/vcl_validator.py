@@ -34,7 +34,7 @@ import re
 import shutil
 from collections.abc import Callable
 
-from backend.utils.vcl_safety import LintResult, VclSafetyError, lint_document, validate_quoted_literal
+from backend.utils.vcl_utils import LintResult, VclSafetyError, lint_document, validate_quoted_literal
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ def validate_url_exclusion_regex(value: str) -> str:
     if bad:
         # Report the first offending codepoint without echoing a raw
         # control char. Re-scan via the unified policy's own match.
-        from backend.utils.vcl_safety import _FORBIDDEN_ALLOW_BACKSLASH
+        from backend.utils.vcl_utils import _FORBIDDEN_ALLOW_BACKSLASH
 
         m = _FORBIDDEN_ALLOW_BACKSLASH.search(cleaned)
         ch = m.group(0) if m else "?"

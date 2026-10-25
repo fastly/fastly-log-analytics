@@ -32,7 +32,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from backend import config as svcconfig
 from backend.config import path_within_dir, service_id_from_source  # noqa: F401
-from backend.utils.error_redaction import (  # noqa: F401
+from backend.utils.structlog_config import (  # noqa: F401
     ABS_PATH_RE,
     REDACTED,
     redact_error_text,

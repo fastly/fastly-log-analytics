@@ -33,16 +33,14 @@ const mockStore = {
   edgeOnly: false,
   compareMode: false,
 }
-vi.mock('@/stores/filterStore', () => ({
+const mockServiceStore = { activeServiceId: 'test-service-id', services: [] }
+vi.mock('@/stores/filterStore', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/stores/filterStore')>()),
   useFilterStore: Object.assign(
     (selector?: (s: typeof mockStore) => unknown) =>
       typeof selector === 'function' ? selector(mockStore) : mockStore,
     { getState: () => mockStore },
   ),
-}))
-
-const mockServiceStore = { activeServiceId: 'test-service-id', services: [] }
-vi.mock('@/stores/serviceStore', () => ({
   useServiceStore: Object.assign(
     (selector?: (s: typeof mockServiceStore) => unknown) =>
       typeof selector === 'function' ? selector(mockServiceStore) : mockServiceStore,

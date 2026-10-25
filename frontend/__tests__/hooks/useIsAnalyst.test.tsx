@@ -13,7 +13,7 @@ import { useHighScaleRequestFacts } from '@/components/high-scale/HighScaleReque
 import { client } from '@/lib/api'
 import { postOk } from '@/__tests__/helpers/page-smoke'
 import { queryKeys } from '@/lib/query-keys'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useServiceStore } from '@/stores/filterStore'
 import { useFilterStore } from '@/stores/filterStore'
 
 function makeWrapper(opts: { isRemoteAnalyst?: boolean; maskIps?: boolean } = {}) {

@@ -12,8 +12,8 @@ import {
   mapInstances,
   maplibreMockFactory,
   installMaplibreSideEffects,
-} from '@/__tests__/helpers/maplibre-mock'
-import { stubResizeObserver } from '@/__tests__/helpers/page-smoke'
+  stubResizeObserver,
+} from '@/__tests__/helpers/page-smoke'
 import React from 'react'
 
 const { setWorkerUrl, constructedWithWorker } = vi.hoisted(() => ({

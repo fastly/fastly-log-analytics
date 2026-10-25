@@ -2,11 +2,9 @@
 
 import React from 'react'
 import { AlertTriangle, CheckCircle2, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
-import { formatLocalDateTime } from '@/lib/date'
-import { formatCount } from '@/lib/format'
+import { formatLocalDateTime, formatCount } from '@/lib/format'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api'
+import { client, unwrapClient } from '@/lib/api'
 import type { ColumnDef } from '@tanstack/react-table'
 import { DataTableReadonly } from '@/components/DataTable'
 import { Badge } from '@/components/ui/badge'
@@ -407,54 +405,64 @@ export function QueueClient() {
       >
         {isStandardMode ? (
           <>
-            <AnalyticsCard
-              key="standard-ingest-summary"
-              title="Standard Ingest Summary"
-              description="Tracked synchronous file ingestion and quarantine state across all services."
-              className="min-h-[204px]"
-              isLoading={isLoading}
-              isFetching={isStatusRefetching}
-              loadingMessage="Loading ingest telemetry..."
-              error={error as AnalyticsCardError | null}
-            >
-              <div className="grid grid-cols-2 gap-4 pt-1 min-h-[100px]" data-testid="admin-queue-standard-ingest-summary">
-                <SummaryStatTile
-                  label="Ingested Files"
-                  value={formatCount(standardIngestedFiles)}
-                  sublabel="Tracked in PostgreSQL ingested_files"
-                />
-                <SummaryStatTile
-                  label="Quarantined Items"
-                  value={formatCount(standardQuarantinedItems)}
-                  valueClassName={standardQuarantinedItems > 0 ? 'text-amber-600 dark:text-amber-400' : ''}
-                  sublabel="Corrupt files & lines preserved on disk"
-                />
-              </div>
-            </AnalyticsCard>
-
-            <AnalyticsCard
-              key="standard-scheduler-overview"
-              title="In-Process Scheduler Overview"
-              description="APScheduler background cron tasks and active PostgreSQL job leases."
-              className="min-h-[204px]"
-              isLoading={isLoading}
-              isFetching={isStatusRefetching}
-              loadingMessage="Loading scheduler telemetry..."
-              error={error as AnalyticsCardError | null}
-            >
-              <div className="grid grid-cols-2 gap-4 pt-1 min-h-[100px]" data-testid="admin-queue-standard-scheduler-summary">
-                <SummaryStatTile
-                  label="Registered Schedules"
-                  value={inprocessSchedules.length}
-                  sublabel="Active APScheduler jobs"
-                />
-                <SummaryStatTile
-                  label="Active Cron Runs"
-                  value={inprocessActiveRuns.length}
-                  sublabel="Currently executing in-process jobs"
-                />
-              </div>
-            </AnalyticsCard>
+            {[
+              {
+                key: 'standard-ingest-summary',
+                title: 'Standard Ingest Summary',
+                description: 'Tracked synchronous file ingestion and quarantine state across all services.',
+                loadingMessage: 'Loading ingest telemetry...',
+                testId: 'admin-queue-standard-ingest-summary',
+                tiles: [
+                  {
+                    label: 'Ingested Files',
+                    value: formatCount(standardIngestedFiles),
+                    sublabel: 'Tracked in PostgreSQL ingested_files',
+                  },
+                  {
+                    label: 'Quarantined Items',
+                    value: formatCount(standardQuarantinedItems),
+                    valueClassName: standardQuarantinedItems > 0 ? 'text-amber-600 dark:text-amber-400' : '',
+                    sublabel: 'Corrupt files & lines preserved on disk',
+                  },
+                ],
+              },
+              {
+                key: 'standard-scheduler-overview',
+                title: 'In-Process Scheduler Overview',
+                description: 'APScheduler background cron tasks and active PostgreSQL job leases.',
+                loadingMessage: 'Loading scheduler telemetry...',
+                testId: 'admin-queue-standard-scheduler-summary',
+                tiles: [
+                  {
+                    label: 'Registered Schedules',
+                    value: inprocessSchedules.length,
+                    sublabel: 'Active APScheduler jobs',
+                  },
+                  {
+                    label: 'Active Cron Runs',
+                    value: inprocessActiveRuns.length,
+                    sublabel: 'Currently executing in-process jobs',
+                  },
+                ],
+              },
+            ].map((card) => (
+              <AnalyticsCard
+                key={card.key}
+                title={card.title}
+                description={card.description}
+                className="min-h-[204px]"
+                isLoading={isLoading}
+                isFetching={isStatusRefetching}
+                loadingMessage={card.loadingMessage}
+                error={error as AnalyticsCardError | null}
+              >
+                <div className="grid grid-cols-2 gap-4 pt-1 min-h-[100px]" data-testid={card.testId}>
+                  {card.tiles.map((tile) => (
+                    <SummaryStatTile key={tile.label} {...tile} />
+                  ))}
+                </div>
+              </AnalyticsCard>
+            ))}
           </>
         ) : (
           <>

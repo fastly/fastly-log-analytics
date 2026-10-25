@@ -2,8 +2,23 @@
 
 import * as React from 'react'
 import { usePathname } from 'next/navigation'
-import { flexRender, type Header, type ColumnDef, type Row, type Table as ReactTable, type VisibilityState } from '@tanstack/react-table'
-import type { Virtualizer } from '@tanstack/react-virtual'
+import {
+  flexRender,
+  type Header,
+  type ColumnDef,
+  type ColumnFiltersState,
+  type ColumnOrderState,
+  type SortingState,
+  type Row,
+  type Table as ReactTable,
+  type VisibilityState,
+  getCoreRowModel,
+  getFilteredRowModel,
+  getPaginationRowModel,
+  getSortedRowModel,
+  useReactTable,
+} from '@tanstack/react-table'
+import { useVirtualizer, type Virtualizer } from '@tanstack/react-virtual'
 import { ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, Copy, ExternalLink, Filter, GripVertical, Inbox, Settings2 } from 'lucide-react'
 import {
   DndContext,
@@ -54,13 +69,196 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useDateFormat } from '@/hooks/useSSE'
 import { useMaskIps } from '@/hooks/useBootstrap'
 import { TimeAgo } from '@/components/SyncStatusBadge/SyncStatusBadge'
-import { useDataTableState, type DataTableBaseProps } from './useDataTableState'
 import { getApiBase } from '@/lib/api'
 import type { Schema } from '@/types/api'
 import type { components } from '@/types/api.generated'
 import { cn, copyToClipboard, isIpFamilyField } from '@/lib/utils'
-import { useFilterStore } from '@/stores/filterStore'
-import { usePopGeoStore } from '@/stores/popGeoStore'
+import { useFilterStore, usePopGeoStore } from '@/stores/filterStore'
+
+export interface DataTableBaseProps<TData, TValue> {
+  columns: ColumnDef<TData, TValue>[]
+  data: TData[]
+  searchKey?: string
+  isLoading?: boolean
+  showPagination?: boolean
+  sorting?: SortingState
+  onSortingChange?: (sorting: SortingState) => void
+  initialSorting?: SortingState
+  initialVisibility?: VisibilityState
+  title?: React.ReactNode
+  compactToolbar?: boolean
+  extraToolbarContent?: React.ReactNode
+  renderToolbar?: (table: ReactTable<TData>) => React.ReactNode
+  hideToolbar?: boolean
+  columnVisibility?: VisibilityState
+  onColumnVisibilityChange?: (visibility: VisibilityState) => void
+  emptyMessage?: string
+  emptyHint?: React.ReactNode
+  onClearFilter?: () => void
+  onRowClick?: (row: TData) => void
+  getRowClassName?: (row: TData) => string
+  tableCaption?: string
+}
+
+interface UseDataTableStateArgs<TData, TValue> {
+  columns: ColumnDef<TData, TValue>[]
+  data?: TData[]
+  showPagination?: boolean
+  controlledSorting?: SortingState
+  onSortingChange?: (sorting: SortingState) => void
+  initialSorting?: SortingState
+  controlledVisibility?: VisibilityState
+  onColumnVisibilityChange?: (visibility: VisibilityState) => void
+  initialVisibility?: VisibilityState
+  initialColumnOrder?: string[]
+  enableColumnOrder?: boolean
+}
+
+export function useDataTableState<TData, TValue>({
+  columns,
+  data = [],
+  showPagination = true,
+  controlledSorting,
+  onSortingChange,
+  initialSorting = [],
+  controlledVisibility,
+  onColumnVisibilityChange,
+  initialVisibility = {},
+  initialColumnOrder,
+  enableColumnOrder = false,
+}: UseDataTableStateArgs<TData, TValue>) {
+  const isControlled = controlledVisibility !== undefined
+  const isSortingControlled = controlledSorting !== undefined
+  const [internalSorting, setInternalSorting] = React.useState<SortingState>(initialSorting)
+  const sorting = isSortingControlled ? controlledSorting : internalSorting
+
+  const [internalVisibility, setInternalVisibility] = React.useState<VisibilityState>(initialVisibility)
+  const columnVisibility = isControlled ? controlledVisibility! : internalVisibility
+  const setColumnVisibility = React.useCallback(
+    (updater: VisibilityState | ((prev: VisibilityState) => VisibilityState)) => {
+      if (isControlled) {
+        const next = typeof updater === 'function' ? updater(controlledVisibility!) : updater
+        onColumnVisibilityChange?.(next)
+      } else {
+        setInternalVisibility(updater)
+      }
+    },
+    [isControlled, controlledVisibility, onColumnVisibilityChange],
+  )
+
+  const [stableData, setStableData] = React.useState<TData[]>(data)
+  const isSameData =
+    stableData === data ||
+    (Array.isArray(stableData) &&
+      Array.isArray(data) &&
+      stableData.length === data.length &&
+      stableData.every((row, i) => row === data[i]))
+  if (!isSameData) {
+    setStableData(data)
+  }
+  const tableData = isSameData ? stableData : data
+
+  const nextVisibilityJson = JSON.stringify(initialVisibility)
+  const [prevInitialVisibilityJson, setPrevInitialVisibilityJson] = React.useState(nextVisibilityJson)
+  if (nextVisibilityJson !== prevInitialVisibilityJson) {
+    setPrevInitialVisibilityJson(nextVisibilityJson)
+    if (!isControlled && Object.keys(initialVisibility).length > 0) {
+      setInternalVisibility(initialVisibility)
+    }
+  }
+
+  const handleSortingChange = (updater: SortingState | ((prev: SortingState) => SortingState)) => {
+    const next = typeof updater === 'function' ? updater(sorting) : updater
+    if (isSortingControlled) {
+      onSortingChange?.(next)
+    } else {
+      setInternalSorting(next)
+    }
+  }
+
+  const defaultColumnOrder = React.useMemo<ColumnOrderState>(() => {
+    if (!enableColumnOrder) return []
+    const allIds = columns.map(columnIdOf)
+    if (initialColumnOrder && initialColumnOrder.length > 0) {
+      const validInitial = initialColumnOrder.filter((id) => allIds.includes(id))
+      const remaining = allIds.filter((id) => !validInitial.includes(id))
+      return [...validInitial, ...remaining]
+    }
+    return allIds
+  }, [columns, initialColumnOrder, enableColumnOrder])
+
+  const [userColumnOrder, setUserColumnOrder] = React.useState<ColumnOrderState | null>(null)
+
+  const columnOrder = React.useMemo<ColumnOrderState>(() => {
+    if (!userColumnOrder || userColumnOrder.length !== defaultColumnOrder.length) return defaultColumnOrder
+    const userSet = new Set(userColumnOrder)
+    for (const id of defaultColumnOrder) {
+      if (!userSet.has(id)) return defaultColumnOrder
+    }
+    return userColumnOrder
+  }, [userColumnOrder, defaultColumnOrder])
+
+  const setColumnOrder = React.useCallback(
+    (next: ColumnOrderState | ((prev: ColumnOrderState) => ColumnOrderState)) => {
+      setUserColumnOrder(typeof next === 'function' ? next(columnOrder) : next)
+    },
+    [columnOrder],
+  )
+
+  const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>([])
+  const [rowSelection, setRowSelection] = React.useState({})
+  const [pagination, setPagination] = React.useState({ pageIndex: 0, pageSize: 50 })
+  const [columnSizing, setColumnSizing] = React.useState<Record<string, number>>({})
+  const tableColumns = React.useMemo(() => columns, [columns])
+
+  const table = useReactTable({
+    data: tableData,
+    columns: tableColumns,
+    onSortingChange: handleSortingChange,
+    manualSorting: isSortingControlled,
+    onColumnFiltersChange: setColumnFilters,
+    onPaginationChange: setPagination,
+    ...(enableColumnOrder ? { onColumnOrderChange: setColumnOrder } : {}),
+    getCoreRowModel: getCoreRowModel(),
+    getPaginationRowModel: showPagination ? getPaginationRowModel() : undefined,
+    getSortedRowModel: isSortingControlled ? undefined : getSortedRowModel(),
+    getFilteredRowModel: getFilteredRowModel(),
+    onColumnVisibilityChange: setColumnVisibility,
+    onRowSelectionChange: setRowSelection,
+    columnResizeMode: 'onChange',
+    onColumnSizingChange: setColumnSizing,
+    state: {
+      sorting,
+      columnFilters,
+      columnVisibility,
+      ...(enableColumnOrder ? { columnOrder } : {}),
+      rowSelection,
+      pagination,
+      columnSizing,
+    },
+  })
+
+  const tableContainerRef = React.useRef<HTMLDivElement>(null)
+  const { rows } = table.getRowModel()
+
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => tableContainerRef.current,
+    estimateSize: () => 40,
+    overscan: 10,
+  })
+
+  return {
+    table,
+    rows,
+    rowVirtualizer,
+    tableContainerRef,
+    columnVisibility,
+    columnSizing,
+    columnOrder,
+    setColumnOrder,
+  }
+}
 
 // ─── PopLabel & PopGeo ───────────────────────────────────────────────────────
 
@@ -397,6 +595,15 @@ interface DataTableBodyProps<TData, TValue> {
   onClearFilter?: () => void
 }
 
+function VirtualSpacerRow({ colSpan, height }: { colSpan: number; height: number }) {
+  if (height <= 0) return null
+  return (
+    <TableRow role="presentation" aria-hidden="true">
+      <TableCell role="none" colSpan={colSpan} style={{ height, padding: 0, border: 0 }} />
+    </TableRow>
+  )
+}
+
 export function DataTableBody<TData, TValue>({
   table,
   rows,
@@ -411,6 +618,13 @@ export function DataTableBody<TData, TValue>({
   emptyHint,
   onClearFilter,
 }: DataTableBodyProps<TData, TValue>) {
+  const virtualItems = rowVirtualizer.getVirtualItems()
+  const topPad = virtualItems.length > 0 ? virtualItems[0].start : 0
+  const bottomPad =
+    virtualItems.length > 0
+      ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end
+      : 0
+
   return (
     <TableBody>
       {isLoading ? (
@@ -424,12 +638,8 @@ export function DataTableBody<TData, TValue>({
         </TableRow>
       ) : table.getRowModel().rows?.length ? (
         <>
-          {rowVirtualizer.getVirtualItems().length > 0 && rowVirtualizer.getVirtualItems()[0].start > 0 && (
-            <TableRow role="presentation" aria-hidden="true">
-              <TableCell role="none" colSpan={columns.length} style={{ height: rowVirtualizer.getVirtualItems()[0].start, padding: 0, border: 0 }} />
-            </TableRow>
-          )}
-          {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+          <VirtualSpacerRow colSpan={columns.length} height={topPad} />
+          {virtualItems.map((virtualRow) => {
             const row = rows[virtualRow.index]
             return (
               <MemoizedTableRow
@@ -442,11 +652,7 @@ export function DataTableBody<TData, TValue>({
               />
             )
           })}
-          {rowVirtualizer.getVirtualItems().length > 0 && rowVirtualizer.getVirtualItems()[rowVirtualizer.getVirtualItems().length - 1].end < rowVirtualizer.getTotalSize() && (
-            <TableRow role="presentation" aria-hidden="true">
-              <TableCell role="none" colSpan={columns.length} style={{ height: rowVirtualizer.getTotalSize() - rowVirtualizer.getVirtualItems()[rowVirtualizer.getVirtualItems().length - 1].end, padding: 0, border: 0 }} />
-            </TableRow>
-          )}
+          <VirtualSpacerRow colSpan={columns.length} height={bottomPad} />
         </>
       ) : (
         <TableRow>
@@ -1010,6 +1216,7 @@ export interface LatencyRow {
 export const textValue = (v: unknown): string => (typeof v === 'string' ? v : '')
 export const numberValue = (v: unknown): number | null | undefined => (typeof v === 'number' ? v : null)
 export const msCell = (value: unknown) => <span>{numberValue(value)?.toFixed(1)}ms</span>
+const ms2Cell = (info: { getValue: () => unknown }) => numberValue(info.getValue())?.toFixed(2) ?? '0.00'
 
 /**
  * Creates standard performance/latency columns with a filter-value drill-down
@@ -1041,8 +1248,8 @@ export const makeLatencyColumns = <TRow extends LatencyRow>(
     }
   },
   { accessorKey: 'requests', header: columnHeader('Reqs'), cell: (info) => formatCountMaybe(numberValue(info.getValue())) ?? '0' },
-  { accessorKey: 'avg', header: columnHeader('Avg (ms)'), cell: (info) => numberValue(info.getValue())?.toFixed(2) ?? '0.00' },
-  { accessorKey: 'p50', header: columnHeader('P50'), cell: (info) => numberValue(info.getValue())?.toFixed(2) ?? '0.00' },
-  { accessorKey: 'p95', header: columnHeader('P95'), cell: (info) => numberValue(info.getValue())?.toFixed(2) ?? '0.00' },
-  { accessorKey: 'p99', header: columnHeader('P99'), cell: (info) => numberValue(info.getValue())?.toFixed(2) ?? '0.00' },
+  { accessorKey: 'avg', header: columnHeader('Avg (ms)'), cell: ms2Cell },
+  { accessorKey: 'p50', header: columnHeader('P50'), cell: ms2Cell },
+  { accessorKey: 'p95', header: columnHeader('P95'), cell: ms2Cell },
+  { accessorKey: 'p99', header: columnHeader('P99'), cell: ms2Cell },
 ]

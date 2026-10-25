@@ -19,9 +19,10 @@ import { http, HttpResponse } from 'msw'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 import { server } from '@/__tests__/helpers/msw/handlers'
-import type { FiltersPayload } from '@/types/filters'
+import type { FiltersPayload } from '@/types/api'
 
-vi.mock('@/stores/serviceStore', () => {
+vi.mock('@/stores/filterStore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/filterStore')>()
   const state = {
     activeServiceId: 'svc-test',
     setActiveServiceId: vi.fn(),
@@ -32,7 +33,7 @@ vi.mock('@/stores/serviceStore', () => {
     vi.fn((selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state)),
     { getState: () => state },
   )
-  return { useServiceStore, __state: state }
+  return { ...actual, useServiceStore, __state: state }
 })
 
 const API_BASE = 'http://127.0.0.1:8000'

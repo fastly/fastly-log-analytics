@@ -19,7 +19,7 @@ import { without } from '@/__tests__/helpers/page-smoke'
 import { http, HttpResponse } from 'msw'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 
-vi.mock('@/stores/serviceStore', () => serviceStoreMockFactory())
+vi.mock('@/stores/filterStore', () => serviceStoreMockFactory())
 
 import {
   buildHandleModalClose,

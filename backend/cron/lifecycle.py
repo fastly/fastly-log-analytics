@@ -321,7 +321,7 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
     def _finalize_duration(self) -> None:
         if self._source is None or self._start_time is None:
             return
-        from backend.cron.jobs._common import finalize_cron_duration
+        from backend.cron.jobs.sync import finalize_cron_duration
 
         finalize_cron_duration(self._source, self._run_id, self._start_time)
 

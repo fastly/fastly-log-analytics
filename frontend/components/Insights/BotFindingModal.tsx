@@ -25,7 +25,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { formatBytes, formatCount } from '@/lib/format'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useServiceStore } from '@/stores/filterStore'
 import { InsightStatCard as StatCard, buildInvestigateHref } from '@/components/Insights/InsightCard'
 import type { BotFindingModalData } from '@/components/Insights/InsightCard'
 

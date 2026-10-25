@@ -292,6 +292,18 @@ def _tenant_matrix_path(service_id: str):
     return _MATRIX_PATH.with_name(f"{_MATRIX_PATH.stem}_{service_id}{_MATRIX_PATH.suffix}")
 
 
+def _read_matrix_file(path, label: str) -> dict | None:
+    try:
+        if path.exists():
+            with path.open() as f:
+                m = json.load(f)
+            if isinstance(m, dict) and m:
+                return m
+    except Exception:
+        logger.debug("[_load_matrix] %s read failed", label, exc_info=True)
+    return None
+
+
 def _load_matrix(service_id: str) -> dict | None:
     """Load the trained L2 transition matrix for ``service_id``.
 
@@ -308,43 +320,24 @@ def _load_matrix(service_id: str) -> dict | None:
 
     Returns None only when all three sources fail.
     """
-    import json as _json
-
     from backend.provision.session_scoring_orchestrator import _MATRIX_PATH
 
     # 1. Tenant-scoped local matrix.
     tenant_path = _tenant_matrix_path(service_id)
-    try:
-        if tenant_path.exists():
-            with tenant_path.open() as f:
-                m = _json.load(f)
-            if isinstance(m, dict) and m:
-                return m
-    except Exception:
-        logger.debug(f"[_load_matrix] local {tenant_path.name} read failed", exc_info=True)
+    if m := _read_matrix_file(tenant_path, f"local {tenant_path.name}"):
+        return m
 
     # 2. FOS-published matrix.
     try:
         from backend.state_sync import fetch_matrix_from_fos
 
-        m = fetch_matrix_from_fos(service_id)
-        if m:
+        if m := fetch_matrix_from_fos(service_id):
             return m
     except Exception:
         logger.debug("[_load_matrix] FOS matrix fetch failed", exc_info=True)
 
     # 3. Default-empty matrix bundled with the image.
-    default_path = _MATRIX_PATH.parent / "matrix.default.json"
-    try:
-        if default_path.exists():
-            with default_path.open() as f:
-                m = _json.load(f)
-            if isinstance(m, dict) and m:
-                return m
-    except Exception:
-        logger.debug("[_load_matrix] default matrix.json read failed", exc_info=True)
-
-    return None
+    return _read_matrix_file(_MATRIX_PATH.parent / "matrix.default.json", "default matrix.json")
 
 
 from backend.repositories import session_scoring as _scoring_repo
@@ -450,6 +443,19 @@ def _reconstruct_labeled_sessions(service_id: str, labels: list[dict]) -> list[t
     return result
 
 
+def _safe_scoring_dict(scoring: dict | None) -> dict:
+    return {k: v for k, v in (scoring or {}).items() if k not in _SECRET_KEYS}
+
+
+def _require_fastly_token(
+    service_id: str, body: ScoringTokenBody | None, err_msg: str = "Fastly API token required"
+) -> str:
+    resolved_token = resolve_fastly_token(service_id, body.token if body else "")
+    if not resolved_token:
+        raise HTTPException(status_code=400, detail={"error": err_msg})
+    return resolved_token
+
+
 @router.post("/{service_id}/scoring/enable", dependencies=[Depends(require_admin)])
 def scoring_enable(
     service_id: str = Path(..., description="Logging service ID to enable scoring on"),
@@ -460,13 +466,9 @@ def scoring_enable(
     Streams SSE status events while the orchestrator runs through:
     Compute service provisioning → Wasm deploy → VCL clone → backend +
     snippets + custom fields + format update → validate → activate."""
-    token = body.token if body else ""
-    resolved_token = resolve_fastly_token(service_id, token)
-    if not resolved_token:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "Fastly API token required (pass in JSON body or set in service config)"},
-        )
+    resolved_token = _require_fastly_token(
+        service_id, body, "Fastly API token required (pass in JSON body or set in service config)"
+    )
 
     from backend import config as svcconfig
 
@@ -501,8 +503,7 @@ def scoring_enable(
 
     def _done_event() -> dict:
         cfg = svcconfig.load_config(service_id) or {}
-        scoring = cfg.get("scoring", {})
-        safe_scoring = {k: v for k, v in scoring.items() if k not in _SECRET_KEYS}
+        safe_scoring = _safe_scoring_dict(cfg.get("scoring"))
         safe_scoring_state.update(safe_scoring)
         return {
             "type": "done",
@@ -572,13 +573,7 @@ def scoring_disable(
     body: ScoringTokenBody | None = None,
 ):
     """Disable session scoring. Reverse of enable_scoring."""
-    token = body.token if body else ""
-    resolved_token = resolve_fastly_token(service_id, token)
-    if not resolved_token:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "Fastly API token required"},
-        )
+    resolved_token = _require_fastly_token(service_id, body)
 
     from backend import config as svcconfig
 
@@ -588,15 +583,12 @@ def scoring_disable(
 
     svcconfig.mutate_config(service_id, _disable)
 
-    def _after_done() -> None:
-        _record_scoring_toggle_audit(service_id, "scoring_disabled")
-
     return stream_iac_reconcile(
         service_id,
         resolved_token,
         start_message=f"Disabling session scoring for {service_id}...",
         done_event={"type": "done", "message": "Session scoring disabled."},
-        after_done=_after_done,
+        after_done=lambda: _record_scoring_toggle_audit(service_id, "scoring_disabled"),
         log_label="scoring_disable",
         logger_obj=logger,
     )
@@ -717,7 +709,7 @@ def scoring_status(
             if ready is not None:
                 result["preflight_pragmas_ready"] = ready
         return result
-    result = {k: v for k, v in scoring.items() if k not in _SECRET_KEYS}
+    result = _safe_scoring_dict(scoring)
 
     # Best-effort: surface the scoring Compute service's LIVE active version +
     # the time it was activated, so operators can confirm exactly what's
@@ -812,6 +804,12 @@ def _strip_pii_fields_for_analyst(request: Request, body) -> None:
             setattr(body, name, fields[name].default)
 
 
+def _finalize_label_write(request: Request, service_id: str, row: dict) -> dict:
+    # Bust analytics cache so the next /top-flagged shows the new badge.
+    _bust_analytics_cache(service_id)
+    return _project_label_for_analyst(row) if _is_analyst_request(request) else row
+
+
 def _scoring_time_window(request: Request, since_hours: int) -> tuple[str, str | None]:
     """SQL timestamp predicate for the ``[now-since_hours, now]`` window,
     clamped to the analyst's allowed window.
@@ -874,10 +872,7 @@ def scoring_labels_create(
     from backend.scoring import labels as _labels
 
     require_service_in_scope(request, service_id)
-
     _strip_pii_fields_for_analyst(request, body)
-    sid = body.sid.strip()
-    label = body.label.strip()
     # save_label() itself validates sid + label and raises ValueError
     # with the same messages; the try/except below converts that into
     # HTTPException(400). Keeping the validation in one place (the
@@ -886,8 +881,8 @@ def scoring_labels_create(
     try:
         row = _labels.save_label(
             service_id,
-            sid=sid,
-            label=label,
+            sid=body.sid.strip(),
+            label=body.label.strip(),
             notes=body.notes,
             flagged_by=body.flagged_by,
             sample_ip=body.sample_ip,
@@ -896,11 +891,7 @@ def scoring_labels_create(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=make_error("invalid_label", str(e)))
-    # Bust analytics cache so the next /top-flagged shows the new badge.
-    _bust_analytics_cache(service_id)
-    if _is_analyst_request(request):
-        row = _project_label_for_analyst(row)
-    return row
+    return _finalize_label_write(request, service_id, row)
 
 
 @router.patch(
@@ -927,10 +918,7 @@ def scoring_labels_update(
         raise HTTPException(status_code=400, detail=make_error("invalid_label", str(e)))
     if not row:
         raise HTTPException(status_code=404, detail=not_found("label_not_found"))
-    _bust_analytics_cache(service_id)
-    if _is_analyst_request(request):
-        row = _project_label_for_analyst(row)
-    return row
+    return _finalize_label_write(request, service_id, row)
 
 
 @router.delete(
@@ -981,6 +969,19 @@ def _prepare_scoring_query(
     return src, cols, ts_pred, win_disc
 
 
+def _cached_scoring_rows(
+    cache_key: tuple,
+    since_hours: int,
+    fetch_fn,
+    ts_field: str = "hour",
+    **extra: object,
+) -> dict:
+    return _cached(
+        cache_key,
+        lambda: {"rows": _isoformat_ts(fetch_fn(), ts_field), "since_hours": since_hours, **extra},
+    )
+
+
 @router.get(
     "/{service_id}/scoring/top-flagged", response_model=ScoringTopFlaggedResponse, response_model_exclude_unset=True
 )
@@ -1002,12 +1003,11 @@ def scoring_top_flagged(
     # ``ip`` is masked for analysts by the response middleware's key-name
     # pass (the column is literally ``ip``); ``ua`` / ``url`` are left intact
     # because analysts triage flagged sessions on them.
-    return _cached(
+    return _cached_scoring_rows(
         ("top-flagged", service_id, since_hours, limit, win_disc),
-        lambda: {
-            "rows": _isoformat_ts(_scoring_repo.top_flagged_rows(service_id, src, ts_pred, limit), "timestamp"),
-            "since_hours": since_hours,
-        },
+        since_hours,
+        lambda: _scoring_repo.top_flagged_rows(service_id, src, ts_pred, limit),
+        ts_field="timestamp",
     )
 
 
@@ -1025,12 +1025,10 @@ def scoring_score_distribution(
     list of {hour, bucket, count} rows; the frontend pivots for the
     histogram."""
     src, _cols, ts_pred, win_disc = _prepare_scoring_query(request, service_id, since_hours)
-    return _cached(
+    return _cached_scoring_rows(
         ("score-distribution", service_id, since_hours, win_disc),
-        lambda: {
-            "rows": _isoformat_ts(_scoring_repo.score_distribution_rows(service_id, src, ts_pred), "hour"),
-            "since_hours": since_hours,
-        },
+        since_hours,
+        lambda: _scoring_repo.score_distribution_rows(service_id, src, ts_pred),
     )
 
 
@@ -1047,12 +1045,10 @@ def scoring_compliance_breakdown(
     """Hourly count grouped by edge_cookie_compliance (ok / missing /
     tampered / expired / unknown)."""
     src, _cols, ts_pred, win_disc = _prepare_scoring_query(request, service_id, since_hours)
-    return _cached(
+    return _cached_scoring_rows(
         ("compliance-breakdown", service_id, since_hours, win_disc),
-        lambda: {
-            "rows": _isoformat_ts(_scoring_repo.compliance_breakdown_rows(service_id, src, ts_pred), "hour"),
-            "since_hours": since_hours,
-        },
+        since_hours,
+        lambda: _scoring_repo.compliance_breakdown_rows(service_id, src, ts_pred),
     )
 
 
@@ -1095,16 +1091,12 @@ def scoring_latency_timeseries(
     # (never interpolated from user input) so it's safe in the f-string SQL.
     bucket = "minute" if int(since_hours) <= 1 else "hour"
 
-    return _cached(
+    return _cached_scoring_rows(
         ("latency-timeseries", service_id, since_hours, win_disc),
-        lambda: {
-            "rows": _isoformat_ts(
-                _scoring_repo.latency_timeseries_rows(service_id, src, ts_pred, bucket, has_rtt, has_exec), "hour"
-            ),
-            "since_hours": since_hours,
-            "has_latency": has_rtt or has_exec,
-            "granularity": bucket,
-        },
+        since_hours,
+        lambda: _scoring_repo.latency_timeseries_rows(service_id, src, ts_pred, bucket, has_rtt, has_exec),
+        has_latency=has_rtt or has_exec,
+        granularity=bucket,
     )
 
 
@@ -1152,18 +1144,12 @@ def scoring_health(
         # Scorer-latency snapshot (µs). Present only when the columns exist
         # AND at least one row carries a value; ``available=False`` tells
         # the UI to hide the tile (older service, or no scored traffic yet).
-        def _opt_int(key: str) -> int | None:
-            v = row.get(key)
-            return int(v) if v is not None else None
-
         latency = {
             "available": has_rtt or has_exec,
-            "rtt_p50_us": _opt_int("rtt_p50_us"),
-            "rtt_p95_us": _opt_int("rtt_p95_us"),
-            "rtt_p99_us": _opt_int("rtt_p99_us"),
-            "rtt_max_us": _opt_int("rtt_max_us"),
-            "exec_p50_us": _opt_int("exec_p50_us"),
-            "exec_p95_us": _opt_int("exec_p95_us"),
+            **{
+                k: (int(v) if (v := row.get(k)) is not None else None)
+                for k in ("rtt_p50_us", "rtt_p95_us", "rtt_p99_us", "rtt_max_us", "exec_p50_us", "exec_p95_us")
+            },
         }
 
         # L2-enforcement opt-in + deployment-age readiness gauge. Admin-only —
@@ -1178,6 +1164,7 @@ def scoring_health(
 
             l2_enforce = l2_enforce_readiness_block(service_id)
 
+        scorer_errors = int(row.get("scorer_errors") or 0)
         return {
             "since_hours": since_hours,
             "total_edge_rows": total,
@@ -1188,12 +1175,12 @@ def scoring_health(
             "p50_score": float(row.get("p50_score") or 0),
             "p95_score": float(row.get("p95_score") or 0),
             "max_score": int(row.get("max_score") or 0),
-            "scorer_errors": int(row.get("scorer_errors") or 0),
+            "scorer_errors": scorer_errors,
             # SRE-15: traffic-normalized fail-open rate. The bare count above
             # rises with request volume, so a fixed count threshold cries wolf
             # under load and stays silent on a low-traffic spike; the rate is
             # the stable spike-arm the UI tones on.
-            "fail_open_rate_pct": round(int(row.get("scorer_errors") or 0) / total * 100.0, 2) if total else 0.0,
+            "fail_open_rate_pct": round(scorer_errors / total * 100.0, 2) if total else 0.0,
             "top_reasons": row.get("top_reasons") or [],
             "fail_open_breakdown": row.get("fail_open_breakdown") or [],
             "latency": latency,
@@ -1361,14 +1348,11 @@ def scoring_curves(
         # Same path the AUC endpoint uses, so the curve is consistent with
         # the headline AUC number.
         labeled_sessions = _reconstruct_labeled_sessions(service_id, label_rows)
-        scored: list[tuple[int, str]] = []
-        for session, label in labeled_sessions:
-            if label not in ("good", "bad"):
-                continue
-            score = session.get("max_edge_score")
-            if score is None:
-                continue
-            scored.append((int(score), label))
+        scored = [
+            (int(score), label)
+            for session, label in labeled_sessions
+            if label in ("good", "bad") and (score := session.get("max_edge_score")) is not None
+        ]
 
         if not scored:
             return {
@@ -1391,26 +1375,17 @@ def scoring_curves(
         for t in range(100, -1, -1):
             tp = sum(1 for s, lbl in scored if lbl == "bad" and s >= t)
             fp = sum(1 for s, lbl in scored if lbl == "good" and s >= t)
-            fn = total_pos - tp
             tpr = tp / total_pos if total_pos else 0.0
             fpr = fp / total_neg if total_neg else 0.0
             precision = (tp / (tp + fp)) if (tp + fp) else 1.0  # convention: empty flagged set → precision 1
-            recall = tpr
             roc.append({"threshold": t, "fpr": round(fpr, 4), "tpr": round(tpr, 4)})
-            pr.append({"threshold": t, "precision": round(precision, 4), "recall": round(recall, 4)})
+            pr.append({"threshold": t, "precision": round(precision, 4), "recall": round(tpr, 4)})
 
         # AUC via trapezoidal integration over the ROC points (sorted by
         # fpr ascending). AP same idea over PR.
         def _trapz(points: list[tuple[float, float]]) -> float:
-            if len(points) < 2:
-                return 0.0
             pts = sorted(points, key=lambda p: p[0])
-            area = 0.0
-            for i in range(1, len(pts)):
-                x0, y0 = pts[i - 1]
-                x1, y1 = pts[i]
-                area += (x1 - x0) * (y0 + y1) / 2.0
-            return area
+            return sum((pts[i][0] - pts[i - 1][0]) * (pts[i - 1][1] + pts[i][1]) / 2.0 for i in range(1, len(pts)))
 
         auc = _trapz([(p["fpr"], p["tpr"]) for p in roc])
         ap = _trapz([(p["recall"], p["precision"]) for p in pr])
@@ -1490,17 +1465,16 @@ def scoring_threshold_preview(
         # When no labels exist yet, the LEFT JOIN simplifies to a
         # no-op and the SELECT degenerates to the aggregate-only path
         # — handled by the separate branch below.
-        flagged_good = flagged_bad = passed_good = passed_bad = 0
         labeled_pairs = [(s, lbl) for s, lbl in sid_to_label.items() if s]
         counts_row = _scoring_repo.threshold_preview_counts(service_id, src, ts_pred, threshold_int, labeled_pairs)
         total = int(counts_row.get("total") or 0)
         flagged_total = int(counts_row.get("flagged_total") or 0)
         passed_total = total - flagged_total
-        if labeled_pairs:
-            flagged_good = int(counts_row.get("flagged_good") or 0)
-            flagged_bad = int(counts_row.get("flagged_bad") or 0)
-            passed_good = int(counts_row.get("passed_good") or 0)
-            passed_bad = int(counts_row.get("passed_bad") or 0)
+        flagged_good, flagged_bad, passed_good, passed_bad = (
+            (int(counts_row.get(k) or 0) for k in ("flagged_good", "flagged_bad", "passed_good", "passed_bad"))
+            if labeled_pairs
+            else (0, 0, 0, 0)
+        )
 
         # Unlabeled buckets fall out by subtraction — every flagged/passed
         # sid that didn't match a label-row is unlabeled.
@@ -1520,17 +1494,8 @@ def scoring_threshold_preview(
             "threshold": threshold_int,
             "since_hours": since_hours,
             "total_scored_sessions": total,
-            "flagged": {
-                "total": flagged,
-                "good": flagged_good,
-                "bad": flagged_bad,
-                "unlabeled": flagged_unlabeled,
-            },
-            "passed": {
-                "good": passed_good,
-                "bad": passed_bad,
-                "unlabeled": passed_unlabeled,
-            },
+            "flagged": {"total": flagged, "good": flagged_good, "bad": flagged_bad, "unlabeled": flagged_unlabeled},
+            "passed": {"good": passed_good, "bad": passed_bad, "unlabeled": passed_unlabeled},
             "precision": round(precision, 4) if precision is not None else None,
             "recall": round(recall, 4) if recall is not None else None,
         }
@@ -1568,6 +1533,23 @@ _CacheRegistry.register("session_scoring._scoring_svc_version_cache", _scoring_s
 sessions_router = APIRouter(prefix="/api/sessions", tags=["sessions"], responses=DEFAULT_ERROR_RESPONSES)
 
 
+def _dispatch_sessions_query(ctx: RequestContext, hs_fn, duck_fn) -> dict:
+    if ctx.high_scale is not None:
+        return hs_fn(ctx.high_scale)
+    return execute_with_stale_view_retry(ctx.con, ctx.source, duck_fn)
+
+
+def _seal_session_rows(rows: list[dict], service_id: str) -> None:
+    for row in rows:
+        row["session_token"] = seal_session_token(
+            row.get("ip", ""),
+            row.get("ja4"),
+            row.get("session_start", ""),
+            row.get("session_end", ""),
+            service_id=service_id,
+        )
+
+
 @sessions_router.post("", response_model=SessionsResponse)
 @query_errors()
 def sessions_endpoint(
@@ -1582,50 +1564,40 @@ def sessions_endpoint(
         # window the repository enforces when a range IS provided.
         if not start_time or not end_time:
             _now = datetime.now(UTC)
-            if not end_time:
-                end_time = _now.isoformat()
-            if not start_time:
-                start_time = (_now - timedelta(days=7)).isoformat()
+            end_time = end_time or _now.isoformat()
+            start_time = start_time or (_now - timedelta(days=7)).isoformat()
 
-        high_scale_service = ctx.high_scale
-        if high_scale_service is not None:
+        def _hs_list(hs):
             from backend.high_scale.sessions import sessions_endpoint as hs_sessions
 
-            result = hs_sessions(high_scale_service, req, start_time, end_time)
-        else:
+            return hs_sessions(hs, req, start_time, end_time)
 
-            def _run_sessions(con):
-                return repo.get_sessions(
-                    con=con,
-                    src=ctx.source,
-                    start_time=start_time,
-                    end_time=end_time,
-                    filters=req.filters,
-                    page=req.page,
-                    limit=req.limit,
-                    sort_by=req.sort_by,
-                    sort_dir=req.sort_dir,
-                    flagged_only=req.flagged_only,
-                    min_reqs_flag=req.min_reqs_flag,
-                    min_4xx_pct_flag=req.min_4xx_pct_flag,
-                    streaming_only=req.streaming_only,
-                )
-
-            result = execute_with_stale_view_retry(ctx.con, ctx.source, _run_sessions)
+        result = _dispatch_sessions_query(
+            ctx,
+            _hs_list,
+            lambda con: repo.get_sessions(
+                con=con,
+                src=ctx.source,
+                start_time=start_time,
+                end_time=end_time,
+                filters=req.filters,
+                page=req.page,
+                limit=req.limit,
+                sort_by=req.sort_by,
+                sort_dir=req.sort_dir,
+                flagged_only=req.flagged_only,
+                min_reqs_flag=req.min_reqs_flag,
+                min_4xx_pct_flag=req.min_4xx_pct_flag,
+                streaming_only=req.streaming_only,
+            ),
+        )
 
         # Mint an opaque token per row from the REAL ip/window — before the analyst
         # masking middleware rewrites ``ip`` on the way out. The detail endpoint
         # unseals it, so a masking analyst can drill in without the masked `ip`
         # (which can never match) being used as the lookup key. Uniform for admin +
         # analyst; the token is opaque ciphertext, so emitting it to everyone is safe.
-        for row in result.get("sessions", []):
-            row["session_token"] = seal_session_token(
-                row.get("ip", ""),
-                row.get("ja4"),
-                row.get("session_start", ""),
-                row.get("session_end", ""),
-                service_id=ctx.service_id,
-            )
+        _seal_session_rows(result.get("sessions", []), ctx.service_id)
         return SessionsResponse.with_telemetry(**result)
 
 
@@ -1681,24 +1653,23 @@ def sessions_detail(
         if start_time is None or end_time is None:
             raise RuntimeError("clamp returned no bounds although both were supplied")
 
-        high_scale_service = ctx.high_scale
-        if high_scale_service is not None:
+        def _hs_detail(hs):
             from backend.high_scale.sessions import sessions_detail as hs_detail
 
-            res = hs_detail(high_scale_service, req, start_time, end_time, ip, ja4)
-            return SessionDetailResponse.with_telemetry(**res)
+            return hs_detail(hs, req, start_time, end_time, ip, ja4)
 
-        def _run_detail(con):
-            return repo.get_session_detail(
+        res = _dispatch_sessions_query(
+            ctx,
+            _hs_detail,
+            lambda con: repo.get_session_detail(
                 con=con,
                 src=ctx.source,
                 ip=ip,
                 ja4=ja4,
                 session_start=start_time,
                 session_end=end_time,
-            )
-
-        res = execute_with_stale_view_retry(ctx.con, ctx.source, _run_detail)
+            ),
+        )
         return SessionDetailResponse.with_telemetry(**res)
 
 

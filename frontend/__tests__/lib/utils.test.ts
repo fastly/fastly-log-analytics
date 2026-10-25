@@ -13,7 +13,7 @@ import {
   ACTIVE_WINDOW_MS,
 } from '@/lib/utils'
 import { showReadOnlyToast, showToast } from '@/lib/utils'
-import { toUTCDate, formatTimeAgo, formatLocalDateTime } from '@/lib/date'
+import { toUTCDate, formatTimeAgo, formatLocalDateTime } from '@/lib/format'
 import { resolveRangeWire, DEFAULT_RANGE_TOKEN, ANCHOR_QUANTUM_SECONDS, quantizeAnchor } from '@/lib/utils'
 import { invalidInput } from '../helpers/page-smoke'
 

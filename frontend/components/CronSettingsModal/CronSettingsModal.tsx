@@ -14,7 +14,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { RetentionSelect } from '@/components/ui/retention-select'
+import { RetentionSelect } from '@/components/ui/confirm-dialog'
 import { Loader2, Clock, Shield } from 'lucide-react'
 import { useSSE } from '@/hooks/useSSE'
 import { SSEActionDialogShell, SSEExecutionSection } from '@/components/SSEModal'

@@ -1,6 +1,6 @@
 import { notFound } from 'next/navigation'
 import { BackToAdminLink } from '@/components/ReportLayout'
-import { PageHeader } from '@/components/ui/page-header'
+import { PageHeader } from '@/components/ui/confirm-dialog'
 import { Activity } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'

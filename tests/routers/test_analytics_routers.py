@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import duckdb
 import pytest
+from backend.models.security import SecurityAggregatesResponse
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
@@ -35,7 +36,6 @@ from backend.high_scale.assets import assets_aggregates
 from backend.main import app
 from backend.models.insights import InsightsRequest
 from backend.models.performance import AssetsRequest
-from backend.models.security import SecurityAggregatesResponse
 from backend.repositories import dashboard as dashboard_repo
 from backend.repositories._base import QueryRunner, _safe_table, _schema_cols_cache
 from backend.utils import bot_sources

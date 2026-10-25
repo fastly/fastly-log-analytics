@@ -7,7 +7,7 @@ import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { parseSSEFrames } from '@/lib/admin-stream-apply'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useServiceStore } from '@/stores/filterStore'
 import type { components } from '@/types/api.generated'
 
 /** Public connection-state for the declarative stream, surfaced for UI. */

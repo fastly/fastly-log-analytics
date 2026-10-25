@@ -6,10 +6,10 @@ import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-quer
 import { client } from '@/lib/api'
 import { unwrapClient } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
-import type { FiltersPayload } from '@/types/filters'
+import type { FiltersPayload } from '@/types/api'
 import { cn } from '@/lib/utils'
 import { useEffectiveServiceId } from '@/hooks/useBootstrap'
-import { useSessionRoleStore } from '@/stores/sessionRoleStore'
+import { useSessionRoleStore } from '@/stores/filterStore'
 import { InsightCard, SEVERITY_BADGE_CLASS } from '@/components/Insights/InsightCard'
 import { InsightCardSkeleton } from '@/components/Insights/InsightCard'
 import { Button } from '@/components/ui/button'
@@ -43,7 +43,7 @@ import {
   type InsightSectionGroup,
   type SectionableInsight,
   type SeveritySummary,
-} from '@/lib/insight-sections'
+} from '@/lib/utils'
 
 const STATUS_OPTIONS = [
   { label: 'All Statuses', value: 'all' },

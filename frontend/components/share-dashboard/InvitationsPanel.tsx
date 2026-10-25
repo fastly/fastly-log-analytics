@@ -25,7 +25,7 @@ import { unwrapClient } from '@/lib/api'
 
 import { CreateInviteDialog } from './CreateInviteDialog'
 import { SortableHead, useShareMutation, useTableSort, type Invite, type ShareStatus, type SortAccessors } from './SharingControlPanel'
-import { formatDeterministicUTC } from '@/lib/date'
+import { formatDeterministicUTC } from '@/lib/format'
 import { useAutoFlash, useCopyToClipboard } from '@/hooks/useAdminEventStream'
 
 interface InvitationsPanelProps {

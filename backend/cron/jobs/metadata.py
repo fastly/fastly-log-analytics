@@ -118,7 +118,7 @@ def _run_metadata_sync(
     # it was explicitly passed in. If a manual run is triggered without
     # start_time, it means "Import All", so we should clear any existing limit.
 
-    from backend.cron.jobs._common import apply_time_range_pinning, get_service_display_label
+    from backend.cron.jobs.sync import apply_time_range_pinning, get_service_display_label
 
     start_time_exec = time.time()
 
@@ -358,7 +358,7 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
     from backend.cron.decorators import dev_mode_no_crons
-    from backend.cron.jobs._common import get_service_display_label
+    from backend.cron.jobs.sync import get_service_display_label
     from backend.utils.ngwaf import cleanup_old_bots, fetch_verified_bots_paged, upsert_bots
 
     if dev_mode_no_crons():

@@ -39,7 +39,7 @@ from backend.high_scale._common import (
     text as _text,
 )
 from backend.high_scale.registry_bootstrap import HighScaleService
-from backend.models.security import (
+from backend.models.dashboard import (
     SecurityAggregatesResponse,
     SecurityTopBotsResponse,
 )

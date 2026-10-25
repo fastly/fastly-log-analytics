@@ -19,10 +19,10 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Play, Search, AlertCircle, Database, Terminal, Activity, Bug } from 'lucide-react'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { NoServiceSelected } from '@/components/ReportLayout'
-import { PageHeader } from '@/components/ui/page-header'
+import { PageHeader } from '@/components/ui/confirm-dialog'
 import { downloadAsCsv } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
-import type { FiltersPayload } from '@/types/filters'
+import type { FiltersPayload } from '@/types/api'
 import {
   buildStructuredSql,
   queryPageUrlParsers,

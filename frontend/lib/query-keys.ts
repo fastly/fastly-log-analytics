@@ -1,5 +1,5 @@
 import type { components, LogFieldsConfig } from '@/types/api'
-import type { FiltersPayload } from '@/types/filters'
+import type { FiltersPayload } from '@/types/api'
 
 /**
  * Centralised React Query key factory.

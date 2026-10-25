@@ -25,23 +25,20 @@ vi.mock('@/lib/utils', async (importOriginal) => ({
   ACTIVE_WINDOW_MS: 120_000,
 }))
 
-vi.mock('@/stores/serviceStore', () => {
+vi.mock('@/stores/filterStore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/filterStore')>()
   const useServiceStore = Object.assign(
     vi.fn((selector?: (s: typeof mockServiceState) => unknown) =>
       selector ? selector(mockServiceState) : mockServiceState,
     ),
     { getState: () => mockServiceState },
   )
-  return { useServiceStore }
-})
-
-vi.mock('@/stores/debugStore', () => {
   const state = { enabled: false, apiCallsEnabled: false }
   const useDebugStore = Object.assign(
     vi.fn(() => state),
     { getState: () => state },
   )
-  return { useDebugStore }
+  return { ...actual, useServiceStore, useDebugStore }
 })
 
 import { client, extractApiError, customFieldsApi, type CustomField, type VclLintRequest } from '@/lib/api'

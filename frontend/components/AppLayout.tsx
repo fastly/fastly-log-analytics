@@ -3,7 +3,7 @@
 import * as React from 'react'
 import dynamic from 'next/dynamic'
 import Link from 'next/link'
-import { usePathname, useSearchParams } from 'next/navigation'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { Dialog as DialogPrimitive } from '@base-ui/react/dialog'
 import {
   LayoutDashboard,
@@ -36,8 +36,7 @@ import { useTheme } from 'next-themes'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { cn, buildServiceHref, SIDEBAR_COLLAPSED_COOKIE } from '@/lib/utils'
-import { rotatePageLoadId, client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api'
+import { rotatePageLoadId, client, unwrapClient } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { Button, buttonVariants } from '@/components/ui/button'
 import {
@@ -60,52 +59,61 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { ServiceSwitcher } from '@/components/ServiceSwitcher/ServiceSwitcher'
 import { useFilterUrlWriteback } from '@/hooks/useDashboardCards'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { SyncStatusBadge } from '@/components/SyncStatusBadge/SyncStatusBadge'
-import { useDebugStore } from '@/stores/debugStore'
-import { useTimezoneStore } from '@/stores/timezoneStore'
-import { useSessionRoleStore } from '@/stores/sessionRoleStore'
-import { getTimezoneAbbr } from '@/lib/date'
-import { useMounted } from '@/hooks/useBootstrap'
+import { ServiceSwitcher, SyncStatusBadge } from '@/components/SyncStatusBadge/SyncStatusBadge'
+import {
+  useDebugStore,
+  useTimezoneStore,
+  useSessionRoleStore,
+  useServiceStore,
+} from '@/stores/filterStore'
+import { getTimezoneAbbr } from '@/lib/format'
+import {
+  useMounted,
+  useUrlServiceSync,
+  useBootstrap,
+  useBootstrapSyncEffects,
+  useIsAnalyst,
+  useEnforceMaskedFilters,
+  useAnalystHeartbeat,
+  useAnalystLogout,
+} from '@/hooks/useBootstrap'
 import type { BootstrapResponse, ShareBanner } from '@/types/api'
+import { PlotlyPrewarm, MapPrewarm } from '@/components/PlotlyChart'
+import packageJson from '../package.json'
 
-// FilterBar is hidden on /admin, /logs, /insights, /alerts, raw-query mode,
-// and the no-services onboarding state. Dynamic-import so those routes
-// never download the FilterBar chunk (the bar + its three dialogs is one
-// of the heaviest client surfaces outside of charts).
 const FilterBar = dynamic(
   () => import('@/components/FilterBar/FilterBar').then(m => ({ default: m.FilterBar })),
 )
-
-
-
-// ActiveFiltersBanner replaces the hidden FilterBar on pages that don't
-// apply filters (insights / alerts / admin / logs / share-login / raw-
-// query). Dynamic-imported so it doesn't ship with the cold bundle on
-// pages where it never mounts.
 const ActiveFiltersBanner = dynamic(
   () => import('@/components/FilterBar/FilterBar').then(m => ({ default: m.ActiveFiltersBanner })),
   { ssr: false },
 )
-
-// DebugPanel only renders when the user has opted into debug mode via
-// useDebugStore (off by default, persisted in localStorage). Dynamic-import
-// with ssr:false and a mount-gate so non-debug users never pay the chunk.
 const DebugPanel = dynamic(
   () => import('@/components/DebugPanel').then(m => ({ default: m.DebugPanel })),
   { ssr: false },
 )
-import { PlotlyPrewarm, MapPrewarm } from '@/components/PlotlyChart'
 
-import { useUrlServiceSync } from '@/hooks/useBootstrap'
-import { useBootstrap, useBootstrapSyncEffects } from '@/hooks/useBootstrap'
-import { useIsAnalyst, useEnforceMaskedFilters } from '@/hooks/useBootstrap'
-import { useServiceStore } from '@/stores/serviceStore'
-import { useRouter } from 'next/navigation'
-import packageJson from '../package.json'
-import { useAnalystHeartbeat, useAnalystLogout } from '@/hooks/useBootstrap'
+const matchesPrefix = (pathname: string, prefixes: readonly string[]) =>
+  prefixes.some((p) => pathname.startsWith(p))
+
+function SrLiveRegion({ children }: { children: React.ReactNode }) {
+  return (
+    <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+      {children}
+    </div>
+  )
+}
+
+function CenteredSpinner({ label }: { label: string }) {
+  return (
+    <div className="flex items-center justify-center h-full text-sm text-muted-foreground" role="status">
+      <Loader2 className="animate-spin mr-2 h-4 w-4" aria-hidden="true" />
+      {label}
+    </div>
+  )
+}
 
 export function ThemeToggle() {
   const { setTheme } = useTheme()
@@ -401,11 +409,7 @@ function RouteFocus() {
     setAnnouncement(`Loaded: ${friendlyPageName(pathname)}`)
   }, [pathname])
 
-  return (
-    <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
-      {announcement}
-    </div>
-  )
+  return <SrLiveRegion>{announcement}</SrLiveRegion>
 }
 
 // Lifts the `?mode=raw` search-param flag into a callback so the parent
@@ -687,7 +691,7 @@ export function AppLayout({
   // alongside the RouteFocus "Loaded: …" announcement that fires after
   // the navigation completes.
   const analystBlocked =
-    (isAnalyst && (pathname.startsWith('/admin') || pathname.startsWith('/usage') || pathname.startsWith('/alerts') || pathname.startsWith('/high-scale'))) ||
+    (isAnalyst && matchesPrefix(pathname, ['/admin', '/usage', '/alerts', '/high-scale'])) ||
     ((isAnalyst || isShareAnalyst) && pathname.startsWith('/logs'))
   const needsSignIn = needsLogin && !pathname.startsWith('/share-login')
   const needsWizard = !needsLogin && !isAnalyst && !hasServices && !pathname.startsWith('/admin')
@@ -761,9 +765,7 @@ export function AppLayout({
   if (isLoginPage || needsLogin) {
     return (
       <>
-        <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
-          {redirectAnnouncement}
-        </div>
+        <SrLiveRegion>{redirectAnnouncement}</SrLiveRegion>
         {isLoginPage ? (
           <div className="min-h-screen flex flex-col bg-muted/40">
             <main id="main" tabIndex={0} className="flex-1 outline-none">
@@ -776,57 +778,28 @@ export function AppLayout({
     )
   }
 
-  // Hint the browser to fetch world.topo.json early on routes that actually
-  // mount a map (dashboard's "Requests by Country" choropleth, /network's
-  // choropleth). Previously this was a global <link rel="preload"> in
-  // app/layout.tsx, which fired on every page (including /share-login)
-  // and wasted ~251KB on routes that never paint a map. React 19 hoists
-  // <link> to <head> automatically when rendered from a client component.
-  //
-  // `rel="prefetch"` (not `preload`): the map is dynamic-imported, so
-  // MapLibre's actual fetch lands several seconds after page load — past
-  // Chrome's "preloaded but not used within a few seconds" timer. Prefetch
-  // is a low-priority hint without that heuristic; the bytes are still
-  // cached for MapLibre's later request, just not flagged as urgent.
-  const needsGeoPreload =
-    pathname.startsWith('/dashboard') || pathname.startsWith('/network')
+  const needsGeoPreload = matchesPrefix(pathname, ['/dashboard', '/network'])
+  const needsPlotlyPrewarm = matchesPrefix(pathname, [
+    '/dashboard',
+    '/network',
+    '/origin',
+    '/performance',
+    '/security',
+    '/charts',
+    '/insights',
+    '/fastly-value',
+    '/usage',
+    '/streaming',
+    '/control-room',
+    '/sessions/stream',
+  ])
+  const needsMapPrewarm = matchesPrefix(pathname, ['/dashboard', '/network', '/security'])
 
-  // Gate the global Plotly + MapLibre prewarms on routes that actually
-  // render charts or maps. Admin pages (/admin, /admin/share, /alerts,
-  // /logs, /share-login) don't import these libs, so the prewarm parse
-  // cost (~727 KB combined: Plotly cartesian ~453 KB + MapLibre ~274 KB)
-  // was contributing FCP latency for nothing. Trends uses a pure-SVG
-  // Sparkline; admin tables don't use Plotly at all.
-  //
-  // /query does NOT render Plotly (chart panel is route-gated to Plot mode).
-  // /sessions (list) is table-only; /sessions/stream DOES render Plotly.
-  const needsPlotlyPrewarm = (
-    pathname.startsWith('/dashboard') ||
-    pathname.startsWith('/network') ||
-    pathname.startsWith('/origin') ||
-    pathname.startsWith('/performance') ||
-    pathname.startsWith('/security') ||
-    pathname.startsWith('/charts') ||
-    pathname.startsWith('/insights') ||
-    pathname.startsWith('/fastly-value') ||
-    pathname.startsWith('/usage') ||
-    pathname.startsWith('/streaming') ||
-    pathname.startsWith('/control-room') ||
-    pathname.startsWith('/sessions/stream')
-  )
-  const needsMapPrewarm = (
-    pathname.startsWith('/dashboard') ||
-    pathname.startsWith('/network') ||
-    pathname.startsWith('/security')
-  )
-
-  // Hide the global filter bar on pages where it does not apply.
-  // /query is a special case: Structured Mode (default) syncs with the
-  // FilterBar, so we keep it visible; Raw SQL Mode (?mode=raw) owns its
-  // own editor + filters and the global bar would only confuse the
-  // SQL the user is hand-writing.
   const isQueryRawMode = pathname.startsWith('/query') && isRawQueryMode
-  const hideFilterBar = pathname.startsWith('/admin') || isQueryRawMode || pathname.startsWith('/insights') || pathname.startsWith('/alerts') || pathname.startsWith('/control-room') || !hasServices
+  const hideFilterBar =
+    matchesPrefix(pathname, ['/admin', '/insights', '/alerts', '/control-room']) ||
+    isQueryRawMode ||
+    !hasServices
 
   if (isInitializing) {
     return (
@@ -931,15 +904,7 @@ export function AppLayout({
           Mounted at layout root so it persists across navigations and
           fires once per pathname transition (see RouteFocus above). */}
       <RouteFocus />
-      {/* A-0 (a11y, WCAG 4.1.3 Status Messages): polite live region that
-          announces bootstrap-driven redirects (sign-in, no-access, no-
-          services). RouteFocus already announces the destination after
-          navigation completes; this fills the gap by naming WHY the move
-          happened. role=status + aria-live=polite so screen readers
-          queue and read without interrupting other narration. */}
-      <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
-        {redirectAnnouncement}
-      </div>
+      <SrLiveRegion>{redirectAnnouncement}</SrLiveRegion>
       {/* Cold-init pre-warmers — intentional perf components, not hacks.
           Plotly (~500-1500ms cold parse + first-plot init) and MapLibre
           GL (~500-1200ms parse + WebGL context + first paint) both pay
@@ -1146,15 +1111,9 @@ export function AppLayout({
               redirect at lines 163-188 has time to fire without
               flashing a half-loaded page. */}
           {isLoading && !bootstrapData ? (
-            <div className="flex items-center justify-center h-full text-sm text-muted-foreground" role="status">
-              <Loader2 className="animate-spin mr-2 h-4 w-4" aria-hidden="true" />
-              Loading app configuration…
-            </div>
-          ) : !hasServices && !pathname.startsWith('/admin') && !pathname.startsWith('/share-login') ? (
-            <div className="flex items-center justify-center h-full text-sm text-muted-foreground" role="status">
-              <Loader2 className="animate-spin mr-2 h-4 w-4" aria-hidden="true" />
-              Setting up your workspace…
-            </div>
+            <CenteredSpinner label="Loading app configuration…" />
+          ) : !hasServices && !matchesPrefix(pathname, ['/admin', '/share-login']) ? (
+            <CenteredSpinner label="Setting up your workspace…" />
           ) : children}
           {debugEnabled && <DebugPanel />}
           {serverFooter && !isAnalyst && serverFooter}

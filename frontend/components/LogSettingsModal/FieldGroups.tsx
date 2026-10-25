@@ -6,7 +6,7 @@ import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Switch } from '@/components/ui/switch'
-import { LabelWithInfo } from '@/components/ui/label-with-info'
+import { LabelWithInfo } from '@/components/ui/confirm-dialog'
 import {
   Select,
   SelectContent,

@@ -1,6 +1,6 @@
 'use client'
 
-import type { PlotlyTrace } from '@/types/plotly'
+import type { PlotlyTrace } from '@/types/api'
 import React, { useMemo, useRef } from 'react'
 import { useInViewOnce } from '@/components/AnalyticsCard'
 import { useQuery } from '@tanstack/react-query'
@@ -9,7 +9,7 @@ import { unwrapClient } from '@/lib/api'
 import { useIsDataReady } from '@/hooks/useBootstrap'
 import type { ChartInterval } from '@/lib/utils'
 import type { ReportConfiguration } from '@/hooks/useDashboardCards'
-import { StatCard } from '@/components/ui/stat-card'
+import { StatCard } from '@/components/ui/confirm-dialog'
 import { Button } from '@/components/ui/button'
 import { ButtonGroup } from '@/components/ui/button-group'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -50,7 +50,7 @@ const FosOperationsHelp = ({ note }: { note?: string }) => (
 )
 
 import { useRouter } from 'next/navigation'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useServiceStore } from '@/stores/filterStore'
 import { buildServiceHref } from '@/lib/utils'
 import { CHART_COLORS } from '@/lib/chart-helpers'
 

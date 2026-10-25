@@ -1,7 +1,7 @@
 'use client'
 
 import { Database } from 'lucide-react'
-import { PageHeader } from '@/components/ui/page-header'
+import { PageHeader } from '@/components/ui/confirm-dialog'
 import { HighScaleRequestFactsPanel } from '@/components/high-scale/HighScaleRequestFactsPanel'
 
 export default function HighScaleRequestFactsPage() {

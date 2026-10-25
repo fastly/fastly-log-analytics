@@ -21,9 +21,7 @@ import structlog
 
 from backend.high_scale.archive_models import ArchiveManifest
 from backend.high_scale.archive_publication import ArchivePublication
-from backend.high_scale.ingest_controller import _enrich_high_scale_ngwaf_bots
-from backend.high_scale.publication import ClickHousePublication
-from backend.high_scale.replay import (
+from backend.high_scale.historical_jobs import (
     ProjectionReplayResult,
     _batch_from_rows,
     _load_manifest_request_events,
@@ -32,6 +30,8 @@ from backend.high_scale.replay import (
     replay_origin_projections,
     replay_performance_projections,
 )
+from backend.high_scale.ingest_controller import _enrich_high_scale_ngwaf_bots
+from backend.high_scale.publication import ClickHousePublication
 from backend.high_scale.security import build_security_projection_rows
 
 logger = structlog.get_logger(__name__)

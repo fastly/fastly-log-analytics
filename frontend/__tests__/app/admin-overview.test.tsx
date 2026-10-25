@@ -68,7 +68,7 @@ import { OperationsOverview, AdminTrendsClient } from '@/app/admin/_sections/Ope
 import { ServicesTable } from '@/app/admin/_sections/ServicesTable'
 import { QuarantineSection } from '@/app/admin/_sections/QuarantineSection'
 import TrendsLoading from '@/app/admin/trends/loading'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useServiceStore } from '@/stores/filterStore'
 import { getApiBase } from '@/lib/api'
 import { server } from '@/__tests__/helpers/msw/handlers'
 

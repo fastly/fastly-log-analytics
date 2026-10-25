@@ -7,7 +7,7 @@ import {
   ReviewHeader,
   ReviewContent,
   ReviewItem,
-} from "@/components/ui/review-card";
+} from "@/components/ui/confirm-dialog";
 import {
   CheckCircle2,
   Cloud,

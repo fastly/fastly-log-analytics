@@ -43,7 +43,7 @@ normally to origin and the log line still has populated score fields
 
 from __future__ import annotations
 
-from backend.utils.vcl_safety import VclSafetyError, validate_quoted_literal
+from backend.utils.vcl_utils import VclSafetyError, validate_quoted_literal
 
 
 def _assert_vcl_string_safe(value: str, *, field: str, allow_backslash: bool = False) -> str:

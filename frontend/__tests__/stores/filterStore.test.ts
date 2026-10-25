@@ -10,11 +10,11 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useFilterStore } from '@/stores/filterStore'
-import { useDebugStore } from '@/stores/debugStore'
-import { usePopGeoStore } from '@/stores/popGeoStore'
-import { useServiceStore, type Service } from '@/stores/serviceStore'
-import { useSessionRoleStore } from '@/stores/sessionRoleStore'
-import { useTimezoneStore } from '@/stores/timezoneStore'
+import { useDebugStore } from '@/stores/filterStore'
+import { usePopGeoStore } from '@/stores/filterStore'
+import { useServiceStore, type Service } from '@/stores/filterStore'
+import { useSessionRoleStore } from '@/stores/filterStore'
+import { useTimezoneStore } from '@/stores/filterStore'
 
 const _initial = useFilterStore.getState()
 

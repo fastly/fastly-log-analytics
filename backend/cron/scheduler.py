@@ -81,10 +81,10 @@ def _resolve_rum_sync_interval(rum_cfg: dict[str, Any], cfg: dict[str, Any], def
 def _display_label(src: dict, service_id: str) -> str:
     """``"{display_name} ({service_id})"`` when the friendly name differs from
     the service id, otherwise just the service id. Delegates to
-    ``get_service_display_label`` in ``backend.cron.jobs._common`` so the
+    ``get_service_display_label`` in ``backend.cron.jobs.sync`` so the
     format lives in one place.
     """
-    from backend.cron.jobs._common import get_service_display_label
+    from backend.cron.jobs.sync import get_service_display_label
 
     return get_service_display_label(service_id, src)
 
@@ -212,7 +212,7 @@ def _log_and_add_progress(
     run_id can be None when start_cron_run failed to register the run; in
     that case add_progress no-ops and only the log message is emitted.
     """
-    from backend.cron.jobs._common import get_service_display_label
+    from backend.cron.jobs.sync import get_service_display_label
     from backend.cron_progress import add_progress
 
     add_progress(run_id, event)
@@ -755,7 +755,6 @@ class Scheduler:
         """Read all service configs and add/update scheduled jobs."""
         from backend import config as svcconfig
         from backend.core.duckdb import get_source_for_service, is_configured
-        from backend.cron.jobs.commit import _run_commit
         from backend.cron.jobs.compaction import _run_expire_snapshots, _run_optimize
         from backend.cron.jobs.metadata import (
             _run_bot_data_refresh,
@@ -767,7 +766,7 @@ class Scheduler:
         )
         from backend.cron.jobs.rum_commit import _run_rum_commit
         from backend.cron.jobs.rum_sync import _run_rum_sync
-        from backend.cron.jobs.sync import _run_full_sweep, _run_gap_heal
+        from backend.cron.jobs.sync import _run_commit, _run_full_sweep, _run_gap_heal
         from backend.cron.jobs.sync import _run_log_discovery_cron as _run_service_cron
 
         configs = svcconfig.list_configs()
@@ -906,7 +905,7 @@ class Scheduler:
             # diffs a lookback FOS LIST. Its own schedule entry (every 15 min):
             # the previous `now.minute % 15 == 0` gate inside the discovery tick
             if svcconfig.is_high_scale_mode(src):
-                from backend.cron.jobs.rum_ledger import _run_ledger_sweep
+                from backend.cron.jobs.rum_sync import _run_ledger_sweep
 
                 sweep_cfg = prov.get("cron_ledger_sweep", {})
                 if sweep_cfg.get("enabled", True):
@@ -942,7 +941,7 @@ class Scheduler:
             rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
             rum_enabled = svcconfig.is_rum_enabled(cfg)
             if rum_enabled and svcconfig.is_high_scale_mode(src):
-                from backend.cron.jobs.rum_ledger import _run_rum_discovery_cron, _run_rum_ledger_sweep
+                from backend.cron.jobs.rum_sync import _run_rum_discovery_cron, _run_rum_ledger_sweep
 
                 rum_disc_interval_secs = _resolve_rum_sync_interval(rum_cfg, cfg, interval_seconds)
                 rum_disc_job_id = f"rum_discovery_{service_id}"

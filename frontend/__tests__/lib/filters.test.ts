@@ -2,15 +2,16 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { buildFiltersPayload } from '@/types/filters'
-import type { FilterPill } from '@/types/filters'
+import { buildFiltersPayload } from '@/types/api'
+import type { FilterPill } from '@/types/api'
 
 const mockAddFilter = vi.fn()
 const mockClearFilters = vi.fn()
 const mockSetRange = vi.fn()
 const mockSetRelativeRange = vi.fn()
 
-vi.mock('@/stores/filterStore', () => ({
+vi.mock('@/stores/filterStore', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/stores/filterStore')>()),
   useFilterStore: {
     getState: vi.fn(() => ({
       addFilter: mockAddFilter,

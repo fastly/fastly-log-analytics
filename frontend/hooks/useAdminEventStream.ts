@@ -15,7 +15,7 @@ import { queryKeys } from '@/lib/query-keys'
 import { buildStreamRequest } from '@/lib/admin-stream-apply'
 import { showToast, showToastWithAction } from '@/lib/utils'
 import { copyToClipboard } from '@/lib/utils'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useServiceStore } from '@/stores/filterStore'
 import type { Schema } from '@/types/api'
 
 interface UseServiceStreamOpts {

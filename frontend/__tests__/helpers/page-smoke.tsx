@@ -31,6 +31,7 @@ import { QueryClient, QueryClientProvider, type QueryClientConfig } from '@tanst
 import { NuqsTestingAdapter } from 'nuqs/adapters/testing'
 import type { client } from '@/lib/api'
 import type { PlotlyChart } from '@/components/PlotlyChart'
+import type { MapOptions } from 'maplibre-gl'
 import { INITIAL_CONFIG } from '@/components/ProvisionWizard/types'
 
 /**
@@ -67,11 +68,12 @@ export function spyOnConsoleError(): MockInstance {
 // ── Shared cross-page module mocks ───────────────────────────────────────────
 // Each returns the module-shape object a page test's `vi.mock` factory should
 // return. Usage (keeps vi.mock hoisting intact):
-//   vi.mock('@/stores/serviceStore', async () =>
+//   vi.mock('@/stores/filterStore', async () =>
 //     (await import('../helpers/page-smoke')).serviceStoreModuleMock())
 
-/** `@/stores/serviceStore` — pass `accessLevel` for pages that read it (usage). */
-export function serviceStoreModuleMock(opts: { accessLevel?: string } = {}) {
+/** `@/stores/filterStore` — pass `accessLevel` for pages that read it (usage). */
+export async function serviceStoreModuleMock(opts: { accessLevel?: string } = {}) {
+  const actual = await vi.importActual<typeof import('@/stores/filterStore')>('@/stores/filterStore')
   const service: Record<string, unknown> = { id: 'test-svc', name: 'Test' }
   if (opts.accessLevel) service.accessLevel = opts.accessLevel
   const state = {
@@ -86,25 +88,27 @@ export function serviceStoreModuleMock(opts: { accessLevel?: string } = {}) {
     vi.fn((selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state)),
     { getState: () => state },
   )
-  return { useServiceStore }
+  const filterState = {
+    startTime: '2026-01-01T00:00:00Z',
+    endTime: '2026-01-01T01:00:00Z',
+    filters: [],
+    isAutoRange: false,
+    compareMode: false,
+    setRange: vi.fn(),
+    clearFilters: vi.fn(),
+  }
+  const useFilterStore = Object.assign(
+    vi.fn((selector?: (s: Record<string, unknown>) => unknown) =>
+      selector ? selector(filterState) : filterState,
+    ),
+    { getState: () => filterState },
+  )
+  return { ...actual, useServiceStore, useFilterStore }
 }
 
 /** `@/stores/filterStore`. */
-export function filterStoreModuleMock() {
-  return {
-    useFilterStore: vi.fn((selector?: (s: Record<string, unknown>) => unknown) => {
-      const state = {
-        startTime: '2026-01-01T00:00:00Z',
-        endTime: '2026-01-01T01:00:00Z',
-        filters: [],
-        isAutoRange: false,
-        compareMode: false,
-        setRange: vi.fn(),
-        clearFilters: vi.fn(),
-      }
-      return selector ? selector(state) : state
-    }),
-  }
+export async function filterStoreModuleMock(opts: { accessLevel?: string } = {}) {
+  return serviceStoreModuleMock(opts)
 }
 
 /** `next/navigation` — each page passes its own pathname. */
@@ -312,7 +316,17 @@ export function serviceStoreMockFactory() {
     (selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state),
     { getState: () => state },
   )
-  return { useServiceStore }
+  const dbgState = { enabled: false, apiCallsEnabled: false }
+  const useDebugStore: unknown = Object.assign(
+    (selector?: (s: typeof dbgState) => unknown) => (selector ? selector(dbgState) : dbgState),
+    { getState: () => dbgState },
+  )
+  const roleState = { isRemoteAnalyst: false, setIsRemoteAnalyst: vi.fn() }
+  const useSessionRoleStore: unknown = Object.assign(
+    (selector?: (s: typeof roleState) => unknown) => (selector ? selector(roleState) : roleState),
+    { getState: () => roleState },
+  )
+  return { useServiceStore, useDebugStore, useSessionRoleStore }
 }
 
 // ── Typed Partial / Fixture Helpers (folded from partial.ts) ─────────────────
@@ -782,5 +796,155 @@ export function reactVirtualModuleMock(rowHeight = 40) {
         getTotalSize: () => count * rowHeight,
       }
     },
+  }
+}
+
+export type MockMapEventPayload = Record<string, unknown>
+export type MockMapListener = (e: MockMapEventPayload) => void
+export type MockMapSource = Record<string, unknown>
+export type MockMapLayer = { id?: string } & Record<string, unknown>
+export type MockMapSourceHandle = MockMapSource & { setData: (data: unknown) => void }
+
+export interface MockMapInstance {
+  container: string | HTMLElement | undefined
+  listeners: Record<string, MockMapListener[]>
+  sources: Record<string, MockMapSource>
+  layers: MockMapLayer[]
+  options: Partial<MapOptions> | undefined
+  on: (event: string, ...rest: unknown[]) => void
+  off: () => void
+  addSource: (id: string, src: MockMapSource) => void
+  addLayer: (layer: MockMapLayer) => void
+  removeLayer: () => void
+  removeSource: () => void
+  getSource: (id: string) => MockMapSourceHandle | undefined
+  getLayer: (id: string) => MockMapLayer | undefined
+  setFeatureState: () => void
+  setPaintProperty: (...args: unknown[]) => void
+  setLayoutProperty: () => void
+  setFilter: () => void
+  setStyle: () => void
+  isStyleLoaded: () => boolean
+  getStyle: () => { layers: MockMapLayer[] }
+  queryRenderedFeatures: () => unknown[]
+  getCanvas: () => { style: Record<string, string> }
+  remove: () => void
+  resize: () => void
+  removed: boolean
+  project: () => { x: number; y: number }
+  fitBounds: () => void
+  flyTo: () => void
+  cameraForBounds: () => { center: [number, number]; zoom: number }
+  setMaxBounds: () => void
+  addControl: () => void
+  emit: (event: string, payload?: MockMapEventPayload) => void
+}
+
+export const mapInstances: MockMapInstance[] = []
+
+export function maplibreMockFactory(opts?: { strictSources?: boolean }) {
+  const strictSources = opts?.strictSources ?? false
+  class MockMap implements MockMapInstance {
+    container: string | HTMLElement | undefined
+    listeners: Record<string, MockMapListener[]> = {}
+    sources: Record<string, MockMapSource> = {}
+    layers: MockMapLayer[] = []
+    options: Partial<MapOptions> | undefined
+    removed = false
+    constructor(opts?: Partial<MapOptions>) {
+      this.container = opts?.container
+      this.options = opts
+      mapInstances.push(this)
+      queueMicrotask(() => this.emit('load'))
+    }
+    on(event: string, ...rest: unknown[]) {
+      const fn = (rest.length === 2 ? rest[1] : rest[0]) as MockMapListener
+      this.listeners[event] = this.listeners[event] || []
+      this.listeners[event].push(fn)
+    }
+    off() {}
+    addSource(id: string, src: MockMapSource) {
+      const handle: MockMapSourceHandle = {
+        ...src,
+        setData: (data: unknown) => {
+          handle.data = data
+        },
+      }
+      this.sources[id] = handle
+    }
+    addLayer(layer: MockMapLayer) {
+      this.layers.push(layer)
+    }
+    removeLayer() {}
+    removeSource() {}
+    getSource(id: string): MockMapSourceHandle | undefined {
+      const src = this.sources[id] as MockMapSourceHandle | undefined
+      if (strictSources) return src
+      return src ?? { setData: () => {} }
+    }
+    getLayer(id: string) {
+      return this.layers.find((l) => l.id === id)
+    }
+    setFeatureState() {}
+    setPaintProperty() {}
+    setLayoutProperty() {}
+    setFilter() {}
+    setStyle() {}
+    isStyleLoaded() {
+      return true
+    }
+    getStyle() {
+      return { layers: this.layers }
+    }
+    queryRenderedFeatures(): unknown[] {
+      return []
+    }
+    getCanvas() {
+      return { style: {} as Record<string, string> }
+    }
+    remove() {
+      this.removed = true
+    }
+    resize() {}
+    project() {
+      return { x: 0, y: 0 }
+    }
+    fitBounds() {}
+    flyTo() {}
+    cameraForBounds(): { center: [number, number]; zoom: number } {
+      return { center: [0, 0], zoom: 2 }
+    }
+    setMaxBounds() {}
+    addControl() {}
+    emit(event: string, payload: MockMapEventPayload = {}) {
+      ;(this.listeners[event] || []).forEach((fn) => fn(payload))
+    }
+  }
+
+  class MockLngLatBounds {
+    extend() {
+      return this
+    }
+  }
+
+  return {
+    default: {
+      Map: MockMap,
+      LngLatBounds: MockLngLatBounds,
+      NavigationControl: class {},
+      GlobeControl: class {},
+      setWorkerUrl: () => {},
+    },
+    Map: MockMap,
+    LngLatBounds: MockLngLatBounds,
+    NavigationControl: class {},
+    GlobeControl: class {},
+    setWorkerUrl: () => {},
+  }
+}
+
+export function installMaplibreSideEffects(): void {
+  if (!('ResizeObserver' in globalThis)) {
+    globalThis.ResizeObserver = StubResizeObserver
   }
 }

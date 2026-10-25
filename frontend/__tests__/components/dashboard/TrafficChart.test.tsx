@@ -7,7 +7,7 @@ import { render, screen, fireEvent, cleanup, within } from '@testing-library/rea
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import React from 'react'
-import type { PlotlyTrace } from '@/types/plotly'
+import type { PlotlyTrace } from '@/types/api'
 
 vi.mock('@/components/AnalyticsCard', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/components/AnalyticsCard')>()),
@@ -53,7 +53,7 @@ import { TrafficChart } from '@/app/dashboard/_sections/TrafficChart'
 import { CardGrid, CARD_CATEGORIES } from '@/app/dashboard/_sections/CardGrid'
 import { FieldSearchDialog } from '@/components/Dashboard/TopTenTable'
 import { useFilterStore } from '@/stores/filterStore'
-import { usePopGeoStore } from '@/stores/popGeoStore'
+import { usePopGeoStore } from '@/stores/filterStore'
 import type { ReportConfiguration } from '@/hooks/useDashboardCards'
 import { partial } from '../../helpers/page-smoke'
 

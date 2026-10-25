@@ -5,7 +5,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Pencil, Trash2, Loader2 } from 'lucide-react'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { LabelsHelp } from '@/components/SessionScoring/help-content'
+import { LabelsHelp, useScoringLabels, type LabelRow, type LabelValue } from '@/components/SessionScoring/help-content'
 import { DateTimeCell, DataTableReadonly } from '@/components/DataTable'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -20,7 +20,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { useScoringLabels, type LabelRow, type LabelValue } from './useScorerTimeseries'
 import { useDeferredDeleteWithUndo } from '@/hooks/useAdminEventStream'
 import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api'

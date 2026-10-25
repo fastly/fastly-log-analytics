@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { TIME_HOVER_LAYOUT, makeTimeXAxis, denseTimeGrid } from '@/lib/chart-helpers'
 import { denseBarTrace, lineTrace, secondaryYAxis, withSecondaryAxis } from '@/lib/chart-helpers'
-import { buildTrafficData, type BuildTrafficDataParams } from '@/lib/traffic-chart'
+import { buildTrafficData, type BuildTrafficDataParams } from '@/lib/utils'
 import { buildTrafficDataAsync } from '@/app/dashboard/_sections/DashboardClient'
 
 describe('TIME_HOVER_LAYOUT', () => {

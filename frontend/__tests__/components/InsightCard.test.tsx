@@ -10,8 +10,7 @@ import { describe, it, expect, test, vi, beforeAll, beforeEach, afterEach } from
 import { http, HttpResponse } from 'msw'
 import { axe } from 'vitest-axe'
 import React, { isValidElement } from 'react'
-import { InsightCard, ScriptedTrafficModal, type ScriptedTrafficData } from '@/components/Insights/InsightCard'
-import { InsightItemRow } from '@/components/Insights/InsightItemRow'
+import { InsightCard, InsightItemRow, ScriptedTrafficModal, type ScriptedTrafficData } from '@/components/Insights/InsightCard'
 import { CacheCollapseModal } from '@/components/Insights/CacheCollapseModal'
 import { getPerformanceContent } from '@/components/Insights/InsightHelpModal/sections/performance'
 import { getSecurityContent } from '@/components/Insights/InsightHelpModal/sections/security'
@@ -19,7 +18,7 @@ import { getTrafficContent } from '@/components/Insights/InsightHelpModal'
 import type { InsightCardData } from '@/types/api'
 import { server } from '@/__tests__/helpers/msw/handlers'
 import { getApiBase } from '@/lib/api'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useServiceStore } from '@/stores/filterStore'
 
 const { realInsightSubcomponentsRef } = vi.hoisted(() => ({
   realInsightSubcomponentsRef: { value: false },
@@ -66,18 +65,6 @@ vi.mock('@/components/Insights/CacheCollapseModal', async (importOriginal) => {
       ) : props.isOpen ? (
         <div data-testid="collapse-modal-open" />
       ) : null,
-  }
-})
-vi.mock('@/components/Insights/InsightItemRow', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/components/Insights/InsightItemRow')>()
-  return {
-    ...actual,
-    InsightItemRow: (props: React.ComponentProps<typeof actual.InsightItemRow>) =>
-      realInsightSubcomponentsRef.value ? (
-        <actual.InsightItemRow {...props} />
-      ) : (
-        <div data-testid="insight-item-row">{props.insight.items[props.index].label ?? 'no-label'}</div>
-      ),
   }
 })
 

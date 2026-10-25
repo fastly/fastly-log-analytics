@@ -9,7 +9,13 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { SectionHeader } from "@/components/ui/section-header";
+import {
+  SectionHeader,
+  ReviewCard,
+  ReviewHeader,
+  ReviewContent,
+  ReviewItem,
+} from "@/components/ui/confirm-dialog";
 import {
   Select,
   SelectContent,
@@ -24,14 +30,7 @@ import {
   TabsList,
   TabsTrigger,
 } from "@/components/ui/tabs";
-import { CollapsibleGroup } from "@/components/LogSettingsModal/FieldGroups";
-import { CmcdConfigSection } from "@/components/LogSettingsModal/FieldGroups";
-import {
-  ReviewCard,
-  ReviewHeader,
-  ReviewContent,
-  ReviewItem,
-} from "@/components/ui/review-card";
+import { CollapsibleGroup, CmcdConfigSection } from "@/components/LogSettingsModal/FieldGroups";
 import {
   Activity,
   AlertCircle,
@@ -61,9 +60,8 @@ import { formatBytes } from "@/lib/format";
 import { ANALYST_PATH_A_UNSUPPORTED_REASON, type ProvisionWizardProps } from "./types";
 import { useWizardState, type WizardState } from "./useWizardState";
 import { WizardHeader, WizardFooter, ResumeBanner } from "./WizardFooter";
-import { StorageStep } from "./steps/StorageStep";
+import { StorageStep, AnalyzeStep } from "./steps/StorageStep";
 import { JoinStep } from "./steps/JoinStep";
-import { AnalyzeStep } from "./steps/AnalyzeStep";
 import { ExecuteStep } from "./steps/ExecuteStep";
 
 // Read the machine-readable error code the services query attaches (see

@@ -55,7 +55,7 @@ from backend.utils.router_utils import (
     validation_failed,
 )
 
-from ._helpers import router, service_id_from_source
+from .high_scale import router, service_id_from_source
 
 logger = logging.getLogger(__name__)
 
@@ -954,7 +954,7 @@ def iceberg_commit_endpoint(
     thread and the response body carries a ``run_id`` the caller can
     poll for completion. 200 (the prior status) misled clients that
     treated it as "done"."""
-    from backend.cron.jobs.commit import _run_commit
+    from backend.cron.jobs.sync import _run_commit
     from backend.utils.router_utils import run_admin_cron_trigger
 
     return run_admin_cron_trigger(

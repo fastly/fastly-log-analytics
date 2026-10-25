@@ -29,7 +29,7 @@ import shutil
 import time
 from collections.abc import Callable, Generator, Iterator
 
-from backend.core.quarantine import purge_evidence
+from backend.core.metadata.ingest_log import purge_evidence
 
 logger = logging.getLogger(__name__)
 

@@ -29,6 +29,7 @@ import sys
 from types import ModuleType
 
 from backend.core.metadata import base as _base
+from backend.core.metadata import ingest_log as _ingest_log
 from backend.core.metadata import state as _state
 from backend.core.metadata import usage_log as _usage_log
 
@@ -36,6 +37,7 @@ alerts = _state
 asn_cache = _state
 views = _state
 usage_log_db = _usage_log
+quarantine = _ingest_log
 
 # Base: connection management, schema, dedup cache, parse helpers.
 from backend.core.metadata.base import (
@@ -72,7 +74,7 @@ from backend.core.metadata.cron_log import (
     update_cron_duration,
 )
 
-# Ingested-files tracking + activity reporting.
+# Ingested-files tracking + activity reporting + quarantined-file tracking.
 from backend.core.metadata.ingest_log import (
     _bootstrap_ingested_files_summary,
     clear_in_flight,
@@ -83,6 +85,7 @@ from backend.core.metadata.ingest_log import (
     get_log_accounting_counts,
     get_log_activity,
     get_node_count_avg,
+    get_quarantine_storage_total,
     get_reclaimable_strand_filenames,
     get_rum_beacons_avg_per_day,
     get_rum_beacons_by_date,
@@ -93,11 +96,6 @@ from backend.core.metadata.ingest_log import (
     list_unbackfilled_fastly_edge_files,
     recompute_ingested_files_summary,
     record_in_flight,
-)
-
-# Quarantined-file tracking (corrupt/invalid ingest files copied to errors/).
-from backend.core.metadata.quarantine import (
-    get_quarantine_storage_total,
 )
 
 # Metadata cleanup + storage stats.
@@ -196,6 +194,8 @@ for _sub in ("alerts", "asn_cache", "views"):
     sys.modules[f"{__name__}.{_sub}"] = _state
 setattr(sys.modules[__name__], "usage_log_db", _usage_log)
 sys.modules[f"{__name__}.usage_log_db"] = _usage_log
+setattr(sys.modules[__name__], "quarantine", _ingest_log)
+sys.modules[f"{__name__}.quarantine"] = _ingest_log
 
 
 __all__ = [

@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import React from 'react'
 
 import { PlotlyChart, ChartA11yTable, tracesToTable } from '@/components/PlotlyChart'
-import type { PlotlyConfig, PlotlyGraphDiv, PlotlyLayout, PlotlyRelayoutEvent } from '@/types/plotly'
+import type { PlotlyConfig, PlotlyGraphDiv, PlotlyLayout, PlotlyRelayoutEvent } from '@/types/api'
 import { stubResizeObserver } from '../../helpers/page-smoke'
 
 type PlotStubProps = {

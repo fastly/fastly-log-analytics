@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 logger = logging.getLogger(__name__)
 
 from backend.config import get_fastly_api_key
-from backend.core.fastly.mock_fixtures import api_key_or_mock
+from backend.core.fastly.client import api_key_or_mock
 from backend.core.fastly.utils import FASTLY_LOG_FIELDS
 from backend.deps import get_source
 from backend.models._base import DEFAULT_ERROR_RESPONSES
@@ -459,7 +459,7 @@ def usage_current_storage(
 
             quarantine_bytes = 0
             try:
-                from backend.core.metadata.quarantine import get_quarantine_storage_total
+                from backend.core.metadata.ingest_log import get_quarantine_storage_total
 
                 quarantine_bytes = get_quarantine_storage_total(src["name"])
             except Exception:

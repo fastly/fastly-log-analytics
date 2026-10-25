@@ -21,7 +21,7 @@
 import * as React from 'react'
 import { formatCount } from '@/lib/format'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { adminJson, adminJsonResult } from '@/lib/api'
+import { adminJson, adminJsonResult, extractApiError } from '@/lib/api'
 import { AlertTriangle, Check, Copy, Group, Keyboard, Pause, Play, RefreshCw, Search } from 'lucide-react'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -29,12 +29,10 @@ import { BackToAdminLink } from '@/components/ReportLayout'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { ConfirmDialog } from '@/components/ui/confirm-dialog'
+import { ConfirmDialog, PageHeader } from '@/components/ui/confirm-dialog'
 import { Input } from '@/components/ui/input'
-import { PageHeader } from '@/components/ui/page-header'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { extractApiError } from '@/lib/api'
 
 import {
   matchesQueryRowFilters,
@@ -66,6 +64,8 @@ import { useCopyToClipboard } from '@/hooks/useAdminEventStream'
 import { queryKeys } from '@/lib/query-keys'
 
 const DEFAULT_SLOW_THRESHOLD_MS = 500
+const formatThresholdMs = (ms: number, space = false) =>
+  ms < 1000 ? `${ms}${space ? ' ' : ''}ms` : `${ms / 1000}${space ? ' ' : ''}s`
 const DB_FILTER_OPTIONS: { value: DbFilter; label: string }[] = [
   { value: 'all', label: 'All DBs' },
   { value: 'DuckDB', label: 'DuckDB' },
@@ -703,7 +703,7 @@ export default function QueryMonitorPage() {
                         : filteredHistoricalRows.length}
                     </Badge>
                     <span className="text-xs text-muted-foreground font-normal">
-                      ≥ {slowThresholdMs < 1000 ? `${slowThresholdMs} ms` : `${slowThresholdMs / 1000}s`},
+                      ≥ {formatThresholdMs(slowThresholdMs, slowThresholdMs < 1000)},
                       sorted slowest first
                     </span>
                     {slowHistoryMode !== 'recent' && historicalQuery.isFetching && (
@@ -739,7 +739,7 @@ export default function QueryMonitorPage() {
                         className="h-7 px-2 text-xs"
                         onClick={() => setSlowThresholdMs(ms)}
                       >
-                        {ms < 1000 ? `${ms}ms` : `${ms / 1000}s`}
+                        {formatThresholdMs(ms)}
                       </Button>
                     ))}
                     <Button
@@ -791,10 +791,10 @@ export default function QueryMonitorPage() {
                       onRowClick={(row) => setDetailRow(row)}
                       emptyMessage={
                         slowHistoryMode === 'recent'
-                          ? `No queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in recent history.`
+                          ? `No queries ≥ ${formatThresholdMs(slowThresholdMs, true)} in recent history.`
                           : historicalQuery.isFetching
                             ? 'Loading query telemetry...'
-                            : `No persisted queries ≥ ${slowThresholdMs < 1000 ? slowThresholdMs + ' ms' : slowThresholdMs / 1000 + ' s'} in the last ${SLOW_HISTORY_META[slowHistoryMode].emptyWindow}.`
+                            : `No persisted queries ≥ ${formatThresholdMs(slowThresholdMs, true)} in the last ${SLOW_HISTORY_META[slowHistoryMode].emptyWindow}.`
                       }
                       initialSorting={[{ id: 'duration_ms', desc: true }]}
                       onToggleGroup={toggleGroup}

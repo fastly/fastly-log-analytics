@@ -1,4 +1,4 @@
-import { PageHeader } from '@/components/ui/page-header'
+import { PageHeader } from '@/components/ui/confirm-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 
 // Stable string keys for placeholder rows (array-index keys trip

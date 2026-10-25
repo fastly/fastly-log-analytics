@@ -6,7 +6,7 @@ import {
   sortInsights,
   groupInsightsBySection,
   summarizeSeverities,
-} from '@/lib/insight-sections'
+} from '@/lib/utils'
 import {
   pickInsightsDefault,
   historyHoursFromExtents,

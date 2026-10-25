@@ -10,13 +10,13 @@ import { Layers, Database, HelpCircle, Archive, Zap, AlertTriangle, FileText, Lo
 import type { ColumnDef } from '@tanstack/react-table'
 import { DataTableReadonly } from '@/components/DataTable'
 import { ReportLayout } from '@/components/ReportLayout'
-import { HelpDialog } from '@/components/ui/help-dialog'
+import { HelpDialog } from '@/components/ui/confirm-dialog'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import { Skeleton } from '@/components/ui/skeleton'
 import { formatBytes, formatPercent, formatCount } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import type { RangeWireArgs } from '@/lib/utils'
-import type { FiltersPayload } from '@/types/filters'
+import type { FiltersPayload } from '@/types/api'
 import type { components } from '@/types/api.generated'
 
 type AssetsAggregates = components['schemas']['AssetsAggregatesResponse']

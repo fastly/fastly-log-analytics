@@ -39,7 +39,7 @@ class RealtimeMetricsPublisher(_InProcessPublisher):
 
 
 if SSE_BACKPLANE == "valkey":
-    from backend.utils.valkey_publisher import ValkeyPublisher
+    from backend.utils.telemetry import ValkeyPublisher
 
     publisher: ValkeyPublisher | RealtimeMetricsPublisher = ValkeyPublisher("realtime", history_size=BUFFER_SIZE)
     setattr(publisher, "publisher", None)
@@ -56,3 +56,13 @@ class _PublisherShimModule(types.ModuleType):
 
 
 sys.modules[f"{__name__}.publisher"] = _PublisherShimModule(f"{__name__}.publisher")
+
+
+def __getattr__(name: str) -> Any:
+    if name in ("poller", "manager"):
+        import importlib
+
+        mod = importlib.import_module("backend.core.realtime.transform")
+        globals()[name] = mod
+        return mod
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

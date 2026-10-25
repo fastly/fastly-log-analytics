@@ -187,7 +187,7 @@ class _MockS3ClientForProvisioning:
 
 
 def _get_fos_s3_client(access_key, secret_key, region, *, service_id=None, bucket_name="", context=""):
-    from backend.core.fastly.mock_fixtures import is_mock_mode
+    from backend.core.fastly.client import is_mock_mode
 
     if is_mock_mode():
         client = _MockS3ClientForProvisioning()

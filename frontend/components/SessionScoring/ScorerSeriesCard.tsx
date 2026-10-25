@@ -6,8 +6,11 @@ import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCa
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
-import { ComplianceHelp, ScoreDistHelp, ScorerErrorsHelp, ScorerLatencyHelp } from '@/components/SessionScoring/help-content'
 import {
+  ComplianceHelp,
+  ScoreDistHelp,
+  ScorerErrorsHelp,
+  ScorerLatencyHelp,
   deriveScorerSeries,
   scorerHourlyLayout,
   useScorerTimeseries,
@@ -15,12 +18,12 @@ import {
   usToMs,
   type LatencyResponse,
   type LatencyRow,
-} from '@/components/SessionScoring/useScorerTimeseries'
+} from '@/components/SessionScoring/help-content'
 import { client } from '@/lib/api'
 import { denseTimeGrid } from '@/lib/chart-helpers'
 import { CHART_COLORS, denseBarTrace, lineTrace, withSecondaryAxis } from '@/lib/chart-helpers'
 import type { components } from '@/types/api.generated'
-import type { PlotlyLayout, PlotlyTrace } from '@/types/plotly'
+import type { PlotlyLayout, PlotlyTrace } from '@/types/api'
 
 interface HourlyRow {
   hour: string

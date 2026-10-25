@@ -26,8 +26,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Final
 
-from backend.scoring.normalize import normalize
-from backend.scoring.scorer import score_layer2
+from backend.scoring.features import normalize, score_layer2
 
 logger = logging.getLogger(__name__)
 

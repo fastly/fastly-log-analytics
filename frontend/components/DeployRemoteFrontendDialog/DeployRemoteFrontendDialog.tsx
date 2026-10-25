@@ -18,7 +18,7 @@ import {
 
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import { CopyButton } from '@/components/ui/copy-button'
+import { CopyButton } from '@/components/ui/confirm-dialog'
 import {
   Dialog,
   DialogContent,

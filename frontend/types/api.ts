@@ -1,5 +1,5 @@
 import type { components } from '@/types/api.generated'
-import type { Service } from '@/stores/serviceStore'
+import type { Service } from '@/stores/filterStore'
 
 export type Schema<K extends keyof components['schemas']> = components['schemas'][K]
 
@@ -110,5 +110,172 @@ export type ShareBanner = WithRequiredNullable<
 
 export type SessionsResponse = components['schemas']['SessionsResponse']
 
-
 export type SessionDetailResponse = components['schemas']['SessionDetailResponse']
+
+// ── Filter Types & Payload Builder (folded from filters.ts) ──────────────────
+
+type FilterSpec = components["schemas"]["FilterSpec"]
+export type FilterMode = FilterSpec["mode"]
+export type FiltersPayload = Record<string, FilterSpec>
+
+export interface FilterPill {
+  id: string
+  column: string
+  value: string
+  mode: FilterMode
+}
+
+/**
+ * Build a FiltersPayload from an array of FilterPills.
+ *
+ * Dedup scheme: when the same column needs both an include AND an exclude
+ * bucket, the second bucket gets a `_<n>` suffix (`country`, `country_1`).
+ * hydrateFilterStoreFromUrl (lib/urlFilterHydration.ts) strips this suffix
+ * on URL hydration, and the backend
+ * (backend/repositories/utils/filters.py) strips it when building WHERE
+ * clauses. As a consequence, column names literally ending in `_<digit>`
+ * would be corrupted on round-trip. filterStore.addFilter guards entry —
+ * any future field naming convention must avoid the collision.
+ */
+export function buildFiltersPayload(filters: FilterPill[]): FiltersPayload {
+  const payload: FiltersPayload = {}
+
+  filters.forEach(f => {
+    let index = 0;
+    let targetKey: string | null = null;
+
+    while (true) {
+      const currentKey = index === 0 ? f.column : `${f.column}_${index}`;
+      if (!payload[currentKey]) {
+        targetKey = currentKey;
+        break;
+      } else if (payload[currentKey].mode === f.mode) {
+        targetKey = currentKey;
+        break;
+      }
+      index++;
+    }
+
+    if (!payload[targetKey]) {
+      payload[targetKey] = { mode: f.mode, values: [] };
+    }
+    payload[targetKey].values.push(f.value);
+  })
+
+  return payload
+}
+
+// ── Minimal Local Plotly Shapes (folded from plotly.ts) ──────────────────────
+//
+// react-plotly.js types `data` / `layout` / `config` as `unknown` and ships no plotly.js
+// typings; `plotly.js-cartesian-dist-min` has none either. These interfaces name the keys
+// this app actually reads or sets and leave every other Plotly attribute open through the
+// `unknown` index signature, so callers keep full attribute freedom without `any`.
+
+export type PlotlyDatum = string | number | boolean | Date | null | undefined
+
+export interface PlotlyFont {
+  color?: string
+  family?: string
+  size?: number
+  [key: string]: unknown
+}
+
+export interface PlotlyAxis {
+  title?: string | { text?: string; [key: string]: unknown }
+  type?: string
+  range?: readonly PlotlyDatum[]
+  nticks?: number
+  tickangle?: number
+  automargin?: boolean
+  fixedrange?: boolean
+  showgrid?: boolean
+  showspikes?: boolean
+  gridcolor?: string
+  zerolinecolor?: string
+  separatethousands?: boolean
+  exponentformat?: string
+  ticksuffix?: string
+  tickformat?: string
+  autorange?: boolean | string
+  [key: string]: unknown
+}
+
+export interface PlotlyLegend {
+  orientation?: 'h' | 'v'
+  x?: number
+  y?: number
+  xanchor?: 'auto' | 'left' | 'center' | 'right'
+  yanchor?: 'auto' | 'top' | 'middle' | 'bottom'
+  font?: PlotlyFont
+  bgcolor?: string
+  [key: string]: unknown
+}
+
+export interface PlotlyMargin {
+  l?: number
+  r?: number
+  t?: number
+  b?: number
+  pad?: number
+}
+
+export interface PlotlyLayout {
+  autosize?: boolean
+  height?: number
+  width?: number
+  title?: string | { text?: string; [key: string]: unknown }
+  barmode?: 'stack' | 'group' | 'overlay' | 'relative'
+  showlegend?: boolean
+  hovermode?: string | false
+  paper_bgcolor?: string
+  plot_bgcolor?: string
+  font?: PlotlyFont
+  margin?: PlotlyMargin
+  legend?: PlotlyLegend
+  xaxis?: PlotlyAxis
+  yaxis?: PlotlyAxis
+  yaxis2?: PlotlyAxis
+  shapes?: readonly Record<string, unknown>[]
+  annotations?: readonly Record<string, unknown>[]
+  [key: string]: unknown
+}
+
+export interface PlotlyConfig {
+  responsive?: boolean
+  displayModeBar?: boolean
+  [key: string]: unknown
+}
+
+export interface PlotlyTrace {
+  type?: string
+  mode?: string
+  name?: string
+  x?: readonly PlotlyDatum[]
+  y?: readonly PlotlyDatum[]
+  z?: readonly (readonly PlotlyDatum[])[]
+  labels?: readonly PlotlyDatum[]
+  values?: readonly PlotlyDatum[]
+  text?: readonly string[] | string
+  fill?: string
+  stackgroup?: string
+  hovertemplate?: string
+  width?: number | readonly number[]
+  marker?: Record<string, unknown>
+  line?: Record<string, unknown>
+  [key: string]: unknown
+}
+
+/** `plotly_relayout` payload: flat dotted keys (`xaxis.range[0]`) or a nested `xaxis.range`. */
+export type PlotlyRelayoutEvent = Record<string, unknown>
+
+export interface PlotlyFigure {
+  data: readonly unknown[]
+  layout: unknown
+  frames: readonly unknown[] | null
+}
+
+/** The `graphDiv` handed to `onInitialized`: an element carrying Plotly's `on` emitter. */
+export interface PlotlyGraphDiv extends HTMLElement {
+  on?: (event: string, handler: (payload: PlotlyRelayoutEvent) => void) => void
+}

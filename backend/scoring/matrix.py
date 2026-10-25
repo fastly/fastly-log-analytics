@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from backend.scoring.normalize import Route, normalize
+from backend.scoring.features import Route, normalize
 
 logger = logging.getLogger(__name__)
 

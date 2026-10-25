@@ -10,10 +10,10 @@ import {
   ReviewHeader,
   ReviewContent,
   ReviewItem,
-} from '@/components/ui/review-card'
-import { SectionHeader } from '@/components/ui/section-header'
+} from '@/components/ui/confirm-dialog'
+import { SectionHeader } from '@/components/ui/confirm-dialog'
 import { SkeletonGrid } from '@/components/ui/skeleton'
-import { StatCard } from '@/components/ui/stat-card'
+import { StatCard } from '@/components/ui/confirm-dialog'
 import { Switch } from '@/components/ui/switch'
 
 describe('ReviewCard', () => {

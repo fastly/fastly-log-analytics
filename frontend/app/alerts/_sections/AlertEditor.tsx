@@ -8,7 +8,7 @@ import { z } from 'zod'
 import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api'
 import { showToast } from '@/lib/utils'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useServiceStore } from '@/stores/filterStore'
 import { useDebounce } from '@/hooks/useDashboardCards'
 import { useIsAnalyst } from '@/hooks/useBootstrap'
 import { Button } from '@/components/ui/button'
@@ -17,7 +17,7 @@ import { Bell, Loader2 } from 'lucide-react'
 import { DialogFooter } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { LabelWithInfo } from '@/components/ui/label-with-info'
+import { LabelWithInfo } from '@/components/ui/confirm-dialog'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import {
   Select,
@@ -28,8 +28,8 @@ import {
 } from "@/components/ui/select"
 import { useLogFieldsCatalog } from '@/hooks/useBootstrap'
 import { CHART_COLORS, useTimeLayout } from '@/lib/chart-helpers'
-import { formatDate } from '@/lib/date'
-import { useTimezoneStore } from '@/stores/timezoneStore'
+import { formatDate } from '@/lib/format'
+import { useTimezoneStore } from '@/stores/filterStore'
 import type { components } from '@/types/api.generated'
 import { keyByOccurrence, oneOf } from '@/lib/utils'
 

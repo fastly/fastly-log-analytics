@@ -62,14 +62,12 @@ app.conf.update(
     include=[
         "backend.core.ingest",
         "backend.cron.jobs.sync",
-        "backend.cron.jobs.commit",
         "backend.cron.jobs.compaction",
         "backend.cron.jobs.metadata",
         "backend.cron.jobs.insights_prewarmer",
         "backend.cron.jobs.metric_snapshot",
         "backend.cron.jobs.rum_sync",
         "backend.cron.jobs.rum_commit",
-        "backend.cron.jobs.rum_ledger",
     ],
     task_routes={
         "backend.core.ingest.*": {"queue": "q.ingest"},
@@ -264,7 +262,7 @@ class SyncStatusPublisher(_InProcessPublisher):
 
 publisher: Any
 if SSE_BACKPLANE == "valkey":
-    from backend.utils.valkey_publisher import ValkeyPublisher
+    from backend.utils.telemetry import ValkeyPublisher
 
     publisher = ValkeyPublisher()
 else:

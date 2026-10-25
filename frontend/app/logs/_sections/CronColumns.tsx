@@ -5,7 +5,7 @@ import {
   Loader2,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
-import { CopyButton } from '@/components/ui/copy-button'
+import { CopyButton } from '@/components/ui/confirm-dialog'
 import {
   Tooltip,
   TooltipContent,

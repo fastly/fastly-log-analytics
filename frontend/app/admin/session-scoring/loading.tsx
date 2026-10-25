@@ -1,6 +1,8 @@
+'use client'
+
 import { ShieldCheck } from 'lucide-react'
 import { BackToAdminLink } from '@/components/ReportLayout'
-import { PageHeader } from '@/components/ui/page-header'
+import { PageHeader } from '@/components/ui/confirm-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 
 function SessionScoringFallback() {

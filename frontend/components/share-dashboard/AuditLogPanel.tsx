@@ -26,7 +26,7 @@ import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api'
 
 import { SortableHead, useTableSort, type AuditLog, type ShareStatus, type SortAccessors } from './SharingControlPanel'
-import { formatDeterministicUTC } from '@/lib/date'
+import { formatDeterministicUTC } from '@/lib/format'
 
 const EVENT_TYPE_FILTER_OPTIONS = [
   'ALL',

@@ -7,7 +7,7 @@ import { unwrapClient } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { cronCacheBust } from '@/lib/admin-stream-apply'
 import { useMounted } from '@/hooks/useBootstrap'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useServiceStore } from '@/stores/filterStore'
 // Direct import (not via the barrel) so the page bundle drops the
 // @dnd-kit tree that the reorder-enabled DataTable pulls in.
 import { DataTableReadonly as DataTable } from '@/components/DataTable'

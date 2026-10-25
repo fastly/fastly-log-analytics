@@ -1,6 +1,9 @@
 import { create } from 'zustand'
-import { FilterPill, FilterMode } from '@/types/filters'
+import { persist } from 'zustand/middleware'
 import { subDays, formatISO } from 'date-fns'
+import type { FilterPill, FilterMode } from '@/types/api'
+import type { PopGeo } from '@/components/DataTable'
+import { setActiveServiceCookie } from '@/lib/utils'
 
 interface FilterState {
   startTime: string
@@ -153,3 +156,157 @@ export const useFilterStore = create<FilterState>((set) => ({
     })
   },
 }))
+
+// ── PoP Geo Store ────────────────────────────────────────────────────────────
+// Module-singleton store for the PoP -> {city,region,country} map. Populated
+// once from the bootstrap response (see useBootstrap), read by <PopLabel> via
+// usePopGeoMap. A store (not the React Query cache) so PopLabel never needs a
+// QueryClientProvider in context — it renders the bare code anywhere the map
+// hasn't loaded (tests, isolated renders) instead of crashing.
+interface PopGeoState {
+  map: Record<string, PopGeo>
+  setMap: (map: Record<string, PopGeo>) => void
+  locations: Record<string, [number, number]>
+  setLocations: (locations: Record<string, [number, number]>) => void
+}
+
+export const usePopGeoStore = create<PopGeoState>((set) => ({
+  map: {},
+  setMap: (map) => set({ map }),
+  locations: {},
+  setLocations: (locations) => set({ locations }),
+}))
+
+// ── Debug Store ──────────────────────────────────────────────────────────────
+interface DebugState {
+  enabled: boolean
+  setEnabled: (val: boolean) => void
+  apiCallsEnabled: boolean
+  setApiCallsEnabled: (val: boolean) => void
+}
+
+export const useDebugStore = create<DebugState>()(
+  persist(
+    (set) => ({
+      enabled: false,
+      setEnabled: (val) => set({ enabled: val }),
+      apiCallsEnabled: false,
+      setApiCallsEnabled: (val) => set({ apiCallsEnabled: val }),
+    }),
+    {
+      name: 'fastly-debug-settings',
+      // SSR safety — see serviceStore. Rehydrated post-mount by
+      // <StoreHydrator> so the first client render matches the server's
+      // `enabled: false` default instead of a persisted `true`.
+      skipHydration: true,
+    }
+  )
+)
+
+// ── Session Role Store ───────────────────────────────────────────────────────
+// Mirrors the caller's role as the backend reports it in /api/bootstrap's
+// settings.is_remote_analyst. Set by useBootstrap on every bootstrap resolve
+// (queryFn for the pure-CSR fast path AND the useEffect for the SSR-hydrated
+// path).
+interface SessionRoleState {
+  isRemoteAnalyst: boolean
+  setIsRemoteAnalyst: (value: boolean) => void
+}
+
+export const useSessionRoleStore = create<SessionRoleState>((set) => ({
+  isRemoteAnalyst: false,
+  setIsRemoteAnalyst: (isRemoteAnalyst) => set({ isRemoteAnalyst }),
+}))
+
+// ── Timezone Store ───────────────────────────────────────────────────────────
+interface TimezoneState {
+  mode: 'system' | 'manual'
+  timezone: string
+  setTimezone: (timezone: string) => void
+  setSystemTimezone: (timezone: string) => void
+}
+
+export const useTimezoneStore = create<TimezoneState>()(
+  persist(
+    (set) => ({
+      // Deterministic default so the server and the first client render
+      // agree. Reading Intl.DateTimeFormat().resolvedOptions().timeZone
+      // here returns the browser zone on the client but 'UTC' on the
+      // server — any SSR-rendered absolute time would then mismatch on
+      // hydration (React #418). <StoreHydrator> resolves the live system
+      // zone post-mount whenever mode is 'system' (and rehydrates any
+      // saved preference).
+      mode: 'system',
+      timezone: 'UTC',
+      setTimezone: (timezone) => set({ mode: 'manual', timezone }),
+      setSystemTimezone: (timezone) => set({ mode: 'system', timezone }),
+    }),
+    {
+      name: 'timezone-storage',
+      // SSR safety — see serviceStore. Rehydrated post-mount.
+      skipHydration: true,
+      version: 1,
+      migrate: (persistedState) => {
+        const state = persistedState as { timezone?: string; mode?: 'system' | 'manual' }
+        // Pre-v1 blobs only ever had `timezone` — written either by the
+        // old one-time browser-zone capture or an explicit user pick.
+        // Treat both as a manual preference so upgrading never changes
+        // what an existing user already sees.
+        if (state.mode) return state
+        return { ...state, mode: 'manual' as const }
+      },
+    }
+  )
+)
+
+// ── Service Store ────────────────────────────────────────────────────────────
+export interface Service {
+  id: string
+  name: string
+  accessLevel?: string
+  cmcdEnabled?: boolean
+  rum_enabled?: boolean
+  analystPathASupported?: boolean
+  analystPathAReason?: string | null
+  is_high_scale?: boolean
+}
+
+interface ServiceState {
+  activeServiceId: string | null
+  services: Service[]
+  isInitialized: boolean
+  setActiveServiceId: (id: string | null) => void
+  setServices: (services: Service[]) => void
+  setInitialized: (initialized: boolean) => void
+}
+
+export const useServiceStore = create<ServiceState>()(
+  persist(
+    (set) => ({
+      activeServiceId: null,
+      services: [],
+      isInitialized: false,
+      setActiveServiceId: (id) => {
+        set({ activeServiceId: id })
+        setActiveServiceCookie(id)
+      },
+      setServices: (services) => set({ services }),
+      setInitialized: (initialized) => set({ isInitialized: initialized }),
+    }),
+    {
+      name: 'service-storage',
+      partialize: (state) => ({
+        activeServiceId: state.activeServiceId,
+        services: state.services,
+      }),
+      // SSR safety: do NOT read localStorage during module load. A
+      // synchronous rehydrate would make the first client render use the
+      // persisted activeServiceId while the server rendered with the null
+      // default (no localStorage on the server) — the sidebar nav
+      // `?service=` hrefs and the ServicesTable "Active" badge would then
+      // diverge and throw React #418 across the whole tree. <StoreHydrator>
+      // calls persist.rehydrate() in a post-mount effect instead.
+      skipHydration: true,
+    }
+  )
+)

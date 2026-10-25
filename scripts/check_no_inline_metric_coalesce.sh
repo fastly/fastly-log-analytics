@@ -22,10 +22,9 @@ source "$SCRIPT_DIR/lib/ratchet_common.sh"
 PATTERN='COALESCE\('
 
 BASELINE='
-backend/core/rollups/origin_dims.py 4
+backend/core/rollups/origin_dims.py 5
 backend/core/rollups/origin_latency_ts.py 1
 backend/core/rollups/overview.py 4
-backend/core/rollups/perf_latency.py 1
 backend/core/rollups/rum.py 8
 backend/core/rollups/sessions.py 2
 backend/core/rollups/slow_urls.py 1
