@@ -91,6 +91,41 @@ beforeEach(() => {
 })
 
 describe('FilterBar — filter chip rendering', () => {
+  it('preserves date drafts until the committed range changes', () => {
+    act(() => {
+      useFilterStore.getState().setRange('2026-01-02T01:00:00Z', '2026-01-02T02:00:00Z')
+    })
+    render(<FilterBar />)
+    const start = screen.getByLabelText<HTMLInputElement>('Range start')
+    const initial = start.value
+    fireEvent.change(start, { target: { value: '2026-01-03T03:00' } })
+    act(() => {
+      useFilterStore.getState().toggleEdgeOnly()
+    })
+    expect(start).toHaveValue('2026-01-03T03:00')
+    act(() => {
+      useFilterStore.getState().setRange('2026-01-04T01:00:00Z', '2026-01-04T02:00:00Z')
+    })
+    expect(start).not.toHaveValue('2026-01-03T03:00')
+    expect(start.value).not.toBe(initial)
+  })
+
+  it('keeps switches synchronized with external store resets', async () => {
+    const user = userEvent.setup()
+    render(<FilterBar />)
+    const edge = screen.getByRole('switch', { name: /edge only/i })
+    const compare = screen.getByRole('switch', { name: /compare/i })
+    await user.click(edge)
+    await user.click(compare)
+    expect(edge).toBeChecked()
+    expect(compare).toBeChecked()
+    act(() => {
+      useFilterStore.getState().resetAll()
+    })
+    expect(edge).not.toBeChecked()
+    expect(compare).not.toBeChecked()
+  })
+
   it('renders no chips when filters is empty', () => {
     render(<FilterBar />)
     expect(screen.getByTestId('add-filter-stub')).toBeTruthy()

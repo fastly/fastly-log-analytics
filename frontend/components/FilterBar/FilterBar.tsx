@@ -532,27 +532,13 @@ export const FilterBar = React.memo(function FilterBar() {
   const [localCompareStart, setLocalCompareStart] = React.useState('')
   const [localCompareEnd, setLocalCompareEnd] = React.useState('')
 
-  // Local state for optimistic UI toggles
-  const [localEdgeOnly, setLocalEdgeOnly] = React.useState(edgeOnly)
-  const [localCompareMode, setLocalCompareMode] = React.useState(compareMode)
-
-  React.useEffect(() => {
-    setLocalEdgeOnly(edgeOnly)
-  }, [edgeOnly])
-
-  React.useEffect(() => {
-    setLocalCompareMode(compareMode)
-  }, [compareMode])
-
   const handleToggleEdgeOnly = React.useCallback((checked: boolean) => {
-    setLocalEdgeOnly(checked)
     React.startTransition(() => {
       if (checked !== edgeOnly) toggleEdgeOnly()
     })
   }, [edgeOnly, toggleEdgeOnly])
 
   const handleToggleCompareMode = React.useCallback((checked: boolean) => {
-    setLocalCompareMode(checked)
     React.startTransition(() => {
       if (checked !== compareMode) {
         toggleCompareMode()
@@ -570,9 +556,11 @@ export const FilterBar = React.memo(function FilterBar() {
     resetRange()
   })
 
-  // Sync local inputs with global store state
   const { timezone } = useTimezoneStore()
-  React.useEffect(() => {
+  const dateSource = JSON.stringify([startTime, endTime, compareStartTime, compareEndTime, timezone])
+  const [syncedDateSource, setSyncedDateSource] = React.useState<string | null>(null)
+  if (mounted && syncedDateSource !== dateSource) {
+    setSyncedDateSource(dateSource)
     if (startTime && endTime) {
       setLocalStart(formatForInput(startTime, timezone))
       setLocalEnd(formatForInput(endTime, timezone))
@@ -581,7 +569,7 @@ export const FilterBar = React.memo(function FilterBar() {
       setLocalCompareStart(formatForInput(compareStartTime, timezone))
       setLocalCompareEnd(formatForInput(compareEndTime, timezone))
     }
-  }, [startTime, endTime, compareStartTime, compareEndTime, timezone])
+  }
 
   const handleApplyCustomDate = React.useCallback(() => {
     React.startTransition(() => {
@@ -604,7 +592,7 @@ export const FilterBar = React.memo(function FilterBar() {
 
   // Same-duration compare presets. Offsets the CURRENT primary range
   // backwards by N days and commits straight to the store — local inputs
-  // re-sync from the effect at L243-246. Same-duration matches what
+  // re-sync when the committed range changes. Same-duration matches what
   // toggleCompareMode auto-seeds, so "1 week ago" means "the same window
   // a week earlier" regardless of how long the primary window is. A
   // "previous period" button is intentionally absent because the compare
@@ -806,7 +794,7 @@ export const FilterBar = React.memo(function FilterBar() {
           <Tooltip>
             <TooltipTrigger render={
               <div className="flex items-center space-x-2 h-7 sm:h-5">
-                <Switch id="edge-only" size="sm" checked={localEdgeOnly} onCheckedChange={handleToggleEdgeOnly} />
+                <Switch id="edge-only" size="sm" checked={mounted && edgeOnly} onCheckedChange={handleToggleEdgeOnly} />
                 <Label htmlFor="edge-only" className="text-xs sm:text-[11px] font-medium leading-none cursor-pointer">Edge only</Label>
               </div>
             } />
@@ -818,7 +806,7 @@ export const FilterBar = React.memo(function FilterBar() {
             <Tooltip>
               <TooltipTrigger render={
                 <div className="flex items-center space-x-2 h-7 sm:h-5">
-                  <Switch id="compare-mode" size="sm" checked={localCompareMode} onCheckedChange={handleToggleCompareMode} />
+                  <Switch id="compare-mode" size="sm" checked={mounted && compareMode} onCheckedChange={handleToggleCompareMode} />
                   <Label htmlFor="compare-mode" className="text-xs sm:text-[11px] font-medium leading-none cursor-pointer">Compare</Label>
                 </div>
               } />
