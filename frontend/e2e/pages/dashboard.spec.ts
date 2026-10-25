@@ -142,13 +142,28 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     await expect(filterBar).toContainText(filterValue)
   })
 
-  test('7. GeoMap panel mounts properly', async ({ page }) => {
+  test('7. GeoMap panel mounts and its country picker preserves keyboard focus', async ({ page }) => {
+    const pageErrors: string[] = []
+    page.on('pageerror', error => pageErrors.push(error.message))
     await page.goto('/dashboard')
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
 
     // Look for map container or header "Requests by Country"
     const mapHeading = page.locator('h3').filter({ hasText: /requests by country/i }).first()
     await expect(mapHeading).toBeVisible({ timeout: 15_000 })
+    const browse = page.getByRole('button', { name: 'Browse countries' })
+    await browse.scrollIntoViewIfNeeded()
+    await browse.click()
+    const list = page.getByRole('listbox', { name: /Countries by request count/ })
+    await expect(list).toBeFocused()
+    await list.press('End')
+    await expect(list.getByRole('option').last()).toHaveAttribute('aria-selected', 'true')
+    await list.press('Home')
+    await expect(list.getByRole('option').first()).toHaveAttribute('aria-selected', 'true')
+    await list.press('Escape')
+    await expect(list).toBeHidden()
+    await expect(browse).toBeFocused()
+    expect(pageErrors).toEqual([])
   })
 
   test('8. Compare mode triggers secondary aggregates query', async ({ page }) => {

@@ -15,10 +15,12 @@ import {
   stubResizeObserver,
 } from '@/__tests__/helpers/page-smoke'
 import React from 'react'
+import { renderToString } from 'react-dom/server'
 
-const { setWorkerUrl, constructedWithWorker } = vi.hoisted(() => ({
+const { setWorkerUrl, constructedWithWorker, failMapConstruction } = vi.hoisted(() => ({
   setWorkerUrl: vi.fn(),
   constructedWithWorker: vi.fn(),
+  failMapConstruction: vi.fn(() => false),
 }))
 
 vi.mock('next-themes', () => ({
@@ -29,6 +31,7 @@ vi.mock('maplibre-gl', () => {
   const mapMock = maplibreMockFactory({ strictSources: true })
   class PrewarmMap extends mapMock.Map {
     constructor(options: ConstructorParameters<typeof mapMock.Map>[0]) {
+      if (failMapConstruction()) throw new Error('WebGL unavailable')
       constructedWithWorker(setWorkerUrl.mock.calls.at(-1)?.[0])
       super(options)
     }
@@ -451,6 +454,7 @@ describe('ShieldingMap component', () => {
 describe('ChoroplethMap', () => {
   beforeEach(() => {
     mapInstances.length = 0
+    failMapConstruction.mockReset().mockReturnValue(false)
   })
 
   it('mounts a map instance into the container ref', async () => {
@@ -481,6 +485,56 @@ describe('ChoroplethMap', () => {
     render(<ChoroplethMap data={[{ country: 'US', count: 1 }]} onCountryClick={handler} />)
     await Promise.resolve()
     expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('server-renders accessible country data without constructing a browser map', () => {
+    const html = renderToString(<ChoroplethMap data={[{ country: 'US', count: 100 }]} />)
+    expect(html).toContain('United States')
+    expect(html).toContain('Browse countries')
+    expect(mapInstances).toHaveLength(0)
+  })
+
+  it('keeps the country picker usable when WebGL initialization fails', () => {
+    failMapConstruction.mockReturnValueOnce(true)
+    const onCountryClick = vi.fn()
+    render(<ChoroplethMap data={[{ country: 'US', count: 100 }]} onCountryClick={onCountryClick} />)
+    expect(screen.getByText(/Interactive map unavailable/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Browse countries' }))
+    const list = screen.getByRole('listbox')
+    expect(list).toHaveFocus()
+    fireEvent.keyDown(list, { key: 'Enter' })
+    expect(onCountryClick).toHaveBeenCalledWith('US')
+    expect(screen.getByRole('button', { name: 'Browse countries' })).toBeInTheDocument()
+  })
+
+  it('resets keyboard selection after row-count changes while keeping the open picker focused', () => {
+    const onCountryClick = vi.fn()
+    const data = [{ country: 'US', count: 100 }, { country: 'GB', count: 50 }, { country: 'CA', count: 5 }]
+    const { rerender } = render(<ChoroplethMap data={data} onCountryClick={onCountryClick} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Browse countries' }))
+    fireEvent.keyDown(screen.getByRole('listbox'), { key: 'End' })
+    expect(screen.getByRole('option', { name: /Canada/ })).toHaveAttribute('aria-selected', 'true')
+    rerender(<ChoroplethMap data={data.slice(0, 2)} onCountryClick={onCountryClick} />)
+    expect(screen.getByRole('listbox')).toHaveFocus()
+    expect(screen.getByRole('option', { name: /United States/ })).toHaveAttribute('aria-selected', 'true')
+    fireEvent.keyDown(screen.getByRole('listbox'), { key: 'Enter' })
+    expect(onCountryClick).toHaveBeenCalledWith('US')
+  })
+
+  it('bounds hover tooltip coordinates using the current map dimensions', async () => {
+    render(<ChoroplethMap data={[{ country: 'US', count: 100 }]} />)
+    await act(async () => { await Promise.resolve() })
+    const instance = mapInstances[0]
+    const container = instance.container as HTMLElement
+    Object.defineProperties(container, {
+      clientWidth: { value: 400 },
+      clientHeight: { value: 200 },
+    })
+    act(() => instance.emit('mousemove', {
+      features: [{ properties: { name: 'United States of America' } }],
+      point: { x: 390, y: 190 },
+    }))
+    expect(screen.getByText('100 requests').parentElement).toHaveStyle({ left: '240px', top: '120px' })
   })
 })
 
