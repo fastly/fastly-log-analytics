@@ -4,7 +4,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from backend.high_scale.aggregate_query import AggregateRequest, query_clickhouse_aggregate
+from backend.high_scale.aggregate_query import (
+    AggregateRequest,
+    query_clickhouse_aggregate,
+    query_clickhouse_aggregates_batch,
+)
 from backend.high_scale.archive_models import ServingWatermark
 
 NOW = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
@@ -112,6 +116,159 @@ def test_range_parameters_use_a_clickhouse_type_matching_the_parameter_format() 
     assert "bucket_start < {end:DateTime64(3)}" in client.sql
     assert "{start:DateTime}" not in client.sql
     assert "{end:DateTime}" not in client.sql
+
+
+def test_partial_minute_query_reads_event_time_facts_with_visibility_fence() -> None:
+    start = NOW + timedelta(seconds=10)
+    end = NOW + timedelta(minutes=1, seconds=20)
+    client = FakeClient(
+        [
+            [{"total_count": 3}],
+            [{"value": "/a", "aggregate_count": 2}],
+        ],
+    )
+
+    response = query_clickhouse_aggregate(
+        client,
+        AggregateRequest("svc", "request", start, end),
+        watermark=watermark(),
+        now=NOW,
+    )
+
+    assert response.request_count == 3
+    assert response.top_values == (("/a", 2),)
+    assert all("request_facts" in sql for sql, _ in client.calls)
+    assert all("request_aggregates" not in sql for sql, _ in client.calls)
+    assert all("event_timestamp >= {start:DateTime64(3)}" in sql for sql, _ in client.calls)
+    assert all("event_timestamp < {end:DateTime64(3)}" in sql for sql, _ in client.calls)
+    assert all("publication_state='visible'" in sql for sql, _ in client.calls)
+    assert client.calls[0][1] is not None
+    assert client.calls[0][1]["start"] == start
+    assert client.calls[0][1]["end"] == end
+
+
+def test_partial_minute_batch_reads_fact_dimensions_and_preserves_domain_bounds() -> None:
+    start = NOW + timedelta(seconds=10)
+    end = NOW + timedelta(minutes=1, seconds=20)
+    client = FakeClient(
+        [
+            [{"dimension": "url", "total_count": 3}, {"dimension": "country", "total_count": 3}],
+            [
+                {"dimension": "url", "value": "/a", "aggregate_count": 2},
+                {"dimension": "country", "value": "US", "aggregate_count": 3},
+            ],
+        ],
+    )
+
+    responses = query_clickhouse_aggregates_batch(
+        client,
+        service_id="svc",
+        domain="request",
+        dimensions=["url", "country"],
+        start=start,
+        end=end,
+        watermark=watermark(),
+        now=NOW,
+    )
+
+    assert responses["url"].request_count == 3
+    assert responses["country"].top_values == (("US", 3),)
+    assert len(client.calls) == 2
+    assert all("request_facts" in sql for sql, _ in client.calls)
+    assert all("publication_state='visible'" in sql for sql, _ in client.calls)
+    assert all("event_timestamp < {end:DateTime64(3)}" in sql for sql, _ in client.calls)
+    assert "tuple({fact_dimension_0:String}, toString(url))" in client.calls[0][0]
+    assert "tuple({fact_dimension_1:String}, toString(country))" in client.calls[0][0]
+
+
+def test_partial_minute_cmcd_session_reads_the_fact_map() -> None:
+    client = FakeClient(
+        [
+            [{"total_count": 2}],
+            [{"value": "session-1", "aggregate_count": 2}],
+        ],
+    )
+
+    response = query_clickhouse_aggregate(
+        client,
+        AggregateRequest("svc", "cmcd", NOW + timedelta(seconds=1), NOW + timedelta(minutes=1)),
+        watermark=watermark("cmcd"),
+        now=NOW,
+    )
+
+    assert response.top_values == (("session-1", 2),)
+    assert all("cmcd_projection_facts" in sql for sql, _ in client.calls)
+    assert all("cmcd['sid']" in sql for sql, _ in client.calls)
+    assert all("event_timestamp <= {end:DateTime64(3)}" in sql for sql, _ in client.calls)
+    assert all("domain='cmcd'" in sql for sql, _ in client.calls)
+
+
+@pytest.mark.parametrize(
+    ("domain", "table", "expression"),
+    [
+        ("rum_vitals", "rum_vitals_facts", "toString(metric_name)"),
+        ("rum_errors", "rum_error_facts", "toString(error_message)"),
+    ],
+)
+def test_partial_minute_rum_reads_event_time_facts_with_inclusive_end(
+    domain: str,
+    table: str,
+    expression: str,
+) -> None:
+    client = FakeClient(
+        [
+            [{"total_count": 1}],
+            [{"value": "event", "aggregate_count": 1}],
+        ],
+    )
+
+    query_clickhouse_aggregate(
+        client,
+        AggregateRequest("svc", domain, NOW + timedelta(seconds=1), NOW + timedelta(minutes=1)),
+        watermark=watermark(domain),
+        now=NOW,
+    )
+
+    assert all(table in sql for sql, _ in client.calls)
+    assert all(expression in sql for sql, _ in client.calls)
+    assert all("event_timestamp <= {end:DateTime64(3)}" in sql for sql, _ in client.calls)
+    assert all(f"domain='{domain}'" in sql for sql, _ in client.calls)
+
+
+def test_partial_minute_request_cmcd_session_uses_request_schema_map() -> None:
+    client = FakeClient(
+        [
+            [{"total_count": 1}],
+            [{"value": "session-1", "aggregate_count": 1}],
+        ],
+    )
+
+    response = query_clickhouse_aggregate(
+        client,
+        AggregateRequest(
+            "svc",
+            "request",
+            NOW + timedelta(seconds=1),
+            NOW + timedelta(minutes=1),
+            "cmcd_session",
+        ),
+        watermark=watermark(),
+        now=NOW,
+    )
+
+    assert response.top_values == (("session-1", 1),)
+    assert all("request_facts" in sql for sql, _ in client.calls)
+    assert all("cmcd['sid']" in sql for sql, _ in client.calls)
+
+
+def test_partial_minute_query_rejects_dimensions_without_fact_mapping() -> None:
+    with pytest.raises(ValueError, match="cannot be read exactly"):
+        query_clickhouse_aggregate(
+            FakeClient([[], []]),
+            AggregateRequest("svc", "request", NOW + timedelta(seconds=1), NOW + timedelta(minutes=1), "made_up"),
+            watermark=watermark(),
+            now=NOW,
+        )
 
 
 def test_query_allows_digit_suffix_in_internal_dimension_identifier() -> None:

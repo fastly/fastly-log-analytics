@@ -61,6 +61,121 @@ DEFAULT_AGGREGATE_DIMENSIONS = {
     "rum_errors": "error_message",
     "cmcd": "cmcd_session",
 }
+_FACT_TABLES = {
+    "request": "request_facts",
+    "rum_vitals": "rum_vitals_facts",
+    "rum_errors": "rum_error_facts",
+    "cmcd": "cmcd_projection_facts",
+}
+_REQUEST_CUSTOM_FIELD_DIMENSIONS = (
+    "asn",
+    "host",
+    "method",
+    "status",
+    "cache",
+    "proto",
+    "ua",
+    "referer",
+    "cookie_session",
+    "resp_header_content_encoding",
+    "ttl",
+    "age",
+    "hits",
+    "digest",
+    "city",
+    "region",
+    "metro",
+    "transport",
+    "c_speed",
+    "c_type",
+    "pop",
+    "backend",
+    "edge",
+    "server_region",
+    "tls",
+    "is_ipv6",
+    "conn_requests",
+    "waf",
+    "waf_resp",
+    "waf_ms",
+    "p_type",
+    "p_desc",
+    "ja3",
+    "ja4",
+    "tls_ciphers_sha",
+    "io_input_format",
+    "io_output_format",
+)
+_FACT_DIMENSION_EXPRESSIONS = {
+    "request": {
+        "url": "url",
+        "country": "country",
+        "client_ip": "client_ip",
+        **{dimension: f"custom_fields['{dimension}']" for dimension in _REQUEST_CUSTOM_FIELD_DIMENSIONS},
+        "cmcd_session": "cmcd['sid']",
+    },
+    "rum_vitals": {"metric_name": "metric_name"},
+    "rum_errors": {"error_message": "error_message"},
+    "cmcd": {"cmcd_session": "cmcd['sid']"},
+}
+
+
+def _is_partial_minute_window(start: datetime | None, end: datetime | None) -> bool:
+    if start is None or end is None:
+        return False
+    return any(value.astimezone(UTC).second != 0 or value.astimezone(UTC).microsecond != 0 for value in (start, end))
+
+
+def _query_fact_aggregates(
+    client: AggregateQueryClient,
+    *,
+    service_id: str,
+    domain: str,
+    dimensions: list[str],
+    start: datetime,
+    end: datetime,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    table = _FACT_TABLES[domain]
+    expressions = _FACT_DIMENSION_EXPRESSIONS[domain]
+    if any(dimension not in expressions for dimension in dimensions):
+        raise ValueError("aggregate dimension cannot be read exactly from event-time facts")
+
+    dimension_values: list[str] = []
+    params: dict[str, Any] = {
+        "service_id": service_id,
+        "start": start.astimezone(UTC),
+        "end": end.astimezone(UTC),
+    }
+    for idx, dimension in enumerate(dimensions):
+        key = f"fact_dimension_{idx}"
+        dimension_values.append(f"tuple({{{key}:String}}, toString({expressions[dimension]}))")
+        params[key] = dimension
+
+    end_operator = "<" if domain == "request" else "<="
+    clauses = [
+        "service_id={service_id:String}",
+        "event_timestamp >= {start:DateTime64(3)}",
+        f"event_timestamp {end_operator} {{end:DateTime64(3)}}",
+        visible_publication_fence_sql(domain),
+    ]
+    fact_values = (
+        "SELECT tupleElement(dimension_value, 1) AS dimension, "
+        "tupleElement(dimension_value, 2) AS value "
+        f"FROM {table} ARRAY JOIN [{', '.join(dimension_values)}] AS dimension_value "
+        f"WHERE {' AND '.join(clauses)}"
+    )
+    totals = client.execute(
+        f"SELECT dimension, count() AS total_count FROM ({fact_values}) GROUP BY dimension",
+        params,
+    )
+    rows = client.execute(
+        f"SELECT dimension, value, count() AS aggregate_count FROM ({fact_values}) "
+        "GROUP BY dimension, value "
+        "ORDER BY dimension ASC, aggregate_count DESC, value ASC "
+        "LIMIT 10 BY dimension",
+        params,
+    )
+    return totals, rows
 
 
 def query_clickhouse_aggregate(
@@ -90,7 +205,12 @@ def query_clickhouse_aggregate(
         "service_id": request.service_id,
         "dimension": dimension,
     }
-    if request.start is not None and request.end is not None:
+    partial_minute_window = _is_partial_minute_window(request.start, request.end)
+    if partial_minute_window:
+        if dimension not in _FACT_DIMENSION_EXPRESSIONS[request.domain]:
+            raise ValueError("aggregate dimension cannot be read exactly from event-time facts")
+        assert request.start is not None and request.end is not None
+    elif request.start is not None and request.end is not None:
         start = request.start.astimezone(UTC)
         end = request.end.astimezone(UTC)
         end_operator = "<" if request.domain == "request" else "<="
@@ -100,16 +220,27 @@ def query_clickhouse_aggregate(
     from backend.core.clickhouse_client import ClickHouseError
 
     try:
-        totals = client.execute(
-            f"SELECT sum({metric}) AS total_count FROM {table} WHERE {' AND '.join(clauses)}",
-            params,
-        )
-        rows = client.execute(
-            f"SELECT value, sum({metric}) AS aggregate_count "
-            f"FROM {table} WHERE {' AND '.join(clauses)} "
-            "GROUP BY value ORDER BY aggregate_count DESC, value ASC LIMIT 10",
-            params,
-        )
+        if partial_minute_window:
+            assert request.start is not None and request.end is not None
+            totals, rows = _query_fact_aggregates(
+                client,
+                service_id=request.service_id,
+                domain=request.domain,
+                dimensions=[dimension],
+                start=request.start,
+                end=request.end,
+            )
+        else:
+            totals = client.execute(
+                f"SELECT sum({metric}) AS total_count FROM {table} WHERE {' AND '.join(clauses)}",
+                params,
+            )
+            rows = client.execute(
+                f"SELECT value, sum({metric}) AS aggregate_count "
+                f"FROM {table} WHERE {' AND '.join(clauses)} "
+                "GROUP BY value ORDER BY aggregate_count DESC, value ASC LIMIT 10",
+                params,
+            )
     except ClickHouseError as e:
         raise ValueError(f"ClickHouse server query failed (S3/FOS access credentials may be expired): {e}")
     values = tuple((str(row["value"]), max(0, int(row["aggregate_count"]))) for row in rows)
@@ -169,6 +300,8 @@ def query_clickhouse_aggregates_batch(
     if domain not in _DOMAIN_TABLES:
         raise ValueError(f"unsupported aggregate domain: {domain}")
     table, metric = _DOMAIN_TABLES[domain]
+    partial_minute_window = _is_partial_minute_window(start, end)
+    from backend.core.clickhouse_client import ClickHouseError
 
     dim_placeholders: list[str] = []
     params: dict[str, Any] = {"service_id": service_id}
@@ -178,6 +311,48 @@ def query_clickhouse_aggregates_batch(
         key = f"dim_{idx}"
         dim_placeholders.append(f"{{{key}:String}}")
         params[key] = dim
+
+    if partial_minute_window:
+        assert start is not None and end is not None
+
+        try:
+            totals_rows, top_rows = _query_fact_aggregates(
+                client,
+                service_id=service_id,
+                domain=domain,
+                dimensions=unique_dims,
+                start=start,
+                end=end,
+            )
+        except ClickHouseError as e:
+            raise ValueError(f"ClickHouse server query failed (S3/FOS access credentials may be expired): {e}")
+
+        fact_totals_by_dim = {
+            str(row.get("dimension") or ""): max(0, int(row.get("total_count") or 0)) for row in totals_rows
+        }
+        fact_tops_by_dim: dict[str, list[tuple[str, int]]] = {dimension: [] for dimension in unique_dims}
+        for row in top_rows:
+            dimension = str(row.get("dimension") or "")
+            if dimension in fact_tops_by_dim and len(fact_tops_by_dim[dimension]) < 10:
+                fact_tops_by_dim[dimension].append((str(row["value"]), max(0, int(row["aggregate_count"]))))
+
+        observed = (now or datetime.now(UTC)).astimezone(UTC)
+        freshness = max(0.0, (observed - watermark.coverage_end).total_seconds()) if watermark.coverage_end else 0.0
+        return {
+            dimension: AggregateResponse(
+                service_id=service_id,
+                domain=domain,
+                request_count=fact_totals_by_dim.get(dimension, 0),
+                top_values=tuple(fact_tops_by_dim.get(dimension, ())),
+                coverage=1.0 if fact_tops_by_dim.get(dimension) or watermark.coverage_end is not None else 0.0,
+                watermark=watermark,
+                freshness_lag_seconds=freshness,
+                exact=True,
+                approximation_error=None,
+                counters=((f"{domain}_events", fact_totals_by_dim.get(dimension, 0)),),
+            )
+            for dimension in unique_dims
+        }
 
     clauses = [
         "service_id={service_id:String}",
@@ -190,8 +365,6 @@ def query_clickhouse_aggregates_batch(
         end_operator = "<" if domain == "request" else "<="
         clauses.extend(["bucket_start >= {start:DateTime64(3)}", f"bucket_start {end_operator} {{end:DateTime64(3)}}"])
         params.update({"start": start_utc, "end": end_utc})
-
-    from backend.core.clickhouse_client import ClickHouseError
 
     try:
         totals_rows = client.execute(
