@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { test } = require('node:test');
 const fs = require('node:fs');
-const { describeResponse, collectResponseMeasurements, budgets } = require('../../scripts/lib/section_measurements.cjs');
+const { describeResponse, collectResponseMeasurements, measurePaintedAction, budgets } = require('../../scripts/lib/section_measurements.cjs');
 
 test('default false does not establish miss and missing timing is explicit', () => {
   const report = describeResponse({ _is_cached: false });
@@ -272,4 +272,194 @@ test('collector regex stays coupled to every section_sweep ENDPOINTS path', asyn
   const rows = await collector.snapshot();
   assert.equal(rows.length, 0, 'collector must not capture /api/bootstrap');
   collector.close();
+});
+
+// --- measurePaintedAction: synchronous argument-validation guard ------------
+
+const GUARD_MESSAGE =
+  'Explicit action target, meaningful text markers and bounded timeout are required';
+
+function guardPage() {
+  // Any evaluate/page interaction means the guard failed to fire first.
+  return {
+    evaluate: async () => {
+      throw new Error('page.evaluate must not run when validation fails');
+    },
+    waitForFunction: async () => {
+      throw new Error('page.waitForFunction must not run when validation fails');
+    },
+    isClosed: () => false,
+  };
+}
+
+function validOptions(overrides = {}) {
+  return {
+    target: 'button.apply-filter',
+    eventType: 'click',
+    feedback: { selector: '.toast', text: 'Filter applied' },
+    results: [{ selector: 'table tbody tr', text: '42' }],
+    timeoutMs: 5000,
+    ...overrides,
+  };
+}
+
+const noopAction = async () => {};
+
+test('measurePaintedAction rejects an empty or non-string action target', async () => {
+  for (const target of ['', null, undefined, 42, {}]) {
+    await assert.rejects(
+      () => measurePaintedAction(guardPage(), validOptions({ target }), noopAction),
+      new RegExp(GUARD_MESSAGE),
+    );
+  }
+});
+
+test('measurePaintedAction rejects an unsupported event type', async () => {
+  for (const eventType of ['mouseover', 'focus', '', null]) {
+    await assert.rejects(
+      () => measurePaintedAction(guardPage(), validOptions({ eventType }), noopAction),
+      new RegExp(GUARD_MESSAGE),
+    );
+  }
+});
+
+test('measurePaintedAction rejects missing, empty or oversized results markers', async () => {
+  const oversized = Array.from({ length: 33 }, (_, i) => ({
+    selector: `tr:nth-child(${i + 1})`,
+    text: String(i),
+  }));
+  for (const results of [undefined, null, 'rows', [], oversized]) {
+    await assert.rejects(
+      () => measurePaintedAction(guardPage(), validOptions({ results }), noopAction),
+      new RegExp(GUARD_MESSAGE),
+    );
+  }
+});
+
+test('measurePaintedAction rejects markers with an empty selector or blank text', async () => {
+  const badMarkers = [
+    { selector: '', text: 'ok' },
+    { selector: 'tr', text: '   ' },
+    { selector: 'tr', text: '' },
+    { selector: 42, text: 'ok' },
+    { selector: 'tr' },
+    'not-an-object',
+  ];
+  for (const marker of badMarkers) {
+    // Invalid as a results marker.
+    await assert.rejects(
+      () => measurePaintedAction(guardPage(), validOptions({ results: [marker] }), noopAction),
+      new RegExp(GUARD_MESSAGE),
+    );
+    // Invalid as the feedback marker (prepended into the marker list).
+    await assert.rejects(
+      () => measurePaintedAction(guardPage(), validOptions({ feedback: marker }), noopAction),
+      new RegExp(GUARD_MESSAGE),
+    );
+  }
+});
+
+test('measurePaintedAction rejects a non-finite or out-of-range timeout', async () => {
+  for (const timeoutMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 60001, '5000']) {
+    await assert.rejects(
+      () => measurePaintedAction(guardPage(), validOptions({ timeoutMs }), noopAction),
+      new RegExp(GUARD_MESSAGE),
+    );
+  }
+});
+
+// --- measurePaintedAction: fake-page post-evaluate tail --------------------
+
+// Builds a fake Puppeteer-like page. The first string-argument evaluate call
+// returns the canned snapshot; the second returns undefined (cleanup). Object
+// -argument evaluate calls (registration) return undefined.
+function paintPage(state) {
+  let snapshotServed = false;
+  return {
+    evaluate: async (_fn, arg) => {
+      if (typeof arg === 'string') {
+        if (!snapshotServed) {
+          snapshotServed = true;
+          return state;
+        }
+        return undefined; // cleanup
+      }
+      return undefined; // registration
+    },
+    waitForFunction: async () => true,
+    isClosed: () => false,
+  };
+}
+
+test('measurePaintedAction reports observed results when every marker paints', async () => {
+  const state = {
+    event: 100,
+    paints: [140, 180],
+    supported: true,
+    visibilitySupported: true,
+    inputDelay: 5,
+    finished: true,
+  };
+  let actionRan = false;
+  const result = await measurePaintedAction(
+    paintPage(state),
+    validOptions(),
+    async () => {
+      actionRan = true;
+    },
+  );
+  assert.equal(actionRan, true);
+  assert.equal(result.qualification, 'incomplete');
+  assert.equal(result.feedback.status, 'observed');
+  assert.equal(result.feedback.elapsed_ms, 40);
+  assert.equal(result.results.status, 'observed');
+  assert.equal(result.results.elapsed_ms, 80);
+  assert.equal(result.results.panels_observed, 1);
+  assert.equal(result.results.panels_required, 1);
+  assert.ok(!result.gaps.includes('visible_results_paint_unobserved'));
+});
+
+test('measurePaintedAction flags unobserved results when a marker never paints', async () => {
+  const state = {
+    event: 100,
+    paints: [140, null],
+    supported: true,
+    visibilitySupported: true,
+    inputDelay: 5,
+    finished: true,
+  };
+  const result = await measurePaintedAction(paintPage(state), validOptions(), noopAction);
+  assert.equal(result.qualification, 'incomplete');
+  assert.equal(result.results.status, 'unobserved');
+  assert.equal(result.results.elapsed_ms, null);
+  assert.equal(result.results.panels_observed, 0);
+  assert.equal(result.results.panels_required, 1);
+  assert.ok(result.gaps.includes('visible_results_paint_unobserved'));
+});
+
+test('measurePaintedAction never leaks private markers through serialization', async () => {
+  const state = {
+    event: 100,
+    paints: [140, 180],
+    supported: true,
+    visibilitySupported: true,
+    inputDelay: 5,
+    finished: true,
+  };
+  const options = validOptions({
+    target: 'button.PRIVATE_TARGET',
+    feedback: { selector: '.PRIVATE_FEEDBACK', text: 'PRIVATE_FEEDBACK_TEXT' },
+    results: [{ selector: 'table.PRIVATE_RESULT', text: 'PRIVATE_RESULT_TEXT' }],
+  });
+  const result = await measurePaintedAction(paintPage(state), options, noopAction);
+  const serialized = JSON.stringify(result);
+  for (const secret of [
+    'PRIVATE_TARGET',
+    'PRIVATE_FEEDBACK',
+    'PRIVATE_FEEDBACK_TEXT',
+    'PRIVATE_RESULT',
+    'PRIVATE_RESULT_TEXT',
+  ]) {
+    assert.equal(serialized.includes(secret), false, `must not leak ${secret}`);
+  }
 });
