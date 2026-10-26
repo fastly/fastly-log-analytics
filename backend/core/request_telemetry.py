@@ -30,6 +30,7 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 from opentelemetry.trace import Span, Tracer
+from opentelemetry.trace.status import Status, StatusCode
 
 from backend import config
 from backend.celery_app import publisher
@@ -305,6 +306,56 @@ def force_flush() -> None:
                 flush(timeout_millis=5000)
         except Exception:
             logger.debug("force_flush: step failed (ignored)", exc_info=True)
+
+
+def _db_spans_enabled() -> bool:
+    """True only when DB/IO spans can actually reach a backend.
+
+    Spans export solely under the ``console`` and ``otlp`` exporters (the
+    ``prometheus`` branch installs no span processor). ``_otel_enabled()`` is
+    False by default, under pytest, and when the exporter is ``none``, so this
+    short-circuits to near-zero cost on the hot path whenever telemetry is off.
+    """
+    try:
+        return _otel_enabled() and _otel_exporter() in ("console", "otlp")
+    except Exception:
+        return False
+
+
+def _start_db_span(kind: str, statement: str, service_id: str | None) -> Span | None:
+    """Start a DB/IO span, or return None if telemetry is off or anything fails.
+
+    Never raises: callers wrap query execution, so a telemetry fault must never
+    surface as a query error. Calls the idempotent ``_setup_sdk`` so worker
+    processes that run queries without an HTTP request still export.
+    """
+    if not _db_spans_enabled():
+        return None
+    try:
+        _setup_sdk()
+        tracer = trace.get_tracer(_TRACER_NAME)
+        span = tracer.start_span(f"db.{kind}")
+        span.set_attribute("db.system", kind)
+        if statement:
+            span.set_attribute("db.statement", statement[:2000])
+        if service_id:
+            span.set_attribute("fla.service_id", service_id)
+        return span
+    except Exception:
+        return None
+
+
+def _end_db_span(span: Span | None, error: BaseException | None = None) -> None:
+    """End a span started by ``_start_db_span`` (idempotent, never raises)."""
+    if span is None:
+        return
+    try:
+        if error is not None:
+            span.record_exception(error)
+            span.set_status(Status(StatusCode.ERROR, str(error)))
+        span.end()
+    except Exception:
+        pass
 
 
 _thread_wait_histogram: Any = None
@@ -944,13 +995,15 @@ class InstrumentedDuckDBConnection:
             err = duckdb.InterruptException("Interrupt Error: Interrupted!")
             _deregister(qid, err, peak_memory_mb=None)
             raise err
+        span = _start_db_span("duckdb", sql_text, self._service_id)
         try:
             result = bound(query, *args, **kwargs)
         except BaseException as err:
             peak = _probe_duckdb_memory(self._con)
             _deregister(qid, err, peak_memory_mb=peak)
+            _end_db_span(span, err)
             raise
-        return _InstrumentedResult(result, qid, con_ref)
+        return _InstrumentedResult(result, qid, con_ref, span)
 
 
 class _InstrumentedResult:
@@ -958,14 +1011,21 @@ class _InstrumentedResult:
     until a terminal fetch completes — or until garbage collection runs.
     """
 
-    __slots__ = ("_raw", "_qid", "_done", "_con_ref", "_start_mono")
+    __slots__ = ("_raw", "_qid", "_done", "_con_ref", "_start_mono", "_span")
 
-    def __init__(self, raw: Any, qid: int, con_ref: Callable[[], Any] | None = None):
+    def __init__(
+        self,
+        raw: Any,
+        qid: int,
+        con_ref: Callable[[], Any] | None = None,
+        span: Span | None = None,
+    ):
         self._raw = raw
         self._qid = qid
         self._done = False
         self._con_ref = con_ref
         self._start_mono = time.monotonic()
+        self._span = span
 
     def _finish(self, error: BaseException | None = None, *, probe_memory: bool = True) -> None:
         if self._done:
@@ -978,6 +1038,7 @@ class _InstrumentedResult:
             if con is not None:
                 peak_mb = _probe_duckdb_memory(con)
         _deregister(self._qid, error, peak_memory_mb=peak_mb)
+        _end_db_span(self._span, error)
 
     def __getattr__(self, name: str) -> Any:
         attr = getattr(self._raw, name)
@@ -987,6 +1048,7 @@ class _InstrumentedResult:
             qid = self._qid
             con_ref = self._con_ref
             start_mono = self._start_mono
+            span = self._span
 
             def _reader_finish(error: BaseException | None = None, *, probe_memory: bool = True) -> None:
                 peak_mb: float | None = None
@@ -996,6 +1058,7 @@ class _InstrumentedResult:
                     if con is not None:
                         peak_mb = _probe_duckdb_memory(con)
                 _deregister(qid, error, peak_memory_mb=peak_mb)
+                _end_db_span(span, error)
 
             def _reader_wrapped(*args: Any, **kwargs: Any) -> Any:
                 try:

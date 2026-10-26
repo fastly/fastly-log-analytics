@@ -2017,3 +2017,54 @@ def test_deregister_slow_query_persistence_and_resilience(svc_id, fresh_singleto
     fresh_singleton_registry._queries[err_qid].started_at_mono = time.monotonic() - 0.5
     fresh_singleton_registry.deregister(err_qid)
     assert _meta.count_slow_queries(svc_id, since_utc=time.time() - 60) == 1
+
+
+# ── Section 8: DB/IO Span Attribution (Track B) ──────────────────────────────
+
+
+def _span_test_provider(monkeypatch):
+    """Wire an in-memory span exporter into request_telemetry's DB/IO span path.
+
+    Forces the normally-off span gate on, no-ops SDK setup, and redirects the
+    tracer lookup to a local provider so spans land in the returned exporter.
+    """
+    provider, exporter = TracerProvider(), InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(request_telemetry, "_db_spans_enabled", lambda: True)
+    monkeypatch.setattr(request_telemetry, "_setup_sdk", lambda: None)
+    monkeypatch.setattr(request_telemetry.trace, "get_tracer", lambda name: provider.get_tracer("test"))
+    return exporter
+
+
+def test_duckdb_query_emits_db_span(duck, monkeypatch):
+    exporter = _span_test_provider(monkeypatch)
+    duck.execute("CREATE TABLE s AS SELECT i FROM range(100) tbl(i)")
+    con = InstrumentedDuckDBConnection(duck, service_id="span_svc")
+    assert con.execute("SELECT count(*) FROM s").fetchall() == [(100,)]
+    spans = [sp for sp in exporter.get_finished_spans() if sp.name == "db.duckdb"]
+    assert len(spans) == 1
+    sp = spans[0]
+    assert sp.attributes.get("db.system") == "duckdb"
+    assert sp.attributes.get("db.statement")
+    assert sp.attributes.get("fla.service_id") == "span_svc"
+
+
+def test_fos_client_shim_spans_only_enumerated_methods(monkeypatch):
+    exporter = _span_test_provider(monkeypatch)
+
+    class _FakeS3:
+        def get_object(self, **kwargs):
+            return {"Body": b"x", "echo": kwargs}
+
+        def not_an_s3_op(self):
+            return "plain"
+
+    shim = _duckdb_mod._ProxyClientShim(_FakeS3())
+    out = shim.get_object(Bucket="b", Key="k")
+    assert out["echo"] == {"Bucket": "b", "Key": "k"}
+    fos_spans = [sp for sp in exporter.get_finished_spans() if sp.name == "db.fos"]
+    assert len(fos_spans) == 1
+    assert fos_spans[0].attributes.get("db.system") == "fos"
+
+    assert shim.not_an_s3_op() == "plain"
+    assert len([sp for sp in exporter.get_finished_spans() if sp.name == "db.fos"]) == 1
