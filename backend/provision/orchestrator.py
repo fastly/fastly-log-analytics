@@ -9,9 +9,7 @@ import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
-
 # ── CMCD custom field definitions & VCL helpers (folded from cmcd_fields.py) ──
-
 _CMCD_CUSTOM_FIELDS: list[dict[str, Any]] = [
     {
         "name": "cmcd_sid",
@@ -160,7 +158,6 @@ _CMCD_CUSTOM_FIELDS: list[dict[str, Any]] = [
 # Ensure exact schema match (strip temporary note if any)
 for _cf in _CMCD_CUSTOM_FIELDS:
     _cf.pop("vcl_log_expression_note", None)
-
 _CMCD_FIELD_NAMES = {cf["name"] for cf in _CMCD_CUSTOM_FIELDS}
 
 
@@ -232,7 +229,6 @@ def _cmcd_field_assignments_vcl(
 def _header_mode_vcl(version: int) -> str:
     bf = _bool_v1 if version == 1 else _bool_v2
     tag = f"v{version}"
-
     if version == 1:
         su = bf("var.cmcd_req_pad", "su")
         bs = bf("var.cmcd_status_pad", "bs")
@@ -248,7 +244,6 @@ def _header_mode_vcl(version: int) -> str:
         su = bf("req.http.CMCD-Request", "su")
         bs = bf("req.http.CMCD-Status", "bs")
         pad_decl = ""
-
     assignments = _cmcd_field_assignments_vcl(
         "req.http.CMCD-Object",
         "req.http.CMCD-Request",
@@ -274,14 +269,12 @@ if (req.http.CMCD-Object != "" || req.http.CMCD-Request != "" || req.http.CMCD-S
 def _query_string_mode_vcl(version: int) -> str:
     bf = _bool_v1 if version == 1 else _bool_v2
     tag = f"v{version}"
-
     if version == 1:
         su = bf("var.cmcd_pad", "su")
         bs = bf("var.cmcd_pad", "bs")
     else:
         su = bf("var.cmcd", "su")
         bs = bf("var.cmcd", "bs")
-
     pad_block = (
         """
   declare local var.cmcd_pad STRING;
@@ -290,7 +283,6 @@ def _query_string_mode_vcl(version: int) -> str:
         if version == 1
         else ""
     )
-
     assignments = _cmcd_field_assignments_vcl(
         "var.cmcd",
         "var.cmcd",
@@ -374,25 +366,580 @@ def reconcile_cfg_system_custom_fields(cfg: dict[str, Any]) -> list[dict]:
 
 # Register cmcd_fields alias BEFORE importing sibling modules
 sys.modules["backend.provision.cmcd_fields"] = sys.modules[__name__]
-
 from backend.core import field_registry as lf  # noqa: E402
 from backend.core.duckdb import rum_duckdb_path  # noqa: E402
 from backend.core.faro_versions import DEFAULT_FARO_VERSION  # noqa: E402
 from backend.core.fastly.client import fastly, is_mock_mode, region_endpoint  # noqa: E402
-from backend.provision.cli import ok, run_with_events, step, warn  # noqa: E402
-from backend.provision.declarative.reconciler import reconcile_vcl_state  # noqa: E402
-from backend.provision.declarative.state import FeatureState  # noqa: E402
+from backend.provision.cli import BOLD, _c, info, ok, run_with_events, step, warn  # noqa: E402
+
+sys.modules["backend.provision.fos_setup"] = sys.modules[__name__]
+sys.modules["backend.utils.terraform_gen"] = sys.modules[__name__]
+import threading
+
+import boto3
+from botocore.config import Config
+from botocore.exceptions import ClientError
+
+# Methods we want billed as Class A regardless of name-based auto-classification
+# in metadata_db.log_usage_calls. The auto-classifier only knows about
+# PUT_OBJECT/POST_OBJECT/COPY_OBJECT/LIST_OBJECTS_V2; the rest of the
+# bucket-lifecycle ops fall through to Class B by default, so we tag them
+# explicitly via the "Class A" sentinel in details (which the classifier
+# honors as an override).
+_PROVISION_CLASS_A: set[str] = {
+    "CREATE_BUCKET",
+    "DELETE_BUCKET",
+    "DELETE_OBJECT",
+    "DELETE_OBJECTS",
+    "LIST_MULTIPART_UPLOADS",
+    "ABORT_MULTIPART_UPLOAD",
+}
+
+
+class _ProvisioningTracker:
+    """Wraps a boto3 S3 client so every call lands in usage_log.
+
+    Why this exists: provisioning runs outside any request handler
+    context, so the ContextVar-backed `record_call` mechanism that
+    powers dashboards drops every op silently — and the local
+    telemetry proxy can't help either, since the service_id config
+    (which carries the SigV4 credentials the proxy needs) does not
+    exist yet when the bucket is being created. We write directly to
+    usage_log via `metadata_db.log_usage_calls`, which is the same
+    persistence layer the proxy writes to — keeping a single source
+    of truth for the Usage Log dashboard.
+
+    Each tracked call accumulates in `_calls`; `flush()` drains them
+    to SQLite. Thread-safe (delete_fos_bucket uses a ThreadPoolExecutor
+    for parallel delete_objects fan-out).
+    """
+
+    def __init__(self, client, service_id: str, bucket_name: str, context: str):
+        self._client = client
+        self._service_id = service_id
+        self._bucket_name = bucket_name
+        self._context = context  # e.g. "provision:bucket-name" or "teardown:bucket-name"
+        self._calls: list[dict] = []
+        self._lock = threading.Lock()
+
+    def get_paginator(self, operation_name):
+        # boto3 paginators internally call list_objects_v2 — wrap the page
+        # iterator so we capture each underlying API call, not just the
+        # surface .paginate() invocation.
+        return _ProvisioningPaginator(self._client.get_paginator(operation_name), operation_name, self)
+
+    def __getattr__(self, name):
+        attr = getattr(self._client, name)
+        if not callable(attr) or name.startswith("_"):
+            return attr
+        op = name.upper()
+
+        def tracked(*args: Any, **kwargs: Any) -> Any:
+            t0 = time.time()
+            status: str | int = "OK"
+            exc_raised = None
+            try:
+                response = attr(*args, **kwargs)
+                if isinstance(response, dict):
+                    meta = response.get("ResponseMetadata") or {}
+                    code = meta.get("HTTPStatusCode")
+                    if isinstance(code, int):
+                        status = code
+                return response
+            except ClientError as exc:
+                err_code = exc.response.get("Error", {}).get("Code", "Error")
+                status = f"Error:{err_code}"
+                exc_raised = exc
+                raise
+            except Exception as exc:
+                status = f"Error:{type(exc).__name__}"
+                exc_raised = exc
+                raise
+            finally:
+                elapsed_ms = round((time.time() - t0) * 1000, 2)
+                self._record(op, args, kwargs, elapsed_ms, status, exception=exc_raised)
+
+        return tracked
+
+    def _record(self, op: str, args, kwargs, elapsed_ms: float, status, exception=None):
+        bucket = kwargs.get("Bucket") or (args[0] if args else "") or self._bucket_name
+        key = kwargs.get("Key", "")
+        path = f"{bucket}/{key}" if key else bucket
+        details = "Class A · provisioning" if op in _PROVISION_CLASS_A else "Class B · provisioning"
+        with self._lock:
+            self._calls.append(
+                {
+                    "service": "FOS",
+                    "method": op,
+                    "path": path or "FOS Operation",
+                    "time_ms": elapsed_ms,
+                    "status": status,
+                    "details": details,
+                    "caller": f"provision.{op.lower()}",
+                }
+            )
+
+    def flush(self) -> int:
+        """Persist accumulated calls. Returns rows written."""
+        with self._lock:
+            if not self._calls:
+                return 0
+            batch = self._calls[:]
+            self._calls.clear()
+        try:
+            from backend.core import metadata as metadata_db
+
+            metadata_db.log_usage_calls(self._service_id, batch, process_context=self._context)
+            return len(batch)
+        except Exception:
+            # Provisioning must never fail because telemetry persistence failed.
+            return 0
+
+
+class _ProvisioningPaginator:
+    """Page iterator that records each underlying list_objects_v2 call."""
+
+    def __init__(self, paginator, operation_name: str, tracker: _ProvisioningTracker):
+        self._paginator = paginator
+        self._operation_name = operation_name
+        self._tracker = tracker
+
+    def paginate(self, **kwargs):
+        op = self._operation_name.upper()
+        underlying = self._paginator.paginate(**kwargs)
+        bucket = kwargs.get("Bucket") or self._tracker._bucket_name
+        prefix = kwargs.get("Prefix", "")
+        path = f"{bucket}/{prefix}" if prefix else bucket
+        for page in underlying:
+            t0 = time.time()
+            # The actual API call already happened by the time iteration yields
+            # the page; we can't time it precisely. Record it as 0ms — counts
+            # matter more than per-page latency for Class A pagination billing.
+            self._tracker._record(op, (), {"Bucket": bucket}, round((time.time() - t0) * 1000, 2), "OK")
+            # Use 0.0 explicitly so totals don't get polluted by tiny iteration overhead.
+            if self._tracker._calls and self._tracker._calls[-1]["method"] == op:
+                self._tracker._calls[-1]["time_ms"] = 0.0
+                self._tracker._calls[-1]["path"] = path
+            yield page
+
+
+class _MockS3ClientForProvisioning:
+    """Mock S3 client used during FASTLY_MOCK_MODE=1 to bypass real FOS network calls."""
+
+    def __init__(self):
+        # boto3 clients have a meta property that some listeners might access
+        self.meta = type("Meta", (), {"events": type("Events", (), {"register": lambda *a, **kw: None})()})()
+
+    def head_bucket(self, Bucket):
+        # Always raise 404 to indicate the bucket doesn't exist yet, forcing the create_bucket flow.
+        raise ClientError({"Error": {"Code": "404", "Message": "Not Found"}}, "HeadBucket")
+
+    def create_bucket(self, Bucket, CreateBucketConfiguration=None):
+        return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+    def delete_bucket(self, Bucket):
+        return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+    def list_multipart_uploads(self, Bucket):
+        return {"Uploads": []}
+
+    def get_paginator(self, operation_name):
+        class _MockPaginator:
+            def paginate(self, **kwargs):
+                return []
+
+        return _MockPaginator()
+
+    def delete_objects(self, Bucket, Delete):
+        return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+
+def _get_fos_s3_client(access_key, secret_key, region, *, service_id=None, bucket_name="", context=""):
+    from backend.core.fastly.client import is_mock_mode
+
+    if is_mock_mode():
+        client = _MockS3ClientForProvisioning()
+    else:
+        endpoint = region_endpoint(region)
+        boto_config = Config(
+            signature_version="s3v4", s3={"addressing_style": "path"}, retries={"max_attempts": 5, "mode": "standard"}
+        )
+        client = boto3.client(
+            "s3",
+            endpoint_url=f"https://{endpoint}",
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            region_name=region,
+            config=boto_config,
+        )
+    if service_id:
+        return _ProvisioningTracker(client, service_id, bucket_name, context or f"provision:{bucket_name}")
+    return client
+
+
+def ensure_fos_bucket(
+    name: str,
+    region: str,
+    access_key: str,
+    secret_key: str,
+    status_cb=None,
+    *,
+    service_id: str | None = None,
+) -> bool:
+    """Create the bucket via Boto3 (S3 API). Returns True on success."""
+    s3 = _get_fos_s3_client(
+        access_key, secret_key, region, service_id=service_id, bucket_name=name, context=f"provision:{name}"
+    )
+    try:
+        try:
+            s3.head_bucket(Bucket=name)
+            ok(f"FOS bucket already exists: {_c(BOLD, name)}")
+            if status_cb:
+                status_cb(f"✅ Bucket '{name}' already exists.")
+            return True
+        except ClientError as exc:
+            error_code = exc.response.get("Error", {}).get("Code", "")
+            if error_code == "404":
+                pass
+            elif error_code in ("403", "Forbidden", "AccessDenied"):
+                raise RuntimeError(
+                    f"Bucket {_c(BOLD, name)} exists but access denied. "
+                    f"Verify FOS credentials have permission to HeadBucket: {exc}"
+                )
+            else:
+                raise RuntimeError(f"Could not check FOS bucket status: {exc}")
+        info(f"Creating FOS bucket {_c(BOLD, name)} in {_c(BOLD, region)}…")
+        if status_cb:
+            status_cb(f"⏳ Creating bucket '{name}' in {region}...")
+        try:
+            if region == "us-east-1":
+                s3.create_bucket(Bucket=name)
+            else:
+                s3.create_bucket(Bucket=name, CreateBucketConfiguration={"LocationConstraint": region})
+            ok("FOS bucket created")
+            if status_cb:
+                status_cb("✅ Bucket created.")
+            return True
+        except ClientError as exc:
+            raise RuntimeError(f"Could not create FOS bucket via S3 API: {exc}")
+    finally:
+        if isinstance(s3, _ProvisioningTracker):
+            s3.flush()
+
+
+def delete_fos_bucket(
+    name: str,
+    region: str,
+    access_key: str,
+    secret_key: str,
+    status_cb=None,
+    *,
+    service_id: str | None = None,
+):
+    """Delete the bucket via Boto3, emptying it first if necessary."""
+    s3 = _get_fos_s3_client(
+        access_key, secret_key, region, service_id=service_id, bucket_name=name, context=f"teardown:{name}"
+    )
+    try:
+        try:
+            s3.head_bucket(Bucket=name)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "404":
+                ok(f"FOS bucket {_c(BOLD, name)} already deleted")
+                return
+            raise RuntimeError(f"Could not check FOS bucket status: {exc}")
+        import concurrent.futures
+
+        def empty_bucket():
+            deleted_count = 0
+
+            def _report():
+                if status_cb and deleted_count > 0:
+                    status_cb(f"🧹 Emptying bucket '{name}'... (deleted {deleted_count:,} objects so far)")
+
+            try:
+                uploads = s3.list_multipart_uploads(Bucket=name).get("Uploads", [])
+                for u in uploads:
+                    s3.abort_multipart_upload(Bucket=name, Key=u["Key"], UploadId=u["UploadId"])
+                    deleted_count += 1
+            except Exception:
+                pass
+            found_any = False
+            paginator = s3.get_paginator("list_objects_v2")
+
+            def delete_batch(batch):
+                s3.delete_objects(Bucket=name, Delete={"Objects": batch})
+                return len(batch)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                futures = set()
+                for page in paginator.paginate(Bucket=name):
+                    objects = page.get("Contents", [])
+                    if objects:
+                        found_any = True
+                        delete_list = [{"Key": obj["Key"]} for obj in objects]
+                        for j in range(0, len(delete_list), 1000):
+                            batch = delete_list[j : j + 1000]
+                            futures.add(executor.submit(delete_batch, batch))
+                    done = {f for f in futures if f.done()}
+                    for f in done:
+                        try:
+                            deleted_count += f.result()
+                        except Exception:
+                            pass
+                    futures -= done
+                    if done:
+                        _report()
+                for f in concurrent.futures.as_completed(futures):
+                    try:
+                        deleted_count += f.result()
+                    except Exception:
+                        pass
+                    _report()
+            return found_any
+
+        if status_cb:
+            status_cb(f"🧹 Emptying bucket '{name}'...")
+        empty_bucket()
+        info(f"Deleting FOS bucket {_c(BOLD, name)}…")
+        if status_cb:
+            status_cb(f"⏳ Deleting bucket '{name}'...")
+        from tenacity import Retrying, retry_if_exception, stop_after_attempt
+
+        max_attempts = 15
+
+        def _is_bucket_not_empty(exc: BaseException) -> bool:
+            return isinstance(exc, ClientError) and exc.response.get("Error", {}).get("Code") == "BucketNotEmpty"
+
+        def _before_sleep(retry_state) -> None:
+            attempt = retry_state.attempt_number
+            wait_time = 2 if attempt <= 6 else 5
+            if status_cb:
+                status_cb(f"⏳ Bucket not empty (attempt {attempt}/{max_attempts}), retrying in {wait_time}s...")
+            time.sleep(wait_time)
+            empty_bucket()
+
+        try:
+            for attempt in Retrying(
+                stop=stop_after_attempt(max_attempts),
+                retry=retry_if_exception(_is_bucket_not_empty),
+                before_sleep=_before_sleep,
+                reraise=True,
+            ):
+                with attempt:
+                    s3.delete_bucket(Bucket=name)
+                    ok("FOS bucket deleted")
+                    if status_cb:
+                        status_cb("✅ Bucket deleted.")
+                    return
+        except ClientError as exc:
+            raise RuntimeError(f"Could not delete FOS bucket after {max_attempts} attempts: {exc}") from exc
+    finally:
+        if isinstance(s3, _ProvisioningTracker):
+            s3.flush()
+
+
+def product_enabled(token: str, product_id: str) -> bool:
+    """Return True if the Fastly account behind ``token`` has ``product_id``
+    enabled, per Fastly's product-enablement endpoint
+    (``GET /enabled-products/v1/{product_id}``).
+
+    Only a subset of Fastly products expose this status endpoint (Object
+    Storage and KV Store are two; Compute and Config Store are NOT — those have
+    to be detected by attempting the create). For the ones that do, we treat:
+
+      * 200            -> True  (enabled)
+      * 4xx            -> False (not enabled for this account)
+      * 5xx / network  -> True  (inconclusive — don't block; the reactive
+                                 create/access failure downstream still guards)
+
+    Callers should validate the token first (e.g. list services) so a 401/403
+    here is only seen for a known-good token and reads as "not enabled".
+    """
+    try:
+        fastly("GET", f"/enabled-products/v1/{product_id}", token=token)
+        return True
+    except RuntimeError as exc:
+        # backend.core.fastly.client.fastly raises "HTTP <code> ..." on HTTP
+        # errors; a 4xx means the product isn't enabled for this account.
+        return "HTTP 4" not in str(exc)
+
+
+def object_storage_enabled(token: str) -> bool:
+    """Return True if the account has Object Storage enabled. Object Storage is
+    REQUIRED for log storage; see ``product_enabled`` for the 200/4xx/5xx
+    semantics."""
+    return product_enabled(token, "object_storage")
+
+
+def find_fos_key(description: str, token: str) -> dict | None:
+    try:
+        resp = fastly("GET", "/resources/object-storage/access-keys", token=token)
+        for key in resp.get("data", []):
+            if key.get("description") == description:
+                return key
+    except RuntimeError:
+        pass
+    return None
+
+
+def ensure_fos_access_key(
+    description: str,
+    state: dict,
+    token: str,
+    *,
+    permission: str = "read-write-objects",
+    buckets: list[str] | None = None,
+    status_cb=None,
+) -> dict:
+    """Create an FOS access key and return {id, access_key, secret_key}."""
+    existing = find_fos_key(description, token)
+    if existing:
+        if description.startswith("fos-log-analysis-"):
+            warn(f"An FOS key with description '{description}' already exists. Recreating...")
+            if status_cb:
+                status_cb(f"🔄 Recreating existing key '{description}'...")
+            fastly(
+                "DELETE",
+                f"/resources/object-storage/access-keys/{existing['access_key']}",
+                token=token,
+                expect_empty=True,
+            )
+        else:
+            raise RuntimeError("FOS access key exists and is not managed by this tool.")
+    info(f"Creating FOS access key ({permission})…")
+    if status_cb:
+        status_cb(f"⏳ Creating {permission} access key...")
+    payload: dict[str, Any] = {"permission": permission, "description": description}
+    if buckets:
+        payload["buckets"] = buckets
+    key = fastly("POST", "/resources/object-storage/access-keys", payload, token=token)
+    ok(f"FOS access key created  (key: {key['access_key']})")
+    if status_cb:
+        status_cb("✅ Access key created.")
+    return {
+        "id": key["access_key"],
+        "access_key": key["access_key"],
+        "secret_key": key["secret_key"],
+    }
+
+
+def delete_fos_access_key(key_id: str, token: str, status_cb=None):
+    info(f"Deleting FOS access key {key_id}…")
+    if status_cb:
+        status_cb(f"⏳ Deleting access key {key_id}...")
+    try:
+        fastly("DELETE", f"/resources/object-storage/access-keys/{key_id}", token=token, expect_empty=True)
+        ok("FOS access key deleted")
+        if status_cb:
+            status_cb("✅ Access key deleted.")
+    except RuntimeError as exc:
+        if "404" in str(exc):
+            ok("FOS access key already deleted")
+        else:
+            raise exc
+
+
+def delete_fos_tokens_for_service(service_id: str, token: str, status_cb=None):
+    """List all FOS access keys and delete ones matching this service's patterns.
+
+    Searches for keys with descriptions matching:
+    - fos-log-analysis-{service_id}
+    - fos-log-analysis-temp-admin-{service_id}
+    - temp-teardown-{service_id}
+    """
+    try:
+        resp = fastly("GET", "/resources/object-storage/access-keys", token=token)
+        keys = resp.get("data", [])
+        patterns = [
+            f"fos-log-analysis-{service_id}",
+            f"fos-log-analysis-temp-admin-{service_id}",
+            f"temp-teardown-{service_id}",
+        ]
+        deleted_count = 0
+        for key in keys:
+            desc = key.get("description", "")
+            if any(desc.startswith(p) for p in patterns):
+                try:
+                    key_id = key.get("access_key")
+                    fastly("DELETE", f"/resources/object-storage/access-keys/{key_id}", token=token, expect_empty=True)
+                    info(f"Deleted FOS key: {desc}")
+                    deleted_count += 1
+                except RuntimeError as exc:
+                    if "404" not in str(exc):
+                        warn(f"Failed to delete FOS key {desc}: {exc}")
+        if deleted_count > 0:
+            ok(f"Deleted {deleted_count} FOS access key(s)")
+        if status_cb:
+            status_cb(f"✅ Deleted {deleted_count} FOS access key(s).")
+    except RuntimeError as exc:
+        warn(f"Failed to list FOS keys: {exc}")
+        if status_cb:
+            status_cb(f"⚠️ Could not clean up FOS keys: {exc}")
+
+
+def delete_fos_prefix(
+    bucket_name: str,
+    region: str,
+    access_key: str,
+    secret_key: str,
+    prefix: str,
+    exclude_prefix: str = None,
+    status_cb=None,
+    *,
+    service_id: str | None = None,
+):
+    """Delete all objects with prefix, optionally excluding those starting with exclude_prefix."""
+    from botocore.exceptions import ClientError
+
+    s3 = _get_fos_s3_client(
+        access_key,
+        secret_key,
+        region,
+        service_id=service_id,
+        bucket_name=bucket_name,
+        context=f"delete_prefix:{prefix}",
+    )
+    try:
+        try:
+            s3.head_bucket(Bucket=bucket_name)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "404":
+                return
+            raise RuntimeError(f"Could not check FOS bucket status: {exc}")
+        deleted_count = 0
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+            objects = page.get("Contents", [])
+            if objects:
+                delete_list = []
+                for obj in objects:
+                    key = obj["Key"]
+                    if exclude_prefix and key.startswith(exclude_prefix):
+                        continue
+                    delete_list.append({"Key": key})
+                if delete_list:
+                    for j in range(0, len(delete_list), 1000):
+                        batch = delete_list[j : j + 1000]
+                        s3.delete_objects(Bucket=bucket_name, Delete={"Objects": batch})
+                        deleted_count += len(batch)
+                        if status_cb:
+                            status_cb(
+                                f"🧹 Deleting cloud files under '{prefix}'... (deleted {deleted_count:,} objects so far)"
+                            )
+        if status_cb:
+            status_cb(f"✅ Deleted {deleted_count:,} cloud files.")
+    except Exception as e:
+        if status_cb:
+            status_cb(f"⚠️ Warning: Failed to delete cloud files under prefix '{prefix}': {e}")
+
+
+from backend.provision.declarative.reconciler import FeatureState, reconcile_vcl_state  # noqa: E402
 from backend.provision.fastly_api import (  # noqa: E402
     delete_cdn_service,
     ensure_cdn_service,
     remove_logging_endpoint,
     validate_log_format,
-)
-from backend.provision.fos_setup import (  # noqa: E402
-    delete_fos_access_key,
-    delete_fos_bucket,
-    ensure_fos_access_key,
-    ensure_fos_bucket,
 )
 
 
@@ -442,7 +989,6 @@ def write_service_config(state: dict):
         _reject_unsafe_fos_component("fos_bucket", bucket, allow_slash=False)
         region = state.get("fos_region", "us-east-1")
         cdn_url = state.get("cdn_url", "")
-
         incoming_lf = dict(state.get("log_fields") or {})
         incoming_custom = incoming_lf.get("custom_fields")
         existing_custom = list((existing_cfg.get("log_fields") or {}).get("custom_fields") or [])
@@ -450,11 +996,9 @@ def write_service_config(state: dict):
             incoming_lf["custom_fields"] = lf._filter_user_custom_fields(existing_custom)
         else:
             incoming_lf["custom_fields"] = lf._filter_user_custom_fields(incoming_lf.get("custom_fields", []))
-
         import datetime as _dt
 
         created_at = existing_cfg.get("created_at") or _dt.datetime.now(_dt.UTC).isoformat()
-
         cfg = {
             "service_id": service_id,
             "name": state.get("name") or state.get("service_name") or service_id,
@@ -476,24 +1020,19 @@ def write_service_config(state: dict):
             "duckdb_path": db_path,
             "log_fields": incoming_lf,
         }
-
         for preserved_key in ("scoring", "cmcd", "ngwaf_workspace_id", "rum"):
             if preserved_key not in state and preserved_key in existing_cfg:
                 cfg[preserved_key] = existing_cfg[preserved_key]
             elif preserved_key in state:
                 cfg[preserved_key] = state[preserved_key]
-
         logging_enabled = state.get("logging_enabled")
         if logging_enabled is None:
             logging_enabled = existing_cfg.get("logging_enabled", True)
-
         rum_enabled = state.get("rum_enabled")
         if rum_enabled is None:
             rum_enabled = existing_cfg.get("rum_enabled", False)
-
         cfg["logging_enabled"] = bool(logging_enabled)
         cfg["rum_enabled"] = bool(rum_enabled)
-
         if cfg["rum_enabled"] and not cfg.get("rum"):
             import datetime as _dt
 
@@ -501,23 +1040,19 @@ def write_service_config(state: dict):
                 "enabled": True,
                 "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
             }
-
         if "log_period" in state:
             cfg["log_period"] = state["log_period"]
         elif "log_period" in state.get("provisioning", {}):
             cfg["log_period"] = state["provisioning"]["log_period"]
-
         log_period_secs = int(cfg.get("log_period", 120))
         sync_interval_seconds = max(5, log_period_secs)
         commit_interval_mins = max(max(1, sync_interval_seconds // 60), int(state.get("commit_interval_mins", 5)))
-
         _rate_limiting = state.get("rate_limiting")
         if _rate_limiting is None:
             _rate_limiting = state.get("provisioning", {}).get("rate_limiting")
         if _rate_limiting is None:
             _rate_limiting = (existing_cfg.get("provisioning") or {}).get("rate_limiting")
         rate_limiting_val = True if _rate_limiting is None else bool(_rate_limiting)
-
         prov_in = state.get("provisioning", {})
         cron_sync_in = prov_in.get("cron_sync", {})
         cron_compact_in = prov_in.get("cron_compact", {})
@@ -606,24 +1141,19 @@ def ensure_logging_via_reconciler(state: dict, token: str, status_cb=None) -> in
     service_id = state.get("logging_service_id")
     if not service_id:
         raise ValueError("state missing logging_service_id")
-
     info("Reconciling VCL state via declarative model…")
     if status_cb:
         status_cb(f"🔄 Reconciling VCL state for {service_id}...")
-
     state_for_feature = dict(state)
     state_for_feature["service_id"] = service_id
-
     try:
         FeatureState.from_config(state_for_feature)
     except (KeyError, ValueError) as e:
         raise RuntimeError(f"Invalid feature state configuration: {e}") from e
-
     try:
         result = reconcile_vcl_state(service_id, token, dry_run=False, status_cb=status_cb)
     except Exception as e:
         raise RuntimeError(f"VCL reconciliation failed: {e}") from e
-
     if result.activated_version is None:
         active_version = get_active_version(service_id, token)
         if active_version is None:
@@ -643,7 +1173,6 @@ def provision(cfg: dict, _resume_from_state: bool = False):
     token = cfg["admin_token"]
     state = load_state() if _resume_from_state else {}
     state.update(cfg)
-
     config_existed = False
     _check_service_id = cfg.get("logging_service_id")
     if _check_service_id:
@@ -654,16 +1183,13 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                 config_existed = True
         except Exception:
             pass
-
     if cfg.get("fos_access_key_id") and cfg.get("fos_secret_access_key"):
         state.setdefault("fos_access_key", cfg["fos_access_key_id"])
         state.setdefault("fos_secret_key", cfg["fos_secret_access_key"])
         state.setdefault("fos_key_id", cfg["fos_access_key_id"])
-
     total = 8
     try:
         yield {"type": "progress", "current": 0, "total": total}
-
         using_falco = bool(shutil.which("falco"))
         validator = "falco" if using_falco else "built-in checks"
         yield {"type": "status", "message": f"✈️ Step 1/8: Pre-flight validation ({validator})..."}
@@ -675,7 +1201,6 @@ def provision(cfg: dict, _resume_from_state: bool = False):
             raise _PreflightError(f"Log format validation failed ({len(fmt_errors)} error(s)).")
         yield {"type": "status", "message": "✅ Pre-flight: Log format OK."}
         yield {"type": "progress", "current": 1, "total": total}
-
         yield {"type": "status", "message": "🔑 Step 2/8: Creating temporary Admin Fastly Object Storage key..."}
         step(2, total, "Creating temporary Admin Fastly Object Storage key")
         temp_desc = f"fos-log-analysis-temp-admin-{cfg['logging_service_id']}"
@@ -687,7 +1212,6 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         state["temp_admin_key_id"] = temp_key["id"]
         save_state(state)
         yield {"type": "progress", "current": 2, "total": total}
-
         yield {"type": "status", "message": "🪣 Step 3/8: Creating Fastly Object Storage bucket..."}
         step(3, total, "Creating Fastly Object Storage bucket")
         yield from run_with_events(
@@ -700,7 +1224,6 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         )
         save_state(state)
         yield {"type": "progress", "current": 3, "total": total}
-
         yield {"type": "status", "message": "🔐 Step 4/8: Creating permanent Scoped Fastly Object Storage key..."}
         step(4, total, "Creating permanent Scoped Fastly Object Storage key")
         key_desc = f"fos-log-analysis-{cfg['logging_service_id']}"
@@ -717,15 +1240,12 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         state["fos_key_id"] = key["id"]
         state["fos_key_description"] = key_desc
         save_state(state)
-
         try:
             write_service_config(state)
             ok("Service config persisted early (FOS ready) — survives stream interruption")
         except Exception as early_cfg_exc:  # noqa: BLE001
             warn(f"Early service-config write failed (non-fatal, retried at finalize): {early_cfg_exc}")
-
         yield {"type": "progress", "current": 4, "total": total}
-
         yield {"type": "status", "message": "🧹 Step 5/8: Cleaning up temporary admin key..."}
         step(5, total, "Cleaning up temporary admin key")
         if state.get("temp_admin_key_id"):
@@ -736,7 +1256,6 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         else:
             ok("Temporary key already removed")
         yield {"type": "progress", "current": 5, "total": total}
-
         yield {
             "type": "status",
             "message": "🌐 Step 6/8: Creating Fastly CDN service to front Fastly Object Storage...",
@@ -760,13 +1279,10 @@ def provision(cfg: dict, _resume_from_state: bool = False):
             state["rate_limiting"] = cdn_svc["rate_limiting"]
         save_state(state)
         yield {"type": "progress", "current": 6, "total": total}
-
         yield {"type": "status", "message": "📡 Step 7/8: Reconciling logging configuration via declarative model..."}
         step(7, total, "Reconciling logging configuration")
-
         write_service_config(state)
         ok("Service config written (for reconciler)")
-
         if state.get("rum_enabled"):
             rum_state_raw = state.get("rum")
             rum_state_cfg = rum_state_raw if isinstance(rum_state_raw, dict) else {}
@@ -805,22 +1321,18 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                     state["rum"] = rum_state_cfg
                 write_service_config(state)
                 ok(f"Faro Web SDK v{resolved_faro_version} uploaded (for reconciler)")
-
         new_ver = yield from run_with_events(ensure_logging_via_reconciler, state, token)
         state["activated_logging_version"] = new_ver
         save_state(state)
         yield {"type": "progress", "current": 7, "total": total}
-
         yield {"type": "status", "message": "⚙️ Step 8/8: Finalizing service configuration..."}
         step(8, total, "Finalizing configuration")
         write_service_config(state)
-
         if is_mock_mode():
             yield {"type": "status", "message": "⚠ Skipping Iceberg initialization in mock mode."}
             yield {"type": "progress", "current": 8, "total": total}
             yield {"type": "done", "message": "🎉 Provisioning complete!"}
             return
-
         try:
             from backend.core import duckdb as db
             from backend.core import iceberg as db_iceberg
@@ -895,10 +1407,8 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                 c.close()
         except Exception:
             logger.exception("[provision] post-provision Iceberg/audit step failed (non-fatal)")
-
         yield {"type": "progress", "current": 8, "total": total}
         yield {"type": "done", "message": "🎉 Provisioning complete!"}
-
     except _PreflightError as e:
         yield {"type": "error", "message": str(e)}
         return
@@ -926,7 +1436,6 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
             "remove_scoring": True,
             "remove_fos_tokens": True,
         }
-
     total_steps = 5
     yield {"type": "progress", "current": 1, "total": total_steps}
     scoring_meta = state.get("scoring") or {}
@@ -954,7 +1463,6 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
                     "Re-run teardown after resolving; continuing with the remaining steps."
                 ),
             }
-
     yield {"type": "progress", "current": 2, "total": total_steps}
     step(
         2,
@@ -974,7 +1482,6 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
             )
         except Exception as exc:
             yield {"type": "status", "message": f"Warning: {exc}"}
-
     yield {"type": "progress", "current": 3, "total": total_steps}
     step(
         3,
@@ -983,12 +1490,9 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
     )
     if opts.get("remove_fos_tokens"):
         try:
-            from backend.provision.fos_setup import delete_fos_tokens_for_service
-
             yield from run_with_events(delete_fos_tokens_for_service, state["logging_service_id"], token)
         except Exception:
             pass
-
     yield {"type": "progress", "current": 4, "total": total_steps}
     step(4, total_steps, "Deleting FOS bucket" if opts.get("remove_bucket") else "Skipping FOS bucket deletion")
     remove_bucket = bool(opts.get("remove_bucket"))
@@ -1010,8 +1514,6 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
                         service_id=state.get("logging_service_id"),
                     )
                 else:
-                    from backend.provision.fos_setup import delete_fos_prefix
-
                     prefix = state.get("fos_prefix", "")
                     yield from run_with_events(
                         delete_fos_prefix,
@@ -1027,7 +1529,6 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
         except Exception as exc:
             if remove_cloud_files:
                 yield {"type": "status", "message": f"Warning: failed to delete cloud files: {exc}"}
-
     yield {"type": "progress", "current": 5, "total": total_steps}
     step(5, total_steps, "Deleting CDN service" if opts.get("remove_cdn") else "Skipping CDN service deletion")
     if (
@@ -1062,7 +1563,6 @@ def cleanup_local_data(service_id: str, bucket: str = None, remove_data: bool = 
         if os.path.exists(cfg_path):
             os.remove(cfg_path)
             ok(f"Removed service config: {cfg_path}")
-
     if remove_data:
         db_path = (
             svcconfig.duckdb_path(service_id)
@@ -1077,7 +1577,6 @@ def cleanup_local_data(service_id: str, bucket: str = None, remove_data: bool = 
                 if os.path.exists(wal):
                     os.remove(wal)
                 ok(f"Removed {label}: {target_db}")
-
         if service_id:
             try:
                 from backend.core import metadata as metadata_db
@@ -1086,7 +1585,6 @@ def cleanup_local_data(service_id: str, bucket: str = None, remove_data: bool = 
                 ok(f"Cleaned up metadata for {service_id}")
             except Exception:
                 pass
-
         if bucket:
             if any(c in bucket for c in ("/", "\\", "..", "\x00")):
                 logger.warning("[teardown] refusing to remove cache for bucket=%r with path-shape characters", bucket)
@@ -1108,7 +1606,6 @@ def cleanup_local_data(service_id: str, bucket: str = None, remove_data: bool = 
                     if os.path.exists(svc_cache_dir):
                         shutil.rmtree(svc_cache_dir)
                         ok(f"Removed local cache: {svc_cache_dir}")
-
     _sync_crontab()
 
 
@@ -1155,7 +1652,6 @@ def generate_analyst_invite(service_id: str) -> dict:
             f"Fastly access-key API returned unexpected shape (keys={list(key.keys()) if isinstance(key, dict) else type(key).__name__}); "
             "cannot generate analyst invite."
         )
-
     return {
         "name": cfg.get("name", service_id),
         "service_id": service_id,
@@ -1188,3 +1684,388 @@ def _build_log_fields_config(args) -> dict:
     field_overrides.update({fid: True for fid in (getattr(args, "enable_field", None) or [])})
     field_overrides.update({fid: False for fid in (getattr(args, "disable_field", None) or [])})
     return {"schema_version": 2, "preset": preset_name, "groups": sorted(groups), "field_overrides": field_overrides}
+
+
+from backend.config import is_rum_enabled
+from backend.core.fastly.utils import load_vcl
+from backend.provision.declarative.reconciler import (
+    desired_backends,
+    desired_logging_endpoints,
+    desired_snippets,
+    logging_service_snippets,
+)
+from backend.provision.fastly_api import _CDN_SNIPPETS
+
+
+def _terraform_template_escape(value: object) -> str:
+    """Escape ``${`` / ``%{`` inside a string so Terraform treats them as
+    literal characters rather than template-syntax openers.
+
+    JSON-level escaping (backslashes, quotes, control bytes) is handled by
+    :func:`json.dumps` at serialise time — this function intentionally does
+    NOT touch those characters. The ONLY thing it owns is the Terraform-
+    interpreter-level template prefix that survives JSON encoding."""
+    s = "" if value is None else str(value)
+    return s.replace("${", "$${").replace("%{", "%%{")
+
+
+def _dump(obj: dict) -> str:
+    """Canonical .tf.json serialisation: 2-space indent, keys sorted for
+    determinism, trailing newline so ``terraform fmt -check`` is happy.
+
+    Sorted keys are load-bearing for the idempotency contract — Python
+    dict insertion order is preserved but the test suite (and human diffs)
+    are easier to read when keys are in the same order across runs and
+    across machines."""
+    return json.dumps(obj, indent=2, sort_keys=True) + "\n"
+
+
+def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key: str) -> dict[str, str]:
+    """Generate Terraform .tf.json for the given provisioning configuration.
+
+    Returns a ``{filename: content}`` map. Filenames have ``.tf.json``
+    extensions (Terraform recognises this suffix as JSON config). The VCL
+    snippet files keep their ``.vcl`` extension — they're referenced from
+    the JSON via ``file("${path.module}/X")`` and aren't Terraform config
+    themselves.
+    """
+    # 023: service_id ends up inside a JSON string. JSON encoding handles
+    # quotes/newlines, but the value also appears in the rendered
+    # instructions README (plain markdown) where a stray CR/LF would break
+    # the surrounding sentence. Strip both before any use.
+    service_id = str(cfg.get("logging_service_id", "YOUR_SERVICE_ID")).replace("\r", "").replace("\n", "")
+    endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "fastly_log_analysis")
+    region = cfg.get("fos_region", "us-east-1")
+    bucket = cfg.get("fos_bucket_name", "your-bucket-name")
+    prefix = cfg.get("fos_prefix", "").strip("/")
+    # 022: log_period flows into a numeric position in the JSON. Cast to
+    # int with a safe fallback so attacker-supplied non-numerics can't
+    # smuggle a string where Terraform expects an int.
+    try:
+        period = int(cfg.get("log_period", 3600))
+    except (TypeError, ValueError):
+        period = 3600
+    try:
+        rum_period_val = cfg.get("rum_log_period") or (cfg.get("rum") or {}).get("log_period")
+        rum_period = int(rum_period_val) if rum_period_val is not None else None
+    except (TypeError, ValueError):
+        rum_period = None
+    cdn_service_name = cfg.get("cdn_service_name", "Fastly Log Analysis CDN Proxy")
+    cdn_prefix = cfg.get("cdn_prefix", bucket)
+    cdn_domain = f"{cdn_prefix}.global.ssl.fastly.net"
+    cdn_shield = cfg.get("cdn_shield", "iad-va-us")
+    cdn_secret = cfg.get("cdn_secret", "replace-with-secure-secret")
+    # Prefer nested provisioning.* fields, fall back to legacy flat fields for backward compat
+    prov = cfg.get("provisioning", {})
+    sample_rate = prov.get("sample_rate") if "sample_rate" in prov else cfg.get("sample_rate", 100)
+    sample_rate = int(sample_rate) if sample_rate is not None else 100
+    edge_only = prov.get("edge_only") if "edge_only" in prov else cfg.get("edge_only", False)
+    edge_only = bool(edge_only)
+    custom_condition = prov.get("custom_condition") if "custom_condition" in prov else cfg.get("custom_condition", "")
+    custom_condition = (custom_condition or "").strip()
+    # Extract nested CMCD and Scoring config
+    cmcd_cfg = cfg.get("cmcd", {})
+    scoring_cfg = cfg.get("scoring", {})
+    # Construct robust declarative FeatureState to reuse all canonical VCL/endpoint rules
+    fs_cfg = {
+        "service_id": service_id,
+        "log_period": period,
+        "rum_log_period": rum_period,
+        "sample_rate": sample_rate,
+        "edge_only": edge_only,
+        "custom_condition": custom_condition,
+        "fos_prefix": prefix,
+        "logging_enabled": bool(cfg.get("logging_enabled", True)),
+        "rum_enabled": is_rum_enabled(cfg),
+        "cmcd": {
+            "enabled": bool(cmcd_cfg.get("enabled", False)),
+            "mode": cmcd_cfg.get("mode", "query_string"),
+            "version": int(cmcd_cfg.get("version", 1)),
+        },
+        "scoring": {
+            "enabled": bool(scoring_cfg.get("enabled", False)),
+            "domain": scoring_cfg.get("domain", ""),
+            "request_secret": scoring_cfg.get("request_secret", ""),
+            "exclude_url_regex": scoring_cfg.get("exclude_url_regex", ""),
+            "enforce_status_code": int(scoring_cfg.get("enforce_status_code", 429)),
+        },
+        "log_fields": cfg.get("log_fields") or {"schema_version": 2, "custom_fields": []},
+    }
+    state = FeatureState.from_config(fs_cfg)
+    # Use the same code to generate snippets, endpoints, and formats
+    desired_snippets_list = desired_snippets(state)
+    desired_endpoints = desired_logging_endpoints(state)
+    desired_backends_list = desired_backends(state)
+    cdn_vcl = load_vcl(rate_limiting=True)
+    cond_parts = ["!segmented_caching.is_inner_req"]
+    if edge_only:
+        # Restart-tolerant when scoring is enabled: scoring restarts the request
+        # (req.restarts 0→1), so gating on req.restarts == 0 would drop every
+        # scored request from the logs. Mirrors fastly_api._log_sampling_edge_clause.
+        if scoring_cfg.get("enabled", False):
+            cond_parts.append("fastly.ff.visits_this_service == 0")
+        else:
+            cond_parts.append("(req.restarts == 0 && fastly.ff.visits_this_service == 0)")
+    if sample_rate < 100:
+        cond_parts.append(f"randombool({sample_rate}, 100)")
+    if custom_condition:
+        cond_parts.append(f"({custom_condition})")
+    cond_stmt = " && ".join(cond_parts)
+    fos_host = f"{region}.object.fastlystorage.app"
+    files: dict[str, str] = {}
+    # ── 1. Companion VCL files (not Terraform config) ──────────────────────────
+    files["cdn_proxy.vcl"] = cdn_vcl
+    # ── 2. versions.tf.json — provider pinning ─────────────────────────────────
+    # Pin major versions so an upstream bump (Fastly v6, AWS v7) doesn't
+    # silently break customer ``terraform apply``. Pessimistic operator
+    # ``~> X.0`` allows minor/patch upgrades. If you bump these, also update
+    # tests/utils/test_terraform_gen.py.
+    files["versions.tf.json"] = _dump(
+        {
+            "terraform": {
+                "required_version": ">= 1.6",
+                "required_providers": {
+                    "aws": {"source": "hashicorp/aws", "version": "~> 5.0"},
+                    "fastly": {"source": "fastly/fastly", "version": "~> 5.0"},
+                },
+            },
+        }
+    )
+    # ── 3. fos.tf.json — Object Storage bucket ─────────────────────────────────
+    files["fos.tf.json"] = _dump(
+        {
+            "resource": {
+                "aws_s3_bucket": {
+                    "fos_bucket": {
+                        "bucket": _terraform_template_escape(bucket),
+                    },
+                },
+            },
+        }
+    )
+    # ── 4. cdn_proxy.tf.json — CDN proxy service + dictionaries ────────────────
+    # Multi-occurrence sub-blocks like ``snippet`` must be JSON arrays. The
+    # ``${…}`` patterns inside string values are Terraform references that we
+    # want preserved verbatim — we do NOT pass these through
+    # ``_terraform_template_escape`` because we authored them, they're not
+    # user input. The escape is for fields whose values come from ``cfg``.
+    cdn_snippets_blocks: list[dict] = []
+    for name, type_, content, priority in _CDN_SNIPPETS:
+        snip_filename = f"cdn_snippets/{name.replace('-', '_')}.vcl"
+        files[snip_filename] = content
+        cdn_snippets_blocks.append(
+            {
+                "name": name,
+                "type": type_,
+                "priority": priority,
+                "content": f'${{file("${{path.module}}/{snip_filename}")}}',
+            }
+        )
+    cdn_proxy_block: dict[str, Any] = {
+        "name": _terraform_template_escape(cdn_service_name),
+        "domain": [{"name": _terraform_template_escape(cdn_domain)}],
+        "backend": [
+            {
+                "name": "fos_origin",
+                "address": _terraform_template_escape(fos_host),
+                "port": 443,
+                "use_ssl": True,
+                "ssl_cert_hostname": _terraform_template_escape(fos_host),
+                "ssl_sni_hostname": _terraform_template_escape(fos_host),
+                "connect_timeout": 5000,
+                "first_byte_timeout": 60000,
+                "between_bytes_timeout": 30000,
+            }
+        ],
+        "vcl": [
+            {
+                "name": "main",
+                "content": '${file("${path.module}/cdn_proxy.vcl")}',
+                "main": True,
+            }
+        ],
+        "dictionary": [
+            {"name": "fos_credentials", "write_only": True},
+            {"name": "cdn_auth", "write_only": True},
+        ],
+        "snippet": cdn_snippets_blocks,
+    }
+    if cdn_shield and cdn_shield.lower() != "none":
+        cdn_proxy_block["backend"][0]["shield"] = _terraform_template_escape(cdn_shield)
+    files["cdn_proxy.tf.json"] = _dump(
+        {
+            "resource": {
+                "fastly_service_vcl": {"cdn_proxy": cdn_proxy_block},
+                "fastly_service_dictionary_items": {
+                    "fos_credentials": {
+                        "service_id": "${fastly_service_vcl.cdn_proxy.id}",
+                        "dictionary_id": '${{ for d in fastly_service_vcl.cdn_proxy.dictionary : d.name => d.dictionary_id }["fos_credentials"]}',
+                        "items": {
+                            "access_key": _terraform_template_escape(fos_access_key),
+                            "secret_key": _terraform_template_escape(fos_secret_key),
+                            "bucket": "${aws_s3_bucket.fos_bucket.bucket}",
+                            "region": _terraform_template_escape(region),
+                        },
+                    },
+                    "cdn_auth": {
+                        "service_id": "${fastly_service_vcl.cdn_proxy.id}",
+                        "dictionary_id": '${{ for d in fastly_service_vcl.cdn_proxy.dictionary : d.name => d.dictionary_id }["cdn_auth"]}',
+                        "items": {"secret": _terraform_template_escape(cdn_secret)},
+                    },
+                },
+            },
+        }
+    )
+    # ── 5. logging_service.tf.json — Logging endpoint on existing service ──────
+    # Use logging-service-specific snippets (capture VCL for all stages)
+    logging_service_snips = logging_service_snippets(state)
+    logging_snippet_blocks: list[dict] = []
+    # Track which subroutines we've already written to avoid conflicts when
+    # multiple snippets target the same subroutine (e.g., recv + recv_reset)
+    seen_filenames: set[str] = set()
+    for snippet in logging_service_snips:
+        subroutine = snippet.subroutine.replace("vcl_", "")
+        # Handle recv_reset specially (it's a recv snippet but needs a different filename)
+        if snippet.name == "Fastly Log Analysis Reset Client IP":
+            snip_filename = "capture_snippets/recv_reset.vcl"
+        else:
+            snip_filename = f"capture_snippets/{subroutine}.vcl"
+        # Avoid duplicate filenames (recv and recv_reset both target recv subroutine)
+        if snip_filename not in seen_filenames:
+            files[snip_filename] = snippet.body
+            seen_filenames.add(snip_filename)
+        logging_snippet_blocks.append(
+            {
+                "name": snippet.name,
+                "type": subroutine,
+                "priority": snippet.priority,
+                "content": f'${{file("${{path.module}}/{snip_filename}")}}',
+            }
+        )
+    logging_s3_blocks: list[dict] = []
+    condition_blocks: list[dict] = []
+    for endpoint in desired_endpoints:
+        if endpoint.name == "Fastly Log Analytics":
+            cond_name = f"Log Sampling - {_terraform_template_escape(endpoint_name)}"
+            condition_blocks.append(
+                {
+                    "name": cond_name,
+                    "statement": _terraform_template_escape(cond_stmt),
+                    "type": "RESPONSE",
+                }
+            )
+            resp_cond = cond_name
+            format_filename = "log_format.vcl"
+        else:
+            resp_cond = ""
+            format_filename = f"{endpoint.name.lower().replace(' ', '_')}_format.vcl"
+        files[format_filename] = endpoint.format_string
+        logging_s3_blocks.append(
+            {
+                "name": _terraform_template_escape(endpoint.name),
+                "bucket_name": "${aws_s3_bucket.fos_bucket.bucket}",
+                "domain": _terraform_template_escape(fos_host),
+                "path": _terraform_template_escape(endpoint.path),
+                "period": endpoint.period,
+                "gzip_level": 9,
+                "message_type": "blank",
+                "timestamp_format": "%Y-%m-%dT%H:%M:%S.000",
+                "response_condition": resp_cond,
+                "format_version": 2,
+                "format": f'${{file("${{path.module}}/{format_filename}")}}',
+                "s3_access_key": _terraform_template_escape(fos_access_key),
+                "s3_secret_key": _terraform_template_escape(fos_secret_key),
+            }
+        )
+    logging_backends: list[dict] = []
+    for backend in desired_backends_list:
+        address = backend.address
+        if address == "fos.example.com":
+            address = fos_host
+        logging_backends.append(
+            {
+                "name": backend.name,
+                "address": _terraform_template_escape(address),
+                "port": backend.port,
+                "use_ssl": True,
+                "ssl_cert_hostname": _terraform_template_escape(address),
+                "ssl_sni_hostname": _terraform_template_escape(address),
+                "connect_timeout": backend.connect_timeout,
+                "first_byte_timeout": backend.first_byte_timeout,
+                "between_bytes_timeout": backend.between_bytes_timeout,
+                "auto_loadbalance": backend.auto_loadbalance,
+            }
+        )
+    logging_service_block: dict[str, Any] = {
+        "name": _terraform_template_escape(cfg.get("service_name", "Logging Service")),
+        "domain": [{"name": "example.com"}],
+        "logging_s3": logging_s3_blocks,
+        "snippet": logging_snippet_blocks,
+    }
+    if condition_blocks:
+        logging_service_block["condition"] = condition_blocks
+    if logging_backends:
+        logging_service_block["backend"] = logging_backends
+    files["logging_service.tf.json"] = _dump(
+        {
+            "resource": {
+                "fastly_service_vcl": {"logging_service": logging_service_block},
+            },
+        }
+    )
+    # ── 6. instructions — companion README explaining the layout ──────────────
+    # JSON can't carry comments; the explanatory text that used to live as
+    # HCL banner comments now lives here. Customers read this before
+    # running ``terraform apply``.
+    files["instructions"] = f"""\
+# Fastly Log Analysis Terraform Export
+
+This directory contains the Terraform configuration to set up Fastly Object Storage logging and a CDN proxy for the Fastly Log Analysis tool.
+
+Configuration is emitted as Terraform's JSON syntax (`.tf.json`). All Terraform commands (`init`, `fmt`, `validate`, `plan`, `apply`) accept it interchangeably with HCL.
+
+## Files
+- `versions.tf.json`: Terraform CLI floor + pinned major versions for the `aws` and `fastly` providers.
+- `fos.tf.json`: The Fastly Object Storage bucket resource (created via the AWS S3-compatible provider).
+- `cdn_proxy.tf.json`: A NEW Fastly Delivery service that fronts the FOS bucket for fast dashboard access.
+- `logging_service.tf.json`: The logging endpoint and capture snippets for your existing service.
+- `cdn_proxy.vcl`: The main VCL for the CDN proxy service (loaded by `cdn_proxy.tf.json`).
+- `log_format.vcl`: The JSON log format string (loaded by `logging_service.tf.json`).
+- `cdn_snippets/`: VCL snippets for the CDN proxy service (loaded by `cdn_proxy.tf.json`).
+- `capture_snippets/`: VCL snippets for your existing logging service (loaded by `logging_service.tf.json`).
+
+## AWS provider configuration
+
+`fos.tf.json` declares an `aws_s3_bucket` resource. Fastly Object Storage is S3-compatible, so the AWS provider works against the Fastly FOS endpoint. Configure it in your root module (or alongside these files) like this:
+
+```hcl
+provider "aws" {{
+  region                      = "{region}"
+  access_key                  = "<your fos access key>"
+  secret_key                  = "<your fos secret key>"
+  endpoints {{ s3 = "https://{fos_host}" }}
+  skip_credentials_validation = true
+  skip_region_validation      = true
+  skip_requesting_account_id  = true
+}}
+```
+
+## Instructions
+1. Review `fos.tf.json` and ensure the `aws` provider above is correctly configured.
+2. `cdn_proxy.tf.json` creates a NEW Fastly service to accelerate your log reads.
+3. `logging_service.tf.json` contains the configuration for your ACTIVE service. You should copy the `logging_s3`, `condition`, and `snippet` blocks into your existing `fastly_service_vcl` resource for service ID `{service_id}`.
+4. Run `terraform init` and `terraform apply` to deploy the changes.
+"""
+    return files
+
+
+_self_mod = sys.modules[__name__]
+for _alias in ("backend.provision.cmcd_fields", "backend.provision.fos_setup", "backend.utils.terraform_gen"):
+    sys.modules[_alias] = _self_mod
+_prov_pkg = sys.modules.get("backend.provision")
+if _prov_pkg is not None:
+    _prov_pkg.cmcd_fields = _self_mod  # type: ignore[attr-defined]
+    _prov_pkg.fos_setup = _self_mod  # type: ignore[attr-defined]
+_utils_pkg = sys.modules.get("backend.utils")
+if _utils_pkg is not None:
+    _utils_pkg.terraform_gen = _self_mod  # type: ignore[attr-defined]

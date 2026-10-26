@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, type Dispatch, type SetStateAction } from 'react'
+import React, { useState } from 'react'
 import Link from 'next/link'
 import dynamic from 'next/dynamic'
 import type { ColumnDef } from '@tanstack/react-table'
@@ -22,8 +22,7 @@ import type { components, FiltersPayload, PlotlyLayout, PlotlyTrace } from '@/ty
 import { useServiceQuery, useAnalyticsReportQuery, useReportRangeAnchor } from '@/hooks/useDashboardCards'
 import { useColumnVisibility } from '@/hooks/useSSE'
 import { useActiveLogFields } from '@/hooks/useBootstrap'
-import { downloadAsCsv, cn, type RangeWireArgs } from '@/lib/utils'
-import { formatCount, formatCompactCount } from '@/lib/format'
+import { downloadAsCsv, cn, formatCount, formatCompactCount } from '@/lib/utils'
 import { Skeleton, SkeletonGrid } from '@/components/ui/skeleton'
 import { AnalyticsCard, LazyMount, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { StatCard } from '@/components/ui/confirm-dialog'
@@ -46,13 +45,13 @@ import { ReportLayout, type ReportLayoutRenderProps } from '@/components/ReportL
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 
-const PlotlyChart = dynamic(() => import('@/components/PlotlyChart').then(mod => mod.PlotlyChart), {
+const PlotlyChart = dynamic(() => import('@/components/PlotlyChart').then((mod) => mod.PlotlyChart), {
   ssr: false, loading: () => <Skeleton className="w-full h-[300px]" />,
 })
-const NetworkMap = dynamic(() => import('@/components/Map/NetworkMap').then(mod => mod.NetworkMap), {
+const NetworkMap = dynamic(() => import('@/components/Map/NetworkMap').then((mod) => mod.NetworkMap), {
   ssr: false, loading: () => <Skeleton className="w-full h-full min-h-[400px]" />,
 })
-const ShieldingMap = dynamic(() => import('@/components/Map/ShieldingMap').then(mod => mod.ShieldingMap), {
+const ShieldingMap = dynamic(() => import('@/components/Map/ShieldingMap').then((mod) => mod.ShieldingMap), {
   ssr: false, loading: () => <Skeleton className="w-full h-[420px] rounded-xl" />,
 })
 
@@ -66,11 +65,7 @@ export function adjustShieldingRows(
   if (!Array.isArray(rows)) return []
   return rows.map((row) => {
     const lowSample = minRequests > 0 && (row.requests ?? 0) < minRequests
-    return {
-      ...row,
-      low_sample: lowSample,
-      anomaly_static: Boolean(row.anomaly_eligible) && !lowSample,
-    }
+    return { ...row, low_sample: lowSample, anomaly_static: Boolean(row.anomaly_eligible) && !lowSample }
   })
 }
 
@@ -97,7 +92,7 @@ function HelpSection({
       <ul className="space-y-3 list-none pl-0">
         {items.map(({ icon: Icon, color, label, body }) => (
           <li key={label} className="flex gap-3">
-            <Icon className={cn("h-5 w-5 shrink-0 mt-0.5", color)} />
+            <Icon className={cn('h-5 w-5 shrink-0 mt-0.5', color)} />
             <span><strong>{label}:</strong> {body}</span>
           </li>
         ))}
@@ -180,7 +175,6 @@ export const MetroLeaderboardHelp = () => (
 export const ShieldingHelp = () => (
   <div className="space-y-4 text-sm text-muted-foreground">
     <p>Edge-to-Shield round-trip latency, isolated by subtracting the Shield-to-Origin fetch time from the Edge&apos;s total upstream wait. Requests are correlated via the <code>rid</code>/<code>prid</code> fields.</p>
-
     <div className="space-y-2 border-t pt-4">
       <h4 className="font-semibold text-foreground text-xs uppercase tracking-wider">Efficiency Legend</h4>
       <ul className="space-y-2 list-none pl-0">
@@ -191,13 +185,12 @@ export const ShieldingHelp = () => (
           { cls: 'bg-[#94a3b8]', title: 'Grey (Low sample):', text: 'Fewer than 30 requests — too few samples for the median/percentiles to be reliable. Shown for visibility but never colour-graded or flagged.' },
         ].map(({ cls, title, text }) => (
           <li key={title} className="flex items-center gap-2">
-            <span className={cn("w-3 h-1 rounded-full", cls)} />
+            <span className={cn('w-3 h-1 rounded-full', cls)} />
             <span><strong>{title}</strong> {text}</span>
           </li>
         ))}
       </ul>
     </div>
-
     <div className="space-y-2 border-t pt-4">
       <h4 className="font-semibold text-foreground text-xs uppercase tracking-wider">Map Markers & Arcs</h4>
       <ul className="space-y-2 list-none pl-0">
@@ -208,17 +201,14 @@ export const ShieldingHelp = () => (
           { swatch: <span className="w-4 border-t-2 border-dashed border-[#ef4444]" />, title: 'Dashed Red Arc:', body: <>Flagged route — efficiency &gt; 3× <em>and</em> &ge; 20ms overhead above the light-speed floor, <em>and</em> at least 30 requests. Worth investigating for suboptimal peering.</> },
           { swatch: <span className="w-4 border-t-2 border-solid border-[#94a3b8]" />, title: 'Grey Arc:', body: 'Low-sample route (< 30 requests) — drawn for visibility but not colour-graded or flagged.' },
         ].map(({ swatch, title, body }) => (
-          <li key={title} className="flex items-center gap-2">
-            {swatch}
-            <span><strong>{title}</strong> {body}</span>
-          </li>
+          <li key={title} className="flex items-center gap-2">{swatch}<span><strong>{title}</strong> {body}</span></li>
         ))}
       </ul>
     </div>
   </div>
 )
 
-export const NetworkQualityHelp = () => (
+const NetworkQualityHelp = () => (
   <HelpSection
     intro={<>Breaks down <strong>average TCP Round Trip Time</strong> (<code>tcp_rtt</code>) by country, ASN, region, and Fastly POP so you can localise where latency is concentrated, plus an RTT-vs-TTFB sample to separate network latency from origin/edge processing time.</>}
     items={[
@@ -233,17 +223,12 @@ export function HealthBadge({ score }: { score: number | null }) {
   if (score == null) return <span className="text-muted-foreground">—</span>
   const variant = score >= 80 ? 'outline' : score >= 50 ? 'secondary' : 'destructive'
   const color = score >= 80 ? 'text-green-600 dark:text-green-400' : score >= 50 ? 'text-yellow-600 dark:text-yellow-400' : ''
-  return (
-    <Badge variant={variant} className={cn("text-[10px]", color)}>
-      {score.toFixed(0)}/100
-    </Badge>
-  )
+  return <Badge variant={variant} className={cn('text-[10px]', color)}>{score.toFixed(0)}/100</Badge>
 }
 
 export const SHIELDING_COLUMNS: ColumnDef<ShieldingRowInput>[] = [
   {
-    accessorKey: 'edge_pop',
-    id: 'edge_pop', meta: { label: 'Edge POP' }, header: columnHeader('Edge POP'),
+    accessorKey: 'edge_pop', id: 'edge_pop', meta: { label: 'Edge POP' }, header: columnHeader('Edge POP'),
     cell: (info) => (
       <FilterValueCell
         filters={[{ column: 'pop', value: textValue(info.getValue()) }]}
@@ -253,8 +238,7 @@ export const SHIELDING_COLUMNS: ColumnDef<ShieldingRowInput>[] = [
     ),
   },
   {
-    accessorKey: 'shield_pop',
-    id: 'shield_pop', meta: { label: 'Shield POP' }, header: columnHeader('Shield POP'),
+    accessorKey: 'shield_pop', id: 'shield_pop', meta: { label: 'Shield POP' }, header: columnHeader('Shield POP'),
     cell: (info) => (
       <FilterValueCell
         filters={[{ column: 'shield_pop', value: textValue(info.getValue()) }]}
@@ -288,7 +272,7 @@ export const SHIELDING_COLUMNS: ColumnDef<ShieldingRowInput>[] = [
     accessorKey: 'light_speed_rtt_ms', id: 'light_speed_rtt_ms', meta: { label: 'Light-Speed Floor' }, header: columnHeader('Light Floor'),
     cell: (info) => {
       const floor = numberValue(info.getValue())
-      return floor != null ? <span className="text-muted-foreground">{floor.toFixed(1)}ms</span> : <span className="text-muted-foreground">—</span>
+      return <span className="text-muted-foreground">{floor != null ? `${floor.toFixed(1)}ms` : '—'}</span>
     },
   },
   {
@@ -298,7 +282,7 @@ export const SHIELDING_COLUMNS: ColumnDef<ShieldingRowInput>[] = [
       if (ratio == null) return <span className="text-muted-foreground">—</span>
       const lowSample = info.row.original.low_sample
       const cls = lowSample || ratio < 0 ? 'bg-muted text-muted-foreground' : ratio < 1.5 ? 'bg-green-500/10 text-green-600 dark:text-green-400' : ratio < 3 ? 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400' : 'bg-destructive/10 text-destructive'
-      return <span title={lowSample ? 'Fewer than 30 requests — too few samples to grade; not flagged' : undefined} className={cn("inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-bold tabular-nums", cls)}>{ratio.toFixed(1)}×</span>
+      return <span title={lowSample ? 'Fewer than 30 requests — too few samples to grade; not flagged' : undefined} className={cn('inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-bold tabular-nums', cls)}>{ratio.toFixed(1)}×</span>
     },
   },
 ]
@@ -306,18 +290,16 @@ export const SHIELDING_COLUMNS: ColumnDef<ShieldingRowInput>[] = [
 const SHIELDING_LABELS: Record<string, string> = Object.fromEntries(
   SHIELDING_COLUMNS.map((c) => [c.id!, (c.meta as { label: string }).label]),
 )
-export const getShieldingLabels = (ids: string[]) => ids.map(id => ({ id, label: SHIELDING_LABELS[id] || id }))
+export const getShieldingLabels = (ids: string[]) => ids.map((id) => ({ id, label: SHIELDING_LABELS[id] || id }))
 
 const PROTOCOL_COLORS = ['bg-emerald-500', 'bg-sky-500', 'bg-amber-500', 'bg-purple-500', 'bg-rose-500'] as const
 
 type TransportMetrics = components['schemas']['TransportMetrics']
 type TransportProtocolShare = components['schemas']['TransportProtocolShare']
 
-interface TransportSectionProps {
+function TransportSection({ activeServiceId, startTime, endTime, filterPayload }: {
   activeServiceId?: string | null; startTime?: string | null; endTime?: string | null; filterPayload?: FiltersPayload
-}
-
-export function TransportSection({ activeServiceId, startTime, endTime, filterPayload }: TransportSectionProps) {
+}) {
   const transportQuery = useServiceQuery(
     ['network', 'bundle', 'transport', activeServiceId, startTime, endTime, filterPayload],
     async ({ signal }) => {
@@ -330,7 +312,7 @@ export function TransportSection({ activeServiceId, startTime, endTime, filterPa
       }))
       return (data as { transport?: TransportMetrics } | undefined)?.transport ?? null
     },
-    { enabled: Boolean(activeServiceId && startTime && endTime) }
+    { enabled: Boolean(activeServiceId && startTime && endTime) },
   )
 
   const transport = transportQuery.data
@@ -444,7 +426,6 @@ const HEATMAP_LAYOUT: PlotlyLayout = { xaxis: { tickangle: -45 } }
 const QUALITY_SCATTER_LAYOUT: PlotlyLayout = { xaxis: { title: { text: 'TCP RTT (ms)' } }, yaxis: { title: { text: 'TTFB (ms)' } } }
 
 type QualityBarRow = components['schemas']['NetworkQualityBarRow']
-type ColumnVisibilityTuple = ReturnType<typeof useColumnVisibility>
 type AsnRow = components['schemas']['NetworkLeaderboardRow']
 type MetroRow = components['schemas']['NetworkMetroRow']
 
@@ -535,18 +516,8 @@ const METRO_COLUMNS: ColumnDef<MetroRow>[] = [
   },
 ]
 
-export function AsnLeaderboardTable({ rows }: { rows: AsnRow[] }) {
-  return <DataTableReadonly columns={ASN_COLUMNS} data={rows} hideToolbar showPagination={false} tableCaption="ASN performance leaderboard" />
-}
-
-export function MetroLeaderboardTable({ rows }: { rows: MetroRow[] }) {
-  return <DataTableReadonly columns={METRO_COLUMNS} data={rows} hideToolbar showPagination={false} tableCaption="Metro and region leaderboard" />
-}
-
 function RttBarList({ rows, filterColumn }: { rows: readonly QualityBarRow[]; filterColumn?: string }) {
-  if (!rows?.length) {
-    return <div className="p-6 text-center text-sm text-muted-foreground">No data in this range</div>
-  }
+  if (!rows?.length) return <div className="p-6 text-center text-sm text-muted-foreground">No data in this range</div>
   const max = Math.max(...rows.map((r) => r.rtt_ms), 1)
   return (
     <div className="space-y-1.5 p-3">
@@ -556,11 +527,7 @@ function RttBarList({ rows, filterColumn }: { rows: readonly QualityBarRow[]; fi
         return (
           <div key={filterVal} className="flex items-center gap-2 text-xs">
             <div className="w-48 truncate shrink-0" title={r.label}>
-              {filterColumn ? (
-                <FilterValueCell filters={[{ column: filterColumn, value: filterVal }]} display={display} />
-              ) : (
-                <span>{display}</span>
-              )}
+              {filterColumn ? <FilterValueCell filters={[{ column: filterColumn, value: filterVal }]} display={display} /> : <span>{display}</span>}
             </div>
             <div className="flex-1 h-4 bg-muted/40 rounded-sm overflow-hidden">
               <div className="h-full bg-primary/70" style={{ width: `${(r.rtt_ms / max) * 100}%` }} />
@@ -575,27 +542,12 @@ function RttBarList({ rows, filterColumn }: { rows: readonly QualityBarRow[]; fi
 }
 
 function LeaderboardStatusBody<T>({
-  isLoading,
-  rows,
-  isActiveField,
-  emptyActiveMsg,
-  emptyInactiveMsg,
-  children,
+  isLoading, rows, isActiveField, emptyActiveMsg, emptyInactiveMsg, children,
 }: {
-  isLoading: boolean
-  rows: readonly T[] | undefined
-  isActiveField: boolean
-  emptyActiveMsg: string
-  emptyInactiveMsg: string
-  children: (rows: readonly T[]) => React.ReactNode
+  isLoading: boolean; rows: readonly T[] | undefined; isActiveField: boolean
+  emptyActiveMsg: string; emptyInactiveMsg: string; children: (rows: readonly T[]) => React.ReactNode
 }) {
-  if (isLoading) {
-    return (
-      <div className="space-y-2 p-4">
-        <SkeletonGrid count={5} height="48px" className="rounded-md" />
-      </div>
-    )
-  }
+  if (isLoading) return <div className="space-y-2 p-4"><SkeletonGrid count={5} height="48px" className="rounded-md" /></div>
   if (!rows || rows.length === 0) {
     return (
       <div className="p-8 text-center text-sm text-muted-foreground">
@@ -613,6 +565,18 @@ const NETWORK_MAP_SECTIONS: NetworkSections = ['cities', 'map_buckets']
 const NETWORK_SHIELDING_SECTIONS: NetworkSections = ['shielding_analysis']
 
 export default function NetworkPage() {
+  return (
+    <ReportLayout
+      title="Network & ASN Health"
+      description="Analysis of TCP performance, packet loss, and jitter by ASN and geography."
+      icon={NetworkIcon}
+    >
+      {(ctx) => <NetworkBody {...ctx} />}
+    </ReportLayout>
+  )
+}
+
+function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: ReportLayoutRenderProps) {
   const [metric, setMetric] = useState('health_score')
   const [mapAsn, setMapAsn] = useState('all')
   const [animBucketSeconds, setAnimBucketSeconds] = useState(3600)
@@ -620,53 +584,16 @@ export default function NetworkPage() {
   const [shieldingVisibility, setShieldingVisibility, onShieldingVisChange] = useColumnVisibility()
   const [minRequests, setMinRequests] = useState(SHIELDING_MIN_REQUESTS_DEFAULT)
   const { relativeRange, isAutoRange, anchor } = useReportRangeAnchor()
-
-  return (
-    <ReportLayout
-      title="Network & ASN Health"
-      description="Analysis of TCP performance, packet loss, and jitter by ASN and geography."
-      icon={NetworkIcon}
-    >
-      {(ctx) => (
-        <NetworkBody
-          {...ctx} metric={metric} setMetric={setMetric} mapAsn={mapAsn} setMapAsn={setMapAsn}
-          animBucketSeconds={animBucketSeconds} setAnimBucketSeconds={setAnimBucketSeconds}
-          regionCountry={regionCountry} setRegionCountry={setRegionCountry}
-          shieldingVisibility={shieldingVisibility} setShieldingVisibility={setShieldingVisibility}
-          onShieldingVisChange={onShieldingVisChange} minRequests={minRequests} setMinRequests={setMinRequests}
-          relativeRange={relativeRange} isAutoRange={isAutoRange} anchor={anchor}
-        />
-      )}
-    </ReportLayout>
-  )
-}
-
-type NetworkBodyProps = ReportLayoutRenderProps &
-  Pick<RangeWireArgs, 'relativeRange' | 'isAutoRange' | 'anchor'> & {
-    metric: string; setMetric: Dispatch<SetStateAction<string>>
-    mapAsn: string; setMapAsn: Dispatch<SetStateAction<string>>
-    animBucketSeconds: number; setAnimBucketSeconds: Dispatch<SetStateAction<number>>
-    regionCountry: string; setRegionCountry: Dispatch<SetStateAction<string>>
-    shieldingVisibility: ColumnVisibilityTuple[0]; setShieldingVisibility: ColumnVisibilityTuple[1]; onShieldingVisChange: ColumnVisibilityTuple[2]
-    minRequests: number; setMinRequests: Dispatch<SetStateAction<number>>
-  }
-
-function NetworkBody({
-  startTime, endTime, activeServiceId, filterPayload, metric, setMetric, mapAsn, setMapAsn,
-  animBucketSeconds, setAnimBucketSeconds, regionCountry, setRegionCountry,
-  shieldingVisibility, setShieldingVisibility, onShieldingVisChange,
-  minRequests, setMinRequests, relativeRange, isAutoRange, anchor,
-}: NetworkBodyProps) {
   const { isFieldActive } = useActiveLogFields()
   const range = { relativeRange, isAutoRange, startTime, endTime, anchor }
 
   const postNetworkHealth = (sections: NetworkSections, rangeToken: string | null, signal: AbortSignal | undefined, targetAsn = mapAsn) =>
-    unwrapClient(client.POST("/api/network-health", {
+    unwrapClient(client.POST('/api/network-health', {
       signal,
       body: {
         start_time: startTime!, end_time: endTime!, filters: filterPayload, metric,
         bucket_seconds: animBucketSeconds, top_n: 30, map_asn: targetAsn, sections, range_token: rangeToken, anchor,
-      }
+      },
     }))
 
   const coreQuery = useAnalyticsReportQuery({
@@ -689,8 +616,8 @@ function NetworkBody({
 
   const qualityQuery = useServiceQuery(
     ['network', 'quality', activeServiceId, startTime, endTime, filterPayload, regionCountry],
-    async ({ signal }) => unwrapClient(client.POST("/api/network-quality", {
-      signal, body: { start_time: startTime!, end_time: endTime!, filters: filterPayload, region_country: regionCountry }
+    async ({ signal }) => unwrapClient(client.POST('/api/network-quality', {
+      signal, body: { start_time: startTime!, end_time: endTime!, filters: filterPayload, region_country: regionCountry },
     })),
   )
 
@@ -912,7 +839,7 @@ function NetworkBody({
                 </>
               ) : (
                 <div className="flex flex-col items-center justify-center py-12 h-full text-center px-4 gap-1">
-                  <Shield className={cn("h-8 w-8 mb-2 opacity-20", shieldingData?.error ? 'text-destructive opacity-30' : 'text-muted-foreground')} />
+                  <Shield className={cn('h-8 w-8 mb-2 opacity-20', shieldingData?.error ? 'text-destructive opacity-30' : 'text-muted-foreground')} />
                   {shieldingData?.error ? (
                     <>
                       <p className="text-sm text-destructive font-medium">Shielding analysis unavailable</p>
@@ -946,7 +873,7 @@ function NetworkBody({
             emptyActiveMsg="No ASN data in this time range."
             emptyInactiveMsg="Requires Network Quality (Group F) fields to be enabled in Fastly logging."
           >
-            {(rows) => <AsnLeaderboardTable rows={[...rows]} />}
+            {(rows) => <DataTableReadonly columns={ASN_COLUMNS} data={[...rows]} hideToolbar showPagination={false} tableCaption="ASN performance leaderboard" />}
           </LeaderboardStatusBody>
         </AnalyticsCard>
 
@@ -961,7 +888,7 @@ function NetworkBody({
               emptyActiveMsg="No metro data in this time range."
               emptyInactiveMsg="Requires Geolocation (Group D/E) fields to be enabled in Fastly logging."
             >
-              {(rows) => <MetroLeaderboardTable rows={[...rows]} />}
+              {(rows) => <DataTableReadonly columns={METRO_COLUMNS} data={[...rows]} hideToolbar showPagination={false} tableCaption="Metro and region leaderboard" />}
             </LeaderboardStatusBody>
           </AnalyticsCard>
         )}

@@ -2,14 +2,12 @@
 
 import React from 'react'
 import { useServiceQuery } from '@/hooks/useDashboardCards'
-import { client, extractApiError } from '@/lib/api'
-import { unwrapClient } from '@/lib/api'
-import { formatBytes, formatCompactCount, formatCount } from '@/lib/format'
+import { client, extractApiError, unwrapClient } from "@/lib/api";
+import { formatBytes, formatCompactCount, formatCount, cn } from "@/lib/utils";
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Activity, ShieldAlert, Globe, Wifi, Zap, Percent, HardDrive, AlertTriangle } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
-import { cn } from '@/lib/utils'
 import type { components } from '@/types/api.generated'
 import {
   Dialog,

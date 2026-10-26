@@ -10,7 +10,7 @@
  * - useHighScaleRequestFacts
  */
 import { renderHook, waitFor, act } from '@testing-library/react'
-import { hashKey, QueryClient } from '@tanstack/react-query'
+import { hashKey } from '@tanstack/react-query'
 import {
   createTestQueryClient,
   makeNeverClosingStreamResponse,
@@ -22,8 +22,7 @@ import { http, HttpResponse } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { server } from '@/__tests__/helpers/msw/handlers'
-import { queryKeys } from '@/lib/query-keys'
-import { client } from '@/lib/api'
+import { queryKeys, client } from "@/lib/api";
 import { __resetForTests } from '@/lib/utils'
 import {
   useActiveLogFields,

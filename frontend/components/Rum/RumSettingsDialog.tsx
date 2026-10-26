@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { formatBytes } from '@/lib/format'
+import { formatBytes, cn } from "@/lib/utils";
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
@@ -13,10 +13,8 @@ import { RumVersionPicker } from '@/components/ProvisionWizard/steps/StorageStep
 import { useSSE, type SSELine } from '@/hooks/useSSE'
 import { useDerivedState, useOpenGeneration } from '@/hooks/useSSE'
 import { SSEActionDialogShell, SSEExecutionSection } from '@/components/SSEModal'
-import { adminFetch } from '@/lib/api'
+import { adminFetch, queryKeys } from "@/lib/api";
 import { useRumStatus } from '@/hooks/useDashboardCards'
-import { queryKeys } from '@/lib/query-keys'
-import { cn } from '@/lib/utils'
 import type { ServiceConfig } from '@/types/api'
 
 const RUM_FIELDS = [

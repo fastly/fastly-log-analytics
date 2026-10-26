@@ -1,77 +1,399 @@
 'use client'
 
-import React, { useEffect, useRef, useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import dynamic from 'next/dynamic'
-import { client, extractApiError, unwrapClient } from '@/lib/api'
-import { showToast, cn } from '@/lib/utils'
-import { cronCacheBust, useSSE, useDateFormat, type SyncStatus } from '@/hooks/useSSE'
-import { queryKeys } from '@/lib/query-keys'
+import { client, extractApiError, unwrapClient, queryKeys } from "@/lib/api";
+import { showToast, showToastWithAction, cn, formatCount, formatCountMaybe, formatBytes } from "@/lib/utils";
+import { cronCacheBust, useSSE, useSyncStatus, useDateFormat, type SyncStatus } from '@/hooks/useSSE'
 import { useServiceStore } from '@/stores/filterStore'
 import { Badge } from '@/components/ui/badge'
 import { Button, buttonVariants } from "@/components/ui/button"
 import { ConfirmDialog, CopyButton, HelpDialog, PageHeader } from '@/components/ui/confirm-dialog'
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from '@/components/ui/dialog'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
-  Database,
-  HardDrive,
-  History,
-  FileCode,
-  Archive,
-  ClipboardList,
-  RefreshCw,
-  Download,
-  Bot,
-  Terminal,
-  ChevronRight,
-  ChevronDown,
-  Folder,
-  Cloud,
-  FileJson,
-  Loader2,
-  Maximize2,
-  Minimize2,
-  Settings,
-  Clock,
-  X,
-  Check,
-  HelpCircle,
-  Trash2,
+  Database, HardDrive, History, FileCode, Archive, ClipboardList, RefreshCw, Download, Bot,
+  Terminal, ChevronRight, ChevronDown, Folder, Cloud, FileJson, Loader2, Maximize2, Minimize2,
+  Settings, Clock, X, Check, HelpCircle, Trash2,
 } from 'lucide-react'
 import { NoServiceSelected } from '@/components/ReportLayout'
-import { useBootstrapResolved } from '@/hooks/useBootstrap'
+import { useBootstrapResolved, useEffectiveServiceId, useLogFieldsCatalog } from '@/hooks/useBootstrap'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { SyncFromCloudModal, LiveElapsed, NextRunCountdown, TimeAgo } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { DataTable, DataTableReadonly, ColumnVisibilityDropdown, DateTimeCell, ingestedFilesColumns } from '@/components/DataTable'
 import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
-import { formatCount, formatCountMaybe, formatBytes } from '@/lib/format'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import type { ColumnDef } from '@tanstack/react-table'
 import type { WithRequired } from '@/types/api'
 import type { components } from '@/types/api.generated'
-
-import { useLogsPageState, type CronRun } from '../_state'
 import Loading from '../loading'
 import { ControlledSSEModal as SSEModal } from '@/components/SSEModal'
+
+export type CronRun = components['schemas']['CronRunEntry']
+
+/**
+ * Accumulate running and completed jobs, pruning older runs of the same task type to prevent
+ * historical clutter: keep the active running job and the single most recent completed job
+ * (last run) for each task. Returns `prev` untouched when nothing changed.
+ */
+function mergeRunningJobs(prev: CronRun[], entries: CronRun[]): CronRun[] {
+  // 1. Identify which tasks are currently running in the poll response
+  const runningTasks = new Set(entries.map((j) => j.task))
+  const runningIds = new Set(entries.map((j) => j.id))
+
+  // 2. Filter out completed jobs of the tasks that are now running a new instance
+  const filtered = prev.filter((j) => runningIds.has(j.id) || !runningTasks.has(j.task))
+
+  // 3. Keep only the single most recent completed job per task to prevent history clutter
+  const jobsByTask: Record<string, CronRun[]> = {}
+  for (const j of filtered) (jobsByTask[j.task] ??= []).push(j)
+
+  const pruned: CronRun[] = []
+  for (const taskJobs of Object.values(jobsByTask)) {
+    const running = taskJobs.filter((j) => runningIds.has(j.id))
+    const completed = taskJobs.filter((j) => !runningIds.has(j.id))
+    if (running.length > 0) pruned.push(...running.map((j) => ({ ...j, status: 'running' })))
+    if (completed.length > 0) {
+      const latestCompleted = completed.reduce((max, job) => (job.id > max.id ? job : max), completed[0])
+      pruned.push({ ...latestCompleted, status: 'completed' })
+    }
+  }
+
+  // 4. Merge in brand new running jobs
+  const prunedIds = new Set(pruned.map((j) => j.id))
+  const brandNew = entries.filter((j) => !prunedIds.has(j.id)).map((j) => ({ ...j, status: 'running' }))
+  const nextJobs = [...pruned, ...brandNew]
+
+  // 5. Compare nextJobs with prev (by id, status, duration, and rows_ingested) to avoid updating state if nothing changed
+  if (
+    prev.length === nextJobs.length &&
+    prev.every((pj) => {
+      const nj = nextJobs.find((j) => j.id === pj.id)
+      return nj && nj.status === pj.status && nj.duration_s === pj.duration_s && nj.rows_ingested === pj.rows_ingested
+    })
+  ) {
+    return prev
+  }
+
+  return nextJobs
+}
+
+/**
+ * Orchestrates all state, data queries, and side-effects for the
+ * Logs / Data Management page. Returns the entire bag of values
+ * needed by the rendering shell + its section components.
+ */
+export function useLogsPageState(initialTab?: string) {
+  // Read activeServiceId via the bootstrap-aware fallback so a cold
+  // load (empty localStorage, bootstrap still in flight or just
+  // hydrated into the React Query cache) doesn't flash through the
+  // <NoServiceSelected /> branch before useBootstrap's post-mount
+  // effect writes the persisted Zustand store. ``services`` still
+  // comes from the store — it's seeded synchronously by useBootstrap.
+  const services = useServiceStore(s => s.services)
+  const activeServiceId = useEffectiveServiceId() ?? null
+  const activeService = services.find(s => s.id === activeServiceId)
+  const isAnalyst = activeService?.accessLevel === 'read_only'
+  const queryClient = useQueryClient()
+  const [activeTab, setActiveTab] = useState(initialTab || 'cron')
+  const [isPurgeOpen, setIsPurgeOpen] = useState(false)
+  const [taskFilter, setTaskFilter] = useState('all')
+  const [statusFilter, setStatusFilter] = useState('all')
+  const [eventFilter, setEventFilter] = useState('all')
+
+  const { lines, status: sseStatus, error: sseError, start, stop, reset } = useSSE()
+  const [isSSEModalOpen, setIsSSEModalOpen] = useState(false)
+  const [isSyncModalOpen, setIsSyncModalOpen] = useState(false)
+  const [sseTitle, setSseTitle] = useState('')
+  const [sseDescription, setSseDescription] = useState('')
+  const [consoleOpen, setConsoleOpen] = useState(false)
+  const [selectedConsoleJobId, setSelectedConsoleJobId] = useState<number | string | null>(null)
+
+  const notifyCronRun = useCallback((run: CronRun) => {
+    const taskName = run.task === 'metadata_sync' ? 'sync' : run.task
+    const label = run.status === 'running' ? 'Background Sync Started' : run.status === 'error' ? 'Background Sync Failed' : 'Background Sync Completed'
+    const details = [
+      taskName,
+      run.status !== 'running' && run.rows_ingested != null ? `${formatCount(run.rows_ingested)} rows` : null,
+      run.status !== 'running' && run.duration_s != null ? `${run.duration_s.toFixed(1)}s` : null,
+    ].filter(Boolean).join(' · ')
+    showToastWithAction(`${label} (${details})`, {
+      actionLabel: 'View Console Logs',
+      kind: run.status === 'error' ? 'error' : run.status === 'running' ? 'info' : 'success',
+      durationMs: 8000,
+      onAction: () => { setSelectedConsoleJobId(run.id); setConsoleOpen(true) },
+    })
+  }, [])
+
+  // Multi-tenant safe run ID tracker to prevent alerting old runs or cross-tenant leaks
+  const maxSeenIdRef = React.useRef<number | null>(null)
+
+  // Reset tracker when switching active services
+  useEffect(() => { maxSeenIdRef.current = null }, [activeServiceId])
+
+  const { data: status } = useSyncStatus()
+
+  const { data: cronLogs, isLoading: isLoadingCron, isFetching: isFetchingCron } = useQuery({
+    queryKey: queryKeys.admin.cronLogs(activeServiceId, taskFilter, statusFilter),
+    queryFn: ({ signal }) => unwrapClient(client.GET("/api/cron-runs", {
+      signal,
+      params: { query: { page: 1, per_page: 500, task: taskFilter === 'all' ? undefined : taskFilter, status: statusFilter === 'all' ? undefined : statusFilter } },
+    })),
+    enabled: !!activeServiceId && activeTab === 'cron',
+    // Primary update path is the /api/admin/events/stream cron-runs channel
+    // (wired in SyncStatusBadge via useAdminEventStream — runs whenever
+    // the header is mounted). Every cron lifecycle event invalidates
+    // this query key, so this interval is now a safety net only.
+    // Five minutes is well under "stale" for a history table and cuts
+    // the steady-state request rate by 10× vs. the prior 30 s cadence.
+    refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
+    staleTime: 30_000,
+  })
+
+  // Separate query specifically for checking recent crons (including running) without reloading the entire 500-row table.
+  // Delta poll (O5): reads `maxSeenIdRef.current` and passes (max - 1) as
+  // `since_id` so steady-state polls return ~1 entry instead of 10.
+  // Backend semantics (`backend/core/metadata_db.py::get_cron_runs`): rows
+  // where id > since_id OR status = 'running'. The OR keeps still-running
+  // rows visible across polls. The `-1` keeps the most-recently-seen row
+  // in the response for ONE more poll so the toast-completion-detection
+  // effect below can observe the running→completed transition for the row
+  // backgroundCronToast is tracking. First poll (maxSeenIdRef.current is
+  // null) omits since_id and returns up to per_page recent rows like before.
+  const { data: recentCrons } = useQuery({
+    queryKey: queryKeys.admin.cronLogsRecent(activeServiceId),
+    queryFn: ({ signal }) => {
+      const max = maxSeenIdRef.current
+      const sinceId = max != null ? Math.max(0, max - 1) : undefined
+      return unwrapClient(client.GET("/api/cron-runs", { signal, params: { query: { page: 1, per_page: 10, since_id: sinceId } } }))
+    },
+    enabled: !!activeServiceId, // Tab independent polling!
+    // Primary update path is the /api/admin/events/stream cron-runs channel
+    // (wired in SyncStatusBadge via useAdminEventStream). The toast
+    // notifier reads this query key, so SSE invalidations propagate
+    // automatically; this interval is now a safety net only.
+    refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
+    staleTime: 15_000,
+  })
+
+  // Derive currently running crons and loading state from recent crons to keep downstream compatibility intact
+  const runningCrons = React.useMemo(
+    () => ({ entries: (recentCrons?.entries || []).filter((e) => e.status === 'running') }),
+    [recentCrons?.entries],
+  )
+
+  // When a running cron completes, refresh the main table so it shows up in the history
+  const prevRunningCount = React.useRef(0)
+  React.useEffect(() => {
+    const count = runningCrons?.entries?.length || 0
+    if (prevRunningCount.current > 0 && count < prevRunningCount.current) {
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsAll() })
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.status() })
+    }
+    prevRunningCount.current = count
+  }, [runningCrons?.entries?.length, queryClient])
+
+  // Accumulate running and completed jobs, pruning older runs of the same task type
+  // to prevent historical clutter. We only keep the active running job and the single
+  // most recent completed job (last run) for each task.
+  const [displayedJobs, setDisplayedJobs] = useState<CronRun[]>([])
+  const runningEntries = runningCrons?.entries
+  const [seenRunningEntries, setSeenRunningEntries] = useState<typeof runningEntries | undefined>(undefined)
+  if (runningEntries && runningEntries !== seenRunningEntries) {
+    // Derived during render (the poll result is the input), not synced in an effect.
+    setSeenRunningEntries(runningEntries)
+    setDisplayedJobs((prev) => mergeRunningJobs(prev, runningEntries))
+  }
+
+  const removeDisplayedJob = useCallback((id: number) => {
+    setDisplayedJobs(prev => prev.filter((j) => j.id !== id))
+  }, [])
+
+  // Effect to monitor recent crons and detect newly started or completed runs (even if they ran very fast)
+  useEffect(() => {
+    if (!recentCrons?.entries?.length) return
+    const maxId = Math.max(...recentCrons.entries.map((e) => e.id))
+    const enqueueJob = (run: CronRun) => {
+      // Automatically add it to displayedJobs so it appears in the Console Terminal dock
+      setDisplayedJobs(prev => (prev.some((j) => j.id === run.id) ? prev : [...prev, { ...run, status: run.status }]))
+      notifyCronRun(run)
+    }
+
+    if (maxSeenIdRef.current === null) {
+      // First load: initialize max seen ID so we don't alert on historical runs
+      maxSeenIdRef.current = maxId
+      // Eagerly capture any running crons at load time and display them as running with live streams
+      recentCrons.entries.filter((e) => e.status === 'running').forEach(enqueueJob)
+      return
+    }
+
+    // On subsequent polls, check if we have any brand new runs!
+    if (maxId > maxSeenIdRef.current) {
+      const newRuns = recentCrons.entries.filter((e) => e.id > (maxSeenIdRef.current || 0))
+      // Update max seen ID
+      maxSeenIdRef.current = maxId
+      // Processes new runs and queue notifications/console placement
+      newRuns.forEach(enqueueJob)
+    }
+  }, [recentCrons?.entries, notifyCronRun])
+
+  // Auto-focus the floating console on the most relevant active job. Adjusted during render
+  // from `displayedJobs` (the input), never synced through an effect.
+  if (displayedJobs.length > 0) {
+    if (selectedConsoleJobId === null || !displayedJobs.some((j) => j.id === selectedConsoleJobId)) {
+      setSelectedConsoleJobId(displayedJobs[0].id)
+    }
+  } else if (selectedConsoleJobId !== null || consoleOpen) {
+    setSelectedConsoleJobId(null)
+    setConsoleOpen(false)
+  }
+
+  const { data: cronSchedule, isLoading: isLoadingSchedule } = useQuery({
+    queryKey: queryKeys.admin.cronSchedule(activeServiceId),
+    queryFn: ({ signal }) => unwrapClient(client.GET("/api/cron-schedule", { signal })),
+    enabled: !!activeServiceId && activeTab === 'cron',
+    // Freshness via useAdminEventStream (wired in SyncStatusBadge):
+    // every cron lifecycle event invalidates this key so the tiles'
+    // last_run / next_run / status update on the moment the cron
+    // fires instead of on a 10s drift. 5-min interval is the safety
+    // net for silently-dropped streams.
+    staleTime: 10_000,
+    refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
+  })
+
+  const orderedSchedules = React.useMemo(() => {
+    // Display priority for known tasks. Backend (/api/cron-schedule) is
+    // the source of truth for WHICH tasks exist — anything not in this
+    // map is still rendered, just appended after the prioritised tiles
+    // in API order. That means a freshly-registered backend cron shows
+    // up on the grid automatically; only its position needs curating.
+    const TASK_PRIORITY: Record<string, number> = {
+      log_discovery: 1, rum_sync: 2, rum_discovery: 2, alerts: 3, commit: 4, rum_commit: 5,
+      optimize: 6, local_compact: 7, metadata_cleanup: 8, expire_snapshots: 9, full_sync: 10,
+      gap_heal: 11, ngwaf_sync: 12, insights_prewarmer: 13, rollup_compact_daily: 14,
+      rollup_hour_heal: 15, metadata_sync: 16,
+    }
+    // Analysts only see the read-only subset; nothing else is even
+    // exposed via the analyst-facing /api/cron-schedule path.
+    const analystAllowed = new Set(['metadata_sync', 'alerts'])
+    // For admin views, hide `metadata_sync` — it's the analyst-only
+    // read-only counterpart of `sync` and only shows up here as a
+    // historical-run entry (next_run_time=null). Worse, CronScheduleBox
+    // renders metadata_sync with the LABEL "sync" by design (so the
+    // analyst tile reads naturally), which created a confusing duplicate
+    // tile both labelled "sync" once the whitelist was lifted.
+    const adminExcluded = new Set(['metadata_sync'])
+    const source = cronSchedule?.schedules ?? []
+    const hasNgwaf = !!status?.ngwaf_workspace_id
+    const filtered = isAnalyst
+      ? source.filter((s) => analystAllowed.has(s.task))
+      : source.filter((s) => !adminExcluded.has(s.task) && (s.task !== 'ngwaf_sync' || hasNgwaf))
+    const sorted = [...filtered].sort((a, b) => (TASK_PRIORITY[a.task] ?? 999) - (TASK_PRIORITY[b.task] ?? 999) || a.task.localeCompare(b.task))
+    return sorted.map((schedule) => ({
+      task: schedule.task,
+      activeJob: displayedJobs.find((j) => j.task === schedule.task && j.status === 'running'),
+      schedule,
+    }))
+  }, [cronSchedule?.schedules, displayedJobs, isAnalyst, status?.ngwaf_workspace_id])
+
+  const { data: catalog } = useLogFieldsCatalog()
+
+  const catalogMaps = React.useMemo(() => {
+    if (!catalog) return { groups: {}, fields: {} }
+    const groups: Record<string, { label: string; description: string }> = {}
+    const fields: Record<string, { label: string; description: string }> = {}
+    catalog.groups?.forEach((g) => { groups[g.id === null ? "null" : String(g.id)] = { label: g.label, description: g.description } })
+    catalog.fields?.forEach((f) => { fields[f.id] = { label: f.label, description: f.description } })
+    return { groups, fields }
+  }, [catalog])
+
+  const { data: auditLogs, isLoading: isLoadingAudit, isFetching: isFetchingAudit } = useQuery({
+    queryKey: queryKeys.admin.auditLogs(activeServiceId, eventFilter),
+    queryFn: ({ signal }) => unwrapClient(client.GET("/api/audit-logs", {
+      signal,
+      params: { query: { page: 1, per_page: 500, event_type: eventFilter === 'all' ? undefined : eventFilter } },
+    })),
+    enabled: !!activeServiceId && activeTab === 'service_history',
+    // Kept fresh by useAdminEventStream (invalidates ['admin','audit-logs',svc]
+    // on cron completion), so the old staleTime:0 — which forced a 1-2s
+    // refetch spinner on every tab visit — is no longer needed. 60s makes
+    // tab-switches instant from cache between real events.
+    staleTime: 60_000,
+  })
+
+  const { data: ingestedFiles, isLoading: isLoadingIngested } = useQuery({
+    queryKey: queryKeys.admin.ingestedFiles(activeServiceId),
+    queryFn: ({ signal }) => unwrapClient(client.GET("/api/admin/ingested-files", { signal })),
+    enabled: !!activeServiceId && activeTab === 'ingestion',
+    // Freshness via useAdminEventStream (invalidates
+    // ['admin','ingested-files',svc] on cron completion). 60s staleTime so
+    // re-entering the tab is instant instead of re-fetching every time.
+    staleTime: 60_000,
+  })
+
+  const { data: schemaData, isLoading: isLoadingSchema } = useQuery({
+    queryKey: queryKeys.admin.schema(activeServiceId),
+    queryFn: ({ signal }) => unwrapClient(client.GET("/api/schema", { signal })),
+    enabled: !!activeServiceId && activeTab === 'schema',
+    // Freshness via useAdminEventStream (invalidates ['admin','schema',svc]
+    // when a data-mutating cron — sync/full_sync/commit — completes).
+    // Schema rarely changes, so 60s staleTime keeps the tab instant.
+    staleTime: 60_000,
+  })
+
+  const purgeMutation = useMutation({
+    mutationFn: async () => { await unwrapClient(client.DELETE("/api/cron-runs", {})) },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsFor(activeServiceId) })
+      setIsPurgeOpen(false)
+    },
+  })
+
+  const handleTabChange = useCallback((value: string) => {
+    setActiveTab(value)
+
+    // cron / service_history / ingestion / schema no longer force a refetch
+    // on switch: cron is SSR-seeded and kept live by useAdminEventStream, and
+    // the other three are now invalidated by that same stream on cron
+    // completion (+ a 60s staleTime safety net). Switching to them serves
+    // instantly from cache instead of spinning on every visit.
+    //
+    // iceberg / raw have no stream coverage, so keep refreshing on entry.
+    if (value === 'iceberg') {
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.iceberg(activeServiceId) })
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.icebergTree(activeServiceId) })
+    } else if (value === 'raw') {
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.rawTree(activeServiceId) })
+    }
+  }, [activeServiceId, queryClient])
+
+  return {
+    // identity
+    activeServiceId, isAnalyst,
+    // tab state
+    activeTab, handleTabChange,
+    // cron tab filters
+    taskFilter, setTaskFilter, statusFilter, setStatusFilter,
+    // audit tab filter
+    eventFilter, setEventFilter,
+    // SSE modal / sync modal
+    sseStatus, sseError, sseTitle, sseDescription, setSseTitle, setSseDescription,
+    lines, start, stop, reset, isSSEModalOpen, setIsSSEModalOpen, isSyncModalOpen, setIsSyncModalOpen,
+    // floating console
+    consoleOpen, setConsoleOpen, selectedConsoleJobId, setSelectedConsoleJobId,
+    displayedJobs, setDisplayedJobs, removeDisplayedJob,
+    // data
+    status, cronLogs, isLoadingCron, isFetchingCron, recentCrons, orderedSchedules, isLoadingSchedule,
+    catalogMaps, auditLogs, isLoadingAudit, isFetchingAudit, ingestedFiles, isLoadingIngested, schemaData, isLoadingSchema,
+    // mutations / actions
+    purgeMutation, isPurgeOpen, setIsPurgeOpen,
+  }
+}
 
 export const CRON_EXPLANATIONS: Record<string, string> = {
   log_discovery: 'Lists recent raw/ minute prefixes in Fastly Object Storage to discover new files and enqueues one convert task per file — background Celery workers download, parse, and commit each file into the data lake.',
@@ -96,25 +418,12 @@ export const CRON_EXPLANATIONS: Record<string, string> = {
 }
 
 export const CRON_DISPLAY_NAMES: Record<string, string> = {
-  log_discovery: 'Log Discovery',
-  commit: 'Commit',
-  full_sync: 'Full Discovery Sweep',
-  gap_heal: 'Gap Heal',
-  local_compact: 'Local Compact',
-  optimize: 'Cloud Compact',
-  expire_snapshots: 'Expire Snapshots',
-  rollup_compact_daily: 'Rollup Compact',
-  rollup_hour_heal: 'Rollup Heal',
-  partial_hour_merge: 'Partial-Hour Merge',
-  ledger_sweep: 'Ledger Sweep',
-  insights_prewarmer: 'Insights Prewarmer',
-  metadata_cleanup: 'Metadata Cleanup',
-  ngwaf_sync: 'NGWAF Sync',
-  metadata_sync: 'Metadata Sync',
-  alerts: 'Alerts Evaluation',
-  rum_sync: 'RUM Discovery',
-  rum_discovery: 'RUM Discovery',
-  rum_commit: 'Ingest RUM',
+  log_discovery: 'Log Discovery', commit: 'Commit', full_sync: 'Full Discovery Sweep', gap_heal: 'Gap Heal',
+  local_compact: 'Local Compact', optimize: 'Cloud Compact', expire_snapshots: 'Expire Snapshots',
+  rollup_compact_daily: 'Rollup Compact', rollup_hour_heal: 'Rollup Heal', partial_hour_merge: 'Partial-Hour Merge',
+  ledger_sweep: 'Ledger Sweep', insights_prewarmer: 'Insights Prewarmer', metadata_cleanup: 'Metadata Cleanup',
+  ngwaf_sync: 'NGWAF Sync', metadata_sync: 'Metadata Sync', alerts: 'Alerts Evaluation',
+  rum_sync: 'RUM Discovery', rum_discovery: 'RUM Discovery', rum_commit: 'Ingest RUM',
 }
 
 export const CRON_GROUPS = [
@@ -126,20 +435,26 @@ export const CRON_GROUPS = [
 ]
 
 type CronScheduleEntry = components['schemas']['CronScheduleEntry']
-type CronSchedule = Pick<
-  WithRequired<CronScheduleEntry, 'task'>,
-  'task' | 'disabled_reason' | 'last_run_time' | 'next_run_time'
->
+type CronSchedule = Pick<WithRequired<CronScheduleEntry, 'task'>, 'task' | 'disabled_reason' | 'last_run_time' | 'next_run_time'>
 type ActiveCronJob = { id: number | string; started_at?: string | null }
 
+function CronTip({ className, side, contentClass = "text-xs", tip, children }: {
+  className?: string; side?: 'top' | 'right'; contentClass?: string; tip: React.ReactNode; children: React.ReactNode
+}) {
+  return (
+    <TooltipProvider delay={200}>
+      <Tooltip>
+        <TooltipTrigger render={<span className={className} />}>{children}</TooltipTrigger>
+        <TooltipContent side={side} className={contentClass}>{tip}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
 export function CronScheduleBox({
-  schedule,
-  activeJob = null,
-  onOpenConsole,
+  schedule, activeJob = null, onOpenConsole,
 }: {
-  schedule: CronSchedule
-  activeJob?: ActiveCronJob | null
-  onOpenConsole?: (jobId: number | string) => void
+  schedule: CronSchedule; activeJob?: ActiveCronJob | null; onOpenConsole?: (jobId: number | string) => void
 }) {
   const { full, abbr } = useDateFormat()
 
@@ -147,14 +462,9 @@ export function CronScheduleBox({
     return (
       <div className="relative flex flex-col justify-center border rounded-md px-2.5 h-8 shrink-0 bg-muted/20 border-muted min-w-[130px] flex-1">
         <div className="flex items-center gap-2 w-full">
-          <TooltipProvider delay={200}>
-            <Tooltip>
-              <TooltipTrigger render={<span className="text-[9px] font-bold uppercase text-muted-foreground tracking-wider shrink-0" />}>
-                alerts
-              </TooltipTrigger>
-              <TooltipContent side="top" className="max-w-[250px] text-xs">{CRON_EXPLANATIONS.alerts}</TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+          <CronTip className="text-[9px] font-bold uppercase text-muted-foreground tracking-wider shrink-0" side="top" contentClass="max-w-[250px] text-xs" tip={CRON_EXPLANATIONS.alerts}>
+            alerts
+          </CronTip>
           <div className="w-px h-4 bg-border shrink-0" />
           <span className="flex-1 min-w-0 truncate text-[9px] text-muted-foreground italic">No alerts configured.</span>
         </div>
@@ -169,14 +479,12 @@ export function CronScheduleBox({
     <div className={`relative flex flex-col justify-center border rounded-md px-2.5 h-8 shrink-0 transition-all ${borderColor} min-w-[130px] flex-1`}>
       {isRunning && <div className="absolute inset-0 rounded-md border border-blue-500/50 animate-pulse pointer-events-none" />}
       <div className="flex items-center gap-2 w-full">
-        <TooltipProvider delay={200}>
-          <Tooltip>
-            <TooltipTrigger render={<span className={`text-[9px] font-bold uppercase tracking-wider shrink-0 ${isRunning ? 'text-blue-700 dark:text-blue-300' : 'text-muted-foreground'}`} />}>
-              {CRON_DISPLAY_NAMES[schedule.task] || schedule.task}
-            </TooltipTrigger>
-            <TooltipContent side="top" className="max-w-[250px] text-xs">{CRON_EXPLANATIONS[schedule.task] || 'Background job.'}</TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+        <CronTip
+          className={`text-[9px] font-bold uppercase tracking-wider shrink-0 ${isRunning ? 'text-blue-700 dark:text-blue-300' : 'text-muted-foreground'}`}
+          side="top" contentClass="max-w-[250px] text-xs" tip={CRON_EXPLANATIONS[schedule.task] || 'Background job.'}
+        >
+          {CRON_DISPLAY_NAMES[schedule.task] || schedule.task}
+        </CronTip>
         <div className="w-px h-4 bg-border shrink-0" />
 
         {isRunning ? (
@@ -193,22 +501,12 @@ export function CronScheduleBox({
           </button>
         ) : (
           <div className="flex-1 min-w-0 flex items-center justify-between text-[9px] text-muted-foreground whitespace-nowrap overflow-hidden">
-            <TooltipProvider delay={200}>
-              <Tooltip>
-                <TooltipTrigger render={<span className="truncate pr-2" />}>
-                  Last: {schedule.last_run_time ? <TimeAgo timestamp={schedule.last_run_time} /> : 'Never'}
-                </TooltipTrigger>
-                <TooltipContent className="text-xs">{schedule.last_run_time ? `${full(schedule.last_run_time)} ${abbr()}` : 'Never'}</TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-            <TooltipProvider delay={200}>
-              <Tooltip>
-                <TooltipTrigger render={<span className="truncate" />}>
-                  Next: <NextRunCountdown when={schedule.next_run_time} />
-                </TooltipTrigger>
-                <TooltipContent className="text-xs">{schedule.next_run_time ? `${full(schedule.next_run_time)} ${abbr()}` : 'Disabled'}</TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
+            <CronTip className="truncate pr-2" tip={schedule.last_run_time ? `${full(schedule.last_run_time)} ${abbr()}` : 'Never'}>
+              Last: {schedule.last_run_time ? <TimeAgo timestamp={schedule.last_run_time} /> : 'Never'}
+            </CronTip>
+            <CronTip className="truncate" tip={schedule.next_run_time ? `${full(schedule.next_run_time)} ${abbr()}` : 'Disabled'}>
+              Next: <NextRunCountdown when={schedule.next_run_time} />
+            </CronTip>
           </div>
         )}
       </div>
@@ -217,13 +515,9 @@ export function CronScheduleBox({
 }
 
 function CronScheduleGroupSection({
-  title,
-  items,
-  onOpenConsole,
+  title, items, onOpenConsole,
 }: {
-  title: string
-  items: Array<{ task: string; activeJob: CronRun | undefined; schedule: CronScheduleEntry }>
-  onOpenConsole: (jobId: number | string) => void
+  title: string; items: Array<{ task: string; activeJob: CronRun | undefined; schedule: CronScheduleEntry }>; onOpenConsole: (jobId: number | string) => void
 }) {
   if (items.length === 0) return null
   return (
@@ -231,12 +525,7 @@ function CronScheduleGroupSection({
       <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">{title}</div>
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2 w-full">
         {items.map((item) => (
-          <CronScheduleBox
-            key={item.task}
-            schedule={item.schedule || { task: item.task }}
-            activeJob={item.activeJob}
-            onOpenConsole={onOpenConsole}
-          />
+          <CronScheduleBox key={item.task} schedule={item.schedule || { task: item.task }} activeJob={item.activeJob} onOpenConsole={onOpenConsole} />
         ))}
       </div>
     </div>
@@ -244,77 +533,33 @@ function CronScheduleGroupSection({
 }
 
 export function CronTab({
-  cronColumns,
-  cronLogs,
-  isLoadingCron,
-  isFetchingCron,
-  orderedSchedules,
-  isLoadingSchedule = false,
-  taskFilter,
-  setTaskFilter,
-  statusFilter,
-  setStatusFilter,
-  isAnalyst,
-  status,
-  activeServiceId,
-  setDisplayedJobs,
-  setSelectedConsoleJobId,
-  setConsoleOpen,
-  isPurgeOpen,
-  setIsPurgeOpen,
-  purgeMutation,
+  cronColumns, cronLogs, isLoadingCron, isFetchingCron, orderedSchedules, isLoadingSchedule = false,
+  taskFilter, setTaskFilter, statusFilter, setStatusFilter, isAnalyst, status, activeServiceId,
+  setDisplayedJobs, setSelectedConsoleJobId, setConsoleOpen, isPurgeOpen, setIsPurgeOpen, purgeMutation,
 }: {
-  cronColumns: ColumnDef<CronRun>[]
-  cronLogs: components['schemas']['CronRunsResponse'] | undefined
-  isLoadingCron: boolean
-  isFetchingCron: boolean
-  orderedSchedules: Array<{ task: string; activeJob: CronRun | undefined; schedule: CronScheduleEntry }>
-  isLoadingSchedule?: boolean
-  taskFilter: string
-  setTaskFilter: (v: string) => void
-  statusFilter: string
-  setStatusFilter: (v: string) => void
-  isAnalyst: boolean
-  status: SyncStatus | undefined
-  activeServiceId: string | null | undefined
-  setDisplayedJobs: React.Dispatch<React.SetStateAction<CronRun[]>>
-  setSelectedConsoleJobId: (id: number | string | null) => void
-  setConsoleOpen: (open: boolean) => void
-  isPurgeOpen: boolean
-  setIsPurgeOpen: (open: boolean) => void
+  cronColumns: ColumnDef<CronRun>[]; cronLogs: components['schemas']['CronRunsResponse'] | undefined
+  isLoadingCron: boolean; isFetchingCron: boolean
+  orderedSchedules: Array<{ task: string; activeJob: CronRun | undefined; schedule: CronScheduleEntry }>; isLoadingSchedule?: boolean
+  taskFilter: string; setTaskFilter: (v: string) => void; statusFilter: string; setStatusFilter: (v: string) => void
+  isAnalyst: boolean; status: SyncStatus | undefined; activeServiceId: string | null | undefined
+  setDisplayedJobs: React.Dispatch<React.SetStateAction<CronRun[]>>; setSelectedConsoleJobId: (id: number | string | null) => void
+  setConsoleOpen: (open: boolean) => void; isPurgeOpen: boolean; setIsPurgeOpen: (open: boolean) => void
   purgeMutation: { isPending: boolean; mutate: () => void }
 }) {
   const queryClient = useQueryClient()
   const [isHelpOpen, setIsHelpOpen] = React.useState(false)
-
-  const tableData = React.useMemo(
-    () => (cronLogs?.entries || []).filter((e) => e.status !== 'running'),
-    [cronLogs?.entries],
-  )
-
+  const tableData = React.useMemo(() => (cronLogs?.entries || []).filter((e) => e.status !== 'running'), [cronLogs?.entries])
   const handleOpenConsole = React.useCallback((jobId: number | string) => {
     setConsoleOpen(true)
     setSelectedConsoleJobId(jobId)
   }, [setConsoleOpen, setSelectedConsoleJobId])
-
   const groupedTaskNames = React.useMemo(() => CRON_GROUPS.flatMap(g => g.tasks), [])
-  const otherTasks = React.useMemo(
-    () => orderedSchedules.filter(s => !groupedTaskNames.includes(s.task)),
-    [orderedSchedules, groupedTaskNames],
-  )
+  const otherTasks = React.useMemo(() => orderedSchedules.filter(s => !groupedTaskNames.includes(s.task)), [orderedSchedules, groupedTaskNames])
 
   const adminTaskFilterOptions: Array<[string, string, boolean?]> = [
-    ['rum_sync', 'RUM Sync'],
-    ['full_sync', 'Full Sync'],
-    ['gap_heal', 'Gap Heal'],
-    ['alerts', 'Alerts', true],
-    ['commit', 'Commit'],
-    ['rum_commit', 'RUM Commit'],
-    ['optimize', 'Optimize'],
-    ['local_compact', 'Local Compact'],
-    ['rollup_compact_daily', 'Rollup Compact'],
-    ['rollup_hour_heal', 'Rollup Heal'],
-    ['expire_snapshots', 'Expire'],
+    ['rum_sync', 'RUM Sync'], ['full_sync', 'Full Sync'], ['gap_heal', 'Gap Heal'], ['alerts', 'Alerts', true],
+    ['commit', 'Commit'], ['rum_commit', 'RUM Commit'], ['optimize', 'Optimize'], ['local_compact', 'Local Compact'],
+    ['rollup_compact_daily', 'Rollup Compact'], ['rollup_hour_heal', 'Rollup Heal'], ['expire_snapshots', 'Expire'],
     ...(status?.ngwaf_workspace_id ? [['ngwaf_sync', 'NGWAF Sync'] as [string, string]] : []),
     ['metadata_cleanup', 'Metadata Cleanup'],
   ]
@@ -379,12 +624,7 @@ export function CronTab({
                   ) : (
                     <>
                       {CRON_GROUPS.map(group => (
-                        <CronScheduleGroupSection
-                          key={group.title}
-                          title={group.title}
-                          items={orderedSchedules.filter(s => group.tasks.includes(s.task))}
-                          onOpenConsole={handleOpenConsole}
-                        />
+                        <CronScheduleGroupSection key={group.title} title={group.title} items={orderedSchedules.filter(s => group.tasks.includes(s.task))} onOpenConsole={handleOpenConsole} />
                       ))}
                       <CronScheduleGroupSection title="Other Tasks" items={otherTasks} onOpenConsole={handleOpenConsole} />
                     </>
@@ -420,11 +660,8 @@ export function CronTab({
               <div className="flex items-center gap-2">
                 <ColumnVisibilityDropdown table={table} />
                 <Button
-                  variant="outline"
-                  size="sm"
+                  variant="outline" size="sm" className="h-8 text-xs" disabled={isFetchingCron}
                   onClick={() => queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsFor(activeServiceId) })}
-                  disabled={isFetchingCron}
-                  className="h-8 text-xs"
                 >
                   <RefreshCw className={`h-3 w-3 mr-1.5 ${isFetchingCron ? 'animate-spin' : ''}`} />
                   Refresh
@@ -437,14 +674,9 @@ export function CronTab({
                 </button>
               </div>
               <ConfirmDialog
-                open={isPurgeOpen}
-                onOpenChange={setIsPurgeOpen}
-                title="Purge all cron logs?"
+                open={isPurgeOpen} onOpenChange={setIsPurgeOpen} title="Purge all cron logs?"
                 description="This will permanently delete the entire history of automated background job records for this service."
-                confirmLabel="Purge"
-                isDangerous
-                isPending={purgeMutation.isPending}
-                onConfirm={() => purgeMutation.mutate()}
+                confirmLabel="Purge" isDangerous isPending={purgeMutation.isPending} onConfirm={() => purgeMutation.mutate()}
               />
             </div>
           </>
@@ -461,25 +693,12 @@ type AuditLogEntry = components['schemas']['AuditLogEntry']
 type TreeNode = components['schemas']['TreeNode']
 
 interface AuditDetails {
-  bucket?: string
-  fos_bucket_name?: string
-  prefix?: string
-  fos_prefix?: string
-  region?: string
-  fos_region?: string
-  sample_rate?: number | string
-  log_period?: number | string
-  edge_only?: boolean
-  cdn_url?: string
-  enable_cron_sync?: boolean
-  log_retention_days?: number
-  delete_after?: boolean
-  log_fields?: { groups?: string[]; field_overrides?: Record<string, boolean> }
-  log_fields_deployed?: boolean
-  groups_before?: string[]
-  groups_after?: string[]
-  fields_added?: string[]
-  fields_removed?: string[]
+  bucket?: string; fos_bucket_name?: string; prefix?: string; fos_prefix?: string
+  region?: string; fos_region?: string; sample_rate?: number | string; log_period?: number | string
+  edge_only?: boolean; cdn_url?: string; enable_cron_sync?: boolean; log_retention_days?: number
+  delete_after?: boolean; log_fields?: { groups?: string[]; field_overrides?: Record<string, boolean> }
+  log_fields_deployed?: boolean; groups_before?: string[]; groups_after?: string[]
+  fields_added?: string[]; fields_removed?: string[]
 }
 
 export type CatalogMaps = {
@@ -494,9 +713,7 @@ const NO_FILES_TASKS = new Set([
   'expire_snapshots', 'rollup_compact_daily', 'rollup_hour_heal',
   'metadata_cleanup', 'insights_prewarmer', 'partial_hour_merge',
 ])
-const NO_ROWS_TASKS = new Set([
-  ...NO_FILES_TASKS, 'optimize', 'commit', 'rum_commit', 'local_compact',
-])
+const NO_ROWS_TASKS = new Set([...NO_FILES_TASKS, 'optimize', 'commit', 'rum_commit', 'local_compact'])
 
 const ADMIN_ONLY_CRON_COLUMNS: ColumnDef<CronRun>[] = [
   {
@@ -504,9 +721,7 @@ const ADMIN_ONLY_CRON_COLUMNS: ColumnDef<CronRun>[] = [
     header: 'Log Files Deleted',
     cell: ({ row }) =>
       row.original.status === 'running' || row.original.task !== 'log_discovery' ? DASH_CELL : (
-        <span className="font-mono text-muted-foreground tabular-nums text-xs">
-          {formatCount(row.original.files_deleted_fos || 0)}
-        </span>
+        <span className="font-mono text-muted-foreground tabular-nums text-xs">{formatCount(row.original.files_deleted_fos || 0)}</span>
       ),
   },
   {
@@ -515,11 +730,7 @@ const ADMIN_ONLY_CRON_COLUMNS: ColumnDef<CronRun>[] = [
     cell: ({ row }) => {
       if (row.original.status === 'running') return PROCESSING_CELL
       const val = row.original.task === 'commit' ? row.original.rows_ingested : null
-      return (
-        <span className="font-mono text-muted-foreground tabular-nums text-xs">
-          {val != null ? formatCount(val) : DASH_CELL}
-        </span>
-      )
+      return <span className="font-mono text-muted-foreground tabular-nums text-xs">{val != null ? formatCount(val) : DASH_CELL}</span>
     },
   },
 ]
@@ -527,20 +738,12 @@ const ADMIN_ONLY_CRON_COLUMNS: ColumnDef<CronRun>[] = [
 export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
   return React.useMemo(() => [
     {
-      accessorKey: 'started_at',
-      id: 'started_at',
-      meta: { label: 'Started At' },
-      header: 'Started At',
+      accessorKey: 'started_at', id: 'started_at', meta: { label: 'Started At' }, header: 'Started At',
       cell: ({ row }) => <DateTimeCell iso={row.original.started_at} />,
     },
     {
-      id: 'finished_at',
-      meta: { label: 'Finished At' },
-      accessorFn: (row) =>
-        row.started_at && row.duration_s != null
-          ? new Date(new Date(row.started_at).getTime() + row.duration_s * 1000).toISOString()
-          : null,
-      enableSorting: false,
+      id: 'finished_at', meta: { label: 'Finished At' }, enableSorting: false,
+      accessorFn: (row) => row.started_at && row.duration_s != null ? new Date(new Date(row.started_at).getTime() + row.duration_s * 1000).toISOString() : null,
       header: () => <span className="text-xs font-medium px-2.5">Finished At</span>,
       cell: ({ row }) => {
         const { status, started_at: startIso, duration_s: dur } = row.original
@@ -549,10 +752,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
       },
     },
     {
-      accessorKey: 'task',
-      id: 'task',
-      meta: { label: 'Task' },
-      header: 'Task',
+      accessorKey: 'task', id: 'task', meta: { label: 'Task' }, header: 'Task',
       cell: ({ row }) => {
         const { task, summary } = row.original
         const isSync = task === 'log_discovery' || task === 'metadata_sync'
@@ -565,9 +765,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
                     {CRON_DISPLAY_NAMES[task] || task}
                   </Badge>
                 } />
-                <TooltipContent side="right" className="max-w-[250px] text-xs">
-                  <p>{CRON_EXPLANATIONS[task] || 'Background job.'}</p>
-                </TooltipContent>
+                <TooltipContent side="right" className="max-w-[250px] text-xs"><p>{CRON_EXPLANATIONS[task] || 'Background job.'}</p></TooltipContent>
               </Tooltip>
             </TooltipProvider>
             {summary && <span className="text-[11px] text-muted-foreground whitespace-normal break-words leading-tight">{summary}</span>}
@@ -576,10 +774,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
       },
     },
     {
-      accessorKey: 'status',
-      id: 'status',
-      meta: { label: 'Status' },
-      header: 'Status',
+      accessorKey: 'status', id: 'status', meta: { label: 'Status' }, header: 'Status',
       cell: ({ row }) => {
         const { status: val, error_message: err, corrupt_rows } = row.original
         if (val === 'running') {
@@ -599,31 +794,18 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
         return (
           <div className="flex items-center gap-1.5">
             <Tooltip>
-              <TooltipTrigger render={<Badge variant="destructive" className="px-1.5 py-0 shadow-none uppercase text-[10px] font-bold" />}>
-                Error
-              </TooltipTrigger>
+              <TooltipTrigger render={<Badge variant="destructive" className="px-1.5 py-0 shadow-none uppercase text-[10px] font-bold" />}>Error</TooltipTrigger>
               <TooltipContent className="max-w-[400px] break-words bg-destructive text-white dark:text-white">
                 <p className="text-xs font-mono">{err || 'Unknown error'}</p>
               </TooltipContent>
             </Tooltip>
-            {err && (
-              <CopyButton
-                text={err}
-                ariaLabel="Copy full error message"
-                title="Copy full error message"
-                stopPropagation
-                className="h-6 w-6 text-muted-foreground hover:text-foreground"
-              />
-            )}
+            {err && <CopyButton text={err} ariaLabel="Copy full error message" title="Copy full error message" stopPropagation className="h-6 w-6 text-muted-foreground hover:text-foreground" />}
           </div>
         )
       },
     },
     {
-      accessorKey: 'duration_s',
-      id: 'duration_s',
-      meta: { label: 'Duration' },
-      header: 'Duration',
+      accessorKey: 'duration_s', id: 'duration_s', meta: { label: 'Duration' }, header: 'Duration',
       cell: ({ row }) => {
         const s = row.original.duration_s
         if (s == null) return <span className="font-mono text-muted-foreground tabular-nums text-xs">—</span>
@@ -635,36 +817,22 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
       },
     },
     {
-      accessorKey: 'files_downloaded',
-      id: 'files_downloaded',
-      meta: { label: 'Files Downloaded' },
-      header: 'Files Processed',
+      accessorKey: 'files_downloaded', id: 'files_downloaded', meta: { label: 'Files Downloaded' }, header: 'Files Processed',
       cell: ({ row }) => {
         if (row.original.status === 'running') return PROCESSING_CELL
         const { task, files_downloaded, rows_ingested, parquet_files_optimized } = row.original
-        if (NO_FILES_TASKS.has(task)) return DASH_CELL
+        if (NO_FILES_TASKS.has(task) || (task === 'metadata_sync' && !isAnalyst)) return DASH_CELL
+        if ((task === 'commit' || task === 'rum_commit') && !rows_ingested) return DASH_CELL
 
-        let count = files_downloaded || 0
-        let label = 'raw logs'
-        if (task === 'alerts') {
-          label = count === 1 ? 'alert evaluated' : 'alerts evaluated'
-        } else if (task === 'commit' || task === 'rum_commit') {
-          if (!rows_ingested) return DASH_CELL
-          count = 1
-          label = 'cloud file cached'
-        } else if (task === 'metadata_sync') {
-          if (!isAnalyst) return DASH_CELL
-          label = 'cloud files downloaded'
-        } else if (task === 'optimize') {
-          count = parquet_files_optimized || 0
-          label = 'files merged'
-        } else if (task === 'local_compact') {
-          label = 'files merged'
-        } else if (task === 'rum_sync' || task === 'rum_discovery') {
-          label = 'raw RUM logs'
-        } else if (task === 'ngwaf_sync') {
-          label = count === 1 ? 'bot record' : 'bot records'
-        }
+        const count = task === 'commit' || task === 'rum_commit' ? 1 : task === 'optimize' ? (parquet_files_optimized || 0) : (files_downloaded || 0)
+        const label =
+          task === 'alerts' ? (count === 1 ? 'alert evaluated' : 'alerts evaluated') :
+          task === 'commit' || task === 'rum_commit' ? 'cloud file cached' :
+          task === 'metadata_sync' ? 'cloud files downloaded' :
+          task === 'optimize' || task === 'local_compact' ? 'files merged' :
+          task === 'rum_sync' || task === 'rum_discovery' ? 'raw RUM logs' :
+          task === 'ngwaf_sync' ? (count === 1 ? 'bot record' : 'bot records') :
+          'raw logs'
 
         return (
           <span className="font-mono text-muted-foreground tabular-nums text-xs" title={label}>
@@ -693,9 +861,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
         const rows = rows_ingested || 0
         const corrupt = corrupt_rows || 0
         if (task === 'metadata_sync') {
-          return rows === 0 ? DASH_CELL : (
-            <span className="font-mono text-muted-foreground tabular-nums text-xs">{formatCount(rows)}</span>
-          )
+          return rows === 0 ? DASH_CELL : <span className="font-mono text-muted-foreground tabular-nums text-xs">{formatCount(rows)}</span>
         }
 
         return (
@@ -707,16 +873,11 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
                   <TooltipTrigger render={<Badge variant="destructive" className="px-1.5 py-0 shadow-none text-[10px] font-bold" />}>
                     {formatCount(corrupt)} Skipped
                   </TooltipTrigger>
-                  <TooltipContent>
-                    These lines were skipped due to missing timestamps or invalid JSON structure.
-                  </TooltipContent>
+                  <TooltipContent>These lines were skipped due to missing timestamps or invalid JSON structure.</TooltipContent>
                 </Tooltip>
                 {error_message && (
                   <CopyButton
-                    text={error_message}
-                    ariaLabel="Copy corrupt-line details"
-                    title="Copy corrupt lines"
-                    stopPropagation
+                    text={error_message} ariaLabel="Copy corrupt-line details" title="Copy corrupt lines" stopPropagation
                     className="h-5 w-5 text-muted-foreground hover:text-foreground opacity-0 group-hover/corrupt:opacity-100 transition-opacity"
                   />
                 )}
@@ -740,17 +901,9 @@ function AuditKVRow({ label, value }: { label: string; value: React.ReactNode })
 }
 
 function AuditGroupDiffCard({
-  title,
-  colorClass,
-  bgClass,
-  ids,
-  groups,
+  title, colorClass, bgClass, ids, groups,
 }: {
-  title: string
-  colorClass: string
-  bgClass: string
-  ids: string[]
-  groups: CatalogMaps['groups']
+  title: string; colorClass: string; bgClass: string; ids: string[]; groups: CatalogMaps['groups']
 }) {
   return (
     <div className={cn("border rounded-md p-3", bgClass)}>
@@ -770,17 +923,11 @@ function AuditGroupDiffCard({
 export function useAuditColumns(catalogMaps: CatalogMaps): ColumnDef<AuditLogEntry>[] {
   return React.useMemo(() => [
     {
-      accessorKey: 'timestamp',
-      id: 'timestamp',
-      meta: { label: 'Time' },
-      header: 'Time',
+      accessorKey: 'timestamp', id: 'timestamp', meta: { label: 'Time' }, header: 'Time',
       cell: ({ row }) => <DateTimeCell iso={row.original.timestamp} />,
     },
     {
-      accessorKey: 'event_type',
-      id: 'event_type',
-      meta: { label: 'Event Type' },
-      header: 'Event Type',
+      accessorKey: 'event_type', id: 'event_type', meta: { label: 'Event Type' }, header: 'Event Type',
       cell: ({ row }) => {
         const type = row.original.event_type || 'unknown'
         const colorClass =
@@ -789,25 +936,15 @@ export function useAuditColumns(catalogMaps: CatalogMaps): ColumnDef<AuditLogEnt
           type === 'fastly_activation' ? 'bg-blue-500/10 text-blue-600' :
           type.includes('update') ? 'bg-amber-500/10 text-amber-600' :
           'bg-slate-500/10 text-slate-600'
-        return (
-          <Badge className={cn("w-fit px-1.5 py-0 shadow-none text-[10px] uppercase font-bold", colorClass)}>
-            {type.replace(/_/g, ' ')}
-          </Badge>
-        )
+        return <Badge className={cn("w-fit px-1.5 py-0 shadow-none text-[10px] uppercase font-bold", colorClass)}>{type.replace(/_/g, ' ')}</Badge>
       },
     },
     {
-      accessorKey: 'actor',
-      id: 'actor',
-      meta: { label: 'Actor' },
-      header: 'Actor',
+      accessorKey: 'actor', id: 'actor', meta: { label: 'Actor' }, header: 'Actor',
       cell: ({ row }) => <span className="text-muted-foreground">{row.original.actor}</span>,
     },
     {
-      accessorKey: 'details',
-      id: 'details',
-      meta: { label: 'Details' },
-      header: 'Details',
+      accessorKey: 'details', id: 'details', meta: { label: 'Details' }, header: 'Details',
       cell: ({ row }) => {
         const details: AuditDetails = row.original.details
         if (!details || typeof details !== 'object' || Object.keys(details).length === 0) {
@@ -884,15 +1021,9 @@ export function useAuditColumns(catalogMaps: CatalogMaps): ColumnDef<AuditLogEnt
                           <div className="flex flex-wrap gap-1.5">
                             {details.log_fields.groups?.map((id) => {
                               const g = catalogMaps.groups[id === null ? "null" : String(id)]
-                              return (
-                                <Badge key={id} variant="outline" className="text-[10px] py-0 font-normal bg-background/50">
-                                  {g ? g.label : id}
-                                </Badge>
-                              )
+                              return <Badge key={id} variant="outline" className="text-[10px] py-0 font-normal bg-background/50">{g ? g.label : id}</Badge>
                             })}
-                            {(!details.log_fields.groups || details.log_fields.groups.length === 0) && (
-                              <span className="text-xs text-muted-foreground italic">None</span>
-                            )}
+                            {!details.log_fields.groups?.length && <span className="text-xs text-muted-foreground italic">None</span>}
                           </div>
                         </div>
 
@@ -907,7 +1038,7 @@ export function useAuditColumns(catalogMaps: CatalogMaps): ColumnDef<AuditLogEnt
                                     key={id}
                                     className={cn(
                                       "text-[10px] py-0 font-normal border shadow-none",
-                                      enabled ? "bg-green-500/10 text-green-600 border-green-500/20" : "bg-red-500/10 text-red-600 border-red-500/20"
+                                      enabled ? "bg-green-500/10 text-green-600 border-green-500/20" : "bg-red-500/10 text-red-600 border-red-500/20",
                                     )}
                                   >
                                     {enabled ? '+' : '-'}{f ? f.label : id}
@@ -988,11 +1119,7 @@ export function useAuditColumns(catalogMaps: CatalogMaps): ColumnDef<AuditLogEnt
               ) : (
                 <div className="flex flex-col gap-2 mt-2">
                   {Object.entries(details).map(([key, value]) => {
-                    if (
-                      (key.toLowerCase().includes('prefix') && !value) ||
-                      value === '' || value === null || value === undefined ||
-                      (type === 'fastly_activation' && key === 'active')
-                    ) return null
+                    if ((key.toLowerCase().includes('prefix') && !value) || value === '' || value == null || (type === 'fastly_activation' && key === 'active')) return null
                     const valString = typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value)
                     return (
                       <div key={key} className="flex flex-col border rounded p-3 bg-muted/20">
@@ -1016,17 +1143,9 @@ export function useAuditColumns(catalogMaps: CatalogMaps): ColumnDef<AuditLogEnt
 }
 
 export function CronLiveLog({
-  runId,
-  singleLine = false,
-  terminalMode = !singleLine,
-  startedAt,
-  onDone,
+  runId, singleLine = false, terminalMode = !singleLine, startedAt, onDone,
 }: {
-  runId: number | string | undefined
-  singleLine?: boolean
-  terminalMode?: boolean
-  startedAt?: string
-  onDone?: () => void
+  runId: number | string | undefined; singleLine?: boolean; terminalMode?: boolean; startedAt?: string; onDone?: () => void
 }) {
   const { lines, status, start, stop } = useSSE()
   const startedForRunId = useRef<number | string | undefined>(undefined)
@@ -1055,37 +1174,36 @@ export function CronLiveLog({
   }, [status, onDone, runId])
 
   const recentLines = singleLine ? lines.slice(-1) : terminalMode ? lines : lines.slice(-2)
+  const renderLine = (line: typeof lines[number], truncateAt80: boolean) => {
+    let text = (line.message as string) || (line.type === 'file_done' ? `Processed ${line.file_name}` : line.type === 'done' ? 'Done.' : JSON.stringify(line))
+    if (truncateAt80 && text.length > 80) text = text.substring(0, 80) + '...'
+    const cls =
+      line.type === 'error' ? (truncateAt80 ? 'text-red-500' : 'text-red-400 font-medium') :
+      line.type === 'done' ? (truncateAt80 ? 'text-emerald-500' : 'text-emerald-400 font-semibold') :
+      line.type === 'status' ? 'text-blue-400' :
+      line.type === 'file_done' ? (truncateAt80 ? 'text-muted-foreground' : 'text-zinc-400') :
+      undefined
+    return { text, node: <span className={cls}>{line.type === 'file_done' ? `Processed ${String(line.file_name)}` : text}</span> }
+  }
 
   if (recentLines.length === 0) {
     if (singleLine) {
       return (
         <div className="flex items-center gap-1.5 text-[9px] font-mono text-muted-foreground truncate h-full w-full">
-          {status === 'streaming' ? (
-            <><Loader2 className="w-3 h-3 animate-spin shrink-0" /> <span className="truncate">Loading logs...</span></>
-          ) : status === 'error' ? (
-            <span className="text-red-500 truncate">Failed to load logs.</span>
-          ) : (
-            <span className="text-muted-foreground/50 truncate italic">Waiting...</span>
-          )}
+          {status === 'streaming' ? <><Loader2 className="w-3 h-3 animate-spin shrink-0" /> <span className="truncate">Loading logs...</span></>
+            : status === 'error' ? <span className="text-red-500 truncate">Failed to load logs.</span>
+            : <span className="text-muted-foreground/50 truncate italic">Waiting...</span>}
         </div>
       )
     }
 
     return (
       <div className="flex flex-col gap-1 w-full font-mono text-xs text-zinc-400 py-1">
-        {startedAt && (
-          <div className="text-zinc-500 border-b border-zinc-900 pb-1.5 mb-1.5">
-            [SESSION INITIATED AT: {full(startedAt)} {abbr()}]
-          </div>
-        )}
+        {startedAt && <div className="text-zinc-500 border-b border-zinc-900 pb-1.5 mb-1.5">[SESSION INITIATED AT: {full(startedAt)} {abbr()}]</div>}
         <div className="flex items-center gap-2">
-          {status === 'streaming' ? (
-            <><Loader2 className="w-3.5 h-3.5 animate-spin shrink-0 text-blue-400" /> <span>Streaming console output...</span></>
-          ) : status === 'error' ? (
-            <span className="text-red-400">Failed to stream logs.</span>
-          ) : (
-            <span className="text-zinc-500 italic">Waiting for stream...</span>
-          )}
+          {status === 'streaming' ? <><Loader2 className="w-3.5 h-3.5 animate-spin shrink-0 text-blue-400" /> <span>Streaming console output...</span></>
+            : status === 'error' ? <span className="text-red-400">Failed to stream logs.</span>
+            : <span className="text-zinc-500 italic">Waiting for stream...</span>}
         </div>
       </div>
     )
@@ -1095,17 +1213,8 @@ export function CronLiveLog({
     return (
       <div className="flex flex-col text-[9px] font-mono text-muted-foreground truncate w-full h-full justify-center">
         {recentLines.map((line, i) => {
-          let text = (line.message as string) || (line.type === 'file_done' ? `Processed ${line.file_name}` : line.type === 'done' ? 'Done.' : JSON.stringify(line))
-          if (text.length > 80) text = text.substring(0, 80) + '...'
-          return (
-            <div key={line._id ?? `idx-${i}`} className="truncate w-full" title={typeof line.message === 'string' ? line.message : text}>
-              {line.type === 'error' ? <span className="text-red-500">{text}</span> :
-               line.type === 'done' ? <span className="text-emerald-500">{text}</span> :
-               line.type === 'status' ? <span className="text-blue-400">{text}</span> :
-               line.type === 'file_done' ? <span className="text-muted-foreground">Processed {String(line.file_name)}</span> :
-               <span>{text}</span>}
-            </div>
-          )
+          const { text, node } = renderLine(line, true)
+          return <div key={line._id ?? `idx-${i}`} className="truncate w-full" title={typeof line.message === 'string' ? line.message : text}>{node}</div>
         })}
       </div>
     )
@@ -1113,33 +1222,18 @@ export function CronLiveLog({
 
   return (
     <div
-      role="log"
-      aria-live="polite"
-      aria-atomic="false"
+      role="log" aria-live="polite" aria-atomic="false"
       aria-label={terminalMode ? "Cron job output stream" : "Recent cron output"}
       className={terminalMode
         ? "flex flex-col gap-1.5 w-full font-mono text-xs leading-relaxed text-zinc-200"
-        : "flex flex-col gap-0.5 mt-1.5 bg-background/50 border border-border/50 p-2 rounded text-[10px] font-mono text-muted-foreground w-[280px] max-w-sm overflow-hidden"
-      }
+        : "flex flex-col gap-0.5 mt-1.5 bg-background/50 border border-border/50 p-2 rounded text-[10px] font-mono text-muted-foreground w-[280px] max-w-sm overflow-hidden"}
     >
-      {terminalMode && startedAt && (
-        <div className="text-zinc-500 border-b border-zinc-900 pb-1.5 mb-1.5">
-          [SESSION INITIATED AT: {full(startedAt)} {abbr()}]
-        </div>
-      )}
+      {terminalMode && startedAt && <div className="text-zinc-500 border-b border-zinc-900 pb-1.5 mb-1.5">[SESSION INITIATED AT: {full(startedAt)} {abbr()}]</div>}
       {recentLines.map((line, i) => {
-        const text = (line.message as string) || (line.type === 'file_done' ? `Processed ${line.file_name}` : line.type === 'done' ? 'Done.' : JSON.stringify(line))
+        const { text, node } = renderLine(line, false)
         return (
-          <div
-            key={line._id ?? `idx-${i}`}
-            className={terminalMode ? "whitespace-pre-wrap break-all w-full text-zinc-300" : "truncate w-full"}
-            title={typeof line.message === 'string' ? line.message : text}
-          >
-            {line.type === 'error' ? <span className="text-red-400 font-medium">{text}</span> :
-             line.type === 'done' ? <span className="text-emerald-400 font-semibold">{text}</span> :
-             line.type === 'status' ? <span className="text-blue-400">{text}</span> :
-             line.type === 'file_done' ? <span className="text-zinc-400">Processed {String(line.file_name)}</span> :
-             <span>{text}</span>}
+          <div key={line._id ?? `idx-${i}`} className={terminalMode ? "whitespace-pre-wrap break-all w-full text-zinc-300" : "truncate w-full"} title={typeof line.message === 'string' ? line.message : text}>
+            {node}
           </div>
         )
       })}
@@ -1148,20 +1242,11 @@ export function CronLiveLog({
 }
 
 export function FloatingOperationsDock({
-  displayedJobs,
-  setDisplayedJobs,
-  isOpen,
-  setIsOpen,
-  selectedJobId,
-  setSelectedJobId,
-  onDismiss,
+  displayedJobs, setDisplayedJobs, isOpen, setIsOpen, selectedJobId, setSelectedJobId, onDismiss,
 }: {
-  displayedJobs: CronRun[]
-  setDisplayedJobs: React.Dispatch<React.SetStateAction<CronRun[]>>
-  isOpen: boolean
-  setIsOpen: (open: boolean) => void
-  selectedJobId: number | string | null
-  setSelectedJobId: (id: number | string | null) => void
+  displayedJobs: CronRun[]; setDisplayedJobs: React.Dispatch<React.SetStateAction<CronRun[]>>
+  isOpen: boolean; setIsOpen: (open: boolean) => void
+  selectedJobId: number | string | null; setSelectedJobId: (id: number | string | null) => void
   onDismiss: (id: number) => void
 }) {
   const { full, abbr } = useDateFormat()
@@ -1174,27 +1259,15 @@ export function FloatingOperationsDock({
     <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-2 pointer-events-auto">
       {!isOpen ? (
         <button
-          onClick={() => setIsOpen(true)}
-          aria-expanded={false}
-          aria-controls="floating-ops-panel"
-          aria-label={
-            runningCount > 0
-              ? `${runningCount} active operation${runningCount > 1 ? 's' : ''} running, open console`
-              : `${displayedJobs.length} completed operation${displayedJobs.length > 1 ? 's' : ''}, open console`
-          }
+          onClick={() => setIsOpen(true)} aria-expanded={false} aria-controls="floating-ops-panel"
+          aria-label={runningCount > 0 ? `${runningCount} active operation${runningCount > 1 ? 's' : ''} running, open console` : `${displayedJobs.length} completed operation${displayedJobs.length > 1 ? 's' : ''}, open console`}
           className={cn(
             "px-4 py-2.5 rounded-full text-xs font-semibold flex items-center gap-2.5 shadow-2xl transition-all hover:scale-105 duration-200 cursor-pointer border",
-            runningCount > 0
-              ? "bg-blue-600 hover:bg-blue-700 text-white border-blue-500/20 animate-bounce"
-              : "bg-zinc-850 hover:bg-zinc-800 text-zinc-300 border-zinc-700/50"
+            runningCount > 0 ? "bg-blue-600 hover:bg-blue-700 text-white border-blue-500/20 animate-bounce" : "bg-zinc-850 hover:bg-zinc-800 text-zinc-300 border-zinc-700/50",
           )}
         >
           {runningCount > 0 ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-blue-200" /> : <Database className="h-3.5 w-3.5 text-zinc-400" />}
-          <span>
-            {runningCount > 0
-              ? `${runningCount} active operation${runningCount > 1 ? 's' : ''} running...`
-              : `${displayedJobs.length} completed operation${displayedJobs.length > 1 ? 's' : ''} (logs)`}
-          </span>
+          <span>{runningCount > 0 ? `${runningCount} active operation${runningCount > 1 ? 's' : ''} running...` : `${displayedJobs.length} completed operation${displayedJobs.length > 1 ? 's' : ''} (logs)`}</span>
         </button>
       ) : (
         <div id="floating-ops-panel" className="bg-zinc-950 text-zinc-100 border border-zinc-800 rounded-lg shadow-2xl w-[440px] sm:w-[500px] h-[380px] flex flex-col overflow-hidden animate-in slide-in-from-bottom-5 duration-300">
@@ -1203,13 +1276,7 @@ export function FloatingOperationsDock({
               <Database className="h-3.5 w-3.5 text-blue-500" />
               <span>Console Log Terminal</span>
             </div>
-            <button
-              onClick={() => setIsOpen(false)}
-              aria-expanded={true}
-              aria-controls="floating-ops-panel"
-              aria-label="Minimize console"
-              className="text-zinc-400 hover:text-zinc-200 p-1 hover:bg-zinc-800 rounded cursor-pointer transition-colors"
-            >
+            <button onClick={() => setIsOpen(false)} aria-expanded={true} aria-controls="floating-ops-panel" aria-label="Minimize console" className="text-zinc-400 hover:text-zinc-200 p-1 hover:bg-zinc-800 rounded cursor-pointer transition-colors">
               <ChevronDown className="h-4 w-4" />
             </button>
           </div>
@@ -1224,26 +1291,14 @@ export function FloatingOperationsDock({
                     key={job.id}
                     className={cn(
                       "rounded-t text-[10px] font-mono uppercase tracking-wider flex items-center gap-1.5 border-t border-x transition-all shrink-0",
-                      isActive
-                        ? "bg-zinc-950 text-blue-400 border-zinc-800 border-b-zinc-950 font-bold"
-                        : "bg-transparent text-zinc-400 border-transparent hover:text-zinc-200 hover:bg-zinc-800/30"
+                      isActive ? "bg-zinc-950 text-blue-400 border-zinc-800 border-b-zinc-950 font-bold" : "bg-transparent text-zinc-400 border-transparent hover:text-zinc-200 hover:bg-zinc-800/30",
                     )}
                   >
-                    <button
-                      type="button"
-                      onClick={() => setSelectedJobId(job.id)}
-                      className="pl-3 py-1.5 flex items-center gap-1.5 cursor-pointer uppercase tracking-wider"
-                    >
+                    <button type="button" onClick={() => setSelectedJobId(job.id)} className="pl-3 py-1.5 flex items-center gap-1.5 cursor-pointer uppercase tracking-wider">
                       <span className={cn("w-1.5 h-1.5 rounded-full transition-colors duration-300", job.status === 'running' ? "bg-blue-500 animate-pulse" : "bg-zinc-600")} />
                       {taskLabel}
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => onDismiss(job.id)}
-                      className="mr-3 hover:bg-zinc-800 p-0.5 rounded text-zinc-500 hover:text-zinc-300 cursor-pointer"
-                      title="Dismiss task"
-                      aria-label={`Dismiss ${taskLabel} task`}
-                    >
+                    <button type="button" onClick={() => onDismiss(job.id)} className="mr-3 hover:bg-zinc-800 p-0.5 rounded text-zinc-500 hover:text-zinc-300 cursor-pointer" title="Dismiss task" aria-label={`Dismiss ${taskLabel} task`}>
                       <X className="h-2.5 w-2.5" />
                     </button>
                   </div>
@@ -1256,35 +1311,19 @@ export function FloatingOperationsDock({
             <div className="flex-1 overflow-hidden flex flex-col">
               <div className="text-[10px] text-zinc-500 border-b border-zinc-900 pb-1 mb-2 flex items-center justify-between shrink-0">
                 <span>STREAM ID: {activeJob?.id}{activeJob?.started_at && ` • STARTED: ${full(activeJob.started_at)} ${abbr()}`}</span>
-                {activeJob?.status === 'running' ? (
-                  <span className="text-emerald-500 font-bold uppercase animate-pulse">● LIVE STREAMING</span>
-                ) : (
-                  <span className="text-zinc-500 font-bold uppercase">● COMPLETED</span>
-                )}
+                {activeJob?.status === 'running' ? <span className="text-emerald-500 font-bold uppercase animate-pulse">● LIVE STREAMING</span> : <span className="text-zinc-500 font-bold uppercase">● COMPLETED</span>}
               </div>
               <div className="flex-1 overflow-y-auto min-h-0 bg-black/30 rounded border border-zinc-900 p-2">
                 <CronLiveLog
-                  key={activeJob?.id}
-                  runId={activeJob?.id}
-                  singleLine={false}
-                  startedAt={activeJob?.started_at}
-                  onDone={() => {
-                    if (activeJob?.id) {
-                      setDisplayedJobs(prev => prev.map(j => j.id === activeJob.id ? { ...j, status: 'completed' } : j))
-                    }
-                  }}
+                  key={activeJob?.id} runId={activeJob?.id} singleLine={false} startedAt={activeJob?.started_at}
+                  onDone={() => { if (activeJob?.id) setDisplayedJobs(prev => prev.map(j => j.id === activeJob.id ? { ...j, status: 'completed' } : j)) }}
                 />
               </div>
             </div>
 
             <div className="mt-2 pt-2 border-t border-zinc-900 flex items-center justify-between text-[10px] text-zinc-500 shrink-0">
               <span>Task: {activeJob?.task}</span>
-              <button
-                onClick={() => onDismiss(activeJob?.id)}
-                className="text-red-400 hover:text-red-300 hover:underline cursor-pointer"
-              >
-                Dismiss Active View
-              </button>
+              <button onClick={() => onDismiss(activeJob?.id)} className="text-red-400 hover:text-red-300 hover:underline cursor-pointer">Dismiss Active View</button>
             </div>
           </div>
         </div>
@@ -1294,29 +1333,13 @@ export function FloatingOperationsDock({
 }
 
 const hasStats = (col: SchemaColumn) => col.null_percentage !== undefined
-const populatedPct = (col: SchemaColumn) =>
-  col.null_percentage != null ? Math.max(0, 100 - col.null_percentage) : null
+const populatedPct = (col: SchemaColumn) => col.null_percentage != null ? Math.max(0, 100 - col.null_percentage) : null
 
 const SCHEMA_COLUMNS: ColumnDef<SchemaColumn>[] = [
+  { id: 'name', header: 'Column Name', accessorFn: (c) => c.name, size: 220, cell: ({ row }) => <span className="font-mono text-xs font-bold">{row.original.name}</span> },
+  { id: 'type', header: 'DuckDB Type', accessorFn: (c) => c.type, size: 160, cell: ({ row }) => <span className="font-mono text-xs text-muted-foreground">{row.original.type}</span> },
   {
-    id: 'name',
-    header: 'Column Name',
-    accessorFn: (c) => c.name,
-    size: 220,
-    cell: ({ row }) => <span className="font-mono text-xs font-bold">{row.original.name}</span>,
-  },
-  {
-    id: 'type',
-    header: 'DuckDB Type',
-    accessorFn: (c) => c.type,
-    size: 160,
-    cell: ({ row }) => <span className="font-mono text-xs text-muted-foreground">{row.original.type}</span>,
-  },
-  {
-    id: 'populated',
-    header: 'Populated %',
-    accessorFn: (c) => populatedPct(c) ?? -1,
-    size: 130,
+    id: 'populated', header: 'Populated %', accessorFn: (c) => populatedPct(c) ?? -1, size: 130,
     cell: ({ row }) => {
       const pct = populatedPct(row.original)
       const text = pct != null ? pct.toFixed(1) : '—'
@@ -1328,10 +1351,7 @@ const SCHEMA_COLUMNS: ColumnDef<SchemaColumn>[] = [
     },
   },
   {
-    id: 'approx_unique',
-    header: 'Approx Unique',
-    accessorFn: (c) => c.approx_unique ?? -1,
-    size: 140,
+    id: 'approx_unique', header: 'Approx Unique', accessorFn: (c) => c.approx_unique ?? -1, size: 140,
     cell: ({ row }) => (
       <span className="block font-mono text-xs text-right text-muted-foreground tabular-nums">
         {hasStats(row.original) ? formatCountMaybe(row.original.approx_unique) ?? '—' : '—'}
@@ -1339,10 +1359,7 @@ const SCHEMA_COLUMNS: ColumnDef<SchemaColumn>[] = [
     ),
   },
   ...(['min', 'max'] as const).map((field): ColumnDef<SchemaColumn> => ({
-    id: field,
-    header: field === 'min' ? 'Min Value' : 'Max Value',
-    accessorFn: (c) => c[field] ?? '',
-    size: 200,
+    id: field, header: field === 'min' ? 'Min Value' : 'Max Value', accessorFn: (c) => c[field] ?? '', size: 200,
     cell: ({ row }) => (
       <span className="font-mono text-xs text-muted-foreground" title={row.original[field] ?? undefined}>
         {hasStats(row.original) ? row.original[field] ?? '—' : '—'}
@@ -1352,11 +1369,9 @@ const SCHEMA_COLUMNS: ColumnDef<SchemaColumn>[] = [
 ]
 
 export function SchemaTab({
-  schemaData,
-  isLoadingSchema,
+  schemaData, isLoadingSchema,
 }: {
-  schemaData: components['schemas']['SchemaResponse'] | undefined
-  isLoadingSchema: boolean
+  schemaData: components['schemas']['SchemaResponse'] | undefined; isLoadingSchema: boolean
 }) {
   return (
     <>
@@ -1367,42 +1382,30 @@ export function SchemaTab({
         </div>
       </div>
       <DataTableReadonly
-        columns={SCHEMA_COLUMNS}
-        data={schemaData?.schema ?? []}
-        isLoading={isLoadingSchema}
-        hideToolbar
-        showPagination={false}
-        tableCaption="DuckDB Table Schema and Statistics"
+        columns={SCHEMA_COLUMNS} data={schemaData?.schema ?? []} isLoading={isLoadingSchema}
+        hideToolbar showPagination={false} tableCaption="DuckDB Table Schema and Statistics"
       />
     </>
   )
 }
 
 export function IngestionTab({
-  ingestedColumns,
-  ingestedFiles,
-  isLoadingIngested,
+  ingestedColumns, ingestedFiles, isLoadingIngested,
 }: {
-  ingestedColumns: ColumnDef<IngestedFile>[]
-  ingestedFiles: components['schemas']['IngestedFilesResponse'] | undefined
-  isLoadingIngested: boolean
+  ingestedColumns: ColumnDef<IngestedFile>[]; ingestedFiles: components['schemas']['IngestedFilesResponse'] | undefined; isLoadingIngested: boolean
 }) {
   return (
     <DataTableReadonly
-      columns={ingestedColumns}
-      data={ingestedFiles?.files || []}
-      isLoading={isLoadingIngested}
-      searchKey="file_name"
-      initialSorting={[{ id: 'ingested_at', desc: true }]}
+      columns={ingestedColumns} data={ingestedFiles?.files || []} isLoading={isLoadingIngested}
+      searchKey="file_name" initialSorting={[{ id: 'ingested_at', desc: true }]}
       renderToolbar={(table) => (
         <div className="p-4 border-b flex flex-wrap items-center justify-between gap-4">
           <h3 className="text-sm font-medium">Log Ingestion History</h3>
           <div className="flex items-center gap-2 ml-auto">
             <Input
-              placeholder="Filter by filename..."
+              placeholder="Filter by filename..." className="max-w-sm h-8"
               value={(table.getColumn('file_name')?.getFilterValue() as string) ?? ''}
               onChange={(event) => table.getColumn('file_name')?.setFilterValue(event.target.value)}
-              className="max-w-sm h-8"
             />
             <ColumnVisibilityDropdown table={table} compact />
           </div>
@@ -1413,57 +1416,37 @@ export function IngestionTab({
 }
 
 export function ServiceHistoryTab({
-  auditColumns,
-  auditLogs,
-  isLoadingAudit,
-  isFetchingAudit,
-  eventFilter,
-  setEventFilter,
-  activeServiceId,
+  auditColumns, auditLogs, isLoadingAudit, isFetchingAudit, eventFilter, setEventFilter, activeServiceId,
 }: {
-  auditColumns: ColumnDef<AuditLogEntry>[]
-  auditLogs: components['schemas']['AuditLogsResponse'] | undefined
-  isLoadingAudit: boolean
-  isFetchingAudit: boolean
-  eventFilter: string
-  setEventFilter: (v: string) => void
-  activeServiceId: string | null | undefined
+  auditColumns: ColumnDef<AuditLogEntry>[]; auditLogs: components['schemas']['AuditLogsResponse'] | undefined
+  isLoadingAudit: boolean; isFetchingAudit: boolean; eventFilter: string; setEventFilter: (v: string) => void; activeServiceId: string | null | undefined
 }) {
   const queryClient = useQueryClient()
 
   return (
     <div className="p-0">
       <DataTableReadonly
-        columns={auditColumns}
-        data={auditLogs?.entries || []}
-        isLoading={isLoadingAudit}
-        initialSorting={[{ id: 'timestamp', desc: true }]}
+        columns={auditColumns} data={auditLogs?.entries || []} isLoading={isLoadingAudit} initialSorting={[{ id: 'timestamp', desc: true }]}
         renderToolbar={(table) => (
           <div className="flex flex-col sm:flex-row sm:items-center justify-between p-4 border-b gap-4">
             <div className="flex items-center gap-4">
               <h3 className="text-sm font-medium whitespace-nowrap">Service History</h3>
               <Select value={eventFilter} onValueChange={(v) => setEventFilter(v || 'all')}>
-                <SelectTrigger className="h-8 w-[200px] text-xs">
-                  <SelectValue placeholder="All events" />
-                </SelectTrigger>
+                <SelectTrigger className="h-8 w-[200px] text-xs"><SelectValue placeholder="All events" /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="all">All events</SelectItem>
-                  <SelectItem value="provision">Provision</SelectItem>
-                  <SelectItem value="fastly_activation">Fastly Activation</SelectItem>
-                  <SelectItem value="cron_settings_update">Cron Settings Update</SelectItem>
-                  <SelectItem value="logging_settings_update">Log Settings Updated</SelectItem>
-                  <SelectItem value="log_format_update">Log Format Update</SelectItem>
+                  {[
+                    ['all', 'All events'], ['provision', 'Provision'], ['fastly_activation', 'Fastly Activation'],
+                    ['cron_settings_update', 'Cron Settings Update'], ['logging_settings_update', 'Log Settings Updated'],
+                    ['log_format_update', 'Log Format Update'],
+                  ].map(([val, label]) => <SelectItem key={val} value={val}>{label}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
             <div className="flex items-center gap-2">
               <ColumnVisibilityDropdown table={table} />
               <Button
-                variant="outline"
-                size="sm"
+                variant="outline" size="sm" className="h-8 text-xs" disabled={isFetchingAudit}
                 onClick={() => queryClient.invalidateQueries({ queryKey: queryKeys.admin.auditLogsFor(activeServiceId) })}
-                disabled={isFetchingAudit}
-                className="h-8 text-xs"
               >
                 <RefreshCw className={`h-3 w-3 mr-1.5 ${isFetchingAudit ? 'animate-spin' : ''}`} />
                 Refresh
@@ -1477,44 +1460,20 @@ export function ServiceHistoryTab({
 }
 
 export function QuickActionsBar({
-  isAnalyst,
-  status,
-  activeServiceId,
-  recentCrons,
-  cronLogs,
-  setSseTitle,
-  setSseDescription,
-  setIsSSEModalOpen,
-  setIsSyncModalOpen,
-  reset,
-  start,
-  setDisplayedJobs,
-  setSelectedConsoleJobId,
-  setConsoleOpen,
+  isAnalyst, status, activeServiceId, recentCrons, cronLogs, setSseTitle, setSseDescription,
+  setIsSSEModalOpen, setIsSyncModalOpen, reset, start, setDisplayedJobs, setSelectedConsoleJobId, setConsoleOpen,
 }: {
-  isAnalyst: boolean
-  status: Partial<SyncStatus> | undefined
-  activeServiceId: string | null | undefined
-  recentCrons: Partial<CronRunsResponse> | undefined
-  cronLogs: Partial<CronRunsResponse> | undefined
-  setSseTitle: (s: string) => void
-  setSseDescription: (s: string) => void
-  setIsSSEModalOpen: (open: boolean) => void
-  setIsSyncModalOpen: (open: boolean) => void
-  reset: () => void
-  start: ReturnType<typeof useSSE>['start']
-  setDisplayedJobs: React.Dispatch<React.SetStateAction<CronRun[]>>
-  setSelectedConsoleJobId: (id: number | string | null) => void
-  setConsoleOpen: (open: boolean) => void
+  isAnalyst: boolean; status: Partial<SyncStatus> | undefined; activeServiceId: string | null | undefined
+  recentCrons: Partial<CronRunsResponse> | undefined; cronLogs: Partial<CronRunsResponse> | undefined
+  setSseTitle: (s: string) => void; setSseDescription: (s: string) => void
+  setIsSSEModalOpen: (open: boolean) => void; setIsSyncModalOpen: (open: boolean) => void
+  reset: () => void; start: ReturnType<typeof useSSE>['start']
+  setDisplayedJobs: React.Dispatch<React.SetStateAction<CronRun[]>>; setSelectedConsoleJobId: (id: number | string | null) => void; setConsoleOpen: (open: boolean) => void
 }) {
   const queryClient = useQueryClient()
   const isReadOnly = status?.access_level === 'read_only'
 
-  const triggerCronAction = async (
-    endpoint: '/api/admin/ingest-logs' | '/api/admin/commit-iceberg',
-    title: string,
-    description: string,
-  ) => {
+  const triggerCronAction = async (endpoint: '/api/admin/ingest-logs' | '/api/admin/commit-iceberg', title: string, description: string) => {
     try {
       const data = (await unwrapClient(client.POST(endpoint, {}))) as { run_id?: number | string } | undefined
       const runId = data?.run_id
@@ -1536,49 +1495,32 @@ export function QuickActionsBar({
       {!isAnalyst ? (
         <>
           <Button
-            size="sm"
-            variant="default"
-            className="h-8 text-xs bg-primary text-primary-foreground hover:bg-primary/90"
-            disabled={isReadOnly}
+            size="sm" variant="default" className="h-8 text-xs bg-primary text-primary-foreground hover:bg-primary/90" disabled={isReadOnly}
             onClick={() => triggerCronAction('/api/admin/ingest-logs', 'Importing Logs', 'Downloading new raw logs from Fastly Object Storage and processing them...')}
           >
             <RefreshCw className="h-3 w-3 mr-1.5" /> Import Logs
           </Button>
           <Button
-            size="sm"
-            variant="outline"
-            className="h-8 text-xs bg-background"
-            disabled={isReadOnly}
-            onClick={() => setIsSyncModalOpen(true)}
-            title="Open the range-picker to backfill a specific historical window (e.g., to close an Ingest Gap)"
+            size="sm" variant="outline" className="h-8 text-xs bg-background" disabled={isReadOnly}
+            onClick={() => setIsSyncModalOpen(true)} title="Open the range-picker to backfill a specific historical window (e.g., to close an Ingest Gap)"
           >
             <Download className="h-3 w-3 mr-1.5" /> Sync from Cloud
           </Button>
           <Button
-            size="sm"
-            variant="outline"
-            className="h-8 text-xs bg-background"
-            disabled={isReadOnly}
+            size="sm" variant="outline" className="h-8 text-xs bg-background" disabled={isReadOnly}
             onClick={() => triggerCronAction('/api/admin/commit-iceberg', 'Committing Buffer', 'Flushing local Parquet buffer to the shared Iceberg table in Object Storage...')}
           >
             <Archive className="h-3 w-3 mr-1.5" /> Commit Buffer
           </Button>
         </>
       ) : (
-        <Button
-          size="sm"
-          variant="default"
-          className="h-8 text-xs bg-primary/90 hover:bg-primary"
-          onClick={() => setIsSyncModalOpen(true)}
-        >
+        <Button size="sm" variant="default" className="h-8 text-xs bg-primary/90 hover:bg-primary" onClick={() => setIsSyncModalOpen(true)}>
           <Download className="h-3 w-3 mr-1.5" /> Sync from Cloud
         </Button>
       )}
       {!isAnalyst && status?.ngwaf_workspace_id && (
         <Button
-          size="sm"
-          variant="outline"
-          className="h-8 text-xs bg-background"
+          size="sm" variant="outline" className="h-8 text-xs bg-background"
           onClick={() => {
             setSseTitle('NGWAF Bot Sync')
             setSseDescription('Fetching verified bot records from Fastly NGWAF and caching them locally. Progress is saved after each page — run again if the time budget is reached.')
@@ -1592,12 +1534,9 @@ export function QuickActionsBar({
         </Button>
       )}
       <Button
-        size="sm"
-        variant="outline"
-        className="h-8 text-xs bg-background"
+        size="sm" variant="outline" className="h-8 text-xs bg-background"
         onClick={() => {
-          const latestSync = recentCrons?.entries?.find((e) => e.task === 'log_discovery') ||
-                             cronLogs?.entries?.find((e) => e.task === 'log_discovery')
+          const latestSync = recentCrons?.entries?.find((e) => e.task === 'log_discovery') || cronLogs?.entries?.find((e) => e.task === 'log_discovery')
           if (latestSync) {
             setDisplayedJobs(prev => prev.some((j) => j.id === latestSync.id) ? prev : [...prev, { ...latestSync, status: latestSync.status }])
             setSelectedConsoleJobId(latestSync.id)
@@ -1613,12 +1552,7 @@ export function QuickActionsBar({
   )
 }
 
-interface TreeProps {
-  prefix: string
-  level: number
-  type: 'iceberg' | 'raw'
-  forceExpand?: boolean
-}
+interface TreeProps { prefix: string; level: number; type: 'iceberg' | 'raw'; forceExpand?: boolean }
 
 function Node({ node, prefix, level, type, forceExpand }: TreeProps & { node: TreeNode }) {
   const [isOpen, setIsOpen] = useState(false)
@@ -1635,39 +1569,23 @@ function Node({ node, prefix, level, type, forceExpand }: TreeProps & { node: Tr
     return (
       <div>
         <div
-          className={cn(
-            "flex items-center justify-between gap-2 py-1.5 hover:bg-muted/50 rounded-md transition-colors group",
-            level === 0 ? "font-medium" : "text-sm text-muted-foreground"
-          )}
+          className={cn("flex items-center justify-between gap-2 py-1.5 hover:bg-muted/50 rounded-md transition-colors group", level === 0 ? "font-medium" : "text-sm text-muted-foreground")}
           style={{ paddingLeft: `${level * 16 + 8}px`, paddingRight: '8px' }}
         >
-          <button
-            type="button"
-            aria-expanded={isOpen}
-            onClick={() => setIsOpen(!isOpen)}
-            className="flex items-center gap-2 min-w-0 flex-1 bg-transparent border-0 p-0 text-left cursor-pointer"
-          >
+          <button type="button" aria-expanded={isOpen} onClick={() => setIsOpen(!isOpen)} className="flex items-center gap-2 min-w-0 flex-1 bg-transparent border-0 p-0 text-left cursor-pointer">
             {isOpen ? <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />}
             <Folder className="h-4 w-4 shrink-0 text-blue-500/70 dark:text-blue-400/70" />
             <span className="truncate group-hover:text-foreground transition-colors">{node.name}</span>
           </button>
           <div className="flex items-center gap-4 shrink-0">
-            {node.size != null && node.size > 0 && (
-              <span className="text-xs font-mono text-muted-foreground tabular-nums w-20 text-right">
-                {formatBytes(node.size)}
-              </span>
-            )}
+            {node.size != null && node.size > 0 && <span className="text-xs font-mono text-muted-foreground tabular-nums w-20 text-right">{formatBytes(node.size)}</span>}
             <div className="w-20 flex items-center justify-end gap-2">
               <Button
-                variant="ghost"
-                size="icon"
-                aria-label="Download folder as ZIP"
-                className="h-6 w-6 text-muted-foreground transition-opacity"
+                variant="ghost" size="icon" aria-label="Download folder as ZIP" title="Download folder as ZIP" className="h-6 w-6 text-muted-foreground transition-opacity"
                 onClick={(e) => {
                   e.stopPropagation()
                   window.open(`/api/download-folder?service=${activeServiceId}&root=${type}&prefix=${encodeURIComponent(node.prefix || (prefix + node.name))}`, '_blank')
                 }}
-                title="Download folder as ZIP"
               >
                 <Download className="h-3.5 w-3.5" />
               </Button>
@@ -1680,38 +1598,22 @@ function Node({ node, prefix, level, type, forceExpand }: TreeProps & { node: Tr
   }
 
   return (
-    <div
-      className="flex items-center justify-between gap-4 py-1 pr-2 hover:bg-muted/50 group rounded-md transition-colors"
-      style={{ paddingLeft: `${level * 16 + 32}px` }}
-    >
+    <div className="flex items-center justify-between gap-4 py-1 pr-2 hover:bg-muted/50 group rounded-md transition-colors" style={{ paddingLeft: `${level * 16 + 32}px` }}>
       <div className="flex items-center gap-2 min-w-0 flex-1">
         <FileJson className="h-4 w-4 shrink-0 text-muted-foreground opacity-70" />
-        <span className="text-sm font-mono truncate text-muted-foreground group-hover:text-foreground transition-colors">
-          {node.name}
-        </span>
+        <span className="text-sm font-mono truncate text-muted-foreground group-hover:text-foreground transition-colors">{node.name}</span>
       </div>
       <div className="flex items-center gap-4 shrink-0">
-        {node.size != null && (
-          <span className="text-xs font-mono text-muted-foreground tabular-nums w-20 text-right">
-            {formatBytes(node.size)}
-          </span>
-        )}
+        {node.size != null && <span className="text-xs font-mono text-muted-foreground tabular-nums w-20 text-right">{formatBytes(node.size)}</span>}
         {node.mtime && (
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger render={
-                <span
-                  tabIndex={0}
-                  role="button"
-                  aria-label="Show full modified timestamp"
-                  className="hidden sm:inline-block text-xs text-muted-foreground w-[120px] text-right truncate rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
+                <span tabIndex={0} role="button" aria-label="Show full modified timestamp" className="hidden sm:inline-block text-xs text-muted-foreground w-[120px] text-right truncate rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                   {relative(node.mtime)}
                 </span>
               } />
-              <TooltipContent className="text-xs">
-                {full(node.mtime)} {abbr()}
-              </TooltipContent>
+              <TooltipContent className="text-xs">{full(node.mtime)} {abbr()}</TooltipContent>
             </Tooltip>
           </TooltipProvider>
         )}
@@ -1723,15 +1625,8 @@ function Node({ node, prefix, level, type, forceExpand }: TreeProps & { node: Tr
           )}
           {node.key && (
             <Button
-              variant="ghost"
-              size="icon"
-              aria-label={`Download ${node.name}`}
-              className="h-6 w-6 text-muted-foreground transition-opacity"
-              onClick={(e) => {
-                e.stopPropagation()
-                window.open(`/api/download?service=${activeServiceId}&key=${encodeURIComponent(node.key as string)}`, '_blank')
-              }}
-              title="Download file"
+              variant="ghost" size="icon" aria-label={`Download ${node.name}`} title="Download file" className="h-6 w-6 text-muted-foreground transition-opacity"
+              onClick={(e) => { e.stopPropagation(); window.open(`/api/download?service=${activeServiceId}&key=${encodeURIComponent(node.key as string)}`, '_blank') }}
             >
               <Download className="h-3.5 w-3.5" />
             </Button>
@@ -1747,11 +1642,9 @@ function Tree({ prefix, level, type, forceExpand }: TreeProps) {
 
   const { data, isLoading, error } = useQuery({
     queryKey: queryKeys.admin.fileTree(type, activeServiceId, prefix),
-    queryFn: async () => {
+    queryFn: () => {
       const init = { params: { query: { prefix: prefix || undefined } } }
-      return type === 'iceberg'
-        ? unwrapClient(client.GET("/api/admin/iceberg-tree", init))
-        : unwrapClient(client.GET("/api/admin/raw-tree", init))
+      return type === 'iceberg' ? unwrapClient(client.GET("/api/admin/iceberg-tree", init)) : unwrapClient(client.GET("/api/admin/raw-tree", init))
     },
     enabled: !!activeServiceId,
   })
@@ -1763,28 +1656,12 @@ function Tree({ prefix, level, type, forceExpand }: TreeProps) {
       </div>
     )
   }
-
-  if (error || !data) {
-    return (
-      <div className="py-2 text-sm text-destructive" style={{ paddingLeft: `${level * 16 + 28}px` }}>
-        Failed to load directory.
-      </div>
-    )
-  }
-
-  if (data.nodes.length === 0) {
-    return (
-      <div className="py-2 text-xs text-muted-foreground italic" style={{ paddingLeft: `${level * 16 + 32}px` }}>
-        Empty directory
-      </div>
-    )
-  }
+  if (error || !data) return <div className="py-2 text-sm text-destructive" style={{ paddingLeft: `${level * 16 + 28}px` }}>Failed to load directory.</div>
+  if (data.nodes.length === 0) return <div className="py-2 text-xs text-muted-foreground italic" style={{ paddingLeft: `${level * 16 + 32}px` }}>Empty directory</div>
 
   return (
     <div className="flex flex-col">
-      {data.nodes.map((node: TreeNode) => (
-        <Node key={node.name} node={node} prefix={prefix} level={level} type={type} forceExpand={forceExpand} />
-      ))}
+      {data.nodes.map((node: TreeNode) => <Node key={node.name} node={node} prefix={prefix} level={level} type={type} forceExpand={forceExpand} />)}
     </div>
   )
 }
@@ -1806,21 +1683,10 @@ export function FileBrowser({ type }: { type: 'iceberg' | 'raw' }) {
       <div className="flex items-center justify-between px-4 py-2 border-b bg-muted/5 sticky top-0 z-10 backdrop-blur-sm">
         <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">{type === 'iceberg' ? 'Iceberg Data Lake' : 'Raw Archives'}</span>
         <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 w-7 p-0 font-semibold shadow-none border-muted/60 bg-background"
-            onClick={handleRefresh}
-            title="Refresh file list"
-          >
+          <Button variant="outline" size="sm" className="h-7 w-7 p-0 font-semibold shadow-none border-muted/60 bg-background" onClick={handleRefresh} title="Refresh file list">
             <RefreshCw className={cn("h-3.5 w-3.5", isRefreshing && "animate-spin")} />
           </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 text-[10px] px-2 font-semibold shadow-none border-muted/60 bg-background"
-            onClick={() => setForceExpand(prev => prev === undefined ? true : !prev)}
-          >
+          <Button variant="outline" size="sm" className="h-7 text-[10px] px-2 font-semibold shadow-none border-muted/60 bg-background" onClick={() => setForceExpand(prev => prev === undefined ? true : !prev)}>
             {forceExpand ? <Minimize2 className="h-3 w-3 mr-1" /> : <Maximize2 className="h-3 w-3 mr-1" />}
             {forceExpand ? 'Collapse All' : 'Expand All'}
           </Button>
@@ -1833,18 +1699,9 @@ export function FileBrowser({ type }: { type: 'iceberg' | 'raw' }) {
   )
 }
 
-const IcebergStatus = dynamic(
-  () => import('@/components/SessionScoring/StatusPanel').then(m => m.IcebergStatus),
-  { ssr: false },
-)
-const IcebergCalendar = dynamic(
-  () => import('@/components/SessionScoring/StatusPanel').then(m => m.IcebergCalendar),
-  { ssr: false },
-)
-const MetadataStorageCard = dynamic(
-  () => import('@/components/SessionScoring/StatusPanel').then(m => m.MetadataStorageCard),
-  { ssr: false },
-)
+const IcebergStatus = dynamic(() => import('@/components/SessionScoring/StatusPanel').then(m => m.IcebergStatus), { ssr: false })
+const IcebergCalendar = dynamic(() => import('@/components/SessionScoring/StatusPanel').then(m => m.IcebergCalendar), { ssr: false })
+const MetadataStorageCard = dynamic(() => import('@/components/SessionScoring/StatusPanel').then(m => m.MetadataStorageCard), { ssr: false })
 
 const LOG_TABS = [
   { value: 'cron', label: 'Cron Runs', icon: History, adminOnly: false },
@@ -1867,31 +1724,18 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
   if (!s.activeServiceId && bootstrapResolved) {
     return <NoServiceSelected icon={Database} message="Please select a service from the header to access admin controls." />
   }
-  if (!s.activeServiceId) {
-    return <Loading />
-  }
+  if (!s.activeServiceId) return <Loading />
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title="Data Management"
-        description="Monitor and manage log ingestion history and active data syncs."
-      />
+      <PageHeader title="Data Management" description="Monitor and manage log ingestion history and active data syncs." />
 
       <QuickActionsBar
-        isAnalyst={s.isAnalyst}
-        status={s.status}
-        activeServiceId={s.activeServiceId}
-        recentCrons={s.recentCrons}
-        cronLogs={s.cronLogs}
-        setSseTitle={s.setSseTitle}
-        setSseDescription={s.setSseDescription}
-        setIsSSEModalOpen={s.setIsSSEModalOpen}
-        setIsSyncModalOpen={s.setIsSyncModalOpen}
-        reset={s.reset}
-        start={s.start}
-        setDisplayedJobs={s.setDisplayedJobs}
-        setSelectedConsoleJobId={s.setSelectedConsoleJobId}
+        isAnalyst={s.isAnalyst} status={s.status} activeServiceId={s.activeServiceId}
+        recentCrons={s.recentCrons} cronLogs={s.cronLogs} setSseTitle={s.setSseTitle}
+        setSseDescription={s.setSseDescription} setIsSSEModalOpen={s.setIsSSEModalOpen}
+        setIsSyncModalOpen={s.setIsSyncModalOpen} reset={s.reset} start={s.start}
+        setDisplayedJobs={s.setDisplayedJobs} setSelectedConsoleJobId={s.setSelectedConsoleJobId}
         setConsoleOpen={s.setConsoleOpen}
       />
 
@@ -1908,46 +1752,26 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
 
         <TabsContent value="cron" className="mt-4 border rounded-lg overflow-hidden bg-card">
           <CronTab
-            cronColumns={cronColumns}
-            cronLogs={s.cronLogs}
-            isLoadingCron={s.isLoadingCron}
-            isFetchingCron={s.isFetchingCron}
-            orderedSchedules={s.orderedSchedules}
-            isLoadingSchedule={s.isLoadingSchedule}
-            taskFilter={s.taskFilter}
-            setTaskFilter={s.setTaskFilter}
-            statusFilter={s.statusFilter}
-            setStatusFilter={s.setStatusFilter}
-            isAnalyst={s.isAnalyst}
-            status={s.status}
-            activeServiceId={s.activeServiceId}
-            setDisplayedJobs={s.setDisplayedJobs}
-            setSelectedConsoleJobId={s.setSelectedConsoleJobId}
-            setConsoleOpen={s.setConsoleOpen}
-            isPurgeOpen={s.isPurgeOpen}
-            setIsPurgeOpen={s.setIsPurgeOpen}
-            purgeMutation={s.purgeMutation}
+            cronColumns={cronColumns} cronLogs={s.cronLogs} isLoadingCron={s.isLoadingCron}
+            isFetchingCron={s.isFetchingCron} orderedSchedules={s.orderedSchedules}
+            isLoadingSchedule={s.isLoadingSchedule} taskFilter={s.taskFilter} setTaskFilter={s.setTaskFilter}
+            statusFilter={s.statusFilter} setStatusFilter={s.setStatusFilter} isAnalyst={s.isAnalyst}
+            status={s.status} activeServiceId={s.activeServiceId} setDisplayedJobs={s.setDisplayedJobs}
+            setSelectedConsoleJobId={s.setSelectedConsoleJobId} setConsoleOpen={s.setConsoleOpen}
+            isPurgeOpen={s.isPurgeOpen} setIsPurgeOpen={s.setIsPurgeOpen} purgeMutation={s.purgeMutation}
           />
         </TabsContent>
 
         <TabsContent value="service_history" className="mt-4 border rounded-lg overflow-hidden bg-card">
           <ServiceHistoryTab
-            auditColumns={auditColumns}
-            auditLogs={s.auditLogs}
-            isLoadingAudit={s.isLoadingAudit}
-            isFetchingAudit={s.isFetchingAudit}
-            eventFilter={s.eventFilter}
-            setEventFilter={s.setEventFilter}
+            auditColumns={auditColumns} auditLogs={s.auditLogs} isLoadingAudit={s.isLoadingAudit}
+            isFetchingAudit={s.isFetchingAudit} eventFilter={s.eventFilter} setEventFilter={s.setEventFilter}
             activeServiceId={s.activeServiceId}
           />
         </TabsContent>
 
         <TabsContent value="ingestion" className="mt-4 border rounded-lg overflow-hidden bg-card">
-          <IngestionTab
-            ingestedColumns={ingestedFilesColumns}
-            ingestedFiles={s.ingestedFiles}
-            isLoadingIngested={s.isLoadingIngested}
-          />
+          <IngestionTab ingestedColumns={ingestedFilesColumns} ingestedFiles={s.ingestedFiles} isLoadingIngested={s.isLoadingIngested} />
         </TabsContent>
 
         <TabsContent value="iceberg" className="mt-4 space-y-4">
@@ -1993,9 +1817,7 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
         onStartSync={async (range) => {
           const apiRange = range ? { start_time: range.start, end_time: range.end } : {}
           try {
-            const data = await unwrapClient(client.POST("/api/admin/ingest-logs", {
-              params: { query: apiRange }
-            }))
+            const data = await unwrapClient(client.POST("/api/admin/ingest-logs", { params: { query: apiRange } }))
             s.setSseTitle('Syncing from Cloud')
             s.setSseDescription('Fetching latest snapshots and downloading new data files from the cloud...')
             s.setIsSSEModalOpen(true)
@@ -2009,23 +1831,15 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
       />
 
       <SSEModal
-        isSSEModalOpen={s.isSSEModalOpen}
-        setIsSSEModalOpen={s.setIsSSEModalOpen}
-        sseStatus={s.sseStatus}
-        sseTitle={s.sseTitle}
-        sseError={s.sseError}
-        sseDescription={s.sseDescription}
-        lines={s.lines}
-        stop={s.stop}
+        isSSEModalOpen={s.isSSEModalOpen} setIsSSEModalOpen={s.setIsSSEModalOpen}
+        sseStatus={s.sseStatus} sseTitle={s.sseTitle} sseError={s.sseError}
+        sseDescription={s.sseDescription} lines={s.lines} stop={s.stop}
       />
 
       <FloatingOperationsDock
-        displayedJobs={s.displayedJobs}
-        setDisplayedJobs={s.setDisplayedJobs}
-        isOpen={s.consoleOpen}
-        setIsOpen={s.setConsoleOpen}
-        selectedJobId={s.selectedConsoleJobId}
-        setSelectedJobId={s.setSelectedConsoleJobId}
+        displayedJobs={s.displayedJobs} setDisplayedJobs={s.setDisplayedJobs}
+        isOpen={s.consoleOpen} setIsOpen={s.setConsoleOpen}
+        selectedJobId={s.selectedConsoleJobId} setSelectedJobId={s.setSelectedConsoleJobId}
         onDismiss={s.removeDisplayedJob}
       />
     </div>

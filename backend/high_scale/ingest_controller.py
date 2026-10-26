@@ -2,34 +2,35 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import inspect
+import json
 import logging
+import math
 import os
 import random
+import re
 import sys
 import tempfile
 import time
 from argparse import ArgumentParser
 from collections import Counter, defaultdict, deque
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event, Thread
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, overload
 from uuid import uuid4
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import structlog
 
 from backend import config as app_config
 from backend.core.clickhouse_client import ClickHouseClient
-from backend.high_scale._common import (
-    ArchiveManifestCatalog,
-    parse_time_window,
-    request_filter_clauses,
-    visible_fact_clauses,
-)
-from backend.high_scale._common import bucket as _bucket
 from backend.high_scale.archive import (
     ArchiveManifest,
     ArchivePublication,
@@ -40,6 +41,432 @@ from backend.high_scale.archive import (
     from_environment,
     write_batch_archive_checkpoint,
 )
+from backend.repositories.utils.filters import filter_spec_attr, normalize_filter_key
+from backend.utils.date_utils import safe_iso
+
+GAMMA = 1.02
+RELATIVE_ERROR = (GAMMA - 1.0) / (GAMMA + 1.0)
+_LOG_GAMMA = math.log(GAMMA)
+
+
+def _centroid(value: float) -> float:
+    if value == 0.0:
+        return 0.0
+    magnitude = abs(value)
+    index = math.ceil(math.log(magnitude) / _LOG_GAMMA)
+    centre = 2.0 * GAMMA**index / (GAMMA + 1.0)
+    return math.copysign(centre, value)
+
+
+def sketch(values: list[float]) -> tuple[list[float], list[int]]:
+    """Return ``(centroids, counts)`` sorted by centroid; every observation is counted once."""
+    histogram = Counter(_centroid(value) for value in values)
+    centroids = sorted(histogram)
+    return centroids, [histogram[centroid] for centroid in centroids]
+
+
+@overload
+def range_value(value: str) -> datetime: ...
+@overload
+def range_value(value: None) -> None: ...
+def range_value(value: str | None) -> datetime | None:
+    """Parse an ISO-8601 bound as-is: ``Z`` becomes ``+00:00``; naive input stays naive."""
+    if value is None:
+        return None
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def bucket(value: object) -> datetime | None:
+    """Floor a datetime or ISO string to its UTC minute; ``None`` when unparseable."""
+    if isinstance(value, datetime):
+        timestamp = value.astimezone(UTC)
+    elif isinstance(value, str):
+        try:
+            timestamp = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+        except ValueError:
+            return None
+    else:
+        return None
+    return timestamp.replace(second=0, microsecond=0)
+
+
+def text(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def finite_float(value: object) -> float | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        parsed = float(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def optional_int(value: object) -> int | None:
+    parsed = finite_float(value)
+    if parsed is None or not parsed.is_integer():
+        return None
+    return int(parsed)
+
+
+def percentiles(values: list[float], qs: tuple[float, ...]) -> list[float | None]:
+    """Linear-interpolated percentiles (each ``q`` in [0, 1]) from a single sort of ``values``."""
+    if not values:
+        return [None] * len(qs)
+    ordered = sorted(values)
+    out: list[float | None] = []
+    for q in qs:
+        position = (len(ordered) - 1) * q
+        lower = math.floor(position)
+        upper = math.ceil(position)
+        if lower == upper:
+            out.append(ordered[lower])
+        else:
+            out.append(ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower))
+    return out
+
+
+MAX_PAGE_SIZE = 500
+
+
+@dataclass(frozen=True)
+class KeysetCursor:
+    timestamp: datetime
+    event_id: str
+    service_id: str
+    domain: str
+
+    def encode(self, secret: bytes) -> str:
+        if not secret:
+            raise ValueError("cursor signing secret is required")
+        payload = json.dumps(
+            {
+                "timestamp": self.timestamp.astimezone(UTC).isoformat(),
+                "event_id": self.event_id,
+                "service_id": self.service_id,
+                "domain": self.domain,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        signature = hmac.new(secret, payload, hashlib.sha256).digest()
+        return f"{_b64(payload)}.{_b64(signature)}"
+
+    @classmethod
+    def decode(cls, token: str, secret: bytes) -> KeysetCursor:
+        if not secret:
+            raise ValueError("cursor signing secret is required")
+        try:
+            payload_token, signature_token = token.split(".", 1)
+            payload = _unb64(payload_token)
+            signature = _unb64(signature_token)
+            expected = hmac.new(secret, payload, hashlib.sha256).digest()
+            if not hmac.compare_digest(signature, expected):
+                raise ValueError("cursor signature mismatch")
+            raw = json.loads(payload)
+            timestamp = datetime.fromisoformat(raw["timestamp"]).astimezone(UTC)
+            if not all(isinstance(raw[key], str) and raw[key] for key in ("event_id", "service_id", "domain")):
+                raise ValueError("cursor fields are invalid")
+            return cls(timestamp, raw["event_id"], raw["service_id"], raw["domain"])
+        except (ValueError, KeyError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError("invalid cursor") from exc
+
+
+def _b64(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _unb64(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+class ArchiveManifestCatalog(Protocol):
+    def manifests_covering(
+        self, service_id: str, domain: str, start: datetime, end: datetime
+    ) -> tuple[ArchiveManifest, ...]: ...
+
+
+def raw_query_producer(
+    catalog: ArchiveManifestCatalog,
+    archive: ArchivePublication,
+    *,
+    service_id: str,
+    domain: str,
+    start: datetime,
+    end: datetime,
+) -> Callable[[], Iterable[Mapping[str, Any]]]:
+    """Build a producer scanning archived rows in ``[start, end)``."""
+
+    def _produce() -> Iterator[dict[str, Any]]:
+        manifests = sorted(
+            catalog.manifests_covering(service_id, domain, start, end),
+            key=lambda manifest: manifest.coverage_start,
+        )
+        for manifest in manifests:
+            payload = archive.read_artifact(manifest)
+            table = pq.read_table(pa.BufferReader(payload))
+            for row in table.to_pylist():
+                timestamp = _row_timestamp(row)
+                if timestamp is not None and (timestamp < start or timestamp >= end):
+                    continue
+                yield row
+
+    return _produce
+
+
+def _row_timestamp(row: Mapping[str, Any]) -> datetime | None:
+    value = row.get("timestamp")
+    if isinstance(value, datetime):
+        return value.astimezone(UTC)
+    if isinstance(value, str):
+        return range_value(value).astimezone(UTC)
+    return None
+
+
+_DOMAIN_IDENT_RE = re.compile(r"^[a-z0-9_]+$")
+VISIBLE_PUBLICATION_FENCE_SQL = (
+    "publication_state='visible' "
+    "AND batch_id IN ("
+    "SELECT batch_id FROM high_scale_batch_publications FINAL "
+    "WHERE service_id={service_id:String} AND publication_state='visible')"
+)
+
+
+def visible_publication_fence_sql(domain: str | None = None) -> str:
+    """Return the publication-fence SQL predicate, optionally scoped to ``domain``."""
+    if domain is None:
+        return VISIBLE_PUBLICATION_FENCE_SQL
+    if not _DOMAIN_IDENT_RE.fullmatch(domain):
+        raise ValueError(f"Invalid publication domain identifier: {domain!r}")
+    return (
+        "publication_state='visible' "
+        "AND batch_id IN ("
+        "SELECT batch_id FROM high_scale_batch_publications FINAL "
+        f"WHERE service_id={{service_id:String}} AND domain='{domain}' "
+        "AND publication_state='visible')"
+    )
+
+
+def visible_fact_clauses(domain: str) -> list[str]:
+    """Predicates (with a ``{service_id:String}`` parameter) limiting a fact table to visible batches of ``domain``."""
+    if not _DOMAIN_IDENT_RE.fullmatch(domain):
+        raise ValueError(f"Invalid publication domain identifier: {domain!r}")
+    return [
+        "service_id={service_id:String}",
+        "publication_state='visible'",
+        "batch_id IN ("
+        "SELECT batch_id FROM high_scale_batch_publications FINAL "
+        f"WHERE service_id={{service_id:String}} AND domain='{domain}' "
+        "AND publication_state='visible')",
+    ]
+
+
+def parse_time_window(
+    start_time: str | None,
+    end_time: str | None,
+    default: timedelta = timedelta(days=1),
+    *,
+    utc: bool = False,
+    now: datetime | None = None,
+) -> tuple[datetime, datetime]:
+    """Parse ``(start_time, end_time)`` ISO bounds, defaulting ``end`` to ``now`` and ``start`` to ``end - default``."""
+    end = range_value(end_time) if end_time else (now or datetime.now(UTC))
+    if utc:
+        end = end.replace(tzinfo=UTC) if end.tzinfo is None else end.astimezone(UTC)
+    start = range_value(start_time) if start_time else (end - default)
+    if utc:
+        start = start.replace(tzinfo=UTC) if start.tzinfo is None else start.astimezone(UTC)
+    return start, end
+
+
+def inclusive_minute_end(end: datetime) -> datetime:
+    """Extend a whole-minute upper bound by 1 minute so ``event_timestamp < end_upper`` includes the minute."""
+    return end + timedelta(minutes=1) if end.second == 0 and end.microsecond == 0 else end
+
+
+_TIMESERIES_METRICS: dict[tuple[str, str], tuple[str, float]] = {
+    ("ttfb", "p50"): ("latency_us", 0.5),
+    ("ttfb", "p95"): ("latency_us", 0.95),
+    ("ttfb", "p99"): ("latency_us", 0.99),
+    ("ttlb", "p50"): ("ottlb_us", 0.5),
+    ("ttlb", "p95"): ("ottlb_us", 0.95),
+    ("ttlb", "p99"): ("ottlb_us", 0.99),
+}
+
+
+def format_iso_utc(value: Any) -> str | None:
+    """Format a datetime or timestamp value as an ISO-8601 UTC ``...Z`` string."""
+    if isinstance(value, datetime):
+        stamp = value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+        return stamp.isoformat().replace("+00:00", "Z")
+    return safe_iso(value)
+
+
+def format_iso_utc_or_empty(value: Any) -> str:
+    """Format a datetime or timestamp value as an ISO-8601 UTC ``...Z`` string (or ``""``)."""
+    return format_iso_utc(value) or ""
+
+
+def _bucket_case(column: str, buckets: tuple[tuple[int, str], ...], last: str) -> str:
+    """Build a ClickHouse ``multiIf(col <= limit, 'label', ..., 'last')`` expression."""
+    arms = ", ".join(f"{column} <= {limit}, '{label}'" for limit, label in buckets)
+    return f"multiIf({arms}, '{last}')"
+
+
+def resolve_asn_display_labels(service_id: str, asns: Iterable[int]) -> dict[int, str]:
+    """Return ``{asn: formatted_display_label}`` for the requested ASN numbers."""
+    asn_list = list(asns)
+    if not asn_list:
+        return {}
+    from backend.core import duckdb as _db
+
+    try:
+        names = _db.get_asn_names(service_id, asn_list)
+    except Exception:
+        names = {}
+    return {asn: _db.format_asn_label(asn, names.get(asn, "")) for asn in asn_list}
+
+
+# Real columns on request_facts; every other key lives in the ``custom_fields`` map.
+_COLUMNS = {"client_ip": "client_ip", "ip": "client_ip", "country": "country", "url": "url"}
+# Stored as floats in the map; the standard path filters on the rounded integer.
+_ROUNDED = frozenset({"age", "ttl"})
+# Stored as 'True'/'False' or '1'/'0' strings in custom_fields; normalise both sides to 'true'/'false'.
+_BOOLEAN = frozenset({"edge", "is_ipv6", "waf"})
+# Resolved by the standard path through lookups the fact table has no column for.
+_UNSUPPORTED = frozenset({"_bot_name", "_ngwaf_bot_name", "_tunnel_requests", "waf_sig_ind", "edge_score_reason_ind"})
+
+
+def _column(key: str, params: dict[str, Any], param: str) -> str:
+    if key in _COLUMNS:
+        return _COLUMNS[key]
+    params[param] = key
+    lookup = f"custom_fields[{{{param}:String}}]"
+    if key in _ROUNDED:
+        return f"toString(toInt32(round(toFloat64OrZero({lookup}))))"
+    if key in _BOOLEAN:
+        return f"if(lower({lookup}) IN ('true', '1'), 'true', if(lower({lookup}) IN ('false', '0'), 'false', {lookup}))"
+    return lookup
+
+
+def request_filter_clauses(
+    filters: Mapping[str, Any] | None, *, prefix: str = "flt"
+) -> tuple[list[str], dict[str, Any]]:
+    """Return ``(clauses, params)`` AND-ing every non-empty filter in ``filters``."""
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+    for i, (raw_key, spec) in enumerate((filters or {}).items()):
+        key = normalize_filter_key(raw_key)
+        mode = str(filter_spec_attr(spec, "mode") or "include")
+        values = [
+            value
+            for value in (filter_spec_attr(spec, "values") or [])
+            if not (isinstance(value, str) and value.strip() == "")
+        ]
+        if not values:
+            continue
+        if key in _UNSUPPORTED or not key:
+            raise ValueError(f"high-scale request readers do not support filtering on {raw_key!r}")
+        column = _column(key, params, f"{prefix}_k{i}")
+        concrete = [value for value in values if value is not None]
+        names: list[str] = []
+        for j, value in enumerate(concrete):
+            name = f"{prefix}_{i}_{j}"
+            str_val = str(value)
+            if key in _BOOLEAN:
+                lowered = str_val.strip().lower()
+                if lowered in ("true", "1"):
+                    str_val = "true"
+                elif lowered in ("false", "0"):
+                    str_val = "false"
+            params[name] = str_val
+            names.append(f"{{{name}:String}}")
+        include = mode != "exclude"
+        parts: list[str] = []
+        if names:
+            parts.append(f"{column} {'IN' if include else 'NOT IN'} ({', '.join(names)})")
+        if len(concrete) != len(values):
+            # A null filter value means "the field is absent", which a map lookup reports as ''.
+            parts.append(f"{column} {'=' if include else '!='} ''")
+        clauses.append(f"({(' OR ' if include else ' AND ').join(parts)})")
+    return clauses, params
+
+
+def build_clickhouse_filters(
+    filters: Mapping[str, Any] | None, *, prefix: str = "filter"
+) -> tuple[str, dict[str, Any]]:
+    """Return ``(sql, params)`` where ``sql`` is ``1=1`` when no filter is active."""
+    clauses, params = request_filter_clauses(filters, prefix=prefix)
+    return (" AND ".join(clauses) if clauses else "1=1"), params
+
+
+def build_published_projection_where(
+    service_id: str,
+    domain: str,
+    start_time: str | None,
+    end_time: str | None,
+    *,
+    dimension: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Build ClickHouse WHERE predicate and params for published minute projections."""
+    clauses = [
+        "service_id={service_id:String}",
+        "publication_state='visible'",
+        "batch_id IN ("
+        "SELECT batch_id FROM high_scale_batch_publications FINAL "
+        "WHERE service_id={service_id:String} AND domain={publication_domain:String} "
+        "AND publication_state='visible')",
+    ]
+    params: dict[str, Any] = {
+        "service_id": service_id,
+        "publication_domain": domain,
+    }
+    start = range_value(start_time)
+    end = range_value(end_time)
+    if start is not None:
+        clauses.append("bucket_start >= {start:DateTime64(3)}")
+        params["start"] = start
+    if end is not None:
+        clauses.append("bucket_start <= {end:DateTime64(3)}")
+        params["end"] = end
+    if dimension is not None:
+        clauses.append("dimension={dimension:String}")
+        params["dimension"] = dimension
+    return " AND ".join(clauses), params
+
+
+def build_published_facts_where(
+    service_id: str,
+    start_time: str | None,
+    end_time: str | None,
+    filters: Mapping[str, Any] | None = None,
+    *,
+    end_inclusive: bool = True,
+    domain: str = "request",
+) -> tuple[str, dict[str, Any]]:
+    """Build ClickHouse WHERE predicate and params for published fact rows."""
+    filter_sql, filter_params = build_clickhouse_filters(dict(filters or {}))
+    clauses = ["service_id={service_id:String}", visible_publication_fence_sql(domain), filter_sql]
+    params: dict[str, Any] = {"service_id": service_id, **filter_params}
+    start = range_value(start_time)
+    end = range_value(end_time)
+    if start is not None:
+        clauses.append("event_timestamp >= {start:DateTime64(3)}")
+        params["start"] = start
+    if end is not None:
+        op = "<=" if end_inclusive else "<"
+        clauses.append(f"event_timestamp {op} {{end:DateTime64(3)}}")
+        params["end"] = end
+    return " AND ".join(clauses), params
+
+
+sys.modules["backend.high_scale._filters"] = sys.modules[__name__]
+_bucket = bucket
+_self_mod = sys.modules[__name__]
+for _early_alias in ("_common", "_filters"):
+    sys.modules[f"backend.high_scale.{_early_alias}"] = _self_mod
 from backend.high_scale.publication import (
     BaseClickHouseBatchAdapter,
     ClickHouseBatchAdapter,
@@ -64,15 +491,12 @@ from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
 if TYPE_CHECKING:
     from backend.high_scale.source_discovery import SourceObjectDescriptor
-
 logger = logging.getLogger(__name__)
 _worker_logger = logging.getLogger("backend.high_scale.worker")
 _recovery_logger = structlog.get_logger(__name__)
 
 
 # ── Registry Bootstrap (folded from registry_bootstrap.py) ────────────────────
-
-
 @dataclass(frozen=True)
 class HighScaleService:
     service_id: str
@@ -170,7 +594,6 @@ def register_high_scale_services(
         raise ValueError("high-scale cursor secret is required")
     if owner_epoch < 0:
         raise ValueError("high-scale owner epoch must be non-negative")
-
     for service_id in service_ids:
         if not service_id:
             raise ValueError("high-scale service id is required")
@@ -226,7 +649,6 @@ def register_high_scale_services_from_environment(
     if not service_ids:
         raise ValueError("HIGH_SCALE_SERVICE_IDS must contain at least one service id (none found in configs/)")
     cursor_secret = os.getenv("HIGH_SCALE_CURSOR_SECRET", "").encode("utf-8")
-
     # Cold-tier wiring is best-effort: the control plane is the same
     # Postgres dependency the isolated worker already hard-requires when
     # HIGH_SCALE_ENABLED=1 (see worker.py's build_worker_from_environment),
@@ -283,8 +705,6 @@ def _watermark(
     *,
     owner_epoch: int,
 ) -> ServingWatermark:
-    from backend.high_scale._common import visible_publication_fence_sql
-
     table = _WATERMARK_TABLES[domain]
     fence_sql = visible_publication_fence_sql(domain)
     event_id_column = "projection_key" if domain == "cmcd" else "event_id"
@@ -342,7 +762,6 @@ def _string_or_none(value: Any) -> str | None:
 
 
 # ── Aggregate Batch Adapter (folded from aggregate_batch_adapter.py) ──────────
-
 DIMENSIONS_BY_DOMAIN: dict[str, tuple[str, ...]] = {
     "request": (
         "url",
@@ -590,7 +1009,6 @@ class AggregateBatchAdapter(BaseClickHouseBatchAdapter):
                 )
                 for row in batch.rows
             ]
-
         return self._publish_table_rows(
             table=table,
             columns=columns,
@@ -608,7 +1026,6 @@ _hs_pkg = sys.modules.get("backend.high_scale")
 if _hs_pkg is not None:
     setattr(_hs_pkg, "registry_bootstrap", _self_mod)
     setattr(_hs_pkg, "aggregate_batch_adapter", _self_mod)
-
 from backend.high_scale.cmcd import project_cmcd  # noqa: E402
 from backend.high_scale.network import build_network_projection_rows  # noqa: E402
 from backend.high_scale.origin import build_origin_projection_rows  # noqa: E402
@@ -617,7 +1034,6 @@ from backend.high_scale.query_service import DecodeResult, QueryClient, decode_s
 from backend.high_scale.security import build_security_projection_rows  # noqa: E402
 
 # ── Ingest Controller ─────────────────────────────────────────────────────────
-
 HIGH_SCALE_PAGE_MAX_BYTES = 64 * 1024 * 1024  # 64 MB in-flight byte guard
 HIGH_SCALE_MAX_DEAD_LETTER_RATIO = 0.05  # 5% dead-letter limit
 _RUM_SIBLING_DOMAIN = {"rum_vitals": "rum_errors", "rum_errors": "rum_vitals"}
@@ -634,7 +1050,6 @@ class BatchIngestResult:
 
 class HighScaleControlPlane(Protocol):
     def owner(self, service_id: str) -> Any: ...
-
     def discover_source(
         self,
         service_id: str,
@@ -647,7 +1062,6 @@ class HighScaleControlPlane(Protocol):
         expected_owner: str,
         expected_owner_epoch: int,
     ) -> Any: ...
-
     def claim_source(
         self,
         service_id: str,
@@ -659,7 +1073,6 @@ class HighScaleControlPlane(Protocol):
         lease_seconds: float,
         now: datetime | None,
     ) -> Any: ...
-
     def record_source_counts(
         self,
         service_id: str,
@@ -669,11 +1082,8 @@ class HighScaleControlPlane(Protocol):
         malformed_rows: int,
         expected_owner_epoch: int,
     ) -> None: ...
-
     def register_archive_manifest(self, manifest: ArchiveManifest, *, owner_epoch: int) -> Any: ...
-
     def archive_manifest(self, manifest_id: str) -> Any: ...
-
     def transition_archive_manifest(
         self,
         manifest_id: str,
@@ -682,7 +1092,6 @@ class HighScaleControlPlane(Protocol):
         next_state: ArchiveState,
         expected_owner_epoch: int,
     ) -> Any: ...
-
     def claim_sources_batch(
         self,
         service_id: str,
@@ -694,7 +1103,6 @@ class HighScaleControlPlane(Protocol):
         expected_owner: str | None = None,
         now: datetime | None = None,
     ) -> tuple[Any, ...]: ...
-
     def acknowledge_sources_batch(
         self,
         service_id: str,
@@ -774,22 +1182,18 @@ class HighScaleIngestController:
                 quarantined_events=0,
                 sources_count=0,
             )
-
         total_bytes = sum(len(payload) for _, payload in sources_payloads)
         if total_bytes > HIGH_SCALE_PAGE_MAX_BYTES:
             raise ValueError(f"high-scale page size {total_bytes} exceeds maximum {HIGH_SCALE_PAGE_MAX_BYTES}")
-
         owner = self._control.owner(service_id) if self._control is not None else self._ownership.get(service_id)
         if owner.current_owner != "high_scale":
             raise RuntimeError(f"high-scale ingest rejected for {service_id}: owner is {owner.current_owner}")
-
         decoded_sources: list[tuple[SourceObjectDescriptor, DecodeResult, list[dict[str, Any]]]] = []
         all_events: list[dict[str, Any]] = []
         sibling_events: list[dict[str, Any]] = []
         total_accepted = 0
         total_quarantined = 0
         sibling_quarantined = 0
-
         for descriptor, payload in sources_payloads:
             if self._control is None:
                 src_obj = self._ledger.discover(
@@ -828,7 +1232,6 @@ class HighScaleIngestController:
             )
             total_accepted += decoded.accepted_rows
             total_quarantined += decoded.quarantined_rows
-
             if self._control is not None:
                 self._control.record_source_counts(
                     service_id,
@@ -844,7 +1247,6 @@ class HighScaleIngestController:
                     accepted_rows=decoded.accepted_rows,
                     malformed_rows=decoded.quarantined_rows,
                 )
-
             archive_rows = [dict(event, _record_kind="event") for event in decoded.events]
             archive_rows.extend(
                 {
@@ -856,7 +1258,6 @@ class HighScaleIngestController:
                 }
                 for item in decoded.dead_letters
             )
-
             decoded_sources.append((descriptor, decoded, archive_rows))
             all_events.extend(decoded.events)
             sibling = _RUM_SIBLING_DOMAIN.get(domain)
@@ -869,7 +1270,6 @@ class HighScaleIngestController:
                 )
                 sibling_quarantined += sibling_decoded.quarantined_rows
                 sibling_events.extend(e for e in sibling_decoded.events if row_matches_serving_domain(sibling, e))
-
         if sibling_quarantined:
             # The claimed-domain archive retains these original raw_json lines,
             # including mixed bodies with a valid exception and invalid metric.
@@ -883,7 +1283,6 @@ class HighScaleIngestController:
             raise ValueError(
                 f"high-scale dead letter ratio {total_quarantined}/{total_rows} exceeds maximum {max_dead_letter_ratio}"
             )
-
         observed = (now or datetime.now(UTC)).astimezone(UTC)
         source_batches = [
             (
@@ -899,7 +1298,6 @@ class HighScaleIngestController:
             )
             for (desc, _, rows), (_, payload) in zip(decoded_sources, sources_payloads)
         ]
-
         with tempfile.TemporaryDirectory(prefix="high-scale-archive-") as root:
             local_manifest = write_batch_archive_checkpoint(
                 Path(root),
@@ -929,16 +1327,13 @@ class HighScaleIngestController:
                 except KeyError:
                     pass
             self._archive.publish(manifest, artifact)
-
         if self._control is not None:
             self._publish_control_manifest(manifest, owner.owner_epoch)
-
         current_owner = (
             self._control.owner(service_id) if self._control is not None else self._ownership.get(service_id)
         )
         if current_owner.current_owner != "high_scale" or current_owner.owner_epoch != owner.owner_epoch:
             raise RuntimeError(f"high-scale owner epoch changed during ingest for {service_id}")
-
         if domain == "request":
             _enrich_high_scale_ngwaf_bots(tuple(all_events))
         serving_rows = tuple(e for e in all_events if row_matches_serving_domain(domain, e))
@@ -959,7 +1354,6 @@ class HighScaleIngestController:
                 rows_visible=0,
                 duplicate=False,
             )
-
         self._publish_aggregates_batch(service_id, domain, manifest.manifest_id, owner.owner_epoch, all_events)
         if domain == "request":
             self._publish_cmcd_projection(
@@ -968,7 +1362,6 @@ class HighScaleIngestController:
                 owner.owner_epoch,
                 all_events,
             )
-
         sibling = _RUM_SIBLING_DOMAIN.get(domain)
         if sibling is not None and sibling_events:
             self._serving.publish(
@@ -981,7 +1374,6 @@ class HighScaleIngestController:
                 )
             )
             self._publish_aggregates_batch(service_id, sibling, manifest.manifest_id, owner.owner_epoch, sibling_events)
-
         object_keys = tuple(desc.object_key for desc, _ in sources_payloads)
         if self._control is not None:
             self._control.acknowledge_sources_batch(
@@ -1007,7 +1399,6 @@ class HighScaleIngestController:
                         owner.owner_epoch,
                     )
                     self._ledger.acknowledge(service_id, desc.object_key, manifest.manifest_id)
-
         return BatchIngestResult(
             manifest=manifest,
             publication=publication,
@@ -1043,7 +1434,6 @@ class HighScaleIngestController:
                 perf_proj = build_performance_projection_rows(event_tuple)
                 security_proj = build_security_projection_rows(event_tuple)
                 network_proj = build_network_projection_rows(event_tuple)
-
                 for sub_domain, rows in (
                     ("origin_summary", origin_proj.summary_rows),
                     ("origin_dimensions", origin_proj.dimension_rows),
@@ -1151,7 +1541,6 @@ def _enrich_high_scale_ngwaf_bots(events: tuple[dict[str, Any], ...]) -> None:
     waf_req_ids = {str(e.get("waf_req_id")) for e in events if e.get("waf_req_id")}
     if not waf_req_ids:
         return
-
     try:
         from backend.core.metadata import pg_connection
 
@@ -1165,7 +1554,6 @@ def _enrich_high_scale_ngwaf_bots(events: tuple[dict[str, Any], ...]) -> None:
             rows = cur.fetchall()
         finally:
             pconn.close()
-
         bot_map = {
             (r["waf_req_id"] if isinstance(r, dict) else r[0]): {
                 "name": r["bot_name"] if isinstance(r, dict) else r[1],
@@ -1196,11 +1584,9 @@ def _enrich_high_scale_ngwaf_bots(events: tuple[dict[str, Any], ...]) -> None:
 from backend.high_scale.source_discovery import SourceObjectDescriptor  # noqa: E402, F401
 
 # ── Assets & Shield Performance Aggregates (folded from assets.py) ────────────
-
 _memo = ResponseMemo(ttl=30.0, maxsize=128)
 _response_cache = _memo.cache
 _CacheRegistry.register("high_scale.assets._response_cache", _response_cache)
-
 _ASSET_TYPE_CASE = """
     CASE
         WHEN url_lower LIKE '%.png' OR url_lower LIKE '%.jpg' OR url_lower LIKE '%.jpeg' OR url_lower LIKE '%.gif' OR url_lower LIKE '%.svg' OR url_lower LIKE '%.webp' OR url_lower LIKE '%.ico' THEN 'Images'
@@ -1223,10 +1609,8 @@ def compute_summary_from_dims(
     by_type_cache_denom: dict[str, int] = defaultdict(int)
     by_type_comp_num: dict[str, int] = defaultdict(int)
     by_type_comp_denom: dict[str, int] = defaultdict(int)
-
     by_cache: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
     by_comp: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
-
     for asset_type, cache_status, encoding_norm, is_compressed, is_compressible, reqs, sum_bytes in dim_rows:
         r = int(reqs or 0)
         b = int(sum_bytes or 0)
@@ -1240,15 +1624,12 @@ def compute_summary_from_dims(
             by_type_comp_denom[asset_type] += r
             if is_compressed == 1:
                 by_type_comp_num[asset_type] += r
-
         cache_pair = by_cache[(asset_type, cache_status)]
         cache_pair[0] += r
         cache_pair[1] += b
-
         comp_pair = by_comp[(asset_type, encoding_norm)]
         comp_pair[0] += r
         comp_pair[1] += b
-
     asset_type_breakdown = [
         {
             "asset_type": at,
@@ -1263,7 +1644,6 @@ def compute_summary_from_dims(
         }
         for at in sorted(by_type_reqs.keys(), key=lambda k: (-by_type_reqs[k], k))
     ]
-
     cache_performance = [
         {
             "asset_type": at,
@@ -1273,7 +1653,6 @@ def compute_summary_from_dims(
         }
         for (at, cs), vals in sorted(by_cache.items(), key=lambda item: (item[0][0], -item[1][0], item[0][1]))
     ]
-
     compression_performance = [
         {
             "asset_type": at,
@@ -1283,7 +1662,6 @@ def compute_summary_from_dims(
         }
         for (at, ce), vals in sorted(by_comp.items(), key=lambda item: (item[0][0], -item[1][0], item[0][1]))
     ]
-
     return asset_type_breakdown, cache_performance, compression_performance
 
 
@@ -1294,7 +1672,6 @@ def assets_aggregates(
     end_time: str | None,
 ) -> AssetsAggregatesResponse:
     start_dt, end_dt = parse_time_window(start_time, end_time)
-
     cache_key = digest_cache_key(
         {
             "svc": service.service_id,
@@ -1307,7 +1684,6 @@ def assets_aggregates(
     cached = _memo.get_with_telemetry(cache_key)
     if cached is not None:
         return AssetsAggregatesResponse.with_telemetry(**cached)
-
     filter_clauses, filter_params = request_filter_clauses(req.filters)
     where = " AND ".join(
         [
@@ -1324,7 +1700,6 @@ def assets_aggregates(
         "end_time": end_dt,
         **filter_params,
     }
-
     enriched_cte = f"""
         WITH grouped_raw AS (
             SELECT
@@ -1368,7 +1743,6 @@ def assets_aggregates(
             FROM grouped_base
         )
     """
-
     dims_sql = f"""
         /* assets:summary_dims */
         {enriched_cte}
@@ -1388,7 +1762,6 @@ def assets_aggregates(
         FROM assets_enriched
         GROUP BY asset_type, cache_status, content_encoding_norm, is_compressed, is_compressible
     """
-
     hotspots_sql = f"""
         /* assets:hotspots */
         {enriched_cte}
@@ -1424,7 +1797,6 @@ def assets_aggregates(
             LIMIT 20
         )
     """
-
     import contextvars
     from concurrent.futures import ThreadPoolExecutor
 
@@ -1433,7 +1805,6 @@ def assets_aggregates(
         fut_hotspots = pool.submit(contextvars.copy_context().run, lambda: service.client.execute(hotspots_sql, params))
         dim_dicts = fut_dims.result()
         hotspot_dicts = fut_hotspots.result()
-
     dim_tuples = [
         (
             str(d["asset_type"]),
@@ -1447,7 +1818,6 @@ def assets_aggregates(
         for d in dim_dicts
     ]
     asset_type_breakdown, cache_performance, compression_performance = compute_summary_from_dims(dim_tuples)
-
     large_uncompressed_assets: list[dict[str, Any]] = []
     low_ttl_assets: list[dict[str, Any]] = []
     for d in hotspot_dicts:
@@ -1470,7 +1840,6 @@ def assets_aggregates(
                     "asset_type": str(d["asset_type"]),
                 }
             )
-
     payload = {
         "asset_type_breakdown": asset_type_breakdown,
         "cache_performance": cache_performance,
@@ -1484,7 +1853,6 @@ def assets_aggregates(
 
 
 # ── Worker Loop (folded from backend.high_scale.worker) ──────────────────────
-
 from backend.high_scale.deletion import (  # noqa: E402
     DeletionController,
     HighScaleDeletionSweeper,
@@ -1713,7 +2081,6 @@ class HighScaleWorkerLoop:
                 run_usage_log_cleanup(service_id)
             except Exception:
                 _worker_logger.debug("periodic usage log cleanup failed", extra={"service_id": service_id})
-
         try:
             from backend.core.clickhouse_client import get_clickhouse_client
             from backend.core.clickhouse_schema import maintain_clickhouse_system_tables
@@ -1757,7 +2124,6 @@ class HighScaleWorkerLoop:
 
 def build_worker_from_environment() -> HighScaleWorkerLoop:
     """Build the durable FOS → archive → ClickHouse worker from process config."""
-
     from backend.core.duckdb import _get_fos_client, get_source_for_service
 
     high_scale_config = from_environment()
@@ -1791,7 +2157,6 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
     object_concurrency = int(os.getenv("HIGH_SCALE_OBJECT_CONCURRENCY", "4"))
     interval_seconds = float(os.getenv("HIGH_SCALE_WORKER_INTERVAL_SECONDS", "5"))
     domains = tuple(_csv_env("HIGH_SCALE_DOMAINS") or ("request", "rum_vitals", "rum_errors"))
-
     control = PostgresControlPlane()
     control.create_schema()
     for service_id in service_ids:
@@ -1800,7 +2165,6 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
             owner="high_scale",
             source_cursor=os.getenv("HIGH_SCALE_INITIAL_CURSOR", "__initial__"),
         )
-
     clickhouse_settings = app_config.load_clickhouse_config()
     if clickhouse_settings is None:
         raise RuntimeError("high-scale worker requires CLICKHOUSE_ENABLED=true")
@@ -1812,10 +2176,8 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
         if aggregates_enabled
         else None
     )
-
     deletion_enabled = os.getenv("HIGH_SCALE_DELETION_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
     deletion_sweep_limit = int(os.getenv("HIGH_SCALE_DELETION_SWEEP_LIMIT", "100"))
-
     coordinators: list[HighScaleWorkerCoordinator] = []
     sweepers: list[HighScaleDeletionSweeper | None] = []
     for service_id in service_ids:
@@ -1872,7 +2234,6 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
             sweepers.append(HighScaleDeletionSweeper(control=control, controller=deletion_controller))
         else:
             sweepers.append(None)
-
     return _MultiServiceWorkerLoop(
         coordinators=tuple(zip(service_ids, coordinators, strict=True)),
         deletion_sweepers=tuple(zip(service_ids, sweepers, strict=True)),
@@ -1900,7 +2261,6 @@ def main() -> None:
             start_http_server(8000)
         except Exception as e:
             logging.warning(f"Failed to start prometheus_client: {e}")
-
     parser = ArgumentParser(description="Run the bounded high-scale source worker")
     parser.add_argument("--once", action="store_true", help="process one bounded page per service and domain")
     parser.add_argument("--iterations", type=int, default=None)
@@ -1910,8 +2270,6 @@ def main() -> None:
 
 
 # ── FOS-Authoritative Recovery (folded from backend.high_scale.recovery) ─────
-
-
 @dataclass(frozen=True)
 class RecoveryCapacityMeasurement:
     events_per_second: int
@@ -1953,7 +2311,6 @@ class RecoveryCapacityReport:
 
 def evaluate_recovery_capacity(measurement: RecoveryCapacityMeasurement) -> RecoveryCapacityReport:
     """Evaluate a measured recovery profile without claiming unmeasured capacity."""
-
     measurement.validate()
     required = (
         measurement.events_per_second
@@ -2016,7 +2373,6 @@ def _evaluate_capacity_gate(
     replayed yet). An infeasible one never blocks recovery: restoring data
     matters more than the claim, so it is logged and carried on the report.
     """
-
     if measurement is None:
         return None
     report = evaluate_recovery_capacity(measurement)
@@ -2073,15 +2429,12 @@ def rebuild_serving_state_from_fos(
     capacity_report = _evaluate_capacity_gate(
         capacity, service_id=service_id, domain=domain, rebuild_id=resolved_rebuild_id
     )
-
     recent_manifests = _sorted(catalog.manifests_covering(service_id, domain, recent_start, observed))
     warm_manifests = _sorted(catalog.manifests_covering(service_id, domain, warm_start, recent_start))
-
     recent_rows, recent_replayed, recent_errors = _replay_all(
         recent_manifests, archive, publication, resolved_rebuild_id
     )
     warm_rows, warm_replayed, warm_errors = _replay_all(warm_manifests, archive, publication, resolved_rebuild_id)
-
     triage_available = not recent_errors
     warm_available = not warm_errors
     return RecoveryReport(
@@ -2423,7 +2776,5 @@ if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
             "backend.high_scale.rum_ingest": "backend.high_scale.rum",
         }
     )
-
-
 if __name__ == "__main__":
     main()

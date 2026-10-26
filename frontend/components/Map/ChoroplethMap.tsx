@@ -10,7 +10,7 @@ maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs')
 import { useTheme } from 'next-themes'
 import { DashboardMapData } from '@/types/api'
 import countryCodes from '@/lib/country-codes.json'
-import { formatCompactCount, resolveCountryName, formatCount } from '@/lib/format'
+import { formatCompactCount, resolveCountryName, formatCount } from "@/lib/utils"
 export { MapPrewarm } from '@/components/PlotlyChart'
 
 export const NORMALIZE_COUNTRY: Record<string, string> = {

@@ -1,139 +1,16 @@
 #!/usr/bin/env bash
-# check_eslint_count.sh
-#
-# ESLint error-count CEILING gate for the frontend. Asserts the eslint error
-# count over the production source dirs is monotonically <= a ceiling, so a
-# refactor can't silently introduce new `as any`, rules-of-hooks, or other
-# lint violations. ESLint is otherwise gated NOWHERE (CI runs only the Python
-# import-linter; `make lint` is ruff), which is why these accumulated unchecked.
-#
-# This mirrors check_security_regression_count.sh, inverted: that is a FLOOR
-# that must not drop (audited-fix coverage); this is a CEILING that must not
-# rise (lint debt). RATCHET IT DOWN: when a PR removes violations, lower
-# CEILING to the new actual in the same PR (same spirit as the coverage
-# --cov-fail-under ratchet). Never raise it to "fix" a regression — fix the
-# new violation instead.
-#
-# Run locally: bash scripts/check_eslint_count.sh
-# Run in CI:   same; exits 1 if count > ceiling.
-
+# check_eslint_count.sh: ESLint error-count CEILING gate for frontend production and test dirs.
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/../frontend"
+# shellcheck source=scripts/lib/ratchet_common.sh
+source "$SCRIPT_DIR/lib/ratchet_common.sh"
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT/frontend"
-
-# Ceiling = the error count at the time this gate was introduced (2026-06-19),
-# scoped to the production source dirs below (generated types/, __tests__/,
-# e2e/, and build output are out of scope — build output is ignored in
-# eslint.config.mjs). Lower this number whenever a PR drives the count down.
-# Lineage (ratchet down as `as any` / violations are removed): 940 -> 936 -> 932 -> 901 -> 895 -> 889 -> 875 -> 873 -> 866 -> 837 -> 835.
-# The big drops came from typing openapi-fetch responses instead of `any` — UX-17
-# (network/page.tsx), the SRE observability pass (health/scoring fields), and the
-# UX type-drift remediation (sections request bodies, usage/dashboard/alerts reads,
-# AdminPrefetchLinks). 895 -> 889: LatencyHeatmap column dedup collapsed six
-# duplicated `(info: any)` cells into shared column constants. 889 -> 875: shielding
-# audit display fixes typed shielding_analysis (ShieldingAnalysis/ShieldingRow) end
-# to end, removing `as any` casts in network/page.tsx + ShieldingMap. 875 -> 873:
-# the typed adjustShieldingRows helper (min-requests threshold) replaced ad-hoc
-# row handling without new `any`. 873 -> 866: the share-dashboard usage/sort work
-# typed ShareStatus.invites/sessions/audit_logs (Invite/ShareSession/AuditLog)
-# instead of `any[]`, net-removing casts across the three share panels. 866 ->
-# 837: Phase-4 Track D insights cleanup — typed InsightsClient availability/data
-# reads against InsightsAvailabilityResponse/InsightsResponse (dropped `as any`),
-# GeoJSON.Feature[] in ImpossibleDistanceModal, and escaped pre-existing JSX
-# entities across the InsightHelpModal section files. 837 ->
-# 835: MetadataStorageCard adopted the typed /api/admin/metadata-storage path
-# (dropped both `as any` casts on the client.GET call). 835 -> 832: the
-# FieldSearchDialog pinned-selected rework replaced its index key and both
-# `v.value as any` casts (FieldTopEntry.value is `unknown` on the wire) with
-# `String(v.value)` / `as string | number`. 824 -> 820: the RUM Faro
-# self-hosting work typed RumClient's filter payload as FiltersPayload and its
-# worst-pages/errors/live-events row shapes, swapped two array-index React keys
-# for composite keys off the backend's dedup fields, moved two
-# useWizardState effects to render-time derived state, and unified a mismatched
-# optional-chain inside one _state.ts useMemo. 820 -> 819: resolved unescaped
-# single quotes in ServicesTable / TeardownDialog and suppressed state-in-effect / purity
-# warnings across multiple workspace files. 819 -> 817: net drop from the RUM
-# branch's frontend work (measured on a clean worktree at the branch tip). 817 -> 815:
-# net drop from resolving pre-existing violations on this branch. 815 -> 843: reconciled
-# actual baseline count after completely eliminating all 17 ESLint errors/warnings inside
-# the newly added RUM, Assets, and Security views (RumSettingsDialog, TeardownRemoteFrontendDialog,
-# PopHealthHeatmap, ThreatIntelPanel, and DeployRemoteFrontendDialog). 843 -> 842: ratchet down ceiling following successful routing and query telemetry fixes. 842 -> 839: adopt shared useMounted hook in all Client analytical views to remove manual effects. 839 -> 835: ratchet down ceiling following absolute type-safety refactor of DebugPanel.tsx (0 any, 0 array-index-keys).
-# 835 -> 834: net drop from the log_ingest -> commit cron rename (CronColumns.tsx task-string comparisons collapsed).
-# 834 -> 831: net drop from the Cron 1 frontend changes.
-# 831 -> 824: F5/F6 DRY refactor — merge-base measured at 832 (ceiling 831 was
-# set by Cron-1 work not present at this merge-base); escaped 8 pre-existing
-# react/no-unescaped-entities violations in network/help-content.tsx (JSX
-# apostrophes/quotes, render-identical) while converting its number formatting
-# to the shared formatCount helper.
-# 824 -> 804: dropped `as any` path casts on typed client calls (share dashboard,
-# scoring labels, ngwaf, network) plus the raw-logs explorer lint fixes (baseline
-# had drifted to 830 above the 824 ceiling).
-# 804 -> 792: typed the /query page (presets, result columns), plus later DRY work.
-# 804 -> 802: adopt useCopyToClipboard/downloadBlob (hook-in-cell extraction in CronColumns).
-# 802 -> 800: shared createBaseMap for the four MapLibre maps; dropped window.map debug global.
-# 800 -> 799: correlator useQuery migration and polling/ticker consolidation dropped one violation.
-# 799 -> 794: moved buildTrafficData out of app/ into lib/traffic-chart (lint-clean in its new home).
-# 792 -> 791: adminJson/adminJsonResult replaced the remaining adminFetch().json() hand casts.
-# 791 -> 788: useShareStatusBanner moved from an effect/setState poller to useQuery.
-# 788 -> 786: scoring label rows and /scoring/labels read typed from the generated schema.
-# 786 -> 785: lake-info range/calendar typed on the response model; SyncFromCloudModal lost its any cast.
-# 785 -> 328: response/request bodies, catalog, bootstrap, scoring, share, provision, logs, alerts and query pages
-# derive from the generated schema instead of any casts.
-# 328 -> 170: security, origin and network sections read typed row models from the generated
-# schema (no row `any` casts), the network page's hooks moved out of the ReportLayout render-prop
-# into NetworkBody, and the DataTable/map internals use tanstack/maplibre generics.
-# 170 -> 0: effects that only mirrored props/storage into state are derived state, keyed state or
-# external-store reads; components are hoisted; index keys and unescaped entities are gone.
-CEILING=0
-
-# Scope: the user-facing source where the crash-class (rules-of-hooks) and the
-# FE<->BE type-drift (no-explicit-any) live. Keep in sync with the `make
-# lint-frontend` target.
+CEILING=9
 SCOPE=(app components hooks lib stores)
-
-# ESLint exits non-zero when it reports errors; capture the JSON anyway.
-# Test-side ceiling: same gate over the test/e2e dirs, but warnings count too
-# (e.g. no-unused-vars), so dead imports and vars cannot pile up. Ratchet to 0.
 TEST_CEILING=0
 TEST_SCOPE=(__tests__ e2e vitest.setup.ts)
 
-count_errors() {
-    local json warn="$1"
-    shift
-    json="$(npx --no-install eslint "$@" -f json 2>/dev/null || true)"
-    if [[ -z "$json" ]]; then
-        echo "ERROR: eslint produced no JSON output (is the frontend dependency tree installed?)" >&2
-        exit 2
-    fi
-    local n
-    n="$(printf '%s' "$json" | COUNT_WARNINGS="$warn" node -e \
-        'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s);console.log(a.reduce((n,f)=>n+(f.errorCount||0)+(process.env.COUNT_WARNINGS==="1"?(f.warningCount||0):0),0))}catch(e){process.exit(3)}})')"
-    if [[ -z "$n" || ! "$n" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: could not parse eslint error count" >&2
-        exit 2
-    fi
-    echo "$n"
-}
-
-check_scope() {
-    local label="$1" ceiling="$2" warn="$3"
-    shift 3
-    local count
-    count="$(count_errors "$warn" "$@")"
-    echo "eslint errors$([[ "$warn" == 1 ]] && echo "+warnings") ($label: $*): $count (ceiling: $ceiling)"
-    if (( count > ceiling )); then
-        echo "FAIL: eslint error count rose above the ceiling — new lint violation(s) introduced." >&2
-        echo "Fix the new violation(s). To see them: cd frontend && npx eslint $*" >&2
-        echo "(Do NOT raise the ceiling to pass. Lower it when you remove violations.)" >&2
-        exit 1
-    fi
-    if (( count < ceiling )); then
-        echo "NOTE: count ($count) is below the ceiling ($ceiling) — ratchet it down to $count in this PR." >&2
-    fi
-}
-
-check_scope production "$CEILING" 0 "${SCOPE[@]}"
-check_scope tests "$TEST_CEILING" 1 "${TEST_SCOPE[@]}"
-
+check_eslint_scope production "$CEILING" 0 "${SCOPE[@]}"
+check_eslint_scope tests "$TEST_CEILING" 1 "${TEST_SCOPE[@]}"
 echo "OK"

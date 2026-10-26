@@ -9,6 +9,8 @@ Public API for the core declarative reconciliation system:
 import sys
 
 from backend.provision.declarative import reconciler as diff
+from backend.provision.declarative import reconciler as fastly_integration
+from backend.provision.declarative import reconciler as generators
 from backend.provision.declarative import reconciler as iac_reconciler
 from backend.provision.declarative import reconciler as state
 from backend.provision.declarative.reconciler import (
@@ -19,6 +21,8 @@ from backend.provision.declarative.reconciler import (
 )
 
 sys.modules[f"{__name__}.diff"] = diff
+sys.modules[f"{__name__}.fastly_integration"] = fastly_integration
+sys.modules[f"{__name__}.generators"] = generators
 sys.modules[f"{__name__}.iac_reconciler"] = iac_reconciler
 sys.modules[f"{__name__}.state"] = state
 sys.modules[f"{__name__}.config_migration"] = state
@@ -26,12 +30,18 @@ _backend_pkg = sys.modules.get("backend")
 if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
     _backend_pkg._MODULE_ALIASES.setdefault("backend.provision.declarative.state", f"{__name__}.reconciler")
     _backend_pkg._MODULE_ALIASES.setdefault("backend.provision.declarative.config_migration", f"{__name__}.reconciler")
+    _backend_pkg._MODULE_ALIASES.setdefault(
+        "backend.provision.declarative.fastly_integration", f"{__name__}.reconciler"
+    )
+    _backend_pkg._MODULE_ALIASES.setdefault("backend.provision.declarative.generators", f"{__name__}.reconciler")
 
 __all__ = [
     "FeatureState",
     "DiffResult",
     "compute_diff",
     "diff",
+    "fastly_integration",
+    "generators",
     "iac_reconciler",
     "reconcile_vcl_state",
     "state",

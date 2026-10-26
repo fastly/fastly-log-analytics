@@ -34,8 +34,7 @@ import { DataTable } from '@/components/DataTable'
 import { History, Bookmark, Download, X, Filter, Code2, Clock, Database, ChevronRight, Columns3 } from 'lucide-react'
 import { useDateFormat } from '@/hooks/useSSE'
 import { useMounted } from '@/hooks/useBootstrap'
-import { formatCount } from '@/lib/format'
-import { cn } from '@/lib/utils'
+import { formatCount, cn } from "@/lib/utils";
 import type { components } from '@/types/api.generated'
 
 export interface CodeEditorHandle {

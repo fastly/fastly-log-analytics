@@ -565,13 +565,15 @@ def test_private_observability_runner_requires_real_verifier_success(tmp_path, m
             return subprocess.CompletedProcess(command, 0, stdout=json.dumps(body))
         return subprocess.CompletedProcess(command, 0, stdout='{"completed": true}')
 
+    obs_root = tmp_path / "obs"
+    obs_root.mkdir()
     monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(
         sys,
         "argv",
         [
             "runner",
-            str(tmp_path),
+            str(obs_root),
             "1",
             "1",
             "1",
@@ -597,11 +599,11 @@ def test_private_observability_runner_requires_real_verifier_success(tmp_path, m
         assert calls[9][:2] == ["ssh-test", "--command"]
         assert any("deployment/high-scale-worker" in command for command in calls)
         assert any("deployment/worker" in command for command in calls)
-        assert len(list(tmp_path.glob("observability-*/*.json"))) == 16
+        assert len(list(obs_root.glob("observability-*/*.json"))) == 16
         assert len(requests) == 3  # One cheap existing health request per env; no edge traffic.
         assert all(request[0].endswith("/api/health") for request in requests)
         assert len({request[1]["traceparent"] for request in requests}) == 3
-    for directory in tmp_path.iterdir():
+    for directory in obs_root.iterdir():
         assert directory.stat().st_mode & 0o777 == 0o700
         for path in directory.iterdir():
             assert path.stat().st_mode & 0o777 == 0o600

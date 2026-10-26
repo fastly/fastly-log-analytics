@@ -5,41 +5,27 @@ import type { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  SectionHeader, ReviewCard, ReviewHeader, ReviewContent, ReviewItem,
-} from "@/components/ui/confirm-dialog";
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from "@/components/ui/select";
+import { SectionHeader, ReviewCard, ReviewHeader, ReviewContent, ReviewItem } from "@/components/ui/confirm-dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { CollapsibleGroup, CmcdConfigSection } from "@/components/LogSettingsModal/FieldGroups";
+import { CollapsibleGroup, CmcdConfigSection } from "@/components/LogSettingsModal/LogSettingsModal";
 import { SSEProgressView } from "@/components/SSEModal";
 import {
-  Activity, AlertCircle, Calendar, CheckCircle2, ChevronLeft, ChevronRight, Cloud,
-  Copy, Database, Eye, FileJson, FileText, Globe, Info, Layers,
-  Loader2, Lock, Plus, RotateCcw, Search, Settings, Shield, Sparkles, XCircle, Zap,
+  Activity, AlertCircle, Calendar, CheckCircle2, ChevronLeft, ChevronRight, Cloud, Copy, Database, Eye, FileJson,
+  FileText, Globe, Info, Layers, Loader2, Lock, Plus, RotateCcw, Search, Settings, Shield, Sparkles, XCircle, Zap,
 } from "lucide-react";
-import { cn, copyToClipboard, formatDateTime, panelDialogContent, panelDialogFooter, REGION_LABELS, SHIELD_LABELS } from "@/lib/utils";
-import { ELAPSED_RELATIVE_AGO, formatBytes, formatElapsed } from "@/lib/format";
-import { evaluateLogFieldPresetSummary, resolveEnabledGroupsWithDeps } from "@/lib/query-keys";
+import { cn, copyToClipboard, formatDateTime, panelDialogContent, panelDialogFooter, REGION_LABELS, SHIELD_LABELS, ELAPSED_RELATIVE_AGO, formatBytes, formatElapsed } from "@/lib/utils";
+import { evaluateLogFieldPresetSummary, resolveEnabledGroupsWithDeps } from "@/lib/api";
 import type { Service } from "@/stores/filterStore";
 import type { SSELine, SSEStatus } from "@/hooks/useSSE";
 import type { Schema } from "@/types/api";
 import { useWizardState } from "./useWizardState";
 import { StorageStep, AnalyzeStep } from "./steps/StorageStep";
 import { JoinStep } from "./steps/JoinStep";
-
-// ── Types & Constants ─────────────────────────────────────────────────────
 
 export type ProvisionService = Schema<"ProvisionService">;
 export type LakeInfo = Schema<"ProvisionLakeInfoResponse">;
@@ -48,11 +34,9 @@ type LogFieldsConfig = Schema<"LogFieldsConfig">;
 type ValidateResponse = Schema<"ProvisionValidateResponse">;
 
 export const WIZARD_DRAFT_VERSION = 1;
-
 export type Step =
   | "mode" | "token" | "service" | "features" | "storage" | "ngwaf"
   | "fields" | "execute" | "terraform" | "join" | "analyze" | "settings" | "confirm";
-
 export type WizardMode = "provision" | "join" | "ingest" | null;
 export type FosStatus = "idle" | "checking" | "success" | "error";
 export type DomainStatus = "idle" | "checking" | "available" | "taken" | "error";
@@ -61,110 +45,39 @@ export type JoinPhase = "form" | "connecting" | "importing" | "done";
 export const ANALYST_PATH_A_UNSUPPORTED_REASON =
   "Independent analyst access is unavailable for scalable Celery/DuckLake services. Use live shared-instance analyst access (Path B).";
 
-export interface TokenInfo {
-  id: string;
-  name: string;
-  type: "user" | "automation";
-}
+export interface TokenInfo { id: string; name: string; type: "user" | "automation"; }
 
 export interface ProvisionConfig {
-  endpoint_name: string;
-  fos_region: string;
-  fos_endpoint: string;
-  fos_bucket_name: string;
-  fos_prefix: string;
-  fos_access_key: string;
-  fos_secret_key: string;
-  sample_rate: number;
-  edge_only: boolean;
-  custom_condition: string;
-  log_period: number;
-  cdn_service_name: string;
-  cdn_prefix: string;
-  cdn_shield: string;
-  cdn_url: string;
-  cdn_secret: string;
-  enable_cron_sync: boolean;
-  delete_after: boolean;
-  commit_interval_mins: number;
-  enable_cron_compact: boolean;
-  log_fields: LogFieldsConfig;
-  ngwaf_workspace_id: string;
-  cmcd_enabled: boolean;
-  cmcd_mode: string;
-  cmcd_version: number;
-  logging_enabled: boolean;
-  rum_enabled: boolean;
-  rum_log_period: number;
-  log_retention_days: number;
-  rum_retention_days: number;
-  cache_retention_days: number;
-  rollup_retention_months: number;
-  rum_custom_condition: string;
-  faro_version: string | null;
+  endpoint_name: string; fos_region: string; fos_endpoint: string; fos_bucket_name: string; fos_prefix: string;
+  fos_access_key: string; fos_secret_key: string; sample_rate: number; edge_only: boolean; custom_condition: string;
+  log_period: number; cdn_service_name: string; cdn_prefix: string; cdn_shield: string; cdn_url: string;
+  cdn_secret: string; enable_cron_sync: boolean; delete_after: boolean; commit_interval_mins: number;
+  enable_cron_compact: boolean; log_fields: LogFieldsConfig; ngwaf_workspace_id: string; cmcd_enabled: boolean;
+  cmcd_mode: string; cmcd_version: number; logging_enabled: boolean; rum_enabled: boolean; rum_log_period: number;
+  log_retention_days: number; rum_retention_days: number; cache_retention_days: number; rollup_retention_months: number;
+  rum_custom_condition: string; faro_version: string | null;
 }
 
 export const INITIAL_CONFIG: ProvisionConfig = {
-  endpoint_name: "",
-  fos_region: "us-east-1",
-  fos_endpoint: "",
-  fos_bucket_name: "",
-  fos_prefix: "",
-  fos_access_key: "",
-  fos_secret_key: "",
-  sample_rate: 100,
-  edge_only: true,
-  custom_condition: "",
-  log_period: 60,
-  rum_log_period: 300,
-  cdn_service_name: "",
-  cdn_prefix: "",
-  cdn_shield: "iad-va-us",
-  cdn_url: "",
-  cdn_secret: "",
-  enable_cron_sync: true,
-  delete_after: true,
-  commit_interval_mins: 5,
-  enable_cron_compact: true,
-  log_fields: { groups: [], field_overrides: {} },
-  ngwaf_workspace_id: "",
-  cmcd_enabled: false,
-  cmcd_mode: "query_string",
-  cmcd_version: 1,
-  logging_enabled: true,
-  rum_enabled: false,
-  log_retention_days: 30,
-  rum_retention_days: 30,
-  cache_retention_days: 14,
-  rollup_retention_months: 12,
-  rum_custom_condition: "",
-  faro_version: null,
+  endpoint_name: "", fos_region: "us-east-1", fos_endpoint: "", fos_bucket_name: "", fos_prefix: "",
+  fos_access_key: "", fos_secret_key: "", sample_rate: 100, edge_only: true, custom_condition: "",
+  log_period: 60, rum_log_period: 300, cdn_service_name: "", cdn_prefix: "", cdn_shield: "iad-va-us",
+  cdn_url: "", cdn_secret: "", enable_cron_sync: true, delete_after: true, commit_interval_mins: 5,
+  enable_cron_compact: true, log_fields: { groups: [], field_overrides: {} }, ngwaf_workspace_id: "",
+  cmcd_enabled: false, cmcd_mode: "query_string", cmcd_version: 1, logging_enabled: true, rum_enabled: false,
+  log_retention_days: 30, rum_retention_days: 30, cache_retention_days: 14, rollup_retention_months: 12,
+  rum_custom_condition: "", faro_version: null,
 };
 
-export type PersistedConfig = Omit<
-  ProvisionConfig,
-  "fos_access_key" | "fos_secret_key" | "cdn_secret"
->;
+export type PersistedConfig = Omit<ProvisionConfig, "fos_access_key" | "fos_secret_key" | "cdn_secret">;
 
 export interface WizardDraft {
-  version: number;
-  draftId: string;
-  mode: Exclude<WizardMode, null>;
-  step: Step;
-  currentStep: Step;
-  selectedServiceId: string | null;
-  selectedServiceName: string | null;
-  selectedCdnServiceId: string | null;
-  selectedCdnServiceName: string | null;
-  tokenInfo: TokenInfo | null;
-  config: PersistedConfig;
-  importMode: "all" | "range";
-  importRange: { start: string; end: string };
-  syncEnabled: boolean;
-  syncIntervalMins: string;
-  icebergMetadataLocation: string;
-  updatedAt: string;
-  createdAt: string;
+  version: number; draftId: string; mode: Exclude<WizardMode, null>; step: Step; currentStep: Step;
+  selectedServiceId: string | null; selectedServiceName: string | null;
+  selectedCdnServiceId: string | null; selectedCdnServiceName: string | null;
+  tokenInfo: TokenInfo | null; config: PersistedConfig; importMode: "all" | "range";
+  importRange: { start: string; end: string }; syncEnabled: boolean; syncIntervalMins: string;
+  icebergMetadataLocation: string; updatedAt: string; createdAt: string;
 }
 
 const JOIN_FLOW_STEPS: { id: Step; label: string }[] = [
@@ -177,25 +90,15 @@ const JOIN_FLOW_STEPS: { id: Step; label: string }[] = [
 export function getStepsForMode(
   mode: WizardMode,
   config?: { logging_enabled?: boolean },
-  step?: Step
+  step?: Step,
 ): { id: Step; label: string }[] {
-  if (mode === "join") {
-    return [{ id: "mode", label: "Role" }, ...JOIN_FLOW_STEPS];
-  }
+  if (mode === "join") return [{ id: "mode", label: "Role" }, ...JOIN_FLOW_STEPS];
   if (mode === "ingest" && step && JOIN_FLOW_STEPS.some((s) => s.id === step)) {
-    return [
-      { id: "mode", label: "Role" },
-      { id: "token", label: "Auth" },
-      { id: "service", label: "Service" },
-      ...JOIN_FLOW_STEPS,
-    ];
+    return [{ id: "mode", label: "Role" }, { id: "token", label: "Auth" }, { id: "service", label: "Service" }, ...JOIN_FLOW_STEPS];
   }
   const steps: { id: Step; label: string }[] = [
-    { id: "mode", label: "Role" },
-    { id: "token", label: "Auth" },
-    { id: "service", label: "Service" },
-    { id: "features", label: "Features" },
-    { id: "storage", label: "Storage" },
+    { id: "mode", label: "Role" }, { id: "token", label: "Auth" },
+    { id: "service", label: "Service" }, { id: "features", label: "Features" }, { id: "storage", label: "Storage" },
   ];
   if (!config || config.logging_enabled !== false) {
     steps.push({ id: "ngwaf", label: "NGWAF" }, { id: "fields", label: "Log Fields" });
@@ -204,119 +107,56 @@ export function getStepsForMode(
   return steps;
 }
 
-export interface ProvisionWizardProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-}
+export interface ProvisionWizardProps { open: boolean; onOpenChange: (open: boolean) => void; }
 
 export interface WizardState {
-  setActiveServiceId: (id: string) => void;
-  setServices: (services: Service[]) => void;
-  services: Service[];
-  timezone: string;
-  queryClient: ReturnType<typeof useQueryClient>;
-  step: Step;
-  setStep: (s: Step) => void;
-  mode: WizardMode;
-  setMode: (m: WizardMode) => void;
-  token: string;
-  setToken: (t: string) => void;
-  tokenInfo: TokenInfo | null;
-  search: string;
-  setSearch: (s: string) => void;
-  selectedService: ProvisionService | null;
-  setSelectedService: (s: ProvisionService | null) => void;
-  selectedCdnService: ProvisionService | null;
-  setSelectedCdnService: (s: ProvisionService | null) => void;
-  isDeploying: boolean;
-  fosStatus: FosStatus;
-  fosError: string;
-  terraformFiles: Record<string, string>;
-  selectedTfFile: string;
-  setSelectedTfFile: (f: string) => void;
-  isFetchingTerraform: boolean;
-  configStatus: Schema<"ProvisionCheckConfigResponse"> | null;
-  isCheckingConfig: boolean;
-  handleCheckConfig: () => Promise<void>;
-  ngwafWorkspaces: { id: string; name: string }[];
-  ngwafFetching: boolean;
-  ngwafFetchError: string;
-  ngwafDebugRaw: string;
-  analystPathASupported: boolean;
-  analystPathAReason: string | null;
-  lakeInfo: LakeInfo | null;
-  isAnalyzing: boolean;
-  importMode: "all" | "range";
-  setImportMode: (m: "all" | "range") => void;
+  setActiveServiceId: (id: string) => void; setServices: (services: Service[]) => void; services: Service[];
+  timezone: string; queryClient: ReturnType<typeof useQueryClient>; step: Step; setStep: (s: Step) => void;
+  mode: WizardMode; setMode: (m: WizardMode) => void; token: string; setToken: (t: string) => void;
+  tokenInfo: TokenInfo | null; search: string; setSearch: (s: string) => void;
+  selectedService: ProvisionService | null; setSelectedService: (s: ProvisionService | null) => void;
+  selectedCdnService: ProvisionService | null; setSelectedCdnService: (s: ProvisionService | null) => void;
+  isDeploying: boolean; fosStatus: FosStatus; fosError: string; terraformFiles: Record<string, string>;
+  selectedTfFile: string; setSelectedTfFile: (f: string) => void; isFetchingTerraform: boolean;
+  configStatus: Schema<"ProvisionCheckConfigResponse"> | null; isCheckingConfig: boolean;
+  handleCheckConfig: () => Promise<void>; ngwafWorkspaces: { id: string; name: string }[];
+  ngwafFetching: boolean; ngwafFetchError: string; ngwafDebugRaw: string;
+  analystPathASupported: boolean; analystPathAReason: string | null; lakeInfo: LakeInfo | null;
+  isAnalyzing: boolean; importMode: "all" | "range"; setImportMode: (m: "all" | "range") => void;
   importRange: { start: string; end: string };
   setImportRange: React.Dispatch<React.SetStateAction<{ start: string; end: string }>>;
-  syncEnabled: boolean;
-  setSyncEnabled: (b: boolean) => void;
-  lines: SSELine[];
-  status: SSEStatus;
-  isDone: boolean;
-  sseError: string | null;
-  stop: () => void;
-  handleModalClose: (isOpen: boolean) => void;
-  onOpenChange: (open: boolean) => void;
-  config: ProvisionConfig;
+  syncEnabled: boolean; setSyncEnabled: (b: boolean) => void; lines: SSELine[]; status: SSEStatus;
+  isDone: boolean; sseError: string | null; stop: () => void; handleModalClose: (isOpen: boolean) => void;
+  onOpenChange: (open: boolean) => void; config: ProvisionConfig;
   setConfig: React.Dispatch<React.SetStateAction<ProvisionConfig>>;
-  catalog: LogFieldsCatalog | undefined;
-  isLoadingCatalog: boolean;
+  catalog: LogFieldsCatalog | undefined; isLoadingCatalog: boolean;
   toggleGroup: (groupId: string, checked: boolean) => void;
   toggleField: (fieldId: string, checked: boolean, defaultEnabledByGroup: boolean) => void;
   updateFieldLimit: (fieldId: string, limit?: number) => void;
-  togglePreset: (presetGroups: string[]) => void;
-  isPresetActive: (groups: string[]) => boolean;
-  estimatedBytes: number;
-  servicesData: ProvisionService[] | undefined;
-  servicesError: Error | null;
-  isLoadingServices: boolean;
-  filteredServices: ProvisionService[];
-  handleTokenSubmit: () => Promise<void>;
+  togglePreset: (presetGroups: string[]) => void; isPresetActive: (groups: string[]) => boolean;
+  estimatedBytes: number; servicesData: ProvisionService[] | undefined; servicesError: Error | null;
+  isLoadingServices: boolean; filteredServices: ProvisionService[]; handleTokenSubmit: () => Promise<void>;
   validateMutation: ReturnType<typeof useMutation<ValidateResponse | undefined, Error, string>>;
   handleServiceSelect: (service: ProvisionService) => void;
   handleCheckFos: (vals?: { bucket?: string; region?: string; access_key?: string; secret_key?: string }) => Promise<void>;
-  checkDomain: (prefix: string) => Promise<void>;
-  domainStatus: DomainStatus;
-  domainMessage: string;
-  joinPhase: JoinPhase;
-  joinedServiceId: string;
-  syncIntervalMins: string;
-  setSyncIntervalMins: (s: string) => void;
-  icebergMetadataLocation: string;
-  setIcebergMetadataLocation: (s: string) => void;
-  estimatedImportSize: number;
-  handleAnalyzeLake: () => Promise<void>;
-  handleJoin: () => void;
-  handleFinishJoin: () => void;
-  handleDeploy: () => void;
-  fetchTerraformPreview: () => Promise<void>;
-  handleExportTerraform: () => Promise<void>;
-  handleAdminIngest: () => Promise<void>;
-  STEPS: { id: Step; label: string }[];
-  pendingDraft: WizardDraft | null;
-  resumeDraft: () => void;
-  discardDraft: () => void;
+  checkDomain: (prefix: string) => Promise<void>; domainStatus: DomainStatus; domainMessage: string;
+  joinPhase: JoinPhase; joinedServiceId: string; syncIntervalMins: string; setSyncIntervalMins: (s: string) => void;
+  icebergMetadataLocation: string; setIcebergMetadataLocation: (s: string) => void;
+  estimatedImportSize: number; handleAnalyzeLake: () => Promise<void>; handleJoin: () => void;
+  handleFinishJoin: () => void; handleDeploy: () => void; fetchTerraformPreview: () => Promise<void>;
+  handleExportTerraform: () => Promise<void>; handleAdminIngest: () => Promise<void>;
+  STEPS: { id: Step; label: string }[]; pendingDraft: WizardDraft | null;
+  resumeDraft: () => void; discardDraft: () => void;
 }
-
-// ── ResumeBanner, WizardHeader & WizardFooter (folded from WizardFooter.tsx) ──
 
 function relativeTime(iso: string): string {
   const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return "earlier";
-  return formatElapsed(Math.floor((Date.now() - then) / 1000), ELAPSED_RELATIVE_AGO);
+  return Number.isNaN(then) ? "earlier" : formatElapsed(Math.floor((Date.now() - then) / 1000), ELAPSED_RELATIVE_AGO);
 }
 
 export function ResumeBanner({
-  draft,
-  onResume,
-  onStartFresh,
-}: {
-  draft: WizardDraft;
-  onResume: () => void;
-  onStartFresh: () => void;
-}) {
+  draft, onResume, onStartFresh,
+}: { draft: WizardDraft; onResume: () => void; onStartFresh: () => void }) {
   const label = getStepsForMode(draft.mode, draft.config).find((s) => s.id === draft.currentStep)?.label ?? draft.currentStep;
   const when = relativeTime(draft.updatedAt);
   return (
@@ -328,12 +168,8 @@ export function ResumeBanner({
           You left off on the <span className="font-medium">{label}</span> step ({when}). Fastly API token and storage credentials were cleared for safety and will need to be re-entered.
         </AlertDescription>
         <div className="mt-3 flex flex-wrap gap-2 group-has-[>svg]/alert:col-start-2">
-          <Button size="sm" onClick={onResume} data-testid="resume-banner-resume">
-            Resume from {label}
-          </Button>
-          <Button size="sm" variant="ghost" onClick={onStartFresh} data-testid="resume-banner-start-fresh">
-            Start fresh
-          </Button>
+          <Button size="sm" onClick={onResume} data-testid="resume-banner-resume">Resume from {label}</Button>
+          <Button size="sm" variant="ghost" onClick={onStartFresh} data-testid="resume-banner-start-fresh">Start fresh</Button>
         </div>
       </Alert>
     </div>
@@ -343,14 +179,12 @@ export function ResumeBanner({
 export function WizardHeader({ s }: { s: WizardState }) {
   const { step, STEPS } = s;
   const stepIndex = STEPS.findIndex((x) => x.id === step);
-
   return (
     <DialogHeader className="px-6 pt-6 pb-7 border-b">
       <DialogTitle className="flex items-center gap-2 text-xl font-bold">
         <Plus className="h-5 w-5 text-primary" />
         Provision New Service
       </DialogTitle>
-
       <div className="flex items-center justify-center w-full mt-6 px-1 sm:px-4 max-w-2xl mx-auto">
         {STEPS.map((s2, i) => {
           const isActive = step === s2.id;
@@ -389,7 +223,6 @@ export function WizardHeader({ s }: { s: WizardState }) {
           );
         })}
       </div>
-
       <div className="text-center mt-7 text-xs text-muted-foreground font-medium">
         Step <span className="text-foreground font-semibold">{stepIndex + 1}</span> of {STEPS.length}
       </div>
@@ -419,13 +252,11 @@ export function WizardFooter({ s }: { s: WizardState }) {
           <ChevronLeft className="h-4 w-4 mr-1" /> Back
         </Button>
       )}
-
       {status !== "streaming" && (
         <Button variant="outline" className="h-9 text-xs" onClick={() => handleModalClose(false)}>
           {status === "done" || isDone ? "Close & Reload" : "Cancel"}
         </Button>
       )}
-
       {!isDeploying && (
         <>
           {step === "mode" && <Button disabled className="h-9 text-xs">Select a Role</Button>}
@@ -465,47 +296,26 @@ export function WizardFooter({ s }: { s: WizardState }) {
             </Button>
           )}
           {step === "fields" && (
-            <Button onClick={() => setStep("execute")} className="h-9 text-xs">
-              Review Settings
-            </Button>
+            <Button onClick={() => setStep("execute")} className="h-9 text-xs">Review Settings</Button>
           )}
           {step === "execute" && (
             <div className="flex gap-2">
-              <Button
-                variant="secondary"
-                className="h-9 font-bold"
-                onClick={() => {
-                  fetchTerraformPreview();
-                  setStep("terraform");
-                }}
-              >
+              <Button variant="secondary" className="h-9 font-bold" onClick={() => { fetchTerraformPreview(); setStep("terraform"); }}>
                 View & Export Terraform
               </Button>
               {mode !== "ingest" ? (
-                <Button
-                  size="lg"
-                  disabled={domainStatus === "taken" || !config.fos_bucket_name}
-                  className="h-9 px-6 font-bold"
-                  onClick={handleDeploy}
-                >
+                <Button size="lg" disabled={domainStatus === "taken" || !config.fos_bucket_name} className="h-9 px-6 font-bold" onClick={handleDeploy}>
                   Deploy to Fastly
                 </Button>
               ) : (
-                <Button
-                  size="lg"
-                  disabled={!config.fos_bucket_name}
-                  className="h-9 px-6 font-bold"
-                  onClick={handleAdminIngest}
-                >
+                <Button size="lg" disabled={!config.fos_bucket_name} className="h-9 px-6 font-bold" onClick={handleAdminIngest}>
                   Complete Setup
                 </Button>
               )}
             </div>
           )}
           {step === "terraform" && (
-            <Button size="lg" className="h-9 px-6 font-bold" onClick={() => setStep("execute")}>
-              Back to Review
-            </Button>
+            <Button size="lg" className="h-9 px-6 font-bold" onClick={() => setStep("execute")}>Back to Review</Button>
           )}
           {step === "join" && joinPhase === "form" && (
             <Button
@@ -518,16 +328,8 @@ export function WizardFooter({ s }: { s: WizardState }) {
               Analyze Data Lake
             </Button>
           )}
-          {step === "analyze" && (
-            <Button className="h-9 text-xs" onClick={() => setStep("settings")}>
-              Continue
-            </Button>
-          )}
-          {step === "settings" && (
-            <Button className="h-9 text-xs" onClick={() => setStep("confirm")}>
-              Review Summary
-            </Button>
-          )}
+          {step === "analyze" && <Button className="h-9 text-xs" onClick={() => setStep("settings")}>Continue</Button>}
+          {step === "settings" && <Button className="h-9 text-xs" onClick={() => setStep("confirm")}>Review Summary</Button>}
           {step === "confirm" && (
             <Button
               size="lg"
@@ -540,36 +342,23 @@ export function WizardFooter({ s }: { s: WizardState }) {
           )}
         </>
       )}
-
-      {status === "streaming" && (
-        <Button variant="outline" onClick={stop} className="h-9 text-xs">
-          Stop
-        </Button>
-      )}
+      {status === "streaming" && <Button variant="outline" onClick={stop} className="h-9 text-xs">Stop</Button>}
     </DialogFooter>
   );
 }
-
-// ── Step Components ───────────────────────────────────────────────────────
 
 function errorCode(e: unknown): string | undefined {
   return e && typeof e === "object" && "code" in e ? String((e as Record<string, unknown>).code) : undefined;
 }
 
 function StatusCheckIcon({ enabled }: { enabled: boolean }) {
-  return enabled ? (
-    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
-  ) : (
-    <XCircle className="h-3.5 w-3.5 text-muted-foreground/30" />
-  );
+  return enabled ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" /> : <XCircle className="h-3.5 w-3.5 text-muted-foreground/30" />;
 }
 
 function FeatureSummaryBadge({ icon: Icon, title, subtitle }: { icon: React.ComponentType<{ className?: string }>; title: string; subtitle: string }) {
   return (
     <div className="flex-1 flex items-center gap-3 border rounded-xl p-3 bg-primary/[0.03] border-primary/10 shadow-sm">
-      <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center text-primary shrink-0">
-        <Icon className="h-4 w-4" />
-      </div>
+      <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center text-primary shrink-0"><Icon className="h-4 w-4" /></div>
       <div className="flex flex-col min-w-0">
         <span className="text-xs font-semibold text-foreground">{title}</span>
         <span className="text-[10px] text-muted-foreground leading-snug">{subtitle}</span>
@@ -580,32 +369,13 @@ function FeatureSummaryBadge({ icon: Icon, title, subtitle }: { icon: React.Comp
 
 export function ExecuteStep({ s }: { s: WizardState }) {
   const { config, catalog, selectedService } = s;
-  const enabledGroups = React.useMemo(
-    () => resolveEnabledGroupsWithDeps(config.log_fields?.groups, catalog),
-    [config.log_fields?.groups, catalog],
-  );
-  const presetSummary = React.useMemo(
-    () => evaluateLogFieldPresetSummary(config.log_fields, catalog),
-    [config.log_fields, catalog],
-  );
-
+  const enabledGroups = React.useMemo(() => resolveEnabledGroupsWithDeps(config.log_fields?.groups, catalog), [config.log_fields?.groups, catalog]);
+  const presetSummary = React.useMemo(() => evaluateLogFieldPresetSummary(config.log_fields, catalog), [config.log_fields, catalog]);
   const automationChecks = [
-    {
-      label: `Sync every ${config.log_period >= 120 ? Math.floor(config.log_period / 120) + "m" : Math.floor(config.log_period / 2) + "s"}`,
-      enabled: config.enable_cron_sync,
-    },
-    {
-      label: `Commit to Iceberg every ${config.commit_interval_mins}m`,
-      enabled: config.enable_cron_sync,
-    },
-    {
-      label: "Auto-delete Raw Logs",
-      enabled: config.delete_after && config.enable_cron_sync,
-    },
-    {
-      label: "Daily Iceberg Optimization",
-      enabled: config.enable_cron_compact && config.enable_cron_sync,
-    },
+    { label: `Sync every ${config.log_period >= 120 ? Math.floor(config.log_period / 120) + "m" : Math.floor(config.log_period / 2) + "s"}`, enabled: config.enable_cron_sync },
+    { label: `Commit to Iceberg every ${config.commit_interval_mins}m`, enabled: config.enable_cron_sync },
+    { label: "Auto-delete Raw Logs", enabled: config.delete_after && config.enable_cron_sync },
+    { label: "Daily Iceberg Optimization", enabled: config.enable_cron_compact && config.enable_cron_sync },
   ];
 
   return (
@@ -632,32 +402,20 @@ export function ExecuteStep({ s }: { s: WizardState }) {
           <>
             <div className="text-center space-y-2">
               <h3 className="text-2xl font-semibold tracking-tight">Review & Deploy</h3>
-              <p className="text-sm text-muted-foreground leading-relaxed">
-                You are about to provision the following resources.
-              </p>
+              <p className="text-sm text-muted-foreground leading-relaxed">You are about to provision the following resources.</p>
             </div>
-
             <div className="grid grid-cols-2 gap-4">
               <ReviewCard className="col-span-2 space-y-3">
                 <ReviewHeader icon={Sparkles}>Enabled Features</ReviewHeader>
                 <div className="flex flex-col sm:flex-row gap-3 pt-1">
                   {config.logging_enabled !== false && (
-                    <FeatureSummaryBadge
-                      icon={Database}
-                      title="Request Logging"
-                      subtitle="In-depth HTTP logs, edge metrics, and WAF protection."
-                    />
+                    <FeatureSummaryBadge icon={Database} title="Request Logging" subtitle="In-depth HTTP logs, edge metrics, and WAF protection." />
                   )}
                   {config.rum_enabled && (
-                    <FeatureSummaryBadge
-                      icon={Globe}
-                      title="Real User Monitoring (RUM)"
-                      subtitle="Client-side web vitals, speed insights, and session analytics."
-                    />
+                    <FeatureSummaryBadge icon={Globe} title="Real User Monitoring (RUM)" subtitle="Client-side web vitals, speed insights, and session analytics." />
                   )}
                 </div>
               </ReviewCard>
-
               <ReviewCard>
                 <ReviewHeader icon={Cloud}>Target Service</ReviewHeader>
                 <ReviewContent>
@@ -673,7 +431,6 @@ export function ExecuteStep({ s }: { s: WizardState }) {
                   )}
                 </ReviewContent>
               </ReviewCard>
-
               <ReviewCard>
                 <ReviewHeader icon={Globe}>CDN Edge Proxy</ReviewHeader>
                 <ReviewContent>
@@ -681,7 +438,6 @@ export function ExecuteStep({ s }: { s: WizardState }) {
                   <ReviewItem label="Shield POP" value={SHIELD_LABELS[config.cdn_shield] || "None"} />
                 </ReviewContent>
               </ReviewCard>
-
               <ReviewCard>
                 <ReviewHeader icon={Database}>Object Storage</ReviewHeader>
                 <ReviewContent>
@@ -690,63 +446,38 @@ export function ExecuteStep({ s }: { s: WizardState }) {
                   <ReviewItem label="Edge Only" value={config.edge_only ? "Yes" : "No"} />
                 </ReviewContent>
               </ReviewCard>
-
               <ReviewCard>
                 <ReviewHeader icon={Settings}>Automation</ReviewHeader>
                 <ReviewContent className="gap-2.5">
                   {automationChecks.map(({ label, enabled }) => (
-                    <ReviewItem
-                      key={label}
-                      variant="between"
-                      label={label}
-                      className={cn(!enabled && "text-muted-foreground")}
-                      value={<StatusCheckIcon enabled={enabled} />}
-                    />
+                    <ReviewItem key={label} variant="between" label={label} className={cn(!enabled && "text-muted-foreground")} value={<StatusCheckIcon enabled={enabled} />} />
                   ))}
                   {config.logging_enabled !== false && (
-                    <ReviewItem
-                      variant="between"
-                      label="Log Retention"
-                      className={cn(!config.enable_cron_sync && "text-muted-foreground")}
-                      value={config.log_retention_days === 0 ? "Forever" : `${config.log_retention_days} days`}
-                    />
+                    <ReviewItem variant="between" label="Log Retention" className={cn(!config.enable_cron_sync && "text-muted-foreground")} value={config.log_retention_days === 0 ? "Forever" : `${config.log_retention_days} days`} />
                   )}
                   {config.rum_enabled && (
-                    <ReviewItem
-                      variant="between"
-                      label="RUM Retention"
-                      className={cn(!config.enable_cron_sync && "text-muted-foreground")}
-                      value={config.rum_retention_days === 0 ? "Forever" : `${config.rum_retention_days} days`}
-                    />
+                    <ReviewItem variant="between" label="RUM Retention" className={cn(!config.enable_cron_sync && "text-muted-foreground")} value={config.rum_retention_days === 0 ? "Forever" : `${config.rum_retention_days} days`} />
                   )}
                 </ReviewContent>
               </ReviewCard>
-
               {config.logging_enabled !== false && (
                 <ReviewCard className="col-span-2 space-y-3">
                   <div className="flex justify-between items-center">
                     <ReviewHeader icon={FileJson}>Log Configuration</ReviewHeader>
-                    <span className="font-mono text-[10px] bg-muted px-2 py-0.5 rounded text-muted-foreground border">
-                      ~{formatBytes(s.estimatedBytes)} / line
-                    </span>
+                    <span className="font-mono text-[10px] bg-muted px-2 py-0.5 rounded text-muted-foreground border">~{formatBytes(s.estimatedBytes)} / line</span>
                   </div>
                   <div className="flex flex-wrap gap-1.5 pt-1">
                     <div className="px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-primary text-primary-foreground">
                       {presetSummary.bestPresetName ? `${presetSummary.bestPresetName} Preset` : "Custom Configuration"}
                     </div>
-                    {!presetSummary.bestPresetName &&
-                      catalog?.groups?.map((g) => {
-                        const isEnabled = g.locked || (g.id != null && presetSummary.enabledGroupsSet.has(g.id));
-                        if (!isEnabled) return null;
-                        return (
-                          <div
-                            key={g.id || "core"}
-                            className="px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-primary/10 text-primary border border-primary/20"
-                          >
-                            {g.label}
-                          </div>
-                        );
-                      })}
+                    {!presetSummary.bestPresetName && catalog?.groups?.map((g) => {
+                      const isEnabled = g.locked || (g.id != null && presetSummary.enabledGroupsSet.has(g.id));
+                      return isEnabled ? (
+                        <div key={g.id || "core"} className="px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-primary/10 text-primary border border-primary/20">
+                          {g.label}
+                        </div>
+                      ) : null;
+                    })}
                     {presetSummary.disabledCount > 0 && (
                       <div className="px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-muted text-muted-foreground border border-transparent">
                         +{presetSummary.disabledCount} disabled
@@ -755,7 +486,6 @@ export function ExecuteStep({ s }: { s: WizardState }) {
                   </div>
                 </ReviewCard>
               )}
-
               {config.logging_enabled !== false && (
                 <ReviewCard className="col-span-2 space-y-3">
                   <div className="flex justify-between items-center">
@@ -766,27 +496,13 @@ export function ExecuteStep({ s }: { s: WizardState }) {
                     {catalog?.insights?.map((insight) => {
                       const isEnabled = insight.required_groups.every((rg) => enabledGroups.has(rg));
                       return (
-                        <div
-                          key={insight.id}
-                          className={cn(
-                            "flex items-start gap-3 border rounded-lg p-2.5 bg-background shadow-sm transition-all",
-                            !isEnabled && "opacity-50 grayscale",
-                          )}
-                        >
+                        <div key={insight.id} className={cn("flex items-start gap-3 border rounded-lg p-2.5 bg-background shadow-sm transition-all", !isEnabled && "opacity-50 grayscale")}>
                           <div className="mt-0.5 shrink-0">
-                            {isEnabled ? (
-                              <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                            ) : (
-                              <XCircle className="h-4 w-4 text-muted-foreground" />
-                            )}
+                            {isEnabled ? <CheckCircle2 className="h-4 w-4 text-emerald-500" /> : <XCircle className="h-4 w-4 text-muted-foreground" />}
                           </div>
                           <div className="flex flex-col min-w-0">
-                            <span className={cn("text-xs font-semibold truncate", !isEnabled && "line-through text-muted-foreground")}>
-                              {insight.title}
-                            </span>
-                            <span className="text-[10px] text-muted-foreground line-clamp-2 leading-tight mt-0.5" title={insight.description}>
-                              {insight.description}
-                            </span>
+                            <span className={cn("text-xs font-semibold truncate", !isEnabled && "line-through text-muted-foreground")}>{insight.title}</span>
+                            <span className="text-[10px] text-muted-foreground line-clamp-2 leading-tight mt-0.5" title={insight.description}>{insight.description}</span>
                           </div>
                         </div>
                       );
@@ -821,9 +537,7 @@ export function TokenStep({ s }: { s: WizardState }) {
       </div>
       <div className="space-y-4 w-full max-w-sm text-left">
         <div className="space-y-2">
-          <Label htmlFor="token" className="flex items-center gap-2 text-sm font-medium">
-            <Lock className="h-3.5 w-3.5" /> API Token
-          </Label>
+          <Label htmlFor="token" className="flex items-center gap-2 text-sm font-medium"><Lock className="h-3.5 w-3.5" /> API Token</Label>
           <Input id="token" type="password" value={s.token} onChange={(e) => s.setToken(e.target.value.trim())} placeholder="" className="font-mono text-center" />
         </div>
         {s.servicesError && (
@@ -837,11 +551,7 @@ export function TokenStep({ s }: { s: WizardState }) {
                 </a>{" "}
                 for your account, then click Fetch Services again.
               </span>
-            ) : s.servicesError instanceof Error ? (
-              s.servicesError.message
-            ) : (
-              "Failed to fetch services"
-            )}
+            ) : s.servicesError instanceof Error ? s.servicesError.message : "Failed to fetch services"}
           </div>
         )}
       </div>
@@ -898,9 +608,7 @@ export function ServiceStep({ s }: { s: WizardState }) {
                   <div className="font-semibold text-sm flex items-center gap-2">
                     {svc.name}
                     {svc.provisioned && (
-                      <Badge variant="secondary" className="text-[10px] h-4 px-1 leading-none font-bold uppercase tracking-tight">
-                        Active
-                      </Badge>
+                      <Badge variant="secondary" className="text-[10px] h-4 px-1 leading-none font-bold uppercase tracking-tight">Active</Badge>
                     )}
                   </div>
                   <div className="text-xs font-mono text-muted-foreground">{svc.id}</div>
@@ -917,9 +625,7 @@ export function ServiceStep({ s }: { s: WizardState }) {
               </button>
             ))
           ) : (
-            <div className="py-12 text-center text-muted-foreground text-sm italic">
-              No services found matching &quot;{s.search}&quot;
-            </div>
+            <div className="py-12 text-center text-muted-foreground text-sm italic">No services found matching &quot;{s.search}&quot;</div>
           )}
         </div>
       </div>
@@ -949,7 +655,6 @@ export function SettingsStep({ s }: { s: WizardState }) {
               </div>
               <Switch aria-labelledby="settings-auto-sync-label" checked={s.syncEnabled} onCheckedChange={s.setSyncEnabled} />
             </div>
-
             {s.syncEnabled && (
               <div className="p-6 space-y-4 bg-background/30 animate-in fade-in slide-in-from-top-1">
                 <div className="flex items-start justify-between gap-8">
@@ -960,14 +665,10 @@ export function SettingsStep({ s }: { s: WizardState }) {
                     </p>
                   </div>
                   <Select value={s.syncIntervalMins} onValueChange={(v) => v && s.setSyncIntervalMins(v)}>
-                    <SelectTrigger id="settings-sync-interval" className="h-9 w-[180px] shrink-0">
-                      <SelectValue />
-                    </SelectTrigger>
+                    <SelectTrigger id="settings-sync-interval" className="h-9 w-[180px] shrink-0"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       {["1", "2", "5", "15", "30", "60"].map((mins) => (
-                        <SelectItem key={mins} value={mins}>
-                          Every {mins} {mins === "1" ? "min" : "mins"}
-                        </SelectItem>
+                        <SelectItem key={mins} value={mins}>Every {mins} {mins === "1" ? "min" : "mins"}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
@@ -975,7 +676,6 @@ export function SettingsStep({ s }: { s: WizardState }) {
               </div>
             )}
           </div>
-
           {!s.syncEnabled && (
             <div className="p-4 rounded-lg bg-amber-500/5 border border-amber-500/20 flex items-start gap-3">
               <Info className="h-4 w-4 text-amber-500 mt-0.5" />
@@ -1002,16 +702,13 @@ export function NgwafStep({ s }: { s: WizardState }) {
         <p className="text-sm text-muted-foreground leading-relaxed">
           Link this service to an existing Fastly NGWAF workspace to enable WAF signal logging and bot detection. This step is optional — skip it if NGWAF is not deployed on this service.
         </p>
-
         {s.ngwafFetching ? (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Loading workspaces…
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading workspaces…
           </div>
         ) : s.ngwafFetchError ? (
           <div className="flex items-center gap-2 text-sm text-destructive">
-            <AlertCircle className="h-4 w-4 shrink-0" />
-            {s.ngwafFetchError}
+            <AlertCircle className="h-4 w-4 shrink-0" /> {s.ngwafFetchError}
           </div>
         ) : s.ngwafWorkspaces.length > 0 ? (
           <div className="space-y-2">
@@ -1025,45 +722,31 @@ export function NgwafStep({ s }: { s: WizardState }) {
                   return {
                     ...prev,
                     ngwaf_workspace_id: workspaceId,
-                    ...(workspaceId && !groups.includes("J")
-                      ? { log_fields: { ...prev.log_fields, groups: [...groups, "J"] } }
-                      : {}),
+                    ...(workspaceId && !groups.includes("J") ? { log_fields: { ...prev.log_fields, groups: [...groups, "J"] } } : {}),
                   };
                 })
               }
             >
-              <SelectTrigger className="h-9 text-sm">
-                <SelectValue placeholder="Select a workspace…" />
-              </SelectTrigger>
+              <SelectTrigger className="h-9 text-sm"><SelectValue placeholder="Select a workspace…" /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="__none__">
-                  <span className="text-muted-foreground">No NGWAF (skip)</span>
-                </SelectItem>
-                {s.ngwafWorkspaces.map((ws) => (
-                  <SelectItem key={ws.id} value={ws.id}>{ws.name}</SelectItem>
-                ))}
+                <SelectItem value="__none__"><span className="text-muted-foreground">No NGWAF (skip)</span></SelectItem>
+                {s.ngwafWorkspaces.map((ws) => <SelectItem key={ws.id} value={ws.id}>{ws.name}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>
         ) : (
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-sm text-muted-foreground bg-muted/30 p-3 rounded-lg border border-dashed">
-              <Info className="h-4 w-4 shrink-0" />
-              No NGWAF workspaces found in this account.
+              <Info className="h-4 w-4 shrink-0" /> No NGWAF workspaces found in this account.
             </div>
             {s.ngwafDebugRaw && (
               <details className="text-[10px]">
-                <summary className="cursor-pointer text-muted-foreground uppercase tracking-wider font-bold">
-                  Raw API response (debug)
-                </summary>
-                <pre className="mt-1 p-2 bg-muted rounded text-xs overflow-auto max-h-32 whitespace-pre-wrap break-all">
-                  {s.ngwafDebugRaw}
-                </pre>
+                <summary className="cursor-pointer text-muted-foreground uppercase tracking-wider font-bold">Raw API response (debug)</summary>
+                <pre className="mt-1 p-2 bg-muted rounded text-xs overflow-auto max-h-32 whitespace-pre-wrap break-all">{s.ngwafDebugRaw}</pre>
               </details>
             )}
           </div>
         )}
-
         <div className="p-4 rounded-xl bg-muted/30 border border-dashed space-y-1">
           <p className="text-xs font-semibold text-muted-foreground">
             WAF / NGWAF log fields (group J) will only be available in the next step if a workspace is selected here.
@@ -1076,60 +759,37 @@ export function NgwafStep({ s }: { s: WizardState }) {
 
 const FEATURE_OPTIONS = [
   {
-    id: "logging" as const,
-    icon: Activity,
-    title: "Request Logging",
+    id: "logging" as const, icon: Activity, title: "Request Logging",
     description: "Stream edge requests directly to Object Storage. Power charts for traffic, status codes, and security.",
-    activeClass: "border-primary bg-primary/5 shadow-md shadow-primary/5",
-    hoverClass: "border-muted hover:border-primary/50 hover:bg-muted/30",
-    iconBgClass: "bg-primary/20",
-    iconColorClass: "text-primary",
-    dotClass: "bg-primary",
+    activeClass: "border-primary bg-primary/5 shadow-md shadow-primary/5", hoverClass: "border-muted hover:border-primary/50 hover:bg-muted/30",
+    iconBgClass: "bg-primary/20", iconColorClass: "text-primary", dotClass: "bg-primary",
   },
   {
-    id: "rum" as const,
-    icon: Eye,
-    title: "RUM only",
+    id: "rum" as const, icon: Eye, title: "RUM only",
     description: "Deploy client-side Core Web Vitals, page performance, and error analytics. Skips standard request logs.",
-    activeClass: "border-amber-500 bg-amber-500/5 shadow-md shadow-amber-500/5",
-    hoverClass: "border-muted hover:border-amber-500/50 hover:bg-muted/30",
-    iconBgClass: "bg-amber-500/20",
-    iconColorClass: "text-amber-500",
-    dotClass: "bg-amber-500",
+    activeClass: "border-amber-500 bg-amber-500/5 shadow-md shadow-amber-500/5", hoverClass: "border-muted hover:border-amber-500/50 hover:bg-muted/30",
+    iconBgClass: "bg-amber-500/20", iconColorClass: "text-amber-500", dotClass: "bg-amber-500",
   },
   {
-    id: "both" as const,
-    icon: Layers,
-    title: "Shared Bundle (Both)",
+    id: "both" as const, icon: Layers, title: "Shared Bundle (Both)",
     description: "Enable Request Logging and Real User Monitoring side-by-side, sharing a single FOS storage bucket.",
-    activeClass: "border-emerald-500 bg-emerald-500/5 shadow-md shadow-emerald-500/5",
-    hoverClass: "border-muted hover:border-emerald-500/50 hover:bg-muted/30",
-    iconBgClass: "bg-emerald-500/20",
-    iconColorClass: "text-emerald-500",
-    dotClass: "bg-emerald-500",
+    activeClass: "border-emerald-500 bg-emerald-500/5 shadow-md shadow-emerald-500/5", hoverClass: "border-muted hover:border-emerald-500/50 hover:bg-muted/30",
+    iconBgClass: "bg-emerald-500/20", iconColorClass: "text-emerald-500", dotClass: "bg-emerald-500",
   },
 ] as const;
 
 export function FeaturesStep({ s }: { s: WizardState }) {
   const { config, setConfig } = s;
-  const currentSelection = React.useMemo(() => {
-    if (config.logging_enabled && config.rum_enabled) return "both";
-    if (config.rum_enabled && !config.logging_enabled) return "rum";
-    return "logging";
-  }, [config.logging_enabled, config.rum_enabled]);
-
+  const currentSelection = config.logging_enabled && config.rum_enabled ? "both" : config.rum_enabled && !config.logging_enabled ? "rum" : "logging";
   return (
     <div className="flex-1 flex flex-col items-center justify-center p-6 md:p-8 space-y-8 text-center animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-4xl mx-auto w-full">
       <div className="space-y-3 max-w-lg">
-        <span className="text-[10px] font-bold uppercase tracking-widest text-primary bg-primary/10 px-2.5 py-1 rounded-full">
-          Step 4 of {s.STEPS.length}
-        </span>
+        <span className="text-[10px] font-bold uppercase tracking-widest text-primary bg-primary/10 px-2.5 py-1 rounded-full">Step 4 of {s.STEPS.length}</span>
         <h3 className="text-2xl font-bold tracking-tight">Select features to deploy</h3>
         <p className="text-sm text-muted-foreground leading-relaxed">
           Choose the integration capabilities you want to configure on your Fastly service. You can adjust these settings later.
         </p>
       </div>
-
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full">
         {FEATURE_OPTIONS.map((opt) => {
           const active = currentSelection === opt.id;
@@ -1138,13 +798,7 @@ export function FeaturesStep({ s }: { s: WizardState }) {
             <button
               key={opt.id}
               type="button"
-              onClick={() =>
-                setConfig((prev) => ({
-                  ...prev,
-                  logging_enabled: opt.id === "logging" || opt.id === "both",
-                  rum_enabled: opt.id === "rum" || opt.id === "both",
-                }))
-              }
+              onClick={() => setConfig((prev) => ({ ...prev, logging_enabled: opt.id === "logging" || opt.id === "both", rum_enabled: opt.id === "rum" || opt.id === "both" }))}
               className={cn(
                 "group relative flex flex-col items-center gap-5 p-6 border-2 rounded-2xl bg-background transition-all text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                 active ? opt.activeClass : opt.hoverClass,
@@ -1182,7 +836,6 @@ export function FieldsStep({ s }: { s: WizardState }) {
             </div>
           )}
         </div>
-
         {isLoadingCatalog ? (
           <div className="h-[200px] flex items-center justify-center bg-muted/10 rounded-lg border border-dashed">
             <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -1219,12 +872,7 @@ export function FieldsStep({ s }: { s: WizardState }) {
                     variant="ghost"
                     size="sm"
                     className="h-8 text-xs font-semibold text-muted-foreground hover:text-foreground ml-auto"
-                    onClick={() =>
-                      setConfig((prev) => ({
-                        ...prev,
-                        log_fields: { ...prev.log_fields, groups: [], field_overrides: {}, field_limits: prev.log_fields.field_limits },
-                      }))
-                    }
+                    onClick={() => setConfig((prev) => ({ ...prev, log_fields: { ...prev.log_fields, groups: [], field_overrides: {}, field_limits: prev.log_fields.field_limits } }))}
                   >
                     Clear All
                   </Button>
@@ -1238,20 +886,17 @@ export function FieldsStep({ s }: { s: WizardState }) {
               </div>
             )}
             <div className="grid grid-cols-1 gap-3 pb-8">
-              {catalog &&
-                (catalog.groups ?? [])
-                  .filter((g) => config.ngwaf_workspace_id || g.id !== "J")
-                  .map((g) => (
-                    <CollapsibleGroup
-                      key={g.id}
-                      group={g}
-                      catalog={catalog}
-                      config={config.log_fields}
-                      toggleGroup={s.toggleGroup}
-                      toggleField={s.toggleField}
-                      updateFieldLimit={s.updateFieldLimit}
-                    />
-                  ))}
+              {catalog && (catalog.groups ?? []).filter((g) => config.ngwaf_workspace_id || g.id !== "J").map((g) => (
+                <CollapsibleGroup
+                  key={g.id}
+                  group={g}
+                  catalog={catalog}
+                  config={config.log_fields}
+                  toggleGroup={s.toggleGroup}
+                  toggleField={s.toggleField}
+                  updateFieldLimit={s.updateFieldLimit}
+                />
+              ))}
               <CmcdConfigSection
                 enabled={config.cmcd_enabled}
                 onEnabledChange={(v) => setConfig((prev) => ({ ...prev, cmcd_enabled: v }))}
@@ -1275,11 +920,8 @@ export function ConfirmStep({ s }: { s: WizardState }) {
       <div className="p-8 space-y-8 pb-12 max-w-4xl mx-auto text-left">
         <div className="text-center space-y-2">
           <h3 className="text-2xl font-bold tracking-tight">Confirm Connection</h3>
-          <p className="text-sm text-muted-foreground leading-relaxed">
-            Review your connection and import settings before continuing.
-          </p>
+          <p className="text-sm text-muted-foreground leading-relaxed">Review your connection and import settings before continuing.</p>
         </div>
-
         <div className="grid grid-cols-2 gap-4">
           <ReviewCard>
             <ReviewHeader icon={Cloud}>Target Service</ReviewHeader>
@@ -1289,7 +931,6 @@ export function ConfirmStep({ s }: { s: WizardState }) {
               <ReviewItem label="Mode" value="Read-Only Analyst" />
             </ReviewContent>
           </ReviewCard>
-
           <ReviewCard>
             <ReviewHeader icon={Database}>Data Lake</ReviewHeader>
             <ReviewContent>
@@ -1298,7 +939,6 @@ export function ConfirmStep({ s }: { s: WizardState }) {
               <ReviewItem label="Existing Data" value={lakeInfo?.table_exists ? "Available" : "Not Found"} />
             </ReviewContent>
           </ReviewCard>
-
           <ReviewCard>
             <ReviewHeader icon={Calendar}>Initial Import</ReviewHeader>
             <ReviewContent>
@@ -1309,28 +949,19 @@ export function ConfirmStep({ s }: { s: WizardState }) {
                   <ReviewItem label="End Time" value={formatDateTime(importRange.end, s.timezone)} />
                 </>
               ) : (
-                <ReviewItem
-                  label="Range"
-                  value={`${formatDateTime(lakeInfo?.range?.start, s.timezone)} → ${formatDateTime(lakeInfo?.range?.end, s.timezone)}`}
-                />
+                <ReviewItem label="Range" value={`${formatDateTime(lakeInfo?.range?.start, s.timezone)} → ${formatDateTime(lakeInfo?.range?.end, s.timezone)}`} />
               )}
               <ReviewItem label="Est. Download Size" value={`~${formatBytes(s.estimatedImportSize)}`} className="text-primary font-medium" />
             </ReviewContent>
           </ReviewCard>
-
           <ReviewCard>
             <ReviewHeader icon={Settings}>Automation</ReviewHeader>
             <ReviewContent>
-              <ReviewItem
-                variant="between"
-                label="Background Sync"
-                value={<StatusCheckIcon enabled={s.syncEnabled} />}
-              />
+              <ReviewItem variant="between" label="Background Sync" value={<StatusCheckIcon enabled={s.syncEnabled} />} />
               {s.syncEnabled && <ReviewItem label="Sync Interval" value={`Every ${s.syncIntervalMins} minutes`} />}
             </ReviewContent>
           </ReviewCard>
         </div>
-
         <div className="p-4 rounded-xl bg-primary/5 border border-primary/20 space-y-3">
           <div className="flex items-center gap-2 text-primary">
             <Sparkles className="h-4 w-4" />
@@ -1350,38 +981,25 @@ export function ModeStep({ s }: { s: WizardState }) {
   const analystPathAReason = s.analystPathAReason ?? ANALYST_PATH_A_UNSUPPORTED_REASON;
   const modeCards = [
     {
-      mode: "provision" as const,
-      nextStep: "token" as const,
-      icon: Zap,
-      iconBg: "bg-primary/10",
-      iconColor: "text-primary",
-      hoverBorder: "hover:border-primary",
+      mode: "provision" as const, nextStep: "token" as const, icon: Zap,
+      iconBg: "bg-primary/10", iconColor: "text-primary", hoverBorder: "hover:border-primary",
       title: "Admin: Provision",
       description: "Deploy new Fastly Object Storage resources, logging endpoints, and a CDN proxy. Best for new projects.",
       disabled: false,
     },
     {
-      mode: "ingest" as const,
-      nextStep: "token" as const,
-      icon: Settings,
-      iconBg: "bg-amber-500/10",
-      iconColor: "text-amber-500",
-      hoverBorder: "hover:border-amber-500",
+      mode: "ingest" as const, nextStep: "token" as const, icon: Settings,
+      iconBg: "bg-amber-500/10", iconColor: "text-amber-500", hoverBorder: "hover:border-amber-500",
       title: "Admin: Connect Terraform",
       description: "Set up ingestion for a service that is already managed via Terraform. We'll skip creating Fastly resources but set up data sync.",
       disabled: false,
     },
     {
-      mode: "join" as const,
-      nextStep: "join" as const,
-      icon: Search,
-      iconBg: "bg-blue-500/10",
-      iconColor: "text-blue-500",
-      hoverBorder: "hover:border-blue-500",
+      mode: "join" as const, nextStep: "join" as const, icon: Search,
+      iconBg: "bg-blue-500/10", iconColor: "text-blue-500", hoverBorder: "hover:border-blue-500",
       title: "Analyst: Join",
       description: "Connect to an existing project. We'll only sync the processed data from the cloud. No new resources.",
-      disabled: joinDisabled,
-      reason: joinDisabled ? analystPathAReason : undefined,
+      disabled: joinDisabled, reason: joinDisabled ? analystPathAReason : undefined,
     },
   ];
 
@@ -1391,7 +1009,6 @@ export function ModeStep({ s }: { s: WizardState }) {
         <h3 className="text-2xl font-bold tracking-tight">Select your role</h3>
         <p className="text-muted-foreground leading-relaxed">Choose how you want to set up this service.</p>
       </div>
-
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full max-w-4xl">
         {modeCards.map((card) => {
           const Icon = card.icon;
@@ -1401,10 +1018,7 @@ export function ModeStep({ s }: { s: WizardState }) {
               type="button"
               disabled={card.disabled}
               aria-describedby={card.reason ? "analyst-path-a-reason" : undefined}
-              onClick={() => {
-                s.setMode(card.mode);
-                s.setStep(card.nextStep);
-              }}
+              onClick={() => { s.setMode(card.mode); s.setStep(card.nextStep); }}
               className={cn(
                 "group relative flex flex-col items-center gap-6 p-8 border-2 rounded-2xl bg-background hover:bg-muted/50 transition-all text-left",
                 card.hoverBorder,
@@ -1417,11 +1031,7 @@ export function ModeStep({ s }: { s: WizardState }) {
               <div className="space-y-2 text-center">
                 <h4 className="font-bold text-lg">{card.title}</h4>
                 <p className="text-xs text-muted-foreground leading-relaxed">{card.description}</p>
-                {card.reason && (
-                  <p id="analyst-path-a-reason" className="text-xs font-medium text-amber-600 dark:text-amber-400 leading-relaxed">
-                    {card.reason}
-                  </p>
-                )}
+                {card.reason && <p id="analyst-path-a-reason" className="text-xs font-medium text-amber-600 dark:text-amber-400 leading-relaxed">{card.reason}</p>}
               </div>
             </button>
           );
@@ -1432,34 +1042,16 @@ export function ModeStep({ s }: { s: WizardState }) {
 }
 
 const TERRAFORM_TABS = [
+  { value: "instructions", label: "Instructions", icon: FileText, defaultFile: "instructions", match: (f: string) => f === "instructions" },
   {
-    value: "instructions",
-    label: "Instructions",
-    icon: FileText,
-    defaultFile: "instructions",
-    match: (f: string) => f === "instructions",
-  },
-  {
-    value: "logging",
-    label: "Logging Service",
-    icon: Zap,
-    defaultFile: "logging_service.tf",
+    value: "logging", label: "Logging Service", icon: Zap, defaultFile: "logging_service.tf",
     match: (f: string) => f === "logging_service.tf" || f === "log_format.vcl" || f.startsWith("capture_snippets/"),
   },
   {
-    value: "cdn",
-    label: "CDN & Storage",
-    icon: Globe,
-    defaultFile: "fos.tf",
+    value: "cdn", label: "CDN & Storage", icon: Globe, defaultFile: "fos.tf",
     match: (f: string) => f === "fos.tf" || f === "cdn_proxy.tf" || f === "cdn_proxy.vcl" || f.startsWith("cdn_snippets/"),
   },
-  {
-    value: "all",
-    label: "All Files",
-    icon: FileJson,
-    defaultFile: undefined,
-    match: () => true,
-  },
+  { value: "all", label: "All Files", icon: FileJson, defaultFile: undefined, match: () => true },
 ] as const;
 
 export function TerraformStep({ s }: { s: WizardState }) {
@@ -1470,14 +1062,12 @@ export function TerraformStep({ s }: { s: WizardState }) {
         <div className="flex items-center justify-between pb-4 border-b shrink-0">
           <div className="space-y-1">
             <h3 className="text-lg font-bold tracking-tight flex items-center gap-2">
-              <FileJson className="h-5 w-5 text-primary" />
-              Terraform & VCL Preview
+              <FileJson className="h-5 w-5 text-primary" /> Terraform & VCL Preview
             </h3>
             <p className="text-sm text-muted-foreground">Review and export the generated configuration files.</p>
           </div>
           <Button onClick={s.handleExportTerraform} className="h-9 font-bold">Export as ZIP</Button>
         </div>
-
         {s.isFetchingTerraform ? (
           <div className="flex-1 flex items-center justify-center bg-muted/10 rounded-lg border border-dashed">
             <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -1494,30 +1084,23 @@ export function TerraformStep({ s }: { s: WizardState }) {
             <TabsList className="grid w-full grid-cols-4 shrink-0">
               {TERRAFORM_TABS.map(({ value, label, icon: Icon }) => (
                 <TabsTrigger key={value} value={value} className="flex items-center gap-2">
-                  <Icon className="w-3.5 h-3.5" />
-                  {label}
+                  <Icon className="w-3.5 h-3.5" /> {label}
                 </TabsTrigger>
               ))}
             </TabsList>
-
             {TERRAFORM_TABS.map(({ value, match }) => (
               <TabsContent key={value} value={value} className="flex-1 flex gap-4 min-h-0 pt-4 mt-0">
                 <div className="w-64 shrink-0 flex flex-col gap-1 overflow-y-auto pr-2 custom-scrollbar border-r">
                   {Object.keys(terraformFiles)
                     .filter(match)
-                    .sort((a, b) => {
-                      if (a.endsWith(".tf") !== b.endsWith(".tf")) return a.endsWith(".tf") ? -1 : 1;
-                      return a.localeCompare(b);
-                    })
+                    .sort((a, b) => (a.endsWith(".tf") !== b.endsWith(".tf") ? (a.endsWith(".tf") ? -1 : 1) : a.localeCompare(b)))
                     .map((fileName) => (
                       <button
                         key={fileName}
                         onClick={() => setSelectedTfFile(fileName)}
                         className={cn(
                           "text-left px-3 py-2 rounded-md text-[11px] font-mono transition-colors truncate",
-                          selectedTfFile === fileName
-                            ? "bg-primary text-primary-foreground font-bold shadow-sm"
-                            : "hover:bg-muted text-muted-foreground",
+                          selectedTfFile === fileName ? "bg-primary text-primary-foreground font-bold shadow-sm" : "hover:bg-muted text-muted-foreground",
                         )}
                       >
                         {fileName}
@@ -1553,25 +1136,14 @@ export function TerraformStep({ s }: { s: WizardState }) {
 }
 
 const STEP_COMPONENTS: Record<WizardState["step"], React.ComponentType<{ s: WizardState }>> = {
-  mode: ModeStep,
-  token: TokenStep,
-  service: ServiceStep,
-  storage: StorageStep,
-  features: FeaturesStep,
-  join: JoinStep,
-  analyze: AnalyzeStep,
-  settings: SettingsStep,
-  confirm: ConfirmStep,
-  ngwaf: NgwafStep,
-  fields: FieldsStep,
-  execute: ExecuteStep,
-  terraform: TerraformStep,
+  mode: ModeStep, token: TokenStep, service: ServiceStep, storage: StorageStep, features: FeaturesStep,
+  join: JoinStep, analyze: AnalyzeStep, settings: SettingsStep, confirm: ConfirmStep,
+  ngwaf: NgwafStep, fields: FieldsStep, execute: ExecuteStep, terraform: TerraformStep,
 };
 
 export function ProvisionWizard({ open, onOpenChange }: ProvisionWizardProps) {
   const s = useWizardState(open, onOpenChange);
   const StepComponent = STEP_COMPONENTS[s.step];
-
   return (
     <Dialog open={open} onOpenChange={s.handleModalClose}>
       <DialogContent

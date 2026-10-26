@@ -6,10 +6,9 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { AlertTriangle, Clock, ExternalLink, Film, Globe, Shield, Users } from 'lucide-react'
 
-import { client, extractApiError, unwrapClient } from '@/lib/api'
-import { queryKeys } from '@/lib/query-keys'
+import { client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
 import { useIsDataReady, useFieldLabel, useServiceSwitchReset } from '@/hooks/useBootstrap'
-import { useScoringLabels, type LabelRow, type LabelValue } from '@/components/SessionScoring/help-content'
+import { useScoringLabels, type LabelRow, type LabelValue } from '@/components/SessionScoring/ScoringAdminPanels'
 import { FlagSessionPopover } from '@/components/SessionScoring/TopFlaggedTable'
 import { useServiceStore } from '@/stores/filterStore'
 import { useDateFormat } from '@/hooks/useSSE'
@@ -23,8 +22,7 @@ import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { cn, buildSessionDashboardUrl, buildStreamDetailUrl } from '@/lib/utils'
-import { formatCount, formatCountMaybe } from '@/lib/format'
+import { cn, buildSessionDashboardUrl, buildStreamDetailUrl, formatCount, formatCountMaybe } from '@/lib/utils'
 import { OBJECT_TYPE_LABELS, STREAM_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from '@/app/streaming/_sections/StreamingClient'
 import type { components } from '@/types/api.generated'
 import type { BootstrapResponse, Session, SessionDetailResponse, SessionsResponse } from '@/types/api'
@@ -36,7 +34,7 @@ const CMCD_DETAIL_COLS = ['cmcd_ot', 'cmcd_br', 'cmcd_bl', 'cmcd_sf', 'cmcd_st']
 const DEFAULT_VISIBLE_DETAIL_COLS = ['timestamp', 'host', 'url', 'method', 'edge', 'status', 'cache', 'ua', 'pop']
 const INITIAL_DETAIL_COLUMN_ORDER = [...DEFAULT_VISIBLE_DETAIL_COLS, ...CMCD_DETAIL_COLS]
 
-export function MetadataItem({ label, children, className }: { label: string; children: React.ReactNode; className?: string }) {
+function MetadataItem({ label, children, className }: { label: string; children: React.ReactNode; className?: string }) {
   return (
     <div className={cn('flex flex-col gap-0.5', className)}>
       <span className="text-[11px] sm:text-[10px] uppercase font-bold text-muted-foreground">{label}</span>
@@ -46,34 +44,15 @@ export function MetadataItem({ label, children, className }: { label: string; ch
 }
 
 function RelativeTimeTooltip({
-  timestamp,
-  relative,
-  full,
-  abbr,
-  className,
-  icon,
+  timestamp, relative, full, abbr, className, icon,
 }: {
-  timestamp: string
-  relative: (ts: string) => string
-  full: (ts: string) => string
-  abbr: () => string
-  className?: string
-  icon?: React.ReactNode
+  timestamp: string; relative: (ts: string) => string; full: (ts: string) => string; abbr: () => string; className?: string; icon?: React.ReactNode
 }) {
   return (
     <TooltipProvider>
       <Tooltip>
-        <TooltipTrigger
-          render={
-            <span className={className}>
-              {icon}
-              {relative(timestamp)}
-            </span>
-          }
-        />
-        <TooltipContent className="text-xs">
-          {full(timestamp)} {abbr()}
-        </TooltipContent>
+        <TooltipTrigger render={<span className={className}>{icon}{relative(timestamp)}</span>} />
+        <TooltipContent className="text-xs">{full(timestamp)} {abbr()}</TooltipContent>
       </Tooltip>
     </TooltipProvider>
   )
@@ -90,13 +69,7 @@ interface SessionDetailProps {
 }
 
 export function SessionDetail({
-  selectedSession,
-  setSelectedSession,
-  activeServiceId,
-  data,
-  labels,
-  labelBySid,
-  onFlagged,
+  selectedSession, setSelectedSession, activeServiceId, data, labels, labelBySid, onFlagged,
 }: SessionDetailProps) {
   const { full, relative, abbr } = useDateFormat()
   const getFieldLabel = useFieldLabel()
@@ -108,12 +81,7 @@ export function SessionDetail({
       if (!selectedSession) return undefined
       const body = selectedSession.session_token
         ? { session_token: selectedSession.session_token }
-        : {
-            ip: selectedSession.ip,
-            ja4: selectedSession.ja4,
-            start_time: selectedSession.session_start,
-            end_time: selectedSession.session_end,
-          }
+        : { ip: selectedSession.ip, ja4: selectedSession.ja4, start_time: selectedSession.session_start, end_time: selectedSession.session_end }
       return unwrapClient(client.POST('/api/sessions/detail', { signal, body }))
     },
     enabled: !!activeServiceId && !!selectedSession,
@@ -133,10 +101,7 @@ export function SessionDetail({
         if (col === 'timestamp') {
           return (
             <RelativeTimeTooltip
-              timestamp={text}
-              relative={relative}
-              full={full}
-              abbr={abbr}
+              timestamp={text} relative={relative} full={full} abbr={abbr}
               className="whitespace-nowrap font-mono text-xs border-b border-dotted border-muted-foreground/30"
             />
           )
@@ -158,9 +123,7 @@ export function SessionDetail({
 
   const initialDetailVisibility = React.useMemo(() => {
     if (!detailData?.columns) return {}
-    const streamingVisible = selectedSession?.is_streaming
-      ? CMCD_DETAIL_COLS.filter((c) => detailData.columns.includes(c))
-      : []
+    const streamingVisible = selectedSession?.is_streaming ? CMCD_DETAIL_COLS.filter((c) => detailData.columns.includes(c)) : []
     const allVisible = new Set([...DEFAULT_VISIBLE_DETAIL_COLS, ...streamingVisible])
     return Object.fromEntries(detailData.columns.map((col) => [col, allVisible.has(col)]))
   }, [detailData?.columns, selectedSession?.is_streaming])
@@ -170,29 +133,19 @@ export function SessionDetail({
     return detailEdgeOnly ? arr.filter((row) => row.edge === 1 || row.edge === true || row.edge === '1') : arr
   }, [detailData?.data, detailEdgeOnly])
 
-  const renderIdentifierLink = (
-    label: string,
-    field: 'ip' | 'ja4' | 'ua',
-    value: string | null | undefined,
-    itemClass = 'min-w-0',
-    textClass = '',
-  ) => {
-    if (!value) return null
-    return (
+  const renderIdentifierLink = (label: string, field: 'ip' | 'ja4' | 'ua', value: string | null | undefined, itemClass = 'min-w-0', textClass = '') =>
+    value ? (
       <MetadataItem label={label} className={itemClass}>
         <Link
           href={buildSessionDashboardUrl(activeServiceId || '', field, value, selectedSession?.session_start, selectedSession?.session_end)}
           className={cn('flex gap-1.5 text-sm hover:underline group', field === 'ua' ? 'items-start' : 'items-center')}
-          title="View in Dashboard"
-          target="_blank"
-          rel="noopener noreferrer"
+          title="View in Dashboard" target="_blank" rel="noopener noreferrer"
         >
           <span className={textClass}>{value}</span>
           <ExternalLink className={cn('h-3 w-3 text-muted-foreground group-hover:text-primary transition-colors shrink-0', field === 'ua' && 'mt-0.5')} />
         </Link>
       </MetadataItem>
-    )
-  }
+    ) : null
 
   return (
     <Dialog open={!!selectedSession} onOpenChange={(open) => !open && setSelectedSession(null)}>
@@ -207,9 +160,7 @@ export function SessionDetail({
                 href={buildStreamDetailUrl(selectedSession.session_token, activeServiceId)}
                 className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 hover:bg-blue-500/20 transition-colors"
               >
-                <Film className="h-3 w-3" />
-                Stream Details
-                <ExternalLink className="h-3 w-3" />
+                <Film className="h-3 w-3" />Stream Details<ExternalLink className="h-3 w-3" />
               </Link>
             )}
             {selectedSession?.flagged && <AlertTriangle className="h-4 w-4 text-yellow-500" />}
@@ -234,40 +185,22 @@ export function SessionDetail({
           <MetadataItem label="Start">
             {selectedSession && (
               <RelativeTimeTooltip
-                timestamp={selectedSession.session_start}
-                relative={relative}
-                full={full}
-                abbr={abbr}
-                className="flex items-center gap-1"
-                icon={<Clock className="h-3 w-3 shrink-0" />}
+                timestamp={selectedSession.session_start} relative={relative} full={full} abbr={abbr}
+                className="flex items-center gap-1" icon={<Clock className="h-3 w-3 shrink-0" />}
               />
             )}
           </MetadataItem>
           <MetadataItem label="End">
-            {selectedSession && (
-              <RelativeTimeTooltip
-                timestamp={selectedSession.session_end}
-                relative={relative}
-                full={full}
-                abbr={abbr}
-              />
-            )}
+            {selectedSession && <RelativeTimeTooltip timestamp={selectedSession.session_end} relative={relative} full={full} abbr={abbr} />}
           </MetadataItem>
           <MetadataItem label="Country">
-            <span className="flex items-center gap-1">
-              <Globe className="h-3 w-3" /> {selectedSession?.country || '—'}
-            </span>
+            <span className="flex items-center gap-1"><Globe className="h-3 w-3" /> {selectedSession?.country || '—'}</span>
           </MetadataItem>
           <MetadataItem label="ASN">{selectedSession?.asn ? `AS${selectedSession.asn}` : '—'}</MetadataItem>
-          <MetadataItem label="Requests">
-            <span className="font-semibold">{formatCountMaybe(selectedSession?.req_count)}</span>
-          </MetadataItem>
+          <MetadataItem label="Requests"><span className="font-semibold">{formatCountMaybe(selectedSession?.req_count)}</span></MetadataItem>
           <MetadataItem label="Unique URLs">{selectedSession?.unique_urls ?? '—'}</MetadataItem>
           <MetadataItem label="Edge / Shield">
-            <span className="flex items-center gap-1">
-              <Shield className="h-3 w-3" />
-              {selectedSession?.edge_count ?? 0} / {selectedSession?.shield_count ?? 0}
-            </span>
+            <span className="flex items-center gap-1"><Shield className="h-3 w-3" />{selectedSession?.edge_count ?? 0} / {selectedSession?.shield_count ?? 0}</span>
           </MetadataItem>
           <MetadataItem label="Med. RTT">
             {selectedSession?.median_rtt_ms ? `${selectedSession.median_rtt_ms.toFixed(1)}ms` : '—'}
@@ -288,8 +221,7 @@ export function SessionDetail({
               <div className="font-medium">Failed to load session detail.</div>
               <div className="font-mono text-xs opacity-80 break-all">{extractApiError(detailError)}</div>
               <button
-                type="button"
-                onClick={() => { void refetchDetail() }}
+                type="button" onClick={() => { void refetchDetail() }}
                 className="mt-1 rounded border border-destructive/50 px-2 py-1 text-xs hover:bg-destructive/20"
               >
                 Retry
@@ -337,15 +269,7 @@ interface SessionsTableProps {
 }
 
 export function SessionsTable({
-  data,
-  activeServiceId,
-  isLoadingInitial,
-  isFetching,
-  labels,
-  labelBySid,
-  idBySid,
-  onFlagged,
-  onRowClick,
+  data, activeServiceId, isLoadingInitial, isFetching, labels, labelBySid, idBySid, onFlagged, onRowClick,
 }: SessionsTableProps) {
   const { full, relative, abbr } = useDateFormat()
 
@@ -357,16 +281,8 @@ export function SessionsTable({
         cell: ({ row }) => (
           <div className="flex items-center gap-1.5">
             <span className="font-medium">{row.getValue('ip') as string}</span>
-            {row.original.is_streaming && (
-              <span title="Streaming Session">
-                <Film className="h-3.5 w-3.5 text-blue-500 shrink-0" />
-              </span>
-            )}
-            {row.original.flagged && (
-              <span title="Flagged Session">
-                <AlertTriangle className="h-3.5 w-3.5 text-yellow-500 shrink-0" />
-              </span>
-            )}
+            {row.original.is_streaming && <span title="Streaming Session"><Film className="h-3.5 w-3.5 text-blue-500 shrink-0" /></span>}
+            {row.original.flagged && <span title="Flagged Session"><AlertTriangle className="h-3.5 w-3.5 text-yellow-500 shrink-0" /></span>}
           </div>
         ),
       },
@@ -376,10 +292,7 @@ export function SessionsTable({
         header: 'Started',
         cell: ({ row }) => (
           <RelativeTimeTooltip
-            timestamp={row.getValue('session_start') as string}
-            relative={relative}
-            full={full}
-            abbr={abbr}
+            timestamp={row.getValue('session_start') as string} relative={relative} full={full} abbr={abbr}
             className="whitespace-nowrap text-xs border-b border-dotted border-muted-foreground/30"
           />
         ),
@@ -415,37 +328,31 @@ export function SessionsTable({
 
     if (data?.has_rtt) {
       cols.push({
-        accessorKey: 'median_rtt_ms',
-        header: 'Med. RTT',
+        accessorKey: 'median_rtt_ms', header: 'Med. RTT',
         cell: ({ row }) => {
           const val = row.getValue('median_rtt_ms') as number
           return val ? `${val.toFixed(1)}ms` : '—'
         },
       })
     }
-
     if (data?.has_ja4) {
       cols.push({
-        accessorKey: 'ja4',
-        header: 'JA4',
+        accessorKey: 'ja4', header: 'JA4',
         cell: ({ row }) => {
           const val = row.getValue('ja4') as string | undefined
           return val ? <span className="text-xs font-mono">{val.slice(0, 16)}…</span> : '—'
         },
       })
     }
-
     if (data?.has_edge) {
       cols.push({
-        id: 'edge',
-        header: 'Edge / Shield',
+        id: 'edge', header: 'Edge / Shield',
         cell: ({ row }) => `${row.original.edge_count ?? 0} / ${row.original.shield_count ?? 0}`,
       })
     }
 
     cols.push({
-      accessorKey: 'ua',
-      header: 'User-Agent',
+      accessorKey: 'ua', header: 'User-Agent',
       cell: ({ row }) => {
         const ua = row.getValue('ua') as string | undefined
         return ua ? <span className="text-xs truncate max-w-[200px] inline-block" title={ua}>{ua}</span> : '—'
@@ -454,8 +361,7 @@ export function SessionsTable({
 
     if (data?.has_edge_sid) {
       cols.push({
-        id: '__flag',
-        header: 'Flag',
+        id: '__flag', header: 'Flag',
         cell: ({ row }) => {
           const sid = row.original.edge_sid ?? undefined
           if (!sid) return null
@@ -475,8 +381,7 @@ export function SessionsTable({
     }
 
     cols.push({
-      id: 'actions',
-      header: '',
+      id: 'actions', header: '',
       cell: ({ row }) => (
         <Button variant="ghost" size="sm" className="h-7" onClick={() => onRowClick(row.original)}>
           Details <ExternalLink className="ml-1.5 h-3 w-3" />
@@ -517,19 +422,8 @@ interface ScoringControlsProps {
 }
 
 export function ScoringControls({
-  cmcdEnabled,
-  flaggedOnly,
-  setFlaggedOnly,
-  streamingOnly,
-  setStreamingOnly,
-  minReqs,
-  setMinReqs,
-  min4xxPct,
-  setMin4xxPct,
-  data,
-  isFetching,
-  isLoadingInitial,
-  refetch,
+  cmcdEnabled, flaggedOnly, setFlaggedOnly, streamingOnly, setStreamingOnly,
+  minReqs, setMinReqs, min4xxPct, setMin4xxPct, data, isFetching, isLoadingInitial, refetch,
 }: ScoringControlsProps) {
   return (
     <div
@@ -558,49 +452,32 @@ export function ScoringControls({
       <div className="flex items-center gap-2">
         <Label className="text-xs text-muted-foreground whitespace-nowrap">Min. requests</Label>
         <Input
-          type="number"
-          min={0}
-          value={minReqs}
+          type="number" min={0} value={minReqs}
           onChange={(e) => setMinReqs(e.target.value === '' ? '' : Number(e.target.value))}
-          placeholder={`≥ ${data?.min_reqs_flag ?? 1000}`}
-          data-testid="min-reqs-input"
-          className="h-8 w-24 text-sm text-right"
+          placeholder={`≥ ${data?.min_reqs_flag ?? 1000}`} data-testid="min-reqs-input" className="h-8 w-24 text-sm text-right"
         />
       </div>
 
       <div className="flex items-center gap-2">
         <Label className="text-xs text-muted-foreground whitespace-nowrap">Min. 4xx%</Label>
         <Input
-          type="number"
-          min={0}
-          max={100}
-          value={min4xxPct}
+          type="number" min={0} max={100} value={min4xxPct}
           onChange={(e) => setMin4xxPct(e.target.value === '' ? '' : Number(e.target.value))}
-          placeholder={`≥ ${data?.min_4xx_pct_flag ?? 20}`}
-          data-testid="min-4xx-input"
-          className="h-8 w-24 text-sm text-right"
+          placeholder={`≥ ${data?.min_4xx_pct_flag ?? 20}`} data-testid="min-4xx-input" className="h-8 w-24 text-sm text-right"
         />
       </div>
 
       {(flaggedOnly || streamingOnly || minReqs !== '' || min4xxPct !== '') && (
         <Button
-          variant="ghost"
-          size="sm"
-          className="h-8 text-xs ml-auto"
-          onClick={() => {
-            setFlaggedOnly(false)
-            setStreamingOnly(false)
-            setMinReqs('')
-            setMin4xxPct('')
-          }}
+          variant="ghost" size="sm" className="h-8 text-xs ml-auto"
+          onClick={() => { setFlaggedOnly(false); setStreamingOnly(false); setMinReqs(''); setMin4xxPct('') }}
         >
           Clear filters
         </Button>
       )}
 
       <Button variant="outline" size="sm" className="h-8 ml-auto" onClick={() => refetch()} disabled={isFetching}>
-        <Clock className={cn('h-3.5 w-3.5 mr-2', isFetching && 'animate-spin')} />
-        Refresh
+        <Clock className={cn('h-3.5 w-3.5 mr-2', isFetching && 'animate-spin')} />Refresh
       </Button>
     </div>
   )
@@ -610,52 +487,21 @@ function useActiveServiceCmcdEnabled(activeServiceId: string | null): boolean {
   const isInitialized = useServiceStore((s) => s.isInitialized)
   const services = useServiceStore((s) => s.services)
   const queryClient = useQueryClient()
-
-  if (isInitialized) {
-    return services.find((s) => s.id === activeServiceId)?.cmcdEnabled ?? false
-  }
-
+  if (isInitialized) return services.find((s) => s.id === activeServiceId)?.cmcdEnabled ?? false
   const bootstrapServices = queryClient.getQueryData<BootstrapResponse>(queryKeys.bootstrap())?.services
-  if (Array.isArray(bootstrapServices)) {
-    return !!bootstrapServices.find((s) => s.service_id === activeServiceId)?.cmcd_enabled
-  }
-
-  return false
-}
-
-interface SessionsBodyProps {
-  startTime: string | null
-  endTime: string | null
-  activeServiceId: string | null
-  filterPayload: SessionsFilters
-  selectedSession: Session | null
-  setSelectedSession: React.Dispatch<React.SetStateAction<Session | null>>
-  flaggedOnly: boolean
-  setFlaggedOnly: React.Dispatch<React.SetStateAction<boolean>>
-  streamingOnly: boolean
-  setStreamingOnly: React.Dispatch<React.SetStateAction<boolean>>
-  minReqs: number | ''
-  setMinReqs: React.Dispatch<React.SetStateAction<number | ''>>
-  min4xxPct: number | ''
-  setMin4xxPct: React.Dispatch<React.SetStateAction<number | ''>>
+  return Array.isArray(bootstrapServices) ? !!bootstrapServices.find((s) => s.service_id === activeServiceId)?.cmcd_enabled : false
 }
 
 function SessionsBody({
-  startTime,
-  endTime,
-  activeServiceId,
-  filterPayload,
-  selectedSession,
-  setSelectedSession,
-  flaggedOnly,
-  setFlaggedOnly,
-  streamingOnly,
-  setStreamingOnly,
-  minReqs,
-  setMinReqs,
-  min4xxPct,
-  setMin4xxPct,
-}: SessionsBodyProps) {
+  startTime, endTime, activeServiceId, filterPayload,
+}: {
+  startTime: string | null; endTime: string | null; activeServiceId: string | null; filterPayload: SessionsFilters
+}) {
+  const [selectedSession, setSelectedSession] = useState<Session | null>(null)
+  const [flaggedOnly, setFlaggedOnly] = useState(false)
+  const [streamingOnly, setStreamingOnly] = useState(false)
+  const [minReqs, setMinReqs] = useState<number | ''>('')
+  const [min4xxPct, setMin4xxPct] = useState<number | ''>('')
   const isReady = useIsDataReady()
   const cmcdEnabled = useActiveServiceCmcdEnabled(activeServiceId)
   const qc = useQueryClient()
@@ -686,15 +532,8 @@ function SessionsBody({
         client.POST('/api/sessions', {
           signal,
           body: {
-            start_time: startTime,
-            end_time: endTime,
-            filters: filterPayload,
-            page: 1,
-            limit: 100,
-            sort_by: 'session_start',
-            sort_dir: 'desc',
-            flagged_only: flaggedOnly,
-            streaming_only: streamingOnly,
+            start_time: startTime, end_time: endTime, filters: filterPayload, page: 1, limit: 100,
+            sort_by: 'session_start', sort_dir: 'desc', flagged_only: flaggedOnly, streaming_only: streamingOnly,
             min_reqs_flag: minReqs !== '' ? minReqs : undefined,
             min_4xx_pct_flag: min4xxPct !== '' ? min4xxPct : undefined,
           },
@@ -734,8 +573,7 @@ function SessionsBody({
           <div className="font-semibold">Failed to load sessions.</div>
           <div className="font-mono text-xs opacity-80 break-all">{extractApiError(error)}</div>
           <button
-            type="button"
-            onClick={() => { void refetch() }}
+            type="button" onClick={() => { void refetch() }}
             className="mt-1 rounded border border-red-400 px-2 py-1 text-xs hover:bg-red-100 dark:hover:bg-red-900"
           >
             Retry
@@ -744,53 +582,26 @@ function SessionsBody({
       ) : null}
 
       <ScoringControls
-        cmcdEnabled={cmcdEnabled}
-        flaggedOnly={flaggedOnly}
-        setFlaggedOnly={setFlaggedOnly}
-        streamingOnly={streamingOnly}
-        setStreamingOnly={setStreamingOnly}
-        minReqs={minReqs}
-        setMinReqs={setMinReqs}
-        min4xxPct={min4xxPct}
-        setMin4xxPct={setMin4xxPct}
-        data={data}
-        isFetching={isFetching}
-        isLoadingInitial={isLoadingInitial}
-        refetch={refetch}
+        cmcdEnabled={cmcdEnabled} flaggedOnly={flaggedOnly} setFlaggedOnly={setFlaggedOnly}
+        streamingOnly={streamingOnly} setStreamingOnly={setStreamingOnly}
+        minReqs={minReqs} setMinReqs={setMinReqs} min4xxPct={min4xxPct} setMin4xxPct={setMin4xxPct}
+        data={data} isFetching={isFetching} isLoadingInitial={isLoadingInitial} refetch={refetch}
       />
 
       <SessionsTable
-        data={data}
-        activeServiceId={activeServiceId}
-        isLoadingInitial={isLoadingInitial}
-        isFetching={isFetching}
-        labels={labels}
-        labelBySid={labelBySid}
-        idBySid={idBySid}
-        onFlagged={onFlagged}
-        onRowClick={setSelectedSession}
+        data={data} activeServiceId={activeServiceId} isLoadingInitial={isLoadingInitial} isFetching={isFetching}
+        labels={labels} labelBySid={labelBySid} idBySid={idBySid} onFlagged={onFlagged} onRowClick={setSelectedSession}
       />
 
       <SessionDetail
-        selectedSession={selectedSession}
-        setSelectedSession={setSelectedSession}
-        activeServiceId={activeServiceId}
-        data={data}
-        labels={labels}
-        labelBySid={labelBySid}
-        onFlagged={onFlagged}
+        selectedSession={selectedSession} setSelectedSession={setSelectedSession} activeServiceId={activeServiceId}
+        data={data} labels={labels} labelBySid={labelBySid} onFlagged={onFlagged}
       />
     </div>
   )
 }
 
 export default function SessionsPage() {
-  const [selectedSession, setSelectedSession] = useState<Session | null>(null)
-  const [flaggedOnly, setFlaggedOnly] = useState(false)
-  const [streamingOnly, setStreamingOnly] = useState(false)
-  const [minReqs, setMinReqs] = useState<number | ''>('')
-  const [min4xxPct, setMin4xxPct] = useState<number | ''>('')
-
   return (
     <ReportLayout
       title="User Sessions"
@@ -798,22 +609,7 @@ export default function SessionsPage() {
       icon={Users}
     >
       {({ startTime, endTime, activeServiceId, filterPayload }) => (
-        <SessionsBody
-          startTime={startTime}
-          endTime={endTime}
-          activeServiceId={activeServiceId}
-          filterPayload={filterPayload}
-          selectedSession={selectedSession}
-          setSelectedSession={setSelectedSession}
-          flaggedOnly={flaggedOnly}
-          setFlaggedOnly={setFlaggedOnly}
-          streamingOnly={streamingOnly}
-          setStreamingOnly={setStreamingOnly}
-          minReqs={minReqs}
-          setMinReqs={setMinReqs}
-          min4xxPct={min4xxPct}
-          setMin4xxPct={setMin4xxPct}
-        />
+        <SessionsBody startTime={startTime} endTime={endTime} activeServiceId={activeServiceId} filterPayload={filterPayload} />
       )}
     </ReportLayout>
   )

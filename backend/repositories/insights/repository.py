@@ -1,7 +1,4 @@
-"""Insights repository — anomaly detection queries, no HTTP imports."""
-
 from __future__ import annotations  # noqa: I001
-
 import contextvars
 import heapq
 import logging
@@ -13,12 +10,9 @@ from collections.abc import Callable, Collection
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
-
 import duckdb
-
 from backend.repositories._base import QueryRunner, _compact_sql_for_debug, _safe_table, record_duckdb_query
 from backend.repositories.insights import registry
-
 from . import (
     definitions as _definitions,  # noqa: F401  side-effect import: registers insight defs with the registry
     definitions as _insights_sql,
@@ -38,9 +32,6 @@ from .definitions import (
 )
 
 logger = logging.getLogger(__name__)
-
-# ── Caches ────────────────────────────────────────────────────────────────────
-
 INSIGHTS_CACHE_TTL = 300  # seconds
 from backend.utils.bounded_cache import BoundedTTLCache as _BoundedTTLCache
 
@@ -55,7 +46,6 @@ def _execute_on_cursor(
     sql: str,
     params: list | None = None,
 ):
-    """Execute ``sql`` on shadow cursor ``cur`` and record timing under request-scoped ``debug_lock``."""
     t0 = time.time()
     res = cur.execute(sql, params or [])
     elapsed_ms = round((time.time() - t0) * 1000, 2)
@@ -137,40 +127,27 @@ def _coalesced_city_aggregates(
     shadow_cursor: duckdb.DuckDBPyConnection | None = None,
     debug_lock: threading.Lock | None = None,
 ) -> dict[str, list[tuple]]:
-    """Compute all 4 city-based insights (surges, error_spikes, latency_regressions, new_city_traffic) in one scan."""
     sql = COALESCED_CITY_AGGREGATES.format(
         table_name=table_name, label_expr=label_expr, region_sel=region_sel, country_sel=country_sel
     )
     rows = _exec_coalesced(runner, sql, [window_start_s, window_start_s], shadow_cursor, debug_lock)
     surges, error_spikes, latency, new_city = [], [], [], []
     baseline_scale = max(baseline_hours, 1.0)
-
     for label, city, region, country, w_cnt, b_cnt, w_err, b_err, w_p95, b_p95, w_lat_total, b_lat_total in rows:
         b_cnt_i, b_err_i = b_cnt or 0, b_err or 0
-
-        # city_surges — HAVING w_cnt >= 20 AND w_cnt > b_cnt/baseline_hours*window_hours*3
         if w_cnt >= 20:
             b_normalized = b_cnt_i * 1.0 / baseline_scale * window_hours
             if w_cnt > b_normalized * 3:
                 surges.append((label, city, region, country, w_cnt, b_cnt, w_cnt * 1.0 / max(b_normalized, 1.0)))
-
-        # city_error_spikes — w_total/b_total here are total reqs in window/baseline
-        # HAVING w_total >= 10 AND w_rate >= 0.10 AND (b_total < 50 OR w_rate >= b_rate*3 + 0.05)
         if w_cnt >= 10:
             w_rate = (w_err / w_cnt) if w_cnt else 0.0
             b_rate = (b_err_i / b_cnt_i) if b_cnt_i else None
             if w_rate >= 0.10 and (b_cnt_i < 50 or (b_rate is not None and w_rate >= b_rate * 3 + 0.05)):
                 error_spikes.append((label, city, region, country, w_rate, b_rate, w_err, w_cnt, b_cnt))
-
-        # city_latency_regressions — uses elapsed-only counts (w_lat_total / b_lat_total)
-        # HAVING w_total >= 10 AND b_total >= 50 AND w_p95 >= b_p95*3.0 AND w_p95 - b_p95 >= 500
         if _p95_regressed(w_lat_total, b_lat_total, w_p95, b_p95, 10, 50, 3.0, 500):
             latency.append((label, city, region, country, w_p95, b_p95, w_lat_total, b_lat_total))
-
-        # new_city_traffic — HAVING w_cnt >= 5 AND b_cnt = 0
         if w_cnt >= 5 and b_cnt_i == 0:
             new_city.append((label, city, region, country, w_cnt, b_cnt))
-
     surges.sort(key=lambda x: -(x[6] or 0))
     error_spikes.sort(key=lambda x: -((x[4] or 0) - (x[5] or 0)))
     latency.sort(key=lambda x: -((x[4] / x[5]) if x[5] else 0))
@@ -192,7 +169,6 @@ def _coalesced_url_aggregates(
     shadow_cursor: duckdb.DuckDBPyConnection | None = None,
     debug_lock: threading.Lock | None = None,
 ) -> dict[str, list[tuple]]:
-    """Coalesce URL-keyed insights into one pass over ``table_name`` (core 5 or extended 10 when ``actual_cols`` given)."""
     use_extended = actual_cols is not None
     if actual_cols is not None:
         sql = COALESCED_URL_EXTENDED_AGGREGATES.format(
@@ -221,13 +197,11 @@ def _coalesced_url_aggregates(
     image_opt_heap: list[Any] = []
     cache_ttl_heap: list[Any] = []
     origin_retries_heap: list[Any] = []
-
     ext_cols = actual_cols if use_extended and actual_cols is not None else ()
     has_pcr = {"resp_header_content_encoding", "resp_bytes"}.issubset(ext_cols)
     has_img = {"resp_bytes", "ua"}.issubset(ext_cols)
     has_ttl = {"ttl", "hits", "age"}.issubset(ext_cols)
     has_oret = "oretries" in ext_cols
-
     for counter, r in enumerate(
         _exec_coalesced(runner, sql, [window_start_s, window_start_s], shadow_cursor, debug_lock, chunked=True), 1
     ):
@@ -238,8 +212,6 @@ def _coalesced_url_aggregates(
         is_img, img_w_cnt, img_w_bytes, img_w_avg_bytes, img_w_mobile = ext[7:12]
         ttl_w_cnt, ttl_w_avg_ttl, ttl_w_avg_hits, ttl_w_avg_age, oret_w_cnt, oret_w_avg, oret_w_max = ext[12:]
         w_total_i, b_total_i = w_total or 0, b_total or 0
-
-        # ── error_spikes ──────────────────────────────────────────────────
         if w_total_i >= 3:
             w_rate_e = (w_5xx or 0) / w_total_i if w_total_i else 0.0
             b_rate_e = ((b_5xx or 0) / b_total_i) if b_total_i else None
@@ -250,8 +222,6 @@ def _coalesced_url_aggregates(
                     counter,
                     (url, w_rate_e, b_rate_e, w_5xx, w_total, b_total),
                 )
-
-        # ── cache_collapse ────────────────────────────────────────────────
         w_cacheable, b_cacheable = (w_hits or 0) + (w_miss or 0), (b_hits or 0) + (b_miss or 0)
         if w_cacheable >= 5 and b_cacheable >= 20:
             w_rate_c, b_rate_c = (w_hits or 0) / w_cacheable, (b_hits or 0) / b_cacheable
@@ -262,8 +232,6 @@ def _coalesced_url_aggregates(
                     counter,
                     (url, w_rate_c, b_rate_c, w_cacheable, b_cacheable),
                 )
-
-        # ── cacheability_regression ───────────────────────────────────────
         if w_total_i >= 10 and b_total_i >= 50:
             w_pass_rate, b_pass_rate = (w_pass or 0) / w_total_i, (b_pass or 0) / b_total_i
             if b_pass_rate <= 0.20 and w_pass_rate >= 0.50 and w_pass_rate >= b_pass_rate + 0.30:
@@ -273,8 +241,6 @@ def _coalesced_url_aggregates(
                     counter,
                     (url, w_pass_rate, b_pass_rate, w_total, b_total),
                 )
-
-        # ── latency_regression ────────────────────────────────────────────
         if _p95_regressed(w_total_i, b_total_i, w_p95, b_p95, 5, 20, 2.0, 200):
             _push_top_k(
                 latency_regression_heap,
@@ -282,15 +248,11 @@ def _coalesced_url_aggregates(
                 counter,
                 (url, w_p95, b_p95, w_total, b_total),
             )
-
-        # ── tail_latency (window-only) ────────────────────────────────────
         if w_lat_total is not None and w_lat_total >= 20 and w_p99 is not None and w_p50 is not None and w_p50 > 0:
             ratio = round(w_p99 / w_p50, 1)
             if ratio > 5:
                 _push_top_k(tail_latency_heap, ratio or 0.0, counter, (url, w_p99, w_p50, ratio, w_lat_total))
-
         if use_extended:
-            # ── new_probe_urls ────────────────────────────────────────────
             if is_probe and w_total_i > 0 and b_total_i == 0:
                 _push_top_k(
                     new_probe_urls_heap,
@@ -299,8 +261,6 @@ def _coalesced_url_aggregates(
                     (url, w_total_i, b_total_i, (w_4xx or 0) * 100.0 / w_total_i),
                     k=25,
                 )
-
-            # ── payload_compression_regression ────────────────────────────
             if has_pcr and is_comp and (pcr_w_total or 0) >= 10 and (pcr_b_total or 0) >= 50:
                 w_rate_p, b_rate_p = (pcr_w_uncomp or 0) / (pcr_w_total or 1), (pcr_b_uncomp or 0) / (pcr_b_total or 1)
                 if b_rate_p <= 0.20 and w_rate_p >= 0.50 and w_rate_p >= b_rate_p + 0.30:
@@ -311,8 +271,6 @@ def _coalesced_url_aggregates(
                         (url, w_rate_p, b_rate_p, pcr_w_total, pcr_b_total),
                         k=15,
                     )
-
-            # ── image_optimization_opportunities ──────────────────────────
             if has_img and is_img and img_w_bytes is not None and img_w_bytes > 524288:
                 avg_kb = round((img_w_avg_bytes or 0.0) / 1024.0, 1)
                 mobile_ratio = ((img_w_mobile or 0) * 1.0 / img_w_cnt) if img_w_cnt else 0.0
@@ -323,8 +281,6 @@ def _coalesced_url_aggregates(
                     (url, img_w_cnt, img_w_bytes, avg_kb, mobile_ratio),
                     k=15,
                 )
-
-            # ── cache_ttl_mismatch ────────────────────────────────────────
             if (
                 has_ttl
                 and (ttl_w_cnt or 0) >= 10
@@ -340,12 +296,9 @@ def _coalesced_url_aggregates(
                     (url, round(ttl_w_avg_ttl, 0), round(ttl_w_avg_hits, 1), round(ttl_w_avg_age or 0.0, 0), ttl_w_cnt),
                     k=20,
                 )
-
-            # ── origin_retries ────────────────────────────────────────────
             if has_oret and (oret_w_cnt or 0) >= 5 and oret_w_avg is not None:
                 avg_ret = round(oret_w_avg, 2)
                 _push_top_k(origin_retries_heap, float(avg_ret), counter, (url, oret_w_cnt, avg_ret, oret_w_max), k=10)
-
     res: dict[str, list[tuple]] = {
         "error_spikes": _heap_to_sorted_items(error_spikes_heap),
         "cache_collapse": _heap_to_sorted_items(cache_collapse_heap),
@@ -377,7 +330,6 @@ def _coalesced_ip_security_aggregates(
     shadow_cursor: duckdb.DuckDBPyConnection | None = None,
     debug_lock: threading.Lock | None = None,
 ) -> dict[str, list[tuple]]:
-    """Coalesce IP-keyed security scans into one ``GROUP BY ip`` pass over ``table_name``."""
     use_extended = actual_cols is not None
     if actual_cols is not None:
         sql = COALESCED_IP_EXTENDED_AGGREGATES.format(
@@ -396,13 +348,11 @@ def _coalesced_ip_security_aggregates(
     content_discovery_heap: list[Any] = []
     orphaned_deep_crawl_heap: list[Any] = []
     session_harvesting_heap: list[Any] = []
-
     ext_cols = actual_cols if use_extended and actual_cols is not None else ()
     has_odc, has_sh = "referer" in ext_cols, "cookie_session" in ext_cols
     has_rsa, has_ca = "req_header_bytes" in ext_cols, "conn_requests" in ext_cols
     rsa_candidates = ca_candidates = 0
     baseline_scale = max(baseline_hours, 1.0)
-
     for counter, r in enumerate(
         _exec_coalesced(runner, sql, [window_start_s, window_start_s], shadow_cursor, debug_lock, chunked=True), 1
     ):
@@ -411,8 +361,6 @@ def _coalesced_ip_security_aggregates(
         ext = r[13:] if use_extended else (None,) * 14
         odc_w_reqs, odc_w_urls, odc_b_reqs, sh_w_sessions, sh_w_reqs, sh_b_sessions = ext[:6]
         rsa_w_cnt, rsa_w_max, rsa_b_min, _rsa_b_max, ca_w_cnt, ca_w_max, ca_b_min, _ca_b_max = ext[6:]
-
-        # ── low_and_slow ──────────────────────────────────────────────────
         ls_hits_i, ls_distinct_i = ls_hits or 0, ls_distinct or 0
         span_s = (ls_max_sec - ls_min_sec) if (ls_min_sec is not None and ls_max_sec is not None) else 0
         if ls_hits_i >= 5 and ls_distinct_i >= 3 and span_s >= 600 and (ls_hits_i / span_s) < 0.2:
@@ -422,36 +370,27 @@ def _coalesced_ip_security_aggregates(
                 counter,
                 (ip, ls_hits_i, ls_distinct_i, span_s, round(ls_hits_i / span_s, 5)),
             )
-
-        # ── credential_enumeration ────────────────────────────────────────
         ce_w_denied_i = ce_w_denied or 0
         if ce_w_denied_i >= 20:
             ce_ratio = (ce_w_denied_i / ce_w_attempts) if ce_w_attempts else 0.0
             if ce_ratio >= 0.5 and ce_w_denied_i > ((ce_b_denied or 0) / baseline_scale * window_hours * 3 + 5):
                 _push_top_k(
                     credential_enumeration_heap,
-                    (ce_w_denied_i,),
+                    (ce_w_denied_i),
                     counter,
                     (ip, ce_w_denied_i, ce_w_attempts, ce_w_paths, ce_b_denied),
                 )
-
-        # ── content_discovery ─────────────────────────────────────────────
         cd_w_404_i, cd_distinct_404_i = cd_w_404 or 0, cd_distinct_404 or 0
         if cd_w_404_i >= 20 and cd_distinct_404_i >= 15 and ((cd_w_404_i / cd_w_total) if cd_w_total else 0.0) >= 0.7:
             _push_top_k(
-                content_discovery_heap,
-                (cd_w_404_i,),
-                counter,
-                (ip, cd_w_404_i, cd_w_total, cd_distinct_404_i, cd_b_404),
+                content_discovery_heap, (cd_w_404_i), counter, (ip, cd_w_404_i, cd_w_total, cd_distinct_404_i, cd_b_404)
             )
-
         if use_extended:
-            # ── orphaned_deep_crawl ───────────────────────────────────────
             if has_odc and odc_w_reqs is not None and odc_w_reqs >= 50 and odc_w_urls is not None and odc_w_urls >= 10:
                 b_reqs_i = odc_b_reqs or 0
                 _push_top_k(
                     orphaned_deep_crawl_heap,
-                    (odc_w_reqs,),
+                    (odc_w_reqs),
                     counter,
                     (
                         ip,
@@ -462,21 +401,14 @@ def _coalesced_ip_security_aggregates(
                         odc_w_reqs * 1.0 / max(b_reqs_i / baseline_scale * window_hours, 1.0),
                     ),
                 )
-
-            # ── session_harvesting ────────────────────────────────────────
             if has_sh and sh_w_sessions is not None and sh_w_sessions >= 20:
                 b_sess_i = sh_b_sessions or 0
                 if sh_w_sessions > b_sess_i * 2 + 10:
                     _push_top_k(
-                        session_harvesting_heap, (sh_w_sessions,), counter, (ip, sh_w_sessions, sh_w_reqs, b_sess_i)
+                        session_harvesting_heap, (sh_w_sessions), counter, (ip, sh_w_sessions, sh_w_reqs, b_sess_i)
                     )
-
-            # ── request_size_anomaly exact lower-bound check ──────────────
-            # Since min(B) <= P95(B), max_w > P95(B)*3 requires max_w > min(B)*3.
             if has_rsa and (rsa_w_cnt or 0) >= 3 and rsa_b_min is not None and (rsa_w_max or 0) > rsa_b_min * 3:
                 rsa_candidates += 1
-
-            # ── connection_abuse exact lower-bound check ──────────────────
             if (
                 has_ca
                 and (ca_w_cnt or 0) >= 5
@@ -485,7 +417,6 @@ def _coalesced_ip_security_aggregates(
                 and (ca_w_max or 0) > ca_b_min * 3
             ):
                 ca_candidates += 1
-
     res: dict[str, list[tuple]] = {
         "low_and_slow": _heap_to_sorted_items(low_and_slow_heap),
         "credential_enumeration": _heap_to_sorted_items(credential_enumeration_heap),
@@ -512,10 +443,6 @@ def _coalesced_asn_aggregates(
     shadow_cursor: duckdb.DuckDBPyConnection | None = None,
     debug_lock: threading.Lock | None = None,
 ) -> dict[str, list[tuple]]:
-    """Coalesce the 4 ASN-keyed insights (asn_concentration, new_asn_traffic,
-    network_asn_health, asn_hosting_shift) into ONE ``GROUP BY asn`` pass over
-    ``table_name``.
-    """
     has_health = {"ploss", "rtt_var", "retrans"}.issubset(actual_cols)
     has_ptype = "p_type" in actual_cols
     sql = COALESCED_ASN_AGGREGATES.format(
@@ -529,23 +456,16 @@ def _coalesced_asn_aggregates(
     w_total_all = sum(int(r[1] or 0) for r in rows)
     b_total_all = sum(int(r[2] or 0) for r in rows)
     concentration, new_asn, health, hosting_shift = [], [], [], []
-
     for r in rows:
         asn, w_cnt, b_cnt, w_ploss, b_ploss, w_jitter, b_jitter, w_retrans, b_retrans = r[:9]
         w_hosting, w_pt_total, b_hosting, b_pt_total = r[9:]
         if asn is None:
             continue
         w_cnt_i, b_cnt_i = int(w_cnt or 0), int(b_cnt or 0)
-
-        # asn_concentration
         if _share_exceeded(w_cnt_i, w_total_all, b_cnt_i, b_total_all, 0.20, mult=3.0, offset=0.10):
             concentration.append((asn, w_cnt_i, b_cnt_i, b_total_all, w_total_all))
-
-        # new_asn_traffic
         if w_cnt_i >= 20 and b_cnt_i == 0:
             new_asn.append((asn, w_cnt_i, b_cnt_i))
-
-        # network_asn_health
         if has_health and w_cnt_i >= 50 and b_cnt_i >= 100:
             w_ploss_f, b_ploss_f = float(w_ploss or 0.0), float(b_ploss or 0.0)
             w_retrans_f, b_retrans_f = float(w_retrans or 0.0), float(b_retrans or 0.0)
@@ -559,8 +479,6 @@ def _coalesced_asn_aggregates(
             retrans_bad = w_retrans_f >= b_retrans_f * 2 + 0.5
             if ploss_bad or jitter_bad or retrans_bad:
                 health.append((asn, w_ploss, b_ploss, w_jitter, b_jitter, w_retrans, b_retrans, w_cnt_i, b_cnt_i))
-
-        # asn_hosting_shift
         if has_ptype:
             w_pt_i, b_pt_i, w_host_i, b_host_i = (
                 int(w_pt_total or 0),
@@ -570,12 +488,10 @@ def _coalesced_asn_aggregates(
             )
             if w_pt_i >= 50 and _share_exceeded(w_host_i, w_pt_i, b_host_i, b_pt_i, 0.30, mult=3.0, offset=0.10):
                 hosting_shift.append((asn, w_host_i, w_pt_i, b_host_i, b_pt_i))
-
     concentration.sort(key=lambda x: -(x[1] or 0))
     new_asn.sort(key=lambda x: -(x[1] or 0))
     health.sort(key=lambda x: (-(x[1] or 0.0), -(x[3] if x[3] is not None else float("-inf"))))
     hosting_shift.sort(key=lambda x: -(x[1] or 0))
-
     res: dict[str, list[tuple]] = {"asn_concentration": concentration[:10], "new_asn_traffic": new_asn[:20]}
     if has_health:
         res["network_asn_health"] = health[:15]
@@ -593,10 +509,6 @@ def _coalesced_scalar_aggregates(
     shadow_cursor: duckdb.DuckDBPyConnection | None = None,
     debug_lock: threading.Lock | None = None,
 ) -> dict[str, list[tuple]]:
-    """Coalesce the ungrouped service-wide scalar insights (http3_fallback,
-    cache_hit_cliff, timeout_split, and origin_latency_spike overall gate)
-    into ONE pass over ``table_name``.
-    """
     has_transport, has_cache = "transport" in actual_cols, "cache" in actual_cols
     has_oconnect, has_ottfb = "oconnect_ms" in actual_cols, "ottfb" in actual_cols
     has_ts = has_oconnect and has_ottfb
@@ -610,7 +522,6 @@ def _coalesced_scalar_aggregates(
         ottfb_sel=_col_or_null("ottfb", actual_cols, "DOUBLE"),
     )
     row = _exec_coalesced(runner, sql, [window_start_s, window_start_s], shadow_cursor, debug_lock, fetch_one=True)
-
     res: dict[str, list[tuple]] = {}
     if not row:
         return {
@@ -623,11 +534,9 @@ def _coalesced_scalar_aggregates(
             )
             if flag
         }
-
     w_quic, w_tr_total, b_quic, b_tr_total, w_hits, w_cacheable, b_hits, b_cacheable = (int(v or 0) for v in row[:8])
     ts_w_conn, ts_b_conn, ts_w_read, ts_b_read, ts_w_total_raw, ts_b_total_raw, ols_w_p95, ols_b_p95 = row[8:16]
     ts_w_total, ts_b_total = int(ts_w_total_raw or 0), int(ts_b_total_raw or 0)
-
     if has_transport:
         res["http3_fallback"] = (
             [(w_quic, w_tr_total, b_quic, b_tr_total)]
@@ -655,7 +564,6 @@ def _coalesced_scalar_aggregates(
             else []
         )
     if has_ottfb:
-        # Gate origin_latency_spike: only run the per-URL query when overall w_p95 > b_p95 * 2
         if ols_w_p95 is None or ols_b_p95 is None or not (ols_w_p95 > ols_b_p95 * 2):
             res["origin_latency_spike"] = []
     return res
@@ -672,10 +580,6 @@ def _coalesced_fp_aggregates(
     shadow_cursor: duckdb.DuckDBPyConnection | None = None,
     debug_lock: threading.Lock | None = None,
 ) -> dict[str, list[tuple]]:
-    """Coalesce fingerprint & cipher spread insights (botnet_grouping,
-    residential_fingerprint_dispersion, cipher_spread) into ONE pass using
-    GROUPING SETS ((fp), (cipher)).
-    """
     has_ip = "ip" in actual_cols
     has_fp = has_ip and ("ja4" in actual_cols or "ja3" in actual_cols)
     has_rfd = has_ip and "ja4" in actual_cols and "asn" in actual_cols and "p_type" in actual_cols
@@ -694,7 +598,6 @@ def _coalesced_fp_aggregates(
     raw_rows = _exec_coalesced(runner, sql, [window_start_s, window_start_s], shadow_cursor, debug_lock)
     baseline_scale, win_h = max(float(baseline_hours), 1.0), float(window_hours)
     botnet, rfd, cipher_list = [], [], []
-
     for r in raw_rows:
         gid, fp, cipher, bg_w_ips, bg_w_reqs, bg_b_ips = r[:6]
         rfd_w_ips, rfd_w_asns, rfd_w_reqs, rfd_b_ips, rfd_b_asns, cs_w_ips, cs_w_reqs, cs_b_ips = r[6:14]
@@ -720,11 +623,9 @@ def _coalesced_fp_aggregates(
             scaled_cb = cb_ips / baseline_scale * win_h
             if cw_ips >= 5 and cw_ips > scaled_cb * 3:
                 cipher_list.append((cw_ips * 1.0 / max(scaled_cb, 1.0), (cipher, cw_ips, cw_reqs, cb_ips)))
-
     botnet.sort(key=lambda r: r[4], reverse=True)
     rfd.sort(key=lambda r: r[5], reverse=True)
     cipher_list.sort(key=lambda pair: pair[0], reverse=True)
-
     res: dict[str, list[tuple]] = {}
     if has_fp:
         res["botnet_grouping"] = botnet[:10]
@@ -744,11 +645,6 @@ def _coalesced_dim_aggregates(
     shadow_cursor: duckdb.DuckDBPyConnection | None = None,
     debug_lock: threading.Lock | None = None,
 ) -> dict[str, list[tuple]]:
-    """Coalesce 8 low-cardinality dimension insights (new_country_traffic,
-    proxy_surge, method_drift, connection_type_mix, origin_error_rate,
-    origin_ip_failure, referer_monoculture, ua_monoculture) into ONE pass
-    using GROUPING SETS.
-    """
     has_country, has_ptype, has_method = "country" in actual_cols, "p_type" in actual_cols, "method" in actual_cols
     has_ctype = "c_type" in actual_cols and "c_speed" in actual_cols
     has_ost = "ost" in actual_cols
@@ -756,7 +652,6 @@ def _coalesced_dim_aggregates(
     has_referer, has_ua = "referer" in actual_cols, "ua" in actual_cols
     if not (has_country or has_ptype or has_method or has_ctype or has_ost or has_oip or has_referer or has_ua):
         return {}
-
     sql = COALESCED_DIM_AGGREGATES.format(
         table_name=table_name,
         country_sel=_col_or_null("country", actual_cols),
@@ -770,20 +665,8 @@ def _coalesced_dim_aggregates(
         ua_sel=_col_or_null("ua", actual_cols),
     )
     raw_rows = _exec_coalesced(runner, sql, [window_start_s, window_start_s], shadow_cursor, debug_lock)
-
-    # GROUPING_ID(country, p_type, method, c_type, c_speed, ost, oip, referer, ua)
-    # Bit positions (8..0):
-    # (country)          -> 0b0_1111_1111 = 255
-    # (p_type)           -> 0b1_0111_1111 = 383
-    # (method)           -> 0b1_1011_1111 = 447
-    # (c_type, c_speed)  -> 0b1_1100_1111 = 463
-    # (ost)              -> 0b1_1111_0111 = 503
-    # (oip)              -> 0b1_1111_1011 = 507
-    # (referer)          -> 0b1_1111_1101 = 509
-    # (ua)               -> 0b1_1111_1110 = 510
     country_rows, ptype_rows, method_rows, ctype_rows = [], [], [], []
     ost_rows, oip_rows, referer_rows, ua_rows = [], [], [], []
-
     for r in raw_rows:
         gid, country, p_type, method, c_type, c_speed, ost, oip, referer, ua = r[:10]
         w_cnt, b_cnt, w_ost_nn, b_ost_nn, w_ost_5xx, b_ost_5xx = (int(v or 0) for v in r[10:16])
@@ -804,9 +687,7 @@ def _coalesced_dim_aggregates(
             referer_rows.append((referer, w_cnt, b_cnt))
         elif gid_i == 510:
             ua_rows.append((ua, w_cnt, b_cnt))
-
     res: dict[str, list[tuple]] = {}
-
     if has_country:
         nc = sorted(
             [(c, wc, bc) for c, wc, bc in country_rows if c is not None and wc >= 3 and bc == 0],
@@ -814,9 +695,7 @@ def _coalesced_dim_aggregates(
             reverse=True,
         )
         res["new_country_traffic"] = nc[:20]
-
     if has_ptype:
-        # PROXY_SURGE filters WHERE p_type IS NOT NULL
         pt_nn = [(pt, wc, bc) for pt, wc, bc in ptype_rows if pt is not None]
         w_total_all, b_total_all = sum(wc for _, wc, _ in pt_nn), sum(bc for _, _, bc in pt_nn)
         pt_nonempty = [(pt, wc, bc) for pt, wc, bc in pt_nn if pt != ""]
@@ -830,7 +709,6 @@ def _coalesced_dim_aggregates(
             res["proxy_surge"] = [(pt, wc, bc, w_total_all, b_total_all) for pt, wc, bc in pt_nonempty]
         else:
             res["proxy_surge"] = []
-
     if has_method:
         m_w_total, m_b_total = sum(wc for _, wc, _ in method_rows), sum(bc for _, _, bc in method_rows)
         md = sorted(
@@ -847,7 +725,6 @@ def _coalesced_dim_aggregates(
             reverse=True,
         )
         res["method_drift"] = md[:10]
-
     if has_ctype:
         ct_valid = [(ct, cs, wc, bc) for ct, cs, wc, bc in ctype_rows if ct is not None and ct != ""]
         ct_w_total, ct_b_total = sum(wc for _, _, wc, _ in ct_valid), sum(bc for _, _, _, bc in ct_valid)
@@ -861,7 +738,6 @@ def _coalesced_dim_aggregates(
             reverse=True,
         )
         res["connection_type_mix"] = ct_out[:15]
-
     if has_ost:
         ost_valid = [r for r in ost_rows if r[0] is not None]
         o_w_total, o_b_total = sum(r[3] for r in ost_valid), sum(r[4] for r in ost_valid)
@@ -877,7 +753,6 @@ def _coalesced_dim_aggregates(
             ]
         else:
             res["origin_error_rate"] = []
-
     if has_oip:
         oip_stats = [
             (oip_val, reqs, round(errs_5xx * 100.0 / reqs, 1))
@@ -922,7 +797,6 @@ def _coalesced_dim_aggregates(
         res["referer_monoculture"] = _monoculture(referer_rows, 0.20, skip_empty=True)
     if has_ua:
         res["ua_monoculture"] = _monoculture(ua_rows, 0.25, skip_empty=False)
-
     return res
 
 
@@ -935,10 +809,6 @@ def _coalesced_geo_latency_aggregates(
     shadow_cursor: duckdb.DuckDBPyConnection | None = None,
     debug_lock: threading.Lock | None = None,
 ) -> dict[str, list[tuple]]:
-    """Coalesce pop_latency_regression, region_latency, and
-    metro_delivery_degradation into ONE pass using GROUPING SETS
-    ((pop), (server_region), (metro)).
-    """
     has_elapsed = "elapsed" in actual_cols
     has_pop, has_sreg = "pop" in actual_cols and has_elapsed, "server_region" in actual_cols and has_elapsed
     has_metro_dr = "metro" in actual_cols and "delivery_rate" in actual_cols
@@ -955,15 +825,9 @@ def _coalesced_geo_latency_aggregates(
         delivery_rate_sel='"delivery_rate"' if has_metro_dr else "NULL::DOUBLE",
     )
     raw_rows = _exec_coalesced(runner, sql, [window_start_s, window_start_s], shadow_cursor, debug_lock)
-
-    # GROUPING_ID(pop, server_region, metro)
-    # (pop)           -> 0b011 = 3
-    # (server_region) -> 0b101 = 5
-    # (metro)         -> 0b110 = 6
     pop_out: list[tuple[float, tuple]] = []
     sreg_out: list[tuple[float, tuple]] = []
     metro_out: list[tuple[float, tuple]] = []
-
     for r in raw_rows:
         gid, pop, server_region, metro, w_p95, b_p95 = r[:6]
         w_lat_total, b_lat_total, w_ottfb_cnt, w_ottfb_p95, w_med_dr, b_med_dr, w_dr_total, b_dr_total = r[6:14]
@@ -992,11 +856,9 @@ def _coalesced_geo_latency_aggregates(
                 and w_med_dr <= b_med_dr * 0.5
             ):
                 metro_out.append((b_med_dr - w_med_dr, (metro, w_med_dr, b_med_dr, wdt, bdt)))
-
     pop_out.sort(key=lambda pair: pair[0], reverse=True)
     sreg_out.sort(key=lambda pair: pair[0], reverse=True)
     metro_out.sort(key=lambda pair: pair[0], reverse=True)
-
     res: dict[str, list[tuple]] = {}
     if has_pop:
         res["pop_latency_regression"] = [item for _, item in pop_out[:15]]
@@ -1052,7 +914,6 @@ def check_insights_cache(
     force_refresh: bool = False,
     filters: dict | None = None,
 ) -> dict | None:
-    """Fast pre-connection check for a cached insights payload."""
     if INSIGHTS_CACHE_TTL <= 0 or force_refresh:
         return None
     cache_key = _build_insights_cache_key(
@@ -1075,10 +936,7 @@ def check_insights_cache(
 
 
 def _compute_clamped_insight_windows(
-    window_hours: float,
-    baseline_hours: float,
-    clamp_start: str | None = None,
-    clamp_end: str | None = None,
+    window_hours: float, baseline_hours: float, clamp_start: str | None = None, clamp_end: str | None = None
 ) -> tuple[datetime, str, str, str]:
     from backend.utils.date_utils import parse_iso_utc
 
@@ -1110,13 +968,11 @@ def get_insights(
     filters: dict | None = None,
     max_workers: int = 8,
 ) -> dict:
-    """Compute the insight cards for ``src`` over the window/baseline ranges."""
     source_name = src["name"]
     table_name = _safe_table(source_name)
     now, now_s, window_start_s, baseline_start_s = _compute_clamped_insight_windows(
         window_hours, baseline_hours, clamp_start, clamp_end
     )
-
     cached = check_insights_cache(
         src,
         window_hours=window_hours,
@@ -1140,7 +996,6 @@ def get_insights(
         clamp_cache_key=clamp_cache_key,
         filters=filters,
     )
-
     runner = QueryRunner(con, src)
     actual_cols = runner.get_schema_cols()
 
@@ -1160,7 +1015,6 @@ def get_insights(
 
     empty_resp = _insights_envelope([])
     if not actual_cols:
-        # Force-rebuild the view once in case a concurrent commit deleted the buffer file.
         try:
             from backend.core import iceberg as db_iceberg
 
@@ -1170,14 +1024,10 @@ def get_insights(
             logger.debug("get_insights: runner.get_schema_cols failed (ignored)", exc_info=True)
         if not actual_cols:
             return empty_resp
-
-    # Materialize relevant window into a per-request ATTACH ':memory:' scratch DB
-    # so shadow cursors across ThreadPoolExecutor workers see the table in-memory.
     scratch_alias = f"insights_scratch_{uuid.uuid4().hex[:12]}"
     runner.con.execute(f"ATTACH ':memory:' AS {scratch_alias} (READ_ONLY FALSE)")
     scratch_attached = True
     temp_table = f"{scratch_alias}.insights_temp_{uuid.uuid4().hex[:12]}"
-
     needed_cols_set: set[str] = {"timestamp"}
     for d in registry.get_all():
         if all(col in actual_cols for col in d.required_fields):
@@ -1189,7 +1039,6 @@ def get_insights(
         cols_sql = "*"
     elif "resp_bytes" not in actual_cols:
         cols_sql += ', 0::BIGINT AS "resp_bytes"'
-
     extra_filter_sql = ""
     if filters:
         from backend.repositories.utils.filters import build_where_clause
@@ -1205,9 +1054,7 @@ def get_insights(
     temp_created = runner.create_temp_table(create_q, [])
     if not temp_created:
         temp_table = table_name  # Fallback to the iceberg view directly
-
     try:
-        # Available history + window total in a single scan over the scratch table
         w_total = 0
         try:
             row_stats = runner.execute(
@@ -1236,7 +1083,6 @@ def get_insights(
                 ).fetchone()[0]
             except Exception:
                 w_total = 0
-
         try:
             from backend.core.field_registry import INSIGHT_DEFINITIONS as _defs
 
@@ -1290,7 +1136,6 @@ def get_insights(
 
         tasks: list[Callable[[], dict | None]] = []
         _debug_lock = threading.Lock()
-
         from backend.repositories.utils.filters import build_geo_select_clause
 
         loc_cols, label_expr, country_sel, region_sel = build_geo_select_clause(actual_cols)
@@ -1303,8 +1148,6 @@ def get_insights(
         q_col = '"url"' if "url" in actual_cols else ('"digest"' if "digest" in actual_cols else "'(unknown)'")
         ua_col = '"ua"' if "ua" in actual_cols else "NULL"
         bot_ua_regex = REPEATED_BOT_UA_REGEX
-
-        # Parallel coalesced aggregate dispatch via thread-safe DuckDB shadow cursors.
         _coalesced_specs: list[tuple[str, bool, str, tuple, dict[str, Any]]] = [
             (
                 "city",
@@ -1370,9 +1213,7 @@ def get_insights(
                 for spec in _coalesced_specs
             ]:
                 precomputed.update(fut.result())
-
         for definition in registry.get_all():
-            # Check if all required fields are present
             if not all(col in actual_cols for col in definition.required_fields):
                 continue
             if definition.id == "waf_signal_spikes" and not temp_created:
@@ -1380,10 +1221,7 @@ def get_insights(
 
             def _make_task(d=definition):
                 def compute_insight() -> dict | None:
-                    # Hydrate template
                     fp_col = "ja4" if "ja4" in actual_cols else "ja3"
-
-                    # Special hydration for specific insights
                     extra_args = {}
                     if d.id == "impossible_distance":
                         from backend.utils.pop_utils import get_pop_lat_lon_map
@@ -1401,7 +1239,6 @@ def get_insights(
                         r = check_baseline(d.id)
                         if r:
                             return r
-
                     default_sql = getattr(_insights_sql, d.id.upper(), None)
                     is_default_template = default_sql is None or d.sql_template == default_sql
                     if is_default_template and d.id in precomputed:
@@ -1427,7 +1264,6 @@ def get_insights(
                             )
                         except KeyError:
                             return None
-
                         params = [window_start_s] * sql.count("?")
                         rows = _execute_on_cursor(runner, _debug_lock, runner.con.cursor(), sql, params).fetchall()
                     items = []
@@ -1445,7 +1281,6 @@ def get_insights(
                             context["asn_names"] = _db_core.get_asn_names(src["name"], [r[0] for r in rows if r])
                             if "metro" in actual_cols:
                                 context["dma_map"] = _db_core._get_dma_map()
-
                         for row in rows:
                             try:
                                 item = d.row_processor(row, d, context)
@@ -1456,7 +1291,6 @@ def get_insights(
                                 items.append(item)
                             except Exception:
                                 continue
-
                     severity = "clean"
                     if items:
                         severity = (
@@ -1464,7 +1298,6 @@ def get_insights(
                             if d.severity_logic
                             else ("critical" if any(i.get("severity") == "critical" for i in items) else "warning")
                         )
-
                     if items:
                         if d.id == "error_spikes":
                             summary = f"{len(items)} URLs with elevated server error rates"
@@ -1474,7 +1307,6 @@ def get_insights(
                             summary = f"{len(items)} anomalies detected"
                     else:
                         summary = f"No {d.title.lower()} detected"
-
                     return _build_insight_card(
                         insight_id=d.id,
                         title=d.title,
@@ -1491,11 +1323,9 @@ def get_insights(
                 return compute_insight
 
             tasks.append(_make_task())
-
         insights_list: list[dict] = []
 
         def _safe_run(fn: Callable[[], dict | None]) -> dict | None:
-            """Run one insight task and surface its failure as an error card."""
             try:
                 return fn()
             except Exception as e:
@@ -1516,7 +1346,6 @@ def get_insights(
                 for res in pool.map(lambda pair: pair[0].run(_safe_run, pair[1]), ctx_tasks):
                     if res:
                         insights_list.append(res)
-
         payload = _insights_envelope(insights_list, w_total)
         if INSIGHTS_CACHE_TTL > 0:
             with _insights_cache_lock:
@@ -1550,7 +1379,6 @@ def get_cache_collapse_detail(
     clamp_end: str | None = None,
     mask_ips: bool = False,
 ) -> dict:
-    """Compute detailed timeline and eviction points for a specific URL."""
     from backend.core.share_db.validation import mask_ip
 
     source_name = src["name"]
@@ -1559,11 +1387,6 @@ def get_cache_collapse_detail(
         window_hours, baseline_hours, clamp_start, clamp_end
     )
     runner = QueryRunner(con, src)
-
-    # 1. Fetch window/baseline cache dispositions for this URL.
-    #    Hit ratio = HIT/(HIT+MISS) (cacheable only, PASS excluded — the
-    #    conventional Fastly definition). Pass rate = PASS/total (uncacheable
-    #    share). Counts double as the window breakdown shown in the modal.
     rates_sql = f"""
         WITH base AS (
             SELECT cache,
@@ -1586,7 +1409,6 @@ def get_cache_collapse_detail(
     params = [window_start_s, window_start_s, url, baseline_start_s, now_s]
     rates_res = runner.execute(rates_sql, params).fetchone() or (0, 0, 0, 0, 0, 0, 0, 0)
     w_hits, w_miss, w_pass, w_total, b_hits, b_miss, b_pass, b_total = (int(v or 0) for v in rates_res)
-
     w_cacheable, b_cacheable = w_hits + w_miss, b_hits + b_miss
     w_rate, b_rate = (w_hits / w_cacheable) if w_cacheable else 0.0, (b_hits / b_cacheable) if b_cacheable else 0.0
     w_pass_rate, b_pass_rate = (w_pass / w_total) if w_total else 0.0, (b_pass / b_total) if b_total else 0.0
@@ -1596,15 +1418,8 @@ def get_cache_collapse_detail(
         "passes": w_pass,
         "other": max(0, w_total - w_hits - w_miss - w_pass),
     }
-
-    # 2. Determine time-bucket interval based on total lookback duration
     total_hours = window_hours + baseline_hours
     bucket_interval = next((iv for max_h, iv in _BUCKET_INTERVALS if total_hours <= max_h), "1 day")
-
-    # 3. Query timeline of requests, hits and misses. expected_hits and hit_rate
-    #    are computed against the cacheable count (HIT+MISS) so the chart matches
-    #    the cacheable hit ratio shown in the stats — PASS traffic doesn't drag
-    #    the line down.
     timeline_sql = f"""
         SELECT
             time_bucket(INTERVAL '{bucket_interval}', timestamp) AS bucket,
@@ -1617,7 +1432,6 @@ def get_cache_collapse_detail(
         ORDER BY bucket ASC
     """
     timeline_rows = runner.execute(timeline_sql, [url, baseline_start_s, now_s]).fetchall()
-
     timeline = []
     for r in timeline_rows:
         bucket_ts, total_requests, real_hits, misses = r[0], int(r[1] or 0), int(r[2] or 0), int(r[3] or 0)
@@ -1632,11 +1446,6 @@ def get_cache_collapse_detail(
                 "hit_rate": float(real_hits / cacheable) if cacheable > 0 else 0.0,
             }
         )
-
-    # 4. Fetch the most recent 50 actual cache MISSes (cacheable requests that
-    #    weren't in cache) — the events relevant to a hit-ratio collapse. PASS
-    #    is uncacheable, so it's deliberately excluded here; the PASS share is
-    #    summarised in `breakdown`/`window_pass_rate` instead.
     misses_sql = f"""
         SELECT timestamp, cache, pop, ip, status
         FROM {table_name}
@@ -1645,7 +1454,6 @@ def get_cache_collapse_detail(
         LIMIT 50
     """
     miss_rows = runner.execute(misses_sql, [url, baseline_start_s, now_s]).fetchall()
-
     recent_misses = [
         {
             "timestamp": _iso_or_str(mr[0]),
@@ -1656,7 +1464,6 @@ def get_cache_collapse_detail(
         }
         for mr in miss_rows
     ]
-
     return {
         "url": url,
         "timeline": timeline,
@@ -1670,8 +1477,6 @@ def get_cache_collapse_detail(
     }
 
 
-# R-1: register the insights TTL cache so the autouse fixture in
-# tests/conftest.py drains it via CacheRegistry.clear_all().
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("insights._insights_cache", _insights_cache)

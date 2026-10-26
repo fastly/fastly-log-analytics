@@ -8,14 +8,16 @@ import io
 import json
 import os
 import time as _time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from backend.core.clickhouse_publication import PAYLOAD_COLUMNS, FosArtifacts
 from backend.core.query_attribution import Attribution, current_attribution
+from backend.deps import get_source, require_admin
 from backend.routers.admin_queries import _admin_id_from_request
 from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware
 from fastapi import FastAPI, HTTPException
@@ -24,9 +26,7 @@ from fastapi.testclient import TestClient
 from backend import config as _svc_config
 from backend.core import metadata as _meta
 from backend.core import metric_snapshots
-from backend.core.clickhouse_publication import PAYLOAD_COLUMNS, FosArtifacts
 from backend.core.query_registry import query_registry
-from backend.deps import get_source, require_admin
 from backend.main import app
 from backend.routers import admin_queries as mod
 from backend.routers.admin import clickhouse as api
@@ -36,6 +36,19 @@ from tests._helpers.config_fakes import fake_mutate_config as _fake_mutate
 from tests._helpers.sources import TinyFos
 from tests.conftest import MOCK_SERVICE_ID
 from tests.core.test_clickhouse import fixture_manifest
+
+_PATCH_KEYS = {"side_effect", "return_value", "new", "autospec", "create"}
+
+
+@contextmanager
+def _patches(*specs):
+    with ExitStack() as stack:
+        yield [
+            stack.enter_context(
+                patch(t, **kw) if isinstance(kw, dict) and kw and set(kw) <= _PATCH_KEYS else patch(t, return_value=kw)
+            )
+            for t, kw in specs
+        ]
 
 
 def _mock_redis(queues: dict[str, int]):
@@ -51,10 +64,9 @@ def _mock_redis(queues: dict[str, int]):
 def _assert_analyst_rbac_403(client, method: str, path: str, *, skip_http_for: tuple[str, ...] = ()) -> None:
     raw_path = path.split("?", 1)[0]
     assert _is_blocked_path(raw_path) is True, f"Expected {raw_path} to be blocked for Analyst Path B"
+    sess = SimpleNamespace(session_id="sess_analyst")
     fake_req = SimpleNamespace(
-        state=SimpleNamespace(analyst_session=SimpleNamespace(session_id="sess_analyst")),
-        headers={},
-        client=SimpleNamespace(host="203.0.113.55"),
+        state=SimpleNamespace(analyst_session=sess), headers={}, client=SimpleNamespace(host="203.0.113.55")
     )
     with pytest.raises(HTTPException) as exc:
         require_admin(fake_req)  # type: ignore[arg-type]
@@ -86,29 +98,21 @@ def test_high_scale_celery_status_full_payload(client):
         con.cursor.return_value = cur
         return con
 
-    with (
-        patch("backend.celery_app.app.control.inspect") as mock_inspect,
-        patch("backend.celery_queue._get_redis", return_value=_mock_redis(queues)),
-        patch("backend.config.list_configs", return_value=[{"service_id": "svc-a"}, {"service_id": "svc-b"}]),
-        patch("backend.core.metadata.base.get_con", side_effect=_fake_get_con),
+    mock_i = MagicMock()
+    t_name = "backend.tasks.ingest.ingest_batch"
+    task = {"id": "task-uuid-1", "name": t_name, "args": ["svc-a", 12], "time_start": 1700000000.5}
+    workers = ("celery@worker-1", "celery@worker-2")
+    mock_i.active.return_value = {"celery@worker-1": [task], "celery@worker-2": []}
+    mock_i.stats.return_value = {w: {"pool": {"max-concurrency": 8}} for w in workers}
+    mock_i.registered.return_value = {w: [t_name] for w in workers}
+    mock_i.scheduled.return_value = {w: [] for w in workers}
+    svcs = [{"service_id": "svc-a"}, {"service_id": "svc-b"}]
+    with _patches(
+        ("backend.celery_app.app.control.inspect", mock_i),
+        ("backend.celery_queue._get_redis", _mock_redis(queues)),
+        ("backend.config.list_configs", svcs),
+        ("backend.core.metadata.base.get_con", {"side_effect": _fake_get_con}),
     ):
-        mock_i = MagicMock()
-        task = {
-            "id": "task-uuid-1",
-            "name": "backend.tasks.ingest.ingest_batch",
-            "args": ["svc-a", 12],
-            "time_start": 1700000000.5,
-        }
-        mock_i.active.return_value = {"celery@worker-1": [task], "celery@worker-2": []}
-        mock_i.stats.return_value = {
-            w: {"pool": {"max-concurrency": 8}} for w in ("celery@worker-1", "celery@worker-2")
-        }
-        mock_i.registered.return_value = {
-            w: ["backend.tasks.ingest.ingest_batch"] for w in ("celery@worker-1", "celery@worker-2")
-        }
-        mock_i.scheduled.return_value = {"celery@worker-1": [], "celery@worker-2": []}
-        mock_inspect.return_value = mock_i
-
         resp = client.get("/api/admin/celery/status", headers={"X-Service-Id": "svc-a"})
         assert resp.status_code == 200
         data = resp.json()
@@ -120,16 +124,14 @@ def test_high_scale_celery_status_full_payload(client):
 
 
 def test_standard_mode_idle_and_unreachable_broker_fallbacks(client):
-    with (
-        patch("backend.celery_app.app.control.inspect") as mock_inspect,
-        patch("backend.celery_queue._get_redis", return_value=_mock_redis({})),
-        patch("backend.config.list_configs", return_value=[]),
+    mock_i = MagicMock()
+    mock_i.active.return_value = mock_i.stats.return_value = {}
+    mock_i.registered.return_value = mock_i.scheduled.return_value = {}
+    with _patches(
+        ("backend.celery_app.app.control.inspect", mock_i),
+        ("backend.celery_queue._get_redis", _mock_redis({})),
+        ("backend.config.list_configs", []),
     ):
-        mock_i = MagicMock()
-        mock_i.active.return_value = mock_i.stats.return_value = mock_i.registered.return_value = (
-            mock_i.scheduled.return_value
-        ) = {}
-        mock_inspect.return_value = mock_i
         resp = client.get("/api/admin/celery/status")
         assert resp.status_code == 200
         data = resp.json()
@@ -138,82 +140,66 @@ def test_standard_mode_idle_and_unreachable_broker_fallbacks(client):
 
     broken_redis = MagicMock()
     broken_redis.scan_iter.side_effect = ConnectionError("Valkey connection refused")
-    with (
-        patch("backend.celery_app.app.control.inspect", side_effect=RuntimeError("Broker connection timeout")),
-        patch("backend.celery_queue._get_redis", return_value=broken_redis),
-        patch("backend.config.list_configs", return_value=[]),
+    with _patches(
+        ("backend.celery_app.app.control.inspect", {"side_effect": RuntimeError("Broker connection timeout")}),
+        ("backend.celery_queue._get_redis", broken_redis),
+        ("backend.config.list_configs", []),
     ):
         resp2 = client.get("/api/admin/celery/status")
         assert resp2.status_code == 200
-        data2 = resp2.json()
-        assert data2["broker_reachable"] is False and data2["workers"]["count"] == 0
-        assert (
-            "Broker connection timeout" in data2["workers"]["error"] and data2["queues"] == {} and data2["ledger"] == {}
-        )
+        d2 = resp2.json()
+        assert d2["broker_reachable"] is False and d2["workers"]["count"] == 0
+        assert "Broker connection timeout" in d2["workers"]["error"] and d2["queues"] == {} and d2["ledger"] == {}
 
 
 def test_standard_mode_inprocess_scheduler_and_metric_history(client):
+    nxt = SimpleNamespace(timestamp=lambda: 1700000010.0)
     fake_job = SimpleNamespace(
-        id="log_discovery_svc-a",
-        name="log_discovery_svc-a",
-        trigger="interval[0:00:10]",
-        next_run_time=SimpleNamespace(timestamp=lambda: 1700000010.0),
+        id="log_discovery_svc-a", name="log_discovery_svc-a", trigger="interval[0:00:10]", next_run_time=nxt
     )
     fake_scheduler = SimpleNamespace(scheduler=SimpleNamespace(get_jobs=lambda: [fake_job]))
     active_entry = [{"run_id": 101, "service_id": "svc-a", "task": "sync", "started_at": 1700000000.0}]
-    with (
-        patch(
-            "backend.celery_queue._get_redis",
-            side_effect=ConnectionError("Celery broker not configured in standard mode"),
-        ),
-        patch("backend.config.is_high_scale_mode", return_value=False),
-        patch("backend.config.list_configs", return_value=[{"service_id": "svc-a"}]),
-        patch("backend.cron.scheduler.get_scheduler", return_value=fake_scheduler),
-        patch("backend.celery_status.inprocess_active_runs_entries", return_value=active_entry),
-        patch(
-            "backend.celery_status.standard_ingest_summary",
-            return_value={"ingested_files": 420, "quarantined_items": 1},
-        ),
-        patch("backend.celery_status.ingest_ledger_summary", return_value={"committed": 420, "quarantined": 1}),
+    err = ConnectionError("Celery broker not configured in standard mode")
+    std_summary = {"ingested_files": 420, "quarantined_items": 1}
+    with _patches(
+        ("backend.celery_queue._get_redis", {"side_effect": err}),
+        ("backend.config.is_high_scale_mode", False),
+        ("backend.config.list_configs", [{"service_id": "svc-a"}]),
+        ("backend.cron.scheduler.get_scheduler", fake_scheduler),
+        ("backend.celery_status.inprocess_active_runs_entries", active_entry),
+        ("backend.celery_status.standard_ingest_summary", std_summary),
+        ("backend.celery_status.ingest_ledger_summary", {"committed": 420, "quarantined": 1}),
     ):
         resp = client.get("/api/admin/celery/status")
         assert resp.status_code == 200
         data = resp.json()
         assert data["broker_reachable"] is False and data["deployment_mode"] == "standard"
-        assert data["inprocess_schedules"] == [
-            {"name": "log_discovery_svc-a", "trigger": "interval[0:00:10]", "next_run_at": 1700000010.0}
-        ]
-        assert data["inprocess_active_runs"] == active_entry
-        assert data["standard_ingest"] == {"ingested_files": 420, "quarantined_items": 1}
+        sched_exp = [{"name": "log_discovery_svc-a", "trigger": "interval[0:00:10]", "next_run_at": 1700000010.0}]
+        assert data["inprocess_schedules"] == sched_exp
+        assert data["inprocess_active_runs"] == active_entry and data["standard_ingest"] == std_summary
         assert data["ledger"] == {"committed": 420, "quarantined": 1}
 
     metric_snapshots.record_snapshot("celery_queue_depth", 7.0)
     metric_snapshots.record_snapshot("celery_active_tasks", 2.0)
     resp_hist = client.get("/api/admin/metric-history/batch?since=1h")
     assert resp_hist.status_code == 200
-    body = resp_hist.json()
-    assert (
-        body["series"]["celery_queue_depth"][-1]["value"] == 7.0
-        and body["series"]["celery_active_tasks"][-1]["value"] == 2.0
-    )
+    series = resp_hist.json()["series"]
+    assert series["celery_queue_depth"][-1]["value"] == 7.0 and series["celery_active_tasks"][-1]["value"] == 2.0
 
 
-@pytest.mark.parametrize(
-    "method,path",
-    [
-        ("GET", "/api/admin/celery/status"),
-        ("GET", "/api/admin/metric-history/batch?since=1h"),
-        ("GET", "/api/admin/events/stream?channels=celery-status"),
-        ("GET", "/api/admin/queries"),
-        ("GET", "/api/admin/queries/summary"),
-        ("GET", "/api/admin/queries/1"),
-        ("POST", "/api/admin/queries/1/cancel"),
-        ("GET", "/api/admin/slow-queries?service_id=svc1"),
-        ("GET", "/api/admin/slow-queries/count?service_id=svc1"),
-        ("DELETE", "/api/admin/slow-queries?service_id=svc1"),
-        ("GET", "/api/admin/app-config/query-monitor"),
-    ],
-)
+_ADMIN_403_ROUTES = [
+    tuple(x.split(":"))
+    for x in (
+        "GET:/api/admin/celery/status GET:/api/admin/metric-history/batch?since=1h "
+        "GET:/api/admin/events/stream?channels=celery-status GET:/api/admin/queries "
+        "GET:/api/admin/queries/summary GET:/api/admin/queries/1 POST:/api/admin/queries/1/cancel "
+        "GET:/api/admin/slow-queries?service_id=svc1 GET:/api/admin/slow-queries/count?service_id=svc1 "
+        "DELETE:/api/admin/slow-queries?service_id=svc1 GET:/api/admin/app-config/query-monitor"
+    ).split()
+]
+
+
+@pytest.mark.parametrize("method,path", _ADMIN_403_ROUTES)
 def test_analyst_session_receives_403_on_admin_routes(client, method, path):
     _assert_analyst_rbac_403(client, method, path, skip_http_for=("/api/admin/events/stream",))
 
@@ -226,65 +212,35 @@ def test_list_retry_and_purge_ingest_ledger_entries(client):
     rum_key = "raw/rum/year=2026/month=10/day=20/hour=04/minute=28/dead-rum.log.gz"
     req_key = "raw/request/year=2026/month=10/day=20/hour=04/minute=29/bad-req.log.gz"
     good_key = "raw/request/year=2026/month=10/day=20/hour=04/minute=30/good-req.log.gz"
-    for key, sz, st, att, err, ekind, clm, disc, task, rid in (
-        (
-            rum_key,
-            1024,
-            "dead_letter",
-            1,
-            "object missing from FOS (already ingested+deleted, or expired)",
-            "object_missing",
-            1729400010.0,
-            1729400000.0,
-            "rum_discovery",
-            99,
-        ),
-        (
-            req_key,
-            2048,
-            "quarantined",
-            3,
-            "Not a gzipped file",
-            "corrupt_gzip",
-            1729400020.0,
-            1729400005.0,
-            "log_discovery",
-            100,
-        ),
-    ):
-        cur.execute(
-            "INSERT INTO ingest_ledger (service_id, object_key, size_bytes, status, attempts, last_error, error_kind, claimed_at, discovered_at, originating_task, originating_run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (sid, key, sz, st, att, err, ekind, clm, disc, task, rid),
-        )
+    e_miss = "object missing from FOS (already ingested+deleted, or expired)"
+    e_gzip = "Not a gzipped file"
+    r1 = (rum_key, 1024, "dead_letter", 1, e_miss, "object_missing", 1729400010.0, 1729400000.0, "rum_discovery", 99)
+    r2 = (req_key, 2048, "quarantined", 3, e_gzip, "corrupt_gzip", 1729400020.0, 1729400005.0, "log_discovery", 100)
+    ins_sql = (
+        "INSERT INTO ingest_ledger (service_id, object_key, size_bytes, status, attempts, last_error, "
+        "error_kind, claimed_at, discovered_at, originating_task, originating_run_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    for row in (r1, r2):
+        cur.execute(ins_sql, (sid, *row))
     cur.execute(
-        "INSERT INTO ingest_ledger (service_id, object_key, size_bytes, status, attempts, committed_at, discovered_at) VALUES (?, ?, ?, 'committed', 1, 1729400030.0, 1729400000.0)",
+        "INSERT INTO ingest_ledger (service_id, object_key, size_bytes, status, attempts, committed_at, discovered_at) "
+        "VALUES (?, ?, ?, 'committed', 1, 1729400030.0, 1729400000.0)",
         (sid, good_key, 4096),
     )
     con.commit()
 
     try:
         with patch("backend.config.list_configs", return_value=[{"service_id": sid}]):
-            resp = client.get("/api/admin/celery/ledger")
-            assert resp.status_code == 200
-            body = resp.json()
+            body = client.get("/api/admin/celery/ledger").json()
             assert body["total"] == 2 and len(body["items"]) == 2
             by_key = {item["object_key"]: item for item in body["items"]}
             rum_item, req_item = by_key[rum_key], by_key[req_key]
-            assert (
-                rum_item["source_type"] == "rum"
-                and rum_item["status"] == "dead_letter"
-                and rum_item["error_kind"] == "object_missing"
-            )
-            assert (
-                "object missing from FOS" in rum_item["last_error"]
-                and rum_item["originating_task"] == "rum_discovery"
-                and rum_item["originating_run_id"] == 99
-            )
-            assert (
-                req_item["source_type"] == "request"
-                and req_item["status"] == "quarantined"
-                and req_item["error_kind"] == "corrupt_gzip"
-            )
+            assert rum_item["source_type"] == "rum" and rum_item["status"] == "dead_letter"
+            assert rum_item["error_kind"] == "object_missing" and "object missing from FOS" in rum_item["last_error"]
+            assert rum_item["originating_task"] == "rum_discovery" and rum_item["originating_run_id"] == 99
+            assert req_item["source_type"] == "request" and req_item["status"] == "quarantined"
+            assert req_item["error_kind"] == "corrupt_gzip"
 
             with (
                 patch("backend.core.ingest.convert_batch_files.delay") as mock_req_delay,
@@ -294,8 +250,8 @@ def test_list_retry_and_purge_ingest_ledger_entries(client):
                     "/api/admin/celery/ledger/retry", json={"items": [{"service_id": sid, "object_key": rum_key}]}
                 )
                 assert retry_resp.status_code == 200
-                retry_data = retry_resp.json()
-                assert retry_data["ok"] is True and retry_data["affected"] == 1 and retry_data["dispatched"] == 1
+                rd = retry_resp.json()
+                assert rd["ok"] is True and rd["affected"] == 1 and rd["dispatched"] == 1
                 mock_rum_delay.assert_called_once_with(sid, [rum_key])
                 mock_req_delay.assert_not_called()
 
@@ -303,9 +259,8 @@ def test_list_retry_and_purge_ingest_ledger_entries(client):
             assert after_retry["total"] == 1 and after_retry["items"][0]["status"] == "quarantined"
 
             purge_resp = client.post("/api/admin/celery/ledger/purge", json={"status": "problem"})
-            assert (
-                purge_resp.status_code == 200 and purge_resp.json()["ok"] is True and purge_resp.json()["affected"] == 1
-            )
+            pd = purge_resp.json()
+            assert purge_resp.status_code == 200 and pd["ok"] is True and pd["affected"] == 1
 
             after_purge = client.get("/api/admin/celery/ledger").json()
             assert after_purge["total"] == 0 and after_purge["items"] == []
@@ -327,15 +282,12 @@ def test_task_routes_and_worker_queues_coverage():
     registered = set(celery_app.tasks.keys())
     for pattern in celery_app.conf.task_routes:
         if pattern.endswith("*"):
-            assert any(t.startswith(pattern[:-1]) for t in registered), (
-                f"task_routes pattern {pattern!r} matches no registered task"
-            )
+            assert any(t.startswith(pattern[:-1]) for t in registered), f"Unmatched pattern {pattern!r}"
         else:
-            assert pattern in registered, f"task_routes key {pattern!r} is not a registered task"
+            assert pattern in registered, f"task_routes key {pattern!r} is not registered"
 
-    routed = {spec["queue"] for spec in celery_app.conf.task_routes.values()} | {
-        celery_app.conf.task_default_queue or "celery"
-    }
+    default_q = celery_app.conf.task_default_queue or "celery"
+    routed = {spec["queue"] for spec in celery_app.conf.task_routes.values()} | {default_q}
     assert routed <= set(KNOWN_QUEUES), f"queues {routed - set(KNOWN_QUEUES)} not covered by KNOWN_QUEUES"
 
 
@@ -352,14 +304,10 @@ def boundary(monkeypatch):
     monkeypatch.setattr(api.config, "load_config", lambda sid: cfg if sid == SERVICE else None)
     store, ch, objects, audit = MagicMock(), MagicMock(), MagicMock(), MagicMock()
     counts = {"pending": 1, "claimed": 0, "failed": 0, "published": 2}
-    store.admin_status.return_value = dict(
-        schema_version=api.CLICKHOUSE_SCHEMA_VERSION,
-        publication_counts=counts,
-        oldest_pending_age_seconds=12.5,
-        last_published_at="2026-09-07T00:00:00+00:00",
-        active_generation=None,
-        expired_dataset_count=1,
-    )
+    st = {"schema_version": api.CLICKHOUSE_SCHEMA_VERSION, "publication_counts": counts, "active_generation": None}
+    st |= {"oldest_pending_age_seconds": 12.5, "last_published_at": "2026-09-07T00:00:00+00:00"}
+    st["expired_dataset_count"] = 1
+    store.admin_status.return_value = st
     store.replay_preview.return_value = {"dataset_id": "dataset", "artifact_count": 1, "planned_artifacts": 1}
     monkeypatch.setattr(api, "PgManifest", MagicMock(return_value=store))
     monkeypatch.setattr(api, "get_clickhouse_client", lambda: ch)
@@ -379,29 +327,20 @@ def test_registered_on_real_app_openapi():
         (STATUS, "get", "ClickHouseStatusResponse"),
         (REPLAY, "post", "ClickHouseReplayResponse"),
     ):
-        assert paths[path][verb]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
-            "/" + model
-        )
+        ref = paths[path][verb]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+        assert ref.endswith("/" + model)
 
 
 def test_status_disabled_and_active_generation_scoping(boundary, monkeypatch):
     client, store, *_ = boundary
-    store.admin_status.return_value["active_generation"] = dict(
-        generation="g",
-        dataset_id="d",
-        coverage_start="2026-09-01T00:00:00+00:00",
-        coverage_end="2026-09-02T00:00:00+00:00",
-        expires_at="2026-09-03T00:00:00+00:00",
-        expired=True,
-        target_matches=False,
-        coverage_age_seconds=500000,
-    )
+    ag = {"generation": "g", "dataset_id": "d", "coverage_start": "2026-09-01T00:00:00+00:00", "expired": True}
+    ag |= {"coverage_end": "2026-09-02T00:00:00+00:00", "expires_at": "2026-09-03T00:00:00+00:00"}
+    ag |= {"target_matches": False, "coverage_age_seconds": 500000}
+    store.admin_status.return_value["active_generation"] = ag
     response = client.get(STATUS, params={"service_id": SERVICE})
     assert response.status_code == 200
-    assert (
-        response.json()["active_generation"]["expired"] is True
-        and response.json()["oldest_pending_age_seconds"] == 12.5
-    )
+    rj = response.json()
+    assert rj["active_generation"]["expired"] is True and rj["oldest_pending_age_seconds"] == 12.5
     store.admin_status.assert_called_once_with(SERVICE, "target")
 
     store.admin_status.reset_mock()
@@ -410,14 +349,7 @@ def test_status_disabled_and_active_generation_scoping(boundary, monkeypatch):
     assert resp_dis.status_code == 200
     data = resp_dis.json()
     assert data["enabled"] is False and data["health"] == "disabled"
-    for key in (
-        "schema_version",
-        "publication_counts",
-        "oldest_pending_age_seconds",
-        "last_published_at",
-        "active_generation",
-        "expired_dataset_count",
-    ):
+    for key in "schema_version publication_counts oldest_pending_age_seconds last_published_at active_generation expired_dataset_count".split():
         assert data[key] is None
     store.admin_status.assert_not_called()
 
@@ -433,13 +365,10 @@ def test_status_unavailable_is_sanitized_503(boundary, failure):
         store.admin_status.return_value["schema_version"] = 99
     response = client.get(STATUS, params={"service_id": SERVICE})
     assert response.status_code == 503
-    assert (
-        response.json()["health"] == "unavailable"
-        and response.json()["enabled"] is True
-        and "private" not in response.text
-    )
+    rj = response.json()
+    assert rj["health"] == "unavailable" and rj["enabled"] is True and "private" not in response.text
     if failure != "schema":
-        assert response.json()["publication_counts"] is None
+        assert rj["publication_counts"] is None
 
 
 @pytest.mark.parametrize("sid", ["missing", "../secrets"])
@@ -466,17 +395,14 @@ def test_replay_disabled_and_readonly_rejected(boundary, monkeypatch):
     assert not store.mock_calls and not objects.called and not audit.called
 
 
-@pytest.mark.parametrize(
-    "extra",
-    [
-        {},
-        {"dataset_id": None},
-        {"dataset_id": "../other"},
-        {"dataset_id": "d", "generation": "also"},
-        {"dataset_id": "d", "export": True},
-        *[{"dataset_id": "d", "limit": v} for v in (0, 101, 1001, True, 1.5)],
-    ],
-)
+_BAD_REPLAY_ARGS = [{}, {"dataset_id": None}, {"dataset_id": "../other"}, {"dataset_id": "d", "generation": "also"}]
+_BAD_REPLAY_ARGS += [
+    {"dataset_id": "d", "export": True},
+    *({"dataset_id": "d", "limit": v} for v in (0, 101, 1001, True, 1.5)),
+]
+
+
+@pytest.mark.parametrize("extra", _BAD_REPLAY_ARGS)
 def test_replay_invalid_arguments_never_reach_manifest(boundary, extra):
     client, store, _, objects, audit, _ = boundary
     response = client.post(REPLAY, json={"service_id": SERVICE, **extra})
@@ -491,19 +417,11 @@ def test_dry_run_validates_references_without_mutators_or_fos(boundary, monkeypa
     monkeypatch.setattr(api, "replay_unpublished", resume)
     response = client.post(REPLAY, json={"service_id": SERVICE, **reference})
     assert response.status_code == 200
-    assert (
-        response.json()["dry_run"] is True
-        and response.json()["attempted"] == 0
-        and response.json()["planned_artifacts"] == 1
-    )
+    rj = response.json()
+    assert rj["dry_run"] is True and rj["attempted"] == 0 and rj["planned_artifacts"] == 1
     assert [call[0] for call in store.mock_calls] == ["replay_preview"]
-    store.replay_preview.assert_called_once_with(
-        SERVICE,
-        dataset_id=reference.get("dataset_id"),
-        generation=reference.get("generation"),
-        target="target",
-        limit=100,
-    )
+    ds_id, gen = reference.get("dataset_id"), reference.get("generation")
+    store.replay_preview.assert_called_once_with(SERVICE, dataset_id=ds_id, generation=gen, target="target", limit=100)
     assert not objects.called and not audit.called and not rebuild.called and not resume.called
 
 
@@ -539,23 +457,21 @@ def test_apply_uses_real_loader_and_publication_without_fos_writes(boundary, mon
 
     def execute(sql, params):
         assert params["service"] == SERVICE and "log_facts FINAL" in sql
-        return (
-            [{"n": len(batch.rows)}]
-            if "SELECT count()" in sql
-            else [dict(zip(PAYLOAD_COLUMNS, row, strict=True)) for row in batch.rows]
-        )
+        if "SELECT count()" in sql:
+            return [{"n": len(batch.rows)}]
+        return [dict(zip(PAYLOAD_COLUMNS, row, strict=True)) for row in batch.rows]
 
     ch.execute.side_effect = execute
     reference = {"generation": "g"} if resume else {"dataset_id": "dataset"}
     response = client.post(REPLAY, json={"service_id": SERVICE, **reference, "dry_run": False, "limit": 1})
     assert response.status_code == 200, response.text
-    assert response.json()["published"] == 1 and response.json()["activated"] is True
-    assert response.json()["generation"] == ("g" if resume else "new-generation") and fos.puts == writes
+    rj = response.json()
+    assert rj["published"] == 1 and rj["activated"] is True
+    assert rj["generation"] == ("g" if resume else "new-generation") and fos.puts == writes
     ch.insert_rows.assert_called_once()
     assert "s3://" not in response.text and "test-bucket" not in response.text
-    assert audit.call_args.kwargs["details"]["published"] == 1 and audit.call_args.kwargs["details"]["action"] == (
-        "resume" if resume else "rebuild"
-    )
+    details = audit.call_args.kwargs["details"]
+    assert details["published"] == 1 and details["action"] == ("resume" if resume else "rebuild")
     if resume:
         store.begin_generation.assert_not_called()
     else:
@@ -569,10 +485,8 @@ def test_apply_failure_sanitized_and_analyst_path_b_rejected(boundary, monkeypat
 
     response = client.post(REPLAY, json={"service_id": SERVICE, "dataset_id": "d", "dry_run": False})
     assert response.status_code == 503 and "private" not in response.text
-    assert (
-        response.json()["detail"]["error"] == "replay_unavailable"
-        and audit.call_args.kwargs["details"]["phase"] == "failed"
-    )
+    assert response.json()["detail"]["error"] == "replay_unavailable"
+    assert audit.call_args.kwargs["details"]["phase"] == "failed"
 
     monkeypatch.setenv("DEBUG_RESPONSES", "true")
     debug_calls = MagicMock(return_value=[{"url": "s3://private-secret"}])
@@ -625,11 +539,8 @@ def test_optimize_now_local_compact_and_compaction_stats_endpoints(client):
 
     with patch("backend.core.local_compaction.compact_local_partitions", return_value={"rewritten": 0}) as m4:
         resp4 = client.post("/api/admin/local-compact-now?min_files=0&dry_run=true")
-    assert (
-        resp4.status_code == 200
-        and m4.call_args.kwargs["min_files_per_partition"] == 0
-        and m4.call_args.kwargs["dry_run"] is True
-    )
+    assert resp4.status_code == 200 and m4.call_args.kwargs["min_files_per_partition"] == 0
+    assert m4.call_args.kwargs["dry_run"] is True
     assert client.post("/api/admin/local-compact-now?min_files=-1").status_code == 422
 
     fake_stats = {"partitions": 100, "partitions_above_3": 5, "avg_files_per_partition": 1.8}
@@ -638,109 +549,78 @@ def test_optimize_now_local_compact_and_compaction_stats_endpoints(client):
     assert resp_s.status_code == 200 and resp_s.json()["partitions"] == 100 and resp_s.json()["partitions_above_3"] == 5
 
 
-def _patch_retention(
-    client,
-    payload: dict,
-    *,
-    base: dict | None = None,
-    load_ret: dict | None = None,
-    dedup: bool = True,
-    audit_side_effect=None,
-):
+def _patch_retention(client, payload: dict, **opts):
     saved: dict = {}
     audit_calls: list[dict] = []
-    base_cfg = base if base is not None else {"name": "svc", "service_id": "svc"}
-    load_val = base_cfg if load_ret is None else load_ret
-    audit_fn = audit_side_effect or (lambda **kw: audit_calls.append(kw))
-    with (
-        patch("backend.config.load_config", return_value=load_val),
-        patch("backend.config.mutate_config", side_effect=_fake_mutate(base_cfg, saved=saved)),
-        patch("backend.core.metadata.is_ingested_files_dedup_active", return_value=dedup),
-        patch("backend.core.metadata.record_audit", side_effect=audit_fn),
+    base_cfg = opts.get("base") or {"name": "svc", "service_id": "svc"}
+    load_val = opts["load_ret"] if "load_ret" in opts else base_cfg
+    audit_fn = opts.get("audit_side_effect") or (lambda **kw: audit_calls.append(kw))
+    with _patches(
+        ("backend.config.load_config", load_val),
+        ("backend.config.mutate_config", {"side_effect": _fake_mutate(base_cfg, saved=saved)}),
+        ("backend.core.metadata.is_ingested_files_dedup_active", opts.get("dedup", True)),
+        ("backend.core.metadata.record_audit", {"side_effect": audit_fn}),
     ):
         resp = client.patch("/api/admin/metadata-retention", json=payload)
     return resp, saved, audit_calls
 
 
 def test_metadata_retention_patch_and_storage_endpoints(client):
-    resp, saved, audit = _patch_retention(
-        client, {"usage_log_days": 14, "ingested_files_days": 30, "cron_runs_days": 7}
-    )
+    ret_in = {"usage_log_days": 14, "ingested_files_days": 30, "cron_runs_days": 7}
+    resp, saved, audit = _patch_retention(client, ret_in)
     assert resp.status_code == 200
     ret = resp.json()["retention"]
     assert ret["usage_log_days"] == 14 and ret["ingested_files_days"] == 30 and ret["cron_runs_days"] == 7
-    assert saved["metadata_retention"] == {"usage_log_days": 14, "ingested_files_days": 30, "cron_runs_days": 7}
+    assert saved["metadata_retention"] == ret_in
     assert len(audit) == 1 and audit[0]["event_type"] == "metadata_retention_update"
 
     base_merge = {"name": "svc", "service_id": "svc", "metadata_retention": {"usage_log_days": 21, "cron_runs_days": 9}}
     resp2, saved2, _ = _patch_retention(
         client, {"ingested_files_days": 30}, base=base_merge, load_ret={"name": "svc", "service_id": "svc"}
     )
-    assert resp2.status_code == 200 and saved2["metadata_retention"] == {
-        "usage_log_days": 21,
-        "cron_runs_days": 9,
-        "ingested_files_days": 30,
-    }
+    assert resp2.status_code == 200
+    assert saved2["metadata_retention"] == {"usage_log_days": 21, "cron_runs_days": 9, "ingested_files_days": 30}
 
     with patch("backend.config.load_config", return_value=None):
         resp_404 = client.patch("/api/admin/metadata-retention", json={"usage_log_days": 7})
     assert resp_404.status_code == 404 and resp_404.json()["detail"]["error"] == "Service not found"
 
     resp_clamp, saved_clamp, _ = _patch_retention(client, {"usage_log_days": -5, "cron_runs_days": "not-a-number"})
-    assert (
-        resp_clamp.status_code == 200
-        and saved_clamp["metadata_retention"]["usage_log_days"] == 0
-        and saved_clamp["metadata_retention"]["cron_runs_days"] == 0
-    )
+    mr_clamp = saved_clamp["metadata_retention"]
+    assert resp_clamp.status_code == 200 and mr_clamp["usage_log_days"] == 0 and mr_clamp["cron_runs_days"] == 0
 
     resp_dedup, saved_dedup, _ = _patch_retention(client, {"ingested_files_days": 30}, dedup=False)
     assert resp_dedup.status_code == 200 and saved_dedup["metadata_retention"]["ingested_files_days"] == 0
-    assert (
-        _patch_retention(client, {"usage_log_days": 7}, audit_side_effect=RuntimeError("audit-boom"))[0].status_code
-        == 200
-    )
+    r_boom, _, _ = _patch_retention(client, {"usage_log_days": 7}, audit_side_effect=RuntimeError("audit-boom"))
+    assert r_boom.status_code == 200
 
-    for stats, cfg, dedup, expected_lock in (
-        (
-            {"by_table": {"usage_log": {"rows": 1000, "bytes": 50000}}},
-            {"name": "svc", "service_id": "svc", "metadata_retention": {"usage_log_days": 14}},
-            True,
-            False,
-        ),
-        ({}, {"name": "svc"}, False, True),
-    ):
-        with (
-            patch("backend.core.metadata.get_metadata_storage_stats", return_value=stats),
-            patch("backend.config.load_config", return_value=cfg),
-            patch("backend.core.metadata.is_ingested_files_dedup_active", return_value=dedup),
+    st_full = {"by_table": {"usage_log": {"rows": 1000, "bytes": 50000}}}
+    cfg_full = {"name": "svc", "service_id": "svc", "metadata_retention": {"usage_log_days": 14}}
+    for stats, cfg, dedup, expected_lock in ((st_full, cfg_full, True, False), ({}, {"name": "svc"}, False, True)):
+        with _patches(
+            ("backend.core.metadata.get_metadata_storage_stats", stats),
+            ("backend.config.load_config", cfg),
+            ("backend.core.metadata.is_ingested_files_dedup_active", dedup),
         ):
             r_st = client.get("/api/admin/metadata-storage")
         assert r_st.status_code == 200 and r_st.json()["ingested_files_locked"] is expected_lock
         if stats:
-            assert (
-                r_st.json()["by_table"]["usage_log"]["rows"] == 1000
-                and r_st.json()["retention"]["usage_log_days"] == 14
-            )
+            assert r_st.json()["by_table"]["usage_log"]["rows"] == 1000
+            assert r_st.json()["retention"]["usage_log_days"] == 14
 
 
 def _post_metadata_cleanup(client, *, cfg=None, start_ret=1, start_err=None, cleanup_ret=None, cleanup_err=None):
     log_calls: list = []
-    with (
-        patch("backend.config.load_config", return_value=cfg if cfg is not None else {"metadata_retention": {}}),
-        patch("backend.core.duckdb.start_cron_run", side_effect=start_err, return_value=start_ret),
-        patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))) as mock_log,
-        patch(
-            "backend.core.metadata.cleanup_metadata",
-            side_effect=cleanup_err,
-            return_value=cleanup_ret if cleanup_ret is not None else {"deleted": {}, "vacuumed": False},
-        ) as mock_cleanup,
-    ):
+    c_ret = cleanup_ret if cleanup_ret is not None else {"deleted": {}, "vacuumed": False}
+    with _patches(
+        ("backend.config.load_config", cfg if cfg is not None else {"metadata_retention": {}}),
+        ("backend.core.duckdb.start_cron_run", {"side_effect": start_err, "return_value": start_ret}),
+        ("backend.core.duckdb.log_cron_run", {"side_effect": lambda *a, **kw: log_calls.append((a, kw))}),
+        ("backend.core.metadata.cleanup_metadata", {"side_effect": cleanup_err, "return_value": c_ret}),
+    ) as (_, _, mock_log, mock_cleanup):
         resp = client.post("/api/admin/metadata-cleanup")
-    events = [
-        json.loads(ln[6:])
-        for ln in resp.content.decode("utf-8", errors="replace").splitlines()
-        if ln.startswith("data: ")
-    ]
+    lines = resp.content.decode("utf-8", errors="replace").splitlines()
+    events = [json.loads(ln[6:]) for ln in lines if ln.startswith("data: ")]
     return resp, events, log_calls, mock_log, mock_cleanup
 
 
@@ -753,19 +633,13 @@ def test_metadata_cleanup_streams_success_zero_rows_errors_and_headers(client):
     )
     assert resp.status_code == 200 and resp.headers["content-type"].startswith("text/event-stream")
     done = events[-1]
-    assert (
-        done["type"] == "done"
-        and done["result"]["vacuumed"] is True
-        and done["result"]["deleted"]["usage_log"] == 100
-        and "Trimmed 110 rows" in done["message"]
-    )
+    assert done["type"] == "done" and done["result"]["vacuumed"] is True
+    assert done["result"]["deleted"]["usage_log"] == 100 and "Trimmed 110 rows" in done["message"]
 
     resp_zero, events_zero, *_ = _post_metadata_cleanup(client, cfg={})
     assert events_zero[-1]["type"] == "done" and events_zero[-1]["message"] == "No rows older than retention windows."
-    cache_control = resp_zero.headers.get("cache-control", "")
-    assert ("no-store" in cache_control or "no-cache" in cache_control) and resp_zero.headers.get(
-        "x-accel-buffering"
-    ) == "no"
+    cc = resp_zero.headers.get("cache-control", "")
+    assert ("no-store" in cc or "no-cache" in cc) and resp_zero.headers.get("x-accel-buffering") == "no"
     assert resp_zero.headers.get("connection") == "keep-alive"
 
     _, events_start_err, _, mock_log, mock_cleanup = _post_metadata_cleanup(
@@ -784,23 +658,10 @@ def test_metadata_cleanup_streams_success_zero_rows_errors_and_headers(client):
 
 
 _BUNDLE_KEYS = (
-    "slow_urls",
-    "origin_summary",
-    "origin_dims",
-    "origin_latency_ts",
-    "network_rtt",
-    "network_speed",
-    "network_quality",
-    "verified_bots_ts",
-    "perf_latency",
-    "pop_health",
-    "security_dims",
-    "security_proxies",
-    "ngwaf_bots",
-    "ngwaf_bots_ts",
-    "overview",
-    "network_summary",
-)
+    "slow_urls origin_summary origin_dims origin_latency_ts network_rtt network_speed network_quality "
+    "verified_bots_ts perf_latency pop_health security_dims security_proxies ngwaf_bots ngwaf_bots_ts "
+    "overview network_summary"
+).split()
 _ROLLUP_BACKFILL_MAP = {
     **{f"backfill_{k}_bundles": k for k in _BUNDLE_KEYS},
     "backfill_perf_dims_bundles": "perf_ttl_dist",
@@ -845,11 +706,8 @@ def test_backfill_bundle_rollups_and_rebuild_time_series_rollups(client):
         patch("backend.core.rollups.recompute.recompute_touched_hours") as recompute,
     ):
         response = client.post("/api/admin/rebuild-time-series-rollups", json={"hours": hours})
-    assert (
-        response.status_code == 200
-        and response.json()["requested_hours"] == hours
-        and response.json()["rebuilt"] == len(hours)
-    )
+    assert response.status_code == 200 and response.json()["requested_hours"] == hours
+    assert response.json()["rebuilt"] == len(hours)
     assert rebuild.call_count == 1 and rebuild.call_args.args[2] == hours and not recompute.called
 
     for bad_hours in (["not-an-hour"], ["2099-01-01-00"], [hours[-1], hours[-1]]):
@@ -859,15 +717,14 @@ def test_backfill_bundle_rollups_and_rebuild_time_series_rollups(client):
 
 # --- Downloads Endpoints ---
 
+_DL_ERR_CASES = [
+    ("", "Missing key parameter"),
+    ("other_prefix/file.log", "invalid_key"),
+    ("raw_prefix/../../../etc/passwd", "invalid_key"),
+]
 
-@pytest.mark.parametrize(
-    ("key", "expected_err"),
-    [
-        ("", "Missing key parameter"),
-        ("other_prefix/file.log", "invalid_key"),
-        ("raw_prefix/../../../etc/passwd", "invalid_key"),
-    ],
-)
+
+@pytest.mark.parametrize(("key", "expected_err"), _DL_ERR_CASES)
 def test_download_file_validation_errors(client, override_source, key, expected_err):
     response = client.get(f"/api/download?key={key}")
     assert response.status_code == 400 and response.json()["detail"]["error"] == expected_err
@@ -914,26 +771,16 @@ def test_download_file_from_local_cache_fos_and_cdn(client, override_source, tmp
 
 def test_download_folder_and_download_all_local_and_cloud(client, override_source, tmp_path):
     fake_fos, fake_paginator = MagicMock(), MagicMock()
-    fake_paginator.paginate.return_value = [
-        {
-            "Contents": [
-                {"Key": "raw_prefix/raw/foo/file1.log"},
-                {"Key": "raw_prefix/raw/foo/sub/file2.log"},
-                {"Key": "raw_prefix/raw/foo/dir_marker/"},
-            ]
-        }
-    ]
+    keys = ("raw_prefix/raw/foo/file1.log", "raw_prefix/raw/foo/sub/file2.log", "raw_prefix/raw/foo/dir_marker/")
+    fake_paginator.paginate.return_value = [{"Contents": [{"Key": k} for k in keys]}]
     fake_fos.get_paginator.return_value = fake_paginator
     with (
         patch("backend.core.duckdb._get_fos_client", return_value=fake_fos),
         patch("backend.routers.admin.downloads._fetch_file_to_zip") as mock_fetch,
     ):
         response = client.get("/api/download-folder?prefix=foo&root=raw")
-        assert (
-            response.status_code == 200
-            and response.headers["content-type"] == "application/zip"
-            and len(b"".join(response.iter_bytes())) > 0
-        )
+        assert response.status_code == 200 and response.headers["content-type"] == "application/zip"
+        assert len(b"".join(response.iter_bytes())) > 0
         fake_fos.get_paginator.assert_called_with("list_objects_v2", caller_hint="download_zip")
         fake_paginator.paginate.assert_called_with(Bucket="test-bucket", Prefix="raw_prefix/raw/foo/")
         assert mock_fetch.call_count == 2
@@ -948,19 +795,16 @@ def test_download_folder_and_download_all_local_and_cloud(client, override_sourc
     fake_paginator.paginate.return_value = [
         {"Contents": [{"Key": "raw_prefix/raw/file1.log"}, {"Key": "raw_prefix/raw/file2.log"}]}
     ]
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_dir)),
-        patch("backend.core.duckdb._get_fos_client", return_value=fake_fos),
-        patch("backend.routers.admin.downloads._fetch_file_to_zip") as mock_fetch_cloud,
-        patch("backend.core.duckdb.get_source_for_service", return_value=override_source),
-        patch("backend.config.load_config", return_value={"name": "service123", "service_id": "service123"}),
-    ):
+    with _patches(
+        ("backend.core.duckdb._cache_dir", str(cache_dir)),
+        ("backend.core.duckdb._get_fos_client", fake_fos),
+        ("backend.routers.admin.downloads._fetch_file_to_zip", {}),
+        ("backend.core.duckdb.get_source_for_service", override_source),
+        ("backend.config.load_config", {"name": "service123", "service_id": "service123"}),
+    ) as (_, _, mock_fetch_cloud, _, _):
         resp_local = client.get("/api/download-all", params={"service_id": "service123", "include": "local"})
-        assert (
-            resp_local.status_code == 200
-            and resp_local.headers["content-type"] == "application/zip"
-            and len(b"".join(resp_local.iter_bytes())) > 0
-        )
+        assert resp_local.status_code == 200 and resp_local.headers["content-type"] == "application/zip"
+        assert len(b"".join(resp_local.iter_bytes())) > 0
 
         resp_cloud = client.get("/api/download-all", params={"service_id": "service123", "include": "cloud"})
         assert resp_cloud.status_code == 200 and resp_cloud.headers["content-type"] == "application/zip"
@@ -976,26 +820,12 @@ def clean_res(data: dict) -> dict:
 
 def test_quarantine_routes_list_summary_download_purge_and_rbac(client, override_source):
     paths = app.openapi()["paths"]
-    for p in (
-        "/api/admin/quarantine",
-        "/api/admin/quarantine/summary",
-        "/api/admin/quarantine/download/{item_id}",
-        "/api/admin/quarantine/purge",
-    ):
-        assert p in paths
+    for sfx in ("", "/summary", "/download/{item_id}", "/purge"):
+        assert f"/api/admin/quarantine{sfx}" in paths
 
-    item = dict(
-        id=7,
-        source_type="request",
-        original_key="raw/request/batch.log.gz",
-        line_ordinal=4,
-        byte_offset=92,
-        byte_length=11,
-        error_category="invalid_json",
-        error_text="malformed record",
-        sha256="a" * 64,
-        quarantined_at="2026-09-29T12:00:00Z",
-    )
+    item = {"id": 7, "source_type": "request", "original_key": "raw/request/batch.log.gz", "line_ordinal": 4}
+    item |= {"byte_offset": 92, "byte_length": 11, "error_category": "invalid_json", "error_text": "malformed record"}
+    item |= {"sha256": "a" * 64, "quarantined_at": "2026-09-29T12:00:00Z"}
     with (
         patch("backend.routers.admin.quarantine.list_quarantine_evidence", return_value=[item]) as list_items,
         patch("backend.routers.admin.quarantine.count_quarantine_evidence", return_value=1) as count_items,
@@ -1007,15 +837,9 @@ def test_quarantine_routes_list_summary_download_purge_and_rbac(client, override
     )
     count_items.assert_called_once_with("service123", error_category="invalid_json", source_type=None)
 
-    summary = dict(
-        total_items=3,
-        total_bytes=18,
-        request_items=2,
-        rum_items=1,
-        oldest_at="2026-09-29T11:00:00Z",
-        newest_at="2026-09-29T12:00:00Z",
-        category_counts={"invalid_json": 2, "corrupt_container": 1},
-    )
+    summary = {"total_items": 3, "total_bytes": 18, "request_items": 2, "rum_items": 1}
+    summary |= {"oldest_at": "2026-09-29T11:00:00Z", "newest_at": "2026-09-29T12:00:00Z"}
+    summary |= {"category_counts": {"invalid_json": 2, "corrupt_container": 1}}
     with patch("backend.routers.admin.quarantine.get_quarantine_evidence_summary", return_value=summary) as get_summary:
         resp_sum = client.get("/api/admin/quarantine/summary")
     assert resp_sum.status_code == 200 and clean_res(resp_sum.json()) == summary
@@ -1062,10 +886,8 @@ def test_quarantine_routes_list_summary_download_purge_and_rbac(client, override
     invite = _seed_invite(service_ids=["service123"])
     with TestClient(app) as c:
         _login_analyst(c, invite)
-        assert (
-            c.get("/api/admin/quarantine/summary", headers={"X-Remote-Analyst": "1", "Host": "testserver"}).status_code
-            == 403
-        )
+        r_qa = c.get("/api/admin/quarantine/summary", headers={"X-Remote-Analyst": "1", "Host": "testserver"})
+        assert r_qa.status_code == 403
 
 
 # --- Query Monitor & Slow Queries Endpoints ---
@@ -1081,48 +903,15 @@ def _reset_registry():
     query_registry._history.extend(history)
 
 
-def _slow_row(
-    svc_id: str,
-    qid: int,
-    db: str,
-    start: float,
-    end: float,
-    dur: float,
-    prev: str,
-    full: str,
-    kind: str,
-    label: str,
-    qual: str,
-    cfile: str,
-    **kw,
-) -> dict:
-    base = dict(
-        service_id=svc_id,
-        query_id=qid,
-        db_type=db,
-        started_at_utc=start,
-        ended_at_utc=end,
-        duration_ms=dur,
-        sql_preview=prev,
-        sql_full=full,
-        sql_len=len(full),
-        outcome="ok",
-        attr_kind=kind,
-        attr_label=label,
-        attr_principal_id=None,
-        attr_caller_qualname=qual,
-        attr_caller_file=cfile,
-        attr_request_path=None,
-        attr_request_id=None,
-        attr_cron_job=None,
-        attr_cron_run_id=None,
-        attr_pool_slot=None,
-        error_type=None,
-        error_message=None,
-        peak_memory_mb=None,
-    )
-    base.update(kw)
-    return base
+_SLOW_DEFAULTS = dict.fromkeys(
+    "attr_principal_id attr_request_path attr_request_id attr_cron_job attr_cron_run_id attr_pool_slot error_type error_message peak_memory_mb".split()
+)
+
+
+def _slow_row(svc_id, qid, db, start, end, dur, prev, full, **kw) -> dict:
+    keys = "service_id query_id db_type started_at_utc ended_at_utc duration_ms sql_preview sql_full sql_len outcome".split()
+    vals = (svc_id, qid, db, start, end, dur, prev, full, len(full), "ok")
+    return {**_SLOW_DEFAULTS, **dict(zip(keys, vals, strict=True)), **kw}
 
 
 @pytest.mark.usefixtures("_reset_registry")
@@ -1158,19 +947,14 @@ class TestQueryMonitorAndSlowQueries:
 
         body = client.get("/api/admin/queries").json()
         row = next(r for r in body["active"] if r["query_id"] == qid)
-        assert (
-            row["db_type"] == "DuckDB"
-            and row["attribution"]["kind"] == "admin"
-            and row["sql"] is None
-            and "SELECT 1" in row["sql_preview"]
-        )
+        assert row["db_type"] == "DuckDB" and row["attribution"]["kind"] == "admin"
+        assert row["sql"] is None and "SELECT 1" in row["sql_preview"]
         query_registry.deregister(qid)
 
         qid2 = query_registry.register("SQLite", "DROP TABLE x", con=None)
         query_registry.deregister(qid2)
-        assert any(
-            r["query_id"] == qid2 for r in client.get("/api/admin/queries?include_completed=true").json()["completed"]
-        )
+        completed = client.get("/api/admin/queries?include_completed=true").json()["completed"]
+        assert any(r["query_id"] == qid2 for r in completed)
 
         query_registry._queries.clear()
         a, b = query_registry.register("SQLite", "A", con=None), query_registry.register("SQLite", "B", con=None)
@@ -1184,17 +968,11 @@ class TestQueryMonitorAndSlowQueries:
         body = client.get("/api/admin/queries/summary").json()
         assert body["active_total"] == 0 and body["by_db_type"] == {} and body["longest_ms"] == 0.0
 
-        a, b = (
-            query_registry.register("DuckDB", "SELECT 1", con=None),
-            query_registry.register("SQLite", "SELECT 2", con=None),
-        )
+        a = query_registry.register("DuckDB", "SELECT 1", con=None)
+        b = query_registry.register("SQLite", "SELECT 2", con=None)
         body2 = client.get("/api/admin/queries/summary").json()
-        assert (
-            body2["active_total"] == 2
-            and body2["by_db_type"]["DuckDB"] == 1
-            and body2["by_db_type"]["SQLite"] == 1
-            and body2["longest_ms"] >= 0
-        )
+        assert body2["active_total"] == 2 and body2["by_db_type"] == {"DuckDB": 1, "SQLite": 1}
+        assert body2["longest_ms"] >= 0
         query_registry.deregister(a)
         query_registry.deregister(b)
 
@@ -1203,19 +981,13 @@ class TestQueryMonitorAndSlowQueries:
 
         qid = query_registry.register("DuckDB", "SELECT something_specific_xyz", con=None)
         resp_q = client.get(f"/api/admin/queries/{qid}")
-        assert (
-            resp_q.status_code == 200
-            and resp_q.json()["query_id"] == qid
-            and "something_specific_xyz" in resp_q.json()["sql"]
-        )
+        assert resp_q.status_code == 200 and resp_q.json()["query_id"] == qid
+        assert "something_specific_xyz" in resp_q.json()["sql"]
         query_registry.deregister(qid)
 
         resp_c1 = client.post("/api/admin/queries/9999999/cancel")
-        assert (
-            resp_c1.status_code == 200
-            and resp_c1.json()["state"] == "not_found"
-            and resp_c1.json()["query_id"] == 9999999
-        )
+        assert resp_c1.status_code == 200 and resp_c1.json()["state"] == "not_found"
+        assert resp_c1.json()["query_id"] == 9999999
 
         qid_nc = query_registry.register("SQLite", "SELECT 1", con=None)
         resp_c2 = client.post(f"/api/admin/queries/{qid_nc}/cancel")
@@ -1231,9 +1003,8 @@ class TestQueryMonitorAndSlowQueries:
             mod._cancel_history.clear()
 
     def test_admin_id_fallbacks_and_cancel_audit(self, client):
-        assert (
-            _admin_id_from_request(SimpleNamespace(headers={}, client=SimpleNamespace(host="127.0.0.1"))) == "127.0.0.1"
-        )
+        req_local = SimpleNamespace(headers={}, client=SimpleNamespace(host="127.0.0.1"))
+        assert _admin_id_from_request(req_local) == "127.0.0.1"
         assert _admin_id_from_request(SimpleNamespace(headers={}, client=None)) == "unknown"
 
         svc_id = "test_svc_cancel_audit"
@@ -1250,12 +1021,8 @@ class TestQueryMonitorAndSlowQueries:
             current_attribution.set(prev)
 
         resp = client.post(f"/api/admin/queries/{qid}/cancel")
-        assert (
-            resp.status_code == 200
-            and resp.json()["state"] == "cancelled"
-            and resp.json()["query_id"] == qid
-            and interrupted == [True]
-        )
+        assert resp.status_code == 200 and resp.json()["state"] == "cancelled"
+        assert resp.json()["query_id"] == qid and interrupted == [True]
         query_registry.deregister(qid, error=RuntimeError("Query interrupted"))
         assert any(a["event_type"] == "query_cancelled" for a in _meta.list_audit(svc_id, limit=20))
 
@@ -1263,100 +1030,51 @@ class TestQueryMonitorAndSlowQueries:
         svc_id = "test-service-id"
         _meta.clear_slow_queries(svc_id)
         now = _time.time()
-        _meta.insert_slow_query(
-            svc_id,
-            _slow_row(
-                svc_id,
-                7001,
-                "DuckDB",
-                now - 120.0,
-                now - 118.2,
-                1800.0,
-                "SELECT count(*) FROM logs",
-                "SELECT count(*) FROM logs WHERE status >= 500",
-                "admin",
-                "admin @ 127.0.0.1",
-                "dashboard.aggregates",
-                "backend/routers/dashboard.py:42",
-                attr_principal_id="127.0.0.1",
-                attr_request_path="/api/dashboard/aggregates",
-                attr_request_id="req-slow-1",
-                attr_pool_slot="pool#1",
-                peak_memory_mb=64.5,
-            ),
-        )
-        _meta.insert_slow_query(
-            svc_id,
-            _slow_row(
-                svc_id,
-                7002,
-                "Postgres",
-                now - 60.0,
-                now - 59.5,
-                500.0,
-                "SELECT * FROM ingested_files",
-                "SELECT * FROM ingested_files WHERE service_id = $1",
-                "cron",
-                "cron:full_sync",
-                "ingest_log.list_ingested_files",
-                "backend/core/metadata/ingest_log.py:100",
-                attr_cron_job="full_sync",
-                attr_cron_run_id=99,
-            ),
-        )
+        s1, s2 = "SELECT count(*) FROM logs", "SELECT count(*) FROM logs WHERE status >= 500"
+        row1 = _slow_row(svc_id, 7001, "DuckDB", now - 120.0, now - 118.2, 1800.0, s1, s2)
+        row1 |= {"attr_kind": "admin", "attr_label": "admin @ 127.0.0.1", "attr_principal_id": "127.0.0.1"}
+        row1 |= {"attr_caller_qualname": "dashboard.aggregates", "attr_caller_file": "backend/routers/dashboard.py:42"}
+        row1 |= {"attr_request_path": "/api/dashboard/aggregates", "attr_request_id": "req-slow-1"}
+        row1 |= {"attr_pool_slot": "pool#1", "peak_memory_mb": 64.5}
+        _meta.insert_slow_query(svc_id, row1)
+
+        s3, s4 = "SELECT * FROM ingested_files", "SELECT * FROM ingested_files WHERE service_id = $1"
+        row2 = _slow_row(svc_id, 7002, "Postgres", now - 60.0, now - 59.5, 500.0, s3, s4)
+        row2 |= {"attr_kind": "cron", "attr_label": "cron:full_sync", "attr_cron_job": "full_sync"}
+        row2 |= {"attr_caller_qualname": "ingest_log.list_ingested_files", "attr_cron_run_id": 99}
+        row2["attr_caller_file"] = "backend/core/metadata/ingest_log.py:100"
+        _meta.insert_slow_query(svc_id, row2)
 
         cnt_resp = client.get(f"/api/admin/slow-queries/count?service_id={svc_id}&since_hours=24&threshold_ms=1000")
-        assert cnt_resp.status_code == 200 and clean_res(cnt_resp.json()) == {
-            "count": 1,
-            "since_hours": 24,
-            "threshold_ms": 1000.0,
-        }
+        assert cnt_resp.status_code == 200
+        assert clean_res(cnt_resp.json()) == {"count": 1, "since_hours": 24, "threshold_ms": 1000.0}
 
         list_resp = client.get(
             f"/api/admin/slow-queries?service_id={svc_id}&since_hours=24&threshold_ms=100&sort=duration"
         )
         assert list_resp.status_code == 200
         rows = list_resp.json()["rows"]
-        assert (
-            len(rows) == 2
-            and rows[0]["query_id"] == 7001
-            and rows[0]["sql"] == "SELECT count(*) FROM logs WHERE status >= 500"
-        )
-        assert (
-            rows[0]["attribution"]["kind"] == "admin"
-            and rows[0]["attribution"]["pool_slot"] == "pool#1"
-            and rows[1]["attribution"]["cron_run_id"] == "99"
-        )
+        assert len(rows) == 2 and rows[0]["query_id"] == 7001 and rows[0]["sql"] == s2
+        assert rows[0]["attribution"]["kind"] == "admin" and rows[0]["attribution"]["pool_slot"] == "pool#1"
+        assert rows[1]["attribution"]["cron_run_id"] == "99"
 
         pg_rows = client.get(
-            f"/api/admin/slow-queries?service_id={svc_id}&since_hours=24&threshold_ms=100&db_type=Postgres"
+            f"/api/admin/slow-queries?service_id={svc_id}&since_hours=24&threshold_ms=250&db_type=Postgres"
         ).json()["rows"]
         assert len(pg_rows) == 1 and pg_rows[0]["query_id"] == 7002 and pg_rows[0]["db_type"] == "Postgres"
 
         del_resp = client.delete(f"/api/admin/slow-queries?service_id={svc_id}")
-        assert (
-            del_resp.status_code == 200 and del_resp.json()["deleted"] == 2 and del_resp.json()["service_id"] == svc_id
-        )
-        assert (
-            client.get(f"/api/admin/slow-queries/count?service_id={svc_id}&since_hours=24&threshold_ms=100").json()[
-                "count"
-            ]
-            == 0
-        )
+        assert del_resp.status_code == 200 and del_resp.json()["deleted"] >= 2
+        assert del_resp.json()["service_id"] == svc_id
+        cnt_after = client.get(f"/api/admin/slow-queries/count?service_id={svc_id}&since_hours=24&threshold_ms=100")
+        assert cnt_after.json()["count"] == 0
 
 
 # --- Usage & Log Accounting Endpoints ---
 
-_DEFAULT_UL_CFG = dict(
-    enabled=True,
-    retention_days=30,
-    class_a_rate_per_1k=0.005,
-    class_b_rate_per_10k=0.004,
-    cdn_egress_rate_per_gb=0.12,
-    storage_rate_per_gb_month=0.02,
-    min_billed_days=30,
-    billing_zone="MBZ100",
-)
+_DEFAULT_UL_CFG = {"enabled": True, "retention_days": 30, "class_a_rate_per_1k": 0.005, "class_b_rate_per_10k": 0.004}
+_DEFAULT_UL_CFG |= {"cdn_egress_rate_per_gb": 0.12, "storage_rate_per_gb_month": 0.02}
+_DEFAULT_UL_CFG |= {"min_billed_days": 30, "billing_zone": "MBZ100"}
 
 
 @pytest.fixture
@@ -1401,19 +1119,10 @@ def _fake_urlopen(payload: dict):
 
 
 def _complete_src(**overrides) -> dict:
-    base = dict(
-        name="test_service",
-        service_id=MOCK_SERVICE_ID,
-        logging_service_id=MOCK_SERVICE_ID,
-        bucket="test-bucket",
-        prefix="",
-        region="us-east-1",
-        endpoint="us-east-1.object.fastlystorage.app",
-        access_key_id="k",
-        secret_access_key="s",
-    )
-    base.update(overrides)
-    return base
+    base = {"name": "test_service", "service_id": MOCK_SERVICE_ID, "logging_service_id": MOCK_SERVICE_ID}
+    base |= {"bucket": "test-bucket", "prefix": "", "region": "us-east-1"}
+    base |= {"access_key_id": "k", "secret_access_key": "s", "endpoint": "us-east-1.object.fastlystorage.app"}
+    return {**base, **overrides}
 
 
 def _run_log_accounting(log_accounting_client, svc_id: str, counts: list[tuple[int, int, int]], hours: int):
@@ -1446,16 +1155,9 @@ def test_log_accounting_sustained_loss_normal_drift_and_missing_key(log_accounti
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert (
-        body["totals"]["fastly_requests"] == 3000
-        and body["totals"]["our_rows"] == 2700
-        and body["totals"]["gap"] == 300
-    )
-    assert (
-        body["sustained_loss"] is not None
-        and body["sustained_loss"]["n_buckets"] == 3
-        and body["sustained_loss"]["total_lost_lines"] == 300
-    )
+    tots, sl = body["totals"], body["sustained_loss"]
+    assert tots["fastly_requests"] == 3000 and tots["our_rows"] == 2700 and tots["gap"] == 300
+    assert sl is not None and sl["n_buckets"] == 3 and sl["total_lost_lines"] == 300
 
     _la._FASTLY_COUNTS_CACHE.clear()
     _la._DUCKDB_COUNTS_CACHE.clear()
@@ -1472,28 +1174,17 @@ def test_log_accounting_sustained_loss_normal_drift_and_missing_key(log_accounti
 def test_usage_logging_settings_zones_and_validation(client, tmp_path, monkeypatch):
     monkeypatch.setattr(_svc_config, "SYSTEM_DATA_DIR", tmp_path)
     monkeypatch.setattr(_svc_config, "_USAGE_LOGGING_CONFIG_PATH", tmp_path / "usage_logging.json")
-    assert (
-        client.get("/api/admin/usage-logging").status_code == 200
-        and "enabled" in client.get("/api/admin/usage-logging").json()
-    )
+    r0 = client.get("/api/admin/usage-logging")
+    assert r0.status_code == 200 and "enabled" in r0.json()
 
     for zone, expected_rate in [("MBZ100", 0.08), ("MBZ200", 0.12), ("Global", 0.18)]:
         p = client.patch("/api/admin/usage-logging", json={"billing_zone": zone})
-        assert (
-            p.status_code == 200
-            and p.json()["billing_zone"] == zone
-            and p.json()["cdn_egress_rate_per_gb"] == expected_rate
-        )
+        assert p.status_code == 200 and p.json()["billing_zone"] == zone
+        assert p.json()["cdn_egress_rate_per_gb"] == expected_rate
 
     assert client.patch("/api/admin/usage-logging", json={"billing_zone": "INVALID_ZONE"}).status_code in (400, 422)
-    for field in (
-        "retention_days",
-        "class_a_rate_per_1k",
-        "class_b_rate_per_10k",
-        "cdn_egress_rate_per_gb",
-        "storage_rate_per_gb_month",
-        "min_billed_days",
-    ):
+    rate_fields = "retention_days class_a_rate_per_1k class_b_rate_per_10k cdn_egress_rate_per_gb storage_rate_per_gb_month min_billed_days"
+    for field in rate_fields.split():
         for bad_val in (0, -1):
             assert client.patch("/api/admin/usage-logging", json={field: bad_val}).status_code in (400, 422)
 
@@ -1504,15 +1195,8 @@ def test_usage_log_query_export_delete_and_system_jobs(mock_ul_cfg):
     _meta.clear_usage_log(svc)
     try:
         with patch("backend.core.metadata.usage_log.iso_z_now", return_value="2026-06-01T10:15:00Z"):
-            call = {
-                "service": "FOS",
-                "method": "PutObject",
-                "path": "=cmd|' /C calc'!A0",
-                "bytes": 512,
-                "time_ms": 5.0,
-                "caller": "+sum(1,2)",
-                "status": "-200",
-            }
+            call = {"service": "FOS", "method": "PutObject", "path": "=cmd|' /C calc'!A0", "bytes": 512}
+            call |= {"time_ms": 5.0, "caller": "+sum(1,2)", "status": "-200"}
             _meta.log_usage_calls(svc, [call], process_context="@at_context")
         app.dependency_overrides[get_source] = lambda: {"name": svc, "service_id": svc}
         try:
@@ -1534,42 +1218,30 @@ def test_usage_log_query_export_delete_and_system_jobs(mock_ul_cfg):
     fake_job = SimpleNamespace(next_run_time=datetime(2026, 6, 2, 3, 0, 0, tzinfo=UTC))
     sched_obj = MagicMock()
     sched_obj.get_job.side_effect = lambda jid: fake_job if jid == "bot_data_refresh" else None
+    job_st = {"bot_data_refresh": {"last_run_at": "2026-06-01T10:00:00Z", "status": "ok", "duration_s": 1.25}}
     with (
-        patch(
-            "backend.cron.decorators.get_system_job_status",
-            return_value={
-                "bot_data_refresh": {"last_run_at": "2026-06-01T10:00:00Z", "status": "ok", "duration_s": 1.25}
-            },
-        ),
+        patch("backend.cron.decorators.get_system_job_status", return_value=job_st),
         patch("backend.cron.scheduler.get_scheduler", return_value=sched_obj),
         TestClient(app) as c,
     ):
         r = c.get("/api/admin/system-jobs")
-    assert r.status_code == 200 and {j["id"] for j in r.json()["jobs"]} == {
-        "bot_data_refresh",
-        "rdns_enrichment",
-        "share_audit_purge",
-    }
+    assert r.status_code == 200
+    assert {j["id"] for j in r.json()["jobs"]} == {"bot_data_refresh", "rdns_enrichment", "share_audit_purge"}
     for path in ("/api/admin/usage-logging", "/api/admin/usage-log", "/api/admin/system-jobs"):
         assert _is_blocked_path(path) is True
 
 
-@pytest.mark.parametrize(
-    ("record", "expected"),
-    [
-        (
-            {
-                "object_storage_class_a_operations_count": 1234,
-                "object_storage_class_b_operations_count": 5678,
-                "object_storage": {"class_a_operations_count": 1, "class_b_operations_count": 1},
-            },
-            (1234, 5678),
-        ),
-        ({"object_storage": {"class_a_operations_count": 100, "class_b_operations_count": 200}}, (100, 200)),
-        ({"object_storage_class_a_operations_count": None, "object_storage_class_b_operations_count": None}, (0, 0)),
-        ({"other": 42}, (0, 0)),
-    ],
-)
+_KA, _KB = "object_storage_class_a_operations_count", "object_storage_class_b_operations_count"
+_NA, _NB = "class_a_operations_count", "class_b_operations_count"
+_FOS_OPS_CASES = [
+    ({_KA: 1234, _KB: 5678, "object_storage": {_NA: 1, _NB: 1}}, (1234, 5678)),
+    ({"object_storage": {_NA: 100, _NB: 200}}, (100, 200)),
+    ({_KA: None, _KB: None}, (0, 0)),
+    ({"other": 42}, (0, 0)),
+]
+
+
+@pytest.mark.parametrize(("record", "expected"), _FOS_OPS_CASES)
 def test_extract_fos_ops_and_fastly_api_helper(record, expected):
     assert _extract_fos_ops(record) == expected
     fake_resp = MagicMock()
@@ -1579,44 +1251,28 @@ def test_extract_fos_ops_and_fastly_api_helper(record, expected):
     with patch("urllib.request.urlopen", return_value=fake_resp) as mock_open:
         assert _fastly_api("/services/svc1/details", "test-token") == {"data": []}
     req = mock_open.call_args[0][0]
-    assert (
-        req.full_url == "https://api.fastly.com/services/svc1/details" and req.get_header("Fastly-key") == "test-token"
-    )
+    assert req.full_url == "https://api.fastly.com/services/svc1/details"
+    assert req.get_header("Fastly-key") == "test-token"
 
 
 def test_usage_prefill_operations_and_rum_breakdown(client, tmp_path, monkeypatch):
     monkeypatch.setattr(_svc_config, "CONFIGS_DIR", tmp_path / "cfgs")
     _svc_config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID, "fastly_api_key": "api-tok"})
     app.dependency_overrides[get_source] = lambda: _complete_src(cdn_service_id="cdn-svc-id")
-    fake_payload = {
-        "data": [
-            dict(
-                start_time=1767225600,
-                requests=1000,
-                edge_requests=800,
-                object_storage_class_a_operations_count=100,
-                object_storage_class_b_operations_count=50,
-            )
-        ]
-    }
+    row_d = {"start_time": 1767225600, "requests": 1000, "edge_requests": 800, _KA: 100, _KB: 50}
     try:
-        with (
-            patch("backend.routers.usage.get_fastly_api_key", return_value="api-tok"),
-            patch("backend.core.fastly.service.get_active_version", return_value=None),
-            patch("backend.routers.usage._fastly_api", return_value=fake_payload),
+        with _patches(
+            ("backend.routers.usage.get_fastly_api_key", "api-tok"),
+            ("backend.core.fastly.service.get_active_version", None),
+            ("backend.routers.usage._fastly_api", {"data": [row_d]}),
         ):
             r_pre = client.get("/api/usage/prefill", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
-            assert (
-                r_pre.status_code == 200
-                and "storage_rate_per_gb_month" in r_pre.json()
-                and r_pre.json()["requests_per_day"] == 1000
+            assert r_pre.status_code == 200 and "storage_rate_per_gb_month" in r_pre.json()
+            assert r_pre.json()["requests_per_day"] == 1000
+            r_ops = client.get(
+                "/api/usage/operations", headers={"x-fastly-service-id": MOCK_SERVICE_ID}, params={"by": "minute"}
             )
-            assert (
-                client.get(
-                    "/api/usage/operations", headers={"x-fastly-service-id": MOCK_SERVICE_ID}, params={"by": "minute"}
-                ).status_code
-                == 200
-            )
+            assert r_ops.status_code == 200
 
         svc = "test_usage_rum_breakdown_svc"
         con = _meta.get_con(svc)

@@ -959,3 +959,1335 @@ def test_crash_after_manifest_committed_is_idempotently_recoverable() -> None:
     batch_id_1 = str(uuid.uuid5(uuid.NAMESPACE_OID, manifest_id))
     batch_id_2 = str(uuid.uuid5(uuid.NAMESPACE_OID, manifest_id))
     assert batch_id_1 == batch_id_2
+
+
+# ── Merged from tests/high_scale/test_late_rum_discovery.py ──
+
+"""Regression coverage for bounded late-arrival RUM source discovery."""
+
+
+import os
+from types import SimpleNamespace
+from typing import Any
+from uuid import uuid4
+
+from backend.high_scale.source_discovery import (
+    RUM_REINSPECTION_INTERVAL,
+)
+from botocore.stub import Stubber
+from psycopg_pool import ConnectionPool
+
+
+class _Paginator_late_rum_discovery:
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        self.responses = responses
+        self.requests: list[dict[str, Any]] = []
+
+    def paginate(self, **request: Any) -> list[dict[str, Any]]:
+        self.requests.append(request)
+        return [self.responses.pop(0)]
+
+
+class _Client_late_rum_discovery:
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        self.paginator = _Paginator_late_rum_discovery(responses)
+
+    def get_paginator(self, name: str) -> _Paginator_late_rum_discovery:
+        assert name == "list_objects_v2"
+        return self.paginator
+
+
+def _page(
+    *,
+    token: str | None = None,
+    continuation_token: str | None = None,
+    key: str | None = None,
+) -> dict[str, Any]:
+    response: dict[str, Any] = {"Contents": []}
+    if key is not None:
+        response["Contents"] = [{"Key": key, "ETag": '"etag"', "Size": 1}]
+    if token is not None:
+        response["NextToken"] = token
+    if continuation_token is not None:
+        response["IsTruncated"] = True
+        response["NextContinuationToken"] = continuation_token
+    return response
+
+
+def test_rum_cursor_schedules_a_bounded_reinspection_without_rewinding_forward_cursor() -> None:
+    """One reinspection page is inserted after each ten forward pages."""
+    pages = [_page(token=f"forward-{i}") for i in range(1, 11)]
+    pages.append(_page(continuation_token="reinspect-1", key="raw/rum/page-1.gz"))
+    client = _Client_late_rum_discovery(pages)
+    lister = S3SourceObjectLister(client, bucket="archive-bucket")
+    cursor: str | None = INITIAL_SOURCE_CURSOR
+    reinspection_cursor = INITIAL_SOURCE_CURSOR
+    forward_pages = 0
+
+    for _ in range(RUM_REINSPECTION_INTERVAL):
+        page = lister.list_source_objects(
+            "svc",
+            "rum_vitals",
+            page_size=25,
+            cursor=cursor,
+            reinspection_cursor=reinspection_cursor,
+            forward_pages_since_reinspection=forward_pages,
+        )
+        cursor = page.next_cursor
+        reinspection_cursor = page.next_reinspection_cursor or reinspection_cursor
+        forward_pages = page.forward_pages_since_reinspection or 0
+    assert cursor == "forward-10"
+    assert reinspection_cursor == INITIAL_SOURCE_CURSOR
+    assert forward_pages == RUM_REINSPECTION_INTERVAL
+
+    page = lister.list_source_objects(
+        "svc",
+        "rum_vitals",
+        page_size=25,
+        cursor=cursor,
+        reinspection_cursor=reinspection_cursor,
+        reinspect=True,
+        forward_pages_since_reinspection=forward_pages,
+    )
+    assert page.next_cursor == cursor
+    assert page.next_reinspection_cursor == f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/page-1.gz"
+    assert page.forward_pages_since_reinspection == 0
+    # Reinspection uses its own page token and leaves the forward scan intact.
+    request = client.paginator.requests[-1]
+    assert request["Prefix"] == "raw/rum/"
+    assert request["PaginationConfig"] == {"PageSize": 25}
+
+
+def test_rum_late_objects_are_seen_when_reinspection_wraps_to_prefix_start() -> None:
+    """A new key behind the forward cursor is eligible during a bounded sweep."""
+    client = _Client_late_rum_discovery(
+        [
+            _page(key="raw/rum/late-arrival.gz"),
+        ]
+    )
+    lister = S3SourceObjectLister(client, bucket="archive-bucket")
+    forward_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/z.gz"
+
+    page = lister.list_source_objects(
+        "svc",
+        "rum_errors",
+        page_size=25,
+        cursor=forward_cursor,
+        reinspection_cursor=INITIAL_SOURCE_CURSOR,
+        reinspect=True,
+        forward_pages_since_reinspection=RUM_REINSPECTION_INTERVAL,
+    )
+
+    assert [obj.object_key for obj in page.objects] == ["raw/rum/late-arrival.gz"]
+    assert client.paginator.requests[0]["PaginationConfig"] == {"PageSize": 25}
+    assert page.next_cursor == forward_cursor
+    assert page.next_reinspection_cursor == INITIAL_SOURCE_CURSOR
+    assert page.forward_pages_since_reinspection == 0
+
+
+def test_rum_reinspection_continues_one_real_s3_page_at_a_time() -> None:
+    import boto3
+
+    client = boto3.client(
+        "s3",
+        region_name="us-east-1",
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+    )
+    stubber = Stubber(client)
+    stubber.add_response(
+        "list_objects_v2",
+        {
+            "IsTruncated": True,
+            "Contents": [
+                {"Key": "raw/rum/a.gz", "ETag": '"a"', "Size": 1},
+                {"Key": "raw/rum/b.gz", "ETag": '"b"', "Size": 1},
+            ],
+            "NextContinuationToken": "opaque-continuation-token",
+        },
+        {"Bucket": "bucket", "Prefix": "raw/rum/", "MaxKeys": 2},
+    )
+    stubber.add_response(
+        "list_objects_v2",
+        {
+            "IsTruncated": False,
+            "Contents": [{"Key": "raw/rum/c.gz", "ETag": '"c"', "Size": 1}],
+        },
+        {
+            "Bucket": "bucket",
+            "Prefix": "raw/rum/",
+            "MaxKeys": 2,
+            "StartAfter": "raw/rum/b.gz",
+        },
+    )
+    lister = S3SourceObjectLister(client, bucket="bucket")
+
+    with stubber:
+        first = lister.list_source_objects(
+            "svc",
+            "rum_vitals",
+            page_size=2,
+            cursor="forward-cursor",
+            reinspection_cursor=INITIAL_SOURCE_CURSOR,
+            reinspect=True,
+        )
+        second = lister.list_source_objects(
+            "svc",
+            "rum_vitals",
+            page_size=2,
+            cursor="forward-cursor",
+            reinspection_cursor=first.next_reinspection_cursor,
+            reinspect=True,
+        )
+
+    assert [obj.object_key for obj in first.objects] == ["raw/rum/a.gz", "raw/rum/b.gz"]
+    assert first.next_reinspection_cursor == f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/b.gz"
+    assert [obj.object_key for obj in second.objects] == ["raw/rum/c.gz"]
+    assert second.next_reinspection_cursor == INITIAL_SOURCE_CURSOR
+    assert first.next_cursor == second.next_cursor == "forward-cursor"
+
+
+def test_legacy_rum_terminal_cursor_keeps_start_after_semantics() -> None:
+    client = _Client_late_rum_discovery([_page(key="raw/rum/new.gz")])
+    lister = S3SourceObjectLister(client, bucket="archive-bucket")
+
+    page = lister.list_source_objects(
+        "svc",
+        "rum_vitals",
+        page_size=25,
+        cursor=f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/previous.gz",
+    )
+
+    assert client.paginator.requests[0]["StartAfter"] == "raw/rum/previous.gz"
+    assert page.objects[0].object_key == "raw/rum/new.gz"
+    assert page.next_cursor is None
+
+
+def test_legacy_rum_paginator_token_keeps_starting_token_semantics() -> None:
+    client = _Client_late_rum_discovery([_page(token="next-token")])
+    lister = S3SourceObjectLister(client, bucket="archive-bucket")
+
+    page = lister.list_source_objects("svc", "rum_errors", page_size=25, cursor="legacy-page-token")
+
+    assert client.paginator.requests[0]["PaginationConfig"] == {
+        "PageSize": 25,
+        "StartingToken": "legacy-page-token",
+    }
+    assert page.next_cursor == "next-token"
+
+
+def test_request_cursor_path_remains_unchanged() -> None:
+    client = _Client_late_rum_discovery([_page(key="raw/request/new.gz")])
+    lister = S3SourceObjectLister(client, bucket="archive-bucket")
+
+    lister.list_source_objects(
+        "svc",
+        "request",
+        page_size=25,
+        cursor=f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/request/previous.gz",
+    )
+
+    assert client.paginator.requests[0]["PaginationConfig"] == {"PageSize": 25}
+    assert client.paginator.requests[0]["StartAfter"] == "raw/request/previous.gz"
+
+
+def test_coordinator_persists_reinspection_state_without_advancing_forward_cursor() -> None:
+    forward_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/latest.gz"
+    control = MagicMock()
+    control.owner.return_value = SimpleNamespace(
+        current_owner="high_scale",
+        owner_epoch=3,
+        source_cursor="owner-cursor",
+    )
+    control.source_cursor_for.return_value = forward_cursor
+    control.source_reinspection_state_for.return_value = (INITIAL_SOURCE_CURSOR, RUM_REINSPECTION_INTERVAL)
+    control.claim_sources_batch.return_value = ()
+    control.expired_claims.return_value = ()
+    control.advance_source_cursor = MagicMock()
+
+    lister = MagicMock()
+    lister.list_source_objects.return_value = SourceObjectPage(
+        (),
+        forward_cursor,
+        next_reinspection_cursor=INITIAL_SOURCE_CURSOR,
+        forward_pages_since_reinspection=0,
+        reinspection_page=True,
+    )
+    coordinator = HighScaleWorkerCoordinator(
+        lister=lister,
+        reader=MagicMock(),
+        controller=MagicMock(),
+        ownership=MagicMock(),
+        ledger=MagicMock(),
+        worker_id="rum-reinspection-test",
+        control_plane=control,
+    )
+
+    run = coordinator.run_page(service_id="svc", domain="rum_vitals")
+
+    assert run.next_cursor == forward_cursor
+    lister.list_source_objects.assert_called_once_with(
+        "svc",
+        "rum_vitals",
+        page_size=100,
+        cursor=forward_cursor,
+        reinspection_cursor=INITIAL_SOURCE_CURSOR,
+        reinspect=True,
+        forward_pages_since_reinspection=RUM_REINSPECTION_INTERVAL,
+    )
+    control.advance_source_cursor.assert_not_called()
+    control.advance_reinspection_state.assert_called_once_with(
+        "svc",
+        "rum_vitals",
+        INITIAL_SOURCE_CURSOR,
+        0,
+        expected_owner="high_scale",
+        expected_owner_epoch=3,
+    )
+
+
+def test_coordinator_advances_forward_and_reinspection_cursors_together() -> None:
+    control = MagicMock()
+    control.owner.return_value = SimpleNamespace(
+        current_owner="high_scale",
+        owner_epoch=3,
+        source_cursor="owner-cursor",
+    )
+    control.source_cursor_for.return_value = "forward-page-1"
+    control.source_reinspection_state_for.return_value = ("reinspection-page-2", 2)
+    control.claim_sources_batch.return_value = ()
+    control.expired_claims.return_value = ()
+
+    lister = MagicMock()
+    lister.list_source_objects.return_value = SourceObjectPage(
+        (),
+        "forward-page-2",
+        next_reinspection_cursor="reinspection-page-2",
+        forward_pages_since_reinspection=3,
+    )
+    coordinator = HighScaleWorkerCoordinator(
+        lister=lister,
+        reader=MagicMock(),
+        controller=MagicMock(),
+        ownership=MagicMock(),
+        ledger=MagicMock(),
+        worker_id="rum-forward-test",
+        control_plane=control,
+    )
+
+    coordinator.run_page(service_id="svc", domain="rum_errors")
+
+    control.advance_source_cursor.assert_called_once_with(
+        "svc",
+        "forward-page-2",
+        expected_owner="high_scale",
+        expected_owner_epoch=3,
+        domain="rum_errors",
+        reinspection_cursor="reinspection-page-2",
+        forward_pages_since_reinspection=3,
+    )
+
+
+def test_postgres_reinspection_state_defaults_and_reads_domain_cursor_fields() -> None:
+    pool = MagicMock()
+    connection = MagicMock()
+    pool.connection.return_value.__enter__.return_value = connection
+    connection.transaction.return_value.__enter__.return_value = connection
+    selected = MagicMock()
+    selected.fetchone.return_value = ("__terminal__:raw/rum/a.gz", 4)
+    connection.execute.side_effect = [MagicMock(), selected]
+    control = PostgresControlPlane(pool=pool)
+
+    assert control.source_reinspection_state_for("svc", "rum_vitals") == (
+        "__terminal__:raw/rum/a.gz",
+        4,
+    )
+    sql = connection.execute.call_args_list[1].args[0]
+    assert "reinspection_cursor" in sql
+    assert "forward_pages_since_reinspection" in sql
+
+
+def test_postgres_reinspection_state_defaults_for_a_new_domain() -> None:
+    pool = MagicMock()
+    connection = MagicMock()
+    pool.connection.return_value.__enter__.return_value = connection
+    connection.transaction.return_value.__enter__.return_value = connection
+    selected = MagicMock()
+    selected.fetchone.return_value = None
+    connection.execute.side_effect = [MagicMock(), selected]
+    control = PostgresControlPlane(pool=pool)
+
+    assert control.source_reinspection_state_for("svc", "rum_errors") == (INITIAL_SOURCE_CURSOR, 0)
+
+
+def test_postgres_reinspection_advance_does_not_update_forward_source_cursor() -> None:
+    pool = MagicMock()
+    connection = MagicMock()
+    pool.connection.return_value.__enter__.return_value = connection
+    connection.transaction.return_value.__enter__.return_value = connection
+    owner = MagicMock()
+    owner.fetchone.return_value = {
+        "service_id": "svc",
+        "owner_epoch": 3,
+        "current_owner": "high_scale",
+        "previous_owner": None,
+        "source_cursor": "owner-cursor",
+        "drain_complete": False,
+        "cutover_committed": False,
+        "rollback_allowed": False,
+    }
+    connection.execute.side_effect = [owner, MagicMock()]
+    control = PostgresControlPlane(pool=pool)
+
+    control.advance_reinspection_state(
+        "svc",
+        "rum_vitals",
+        "reinspection-page-2",
+        0,
+        expected_owner="high_scale",
+        expected_owner_epoch=3,
+    )
+
+    update_sql = connection.execute.call_args_list[1].args[0]
+    assert "SET reinspection_cursor=%s" in update_sql
+    assert "forward_pages_since_reinspection=%s" in update_sql
+    assert "source_cursor=" not in update_sql
+    assert connection.execute.call_args_list[1].args[1] == (
+        "reinspection-page-2",
+        0,
+        "svc",
+        "rum_vitals",
+    )
+
+
+@pytest.mark.parametrize("failure_stage", ["read", "publication"])
+def test_reinspection_failure_preserves_forward_and_reinspection_cursors(failure_stage: str) -> None:
+    forward_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/latest.gz"
+    descriptor = SourceObjectDescriptor("raw/rum/late.gz", "etag:late", 12, "v1")
+    control = MagicMock()
+    control.owner.return_value = SimpleNamespace(current_owner="high_scale", owner_epoch=5, source_cursor=None)
+    control.source_cursor_for.return_value = forward_cursor
+    control.source_reinspection_state_for.return_value = (INITIAL_SOURCE_CURSOR, RUM_REINSPECTION_INTERVAL)
+    control.discover_source.return_value = SimpleNamespace(status="discovered")
+    control.claim_sources_batch.return_value = (SimpleNamespace(object_key=descriptor.object_key),)
+    control.expired_claims.return_value = ()
+    lister = MagicMock()
+    lister.list_source_objects.return_value = SourceObjectPage(
+        (descriptor,),
+        forward_cursor,
+        next_reinspection_cursor=f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/late.gz",
+        forward_pages_since_reinspection=0,
+        reinspection_page=True,
+    )
+    reader = MagicMock()
+    controller = MagicMock()
+    if failure_stage == "read":
+        reader.read_source_object.side_effect = RuntimeError("temporary FOS read failure")
+    else:
+        reader.read_source_object.return_value = b"source payload"
+        controller.ingest_batch.side_effect = RuntimeError("temporary publication failure")
+    coordinator = HighScaleWorkerCoordinator(
+        lister=lister,
+        reader=reader,
+        controller=controller,
+        ownership=MagicMock(),
+        ledger=MagicMock(),
+        worker_id="rum-reinspection-failure-test",
+        control_plane=control,
+    )
+
+    run = coordinator.run_page(service_id="svc", domain="rum_vitals")
+
+    assert run.failed == 1
+    control.advance_source_cursor.assert_not_called()
+    control.advance_reinspection_state.assert_not_called()
+    if failure_stage == "publication":
+        assert controller.ingest_batch.call_args.kwargs["next_cursor"] is None
+
+
+def test_confirmed_missing_reinspection_object_advances_only_reinspection_position() -> None:
+    forward_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/latest.gz"
+    descriptor = SourceObjectDescriptor("raw/rum/late-missing.gz", "etag:late", 12, "v1")
+    control = MagicMock()
+    control.owner.return_value = SimpleNamespace(current_owner="high_scale", owner_epoch=5, source_cursor=None)
+    control.source_cursor_for.return_value = forward_cursor
+    control.source_reinspection_state_for.return_value = (INITIAL_SOURCE_CURSOR, RUM_REINSPECTION_INTERVAL)
+    control.discover_source.return_value = SimpleNamespace(status="discovered")
+    control.claim_sources_batch.return_value = (SimpleNamespace(object_key=descriptor.object_key),)
+    control.expired_claims.return_value = ()
+    lister = MagicMock()
+    lister.list_source_objects.return_value = SourceObjectPage(
+        (descriptor,),
+        forward_cursor,
+        next_reinspection_cursor=INITIAL_SOURCE_CURSOR,
+        forward_pages_since_reinspection=0,
+        reinspection_page=True,
+    )
+    reader = MagicMock()
+    reader.read_source_object.side_effect = SourceObjectMissingError("source disappeared")
+    coordinator = HighScaleWorkerCoordinator(
+        lister=lister,
+        reader=reader,
+        controller=MagicMock(),
+        ownership=MagicMock(),
+        ledger=MagicMock(),
+        worker_id="rum-reinspection-missing-test",
+        control_plane=control,
+    )
+
+    run = coordinator.run_page(service_id="svc", domain="rum_vitals")
+
+    assert run.missing == 1 and run.failed == 0
+    control.mark_source_missing.assert_called_once()
+    control.advance_source_cursor.assert_not_called()
+    control.advance_reinspection_state.assert_called_once_with(
+        "svc",
+        "rum_vitals",
+        INITIAL_SOURCE_CURSOR,
+        0,
+        expected_owner="high_scale",
+        expected_owner_epoch=5,
+    )
+
+
+@pytest.mark.postgres_integration
+def test_postgres_rum_reinspection_state_is_schema_scoped_and_owner_fenced() -> None:
+    dsn = os.getenv("HIGH_SCALE_POSTGRES_TEST_DSN")
+    if not dsn:
+        pytest.skip("HIGH_SCALE_POSTGRES_TEST_DSN is not set")
+
+    schema = f"hs_reinspect_{uuid4().hex}"
+    setup_pool = ConnectionPool(
+        conninfo=dsn,
+        kwargs={"autocommit": False},
+        min_size=1,
+        max_size=1,
+        timeout=5,
+    )
+    scoped_pool: ConnectionPool | None = None
+    try:
+        setup_pool.open(wait=True)
+        with setup_pool.connection(timeout=5) as connection, connection.transaction():
+            connection.execute(f'CREATE SCHEMA "{schema}"')
+        scoped_pool = ConnectionPool(
+            conninfo=dsn,
+            kwargs={"autocommit": False, "options": f"-csearch_path={schema}"},
+            min_size=1,
+            max_size=2,
+            timeout=5,
+        )
+        scoped_pool.open(wait=True)
+        control = PostgresControlPlane(pool=scoped_pool, pool_timeout=5)
+        control.create_schema()
+        owner = control.initialize_owner("svc", owner="high_scale", source_cursor="owner")
+        control.advance_source_cursor(
+            "svc",
+            f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/latest.gz",
+            expected_owner="high_scale",
+            expected_owner_epoch=owner.owner_epoch,
+            domain="rum_vitals",
+            reinspection_cursor=INITIAL_SOURCE_CURSOR,
+            forward_pages_since_reinspection=RUM_REINSPECTION_INTERVAL,
+        )
+
+        # Simulate an existing schema and row from a worker predating the
+        # additive state. Bootstrap must preserve its forward wire cursor.
+        with scoped_pool.connection(timeout=5) as connection, connection.transaction():
+            connection.execute(
+                "ALTER TABLE high_scale_source_cursors "
+                "DROP COLUMN reinspection_cursor, DROP COLUMN forward_pages_since_reinspection"
+            )
+        control.create_schema()
+        assert control.source_cursor_for("svc", "rum_vitals") == f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/latest.gz"
+        assert control.source_reinspection_state_for("svc", "rum_vitals") == (INITIAL_SOURCE_CURSOR, 0)
+
+        control.advance_reinspection_state(
+            "svc",
+            "rum_vitals",
+            f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/page-2.gz",
+            0,
+            expected_owner="high_scale",
+            expected_owner_epoch=owner.owner_epoch,
+        )
+        assert control.source_cursor_for("svc", "rum_vitals") == (f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/latest.gz")
+        assert control.source_reinspection_state_for("svc", "rum_vitals") == (
+            f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/page-2.gz",
+            0,
+        )
+        # A rolling older worker updates just the forward column and must not
+        # erase a newer worker's independently persisted sweep position.
+        control.advance_source_cursor(
+            "svc",
+            f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/latest.gz",
+            expected_owner="high_scale",
+            expected_owner_epoch=owner.owner_epoch,
+            domain="rum_vitals",
+        )
+        assert control.source_reinspection_state_for("svc", "rum_vitals") == (
+            f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/page-2.gz",
+            0,
+        )
+
+        with pytest.raises(ValueError, match="owner epoch"):
+            control.advance_reinspection_state(
+                "svc",
+                "rum_vitals",
+                INITIAL_SOURCE_CURSOR,
+                0,
+                expected_owner="high_scale",
+                expected_owner_epoch=owner.owner_epoch + 1,
+            )
+        assert control.source_cursor_for("svc", "rum_vitals") == (f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/latest.gz")
+        assert control.source_reinspection_state_for("svc", "rum_vitals") == (
+            f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/page-2.gz",
+            0,
+        )
+    finally:
+        if scoped_pool is not None:
+            scoped_pool.close()
+        if setup_pool.closed:
+            setup_pool.open(wait=True)
+        with setup_pool.connection(timeout=5) as connection, connection.transaction():
+            connection.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        setup_pool.close()
+
+
+# ── Merged from tests/high_scale/test_publication.py ──
+
+from uuid import UUID
+
+import pytest
+
+from backend.high_scale.publication import (
+    BatchManifest,
+    ClickHouseBatchAdapter,
+    ClickHousePublication,
+    HighScaleBatch,
+    InMemoryBatchManifestStore,
+    InsertReceipt,
+    PartialInsert,
+    PostgresBatchManifestStore,
+    PublicationStatus,
+    row_matches_serving_domain,
+)
+
+
+def _batch() -> HighScaleBatch:
+    return HighScaleBatch(
+        batch_id="batch-1",
+        service_id="svc",
+        domain="request",
+        generation="epoch-4",
+        rows=({"event_id": "event-1"}, {"event_id": "event-2"}),
+    )
+
+
+class FakeClickHouse:
+    def __init__(self) -> None:
+        self.inserts: list[str] = []
+        self.fail_after_insert = False
+        self.partial_rows: int | None = None
+
+    def insert(self, batch: HighScaleBatch) -> InsertReceipt:
+        self.inserts.append(batch.batch_id)
+        if self.partial_rows is not None:
+            raise PartialInsert(self.partial_rows)
+        if self.fail_after_insert:
+            self.fail_after_insert = False
+            raise RuntimeError("lost acknowledgement")
+        return InsertReceipt(batch.batch_id, len(batch.rows), batch.digest)
+
+
+def test_retry_after_lost_acknowledgement_publishes_once() -> None:
+    store = InMemoryBatchManifestStore()
+    client = FakeClickHouse()
+    client.fail_after_insert = True
+    publication = ClickHousePublication(store, client)
+    batch = _batch()
+
+    with pytest.raises(RuntimeError, match="lost acknowledgement"):
+        publication.publish(batch)
+
+    result = publication.publish(batch)
+
+    assert result.status is PublicationStatus.VISIBLE
+    assert result.rows_visible == 2
+    assert client.inserts == ["batch-1", "batch-1"]
+    assert store.get("batch-1").status is PublicationStatus.VISIBLE
+
+
+def test_partial_insert_never_becomes_visible() -> None:
+    store = InMemoryBatchManifestStore()
+    client = FakeClickHouse()
+    client.partial_rows = 1
+    publication = ClickHousePublication(store, client)
+
+    with pytest.raises(PartialInsert):
+        publication.publish(_batch())
+
+    assert store.get("batch-1").status is PublicationStatus.PENDING
+
+
+def test_postgres_manifest_store_survives_store_recreation() -> None:
+    from types import SimpleNamespace
+
+    manifests: dict[str, BatchManifest] = {}
+    control = SimpleNamespace(
+        get_batch_manifest=manifests.get,
+        put_batch_manifest=lambda m: manifests.__setitem__(m.batch_id, m),
+    )
+    first_store = PostgresBatchManifestStore(control)
+    first_store.put(
+        BatchManifest(
+            batch_id="batch-1",
+            service_id="svc",
+            domain="request",
+            generation="epoch-4",
+            digest="sha256:batch",
+            expected_rows=2,
+            status=PublicationStatus.VISIBLE,
+            visible_rows=2,
+        )
+    )
+
+    recreated_store = PostgresBatchManifestStore(control)
+
+    manifest = recreated_store.get("batch-1")
+    assert manifest is not None
+    assert manifest.status is PublicationStatus.VISIBLE
+    assert manifest.visible_rows == 2
+
+
+def test_same_batch_id_with_different_digest_is_rejected() -> None:
+    store = InMemoryBatchManifestStore()
+    client = FakeClickHouse()
+    publication = ClickHousePublication(store, client)
+    publication.publish(_batch())
+
+    changed = HighScaleBatch(
+        batch_id="batch-1",
+        service_id="svc",
+        domain="request",
+        generation="epoch-4",
+        rows=({"event_id": "different"},),
+    )
+    with pytest.raises(ValueError, match="digest"):
+        publication.publish(changed)
+
+
+def _request_batch() -> HighScaleBatch:
+    return HighScaleBatch(
+        batch_id="svc:request:object-1",
+        service_id="svc",
+        domain="request",
+        generation="4",
+        rows=(
+            {
+                "event_id": "event-1",
+                "timestamp": "2026-09-11T20:00:00Z",
+                "source_object_key": "raw/request/object-1.gz",
+                "source_object_version": "sha256:object-1",
+                "line_ordinal": 0,
+                "transform_version": "normalize.v1",
+                "country": "US",
+                "client_ip": "192.0.2.1",
+                "url": "/",
+                "custom_fields": {"tenant": "demo"},
+                "cmcd": {},
+            },
+        ),
+    )
+
+
+class FakeHttpClickHouse:
+    def __init__(self) -> None:
+        self.inserts: list[tuple[str, list[str], list[tuple]]] = []
+        self.publications: dict[str, dict] = {}
+        self.facts: dict[str, list[tuple]] = {}
+        self.fail_fact_ack = False
+        self.fail_visible_ack = False
+
+    def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+        params = params or {}
+        if "high_scale_batch_publications" in sql:
+            row = self.publications.get(str(params["batch_id"]))
+            return [] if row is None else [row]
+        if "SELECT count()" in sql:
+            return [{"row_count": len(self.facts.get(str(params["batch_id"]), []))}]
+        raise AssertionError(f"unexpected query: {sql}")
+
+    def insert_rows(self, table: str, columns: list[str], rows: list[tuple]) -> None:
+        self.inserts.append((table, columns, rows))
+        if table == "high_scale_batch_publications":
+            row = rows[0]
+            publication = dict(zip(columns, row, strict=True))
+            self.publications[str(row[0])] = publication
+            if publication["publication_state"] == "visible" and self.fail_visible_ack:
+                self.fail_visible_ack = False
+                raise RuntimeError("lost acknowledgement")
+        else:
+            batch_id = str(rows[0][4] if table == "cmcd_projection_facts" else rows[0][8])
+            self.facts.setdefault(batch_id, []).extend(rows)
+            if self.fail_fact_ack:
+                self.fail_fact_ack = False
+                raise RuntimeError("lost acknowledgement")
+
+
+def test_clickhouse_adapter_inserts_exact_allowlisted_shape() -> None:
+    client = FakeHttpClickHouse()
+    result = ClickHouseBatchAdapter(client).insert(_request_batch())
+
+    assert result.rows_inserted == 1
+    pending, facts, visible = client.inserts
+    assert pending[0] == "high_scale_batch_publications"
+    assert pending[1] == [
+        "batch_id",
+        "service_id",
+        "domain",
+        "generation",
+        "batch_digest",
+        "expected_rows",
+        "visible_rows",
+        "quorum_acked",
+        "publication_state",
+        "manifest_version",
+        "updated_at",
+    ]
+    assert facts[0] == "request_facts"
+    assert facts[1][-5:] == ["country", "client_ip", "url", "custom_fields", "cmcd"]
+    assert UUID(facts[2][0][1])
+    assert UUID(facts[2][0][8])
+    assert visible[2][0][7:9] == (1, "visible")
+
+
+def test_clickhouse_adapter_uses_raw_request_ip_for_client_ip() -> None:
+    client = FakeHttpClickHouse()
+    row = {key: value for key, value in _request_batch().rows[0].items() if key != "client_ip"}
+    row["ip"] = "198.51.100.10"
+    batch = HighScaleBatch("batch-raw-ip", "svc", "request", "4", (row,))
+
+    ClickHouseBatchAdapter(client).insert(batch)
+
+    facts = next(rows for table, _, rows in client.inserts if table == "request_facts")
+    assert facts[0][-4] == "198.51.100.10"
+
+
+def test_clickhouse_adapter_rejects_invalid_rows_before_http() -> None:
+    batch = _request_batch()
+    invalid = HighScaleBatch(
+        batch.batch_id,
+        batch.service_id,
+        batch.domain,
+        batch.generation,
+        ({**batch.rows[0], "custom_fields": {"bad": 1}},),
+    )
+    client = FakeHttpClickHouse()
+
+    with pytest.raises(ValueError, match="keys and values"):
+        ClickHouseBatchAdapter(client).insert(invalid)
+
+    assert client.inserts == []
+
+
+def test_clickhouse_adapter_duplicate_retry_does_not_insert_facts_twice() -> None:
+    client = FakeHttpClickHouse()
+    adapter = ClickHouseBatchAdapter(client)
+    batch = _request_batch()
+
+    first = adapter.insert(batch)
+    second = adapter.insert(batch)
+
+    assert first == second
+    assert [table for table, _, _ in client.inserts].count("request_facts") == 1
+
+
+def test_clickhouse_adapter_lost_visible_ack_is_recovered_by_retry() -> None:
+    client = FakeHttpClickHouse()
+    client.fail_visible_ack = True
+    publication = ClickHousePublication(InMemoryBatchManifestStore(), ClickHouseBatchAdapter(client))
+    batch = _request_batch()
+
+    with pytest.raises(RuntimeError, match="lost acknowledgement"):
+        publication.publish(batch)
+
+    result = publication.publish(batch)
+
+    assert result.status is PublicationStatus.VISIBLE
+    assert [table for table, _, _ in client.inserts].count("request_facts") == 1
+
+
+def test_clickhouse_adapter_lost_fact_ack_is_recovered_without_duplicate_rows() -> None:
+    client = FakeHttpClickHouse()
+    client.fail_fact_ack = True
+    publication = ClickHousePublication(InMemoryBatchManifestStore(), ClickHouseBatchAdapter(client))
+    batch = _request_batch()
+
+    with pytest.raises(RuntimeError, match="lost acknowledgement"):
+        publication.publish(batch)
+
+    result = publication.publish(batch)
+
+    assert result.status is PublicationStatus.VISIBLE
+    assert [table for table, _, _ in client.inserts].count("request_facts") == 1
+
+
+@pytest.mark.parametrize(
+    ("domain", "row", "table"),
+    [
+        (
+            "rum_vitals",
+            {
+                "event_id": "rum-vital-1",
+                "timestamp": "2026-09-11T20:00:00Z",
+                "source_object_key": "raw/rum/vitals-1.gz",
+                "source_object_version": "sha256:rum-1",
+                "line_ordinal": 0,
+                "transform_version": "normalize.v1",
+                "metric_name": "LCP",
+                "metric_value": 1.25,
+            },
+            "rum_vitals_facts",
+        ),
+        (
+            "rum_errors",
+            {
+                "event_id": "rum-error-1",
+                "timestamp": "2026-09-11T20:00:00Z",
+                "source_object_key": "raw/rum/errors-1.gz",
+                "source_object_version": "sha256:rum-2",
+                "line_ordinal": 0,
+                "transform_version": "normalize.v1",
+                "error_message": "boom",
+            },
+            "rum_error_facts",
+        ),
+        (
+            "cmcd",
+            {
+                "request_event_id": "request-event-1",
+                "timestamp": "2026-09-11T20:00:00Z",
+                "fields": {"br": "1000"},
+            },
+            "cmcd_projection_facts",
+        ),
+    ],
+)
+def test_clickhouse_adapter_maps_each_schema_domain(domain: str, row: dict, table: str) -> None:
+    client = FakeHttpClickHouse()
+    batch = HighScaleBatch("batch-" + domain, "svc", domain, "4", (row,))
+
+    ClickHouseBatchAdapter(client).insert(batch)
+
+    assert [name for name, _, _ in client.inserts].count(table) == 1
+
+
+class TestRowMatchesServingDomain:
+    """A raw raw/rum/ object mixes vitals and error beacon lines from the
+    same log period, but the ledger attributes the WHOLE object to a single
+    domain — whichever claims it first. Callers must filter with
+    ``row_matches_serving_domain`` before building a serving HighScaleBatch,
+    or a mismatched row either crashes ``_rows_for_domain`` (rum_vitals: no
+    finite metric_value) or becomes a bogus, all-blank fact row (rum_errors:
+    empty error_message defaulted silently)."""
+
+    def test_rum_vitals_row_with_finite_metric_value_matches(self):
+        assert row_matches_serving_domain("rum_vitals", {"metric_value": 1.25}) is True
+
+    def test_rum_vitals_row_missing_metric_value_does_not_match(self):
+        assert row_matches_serving_domain("rum_vitals", {"error_message": "boom"}) is False
+
+    def test_rum_vitals_row_with_nan_metric_value_does_not_match(self):
+        assert row_matches_serving_domain("rum_vitals", {"metric_value": float("nan")}) is False
+
+    def test_rum_errors_row_with_error_message_matches(self):
+        assert row_matches_serving_domain("rum_errors", {"error_message": "boom"}) is True
+
+    def test_rum_errors_row_missing_error_message_does_not_match(self):
+        assert row_matches_serving_domain("rum_errors", {"metric_value": 1.25}) is False
+
+    def test_request_domain_rows_always_match(self):
+        assert row_matches_serving_domain("request", {}) is True
+
+
+def test_cmcd_rows_persist_country_and_asn_after_the_cmcd_map() -> None:
+    from backend.high_scale.publication import _DOMAIN_COLUMNS, _rows_for_domain
+
+    batch = HighScaleBatch(
+        "batch-cmcd",
+        "svc",
+        "cmcd",
+        "4",
+        (
+            {
+                "request_event_id": "request-event-1",
+                "timestamp": "2026-09-11T20:00:00Z",
+                "fields": {"br": "1000"},
+                "country": "US",
+                "asn": 7922,
+            },
+            {"request_event_id": "request-event-2", "timestamp": "2026-09-11T20:00:01Z", "fields": {"br": "1"}},
+        ),
+    )
+
+    first, second = _rows_for_domain(batch, "00000000-0000-0000-0000-000000000001")
+
+    assert _DOMAIN_COLUMNS["cmcd"][-3:] == ("cmcd", "country", "asn")
+    assert len(first) == len(_DOMAIN_COLUMNS["cmcd"])
+    assert first[-2:] == ("US", 7922)
+    assert second[-2:] == ("", None)
+
+
+def _rum_batch(domain: str, row: dict) -> HighScaleBatch:
+    base = {
+        "event_id": f"{domain}-1",
+        "timestamp": "2026-09-11T20:00:00Z",
+        "source_object_key": "raw/rum/one.gz",
+        "source_object_version": "v1",
+        "line_ordinal": 0,
+        "transform_version": "normalize.v1",
+    }
+    return HighScaleBatch(f"batch-{domain}", "svc", domain, "4", ({**base, **row},))
+
+
+def test_rum_vitals_rows_persist_environment_columns_after_country() -> None:
+    from backend.high_scale.publication import _DOMAIN_COLUMNS, _rows_for_domain
+
+    batch = _rum_batch(
+        "rum_vitals",
+        {
+            "metric_name": "LCP",
+            "metric_value": 1.5,
+            "browser": "Firefox",
+            "os": "Linux",
+            "device": "Desktop",
+            "geo_country_code": "DE",
+            "city": "Berlin",
+            "region": "BE",
+            "server_pop": "FRA",
+            "tls": "1.3",
+            "ttfb": "0.04",
+        },
+    )
+
+    (row,) = _rows_for_domain(batch, "00000000-0000-0000-0000-000000000001")
+
+    columns = _DOMAIN_COLUMNS["rum_vitals"]
+    assert columns[-9:] == ("country", "browser", "os", "device", "city", "region", "pop", "tls", "ttfb")
+    assert len(row) == len(columns)
+    assert row[-9:] == ("DE", "Firefox", "Linux", "Desktop", "Berlin", "BE", "FRA", "1.3", 0.04)
+
+
+def test_rum_error_rows_persist_error_position_and_environment() -> None:
+    from backend.high_scale.publication import _DOMAIN_COLUMNS, _rows_for_domain
+
+    batch = _rum_batch(
+        "rum_errors",
+        {
+            "error_message": "boom",
+            "error_file": "app.js",
+            "rum_error_line": "12",
+            "rum_error_col": "34",
+            "browser": "Chrome",
+            "country": "US",
+        },
+    )
+
+    (row,) = _rows_for_domain(batch, "00000000-0000-0000-0000-000000000001")
+
+    columns = _DOMAIN_COLUMNS["rum_errors"]
+    assert columns[-11:] == (
+        "country",
+        "error_line",
+        "error_col",
+        "browser",
+        "os",
+        "device",
+        "city",
+        "region",
+        "pop",
+        "tls",
+        "ttfb",
+    )
+    assert len(row) == len(columns)
+    assert row[-11:] == ("US", 12, 34, "Chrome", "", "", "", "", "", "", None)
+
+
+def test_rum_rows_without_environment_keep_empty_columns_not_defaults() -> None:
+    from backend.high_scale.publication import _rows_for_domain
+
+    (row,) = _rows_for_domain(
+        _rum_batch("rum_vitals", {"metric_name": "CLS", "metric_value": 0.1}),
+        "00000000-0000-0000-0000-000000000001",
+    )
+
+    assert row[-9:] == ("", "", "", "", "", "", "", "", None)
+
+
+# ── Merged from test_archive_publication.py ──
+
+from dataclasses import replace
+
+import pytest
+from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
+from backend.high_scale.archive_publication import (
+    ArchivePublication,
+    InMemoryObjectStore,
+    PublicationState,
+)
+
+from tests.high_scale.conftest import sha256_checksum as _checksum
+
+
+def _manifest() -> ArchiveManifest:
+    return ArchiveManifest(
+        manifest_id="manifest-1",
+        source=ArchiveSourceObject("svc", "request", "raw/request/a.gz", "sha256:source", 10, "v1"),
+        artifact=ArchiveArtifact(
+            uri="s3://archive/artifacts/manifest-1.parquet",
+            checksum="sha256:artifact",
+            size_bytes=4,
+            row_count=2,
+            byte_count=20,
+            canonical_digest="sha256:events",
+            schema_version="request.v1",
+            transform_version="normalize.v1",
+        ),
+        coverage_start=datetime(2026, 9, 1, tzinfo=UTC),
+        coverage_end=datetime(2026, 9, 1, 0, 1, tzinfo=UTC),
+        retention_deadline=datetime(2026, 9, 2, tzinfo=UTC),
+        deletion_authorization_deadline=datetime(2026, 9, 3, tzinfo=UTC),
+        archive_epoch=4,
+    )
+
+
+def test_publication_requires_verified_artifact_before_manifest_commit() -> None:
+    store = InMemoryObjectStore()
+    publication = ArchivePublication(store)
+    manifest = _manifest()
+
+    with pytest.raises(ValueError, match="artifact checksum"):
+        publication.publish(manifest, b"bad")
+
+    assert publication.state(manifest.manifest_id) is None
+    assert not store.exists("archive/manifests/manifest-1.commit")
+
+
+def test_publication_commits_manifest_only_after_verified_artifact() -> None:
+    store = InMemoryObjectStore()
+    publication = ArchivePublication(store)
+    manifest = _manifest()
+    artifact = b"data"
+
+    manifest = replace(manifest, artifact=replace(manifest.artifact, checksum=_checksum(artifact)))
+
+    result = publication.publish(manifest, artifact)
+
+    assert result.state is PublicationState.MANIFEST_COMMITTED
+    assert result.manifest_id == manifest.manifest_id
+    assert store.exists("archive/manifests/manifest-1.commit")
+    assert publication.is_replayable(manifest.manifest_id)
+
+
+def test_publish_is_idempotent_even_when_a_retry_recomputes_different_timestamps() -> None:
+    """Regression test: manifest_id is derived from (service_id, domain,
+    object_key, checksum, artifact_checksum) — never from coverage_start/
+    coverage_end — so a retried publish() for the same logical object (e.g.
+    after a crash between publish and the caller's next step) computes the
+    SAME manifest_id but, since coverage_start/end come from wall-clock
+    `now`, a byte-DIFFERENT manifest payload. Overwriting the already-
+    published key with different content breaks the immutable-artifact
+    contract and, against a CDN-cached store, can make the immediate
+    post-write verification read back stale bytes and fail outright —
+    observed live as every retry of one real object failing here forever.
+    A retry must be a no-op once the manifest is already durably published."""
+    store = InMemoryObjectStore()
+    publication = ArchivePublication(store)
+    artifact = b"data"
+    manifest = replace(_manifest(), artifact=replace(_manifest().artifact, checksum=_checksum(artifact)))
+
+    first = publication.publish(manifest, artifact)
+
+    retried_manifest = replace(
+        manifest,
+        coverage_start=datetime(2026, 9, 1, 0, 5, tzinfo=UTC),
+        coverage_end=datetime(2026, 9, 1, 0, 6, tzinfo=UTC),
+    )
+    second = publication.publish(retried_manifest, artifact)
+
+    assert second == first
+    # The originally-published manifest content is untouched — never
+    # overwritten with the retry's different coverage_start/end.
+    assert publication.is_replayable(manifest.manifest_id) is True
+
+
+def test_commit_marker_digest_mismatch_is_not_replayable() -> None:
+    store = InMemoryObjectStore()
+    publication = ArchivePublication(store)
+    manifest = replace(_manifest(), artifact=replace(_manifest().artifact, checksum=_checksum(b"data")))
+    publication.publish(manifest, b"data")
+    store.put("archive/manifests/manifest-1.commit", b"tampered")
+
+    assert publication.is_replayable(manifest.manifest_id) is False
+
+
+# ── Merged from test_archive_writer.py ──
+
+
+import pytest
+from backend.high_scale.archive_writer import write_batch_archive_checkpoint
+
+
+def test_archive_checkpoint_is_verified_and_replayable(tmp_path) -> None:
+    source = ArchiveSourceObject("svc", "request", "raw/request/a.gz", "sha256:a", 12, "v1")
+    manifest = write_batch_archive_checkpoint(
+        tmp_path,
+        service_id="svc",
+        domain="request",
+        source_batches=[(source, [{"event_id": "1", "status": 200}, {"event_id": "2", "status": 500}])],
+        archive_epoch=4,
+        schema_version="request.v1",
+        transform_version="normalize.v1",
+        coverage_start=datetime(2026, 9, 1, tzinfo=UTC),
+        coverage_end=datetime(2026, 9, 1, 0, 1, tzinfo=UTC),
+        retention_seconds=3600,
+        deletion_grace_seconds=900,
+    )
+    assert manifest.artifact.row_count == 2
+    assert manifest.deletion_authorization_deadline > manifest.retention_deadline
+    assert (tmp_path / f"{manifest.manifest_id}.manifest.json").is_file()
+
+
+def test_archive_checkpoint_rejects_mismatched_source(tmp_path) -> None:
+    source = ArchiveSourceObject("other", "request", "raw/request/a.gz", "sha256:a", 12)
+    with pytest.raises(ValueError, match="source identity"):
+        write_batch_archive_checkpoint(
+            tmp_path,
+            service_id="svc",
+            domain="request",
+            source_batches=[(source, [{"event_id": "1"}])],
+            archive_epoch=1,
+            schema_version="request.v1",
+            transform_version="normalize.v1",
+            coverage_start=datetime(2026, 9, 1, tzinfo=UTC),
+            coverage_end=datetime(2026, 9, 1, 0, 1, tzinfo=UTC),
+        )
+
+
+def test_archive_checkpoint_accepts_empty_rum_body(tmp_path) -> None:
+    source = ArchiveSourceObject("svc", "rum_errors", "raw/rum/errors.gz", "sha256:a", 12)
+    manifest = write_batch_archive_checkpoint(
+        tmp_path,
+        service_id="svc",
+        domain="rum_errors",
+        source_batches=[
+            (
+                source,
+                [
+                    {
+                        "event_id": "1",
+                        "rum_body": {},
+                        "error_message": "empty body remains publishable",
+                    }
+                ],
+            )
+        ],
+        archive_epoch=1,
+        schema_version="rum_errors.v1",
+        transform_version="normalize.v1",
+        coverage_start=datetime(2026, 9, 1, tzinfo=UTC),
+        coverage_end=datetime(2026, 9, 1, 0, 1, tzinfo=UTC),
+    )
+    assert manifest.artifact.row_count == 1
+
+
+# ── Merged from test_raw_query.py ──
+
+
+from backend.high_scale._common import raw_query_producer
+
+from tests.high_scale.conftest import (
+    InMemoryManifestCatalog as _Catalog,
+)
+from tests.high_scale.conftest import (
+    make_test_archive_manifest as _raw_query_manifest,
+)
+
+
+def test_producer_yields_rows_from_all_manifests_covering_the_window() -> None:
+    m1, bytes1 = _raw_query_manifest(
+        "m1",
+        datetime(2026, 9, 1, 0, 0, tzinfo=UTC),
+        datetime(2026, 9, 1, 0, 1, tzinfo=UTC),
+        ({"event_id": "1", "timestamp": "2026-09-01T00:00:30Z"},),
+    )
+    m2, bytes2 = _raw_query_manifest(
+        "m2",
+        datetime(2026, 9, 1, 0, 1, tzinfo=UTC),
+        datetime(2026, 9, 1, 0, 2, tzinfo=UTC),
+        ({"event_id": "2", "timestamp": "2026-09-01T00:01:30Z"},),
+    )
+    store = InMemoryObjectStore()
+    archive = ArchivePublication(store)
+    archive.publish(m1, bytes1)
+    archive.publish(m2, bytes2)
+    catalog = _Catalog((m1, m2))
+
+    producer = raw_query_producer(
+        catalog,
+        archive,
+        service_id="svc",
+        domain="request",
+        start=datetime(2026, 9, 1, 0, 0, tzinfo=UTC),
+        end=datetime(2026, 9, 1, 0, 2, tzinfo=UTC),
+    )
+
+    rows = list(producer())
+
+    assert [row["event_id"] for row in rows] == ["1", "2"]
+
+
+def test_producer_excludes_rows_outside_the_requested_window() -> None:
+    manifest, artifact_bytes = _raw_query_manifest(
+        "m1",
+        datetime(2026, 9, 1, 0, 0, tzinfo=UTC),
+        datetime(2026, 9, 1, 0, 2, tzinfo=UTC),
+        (
+            {"event_id": "early", "timestamp": "2026-09-01T00:00:10Z"},
+            {"event_id": "in-window", "timestamp": "2026-09-01T00:01:00Z"},
+            {"event_id": "late", "timestamp": "2026-09-01T00:01:50Z"},
+        ),
+    )
+    store = InMemoryObjectStore()
+    archive = ArchivePublication(store)
+    archive.publish(manifest, artifact_bytes)
+    catalog = _Catalog((manifest,))
+
+    producer = raw_query_producer(
+        catalog,
+        archive,
+        service_id="svc",
+        domain="request",
+        start=datetime(2026, 9, 1, 0, 0, 30, tzinfo=UTC),
+        end=datetime(2026, 9, 1, 0, 1, 30, tzinfo=UTC),
+    )
+
+    rows = list(producer())
+
+    assert [row["event_id"] for row in rows] == ["in-window"]
+
+
+def test_producer_yields_nothing_when_no_manifest_covers_the_window() -> None:
+    catalog = _Catalog(())
+    store = InMemoryObjectStore()
+    archive = ArchivePublication(store)
+
+    producer = raw_query_producer(
+        catalog,
+        archive,
+        service_id="svc",
+        domain="request",
+        start=datetime(2026, 9, 1, tzinfo=UTC),
+        end=datetime(2026, 9, 1, 1, tzinfo=UTC),
+    )
+
+    assert list(producer()) == []

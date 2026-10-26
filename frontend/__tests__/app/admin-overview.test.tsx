@@ -1,7 +1,7 @@
 import { act, render, renderHook, screen, waitFor, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
-import { withNuqsTestingAdapter } from 'nuqs/adapters/testing'
+import { withNuqsTestingAdapter, type OnUrlUpdateFunction } from 'nuqs/adapters/testing'
 import {
   createTestQueryClient, makeQueryWrapper, renderWithQuery, renderWithQueryClient,
   stubMatchMedia, stubResizeObserver, stubGetAnimations, stubPointerCaptureAndScroll,
@@ -9,17 +9,22 @@ import {
 import { describe, expect, it, test, vi, beforeAll, beforeEach, afterEach } from 'vitest'
 import React from 'react'
 
-const { adminFetchSpy, adminJsonSpy, adminJsonResultSpy, clientGetSpy, realApiRef, notFoundMock } = vi.hoisted(() => ({
+let mockSearchParamsString = 'service=svc-test'
+let mockScoringSubcomponents = false
+
+const { adminFetchSpy, adminJsonSpy, adminJsonResultSpy, clientGetSpy, clientPostSpy, realApiRef, notFoundMock } = vi.hoisted(() => ({
   adminFetchSpy: vi.fn(),
   adminJsonSpy: vi.fn(),
   adminJsonResultSpy: vi.fn(),
   clientGetSpy: vi.fn(),
+  clientPostSpy: vi.fn(),
   notFoundMock: vi.fn(() => { throw new Error('NEXT_HTTP_ERROR_FALLBACK;404') }),
   realApiRef: {
     adminFetch: null as ((...args: unknown[]) => Promise<Response>) | null,
     adminJson: null as ((...args: unknown[]) => Promise<unknown>) | null,
     adminJsonResult: null as ((...args: unknown[]) => Promise<unknown>) | null,
     clientGet: null as ((...args: unknown[]) => Promise<unknown>) | null,
+    clientPost: null as ((...args: unknown[]) => Promise<unknown>) | null,
   },
 }))
 
@@ -27,6 +32,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>()
   realApiRef.adminFetch = actual.adminFetch as (...args: unknown[]) => Promise<Response>
   realApiRef.clientGet = actual.client.GET as (...args: unknown[]) => Promise<unknown>
+  realApiRef.clientPost = actual.client.POST as (...args: unknown[]) => Promise<unknown>
   realApiRef.adminJsonResult = actual.adminJsonResult as (...args: unknown[]) => Promise<unknown>
   const defaultAdminJson = async (...args: unknown[]): Promise<unknown> => {
     const [, url, init, errorMessage] = args as [unknown, unknown, unknown, ((status: number) => string) | undefined]
@@ -39,17 +45,101 @@ vi.mock('@/lib/api', async (importOriginal) => {
   adminJsonSpy.mockImplementation(defaultAdminJson)
   adminJsonResultSpy.mockImplementation(realApiRef.adminJsonResult)
   clientGetSpy.mockImplementation(realApiRef.clientGet)
+  clientPostSpy.mockImplementation(realApiRef.clientPost)
   return {
     ...actual,
     adminFetch: (...args: unknown[]) => adminFetchSpy(...args),
     adminJson: (...args: unknown[]) => adminJsonSpy(...args),
     adminJsonResult: (...args: unknown[]) => adminJsonResultSpy(...args),
-    client: { ...actual.client, GET: (...args: unknown[]) => clientGetSpy(...args) },
+    client: {
+      ...actual.client,
+      GET: (...args: unknown[]) => clientGetSpy(...args),
+      POST: (...args: unknown[]) => clientPostSpy(...args),
+    },
+  }
+})
+
+vi.mock('@/hooks/useSSE', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useSSE')>()),
+  useAdminEventStream: () => ({ state: 'open' as const }),
+}))
+
+vi.mock('@/components/SessionScoring/ScoringAdminPanels', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/SessionScoring/ScoringAdminPanels')>()
+  return {
+    ...actual,
+    ScoringHealthCard: (...args: Parameters<typeof actual.ScoringHealthCard>) =>
+      mockScoringSubcomponents ? null : actual.ScoringHealthCard(...args),
+    ScorerFailOpenBreakdownCard: (...args: Parameters<typeof actual.ScorerFailOpenBreakdownCard>) =>
+      mockScoringSubcomponents ? null : actual.ScorerFailOpenBreakdownCard(...args),
+    MatrixVersionsCard: (...args: Parameters<typeof actual.MatrixVersionsCard>) =>
+      mockScoringSubcomponents ? null : actual.MatrixVersionsCard(...args),
+    AuditLogTab: (...args: Parameters<typeof actual.AuditLogTab>) =>
+      mockScoringSubcomponents ? null : actual.AuditLogTab(...args),
+    ExcludeRegexCard: (...args: Parameters<typeof actual.ExcludeRegexCard>) =>
+      mockScoringSubcomponents ? null : actual.ExcludeRegexCard(...args),
+    RetrainButton: (...args: Parameters<typeof actual.RetrainButton>) =>
+      mockScoringSubcomponents ? null : actual.RetrainButton(...args),
+    RotateKeyButton: (...args: Parameters<typeof actual.RotateKeyButton>) =>
+      mockScoringSubcomponents ? null : actual.RotateKeyButton(...args),
+  }
+})
+
+vi.mock('@/components/SessionScoring/StatusPanel', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/SessionScoring/StatusPanel')>()
+  return {
+    ...actual,
+    StatusPanel: (props: React.ComponentProps<typeof actual.StatusPanel>) =>
+      mockScoringSubcomponents ? (
+        <div data-testid="admin-session-scoring-status-card">Status for {props.serviceId}</div>
+      ) : (
+        actual.StatusPanel(props)
+      ),
+    L2EnforcementCard: (props: React.ComponentProps<typeof actual.L2EnforcementCard>) =>
+      mockScoringSubcomponents ? null : actual.L2EnforcementCard(props),
+    RocPrCurves: (...args: Parameters<typeof actual.RocPrCurves>) =>
+      mockScoringSubcomponents ? null : actual.RocPrCurves(...args),
+    PerReasonAucCard: (...args: Parameters<typeof actual.PerReasonAucCard>) =>
+      mockScoringSubcomponents ? null : actual.PerReasonAucCard(...args),
+    ScoreDistChart: (...args: Parameters<typeof actual.ScoreDistChart>) =>
+      mockScoringSubcomponents ? null : actual.ScoreDistChart(...args),
+    ComplianceChart: (...args: Parameters<typeof actual.ComplianceChart>) =>
+      mockScoringSubcomponents ? null : actual.ComplianceChart(...args),
+    StackedHourlyBarChart: (...args: Parameters<typeof actual.StackedHourlyBarChart>) =>
+      mockScoringSubcomponents ? null : actual.StackedHourlyBarChart(...args),
+    ScorerLatencyChart: (...args: Parameters<typeof actual.ScorerLatencyChart>) =>
+      mockScoringSubcomponents ? null : actual.ScorerLatencyChart(...args),
+    ScorerErrorsChart: (...args: Parameters<typeof actual.ScorerErrorsChart>) =>
+      mockScoringSubcomponents ? null : actual.ScorerErrorsChart(...args),
+    ScorerSeriesCard: (...args: Parameters<typeof actual.ScorerSeriesCard>) =>
+      mockScoringSubcomponents ? null : actual.ScorerSeriesCard(...args),
+  }
+})
+
+vi.mock('@/components/SessionScoring/ThresholdSlider', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/SessionScoring/ThresholdSlider')>()
+  return {
+    ...actual,
+    ThresholdSlider: (...args: Parameters<typeof actual.ThresholdSlider>) =>
+      mockScoringSubcomponents ? null : actual.ThresholdSlider(...args),
+  }
+})
+
+vi.mock('@/components/SessionScoring/TopFlaggedTable', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/SessionScoring/TopFlaggedTable')>()
+  return {
+    ...actual,
+    TopFlaggedTable: (...args: Parameters<typeof actual.TopFlaggedTable>) =>
+      mockScoringSubcomponents ? null : actual.TopFlaggedTable(...args),
   }
 })
 
 import AdminPage from '@/app/admin/page'
 import Loading from '@/app/admin/loading'
+import AdminQueuePage from '@/app/admin/queue/page'
+import QueueLoading from '@/app/admin/queue/loading'
+import ShareDashboardPage from '@/app/admin/share/page'
+import SessionScoringPage from '@/app/admin/session-scoring/page'
 import RumAdminPage from '@/app/admin/rum/page'
 import RumLoading from '@/app/admin/rum/loading'
 import QueryMonitorPage from '@/app/admin/queries/page'
@@ -57,8 +147,7 @@ import QueriesLoading from '@/app/admin/queries/loading'
 import ClickHouseLoading from '@/app/admin/clickhouse/loading'
 import ClickHouseAdminPage from '@/app/admin/clickhouse/page'
 import ClickHouseAdminClient, { ClickHouseStatusNotice } from '@/app/admin/clickhouse/_sections/ClickHouseAdminClient'
-import { OperationsOverview, AdminTrendsClient } from '@/app/admin/_sections/OperationsOverview'
-import { ServicesTable } from '@/app/admin/_sections/ServicesTable'
+import { OperationsOverview, AdminTrendsClient, ServicesTable } from '@/app/admin/_sections/OperationsOverview'
 import { QuarantineSection } from '@/app/control-room/_sections/ControlRoomClient'
 import TrendsLoading from '@/app/admin/trends/loading'
 import { useServiceStore } from '@/stores/filterStore'
@@ -84,17 +173,20 @@ const API_BASE = getApiBase()
 
 vi.mock('next/navigation', async () => ({
   ...(await import('../helpers/page-smoke')).navigationModuleMock('/admin'),
-  useSearchParams: vi.fn(() => new URLSearchParams('service=svc-test')),
+  useSearchParams: vi.fn(() => new URLSearchParams(mockSearchParamsString)),
   notFound: () => notFoundMock(),
 }))
 vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/page-smoke')).reactVirtualModuleMock())
 
 beforeEach(() => {
   vi.clearAllMocks()
+  mockSearchParamsString = 'service=svc-test'
+  mockScoringSubcomponents = false
   if (realApiRef.adminFetch) adminFetchSpy.mockImplementation(realApiRef.adminFetch)
   if (realApiRef.adminJson) adminJsonSpy.mockImplementation(realApiRef.adminJson)
   if (realApiRef.adminJsonResult) adminJsonResultSpy.mockImplementation(realApiRef.adminJsonResult)
   if (realApiRef.clientGet) clientGetSpy.mockImplementation(realApiRef.clientGet)
+  if (realApiRef.clientPost) clientPostSpy.mockImplementation(realApiRef.clientPost)
   useServiceStore.setState({ activeServiceId: 'test-svc', isInitialized: true })
 })
 
@@ -812,5 +904,736 @@ describe('SessionScoring Admin Panels: StatusPanel, AuditLogTab, MatrixVersionsC
     expect(screen.getByText(/fading in/i)).toBeInTheDocument()
     expect(screen.getByText(/33%/)).toBeInTheDocument()
     expect(screen.getByRole('switch')).toBeChecked()
+  })
+})
+
+
+describe('AdminQueuePage (/admin/queue)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('renders route-level loading skeleton with zero-CLS reservation containers and contextual messages', () => {
+    render(<QueueLoading />)
+    expect(screen.getByTestId('admin-queue-loading')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-queue-toolbar-skeleton')).toBeInTheDocument()
+    expect(screen.getAllByText(/Inspecting Celery task broker/i).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/Loading queue telemetry/i).length).toBeGreaterThan(0)
+  })
+
+  it('renders pre-allocated zero-CLS reservation containers and contextual in-place skeletons while queries are pending', () => {
+    clientGetSpy.mockImplementation(() => new Promise(() => {}))
+
+    renderWithQuery(<AdminQueuePage />)
+    expect(screen.getByTestId('admin-queue-root')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-queue-trends-reservation')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-queue-depths-reservation')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-queue-workers-reservation')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-queue-ledger-reservation')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-queue-schedules-reservation')).toBeInTheDocument()
+    expect(screen.getAllByText(/Inspecting Celery task broker/i).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/Loading queue telemetry/i).length).toBeGreaterThan(0)
+    expect(screen.getByTestId('admin-queue-refresh-btn')).toBeDisabled()
+  })
+
+  it('renders High-Scale queue depths, active workers, ingest ledger cards, in-process schedules, and supports manual Refresh', async () => {
+    let statusCalls = 0
+    let batchCalls = 0
+
+    clientGetSpy.mockImplementation(async (path: string) => {
+      if (path === '/api/admin/celery/status') {
+        statusCalls += 1
+        return {
+          data: {
+            broker_reachable: true,
+            workers: {
+              count: 1,
+              active_tasks: {
+                'celery@worker-1': [
+                  {
+                    id: 'task-uuid-101',
+                    name: 'backend.tasks.ingest.ingest_batch',
+                    args: ['svc-alpha', 25],
+                    time_start: 1700000000,
+                  },
+                ],
+              },
+              stats: { 'celery@worker-1': {} },
+              registered: { 'celery@worker-1': ['backend.tasks.ingest.ingest_batch'] },
+              scheduled: { 'celery@worker-1': [] },
+            },
+            queues: {
+              celery: 0,
+              'q.control': 2,
+              'q.ingest': 9,
+            },
+            inprocess_schedules: [
+              {
+                name: 'log_discovery_svc-alpha',
+                trigger: 'interval[0:00:10]',
+                next_run_at: 1700000010,
+              },
+            ],
+            ledger: {
+              discovered: 5,
+              claimed: 2,
+              committed: 140,
+              quarantined: 1,
+              dead_letter: 0,
+            },
+          },
+          response: { ok: true, status: 200 },
+        }
+      }
+      if (path === '/api/admin/metric-history/batch') {
+        batchCalls += 1
+        return {
+          data: {
+            series: {
+              celery_queue_depth: [
+                { ts: 1700000000, value: 4 },
+                { ts: 1700000060, value: 11 },
+              ],
+              celery_active_tasks: [
+                { ts: 1700000000, value: 1 },
+                { ts: 1700000060, value: 1 },
+              ],
+            },
+          },
+          response: { ok: true, status: 200 },
+        }
+      }
+      if (path === '/api/admin/celery/ledger') {
+        return {
+          data: {
+            items: [
+              {
+                service_id: 'svc-alpha',
+                object_key: 'raw/rum/year=2026/month=10/day=20/hour=04/minute=28/2026-10-20T04_28_00.000-test.log.gz',
+                source_type: 'rum',
+                status: 'quarantined',
+                attempts: 1,
+                error_kind: 'corrupt_gzip',
+                last_error: 'Not a gzipped file',
+                originating_task: 'rum_discovery',
+                originating_run_id: 42,
+                discovered_at: 1700000000,
+              },
+            ],
+            total: 1,
+          },
+          response: { ok: true, status: 200 },
+        }
+      }
+      return { data: {}, response: { ok: true, status: 200 } }
+    })
+
+    renderWithQuery(<AdminQueuePage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('admin-queue-broker-badge')).toHaveTextContent('Broker Reachable')
+    })
+
+    expect(screen.getByTestId('admin-queue-depths-table')).toBeInTheDocument()
+    expect(screen.getByText('q.ingest')).toBeInTheDocument()
+    expect(screen.getByText('q.control')).toBeInTheDocument()
+
+    expect(screen.getByTestId('admin-queue-workers-list')).toBeInTheDocument()
+    expect(screen.getByText('celery@worker-1')).toBeInTheDocument()
+    expect(screen.getByText('task-uuid-101')).toBeInTheDocument()
+
+    expect(screen.getByTestId('admin-queue-ledger-cards')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-queue-ledger-discovered')).toHaveTextContent('5')
+    expect(screen.getByTestId('admin-queue-ledger-committed')).toHaveTextContent('140')
+
+    expect(screen.getByTestId('admin-queue-inprocess-schedules-table')).toBeInTheDocument()
+    expect(screen.getByText('log_discovery_svc-alpha')).toBeInTheDocument()
+
+    const refreshBtn = screen.getByTestId('admin-queue-refresh-btn')
+    expect(refreshBtn).not.toBeDisabled()
+    fireEvent.click(refreshBtn)
+
+    await waitFor(() => {
+      expect(statusCalls).toBeGreaterThanOrEqual(2)
+      expect(batchCalls).toBeGreaterThanOrEqual(2)
+    })
+  })
+
+  it('renders Standard mode fallback cleanly when broker is unreachable or Celery queues are empty', async () => {
+    clientGetSpy.mockImplementation(async (path: string) => {
+      if (path === '/api/admin/celery/status') {
+        return {
+          data: {
+            broker_reachable: false,
+            workers: {
+              count: 0,
+              active_tasks: {},
+              stats: {},
+              registered: {},
+              scheduled: {},
+              error: 'Valkey unreachable',
+            },
+            queues: {},
+            inprocess_schedules: [],
+            ledger: {},
+          },
+          response: { ok: true, status: 200 },
+        }
+      }
+      if (path === '/api/admin/metric-history/batch') {
+        return {
+          data: { series: {} },
+          response: { ok: true, status: 200 },
+        }
+      }
+      return { data: {}, response: { ok: true, status: 200 } }
+    })
+
+    renderWithQuery(<AdminQueuePage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('admin-queue-broker-badge')).toHaveTextContent(
+        'Broker Unreachable / Standard Mode',
+      )
+    })
+
+    expect(screen.getByText(/No queues found or Celery mode is inactive/i)).toBeInTheDocument()
+    expect(screen.getByText(/No active workers found/i)).toBeInTheDocument()
+    expect(screen.getByText(/Ledger is empty/i)).toBeInTheDocument()
+    expect(screen.getByText(/No in-process schedules registered/i)).toBeInTheDocument()
+  })
+
+  it('renders Standard Mode in-process scheduler & ingest telemetry and hides Celery sections when deployment_mode is standard', async () => {
+    clientGetSpy.mockImplementation(async (path: string) => {
+      if (path === '/api/admin/celery/status') {
+        return {
+          data: {
+            broker_reachable: false,
+            deployment_mode: 'standard',
+            workers: {
+              count: 0,
+              active_tasks: {},
+              stats: {},
+              registered: {},
+              scheduled: {},
+              error: 'Celery broker not configured in standard mode',
+            },
+            queues: {},
+            inprocess_schedules: [
+              {
+                name: 'log_discovery_svc-alpha',
+                trigger: 'interval[0:00:10]',
+                next_run_at: 1700000010,
+              },
+              {
+                name: 'commit_svc-alpha',
+                trigger: 'interval[0:05:00]',
+                next_run_at: 1700000300,
+              },
+            ],
+            inprocess_active_runs: [
+              {
+                run_id: 101,
+                service_id: 'svc-alpha',
+                task: 'sync',
+                started_at: 1700000000,
+              },
+            ],
+            standard_ingest: {
+              ingested_files: 1250,
+              quarantined_items: 2,
+            },
+            ledger: {
+              committed: 1250,
+              quarantined: 2,
+              dead_letter: 0,
+            },
+          },
+          response: { ok: true, status: 200 },
+        }
+      }
+      if (path === '/api/admin/metric-history/batch') {
+        return { data: { series: {} }, response: { ok: true, status: 200 } }
+      }
+      return { data: {}, response: { ok: true, status: 200 } }
+    })
+
+    renderWithQuery(<AdminQueuePage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('admin-queue-broker-badge')).toHaveTextContent(
+        'Standard Mode · In-Process Scheduler',
+      )
+    })
+
+    expect(screen.queryByText(/^Queue Depths$/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Total Queue Depth \(1h\)/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Inspect warning:/i)).not.toBeInTheDocument()
+
+    expect(screen.getByTestId('admin-queue-depths-reservation')).toBeInTheDocument()
+    expect(screen.getByText(/Quarantined Files & Corrupt Lines \(2\)/i)).toBeInTheDocument()
+    expect(screen.getByTestId('admin-queue-standard-ingest-summary')).toBeInTheDocument()
+    expect(screen.getByText('1,250')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-queue-standard-scheduler-summary')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-queue-inprocess-active-table')).toBeInTheDocument()
+    expect(screen.getByTestId('admin-queue-inprocess-schedules-table')).toBeInTheDocument()
+    expect(screen.getByText('log_discovery_svc-alpha')).toBeInTheDocument()
+    expect(screen.getByText('commit_svc-alpha')).toBeInTheDocument()
+  })
+
+  it('displays dead-letter entries in the ledger inspector and handles Retry and Dismiss actions', async () => {
+    clientGetSpy.mockImplementation(async (path: string) => {
+      if (path === '/api/admin/celery/status') {
+        return {
+          data: {
+            broker_reachable: true,
+            workers: { count: 1, active_tasks: {}, stats: {}, registered: {}, scheduled: {} },
+            queues: { celery: 0, 'q.ingest': 0, 'q.control': 0 },
+            inprocess_schedules: [],
+            ledger: {
+              discovered: 0,
+              claimed: 0,
+              committed: 120,
+              quarantined: 0,
+              dead_letter: 3,
+            },
+          },
+          response: { ok: true, status: 200 },
+        }
+      }
+      if (path === '/api/admin/celery/ledger') {
+        return {
+          data: {
+            items: [
+              {
+                service_id: 'svc-alpha',
+                object_key: 'raw/rum/year=2026/month=10/day=20/hour=04/minute=28/sample-dead.log.gz',
+                source_type: 'rum',
+                status: 'dead_letter',
+                attempts: 1,
+                error_kind: 'object_missing',
+                last_error: 'object missing from FOS (already ingested+deleted, or expired)',
+                originating_task: 'rum_discovery',
+                originating_run_id: 24368,
+                claimed_at: 1729400000,
+              },
+            ],
+            total: 1,
+          },
+          response: { ok: true, status: 200 },
+        }
+      }
+      if (path === '/api/admin/metric-history/batch') {
+        return { data: { series: {} }, response: { ok: true, status: 200 } }
+      }
+      return { data: {}, response: { ok: true, status: 200 } }
+    })
+
+    clientPostSpy.mockImplementation(async () => ({
+      data: { ok: true, affected: 1, dispatched: 1 },
+      response: { ok: true, status: 200 },
+    }))
+
+    renderWithQuery(<AdminQueuePage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('admin-queue-ledger-entries')).toBeInTheDocument()
+    })
+
+    expect(
+      screen.getByText('raw/rum/year=2026/month=10/day=20/hour=04/minute=28/sample-dead.log.gz'),
+    ).toBeInTheDocument()
+    expect(screen.getByText('object_missing')).toBeInTheDocument()
+    expect(
+      screen.getByText('object missing from FOS (already ingested+deleted, or expired)'),
+    ).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('admin-queue-ledger-retry-row'))
+    await waitFor(() => {
+      expect(clientPostSpy).toHaveBeenCalledWith(
+        '/api/admin/celery/ledger/retry',
+        expect.objectContaining({
+          body: {
+            items: [
+              {
+                service_id: 'svc-alpha',
+                object_key: 'raw/rum/year=2026/month=10/day=20/hour=04/minute=28/sample-dead.log.gz',
+              },
+            ],
+          },
+        }),
+      )
+    })
+
+    fireEvent.click(screen.getByTestId('admin-queue-ledger-purge-all'))
+    await waitFor(() => {
+      expect(clientPostSpy).toHaveBeenCalledWith(
+        '/api/admin/celery/ledger/purge',
+        expect.objectContaining({
+          body: { status: 'problem' },
+        }),
+      )
+    })
+  })
+})
+
+function buildMockShareStatus(overrides: Record<string, unknown> = {}) {
+  return {
+    sharing_active: false,
+    public_endpoint: null,
+    public_url: null,
+    forward_port: null,
+    started_at: null,
+    max_concurrent_sessions: 10,
+    active_session_count: 0,
+    rate_limits: {
+      failures: [],
+      lockouts: [],
+    },
+    telemetry: {
+      current_uptime_s: null,
+      heartbeat_unauth_count: 0,
+      tunnel_uptime_history: [],
+    },
+    invites: [
+      {
+        id: 'inv-1',
+        name: 'Security Analyst',
+        email: 'analyst@example.com',
+        created_at: 1710000000,
+        expires_at: null,
+        revoked: false,
+        max_sessions: 1,
+        services: ['svc-1'],
+        active_sessions: 0,
+      },
+    ],
+    sessions: [],
+    services: [
+      {
+        service_id: 'svc-1',
+        name: 'Primary Edge Service',
+        remote_frontend_deployed: false,
+        sharing_domain: null,
+      },
+    ],
+    audit_logs: [],
+    ...overrides,
+  }
+}
+
+describe('admin/share page', () => {
+  beforeEach(() => {
+    mockSearchParamsString = ''
+  })
+
+  test('renders zero-CLS reservation containers, SharingControlPanel, InvitationsPanel, and tabs', async () => {
+    let statusCalls = 0
+    let liveCalls = 0
+
+    server.use(
+      http.get(`${API_BASE}/api/admin/share/status`, () => {
+        statusCalls += 1
+        return HttpResponse.json(buildMockShareStatus())
+      }),
+      http.get(`${API_BASE}/api/admin/share/live`, () => {
+        liveCalls += 1
+        return HttpResponse.json({
+          sharing_active: false,
+          public_url: null,
+          active_session_count: 0,
+          rate_limits: {
+            failures: [],
+            lockouts: [],
+          },
+          telemetry: {
+            current_uptime_s: null,
+            heartbeat_unauth_count: 0,
+            tunnel_uptime_history: [],
+          },
+        })
+      }),
+    )
+
+    renderWithQuery(<ShareDashboardPage />, {
+      wrapper: withNuqsTestingAdapter({ searchParams: mockSearchParamsString }),
+    })
+
+    await waitFor(() => {
+      expect(statusCalls).toBe(1)
+      expect(liveCalls).toBe(1)
+    })
+
+    const root = screen.getByTestId('admin-share-root')
+    const controlRes = screen.getByTestId('admin-share-control-reservation')
+    const panelRes = screen.getByTestId('admin-share-panel-reservation')
+    expect(root).toBeTruthy()
+    expect(controlRes.className).toContain('[contain-intrinsic-size:auto_220px]')
+    expect(controlRes.className).toContain('[content-visibility:auto]')
+    expect(panelRes.className).toContain('[contain-intrinsic-size:auto_360px]')
+    expect(panelRes.className).toContain('[content-visibility:auto]')
+
+    await waitFor(() => {
+      expect(screen.getByTestId('admin-share-control-panel')).toBeTruthy()
+      expect(screen.getByTestId('admin-share-status-badge').textContent).toBe('OFF')
+      expect(screen.getByTestId('admin-share-invites-panel')).toBeTruthy()
+    })
+
+    expect(screen.getByTestId('admin-share-tab-invites')).toBeTruthy()
+    expect(screen.getByTestId('admin-share-tab-sessions')).toBeTruthy()
+    expect(screen.getByTestId('admin-share-tab-audit')).toBeTruthy()
+    expect(screen.getByText('analyst@example.com')).toBeTruthy()
+  })
+
+  test('manual Refresh button refetches /api/admin/share/status', async () => {
+    let statusCalls = 0
+    server.use(
+      http.get(`${API_BASE}/api/admin/share/status`, () => {
+        statusCalls += 1
+        return HttpResponse.json(
+          buildMockShareStatus({
+            sharing_active: statusCalls > 1,
+            public_url: statusCalls > 1 ? 'https://share.example.com' : null,
+          }),
+        )
+      }),
+      http.get(`${API_BASE}/api/admin/share/live`, () => {
+        return HttpResponse.json({})
+      }),
+    )
+
+    renderWithQuery(<ShareDashboardPage />, {
+      wrapper: withNuqsTestingAdapter({ searchParams: mockSearchParamsString }),
+    })
+
+    await waitFor(() => {
+      expect(statusCalls).toBe(1)
+      expect(screen.getByTestId('admin-share-status-badge').textContent).toBe('OFF')
+    })
+
+    const refreshBtn = screen.getByTestId('admin-share-refresh-btn')
+    fireEvent.click(refreshBtn)
+
+    await waitFor(() => {
+      expect(statusCalls).toBe(2)
+      expect(screen.getByTestId('admin-share-status-badge').textContent).toBe('ACTIVE')
+    })
+  })
+
+  test('initializes activeTab from URL ?tab= query parameter', async () => {
+    mockSearchParamsString = 'tab=sessions'
+
+    server.use(
+      http.get(`${API_BASE}/api/admin/share/status`, () => {
+        return HttpResponse.json(buildMockShareStatus())
+      }),
+      http.get(`${API_BASE}/api/admin/share/live`, () => {
+        return HttpResponse.json({})
+      }),
+    )
+
+    renderWithQuery(<ShareDashboardPage />, {
+      wrapper: withNuqsTestingAdapter({ searchParams: mockSearchParamsString }),
+    })
+
+    await waitFor(() => {
+      expect(screen.getByTestId('admin-share-control-panel')).toBeTruthy()
+    })
+
+    const sessionsTrigger = screen.getByTestId('admin-share-tab-sessions')
+    expect(sessionsTrigger.getAttribute('aria-selected')).toBe('true')
+  })
+
+  test('displays destructive alert when /api/admin/share/status returns 500', async () => {
+    server.use(
+      http.get(`${API_BASE}/api/admin/share/status`, () => {
+        return HttpResponse.json({ detail: 'Share DB unavailable' }, { status: 500 })
+      }),
+      http.get(`${API_BASE}/api/admin/share/live`, () => {
+        return HttpResponse.json({})
+      }),
+    )
+
+    renderWithQuery(<ShareDashboardPage />, {
+      wrapper: withNuqsTestingAdapter({ searchParams: mockSearchParamsString }),
+    })
+
+    await waitFor(() => {
+      expect(screen.getByTestId('admin-share-status-error')).toBeTruthy()
+    })
+  })
+
+  test('an unknown ?tab= falls back to invites; tab clicks write and clear ?tab= (replace)', async () => {
+    mockSearchParamsString = 'tab=bogus'
+    const onUrlUpdate = vi.fn<OnUrlUpdateFunction>()
+
+    server.use(
+      http.get(`${API_BASE}/api/admin/share/status`, () => HttpResponse.json(buildMockShareStatus())),
+      http.get(`${API_BASE}/api/admin/share/live`, () => HttpResponse.json({})),
+    )
+
+    renderWithQuery(<ShareDashboardPage />, {
+      wrapper: withNuqsTestingAdapter({
+        searchParams: mockSearchParamsString,
+        hasMemory: true,
+        onUrlUpdate,
+        resetUrlUpdateQueueOnMount: false,
+      }),
+    })
+
+    await waitFor(() => expect(screen.getByTestId('admin-share-control-panel')).toBeTruthy())
+    expect(screen.getByTestId('admin-share-tab-invites').getAttribute('aria-selected')).toBe('true')
+
+    fireEvent.click(screen.getByTestId('admin-share-tab-sessions'))
+    await waitFor(() => expect(onUrlUpdate.mock.calls.at(-1)?.[0].searchParams.get('tab')).toBe('sessions'))
+    expect(onUrlUpdate.mock.calls.at(-1)?.[0].options.history).toBe('replace')
+
+    fireEvent.click(screen.getByTestId('admin-share-tab-invites'))
+    await waitFor(() => expect(onUrlUpdate.mock.calls.at(-1)?.[0].searchParams.has('tab')).toBe(false))
+  })
+})
+
+describe('admin/session-scoring page', () => {
+  beforeEach(() => {
+    mockScoringSubcomponents = true
+    useServiceStore.setState({
+      activeServiceId: 'svc-default',
+      isInitialized: true,
+    })
+  })
+
+  test('renders without unhandled requests (default MSW handlers cover the composites)', async () => {
+    const analyticsHits: string[] = []
+    const configHits: string[] = []
+    server.use(
+      http.get(`${API_BASE}/api/services/:service_id/scoring/analytics`, ({ params }) => {
+        analyticsHits.push(String(params.service_id))
+        return HttpResponse.json({
+          health: { ok: true },
+          top_flagged: { rows: [] },
+          score_distribution: { buckets: [] },
+          compliance_breakdown: { categories: [] },
+          evaluation_per_reason: { rows: [] },
+          evaluation: { mean_score: 0 },
+        })
+      }),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/config`, ({ params }) => {
+        configHits.push(String(params.service_id))
+        return HttpResponse.json({
+          status: { enabled: false },
+          threshold: { value: 50 },
+          exclude_regex: { pattern: '' },
+          enforce_status_code: { code: 403 },
+          matrix_versions: { versions: [] },
+        })
+      }),
+    )
+
+    renderWithQuery(<SessionScoringPage />)
+
+    await waitFor(() => {
+      expect(analyticsHits, 'scoring/analytics composite must have been called').not.toEqual([])
+      expect(configHits, 'scoring/config composite must have been called').not.toEqual([])
+    })
+
+    expect(analyticsHits[0]).toBe('svc-default')
+    expect(configHits[0]).toBe('svc-default')
+
+    const root = screen.getByTestId('admin-session-scoring-root')
+    const statusRes = screen.getByTestId('admin-session-scoring-status-reservation')
+    const overviewRes = screen.getByTestId('admin-session-scoring-overview-reservation')
+    expect(root).toBeTruthy()
+    expect(statusRes.className).toContain('[contain-intrinsic-size:auto_220px]')
+    expect(statusRes.className).toContain('[content-visibility:auto]')
+    expect(overviewRes.className).toContain('[contain-intrinsic-size:auto_900px]')
+    expect(overviewRes.className).toContain('[content-visibility:auto]')
+
+    expect(screen.getByTestId('admin-session-scoring-tab-overview')).toBeTruthy()
+    expect(screen.getByTestId('admin-session-scoring-tab-labels')).toBeTruthy()
+    expect(screen.getByTestId('admin-session-scoring-tab-matrix')).toBeTruthy()
+    expect(screen.getByTestId('admin-session-scoring-tab-audit')).toBeTruthy()
+  })
+
+  test('manual refresh button invalidates and refetches composites', async () => {
+    let configCalls = 0
+    let analyticsCalls = 0
+    server.use(
+      http.get(`${API_BASE}/api/services/:service_id/scoring/analytics`, () => {
+        analyticsCalls += 1
+        return HttpResponse.json({
+          health: { ok: true },
+          top_flagged: { rows: [] },
+          score_distribution: { buckets: [] },
+          compliance_breakdown: { categories: [] },
+          evaluation_per_reason: { rows: [] },
+          evaluation: { mean_score: 0 },
+        })
+      }),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/config`, () => {
+        configCalls += 1
+        return HttpResponse.json({
+          status: { enabled: true },
+          threshold: { threshold: 75 },
+          exclude_regex: { pattern: '' },
+          enforce_status_code: { effective: 429 },
+        })
+      }),
+    )
+
+    renderWithQuery(<SessionScoringPage />)
+
+    await waitFor(() => {
+      expect(configCalls).toBe(1)
+      expect(analyticsCalls).toBe(1)
+    })
+
+    const refreshBtn = screen.getByTestId('admin-session-scoring-refresh-btn')
+    fireEvent.click(refreshBtn)
+
+    await waitFor(() => {
+      expect(configCalls).toBe(2)
+      expect(analyticsCalls).toBe(2)
+    })
+  })
+
+  test('falls back to /api/services when activeServiceId is initially empty', async () => {
+    useServiceStore.setState({
+      activeServiceId: null,
+      isInitialized: false,
+    })
+
+    const configHits: string[] = []
+    server.use(
+      http.get(`${API_BASE}/api/services`, () => {
+        return HttpResponse.json({
+          services: [{ service_id: 'svc-fallback', name: 'Fallback Service' }],
+        })
+      }),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/analytics`, () => {
+        return HttpResponse.json({
+          health: { ok: true },
+          top_flagged: { rows: [] },
+          score_distribution: { buckets: [] },
+          compliance_breakdown: { categories: [] },
+          evaluation_per_reason: { rows: [] },
+          evaluation: { mean_score: 0 },
+        })
+      }),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/config`, ({ params }) => {
+        configHits.push(String(params.service_id))
+        return HttpResponse.json({
+          status: { enabled: false },
+          threshold: { threshold: null },
+          exclude_regex: { pattern: '' },
+          enforce_status_code: { effective: 429 },
+        })
+      }),
+    )
+
+    renderWithQuery(<SessionScoringPage />)
+
+    await waitFor(() => {
+      expect(configHits).toContain('svc-fallback')
+    })
   })
 })

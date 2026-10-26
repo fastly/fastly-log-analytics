@@ -143,8 +143,8 @@ vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
   useEnforceMaskedFilters: () => {},
 }))
 
-vi.mock('@/components/SessionScoring/help-content', async (orig) => {
-  const actual = await orig<typeof import('@/components/SessionScoring/help-content')>()
+vi.mock('@/components/SessionScoring/ScoringAdminPanels', async (orig) => {
+  const actual = await orig<typeof import('@/components/SessionScoring/ScoringAdminPanels')>()
   return {
     ...actual,
     useScorerTimeseries: () => ({
@@ -157,8 +157,8 @@ vi.mock('@/components/SessionScoring/help-content', async (orig) => {
   }
 })
 
-vi.mock('@/lib/chart-helpers', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/lib/chart-helpers')>()),
+vi.mock("@/lib/utils", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/utils")>()),
   TIME_HOVER_LAYOUT: { hovermode: 'x unified' },
   makeTimeXAxis: (start: string | null | undefined, end: string | null | undefined) => ({
     type: 'date',

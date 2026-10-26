@@ -5,9 +5,7 @@ import dynamic from 'next/dynamic'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Clock, RefreshCw, ShieldCheck } from 'lucide-react'
 
-import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api'
-import { queryKeys } from '@/lib/query-keys'
+import { client, unwrapClient, queryKeys } from "@/lib/api";
 import { cn } from '@/lib/utils'
 
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -48,7 +46,7 @@ import {
   invalidateServiceScoringQueries,
   scoringAnalyticsCompositeOptions,
   scoringConfigCompositeOptions,
-} from '@/components/SessionScoring/help-content'
+} from '@/components/SessionScoring/ScoringAdminPanels'
 import { useServiceStore } from '@/stores/filterStore'
 import Loading from './loading'
 

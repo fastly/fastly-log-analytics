@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import struct
 import sys
@@ -23,13 +24,13 @@ from types import FrameType
 from typing import Any
 
 import cachetools
+import httpx
 import structlog
+import tenacity
 from opentelemetry import trace
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
-
-from backend.utils.date_utils import iso_z, parse_iso_utc
 
 logger = logging.getLogger(__name__)
 _os = os
@@ -1623,6 +1624,298 @@ def redact_error_text(msg: object) -> str:
     return ABS_PATH_RE.sub("<path>", scrub_secrets(str(msg)))
 
 
+# ── Shared HTTP helper (folded from backend.utils.http) ──────────────────────
+
+_DEFAULT_UA = "fastly-log-analysis/1.0"
+
+
+def http_get_text(url: str, *, headers: dict[str, str] | None = None, timeout: float = 30.0) -> str:
+    """GET ``url`` and return the response body decoded as UTF-8 text.
+
+    Follows redirects and raises on a 4xx/5xx status or a network error,
+    matching the previous stdlib URL-open semantics (which raise on a bad
+    status and follow redirects by default). ``.decode()`` is explicit UTF-8
+    to match the old ``resp.read().decode()`` rather than httpx's
+    header-driven charset guessing.
+    """
+    hdrs = {"User-Agent": _DEFAULT_UA}
+    if headers:
+        hdrs.update(headers)
+    resp = httpx.get(url, headers=hdrs, timeout=timeout, follow_redirects=True)
+    resp.raise_for_status()
+    return resp.content.decode()
+
+
+def make_client(
+    timeout: float | httpx.Timeout | None = 5.0,
+    *,
+    verify: Any = None,
+    transport: httpx.BaseTransport | None = None,
+    **kwargs: Any,
+) -> httpx.Client:
+    """Build the shared sync ``httpx.Client`` used by outbound HTTP call sites.
+
+    One construction point so TLS verification (httpx's default certifi bundle
+    unless ``verify`` overrides it) and the default timeout (httpx's 5 s, matching
+    the pre-factory call sites) are uniform.
+    ``transport`` is the injectable test seam. Callers own the lifecycle
+    (use as a context manager). Never put credentials in the client defaults
+    that would be logged; pass auth headers per request or via ``headers=``.
+    """
+    if verify is not None:
+        kwargs["verify"] = verify
+    if transport is not None:
+        kwargs["transport"] = transport
+    return httpx.Client(timeout=timeout, **kwargs)
+
+
+# ── Shared retry policy (folded from backend.core.retry) ─────────────────────
+
+
+def retry_call[T](
+    fn: Callable[[], T],
+    *,
+    retry_on: Callable[[BaseException], bool],
+    attempts: int,
+    base_delay: float = 0.0,
+    max_delay: float | None = None,
+    multiplier: float = 2.0,
+    jitter: float = 0.0,
+    max_elapsed: float | None = None,
+    before_retry: Callable[[BaseException], None] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> T:
+    """Call ``fn`` with bounded, backed-off retries on retryable failures.
+
+    Args:
+        fn: Zero-arg callable to invoke. Return value is passed through.
+        retry_on: Predicate run against each raised exception. Returns ``True``
+            to allow another attempt, ``False`` to re-raise immediately. The
+            exception is never swallowed — on give-up (budget exhausted) the
+            last exception is re-raised.
+        attempts: Maximum number of calls to ``fn`` (``>= 1``). ``attempts=1``
+            disables retrying (``fn`` is called once; any exception propagates
+            per ``retry_on``).
+        base_delay: Delay (seconds) before the first retry. ``0`` means no
+            wait between attempts.
+        max_delay: Upper clamp on any single backoff delay. ``None`` = no clamp.
+        multiplier: Exponential growth factor applied per retry.
+        jitter: Maximum extra uniform-random seconds added to each delay.
+        max_elapsed: Optional wall-clock budget (seconds). When exceeded, the
+            loop stops and the last exception is re-raised even if ``attempts``
+            remain.
+        before_retry: Optional action invoked with the retryable exception
+            after a failed attempt and before the backoff sleep. Use it for a
+            specialized recovery step (e.g. busting a cache). Exceptions it
+            raises propagate (they are not themselves retried here).
+        sleep: Injectable sleep function (test seam).
+
+    Returns:
+        Whatever ``fn`` returns on its first successful call.
+
+    Raises:
+        The last exception raised by ``fn`` once the budget is exhausted, or
+        immediately when ``retry_on`` returns ``False``.
+    """
+    if attempts < 1:
+        raise ValueError("attempts must be >= 1")
+
+    def _wait(retry_state: tenacity.RetryCallState) -> float:
+        delay = base_delay * (multiplier ** (retry_state.attempt_number - 1))
+        if max_delay is not None:
+            delay = min(delay, max_delay)
+        if jitter:
+            delay += random.uniform(0, jitter)
+        return max(delay, 0.0)
+
+    def _before_sleep(retry_state: tenacity.RetryCallState) -> None:
+        if before_retry is None:
+            return
+        outcome = retry_state.outcome
+        exc = outcome.exception() if outcome is not None else None
+        if exc is not None:
+            before_retry(exc)
+
+    stop: tenacity.stop.stop_base = tenacity.stop_after_attempt(attempts)
+    if max_elapsed is not None:
+        stop = stop | tenacity.stop_after_delay(max_elapsed)
+
+    retrying = tenacity.Retrying(
+        retry=tenacity.retry_if_exception(retry_on),
+        stop=stop,
+        wait=_wait,
+        before_sleep=_before_sleep if before_retry is not None else None,
+        reraise=True,
+        sleep=sleep,
+    )
+    return retrying(fn)
+
+
+# ── Date & window utilities (folded from backend.utils.date_utils) ───────────
+
+
+def parse_iso_utc(s: str | None) -> datetime | None:
+    """Parse an ISO-8601 or YYYY-MM-DD string to a UTC datetime. Returns None if invalid or None."""
+    if not s:
+        return None
+    try:
+        d = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return d.astimezone(UTC) if d.tzinfo is not None else d.replace(tzinfo=UTC)
+    except ValueError:
+        try:
+            return datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=UTC)
+        except ValueError:
+            return None
+
+
+def parse_window(start: str | None, end: str | None) -> tuple[datetime, datetime] | None:
+    """Parse a ``(start, end)`` ISO pair to UTC datetimes, or ``None`` when either is missing/unparseable
+    or the window is empty/inverted (``end <= start``)."""
+    st = parse_iso_utc(start)
+    et = parse_iso_utc(end)
+    if st is None or et is None or et <= st:
+        return None
+    return st, et
+
+
+def parse_hour_key_strict(s: str) -> datetime:
+    """Parse a ``YYYY-MM-DD-HH`` partition key to a tz-aware UTC datetime.
+
+    Raises ``ValueError`` on malformed input (same contract as the raw
+    ``datetime.strptime`` it replaces).
+    """
+    return datetime.strptime(s, "%Y-%m-%d-%H").replace(tzinfo=UTC)
+
+
+def parse_hour_key(s: str) -> datetime | None:
+    """Like :func:`parse_hour_key_strict` but returns ``None`` when malformed."""
+    try:
+        return parse_hour_key_strict(s)
+    except ValueError:
+        return None
+
+
+def parse_day_key_strict(s: str) -> datetime:
+    """Parse a ``YYYY-MM-DD`` partition key to midnight UTC (raises ``ValueError``)."""
+    return datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=UTC)
+
+
+def ensure_utc(dt: datetime) -> datetime:
+    """Return ``dt`` as an aware UTC datetime.
+
+    Naive values are treated as UTC (DuckDB TIMESTAMP is naive-UTC); aware
+    values are converted with ``astimezone`` so the instant is preserved.
+    """
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
+def iso_z(dt: datetime) -> str:
+    """Format a datetime to ISO 8601 with a Z suffix."""
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def iso_z_now() -> str:
+    """Return the current UTC time as an ISO 8601 string with a Z suffix."""
+    return iso_z(datetime.now(UTC))
+
+
+def _parse_dt(s: str, default: datetime) -> datetime:
+    """Parse an ISO-8601 or YYYY-MM-DD string to a UTC datetime, returning default on failure."""
+    dt = parse_iso_utc(s)
+    return dt if dt is not None else default
+
+
+def parse_date_window(start: str, end: str, default_days: int = 7) -> tuple[str, str]:
+    now = datetime.now(UTC)
+    start_dt = _parse_dt(start, now - timedelta(days=default_days))
+    end_dt = _parse_dt(end, now)
+
+    if len(end) <= 10:
+        end_dt = end_dt.replace(hour=23, minute=59, second=59)
+
+    return iso_z(start_dt), iso_z(end_dt)
+
+
+def safe_iso(dt) -> str | None:
+    """Normalise a datetime or string to an ISO-8601 string ending in Z.
+
+    DuckDB TIMESTAMP is timezone-naive but always represents UTC; appending
+    Z ensures JavaScript parses it as UTC instead of local time. Used by
+    both the duckdb core layer and the repositories layer.
+    """
+    if dt is None:
+        return None
+    if hasattr(dt, "isoformat"):
+        s = dt.isoformat()
+        if not s.endswith("Z") and "+" not in s and s.count("-") <= 2:
+            s += "Z"
+        return s
+    s = str(dt).strip()
+    if not s:
+        return None
+    if " " in s:
+        s = s.replace(" ", "T")
+        if not s.endswith("Z") and "+" not in s:
+            s += "Z"
+    elif "T" in s and not s.endswith("Z") and "+" not in s:
+        s += "Z"
+    return s
+
+
+def parse_window_str_to_dt(s: str) -> datetime:
+    """Parse a string returned by ``parse_date_window`` back into a UTC datetime.
+
+    ``parse_date_window`` returns ISO-8601 ``"%Y-%m-%dT%H:%M:%SZ"``; callers
+    that need a ``datetime`` for arithmetic (e.g. ``.timestamp()``) should
+    use this helper rather than ``strptime("%Y-%m-%d %H:%M:%S")``, which
+    fails on the T separator and Z suffix.
+    """
+    dt = parse_iso_utc(s)
+    if dt is None:
+        raise ValueError(f"Invalid date window string: {s}")
+    return dt
+
+
+def window_to_epoch(start: str, end: str) -> tuple[str, str, int, int]:
+    """Parse a (start, end) request window into its ISO-Z strings plus the
+    matching epoch-second integers.
+
+    Folds the three-step ``parse_date_window`` → ``parse_window_str_to_dt``
+    → ``int(.timestamp())`` dance that the usage router's Fastly /stats
+    handlers each repeated. Returns ``(start_str, end_str, from_ts, to_ts)``.
+    """
+    s, e = parse_date_window(start, end)
+    return s, e, int(parse_window_str_to_dt(s).timestamp()), int(parse_window_str_to_dt(e).timestamp())
+
+
+def parse_relative_time_window(since: str, max_lookback_days: int = 30) -> datetime:
+    """Parse a window string like ``"1h"`` / ``"24h"`` / ``"7d"`` / ``"30m"``
+    into a UTC datetime ``now - delta``.
+
+    Capped at ``max_lookback_days`` so an oversized input can't pull data
+    beyond the retention window. Falls back to ``now - 1 hour`` for empty /
+    malformed input — admin UIs that drive this pass a controlled set of
+    values, so silent fallback is preferable to surfacing a 400.
+    """
+    now = datetime.now(UTC)
+    if not since:
+        return now - timedelta(hours=1)
+    s = since.strip().lower()
+    try:
+        if s.endswith("h"):
+            hours = max(1, min(int(s[:-1]), max_lookback_days * 24))
+            return now - timedelta(hours=hours)
+        if s.endswith("d"):
+            days = max(1, min(int(s[:-1]), max_lookback_days))
+            return now - timedelta(days=days)
+        if s.endswith("m"):
+            minutes = max(1, min(int(s[:-1]), max_lookback_days * 24 * 60))
+            return now - timedelta(minutes=minutes)
+    except ValueError:
+        pass
+    return now - timedelta(hours=1)
+
+
 _FOLDED_TELEMETRY_SUBMODULES: tuple[str, ...] = (
     "sqlite_profiler",
     "valkey_publisher",
@@ -1637,6 +1930,8 @@ _FOLDED_TELEMETRY_SUBMODULES: tuple[str, ...] = (
     "structlog_config",
     "atomic_write",
     "error_redaction",
+    "http",
+    "date_utils",
 )
 _this_telemetry_mod = sys.modules[__name__]
 _utils_pkg = sys.modules.get("backend.utils")
@@ -1645,8 +1940,14 @@ for _submod_name in _FOLDED_TELEMETRY_SUBMODULES:
     if _utils_pkg is not None:
         setattr(_utils_pkg, _submod_name, _this_telemetry_mod)
 
+sys.modules["backend.core.retry"] = _this_telemetry_mod
+_core_pkg = sys.modules.get("backend.core")
+if _core_pkg is not None:
+    setattr(_core_pkg, "retry", _this_telemetry_mod)
+
 _backend_pkg = sys.modules.get("backend")
 if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
     _backend_pkg._MODULE_ALIASES.update(
         {f"backend.utils.{_submod_name}": "backend.utils.telemetry" for _submod_name in _FOLDED_TELEMETRY_SUBMODULES}
     )
+    _backend_pkg._MODULE_ALIASES["backend.core.retry"] = "backend.utils.telemetry"

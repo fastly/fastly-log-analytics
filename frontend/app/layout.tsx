@@ -11,7 +11,7 @@ import { AppLayout } from "@/components/AppLayout";
 import { ServerFooter } from "@/components/ServerFooter";
 import { SIDEBAR_COLLAPSED_COOKIE } from "@/lib/utils";
 import { ErrorBoundaryWithRouteReset } from "@/components/AnalyticsCard";
-import { queryKeys, seedBootstrapDependentCaches } from "@/lib/query-keys";
+import { queryKeys, seedBootstrapDependentCaches } from "@/lib/api";
 import { fetchBootstrapServerSide } from '@/lib/ssr/upstream';
 import { shouldLoadRumScript } from "@/lib/ssr/upstream";
 

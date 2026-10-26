@@ -1,24 +1,49 @@
 from __future__ import annotations
 
-"""scripts/lib/gce_ssh.sh builds the remote command from a quoted argv (S10).
+"""scripts/lib/gce_ssh.sh, readiness probes, admin TLS, CLI, prom, streaming fixture, profile_insights, check_osv, port_forward, and run_contract_backend tests."""
 
-A stub ``gcloud`` on PATH records the exact argv it receives and, like a real
-remote login shell, re-parses ``--command`` with ``bash -c``. Hostile inputs
-must arrive on the "remote" side byte-for-byte and never execute.
-"""
-
+import argparse
+import asyncio
+import importlib
+import importlib.util
 import json
 import os
 import re
+import signal
+import socket
+import ssl
 import subprocess
 import sys
 import tarfile
+import threading
+import time
+import urllib.error
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, urlparse
+from urllib.request import Request
 
+import httpx
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from scripts import check_environment_health as health
+from scripts import run_contract_backend
+from scripts.dev import audit_environments as audit
+from scripts.lib import admin_tls, environments, readiness
+from scripts.lib import admin_tls as admin_http
+from scripts.lib import environments as prom
+from scripts.lib import port_forward as pf
+from scripts.lib.environments import add_common_args, remediation_command
+from scripts.run_contract_backend import install_streaming_fixture
 
 REPO = Path(__file__).resolve().parents[2]
 LIB = REPO / "scripts" / "lib" / "gce_ssh.sh"
+LAUNCHER = REPO / "scripts" / "run_contract_backend.py"
+SCRIPT_PATH = REPO / "scripts" / "check_osv.py"
 TRACKED_SCRIPTS = [
     REPO / "scripts" / "backup_service_configs.sh",
     REPO / "scripts" / "dev" / "snapshot_prod_to_dev.sh",
@@ -45,7 +70,7 @@ HOSTILE = [
 ]
 
 STUB = """#!{python}
-import json, os, subprocess, sys
+import json, os, shutil, subprocess, sys
 argv = sys.argv[1:]
 with open(os.environ["STUB_LOG"], "a") as fh:
     fh.write(json.dumps(argv) + "\\n")
@@ -53,7 +78,6 @@ if argv[:2] == ["compute", "ssh"]:
     cmd = [a for a in argv if a.startswith("--command=")][0][len("--command="):]
     sys.exit(subprocess.call(["bash", "-c", cmd]))
 if argv[:2] == ["storage", "cp"]:
-    import shutil
     shutil.copy(argv[2], os.environ["STUB_UPLOAD"])
     sys.exit(0)
 if argv[:2] == ["storage", "ls"]:
@@ -88,38 +112,27 @@ def gce_stub(tmp_path):
     }
 
     def calls() -> list[list[str]]:
-        if not log.exists():
-            return []
-        return [json.loads(line) for line in log.read_text().splitlines()]
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
     return env, calls, tmp_path
 
 
-def run_bash(body: str, env: dict[str, str], cwd: Path) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["bash", "-c", f'source "{LIB}"\n{body}'],
-        env=env,
-        cwd=cwd,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+def run_bash(body: str, env: dict[str, str], cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    cmd = ["bash", "-c", f'source "{LIB}"\n{body}']
+    if args:
+        cmd.extend(["_", *args])
+    return subprocess.run(cmd, env=env, cwd=cwd, text=True, capture_output=True, timeout=30, check=False)
 
 
-def test_exact_argv_for_simple_command(gce_stub):
+def test_exact_argv_for_simple_and_hostile_commands(gce_stub):
     env, calls, tmp = gce_stub
     r = run_bash("gce_ssh_run my-vm us-central1-a --quiet -- echo /a b", env, tmp)
     assert r.returncode == 0, r.stderr
     assert calls() == [["compute", "ssh", "my-vm", "--zone=us-central1-a", "--quiet", "--command=echo /a b"]]
 
-
-def test_exact_argv_quotes_hostile_arg(gce_stub):
-    env, calls, tmp = gce_stub
-    r = run_bash("gce_ssh_run vm z1 -- echo 'a b;$(x)'", env, tmp)
-    assert r.returncode == 0, r.stderr
-    (argv,) = calls()
-    assert argv == ["compute", "ssh", "vm", "--zone=z1", r"--command=echo a\ b\;\$\(x\)"]
+    r2 = run_bash("gce_ssh_run vm z1 -- echo 'a b;$(x)'", env, tmp)
+    assert r2.returncode == 0, r2.stderr
+    assert calls()[-1] == ["compute", "ssh", "vm", "--zone=z1", r"--command=echo a\ b\;\$\(x\)"]
 
 
 @pytest.mark.parametrize("value", HOSTILE)
@@ -127,24 +140,7 @@ def test_run_roundtrips_hostile_argument_without_executing(gce_stub, value):
     env, calls, tmp = gce_stub
     dump = tmp / "dump.py"
     dump.write_text(DUMP)
-    r = subprocess.run(
-        [
-            "bash",
-            "-c",
-            f'source "{LIB}"\ngce_ssh_run vm z1 -- "$1" "$2" "$3" "$4"',
-            "_",
-            sys.executable,
-            str(dump),
-            value,
-            value,
-        ],
-        env=env,
-        cwd=tmp,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    r = run_bash('gce_ssh_run vm z1 -- "$1" "$2" "$3" "$4"', env, tmp, sys.executable, str(dump), value, value)
     assert r.returncode == 0, r.stderr
     assert (tmp / "dump.bin").read_bytes() == b"\0".join([value.encode(), value.encode()])
     assert not (tmp / "CANARY").exists()
@@ -155,23 +151,7 @@ def test_run_roundtrips_hostile_argument_without_executing(gce_stub, value):
 def test_script_binds_hostile_args_as_positionals(gce_stub, value):
     env, calls, tmp = gce_stub
     script = 'printf "%s\\0" "$#" "$@" > "$DUMP_OUT"'
-    r = subprocess.run(
-        [
-            "bash",
-            "-c",
-            f'source "{LIB}"\ngce_ssh_script vm z1 --quiet -- "$1" "$2" "$3"',
-            "_",
-            script,
-            value,
-            "second " + value,
-        ],
-        env=env,
-        cwd=tmp,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    r = run_bash('gce_ssh_script vm z1 --quiet -- "$1" "$2" "$3"', env, tmp, script, value, "second " + value)
     assert r.returncode == 0, r.stderr
     got = (tmp / "dump.bin").read_bytes().split(b"\0")[:-1]
     assert got == [b"2", value.encode(), ("second " + value).encode()]
@@ -182,40 +162,29 @@ def test_script_binds_hostile_args_as_positionals(gce_stub, value):
 
 
 @pytest.mark.parametrize(
-    "bad",
-    ["", "-oProxyCommand=x", "vm name", "vm;touch CANARY", "vm$(x)", "vm\nx", ".hidden", "a/b"],
+    "bad", ["", "-oProxyCommand=x", "vm name", "vm;touch CANARY", "vm$(x)", "vm\nx", ".hidden", "a/b"]
 )
 @pytest.mark.parametrize("slot", ["instance", "zone"])
 def test_rejects_unsafe_instance_or_zone(gce_stub, bad, slot):
     env, calls, tmp = gce_stub
     inst, zone = (bad, "z1") if slot == "instance" else ("vm", bad)
-    r = subprocess.run(
-        ["bash", "-c", f'source "{LIB}"\ngce_ssh_run "$1" "$2" -- true', "_", inst, zone],
-        env=env,
-        cwd=tmp,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
-    assert r.returncode == 2
+    assert run_bash('gce_ssh_run "$1" "$2" -- true', env, tmp, inst, zone).returncode == 2
     assert calls() == []
 
 
-def test_rejects_non_flag_before_separator_and_missing_command(gce_stub):
+def test_rejects_non_flag_before_separator_and_missing_command_and_passes_exit(gce_stub):
     env, calls, tmp = gce_stub
-    assert run_bash("gce_ssh_run vm z1 oops -- true", env, tmp).returncode == 2
-    assert run_bash("gce_ssh_run vm z1 --quiet", env, tmp).returncode == 2
-    assert run_bash("gce_ssh_run vm z1 --quiet --", env, tmp).returncode == 2
-    assert run_bash("gce_ssh_script vm z1 --", env, tmp).returncode == 2
+    for cmd in (
+        "gce_ssh_run vm z1 oops -- true",
+        "gce_ssh_run vm z1 --quiet",
+        "gce_ssh_run vm z1 --quiet --",
+        "gce_ssh_script vm z1 --",
+    ):
+        assert run_bash(cmd, env, tmp).returncode == 2
     assert calls() == []
 
-
-def test_exit_status_and_stdout_pass_through(gce_stub):
-    env, _, tmp = gce_stub
     r = run_bash("gce_ssh_script vm z1 -- 'echo out; exit 7'", env, tmp)
-    assert r.returncode == 7
-    assert r.stdout == "out\n"
+    assert (r.returncode, r.stdout) == (7, "out\n")
 
 
 def test_no_ssh_command_string_building_or_eval_in_lib():
@@ -225,8 +194,7 @@ def test_no_ssh_command_string_building_or_eval_in_lib():
 
 @pytest.mark.parametrize("script", TRACKED_SCRIPTS, ids=lambda p: p.name)
 def test_tracked_scripts_use_the_shared_helper(script):
-    text = script.read_text()
-    code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    code = "\n".join(line for line in script.read_text().splitlines() if not line.lstrip().startswith("#"))
     assert "source" in code and "lib/gce_ssh.sh" in code
     assert not re.search(r"^\s*(if\s+!?\s*)?(\w+=\"?\$\()?gcloud compute ssh\b", code, re.M)
     assert "--command=" not in code
@@ -259,34 +227,13 @@ def test_backup_script_end_to_end_with_hostile_paths(gce_stub):
     assert not (tmp / "CANARY").exists()
     with tarfile.open(tmp / "uploaded.tar.gz") as tf:
         assert [m.name for m in tf.getmembers() if m.isfile()] == ["configs/svc.json"]
-    payload = json.loads(marker.read_text())
-    assert payload["remote"].startswith("gs://b/configs/")
+    assert json.loads(marker.read_text())["remote"].startswith("gs://b/configs/")
     ssh_calls = [c for c in calls() if c[:2] == ["compute", "ssh"]]
     assert len(ssh_calls) == 2
     assert all(c[2] == "vm-1" and c[3] == "--zone=us-central1-a" for c in ssh_calls)
 
 
 # ── Merged from test_health_probes.py ──────────────────────────────────────────────────────
-
-"""Characterization of the health/audit scripts on the shared probe API (S1/S11).
-
-A local stub backend stands in for an environment. Expected values here were
-produced by the pre-refactor hand-rolled ``urllib`` implementations, so they
-pin behavior across the move onto ``scripts.lib.readiness.probe``.
-"""
-
-import threading
-import time
-import urllib.error
-from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
-
-import pytest
-
-from scripts import check_environment_health as health
-from scripts.dev import audit_environments as audit
-from scripts.lib import readiness
 
 HEALTHY: dict[str, tuple[int, Any]] = {
     "GET /api/health": (200, {"status": "ok", "version": "1.2.3"}),
@@ -325,14 +272,7 @@ class Stub:
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def target(self, name: str = "stub") -> health.EnvironmentTarget:
-        return health.EnvironmentTarget(
-            name=name,
-            architecture="Stub",
-            backend_url=self.origin,
-            frontend_url=self.origin,
-            fastly_service_id="svc1",
-            remediation_cmd="fix-it",
-        )
+        return health.EnvironmentTarget(name, "Stub", self.origin, self.origin, "svc1", "fix-it")
 
 
 @pytest.fixture
@@ -352,8 +292,6 @@ def probe_stub(monkeypatch: pytest.MonkeyPatch) -> Iterator[Stub]:
 
 
 class _SleepStub:
-    """Module stand-in that overrides sleep only for the audit module (the real ``time.sleep`` is global)."""
-
     def __init__(self, sleep: Any) -> None:
         self.sleep = sleep
 
@@ -362,119 +300,94 @@ class _SleepStub:
 
 
 def dead_origin() -> str:
-    import socket
-
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return f"http://127.0.0.1:{sock.getsockname()[1]}"
 
 
-def test_probe_reports_status_body_and_latency(probe_stub: Stub) -> None:
+def test_probe_reports_status_body_latency_and_errors(probe_stub: Stub) -> None:
     result = readiness.probe(f"{probe_stub.origin}/api/health", timeout=5)
     assert (result.status, result.failed, result.http_error) == (200, False, False)
     assert result.json() == {"status": "ok", "version": "1.2.3"}
-    assert result.content_type == "application/json"
-    assert result.latency_ms >= 0
+    assert result.content_type == "application/json" and result.latency_ms >= 0
 
-
-def test_probe_http_error_keeps_status_and_bounded_body(probe_stub: Stub) -> None:
     probe_stub.routes["GET /api/health"] = (503, {"error": "busy"})
-    result = readiness.probe(f"{probe_stub.origin}/api/health", timeout=5)
-    assert (result.status, result.http_error, result.reason) == (503, True, "Service Unavailable")
-    assert result.error == "HTTP Error 503: Service Unavailable"
-    assert result.json() == {"error": "busy"}
+    err_res = readiness.probe(f"{probe_stub.origin}/api/health", timeout=5)
+    assert (err_res.status, err_res.http_error, err_res.reason) == (503, True, "Service Unavailable")
+    assert err_res.error == "HTTP Error 503: Service Unavailable" and err_res.json() == {"error": "busy"}
 
-
-def test_probe_transport_failure_never_raises() -> None:
-    result = readiness.probe(f"{dead_origin()}/x", timeout=2)
-    assert result.status is None and result.failed and not result.http_error
-    assert isinstance(result.exc, urllib.error.URLError)
+    dead_res = readiness.probe(f"{dead_origin()}/x", timeout=2)
+    assert dead_res.status is None and dead_res.failed and not dead_res.http_error
+    assert isinstance(dead_res.exc, urllib.error.URLError)
 
 
 def test_probe_delegates_to_admin_urlopen_with_request_details(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
     def fake(request: Any, timeout: float) -> Any:
-        captured.update(url=request.full_url, method=request.get_method(), data=request.data, timeout=timeout)
-        captured["headers"] = dict(request.header_items())
+        captured.update(
+            url=request.full_url,
+            method=request.get_method(),
+            data=request.data,
+            timeout=timeout,
+            headers=dict(request.header_items()),
+        )
         raise OSError("stop")
 
     monkeypatch.setattr(readiness, "admin_urlopen", fake)
     result = readiness.probe("http://x/y", timeout=7, headers={"X-A": "1"}, data=b"{}", method="POST")
     assert result.error == "stop"
-    assert captured == {
-        "url": "http://x/y",
-        "method": "POST",
-        "data": b"{}",
-        "timeout": 7,
-        "headers": {"X-a": "1"},
-    }
+    assert captured == {"url": "http://x/y", "method": "POST", "data": b"{}", "timeout": 7, "headers": {"X-a": "1"}}
 
 
-def test_health_ok(probe_stub: Stub) -> None:
+def test_health_ok_and_failure_modes(probe_stub: Stub) -> None:
     result = health.check_backend_health(probe_stub.target(), timeout_s=5)
     assert (result.backend_ok, result.status_code, result.version, result.error) == (True, 200, "1.2.3", None)
     headers = next(h for line, h, _ in probe_stub.seen if line == "GET /api/health")
-    assert headers["User-Agent"] == "FLA-HealthCheck/1.0"
-    assert headers["Accept"] == "application/json"
+    assert headers["User-Agent"] == "FLA-HealthCheck/1.0" and headers["Accept"] == "application/json"
+
+    for route, expected, expected_err in [
+        ((503, {"x": 1}), (False, 503, None), "HTTPError 503: Service Unavailable"),
+        (
+            (200, {"status": "degraded", "version": "9"}),
+            (False, 200, "9"),
+            'Unexpected payload: {"status": "degraded", "version": "9"}',
+        ),
+        ((200, b"<html>"), (False, None, None), "Expecting value: line 1 column 1 (char 0)"),
+    ]:
+        probe_stub.routes["GET /api/health"] = route
+        r = health.check_backend_health(probe_stub.target(), timeout_s=5)
+        assert (r.backend_ok, r.status_code, r.version) == expected
+        assert r.error == expected_err
+
+    dead_target = health.EnvironmentTarget("d", "A", dead_origin(), "", "svc1", "fix")
+    r_dead = health.check_backend_health(dead_target, timeout_s=2)
+    assert (r_dead.backend_ok, r_dead.status_code) == (False, None)
+    assert r_dead.error and "Connection refused" in r_dead.error
 
 
-def test_health_http_error(probe_stub: Stub) -> None:
-    probe_stub.routes["GET /api/health"] = (503, {"x": 1})
-    result = health.check_backend_health(probe_stub.target(), timeout_s=5)
-    assert (result.backend_ok, result.status_code, result.version) == (False, 503, None)
-    assert result.error == "HTTPError 503: Service Unavailable"
-
-
-def test_health_unexpected_payload(probe_stub: Stub) -> None:
-    probe_stub.routes["GET /api/health"] = (200, {"status": "degraded", "version": "9"})
-    result = health.check_backend_health(probe_stub.target(), timeout_s=5)
-    assert (result.backend_ok, result.status_code, result.version) == (False, 200, "9")
-    assert result.error == 'Unexpected payload: {"status": "degraded", "version": "9"}'
-
-
-def test_health_non_json_body(probe_stub: Stub) -> None:
-    probe_stub.routes["GET /api/health"] = (200, b"<html>")
-    result = health.check_backend_health(probe_stub.target(), timeout_s=5)
-    assert (result.backend_ok, result.status_code, result.version) == (False, None, None)
-    assert result.error == "Expecting value: line 1 column 1 (char 0)"
-
-
-def test_health_connection_refused() -> None:
-    target = health.EnvironmentTarget("d", "A", dead_origin(), "", "svc1", "fix")
-    result = health.check_backend_health(target, timeout_s=2)
-    assert (result.backend_ok, result.status_code) == (False, None)
-    assert result.error and "Connection refused" in result.error
-
-
-def test_tenancy_ok_posts_expected_probe(probe_stub: Stub) -> None:
+def test_tenancy_ok_and_failure_modes(probe_stub: Stub) -> None:
     result = health.check_tenancy(probe_stub.target(), timeout_s=5)
     assert (result.service_match, result.rejection_ok, result.rejection_code, result.error) == (True, True, 404, None)
     assert result.resolved_service_id == "svc1"
     line, headers, body = next(s for s in probe_stub.seen if s[0].startswith("POST"))
     assert line == "POST /api/dashboard/bundle?service_id=nonexistent_tenant_xyz"
-    assert json.loads(body) == {"time_range": "24h"}
-    assert headers["Content-Type"] == "application/json"
+    assert json.loads(body) == {"time_range": "24h"} and headers["Content-Type"] == "application/json"
 
-
-def test_tenancy_breach_when_fake_tenant_gets_200(probe_stub: Stub) -> None:
     probe_stub.routes["POST /api/dashboard/bundle?service_id=nonexistent_tenant_xyz"] = (200, {})
-    result = health.check_tenancy(probe_stub.target(), timeout_s=5)
-    assert (result.rejection_ok, result.rejection_code) == (False, 200)
-    assert result.error == "Tenancy breach: fake tenant returned HTTP 200 (expected 400/401/403/404)"
+    r200 = health.check_tenancy(probe_stub.target(), timeout_s=5)
+    assert (r200.rejection_ok, r200.rejection_code) == (False, 200)
+    assert r200.error == "Tenancy breach: fake tenant returned HTTP 200 (expected 400/401/403/404)"
 
-
-def test_tenancy_unsafe_5xx_is_not_a_rejection(probe_stub: Stub) -> None:
     probe_stub.routes["POST /api/dashboard/bundle?service_id=nonexistent_tenant_xyz"] = (500, {})
-    result = health.check_tenancy(probe_stub.target(), timeout_s=5)
-    assert (result.rejection_ok, result.rejection_code) == (False, 500)
+    r500 = health.check_tenancy(probe_stub.target(), timeout_s=5)
+    assert (r500.rejection_ok, r500.rejection_code) == (False, 500)
 
-
-def test_tenancy_service_mismatch(probe_stub: Stub) -> None:
+    probe_stub.routes["POST /api/dashboard/bundle?service_id=nonexistent_tenant_xyz"] = (404, {"error": "nope"})
     probe_stub.routes["GET /api/bootstrap"] = (200, {"active_service_id": "other"})
-    result = health.check_tenancy(probe_stub.target(), timeout_s=5)
-    assert (result.service_match, result.rejection_ok) == (False, True)
-    assert result.error == "Service mismatch: got 'other', expected 'svc1'"
+    rmis = health.check_tenancy(probe_stub.target(), timeout_s=5)
+    assert (rmis.service_match, rmis.rejection_ok) == (False, True)
+    assert rmis.error == "Service mismatch: got 'other', expected 'svc1'"
 
 
 @pytest.mark.parametrize(
@@ -493,7 +406,7 @@ def test_tenancy_bootstrap_failures(probe_stub: Stub, route: tuple[int, Any], me
     assert not any(line.startswith("POST") for line, _, _ in probe_stub.seen)
 
 
-def test_rbac_ok_sends_remote_analyst_header(probe_stub: Stub) -> None:
+def test_rbac_ok_and_failure_modes(probe_stub: Stub) -> None:
     result = health.check_rbac(probe_stub.target(), timeout_s=5)
     assert (result.auth_config_ok, result.unauth_analyst_blocked, result.unauth_analyst_code, result.error) == (
         True,
@@ -504,16 +417,15 @@ def test_rbac_ok_sends_remote_analyst_header(probe_stub: Stub) -> None:
     headers = next(h for line, h, _ in probe_stub.seen if line == "GET /api/share/auth-config")
     assert headers["X-Remote-Analyst"] == "1"
 
-
-def test_rbac_missing_flag_and_http_error(probe_stub: Stub) -> None:
     probe_stub.routes["GET /api/share/auth-config"] = (200, {"other": 1})
-    result = health.check_rbac(probe_stub.target(), timeout_s=5)
-    assert result.auth_config_ok is False and result.unauth_analyst_blocked is True
-    assert result.error == "Auth config endpoint failed or returned unexpected payload"
+    r1 = health.check_rbac(probe_stub.target(), timeout_s=5)
+    assert r1.auth_config_ok is False and r1.unauth_analyst_blocked is True
+    assert r1.error == "Auth config endpoint failed or returned unexpected payload"
+
     probe_stub.routes["GET /api/share/auth-config"] = (404, {})
-    result = health.check_rbac(probe_stub.target(), timeout_s=5)
-    assert (result.auth_config_ok, result.unauth_analyst_blocked, result.unauth_analyst_code) == (False, False, None)
-    assert result.error == "Failed to query /api/share/auth-config: HTTP Error 404: Not Found"
+    r2 = health.check_rbac(probe_stub.target(), timeout_s=5)
+    assert (r2.auth_config_ok, r2.unauth_analyst_blocked, r2.unauth_analyst_code) == (False, False, None)
+    assert r2.error == "Failed to query /api/share/auth-config: HTTP Error 404: Not Found"
 
 
 def _run_main(monkeypatch: pytest.MonkeyPatch, target: health.EnvironmentTarget, *extra: str) -> int:
@@ -522,7 +434,7 @@ def _run_main(monkeypatch: pytest.MonkeyPatch, target: health.EnvironmentTarget,
     return health.main()
 
 
-def test_main_text_report_golden(
+def test_main_text_and_json_reports_golden(
     probe_stub: Stub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert _run_main(monkeypatch, probe_stub.target("stub-env")) == 0
@@ -535,22 +447,6 @@ def test_main_text_report_golden(
         "",
     ]
 
-
-def test_main_text_report_failure_golden(
-    probe_stub: Stub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    probe_stub.routes["GET /api/health"] = (503, {})
-    assert _run_main(monkeypatch, probe_stub.target("stub-env")) == 1
-    out = re.sub(r"\d+\.\dms", "<lat>", capsys.readouterr().out)
-    lines = out.splitlines()[6:]
-    assert lines[0].startswith("stub-env               | FAIL     | svc1 (OK)")
-    assert lines[1:3] == ["   [!] Health Error: HTTPError 503: Service Unavailable", "   [!] Fix command: fix-it"]
-    assert "FAILURE: 1/1 environments failed checks." in lines
-
-
-def test_main_json_report_golden(
-    probe_stub: Stub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
     assert _run_main(monkeypatch, probe_stub.target("stub-env"), "--json") == 0
     (row,) = json.loads(capsys.readouterr().out)
     row.pop("latency_ms")
@@ -572,34 +468,41 @@ def test_main_json_report_golden(
         "remediation": None,
     }
 
+    probe_stub.routes["GET /api/health"] = (503, {})
+    assert _run_main(monkeypatch, probe_stub.target("stub-env")) == 1
+    fail_lines = re.sub(r"\d+\.\dms", "<lat>", capsys.readouterr().out).splitlines()[6:]
+    assert fail_lines[0].startswith("stub-env               | FAIL     | svc1 (OK)")
+    assert fail_lines[1:3] == ["   [!] Health Error: HTTPError 503: Service Unavailable", "   [!] Fix command: fix-it"]
+    assert "FAILURE: 1/1 environments failed checks." in fail_lines
 
-def test_audit_get_json(probe_stub: Stub) -> None:
+
+def test_audit_get_and_post_json(probe_stub: Stub, monkeypatch: pytest.MonkeyPatch) -> None:
     status, data = audit.http_get_json(f"{probe_stub.origin}/api/health", headers={"X-T": "1"}, timeout=5)
     assert (status, data) == (200, {"status": "ok", "version": "1.2.3"})
     _, headers, _ = probe_stub.seen[-1]
     assert headers["User-Agent"] == "FLA-AuditTool/1.0" and headers["X-T"] == "1"
 
-
-def test_audit_get_json_error_shapes(probe_stub: Stub) -> None:
-    probe_stub.routes["GET /e1"] = (500, {"detail": "boom"})
-    probe_stub.routes["GET /e2"] = (502, b"<html>")
-    probe_stub.routes["GET /e3"] = (200, b"<html>")
+    probe_stub.routes.update(
+        {"GET /e1": (500, {"detail": "boom"}), "GET /e2": (502, b"<html>"), "GET /e3": (200, b"<html>")}
+    )
     assert audit.http_get_json(f"{probe_stub.origin}/e1") == (500, {"detail": "boom"})
     assert audit.http_get_json(f"{probe_stub.origin}/e2") == (502, {"error": "HTTP Error 502: Bad Gateway"})
     assert audit.http_get_json(f"{probe_stub.origin}/e3") == (0, {"error": "Expecting value: line 1 column 1 (char 0)"})
     status, data = audit.http_get_json(f"{dead_origin()}/x", timeout=2)
     assert status == 0 and "Connection refused" in data["error"]
 
-
-def test_audit_post_json_sends_payload_and_parses_error_body(probe_stub: Stub) -> None:
     probe_stub.routes["POST /p"] = (422, {"detail": "bad"})
     assert audit.http_post_json(f"{probe_stub.origin}/p", {"a": 1}, timeout=5) == (422, {"detail": "bad"})
     line, headers, body = probe_stub.seen[-1]
-    assert (line, json.loads(body)) == ("POST /p", {"a": 1})
-    assert headers["Content-Type"] == "application/json"
+    assert (line, json.loads(body), headers["Content-Type"]) == ("POST /p", {"a": 1}, "application/json")
     probe_stub.routes["POST /q"] = (200, {"ok": True})
     assert audit.http_post_json(f"{probe_stub.origin}/q", timeout=5) == (200, {"ok": True})
     assert json.loads(probe_stub.seen[-1][2]) == {}
+
+    probe_stub.routes["POST /p500"] = (500, {"e": 1})
+    monkeypatch.setattr(audit, "time", _SleepStub(lambda _s: pytest.fail("must not retry HTTP errors")))
+    assert audit.http_post_json(f"{probe_stub.origin}/p500", {}, timeout=5) == (500, {"e": 1})
+    assert [line for line, _, _ in probe_stub.seen].count("POST /p500") == 1
 
 
 def test_audit_post_json_retries_transport_failure_once(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -618,18 +521,9 @@ def test_audit_post_json_retries_transport_failure_once(monkeypatch: pytest.Monk
     assert len(calls) == 2 and sleeps == [0.5]
 
 
-def test_audit_post_json_does_not_retry_http_errors(probe_stub: Stub, monkeypatch: pytest.MonkeyPatch) -> None:
-    probe_stub.routes["POST /p"] = (500, {"e": 1})
-    monkeypatch.setattr(audit, "time", _SleepStub(lambda _s: pytest.fail("must not retry HTTP errors")))
-    assert audit.http_post_json(f"{probe_stub.origin}/p", {}, timeout=5) == (500, {"e": 1})
-    assert [line for line, _, _ in probe_stub.seen].count("POST /p") == 1
-
-
 def test_load_persisted_deploy_env_populates_admin_origins_and_respects_existing_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    from scripts.lib import environments
-
     tracked_keys = (
         "FLA_ADMIN_DEPLOY_ENV",
         "LOCAL_STANDARD_ADMIN_MTLS",
@@ -655,9 +549,7 @@ def test_load_persisted_deploy_env_populates_admin_origins_and_respects_existing
     }
     deploy_env = tmp_path / "deploy.env"
     deploy_env.write_text(
-        f"LOCAL_STANDARD_ADMIN_MTLS=1\n"
-        f"GCE_ADMIN_MTLS=1\n"
-        f"ELEVATION_ADMIN_MTLS=1\n"
+        f"LOCAL_STANDARD_ADMIN_MTLS=1\nGCE_ADMIN_MTLS=1\nELEVATION_ADMIN_MTLS=1\n"
         f"ADMIN_GATEWAY_ENDPOINTS='{json.dumps(endpoints)}'\n"
     )
     deploy_env.chmod(0o600)
@@ -666,9 +558,7 @@ def test_load_persisted_deploy_env_populates_admin_origins_and_respects_existing
 
     try:
         loaded = environments.load_persisted_deploy_env()
-        assert loaded["LOCAL_STANDARD_ADMIN_MTLS"] == "1"
-        assert loaded["ELEVATION_ADMIN_MTLS"] == "1"
-        # Existing process env wins over persisted deploy.env
+        assert loaded["LOCAL_STANDARD_ADMIN_MTLS"] == "1" and loaded["ELEVATION_ADMIN_MTLS"] == "1"
         assert environments.os.environ["GCE_ADMIN_MTLS"] == "0"
 
         audit.refresh_environment_origins()
@@ -684,17 +574,15 @@ def test_load_persisted_deploy_env_populates_admin_origins_and_respects_existing
 def test_audit_target_private_mtls_timeout_adds_vpn_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(audit, "is_admin_url", lambda url: url.startswith("https://10.0.0.10:8443"))
     monkeypatch.setattr(
-        audit,
-        "http_get_json",
-        lambda url, headers=None, timeout=5.0: (0, {"error": "<urlopen error timed out>"}),
+        audit, "http_get_json", lambda url, headers=None, timeout=5.0: (0, {"error": "<urlopen error timed out>"})
     )
     env = audit.EnvironmentConfig(
-        name="remote-high-scale",
-        architecture="High-Scale (Remote/K8s)",
-        backend_url="https://10.0.0.10:8443",
-        frontend_url="https://10.0.0.10:8443/dashboard",
-        service_id="svc-hs",
-        is_high_scale=True,
+        "remote-high-scale",
+        "High-Scale (Remote/K8s)",
+        "https://10.0.0.10:8443",
+        "https://10.0.0.10:8443/dashboard",
+        "svc-hs",
+        True,
     )
     res = audit.audit_target(env, timeout=1.0)
     assert not res.reachable
@@ -702,16 +590,6 @@ def test_audit_target_private_mtls_timeout_adds_vpn_hint(monkeypatch: pytest.Mon
 
 
 # ── Merged from test_lib_helpers.py ──────────────────────────────────────────────────────
-
-import asyncio
-import ssl
-from urllib.request import Request
-
-import httpx
-import pytest
-
-from scripts.lib import admin_tls
-from scripts.lib import admin_tls as admin_http
 
 
 def test_total_deadline_cancels_a_stalled_response_body(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -753,9 +631,11 @@ def test_deadline_transport_preserves_request_and_refuses_redirects(monkeypatch:
     with pytest.raises(httpx.HTTPStatusError):
         asyncio.run(admin_http.async_admin_json(request, timeout=1))
     assert len(seen) == 1
-    assert seen[0].method == "POST"
-    assert seen[0].content == b'{"filters":{}}'
-    assert seen[0].headers["x-page-load-id"] == "test-correlation"
+    assert (seen[0].method, seen[0].content, seen[0].headers["x-page-load-id"]) == (
+        "POST",
+        b'{"filters":{}}',
+        "test-correlation",
+    )
 
 
 @pytest.mark.parametrize(
@@ -766,27 +646,15 @@ def test_deadline_transport_preserves_request_and_refuses_redirects(monkeypatch:
     ],
 )
 def test_deadline_transport_rejects_untrusted_identity_use_before_tls(
-    monkeypatch: pytest.MonkeyPatch,
-    url: str,
-    headers: dict,
+    monkeypatch: pytest.MonkeyPatch, url: str, headers: dict
 ) -> None:
     monkeypatch.setattr(admin_tls, "_settings", lambda: {"test": {"origin": "https://example.com:443"}})
-
-    def forbidden(config: dict) -> ssl.SSLContext:
-        pytest.fail("TLS identity must not be loaded")
-
-    monkeypatch.setattr(admin_tls, "_context", forbidden)
+    monkeypatch.setattr(admin_tls, "_context", lambda config: pytest.fail("TLS identity must not be loaded"))
     with pytest.raises(ValueError):
         asyncio.run(admin_http.async_admin_json(Request(url, headers=headers), timeout=1))
 
 
 # ── Merged from test_cli.py ──
-
-import argparse
-
-import pytest
-
-from scripts.lib.environments import add_common_args
 
 
 def _parser(**kwargs: object) -> argparse.ArgumentParser:
@@ -795,25 +663,20 @@ def _parser(**kwargs: object) -> argparse.ArgumentParser:
     return parser
 
 
-def test_adds_nothing_unless_asked() -> None:
-    with pytest.raises(SystemExit):
-        _parser().parse_args(["--timeout", "1"])
-    with pytest.raises(SystemExit):
-        _parser().parse_args(["--json"])
+def test_common_args_behavior() -> None:
+    for bad_arg in (["--timeout", "1"], ["--json"]):
+        with pytest.raises(SystemExit):
+            _parser().parse_args(bad_arg)
 
-
-def test_timeout_default_type_and_help() -> None:
     parser = _parser(timeout_default=5.0, timeout_label="HTTP request")
     assert parser.parse_args([]).timeout == 5.0
     assert parser.parse_args(["--timeout", "2.5"]).timeout == 2.5
     assert "HTTP request timeout in seconds (default: 5.0)" in parser.format_help()
 
-
-def test_json_flag() -> None:
-    parser = _parser(json_help="Output raw JSON results")
-    assert parser.parse_args([]).json is False
-    assert parser.parse_args(["--json"]).json is True
-    assert "Output raw JSON results" in parser.format_help()
+    jparser = _parser(json_help="Output raw JSON results")
+    assert jparser.parse_args([]).json is False
+    assert jparser.parse_args(["--json"]).json is True
+    assert "Output raw JSON results" in jparser.format_help()
 
 
 @pytest.mark.parametrize(
@@ -823,25 +686,15 @@ def test_json_flag() -> None:
 def test_adopting_scripts_keep_their_timeout_defaults(
     module: str, default: float, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    import importlib
-
     mod = importlib.import_module(module)
     monkeypatch.setattr("sys.argv", ["prog", "--help"])
     with pytest.raises(SystemExit):
         mod.main()
     out = capsys.readouterr().out
-    assert f"timeout in seconds (default: {default})" in out
-    assert "--json" in out
+    assert f"timeout in seconds (default: {default})" in out and "--json" in out
 
 
 # ── Merged from test_prom.py ──
-
-from http.server import HTTPServer
-from urllib.parse import parse_qs, urlparse
-
-import pytest
-
-from scripts.lib import environments as prom
 
 
 def test_histogram_quantile_matches_the_legacy_query_text() -> None:
@@ -884,28 +737,16 @@ def prom_server() -> Iterator[tuple[str, list[str]]]:
         thread.join(timeout=5)
 
 
-def test_instant_returns_first_sample_and_sends_the_query(prom_server: tuple[str, list[str]]) -> None:
+def test_instant_returns_sample_or_none_on_errors(prom_server: tuple[str, list[str]]) -> None:
     base, seen = prom_server
     assert prom.instant(base, "up{job='a b'}") == 12.5
     assert seen == ["up{job='a b'}"]
-
-
-def test_instant_is_none_for_empty_result_http_error_and_unreachable(prom_server: tuple[str, list[str]]) -> None:
-    base, _ = prom_server
     assert prom.instant(base, "empty") is None
     assert prom.instant(base, "boom") is None
     assert prom.instant("http://127.0.0.1:1", "up", timeout=1) is None
 
 
 # ── Merged from test_streaming_e2e_fixture.py ──
-
-
-import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
-from scripts import run_contract_backend
-from scripts.run_contract_backend import install_streaming_fixture
 
 
 def test_streaming_fixture_requires_an_isolated_contract_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -917,7 +758,7 @@ def test_streaming_fixture_requires_an_isolated_contract_sandbox(monkeypatch: py
         run_contract_backend.main()
 
 
-def test_streaming_fixture_is_cookie_scoped_and_records_ssr_requests() -> None:
+def test_streaming_fixture_is_cookie_scoped_and_isolated() -> None:
     app = FastAPI()
 
     @app.post("/api/cmcd/aggregates")
@@ -934,82 +775,46 @@ def test_streaming_fixture_is_cookie_scoped_and_records_ssr_requests() -> None:
             assert ssr.post("/api/cmcd/aggregates", json=body).json() == payload
         assert browser.get("/api/__e2e__/streaming-fixture").json() == {"bodies": [body]}
         assert other_browser.post("/api/cmcd/aggregates", json=body).json() == {"available": False}
+
+        other_browser.post("/api/__e2e__/streaming-fixture", json={"available": False, "has_data": False})
+        assert browser.post("/api/cmcd/aggregates", json={}).json() == payload
+        assert other_browser.post("/api/cmcd/aggregates", json={}).json() == {"available": False, "has_data": False}
+
         assert browser.delete("/api/__e2e__/streaming-fixture").status_code == 200
         assert browser.get("/api/__e2e__/streaming-fixture").status_code == 404
         assert browser.post("/api/cmcd/aggregates", json=body).json() == {"available": False}
 
 
-def test_unavailable_fixture_does_not_reuse_another_browsers_populated_response() -> None:
-    app = FastAPI()
-    install_streaming_fixture(app)
-    with TestClient(app) as populated, TestClient(app) as unavailable:
-        populated.post("/api/__e2e__/streaming-fixture", json={"available": True})
-        unavailable.post("/api/__e2e__/streaming-fixture", json={"available": False, "has_data": False})
-        assert populated.post("/api/cmcd/aggregates", json={}).json() == {"available": True}
-        assert unavailable.post("/api/cmcd/aggregates", json={}).json() == {"available": False, "has_data": False}
-
-
 # ── Merged from test_profile_insights.py ──
 
-from pathlib import Path
 
-from scripts.dev.profile_insights import format_markdown_report, main, run_profile
+def test_run_profile_and_cli_output(tmp_path: Path):
+    from scripts.dev.profile_insights import format_markdown_report, run_profile
+    from scripts.dev.profile_insights import main as profile_main
 
-
-def test_run_profile_collects_phases_coalesced_and_insights():
     res = run_profile(total_rows=1000, runs=2, num_files=3, window_hours=1.0, baseline_hours=24.0)
-
-    assert res["runs"] == 2
-    assert res["dataset"]["total_rows"] == 1000
-    assert res["cold_total"]["wall_p50_ms"] > 0
-    assert res["warm_total"]["wall_p50_ms"] >= 0
-    assert len(res["top_10_by_wall_p50"]) == 10
-    assert len(res["top_10_by_cpu_p50"]) == 10
+    assert res["runs"] == 2 and res["dataset"]["total_rows"] == 1000
+    assert res["cold_total"]["wall_p50_ms"] > 0 and res["warm_total"]["wall_p50_ms"] >= 0
+    assert len(res["top_10_by_wall_p50"]) == 10 and len(res["top_10_by_cpu_p50"]) == 10
 
     op_names = {op["operation"] for op in res["all_operations"]}
-    assert "phase:scratch_table_build" in op_names
-    assert "coalesced:city" in op_names
-    assert "coalesced:url" in op_names
-    assert "coalesced:ip" in op_names
-    assert "coalesced:waf" in op_names
+    assert {"phase:scratch_table_build", "coalesced:city", "coalesced:url", "coalesced:ip", "coalesced:waf"}.issubset(
+        op_names
+    )
     assert any(name.startswith("insight:") for name in op_names)
 
     md = format_markdown_report(res)
-    assert "# Insights Performance Profile" in md
-    assert "Top 10 Costs by Wall-Clock p50" in md
+    assert "# Insights Performance Profile" in md and "Top 10 Costs by Wall-Clock p50" in md
 
-
-def test_profile_insights_cli_writes_markdown_and_json(tmp_path: Path):
-    md_out = tmp_path / "profile.md"
-    json_out = tmp_path / "profile.json"
-    rc = main(
-        [
-            "--rows",
-            "500",
-            "--runs",
-            "1",
-            "--files",
-            "2",
-            "--output",
-            str(md_out),
-            "--json-output",
-            str(json_out),
-        ]
+    md_out, json_out = tmp_path / "profile.md", tmp_path / "profile.json"
+    rc = profile_main(
+        ["--rows", "500", "--runs", "1", "--files", "2", "--output", str(md_out), "--json-output", str(json_out)]
     )
-    assert rc == 0
-    assert md_out.exists()
-    assert json_out.exists()
-    payload = json.loads(json_out.read_text())
-    assert payload["dataset"]["total_rows"] == 500
+    assert rc == 0 and md_out.exists() and json_out.exists()
+    assert json.loads(json_out.read_text())["dataset"]["total_rows"] == 500
 
 
 # ── Merged from test_check_osv.py ──
-
-import importlib.util
-
-import pytest
-
-SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "check_osv.py"
 
 
 @pytest.fixture(scope="module")
@@ -1024,13 +829,9 @@ def osv():
 @pytest.mark.parametrize(
     "vector,expected",
     [
-        # Log4Shell (CVE-2021-44228) — the canonical 10.0 CRITICAL.
         ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),
-        # A textbook HIGH (7.5): network, no priv, availability impact only.
         ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H", 7.5),
-        # A MEDIUM (6.1): reflected XSS shape, scope changed.
         ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N", 6.1),
-        # A LOW (3.1).
         ("CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:L/I:N/A:N", 3.1),
     ],
 )
@@ -1039,65 +840,45 @@ def test_cvss3_base_score_known_vectors(osv, vector, expected):
 
 
 def test_cvss3_base_score_rejects_v4_vector(osv):
-    # CVSS_V4 uses a different formula we do not implement → None.
     assert osv.cvss3_base_score("CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N") is None
 
 
-def test_severity_from_cvss_array_when_database_specific_absent(osv):
-    """The fail-open regression: CRITICAL severity carried ONLY in the CVSS
-    array (no database_specific) must still resolve to CRITICAL."""
-    vuln = {
-        "id": "CVE-2021-44228",
-        "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H"}],
-    }
-    assert osv.severity_for_vuln(vuln) == "CRITICAL"
-
-
-def test_severity_takes_max_across_sources(osv):
-    """database_specific says LOW but the CVSS vector says CRITICAL → CRITICAL."""
-    vuln = {
-        "id": "X",
-        "database_specific": {"severity": "LOW"},
-        "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H"}],
-    }
-    assert osv.severity_for_vuln(vuln) == "CRITICAL"
-
-
-def test_severity_database_specific_still_honored(osv):
-    vuln = {"id": "X", "database_specific": {"severity": "critical"}}
-    assert osv.severity_for_vuln(vuln) == "CRITICAL"
-
-
-def test_severity_unknown_when_no_signal(osv):
-    assert osv.severity_for_vuln({"id": "X"}) == "UNKNOWN"
-
-
-def test_unparsed_v4_only_vector_is_unknown_not_crash(osv):
-    vuln = {
-        "id": "CVE-2099-0001",
-        "severity": [{"type": "CVSS_V4", "score": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"}],
-    }
-    # No qualitative source and an unparseable vector → UNKNOWN (surfaced via stderr).
-    assert osv.severity_for_vuln(vuln) == "UNKNOWN"
+@pytest.mark.parametrize(
+    ("vuln", "expected"),
+    [
+        (
+            {
+                "id": "CVE-2021-44228",
+                "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H"}],
+            },
+            "CRITICAL",
+        ),
+        (
+            {
+                "id": "X",
+                "database_specific": {"severity": "LOW"},
+                "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H"}],
+            },
+            "CRITICAL",
+        ),
+        ({"id": "X", "database_specific": {"severity": "critical"}}, "CRITICAL"),
+        ({"id": "X"}, "UNKNOWN"),
+        (
+            {
+                "id": "CVE-2099-0001",
+                "severity": [
+                    {"type": "CVSS_V4", "score": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"}
+                ],
+            },
+            "UNKNOWN",
+        ),
+    ],
+)
+def test_severity_for_vuln_resolution(osv, vuln, expected):
+    assert osv.severity_for_vuln(vuln) == expected
 
 
 # ── Merged from test_port_forward.py ──────────────────────────────────────────────────────
-
-"""scripts/lib/port_forward.py against a stub ``kubectl`` (no cluster involved).
-
-The stub parses the real ``port-forward ... LOCAL:REMOTE`` argv, binds LOCAL
-like kubectl would, and records its argv/pid. STUB_MODE selects misbehaviour.
-"""
-
-import signal
-import socket
-from pathlib import Path
-
-import pytest
-
-from scripts.lib import port_forward as pf
-
-REPO = Path(__file__).resolve().parents[2]
 
 _PF_STUB = """#!{python}
 import json, os, signal, socket, subprocess, sys, time
@@ -1169,9 +950,9 @@ def kubectl(tmp_path, monkeypatch):
 def alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
+        return True
     except ProcessLookupError:
         return False
-    return True
 
 
 def wait_dead(pid: int, timeout: float = 5.0) -> bool:
@@ -1183,7 +964,7 @@ def wait_dead(pid: int, timeout: float = 5.0) -> bool:
     return False
 
 
-def test_argv_is_a_list_with_hostile_values_untouched():
+def test_argv_and_parse_forward():
     fwd = pf.Forward("svc/back end;$(x)", 8002, 8000, namespace="ns'; rm", context="c x")
     assert fwd.argv("kubectl") == [
         "kubectl",
@@ -1197,6 +978,9 @@ def test_argv_is_a_list_with_hostile_values_untouched():
         "svc/back end;$(x)",
         "8002:8000",
     ]
+    assert pf.parse_forward("svc/backend-svc:8002:8000", namespace="ns") == pf.Forward(
+        "svc/backend-svc", 8002, 8000, namespace="ns"
+    )
 
 
 @pytest.mark.parametrize("bad", ["svc/x", "svc/x:80", "svc/x:a:b", ":1:2", "svc/x:0:80", "svc/x:80:70000"])
@@ -1205,52 +989,34 @@ def test_parse_forward_rejects_malformed_specs(bad):
         pf.parse_forward(bad)
 
 
-def test_parse_forward_roundtrip():
-    assert pf.parse_forward("svc/backend-svc:8002:8000", namespace="ns") == pf.Forward(
-        "svc/backend-svc", 8002, 8000, namespace="ns"
-    )
-
-
 def test_port_in_use_is_refused_before_spawning(kubectl):
-    with socket.socket() as blocker:
-        blocker.bind(("127.0.0.1", 0))
-        blocker.listen(1)
-        port = blocker.getsockname()[1]
-        with pytest.raises(pf.PortInUse):
-            pf.ForwardSet([pf.Forward("svc/x", port, 80)], kubectl=kubectl.path).start()
+    first = free_port()
+    for make_specs in (
+        lambda taken: [pf.Forward("svc/x", taken, 80)],
+        lambda taken: [pf.Forward("svc/a", first, 80), pf.Forward("svc/b", taken, 80)],
+    ):
+        with socket.socket() as blocker:
+            blocker.bind(("127.0.0.1", 0))
+            blocker.listen(1)
+            with pytest.raises(pf.PortInUse):
+                pf.ForwardSet(make_specs(blocker.getsockname()[1]), kubectl=kubectl.path).start()
     assert kubectl.calls() == []
 
 
-def test_early_exit_surfaces_kubectl_stderr_and_cleans_up(kubectl, monkeypatch):
+def test_early_exit_and_readiness_timeout_clean_up(kubectl, monkeypatch):
     monkeypatch.setenv("STUB_MODE", "exit-early")
     with pytest.raises(pf.ForwardExited, match="pod is not running"):
         pf.ForwardSet([pf.Forward("svc/x", free_port(), 80)], kubectl=kubectl.path, ready_timeout=15).start()
-    (call,) = kubectl.calls()
-    assert wait_dead(call["child"])
+    assert wait_dead(kubectl.calls()[-1]["child"])
 
-
-def test_readiness_timeout_kills_the_forward(kubectl, monkeypatch):
     monkeypatch.setenv("STUB_MODE", "never-ready")
     with pytest.raises(pf.ReadinessTimeout):
         pf.ForwardSet([pf.Forward("svc/x", free_port(), 80)], kubectl=kubectl.path, ready_timeout=2.0).start()
-    (call,) = kubectl.calls()
-    assert wait_dead(call["pid"])
-    assert wait_dead(call["child"])
+    call = kubectl.calls()[-1]
+    assert wait_dead(call["pid"]) and wait_dead(call["child"])
 
 
-def test_any_taken_port_refuses_the_whole_set_before_spawning(kubectl):
-    first, taken = free_port(), free_port()
-    with socket.socket() as blocker:
-        blocker.bind(("127.0.0.1", taken))
-        blocker.listen(1)
-        with pytest.raises(pf.PortInUse):
-            pf.ForwardSet(
-                [pf.Forward("svc/a", first, 80), pf.Forward("svc/b", taken, 80)], kubectl=kubectl.path
-            ).start()
-    assert kubectl.calls() == []
-
-
-def test_poll_restarts_a_dropped_forward_within_budget(kubectl, monkeypatch):
+def test_poll_restarts_within_budget_and_raises_when_spent(kubectl, monkeypatch):
     monkeypatch.setenv("STUB_MODE", "die-once")
     port = free_port()
     fwd_set = pf.ForwardSet([pf.Forward("svc/x", port, 80)], kubectl=kubectl.path, ready_timeout=15, max_restarts=1)
@@ -1298,86 +1064,58 @@ def test_cli_cleans_up_on_signal(kubectl, sig):
     port = free_port()
     proc = _cli(kubectl, f"svc/x:{port}:80")
     try:
-        assert proc.stdout is not None
-        assert proc.stdout.readline().startswith("port-forward ready:")
+        assert proc.stdout is not None and proc.stdout.readline().startswith("port-forward ready:")
         (call,) = kubectl.calls()
         proc.send_signal(sig)
         assert proc.wait(timeout=20) == 128 + sig
     finally:
         if proc.poll() is None:
             proc.kill()
-    assert wait_dead(call["pid"])
-    assert wait_dead(call["child"])
-    assert not pf.port_in_use(port)
+    assert wait_dead(call["pid"]) and wait_dead(call["child"]) and not pf.port_in_use(port)
 
 
-def test_cli_runs_command_then_tears_down_and_returns_its_status(kubectl):
+def test_cli_runs_command_and_reports_port_in_use(kubectl):
     port = free_port()
     code = f"import socket,sys; socket.create_connection(('127.0.0.1', {port}), timeout=2).close(); sys.exit(7)"
     proc = _cli(kubectl, f"svc/x:{port}:80", "--", sys.executable, "-c", code)
     out, _ = proc.communicate(timeout=30)
-    assert proc.returncode == 7
-    assert "port-forward ready:" in out
+    assert proc.returncode == 7 and "port-forward ready:" in out
     (call,) = kubectl.calls()
-    assert wait_dead(call["pid"])
-    assert wait_dead(call["child"])
+    assert wait_dead(call["pid"]) and wait_dead(call["child"])
 
-
-def test_cli_reports_port_in_use(kubectl):
     with socket.socket() as blocker:
         blocker.bind(("127.0.0.1", 0))
         blocker.listen(1)
-        port = blocker.getsockname()[1]
-        proc = _cli(kubectl, f"svc/x:{port}:80")
-        _, err = proc.communicate(timeout=20)
-    assert proc.returncode == 1
-    assert f"port {port} is already in use" in err
-    assert kubectl.calls() == []
+        taken = blocker.getsockname()[1]
+        proc2 = _cli(kubectl, f"svc/x:{taken}:80")
+        _, err = proc2.communicate(timeout=20)
+    assert proc2.returncode == 1 and f"port {taken} is already in use" in err
 
 
 def test_remote_high_scale_remediation_uses_the_supervisor(monkeypatch):
-    from scripts.lib.environments import remediation_command
-
     monkeypatch.delenv("REMOTE_HIGH_SCALE_FORWARD_CMD", raising=False)
     monkeypatch.setenv("ELEVATION_NAMESPACE", "team-ns")
     cmd = remediation_command("remote-high-scale")
-    assert cmd.startswith("python3 -m scripts.lib.port_forward --namespace team-ns ")
-    assert "&" not in cmd
+    assert cmd.startswith("python3 -m scripts.lib.port_forward --namespace team-ns ") and "&" not in cmd
     for spec in cmd.split()[-2:]:
         pf.parse_forward(spec)
 
 
 # ── Merged from test_run_contract_backend.py ──────────────────────────────────────────────────────
 
-"""Fresh-process checks: no conftest path patches can hide launcher escapes."""
-
-from pathlib import Path
-
-import pytest
-
-REPO = Path(__file__).resolve().parents[2]
-LAUNCHER = REPO / "scripts" / "run_contract_backend.py"
-
 
 def run_probe(code: str, overrides: dict[str, str]) -> subprocess.CompletedProcess:
     env = {key: os.environ[key] for key in ("PATH", "HOME") if key in os.environ}
     env.update(overrides)
     return subprocess.run(
-        [sys.executable, "-B", "-c", code],
-        cwd=REPO,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
+        [sys.executable, "-B", "-c", code], cwd=REPO, env=env, text=True, capture_output=True, timeout=30, check=False
     )
 
 
 @pytest.mark.parametrize("relative", [False, True])
 def test_real_paths_resolve_inside_sandbox(tmp_path, relative):
     sandbox = tmp_path / "sandbox"
-    configs = sandbox / "configs"
-    data = sandbox / "data"
+    configs, data = sandbox / "configs", sandbox / "data"
     overrides = {
         "CONTRACT_CONFIGS_DIR": str(configs),
         "CONTRACT_DATA_DIR": str(data),
@@ -1389,8 +1127,6 @@ def test_real_paths_resolve_inside_sandbox(tmp_path, relative):
         f"""
 import json, os, runpy, sys
 from pathlib import Path
-
-# Path-only probes must never open a database, even on a regressed launcher.
 def audit(event, args):
     if event in ("sqlite3.connect", "socket.connect"):
         raise AssertionError("Probe must not open databases or network connections")
@@ -1414,8 +1150,7 @@ print(json.dumps({{key: str(Path(value).resolve()) for key, value in paths.items
         overrides,
     )
     assert result.returncode == 0, result.stderr
-    paths = json.loads(result.stdout)
-    assert paths == {
+    assert json.loads(result.stdout) == {
         "cwd": str(sandbox),
         "configs": str(configs),
         "data": str(data),
@@ -1458,8 +1193,8 @@ else:
     assert result.returncode == 0, result.stderr
 
 
-def test_no_overrides_is_a_noop():
-    result = run_probe(
+def test_no_overrides_and_main_chdir(tmp_path):
+    r1 = run_probe(
         f"""
 import os, runpy, sys
 launcher = runpy.run_path({str(LAUNCHER)!r})
@@ -1470,11 +1205,9 @@ assert "backend.config" not in sys.modules
 """,
         {},
     )
-    assert result.returncode == 0, result.stderr
+    assert r1.returncode == 0, r1.stderr
 
-
-def test_main_retains_repo_importability_after_chdir(tmp_path):
-    result = run_probe(
+    r2 = run_probe(
         f"""
 import runpy, sys, types
 from pathlib import Path
@@ -1490,4 +1223,4 @@ runpy.run_path({str(LAUNCHER)!r}, run_name="__main__")
 """,
         {"CONTRACT_CONFIGS_DIR": str(tmp_path / "configs"), "CONTRACT_DATA_DIR": str(tmp_path / "data")},
     )
-    assert result.returncode == 0, result.stderr
+    assert r2.returncode == 0, r2.stderr

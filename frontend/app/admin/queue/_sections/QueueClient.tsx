@@ -2,9 +2,9 @@
 
 import React from 'react'
 import { AlertTriangle, CheckCircle2, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
-import { formatLocalDateTime, formatCount } from '@/lib/format'
+import { formatLocalDateTime, formatCount } from "@/lib/utils"
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { client, unwrapClient } from '@/lib/api'
+import { client, unwrapClient, queryKeys } from "@/lib/api";
 import type { ColumnDef } from '@tanstack/react-table'
 import { DataTableReadonly } from '@/components/DataTable'
 import { Badge } from '@/components/ui/badge'
@@ -14,7 +14,6 @@ import { Sparkline } from '@/app/dashboard/_sections/DashboardClient'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import type { components } from '@/types/api.generated'
 import { useAdminEventStream } from '@/hooks/useSSE'
-import { queryKeys } from '@/lib/query-keys'
 import { QuarantineSection } from '@/app/control-room/_sections/ControlRoomClient'
 
 type TrendBatch = components['schemas']['MetricHistoryBatchResponse']

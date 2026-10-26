@@ -473,6 +473,7 @@ def test_preview_alert_bucket_granularity_scales_with_lookback(
             return_value={"name": "test_service", "service_id": _SERVICE_ID},
         ),
         patch("backend.utils.telemetry.track_query", _spy),
+        patch("backend.repositories.assets.track_query", _spy),
     ):
         resp = client.post(f"/api/alerts/preview?lookback_hours={lookback_hours}", json=_preview_body())
 
@@ -710,6 +711,7 @@ def test_preview_alert_anomaly_zscore(client, in_memory_duckdb):
 
 def test_toggle_alert_missing_service_id_returns_400(client):
     from backend.deps import get_service_id
+
     from backend.main import app
 
     app.dependency_overrides[get_service_id] = lambda: None
@@ -736,6 +738,7 @@ def test_toggle_alert_analyst_not_authorized_returns_403(client):
     alert_id = alert_resp.json()["data"]["id"]
 
     from backend.deps import get_service_id
+
     from backend.main import app
 
     app.dependency_overrides[get_service_id] = lambda: other_service_id
@@ -762,6 +765,7 @@ def test_toggle_alert_analyst_not_authorized_returns_403(client):
 
 def test_delete_alert_missing_service_id_returns_400(client):
     from backend.deps import get_service_id
+
     from backend.main import app
 
     app.dependency_overrides[get_service_id] = lambda: None
@@ -787,6 +791,7 @@ def test_delete_alert_analyst_not_authorized_returns_403(client):
     alert_id = alert_resp.json()["data"]["id"]
 
     from backend.deps import get_service_id
+
     from backend.main import app
 
     app.dependency_overrides[get_service_id] = lambda: other_service_id
@@ -824,6 +829,7 @@ def test_status_cache_has_data_handles_exception(client, in_memory_duckdb):
 
 def test_delete_view_missing_service_id_returns_400(client):
     from backend.deps import get_service_id
+
     from backend.main import app
 
     app.dependency_overrides[get_service_id] = lambda: None
@@ -855,6 +861,7 @@ def test_delete_view_analyst_not_authorized_returns_403(client):
     view_id = view_resp.json()["id"]
 
     from backend.deps import get_service_id
+
     from backend.main import app
 
     app.dependency_overrides[get_service_id] = lambda: other_service_id

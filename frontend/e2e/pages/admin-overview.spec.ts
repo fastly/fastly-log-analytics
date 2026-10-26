@@ -5,17 +5,20 @@
  */
 
 import AxeBuilder from '@axe-core/playwright'
-import { expect, test, type Locator, type Page } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 import {
+  assertAnalyst403,
+  assertFooterVisible,
+  assertIntrinsicReservations,
+  assertManualRefreshAttribution,
+  assertWarmClsAndFcp,
   clsInitScript,
   configureExternalAdminOrigin,
   getFirstServiceId,
   installClsObserver,
-  loginAsPasscodeAnalyst,
   measureWarmPaintAndCls,
   readClsScore,
   resolveFirstServiceId,
-  revokeAnalystInvite,
 } from '../helpers'
 
 const externalOrigin = configureExternalAdminOrigin()
@@ -34,107 +37,6 @@ function recordStreams(page: Page): string[] {
     if (url.includes('/stream')) streamRequests.push(new URL(url).pathname + new URL(url).search)
   })
   return streamRequests
-}
-
-async function assertFooterVisible(page: Page, pattern?: RegExp) {
-  const footer = page.locator('footer').first()
-  await expect(footer).toBeVisible({ timeout: 10_000 })
-  const text = ((await footer.textContent()) ?? '').trim()
-  expect(text.length).toBeGreaterThan(0)
-  if (pattern) expect(text).toMatch(pattern)
-}
-
-async function assertAnalyst403(
-  page: Page,
-  label: string,
-  urlBuilder: (serviceId: string) => string[],
-) {
-  if (process.env.PLAYWRIGHT_BASE_URL) return
-  const serviceId = (await getFirstServiceId(page)) ?? 'svc-playwright-e2e'
-  let inviteId: string | null = null
-  try {
-    const seeded = await loginAsPasscodeAnalyst(page.request, {
-      name: `${label} Guard Analyst`,
-      email: `e2e-${label.toLowerCase()}-guard-${Date.now()}@example.com`,
-      passcode: 'harbor-cloud-forest-91',
-      durationHours: 1,
-      serviceIds: [serviceId],
-    })
-    inviteId = seeded.inviteId
-    for (const url of urlBuilder(serviceId)) {
-      const res = await page.request.get(url, { headers: { 'x-remote-analyst': '1' } })
-      expect(res.status()).toBe(403)
-      const body = await res.json().catch(() => ({}))
-      if (body.error) expect(body.error).toBe('admin_only')
-    }
-  } finally {
-    await revokeAnalystInvite(page.request, inviteId, { logout: true })
-  }
-}
-
-async function assertIntrinsicReservations(page: Page, testIds: string[], root?: Locator) {
-  for (const testId of testIds) {
-    const container = root ? root.getByTestId(testId) : page.locator(`[data-testid="${testId}"]:visible`)
-    await expect(container).toBeVisible({ timeout: 15_000 })
-    const classAttr = (await container.getAttribute('class')) ?? ''
-    expect(classAttr).toContain('contain-intrinsic-size')
-    expect(classAttr).toContain('content-visibility')
-  }
-}
-
-async function assertWarmClsAndFcp(
-  page: Page,
-  navigateOrReload: () => Promise<void>,
-  readyLocators: Locator[],
-  maxFcpMs = 1200,
-) {
-  await page.addInitScript(clsInitScript)
-  await navigateOrReload()
-  for (const loc of readyLocators) {
-    await expect(loc).toBeVisible({ timeout: 30_000 })
-  }
-  const metrics = await page.evaluate(() => {
-    const fcpEntry = performance.getEntriesByName('first-contentful-paint')[0] as PerformanceEntry | undefined
-    return { fcpMs: fcpEntry ? fcpEntry.startTime : 0, cls: window.__clsScore ?? 0 }
-  })
-  expect(metrics.cls).toBeLessThanOrEqual(0.05)
-  if (metrics.fcpMs > 0) expect(metrics.fcpMs).toBeLessThan(maxFcpMs)
-}
-
-async function assertManualRefreshAttribution(
-  page: Page,
-  opts: {
-    url: string
-    readyLocator: Locator
-    refreshLocator: Locator
-    requestFilter: (url: string) => boolean
-  },
-) {
-  const tracked: Array<{ url: string; pageLoadId: string | null }> = []
-  page.on('request', (req) => {
-    if (opts.requestFilter(req.url())) {
-      tracked.push({ url: req.url(), pageLoadId: req.headers()['x-page-load-id'] ?? null })
-    }
-  })
-  await page.goto(opts.url, { waitUntil: 'domcontentloaded' })
-  await expect(opts.readyLocator).toBeVisible({ timeout: 30_000 })
-  await expect.poll(() => tracked.length, { timeout: 25_000 }).toBeGreaterThanOrEqual(1)
-  expect(tracked[0].pageLoadId).toBeTruthy()
-
-  const before = tracked.length
-  await expect(opts.refreshLocator).toBeVisible({ timeout: 15_000 })
-  await expect(opts.refreshLocator).toBeEnabled({ timeout: 15_000 })
-  await expect
-    .poll(
-      async () => {
-        if (tracked.length <= before) await opts.refreshLocator.click()
-        return tracked.length
-      },
-      { timeout: 15_000, intervals: [250, 500, 1000] },
-    )
-    .toBeGreaterThan(before)
-  expect(tracked.some((r) => Boolean(r.pageLoadId))).toBe(true)
-  await expect(opts.readyLocator).toBeVisible()
 }
 
 function buildProvisionPayload(sid: string, label: string, prefix: string) {

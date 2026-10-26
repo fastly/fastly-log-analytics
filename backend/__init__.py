@@ -26,7 +26,7 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.sync_status_snapshot": "backend.cron.scheduler",
     "backend.request_metrics_observer": "backend.core.request_telemetry",
     # Round 15 Group 2 — backend/core/
-    "backend.core.clickhouse_schema": "backend.core.clickhouse_publication",
+    "backend.core.clickhouse_schema": "backend.core.clickhouse",
     "backend.core.clickhouse_observer": "backend.core.clickhouse_client",
     "backend.core.clickhouse_metrics": "backend.core.clickhouse_client",
     "backend.core.session_token": "backend.core.request_context",
@@ -43,9 +43,9 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.models._base": "backend.models.common",
     "backend.models.high_scale": "backend.models.admin",
     "backend.models.admin_status": "backend.models.admin",
-    "backend.models.sessions": "backend.models.dashboard",
+    "backend.models.sessions": "backend.models.analytics",
     "backend.services.service_manager": "backend.utils.router_utils",
-    "backend.utils.pop_utils": "backend.utils.countries",
+    "backend.utils.pop_utils": "backend.utils.router_utils",
     "backend.utils.dir_size": "backend.utils.router_utils",
     "backend.utils.sse": "backend.utils.router_utils",
     "backend.utils.error_utils": "backend.utils.router_utils",
@@ -59,9 +59,9 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.utils.active_requests": "backend.utils.telemetry",
     "backend.utils.sqlite_profiler": "backend.utils.telemetry",
     # Round 16 — Repositories & Routers
-    "backend.repositories.audit": "backend.repositories.alerts",
+    "backend.repositories.audit": "backend.repositories.assets",
     "backend.repositories.insights_helpers": "backend.repositories.insights",
-    "backend.routers.audit": "backend.routers.alerts",
+    "backend.routers.audit": "backend.routers.control_room",
     "backend.routers.debug": "backend.routers.bootstrap",
     "backend.routers.insights": "backend.routers.dashboard",
     "backend.routers.sessions": "backend.routers.session_scoring",
@@ -94,7 +94,7 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.core.realtime.poller": "backend.core.realtime.transform",
     "backend.high_scale.origin_projection": "backend.high_scale.origin",
     "backend.high_scale.replay": "backend.high_scale.historical_jobs",
-    "backend.models.security": "backend.models.dashboard",
+    "backend.models.security": "backend.models.analytics",
     "backend.routers.security": "backend.routers.network",
     # Round 25 — Backend <300-Line Module Consolidation
     "backend.core.query_attribution": "backend.core.request_telemetry",
@@ -200,6 +200,33 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.provision.session_scoring_vcl": "backend.provision.session_scoring_orchestrator",
     "backend.provision.declarative.state": "backend.provision.declarative.reconciler",
     "backend.provision.declarative.config_migration": "backend.provision.declarative.reconciler",
+    # Round 49 — Backend <650-Line Module Consolidation
+    "backend.repositories._sql.rum": "backend.repositories.rum",
+    "backend.repositories._sql.security": "backend.repositories.security",
+    "backend.utils.http": "backend.utils.telemetry",
+    "backend.core.retry": "backend.utils.telemetry",
+    "backend.utils.date_utils": "backend.utils.telemetry",
+    "backend.utils.countries": "backend.utils.router_utils",
+    "backend.deps": "backend.core.request_context",
+    "backend.core.query_instrumentation": "backend.core.request_telemetry",
+    "backend.core.clickhouse_publication": "backend.core.clickhouse",
+    "backend.core.iceberg._ducklake": "backend.core.iceberg._core",
+    "backend.high_scale._common": "backend.high_scale.ingest_controller",
+    "backend.high_scale.performance": "backend.high_scale.query_service",
+    "backend.high_scale.cmcd": "backend.high_scale.query_service",
+    "backend.provision.declarative.fastly_integration": "backend.provision.declarative.reconciler",
+    "backend.provision.declarative.generators": "backend.provision.declarative.reconciler",
+    "backend.provision.fos_setup": "backend.provision.orchestrator",
+    "backend.utils.terraform_gen": "backend.provision.orchestrator",
+    "backend.provision.session_scoring_setup": "backend.provision.session_scoring_orchestrator",
+    "backend.repositories.utils.filters": "backend.repositories._base",
+    "backend.repositories.query": "backend.repositories.dashboard",
+    "backend.core.rollups.network": "backend.core.rollups.origin_dims",
+    "backend.core.rollups.rum": "backend.core.rollups.recompute",
+    "backend.models.session_scoring": "backend.models.analytics",
+    "backend.models.dashboard": "backend.models.analytics",
+    "backend.routers.alerts": "backend.routers.control_room",
+    "backend.repositories.alerts": "backend.repositories.assets",
 }
 
 
@@ -213,7 +240,8 @@ class _AliasLoader(importlib.abc.MetaPathFinder, importlib.abc.ExecutionLoader):
         if fullname == "backend.services":
             return importlib.machinery.ModuleSpec(fullname, self, is_package=True)
         if fullname in _MODULE_ALIASES:
-            target_spec = importlib.util.find_spec(_MODULE_ALIASES[fullname])
+            target_name = _MODULE_ALIASES[fullname]
+            target_spec = importlib.util.find_spec(target_name)
             origin = target_spec.origin if target_spec else None
             return importlib.machinery.ModuleSpec(fullname, self, origin=origin)
         return None
@@ -227,18 +255,18 @@ class _AliasLoader(importlib.abc.MetaPathFinder, importlib.abc.ExecutionLoader):
         return (spec.origin or "") if spec else ""
 
     def get_source(self, fullname: str) -> str | None:
-        target_name = _MODULE_ALIASES.get(fullname)
-        if not target_name:
+        if fullname not in _MODULE_ALIASES:
             return None
+        target_name = _MODULE_ALIASES[fullname]
         spec = importlib.util.find_spec(target_name)
         if spec and spec.loader and hasattr(spec.loader, "get_source"):
             return spec.loader.get_source(target_name)  # type: ignore[no-any-return]
         return None
 
     def get_code(self, fullname: str) -> types.CodeType | None:
-        target_name = _MODULE_ALIASES.get(fullname)
-        if not target_name:
+        if fullname not in _MODULE_ALIASES:
             return None
+        target_name = _MODULE_ALIASES[fullname]
         spec = importlib.util.find_spec(target_name)
         if spec and spec.loader and hasattr(spec.loader, "get_code"):
             return spec.loader.get_code(target_name)  # type: ignore[no-any-return]
@@ -270,7 +298,7 @@ class _AliasLoader(importlib.abc.MetaPathFinder, importlib.abc.ExecutionLoader):
                 setattr(parent_mod, "services", module)
             return
         for alias, target_name in _MODULE_ALIASES.items():
-            if module.__name__ == target_name:
+            if target_name == module.__name__:
                 sys.modules[alias] = module
                 parent_name, _, child_name = alias.rpartition(".")
                 parent_mod = sys.modules.get(parent_name)

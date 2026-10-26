@@ -9,35 +9,24 @@ import { useTheme } from 'next-themes'
 import { Play, Pause } from 'lucide-react'
 import { useTimezoneStore, usePopGeoStore } from '@/stores/filterStore'
 import { formatPopGeo, type PopGeo } from '@/components/DataTable'
-import { formatBucket, formatCompactCount, formatCount, resolveCountryName } from '@/lib/format'
+import { formatBucket, formatCompactCount, formatCount, resolveCountryName, CHART_COLORS } from "@/lib/utils";
 import { Slider } from '@/components/ui/slider'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import countryMapData from '@/lib/country-codes.json'
 import type { components } from '@/types/api.generated'
 import {
-  rafThrottle,
-  countryFill,
-  observeMapResize,
-  NORMALIZE_COUNTRY,
-  useMapResize,
-  addCountryBaseLayer,
-  createBaseMap,
-  removeMapTabStops,
-  updateCountryBaseLayerTheme,
-  type MapFillColor,
+  rafThrottle, countryFill, observeMapResize, NORMALIZE_COUNTRY, useMapResize,
+  addCountryBaseLayer, createBaseMap, removeMapTabStops, updateCountryBaseLayerTheme, type MapFillColor,
 } from '@/components/Map/ChoroplethMap'
-import { CHART_COLORS } from '@/lib/chart-helpers'
 
 type NetworkHealth = components['schemas']['NetworkHealthResponse']
-
 /** The slice of the network-health response the map renders. */
 export type NetworkMapData = Partial<Pick<NetworkHealth, 'buckets' | 'map_buckets' | 'cities'>>
 type MapCity = components['schemas']['NetworkMapCity']
 
 const A2_TO_A3: Record<string, string> = countryMapData
 
-/** One city's value for a metric id (``health_score``, ``rtt_med_us`` …); ``null`` when absent. */
 function cityMetric(c: MapCity, metric: string): number | null {
   const v = (c as Record<string, unknown>)[metric]
   return typeof v === 'number' ? v : null
@@ -58,40 +47,22 @@ export function getScoreColor(val: number | null, metric: string): string {
   const band = SCORE_BANDS[metric]
   if (!band) return CHART_COLORS.info
   const [g, y, o] = band.t
-  if (band.highIsGood) {
-    if (val >= g) return '#22c55e'
-    if (val >= y) return '#eab308'
-    if (val >= o) return '#f97316'
-    return CHART_COLORS.danger
-  }
-  if (val <= g) return '#22c55e'
-  if (val <= y) return '#eab308'
-  if (val <= o) return '#f97316'
-  return CHART_COLORS.danger
+  if (band.highIsGood) return val >= g ? '#22c55e' : val >= y ? '#eab308' : val >= o ? '#f97316' : CHART_COLORS.danger
+  return val <= g ? '#22c55e' : val <= y ? '#eab308' : val <= o ? '#f97316' : CHART_COLORS.danger
 }
 
 interface UseMapInitArgs {
   mapContainer: MutableRefObject<HTMLDivElement | null>
-  isDark: boolean
-  isDarkRef: MutableRefObject<boolean>
+  isDark: boolean; isDarkRef: MutableRefObject<boolean>
   dmaDataRef: MutableRefObject<Record<number, CityTooltipData>>
-  setTooltip: (t: TooltipInfo | null) => void
-  onMapError?: () => void
+  setTooltip: (t: TooltipInfo | null) => void; onMapError?: () => void
 }
 
 /**
  * Initializes the MapLibre instance, adds sources/layers, and wires hover
- * handlers for the city-scatter and dma-fill layers. Cleans up on unmount or
- * when `isDark` changes (so the map style can be rebuilt for the new theme).
+ * handlers for the city-scatter and dma-fill layers.
  */
-export function useMapInit({
-  mapContainer,
-  isDark,
-  isDarkRef,
-  dmaDataRef,
-  setTooltip,
-  onMapError,
-}: UseMapInitArgs): MutableRefObject<maplibregl.Map | null> {
+export function useMapInit({ mapContainer, isDark, isDarkRef, dmaDataRef, setTooltip, onMapError }: UseMapInitArgs): MutableRefObject<maplibregl.Map | null> {
   const map = useRef<maplibregl.Map | null>(null)
   useEffect(() => {
     if (!mapContainer.current) return
@@ -99,94 +70,53 @@ export function useMapInit({
 
     if (!map.current) {
       try {
-        map.current = createBaseMap(maplibregl, mapContainer.current, {
-          renderWorldCopies: false,
-          zoom: 1,
-          cooperativeGestures: true,
-        })
-
-        map.current.on('error', (e) => {
-          console.error('[NetworkMap:map] MapLibre error event:', e)
-        })
-
+        map.current = createBaseMap(maplibregl, mapContainer.current, { renderWorldCopies: false, zoom: 1, cooperativeGestures: true })
+        map.current.on('error', (e) => { console.error('[NetworkMap:map] MapLibre error event:', e) })
         stopResizeObserver = observeMapResize(mapContainer.current, () => map.current)
 
         map.current.on('load', () => {
           if (!map.current) return
-
           map.current.addSource('dma', { type: 'geojson', data: '/geo/dma.geojson' })
           map.current.addSource('heatmap', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
-
-          addCountryBaseLayer(map.current, {
-            isDark: isDarkRef.current,
-            extraPaint: { 'fill-opacity': 0.8 },
-          })
-
+          addCountryBaseLayer(map.current, { isDark: isDarkRef.current, extraPaint: { 'fill-opacity': 0.8 } })
+          map.current.addLayer({ id: 'dma-fill', type: 'fill', source: 'dma', paint: { 'fill-opacity': 0.7, 'fill-color': 'transparent' } })
           map.current.addLayer({
-            id: 'dma-fill',
-            type: 'fill',
-            source: 'dma',
-            paint: { 'fill-opacity': 0.7, 'fill-color': 'transparent' },
-          })
-
-          map.current.addLayer({
-            id: 'city-scatter',
-            type: 'circle',
-            source: 'heatmap',
+            id: 'city-scatter', type: 'circle', source: 'heatmap',
             paint: {
-              'circle-radius': ['get', 'radius'],
-              'circle-color': ['get', 'color'],
-              'circle-opacity': 0.8,
-              'circle-stroke-width': 1,
-              'circle-stroke-color': isDarkRef.current ? '#18181b' : '#ffffff',
+              'circle-radius': ['get', 'radius'], 'circle-color': ['get', 'color'], 'circle-opacity': 0.8,
+              'circle-stroke-width': 1, 'circle-stroke-color': isDarkRef.current ? '#18181b' : '#ffffff',
             },
           })
 
           const pushTooltip = (e: maplibregl.MapLayerMouseEvent, cityData: CityTooltipData) => {
             setTooltip({
-              clientX: e.originalEvent.clientX,
-              clientY: e.originalEvent.clientY,
-              city: asCityString(cityData.city),
-              country: asCityString(cityData.country) || undefined,
-              cityData,
+              clientX: e.originalEvent.clientX, clientY: e.originalEvent.clientY,
+              city: asCityString(cityData.city), country: asCityString(cityData.country) || undefined, cityData,
             })
           }
 
-          map.current.on('mouseenter', 'city-scatter', (e) => {
-            if (!e.features?.length || !map.current) return
-            map.current.getCanvas().style.cursor = 'pointer'
-            pushTooltip(e, e.features[0].properties ?? {})
-          })
+          const bindHover = (layer: string, resolveData: (f: maplibregl.MapGeoJSONFeature) => CityTooltipData | undefined) => {
+            if (!map.current) return
+            map.current.on('mouseenter', layer, (e) => {
+              if (!e.features?.length || !map.current) return
+              const cityData = resolveData(e.features[0])
+              if (!cityData) return
+              map.current.getCanvas().style.cursor = 'pointer'
+              pushTooltip(e, cityData)
+            })
+            map.current.on('mousemove', layer, rafThrottle((e: maplibregl.MapLayerMouseEvent) => {
+              if (!e.features?.length) return
+              const cityData = resolveData(e.features[0])
+              if (cityData) pushTooltip(e, cityData)
+            }))
+            map.current.on('mouseleave', layer, () => {
+              if (map.current) map.current.getCanvas().style.cursor = ''
+              setTooltip(null)
+            })
+          }
 
-          map.current.on('mousemove', 'city-scatter', rafThrottle((e: maplibregl.MapLayerMouseEvent) => {
-            if (!e.features?.length) return
-            pushTooltip(e, e.features[0].properties ?? {})
-          }))
-
-          map.current.on('mouseleave', 'city-scatter', () => {
-            if (map.current) map.current.getCanvas().style.cursor = ''
-            setTooltip(null)
-          })
-
-          map.current.on('mouseenter', 'dma-fill', (e) => {
-            if (!e.features?.length || !map.current) return
-            const cityData = dmaDataRef.current[Number(e.features[0].properties?.dma_code)]
-            if (!cityData) return
-            map.current.getCanvas().style.cursor = 'pointer'
-            pushTooltip(e, cityData)
-          })
-
-          map.current.on('mousemove', 'dma-fill', rafThrottle((e: maplibregl.MapLayerMouseEvent) => {
-            if (!e.features?.length) return
-            const cityData = dmaDataRef.current[Number(e.features[0].properties?.dma_code)]
-            if (!cityData) return
-            pushTooltip(e, cityData)
-          }))
-
-          map.current.on('mouseleave', 'dma-fill', () => {
-            if (map.current) map.current.getCanvas().style.cursor = ''
-            setTooltip(null)
-          })
+          bindHover('city-scatter', (f) => f.properties ?? {})
+          bindHover('dma-fill', (f) => dmaDataRef.current[Number(f.properties?.dma_code)])
         })
       } catch {
         map.current = null
@@ -215,40 +145,25 @@ interface UseMapDataArgs {
   map: MutableRefObject<maplibregl.Map | null>
   dmaDataRef: MutableRefObject<Record<number, CityTooltipData>>
   data: NetworkMapData | null | undefined
-  bucketIdx: number
-  metric: string
-  isDark: boolean
+  bucketIdx: number; metric: string; isDark: boolean
   setTooltip: (t: TooltipInfo | null) => void
 }
 
 /**
  * Pushes the current bucket's city data into the map's heatmap source and
- * recomputes per-country and per-DMA fill colors. Runs whenever bucketIdx,
- * data, metric, or theme changes.
+ * recomputes per-country and per-DMA fill colors.
  */
-export function useMapData({
-  map,
-  dmaDataRef,
-  data,
-  bucketIdx,
-  metric,
-  isDark,
-  setTooltip,
-}: UseMapDataArgs) {
+export function useMapData({ map, dmaDataRef, data, bucketIdx, metric, isDark, setTooltip }: UseMapDataArgs) {
   useEffect(() => {
     if (!map.current || !data?.map_buckets) return
     const mapBuckets = data.map_buckets
     const cityEntries = data.cities ?? []
-
     let pendingStyleDataHandler: (() => void) | null = null
 
     const updateMap = () => {
       if (!map.current) return
-
       if (!map.current.getLayer('countries') || !map.current.getSource('heatmap')) {
-        if (pendingStyleDataHandler) {
-          map.current.off('styledata', pendingStyleDataHandler)
-        }
+        if (pendingStyleDataHandler) map.current.off('styledata', pendingStyleDataHandler)
         const onStyleData = () => {
           if (map.current?.getLayer('countries') && map.current?.getSource('heatmap')) {
             map.current.off('styledata', onStyleData)
@@ -262,9 +177,8 @@ export function useMapData({
       }
 
       setTooltip(null)
-
       const bucketData = mapBuckets[bucketIdx]
-      if (!bucketData || !bucketData.cities) return
+      if (!bucketData?.cities) return
 
       const resolveCity = (c: MapCity) => {
         const entry = c.city_idx >= 0 && c.city_idx < cityEntries.length ? cityEntries[c.city_idx] : undefined
@@ -299,15 +213,9 @@ export function useMapData({
             type: 'Feature',
             geometry: { type: 'Point', coordinates: [city.lon, city.lat] },
             properties: {
-              city: city.name,
-              country: c.country || '',
-              color,
-              radius: Math.max(3, Math.min(15, Math.log10(reqs + 1) * 2.5)),
-              reqs,
-              health_score: c.health_score,
-              rtt_med_us: c.rtt_med_us,
-              avg_ploss: c.avg_ploss,
-              error_pct: c.error_pct,
+              city: city.name, country: c.country || '', color,
+              radius: Math.max(3, Math.min(15, Math.log10(reqs + 1) * 2.5)), reqs,
+              health_score: c.health_score, rtt_med_us: c.rtt_med_us, avg_ploss: c.avg_ploss, error_pct: c.error_pct,
             },
           })
         }
@@ -322,8 +230,7 @@ export function useMapData({
       matchCountry.push(countryFill(isDark))
 
       map.current.setPaintProperty(
-        'countries',
-        'fill-color',
+        'countries', 'fill-color',
         (Object.keys(countryScores).length > 0 ? matchCountry : countryFill(isDark)) as MapFillColor
       )
 
@@ -341,13 +248,10 @@ export function useMapData({
           map.current.setPaintProperty('dma-fill', 'fill-color', 'transparent')
         }
       }
-      if (typeof map.current.resize === 'function') {
-        map.current.resize()
-      }
+      if (typeof map.current.resize === 'function') map.current.resize()
     }
 
     updateMap()
-
     const currentMap = map.current
     return () => {
       if (pendingStyleDataHandler) {
@@ -358,11 +262,7 @@ export function useMapData({
   }, [bucketIdx, data, metric, isDark, dmaDataRef, map, setTooltip])
 }
 
-export const MapLayer = {
-  getScoreColor,
-  useMapInit,
-  useMapData,
-}
+export const MapLayer = { getScoreColor, useMapInit, useMapData }
 
 export const METRIC_OPTIONS = [
   { value: 'health_score', label: 'Health Score' },
@@ -373,35 +273,22 @@ export const METRIC_OPTIONS = [
 ]
 
 export const SPEED_OPTIONS = [
-  { value: 1000, label: '1×' },
-  { value: 500, label: '2×' },
-  { value: 200, label: '5×' },
-  { value: 100, label: '10×' },
+  { value: 1000, label: '1×' }, { value: 500, label: '2×' },
+  { value: 200, label: '5×' }, { value: 100, label: '10×' },
 ]
 
 export const STEP_OPTIONS = [
-  { value: 1, label: '1 sec' },
-  { value: 5, label: '5 sec' },
-  { value: 10, label: '10 sec' },
-  { value: 30, label: '30 sec' },
-  { value: 60, label: '1 min' },
-  { value: 300, label: '5 min' },
-  { value: 900, label: '15 min' },
-  { value: 1800, label: '30 min' },
-  { value: 3600, label: '1 hr' },
-  { value: 7200, label: '2 hr' },
-  { value: 14400, label: '4 hr' },
+  { value: 1, label: '1 sec' }, { value: 5, label: '5 sec' }, { value: 10, label: '10 sec' },
+  { value: 30, label: '30 sec' }, { value: 60, label: '1 min' }, { value: 300, label: '5 min' },
+  { value: 900, label: '15 min' }, { value: 1800, label: '30 min' }, { value: 3600, label: '1 hr' },
+  { value: 7200, label: '2 hr' }, { value: 14400, label: '4 hr' },
 ]
 
 /** Per-city values behind a tooltip: the map-bucket cell fields, or a GeoJSON feature's properties. */
 export type CityTooltipData = Record<string, unknown>
 
 export interface TooltipInfo {
-  clientX: number
-  clientY: number
-  city: string
-  country?: string
-  cityData: CityTooltipData
+  clientX: number; clientY: number; city: string; country?: string; cityData: CityTooltipData
 }
 
 const numberOrNull = (v: unknown): number | null => (typeof v === 'number' ? v : null)
@@ -432,12 +319,10 @@ export function MapTooltip({ info, metric }: { info: TooltipInfo; metric: string
       data-testid="map-tooltip"
       data-metric={metric}
       style={{
-        position: 'fixed',
-        top: info.clientY - 12,
+        position: 'fixed', top: info.clientY - 12,
         left: flipLeft ? info.clientX - 14 : info.clientX + 14,
         transform: flipLeft ? 'translate(-100%, -100%)' : 'translateY(-100%)',
-        zIndex: 9999,
-        pointerEvents: 'none',
+        zIndex: 9999, pointerEvents: 'none',
       }}
       className="bg-popover text-popover-foreground border border-border rounded-lg shadow-xl px-3 py-2.5 font-sans min-w-[160px]"
     >
@@ -464,44 +349,28 @@ export function MapTooltip({ info, metric }: { info: TooltipInfo; metric: string
 }
 
 interface PlaybackControlsProps {
-  playing: boolean
-  setPlaying: (p: boolean) => void
-  bucketIdx: number
-  setBucketIdx: (i: number) => void
-  bucketsLength: number
-  firstBucketLabel: string
-  currentBucketLabel: string
-  lastBucketLabel: string
-  metric: string
-  onMetricChange: (m: string) => void
-  bucketSeconds: number
-  onBucketChange: (b: number) => void
-  playInterval: number
-  setPlayInterval: (n: number) => void
-  mapAsn: string
-  onAsnChange: (a: string) => void
+  playing: boolean; setPlaying: (p: boolean) => void
+  bucketIdx: number; setBucketIdx: (i: number) => void; bucketsLength: number
+  firstBucketLabel: string; currentBucketLabel: string; lastBucketLabel: string
+  metric: string; onMetricChange: (m: string) => void
+  bucketSeconds: number; onBucketChange: (b: number) => void
+  playInterval: number; setPlayInterval: (n: number) => void
+  mapAsn: string; onAsnChange: (a: string) => void
   asnOptions: Array<{ value: string; label: string }>
 }
 
 export function PlaybackControls({
-  playing,
-  setPlaying,
-  bucketIdx,
-  setBucketIdx,
-  bucketsLength,
-  firstBucketLabel,
-  currentBucketLabel,
-  lastBucketLabel,
-  metric,
-  onMetricChange,
-  bucketSeconds,
-  onBucketChange,
-  playInterval,
-  setPlayInterval,
-  mapAsn,
-  onAsnChange,
-  asnOptions,
+  playing, setPlaying, bucketIdx, setBucketIdx, bucketsLength,
+  firstBucketLabel, currentBucketLabel, lastBucketLabel,
+  metric, onMetricChange, bucketSeconds, onBucketChange,
+  playInterval, setPlayInterval, mapAsn, onAsnChange, asnOptions,
 }: PlaybackControlsProps) {
+  const selects = [
+    { label: 'Metric', width: 'w-[150px]', value: metric, onChange: onMetricChange, options: METRIC_OPTIONS },
+    { label: 'Time step', width: 'w-[90px]', value: String(bucketSeconds), onChange: (v: string) => onBucketChange(Number(v)), options: STEP_OPTIONS.map((o) => ({ value: String(o.value), label: o.label })) },
+    { label: 'Playback speed', width: 'w-[68px]', value: String(playInterval), onChange: (v: string) => setPlayInterval(Number(v)), options: SPEED_OPTIONS.map((o) => ({ value: String(o.value), label: o.label })) },
+    { label: 'ASN filter', width: 'w-[180px]', value: mapAsn, onChange: onAsnChange, options: [{ value: 'all', label: 'All ASNs' }, ...asnOptions] },
+  ]
   return (
     <div
       data-testid="playback-controls"
@@ -514,8 +383,7 @@ export function PlaybackControls({
     >
       <div className="flex items-center gap-3">
         <Button
-          variant="outline"
-          size="icon"
+          variant="outline" size="icon"
           aria-label={playing ? 'Pause map playback' : 'Play map playback'}
           className="shrink-0 h-8 w-8"
           onClick={() => setPlaying(!playing)}
@@ -529,12 +397,8 @@ export function PlaybackControls({
             <span>{lastBucketLabel}</span>
           </div>
           <Slider
-            value={[bucketIdx]}
-            min={0}
-            max={bucketsLength - 1}
-            step={1}
-            aria-label="Time scrubber"
-            aria-valuetext={currentBucketLabel}
+            value={[bucketIdx]} min={0} max={bucketsLength - 1} step={1}
+            aria-label="Time scrubber" aria-valuetext={currentBucketLabel}
             onValueChange={(val) => {
               if (Array.isArray(val) && val.length) setBucketIdx(val[0])
               setPlaying(false)
@@ -544,81 +408,34 @@ export function PlaybackControls({
       </div>
 
       <div className="flex items-center gap-2 flex-wrap">
-        <Select value={metric} onValueChange={(val) => val && onMetricChange(val)}>
-          <SelectTrigger aria-label="Metric" className="h-7 text-xs w-[150px]">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {METRIC_OPTIONS.map((o) => (
-              <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-
-        <Select value={String(bucketSeconds)} onValueChange={(v) => v && onBucketChange(Number(v))}>
-          <SelectTrigger aria-label="Time step" className="h-7 text-xs w-[90px]">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {STEP_OPTIONS.map((o) => (
-              <SelectItem key={o.value} value={String(o.value)}>{o.label}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-
-        <Select value={String(playInterval)} onValueChange={(v) => v && setPlayInterval(Number(v))}>
-          <SelectTrigger aria-label="Playback speed" className="h-7 text-xs w-[68px]">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {SPEED_OPTIONS.map((o) => (
-              <SelectItem key={o.value} value={String(o.value)}>{o.label}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-
-        <Select value={mapAsn} onValueChange={(val) => val && onAsnChange(val)}>
-          <SelectTrigger aria-label="ASN filter" className="h-7 text-xs w-[180px]">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All ASNs</SelectItem>
-            {asnOptions.map((o) => (
-              <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        {selects.map((sel) => (
+          <Select key={sel.label} value={sel.value} onValueChange={(v) => v && sel.onChange(v)}>
+            <SelectTrigger aria-label={sel.label} className={`h-7 text-xs ${sel.width}`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {sel.options.map((o) => (
+                <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ))}
       </div>
     </div>
   )
 }
 
 interface NetworkMapProps {
-  data: NetworkMapData | null | undefined
-  isLoading?: boolean
-  error?: unknown
-  className?: string
-  metric: string
-  onMetricChange: (m: string) => void
-  bucketSeconds: number
-  onBucketChange: (b: number) => void
-  mapAsn: string
-  onAsnChange: (a: string) => void
+  data: NetworkMapData | null | undefined; isLoading?: boolean; error?: unknown; className?: string
+  metric: string; onMetricChange: (m: string) => void
+  bucketSeconds: number; onBucketChange: (b: number) => void
+  mapAsn: string; onAsnChange: (a: string) => void
   asnOptions: Array<{ value: string; label: string }>
 }
 
 export function NetworkMap({
-  data,
-  isLoading,
-  error,
-  className,
-  metric,
-  onMetricChange,
-  bucketSeconds,
-  onBucketChange,
-  mapAsn,
-  onAsnChange,
-  asnOptions,
+  data, isLoading, error, className, metric, onMetricChange,
+  bucketSeconds, onBucketChange, mapAsn, onAsnChange, asnOptions,
 }: NetworkMapProps) {
   const mapContainer = useRef<HTMLDivElement>(null)
   const metricRef = useRef(metric)
@@ -641,9 +458,7 @@ export function NetworkMap({
   useEffect(() => {
     const bucketCount = data?.buckets?.length ?? 0
     if (!playing || !bucketCount) return
-    const id = setInterval(() => {
-      setBucketIdx((i) => (i + 1) % bucketCount)
-    }, playInterval)
+    const id = setInterval(() => setBucketIdx((i) => (i + 1) % bucketCount), playInterval)
     return () => clearInterval(id)
   }, [playing, data?.buckets?.length, playInterval])
 
@@ -682,11 +497,7 @@ export function NetworkMap({
 
   return (
     <>
-      <div
-        className={`relative flex flex-col border rounded-lg overflow-hidden ${className} min-h-[400px]`}
-        role="group"
-        aria-label={a11yLabel}
-      >
+      <div className={`relative flex flex-col border rounded-lg overflow-hidden ${className} min-h-[400px]`} role="group" aria-label={a11yLabel}>
         {mapError ? (
           <div className="w-full h-[400px] flex items-center justify-center px-4 text-center text-xs text-muted-foreground" aria-hidden="true">
             Interactive map unavailable in this browser. See the metro table below.
@@ -695,15 +506,9 @@ export function NetworkMap({
           <div ref={mapContainer} className="w-full h-[400px]" aria-hidden="true" />
         )}
         <table className="sr-only">
-          <caption>
-            Network map — top {currentBucketRows.length} metros by {metric} for bucket {currentBucketLabel}.
-          </caption>
+          <caption>Network map — top {currentBucketRows.length} metros by {metric} for bucket {currentBucketLabel}.</caption>
           <thead>
-            <tr>
-              <th scope="col">Rank</th>
-              <th scope="col">Metro code</th>
-              <th scope="col">{metric}</th>
-            </tr>
+            <tr><th scope="col">Rank</th><th scope="col">Metro code</th><th scope="col">{metric}</th></tr>
           </thead>
           <tbody>
             {currentBucketRows.map((r, i) => (
@@ -733,68 +538,40 @@ export function NetworkMap({
           </div>
         ) : (
           <PlaybackControls
-            playing={playing}
-            setPlaying={setPlaying}
-            bucketIdx={bucketIdx}
-            setBucketIdx={setBucketIdx}
-            bucketsLength={data.buckets?.length ?? 0}
-            firstBucketLabel={firstBucketLabel}
-            currentBucketLabel={currentBucketLabel}
-            lastBucketLabel={lastBucketLabel}
-            metric={metric}
-            onMetricChange={onMetricChange}
-            bucketSeconds={bucketSeconds}
-            onBucketChange={onBucketChange}
-            playInterval={playInterval}
-            setPlayInterval={setPlayInterval}
-            mapAsn={mapAsn}
-            onAsnChange={onAsnChange}
-            asnOptions={asnOptions}
+            playing={playing} setPlaying={setPlaying} bucketIdx={bucketIdx} setBucketIdx={setBucketIdx}
+            bucketsLength={data.buckets?.length ?? 0} firstBucketLabel={firstBucketLabel}
+            currentBucketLabel={currentBucketLabel} lastBucketLabel={lastBucketLabel}
+            metric={metric} onMetricChange={onMetricChange} bucketSeconds={bucketSeconds}
+            onBucketChange={onBucketChange} playInterval={playInterval} setPlayInterval={setPlayInterval}
+            mapAsn={mapAsn} onAsnChange={onAsnChange} asnOptions={asnOptions}
           />
         )}
       </div>
 
-      {tooltip && typeof document !== 'undefined' && createPortal(
-        <MapTooltip info={tooltip} metric={metric} />,
-        document.body
-      )}
+      {tooltip && typeof document !== 'undefined' && createPortal(<MapTooltip info={tooltip} metric={metric} />, document.body)}
     </>
   )
 }
 
 type CoordTree = number | CoordTree[]
-
 const isPosition = (coords: CoordTree[]): coords is number[] => typeof coords[0] === 'number'
 
 function geoBbox(geometry: { coordinates: CoordTree[] }): [number, number, number, number] {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-  const processCoord = ([x, y]: number[]) => {
-    if (x < minX) minX = x
-    if (y < minY) minY = y
-    if (x > maxX) maxX = x
-    if (y > maxY) maxY = y
-  }
   const walk = (coords: CoordTree[]) => {
-    if (isPosition(coords)) { processCoord(coords); return }
+    if (isPosition(coords)) {
+      const [x, y] = coords
+      if (x < minX) minX = x; if (y < minY) minY = y; if (x > maxX) maxX = x; if (y > maxY) maxY = y
+      return
+    }
     for (const c of coords) if (Array.isArray(c)) walk(c)
   }
   walk(geometry.coordinates)
   return [minX, minY, maxX, maxY]
 }
 
-interface PopTrafficMapProps {
-  allPops: Record<string, { r: number; e: number }>
-  className?: string
-}
-
-interface PopTooltipState {
-  x: number
-  y: number
-  code: string
-  geo: PopGeo | undefined
-  requests: number
-  errorRate: number
-}
+interface PopTrafficMapProps { allPops: Record<string, { r: number; e: number }>; className?: string }
+interface PopTooltipState { x: number; y: number; code: string; geo: PopGeo | undefined; requests: number; errorRate: number }
 
 export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, className = '' }: PopTrafficMapProps) {
   const mapContainer = useRef<HTMLDivElement>(null)
@@ -810,30 +587,18 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
   const geoMapRef = useRef(geoMap)
   useEffect(() => { geoMapRef.current = geoMap }, [geoMap])
 
-  const popEntries = useMemo(() => {
-    return Object.entries(locations).map(([code, [lat, lon]]) => {
-      const stats = allPops[code] ?? allPops[code.toLowerCase()]
-      const requests = stats?.r ?? 0
-      const errors = stats?.e ?? 0
-      const errorRate = requests > 0 ? errors / requests : 0
-      const geo = geoMap[code]
-      return {
-        code,
-        lat,
-        lon,
-        requests,
-        errors,
-        errorRate,
-        country: geo?.country?.toUpperCase() ?? '',
-      }
-    })
-  }, [allPops, locations, geoMap])
+  const popEntries = useMemo(() => Object.entries(locations).map(([code, [lat, lon]]) => {
+    const stats = allPops[code] ?? allPops[code.toLowerCase()]
+    const requests = stats?.r ?? 0
+    const errors = stats?.e ?? 0
+    const errorRate = requests > 0 ? errors / requests : 0
+    const geo = geoMap[code]
+    return { code, lat, lon, requests, errors, errorRate, country: geo?.country?.toUpperCase() ?? '' }
+  }), [allPops, locations, geoMap])
 
   const countryAgg = useMemo(() => {
     const agg: Record<string, number> = {}
-    for (const e of popEntries) {
-      if (e.country) agg[e.country] = (agg[e.country] ?? 0) + e.requests
-    }
+    for (const e of popEntries) if (e.country) agg[e.country] = (agg[e.country] ?? 0) + e.requests
     return agg
   }, [popEntries])
 
@@ -847,10 +612,7 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
           type: 'Feature' as const,
           geometry: { type: 'Point' as const, coordinates: [e.lon, e.lat] },
           properties: {
-            code: e.code,
-            requests: e.requests,
-            errors: e.errors,
-            errorRate: e.errorRate,
+            code: e.code, requests: e.requests, errors: e.errors, errorRate: e.errorRate,
             radius: active ? 4 + Math.log10(e.requests) * 3 : 3,
             color: active ? (e.errorRate > 0.05 ? CHART_COLORS.danger : CHART_COLORS.info) : '#9ca3af',
             opacity: active ? 0.3 + (e.requests / maxReq) * 0.6 : 0.3,
@@ -862,43 +624,24 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
 
   useEffect(() => {
     if (!mapContainer.current) return
-
     if (!map.current) {
       try {
         map.current = createBaseMap(maplibregl, mapContainer.current, {
-          renderWorldCopies: false,
-          zoom: 0.5,
-          background: isDarkRef.current ? '#1a1b23' : '#f0f4fa',
-          lockRotation: true,
-          showCompass: false,
-          cooperativeGestures: true,
+          renderWorldCopies: false, zoom: 0.5, background: isDarkRef.current ? '#1a1b23' : '#f0f4fa',
+          lockRotation: true, showCompass: false, cooperativeGestures: true,
         })
-
-        requestAnimationFrame(() => {
-          map.current?.resize()
-        })
+        requestAnimationFrame(() => { map.current?.resize() })
 
         map.current.on('load', () => {
           if (!map.current) return
-
           removeMapTabStops(mapContainer.current)
           addCountryBaseLayer(map.current, { isDark: isDarkRef.current })
-
-          map.current.addSource('pop-markers', {
-            type: 'geojson',
-            data: { type: 'FeatureCollection', features: [] },
-          })
-
+          map.current.addSource('pop-markers', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
           map.current.addLayer({
-            id: 'pop-circles',
-            type: 'circle',
-            source: 'pop-markers',
+            id: 'pop-circles', type: 'circle', source: 'pop-markers',
             paint: {
-              'circle-radius': ['get', 'radius'],
-              'circle-color': ['get', 'color'],
-              'circle-opacity': ['get', 'opacity'],
-              'circle-stroke-width': 1,
-              'circle-stroke-color': 'rgba(255,255,255,0.4)',
+              'circle-radius': ['get', 'radius'], 'circle-color': ['get', 'color'],
+              'circle-opacity': ['get', 'opacity'], 'circle-stroke-width': 1, 'circle-stroke-color': 'rgba(255,255,255,0.4)',
             },
           })
 
@@ -915,12 +658,9 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
             if (!e.features?.length || !map.current) return
             const props = e.features[0].properties
             setTooltip({
-              x: e.point.x,
-              y: e.point.y,
-              code: props?.code ?? '',
+              x: e.point.x, y: e.point.y, code: props?.code ?? '',
               geo: geoMapRef.current[(props?.code ?? '').toUpperCase()],
-              requests: props?.requests ?? 0,
-              errorRate: props?.errorRate ?? 0,
+              requests: props?.requests ?? 0, errorRate: props?.errorRate ?? 0,
             })
             map.current.getCanvas().style.cursor = 'pointer'
           })
@@ -929,49 +669,33 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
             setTooltip(null)
             if (map.current) map.current.getCanvas().style.cursor = ''
           })
-
-          map.current.on('mousemove', 'countries', () => {
-            if (map.current) map.current.getCanvas().style.cursor = 'pointer'
-          })
-
-          map.current.on('mouseleave', 'countries', () => {
-            if (map.current) map.current.getCanvas().style.cursor = ''
-          })
+          map.current.on('mousemove', 'countries', () => { if (map.current) map.current.getCanvas().style.cursor = 'pointer' })
+          map.current.on('mouseleave', 'countries', () => { if (map.current) map.current.getCanvas().style.cursor = '' })
         })
       } catch {
         map.current = null
         setMapError(true)
       }
     }
-
-    return () => {
-      map.current?.remove()
-      map.current = null
-    }
+    return () => { map.current?.remove(); map.current = null }
   }, [])
 
   useEffect(() => {
     if (!map.current) return
-
     let pendingStyleDataHandler: (() => void) | null = null
 
     const updateLayers = () => {
       if (!map.current) return
-
       if (map.current.getLayer('background')) {
         map.current.setPaintProperty('background', 'background-color', theme === 'dark' ? '#1a1b23' : '#f0f4fa')
       }
       updateCountryBaseLayerTheme(map.current, theme === 'dark')
 
       const src = map.current.getSource('pop-markers') as maplibregl.GeoJSONSource | undefined
-      if (src) {
-        src.setData(popGeoJson as GeoJSON.FeatureCollection)
-      }
+      if (src) src.setData(popGeoJson as GeoJSON.FeatureCollection)
 
       if (!map.current.getLayer('countries')) {
-        if (pendingStyleDataHandler) {
-          map.current.off('styledata', pendingStyleDataHandler)
-        }
+        if (pendingStyleDataHandler) map.current.off('styledata', pendingStyleDataHandler)
         const onStyleData = () => {
           if (map.current?.getLayer('countries')) {
             map.current.off('styledata', onStyleData)
@@ -991,20 +715,16 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
         return
       }
       const matchExpression: (string | string[])[] = ['match', ['get', 'name']]
-
       for (const [cc, count] of countryEntries) {
         const intensity = 0.15 + (count / max) * 0.55
         const countryName = resolveCountryName(cc)
-        const normalized = NORMALIZE_COUNTRY[countryName] ?? countryName
-        matchExpression.push(normalized, `rgba(59, 130, 246, ${intensity})`)
+        matchExpression.push(NORMALIZE_COUNTRY[countryName] ?? countryName, `rgba(59, 130, 246, ${intensity})`)
       }
-
       matchExpression.push(countryFill(theme === 'dark'))
       map.current.setPaintProperty('countries', 'fill-color', matchExpression as MapFillColor)
     }
 
     updateLayers()
-
     return () => {
       if (pendingStyleDataHandler) {
         map.current?.off('styledata', pendingStyleDataHandler)
@@ -1022,32 +742,18 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
   }
 
   const maxCount = Math.max(1, ...popEntries.map((e) => e.requests))
-
-  const sortedForA11y = useMemo(
-    () => [...popEntries].sort((a, b) => b.requests - a.requests).slice(0, 50),
-    [popEntries],
-  )
+  const sortedForA11y = useMemo(() => [...popEntries].sort((a, b) => b.requests - a.requests).slice(0, 50), [popEntries])
 
   const ariaLabel = useMemo(() => {
-    if (sortedForA11y.length === 0) {
-      return 'World map of traffic by Fastly PoP. No data available.'
-    }
-    const top = sortedForA11y.slice(0, 5)
-    const topPart = top.map((e) => `${e.code} ${formatCompactCount(e.requests)}`).join(', ')
+    if (sortedForA11y.length === 0) return 'World map of traffic by Fastly PoP. No data available.'
+    const topPart = sortedForA11y.slice(0, 5).map((e) => `${e.code} ${formatCompactCount(e.requests)}`).join(', ')
     return `World map of traffic by Fastly PoP, showing top PoPs: ${topPart}.`
   }, [sortedForA11y])
 
   return (
-    <div
-      className={`relative min-h-[300px] w-full rounded-lg overflow-hidden bg-background ${className}`}
-      role="group"
-      aria-label={ariaLabel}
-    >
+    <div className={`relative min-h-[300px] w-full rounded-lg overflow-hidden bg-background ${className}`} role="group" aria-label={ariaLabel}>
       {mapError ? (
-        <div
-          className="absolute inset-0 flex items-center justify-center px-4 text-center text-xs text-muted-foreground"
-          aria-hidden="true"
-        >
+        <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-xs text-muted-foreground" aria-hidden="true">
           Interactive map unavailable in this browser. See the PoP table below.
         </div>
       ) : (
@@ -1055,28 +761,15 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
       )}
 
       <table className="sr-only">
-        <caption>
-          {sortedForA11y.length > 0
-            ? `PoP traffic data — ${sortedForA11y.length} PoPs shown.`
-            : 'PoP traffic data — no PoPs available.'}
-        </caption>
+        <caption>{sortedForA11y.length > 0 ? `PoP traffic data — ${sortedForA11y.length} PoPs shown.` : 'PoP traffic data — no PoPs available.'}</caption>
         <thead>
-          <tr>
-            <th scope="col">Rank</th>
-            <th scope="col">PoP</th>
-            <th scope="col">Location</th>
-            <th scope="col">Requests</th>
-            <th scope="col">Error Rate</th>
-          </tr>
+          <tr><th scope="col">Rank</th><th scope="col">PoP</th><th scope="col">Location</th><th scope="col">Requests</th><th scope="col">Error Rate</th></tr>
         </thead>
         <tbody>
           {sortedForA11y.map((e, i) => (
             <tr key={e.code}>
-              <td>{i + 1}</td>
-              <td>{e.code}</td>
-              <td>{formatPopGeo(geoMap[e.code])}</td>
-              <td>{formatCount(e.requests)}</td>
-              <td>{(e.errorRate * 100).toFixed(2)}%</td>
+              <td>{i + 1}</td><td>{e.code}</td><td>{formatPopGeo(geoMap[e.code])}</td>
+              <td>{formatCount(e.requests)}</td><td>{(e.errorRate * 100).toFixed(2)}%</td>
             </tr>
           ))}
         </tbody>
@@ -1084,8 +777,7 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
 
       {zoomed && (
         <button
-          type="button"
-          onClick={handleResetView}
+          type="button" onClick={handleResetView}
           className="absolute top-3 left-3 z-20 bg-background/95 backdrop-blur-sm border rounded-md px-3 py-1.5 text-xs font-medium shadow-md hover:bg-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
         >
           Back to world view
@@ -1101,19 +793,12 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
           }}
         >
           <div className="font-semibold text-foreground font-mono">{tooltip.code}</div>
-          {tooltip.geo && (
-            <div className="text-muted-foreground text-xs">{formatPopGeo(tooltip.geo)}</div>
-          )}
+          {tooltip.geo && <div className="text-muted-foreground text-xs">{formatPopGeo(tooltip.geo)}</div>}
           <div className="mt-1 text-xs space-y-0.5">
-            <div>
-              <span className="text-muted-foreground">Requests:</span>{' '}
-              <span className="tabular-nums">{formatCount(tooltip.requests)}</span>
-            </div>
+            <div><span className="text-muted-foreground">Requests:</span> <span className="tabular-nums">{formatCount(tooltip.requests)}</span></div>
             <div>
               <span className="text-muted-foreground">Error rate:</span>{' '}
-              <span
-                className={`tabular-nums ${tooltip.errorRate > 0.05 ? 'text-red-600 dark:text-red-400 font-medium' : tooltip.errorRate > 0.01 ? 'text-amber-600 dark:text-amber-400' : ''}`}
-              >
+              <span className={`tabular-nums ${tooltip.errorRate > 0.05 ? 'text-red-600 dark:text-red-400 font-medium' : tooltip.errorRate > 0.01 ? 'text-amber-600 dark:text-amber-400' : ''}`}>
                 {(tooltip.errorRate * 100).toFixed(2)}%
               </span>
             </div>

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeVar
 from uuid import uuid4
 
+import duckdb
 import structlog
 from opentelemetry import metrics, trace
 from opentelemetry.sdk.metrics import MeterProvider
@@ -28,8 +29,7 @@ from opentelemetry.trace import Span, Tracer
 
 from backend import config
 from backend.celery_app import publisher
-from backend.utils.date_utils import parse_iso_utc
-from backend.utils.telemetry import get_page_load_id
+from backend.utils.telemetry import get_page_load_id, parse_iso_utc
 
 logger = logging.getLogger(__name__)
 
@@ -607,7 +607,7 @@ _cancelled = threading.Event()
 
 def _read_durable_rum_metrics(con: Any, source: dict) -> dict[str, Any] | None:
     """Read RUM extents from the same durable serving connection as requests."""
-    from backend.core.iceberg._ducklake import ducklake_table_name
+    from backend.core.iceberg._core import ducklake_table_name
 
     tables: list[str] = []
     for table_name in (ducklake_table_name(source, "client_vitals"), ducklake_table_name(source, "client_errors")):
@@ -665,7 +665,6 @@ def refresh_durable_request_metrics(
     try:
         from backend.core.duckdb import _safe_table_name, open_serving_connection
         from backend.core.metadata.cron_log import latest_cron_per_task
-        from backend.core.query_instrumentation import InstrumentedDuckDBConnection
         from backend.utils.telemetry import process_context_scope
 
         service_id = source["name"]
@@ -837,6 +836,366 @@ class RequestMetricsObserver:
 
 observer = RequestMetricsObserver()
 
+
+# ── Query Instrumentation (folded from backend.core.query_instrumentation) ──
+
+_MEMORY_PROBE_THRESHOLD_S = 0.5
+
+# Methods that return a streaming reader rather than a materialised result.
+# The reader's iteration is the real work; deregistration must wait for
+# the reader to be exhausted (or garbage collected), not for the method to
+# return.
+_READER_METHODS: frozenset[str] = frozenset({"arrow", "fetch_record_batch", "fetch_record_batches"})
+
+# Terminal methods on a DuckDB result that actually materialise data.
+# Deregistration happens after these complete (success or error).
+# Streaming reader methods are handled separately by :data:`_READER_METHODS`
+# below and intentionally NOT listed here.
+_TERMINAL_METHODS: tuple[str, ...] = (
+    "fetchall",
+    "fetchone",
+    "fetchmany",
+    "fetchnumpy",
+    "fetchdf",
+    "fetch_df",
+    "df",
+    "fetch_df_chunk",
+    "fetch_arrow_table",
+    "to_arrow_table",
+    "pl",
+    "to_df",
+    "torch",
+    "tf",
+    "close",
+)
+
+
+class InstrumentedDuckDBConnection:
+    """Thin proxy around a raw ``duckdb.DuckDBPyConnection``.
+
+    Constructed by :func:`backend.core.duckdb_pool._instrument`; lives only
+    inside the request's ``with checkout_connection(...)`` scope.
+    """
+
+    __slots__ = ("_con", "_service_id")
+
+    def __init__(self, raw_con: Any, *, service_id: str | None):
+        self._con = raw_con
+        self._service_id = service_id
+
+    # ── instrumented exec entry-points ──────────────────────────────────────
+
+    def execute(self, query: Any, *args: Any, **kwargs: Any) -> Any:
+        return self._invoke("execute", query, args, kwargs)
+
+    def executemany(self, query: Any, *args: Any, **kwargs: Any) -> Any:
+        return self._invoke("executemany", query, args, kwargs)
+
+    def sql(self, query: Any, *args: Any, **kwargs: Any) -> Any:
+        return self._invoke("sql", query, args, kwargs)
+
+    def query(self, query: Any, *args: Any, **kwargs: Any) -> Any:
+        return self._invoke("query", query, args, kwargs)
+
+    # ── delegation for everything else ──────────────────────────────────────
+
+    def __getattr__(self, name: str) -> Any:
+        # __slots__ omits __dict__, so anything not in the slot list (or
+        # explicitly defined above) lands here. Pass through to the raw
+        # connection.
+        return getattr(self._con, name)
+
+    def __enter__(self) -> InstrumentedDuckDBConnection:
+        # DuckDB connections support context-manager use; preserve it.
+        self._con.__enter__()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
+        return self._con.__exit__(exc_type, exc_val, exc_tb)
+
+    # ── internals ───────────────────────────────────────────────────────────
+
+    def _invoke(self, method_name: str, query: Any, args: tuple, kwargs: dict) -> Any:
+        from backend.core.query_registry import query_registry
+
+        sql_text = str(query)
+        # Per-connection short id so ops can correlate two queries on the
+        # same physical pool slot. id() % 10000 is stable for the
+        # connection's lifetime and never exposed across processes.
+        slot = None
+        if self._service_id is not None:
+            slot = f"{self._service_id}#{id(self._con) % 10000:04d}"
+        qid = query_registry.register(
+            "DuckDB",
+            sql_text,
+            service_id=self._service_id,
+            con=self._con,
+            pool_slot=slot,
+        )
+        if qid >= 0:
+            try:
+                structlog.contextvars.bind_contextvars(query_id=qid)
+            except Exception:
+                logger.debug("_invoke: structlog.contextvars.bind_contextvars failed (ignored)", exc_info=True)
+
+        con_ref = _safe_weakref(self._con)
+        bound = getattr(self._con, method_name)
+        _is_cleanup_sql = sql_text.lstrip().upper().startswith("DROP ")
+        if not _is_cleanup_sql and query_registry.is_query_cancelled(qid):
+            err = duckdb.InterruptException("Interrupt Error: Interrupted!")
+            _deregister(qid, err, peak_memory_mb=None)
+            raise err
+        try:
+            result = bound(query, *args, **kwargs)
+        except BaseException as err:
+            peak = _probe_duckdb_memory(self._con)
+            _deregister(qid, err, peak_memory_mb=peak)
+            raise
+        # The result is a relation / cursor — wrap so terminal fetch
+        # methods drive deregistration with the right timing.
+        return _InstrumentedResult(result, qid, con_ref)
+
+
+class _InstrumentedResult:
+    """Proxy over a DuckDB result object that delays registry deregistration
+    until a terminal fetch completes — or until garbage collection runs.
+    """
+
+    __slots__ = ("_raw", "_qid", "_done", "_con_ref", "_start_mono")
+
+    def __init__(self, raw: Any, qid: int, con_ref: Callable[[], Any] | None = None):
+        self._raw = raw
+        self._qid = qid
+        self._done = False
+        self._con_ref = con_ref
+        self._start_mono = time.monotonic()
+
+    def _finish(self, error: BaseException | None = None, *, probe_memory: bool = True) -> None:
+        if self._done:
+            return
+        self._done = True
+        peak_mb: float | None = None
+        elapsed = time.monotonic() - self._start_mono
+        if probe_memory and elapsed >= _MEMORY_PROBE_THRESHOLD_S and self._con_ref is not None:
+            con = self._con_ref()
+            if con is not None:
+                peak_mb = _probe_duckdb_memory(con)
+        _deregister(self._qid, error, peak_memory_mb=peak_mb)
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._raw, name)
+        if name in _READER_METHODS and callable(attr):
+            finish = self._finish
+            mark_done = self._mark_done
+            qid = self._qid
+            con_ref = self._con_ref
+            start_mono = self._start_mono
+
+            def _reader_finish(error: BaseException | None = None, *, probe_memory: bool = True) -> None:
+                peak_mb: float | None = None
+                elapsed = time.monotonic() - start_mono
+                if probe_memory and elapsed >= _MEMORY_PROBE_THRESHOLD_S and con_ref is not None:
+                    con = con_ref()
+                    if con is not None:
+                        peak_mb = _probe_duckdb_memory(con)
+                _deregister(qid, error, peak_memory_mb=peak_mb)
+
+            def _reader_wrapped(*args: Any, **kwargs: Any) -> Any:
+                try:
+                    reader = attr(*args, **kwargs)
+                except BaseException as e:
+                    finish(e)
+                    raise
+                mark_done()
+                return _InstrumentedRecordReader(reader, _reader_finish)
+
+            return _reader_wrapped
+        if name in _TERMINAL_METHODS and callable(attr):
+            finish = self._finish
+
+            def _wrapped(*args: Any, **kwargs: Any) -> Any:
+                err: BaseException | None = None
+                try:
+                    return attr(*args, **kwargs)
+                except BaseException as e:
+                    err = e
+                    raise
+                finally:
+                    finish(err)
+
+            return _wrapped
+        return attr
+
+    def _mark_done(self) -> None:
+        self._done = True
+
+    def __iter__(self) -> Any:
+        err: BaseException | None = None
+        try:
+            yield from iter(self._raw)
+        except BaseException as e:
+            err = e
+            raise
+        finally:
+            if not self._done:
+                self._finish(err)
+
+    def __del__(self) -> None:
+        try:
+            if not self._done:
+                self._finish(None, probe_memory=False)
+        except Exception:
+            logger.debug("__del__: step failed (ignored)", exc_info=True)
+
+
+class _InstrumentedRecordReader:
+    """Proxy over ``pyarrow.RecordBatchReader`` that defers registry
+    deregistration until iteration completes.
+    """
+
+    __slots__ = ("_raw", "_finish", "_done")
+
+    def __init__(self, raw: Any, finish: Callable[..., None]):
+        self._raw = raw
+        self._finish = finish
+        self._done = False
+
+    def _complete(self, error: BaseException | None = None, *, probe_memory: bool = True) -> None:
+        if self._done:
+            return
+        self._done = True
+        try:
+            self._finish(error, probe_memory=probe_memory)
+        except Exception:
+            logger.debug("_complete: self._finish failed (ignored)", exc_info=True)
+
+    def __iter__(self) -> Any:
+        err: BaseException | None = None
+        try:
+            yield from iter(self._raw)
+        except BaseException as e:
+            err = e
+            raise
+        finally:
+            self._complete(err)
+
+    def read_next_batch(self) -> Any:
+        try:
+            return self._raw.read_next_batch()
+        except StopIteration:
+            self._complete()
+            raise
+        except BaseException as e:
+            self._complete(e)
+            raise
+
+    def read_all(self) -> Any:
+        err: BaseException | None = None
+        try:
+            return self._raw.read_all()
+        except BaseException as e:
+            err = e
+            raise
+        finally:
+            self._complete(err)
+
+    def close(self) -> Any:
+        try:
+            return self._raw.close()
+        finally:
+            self._complete()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._raw, name)
+
+    def __del__(self) -> None:
+        try:
+            self._complete(None, probe_memory=False)
+        except Exception:
+            logger.debug("__del__: self._complete failed (ignored)", exc_info=True)
+
+
+def _safe_weakref(con: Any) -> Callable[[], Any] | None:
+    from backend.core.query_registry import _safe_weakref as _qr_safe_weakref
+
+    return _qr_safe_weakref(con)
+
+
+def _parse_memory_mb(value: Any) -> float | None:
+    """Parse a DuckDB byte count into MB (float). Returns ``None`` if the
+    value can't be interpreted.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        bytes_val = float(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        units = {
+            "b": 1.0,
+            "bytes": 1.0,
+            "kb": 1_000.0,
+            "kib": 1024.0,
+            "mb": 1_000_000.0,
+            "mib": 1024.0**2,
+            "gb": 1_000_000_000.0,
+            "gib": 1024.0**3,
+            "tb": 1_000_000_000_000.0,
+            "tib": 1024.0**4,
+        }
+        import re as _re
+
+        m = _re.match(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([A-Za-z]+)?\s*$", text)
+        if m is None:
+            return None
+        num = float(m.group(1))
+        unit = (m.group(2) or "b").lower()
+        if unit not in units:
+            return None
+        bytes_val = num * units[unit]
+    else:
+        return None
+    return round(bytes_val / (1024.0 * 1024.0), 2)
+
+
+def _probe_duckdb_memory(con: Any) -> float | None:
+    """Best-effort read of the connection's currently-held memory, in MB."""
+    try:
+        cursor = con.cursor()
+        try:
+            row = cursor.execute(
+                "SELECT sum(memory_usage_bytes) + sum(temporary_storage_bytes) FROM duckdb_memory()"
+            ).fetchone()
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                logger.debug("_probe_duckdb_memory: cursor.close failed (ignored)", exc_info=True)
+        if row is None or row[0] is None:
+            return None
+        return _parse_memory_mb(row[0])
+    except Exception:
+        return None
+
+
+def _deregister(qid: int, error: BaseException | None, *, peak_memory_mb: float | None = None) -> None:
+    if qid < 0:
+        return
+    try:
+        from backend.core.query_registry import query_registry
+
+        query_registry.deregister(qid, error=error, peak_memory_mb=peak_memory_mb)
+    except Exception:
+        logger.debug("live-registry deregister failed", exc_info=True)
+    finally:
+        try:
+            structlog.contextvars.unbind_contextvars("query_id")
+        except Exception:
+            logger.debug("_deregister: structlog.contextvars.unbind_contextvars failed (ignored)", exc_info=True)
+
+
 from backend.utils.telemetry import (  # noqa: E402, F401, I001
     _BANDS,
     _FIXED_TOKEN_DELTAS,
@@ -891,13 +1250,23 @@ from backend.utils.telemetry import (  # noqa: E402, F401, I001
 )
 
 _this_module = sys.modules[__name__]
-for _alias in ("high_scale_sections", "query_attribution", "request_metrics"):
+for _alias in (
+    "high_scale_sections",
+    "query_attribution",
+    "request_metrics",
+    "query_instrumentation",
+):
     sys.modules[f"backend.core.{_alias}"] = _this_module
 sys.modules["backend.request_metrics_observer"] = _this_module
 
 _core_pkg = sys.modules.get("backend.core")
 if _core_pkg is not None:
-    for _alias in ("high_scale_sections", "query_attribution", "request_metrics"):
+    for _alias in (
+        "high_scale_sections",
+        "query_attribution",
+        "request_metrics",
+        "query_instrumentation",
+    ):
         setattr(_core_pkg, _alias, _this_module)
 
 _backend_pkg = sys.modules.get("backend")
@@ -908,6 +1277,7 @@ if _backend_pkg is not None:
             {
                 "backend.core.query_attribution": "backend.core.request_telemetry",
                 "backend.core.request_metrics": "backend.core.request_telemetry",
+                "backend.core.query_instrumentation": "backend.core.request_telemetry",
                 "backend.request_metrics_observer": "backend.core.request_telemetry",
                 **{
                     f"backend.utils.{_submod_name}": "backend.utils.telemetry"

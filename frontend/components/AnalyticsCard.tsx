@@ -4,8 +4,7 @@ import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore, type
 import { usePathname } from 'next/navigation'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { PlotlyChart } from '@/components/PlotlyChart'
-import { makeTimeXAxis, TIME_HOVER_LAYOUT } from '@/lib/chart-helpers'
-import { cn } from '@/lib/utils'
+import { makeTimeXAxis, TIME_HOVER_LAYOUT, cn } from "@/lib/utils";
 import { Loader2, HelpCircle, Inbox, Lock } from 'lucide-react'
 import { HelpDialog } from '@/components/ui/confirm-dialog'
 import { Button } from '@/components/ui/button'

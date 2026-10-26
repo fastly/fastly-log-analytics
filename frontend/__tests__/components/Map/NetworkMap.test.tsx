@@ -4,7 +4,8 @@
  * @vitest-environment jsdom
  */
 import React, { useRef, useState } from 'react'
-import { act, render, renderHook, screen, fireEvent } from '@testing-library/react'
+import { renderToString } from 'react-dom/server'
+import { act, render, renderHook, screen, fireEvent, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, test, expect, vi, beforeEach, afterEach } from 'vitest'
 import type * as maplibregl from 'maplibre-gl'
@@ -15,7 +16,7 @@ import {
   maplibreMockFactory,
   installMaplibreSideEffects,
 } from '@/__tests__/helpers/page-smoke'
-import { formatBucket } from '@/lib/format'
+import { formatBucket } from "@/lib/utils"
 import {
   NetworkMap,
   PlaybackControls,
@@ -32,9 +33,26 @@ import {
   type TooltipInfo,
   type NetworkMapData,
 } from '@/components/Map/NetworkMap'
+import {
+  ShieldingMap,
+  greatCirclePoints,
+  efficiencyColor,
+  lineWidth,
+  buildArcFeatures,
+  buildDotFeatures,
+} from '@/components/Map/ShieldingMap'
+import { rafThrottle, ChoroplethMap, MapPrewarm, useMapResize } from '@/components/Map/ChoroplethMap'
+import { ImpossibleDistanceModal } from '@/components/Insights/InsightDetailModal'
+import { InsightHelpModal } from '@/components/Insights/InsightHelpModal'
+
+const { setWorkerUrl, constructedWithWorker, failMapConstruction } = vi.hoisted(() => ({
+  setWorkerUrl: vi.fn(),
+  constructedWithWorker: vi.fn(),
+  failMapConstruction: vi.fn(() => false),
+}))
 
 vi.mock('next-themes', () => ({
-  useTheme: () => ({ theme: 'light' }),
+  useTheme: vi.fn(() => ({ theme: 'light' })),
 }))
 
 vi.mock('@/stores/filterStore', async (importOriginal) => ({
@@ -42,7 +60,23 @@ vi.mock('@/stores/filterStore', async (importOriginal) => ({
   useTimezoneStore: () => ({ timezone: 'UTC' }),
 }))
 
-vi.mock('maplibre-gl', () => maplibreMockFactory())
+let useStrictSources = false
+
+vi.mock('maplibre-gl', () => {
+  const mapMock = maplibreMockFactory({ strictSources: false })
+  class PrewarmMap extends mapMock.Map {
+    constructor(options: ConstructorParameters<typeof mapMock.Map>[0]) {
+      if (failMapConstruction()) throw new Error('WebGL unavailable')
+      constructedWithWorker(setWorkerUrl.mock.calls.at(-1)?.[0])
+      super(options)
+    }
+    override getSource(id: string) {
+      const src = this.sources[id] as ReturnType<InstanceType<typeof mapMock.Map>['getSource']>
+      return useStrictSources ? src : super.getSource(id)
+    }
+  }
+  return { ...mapMock, Map: PrewarmMap, setWorkerUrl }
+})
 vi.mock('maplibre-gl/dist/maplibre-gl.css', () => ({}))
 installMaplibreSideEffects()
 
@@ -101,6 +135,16 @@ function baseProps(overrides: Partial<React.ComponentProps<typeof NetworkMap>> =
 beforeEach(() => {
   stubResizeObserver()
   mapDataCalls.length = 0
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => ({
+      json: async () => ({
+        type: 'Topology',
+        objects: { world: { type: 'GeometryCollection', geometries: [] } },
+        arcs: [],
+      }),
+    })),
+  )
 })
 
 afterEach(() => {
@@ -791,5 +835,569 @@ describe('exported option arrays', () => {
     }
     expect(values[0]).toBe(1)
     expect(values[values.length - 1]).toBe(14400)
+  })
+})
+
+
+describe('ShieldingMap helpers', () => {
+  describe('greatCirclePoints', () => {
+    it('returns a 2-point degenerate when endpoints are identical', () => {
+      const pts = greatCirclePoints(40, -74, 40, -74)
+      expect(pts).toHaveLength(2)
+      expect(pts[0]).toEqual([-74, 40])
+      expect(pts[1]).toEqual([-74, 40])
+    })
+
+    it('handles antimeridian wrap without >180 degree jumps in output', () => {
+      const pts = greatCirclePoints(0, -179, 0, 179)
+      for (let i = 1; i < pts.length; i++) {
+        const delta = Math.abs(pts[i][0] - pts[i - 1][0])
+        expect(delta).toBeLessThanOrEqual(180)
+      }
+      expect(pts.length).toBeGreaterThan(2)
+    })
+  })
+
+  describe('efficiencyColor', () => {
+    it('returns the neutral indigo when ratio is null', () => {
+      expect(efficiencyColor(null)).toBe('#6366f1')
+    })
+
+    it('returns green when ratio < 1.5', () => {
+      expect(efficiencyColor(1.0)).toBe('#22c55e')
+      expect(efficiencyColor(1.49)).toBe('#22c55e')
+    })
+
+    it('returns yellow when ratio < 3', () => {
+      expect(efficiencyColor(1.5)).toBe('#eab308')
+      expect(efficiencyColor(2.9)).toBe('#eab308')
+    })
+
+    it('returns red when ratio >= 3', () => {
+      expect(efficiencyColor(3.0)).toBe('#ef4444')
+      expect(efficiencyColor(10)).toBe('#ef4444')
+    })
+
+    it('returns neutral indigo (not green) for a negative ratio (L5)', () => {
+      expect(efficiencyColor(-0.5)).toBe('#6366f1')
+      expect(efficiencyColor(-10)).toBe('#6366f1')
+    })
+  })
+
+  describe('lineWidth', () => {
+    it('clamps to 1.5 at low request counts', () => {
+      expect(lineWidth(0)).toBe(1.5)
+      expect(lineWidth(1)).toBe(1.5)
+    })
+
+    it('clamps to 6 at very high request counts', () => {
+      expect(lineWidth(1_000_000_000)).toBe(6)
+      expect(lineWidth(Number.MAX_SAFE_INTEGER)).toBe(6)
+    })
+
+    it('scales logarithmically between the bounds', () => {
+      const w10 = lineWidth(10)
+      const w100 = lineWidth(100)
+      expect(w10).toBeGreaterThan(1.5)
+      expect(w10).toBeLessThan(6)
+      expect(w100).toBeGreaterThan(w10)
+    })
+  })
+
+  describe('rafThrottle', () => {
+    let rafCallbacks: FrameRequestCallback[]
+    let originalRAF: typeof globalThis.requestAnimationFrame
+
+    beforeEach(() => {
+      rafCallbacks = []
+      originalRAF = globalThis.requestAnimationFrame
+      globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {
+        rafCallbacks.push(cb)
+        return rafCallbacks.length
+      }) as typeof globalThis.requestAnimationFrame
+    })
+
+    afterEach(() => {
+      globalThis.requestAnimationFrame = originalRAF
+    })
+
+    it('coalesces multiple calls within a frame to a single invocation', () => {
+      const fn = vi.fn()
+      const throttled = rafThrottle(fn)
+      throttled(1)
+      throttled(2)
+      throttled(3)
+      expect(fn).not.toHaveBeenCalled()
+      expect(rafCallbacks).toHaveLength(1)
+      rafCallbacks[0](performance.now())
+      expect(fn).toHaveBeenCalledTimes(1)
+      expect(fn).toHaveBeenCalledWith(3)
+    })
+
+    it('re-queues on subsequent calls after the frame fires', () => {
+      const fn = vi.fn()
+      const throttled = rafThrottle(fn)
+      throttled('a')
+      rafCallbacks[0](performance.now())
+      throttled('b')
+      expect(rafCallbacks).toHaveLength(2)
+      rafCallbacks[1](performance.now())
+      expect(fn).toHaveBeenCalledTimes(2)
+      expect(fn).toHaveBeenNthCalledWith(1, 'a')
+      expect(fn).toHaveBeenNthCalledWith(2, 'b')
+    })
+  })
+
+  describe('buildArcFeatures', () => {
+    it('returns a FeatureCollection with one feature per valid row', () => {
+      const rows = [
+        {
+          edge_lat: 40, edge_lon: -74,
+          shield_lat: 51, shield_lon: 0,
+          edge_pop: 'JFK', shield_pop: 'LON',
+          requests: 100, p50_ms: 10, p95_ms: 50, p99_ms: 100,
+          distance_km: 5000, light_speed_rtt_ms: 33, efficiency_ratio: 2.5,
+          anomaly_static: false,
+        },
+        {
+          edge_lat: 35, edge_lon: 139,
+          shield_lat: 22, shield_lon: 114,
+          edge_pop: 'NRT', shield_pop: 'HKG',
+          requests: 50, p50_ms: 5, p95_ms: 20, p99_ms: 40,
+          distance_km: 2900, light_speed_rtt_ms: 19, efficiency_ratio: 1.2,
+          anomaly_static: false,
+        },
+      ]
+      const fc = buildArcFeatures(rows)
+      expect(fc.type).toBe('FeatureCollection')
+      expect(fc.features).toHaveLength(2)
+      expect(fc.features[0].geometry.type).toBe('LineString')
+      expect(fc.features[0].properties?.edge_pop).toBe('JFK')
+      expect(fc.features[0].properties?.color).toBeDefined()
+      expect(fc.features[0].properties?.line_width).toBeGreaterThan(1.5)
+    })
+
+    it('carries anomaly_static through to feature properties (L7 map paint)', () => {
+      const rows = [
+        {
+          edge_lat: 40, edge_lon: -74,
+          shield_lat: 51, shield_lon: 0,
+          edge_pop: 'JFK', shield_pop: 'LON',
+          requests: 100, p50_ms: 80, p95_ms: 120, p99_ms: 200,
+          distance_km: 5000, light_speed_rtt_ms: 33, efficiency_ratio: 4.5,
+          anomaly_static: true,
+        },
+      ]
+      const fc = buildArcFeatures(rows)
+      expect(fc.features[0].properties?.anomaly_static).toBe(true)
+    })
+
+    it('paints low_sample routes a neutral grey, not an efficiency colour (low-sample gating)', () => {
+      const rows = [
+        {
+          edge_lat: 40, edge_lon: -74,
+          shield_lat: 51, shield_lon: 0,
+          edge_pop: 'JFK', shield_pop: 'LON',
+          requests: 3, p50_ms: 400, p95_ms: 800, p99_ms: 1200,
+          distance_km: 5000, light_speed_rtt_ms: 33, efficiency_ratio: 12,
+          anomaly_static: false, low_sample: true,
+        },
+      ]
+      const fc = buildArcFeatures(rows)
+      expect(fc.features[0].properties?.color).toBe('#94a3b8')
+      expect(fc.features[0].properties?.low_sample).toBe(true)
+    })
+
+    it('skips rows with missing coords or zero-length arcs', () => {
+      const rows = [
+        { edge_lat: 40, edge_lon: -74, shield_lat: null, shield_lon: null, requests: 10 },
+        { edge_lat: null, edge_lon: null, shield_lat: 51, shield_lon: 0, requests: 10 },
+        { edge_lat: 40, edge_lon: -74, shield_lat: 40, shield_lon: -74, requests: 10 },
+      ]
+      const fc = buildArcFeatures(rows)
+      expect(fc.features).toHaveLength(0)
+    })
+  })
+
+  describe('buildDotFeatures', () => {
+    it('returns one feature per unique edge/shield POP', () => {
+      const rows = [
+        { edge_lat: 40, edge_lon: -74, edge_pop: 'JFK', shield_lat: 51, shield_lon: 0, shield_pop: 'LON' },
+        { edge_lat: 40, edge_lon: -74, edge_pop: 'JFK', shield_lat: 35, shield_lon: 139, shield_pop: 'NRT' },
+      ]
+      const fc = buildDotFeatures(rows)
+      expect(fc.type).toBe('FeatureCollection')
+      expect(fc.features).toHaveLength(3)
+      const roles = fc.features.map((f) => f.properties?.role).sort()
+      expect(roles).toEqual(['edge', 'shield', 'shield'])
+    })
+
+    it('omits the synthetic "Direct to Origin" shield placeholder', () => {
+      const rows = [
+        {
+          edge_lat: 40, edge_lon: -74, edge_pop: 'JFK',
+          shield_lat: 0, shield_lon: 0, shield_pop: 'Direct to Origin',
+        },
+      ]
+      const fc = buildDotFeatures(rows)
+      const shieldPops = fc.features.filter((f) => f.properties?.role === 'shield')
+      expect(shieldPops).toHaveLength(0)
+    })
+
+    it('returns an empty FeatureCollection for missing coords', () => {
+      const rows = [
+        { edge_lat: null, edge_lon: null, shield_lat: null, shield_lon: null },
+      ]
+      const fc = buildDotFeatures(rows)
+      expect(fc.features).toHaveLength(0)
+    })
+  })
+})
+
+describe('ShieldingMap component', () => {
+  beforeEach(() => {
+    useStrictSources = true
+    mapInstances.length = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        json: async () => ({
+          type: 'Topology',
+          objects: { world: { type: 'GeometryCollection', geometries: [] } },
+          arcs: [],
+        }),
+      })),
+    )
+  })
+
+  afterEach(() => {
+    useStrictSources = false
+    vi.unstubAllGlobals()
+  })
+
+  it('mounts a map instance and registers arcs + dots sources', async () => {
+    const rows = [
+      {
+        edge_lat: 40, edge_lon: -74,
+        shield_lat: 51, shield_lon: 0,
+        edge_pop: 'JFK', shield_pop: 'LON',
+        requests: 100, p50_ms: 10, p95_ms: 50, p99_ms: 100,
+      },
+    ]
+    render(<ShieldingMap rows={rows} />)
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(mapInstances.length).toBe(1)
+    const instance = mapInstances[0]
+    await waitFor(() => {
+      expect(Object.keys(instance.sources)).toEqual(
+        expect.arrayContaining(['world', 'arcs', 'dots']),
+      )
+    })
+  })
+
+  it('renders the edge-only fallback when edgeOnly is true', () => {
+    const { getByText } = render(<ShieldingMap rows={[]} edgeOnly />)
+    expect(getByText(/edge-only logging detected/i)).toBeInTheDocument()
+  })
+
+  it('renders the empty-state when rows is empty and not loading', () => {
+    const { getByText } = render(<ShieldingMap rows={[]} isLoading={false} />)
+    expect(getByText(/no shielding path data/i)).toBeInTheDocument()
+  })
+
+  it('renders the error state when errored is true (M2 sentinel)', () => {
+    const { getByText, queryByText } = render(<ShieldingMap rows={[]} isLoading={false} errored />)
+    expect(getByText(/shielding analysis unavailable/i)).toBeInTheDocument()
+    expect(queryByText(/no shielding path data/i)).not.toBeInTheDocument()
+  })
+
+  it('does not crash transitioning from loading to the empty state (Rules-of-Hooks regression)', async () => {
+    const { rerender, getByText } = render(<ShieldingMap rows={[]} isLoading />)
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    rerender(<ShieldingMap rows={[]} isLoading={false} />)
+    expect(getByText(/no shielding path data/i)).toBeInTheDocument()
+  })
+
+  it('renders the POP-coordinates-unavailable fallback when rows have no coords', () => {
+    const rows = [
+      { edge_pop: 'XYZ', shield_pop: 'ABC', edge_lat: null, edge_lon: null, shield_lat: null, shield_lon: null },
+    ]
+    const { getByText } = render(<ShieldingMap rows={rows} isLoading={false} />)
+    expect(getByText(/POP coordinates unavailable/i)).toBeInTheDocument()
+  })
+
+  it('shows no expand button by default', async () => {
+    const rows = [
+      {
+        edge_lat: 40, edge_lon: -74,
+        shield_lat: 51, shield_lon: 0,
+        edge_pop: 'JFK', shield_pop: 'LON',
+        requests: 100, p50_ms: 10, p95_ms: 50, p99_ms: 100,
+      },
+    ]
+    const { queryByLabelText } = render(<ShieldingMap rows={rows} />)
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(queryByLabelText(/expand map to fullscreen/i)).not.toBeInTheDocument()
+  })
+
+  it('opens a fullscreen dialog with a second map when Expand is clicked', async () => {
+    const rows = [
+      {
+        edge_lat: 40, edge_lon: -74,
+        shield_lat: 51, shield_lon: 0,
+        edge_pop: 'JFK', shield_pop: 'LON',
+        requests: 100, p50_ms: 10, p95_ms: 50, p99_ms: 100,
+      },
+    ]
+    const { getByLabelText, findByRole } = render(<ShieldingMap rows={rows} expandable />)
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(mapInstances.length).toBe(1)
+
+    await act(async () => {
+      fireEvent.click(getByLabelText(/expand map to fullscreen/i))
+    })
+
+    const dialog = await findByRole('dialog')
+    expect(dialog).toHaveTextContent(/Edge → Shield Transit Map/)
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(mapInstances.length).toBe(2)
+  })
+
+  it('calls map.remove() on unmount to release WebGL resources', async () => {
+    const rows = [
+      {
+        edge_lat: 40, edge_lon: -74,
+        shield_lat: 51, shield_lon: 0,
+        edge_pop: 'JFK', shield_pop: 'LON',
+        requests: 100, p50_ms: 10, p95_ms: 50, p99_ms: 100,
+      },
+    ]
+    const { unmount } = render(<ShieldingMap rows={rows} />)
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    const instance = mapInstances[0]
+    expect(instance.removed).toBe(false)
+    unmount()
+    expect(instance.removed).toBe(true)
+  })
+})
+
+describe('ChoroplethMap', () => {
+  beforeEach(() => {
+    mapInstances.length = 0
+    failMapConstruction.mockReset().mockReturnValue(false)
+  })
+
+  it('mounts a map instance into the container ref', async () => {
+    const { container } = render(
+      <ChoroplethMap data={[{ country: 'US', count: 100 }]} />,
+    )
+    expect(container.querySelector('div')).toBeInTheDocument()
+    await Promise.resolve()
+    expect(mapInstances.length).toBe(1)
+  })
+
+  it('renders an empty container when given an empty data array and re-renders cleanly on data changes', () => {
+    const { rerender, container } = render(<ChoroplethMap data={[]} />)
+    expect(container.firstChild).not.toBeNull()
+    rerender(
+      <ChoroplethMap
+        data={[
+          { country: 'US', count: 50 },
+          { country: 'GB', count: 5 },
+        ]}
+      />,
+    )
+    expect(container.firstChild).not.toBeNull()
+  })
+
+  it('accepts an onCountryClick handler without invoking it on mount', async () => {
+    const handler = vi.fn()
+    render(<ChoroplethMap data={[{ country: 'US', count: 1 }]} onCountryClick={handler} />)
+    await Promise.resolve()
+    expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('server-renders accessible country data without constructing a browser map', () => {
+    const html = renderToString(<ChoroplethMap data={[{ country: 'US', count: 100 }]} />)
+    expect(html).toContain('United States')
+    expect(html).toContain('Browse countries')
+    expect(mapInstances).toHaveLength(0)
+  })
+
+  it('keeps the country picker usable when WebGL initialization fails', () => {
+    failMapConstruction.mockReturnValueOnce(true)
+    const onCountryClick = vi.fn()
+    render(<ChoroplethMap data={[{ country: 'US', count: 100 }]} onCountryClick={onCountryClick} />)
+    expect(screen.getByText(/Interactive map unavailable/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Browse countries' }))
+    const list = screen.getByRole('listbox')
+    expect(list).toHaveFocus()
+    fireEvent.keyDown(list, { key: 'Enter' })
+    expect(onCountryClick).toHaveBeenCalledWith('US')
+    expect(screen.getByRole('button', { name: 'Browse countries' })).toBeInTheDocument()
+  })
+
+  it('resets keyboard selection after row-count changes while keeping the open picker focused', () => {
+    const onCountryClick = vi.fn()
+    const data = [{ country: 'US', count: 100 }, { country: 'GB', count: 50 }, { country: 'CA', count: 5 }]
+    const { rerender } = render(<ChoroplethMap data={data} onCountryClick={onCountryClick} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Browse countries' }))
+    fireEvent.keyDown(screen.getByRole('listbox'), { key: 'End' })
+    expect(screen.getByRole('option', { name: /Canada/ })).toHaveAttribute('aria-selected', 'true')
+    rerender(<ChoroplethMap data={data.slice(0, 2)} onCountryClick={onCountryClick} />)
+    expect(screen.getByRole('listbox')).toHaveFocus()
+    expect(screen.getByRole('option', { name: /United States/ })).toHaveAttribute('aria-selected', 'true')
+    fireEvent.keyDown(screen.getByRole('listbox'), { key: 'Enter' })
+    expect(onCountryClick).toHaveBeenCalledWith('US')
+  })
+
+  it('bounds hover tooltip coordinates using the current map dimensions', async () => {
+    render(<ChoroplethMap data={[{ country: 'US', count: 100 }]} />)
+    await act(async () => { await Promise.resolve() })
+    const instance = mapInstances[0]
+    const container = instance.container as HTMLElement
+    Object.defineProperties(container, {
+      clientWidth: { value: 400 },
+      clientHeight: { value: 200 },
+    })
+    act(() => instance.emit('mousemove', {
+      features: [{ properties: { name: 'United States of America' } }],
+      point: { x: 390, y: 190 },
+    }))
+    expect(screen.getByText('100 requests').parentElement).toHaveStyle({ left: '240px', top: '120px' })
+  })
+})
+
+describe('MapPrewarm', () => {
+  it('configures the worker before prewarming without another map component present', async () => {
+    constructedWithWorker.mockClear()
+    const { unmount } = render(<MapPrewarm />)
+    await waitFor(() => expect(constructedWithWorker).toHaveBeenCalledTimes(1))
+    expect(constructedWithWorker).toHaveBeenCalledWith('/maplibre-gl-worker.mjs')
+    unmount()
+  })
+})
+
+describe('useMapResize', () => {
+  test('calls map.resize() whenever the container resizes and disconnects on unmount', () => {
+    const ro = stubResizeObserver()
+    const el = document.createElement('div')
+    const resize = vi.fn()
+    const mapRef = { current: { resize } }
+    const containerRef = { current: el }
+    const { unmount } = renderHook(() => useMapResize(mapRef, containerRef))
+
+    expect(ro.observe).toHaveBeenCalledWith(el)
+    ro.fire()
+    expect(resize).toHaveBeenCalledTimes(1)
+
+    unmount()
+    expect(ro.disconnect).toHaveBeenCalledTimes(1)
+  })
+
+  test('tolerates a map that has not been constructed yet or missing container', () => {
+    const ro = stubResizeObserver()
+    const mapRef = { current: null }
+    renderHook(() => useMapResize(mapRef, { current: document.createElement('div') }))
+    expect(() => ro.fire()).not.toThrow()
+
+    const ro2 = stubResizeObserver()
+    renderHook(() => useMapResize({ current: null }, { current: null }))
+    expect(ro2.observe).not.toHaveBeenCalled()
+  })
+})
+
+const VALID_DATA = {
+  label: '1.2.3.4',
+  client_lat: 48.8566,
+  client_lon: 2.3522,
+  pop_lat: 37.7749,
+  pop_lon: -122.4194,
+  pop: 'SFO',
+  tcp_rtt: 20000,
+  distance_km: 8960,
+  max_km: 2000,
+  city: 'Paris',
+  country: 'FR',
+}
+
+describe('ImpossibleDistanceModal & InsightHelpModal', () => {
+  test('renders modal with valid data', () => {
+    render(
+      <ImpossibleDistanceModal isOpen data={VALID_DATA} onOpenChange={vi.fn()} />
+    )
+    expect(screen.getByText(/Physics Violation/)).toBeInTheDocument()
+    expect(screen.getAllByText(/8,960/).length).toBeGreaterThan(0)
+  })
+
+  test('shows fallback when coordinates are missing', () => {
+    const bad = { ...VALID_DATA, pop_lat: NaN, pop_lon: NaN }
+    render(
+      <ImpossibleDistanceModal isOpen data={bad} onOpenChange={vi.fn()} />
+    )
+    expect(screen.getByText('Location data unavailable.')).toBeInTheDocument()
+  })
+
+  test('hasCoords guard prevents .toFixed() crash on undefined pop coordinates', () => {
+    expect(Number.isFinite(undefined)).toBe(false)
+    expect(Number.isFinite(null)).toBe(false)
+    expect(Number.isFinite(NaN)).toBe(false)
+    expect(Number.isFinite(37.7749)).toBe(true)
+  })
+
+  test('shows city and country in coordinate overlay when provided', () => {
+    render(
+      <ImpossibleDistanceModal isOpen data={VALID_DATA} onOpenChange={vi.fn()} />
+    )
+    expect(screen.getAllByText(/Paris, FR/).length).toBeGreaterThan(0)
+  })
+
+  test('returns null when data is null', () => {
+    const { container } = render(
+      <ImpossibleDistanceModal isOpen={false} data={null} onOpenChange={vi.fn()} />
+    )
+    expect(container).toBeEmptyDOMElement()
+  })
+
+  test('InsightHelpModal renders impossible_distance content', () => {
+    render(
+      <InsightHelpModal insightId="impossible_distance" isOpen onOpenChange={vi.fn()} />
+    )
+    expect(screen.getByText(/The Physics of/)).toBeInTheDocument()
+    expect(screen.getByText(/Speed of Light Violation Detected/)).toBeInTheDocument()
+  })
+
+  test('InsightHelpModal renders default content for unknown insight', () => {
+    render(
+      <InsightHelpModal insightId="unknown_insight_xyz" isOpen onOpenChange={vi.fn()} />
+    )
+    expect(screen.getByText('Insight Analysis')).toBeInTheDocument()
+  })
+
+  test('InsightHelpModal close button triggers onOpenChange', async () => {
+    const onChange = vi.fn()
+    render(
+      <InsightHelpModal insightId="impossible_distance" isOpen onOpenChange={onChange} />
+    )
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
   })
 })

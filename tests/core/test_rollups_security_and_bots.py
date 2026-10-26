@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sqlite3
+import urllib.parse
 import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
@@ -13,7 +14,26 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+import vcr
 from backend.core.rollups.ngwaf_bots import _purge_stale_ngwaf_bots_parquets
+from backend.repositories._sql.security import (
+    BOT_EFFICIENCY,
+    CONN_REUSE_DIST,
+    FINGERPRINT_COVERAGE_BULK,
+    GET_SECURITY_PROXIES_COMBINED,
+    REQ_HEADER_SIZE_DIST,
+    TOP_IPS_BY_MAX_HEADER,
+)
+from backend.utils.ngwaf import (
+    _extract_bot_record,
+    _get_relative_time_range,
+    cleanup_old_bots,
+    fetch_verified_bots_paged,
+    get_cache_stats,
+    get_last_timestamp,
+    oldest_unenriched_timestamp,
+    upsert_bots,
+)
 from tests._helpers.rollups import (
     build_writer_patches as _build_patches,
 )
@@ -43,6 +63,8 @@ from tests._helpers.rollups import (
 )
 
 from backend.core import rollups
+from backend.core.metadata import pg_connection
+from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.core.rollups import day_bundles, security_dims, security_proxies, verified_bots_ts, wellknown_bots
 from backend.core.rollups import ngwaf_bots as nb
 from backend.core.rollups.day_bundles import (
@@ -51,18 +73,30 @@ from backend.core.rollups.day_bundles import (
 )
 from backend.repositories._base import QueryRunner, attach_ngwaf_cache, ensure_ngwaf_bots_materialized, safe_iso
 from backend.repositories._sql import security as SQL
-from backend.repositories._sql.security import (
-    BOT_EFFICIENCY,
-    CONN_REUSE_DIST,
-    FINGERPRINT_COVERAGE_BULK,
-    GET_SECURITY_PROXIES_COMBINED,
-    REQ_HEADER_SIZE_DIST,
-    TOP_IPS_BY_MAX_HEADER,
-)
 from backend.repositories.dashboard import CONN_REQUESTS_BUCKET
 from backend.repositories.security import _build_security_response
 
 # ── Merged from tests/core/test_rollups_ngwaf_bots.py ──
+
+
+@contextlib.contextmanager
+def _writer_ctx(cache_root, table: str, con_fn, db_path: str | None = None):
+    p = _build_patches(cache_root, table, con_fn)
+    with contextlib.ExitStack() as stack:
+        for cm in p:
+            stack.enter_context(cm)
+        if db_path is not None:
+            stack.enter_context(patch("backend.config.ngwaf_db_path", return_value=db_path))
+        yield
+
+
+@contextlib.contextmanager
+def _compact_ctx(cache_root):
+    with (
+        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
+        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+    ):
+        yield
 
 
 def _seed_logs(con: duckdb.DuckDBPyConnection, table: str, rows: list[dict]) -> None:
@@ -89,6 +123,16 @@ def _create_cache_db(db_path: str, entries: list[tuple]) -> None:
     con.close()
 
 
+def _sqlite_duckdb(table: str, rows: list[dict]):
+    def _con():
+        c = duckdb.connect(":memory:")
+        c.execute("INSTALL sqlite; LOAD sqlite;")
+        _seed_logs(c, table, rows)
+        return c
+
+    return _con
+
+
 @pytest.mark.usefixtures("frozen_clock")
 class TestRollupsNgwafBots:
     def test_build_ngwaf_bots_writes_aggregated_join(self, tmp_path):
@@ -103,25 +147,13 @@ class TestRollupsNgwafBots:
                 ("w3", "AhrefsBot", "SEO", None),
             ],
         )
-        src = {"name": "svc-nb-1"}
         hour_token, hour_dt = _past_hour(2)
         rows = [
-            {"timestamp": hour_dt, "waf_req_id": "w1"},
-            {"timestamp": hour_dt + timedelta(seconds=1), "waf_req_id": "w2"},
-            {"timestamp": hour_dt + timedelta(seconds=2), "waf_req_id": "w3"},
-            {"timestamp": hour_dt + timedelta(seconds=3), "waf_req_id": "unmatched"},
-            {"timestamp": hour_dt + timedelta(seconds=4), "waf_req_id": None},
+            {"timestamp": hour_dt + timedelta(seconds=i), "waf_req_id": wid}
+            for i, wid in enumerate(["w1", "w2", "w3", "unmatched", None])
         ]
-
-        def _fresh_con():
-            c = duckdb.connect(":memory:")
-            c.execute("INSTALL sqlite; LOAD sqlite;")
-            _seed_logs(c, "logs_nb", rows)
-            return c
-
-        p = _build_patches(cache_root, "logs_nb", _fresh_con)
-        with p[0], p[1], p[2], p[3], p[4], patch("backend.config.ngwaf_db_path", return_value=db_path):
-            assert nb.build_ngwaf_bots_bundles("svc-nb-1", src, [hour_token]) == 1
+        with _writer_ctx(cache_root, "logs_nb", _sqlite_duckdb("logs_nb", rows), db_path):
+            assert nb.build_ngwaf_bots_bundles("svc-nb-1", {"name": "svc-nb-1"}, [hour_token]) == 1
 
         out = cache_root / "rollups" / "hour_bundled" / f"hour={hour_token}" / "ngwaf_bots.parquet"
         assert out.is_file()
@@ -131,63 +163,40 @@ class TestRollupsNgwafBots:
         }
         assert got == {("GPTBot", "GPTBot", "AI-CRAWLER"): 2, ("AhrefsBot", None, "SEO"): 1}
 
-    def test_build_ngwaf_bots_zero_bot_hour_writes_empty_marker(self, tmp_path):
+    def test_build_ngwaf_bots_zero_bot_and_skip_conditions(self, tmp_path):
         cache_root = tmp_path / "cache"
         cache_root.mkdir()
         db_path = str(tmp_path / "ngwaf_bot_cache.db")
         _create_cache_db(db_path, [])
-        src = {"name": "svc-nb-2"}
         hour_token, hour_dt = _past_hour(2)
 
-        def _fresh_con():
-            c = duckdb.connect(":memory:")
-            c.execute("INSTALL sqlite; LOAD sqlite;")
-            _seed_logs(c, "logs_nb2", [{"timestamp": hour_dt, "waf_req_id": "wX"}])
-            return c
-
-        p = _build_patches(cache_root, "logs_nb2", _fresh_con)
-        with p[0], p[1], p[2], p[3], p[4], patch("backend.config.ngwaf_db_path", return_value=db_path):
-            assert nb.build_ngwaf_bots_bundles("svc-nb-2", src, [hour_token]) == 1
-
+        with _writer_ctx(
+            cache_root, "logs_nb2", _sqlite_duckdb("logs_nb2", [{"timestamp": hour_dt, "waf_req_id": "wX"}]), db_path
+        ):
+            assert nb.build_ngwaf_bots_bundles("svc-nb-2", {"name": "svc-nb-2"}, [hour_token]) == 1
         out = cache_root / "rollups" / "hour_bundled" / f"hour={hour_token}" / "ngwaf_bots.parquet"
         assert out.is_file() and pq.read_table(str(out)).num_rows == 0
-
-    def test_build_ngwaf_bots_skips_without_column_or_cache(self, tmp_path):
-        cache_root = tmp_path / "cache"
-        cache_root.mkdir()
-        src = {"name": "svc-nb-3"}
-        hour_token, hour_dt = _past_hour(2)
-        db_path = str(tmp_path / "ngwaf_bot_cache.db")
-        _create_cache_db(db_path, [])
 
         def _con_no_col():
             c = duckdb.connect(":memory:")
             c.execute("CREATE TABLE logs_nb3 (timestamp TIMESTAMPTZ)")
             return c
 
-        p = _build_patches(cache_root, "logs_nb3", _con_no_col)
-        with p[0], p[1], p[2], p[3], p[4], patch("backend.config.ngwaf_db_path", return_value=db_path):
-            assert nb.build_ngwaf_bots_bundles("svc-nb-3", src, [hour_token]) == 0
+        with _writer_ctx(cache_root, "logs_nb3", _con_no_col, db_path):
+            assert nb.build_ngwaf_bots_bundles("svc-nb-3", {"name": "svc-nb-3"}, [hour_token]) == 0
 
-        def _con_with_col():
-            c = duckdb.connect(":memory:")
-            _seed_logs(c, "logs_nb3b", [{"timestamp": hour_dt, "waf_req_id": "w1"}])
-            return c
-
-        p = _build_patches(cache_root, "logs_nb3b", _con_with_col)
-        with (
-            p[0],
-            p[1],
-            p[2],
-            p[3],
-            p[4],
-            patch("backend.config.ngwaf_db_path", return_value=str(tmp_path / "missing.db")),
+        with _writer_ctx(
+            cache_root,
+            "logs_nb3b",
+            _sqlite_duckdb("logs_nb3b", [{"timestamp": hour_dt, "waf_req_id": "w1"}]),
+            str(tmp_path / "missing.db"),
         ):
-            assert nb.build_ngwaf_bots_bundles("svc-nb-3", src, [hour_token]) == 0
+            assert nb.build_ngwaf_bots_bundles("svc-nb-3", {"name": "svc-nb-3"}, [hour_token]) == 0
 
-    def test_compact_ngwaf_bots_days_sums_hours(self, tmp_path):
+    def test_compact_ngwaf_bots_and_ts_days_sums_hours(self, tmp_path):
         cache_root = tmp_path / "cache"
-        day = (datetime.now(UTC) - timedelta(days=2)).strftime("%Y-%m-%d")
+        day_dt = (datetime.now(UTC) - timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+        day = day_dt.strftime("%Y-%m-%d")
         for h in range(24):
             hour_dir = cache_root / "rollups" / "hour_bundled" / f"hour={day}-{h:02d}"
             hour_dir.mkdir(parents=True)
@@ -199,30 +208,9 @@ class TestRollupsNgwafBots:
                         "category": ["AI-CRAWLER"],
                         "count": pa.array([2], type=pa.int64()),
                     }
-                ),
+                ),  # fmt: skip
                 str(hour_dir / "ngwaf_bots.parquet"),
             )
-
-        with (
-            patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-            patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        ):
-            assert compact_ngwaf_bots_closed_days_to_daily("svc-nb-4", {"name": "svc-nb-4"}) == 1
-
-        out = cache_root / "rollups" / "day_bundled" / f"day={day}" / "ngwaf_bots.parquet"
-        assert out.is_file()
-        rows = pq.read_table(str(out)).to_pylist()
-        assert [{k: r[k] for k in ("bot_name", "wellknown_bot_name", "category", "count")} for r in rows] == [
-            {"bot_name": "GPTBot", "wellknown_bot_name": "GPTBot", "category": "AI-CRAWLER", "count": 48}
-        ]
-
-    def test_compact_ngwaf_bots_ts_days_sums_hours(self, tmp_path):
-        cache_root = tmp_path / "cache"
-        day_dt = (datetime.now(UTC) - timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
-        day = day_dt.strftime("%Y-%m-%d")
-        for h in range(24):
-            hour_dir = cache_root / "rollups" / "hour_bundled" / f"hour={day}-{h:02d}"
-            hour_dir.mkdir(parents=True)
             pq.write_table(
                 pa.table(
                     {
@@ -230,20 +218,23 @@ class TestRollupsNgwafBots:
                         "bot_name": ["GPTBot"],
                         "count": pa.array([3], type=pa.int64()),
                     }
-                ),
+                ),  # fmt: skip
                 str(hour_dir / "ngwaf_bots_ts.parquet"),
             )
 
-        with (
-            patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-            patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        ):
+        with _compact_ctx(cache_root):
+            assert compact_ngwaf_bots_closed_days_to_daily("svc-nb-4", {"name": "svc-nb-4"}) == 1
             assert compact_ngwaf_bots_ts_closed_days_to_daily("svc-nb-4-ts", {"name": "svc-nb-4-ts"}) == 1
 
-        out = cache_root / "rollups" / "day_bundled" / f"day={day}" / "ngwaf_bots_ts.parquet"
-        assert out.is_file()
+        out = cache_root / "rollups" / "day_bundled" / f"day={day}" / "ngwaf_bots.parquet"
         rows = pq.read_table(str(out)).to_pylist()
-        assert len(rows) == 24 and sum(r["count"] for r in rows) == 72
+        assert [{k: r[k] for k in ("bot_name", "wellknown_bot_name", "category", "count")} for r in rows] == [
+            {"bot_name": "GPTBot", "wellknown_bot_name": "GPTBot", "category": "AI-CRAWLER", "count": 48}
+        ]
+        ts_rows = pq.read_table(
+            str(cache_root / "rollups" / "day_bundled" / f"day={day}" / "ngwaf_bots_ts.parquet")
+        ).to_pylist()
+        assert len(ts_rows) == 24 and sum(r["count"] for r in ts_rows) == 72
 
     def test_stale_3col_ngwaf_bots_parquet_fallback_and_purge(self, tmp_path):
         cache_root = tmp_path / "cache"
@@ -261,7 +252,6 @@ class TestRollupsNgwafBots:
         src = {"name": "svc-nb-trap24"}
         runner = QueryRunner(duckdb.connect(":memory:"), src)
         st, et = base.isoformat(), (base + timedelta(hours=24)).isoformat()
-
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
             assert runner.try_ngwaf_verified_bots_from_rollup(st, et, has_filters=False) is None
             assert _purge_stale_ngwaf_bots_parquets(src) == 24
@@ -302,8 +292,7 @@ class TestRollupsNgwafBots:
             return c
 
         src = {"name": "svc-nb-parity", "service_id": "svc-nb-parity"}
-        p = _build_patches(cache_root, "logs_parity", _fresh_con)
-        with p[0], p[1], p[2], p[3], p[4], patch("backend.config.ngwaf_db_path", return_value=db_path):
+        with _writer_ctx(cache_root, "logs_parity", _fresh_con, db_path):
             assert nb.build_ngwaf_bots_bundles("svc-nb-parity", src, closed_hours) == 24
             assert nb.build_ngwaf_bots_ts_bundles("svc-nb-parity", src, closed_hours) == 24
 
@@ -315,13 +304,12 @@ class TestRollupsNgwafBots:
                     "timestamp": pa.array([h_active], type=pa.timestamp("us", tz="UTC")),
                     "waf_req_id": pa.array(["w2"], type=pa.string()),
                 }
-            ),
+            ),  # fmt: skip
             str(buffer_dir / "live.parquet"),
         )
 
         con = _fresh_con()
         st_iso, et_iso = base_dt.isoformat(), (active_dt + timedelta(minutes=30)).isoformat()
-
         with (
             patch("backend.config.ngwaf_db_path", return_value=db_path),
             patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
@@ -351,19 +339,9 @@ class TestRollupsNgwafBots:
 
             section_timings: list[dict] = []
             resp = _build_security_response(
-                runner,
-                src,
-                ["timestamp", "waf_req_id"],
-                "logs_parity",
-                "",
-                None,
-                60,
-                section_timings,
-                start_time=st_iso,
-                end_time=et_iso,
-                filters=None,
-                sections={"ngwaf_verified_bots", "ngwaf_verified_bots_ts"},
-            )
+                runner, src, ["timestamp", "waf_req_id"], "logs_parity", "", None, 60, section_timings,
+                start_time=st_iso, end_time=et_iso, filters=None, sections={"ngwaf_verified_bots", "ngwaf_verified_bots_ts"},
+            )  # fmt: skip
             assert resp["ngwaf_verified_bots"] == live_table_rows
             phase_names = {entry.get("name") or entry.get("section") for entry in section_timings}
             assert {
@@ -373,7 +351,7 @@ class TestRollupsNgwafBots:
             } <= phase_names
             assert "temp_table_create" not in phase_names and "security:temp_ngwaf_narrowed" not in phase_names
 
-    def test_reader_sums_and_ranks_closed_hours(self, tmp_path):
+    def test_reader_sums_ranks_eligibility_and_live_topup(self, tmp_path):
         cache_root = tmp_path / "cache"
         base = (datetime.now(UTC) - timedelta(hours=6)).replace(minute=0, second=0, microsecond=0)
         for i in range(3):
@@ -388,7 +366,7 @@ class TestRollupsNgwafBots:
                         "category": ["AI-CRAWLER", "SEO"],
                         "count": pa.array([5, 1], type=pa.int64()),
                     }
-                ),
+                ),  # fmt: skip
                 str(hour_dir / "ngwaf_bots.parquet"),
             )
 
@@ -397,57 +375,46 @@ class TestRollupsNgwafBots:
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
             got = runner.try_ngwaf_top_bots_from_rollup(st, et, has_filters=False, n=10)
             top1 = runner.try_ngwaf_top_bots_from_rollup(st, et, has_filters=False, n=1)
-
         assert got == [
             {"name": "GPTBot", "category": "AI-CRAWLER", "request_count": 15},
             {"name": "AhrefsBot", "category": "SEO", "request_count": 3},
         ]
         assert top1 == [{"name": "GPTBot", "category": "AI-CRAWLER", "request_count": 15}]
 
-    def test_reader_eligibility_gates(self, tmp_path):
-        cache_root = tmp_path / "cache"
-        cache_root.mkdir()
-        runner = QueryRunner(duckdb.connect(":memory:"), {"name": "svc-nb-6"})
-
-        with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        empty_cache = tmp_path / "empty_cache"
+        empty_cache.mkdir()
+        runner_empty = QueryRunner(duckdb.connect(":memory:"), {"name": "svc-nb-6"})
+        with patch("backend.core.duckdb._cache_dir", return_value=str(empty_cache)):
             for s, e, hf in [
                 ("2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z", True),
                 ("2026-06-01T00:00:00Z", "2026-06-01T01:30:00Z", False),
                 ("2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z", False),
                 ("not-a-date", "2026-06-02T00:00:00Z", False),
             ]:
-                assert runner.try_ngwaf_top_bots_from_rollup(s, e, has_filters=hf, n=10) is None
-
+                assert runner_empty.try_ngwaf_top_bots_from_rollup(s, e, has_filters=hf, n=10) is None
             assert (
-                runner.try_ngwaf_verified_bots_from_rollup(
+                runner_empty.try_ngwaf_verified_bots_from_rollup(
                     "2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z", has_filters=True
                 )
                 is None
             )
             assert (
-                runner.try_ngwaf_verified_bots_from_rollup(
+                runner_empty.try_ngwaf_verified_bots_from_rollup(
                     "2026-06-01T00:00:00Z", "2026-06-01T12:00:00Z", has_filters=False
                 )
                 is None
             )
-            assert (
-                runner.try_ngwaf_verified_bots_ts_from_rollup(
-                    "2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z", bucket_seconds=60, has_filters=True
+            for bs, hf, e in [
+                (60, True, "2026-06-02T00:00:00Z"),
+                (45, False, "2026-06-02T00:00:00Z"),
+                (60, False, "2026-06-01T12:00:00Z"),
+            ]:
+                assert (
+                    runner_empty.try_ngwaf_verified_bots_ts_from_rollup(
+                        "2026-06-01T00:00:00Z", e, bucket_seconds=bs, has_filters=hf
+                    )
+                    is None
                 )
-                is None
-            )
-            assert (
-                runner.try_ngwaf_verified_bots_ts_from_rollup(
-                    "2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z", bucket_seconds=45, has_filters=False
-                )
-                is None
-            )
-            assert (
-                runner.try_ngwaf_verified_bots_ts_from_rollup(
-                    "2026-06-01T00:00:00Z", "2026-06-01T12:00:00Z", bucket_seconds=60, has_filters=False
-                )
-                is None
-            )
 
     def test_reader_live_topup_joins_active_hour_buffer(self, tmp_path):
         cache_root = tmp_path / "cache"
@@ -470,13 +437,12 @@ class TestRollupsNgwafBots:
                     "timestamp": pa.array([ts, ts], type=pa.timestamp("us", tz="UTC")),
                     "waf_req_id": pa.array(["w1", "w9"], type=pa.string()),
                 }
-            ),
+            ),  # fmt: skip
             str(buffer_dir / "live.parquet"),
         )
 
         db_path = str(tmp_path / "ngwaf_bot_cache.db")
         _create_cache_db(db_path, [("w1", "GPTBot", "AI-CRAWLER")])
-
         con = duckdb.connect(":memory:")
         con.execute("INSTALL sqlite; LOAD sqlite;")
         with (
@@ -506,21 +472,22 @@ def _seed_logs_rollups_security_dims(con: duckdb.DuckDBPyConnection, table: str,
         )
 
 
+def _sd_con_fn(table: str, rows: list[dict]):
+    def _con():
+        c = duckdb.connect(":memory:")
+        _seed_logs_rollups_security_dims(c, table, rows)
+        return c
+
+    return _con
+
+
 @pytest.mark.usefixtures("frozen_clock")
 class TestRollupsSecurityDims:
     def test_build_security_dims_writes_four_bundles(self, tmp_path):
         cache_root = tmp_path / "cache"
         cache_root.mkdir()
-        src = {"name": "svc-sd-1"}
         hour_token, hour_dt = _past_hour(2)
-        specs = [
-            ("10.0.0.1", 100, 1, "abc"),
-            ("10.0.0.1", 300, 3, "abc"),
-            ("10.0.0.2", 5000, 10, "def"),
-            ("10.0.0.2", 200, 1, "def"),
-            ("10.0.0.3", 50, 1, ""),
-            ("10.0.0.3", 50, 1, None),
-        ]
+        specs = [("10.0.0.1", 100, 1, "abc"), ("10.0.0.1", 300, 3, "abc"), ("10.0.0.2", 5000, 10, "def"), ("10.0.0.2", 200, 1, "def"), ("10.0.0.3", 50, 1, ""), ("10.0.0.3", 50, 1, None)]  # fmt: skip
         rows = [
             {
                 "timestamp": hour_dt + timedelta(minutes=i),
@@ -528,68 +495,45 @@ class TestRollupsSecurityDims:
                 "req_header_bytes": rhb,
                 "conn_requests": cr,
                 "tls_ciphers_sha": tls,
-            }
+            }  # fmt: skip
             for i, (ip, rhb, cr, tls) in enumerate(specs)
         ]
 
-        def _fresh_con():
-            c = duckdb.connect(":memory:")
-            _seed_logs_rollups_security_dims(c, "logs_sd", rows)
-            return c
-
-        p = _build_patches(cache_root, "logs_sd", _fresh_con)
-        with p[0], p[1], p[2], p[3], p[4]:
-            assert security_dims.build_security_dims_bundles("svc-sd-1", src, [hour_token]) == 4
+        with _writer_ctx(cache_root, "logs_sd", _sd_con_fn("logs_sd", rows)):
+            assert security_dims.build_security_dims_bundles("svc-sd-1", {"name": "svc-sd-1"}, [hour_token]) == 4
 
         hour_dir = cache_root / "rollups" / "hour_bundled" / f"hour={hour_token}"
         req_file, conn_file = hour_dir / "security_req_size.parquet", hour_dir / "security_conn_reuse.parquet"
         topips_file, cov_file = hour_dir / "security_topips.parquet", hour_dir / "security_cov.parquet"
         assert req_file.exists() and conn_file.exists() and topips_file.exists() and cov_file.exists()
+        assert {"bucket", "count", "min_val"} <= set(pq.read_table(str(req_file)).column_names)
+        assert {"bucket", "count", "min_val"} <= set(pq.read_table(str(conn_file)).column_names)
+        assert {"ip", "max_header"} <= set(pq.read_table(str(topips_file)).column_names)
+        assert {"total_rows", "tls_populated"} <= set(pq.read_table(str(cov_file)).column_names)
 
-        assert {"bucket", "count", "min_val"}.issubset(set(pq.read_table(str(req_file)).column_names))
-        assert {"bucket", "count", "min_val"}.issubset(set(pq.read_table(str(conn_file)).column_names))
-        assert {"ip", "max_header"}.issubset(set(pq.read_table(str(topips_file)).column_names))
-        assert {"total_rows", "tls_populated"}.issubset(set(pq.read_table(str(cov_file)).column_names))
+        req_rows = {r["bucket"]: (r["count"], r["min_val"]) for r in pq.read_table(str(req_file)).to_pylist()}
+        assert req_rows["0-256B"] == (4, 50) and req_rows["256-512B"] == (1, 300) and req_rows["4-6KB"] == (1, 5000)
 
-        req_rows = {r["bucket"]: r for r in pq.read_table(str(req_file)).to_pylist()}
-        assert req_rows["0-256B"]["count"] == 4 and req_rows["0-256B"]["min_val"] == 50
-        assert req_rows["256-512B"]["count"] == 1 and req_rows["256-512B"]["min_val"] == 300
-        assert req_rows["4-6KB"]["count"] == 1 and req_rows["4-6KB"]["min_val"] == 5000
+        conn_rows = {r["bucket"]: (r["count"], r["min_val"]) for r in pq.read_table(str(conn_file)).to_pylist()}
+        assert conn_rows["1 (None)"] == (4, 1) and conn_rows["2-5"] == (1, 3) and conn_rows["6-20"] == (1, 10)
 
-        conn_rows = {r["bucket"]: r for r in pq.read_table(str(conn_file)).to_pylist()}
-        assert conn_rows["1 (None)"]["count"] == 4 and conn_rows["1 (None)"]["min_val"] == 1
-        assert conn_rows["2-5"]["count"] == 1 and conn_rows["2-5"]["min_val"] == 3
-        assert conn_rows["6-20"]["count"] == 1 and conn_rows["6-20"]["min_val"] == 10
-
-        topips_rows = {r["ip"]: r["max_header"] for r in pq.read_table(str(topips_file)).to_pylist()}
-        assert topips_rows == {"10.0.0.1": 300, "10.0.0.2": 5000, "10.0.0.3": 50}
-
+        assert {r["ip"]: r["max_header"] for r in pq.read_table(str(topips_file)).to_pylist()} == {"10.0.0.1": 300, "10.0.0.2": 5000, "10.0.0.3": 50}  # fmt: skip
         cov = pq.read_table(str(cov_file)).to_pylist()[0]
         assert cov["total_rows"] == 6 and cov["tls_populated"] == 4
 
-    def test_build_security_dims_skips_active_hour(self, tmp_path):
+    def test_build_security_dims_skips_active_hour_and_missing_cols(self, tmp_path):
         cache_root = tmp_path / "cache"
         cache_root.mkdir()
         active_token = datetime.now(UTC).strftime("%Y-%m-%d-%H")
-
-        def _fresh_con():
-            c = duckdb.connect(":memory:")
-            _seed_logs_rollups_security_dims(c, "logs_sd", [])
-            return c
-
-        p = _build_patches(cache_root, "logs_sd", _fresh_con)
-        with p[0], p[1], p[2], p[3], p[4]:
+        with _writer_ctx(cache_root, "logs_sd", _sd_con_fn("logs_sd", [])):
             assert security_dims.build_security_dims_bundles("svc-sd-2", {"name": "svc-sd-2"}, [active_token]) == 0
         assert not (
             cache_root / "rollups" / "hour_bundled" / f"hour={active_token}" / "security_req_size.parquet"
         ).exists()
 
-    def test_build_security_dims_missing_conn_requests_skips_that_bundle(self, tmp_path):
-        cache_root = tmp_path / "cache"
-        cache_root.mkdir()
         hour_token, hour_dt = _past_hour(2)
 
-        def _fresh_con():
+        def _con_nocr():
             c = duckdb.connect(":memory:")
             c.execute(
                 "CREATE TABLE logs_nocr (timestamp TIMESTAMPTZ, ip VARCHAR, req_header_bytes BIGINT, tls_ciphers_sha VARCHAR)"
@@ -601,20 +545,15 @@ class TestRollupsSecurityDims:
                 )
             return c
 
-        p = _build_patches(cache_root, "logs_nocr", _fresh_con)
-        with p[0], p[1], p[2], p[3], p[4]:
+        c_nocr = tmp_path / "cache_nocr"
+        c_nocr.mkdir()
+        with _writer_ctx(c_nocr, "logs_nocr", _con_nocr):
             assert security_dims.build_security_dims_bundles("svc-sd-3", {"name": "svc-sd-3"}, [hour_token]) == 3
+        d_nocr = c_nocr / "rollups" / "hour_bundled" / f"hour={hour_token}"
+        assert (d_nocr / "security_req_size.parquet").exists() and (d_nocr / "security_topips.parquet").exists()
+        assert (d_nocr / "security_cov.parquet").exists() and not (d_nocr / "security_conn_reuse.parquet").exists()
 
-        hour_dir = cache_root / "rollups" / "hour_bundled" / f"hour={hour_token}"
-        assert (hour_dir / "security_req_size.parquet").exists() and (hour_dir / "security_topips.parquet").exists()
-        assert (hour_dir / "security_cov.parquet").exists() and not (hour_dir / "security_conn_reuse.parquet").exists()
-
-    def test_build_security_dims_missing_ip_skips_topips_only(self, tmp_path):
-        cache_root = tmp_path / "cache"
-        cache_root.mkdir()
-        hour_token, hour_dt = _past_hour(2)
-
-        def _fresh_con():
+        def _con_noip():
             c = duckdb.connect(":memory:")
             c.execute(
                 "CREATE TABLE logs_noip (timestamp TIMESTAMPTZ, req_header_bytes BIGINT, conn_requests BIGINT, tls_ciphers_sha VARCHAR)"
@@ -625,15 +564,15 @@ class TestRollupsSecurityDims:
                 )
             return c
 
-        p = _build_patches(cache_root, "logs_noip", _fresh_con)
-        with p[0], p[1], p[2], p[3], p[4]:
+        c_noip = tmp_path / "cache_noip"
+        c_noip.mkdir()
+        with _writer_ctx(c_noip, "logs_noip", _con_noip):
             assert security_dims.build_security_dims_bundles("svc-sd-3b", {"name": "svc-sd-3b"}, [hour_token]) == 3
+        d_noip = c_noip / "rollups" / "hour_bundled" / f"hour={hour_token}"
+        assert (d_noip / "security_req_size.parquet").exists() and (d_noip / "security_conn_reuse.parquet").exists()
+        assert (d_noip / "security_cov.parquet").exists() and not (d_noip / "security_topips.parquet").exists()
 
-        hour_dir = cache_root / "rollups" / "hour_bundled" / f"hour={hour_token}"
-        assert (hour_dir / "security_req_size.parquet").exists() and (hour_dir / "security_conn_reuse.parquet").exists()
-        assert (hour_dir / "security_cov.parquet").exists() and not (hour_dir / "security_topips.parquet").exists()
-
-    def test_compact_security_dims_day_merge(self, tmp_path):
+    def test_compact_security_dims_day_merge_and_topips_recap(self, tmp_path):
         cache_root = tmp_path / "cache"
         cache_root.mkdir()
         day_dt = (datetime.now(UTC) - timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -643,71 +582,55 @@ class TestRollupsSecurityDims:
         for hh in (3, 4):
             hour_dir = str(bundled_root / f"hour={(day_dt + timedelta(hours=hh)).strftime('%Y-%m-%d-%H')}")
             _write_hour_bundle(
-                hour_dir,
-                "security_req_size.parquet",
-                "('0-256B', CAST(4 AS BIGINT), CAST(50 AS BIGINT))"
-                if hh == 3
-                else "('0-256B', CAST(6 AS BIGINT), CAST(80 AS BIGINT))",
+                hour_dir, "security_req_size.parquet",
+                "('0-256B', CAST(4 AS BIGINT), CAST(50 AS BIGINT))" if hh == 3 else "('0-256B', CAST(6 AS BIGINT), CAST(80 AS BIGINT))",
                 "bucket, count, min_val",
-            )
+            )  # fmt: skip
             _write_hour_bundle(
-                hour_dir,
-                "security_conn_reuse.parquet",
-                "('1 (None)', CAST(2 AS BIGINT), CAST(1 AS BIGINT))"
-                if hh == 3
-                else "('1 (None)', CAST(3 AS BIGINT), CAST(1 AS BIGINT))",
+                hour_dir, "security_conn_reuse.parquet",
+                "('1 (None)', CAST(2 AS BIGINT), CAST(1 AS BIGINT))" if hh == 3 else "('1 (None)', CAST(3 AS BIGINT), CAST(1 AS BIGINT))",
                 "bucket, count, min_val",
-            )
+            )  # fmt: skip
             _write_hour_bundle(
-                hour_dir,
-                "security_topips.parquet",
+                hour_dir, "security_topips.parquet",
                 "('A', CAST(100 AS BIGINT)), ('B', CAST(500 AS BIGINT))" if hh == 3 else "('A', CAST(900 AS BIGINT))",
                 "ip, max_header",
-            )
+            )  # fmt: skip
             _write_hour_bundle(
-                hour_dir,
-                "security_cov.parquet",
+                hour_dir, "security_cov.parquet",
                 "(CAST(10 AS BIGINT), CAST(4 AS BIGINT))" if hh == 3 else "(CAST(20 AS BIGINT), CAST(9 AS BIGINT))",
                 "total_rows, tls_populated",
-            )
+            )  # fmt: skip
 
-        with (
-            patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-            patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        ):
+        with _compact_ctx(cache_root):
             assert day_bundles.compact_security_dims_closed_days_to_daily("svc-sd-4", {"name": "svc-sd-4"}) == 4
 
         day_root = cache_root / "rollups" / "day_bundled" / f"day={day_str}"
         req = pq.read_table(str(day_root / "security_req_size.parquet")).to_pylist()[0]
-        assert req["bucket"] == "0-256B" and req["count"] == 10 and req["min_val"] == 50
+        assert (req["bucket"], req["count"], req["min_val"]) == ("0-256B", 10, 50)
         conn = pq.read_table(str(day_root / "security_conn_reuse.parquet")).to_pylist()[0]
-        assert conn["count"] == 5 and conn["min_val"] == 1
-        topips = {
+        assert (conn["count"], conn["min_val"]) == (5, 1)
+        assert {
             r["ip"]: r["max_header"] for r in pq.read_table(str(day_root / "security_topips.parquet")).to_pylist()
-        }
-        assert topips == {"A": 900, "B": 500}
+        } == {"A": 900, "B": 500}
         cov = pq.read_table(str(day_root / "security_cov.parquet")).to_pylist()[0]
-        assert cov["total_rows"] == 30 and cov["tls_populated"] == 13
+        assert (cov["total_rows"], cov["tls_populated"]) == (30, 13)
 
-    def test_compact_security_dims_topips_recaps_above_500(self, tmp_path):
-        cache_root = tmp_path / "cache"
-        cache_root.mkdir()
-        day_dt = (datetime.now(UTC) - timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
-        day_str = day_dt.strftime("%Y-%m-%d")
-        hour_dir = str(
-            cache_root / "rollups" / "hour_bundled" / f"hour={(day_dt + timedelta(hours=5)).strftime('%Y-%m-%d-%H')}"
+        cap_root = tmp_path / "cache_cap"
+        cap_root.mkdir()
+        hour_dir_cap = str(
+            cap_root / "rollups" / "hour_bundled" / f"hour={(day_dt + timedelta(hours=5)).strftime('%Y-%m-%d-%H')}"
         )
-        values = ", ".join(f"('ip{i:04d}', CAST({i} AS BIGINT))" for i in range(600))
-        _write_hour_bundle(hour_dir, "security_topips.parquet", values, "ip, max_header")
-
-        with (
-            patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-            patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        ):
+        _write_hour_bundle(
+            hour_dir_cap,
+            "security_topips.parquet",
+            ", ".join(f"('ip{i:04d}', CAST({i} AS BIGINT))" for i in range(600)),
+            "ip, max_header",
+        )
+        with _compact_ctx(cap_root):
             day_bundles.compact_security_dims_closed_days_to_daily("svc-sd-5", {"name": "svc-sd-5"})
-
         rows = pq.read_table(
-            str(cache_root / "rollups" / "day_bundled" / f"day={day_str}" / "security_topips.parquet")
+            str(cap_root / "rollups" / "day_bundled" / f"day={day_str}" / "security_topips.parquet")
         ).to_pylist()
         maxes = sorted(r["max_header"] for r in rows)
         assert len(rows) == 500 and maxes[0] == 100 and maxes[-1] == 599
@@ -755,13 +678,17 @@ class TestRollupsSecurityDims:
                 runner.try_security_conn_reuse_from_rollup,
                 runner.try_security_top_ips_from_rollup,
                 runner.try_security_coverage_from_rollup,
+                runner.try_conn_requests_hist_from_rollup,
             ]
             with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
                 for call in readers:
-                    assert call("2026-06-01T00:00:00Z", "2026-06-15T00:00:00Z", has_filters=True) is None
-                    assert call("2026-06-01T00:00:00Z", "2026-06-02T12:00:00Z", has_filters=False) is None
-                    assert call("2026-06-01T00:00:00Z", "2026-06-15T00:00:00Z", has_filters=False) is None
-                    assert call("not-a-date", "2026-06-15T00:00:00Z", has_filters=False) is None
+                    for s, e, hf in [
+                        ("2026-06-01T00:00:00Z", "2026-06-15T00:00:00Z", True),
+                        ("2026-06-01T00:00:00Z", "2026-06-01T01:30:00Z", False),
+                        ("2026-06-01T00:00:00Z", "2026-06-15T00:00:00Z", False),
+                        ("not-a-date", "2026-06-15T00:00:00Z", False),
+                    ]:
+                        assert call(s, e, has_filters=hf) is None
 
     def test_rollup_readers_match_live_sql(self, tmp_path):
         cache_root = tmp_path / "cache"
@@ -769,14 +696,7 @@ class TestRollupsSecurityDims:
         src = {"name": "svc-sd-8"}
         base_dt = (datetime.now(UTC) - timedelta(hours=100)).replace(minute=0, second=0, microsecond=0)
         hours = [base_dt + timedelta(hours=i) for i in range(50)]
-        specs = [
-            ("10.0.0.1", 100, 1, "abc"),
-            ("10.0.0.1", 400, 4, "abc"),
-            ("10.0.0.2", 5000, 12, "def"),
-            ("10.0.0.2", 9000, 1, ""),
-            ("10.0.0.3", 200, 50, None),
-            ("10.0.0.3", 200, 200, "ghi"),
-        ]
+        specs = [("10.0.0.1", 100, 1, "abc"), ("10.0.0.1", 400, 4, "abc"), ("10.0.0.2", 5000, 12, "def"), ("10.0.0.2", 9000, 1, ""), ("10.0.0.3", 200, 50, None), ("10.0.0.3", 200, 200, "ghi")]  # fmt: skip
 
         def _canonical_rows(hour_dt):
             return [
@@ -786,39 +706,26 @@ class TestRollupsSecurityDims:
                     "req_header_bytes": rhb,
                     "conn_requests": cr,
                     "tls_ciphers_sha": tls,
-                }
+                }  # fmt: skip
                 for j, (ip, rhb, cr, tls) in enumerate(specs)
             ]
 
         for dt in hours:
-            canonical = _canonical_rows(dt)
-
-            def _fresh_con(rows=canonical):
-                c = duckdb.connect(":memory:")
-                _seed_logs_rollups_security_dims(c, "logs_par", rows)
-                return c
-
-            p = _build_patches(cache_root, "logs_par", _fresh_con)
-            with p[0], p[1], p[2], p[3], p[4]:
+            with _writer_ctx(cache_root, "logs_par", _sd_con_fn("logs_par", _canonical_rows(dt))):
                 security_dims.build_security_dims_bundles("svc-sd-8", src, [dt.strftime("%Y-%m-%d-%H")])
 
         with contextlib.closing(duckdb.connect(":memory:")) as con:
-            all_rows = [r for dt in hours for r in _canonical_rows(dt)]
-            _seed_logs_rollups_security_dims(con, "t_par", all_rows)
+            _seed_logs_rollups_security_dims(con, "t_par", [r for dt in hours for r in _canonical_rows(dt)])
             runner = QueryRunner(con, src)
-
-            live_req_pairs = [
+            live_req = [
                 (r[0], int(r[1])) for r in con.execute(REQ_HEADER_SIZE_DIST.format(temp_table="t_par")).fetchall()
             ]
-            live_conn_pairs = [
-                (r[0], int(r[1])) for r in con.execute(CONN_REUSE_DIST.format(temp_table="t_par")).fetchall()
-            ]
-            live_topips_pairs = [
+            live_conn = [(r[0], int(r[1])) for r in con.execute(CONN_REUSE_DIST.format(temp_table="t_par")).fetchall()]
+            live_topips = [
                 (r[0], int(r[1])) for r in con.execute(TOP_IPS_BY_MAX_HEADER.format(temp_table="t_par")).fetchall()
             ]
             agg = "count(*) FILTER (WHERE tls_ciphers_sha IS NOT NULL AND tls_ciphers_sha != '') AS populated_0"
             live_cov = con.execute(FINGERPRINT_COVERAGE_BULK.format(temp_table="t_par", agg_cols=agg)).fetchone()
-            live_total, live_pop = int(live_cov[0]), int(live_cov[1])
 
             st_iso = hours[0].isoformat().replace("+00:00", "Z")
             et_iso = (hours[-1] + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
@@ -829,20 +736,20 @@ class TestRollupsSecurityDims:
                 roll_cov = runner.try_security_coverage_from_rollup(st_iso, et_iso, has_filters=False)
 
         assert roll_req is not None and roll_conn is not None and roll_topips is not None and roll_cov is not None
-        assert [(r["bucket"], r["count"]) for r in roll_req] == live_req_pairs
+        assert [(r["bucket"], r["count"]) for r in roll_req] == live_req
         assert "_approx" not in {k for d in roll_req for k in d}
-        assert [(r["bucket"], r["count"]) for r in roll_conn] == live_conn_pairs
-        assert [(r["ip"], r["max_header"]) for r in roll_topips] == live_topips_pairs
-        assert roll_cov == (live_total, live_pop)
+        assert [(r["bucket"], r["count"]) for r in roll_conn] == live_conn
+        assert [(r["ip"], r["max_header"]) for r in roll_topips] == live_topips
+        assert roll_cov == (int(live_cov[0]), int(live_cov[1]))
 
-    def test_conn_requests_hist_reader_parity_and_fold(self, tmp_path):
+    def test_conn_requests_hist_reader_parity_and_live_topup(self, tmp_path):
         cache_root = tmp_path / "cache"
         cache_root.mkdir()
         src = {"name": "svc-cr-1"}
         base_dt = (datetime.now(UTC) - timedelta(hours=6)).replace(minute=0, second=0, microsecond=0)
         hours = [base_dt + timedelta(hours=i) for i in range(3)]
 
-        def _canonical_rows(hour_dt):
+        def _canonical_rows(hour_dt, crs=(1, 1, 3, 10, 50, 200, 0, None)):
             return [
                 {
                     "timestamp": hour_dt + timedelta(seconds=j),
@@ -850,29 +757,22 @@ class TestRollupsSecurityDims:
                     "req_header_bytes": 100,
                     "conn_requests": v,
                     "tls_ciphers_sha": "abc",
-                }
-                for j, v in enumerate([1, 1, 3, 10, 50, 200, 0, None])
+                }  # fmt: skip
+                for j, v in enumerate(crs)
             ]
 
         for dt in hours:
-            canonical = _canonical_rows(dt)
-
-            def _fresh_con(rows=canonical):
-                c = duckdb.connect(":memory:")
-                _seed_logs_rollups_security_dims(c, "logs_cr", rows)
-                return c
-
-            p = _build_patches(cache_root, "logs_cr", _fresh_con)
-            with p[0], p[1], p[2], p[3], p[4]:
+            with _writer_ctx(cache_root, "logs_cr", _sd_con_fn("logs_cr", _canonical_rows(dt))):
                 security_dims.build_security_dims_bundles("svc-cr-1", src, [dt.strftime("%Y-%m-%d-%H")])
 
         with contextlib.closing(duckdb.connect(":memory:")) as con:
             _seed_logs_rollups_security_dims(con, "t_par", [r for dt in hours for r in _canonical_rows(dt)])
-            live = con.execute(
-                CONN_REQUESTS_BUCKET.format(requests_metric="COUNT(*)", table_name="t_par", where_clause="1=1")
-            ).fetchall()
-            live_pairs = [(r[0], int(r[1])) for r in live]
-
+            live_pairs = [
+                (r[0], int(r[1]))
+                for r in con.execute(
+                    CONN_REQUESTS_BUCKET.format(requests_metric="COUNT(*)", table_name="t_par", where_clause="1=1")
+                ).fetchall()
+            ]
             runner = QueryRunner(con, src)
             st_iso = hours[0].isoformat().replace("+00:00", "Z")
             et_iso = (hours[-1] + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
@@ -886,67 +786,16 @@ class TestRollupsSecurityDims:
         assert [r["value"] for r in hist["top"]] == ["1", "2–5", "6–20", "21+"]
         assert hist["total"] == sum(c for _b, c in live_pairs)
 
-    def test_conn_requests_hist_reader_eligibility(self, tmp_path):
-        cache_root = tmp_path / "cache"
-        cache_root.mkdir()
-        with contextlib.closing(duckdb.connect(":memory:")) as con:
-            runner = QueryRunner(con, {"name": "svc-cr-2"})
-            with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-                assert (
-                    runner.try_conn_requests_hist_from_rollup(
-                        "2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z", has_filters=True
-                    )
-                    is None
-                )
-                assert (
-                    runner.try_conn_requests_hist_from_rollup(
-                        "2026-06-01T00:00:00Z", "2026-06-01T01:30:00Z", has_filters=False
-                    )
-                    is None
-                )
-                assert (
-                    runner.try_conn_requests_hist_from_rollup(
-                        "2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z", has_filters=False
-                    )
-                    is None
-                )
-                assert (
-                    runner.try_conn_requests_hist_from_rollup("not-a-date", "2026-06-02T00:00:00Z", has_filters=False)
-                    is None
-                )
-
-    def test_conn_requests_hist_reader_live_topup(self, tmp_path):
-        cache_root = tmp_path / "cache"
-        cache_root.mkdir()
-        src = {"name": "svc-cr-3"}
+        topup_cache = tmp_path / "cache_topup"
+        topup_cache.mkdir()
+        src3 = {"name": "svc-cr-3"}
         active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
         closed = [active_dt - timedelta(hours=2), active_dt - timedelta(hours=1)]
-
-        def _closed_rows(hour_dt):
-            return [
-                {
-                    "timestamp": hour_dt + timedelta(seconds=i),
-                    "ip": "10.0.0.1",
-                    "req_header_bytes": 100,
-                    "conn_requests": cr,
-                    "tls_ciphers_sha": "x",
-                }
-                for i, cr in enumerate([1, 1, 3])
-            ]
-
         for dt in closed:
-            canonical = _closed_rows(dt)
+            with _writer_ctx(topup_cache, "logs_cr3", _sd_con_fn("logs_cr3", _canonical_rows(dt, (1, 1, 3)))):
+                security_dims.build_security_dims_bundles("svc-cr-3", src3, [dt.strftime("%Y-%m-%d-%H")])
 
-            def _fresh_con(rows=canonical):
-                c = duckdb.connect(":memory:")
-                _seed_logs_rollups_security_dims(c, "logs_cr3", rows)
-                return c
-
-            p = _build_patches(cache_root, "logs_cr3", _fresh_con)
-            with p[0], p[1], p[2], p[3], p[4]:
-                security_dims.build_security_dims_bundles("svc-cr-3", src, [dt.strftime("%Y-%m-%d-%H")])
-
-        buffer_dir = cache_root / "buffer"
+        buffer_dir = topup_cache / "buffer"
         buffer_dir.mkdir()
         ts = active_dt + timedelta(minutes=5)
         pq.write_table(
@@ -955,22 +804,22 @@ class TestRollupsSecurityDims:
                     "timestamp": pa.array([ts, ts, ts], type=pa.timestamp("us", tz="UTC")),
                     "conn_requests": pa.array([1, 7, 7], type=pa.int64()),
                 }
-            ),
+            ),  # fmt: skip
             str(buffer_dir / "live.parquet"),
         )
-
         with contextlib.closing(duckdb.connect(":memory:")) as con:
-            runner = QueryRunner(con, src)
-            st_iso = closed[0].isoformat().replace("+00:00", "Z")
-            et_iso = (active_dt + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
-            with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-                hist = runner.try_conn_requests_hist_from_rollup(
-                    st_iso, et_iso, has_filters=False, actual_cols=["conn_requests"]
+            runner3 = QueryRunner(con, src3)
+            st_iso3 = closed[0].isoformat().replace("+00:00", "Z")
+            et_iso3 = (active_dt + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
+            with patch("backend.core.duckdb._cache_dir", return_value=str(topup_cache)):
+                hist3 = runner3.try_conn_requests_hist_from_rollup(
+                    st_iso3, et_iso3, has_filters=False, actual_cols=["conn_requests"]
                 )
-
-        assert hist is not None
-        assert {r["value"]: r["count"] for r in hist["top"]} == {"1": 5, "2–5": 2, "6–20": 2}
-        assert hist["total"] == 9
+        assert (
+            hist3 is not None
+            and {r["value"]: r["count"] for r in hist3["top"]} == {"1": 5, "2–5": 2, "6–20": 2}
+            and hist3["total"] == 9
+        )
 
 
 # ── Merged from tests/core/test_rollups_security_proxies.py ──
@@ -1626,23 +1475,6 @@ class TestRollupsWellknownBots:
 
 
 # ── Merged from tests/utils/test_ngwaf.py ────────────────────────────────────
-
-import urllib.parse
-
-import vcr
-from backend.utils.ngwaf import (
-    _extract_bot_record,
-    _get_relative_time_range,
-    cleanup_old_bots,
-    fetch_verified_bots_paged,
-    get_cache_stats,
-    get_last_timestamp,
-    oldest_unenriched_timestamp,
-    upsert_bots,
-)
-
-from backend.core.metadata import pg_connection
-from backend.core.metadata.cron_log import CronLeaseHeldError
 
 
 def _make_ngwaf_page(data: list, next_cursor: str = "") -> dict:

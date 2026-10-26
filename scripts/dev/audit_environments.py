@@ -1,25 +1,5 @@
 #!/usr/bin/env python3
-"""Multi-Environment Infrastructure & Data Pipeline Audit Tool.
-
-Audits all Fastly Log Analytics deployment environments (Local Standard,
-GCE Standard, Elevation High-Scale):
-  - Host & container vitals: CPU load, vCPUs, memory, data mount and root disk.
-  - Scheduler & cron health: Scheduler tick freshness, in-flight runs, backlog detection,
-    recent cron run errors/warnings.
-  - Celery & Valkey pipeline (High-Scale): Queue depth, worker count, broker reachability.
-  - Log ingest currency: Request and RUM latest log timestamps vs wall clock.
-  - FOS queue verification: Verifies whether bucket is actively streaming, genuinely idle
-    (0 files waiting in FOS), or stalled/backlogged.
-  - Parquet compactions & rollups: Partition sprawl (partitions > 3 or 10 files), daily/weekly
-    tier files, DuckLake/Iceberg durable bytes and files.
-  - DuckDB pool health: Active/idle connections, p95/p99 wait latencies, saturation rejects.
-  - ClickHouse state (High-Scale): Health, published/pending manifests.
-
-Modes:
-  - Point-in-time snapshot (--once, default)
-  - Live continuous monitor (--watch, with --duration and --interval)
-  - Machine-readable JSON output (--json)
-"""
+"""Multi-Environment Infrastructure & Data Pipeline Audit Tool."""
 
 from __future__ import annotations
 
@@ -37,7 +17,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-# Direct path invocation and python -m both resolve the shared project helper.
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.lib.admin_tls import admin_origin, is_admin_url, validate_admin_tls_config  # noqa: E402
@@ -51,20 +30,10 @@ from scripts.lib.environments import (  # noqa: E402
 from scripts.lib.environments import service_id as _registry_service_id  # noqa: E402
 from scripts.lib.readiness import ProbeResult, probe  # noqa: E402
 
-# ANSI Color codes for clean terminal output
-RESET = "\033[0m"
-BOLD = "\033[1m"
-DIM = "\033[2m"
-RED = "\033[31m"
-GREEN = "\033[32m"
-YELLOW = "\033[33m"
-BLUE = "\033[34m"
-MAGENTA = "\033[35m"
-CYAN = "\033[36m"
-WHITE = "\033[37m"
-BG_RED = "\033[41m"
-BG_GREEN = "\033[42m"
-BG_YELLOW = "\033[43m"
+# fmt: off
+RESET, BOLD, DIM = "\033[0m", "\033[1m", "\033[2m"
+RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE = "\033[31m", "\033[32m", "\033[33m", "\033[34m", "\033[35m", "\033[36m", "\033[37m"
+BG_RED, BG_GREEN, BG_YELLOW = "\033[41m", "\033[42m", "\033[43m"
 
 
 @dataclass
@@ -78,21 +47,15 @@ class EnvironmentConfig:
 
 
 def load_dotenv_manually() -> None:
-    """Load the repo-root ``.env`` via the shared registry loader (python-dotenv)."""
     load_dotenv()
 
 
 load_dotenv_manually()
 
-
 ENVIRONMENTS: dict[str, EnvironmentConfig] = {
     name: EnvironmentConfig(
-        name=spec.name,
-        architecture=spec.architecture,
-        backend_url=spec.backend_url,
-        frontend_url=spec.frontend_url,
-        service_id=_registry_service_id(name),
-        is_high_scale=spec.is_high_scale,
+        name=spec.name, architecture=spec.architecture, backend_url=spec.backend_url,
+        frontend_url=spec.frontend_url, service_id=_registry_service_id(name), is_high_scale=spec.is_high_scale,
     )
     for name, spec in ENVIRONMENT_SPECS.items()
 }
@@ -106,8 +69,7 @@ def refresh_environment_origins() -> None:
             env_config.backend_url = configured_origin
             env_config.frontend_url = f"{configured_origin}/dashboard"
         else:
-            env_config.backend_url = spec.backend_url
-            env_config.frontend_url = spec.frontend_url
+            env_config.backend_url, env_config.frontend_url = spec.backend_url, spec.frontend_url
 
 
 refresh_environment_origins()
@@ -148,7 +110,7 @@ class AuditResult:
     rum_latest_log_age_s: float | None = None
     rum_total_rows: int | None = None
     rum_last_sync_at: str | None = None
-    ingest_state: str = "UNKNOWN"  # STREAMING, IDLE, STALLED, NO_LOGS
+    ingest_state: str = "UNKNOWN"
     fos_reachable: bool = False
     fos_error: str | None = None
     compaction_total_files: int = 0
@@ -169,39 +131,21 @@ class AuditResult:
 
 
 def _decode(result: ProbeResult) -> tuple[int, Any]:
-    """Probe result -> (status, parsed JSON); transport/parse failures -> (0, {"error": ...})."""
     if result.status is None:
         return 0, {"error": result.error}
     try:
         return result.status, json.loads(result.body.decode("utf-8"))
     except Exception as e:
-        if result.http_error:
-            return result.status, {"error": result.error}
-        return 0, {"error": str(e)}
+        return (result.status, {"error": result.error}) if result.http_error else (0, {"error": str(e)})
 
 
 def http_get_json(url: str, headers: dict[str, str] | None = None, timeout: float = 5.0) -> tuple[int, Any]:
-    req_headers = {
-        "User-Agent": "FLA-AuditTool/1.0",
-        "Accept": "application/json",
-        "Connection": "close",
-    }
-    if headers:
-        req_headers.update(headers)
+    req_headers = {"User-Agent": "FLA-AuditTool/1.0", "Accept": "application/json", "Connection": "close", **(headers or {})}
     return _decode(probe(url, timeout=timeout, headers=req_headers))
 
 
-def http_post_json(
-    url: str, payload: dict | list | None = None, headers: dict[str, str] | None = None, timeout: float = 5.0
-) -> tuple[int, Any]:
-    req_headers = {
-        "User-Agent": "FLA-AuditTool/1.0",
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Connection": "close",
-    }
-    if headers:
-        req_headers.update(headers)
+def http_post_json(url: str, payload: dict | list | None = None, headers: dict[str, str] | None = None, timeout: float = 5.0) -> tuple[int, Any]:
+    req_headers = {"User-Agent": "FLA-AuditTool/1.0", "Accept": "application/json", "Content-Type": "application/json", "Connection": "close", **(headers or {})}
     body = json.dumps(payload if payload is not None else {}).encode("utf-8")
     result = probe(url, timeout=timeout, headers=req_headers, data=body, method="POST")
     if isinstance(result.exc, (ConnectionResetError, urllib.error.URLError)) and not result.http_error:
@@ -212,9 +156,7 @@ def http_post_json(
 
 def parse_timestamp_age(ts_str: str | None) -> float | None:
     dt = parse_iso_utc(ts_str)
-    if dt is None:
-        return None
-    return max(0.0, (datetime.now(UTC) - dt).total_seconds())
+    return max(0.0, (datetime.now(UTC) - dt).total_seconds()) if dt is not None else None
 
 
 def format_duration(seconds: float | None) -> str:
@@ -224,9 +166,7 @@ def format_duration(seconds: float | None) -> str:
         return f"{seconds:.0f}s"
     if seconds < 3600:
         return f"{seconds / 60:.1f}m"
-    if seconds < 86400:
-        return f"{seconds / 3600:.1f}h"
-    return f"{seconds / 86400:.1f}d"
+    return f"{seconds / 3600:.1f}h" if seconds < 86400 else f"{seconds / 86400:.1f}d"
 
 
 def format_bytes(b: int | float | None) -> str:
@@ -255,18 +195,8 @@ def _private_network_mtls_hint(url: str) -> str:
 
 
 def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
-    res = AuditResult(
-        target=env.name,
-        architecture=env.architecture,
-        service_id=env.service_id,
-        backend_url=env.backend_url,
-    )
-
+    res = AuditResult(target=env.name, architecture=env.architecture, service_id=env.service_id, backend_url=env.backend_url)
     req_headers: dict[str, str] = {}
-
-    # 1. Ping /api/health first — every other probe depends on the backend
-    # being alive, and there is no reason to fire five more requests at one
-    # that's already down.
     t0 = time.perf_counter()
     status, health_data = http_get_json(f"{env.backend_url}/api/health?deep=1", headers=req_headers, timeout=timeout)
     res.latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -280,54 +210,17 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
 
     res.reachable = True
     res.version = health_data.get("version")
-
-    # Discover active service_id if not explicitly configured
-    active_sid = env.service_id
-    if not active_sid and health_data.get("services"):
-        active_sid = health_data["services"][0].get("service_id", "")
+    active_sid = env.service_id or ((health_data.get("services") or [{}])[0].get("service_id", "") if health_data.get("services") else "")
     res.service_id = active_sid
 
-    # 2-6. The remaining probes don't depend on one another — fire them
-    # concurrently instead of paying for 4-5 sequential round trips per
-    # environment. Keeps a single audit_target() call fast enough that
-    # --watch's --interval isn't routinely blown by its own probing.
     probes: dict[str, tuple[Any, tuple, dict]] = {
-        "bootstrap": (
-            http_get_json,
-            (f"{env.backend_url}/api/bootstrap",),
-            {"headers": req_headers, "timeout": timeout},
-        ),
-        "health_snapshot": (
-            http_get_json,
-            (f"{env.backend_url}/api/admin/health-snapshot?probe_fos=1",),
-            {"headers": req_headers, "timeout": timeout},
-        ),
-        "cron_runs": (
-            http_get_json,
-            (f"{env.backend_url}/api/cron-runs?service_id={active_sid}&task=log_discovery&per_page=3",),
-            {"headers": req_headers, "timeout": timeout},
-        ),
-        # NOTE: the scan window MUST be passed as the `range_token` body
-        # field, not a `range=` query param — /api/dashboard/bundle has no
-        # such query param, and an empty body (both start_time/end_time
-        # None) hits build_where_clause's no-bounds branch, which adds NO
-        # time predicate at all: an unbounded full-table scan with zero
-        # partition pruning, on every audit tick. `range_token: "24h"` is
-        # the real wire contract (see backend/utils/time_window.py) and is
-        # what actually bounds this probe to the 24h window it claims to
-        # exercise.
-        "dashboard_bundle": (
-            http_post_json,
-            (f"{env.backend_url}/api/dashboard/bundle?service_id={active_sid}",),
-            {"payload": {"range_token": "24h"}, "headers": req_headers, "timeout": max(timeout, 45.0)},
-        ),
+        "bootstrap": (http_get_json, (f"{env.backend_url}/api/bootstrap",), {"headers": req_headers, "timeout": timeout}),
+        "health_snapshot": (http_get_json, (f"{env.backend_url}/api/admin/health-snapshot?probe_fos=1",), {"headers": req_headers, "timeout": timeout}),
+        "cron_runs": (http_get_json, (f"{env.backend_url}/api/cron-runs?service_id={active_sid}&task=log_discovery&per_page=3",), {"headers": req_headers, "timeout": timeout}),
+        "dashboard_bundle": (http_post_json, (f"{env.backend_url}/api/dashboard/bundle?service_id={active_sid}",), {"payload": {"range_token": "24h"}, "headers": req_headers, "timeout": max(timeout, 45.0)}),
     }
     if env.is_high_scale:
-        probes["clickhouse_status"] = (
-            http_get_json,
-            (f"{env.backend_url}/api/admin/clickhouse/status?service_id={active_sid}",),
-            {"headers": req_headers, "timeout": timeout},
-        )
+        probes["clickhouse_status"] = (http_get_json, (f"{env.backend_url}/api/admin/clickhouse/status?service_id={active_sid}",), {"headers": req_headers, "timeout": timeout})
 
     with ThreadPoolExecutor(max_workers=len(probes)) as pool:
         futures = {name: pool.submit(fn, *args, **kwargs) for name, (fn, args, kwargs) in probes.items()}
@@ -339,65 +232,46 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
     d_status, d_data = outcomes["dashboard_bundle"]
     ch_status, ch_data = outcomes.get("clickhouse_status", (0, {}))
 
-    # Bootstrap parsing (unauthenticated baseline)
     if b_status == 200 and isinstance(b_data, dict):
         status_sec = b_data.get("sync_status") or b_data.get("status") or {}
         req_sec = status_sec.get("request") or (b_data.get("header_badge") or {}).get("request") or {}
         rum_sec = status_sec.get("rum") or (b_data.get("header_badge") or {}).get("rum") or {}
-
         res.request_latest_log_at = req_sec.get("latest_log_at")
         res.request_latest_log_age_s = parse_timestamp_age(res.request_latest_log_at)
         res.request_total_rows = req_sec.get("total_rows") or status_sec.get("local_rows")
         res.request_last_sync_at = req_sec.get("last_sync_at")
-
         res.rum_latest_log_at = rum_sec.get("latest_log_at")
         res.rum_latest_log_age_s = parse_timestamp_age(res.rum_latest_log_at)
         res.rum_total_rows = rum_sec.get("total_rows")
         res.rum_last_sync_at = rum_sec.get("last_sync_at")
-
         res.duckdb_size_bytes = status_sec.get("duckdb_size_bytes") or 0
         res.iceberg_bytes = status_sec.get("iceberg_bytes") or 0
         res.iceberg_files = status_sec.get("iceberg_files") or 0
 
     if hs_status == 200 and isinstance(hs_data, dict):
-        # CPU
         load = hs_data.get("load") or {}
-        res.cpu_load_1m = float(load.get("avg_1m", 0.0))
-        res.cpu_load_5m = float(load.get("avg_5m", 0.0))
-        res.cpu_load_15m = float(load.get("avg_15m", 0.0))
+        res.cpu_load_1m, res.cpu_load_5m, res.cpu_load_15m = float(load.get("avg_1m", 0.0)), float(load.get("avg_5m", 0.0)), float(load.get("avg_15m", 0.0))
         res.vcpus = int(hs_data.get("vcpus", 1))
-
         if res.cpu_load_1m > (res.vcpus * 2.0):
             res.warnings.append(f"High CPU load: 1m avg {res.cpu_load_1m:.1f} exceeds 2x vCPUs ({res.vcpus})")
 
-        # Memory
         mem = hs_data.get("memory") or {}
-        res.mem_used_pct = float(mem.get("used_pct", 0.0))
-        res.mem_available_mb = float(mem.get("available_mb", 0.0))
-        res.mem_total_mb = float(mem.get("total_mb", 0.0))
+        res.mem_used_pct, res.mem_available_mb, res.mem_total_mb = float(mem.get("used_pct", 0.0)), float(mem.get("available_mb", 0.0)), float(mem.get("total_mb", 0.0))
         if res.mem_used_pct > 92.0:
             res.errors.append(f"Critical memory usage: {res.mem_used_pct:.1f}%")
         elif res.mem_used_pct > 85.0:
             res.warnings.append(f"Elevated memory usage: {res.mem_used_pct:.1f}%")
 
-        # Disks
         dm = hs_data.get("data_mount") or {}
-        res.data_mount_used_pct = float(dm.get("used_pct", 0.0))
-        res.data_mount_free_gb = float(dm.get("free_gb", 0.0))
+        res.data_mount_used_pct, res.data_mount_free_gb = float(dm.get("used_pct", 0.0)), float(dm.get("free_gb", 0.0))
         if res.data_mount_used_pct > 95.0:
-            res.errors.append(
-                f"Data mount nearly full: {res.data_mount_used_pct:.1f}% used ({res.data_mount_free_gb:.1f} GB free)"
-            )
+            res.errors.append(f"Data mount nearly full: {res.data_mount_used_pct:.1f}% used ({res.data_mount_free_gb:.1f} GB free)")
         elif res.data_mount_used_pct > 85.0:
-            res.warnings.append(
-                f"Data mount high: {res.data_mount_used_pct:.1f}% used ({res.data_mount_free_gb:.1f} GB free)"
-            )
+            res.warnings.append(f"Data mount high: {res.data_mount_used_pct:.1f}% used ({res.data_mount_free_gb:.1f} GB free)")
 
         rd = hs_data.get("root_disk") or {}
-        res.root_disk_used_pct = float(rd.get("used_pct", 0.0))
-        res.root_disk_free_gb = float(rd.get("free_gb", 0.0))
+        res.root_disk_used_pct, res.root_disk_free_gb = float(rd.get("used_pct", 0.0)), float(rd.get("free_gb", 0.0))
 
-        # Scheduler
         res.scheduler_tick_age_s = hs_data.get("scheduler_last_tick_age_s")
         if res.scheduler_tick_age_s is not None:
             if res.scheduler_tick_age_s > 180.0:
@@ -407,22 +281,18 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
 
         res.in_flight_runs = hs_data.get("in_flight_runs") or []
         for ifr in res.in_flight_runs:
-            dur = ifr.get("duration_s", 0.0)
-            task = ifr.get("task", "unknown")
-            if dur > 300:
-                res.warnings.append(f"Long running job: {task} has been running for {dur:.0f}s")
+            if (dur := ifr.get("duration_s", 0.0)) > 300:
+                res.warnings.append(f"Long running job: {ifr.get('task', 'unknown')} has been running for {dur:.0f}s")
 
         res.recent_failures = hs_data.get("recent_cron_failures") or []
         for fail in res.recent_failures:
             started = fail.get("started_at")
             age_s = parse_timestamp_age(started)
-            age_str = f" ({format_duration(age_s)} ago)" if started else ""
-            err_msg = fail.get("error_message") or fail.get("summary") or fail.get("status") or "error"
-            # Only alert on failures within the last 24h
             if age_s is None or age_s <= 86400:
+                age_str = f" ({format_duration(age_s)} ago)" if started else ""
+                err_msg = fail.get("error_message") or fail.get("summary") or fail.get("status") or "error"
                 res.warnings.append(f"Cron failure in {fail.get('task')}{age_str}: {err_msg}")
 
-        # Celery / Valkey
         celery = hs_data.get("celery")
         if celery and isinstance(celery, dict):
             res.celery_reachable = celery.get("broker_reachable")
@@ -435,7 +305,6 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
             elif (res.celery_queue_depth or 0) > 100:
                 res.warnings.append(f"High Celery queue backlog: {res.celery_queue_depth} tasks queued")
 
-        # FOS probe
         fos = hs_data.get("fos")
         if fos and isinstance(fos, dict):
             svc_fos = fos.get(active_sid) or {}
@@ -444,63 +313,45 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
             if not res.fos_reachable and res.fos_error:
                 res.errors.append(f"FOS probe failed: {res.fos_error}")
 
-        # Compaction stats
-        comp = hs_data.get("compaction") or {}
-        svc_comp = comp.get(active_sid) or {}
+        svc_comp = (hs_data.get("compaction") or {}).get(active_sid) or {}
         res.compaction_total_files = svc_comp.get("total_files") or 0
         res.compaction_daily_files = svc_comp.get("daily_files") or 0
         res.compaction_weekly_files = svc_comp.get("weekly_files") or 0
         res.compaction_partitions_above_3 = svc_comp.get("partitions_above_3") or 0
         res.compaction_partitions_above_10 = svc_comp.get("partitions_above_10") or 0
         if res.compaction_partitions_above_10 > 0:
-            res.warnings.append(
-                f"Uncompacted partitions: {res.compaction_partitions_above_10} partitions have >10 files"
-            )
+            res.warnings.append(f"Uncompacted partitions: {res.compaction_partitions_above_10} partitions have >10 files")
 
-        # Pool stats
-        pools = hs_data.get("pool_wait") or []
-        for p in pools:
+        for p in hs_data.get("pool_wait") or []:
             if p.get("service") == active_sid:
                 res.pool_saturated_rejects += p.get("saturated_rejects_total", 0)
-                wait_stats = p.get("wait") or {}
-                res.pool_wait_p95_ms = max(res.pool_wait_p95_ms, float(wait_stats.get("p95_ms", 0.0)))
+                res.pool_wait_p95_ms = max(res.pool_wait_p95_ms, float((p.get("wait") or {}).get("p95_ms", 0.0)))
         if res.pool_saturated_rejects > 0:
             res.warnings.append(f"DuckDB pool saturated: {res.pool_saturated_rejects} rejected queries (lifetime)")
-
     elif hs_status == 401:
         res.errors.append("Authentication required for /api/admin/health-snapshot")
 
-    # Ingest state determination (uses the bootstrap + cron-runs results fetched above)
-    last_disc_summary = ""
-    if cron_status == 200 and isinstance(cron_data, dict):
-        entries = cron_data.get("entries") or []
-        if entries:
-            last_disc_summary = entries[0].get("summary") or ""
-
+    entries = (cron_data.get("entries") or []) if cron_status == 200 and isinstance(cron_data, dict) else []
+    last_disc_summary = (entries[0].get("summary") or "") if entries else ""
     if res.request_latest_log_age_s is not None:
-        if res.request_latest_log_age_s <= 900:  # <= 15m
+        if res.request_latest_log_age_s <= 900:
             res.ingest_state = "STREAMING"
+        elif "No new log files" in last_disc_summary or "Discovered 0" in last_disc_summary:
+            res.ingest_state = "IDLE (0 in FOS)"
+        elif "Ingested" in last_disc_summary or "Discovered" in last_disc_summary:
+            res.ingest_state = "STREAMING (Catching up)"
         else:
-            if "No new log files" in last_disc_summary or "Discovered 0" in last_disc_summary:
-                res.ingest_state = "IDLE (0 in FOS)"
-            elif "Ingested" in last_disc_summary or "Discovered" in last_disc_summary:
-                res.ingest_state = "STREAMING (Catching up)"
-            else:
-                res.ingest_state = "IDLE (No recent traffic)"
+            res.ingest_state = "IDLE (No recent traffic)"
     else:
         res.ingest_state = "NO LOGS"
 
-    # ClickHouse status (if high scale; fetched above)
-    if env.is_high_scale:
-        if ch_status == 200 and isinstance(ch_data, dict):
-            res.clickhouse_health = ch_data.get("health")
-            pub_counts = ch_data.get("publication_counts") or {}
-            res.clickhouse_pending = pub_counts.get("pending", 0)
-            res.clickhouse_published = pub_counts.get("published", 0)
-            if res.clickhouse_health not in ("ok", "disabled", None):
-                res.warnings.append(f"ClickHouse state: {res.clickhouse_health}")
+    if env.is_high_scale and ch_status == 200 and isinstance(ch_data, dict):
+        res.clickhouse_health = ch_data.get("health")
+        pub_counts = ch_data.get("publication_counts") or {}
+        res.clickhouse_pending, res.clickhouse_published = pub_counts.get("pending", 0), pub_counts.get("published", 0)
+        if res.clickhouse_health not in ("ok", "disabled", None):
+            res.warnings.append(f"ClickHouse state: {res.clickhouse_health}")
 
-    # Active Dashboard Analytical Query Probe (fetched above, bounded to a 24h range_token)
     if d_status != 200:
         res.errors.append(f"Dashboard query failed: HTTP {d_status} (data: {d_data})")
     elif isinstance(d_data, dict):
@@ -517,60 +368,40 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
 def print_audit_report(results: list[AuditResult], clear_screen: bool = False) -> None:
     if clear_screen and sys.stdout.isatty():
         sys.stdout.write("\033[H\033[J")
-
     now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    print(
-        f"\n{BOLD}{CYAN}╔═══════════════════════════════════════════════════════════════════════════════════════════╗{RESET}"
-    )
-    print(
-        f"{BOLD}{CYAN}║                     FASTLY LOG ANALYTICS — MULTI-ENVIRONMENT AUDIT                       ║{RESET}"
-    )
+    print(f"\n{BOLD}{CYAN}╔═══════════════════════════════════════════════════════════════════════════════════════════╗{RESET}")
+    print(f"{BOLD}{CYAN}║                     FASTLY LOG ANALYTICS — MULTI-ENVIRONMENT AUDIT                       ║{RESET}")
     print(f"{BOLD}{CYAN}║                     Timestamp: {now_str:<50} ║{RESET}")
-    print(
-        f"{BOLD}{CYAN}╚═══════════════════════════════════════════════════════════════════════════════════════════╝{RESET}\n"
-    )
+    print(f"{BOLD}{CYAN}╚═══════════════════════════════════════════════════════════════════════════════════════════╝{RESET}\n")
 
     for r in results:
         status_tag = f"{BG_GREEN}{WHITE} REACHABLE {RESET}" if r.reachable else f"{BG_RED}{WHITE} UNREACHABLE {RESET}"
         print(f"{BOLD}{WHITE}● {r.target.upper()}{RESET} — {DIM}{r.architecture}{RESET} {status_tag}")
-        print(
-            f"  {DIM}URL:{RESET} {r.backend_url:<28} {DIM}Service ID:{RESET} {r.service_id} {DIM}Latency:{RESET} {r.latency_ms:.1f}ms"
-        )
-
+        print(f"  {DIM}URL:{RESET} {r.backend_url:<28} {DIM}Service ID:{RESET} {r.service_id} {DIM}Latency:{RESET} {r.latency_ms:.1f}ms")
         if not r.reachable:
             for err in r.errors:
                 print(f"  {RED}✖ {err}{RESET}")
             print()
             continue
 
-        # Resources Line
         cpu_color = RED if r.cpu_load_1m > (r.vcpus * 2) else (YELLOW if r.cpu_load_1m > r.vcpus else GREEN)
         mem_color = RED if r.mem_used_pct > 90 else (YELLOW if r.mem_used_pct > 80 else GREEN)
         disk_color = RED if r.data_mount_used_pct > 90 else (YELLOW if r.data_mount_used_pct > 80 else GREEN)
-
         print(
-            f"  {BOLD}Resources:{RESET} "
-            f"CPU: {cpu_color}{r.cpu_load_1m:.2f}{RESET}/{r.cpu_load_5m:.2f}/{r.cpu_load_15m:.2f} ({r.vcpus} vCPUs) │ "
+            f"  {BOLD}Resources:{RESET} CPU: {cpu_color}{r.cpu_load_1m:.2f}{RESET}/{r.cpu_load_5m:.2f}/{r.cpu_load_15m:.2f} ({r.vcpus} vCPUs) │ "
             f"RAM: {mem_color}{r.mem_used_pct:.1f}%{RESET} ({r.mem_available_mb / 1024:.1f}/{r.mem_total_mb / 1024:.1f} GB free) │ "
             f"Disk: {disk_color}{r.data_mount_used_pct:.1f}%{RESET} ({r.data_mount_free_gb:.1f} GB free)"
         )
 
-        # Ingest & Storage Line
         ingest_color = GREEN if "STREAMING" in r.ingest_state else (CYAN if "IDLE" in r.ingest_state else YELLOW)
-        req_age_str = format_duration(r.request_latest_log_age_s)
-        rum_age_str = format_duration(r.rum_latest_log_age_s)
-
         print(
-            f"  {BOLD}Ingest:{RESET}    "
-            f"State: {ingest_color}{r.ingest_state}{RESET} │ "
-            f"Request: {r.request_total_rows or 0:,} rows (latest {req_age_str} ago) │ "
-            f"RUM: {r.rum_total_rows or 0:,} rows (latest {rum_age_str} ago)"
+            f"  {BOLD}Ingest:{RESET}    State: {ingest_color}{r.ingest_state}{RESET} │ "
+            f"Request: {r.request_total_rows or 0:,} rows (latest {format_duration(r.request_latest_log_age_s)} ago) │ "
+            f"RUM: {r.rum_total_rows or 0:,} rows (latest {format_duration(r.rum_latest_log_age_s)} ago)"
         )
 
-        # Scheduler & Storage / Compaction Line
         sched_color = RED if (r.scheduler_tick_age_s or 0) > 45 else GREEN
         comp_color = YELLOW if (r.compaction_partitions_above_10 or 0) > 0 else GREEN
-
         sched_str = f"{r.scheduler_tick_age_s:.0f}s ago" if r.scheduler_tick_age_s is not None else "—"
         storage_parts = [f"Scheduler Tick: {sched_color}{sched_str}{RESET}"]
         if (r.duckdb_size_bytes or 0) > 0:
@@ -580,66 +411,43 @@ def print_audit_report(results: list[AuditResult], clear_screen: bool = False) -
         storage_parts.append(
             f"Compaction: {comp_color}{r.compaction_total_files or 0} files ({r.compaction_daily_files or 0} daily, {r.compaction_weekly_files or 0} weekly){RESET}"
         )
-
         storage_line = f"  {BOLD}Pipeline:{RESET}  {' │ '.join(storage_parts)}"
         if (r.compaction_partitions_above_10 or 0) > 0:
             storage_line += f" {YELLOW}[sprawl: {r.compaction_partitions_above_10} dirs >10 files]{RESET}"
         print(storage_line)
 
-        # High-Scale & Pool Line
         extra_parts: list[str] = []
         if r.celery_reachable is not None:
             c_color = GREEN if r.celery_reachable and (r.celery_workers or 0) > 0 else RED
-            extra_parts.append(
-                f"Celery: {c_color}{r.celery_workers} workers, queue depth {r.celery_queue_depth}{RESET}"
-            )
+            extra_parts.append(f"Celery: {c_color}{r.celery_workers} workers, queue depth {r.celery_queue_depth}{RESET}")
         if r.clickhouse_health:
             ch_color = GREEN if r.clickhouse_health == "ok" else YELLOW
-            extra_parts.append(
-                f"ClickHouse: {ch_color}{r.clickhouse_health}{RESET} ({r.clickhouse_published} published, {r.clickhouse_pending} pending)"
-            )
+            extra_parts.append(f"ClickHouse: {ch_color}{r.clickhouse_health}{RESET} ({r.clickhouse_published} published, {r.clickhouse_pending} pending)")
         if r.pool_wait_p95_ms > 0:
             extra_parts.append(f"DuckDB Pool p95: {r.pool_wait_p95_ms:.2f}ms")
-
         if extra_parts:
             print(f"  {BOLD}Scale/Pool:{RESET} {' │ '.join(extra_parts)}")
 
-        # Warnings / Errors
-        if r.warnings:
-            for w in r.warnings:
-                print(f"  {YELLOW}⚠ Warning: {w}{RESET}")
-        if r.errors:
-            for e in r.errors:
-                print(f"  {RED}✖ Error: {e}{RESET}")
-
+        for w in r.warnings:
+            print(f"  {YELLOW}⚠ Warning: {w}{RESET}")
+        for e in r.errors:
+            print(f"  {RED}✖ Error: {e}{RESET}")
         print()
 
-    # Global Summary
-    total_envs = len(results)
-    healthy_envs = sum(1 for r in results if r.reachable and not r.errors and not r.warnings)
-    warning_envs = sum(1 for r in results if r.reachable and r.warnings and not r.errors)
-    unhealthy_envs = sum(1 for r in results if not r.reachable or r.errors)
-
-    print(
-        f"{BOLD}SUMMARY:{RESET} {total_envs} Environments Audited │ {GREEN}{healthy_envs} Optimal{RESET} │ {YELLOW}{warning_envs} Warnings{RESET} │ {RED}{unhealthy_envs} Degraded{RESET}"
-    )
+    healthy = sum(1 for r in results if r.reachable and not r.errors and not r.warnings)
+    warned = sum(1 for r in results if r.reachable and r.warnings and not r.errors)
+    unhealthy = sum(1 for r in results if not r.reachable or r.errors)
+    print(f"{BOLD}SUMMARY:{RESET} {len(results)} Environments Audited │ {GREEN}{healthy} Optimal{RESET} │ {YELLOW}{warned} Warnings{RESET} │ {RED}{unhealthy} Degraded{RESET}")
 
 
-def run_audit(
-    target_names: list[str] | None = None,
-    timeout: float = 5.0,
-) -> list[AuditResult]:
-    # Resolve targets
+def run_audit(target_names: list[str] | None = None, timeout: float = 5.0) -> list[AuditResult]:
     envs_to_check: list[EnvironmentConfig] = []
     if target_names and "all" not in target_names:
         for name in target_names:
             if name in ENVIRONMENTS:
                 envs_to_check.append(ENVIRONMENTS[name])
             else:
-                print(
-                    f"{YELLOW}Warning: Unknown environment '{name}'. Available: {list(ENVIRONMENTS.keys())}{RESET}",
-                    file=sys.stderr,
-                )
+                print(f"{YELLOW}Warning: Unknown environment '{name}'. Available: {list(ENVIRONMENTS.keys())}{RESET}", file=sys.stderr)
     else:
         envs_to_check = list(ENVIRONMENTS.values())
 
@@ -654,16 +462,10 @@ def run_audit(
                 results.append(future.result())
             except Exception as e:
                 env = future_to_env[future]
-                res = AuditResult(
-                    target=env.name,
-                    architecture=env.architecture,
-                    service_id=env.service_id,
-                    backend_url=env.backend_url,
-                    errors=[f"Audit execution exception: {e}"],
-                )
-                results.append(res)
-
-    # Sort results in consistent order
+                results.append(AuditResult(
+                    target=env.name, architecture=env.architecture, service_id=env.service_id,
+                    backend_url=env.backend_url, errors=[f"Audit execution exception: {e}"],
+                ))
     env_order = list(ENVIRONMENTS.keys())
     results.sort(key=lambda r: env_order.index(r.target) if r.target in env_order else 999)
     return results
@@ -674,35 +476,11 @@ def main() -> int:
         description="Fastly Log Analytics Multi-Environment Diagnostic & Health Audit",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        "--env",
-        nargs="+",
-        default=["all"],
-        help=f"Environments to audit (default: all). Choices: {list(ENVIRONMENTS.keys())} or 'all'",
-    )
-    parser.add_argument(
-        "--watch",
-        action="store_true",
-        help="Run continuously in watch monitor mode",
-    )
-    parser.add_argument(
-        "--duration",
-        type=float,
-        default=0.0,
-        help="Duration in minutes to run in watch mode (default: 0 = indefinite until Ctrl+C)",
-    )
-    parser.add_argument(
-        "--interval",
-        type=float,
-        default=5.0,
-        help="Polling interval in seconds for watch mode (default: 5.0)",
-    )
-    add_common_args(
-        parser,
-        timeout_default=10.0,
-        timeout_label="HTTP request",
-        json_help="Output raw audit results as JSON",
-    )
+    parser.add_argument("--env", nargs="+", default=["all"], help=f"Environments to audit (default: all). Choices: {list(ENVIRONMENTS.keys())} or 'all'")
+    parser.add_argument("--watch", action="store_true", help="Run continuously in watch monitor mode")
+    parser.add_argument("--duration", type=float, default=0.0, help="Duration in minutes to run in watch mode (default: 0 = indefinite until Ctrl+C)")
+    parser.add_argument("--interval", type=float, default=5.0, help="Polling interval in seconds for watch mode (default: 5.0)")
+    add_common_args(parser, timeout_default=10.0, timeout_label="HTTP request", json_help="Output raw audit results as JSON")
 
     args = parser.parse_args()
     load_persisted_deploy_env()
@@ -715,10 +493,8 @@ def main() -> int:
             print(json.dumps([asdict(r) for r in results], indent=2))
         else:
             print_audit_report(results, clear_screen=False)
-        has_critical = any(not r.reachable or len(r.errors) > 0 for r in results)
-        return 1 if has_critical else 0
+        return 1 if any(not r.reachable or len(r.errors) > 0 for r in results) else 0
 
-    # Watch mode
     start_time = time.time()
     max_duration_s = args.duration * 60.0 if args.duration > 0 else float("inf")
     last_results: list[AuditResult] = []
@@ -728,28 +504,18 @@ def main() -> int:
             if elapsed >= max_duration_s:
                 print(f"\n{GREEN}Completed watch duration of {args.duration:.1f} minute(s). Exiting.{RESET}")
                 break
-
             last_results = run_audit(target_names=args.env, timeout=args.timeout)
             if args.json:
                 print(json.dumps([asdict(r) for r in last_results]))
             else:
                 print_audit_report(last_results, clear_screen=True)
-                if max_duration_s < float("inf"):
-                    remaining_s = max_duration_s - elapsed
-                    print(
-                        f"{DIM}Watching... Elapsed: {elapsed:.0f}s / {max_duration_s:.0f}s (Remaining: {remaining_s:.0f}s, Interval: {args.interval}s, Ctrl+C to stop){RESET}"
-                    )
-                else:
-                    print(
-                        f"{DIM}Watching... Elapsed: {elapsed:.0f}s (Interval: {args.interval}s, Ctrl+C to stop){RESET}"
-                    )
-
+                rem = f" / {max_duration_s:.0f}s (Remaining: {max_duration_s - elapsed:.0f}s, " if max_duration_s < float("inf") else " ("
+                print(f"{DIM}Watching... Elapsed: {elapsed:.0f}s{rem}Interval: {args.interval}s, Ctrl+C to stop){RESET}")
             time.sleep(args.interval)
     except KeyboardInterrupt:
         print(f"\n{YELLOW}Audit watch stopped by operator.{RESET}")
 
-    has_critical = any(not r.reachable or len(r.errors) > 0 for r in last_results)
-    return 1 if has_critical else 0
+    return 1 if any(not r.reachable or len(r.errors) > 0 for r in last_results) else 0
 
 
 if __name__ == "__main__":

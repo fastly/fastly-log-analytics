@@ -11,7 +11,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { useOpenGeneration, useSSE } from '@/hooks/useSSE'
-import { queryKeys } from '@/lib/query-keys'
+import { queryKeys } from "@/lib/api"
 import type { ServiceConfig } from '@/types/api'
 
 export const SYNC_INTERVAL_OPTIONS = [

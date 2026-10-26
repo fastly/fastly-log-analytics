@@ -43,12 +43,15 @@ from __future__ import annotations
 
 import sys
 
-from . import day_bundles, network, origin_dims, recompute, security_dims
+from . import day_bundles, origin_dims, recompute, security_dims
 
+network = origin_dims
 perf_latency = origin_dims
 hour_bundles = day_bundles
 partial_hour = day_bundles
 time_series = recompute
+rum = recompute
+spec = recompute
 ngwaf_bots = security_dims
 wellknown_bots = security_dims
 
@@ -122,34 +125,32 @@ from .day_bundles import (
     compact_verified_bots_ts_closed_days_to_daily,
     retire_compacted_hour_bundles,
 )
-from .network import (
+from .origin_dims import (
     backfill_network_geo_bundles,
     backfill_network_heatmap_bundles,
     backfill_network_quality_bundles,
     backfill_network_rtt_bundles,
     backfill_network_speed_bundles,
     backfill_network_summary_bundles,
+    backfill_origin_dims_bundles,
+    backfill_origin_latency_ts_bundles,
+    backfill_origin_summary_bundles,
+    backfill_perf_dims_bundles,
+    backfill_perf_latency_bundles,
     backfill_pop_health_bundles,
+    backfill_slow_urls_bundles,
     build_network_geo_bundles,
     build_network_heatmap_bundles,
     build_network_quality_bundles,
     build_network_rtt_bundles,
     build_network_speed_bundles,
     build_network_summary_bundles,
-    build_pop_health_bundles,
-)
-from .origin_dims import (
-    backfill_origin_dims_bundles,
-    backfill_origin_latency_ts_bundles,
-    backfill_origin_summary_bundles,
-    backfill_perf_dims_bundles,
-    backfill_perf_latency_bundles,
-    backfill_slow_urls_bundles,
     build_origin_dims_bundles,
     build_origin_latency_ts_bundles,
     build_origin_summary_bundles,
     build_perf_dims_bundles,
     build_perf_latency_bundles,
+    build_pop_health_bundles,
     build_slow_urls_bundles,
 )
 from .recompute import (
@@ -161,14 +162,15 @@ from .recompute import (
     _run_per_field_copy,
     backfill_missing_hour_bundles,
     backfill_missing_hour_ip_spread,
+    backfill_missing_rum_aggregates,
     backfill_overview_bundles,
     build_overview_bundles,
     build_session_bundles,
     build_time_series_bundles,
     cleanup_old_rollups,
+    recompute_rum_aggregates,
     recompute_touched_hours,
 )
-from .rum import backfill_missing_rum_aggregates, recompute_rum_aggregates
 from .security_dims import (
     backfill_ngwaf_bots_bundles,
     backfill_ngwaf_bots_ts_bundles,

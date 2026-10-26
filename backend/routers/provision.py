@@ -43,7 +43,7 @@ from backend.models.provision import (
     ProvisionValidateResponse,
     TerraformPreviewResponse,
 )
-from backend.provision.fos_setup import _get_fos_s3_client
+from backend.provision.orchestrator import _get_fos_s3_client
 from backend.utils.router_utils import make_error, raise_internal, require_json_content_type, require_service_id
 from backend.utils.sse import sse_response
 
@@ -632,7 +632,7 @@ def provision_reconcile(body: ProvisionReconcileRequest):
 
 
 def _render_terraform(body: ProvisionConfigRequest) -> dict[str, str]:
-    from backend.utils.terraform_gen import generate_terraform
+    from backend.provision.orchestrator import generate_terraform
 
     cfg = body.model_dump(exclude_none=True)
     access_key = cfg.get("fos_access_key") or "YOUR_FOS_ACCESS_KEY"

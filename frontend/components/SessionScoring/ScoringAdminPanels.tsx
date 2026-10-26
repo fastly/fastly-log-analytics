@@ -1,15 +1,13 @@
 'use client'
 
 import * as React from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { queryOptions, useMutation, useQuery, useQueryClient, type QueryClient, type QueryKey, type UseQueryOptions } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import { z } from 'zod'
-import { Activity, AlertTriangle, Brain, Check, CheckCircle2, Clock, Filter, Gauge, History, Info, KeyRound, Loader2, Lock, Pencil, RotateCcw, ScrollText, ServerCrash, Trash2, Users, XCircle } from 'lucide-react'
+import { Activity, AlertTriangle, Bookmark, Brain, Check, CheckCircle, CheckCircle2, Clock, Filter, Gauge, History, Info, KeyRound, LineChart, ListChecks, Loader2, Lock, Pencil, RotateCcw, ScrollText, ServerCrash, Shield, ShieldAlert, SlidersHorizontal, Trash2, Users, XCircle } from 'lucide-react'
 import type { ColumnDef } from '@tanstack/react-table'
-
 import { AnalyticsCard, CardErrorState } from '@/components/AnalyticsCard'
 import { DataTableReadonly, DateTimeCell } from '@/components/DataTable'
-import { AuditLogHelp, LabelsHelp, MatrixHistoryHelp, ScorerFailOpenHelp, ScoringHealthHelp, invalidateServiceScoringQueries, scoringConfigCompositeKey, useScoringLabels, useScoringQuery, type LabelRow, type LabelValue } from '@/components/SessionScoring/help-content'
 import { SessionEventsDialog } from './TopFlaggedTable'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -23,11 +21,262 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Skeleton, SkeletonGrid } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { useAutoFlash, useDeferredDeleteWithUndo, useOpenGeneration } from '@/hooks/useSSE'
-import { client, extractApiError, unwrapClient } from '@/lib/api'
-import { formatBytes, formatCount, formatDeterministicUTC, formatTimeAgo } from '@/lib/format'
-import { queryKeys } from '@/lib/query-keys'
-import { keyByOccurrence } from '@/lib/utils'
+import { client, extractApiError, unwrapClient, queryKeys } from "@/lib/api"
+import { formatBytes, formatCount, formatDeterministicUTC, formatTimeAgo, keyByOccurrence } from "@/lib/utils"
 import type { components } from '@/types/api.generated'
+
+export const scoringAnalyticsCompositeKey = (serviceId: string | null | undefined) => ['scoring-analytics-composite', serviceId] as const
+export const scoringConfigCompositeKey = (serviceId: string | null | undefined) => ['scoring-config-composite', serviceId] as const
+
+export const scoringAnalyticsCompositeOptions = (serviceId: string | null | undefined, sinceHours: number) =>
+  queryOptions({
+    queryKey: [...scoringAnalyticsCompositeKey(serviceId), sinceHours] as const,
+    queryFn: async ({ signal }) => unwrapClient(client.GET('/api/services/{service_id}/scoring/analytics', { params: { path: { service_id: serviceId ?? '' }, query: { since_hours: sinceHours } }, signal })),
+  })
+
+export const scoringConfigCompositeOptions = (serviceId: string | null | undefined) =>
+  queryOptions({
+    queryKey: scoringConfigCompositeKey(serviceId),
+    queryFn: async ({ signal }) => unwrapClient(client.GET('/api/services/{service_id}/scoring/config', { params: { path: { service_id: serviceId ?? '' } }, signal })),
+  })
+
+type LabelRowWire = components['schemas']['ScoringLabelRow']
+export type LabelValue = LabelRowWire['label']
+export type LabelRow = LabelRowWire
+
+interface ScoringLabelsResult {
+  labels: LabelRow[]; counts: Record<LabelValue, number>; labelBySid: Map<string, LabelValue>
+  idBySid: Map<string, string>; isLoading: boolean; isFetching: boolean; error: (Error & { status?: number }) | null
+}
+
+export function useScoringLabels(serviceId: string, opts: { enabled?: boolean } = {}): ScoringLabelsResult {
+  const { enabled = true } = opts
+  const q = useQuery({
+    queryKey: queryKeys.scoringLabels(serviceId),
+    enabled: enabled && !!serviceId,
+    queryFn: async () => unwrapClient(client.GET('/api/services/{service_id}/scoring/labels', { params: { path: { service_id: serviceId } } })),
+    staleTime: 5 * 60_000,
+  })
+
+  const { labelBySid, idBySid } = React.useMemo(() => {
+    const lab = new Map<string, LabelValue>()
+    const id = new Map<string, string>()
+    for (const l of q.data?.labels ?? []) { lab.set(l.sid, l.label); id.set(l.sid, l.id) }
+    return { labelBySid: lab, idBySid: id }
+  }, [q.data])
+
+  return {
+    labels: q.data?.labels ?? [], counts: q.data?.counts ?? { good: 0, bad: 0, neutral: 0 },
+    labelBySid, idBySid, isLoading: q.isLoading, isFetching: q.isFetching,
+    error: (q.error as (Error & { status?: number }) | null) ?? null,
+  }
+}
+
+export const SCORING_KEY_PREFIXES = [
+  'scoring-status', 'scoring-evaluation', 'scoring-score-dist', 'scoring-latency-timeseries',
+  'scoring-fail-open-breakdown', 'scoring-compliance', 'scoring-top-flagged', 'scoring-per-reason-auc',
+  'scoring-threshold-preview', 'scoring-threshold-committed', 'scoring-enforce-threshold',
+  'scoring-enforce-status-code', 'scoring-l2-enforce', 'scoring-exclude-regex',
+  'scoring-matrix-versions', 'scoring-audit', 'scoring-session-events', 'scoring-labels',
+] as const
+
+export function invalidateServiceScoringQueries(queryClient: QueryClient, serviceId: string): void {
+  if (!serviceId) return
+  queryClient.invalidateQueries({ queryKey: scoringAnalyticsCompositeKey(serviceId) })
+  queryClient.invalidateQueries({ queryKey: scoringConfigCompositeKey(serviceId) })
+  for (const prefix of SCORING_KEY_PREFIXES) queryClient.invalidateQueries({ queryKey: [prefix, serviceId] })
+}
+
+export function useScoringQuery<TData>(
+  queryKey: QueryKey,
+  fn: () => Promise<{ data?: TData; error?: unknown; response: Response }>,
+  options?: Omit<UseQueryOptions<TData, Error>, 'queryKey' | 'queryFn'>,
+) {
+  return useQuery<TData, Error>({ queryKey, queryFn: () => unwrapClient(fn()), staleTime: 60_000, ...options })
+}
+
+export type LatencyRow = components['schemas']['ScoringLatencyRow']
+export type LatencyResponse = components['schemas']['ScoringLatencyTimeseriesResponse']
+
+export const usToMs = (us: number | null | undefined) => (us == null ? null : us / 1000)
+
+export function deriveScorerSeries(data: LatencyResponse | undefined) {
+  const rows = data?.rows ?? []
+  return { rows, hours: rows.map((r) => r.hour), perMinute: data?.granularity === 'minute' }
+}
+
+export function scorerHourlyLayout(perMinute: boolean, yTitle: string, showlegend: boolean) {
+  return {
+    showlegend,
+    margin: { l: 50, r: 20, t: showlegend ? 35 : 10, b: 40 },
+    xaxis: { title: '', type: 'date', ...(perMinute ? { tickformat: '%H:%M' } : {}) },
+    yaxis: { title: yTitle, rangemode: 'tozero' },
+    legend: { orientation: 'h' as const, y: 1.05, x: 0.5, xanchor: 'center' as const, yanchor: 'bottom' as const, font: { size: 9.5 }, bgcolor: 'transparent' },
+  }
+}
+
+export function useScorerTimeseries(serviceId: string, sinceHours: number) {
+  return useScoringQuery(
+    ['scoring-latency-timeseries', serviceId, sinceHours],
+    () => client.GET('/api/services/{service_id}/scoring/latency-timeseries', { params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } } }),
+  )
+}
+
+function HelpList({ intro, items }: { intro: React.ReactNode; items: [React.ComponentType<{ className?: string }>, string, React.ReactNode][] }) {
+  return (
+    <div className="space-y-4 text-sm text-muted-foreground leading-relaxed">
+      <p>{intro}</p>
+      <ul className="space-y-3 list-none pl-0">
+        {items.map(([Icon, cls, body], idx) => (
+          <li key={`${cls}-${idx.toString()}`} className="flex gap-3">
+            <Icon className={`h-5 w-5 shrink-0 ${cls} mt-0.5`} />
+            <span>{body}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+export const StatusPanelHelp = () => (
+  <HelpList
+    intro={<>The Session Scorer uses a highly-optimized, multi-layer classification engine running at the <strong>Fastly Compute</strong> edge. Every client request is evaluated in real-time to assess risk.</>}
+    items={[
+      [Shield, 'text-primary', <><strong>Layer 1 (L1 - Deterministic Checks):</strong> Fast, rules-based verification checking session duration limits, query structures, and cryptographic signature validity of the session cookie.</>],
+      [Activity, 'text-emerald-500', <><strong>Layer 2 (L2 - Transition Analysis):</strong> Evaluates navigational behavior. It scores the unlikeliness of specific route-to-route transitions using a site-specific PageRank-trained matrix.</>],
+      [Info, 'text-blue-500', <><strong>Infrastructure:</strong> Toggling the scorer dynamically deploys Wasm binaries, registers 6 custom logging custom_fields, and updates Edge VCL snippets without downtime.</>],
+    ]}
+  />
+)
+
+export const ScoringHealthHelp = () => (
+  <HelpList
+    intro="Operational metrics monitoring the throughput, effectiveness, and reliability of the edge scoring system over the selected time window."
+    items={[
+      [Activity, 'text-primary', <><strong>Fire Rate:</strong> The percentage of total CDN request volume routed through and successfully classified by the scorer.</>],
+      [Gauge, 'text-blue-500', <><strong>Average & Percentiles:</strong> Average, median (p50), tail latency (p95), and maximum scores. Higher values denote greater anomalous/threat activity.</>],
+      [XCircle, 'text-destructive', <><strong>Scorer Errors:</strong> Failures like token authentication issues or timeouts. High numbers indicate configuration mismatch or network degradation (the system safely fails-open).</>],
+      [AlertTriangle, 'text-amber-500', <><strong>Matrix Staleness:</strong> Triggered when a high percentage of live traffic scores ≥ 50, indicating the matrix is treating legitimate, updated routes as anomalous. Click <strong>Retrain matrix</strong> to resolve.</>],
+    ]}
+  />
+)
+
+export const ThresholdSliderHelp = () => (
+  <HelpList
+    intro="Simulate and enforce the sensitivity threshold for edge blocking."
+    items={[
+      [CheckCircle, 'text-emerald-500', <><strong>Commit Threshold:</strong> Saves a local reference cutoff for your team to visualize. This does not block live traffic, but serves as a tuning baseline.</>],
+      [ShieldAlert, 'text-destructive', <><strong>Enforce (LIVE BLOCKING):</strong> Deploys the threshold directly to Fastly ConfigStore. Real-time requests scoring ≥ the threshold will be immediately blocked at the edge with the configured HTTP status code (default 429; override via the &quot;Enforce response code&quot; selector — 403 / 451 / 503 also supported).</>],
+      [SlidersHorizontal, 'text-primary', <><strong>Precision & Recall:</strong> Statistical performance measures. Precision shows what portion of flagged sessions are actually labeled bad. Recall shows what portion of all bad sessions were successfully caught.</>],
+    ]}
+  />
+)
+
+export const RocPrCurvesHelp = () => (
+  <HelpList
+    intro="Sanity checks displaying the classification power of the current scoring model against your analyst-assigned labels."
+    items={[
+      [LineChart, 'text-primary', <><strong>ROC Curve (AUC):</strong> Measures how well the matrix separates good and bad sessions. Curves hugging the top-left indicate great separation; the diagonal represents random guessing.</>],
+      [LineChart, 'text-emerald-500', <><strong>Precision-Recall Curve (AP):</strong> Evaluates quality when dealing with highly imbalanced classes (typical of bot traffic). High AP (area under PR curve) means the model maintains high accuracy even when catching most threats.</>],
+    ]}
+  />
+)
+
+export const PerReasonAucHelp = () => (
+  <HelpList
+    intro="Predictive performance of individual L1/L2 rule atoms (e.g., cookie compliance issues, impossible speed, anomalous navigation paths)."
+    items={[[ListChecks, 'text-primary', <><strong>Relevance:</strong> Helps operators see which rules are highly predictive (AUC &gt; 0.8) and which are mostly noisy (AUC ~ 0.5) for the current site&apos;s legitimate traffic patterns.</>]]}
+  />
+)
+
+export const TopFlaggedHelp = () => (
+  <HelpList
+    intro="Real-time feed of the highest-scoring client sessions currently visiting your service."
+    items={[
+      [Users, 'text-primary', <><strong>Session ID (SID):</strong> Click any SID to open the deep request timeline and observe absolute timing offsets, sequence headers, and referrers.</>],
+      [Bookmark, 'text-emerald-500', <><strong>Labeling:</strong> Use the Flag column to label a session as Good, Bad, or Neutral. This updates the dataset used to compute AUC metrics and retrain the behavioral model.</>],
+    ]}
+  />
+)
+
+export const ScoreDistHelp = () => (
+  <HelpList
+    intro="Hourly aggregation of requests categorized into four distinct risk buckets."
+    items={[
+      [Activity, 'text-primary', <><strong>Risk Buckets:</strong> 0-25 (Safe), 25-50 (Low Risk), 50-75 (Suspicious), and 75-100 (Anomalous).</>],
+      [AlertTriangle, 'text-amber-500', <><strong>Analysis:</strong> Sudden spikes in orange (50-75) or red (75-100) buckets represent volumetric scanning, scraper surges, or credential-stuffing campaigns.</>],
+    ]}
+  />
+)
+
+export const ScorerLatencyHelp = () => (
+  <HelpList
+    intro={<>Hourly latency of the Compute scorer sub-fetch. Read it alongside the Scorer&nbsp;errors chart — fail-opens are a latency symptom.</>}
+    items={[
+      [LineChart, 'text-primary', <><strong>Round-trip (solid):</strong> edge-observed p50/p95/p99 latency (<code>edge_score_rtt_us</code>) — network + Compute cold-start + Wasm exec. This is the number compared against the backend timeout (~100&nbsp;ms).</>],
+      [Activity, 'text-emerald-500', <><strong>Exec (dashed):</strong> the scorer&apos;s own Wasm time (<code>edge_score_exec_us</code>) is ~µs; if the round-trip lines sit far above the exec lines, the cost is network/cold-start, not compute.</>],
+    ]}
+  />
+)
+
+export const ScorerErrorsHelp = () => (
+  <HelpList
+    intro={<>Hourly count of scorer fail-opens. Read it alongside the Scorer&nbsp;latency chart — these rise as latency does.</>}
+    items={[
+      [AlertTriangle, 'text-destructive', <><strong>Fail-opens:</strong> rows that timed out or failed auth and were let through unscored (the system fails open rather than blocking on a scorer error).</>],
+      [LineChart, 'text-primary', <><strong>Correlate with latency:</strong> when scorer p95 climbs toward the ~100&nbsp;ms timeout budget, these bars rise with it — that&apos;s the signal to raise the timeout or investigate cold starts.</>],
+    ]}
+  />
+)
+
+export const ScorerFailOpenHelp = () => (
+  <HelpList
+    intro={<>When the scorer can&apos;t produce a verdict it fails <strong>open</strong> — the request flows through unscored rather than being blocked. This card groups those fail-opens by the exact reason so you can tell the failure modes apart (the Scorer&nbsp;errors chart shows <em>when</em>; this shows <em>what kind</em>).</>}
+    items={[
+      [AlertTriangle, 'text-destructive', <><strong>compute-unavailable-503:</strong> the scorer sub-fetch timed out or the service was unreachable — usually cold-start latency past the timeout budget. Raise the timeout or investigate cold starts.</>],
+      [XCircle, 'text-destructive', <><strong>compute-unavailable-500 / -401:</strong> a 500 is a Wasm trap inside the scorer; a 401 means the VCL-stamped <code>X-Edge-Scorer-Auth</code> secret drifted from the scoring_keys store — redeploy to re-sync it.</>],
+      [ShieldAlert, 'text-amber-500', <><strong>internal-error-keys:</strong> the scorer started but couldn&apos;t load the AES keys / KV store — a provisioning issue on the scoring service, not a transient timeout.</>],
+    ]}
+  />
+)
+
+export const ComplianceHelp = () => (
+  <HelpList
+    intro="Cookie state integrity evaluated on the initial Edge VCL pass before routing requests."
+    items={[
+      [AlertTriangle, 'text-amber-500', <><strong>missing:</strong> The request requested a dynamic path but did not include the session cookie. This is a primary indicator of automated web scrapers.</>],
+      [ShieldAlert, 'text-destructive', <><strong>tampered:</strong> The session cookie signature failed cryptographic validation, indicating active replay or session hijacking attempts.</>],
+      [Info, 'text-blue-500', <><strong>expired:</strong> The session exceeded its hard-cap lifetime and is slated to receive a clean renewal cookie.</>],
+    ]}
+  />
+)
+
+export const LabelsHelp = () => (
+  <HelpList
+    intro="Management interface for analyst-defined ground-truth session ratings."
+    items={[
+      [Bookmark, 'text-emerald-500', <><strong>Purpose:</strong> Labels are compiled into evaluation datasets for calculating ROC curves. They are not active blocking rules — edge blocking is driven exclusively by the score threshold.</>],
+      [Info, 'text-blue-500', <><strong>SID Lifespans:</strong> SIDs are encrypted state tokens that naturally rotate to secure client-side transactions. If a visitor clears cookies or is idle too long, they will get a fresh SID.</>],
+    ]}
+  />
+)
+
+export const MatrixHistoryHelp = () => (
+  <HelpList
+    intro="Deploy and manage transition matrices for behavioral modeling."
+    items={[
+      [History, 'text-primary', <><strong>History:</strong> Lists all transition matrices generated by retraining. You can roll back to any prior matrix version with one click.</>],
+      [Shield, 'text-blue-500', <><strong>Deployment:</strong> Restoring a matrix immediately switches L2 edge evaluation to that behavioral dataset.</>],
+    ]}
+  />
+)
+
+export const AuditLogHelp = () => (
+  <HelpList
+    intro="Immutable ledger tracking administrative session scoring operations on this service."
+    items={[[ScrollText, 'text-primary', <><strong>Tracking:</strong> Records operator-attributed events such as threshold overrides, matrix deployments, key rotations, and toggles.</>]]}
+  />
+)
 
 type RetrainResult = components['schemas']['ScoringRetrainResponse']
 type RotateKeyResponse = components['schemas']['ScoringRotateKeyResponse']
@@ -35,8 +284,6 @@ type FailOpenBucket = NonNullable<components['schemas']['ScoringReasonCount']>
 type RestoreResponse = components['schemas']['ScoringMatrixRestoreResponse']
 type MatrixVersion = components['schemas']['ScoringMatrixVersion']
 type AuditRow = components['schemas']['ScoringAuditRow']
-
-// ─── Shared Panel Helpers ─────────────────────────────────────────────────────
 
 function DeployHintBox({ title, hint, ariaLabel, copiedAriaLabel, buttonTitle, timeoutMs }: {
   title: string; hint: string; ariaLabel: string; copiedAriaLabel: string; buttonTitle?: string; timeoutMs?: number
@@ -68,13 +315,16 @@ function HealthMetric({ icon: Icon, label, value, sub, tone = 'default' }: {
   const valueClass = tone === 'warn' ? 'text-destructive' : tone === 'good' ? 'text-green-600' : 'text-foreground'
   return (
     <div className="flex flex-col gap-1 p-3 rounded-md border bg-card">
-      <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
-        <Icon className="h-3 w-3" />
-        {label}
-      </div>
+      <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-muted-foreground"><Icon className="h-3 w-3" />{label}</div>
       <div className={`text-lg font-mono tabular-nums ${valueClass}`}>{value}</div>
       {sub && <div className="text-[10px] text-muted-foreground whitespace-pre-line">{sub}</div>}
     </div>
+  )
+}
+
+function useScoringHealth(serviceId: string, sinceHours: number) {
+  return useScoringQuery(['scoring-health', serviceId, sinceHours], () =>
+    client.GET('/api/services/{service_id}/scoring/health', { params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } } }),
   )
 }
 
@@ -89,9 +339,7 @@ function labelBadge(label: LabelValue) {
 // Edit state lives here (not in LabelsTab) so typing in the popover does not
 // invalidate the table's column defs, which would remount the cell mid-edit.
 function LabelActions({ row: r, onSave, onDelete }: {
-  row: LabelRow
-  onSave: (row: LabelRow, label: LabelValue, notes: string) => Promise<boolean>
-  onDelete: (row: LabelRow) => void
+  row: LabelRow; onSave: (row: LabelRow, label: LabelValue, notes: string) => Promise<boolean>; onDelete: (row: LabelRow) => void
 }) {
   const [open, setOpen] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
@@ -109,9 +357,7 @@ function LabelActions({ row: r, onSave, onDelete }: {
     <div className="flex items-center justify-end gap-1">
       <Popover open={open} onOpenChange={(o) => { if (o) { setEditLabel(r.label); setEditNotes(r.notes ?? '') } setOpen(o) }}>
         <PopoverTrigger render={(props: React.ComponentPropsWithRef<'button'>) => (
-          <Button {...props} variant="ghost" size="icon" aria-label="Edit label" className="h-7 w-7" title="Edit label">
-            <Pencil className="h-3.5 w-3.5" />
-          </Button>
+          <Button {...props} variant="ghost" size="icon" aria-label="Edit label" className="h-7 w-7" title="Edit label"><Pencil className="h-3.5 w-3.5" /></Button>
         )} />
         <PopoverContent className="w-80" align="end">
           <div className="space-y-3">
@@ -150,8 +396,7 @@ export function LabelsTab({ serviceId }: { serviceId: string }) {
     setError('')
     try {
       await unwrapClient(client.PATCH('/api/services/{service_id}/scoring/labels/{label_id}', {
-        params: { path: { service_id: serviceId, label_id: row.id } },
-        body: { label, notes },
+        params: { path: { service_id: serviceId, label_id: row.id } }, body: { label, notes },
       }))
       qc.invalidateQueries({ queryKey: queryKeys.scoringLabels(serviceId) })
       return true
@@ -161,10 +406,7 @@ export function LabelsTab({ serviceId }: { serviceId: string }) {
     }
   }, [qc, serviceId])
 
-  const requestDelete = React.useCallback((row: LabelRow) => {
-    setError('')
-    setPendingDelete(row)
-  }, [])
+  const requestDelete = React.useCallback((row: LabelRow) => { setError(''); setPendingDelete(row) }, [])
 
   const remove = (row: LabelRow) => {
     setError('')
@@ -191,9 +433,7 @@ export function LabelsTab({ serviceId }: { serviceId: string }) {
       id: 'sid', header: 'SID', accessorFn: (r) => r.sid, size: 160, enableSorting: false,
       cell: ({ row }) => (
         <SessionEventsDialog
-          serviceId={serviceId}
-          sid={row.original.sid}
-          label={row.original.label}
+          serviceId={serviceId} sid={row.original.sid} label={row.original.label}
           trigger={<button type="button" className="text-xs font-mono hover:underline text-primary" title="View session events">{row.original.sid}</button>}
         />
       ),
@@ -205,11 +445,7 @@ export function LabelsTab({ serviceId }: { serviceId: string }) {
       { id: 'sample_ip' as const, header: 'IP', size: 140, mono: true, title: false },
     ].map(({ id, header, size, mono, title }): ColumnDef<LabelRow> => ({
       id, header, accessorFn: (r) => r[id] ?? '', size, enableSorting: false,
-      cell: ({ row }) => (
-        <span className={mono ? 'text-xs font-mono' : 'text-xs'} title={title ? (row.original[id] ?? undefined) : undefined}>
-          {row.original[id] || '—'}
-        </span>
-      ),
+      cell: ({ row }) => <span className={mono ? 'text-xs font-mono' : 'text-xs'} title={title ? (row.original[id] ?? undefined) : undefined}>{row.original[id] || '—'}</span>,
     }))),
     { id: 'updated_at', header: 'Updated', accessorFn: (r) => r.updated_at ?? '', size: 170, enableSorting: false, cell: ({ row }) => <span className="text-xs whitespace-nowrap"><DateTimeCell iso={row.original.updated_at} /></span> },
     { id: 'actions', header: 'Actions', size: 100, enableSorting: false, cell: ({ row }) => <LabelActions row={row.original} onSave={saveEdit} onDelete={requestDelete} /> },
@@ -219,12 +455,8 @@ export function LabelsTab({ serviceId }: { serviceId: string }) {
     <AnalyticsCard
       title="Session labels"
       description="Human-applied labels feeding the matrix-quality evaluator (ROC-AUC). Labels are NOT used for active blocking — that's VCL's job — they only tell us whether the trained matrix can separate good from bad."
-      helpContent={<LabelsHelp />}
-      helpTitle="About Session Labels"
-      isLoading={labels.isLoading}
-      isFetching={labels.isFetching}
-      error={labels.error}
-      contentClassName="p-0"
+      helpContent={<LabelsHelp />} helpTitle="About Session Labels"
+      isLoading={labels.isLoading} isFetching={labels.isFetching} error={labels.error} contentClassName="p-0"
       headerAction={
         <div className="flex items-center gap-2 text-xs">
           <span className="text-emerald-700">good: {counts.good}</span>
@@ -244,22 +476,15 @@ export function LabelsTab({ serviceId }: { serviceId: string }) {
       </p>
       {error && <p className="text-xs text-rose-600 px-4 py-2">{error}</p>}
       <DataTableReadonly
-        columns={columns}
-        data={rows}
-        hideToolbar
-        showPagination={rows.length > 50}
-        tableCaption="Session labels"
-        isLoading={labels.isLoading}
+        columns={columns} data={rows} hideToolbar showPagination={rows.length > 50}
+        tableCaption="Session labels" isLoading={labels.isLoading}
         emptyMessage="No labels yet. Flag a session from the dashboard or the Top Flagged table to add one."
       />
       <ConfirmDialog
-        open={pendingDelete !== null}
-        onOpenChange={(open) => { if (!open) setPendingDelete(null) }}
-        isDangerous
-        title="Delete label"
+        open={pendingDelete !== null} onOpenChange={(open) => { if (!open) setPendingDelete(null) }}
+        isDangerous title="Delete label"
         description={pendingDelete ? <>Delete label for sid <span className="font-mono">{pendingDelete.sid}</span>?</> : null}
-        confirmLabel="Delete"
-        onConfirm={() => { if (pendingDelete) remove(pendingDelete) }}
+        confirmLabel="Delete" onConfirm={() => { if (pendingDelete) remove(pendingDelete) }}
       />
     </AnalyticsCard>
   )
@@ -289,10 +514,7 @@ function RetrainDialogBody({ serviceId, onClose }: { serviceId: string; onClose:
       unwrapClient(client.POST('/api/services/{service_id}/scoring/retrain', {
         params: { path: { service_id: serviceId }, query: { since_days: sinceDays } },
       })),
-    onSuccess: (data) => {
-      setResult(data)
-      invalidateServiceScoringQueries(queryClient, serviceId)
-    },
+    onSuccess: (data) => { setResult(data); invalidateServiceScoringQueries(queryClient, serviceId) },
   })
 
   return (
@@ -312,14 +534,8 @@ function RetrainDialogBody({ serviceId, onClose }: { serviceId: string; onClose:
           <div className="space-y-1.5">
             <Label htmlFor="since-days" className="text-xs">Training window (days)</Label>
             <Input
-              id="since-days"
-              type="number"
-              min={1}
-              max={90}
-              value={sinceDays}
-              onChange={(e) => setSinceDays(Number(e.target.value) || 7)}
-              className="text-sm"
-              disabled={mutation.isPending}
+              id="since-days" type="number" min={1} max={90} value={sinceDays}
+              onChange={(e) => setSinceDays(Number(e.target.value) || 7)} className="text-sm" disabled={mutation.isPending}
             />
             <p className="text-[11px] text-muted-foreground">
               7 days is the default; bump to 30 once you have steady traffic. Larger
@@ -347,10 +563,7 @@ function RetrainDialogBody({ serviceId, onClose }: { serviceId: string; onClose:
           </div>
           {result.rejected && (
             <p className="text-xs text-muted-foreground">
-              Kept {formatCount(result.rejected.kept ?? 0)} sessions ·
-              {' '}dropped {formatCount(result.rejected.too_few_events ?? 0)} too-short,
-              {' '}{formatCount(result.rejected.too_fast ?? 0)} too-fast ·
-              {' '}{formatCount(result.rejected.routes_seen ?? 0)} routes seen
+              Kept {formatCount(result.rejected.kept ?? 0)} sessions · dropped {formatCount(result.rejected.too_few_events ?? 0)} too-short, {formatCount(result.rejected.too_fast ?? 0)} too-fast · {formatCount(result.rejected.routes_seen ?? 0)} routes seen
             </p>
           )}
           {result.auc_against_labels ? (
@@ -377,9 +590,7 @@ function RetrainDialogBody({ serviceId, onClose }: { serviceId: string; onClose:
           </div>
           {result.deploy_hint && (
             <details className="text-xs">
-              <summary className="cursor-pointer text-muted-foreground hover:text-foreground mb-2">
-                Deploy the new matrix to Fastly Compute
-              </summary>
+              <summary className="cursor-pointer text-muted-foreground hover:text-foreground mb-2">Deploy the new matrix to Fastly Compute</summary>
               <DeployHintBox title="deploy command" hint={result.deploy_hint} ariaLabel="Copy deploy hint" copiedAriaLabel="Copied deploy hint" />
             </details>
           )}
@@ -409,9 +620,7 @@ export function RotateKeyButton({ serviceId }: { serviceId: string }) {
 
   const mutation = useMutation({
     mutationFn: (): Promise<RotateKeyResponse> =>
-      unwrapClient(client.POST('/api/services/{service_id}/scoring/rotate-key', {
-        params: { path: { service_id: serviceId } },
-      })),
+      unwrapClient(client.POST('/api/services/{service_id}/scoring/rotate-key', { params: { path: { service_id: serviceId } } })),
     onSuccess: () => {
       flashStatus({ kind: 'success', message: 'Key rotated; previous slot updated' })
       setOpen(false)
@@ -427,11 +636,8 @@ export function RotateKeyButton({ serviceId }: { serviceId: string }) {
   return (
     <div className="inline-flex flex-col items-end gap-1">
       <Button
-        variant="destructive"
-        size="sm"
-        onClick={() => { clearStatus(); setOpen(true) }}
-        disabled={mutation.isPending}
-        title="Rotate the AES key used to encrypt scoring cookies"
+        variant="destructive" size="sm" onClick={() => { clearStatus(); setOpen(true) }}
+        disabled={mutation.isPending} title="Rotate the AES key used to encrypt scoring cookies"
       >
         {mutation.isPending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <KeyRound className="h-4 w-4 mr-1" />}
         Rotate AES key
@@ -444,11 +650,8 @@ export function RotateKeyButton({ serviceId }: { serviceId: string }) {
       )}
 
       <ConfirmDialog
-        open={open}
-        onOpenChange={(o) => { if (!mutation.isPending) setOpen(o) }}
-        isDangerous
-        isPending={mutation.isPending}
-        title="Rotate AES cookie key?"
+        open={open} onOpenChange={(o) => { if (!mutation.isPending) setOpen(o) }}
+        isDangerous isPending={mutation.isPending} title="Rotate AES cookie key?"
         description={
           <div className="space-y-2 text-sm">
             <p>
@@ -467,9 +670,7 @@ export function RotateKeyButton({ serviceId }: { serviceId: string }) {
             </ul>
           </div>
         }
-        confirmLabel="Rotate key"
-        cancelLabel="Cancel"
-        onConfirm={() => mutation.mutate()}
+        confirmLabel="Rotate key" cancelLabel="Cancel" onConfirm={() => mutation.mutate()}
       />
     </div>
   )
@@ -478,11 +679,7 @@ export function RotateKeyButton({ serviceId }: { serviceId: string }) {
 // ─── 3. ScoringHealthCard & ScorerFailOpenBreakdownCard ───────────────────────
 
 export function ScoringHealthCard({ serviceId, sinceHours = 24 }: { serviceId: string; sinceHours?: number }) {
-  const { data, isLoading, isError, error, refetch } = useScoringQuery(['scoring-health', serviceId, sinceHours], () =>
-    client.GET('/api/services/{service_id}/scoring/health', {
-      params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } },
-    }),
-  )
+  const { data, isLoading, isError, error, refetch } = useScoringHealth(serviceId, sinceHours)
 
   if (isError) {
     const raw = String(error?.message || 'Unknown error')
@@ -534,9 +731,7 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: { serviceId: s
         <HealthMetric icon={Users} label="Sessions" value={formatCount(data.distinct_sids ?? 0)} sub="distinct sids seen" />
         <HealthMetric icon={XCircle} label="Scorer Errors" value={formatCount(scorerErrors)} sub={failRate != null ? `${failRate.toFixed(2)}% of edge rows` : 'fail-open + auth fail rows'} tone={errorsTone} />
         <HealthMetric
-          icon={Clock}
-          label="Scorer Latency (p95 rtt)"
-          value={rttP95Us != null ? fmtMs(rttP95Us) : '—'}
+          icon={Clock} label="Scorer Latency (p95 rtt)" value={rttP95Us != null ? fmtMs(rttP95Us) : '—'}
           sub={rttP95Us != null ? `rtt: p50 ${fmtMs(lat?.rtt_p50_us)} · p99 ${fmtMs(lat?.rtt_p99_us)} · max ${fmtMs(lat?.rtt_max_us)}\nexec: p50 ${fmtUs(lat?.exec_p50_us)} · p95 ${fmtUs(lat?.exec_p95_us)}` : 'awaiting re-provision'}
           tone={latencyTone}
         />
@@ -578,12 +773,7 @@ export function ScoringHealthCard({ serviceId, sinceHours = 24 }: { serviceId: s
 }
 
 export function ScorerFailOpenBreakdownCard({ serviceId, sinceHours = 24 }: { serviceId: string; sinceHours?: number }) {
-  const { data, isLoading, isError, error, refetch } = useScoringQuery(['scoring-health', serviceId, sinceHours], () =>
-    client.GET('/api/services/{service_id}/scoring/health', {
-      params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } },
-    }),
-  )
-
+  const { data, isLoading, isError, error, refetch } = useScoringHealth(serviceId, sinceHours)
   const buckets = data?.fail_open_breakdown ?? []
   const total = buckets.reduce((acc, b) => acc + (b.count ?? 0), 0)
   const max = buckets.reduce((acc, b) => Math.max(acc, b.count ?? 0), 0)
@@ -592,8 +782,7 @@ export function ScorerFailOpenBreakdownCard({ serviceId, sinceHours = 24 }: { se
     <AnalyticsCard
       title={`Fail-open breakdown — last ${sinceHours}h`}
       description="Fail-opens grouped by reason/status — why the scorer let requests through unscored."
-      helpContent={<ScorerFailOpenHelp />}
-      helpTitle="About Fail-open Breakdown"
+      helpContent={<ScorerFailOpenHelp />} helpTitle="About Fail-open Breakdown"
     >
       {isError ? (
         <CardErrorState icon={<AlertTriangle className="h-4 w-4" />} title="Fail-open breakdown unavailable" message={(error as Error)?.message || 'Unknown error'} onRetry={() => refetch()} />
@@ -612,9 +801,7 @@ export function ScorerFailOpenBreakdownCard({ serviceId, sinceHours = 24 }: { se
             <span className="font-mono tabular-nums text-foreground">{buckets.length}</span>{' '}
             {buckets.length === 1 ? 'class' : 'classes'}.
           </div>
-          <div className="space-y-1.5">
-            {buckets.map((b) => <FailOpenRow key={b.reason ?? ''} bucket={b} max={max} />)}
-          </div>
+          <div className="space-y-1.5">{buckets.map((b) => <FailOpenRow key={b.reason ?? ''} bucket={b} max={max} />)}</div>
         </div>
       )}
     </AnalyticsCard>
@@ -712,26 +899,18 @@ export function ExcludeRegexCard({ serviceId }: { serviceId: string }) {
   })
 
   const runLintCheck = React.useCallback(async (regex: string) => {
-    if (regex.trim() === '') {
-      setLintResult(null)
-      return
-    }
+    if (regex.trim() === '') { setLintResult(null); return }
     if (lintResult && lintResult.regex === regex) return
     setLintPending(true)
     try {
       const { data: r, error: errBody, response } = await client.POST('/api/services/{service_id}/scoring/exclude-regex/validate', {
-        params: { path: { service_id: serviceId } },
-        body: { regex },
+        params: { path: { service_id: serviceId } }, body: { regex },
       })
       if (!response.ok || !r) {
         setLintResult({ regex, ok: false, error: errBody ? extractApiError(errBody) : `HTTP ${response.status}`, reason: 'http_error' })
         return
       }
-      if (r.ok) {
-        setLintResult({ regex, ok: true, lint_warnings: r.lint_warnings || [] })
-      } else {
-        setLintResult({ regex, ok: false, error: r.error ?? '', reason: r.reason ?? '' })
-      }
+      setLintResult(r.ok ? { regex, ok: true, lint_warnings: r.lint_warnings || [] } : { regex, ok: false, error: r.error ?? '', reason: r.reason ?? '' })
     } catch (e) {
       setLintResult({ regex, ok: false, error: e instanceof Error ? e.message : String(e), reason: 'network_error' })
     } finally {
@@ -747,14 +926,11 @@ export function ExcludeRegexCard({ serviceId }: { serviceId: string }) {
   if (isLoading || !data) {
     return (
       <AnalyticsCard
-        title="URL exclusion regex"
-        icon={<Filter className="h-4 w-4" />}
+        title="URL exclusion regex" icon={<Filter className="h-4 w-4" />}
         description={EXCLUDE_REGEX_DESCRIPTION}
         error={!isLoading ? (error as (Error & { status?: number }) | null) : undefined}
       >
-        {isLoading ? (
-          <Skeleton className="h-32 w-full" />
-        ) : (
+        {isLoading ? <Skeleton className="h-32 w-full" /> : (
           <Alert variant="destructive">
             <AlertTriangle className="h-4 w-4" />
             <AlertDescription>Failed to load current exclusion regex.</AlertDescription>
@@ -764,12 +940,12 @@ export function ExcludeRegexCard({ serviceId }: { serviceId: string }) {
     )
   }
 
+  const activeLint = !lintPending && lintResult && lintResult.regex === draft ? lintResult : null
+
   return (
     <AnalyticsCard
-      title="URL exclusion regex"
-      icon={<Filter className="h-4 w-4" />}
-      description={EXCLUDE_REGEX_DESCRIPTION}
-      error={error as (Error & { status?: number }) | null}
+      title="URL exclusion regex" icon={<Filter className="h-4 w-4" />}
+      description={EXCLUDE_REGEX_DESCRIPTION} error={error as (Error & { status?: number }) | null}
     >
       <div className="space-y-4">
         <div className="space-y-1.5">
@@ -778,13 +954,9 @@ export function ExcludeRegexCard({ serviceId }: { serviceId: string }) {
             <span className="text-muted-foreground">({data.is_default ? 'currently default' : 'currently custom override'})</span>
           </Label>
           <Textarea
-            id="exclude-regex-textarea"
-            value={draft}
-            onChange={(e) => handleDraftChange(e.target.value)}
-            onBlur={(e) => runLintCheck(e.target.value)}
-            className="font-mono text-xs min-h-24"
-            spellCheck={false}
-            autoComplete="off"
+            id="exclude-regex-textarea" value={draft}
+            onChange={(e) => handleDraftChange(e.target.value)} onBlur={(e) => runLintCheck(e.target.value)}
+            className="font-mono text-xs min-h-24" spellCheck={false} autoComplete="off"
           />
           <p className="text-[10px] text-muted-foreground">
             VCL pattern compiled by Fastly&apos;s regex engine (RE2). No quotes / control chars; max 2 KB.
@@ -795,32 +967,30 @@ export function ExcludeRegexCard({ serviceId }: { serviceId: string }) {
 
         {lintPending && (
           <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            Linting regex…
+            <Loader2 className="h-3 w-3 animate-spin" /> Linting regex…
           </div>
         )}
-        {!lintPending && lintResult && lintResult.regex === draft && !lintResult.ok && (
+        {activeLint && !activeLint.ok && (
           <Alert variant="destructive">
             <AlertTriangle className="h-4 w-4" />
             <AlertDescription className="text-xs">
-              <strong>Lint error ({lintResult.reason}):</strong>
-              <div className="font-mono whitespace-pre-wrap mt-1">{lintResult.error}</div>
+              <strong>Lint error ({activeLint.reason}):</strong>
+              <div className="font-mono whitespace-pre-wrap mt-1">{activeLint.error}</div>
             </AlertDescription>
           </Alert>
         )}
-        {!lintPending && lintResult && lintResult.regex === draft && lintResult.ok && lintResult.lint_warnings.length > 0 && (
+        {activeLint && activeLint.ok && activeLint.lint_warnings.length > 0 && (
           <Alert>
             <AlertTriangle className="h-4 w-4" />
             <AlertDescription className="text-xs">
               <strong>Lint warnings (non-blocking):</strong>
-              <LintWarningsList warnings={lintResult.lint_warnings} />
+              <LintWarningsList warnings={activeLint.lint_warnings} />
             </AlertDescription>
           </Alert>
         )}
-        {!lintPending && lintResult && lintResult.regex === draft && lintResult.ok && lintResult.lint_warnings.length === 0 && isDirty && (
+        {activeLint && activeLint.ok && activeLint.lint_warnings.length === 0 && isDirty && (
           <div className="flex items-center gap-2 text-[11px] text-emerald-700">
-            <Check className="h-3 w-3" />
-            Lint clean — ready to publish.
+            <Check className="h-3 w-3" /> Lint clean — ready to publish.
           </div>
         )}
 
@@ -848,14 +1018,11 @@ export function ExcludeRegexCard({ serviceId }: { serviceId: string }) {
 
         <div className="flex items-center justify-end gap-2 pt-2 border-t">
           <Button
-            variant="outline"
-            size="sm"
+            variant="outline" size="sm"
             onClick={() => form.setValue('regex', data.default ?? '', { shouldDirty: true })}
-            disabled={(data.is_default ?? false) && draft === ''}
-            className="text-xs"
+            disabled={(data.is_default ?? false) && draft === ''} className="text-xs"
           >
-            <RotateCcw className="h-3 w-3 mr-1" />
-            Reset to default
+            <RotateCcw className="h-3 w-3 mr-1" /> Reset to default
           </Button>
           <Button size="sm" onClick={() => setConfirmOpen(true)} disabled={!isDirty || saveMut.isPending} className="text-xs">
             {saveMut.isPending ? <><Loader2 className="h-3 w-3 mr-1 animate-spin" />Publishing…</> : isResetToDefault ? 'Reset & publish' : 'Save & publish'}
@@ -864,17 +1031,14 @@ export function ExcludeRegexCard({ serviceId }: { serviceId: string }) {
       </div>
 
       <ConfirmDialog
-        open={confirmOpen}
-        onOpenChange={setConfirmOpen}
+        open={confirmOpen} onOpenChange={setConfirmOpen}
         title="Publish updated scoring exclusion regex?"
         description={
           isResetToDefault
             ? 'This will revert this service to the built-in default static-asset regex and activate a new VCL version on the Fastly service. Effective at the edge after activation propagates (~5-15s).'
             : "This will clone the active Fastly version, swap the scoring recv snippet to use your custom regex, validate via falco + Fastly's compiler, and activate. Effective at the edge after activation propagates (~5-15s). A bad regex could disable scoring entirely or DoS Compute — double-check the value above."
         }
-        confirmLabel="Publish"
-        isDangerous
-        isPending={saveMut.isPending}
+        confirmLabel="Publish" isDangerous isPending={saveMut.isPending}
         onConfirm={() => saveMut.mutate(draft)}
       />
     </AnalyticsCard>
@@ -898,11 +1062,7 @@ export function MatrixVersionsCard({ serviceId }: { serviceId: string }) {
       unwrapClient(client.POST('/api/services/{service_id}/scoring/matrix-versions/{version}/restore', {
         params: { path: { service_id: serviceId, version }, query: { confirm: true } },
       })),
-    onSuccess: (res) => {
-      setRestoreResult(res)
-      setPendingVersion(null)
-      invalidateServiceScoringQueries(qc, serviceId)
-    },
+    onSuccess: (res) => { setRestoreResult(res); setPendingVersion(null); invalidateServiceScoringQueries(qc, serviceId) },
   })
 
   const currentVersion = data?.current_version ?? null
@@ -931,14 +1091,12 @@ export function MatrixVersionsCard({ serviceId }: { serviceId: string }) {
       cell: ({ row }) => (
         <div className="flex justify-end">
           <Button
-            variant="outline"
-            size="sm"
+            variant="outline" size="sm"
             className="h-7 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive border-destructive/30"
             disabled={currentVersion === row.original.version || restorePending}
             onClick={() => setPendingVersion(row.original.version ?? null)}
           >
-            <RotateCcw className="h-3 w-3 mr-1" />
-            Restore
+            <RotateCcw className="h-3 w-3 mr-1" /> Restore
           </Button>
         </div>
       ),
@@ -953,14 +1111,10 @@ export function MatrixVersionsCard({ serviceId }: { serviceId: string }) {
 
   return (
     <AnalyticsCard
-      title="Matrix history"
-      icon={<History className="h-4 w-4" />}
+      title="Matrix history" icon={<History className="h-4 w-4" />}
       description="Restore a prior trained matrix. Edge Wasm keeps the embedded matrix until you re-run deploy_wasm.sh."
-      helpContent={<MatrixHistoryHelp />}
-      helpTitle="About Matrix History"
-      isLoading={isLoading}
-      isFetching={isFetching}
-      contentClassName="p-0"
+      helpContent={<MatrixHistoryHelp />} helpTitle="About Matrix History"
+      isLoading={isLoading} isFetching={isFetching} contentClassName="p-0"
     >
       {isLoading ? (
         <div className="p-4 space-y-2"><SkeletonGrid count={3} height="2.5rem" className="rounded-md" /></div>
@@ -978,8 +1132,7 @@ export function MatrixVersionsCard({ serviceId }: { serviceId: string }) {
       )}
 
       <ConfirmDialog
-        open={pendingVersion !== null}
-        onOpenChange={(open) => { if (!open) setPendingVersion(null) }}
+        open={pendingVersion !== null} onOpenChange={(open) => { if (!open) setPendingVersion(null) }}
         title={`Restore matrix version ${pendingVersion ?? ''}?`}
         description={
           <div className="space-y-2 text-sm">
@@ -992,10 +1145,8 @@ export function MatrixVersionsCard({ serviceId }: { serviceId: string }) {
             {restore.isError && <p className="text-destructive text-xs">{(restore.error as Error).message}</p>}
           </div>
         }
-        confirmLabel="Restore version"
-        cancelLabel="Cancel"
-        isDangerous
-        isPending={restore.isPending}
+        confirmLabel="Restore version" cancelLabel="Cancel"
+        isDangerous isPending={restore.isPending}
         onConfirm={() => { if (pendingVersion) restore.mutate(pendingVersion) }}
       />
     </AnalyticsCard>
@@ -1051,23 +1202,16 @@ export function AuditLogTab({ serviceId }: { serviceId: string }) {
 
   return (
     <AnalyticsCard
-      title="Audit log"
-      icon={<ScrollText className="h-4 w-4" />}
+      title="Audit log" icon={<ScrollText className="h-4 w-4" />}
       description="Recent operator actions on this service's scoring config (most-recent first)."
-      helpContent={<AuditLogHelp />}
-      helpTitle="About Scoring Audit Log"
-      isLoading={query.isLoading}
-      isFetching={query.isFetching}
-      contentClassName="p-0"
+      helpContent={<AuditLogHelp />} helpTitle="About Scoring Audit Log"
+      isLoading={query.isLoading} isFetching={query.isFetching} contentClassName="p-0"
     >
       {query.isLoading ? (
         <div className="p-4 space-y-2"><SkeletonGrid count={3} height="2.5rem" className="rounded-md" /></div>
       ) : (
         <DataTableReadonly
-          columns={AUDIT_COLUMNS}
-          data={rows}
-          hideToolbar
-          showPagination={rows.length > 50}
+          columns={AUDIT_COLUMNS} data={rows} hideToolbar showPagination={rows.length > 50}
           tableCaption="Scoring audit log"
           emptyMessage="No audit events yet. Mutations to scoring (enable, retrain, rotate key, etc.) will appear here."
         />

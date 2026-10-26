@@ -52659,8 +52659,7 @@
           "ip",
           "risk_level"
         ],
-        "title": "ActiveClientItem",
-        "description": "Field order mirrors ``GET_ACTIVE_PROXY_CLIENTS`` (``asn`` is swapped for a\ntrailing ``asn_name`` by the repository)."
+        "title": "ActiveClientItem"
       },
       "ActiveQueryRow": {
         "properties": {
@@ -55936,8 +55935,7 @@
           "category",
           "request_count"
         ],
-        "title": "BotEfficiencyRow",
-        "description": "Bot & crawler value vs. cost row (requests + bandwidth consumed vs. human referrals)."
+        "title": "BotEfficiencyRow"
       },
       "BotMetrics": {
         "properties": {
@@ -56298,8 +56296,7 @@
         "required": [
           "count"
         ],
-        "title": "BucketCountRow",
-        "description": "Histogram bucket. Repository paths key the bucket as ``bucket``; the\nhigh-scale path keys it as ``label``."
+        "title": "BucketCountRow"
       },
       "BundleResponse": {
         "properties": {
@@ -56377,8 +56374,7 @@
           }
         },
         "type": "object",
-        "title": "BundleResponse",
-        "description": "Composite response for /api/dashboard/bundle (finding 013).\n\nWithout an explicit response_model the endpoint emitted an untyped dict\nthat bypassed the BaseResponse._strip_debug_when_disabled serializer,\nleaking internal SQL queries + execution timings to clients regardless\nof the DEBUG_RESPONSES flag. Declaring the shape with nested typed\nsub-responses re-engages Pydantic's serialization lifecycle so the\nsame redaction rules apply here as on the dedicated /aggregates and\n/top-bots endpoints.\n\nSub-responses are Optional so the selector (``sections=[...]``) can\nomit a branch: a ``sections=['core']`` call returns ``top_bots: None``\ninstead of paying for the second pool connection + bot SQL."
+        "title": "BundleResponse"
       },
       "CacheBreakdown": {
         "properties": {
@@ -71393,8 +71389,7 @@
         },
         "additionalProperties": true,
         "type": "object",
-        "title": "Ipv6AdoptionRow",
-        "description": "Repository paths emit ``time``/``pct``; the high-scale path emits ``version``/``count``."
+        "title": "Ipv6AdoptionRow"
       },
       "JsonValue": {},
       "LakeInfoRequest": {
@@ -82504,8 +82499,7 @@
           "truncated",
           "elapsed_ms"
         ],
-        "title": "QueryResponse",
-        "description": "``POST /api/query`` result.\n\nRows hold DuckDB-native values (Decimal, tz-aware datetimes, bytes) that\npydantic's JSON mode would encode differently from ``jsonable_encoder``\n(the pre-typing wire path), so ``data`` is pre-encoded the same way."
+        "title": "QueryResponse"
       },
       "QueryResponseMetadataResponse": {
         "properties": {
@@ -86036,8 +86030,7 @@
         },
         "additionalProperties": true,
         "type": "object",
-        "title": "ScoringAnalyticsResponse",
-        "description": "Composite of the analyst-safe sub-reads (plus the two admin-only\nevaluation blocks, present only on the admin path)."
+        "title": "ScoringAnalyticsResponse"
       },
       "ScoringAucAgainstLabels": {
         "properties": {
@@ -86276,8 +86269,7 @@
         },
         "additionalProperties": true,
         "type": "object",
-        "title": "ScoringConfigCompositeResponse",
-        "description": "``GET /scoring/config``: the four token-free config reads in one body."
+        "title": "ScoringConfigCompositeResponse"
       },
       "ScoringCurvePoint": {
         "properties": {
@@ -86611,8 +86603,7 @@
         },
         "additionalProperties": true,
         "type": "object",
-        "title": "ScoringDashboardResponse",
-        "description": "Composite of the per-endpoint producers \u2014 each sub-block is the\nbyte-identical dict its standalone endpoint returns, so each nests the\nsame model that endpoint declares."
+        "title": "ScoringDashboardResponse"
       },
       "ScoringDistributionRow": {
         "properties": {
@@ -86653,8 +86644,7 @@
           }
         },
         "type": "object",
-        "title": "ScoringEnforceStatusCodeBody",
-        "description": "Body for ``PUT /scoring/enforce-status-code``.\n\nHTTP code returned by the enforce snippet when the scorer flags a\nrequest. ``None`` resets to the default 429."
+        "title": "ScoringEnforceStatusCodeBody"
       },
       "ScoringEnforceStatusCodePutResponse": {
         "properties": {
@@ -87005,8 +86995,7 @@
           }
         },
         "type": "object",
-        "title": "ScoringExcludeRegexBody",
-        "description": "Body for ``PUT /scoring/exclude-regex`` and ``POST /scoring/exclude-regex/validate``.\n\nEmpty string resets to the bundled default regex."
+        "title": "ScoringExcludeRegexBody"
       },
       "ScoringExcludeRegexPutResponse": {
         "properties": {
@@ -87350,8 +87339,7 @@
           }
         },
         "type": "object",
-        "title": "ScoringL2EnforceBody",
-        "description": "Body for ``PUT /scoring/l2-enforce``.\n\n``enabled`` is the operator's explicit opt-in: ``True`` makes edge Layer-2\njoin the *enforced* combined score (fading in over a few days from the moment\nof consent); ``False`` keeps L2 observe-only. Default ``False`` so an empty\nbody is a no-op-toward-off rather than an accidental enable."
+        "title": "ScoringL2EnforceBody"
       },
       "ScoringL2EnforcePutResponse": {
         "properties": {
@@ -87506,8 +87494,7 @@
           "ramp_days",
           "readiness_days"
         ],
-        "title": "ScoringL2EnforceState",
-        "description": "Shape from _build_l2_enforce_block / _l2_enforce_unavailable \u2014\nalso nested as ``l2_enforce`` in ScoringHealthResponse."
+        "title": "ScoringL2EnforceState"
       },
       "ScoringLabelCounts": {
         "properties": {
@@ -87572,8 +87559,7 @@
           }
         },
         "type": "object",
-        "title": "ScoringLabelCreate",
-        "description": "Body for ``POST /scoring/labels``.\n\n``sid`` and ``label`` are validated downstream by ``save_label``\n(raises ValueError \u2192 ``invalid_label`` 400) so we keep this model\npermissive on field content."
+        "title": "ScoringLabelCreate"
       },
       "ScoringLabelDeleteResponse": {
         "properties": {
@@ -87747,8 +87733,7 @@
           }
         },
         "type": "object",
-        "title": "ScoringLabelUpdate",
-        "description": "Body for ``PATCH /scoring/labels/{label_id}``.\n\nBoth fields are optional. ``label`` content is validated\ndownstream by ``update_label``."
+        "title": "ScoringLabelUpdate"
       },
       "ScoringLabelsListResponse": {
         "properties": {
@@ -88951,8 +88936,7 @@
         },
         "additionalProperties": true,
         "type": "object",
-        "title": "ScoringStatusResponse",
-        "description": "``GET /scoring/status``: the secret-filtered ``cfg.scoring`` block plus\nlive-version and drift keys. Config-derived keys beyond these ride as extras."
+        "title": "ScoringStatusResponse"
       },
       "ScoringThresholdBody": {
         "properties": {
@@ -88969,8 +88953,7 @@
           }
         },
         "type": "object",
-        "title": "ScoringThresholdBody",
-        "description": "Body for ``PUT /scoring/threshold`` and ``PUT /scoring/enforce-threshold``.\n\n``threshold`` is the 0-100 risk score. ``None`` clears the operator's\nchosen value (preview-only) or disables live enforcement, depending on\nthe endpoint."
+        "title": "ScoringThresholdBody"
       },
       "ScoringThresholdBucket": {
         "properties": {
@@ -89141,8 +89124,7 @@
           "set_at",
           "enforced"
         ],
-        "title": "ScoringThresholdState",
-        "description": "GET and PUT /scoring/threshold both return this exact shape."
+        "title": "ScoringThresholdState"
       },
       "ScoringTokenBody": {
         "properties": {
@@ -89153,8 +89135,7 @@
           }
         },
         "type": "object",
-        "title": "ScoringTokenBody",
-        "description": "Body for ``POST /scoring/enable`` and ``POST /scoring/disable``.\n\n``token`` falls back to the per-service ``fastly_api_key`` when\nempty. Optional on the wire \u2014 callers can omit the body entirely\nwhen the server has a stored token."
+        "title": "ScoringTokenBody"
       },
       "ScoringTopFlaggedResponse": {
         "properties": {
@@ -89787,8 +89768,7 @@
           "name",
           "request_count"
         ],
-        "title": "SecurityBotRow",
-        "description": "One top-bot leaderboard row. UA-matched rows carry ``id``; NGWAF rows\ndon't (the rollup/direct-join variants only emit name/category/request_count,\nthe high-scale one adds the verification counters)."
+        "title": "SecurityBotRow"
       },
       "SecurityMetrics": {
         "properties": {
@@ -94121,8 +94101,7 @@
         },
         "additionalProperties": true,
         "type": "object",
-        "title": "TlsFingerprintRow",
-        "description": "Live and rollup paths emit ``fingerprint``/``ip_count``/``request_count``;\nthe high-scale ClickHouse path emits ``fingerprint``/``count``/``ips``."
+        "title": "TlsFingerprintRow"
       },
       "TopBotRow": {
         "properties": {
@@ -96578,8 +96557,7 @@
           "pending_count",
           "verification_coverage"
         ],
-        "title": "WellknownBotRow",
-        "description": "UA-matched bot with FCrDNS verification counters (``verification_coverage`` is\nannotated last, after the counters)."
+        "title": "WellknownBotRow"
       },
       "WizardStateResponse": {
         "properties": {

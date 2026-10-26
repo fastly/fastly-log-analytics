@@ -36,11 +36,8 @@ from backend.cron.scheduler import (
 )
 
 logger = logging.getLogger("backend.scheduler")
-
 _post_commit_metadata_sync_lock = threading.Lock()
 _post_commit_metadata_sync_rerun: dict[str, bool] = {}
-
-
 _RETRYABLE_WEBHOOK_STATUS = (429, 500, 502, 503, 504)
 
 
@@ -77,8 +74,6 @@ def _post_pagerduty_notification(url: str, alert_name: str, metric: str, msg_val
 
 
 # ── _run_metadata_sync (no @cron_task — also called as a bootstrap helper) ────
-
-
 def _run_metadata_sync(
     service_id: str, run_id: int | None = None, start_time: str | None = None, end_time: str | None = None
 ) -> None:
@@ -98,23 +93,18 @@ def _run_metadata_sync(
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         return
-
     src = get_source_for_service(service_id)
     if src is None:
         return
-
     is_manual = run_id is not None
-
     if not is_manual:
         from backend.utils.active_requests import should_defer_cron
 
         if should_defer_cron("metadata_sync", service_id):
             return
-
     # For manual runs (run_id is not None), we ignore the default limit unless
     # it was explicitly passed in. If a manual run is triggered without
     # start_time, it means "Import All", so we should clear any existing limit.
-
     from backend.cron.jobs.sync import apply_time_range_pinning, get_service_display_label
 
     start_time_exec = time.time()
@@ -143,7 +133,6 @@ def _run_metadata_sync(
             job_name="metadata_sync",
             event={"type": "status", "message": f"{elapsed()} Starting metadata sync..."},
         )
-
         # 1. Refresh Iceberg catalog from cloud
         # In PyIceberg SqlCatalog, load_table() will verify metadata from S3
         _log_and_add_progress(
@@ -184,7 +173,6 @@ def _run_metadata_sync(
                 table_present = False
             else:
                 raise
-
         if not table_present:
             msg = "Iceberg table not found, skipping sync until data is committed."
             _log_and_add_progress(run_id, service_id, job_name="metadata_sync", event={"message": msg})
@@ -194,7 +182,6 @@ def _run_metadata_sync(
             run.success(msg)
             _log_and_add_progress(run_id, service_id, job_name="metadata_sync", event={"type": "done", "message": msg})
             return
-
         # 2. Sync data files (Pull-to-Local caching)
         start_time, end_time = apply_time_range_pinning(
             service_id,
@@ -208,7 +195,6 @@ def _run_metadata_sync(
         msg = "Scanning Iceberg table for new data files..."
         if start_time or end_time:
             msg += f" (Range: {start_time or 'Start'} to {end_time or 'End'})"
-
         _log_and_add_progress(run_id, service_id, job_name="metadata_sync", event={"type": "status", "message": msg})
 
         def _sync_progress(downloaded: int, total: int, filename: str, rows: int) -> None:
@@ -225,7 +211,6 @@ def _run_metadata_sync(
         data_res = db_iceberg.sync_data(src, progress_callback=_sync_progress, start_time=start_time, end_time=end_time)
         files_cached = data_res.get("files_downloaded", 0)
         rows_cached = data_res.get("rows_downloaded", 0)
-
         if files_cached == 0:
             _log_and_add_progress(
                 run_id,
@@ -243,7 +228,6 @@ def _run_metadata_sync(
                     "message": f"Synced {files_cached} Iceberg data file(s) to local cache, {rows_cached:,} rows.",
                 },
             )
-
         # 3. Update DuckDB view
         _log_and_add_progress(
             run_id,
@@ -263,7 +247,6 @@ def _run_metadata_sync(
             db_iceberg.update_iceberg_view(con, src)
         finally:
             con.close()
-
         # 4. Import shared history and views/alerts from Admin
         import_error: str | None = None
         try:
@@ -273,10 +256,8 @@ def _run_metadata_sync(
         except Exception as e:
             import_error = str(e)
             _log_and_add_progress(run_id, service_id, job_name="metadata_sync", event={"type": "warning", "message": e})
-
         # 5. Refresh cached status (row count, etc)
         refresh_config_status(service_id)
-
         # ── 6. Invalidate dashboard cache ─────────────────────────────────────
         try:
             from backend.repositories.dashboard import invalidate_service
@@ -284,7 +265,6 @@ def _run_metadata_sync(
             invalidate_service(src["name"])
         except Exception:
             pass
-
         summary = "Refreshed metadata"
         if files_cached > 0:
             verb = "downloaded" if src.get("access_level") == "read_only" else "synced"
@@ -294,10 +274,8 @@ def _run_metadata_sync(
             run_status = "warning"
         else:
             run_status = "success"
-
         run.record(run_status, summary=summary, files_downloaded=files_cached, rows_ingested=rows_cached)
         _log_and_add_progress(run_id, service_id, job_name="metadata_sync", event={"type": "done", "message": summary})
-
     logger.info("🏁  \x1b[96m[metadata_sync]\x1b[0m %s: Metadata sync job finished.", _display)
 
 
@@ -312,7 +290,6 @@ def _post_commit_metadata_sync_worker(service_id: str) -> None:
             _run_post_commit_metadata_sync(service_id)
         except Exception:
             logger.exception("[scheduler] %s: post-commit metadata sync failed unexpectedly", service_id)
-
         with _post_commit_metadata_sync_lock:
             if _post_commit_metadata_sync_rerun.get(service_id, False):
                 _post_commit_metadata_sync_rerun[service_id] = False
@@ -327,7 +304,6 @@ def dispatch_post_commit_metadata_sync(service_id: str) -> None:
         if service_id in _post_commit_metadata_sync_rerun:
             _post_commit_metadata_sync_rerun[service_id] = True
             return
-
         _post_commit_metadata_sync_rerun[service_id] = False
         worker = threading.Thread(
             target=_post_commit_metadata_sync_worker,
@@ -343,8 +319,6 @@ def dispatch_post_commit_metadata_sync(service_id: str) -> None:
 
 
 # ── _run_ngwaf_bot_sync ──────────────────────────────────────────────────────
-
-
 @cron_task("sync_ngwaf_bots", job_name="ngwaf_sync")
 def _run_ngwaf_bot_sync(service_id: str) -> None:
     """Fetch NGWAF VERIFIED-BOT records and upsert into the PostgreSQL ngwaf_bots table.
@@ -361,30 +335,23 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
     if dev_mode_no_crons():
         logger.info("⏸️  \x1b[36m[ngwaf_sync]\x1b[0m %s: dev_mode_no_crons active, skipping NGWAF sync.", service_id)
         return
-
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         return
-
     workspace_id = svcconfig.get_ngwaf_workspace_id(service_id)
     if not workspace_id:
         return  # Not configured — skip silently
-
     src = get_source_for_service(service_id)
     if src is None:
         return
-
     api_key = cfg.get("fastly_api_key", "")
     if not api_key:
         logger.warning("[ngwaf_sync] %s: no fastly_api_key configured, skipping.", service_id)
         return
-
     svc_display = get_service_display_label(service_id, cfg)
-
     prov = cfg.get("provisioning", {})
     retention_days = int(prov.get("cron_ngwaf", {}).get("log_retention_days", 30))
     server_name_filter = cfg.get("server_name") or None
-
     with cron_run(
         service_id,
         "ngwaf_sync",
@@ -420,16 +387,13 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
                 )
                 logger.info("🏁  \x1b[36m[ngwaf_sync]\x1b[0m %s: NGWAF sync job finished.", svc_display)
                 return
-
             max_runtime_secs = 240
             budget_exceeded = False
-
             for page_records, page_latest_ts, _raw_count in fetch_verified_bots_paged(api_key, workspace_id, from_ts):
                 if server_name_filter:
                     page_records = [
                         r for r in page_records if not r.get("server_name") or r["server_name"] == server_name_filter
                     ]
-
                 enriched: list[dict] = []
                 for r in page_records:
                     ua = r.get("user_agent")
@@ -442,15 +406,12 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
                             "wellknown_bot_name": wk_match.get("name") if wk_match else None,
                         }
                     )
-
                 if enriched or page_latest_ts:
                     upsert_bots(enriched, workspace_id, page_latest_ts)
                 total_records += len(enriched)
-
                 if run.elapsed() >= max_runtime_secs:
                     budget_exceeded = True
                     break
-
             deleted = cleanup_old_bots(retention_days)
             if budget_exceeded:
                 summary = f"Synced {total_records} bot record(s) (budget reached — will continue next run), cleaned {deleted} old row(s)."
@@ -458,7 +419,6 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
                 summary = f"Synced {total_records} bot record(s), cleaned {deleted} old row(s)."
             run.success(summary, files_downloaded=total_records)
             _log_and_add_progress(run_id, service_id, job_name="ngwaf_sync", event={"type": "done", "message": summary})
-
             # Adaptive scheduling under load:
             # If budget was reached or high bot volume (>= 500 records), tighten interval to 2 minutes
             # to rapidly catch up. When backlog subsides, restore baseline configured interval (default 5m).
@@ -496,13 +456,10 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
                 run_id, service_id, job_name="ngwaf_sync", event={"type": "error", "message": summary}
             )
             logger.exception("[ngwaf_sync] %s: sync failed: %s", svc_display, err_msg)
-
     logger.info("🏁  \x1b[36m[ngwaf_sync]\x1b[0m %s: NGWAF sync job finished.", svc_display)
 
 
 # ── _run_bot_data_refresh / _run_rdns_enrichment / _run_share_audit_purge ────
-
-
 @global_job("bot_data_refresh", color="36", tag="bots", label="Bot data refresh")
 def _run_bot_data_refresh() -> tuple[str, str]:
     """Fetch and cache all enabled bot sources (nightly 02:00 UTC)."""
@@ -512,14 +469,12 @@ def _run_bot_data_refresh() -> tuple[str, str]:
     if dev_mode_no_crons():
         logger.info("⏸️  \x1b[36m[bots]\x1b[0m dev_mode_no_crons active, skipping bot data refresh.")
         return ("skipped", "skipped (dev_mode_no_crons)")
-
     results = refresh_all_sources()
     failed = [r for r in results if r.get("failed")]
     succeeded = [r for r in results if not r.get("failed")]
     total = sum(r.get("entry_count", 0) for r in succeeded)
     logger.info("✅ \x1b[36m[bots]\x1b[0m Refreshed %d source(s), %d total entries", len(succeeded), total)
     detail = f"Updated {len(succeeded)} source(s), {total} total entries"
-
     if failed and not succeeded:
         failed_ids = ", ".join(r.get("id", "unknown") for r in failed)
         return ("error", f"{detail} (All {len(failed)} bot sources failed: {failed_ids})")
@@ -538,7 +493,6 @@ def _run_rdns_enrichment() -> tuple[str, str]:
     if dev_mode_no_crons():
         logger.info("⏸️  \x1b[34m[rdns]\x1b[0m dev_mode_no_crons active, skipping rDNS enrichment.")
         return ("skipped", "skipped (dev_mode_no_crons)")
-
     summary = enrich_batch()
     detail = f"resolved={summary['resolved']} errors={summary['errors']} discovered={summary['discovered']}"
     if summary["errors"] > 0 and summary["resolved"] == 0:
@@ -559,7 +513,6 @@ def _run_share_audit_purge() -> tuple[str, str]:
     if dev_mode_no_crons():
         logger.info("⏸️  \x1b[35m[share_audit_purge]\x1b[0m dev_mode_no_crons active, skipping share audit purge.")
         return ("skipped", "skipped (dev_mode_no_crons)")
-
     raw = share_db.get_setting(share_db.SHARE_AUDIT_RETENTION_DAYS_KEY, "90")
     try:
         retention = max(1, int(raw or "90"))
@@ -584,34 +537,27 @@ def _run_share_audit_purge() -> tuple[str, str]:
 
 
 # ── _run_service_alerts_evaluation ───────────────────────────────────────────
-
-
 @cron_task("evaluate_alerts", job_name="alerts")
 def _run_service_alerts_evaluation(service_id: str) -> None:
     """Evaluate all enabled alerts for a specific service."""
     from backend.core.duckdb import get_connection, get_source_for_service
     from backend.cron.decorators import dev_mode_no_crons
-    from backend.repositories import alerts as alert_repo
+    from backend.repositories import alerts as alert_repo  # type: ignore[attr-defined]
     from backend.utils.active_requests import should_defer_cron
 
     if dev_mode_no_crons():
         logger.info("⏸️  \x1b[93m[alerts]\x1b[0m %s: dev_mode_no_crons active, skipping alerts evaluation.", service_id)
         return
-
     start = time.monotonic()
-
     src = get_source_for_service(service_id)
     if not src:
         logger.warning("Could not find source for service_id %s", service_id)
         return
-
     if should_defer_cron("alerts", service_id):
         return
-
     task_name = "alerts"
     _display = _display_label(src, service_id)
     logger.info("🏎️  \x1b[93m[alerts]\x1b[0m %s: Alerts evaluation job started.", _display)
-
     # Fetch alerts from PostgreSQL metadata (no DuckDB needed).
     alerts = alert_repo.get_alerts(service_id=service_id)
     enabled_alerts = [a for a in alerts if a["enabled"]]
@@ -620,7 +566,6 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
         record_skip_row(src, task_name, "No alerts configured", duration_s=time.monotonic() - start)
         logger.info("🏁  \x1b[93m[alerts]\x1b[0m %s: Alerts evaluation job finished.", _display)
         return
-
     with cron_run(
         service_id,
         task_name,
@@ -635,15 +580,11 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
         run_id = run.run_id
         # DuckDB connection is only needed (and only opened) once the lease is held.
         con_ro = get_connection(src, read_only=True)
-
         webhook_failures: list[str] = []
-
         try:
             display_name = _display_label(src, service_id)
-
             # (alert, webhook_url, payload, max_ts) for each alert that should fire
             triggered_items: list[tuple[dict, str | None, dict | None, str | None]] = []
-
             for alert in enabled_alerts:
                 try:
                     fired, webhook_url, payload, max_ts = alert_repo.evaluate_alert(
@@ -669,20 +610,17 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
         finally:
             if con_ro is not None:
                 con_ro.close()
-
         try:
             # Second pass: write timestamps first, then dispatch webhooks so a crash
             # between the two doesn't cause duplicate notifications on the next run.
             if triggered_items:
                 for alert, _, _, max_ts in triggered_items:
                     alert_repo.update_last_triggered(service_id, alert["id"], max_ts)
-
                 # Export updated state before sending webhooks so the quiet-period
                 # timestamp is durable even if a webhook call hangs or fails.
                 from backend.state_sync import export_admin_state
 
                 export_admin_state(service_id)
-
                 for alert, webhook_url, payload, _ in triggered_items:
                     # 1. Post legacy webhook if configured
                     if webhook_url and payload:
@@ -697,7 +635,6 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
                                 alert["id"],
                                 e,
                             )
-
                     # 2. Post to modern alert channels if configured
                     channels = alert.get("channels") or []
                     for channel in channels:
@@ -748,7 +685,6 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
                                 alert["id"],
                                 e,
                             )
-
             n_eval = len(enabled_alerts)
             n_trig = len(triggered_items)
             status = "warning" if (n_trig > 0 or webhook_failures) else "success"
@@ -758,7 +694,6 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
             )
             if webhook_failures:
                 summary += f" ({len(webhook_failures)} notification failure{'s' if len(webhook_failures) > 1 else ''}: {', '.join(webhook_failures)})"
-
             run.record(status, summary=summary, files_downloaded=n_eval, rows_ingested=n_trig)
             _log_and_add_progress(
                 run_id,
@@ -766,7 +701,6 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
                 job_name=task_name,
                 event={"type": "done", "message": summary},
             )
-
         except Exception as e:
             import traceback
 
@@ -782,8 +716,6 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
 
 
 # ── _run_metadata_cleanup ────────────────────────────────────────────────────
-
-
 @cron_task("metadata_cleanup", job_name="metadata_cleanup")
 def _run_metadata_cleanup(service_id: str) -> None:
     """Daily: trim usage_log + ingested_files + cron_runs per service retention cfg.
@@ -816,23 +748,17 @@ def _run_metadata_cleanup(service_id: str) -> None:
 
     color = JOB_COLORS.get("metadata_cleanup", "")
     label = f"{color}[metadata_cleanup]{RESET_COLOR}"
-
     if dev_mode_no_crons():
         logger.info("⏸️  %s %s: dev_mode_no_crons active, skipping metadata cleanup.", label, service_id)
         return
-
     src = get_source_for_service(service_id)
     if src is None:
         return
-
     if should_defer_cron("metadata_cleanup", service_id):
         return
-
     cfg = svcconfig.load_config(service_id) or {}
     retention = cfg.get("metadata_retention") or {}
-
     _display = _display_label(src, service_id)
-
     with cron_run(
         service_id,
         "metadata_cleanup",
@@ -861,7 +787,6 @@ def _run_metadata_cleanup(service_id: str) -> None:
             if total_deleted
             else "No rows older than retention windows."
         )
-
         if total_deleted:
             logger.info(
                 "🧹 %s %s: deleted %d rows (%s) vacuumed=%s in %.2fs",
@@ -874,7 +799,6 @@ def _run_metadata_cleanup(service_id: str) -> None:
             )
         else:
             logger.info("🏁  %s %s: no rows to trim (took %.2fs)", label, _display, result["duration_s"])
-
         # Also trim the global system_metrics.db retention window. Idempotent
         # across per-service runs (the second call this day deletes 0 rows
         # because the first one already cleared them), and the DELETE rides
@@ -885,7 +809,6 @@ def _run_metadata_cleanup(service_id: str) -> None:
             purge_old(retention_days=30)
         except Exception as e:
             logger.debug("[metadata_cleanup] metric_snapshots purge failed: %s", e)
-
         # Repurpose the rows_ingested column for the count of rows trimmed —
         # the schema is shared across all cron tasks, and "rows_ingested" is
         # the closest semantic fit (each task interprets it by context).
@@ -899,7 +822,6 @@ def _run_metadata_cleanup(service_id: str) -> None:
 
 
 # ── Metric Snapshots (folded from backend.core.metric_snapshots) ─────────────
-
 import gc  # noqa: E402
 import os  # noqa: E402
 import signal  # noqa: E402
@@ -931,8 +853,6 @@ def _pg_write_connection():
 
 
 # ── Write path ───────────────────────────────────────────────────────────────
-
-
 def record_snapshot(
     metric: str,
     value: float,
@@ -961,8 +881,6 @@ def record_snapshot(
 
 
 # ── Read path ────────────────────────────────────────────────────────────────
-
-
 def get_batch(*, since: datetime | str) -> dict:
     """Return every series newer than ``since``, grouped by series key.
 
@@ -991,8 +909,6 @@ def get_batch(*, since: datetime | str) -> dict:
 
 
 # ── Liveness ─────────────────────────────────────────────────────────────────
-
-
 def last_snapshot_age_s() -> float | None:
     """Seconds since the most recent metric_snapshots row, or ``None`` if empty.
 
@@ -1018,8 +934,6 @@ def last_snapshot_age_s() -> float | None:
 
 
 # ── Retention ────────────────────────────────────────────────────────────────
-
-
 def purge_old(retention_days: int = 30) -> int:
     """Delete rows older than ``retention_days``. Returns the row count."""
     if retention_days <= 0:
@@ -1035,8 +949,6 @@ def purge_old(retention_days: int = 30) -> int:
 
 
 # ── Test / teardown helpers ──────────────────────────────────────────────────
-
-
 def close_all_connections() -> None:
     """Close any thread-local connection (no-op under Postgres)."""
     pass
@@ -1084,11 +996,9 @@ def teardown() -> None:
 
 
 # ── Latest operational samples exported through the configured OTel meter ────
-
 _lock = threading.Lock()
 _values: dict[str, dict[tuple[tuple[str, str], ...], float]] = {}
 _instruments: dict[str, Any] = {}
-
 _METRICS = {
     "celery_queue_depth": ("Celery broker queue depth", "{messages}"),
     "celery_broker_reachable": ("Celery broker reachability", "1"),
@@ -1109,7 +1019,6 @@ def _instrument(metric: str) -> Any:
     instrument = _instruments.get(metric)
     if instrument is not None:
         return instrument
-
     description, unit = _METRICS[metric]
 
     def callback(_options: CallbackOptions, metric_name: str = metric) -> list[Observation]:
@@ -1145,8 +1054,6 @@ def reset_for_tests() -> None:
 
 
 # ── DuckDB Recycle (folded from backend.core.duckdb_recycle) ─────────────────
-
-
 def recycle_interval_min() -> float:
     """Interval (minutes) between recycles. 0 = disabled (the scheduler then
     never registers the job). Default 0."""
@@ -1204,7 +1111,6 @@ def _sources_by_db_path() -> dict[str, list[dict]]:
         except Exception:
             continue
         groups.setdefault(_db.db_path_for_source(src), []).append(src)
-
         rum_cfg = cfg.get("rum")
         rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
         rum_enabled = svcconfig.is_rum_enabled(cfg)
@@ -1247,7 +1153,6 @@ def _recycle_db_path(db_path: str, sources: list[dict]) -> dict:
     grace = _recycle_grace_s()
     lock_timeout = _recycle_lock_timeout_s()
     service_keys = [_service_key(s) for s in sources]
-
     # Acquire write/rebind locks in a deterministic global order (sorted lock
     # keys) so recycle can never deadlock against a writer holding one of them.
     lock_keys = sorted({_lock_key(s) for s in sources})
@@ -1264,14 +1169,12 @@ def _recycle_db_path(db_path: str, sources: list[dict]) -> dict:
                 )
                 return {"db_path": db_path, "status": "skipped_locked", "lock": lk}
             acquired.append(lock)
-
         # Locks held → raise the barrier so no NEW connection opens for this file.
         _db.set_recycle_barrier(db_path, True)
         retired_pools = {}
         try:
             retired_pools = _pool.begin_drain_pools(service_keys)
             drained = _pool.wait_pools_drained(retired_pools, drain_timeout)
-
             # gc so closed-but-not-yet-collected conn wrappers leave the WeakSet.
             _trim_memory()
             deadline = time.monotonic() + grace
@@ -1288,7 +1191,6 @@ def _recycle_db_path(db_path: str, sources: list[dict]) -> dict:
                 lock.release()
             except RuntimeError:
                 pass
-
     _trim_memory()
     rss_after = _db.current_rss_bytes()
     freed = (rss_before - rss_after) if (rss_before is not None and rss_after is not None) else None
@@ -1378,8 +1280,6 @@ def maybe_graceful_restart() -> bool:
 
 
 # ── run_duckdb_recycle ───────────────────────────────────────────────────────
-
-
 def _maybe_adjust_recycle_schedule(*, expedite: bool) -> None:
     """Dynamically adjust recycle interval under memory pressure (e.g. tighten to 2m, or relax back to baseline)."""
     try:
@@ -1389,13 +1289,10 @@ def _maybe_adjust_recycle_schedule(*, expedite: bool) -> None:
         job = sched.get_job("duckdb_recycle")
         if not job:
             return
-
         baseline_mins = max(1.0, recycle_interval_min() or 60.0)
         target_mins = min(2.0, baseline_mins) if expedite else baseline_mins
-
         current_trigger = getattr(job, "trigger", None)
         current_interval_s = getattr(getattr(current_trigger, "interval", None), "total_seconds", lambda: 0)()
-
         if int(current_interval_s) != int(target_mins * 60):
             job.reschedule("interval", minutes=target_mins)
             logger.info(
@@ -1427,9 +1324,7 @@ def run_duckdb_recycle() -> str:
             elif rss < int(threshold * 0.5):
                 _maybe_adjust_recycle_schedule(expedite=False)
             return f"skipped: RSS {rss / (1024 * 1024):.0f}MB < threshold {threshold / (1024 * 1024):.0f}MB"
-
     res = recycle_once(reason="interval")
-
     # Evaluate post-recycle memory to adapt schedule for next tick
     rss_after = _db.current_rss_bytes()
     if "incomplete" in res:
@@ -1441,21 +1336,17 @@ def run_duckdb_recycle() -> str:
             _maybe_adjust_recycle_schedule(expedite=False)
     elif threshold == 0:
         _maybe_adjust_recycle_schedule(expedite=False)
-
     return res
 
 
 # ── Insights prewarmer (folded from backend.cron.jobs.insights_prewarmer) ────
-
 from backend.utils.bounded_cache import CacheRegistry  # noqa: E402
 
 _MAX_ANALYST_SHAPES = 8
 _INGEST_TASKS = ("log_discovery", "rum_sync")
 DEFAULT_PREWARM_IDLE_MINUTES = 30.0
-
 _last_full_warm: dict[str, float] = {}
 CacheRegistry.register("insights_prewarmer._last_full_warm", _last_full_warm)
-
 _last_insights_request: dict[str, float] = {}
 CacheRegistry.register("insights_prewarmer._last_insights_request", _last_insights_request)
 
@@ -1481,14 +1372,12 @@ def _prewarm_idle_minutes(service_id: str, src: dict | None = None) -> float:
             return float(cron_ip["idle_minutes"])
         except (TypeError, ValueError):
             pass
-
     env_val = os.environ.get("INSIGHTS_PREWARM_IDLE_MINUTES", "").strip()
     if env_val:
         try:
             return float(env_val)
         except ValueError:
             pass
-
     return DEFAULT_PREWARM_IDLE_MINUTES
 
 
@@ -1558,7 +1447,6 @@ def _active_analyst_shapes(service_id: str) -> list[tuple[str | None, str | None
                 mask,
             )
         )
-
     ordered = sorted(shapes, key=lambda s: (s[0] or "", s[1] or "", s[2] or 0, s[3]))
     if len(ordered) > _MAX_ANALYST_SHAPES:
         logger.warning(
@@ -1588,10 +1476,8 @@ def _run_insights_prewarmer(service_id: str) -> None:
     src = get_source_for_service(service_id)
     if src is None:
         return
-
     if should_defer_cron("insights_prewarmer", service_id):
         return
-
     idle_mins = _prewarm_idle_minutes(service_id, src)
     if not is_insights_active(service_id, src, idle_minutes=idle_mins):
         logger.info(
@@ -1600,7 +1486,6 @@ def _run_insights_prewarmer(service_id: str) -> None:
             idle_mins,
         )
         return
-
     must_run = _cache_cold(service_id)
     if not must_run:
         ingest_task = _running_ingest(service_id)
@@ -1611,9 +1496,7 @@ def _run_insights_prewarmer(service_id: str) -> None:
                 ingest_task,
             )
             return
-
     _display = _display_label(src, service_id)
-
     con = None
     with cron_run(
         service_id,
@@ -1630,16 +1513,12 @@ def _run_insights_prewarmer(service_id: str) -> None:
             cached_status = svcconfig.get_status(src["name"]) or {}
             history_hours = history_hours_from_earliest(cached_status.get("earliest_log_at"))
             window_hours, baseline_hours = pick_insights_default(history_hours)
-
             con = get_connection(source=src, max_wait=5, read_only=True, skip_view_update=True)
-
             # Serial insight queries leave headroom for foreground requests.
             # Never change DuckDB thread count or memory_limit here:
             # both are instance-global, so they'd clobber every concurrent query, and
             # changing thread count mid-flight deadlocks DuckDB (AGENTS.md Trap #42).
-
             yield_to_api(max_wait_secs=1.0)
-
             get_insights(
                 con,
                 src,
@@ -1649,7 +1528,6 @@ def _run_insights_prewarmer(service_id: str) -> None:
                 force_refresh=True,
                 max_workers=1,
             )
-
             analyst_warmed = 0
             stopped_for: str | None = None
             complete = True
@@ -1697,7 +1575,6 @@ def _run_insights_prewarmer(service_id: str) -> None:
                         max_workers=1,
                     )
                     analyst_warmed += 1
-
             duration = run.elapsed()
             summary = (
                 f"Prewarmed default insights selection ({window_hours:g}h/{baseline_hours:g}h: "
@@ -1726,7 +1603,6 @@ def _run_insights_prewarmer(service_id: str) -> None:
 
 
 # ── Minute-cadence operational metric snapshot sampler (folded from metric_snapshot.py) ──
-
 import os as _os  # noqa: E402
 import shutil as _shutil  # noqa: E402
 
@@ -1750,7 +1626,6 @@ def _safe_record(
         logger.debug("[metric_snapshot] record %s failed: %s", metric, e)
     try:
         operational_metrics = _sys.modules[__name__]
-
         if metric in {"celery_active_tasks", "celery_active_workers"}:
             operational_metrics.record(metric, value)
         elif metric.startswith("celery_queue_depth_"):
@@ -1840,7 +1715,6 @@ def _sample_cron_duration() -> int:
                           )
                         """
                     ).fetchall()
-
                 for r in rows:
                     task = r["task"]
                     secs = r["duration_s"]
@@ -1942,7 +1816,6 @@ def _sample_os_vitals() -> int:
             count += 1
     except Exception as e:
         logger.debug("[metric_snapshot] cpu_load sample failed: %s", e)
-
     try:
         with open("/proc/meminfo") as f:
             meminfo: dict[str, int] = {}
@@ -1960,7 +1833,6 @@ def _sample_os_vitals() -> int:
         pass
     except Exception as e:
         logger.debug("[metric_snapshot] mem sample failed: %s", e)
-
     for path, metric in (("/app/data", "disk_used_pct"), ("/", "disk_used_pct_root")):
         try:
             d = _shutil.disk_usage(path)
@@ -2048,7 +1920,6 @@ def _sample_high_scale() -> int:
             present_pub = {row["domain"] for row in snapshot["publications"]}
             try:
                 operational_metrics = _sys.modules[__name__]
-
                 for domain in domains:
                     for status in source_statuses:
                         if (domain, status) not in present_status:
@@ -2188,7 +2059,6 @@ def _sample_celery_workers() -> int:
         stats = i.stats() or {}
         if _safe_record("celery_active_workers", float(len(stats))):
             count += 1
-
         active = (i.active() or {}) if stats else {}
         active_tasks = sum(len(tasks) for tasks in active.values())
         if _safe_record("celery_active_tasks", float(active_tasks)):

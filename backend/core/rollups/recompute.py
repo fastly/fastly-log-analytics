@@ -15,13 +15,17 @@ import logging
 import os
 import shutil
 import sys
+import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+from backend.utils.telemetry import ensure_utc
 
 from .. import metric_expressions
 from ._common import (
@@ -55,21 +59,19 @@ from .day_bundles import bundle_hours, bundle_hours_ip_spread
 
 # Writers dispatched by name from spec.HOUR_WRITERS (resolved against this
 # module at call time, so each name here is also the test patch point).
-from .network import (  # noqa: F401
+from .origin_dims import (  # noqa: F401  # noqa: F401
     build_network_geo_bundles,
     build_network_heatmap_bundles,
     build_network_quality_bundles,
     build_network_rtt_bundles,
     build_network_speed_bundles,
     build_network_summary_bundles,
-    build_pop_health_bundles,
-)
-from .origin_dims import (  # noqa: F401
     build_origin_dims_bundles,
     build_origin_latency_ts_bundles,
     build_origin_summary_bundles,
     build_perf_dims_bundles,
     build_perf_latency_bundles,
+    build_pop_health_bundles,
     build_slow_urls_bundles,
 )
 from .security_dims import (  # noqa: F401
@@ -1287,3 +1289,563 @@ for _legacy_mod in (
     "backend.core.rollups.sessions",
 ):
     sys.modules[_legacy_mod] = sys.modules[__name__]
+
+
+# ── RUM rollup writers (folded from backend.core.rollups.rum) ────────────────
+
+_RECOMPUTE_LOCKS: dict[str, threading.Lock] = {}
+_RECOMPUTE_LOCKS_GUARD = threading.Lock()
+
+
+def _recompute_lock(service_id: str) -> threading.Lock:
+    with _RECOMPUTE_LOCKS_GUARD:
+        return _RECOMPUTE_LOCKS.setdefault(service_id, threading.Lock())
+
+
+def _normalize_hour_dt(dt_val: datetime) -> datetime:
+    """Normalize a datetime to an hour boundary, converting aware timestamps to UTC."""
+    if getattr(dt_val, "tzinfo", None) is not None:
+        dt_val = dt_val.astimezone(UTC)
+    return dt_val.replace(minute=0, second=0, microsecond=0)
+
+
+def table_exists(con: Any, table_name: str) -> bool:
+    try:
+        con.execute(f"SELECT 1 FROM {table_name} LIMIT 1")
+        return True
+    except Exception:
+        return False
+
+
+def _rum_raw_latest(con: Any) -> Any:
+    """MAX(timestamp) across the raw RUM beacon tables, or ``None``."""
+    ts_list = []
+    for tbl in ("client_vitals", "client_errors"):
+        try:
+            row = con.execute(f"SELECT MAX(timestamp) FROM {tbl}").fetchone()
+        except Exception:
+            continue
+        if row and row[0]:
+            ts_list.append(row[0])
+    return max(ts_list) if ts_list else None
+
+
+def rum_count_and_latest(con: Any) -> tuple[int, Any]:
+    """Return ``(beacon_count, latest_timestamp)`` for the RUM store.
+
+    Freshness (``latest_timestamp``) is ALWAYS the raw beacon event-time
+    MAX(timestamp), mirroring the request side (AGENTS.md Trap #39). The
+    precomputed aggregate tables are only a fast *count* path, and only
+    when they actually hold rows — an existing-but-empty aggregate (rollup
+    lag, a failed recompute tick, or a service whose first rollup hasn't
+    run yet) must fall through to a raw distinct-beacon count so the header
+    never reports "Never" over live, queryable beacons.
+    """
+    if table_exists(con, "rum_vitals_aggregates") and table_exists(con, "rum_error_aggregates"):
+        try:
+            v_res = con.execute(
+                "SELECT SUM(event_count) FROM rum_vitals_aggregates "
+                "WHERE dimension = 'total' AND value IN ('pageviews', 'interactions')"
+            ).fetchone()
+            v_cnt = v_res[0] if v_res and v_res[0] is not None else 0
+            e_res = con.execute("SELECT SUM(error_count) FROM rum_error_aggregates").fetchone()
+            e_cnt = e_res[0] if e_res and e_res[0] is not None else 0
+            cnt = int(v_cnt) + int(e_cnt)
+            if cnt > 0:
+                return cnt, _rum_raw_latest(con)
+        except Exception:
+            logger.debug("rum_count_and_latest: step failed (ignored)", exc_info=True)
+
+    # Raw fallback: aggregates missing, empty, or errored. Count distinct
+    # beacons and read freshness straight from the raw tables.
+    distinct_id = "hash(COALESCE(NULLIF(req_id, ''), concat(cid, '_', CAST(epoch(timestamp) AS BIGINT))))"
+    cnt = 0
+    for tbl in ("client_vitals", "client_errors"):
+        try:
+            row = con.execute(f"SELECT COUNT(DISTINCT {distinct_id}) FROM {tbl}").fetchone()
+        except Exception:
+            continue
+        cnt += int(row[0]) if row and row[0] else 0
+    return cnt, _rum_raw_latest(con)
+
+
+def recompute_rum_aggregates(con: Any, service_id: str, hours: list[datetime] | list[str] | None = None) -> None:
+    """Ensure RUM aggregate tables exist, find active hours, and update them idempotently.
+
+    Serialized per service: the delete-then-insert below is not atomic, so two concurrent runs (commit cron, compaction
+    heal, admin recompute) over the same hours each delete nothing and both insert, doubling every beacon count.
+    """
+    with _recompute_lock(service_id):
+        _recompute_rum_aggregates_locked(con, service_id, hours)
+
+
+def _recompute_rum_aggregates_locked(con: Any, service_id: str, hours: list[datetime] | list[str] | None) -> None:
+    logger.info("[rum_rollups] Ensuring RUM aggregate schemas exist...")
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS rum_vitals_aggregates (
+            service_id VARCHAR,
+            bucket_start TIMESTAMPTZ,
+            dimension VARCHAR,
+            value VARCHAR,
+            event_count BIGINT,
+            value_sum DOUBLE,
+            good_count BIGINT,
+            ni_count BIGINT,
+            poor_count BIGINT,
+            p50_value DOUBLE,
+            p75_value DOUBLE,
+            p99_value DOUBLE
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS rum_error_aggregates (
+            service_id VARCHAR,
+            bucket_start TIMESTAMPTZ,
+            dimension VARCHAR,
+            value VARCHAR,
+            error_count BIGINT
+        )
+    """)
+
+    has_vitals = table_exists(con, "client_vitals")
+    has_errors = table_exists(con, "client_errors")
+
+    if not has_vitals and not has_errors:
+        logger.info("[rum_rollups] %s: No client_vitals or client_errors table found. Skipping.", service_id)
+        return
+
+    # 2. Identify the hours that have raw data
+    hours_set: set[datetime] = set()
+    if hours is not None:
+        for h in hours:
+            if isinstance(h, str):
+                try:
+                    parsed_dt = _normalize_hour_dt(datetime.fromisoformat(h.replace("Z", "+00:00")))
+                    hours_set.add(parsed_dt)
+                except ValueError:
+                    pass
+            elif isinstance(h, datetime):
+                hours_set.add(_normalize_hour_dt(h))
+    else:
+        if has_vitals:
+            try:
+                res = con.execute(
+                    "SELECT DISTINCT DATE_TRUNC('hour', timestamp) FROM client_vitals WHERE timestamp IS NOT NULL"
+                ).fetchall()
+                for r in res:
+                    if r[0]:
+                        dt_val = r[0]
+                        if isinstance(dt_val, datetime):
+                            dt_val = _normalize_hour_dt(dt_val)
+                        hours_set.add(dt_val)
+            except Exception as e:
+                logger.warning("[rum_rollups] Failed to query active hours from client_vitals: %s", e)
+
+        if has_errors:
+            try:
+                res = con.execute(
+                    "SELECT DISTINCT DATE_TRUNC('hour', timestamp) FROM client_errors WHERE timestamp IS NOT NULL"
+                ).fetchall()
+                for r in res:
+                    if r[0]:
+                        dt_val = r[0]
+                        if isinstance(dt_val, datetime):
+                            dt_val = _normalize_hour_dt(dt_val)
+                        hours_set.add(dt_val)
+            except Exception as e:
+                logger.warning("[rum_rollups] Failed to query active hours from client_errors: %s", e)
+
+    if not hours_set:
+        logger.info("[rum_rollups] %s: No active RUM data hours found. Skipping.", service_id)
+        return
+
+    if any(getattr(h, "tzinfo", None) is not None for h in hours_set):
+        hours_set = {ensure_utc(h) for h in hours_set}
+
+    # 3. Format hours as SQL TIMESTAMPTZ list
+    hours_list = sorted(list(hours_set))
+    hours_str = ", ".join(f"TIMESTAMPTZ '{h.isoformat()}'" for h in hours_list)
+
+    logger.info(
+        "[rum_rollups] %s: Recomputing aggregates for %d hours: %s",
+        service_id,
+        len(hours_list),
+        [h.isoformat() for h in hours_list],
+    )
+
+    # 4. Delete existing aggregates for these hours
+    con.execute(
+        f"DELETE FROM rum_vitals_aggregates WHERE service_id = ? AND bucket_start IN ({hours_str})", [service_id]
+    )
+    con.execute(
+        f"DELETE FROM rum_error_aggregates WHERE service_id = ? AND bucket_start IN ({hours_str})", [service_id]
+    )
+
+    distinct_id = "hash(COALESCE(NULLIF(req_id, ''), concat(cid, '_', CAST(epoch(timestamp) AS BIGINT))))"
+
+    # 5. Populate vitals aggregates
+    if has_vitals:
+        con.execute(
+            f"""
+            INSERT INTO rum_vitals_aggregates
+            -- Dimension: total
+            SELECT
+                ? AS service_id,
+                DATE_TRUNC('hour', timestamp) AS bucket_start,
+                'total' AS dimension,
+                CASE WHEN metric_name LIKE 'event_%' THEN 'interactions' ELSE 'pageviews' END AS value,
+                COUNT(DISTINCT {distinct_id}) AS event_count,
+                0.0 AS value_sum,
+                0 AS good_count,
+                0 AS ni_count,
+                0 AS poor_count,
+                0.0 AS p50_value,
+                0.0 AS p75_value,
+                0.0 AS p99_value
+            FROM client_vitals
+            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
+            GROUP BY bucket_start, value
+
+            UNION ALL
+
+            -- Dimension: metric_name
+            SELECT
+                ? AS service_id,
+                DATE_TRUNC('hour', timestamp) AS bucket_start,
+                'metric_name' AS dimension,
+                metric_name AS value,
+                COUNT(*) AS event_count,
+                CAST(COALESCE(SUM(metric_value), 0.0) AS DOUBLE) AS value_sum,
+                COUNT(*) FILTER (WHERE metric_rating = 'good') AS good_count,
+                COUNT(*) FILTER (WHERE metric_rating = 'needs_improvement') AS ni_count,
+                COUNT(*) FILTER (WHERE metric_rating = 'poor') AS poor_count,
+                CAST(MEDIAN(metric_value) AS DOUBLE) AS p50_value,
+                CAST(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE) AS p75_value,
+                CAST(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE) AS p99_value
+            FROM client_vitals
+            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
+            GROUP BY bucket_start, metric_name
+
+            UNION ALL
+
+            -- Dimension: browser
+            SELECT
+                ? AS service_id,
+                DATE_TRUNC('hour', timestamp) AS bucket_start,
+                'browser' AS dimension,
+                COALESCE(browser, 'Unknown') AS value,
+                COUNT(DISTINCT {distinct_id}) AS event_count,
+                0.0 AS value_sum,
+                0 AS good_count,
+                0 AS ni_count,
+                0 AS poor_count,
+                0.0 AS p50_value,
+                0.0 AS p75_value,
+                0.0 AS p99_value
+            FROM client_vitals
+            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
+            GROUP BY bucket_start, browser
+
+            UNION ALL
+
+            -- Dimension: os
+            SELECT
+                ? AS service_id,
+                DATE_TRUNC('hour', timestamp) AS bucket_start,
+                'os' AS dimension,
+                COALESCE(os, 'Unknown') AS value,
+                COUNT(DISTINCT {distinct_id}) AS event_count,
+                0.0 AS value_sum,
+                0 AS good_count,
+                0 AS ni_count,
+                0 AS poor_count,
+                0.0 AS p50_value,
+                0.0 AS p75_value,
+                0.0 AS p99_value
+            FROM client_vitals
+            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
+            GROUP BY bucket_start, os
+
+            UNION ALL
+
+            -- Dimension: device
+            SELECT
+                ? AS service_id,
+                DATE_TRUNC('hour', timestamp) AS bucket_start,
+                'device' AS dimension,
+                COALESCE(device, 'Unknown') AS value,
+                COUNT(DISTINCT {distinct_id}) AS event_count,
+                0.0 AS value_sum,
+                0 AS good_count,
+                0 AS ni_count,
+                0 AS poor_count,
+                0.0 AS p50_value,
+                0.0 AS p75_value,
+                0.0 AS p99_value
+            FROM client_vitals
+            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
+            GROUP BY bucket_start, device
+
+            UNION ALL
+
+            -- Dimension: pathname
+            SELECT
+                ? AS service_id,
+                DATE_TRUNC('hour', timestamp) AS bucket_start,
+                'pathname' AS dimension,
+                pathname AS value,
+                COUNT(DISTINCT {distinct_id}) AS event_count,
+                0.0 AS value_sum,
+                0 AS good_count,
+                0 AS ni_count,
+                0 AS poor_count,
+                0.0 AS p50_value,
+                0.0 AS p75_value,
+                0.0 AS p99_value
+            FROM client_vitals
+            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str}) AND pathname IS NOT NULL
+            GROUP BY bucket_start, pathname
+
+            UNION ALL
+
+            -- Dimension: path_metric_load
+            SELECT
+                ? AS service_id,
+                DATE_TRUNC('hour', timestamp) AS bucket_start,
+                'path_metric_load' AS dimension,
+                pathname AS value,
+                COUNT(*) AS event_count,
+                CAST(COALESCE(SUM(metric_value), 0.0) AS DOUBLE) AS value_sum,
+                0 AS good_count,
+                0 AS ni_count,
+                0 AS poor_count,
+                0.0 AS p50_value,
+                0.0 AS p75_value,
+                0.0 AS p99_value
+            FROM client_vitals
+            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
+              AND pathname IS NOT NULL
+              AND metric_name IN ('duration', 'pageLoadTime', 'load_time', 'pageLoad', 'LCP', 'lcp', 'ttfb', 'TTFB', 'fcp', 'FCP')
+            GROUP BY bucket_start, pathname
+
+            UNION ALL
+
+            -- Dimension: path_metric_lcp
+            SELECT
+                ? AS service_id,
+                DATE_TRUNC('hour', timestamp) AS bucket_start,
+                'path_metric_lcp' AS dimension,
+                pathname AS value,
+                COUNT(*) AS event_count,
+                0.0 AS value_sum,
+                0 AS good_count,
+                0 AS ni_count,
+                0 AS poor_count,
+                0.0 AS p50_value,
+                CAST(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE) AS p75_value,
+                0.0 AS p99_value
+            FROM client_vitals
+            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
+              AND pathname IS NOT NULL
+              AND metric_name IN ('LCP', 'lcp')
+            GROUP BY bucket_start, pathname
+
+            UNION ALL
+
+            -- Dimension: path_metric_cls
+            SELECT
+                ? AS service_id,
+                DATE_TRUNC('hour', timestamp) AS bucket_start,
+                'path_metric_cls' AS dimension,
+                pathname AS value,
+                COUNT(*) AS event_count,
+                0.0 AS value_sum,
+                0 AS good_count,
+                0 AS ni_count,
+                0 AS poor_count,
+                0.0 AS p50_value,
+                CAST(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE) AS p75_value,
+                0.0 AS p99_value
+            FROM client_vitals
+            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
+              AND pathname IS NOT NULL
+              AND metric_name IN ('CLS', 'cls')
+            GROUP BY bucket_start, pathname
+        """,
+            [service_id] * 9,
+        )
+
+    # 6. Populate error aggregates
+    if has_errors:
+        con.execute(
+            f"""
+            INSERT INTO rum_error_aggregates
+            -- Dimension: total
+            SELECT
+                ? AS service_id,
+                DATE_TRUNC('hour', timestamp) AS bucket_start,
+                'total' AS dimension,
+                'errors' AS value,
+                COUNT(DISTINCT {distinct_id}) AS error_count
+            FROM client_errors
+            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
+            GROUP BY bucket_start
+
+            UNION ALL
+
+            -- Dimension: pathname
+            SELECT
+                ? AS service_id,
+                DATE_TRUNC('hour', timestamp) AS bucket_start,
+                'pathname' AS dimension,
+                pathname AS value,
+                COUNT(DISTINCT {distinct_id}) AS error_count
+            FROM client_errors
+            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str}) AND pathname IS NOT NULL
+            GROUP BY bucket_start, pathname
+
+            UNION ALL
+
+            -- Dimension: exception
+            SELECT
+                ? AS service_id,
+                DATE_TRUNC('hour', timestamp) AS bucket_start,
+                'exception' AS dimension,
+                concat(COALESCE(error_message, ''), '|', COALESCE(error_file, ''), '|', CAST(COALESCE(error_line, 0) AS VARCHAR), '|', CAST(COALESCE(error_col, 0) AS VARCHAR)) AS value,
+                COUNT(*) AS error_count
+            FROM client_errors
+            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
+            GROUP BY bucket_start, value
+        """,
+            [service_id] * 3,
+        )
+
+    # 7. Populate a single unified beacon count per hour. This MUST match the
+    # header badge's cross-table COUNT(DISTINCT distinct_id) semantics
+    # (backend/routers/bootstrap.py) — summing the vitals 'pageviews' +
+    # 'interactions' dimension counts (step 5) plus the error 'errors'
+    # dimension count (step 6) double-counts any physical beacon event that
+    # emits more than one row sharing a distinct_id (e.g. a vitals metric AND
+    # an interaction event from the same page load). Computed directly from
+    # a UNION of the raw tables rather than from the per-dimension aggregates
+    # above, since those are already partitioned in a way that loses the
+    # cross-partition distinct_id overlap.
+    union_parts = []
+    if has_vitals:
+        union_parts.append(
+            f"SELECT timestamp, {distinct_id} AS distinct_id FROM client_vitals "
+            f"WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})"
+        )
+    if has_errors:
+        union_parts.append(
+            f"SELECT timestamp, {distinct_id} AS distinct_id FROM client_errors "
+            f"WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})"
+        )
+    con.execute(
+        f"""
+        INSERT INTO rum_vitals_aggregates
+        SELECT
+            ? AS service_id,
+            DATE_TRUNC('hour', timestamp) AS bucket_start,
+            'total' AS dimension,
+            'total_beacons' AS value,
+            COUNT(DISTINCT distinct_id) AS event_count,
+            0.0 AS value_sum,
+            0 AS good_count,
+            0 AS ni_count,
+            0 AS poor_count,
+            0.0 AS p50_value,
+            0.0 AS p75_value,
+            0.0 AS p99_value
+        FROM ({" UNION ALL ".join(union_parts)})
+        GROUP BY bucket_start
+        """,
+        [service_id],
+    )
+
+    logger.info("[rum_rollups] %s: RUM aggregates successfully updated for %d hours", service_id, len(hours_list))
+
+
+def backfill_missing_rum_aggregates(
+    con: Any,
+    service_id: str,
+    lookback_days: int = 30,
+) -> list[datetime]:
+    """Detect and heal hours in ``client_vitals`` / ``client_errors`` within
+    ``lookback_days`` that are either absent from ``rum_vitals_aggregates`` or
+    lack a ``total_beacons`` aggregate row or carry more than one (a past concurrent recompute).
+
+    Historical hours aggregated before commit ``3fcbcd27`` already have rows in
+    ``rum_vitals_aggregates`` (for ``LCP``/``CLS``/``pageviews``/etc.) and would
+    be skipped by a naive ``NOT EXISTS`` check on ``bucket_start`` alone.
+    Checking specifically for ``value = 'total_beacons'`` ensures those legacy
+    hours are detected and recomputed.
+    """
+    has_vitals = table_exists(con, "client_vitals")
+    has_errors = table_exists(con, "client_errors")
+    if not has_vitals and not has_errors:
+        return []
+
+    cutoff = datetime.now(UTC) - timedelta(days=max(1, int(lookback_days)))
+    raw_parts: list[str] = []
+    params: list[object] = []
+
+    if has_vitals:
+        raw_parts.append(
+            "SELECT DISTINCT DATE_TRUNC('hour', timestamp) AS bucket_start "
+            "FROM client_vitals WHERE timestamp IS NOT NULL AND timestamp >= ?"
+        )
+        params.append(cutoff)
+    if has_errors:
+        raw_parts.append(
+            "SELECT DISTINCT DATE_TRUNC('hour', timestamp) AS bucket_start "
+            "FROM client_errors WHERE timestamp IS NOT NULL AND timestamp >= ?"
+        )
+        params.append(cutoff)
+
+    raw_union = " UNION ".join(raw_parts)
+    if table_exists(con, "rum_vitals_aggregates"):
+        sql = f"""
+            SELECT DISTINCT r.bucket_start
+            FROM ({raw_union}) r
+            WHERE r.bucket_start IS NOT NULL
+              AND (
+                  SELECT COUNT(*)
+                  FROM rum_vitals_aggregates a
+                  WHERE a.service_id = ?
+                    AND a.bucket_start = r.bucket_start
+                    AND a.value = 'total_beacons'
+              ) <> 1
+            ORDER BY r.bucket_start ASC
+        """
+        rows = con.execute(sql, [*params, service_id]).fetchall()
+    else:
+        sql = f"""
+            SELECT DISTINCT r.bucket_start
+            FROM ({raw_union}) r
+            WHERE r.bucket_start IS NOT NULL
+            ORDER BY r.bucket_start ASC
+        """
+        rows = con.execute(sql, params).fetchall()
+
+    missing_hours: list[datetime] = []
+    for r in rows:
+        if r and r[0] is not None:
+            dt_val = r[0]
+            if isinstance(dt_val, datetime):
+                dt_val = _normalize_hour_dt(dt_val)
+            missing_hours.append(dt_val)
+
+    if missing_hours:
+        logger.info(
+            "[rum_rollups] %s: Healing %d RUM aggregate hour(s) with a missing or duplicated total_beacons row (lookback=%dd)",
+            service_id,
+            len(missing_hours),
+            lookback_days,
+        )
+        recompute_rum_aggregates(con, service_id, hours=missing_hours)
+
+    return missing_hours
+
+
+sys.modules["backend.core.rollups.rum"] = sys.modules[__name__]

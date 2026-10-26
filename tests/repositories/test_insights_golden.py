@@ -32,7 +32,6 @@ _MOCK_POP_MAP = {
     "DEN": (39.8561, -104.6737),
     "IAD": (38.9531, -77.4565),
 }
-
 _MOCK_ASN_NAMES = {
     "64501": "MonoNet ASN",
     "64502": "MetroISP Corp",
@@ -40,31 +39,76 @@ _MOCK_ASN_NAMES = {
     "64504": "BrandNew Cloud",
     "64505": "HostingShift Networks",
 }
-
-_MOCK_DMA_MAP = {
-    "501": "New York, NY",
-    "803": "Los Angeles, CA",
-}
+_MOCK_DMA_MAP = {"501": "New York, NY", "803": "Los Angeles, CA"}
 
 
 def _create_full_schema_table(con: duckdb.DuckDBPyConnection, table_name: str) -> list[str]:
     """Create a log table with all raw catalog columns plus any required_fields."""
-    col_types: dict[str, str] = {}
-    for f in LOG_FIELD_CATALOG:
-        if f.get("vcl") is not None:
-            col_types[f["id"]] = "TIMESTAMPTZ" if f["id"] == "timestamp" else f["duckdb_type"]
-
+    col_types = {
+        f["id"]: ("TIMESTAMPTZ" if f["id"] == "timestamp" else f["duckdb_type"])
+        for f in LOG_FIELD_CATALOG
+        if f.get("vcl") is not None
+    }
     for d in registry.get_all():
         for req_col in d.required_fields:
-            if req_col not in col_types:
-                col_types[req_col] = "VARCHAR"
-
+            col_types.setdefault(req_col, "VARCHAR")
     for extra_col in ("ja3", "ja4", "region"):
         col_types.setdefault(extra_col, "VARCHAR")
-
     cols_sql = ", ".join(f'"{c}" {t}' for c, t in col_types.items())
     con.execute(f"CREATE TABLE IF NOT EXISTS {table_name} ({cols_sql})")
     return list(col_types.keys())
+
+
+_BASE_ROW_DEFAULTS: dict[str, Any] = {
+    "ip": "192.0.2.1",
+    "status": 200,
+    "elapsed": 25000,
+    "cache": "HIT",
+    "resp_bytes": 2048,
+    "host": "www.example.com",
+    "url": "/normal/page",
+    "method": "GET",
+    "proto": "HTTP/2",
+    "ua": "Mozilla/5.0 StandardBrowser/1.0",
+    "pop": "IAD",
+    "country": "US",
+    "region": "VA",
+    "city": "Ashburn",
+    "asn": "64500",
+    "metro": None,
+    "lat": 39.0438,
+    "lon": -77.4874,
+    "tcp_rtt": 20000,
+    "rtt_var": 2000,
+    "ploss": 0.0,
+    "retrans": 0,
+    "delivery_rate": 0,
+    "ja3": "ja3_default",
+    "ja4": "ja4_default",
+    "tls_ciphers_sha": "cipher_default",
+    "req_header_bytes": 400,
+    "conn_requests": 2,
+    "server_region": "",
+    "ottfb": None,
+    "ttl": 0,
+    "hits": 0,
+    "age": 0,
+    "ost": None,
+    "oretries": 0,
+    "oip": "",
+    "rid": "",
+    "prid": "",
+    "edge": True,
+    "waf_sig": "",
+    "p_type": "",
+    "c_type": "",
+    "c_speed": "",
+    "transport": "",
+    "referer": "",
+    "resp_header_content_encoding": "br",
+    "cookie_session": "",
+    "oconnect_ms": None,
+}
 
 
 def _build_comprehensive_anomaly_rows() -> list[dict[str, Any]]:
@@ -73,82 +117,25 @@ def _build_comprehensive_anomaly_rows() -> list[dict[str, Any]]:
     """
     rng = random.Random(42)
     base_records = generate_mock_records(
-        {"log_fields": {"groups": ["A", "B", "C", "D", "E", "F", "G"]}},
-        num_logs=40,
-        hours_ago=12,
-        rng=rng,
+        {"log_fields": {"groups": ["A", "B", "C", "D", "E", "F", "G"]}}, num_logs=40, hours_ago=12, rng=rng
     )
-
     w_ts_base = FIXED_NOW - timedelta(minutes=30)
     b_ts_base = FIXED_NOW - timedelta(hours=12)
     earliest_ts = FIXED_NOW - timedelta(hours=24, minutes=55)
 
     def _row(ts: datetime, **overrides: Any) -> dict[str, Any]:
-        base: dict[str, Any] = {
-            "timestamp": ts.isoformat(),
-            "ip": "192.0.2.1",
-            "status": 200,
-            "elapsed": 25000,
-            "cache": "HIT",
-            "resp_bytes": 2048,
-            "host": "www.example.com",
-            "url": "/normal/page",
-            "method": "GET",
-            "proto": "HTTP/2",
-            "ua": "Mozilla/5.0 StandardBrowser/1.0",
-            "pop": "IAD",
-            "country": "US",
-            "region": "VA",
-            "city": "Ashburn",
-            "asn": "64500",
-            "metro": None,
-            "lat": 39.0438,
-            "lon": -77.4874,
-            "tcp_rtt": 20000,
-            "rtt_var": 2000,
-            "ploss": 0.0,
-            "retrans": 0,
-            "delivery_rate": 0,
-            "ja3": "ja3_default",
-            "ja4": "ja4_default",
-            "tls_ciphers_sha": "cipher_default",
-            "req_header_bytes": 400,
-            "conn_requests": 2,
-            "server_region": "",
-            "ottfb": None,
-            "ttl": 0,
-            "hits": 0,
-            "age": 0,
-            "ost": None,
-            "oretries": 0,
-            "oip": "",
-            "rid": "",
-            "prid": "",
-            "edge": True,
-            "waf_sig": "",
-            "p_type": "",
-            "c_type": "",
-            "c_speed": "",
-            "transport": "",
-            "referer": "",
-            "resp_header_content_encoding": "br",
-            "cookie_session": "",
-            "oconnect_ms": None,
-        }
-        base.update(overrides)
-        return base
+        return {"timestamp": ts.isoformat(), **_BASE_ROW_DEFAULTS, **overrides}
 
-    rows: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = [_row(earliest_ts, ip="192.0.2.250", cache="HIT")]
 
-    # Anchor row at -24h55m so available_history_hours > 24.0
-    rows.append(_row(earliest_ts, ip="192.0.2.250", cache="HIT"))
+    def _add(ts: datetime, n: int, **kw: Any) -> None:
+        for i in range(n):
+            rows.append(_row(ts + timedelta(milliseconds=i), **kw))
 
-    # Fold in deterministic log_factory records (pinned to baseline timestamps)
     for idx, rec in enumerate(base_records):
-        pinned_ts = b_ts_base - timedelta(minutes=idx * 5)
         rows.append(
             _row(
-                pinned_ts,
+                b_ts_base - timedelta(minutes=idx * 5),
                 ip=rec.get("ip", "192.0.2.2"),
                 status=200,
                 elapsed=20000,
@@ -163,10 +150,8 @@ def _build_comprehensive_anomaly_rows() -> list[dict[str, Any]]:
         )
 
     # 1. error_spikes: /api/err-spike
-    for i in range(12):
-        rows.append(_row(b_ts_base + timedelta(milliseconds=i), url="/api/err-spike", status=200))
-    for i in range(5):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), url="/api/err-spike", status=502))
+    _add(b_ts_base, 12, url="/api/err-spike", status=200)
+    _add(w_ts_base, 5, url="/api/err-spike", status=502)
 
     # 2. botnet_grouping: ja4='ja4_botnet_1'
     rows.append(_row(b_ts_base, ja4="ja4_botnet_1", ip="10.1.0.1"))
@@ -174,108 +159,53 @@ def _build_comprehensive_anomaly_rows() -> list[dict[str, Any]]:
         rows.append(_row(w_ts_base + timedelta(milliseconds=i), ja4="ja4_botnet_1", ip=f"10.1.0.{i + 1}"))
 
     # 4. new_country_traffic: country='IS'
-    for i in range(4):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), country="IS", city="Reykjavik", region="1"))
+    _add(w_ts_base, 4, country="IS", city="Reykjavik", region="1")
 
     # 5. city_surges: SurgeVille
-    for i in range(5):
-        rows.append(_row(b_ts_base + timedelta(milliseconds=i), city="SurgeVille", region="TX", country="US"))
-    for i in range(25):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), city="SurgeVille", region="TX", country="US"))
+    _add(b_ts_base, 5, city="SurgeVille", region="TX", country="US")
+    _add(w_ts_base, 25, city="SurgeVille", region="TX", country="US")
 
     # 6. city_error_spikes: ErrTown
-    for i in range(20):
-        rows.append(_row(b_ts_base + timedelta(milliseconds=i), city="ErrTown", region="CA", country="US", status=200))
-    for i in range(12):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), city="ErrTown", region="CA", country="US", status=500))
+    _add(b_ts_base, 20, city="ErrTown", region="CA", country="US", status=200)
+    _add(w_ts_base, 12, city="ErrTown", region="CA", country="US", status=500)
 
     # 7. city_latency_regressions: SlowBerg
-    for i in range(55):
-        rows.append(
-            _row(
-                b_ts_base + timedelta(milliseconds=i),
-                city="SlowBerg",
-                region="NY",
-                country="US",
-                url="/city/slowberg",
-                elapsed=100000,
-            )
-        )
-    for i in range(12):
-        rows.append(
-            _row(
-                w_ts_base + timedelta(milliseconds=i),
-                city="SlowBerg",
-                region="NY",
-                country="US",
-                url="/city/slowberg",
-                elapsed=1500000,
-            )
-        )
+    _add(b_ts_base, 55, city="SlowBerg", region="NY", country="US", url="/city/slowberg", elapsed=100000)
+    _add(w_ts_base, 12, city="SlowBerg", region="NY", country="US", url="/city/slowberg", elapsed=1500000)
 
     # 8. new_city_traffic: FreshPolis
-    for i in range(6):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), city="FreshPolis", region="WA", country="US"))
+    _add(w_ts_base, 6, city="FreshPolis", region="WA", country="US")
 
     # 10. new_probe_urls: /wp-admin/setup.php
-    for i in range(4):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), url="/wp-admin/setup.php", status=404))
+    _add(w_ts_base, 4, url="/wp-admin/setup.php", status=404)
 
     # 11. waf_signal_spikes: SQLI-PROBE
     rows.append(_row(b_ts_base, waf_sig="SQLI-PROBE"))
-    for i in range(5):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), waf_sig="SQLI-PROBE,BOT-ANALYSIS"))
+    _add(w_ts_base, 5, waf_sig="SQLI-PROBE,BOT-ANALYSIS")
 
     # 12. proxy_surge + 37b. asn_hosting_shift
     rows.append(_row(b_ts_base, asn="64500", p_type="hosting"))
     rows.append(_row(b_ts_base, asn="64505", p_type=""))
-    for i in range(120):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), asn="64505", p_type="hosting"))
+    _add(w_ts_base, 120, asn="64505", p_type="hosting")
 
     # 14. asn_metro_performance
-    for i in range(55):
-        rows.append(_row(b_ts_base + timedelta(milliseconds=i), asn="64502", metro="501", country="US", tcp_rtt=20000))
-    for i in range(22):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), asn="64502", metro="501", country="US", tcp_rtt=120000))
+    _add(b_ts_base, 55, asn="64502", metro="501", country="US", tcp_rtt=20000)
+    _add(w_ts_base, 22, asn="64502", metro="501", country="US", tcp_rtt=120000)
 
-    # 15. cache_collapse
-    for i in range(25):
-        rows.append(_row(b_ts_base + timedelta(milliseconds=i), url="/static/bundle.js", cache="HIT"))
-    for i in range(10):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), url="/static/bundle.js", cache="MISS"))
-
-    # 15b. cacheability_regression
-    for i in range(55):
-        rows.append(_row(b_ts_base + timedelta(milliseconds=i), url="/account/overview", cache="HIT"))
-    for i in range(12):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), url="/account/overview", cache="PASS"))
-
-    # 16. latency_regression
-    for i in range(25):
-        rows.append(_row(b_ts_base + timedelta(milliseconds=i), url="/api/slow-endpoint", elapsed=100000))
-    for i in range(8):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), url="/api/slow-endpoint", elapsed=900000))
+    # 15. cache_collapse & 15b. cacheability_regression & 16. latency_regression
+    _add(b_ts_base, 25, url="/static/bundle.js", cache="HIT")
+    _add(w_ts_base, 10, url="/static/bundle.js", cache="MISS")
+    _add(b_ts_base, 55, url="/account/overview", cache="HIT")
+    _add(w_ts_base, 12, url="/account/overview", cache="PASS")
+    _add(b_ts_base, 25, url="/api/slow-endpoint", elapsed=100000)
+    _add(w_ts_base, 8, url="/api/slow-endpoint", elapsed=900000)
 
     # 17. impossible_distance
-    for i in range(3):
-        rows.append(
-            _row(
-                w_ts_base + timedelta(milliseconds=i),
-                pop="JFK",
-                lat=0.0,
-                lon=0.0,
-                tcp_rtt=1000,
-                ja4="ja4_spoof_fp",
-                ip="198.51.100.77",
-                edge=True,
-            )
-        )
+    _add(w_ts_base, 3, pop="JFK", lat=0.0, lon=0.0, tcp_rtt=1000, ja4="ja4_spoof_fp", ip="198.51.100.77", edge=True)
 
     # 18. tail_latency
-    for i in range(22):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), url="/api/tail-heavy", elapsed=10000))
-    for i in range(2):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=30 + i), url="/api/tail-heavy", elapsed=200000))
+    _add(w_ts_base, 22, url="/api/tail-heavy", elapsed=10000)
+    _add(w_ts_base + timedelta(milliseconds=30), 2, url="/api/tail-heavy", elapsed=200000)
 
     # 19. cipher_spread
     rows.append(_row(b_ts_base, tls_ciphers_sha="cipher_sha_bot_1", ip="10.2.0.1"))
@@ -284,81 +214,41 @@ def _build_comprehensive_anomaly_rows() -> list[dict[str, Any]]:
             _row(w_ts_base + timedelta(milliseconds=i), tls_ciphers_sha="cipher_sha_bot_1", ip=f"10.2.0.{i + 1}")
         )
 
-    # 20. request_size_anomaly
-    for i in range(10):
-        rows.append(_row(b_ts_base + timedelta(milliseconds=i), ip="10.3.0.1", req_header_bytes=500))
-    for i in range(4):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), ip="10.3.0.1", req_header_bytes=12000))
-
-    # 21. connection_abuse
-    for i in range(10):
-        rows.append(_row(b_ts_base + timedelta(milliseconds=i), ip="10.4.0.1", conn_requests=5))
-    for i in range(6):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), ip="10.4.0.1", conn_requests=120))
+    # 20. request_size_anomaly & 21. connection_abuse
+    _add(b_ts_base, 10, ip="10.3.0.1", req_header_bytes=500)
+    _add(w_ts_base, 4, ip="10.3.0.1", req_header_bytes=12000)
+    _add(b_ts_base, 10, ip="10.4.0.1", conn_requests=5)
+    _add(w_ts_base, 6, ip="10.4.0.1", conn_requests=120)
 
     # 22. region_latency + 25. origin_latency_spike + 45. timeout_split
-    for i in range(105):
-        rows.append(
-            _row(
-                b_ts_base + timedelta(milliseconds=i),
-                server_region="US-East",
-                url="/api/origin-timed",
-                elapsed=100000,
-                ottfb=20000,
-                oconnect_ms=10,
-            )
-        )
-    for i in range(55):
-        rows.append(
-            _row(
-                w_ts_base + timedelta(milliseconds=i),
-                server_region="US-East",
-                url="/api/origin-timed",
-                elapsed=600000,
-                ottfb=450000,
-                oconnect_ms=150,
-            )
-        )
+    _add(b_ts_base, 105, server_region="US-East", url="/api/origin-timed", elapsed=100000, ottfb=20000, oconnect_ms=10)
+    _add(w_ts_base, 55, server_region="US-East", url="/api/origin-timed", elapsed=600000, ottfb=450000, oconnect_ms=150)
 
-    # 23. cache_ttl_mismatch
-    for i in range(12):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), url="/Promo/Banner", ttl=3600, hits=0, age=10))
+    # 23. cache_ttl_mismatch & 24. image_optimization_opportunities
+    _add(w_ts_base, 12, url="/Promo/Banner", ttl=3600, hits=0, age=10)
+    _add(
+        w_ts_base,
+        10,
+        url="/media/hero-banner.png",
+        status=200,
+        resp_bytes=102400,
+        ua="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Mobile",
+    )
 
-    # 24. image_optimization_opportunities
-    for i in range(10):
-        rows.append(
-            _row(
-                w_ts_base + timedelta(milliseconds=i),
-                url="/media/hero-banner.png",
-                status=200,
-                resp_bytes=102400,
-                ua="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Mobile",
-            )
-        )
-
-    # 26. origin_error_rate + 28. origin_ip_failure
-    for i in range(40):
-        rows.append(_row(b_ts_base + timedelta(milliseconds=i), oip="192.0.2.10", ost=200))
-    for i in range(12):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), oip="192.0.2.10", ost=200))
-    for i in range(12):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), oip="192.0.2.11", ost=200))
-    for i in range(12):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), oip="192.0.2.99", ost=503))
-
-    # 27. origin_retries
-    for i in range(6):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), url="/api/flaky-upstream", oretries=3))
+    # 26. origin_error_rate + 28. origin_ip_failure + 27. origin_retries
+    _add(b_ts_base, 40, oip="192.0.2.10", ost=200)
+    _add(w_ts_base, 12, oip="192.0.2.10", ost=200)
+    _add(w_ts_base, 12, oip="192.0.2.11", ost=200)
+    _add(w_ts_base, 12, oip="192.0.2.99", ost=503)
+    _add(w_ts_base, 6, url="/api/flaky-upstream", oretries=3)
 
     # 29. shield_path_degradation
     for i in range(6):
-        rid_b = f"rid_b_{i}"
-        rows.append(_row(b_ts_base + timedelta(milliseconds=i), rid=rid_b, pop="LAX", edge=True, ottfb=60000))
-        rows.append(_row(b_ts_base + timedelta(milliseconds=i), prid=rid_b, pop="IAD", edge=False, ottfb=20000))
+        rows.append(_row(b_ts_base + timedelta(milliseconds=i), rid=f"rid_b_{i}", pop="LAX", edge=True, ottfb=60000))
+        rows.append(_row(b_ts_base + timedelta(milliseconds=i), prid=f"rid_b_{i}", pop="IAD", edge=False, ottfb=20000))
     for i in range(6):
-        rid_w = f"rid_w_{i}"
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), rid=rid_w, pop="LAX", edge=True, ottfb=260000))
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), prid=rid_w, pop="IAD", edge=False, ottfb=20000))
+        rows.append(_row(w_ts_base + timedelta(milliseconds=i), rid=f"rid_w_{i}", pop="LAX", edge=True, ottfb=260000))
+        rows.append(_row(w_ts_base + timedelta(milliseconds=i), prid=f"rid_w_{i}", pop="IAD", edge=False, ottfb=20000))
 
     # 30. repeated_patterns + 30b. repeated_patterns_fp
     for i in range(15):
@@ -372,26 +262,13 @@ def _build_comprehensive_anomaly_rows() -> list[dict[str, Any]]:
         )
 
     # 31. low_and_slow
-    probe_paths = ["/.env", "/.env", "/.env", "/.git/config", "/.git/config", "/wp-login.php"]
-    for i, probe_url in enumerate(probe_paths):
-        rows.append(
-            _row(
-                w_ts_base + timedelta(seconds=i * 150),
-                ip="10.6.0.1",
-                url=probe_url,
-                status=404,
-            )
-        )
+    for i, probe_url in enumerate(["/.env", "/.env", "/.env", "/.git/config", "/.git/config", "/wp-login.php"]):
+        rows.append(_row(w_ts_base + timedelta(seconds=i * 150), ip="10.6.0.1", url=probe_url, status=404))
 
-    # 32. credential_enumeration
-    for i in range(25):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), ip="10.7.0.1", url="/api/auth/login", status=401))
-
-    # 33. network_asn_health
-    for i in range(110):
-        rows.append(_row(b_ts_base + timedelta(milliseconds=i), asn="64503", ploss=0.001, rtt_var=5000, retrans=0))
-    for i in range(55):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), asn="64503", ploss=0.08, rtt_var=60000, retrans=2))
+    # 32. credential_enumeration & 33. network_asn_health
+    _add(w_ts_base, 25, ip="10.7.0.1", url="/api/auth/login", status=401)
+    _add(b_ts_base, 110, asn="64503", ploss=0.001, rtt_var=5000, retrans=0)
+    _add(w_ts_base, 55, asn="64503", ploss=0.08, rtt_var=60000, retrans=2)
 
     # 34. content_discovery
     for i in range(22):
@@ -404,78 +281,32 @@ def _build_comprehensive_anomaly_rows() -> list[dict[str, Any]]:
             )
         )
 
-    # 37. new_asn_traffic
-    for i in range(22):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), asn="64504"))
-
-    # 38. metro_delivery_degradation
-    for i in range(55):
-        rows.append(_row(b_ts_base + timedelta(milliseconds=i), metro="803", delivery_rate=500000))
-    for i in range(22):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), metro="803", delivery_rate=100000))
-
-    # 39. connection_type_mix
-    for i in range(60):
-        rows.append(_row(b_ts_base + timedelta(milliseconds=i), c_type="broadband", c_speed="fiber"))
-    for i in range(25):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), c_type="cellular", c_speed="5g"))
-
-    # 40. pop_latency_regression
-    for i in range(55):
-        rows.append(_row(b_ts_base + timedelta(milliseconds=i), pop="DEN", url="/pop/den", elapsed=50000))
-    for i in range(22):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), pop="DEN", url="/pop/den", elapsed=500000))
+    # 37. new_asn_traffic, 38. metro_delivery_degradation, 39. connection_type_mix, 40. pop_latency_regression
+    _add(w_ts_base, 22, asn="64504")
+    _add(b_ts_base, 55, metro="803", delivery_rate=500000)
+    _add(w_ts_base, 22, metro="803", delivery_rate=100000)
+    _add(b_ts_base, 60, c_type="broadband", c_speed="fiber")
+    _add(w_ts_base, 25, c_type="cellular", c_speed="5g")
+    _add(b_ts_base, 55, pop="DEN", url="/pop/den", elapsed=50000)
+    _add(w_ts_base, 22, pop="DEN", url="/pop/den", elapsed=500000)
 
     # 41. http3_fallback
-    for i in range(60):
-        rows.append(_row(b_ts_base + timedelta(milliseconds=i), transport="quic"))
-    for i in range(60):
-        rows.append(_row(b_ts_base + timedelta(milliseconds=60 + i), transport="tcp"))
-    for i in range(12):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), transport="quic"))
-    for i in range(108):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=12 + i), transport="tcp"))
+    _add(b_ts_base, 60, transport="quic")
+    _add(b_ts_base + timedelta(milliseconds=60), 60, transport="tcp")
+    _add(w_ts_base, 12, transport="quic")
+    _add(w_ts_base + timedelta(milliseconds=12), 108, transport="tcp")
 
     # 43. payload_compression_regression
-    for i in range(55):
-        rows.append(
-            _row(
-                b_ts_base + timedelta(milliseconds=i),
-                url="/static/main.js",
-                status=200,
-                resp_bytes=4096,
-                resp_header_content_encoding="br",
-            )
-        )
-    for i in range(12):
-        rows.append(
-            _row(
-                w_ts_base + timedelta(milliseconds=i),
-                url="/static/main.js",
-                status=200,
-                resp_bytes=4096,
-                resp_header_content_encoding="",
-            )
-        )
+    _add(b_ts_base, 55, url="/static/main.js", status=200, resp_bytes=4096, resp_header_content_encoding="br")
+    _add(w_ts_base, 12, url="/static/main.js", status=200, resp_bytes=4096, resp_header_content_encoding="")
 
-    # 44. session_harvesting
+    # 44. session_harvesting & 46. crawler_disparity
     for i in range(22):
-        rows.append(
-            _row(
-                w_ts_base + timedelta(milliseconds=i),
-                ip="10.9.0.1",
-                cookie_session=f"sess_harvest_{i}",
-            )
-        )
+        rows.append(_row(w_ts_base + timedelta(milliseconds=i), ip="10.9.0.1", cookie_session=f"sess_harvest_{i}"))
+    _add(b_ts_base, 10, ua="Mozilla/5.0 (compatible; Claude-SearchBot/1.0)")
+    _add(w_ts_base, 105, ua="Mozilla/5.0 (compatible; Claude-SearchBot/1.0)")
 
-    # 46. crawler_disparity
-    for i in range(10):
-        rows.append(_row(b_ts_base + timedelta(milliseconds=i), ua="Mozilla/5.0 (compatible; Claude-SearchBot/1.0)"))
-    for i in range(105):
-        rows.append(_row(w_ts_base + timedelta(milliseconds=i), ua="Mozilla/5.0 (compatible; Claude-SearchBot/1.0)"))
-
-    # 47. stale_browser_version (needs >= 500 window rows with Chrome < 131)
-    # Also piggyback referer_monoculture, asn_concentration, method_drift, and cache_hit_cliff!
+    # 47. stale_browser_version + referer_monoculture, asn_concentration, method_drift, cache_hit_cliff
     for i in range(505):
         rows.append(
             _row(
@@ -490,18 +321,11 @@ def _build_comprehensive_anomaly_rows() -> list[dict[str, Any]]:
             )
         )
 
-    # 48. orphaned_deep_crawl
+    # 48. orphaned_deep_crawl & 49. residential_fingerprint_dispersion & 9. ua_monoculture
     for i in range(55):
         rows.append(
-            _row(
-                w_ts_base + timedelta(milliseconds=i),
-                ip="10.10.0.1",
-                url=f"/catalog/dept/item-{i % 15}",
-                referer="",
-            )
+            _row(w_ts_base + timedelta(milliseconds=i), ip="10.10.0.1", url=f"/catalog/dept/item-{i % 15}", referer="")
         )
-
-    # 49. residential_fingerprint_dispersion
     for i in range(2):
         rows.append(
             _row(
@@ -522,20 +346,7 @@ def _build_comprehensive_anomaly_rows() -> list[dict[str, Any]]:
                 p_type="",
             )
         )
-
-    # 9. ua_monoculture (needs >= 25% of window total)
-    # Add 520 window rows with MonoScraper/9.9 so 520 / ~1920 >= 27%
-    # (505 / ~1920 = 26.3% for Chrome 120, so both exceed 25%!)
-    for i in range(520):
-        rows.append(
-            _row(
-                w_ts_base + timedelta(milliseconds=i),
-                ua="MonoScraper/9.9",
-                asn="64501",
-                referer="https://hotlink-scraper.example/page",
-            )
-        )
-
+    _add(w_ts_base, 520, ua="MonoScraper/9.9", asn="64501", referer="https://hotlink-scraper.example/page")
     return rows
 
 

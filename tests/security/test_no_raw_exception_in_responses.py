@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SCAN = [
     ROOT / "backend" / "routers",
     ROOT / "backend" / "utils",
-    ROOT / "backend" / "deps.py",
+    ROOT / "backend" / "core" / "request_context.py",
     ROOT / "backend" / "main.py",
 ]
 
@@ -872,11 +872,11 @@ def test_admin_paths_blocked_for_analyst(probe_session, path):
 
 # ── Merged from tests/security/test_adversarial_ast_pii_redaction.py ──
 
+from backend.repositories.query import execute_query
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.core import share_db
-from backend.repositories.query import execute_query
 from backend.routers import share_admin, share_auth
 from backend.utils import tunnel
 from backend.utils.remote_access import RemoteAccessMiddleware

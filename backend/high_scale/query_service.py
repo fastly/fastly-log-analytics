@@ -43,7 +43,6 @@ from backend.utils.telemetry import (
 
 if TYPE_CHECKING:
     from backend.high_scale.ingest_controller import HighScaleService
-
 QueryStatus = Literal["complete", "partial", "queued", "running", "failed"]
 
 
@@ -128,7 +127,6 @@ def query_request_facts(
     decoded = KeysetCursor.decode(cursor, cursor_secret) if cursor else None
     if decoded and (decoded.service_id != service_id or decoded.domain != "request"):
         raise ValueError("cursor does not belong to this service and domain")
-
     return _query_facts(
         client,
         service_id=service_id,
@@ -272,7 +270,6 @@ def _query_facts(
     decoded = KeysetCursor.decode(cursor, cursor_secret) if cursor else None
     if decoded and (decoded.service_id != service_id or decoded.domain != domain):
         raise ValueError("cursor does not belong to this service and domain")
-
     params: dict[str, Any] = {
         "service_id": service_id,
         "domain": domain,
@@ -300,7 +297,6 @@ def _query_facts(
     if batch_id is not None and str(batch_id).strip():
         params["filter_batch_id"] = str(batch_id).strip()
         filter_clauses.append(" AND toString(batch_id) = {filter_batch_id:String}")
-
     cursor_clause = ""
     if decoded:
         params.update({"cursor_timestamp": decoded.timestamp, "cursor_event_id": decoded.event_id})
@@ -333,14 +329,12 @@ def _query_facts(
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
     if len(get_queries()) == before_queries:
         _record_clickhouse_telemetry(service_id, sql_query, elapsed_ms)
-
     page_rows = tuple(rows[:limit])
     next_cursor = None
     if len(rows) > limit:
         last = page_rows[-1]
         timestamp = _timestamp(last)
         next_cursor = KeysetCursor(timestamp, str(last["event_id"]), service_id, domain).encode(cursor_secret)
-
     observed = (now or datetime.now(UTC)).astimezone(UTC)
     lag = max(0.0, (observed - watermark.coverage_end).total_seconds()) if watermark.coverage_end else 0.0
     metadata = QueryResponseMetadata(
@@ -480,7 +474,6 @@ class QueryRouter:
         observed = observed.astimezone(UTC)
         if request.end_utc > observed:
             raise ValueError("query end cannot be in the future")
-
         age = observed - request.start_utc
         if request.intent is QueryIntent.TRIAGE and age <= self._config.aggregate_retention:
             return self._build(request, QueryTier.TRIAGE_AGGREGATE, ("aggregates",), False, False, "recent triage")
@@ -537,8 +530,6 @@ _self_mod = sys.modules[__name__]
 
 
 # ── Lossless Source-Object Decoder (folded from decoder.py) ───────────────────
-
-
 @dataclass(frozen=True)
 class DeadLetterRecord:
     source_object_key: str
@@ -654,7 +645,6 @@ def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
     if domain == "request":
         custom_fields = event.setdefault("custom_fields", {})
         cmcd = event.setdefault("cmcd", {})
-
         keys_to_check = [
             k
             for k in list(event.keys())
@@ -672,7 +662,6 @@ def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
                 "cmcd",
             }
         ]
-
         for k in keys_to_check:
             val = event[k]
             if k.startswith("cmcd_") or k.startswith("cmcd."):
@@ -681,7 +670,6 @@ def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
                 if short_k:
                     cmcd[short_k] = str(val) if val is not None else ""
                 continue
-
             field = try_get(k) or try_get(_FIELD_ALIASES.get(k, ""))
             if field is not None:
                 if field.duck_type in (
@@ -721,7 +709,6 @@ def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
         raw_metric_value = event.get("rum_metric_value", event.get("metric_value"))
         metric_rating = event.get("rum_metric_rating") or event.get("metric_rating") or ""
         pathname = event.get("rum_pathname") or event.get("pathname") or ""
-
         if not metric_name or raw_metric_value in (None, ""):
             qparams = _rum_querystring_params(event)
             if qparams:
@@ -731,7 +718,6 @@ def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
                 metric_rating = metric_rating or _first_qparam(qparams, "rum_metric_rating")
                 client_id = client_id or _first_qparam(qparams, "cid")
                 pathname = pathname or _first_qparam(qparams, "rum_pathname")
-
         event["client_id"] = client_id
         event["metric_name"] = metric_name
         if raw_metric_value in (None, ""):
@@ -793,13 +779,11 @@ def _expand_faro_rum_events(log_data: dict[str, Any], domain: str) -> list[dict[
         raise ValueError("invalid Faro RUM body") from exc
     if not extracted:
         return []
-
     if domain == "rum_vitals":
         domain_items = [m for m in extracted if not _is_faro_exception_metric(m)]
     else:
         domain_items = [m for m in extracted if _is_faro_exception_metric(m)]
     selected_items = domain_items if domain_items else extracted
-
     rows: list[dict[str, Any]] = []
     for metric in selected_items:
         is_exc = _is_faro_exception_metric(metric)
@@ -902,7 +886,6 @@ def _event_id(event: dict[str, Any], domain: str, *, sub_ordinal: int | None = N
 
 
 # ── SQL Console Query Endpoint (folded from query.py) ─────────────────────────
-
 _FACT_DOMAINS = {"request_facts": "request", "rum_vitals_facts": "rum_vitals", "rum_error_facts": "rum_errors"}
 
 
@@ -999,7 +982,6 @@ _SQL_TOKEN = re.compile(
     """.replace("IDENT", SAFE_IDENT_RE.pattern),
     re.VERBOSE | re.DOTALL,
 )
-
 _LITERAL_OR_COMMENT = re.compile(r"'(?:[^'\\]|\\.|'')*'|--[^\n]*|/\*.*?\*/", re.DOTALL)
 
 
@@ -1067,12 +1049,10 @@ def query_endpoint(
     names = {canonical: (tables or {}).get(canonical, canonical) for canonical in _FACT_DOMAINS}
     timer = SectionTimer()
     section_timings = timer.entries
-
     raw_sql = req.sql.strip()
     max_rows = max(1, min(int(req.max_rows), MAX_QUERY_ROWS))
     svc_table = _safe_table(service.service_id)
     allowed_tables = frozenset({"logs", "client_vitals", "client_errors", svc_table.lower()})
-
     _t_val = time.perf_counter()
     _reject_ambiguous_syntax(raw_sql, allowed_tables | frozenset(names.values()))
     with duckdb.connect(":memory:") as parser_con:
@@ -1087,15 +1067,12 @@ def query_endpoint(
         except SQLValidationError as exc:
             raise PermissionError(exc.message) from exc
     timer.mark("validate_user_sql", _t_val)
-
     sql = raw_sql.rstrip().rstrip(";")
-
     if svc_table != "logs":
         sql = re.sub(rf"\b{re.escape(svc_table)}\b", names["request_facts"], sql, flags=re.IGNORECASE)
     sql = re.sub(r"\blogs\b", names["request_facts"], sql, flags=re.IGNORECASE)
     sql = re.sub(r"\bclient_vitals\b", names["rum_vitals_facts"], sql, flags=re.IGNORECASE)
     sql = re.sub(r"\bclient_errors\b", names["rum_error_facts"], sql, flags=re.IGNORECASE)
-
     sql = re.sub(r"(?<!AS\s)(?<!')\btimestamp\b(?!')", "event_timestamp", sql, flags=re.IGNORECASE)
     sql = re.sub(r"(?<!AS\s)(?<!')\bip\b(?!')", "client_ip", sql, flags=re.IGNORECASE)
 
@@ -1112,14 +1089,12 @@ def query_endpoint(
         _normalize_iso_literal,
         sql,
     )
-
     from backend.high_scale.dashboard import _FIELD_DIMENSIONS
 
     for field in _FIELD_DIMENSIONS.values():
         if field in {"client_ip", "country", "url", "cmcd", "custom_fields"}:
             continue
         sql = re.sub(rf"(?<!')\b{field}\b(?!')", f"custom_fields['{field}']", sql)
-
     for b_field in ("edge", "is_ipv6", "waf"):
         sql = re.sub(
             rf"custom_fields\['{b_field}'\]\s+IN\s*\(\s*'true'\s*\)",
@@ -1151,7 +1126,6 @@ def query_endpoint(
             sql,
             flags=re.IGNORECASE,
         )
-
     sql = re.sub(
         r"(custom_fields\['[a-zA-Z0-9_]+'\])\s*(=|!=|<>)\s*(-?\d+(?:\.\d+)?)\b",
         r"\1 \2 '\3'",
@@ -1162,16 +1136,13 @@ def query_endpoint(
         r"toFloat64OrZero(\1) \2 \3",
         sql,
     )
-
     fact_tables = {
         names[canonical]: domain
         for canonical, domain in _FACT_DOMAINS.items()
         if re.search(rf"\b{re.escape(names[canonical])}\b", sql, flags=re.IGNORECASE)
     }
-
     has_explicit_limit = bool(re.search(r"\bLIMIT\b", _code_only(sql), flags=re.IGNORECASE))
     _reject_unsafe_functions(sql)
-
     row_cap = (MAX_QUERY_ROWS if has_explicit_limit else max_rows) + 1
     sql = f"SELECT * FROM (\n{sql}\n) LIMIT {row_cap}"
     settings = {
@@ -1184,7 +1155,6 @@ def query_endpoint(
         scope = _table_filters(service.service_id, start_time, end_time, fact_tables, scoped_by_view=tables is not None)
         if scope is not None:
             settings["additional_table_filters"] = scope
-
     t0 = time.perf_counter()
     try:
         res = client.execute(sql, settings=settings)
@@ -1193,7 +1163,6 @@ def query_endpoint(
     timer.mark("execute", t0)
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
     compact_sql = _compact_sql_for_debug(sql.strip())
-
     _debug_queries = [
         {
             "sql": compact_sql,
@@ -1201,18 +1170,15 @@ def query_endpoint(
             "engine": "ClickHouse",
         }
     ]
-
     fetched_rows = len(res) if res else 0
     truncated = fetched_rows > max_rows
     if truncated:
         res = res[:max_rows]
     total_rows = -1 if (truncated and not has_explicit_limit) else fetched_rows
-
     _t_serialize = time.perf_counter()
     data: list[dict[str, Any]] = []
     cols = list(res[0].keys()) if res else []
     redact_keys = IP_FAMILY_KEYS | SESSION_ID_KEYS | {"client_ip"}
-
     for d in res:
         row_copy = dict(d)
         for k, v in row_copy.items():
@@ -1222,11 +1188,9 @@ def query_endpoint(
             elif mask_ips and k.lower() in redact_keys and v:
                 row_copy[k] = "[redacted]"
         data.append(row_copy)
-
     if mask_ips:
         data = mask_ip_values(data)
     timer.mark("serialize_json", _t_serialize)
-
     return {
         "columns": cols,
         "data": data,
@@ -1244,7 +1208,6 @@ def query_endpoint(
 # ---------------------------------------------------------------------------
 # Insights (anomaly detection) for high-scale services (folded from insights.py)
 # ---------------------------------------------------------------------------
-
 import contextvars
 import urllib.parse
 from collections.abc import Callable
@@ -1297,7 +1260,6 @@ _MAX_WORKERS = 12
 _FIELD_SAMPLE_ROWS = 1000
 _BASE_FIELDS = frozenset({"timestamp", "url", "country", "ip"})
 _ASN_INSIGHT_MARKERS = ("asn", "metro")
-
 _INSIGHTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=300)
 _CacheRegistry.register("high_scale.insights._INSIGHTS_CACHE", _INSIGHTS_CACHE)
 
@@ -1434,7 +1396,6 @@ def insights_endpoint(
     baseline_hours = float(req.baseline_hours)
     req_filters = getattr(req, "filters", None)
     filter_clause, filter_params = build_clickhouse_filters(req_filters) if req_filters else ("", {})
-
     if clamp_cache_key is not None:
         key_clamp = clamp_cache_key
     elif clamp_start or clamp_end:
@@ -1458,7 +1419,6 @@ def insights_endpoint(
         cached = _INSIGHTS_CACHE.get(cache_key)
         if cached is not None:
             return InsightsResponse.with_telemetry(**cached, is_cached=True, cache_age_seconds=0)
-
     baseline_start, window_start, now = _window(window_hours, baseline_hours, clamp_start, clamp_end)
     scope = " AND ".join(visible_fact_clauses("request"))
     if filter_clause:
@@ -1477,7 +1437,6 @@ def insights_endpoint(
         **filter_params,
     }
     in_range = "event_timestamp >= {baseline_start:DateTime64(3)} AND event_timestamp <= {window_end:DateTime64(3)}"
-
     history_sql = (
         "/* insight:history */ SELECT min(event_timestamp) AS earliest, "
         "countIf(event_timestamp >= {window_start:DateTime64(3)}) AS window_total "
@@ -1555,7 +1514,6 @@ def insights_endpoint(
         # Each task runs in a copy of this request's context so its ClickHouse calls stay attributed to the request.
         futures = [pool.submit(contextvars.copy_context().run, lambda pair=pair: run(*pair)) for pair in candidates]
         cards = [future.result() for future in futures]
-
     computed_at = now.isoformat()
     payload = {
         "insights": cards,
@@ -1633,7 +1591,6 @@ def cache_collapse_detail_endpoint(
     w_cacheable, b_cacheable = w_hits + w_miss, b_hits + b_miss
     w_rate = w_hits / w_cacheable if w_cacheable else 0.0
     b_rate = b_hits / b_cacheable if b_cacheable else 0.0
-
     timeline_rows = service.client.execute(
         "/* insight:cache_collapse_timeline */ SELECT "
         f"toStartOfInterval(event_timestamp, {_bucket_interval(window_hours + baseline_hours)}) AS bucket, "
@@ -1656,7 +1613,6 @@ def cache_collapse_detail_endpoint(
                 "hit_rate": float(real_hits / cacheable) if cacheable else 0.0,
             }
         )
-
     miss_rows = service.client.execute(
         "/* insight:cache_collapse_misses */ SELECT event_timestamp AS timestamp, "
         f"{cache} AS cache, custom_fields['pop'] AS pop, client_ip AS ip, toInt32OrNull(custom_fields['status']) AS status "
@@ -1694,10 +1650,8 @@ def cache_collapse_detail_endpoint(
 # ---------------------------------------------------------------------------
 # High-scale session stitching over ClickHouse request_facts (folded from sessions.py)
 # ---------------------------------------------------------------------------
-
-_memo = ResponseMemo(ttl=30.0, maxsize=128)
-_CacheRegistry.register("high_scale.sessions._response_cache", _memo.cache)
-
+_sessions_memo = ResponseMemo(ttl=30.0, maxsize=128)
+_CacheRegistry.register("high_scale.sessions._response_cache", _sessions_memo.cache)
 _DEFAULT_MIN_REQS_FLAG = 1000
 _DEFAULT_MIN_4XX_PCT_FLAG = 20.0
 _SORTABLE = frozenset(
@@ -1726,7 +1680,6 @@ _HELPER_COLUMNS = (
 )
 _DETAIL_LIMIT = 500
 _FULL_CTE_SORTS = frozenset({"unique_urls", "median_rtt_ms"})
-
 _SESSIONS_FAST_CTE = """
     WITH raw_events AS (
         SELECT
@@ -1804,7 +1757,6 @@ _SESSIONS_FAST_CTE = """
         FROM sessions_agg
     )
 """
-
 _SESSIONS_CTE = """
     WITH raw_events AS (
         SELECT
@@ -1901,8 +1853,6 @@ _FILTERED = """
     WHERE (({streaming_only:UInt8} = 0) OR is_streaming = 1)
       AND (({flagged_only:UInt8} = 0) OR flagged = 1)
 """
-
-
 _asn_label_map = resolve_asn_display_labels
 
 
@@ -1926,7 +1876,6 @@ def _enrich_paginated_sessions(
     max_end: datetime | None = None
     unique_ips: list[str] = []
     seen_ips: set[str] = set()
-
     for idx, row in enumerate(rows):
         row.setdefault("asn", None)
         row.setdefault("country", "")
@@ -1934,7 +1883,6 @@ def _enrich_paginated_sessions(
         row.setdefault("ua", "")
         row.setdefault("median_rtt_ms", None)
         row.setdefault("edge_sid", "")
-
         s_dt = _as_dt(row.get("session_start"))
         e_dt = _as_dt(row.get("session_end"))
         if s_dt is None or e_dt is None:
@@ -1956,20 +1904,16 @@ def _enrich_paginated_sessions(
             f"tuple(toUInt32({idx}), {{en_ip_{idx}:String}}, {{en_ja4_{idx}:String}}, "
             f"{{en_s_{idx}:DateTime64(3)}}, {{en_e_{idx}:DateTime64(3)}})"
         )
-
     if not tuples_sql_parts or not unique_ips:
         return
-
     if min_start is not None:
         enrich_params["start_time"] = min_start
     if max_end is not None:
         enrich_params["end_time"] = max_end
-
     ip_placeholders: list[str] = []
     for i, ip_val in enumerate(unique_ips):
         enrich_params[f"en_uip_{i}"] = ip_val
         ip_placeholders.append(f"{{en_uip_{i}:String}}")
-
     enrich_sql = (
         "/* sessions:enrich */ "
         "WITH page_keys AS ("
@@ -2052,10 +1996,9 @@ def sessions_endpoint(
         },
         {"service_id": service.service_id},
     )
-    cached = _memo.get(memo_key)
+    cached = _sessions_memo.get(memo_key)
     if cached is not None:
         return cached
-
     rows = [
         dict(r)
         for r in service.client.execute(
@@ -2077,10 +2020,8 @@ def sessions_endpoint(
             {**params, "limit": req.limit, "offset": (req.page - 1) * req.limit},
         )
     ]
-
     if rows and "unique_urls" not in rows[0]:
         _enrich_paginated_sessions(service, rows, where, params)
-
     if rows:
         total = int(rows[0]["total_sessions"])
     elif req.page > 1:
@@ -2090,7 +2031,6 @@ def sessions_endpoint(
         total = int(counted[0]["total_sessions"]) if counted else 0
     else:
         total = 0
-
     first = rows[0] if rows else {}
     sessions: list[dict[str, Any]] = []
     for row in rows:
@@ -2100,7 +2040,6 @@ def sessions_endpoint(
         session["flagged"] = bool(session.get("flagged"))
         session["is_streaming"] = bool(session.get("is_streaming"))
         sessions.append(session)
-
     asns = sorted({int(session["asn"]) for session in sessions if session.get("asn") is not None})
     result = {
         "sessions": sessions,
@@ -2116,7 +2055,7 @@ def sessions_endpoint(
         "min_reqs_flag": min_reqs_flag,
         "min_4xx_pct_flag": min_4xx_pct_flag,
     }
-    _memo.put(memo_key, result)
+    _sessions_memo.put(memo_key, result)
     return result
 
 
@@ -2190,8 +2129,6 @@ def sessions_detail(
 # ---------------------------------------------------------------------------
 # ClickHouse-backed triage aggregate reads (folded from aggregate_query.py)
 # ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class AggregateResponse:
     service_id: str
@@ -2326,7 +2263,6 @@ def _query_fact_aggregates(
     expressions = _FACT_DIMENSION_EXPRESSIONS[domain]
     if any(dimension not in expressions for dimension in dimensions):
         raise ValueError("aggregate dimension cannot be read exactly from event-time facts")
-
     dimension_values: list[str] = []
     params: dict[str, Any] = {
         "service_id": service_id,
@@ -2337,7 +2273,6 @@ def _query_fact_aggregates(
         key = f"fact_dimension_{idx}"
         dimension_values.append(f"tuple({{{key}:String}}, toString({expressions[dimension]}))")
         params[key] = dimension
-
     end_operator = "<" if domain == "request" else "<="
     clauses = [
         "service_id={service_id:String}",
@@ -2373,7 +2308,6 @@ def query_clickhouse_aggregate(
     now: datetime | None = None,
 ) -> AggregateResponse:
     """Read visible aggregate rows while preserving the aggregate contract."""
-
     request.validate()
     watermark.validate()
     if watermark.service_id != request.service_id or watermark.domain != request.domain:
@@ -2382,7 +2316,6 @@ def query_clickhouse_aggregate(
     dimension = request.dimension or DEFAULT_AGGREGATE_DIMENSIONS[request.domain]
     if not dimension or _INTERNAL_IDENTIFIER.fullmatch(dimension) is None:
         raise ValueError("aggregate dimension must be an internal identifier")
-
     clauses = [
         "service_id={service_id:String}",
         "dimension={dimension:String}",
@@ -2402,7 +2335,6 @@ def query_clickhouse_aggregate(
         end_operator = "<" if request.domain == "request" else "<="
         clauses.extend(["bucket_start >= {start:DateTime64(3)}", f"bucket_start {end_operator} {{end:DateTime64(3)}}"])
         params.update({"start": start, "end": end})
-
     try:
         if partial_minute_window:
             start, end = _require_window_bounds(request.start, request.end)
@@ -2477,7 +2409,6 @@ def query_clickhouse_aggregates_batch(
                 now=now,
             )
         }
-
     watermark.validate()
     if watermark.service_id != service_id or watermark.domain != domain:
         raise ValueError("watermark does not belong to this service and domain")
@@ -2485,7 +2416,6 @@ def query_clickhouse_aggregates_batch(
         raise ValueError(f"unsupported aggregate domain: {domain}")
     table, metric = _DOMAIN_TABLES[domain]
     partial_minute_window = _is_partial_minute_window(start, end)
-
     dim_placeholders: list[str] = []
     params: dict[str, Any] = {"service_id": service_id}
     for idx, dim in enumerate(unique_dims):
@@ -2494,10 +2424,8 @@ def query_clickhouse_aggregates_batch(
         key = f"dim_{idx}"
         dim_placeholders.append(f"{{{key}:String}}")
         params[key] = dim
-
     if partial_minute_window:
         start, end = _require_window_bounds(start, end)
-
         try:
             totals_rows, top_rows = _query_fact_aggregates(
                 client,
@@ -2509,7 +2437,6 @@ def query_clickhouse_aggregates_batch(
             )
         except ClickHouseError as e:
             raise ValueError(f"ClickHouse server query failed (S3/FOS access credentials may be expired): {e}")
-
         fact_totals_by_dim = {
             str(row.get("dimension") or ""): max(0, int(row.get("total_count") or 0)) for row in totals_rows
         }
@@ -2518,7 +2445,6 @@ def query_clickhouse_aggregates_batch(
             dimension = str(row.get("dimension") or "")
             if dimension in fact_tops_by_dim and len(fact_tops_by_dim[dimension]) < 10:
                 fact_tops_by_dim[dimension].append((str(row["value"]), max(0, int(row["aggregate_count"]))))
-
         observed = (now or datetime.now(UTC)).astimezone(UTC)
         freshness = max(0.0, (observed - watermark.coverage_end).total_seconds()) if watermark.coverage_end else 0.0
         return {
@@ -2536,7 +2462,6 @@ def query_clickhouse_aggregates_batch(
             )
             for dimension in unique_dims
         }
-
     clauses = [
         "service_id={service_id:String}",
         f"dimension IN ({', '.join(dim_placeholders)})",
@@ -2548,7 +2473,6 @@ def query_clickhouse_aggregates_batch(
         end_operator = "<" if domain == "request" else "<="
         clauses.extend(["bucket_start >= {start:DateTime64(3)}", f"bucket_start {end_operator} {{end:DateTime64(3)}}"])
         params.update({"start": start_utc, "end": end_utc})
-
     try:
         totals_rows = client.execute(
             f"SELECT dimension, sum({metric}) AS total_count "
@@ -2598,21 +2522,17 @@ def query_clickhouse_aggregates_batch(
             }
     except ClickHouseError as e:
         raise ValueError(f"ClickHouse server query failed (S3/FOS access credentials may be expired): {e}")
-
     totals_by_dim: dict[str, int] = {}
     for row in totals_rows:
         d = str(row.get("dimension") or "")
         totals_by_dim[d] = max(0, int(row.get("total_count") or 0))
-
     tops_by_dim: dict[str, list[tuple[str, int]]] = {d: [] for d in unique_dims}
     for row in top_rows:
         d = str(row.get("dimension") or "")
         if d in tops_by_dim and len(tops_by_dim[d]) < 10:
             tops_by_dim[d].append((str(row["value"]), max(0, int(row["aggregate_count"]))))
-
     observed = (now or datetime.now(UTC)).astimezone(UTC)
     freshness = max(0.0, (observed - watermark.coverage_end).total_seconds()) if watermark.coverage_end else 0.0
-
     out: dict[str, AggregateResponse] = {}
     for dim in unique_dims:
         values = tuple(tops_by_dim.get(dim, ()))
@@ -2632,13 +2552,1129 @@ def query_clickhouse_aggregates_batch(
     return out
 
 
-for _alias_name in ("query_router", "decoder", "query", "clickhouse", "insights", "sessions", "aggregate_query"):
+import hashlib
+import heapq
+import os
+import sys
+from collections import defaultdict
+from dataclasses import dataclass
+from dataclasses import field as _dc_field
+
+from backend.core.request_telemetry import HighScaleSections
+from backend.high_scale._common import (
+    bucket as _bucket,
+)
+from backend.high_scale._common import (
+    build_published_facts_where as _facts_where,
+)
+from backend.high_scale._common import (
+    build_published_projection_where as _where,
+)
+from backend.high_scale._common import (
+    finite_float as _finite_float,
+)
+from backend.high_scale._common import (
+    percentiles as _percentiles,
+)
+from backend.high_scale._common import (
+    resolve_asn_display_labels,
+)
+from backend.high_scale._common import (
+    text as _text,
+)
+from backend.high_scale.dashboard import _FIELD_DIMENSIONS
+from backend.models.performance import PerformanceAggregatesResponse
+from backend.repositories.utils.response_cache import (
+    ResponseMemo,
+    serialize_filters_for_key,
+)
+from backend.utils.time_window import CacheRegistry
+
+# Matches the standard path's ``USING SAMPLE 300``. Each batch keeps its lowest
+# ``sample_key`` rows, so the lowest keys across any union of batches are a
+# uniform sample of the union's rows.
+SCATTER_SAMPLE_SIZE = 300
+
+
+@dataclass(frozen=True)
+class PerformanceProjection:
+    dimension_rows: tuple[dict[str, Any], ...]
+    summary_rows: tuple[dict[str, Any], ...] = ()
+    scatter_rows: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass
+class _Accumulator:
+    requests: int = 0
+    latencies: list[float] = _dc_field(default_factory=list)
+
+
+@dataclass
+class _WaterfallSums:
+    count: int = 0
+    edge_processing: float = 0.0
+    origin_wait: float = 0.0
+    origin_download: float = 0.0
+    client_download: float = 0.0
+
+
+def _asn_text(value: Any) -> str:
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return _text(value)
+
+
+def build_performance_projection_rows(rows: tuple[Mapping[str, Any], ...]) -> PerformanceProjection:
+    dimensions: dict[tuple[datetime, str, str], _Accumulator] = defaultdict(_Accumulator)
+    waterfalls: dict[datetime, _WaterfallSums] = defaultdict(_WaterfallSums)
+    scatter_candidates: list[tuple[int, int, dict[str, Any]]] = []
+    for index, row in enumerate(rows):
+        bucket = _bucket(row.get("timestamp"))
+        if bucket is None:
+            continue
+        elapsed = _finite_float(row.get("elapsed"))
+        _add_waterfall_and_scatter(row, index, bucket, elapsed, waterfalls, scatter_candidates)
+        # URL dimension
+        url = _text(row.get("url"))
+        if url:
+            acc = dimensions[(bucket, "url", url)]
+            acc.requests += 1
+            if elapsed is not None:
+                acc.latencies.append(elapsed)
+        # ASN dimension
+        asn = _asn_text(row.get("asn"))
+        if asn:
+            acc = dimensions[(bucket, "asn", asn)]
+            acc.requests += 1
+            if elapsed is not None:
+                acc.latencies.append(elapsed)
+        # Top Bots? (Wait, user said "bot detection metrics")
+        # NGWAF Bots might use "ngwaf_bot_name"
+        # Let's add ASN and URL for now, maybe bot later or add it now if we need.
+        bot = _text(row.get("_ngwaf_bot_name"))
+        if bot:
+            acc = dimensions[(bucket, "bot", bot)]
+            acc.requests += 1
+            if elapsed is not None:
+                acc.latencies.append(elapsed)
+    return PerformanceProjection(
+        dimension_rows=tuple(
+            _dimension_row(bucket, dimension, value, acc)
+            for (bucket, dimension, value), acc in sorted(dimensions.items())
+        ),
+        summary_rows=tuple(_summary_row(bucket, sums) for bucket, sums in sorted(waterfalls.items())),
+        scatter_rows=tuple(
+            row for _, _, row in heapq.nsmallest(SCATTER_SAMPLE_SIZE, scatter_candidates, key=lambda c: c[:2])
+        ),
+    )
+
+
+def _add_waterfall_and_scatter(
+    row: Mapping[str, Any],
+    index: int,
+    bucket: datetime,
+    elapsed_us: float | None,
+    waterfalls: dict[datetime, _WaterfallSums],
+    scatter_candidates: list[tuple[int, int, dict[str, Any]]],
+) -> None:
+    """Mirror the standard ``components`` CTE: rows need both ``ttfb`` and ``elapsed``."""
+    ttfb_s = _finite_float(row.get("ttfb"))
+    if elapsed_us is None or ttfb_s is None:
+        return
+    elapsed_ms = elapsed_us / 1000.0
+    ttfb_ms = ttfb_s * 1000.0
+    ottfb_ms = (_finite_float(row.get("ottfb")) or 0.0) / 1000.0
+    ottlb_ms = (_finite_float(row.get("ottlb")) or 0.0) / 1000.0
+    sums = waterfalls[bucket]
+    sums.count += 1
+    sums.edge_processing += max(0.0, ttfb_ms - ottfb_ms)
+    sums.origin_wait += ottfb_ms
+    sums.origin_download += max(0.0, ottlb_ms - ottfb_ms)
+    sums.client_download += max(0.0, elapsed_ms - max(ottlb_ms, ttfb_ms))
+    edge_ms = elapsed_ms - ttfb_ms
+    if edge_ms < 0:
+        return
+    sample_key = _sample_key(row, index)
+    scatter_candidates.append(
+        (
+            sample_key,
+            index,
+            {
+                "bucket_start": bucket.isoformat(),
+                "sample_key": sample_key,
+                "origin_ms": ttfb_ms,
+                "edge_ms": edge_ms,
+                "cache": _text(row.get("cache")),
+            },
+        )
+    )
+
+
+def _sample_key(row: Mapping[str, Any], index: int) -> int:
+    identity = _text(row.get("event_id")) or f"{row.get('timestamp')}|{row.get('url')}|{index}"
+    return int.from_bytes(hashlib.sha256(identity.encode()).digest()[:8], "big")
+
+
+def _summary_row(bucket: datetime, sums: _WaterfallSums) -> dict[str, Any]:
+    return {
+        "bucket_start": bucket.isoformat(),
+        "component_count": sums.count,
+        "edge_processing_sum_ms": sums.edge_processing,
+        "origin_wait_sum_ms": sums.origin_wait,
+        "origin_download_sum_ms": sums.origin_download,
+        "client_download_sum_ms": sums.client_download,
+    }
+
+
+def _dimension_row(
+    bucket: datetime,
+    dimension: str,
+    value: str,
+    acc: _Accumulator,
+) -> dict[str, Any]:
+    lat_p50, lat_p95, lat_p99 = _percentiles(acc.latencies, (0.50, 0.95, 0.99))
+    return {
+        "bucket_start": bucket.isoformat(),
+        "dimension": dimension,
+        "value": value,
+        "requests": acc.requests,
+        "latency_count": len(acc.latencies),
+        "latency_sum_ms": sum(acc.latencies) if acc.latencies else None,
+        "latency_p50_ms": lat_p50,
+        "latency_p95_ms": lat_p95,
+        "latency_p99_ms": lat_p99,
+    }
+
+
+_HS_PERF_CACHE_TTL = float(os.getenv("HS_PERF_CACHE_TTL_SECONDS", "30"))
+_perf_memo = ResponseMemo(ttl=_HS_PERF_CACHE_TTL, maxsize=128, prewarmer=False)
+CacheRegistry.register("hs_performance_aggregates_memo", _perf_memo.cache)
+_ALL_SECTIONS = frozenset({"top_urls", "top_asns", "ttl_dist", "waterfall", "scatter"})
+_SORT_COLUMNS = {"avg": "avg_ms", "p50": "p50_ms", "p95": "p95_ms", "p99": "p99_ms"}
+# Same minimum request counts as the standard path's live queries.
+_MIN_URL_REQUESTS = 5
+_MIN_ASN_REQUESTS = 10
+_TOP_N = 20
+# Upper bound (seconds, inclusive) -> label; identical to the standard ttl_dist CASE.
+_TTL_EDGES = (
+    (0, "0s"),
+    (10, "<10s"),
+    (30, "<30s"),
+    (60, "<1m"),
+    (300, "<5m"),
+    (600, "<10m"),
+    (1800, "<30m"),
+    (3600, "<1h"),
+    (10800, "<3h"),
+    (21600, "<6h"),
+    (43200, "<12h"),
+    (86400, "<1d"),
+    (259200, "<3d"),
+    (604800, "<1w"),
+    (1209600, "<2w"),
+    (2592000, "<30d"),
+    (7776000, "<90d"),
+    (31536000, "<1y"),
+)
+
+
+def _ttl_bucket_expr(column: str) -> str:
+    from backend.high_scale._common import _bucket_case
+
+    return _bucket_case(column, _TTL_EDGES, ">1y")
+
+
+# Raw request_facts expressions. Event fields live as strings in custom_fields, in
+# the units the log format emits: elapsed/ottfb/ottlb in microseconds, ttfb in seconds.
+_ELAPSED_MS = "toFloat64OrNull(custom_fields['elapsed']) / 1000.0"
+_TTFB_MS = "toFloat64OrNull(custom_fields['ttfb']) * 1000.0"
+_OTTFB_MS = "coalesce(toFloat64OrNull(custom_fields['ottfb']), 0) / 1000.0"
+_OTTLB_MS = "coalesce(toFloat64OrNull(custom_fields['ottlb']), 0) / 1000.0"
+
+
+def _active_filters(req: Any) -> dict[str, Any]:
+    """Filters that actually constrain rows; a field with no facts mapping is rejected, never ignored."""
+    active: dict[str, Any] = {}
+    for field_name, config in (getattr(req, "filters", None) or {}).items():
+        values = config.get("values") if isinstance(config, Mapping) else getattr(config, "values", None)
+        if not values:
+            continue
+        if field_name not in _FIELD_DIMENSIONS:
+            raise ValueError(f"unsupported Performance filter field for high-scale: {field_name}")
+        active[field_name] = config
+    return active
+
+
+def _weighted(column: str, count_column: str = "latency_count") -> str:
+    return f"sum({column} * {count_column}) / nullIf(sum(if({column} IS NOT NULL, {count_column}, 0)), 0)"
+
+
+def _optional_float(value: Any) -> float:
+    return float(value) if value is not None else 0.0
+
+
+def _projection_percentile_rows(
+    service: HighScaleService,
+    *,
+    marker: str,
+    dimension: str,
+    start_time: str | None,
+    end_time: str | None,
+    sort_column: str,
+    min_requests: int,
+) -> list[dict[str, Any]]:
+    where, params = _where(
+        service.service_id,
+        "performance_dimensions",
+        start_time,
+        end_time,
+        dimension=dimension,
+    )
+    params["limit"] = _TOP_N
+    # The stored latency_*_ms columns hold the raw elapsed value, which is microseconds.
+    return service.client.execute(
+        f"/* perf:{marker} */ SELECT value, "
+        "sum(requests) AS req_count, "
+        "sum(latency_sum_ms) / nullIf(sum(latency_count), 0) / 1000.0 AS avg_ms, "
+        f"{_weighted('latency_p50_ms')} / 1000.0 AS p50_ms, "
+        f"{_weighted('latency_p95_ms')} / 1000.0 AS p95_ms, "
+        f"{_weighted('latency_p99_ms')} / 1000.0 AS p99_ms "
+        f"FROM performance_minute_dimensions WHERE {where} GROUP BY value "
+        f"HAVING req_count > {min_requests} ORDER BY {sort_column} DESC NULLS LAST LIMIT {{limit:UInt32}}",
+        params,
+    )
+
+
+def _facts_percentile_rows(
+    service: HighScaleService,
+    *,
+    marker: str,
+    key_expr: str,
+    where: str,
+    params: dict[str, Any],
+    sort_column: str,
+    min_requests: int,
+) -> list[dict[str, Any]]:
+    return service.client.execute(
+        f"/* perf:{marker} */ SELECT value, count() AS req_count, "
+        "avg(elapsed_ms) AS avg_ms, "
+        "quantile(0.5)(elapsed_ms) AS p50_ms, "
+        "quantile(0.95)(elapsed_ms) AS p95_ms, "
+        "quantile(0.99)(elapsed_ms) AS p99_ms "
+        f"FROM (SELECT {key_expr} AS value, {_ELAPSED_MS} AS elapsed_ms FROM request_facts WHERE {where}) "
+        f"WHERE value != '' AND elapsed_ms IS NOT NULL GROUP BY value "
+        f"HAVING req_count > {min_requests} ORDER BY {sort_column} DESC NULLS LAST LIMIT {{limit:UInt32}}",
+        {**params, "limit": _TOP_N},
+    )
+
+
+def _latency_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "requests": int(row["req_count"]),
+        "avg": _optional_float(row["avg_ms"]),
+        "p50": _optional_float(row["p50_ms"]),
+        "p95": _optional_float(row["p95_ms"]),
+        "p99": _optional_float(row["p99_ms"]),
+    }
+
+
+def _asn_rows(service: HighScaleService, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach the same ``label`` the standard path's ``_resolve_asns`` adds."""
+    asn_labels = resolve_asn_display_labels(
+        service.service_id, [int(row["value"]) for row in rows if str(row["value"]).isdigit()]
+    )
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        asn: int | str = int(row["value"]) if str(row["value"]).isdigit() else row["value"]
+        label = asn_labels.get(asn, f"AS{asn}") if isinstance(asn, int) else str(asn)
+        out.append({"asn": asn, "label": label, **_latency_row(row)})
+    return out
+
+
+def _ttl_dist(
+    service: HighScaleService,
+    start_time: str | None,
+    end_time: str | None,
+    filters: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if filters:
+        where, params = _facts_where(service.service_id, start_time, end_time, filters)
+        source = f"SELECT toFloat64OrNull(custom_fields['ttl']) AS ttl, 1 AS weight FROM request_facts WHERE {where}"
+    else:
+        where, params = _where(service.service_id, "request_aggregate", start_time, end_time, dimension="ttl")
+        source = f"SELECT toFloat64OrNull(value) AS ttl, request_count AS weight FROM request_aggregates WHERE {where}"
+    rows = service.client.execute(
+        f"/* perf:ttl_dist */ SELECT {_ttl_bucket_expr('ttl')} AS bucket, sum(weight) AS count, min(ttl) AS min_ttl "
+        f"FROM ({source}) WHERE ttl IS NOT NULL GROUP BY bucket ORDER BY min_ttl",
+        params,
+    )
+    return [{"bucket": row["bucket"], "count": int(row["count"])} for row in rows]
+
+
+def _waterfall(
+    service: HighScaleService,
+    start_time: str | None,
+    end_time: str | None,
+    filters: Mapping[str, Any],
+) -> dict[str, Any]:
+    if filters:
+        where, params = _facts_where(service.service_id, start_time, end_time, filters)
+        sql = (
+            "/* perf:waterfall */ SELECT count() AS component_count, "
+            "sum(greatest(0, ttfb_ms - ottfb_ms)) / nullIf(count(), 0) AS edge_processing, "
+            "sum(ottfb_ms) / nullIf(count(), 0) AS origin_wait, "
+            "sum(greatest(0, ottlb_ms - ottfb_ms)) / nullIf(count(), 0) AS origin_download, "
+            "sum(greatest(0, elapsed_ms - greatest(ottlb_ms, ttfb_ms))) / nullIf(count(), 0) AS client_download "
+            f"FROM (SELECT {_ELAPSED_MS} AS elapsed_ms, {_TTFB_MS} AS ttfb_ms, "
+            f"{_OTTFB_MS} AS ottfb_ms, {_OTTLB_MS} AS ottlb_ms FROM request_facts WHERE {where}) "
+            "WHERE elapsed_ms IS NOT NULL AND ttfb_ms IS NOT NULL"
+        )
+    else:
+        where, params = _where(service.service_id, "performance_summary", start_time, end_time)
+        sql = (
+            "/* perf:waterfall */ SELECT sum(component_count) AS n_components, "
+            "sum(edge_processing_sum_ms) / nullIf(sum(component_count), 0) AS edge_processing, "
+            "sum(origin_wait_sum_ms) / nullIf(sum(component_count), 0) AS origin_wait, "
+            "sum(origin_download_sum_ms) / nullIf(sum(component_count), 0) AS origin_download, "
+            "sum(client_download_sum_ms) / nullIf(sum(component_count), 0) AS client_download "
+            f"FROM performance_minute_summary WHERE {where}"
+        )
+    rows = service.client.execute(sql, params)
+    row = rows[0] if rows else {}
+    return {
+        "avg": {
+            "edge_processing": _optional_float(row.get("edge_processing")),
+            "origin_wait": _optional_float(row.get("origin_wait")),
+            "origin_download": _optional_float(row.get("origin_download")),
+            "client_download": _optional_float(row.get("client_download")),
+        }
+    }
+
+
+def _scatter(
+    service: HighScaleService,
+    start_time: str | None,
+    end_time: str | None,
+    filters: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if filters:
+        where, params = _facts_where(service.service_id, start_time, end_time, filters)
+        sql = (
+            "/* perf:scatter */ SELECT ttfb_ms AS origin_ms, elapsed_ms - ttfb_ms AS edge_ms, cache "
+            f"FROM (SELECT event_id, {_ELAPSED_MS} AS elapsed_ms, {_TTFB_MS} AS ttfb_ms, "
+            f"custom_fields['cache'] AS cache FROM request_facts WHERE {where}) "
+            "WHERE elapsed_ms IS NOT NULL AND ttfb_ms IS NOT NULL AND elapsed_ms - ttfb_ms >= 0 "
+            "ORDER BY cityHash64(event_id) LIMIT {scatter_limit:UInt32}"
+        )
+    else:
+        where, params = _where(service.service_id, "performance_scatter", start_time, end_time)
+        sql = (
+            "/* perf:scatter */ SELECT origin_ms, edge_ms, cache "
+            f"FROM performance_scatter_samples WHERE {where} "
+            "ORDER BY sample_key LIMIT {scatter_limit:UInt32}"
+        )
+    rows = service.client.execute(sql, {**params, "scatter_limit": SCATTER_SAMPLE_SIZE})
+    return [
+        {
+            "origin": _optional_float(row["origin_ms"]),
+            "edge": _optional_float(row["edge_ms"]),
+            "cache": row["cache"] or None,
+        }
+        for row in rows
+    ]
+
+
+def performance_aggregates(
+    service: HighScaleService,
+    req: Any,
+    start_time: str | None,
+    end_time: str | None,
+    *,
+    sections: set[str] | None = None,
+) -> PerformanceAggregatesResponse:
+    wanted = _ALL_SECTIONS if sections is None else sections
+    filters = _active_filters(req)
+    sort_by = getattr(req, "sort_by", "p99")
+    sort_column = _SORT_COLUMNS.get(sort_by, "p99_ms")
+    cache_key: str | None = None
+    if _HS_PERF_CACHE_TTL > 0 and start_time is not None and end_time is not None:
+        cache_key = digest_cache_key(
+            {
+                "ep": "hs_performance_aggregates",
+                "svc": service.service_id,
+                "cid": client_cache_token(service.client),
+                "s": bucket_time_to_minute(start_time),
+                "e": bucket_time_to_minute(end_time),
+                "f": serialize_filters_for_key(filters),
+                "sb": sort_by,
+                "sec": sorted(wanted),
+            },
+            {"service_id": service.service_id},
+        )
+        cached = _perf_memo.get_with_telemetry(cache_key)
+        if cached is not None:
+            return PerformanceAggregatesResponse.with_telemetry(**cached)
+    # Pre-validate filter clauses on the caller thread so unsupported filter
+    # fields raise immediately and deterministically.
+    facts_where_params: tuple[str, dict[str, Any]] | None = None
+    if filters and (wanted & {"top_urls", "top_asns", "ttl_dist", "waterfall", "scatter"}):
+        facts_where_params = _facts_where(service.service_id, start_time, end_time, filters)
+    trace = HighScaleSections(service.service_id, "performance")
+    tasks: list[tuple[str, Any]] = []
+    if "top_urls" in wanted:
+
+        def _fetch_top_urls() -> list[dict[str, Any]]:
+            if facts_where_params is not None:
+                where, params = facts_where_params
+                rows = _facts_percentile_rows(
+                    service,
+                    marker="top_urls",
+                    key_expr="url",
+                    where=where,
+                    params=params,
+                    sort_column=sort_column,
+                    min_requests=_MIN_URL_REQUESTS,
+                )
+            else:
+                rows = _projection_percentile_rows(
+                    service,
+                    marker="top_urls",
+                    dimension="url",
+                    start_time=start_time,
+                    end_time=end_time,
+                    sort_column=sort_column,
+                    min_requests=_MIN_URL_REQUESTS,
+                )
+            return [{"url": row["value"], **_latency_row(row)} for row in rows]
+
+        tasks.append(("top_urls", _fetch_top_urls))
+    if "top_asns" in wanted:
+
+        def _fetch_top_asns() -> list[dict[str, Any]]:
+            if facts_where_params is not None:
+                where, params = facts_where_params
+                rows = _facts_percentile_rows(
+                    service,
+                    marker="top_asns",
+                    key_expr="custom_fields['asn']",
+                    where=where,
+                    params=params,
+                    sort_column=sort_column,
+                    min_requests=_MIN_ASN_REQUESTS,
+                )
+            else:
+                rows = _projection_percentile_rows(
+                    service,
+                    marker="top_asns",
+                    dimension="asn",
+                    start_time=start_time,
+                    end_time=end_time,
+                    sort_column=sort_column,
+                    min_requests=_MIN_ASN_REQUESTS,
+                )
+            return rows
+
+        tasks.append(("top_asns", _fetch_top_asns))
+    if "ttl_dist" in wanted:
+        tasks.append(("ttl_dist", lambda: _ttl_dist(service, start_time, end_time, filters)))
+    if "waterfall" in wanted:
+        tasks.append(("waterfall", lambda: _waterfall(service, start_time, end_time, filters)))
+    if "scatter" in wanted:
+        tasks.append(("scatter", lambda: _scatter(service, start_time, end_time, filters)))
+    result = trace.run_parallel(tasks, source="fact" if filters else "projection")
+    if "top_asns" in result:
+        result["top_asns"] = trace.run(
+            "asn_labels", lambda: _asn_rows(service, result["top_asns"]), activity="overhead"
+        )
+    # Unfiltered top tables request-weight-average per-minute percentiles; filtered ones
+    # are exact ClickHouse quantiles over the matching facts.
+    payload = {**result, "_approx": not filters, "section_timings": trace.timings()}
+    if cache_key is not None:
+        _perf_memo.put(cache_key, payload)
+    return PerformanceAggregatesResponse.with_telemetry(
+        **_perf_memo.result(payload, state="miss" if cache_key is not None else "bypass")
+    )
+
+
+from datetime import timedelta
+
+from backend.high_scale.publication import build_cmcd_projection_key
+from backend.models.performance import CmcdRequest
+from backend.repositories.utils.response_cache import (
+    ResponseMemo,
+)
+from backend.utils.bounded_cache import CacheRegistry
+
+
+def project_cmcd(request_event: Mapping[str, Any]) -> dict[str, Any] | None:
+    raw_fields = request_event.get("cmcd")
+    if raw_fields is None:
+        return None
+    if not isinstance(raw_fields, Mapping):
+        raise ValueError("CMCD fields must be a mapping")
+    request_event_id = request_event.get("event_id")
+    if not isinstance(request_event_id, str) or not request_event_id:
+        raise ValueError("CMCD projection requires request_event_id")
+    service_id = request_event.get("service_id")
+    if not isinstance(service_id, str) or not service_id:
+        raise ValueError("CMCD projection requires service_id")
+    projection = {
+        "projection_key": build_cmcd_projection_key({"request_event_id": request_event_id}),
+        "request_event_id": request_event_id,
+        "service_id": service_id,
+        "timestamp": request_event.get("timestamp"),
+        "cmcd_version": request_event.get("cmcd_version"),
+        "sid": request_event.get("sid"),
+        "country": _country(request_event.get("country")),
+        "asn": _asn(request_event.get("asn")),
+        "fields": dict(raw_fields),
+    }
+    return projection
+
+
+def _country(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _asn(value: object) -> int | None:
+    """A positive AS number, or None: the analytics group by ASN, never by a malformed label."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip()) or None
+    return None
+
+
+_memo = ResponseMemo(ttl=30.0, maxsize=128, prewarmer=False)
+CacheRegistry.register("hs_cmcd_aggregates_memo", _memo.cache)
+_DEFAULT_WINDOW = timedelta(days=1)
+_BUCKET_FORMAT = "%Y-%m-%d %H:%M:%S"
+_DURATION_BUCKETS = {
+    1: "<30s",
+    2: "30s–2m",
+    3: "2–5m",
+    4: "5–10m",
+    5: "10–30m",
+    6: "30m–1h",
+    7: ">1h",
+}
+_FILTER_COLUMNS = {"country": "country", "asn": "asn"}
+# One row per CMCD event with each key parsed once. Flags are NULL when the key is absent so
+# "never reported" stays distinguishable from "reported false".
+_EVENTS = """
+    SELECT event_timestamp AS ts,
+           cmcd['sid'] AS sid,
+           cmcd['cid'] AS cid,
+           cmcd['ot'] AS ot,
+           cmcd['sf'] AS sf,
+           country,
+           asn,
+           toFloat64OrNull(cmcd['bl']) AS bl,
+           toFloat64OrNull(cmcd['br']) AS br,
+           toFloat64OrNull(cmcd['mtp']) AS mtp,
+           toFloat64OrNull(cmcd['tb']) AS tb,
+           if(cmcd['bs'] = '', NULL, lower(cmcd['bs']) IN ('true', '1')) AS bs,
+           if(cmcd['su'] = '', NULL, lower(cmcd['su']) IN ('true', '1')) AS su
+    FROM cmcd_projection_facts
+    WHERE {where}
+"""
+_BUCKET = (
+    "formatDateTime(toStartOfInterval({column}, INTERVAL {{bucket_seconds:UInt32}} SECOND), '%Y-%m-%d %H:%i:%S', 'UTC')"
+)
+_VIDEO = "ot = 'v'"
+
+
+def _asn_names(service_id: str, asns: list[int]) -> dict[int, str]:
+    from backend.core import duckdb as _db
+
+    return _db.get_asn_names(service_id, asns)
+
+
+def _asn_label(asn: int, names: Mapping[int, str]) -> str:
+    from backend.core import duckdb as _db
+
+    return _db.format_asn_label(asn, names.get(asn, ""))
+
+
+def _spec(config: Any) -> tuple[str, list[Any]]:
+    if isinstance(config, Mapping):
+        return str(config.get("mode", "include")), list(config.get("values") or [])
+    return str(getattr(config, "mode", "include")), list(getattr(config, "values", None) or [])
+
+
+def _filter_clauses(filters: Mapping[str, Any]) -> tuple[list[str], dict[str, Any]]:
+    unsupported = sorted(name for name, config in filters.items() if _spec(config)[1] and name not in _FILTER_COLUMNS)
+    if unsupported:
+        raise ValueError(
+            f"high-scale CMCD projections cannot filter on: {', '.join(unsupported)} (supported: country, asn)"
+        )
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+    for i, (name, config) in enumerate(filters.items()):
+        mode, values = _spec(config)
+        if not values:
+            continue
+        keys: list[str] = []
+        for j, value in enumerate(values):
+            param = f"flt_{i}_{j}"
+            if name == "asn":
+                if not str(value).strip().isdigit():
+                    raise ValueError("asn filter values must be numeric AS numbers")
+                params[param] = int(str(value).strip())
+                keys.append(f"{{{param}:UInt32}}")
+            else:
+                params[param] = str(value)
+                keys.append(f"{{{param}:String}}")
+        operator = "NOT IN" if mode == "exclude" else "IN"
+        clauses.append(f"{_FILTER_COLUMNS[name]} {operator} ({', '.join(keys)})")
+    return clauses, params
+
+
+def _scope(service: HighScaleService, req: CmcdRequest, start: datetime, end: datetime) -> tuple[str, dict[str, Any]]:
+    filter_clauses, filter_params = _filter_clauses(req.filters or {})
+    clauses = [
+        "service_id={service_id:String}",
+        "publication_state='visible'",
+        "batch_id IN ("
+        "SELECT batch_id FROM high_scale_batch_publications FINAL "
+        "WHERE service_id={service_id:String} AND domain='cmcd' AND publication_state='visible')",
+        "event_timestamp >= {start:DateTime64(3)}",
+        "event_timestamp <= {end:DateTime64(3)}",
+        "cmcd['sid'] != ''",
+        *filter_clauses,
+    ]
+    params = {
+        "service_id": service.service_id,
+        "start": start,
+        "end": end,
+        "bucket_seconds": int(req.bucket_seconds),
+        "top_n": int(req.top_n),
+        **filter_params,
+    }
+    return " AND ".join(clauses), params
+
+
+def _round(value: Any) -> float | None:
+    return None if value is None else round(float(value), 2)
+
+
+def _pad(
+    start: datetime, end: datetime, bucket_seconds: int, rows: dict[str, dict[str, Any]], default: dict[str, Any]
+) -> list[dict[str, Any]]:
+    first = int(start.timestamp())
+    last = int(end.timestamp())
+    cursor = first - first % bucket_seconds
+    final = last - last % bucket_seconds
+    padded: list[dict[str, Any]] = []
+    while cursor <= final:
+        bucket = datetime.fromtimestamp(cursor, tz=UTC).strftime(_BUCKET_FORMAT)
+        padded.append({"bucket": bucket, **rows.get(bucket, default)})
+        cursor += bucket_seconds
+    return padded
+
+
+def _sessions_ts(rows: Iterable[dict[str, Any]], new_sessions: Mapping[str, int]) -> dict[str, dict[str, Any]]:
+    return {
+        str(row["bucket"]): {
+            "concurrent_sessions": int(row["concurrent_sessions"] or 0),
+            "rebuffer_session_pct": _round(row.get("rebuffer_session_pct")),
+            "new_sessions": new_sessions.get(str(row["bucket"]), 0),
+        }
+        for row in rows
+    }
+
+
+def cmcd_aggregates(
+    service: HighScaleService,
+    req: CmcdRequest,
+    start_time: str | None,
+    end_time: str | None,
+    sections: set[Any] | None,
+    mask_ips: bool,
+) -> dict[str, Any]:
+    """Return the standard CMCD response shape; ``mask_ips`` is moot because no section emits an IP."""
+    memo_key = digest_cache_key(
+        {
+            "ep": "hs_cmcd_aggregates",
+            "cid": client_cache_token(service.client),
+            "s": bucket_time_to_minute(start_time),
+            "e": bucket_time_to_minute(end_time),
+            "b": int(req.bucket_seconds),
+            "n": int(req.top_n),
+            "sec": sorted(str(s) for s in sections) if sections else None,
+            "m": bool(mask_ips),
+            "f": serialize_filters_for_key(req.filters or {}),
+        },
+        {"name": service.service_id, "service_id": service.service_id},
+    )
+    cached_resp = _memo.get(memo_key)
+    if cached_resp is not None:
+        return dict(cached_resp)
+
+    def _compute() -> dict[str, Any]:
+        return _cmcd_aggregates_compute(service, req, start_time, end_time, sections, mask_ips)
+
+    result = _memo.coalesce(f"hs_cmcd_agg:{memo_key}", _compute)
+    _memo.put(memo_key, result, strip=("section_timings",))
+    return result
+
+
+def _cmcd_aggregates_compute(
+    service: HighScaleService,
+    req: CmcdRequest,
+    start_time: str | None,
+    end_time: str | None,
+    sections: set[Any] | None,
+    mask_ips: bool,
+) -> dict[str, Any]:
+    start, end = parse_time_window(start_time, end_time, _DEFAULT_WINDOW, utc=True)
+    where, params = _scope(service, req, start, end)
+    events = _EVENTS.format(where=where)
+    execute = service.client.execute
+
+    def wanted(name: str) -> bool:
+        return sections is None or name in sections
+
+    trace = HighScaleSections(service.service_id, "cmcd")
+    probe = trace.run(
+        "probe",
+        lambda: execute(
+            "/* cmcd:probe */ SELECT count() AS events, uniqExact(sid) AS sessions, "
+            "countIf(bl IS NOT NULL) AS has_bl, countIf(br IS NOT NULL) AS has_br, countIf(bs IS NOT NULL) AS has_bs, "
+            "countIf(mtp IS NOT NULL) AS has_mtp, countIf(ot != '') AS has_ot, countIf(sf != '') AS has_sf, "
+            "countIf(su IS NOT NULL) AS has_su, countIf(tb IS NOT NULL) AS has_tb, countIf(cid != '') AS has_cid, "
+            "countIf(country != '') AS has_country, countIf(asn IS NOT NULL) AS has_asn "
+            f"FROM ({events})",
+            params,
+        ),
+        source="projected_fact",
+        activity="overhead",
+    )[0]
+    if not int(probe["events"] or 0):
+        return {"available": True, "has_data": False, "section_timings": trace.timings()}
+    has = {key: bool(int(probe[f"has_{key}"] or 0)) for key in ("bl", "br", "bs", "mtp", "ot", "sf", "su", "tb", "cid")}
+    has_country = bool(int(probe["has_country"] or 0))
+    has_asn = bool(int(probe["has_asn"] or 0))
+    has_video_filter = has["ot"]
+    video = _VIDEO if has_video_filter else "1"
+    result: dict[str, Any] = {"available": True, "has_data": True}
+    tasks: list[tuple[str, Callable[[], dict[str, Any]]]] = []
+    if wanted("overview"):
+
+        def _run_overview() -> dict[str, Any]:
+            row = execute(
+                "/* cmcd:overview */ SELECT uniqExact(sid) AS active_sessions, "
+                "if(countIf(bs IS NOT NULL) = 0, NULL, "
+                "uniqExactIf(sid, bs = 1) * 100.0 / nullIf(uniqExact(sid), 0)) AS rebuffer_rate, "
+                f"avgIf(br, {video}) AS avg_bitrate, avgIf(bl, {video}) AS avg_buffer_length, "
+                f"quantileTDigestIf(0.5)(mtp, {video}) AS median_throughput FROM ({events})",
+                params,
+            )[0]
+            peak = execute(
+                "/* cmcd:overview_peak */ SELECT max(viewers) AS peak_viewers FROM ("
+                "SELECT uniqExact(sid) AS viewers FROM (" + events + ") "
+                f"GROUP BY {_BUCKET.format(column='ts')})",
+                params,
+            )
+            duration = execute(
+                "/* cmcd:overview_duration */ SELECT avg(duration) AS avg_duration FROM ("
+                "SELECT (toUnixTimestamp64Milli(max(ts)) - toUnixTimestamp64Milli(min(ts))) / 1000.0 AS duration "
+                "FROM (" + events + ") GROUP BY sid HAVING duration > 0)",
+                params,
+            )
+            avg_duration = duration[0].get("avg_duration") if duration else None
+            return {
+                "overview": {
+                    "active_sessions": int(row["active_sessions"] or 0),
+                    "rebuffer_rate": _round(row.get("rebuffer_rate")) if has["bs"] else None,
+                    "avg_bitrate": _round(row.get("avg_bitrate")) if has["br"] else None,
+                    "avg_buffer_length": _round(row.get("avg_buffer_length")) if has["bl"] else None,
+                    "median_throughput": _round(row.get("median_throughput")) if has["mtp"] else None,
+                    "peak_viewers": int((peak[0].get("peak_viewers") if peak else 0) or 0),
+                    "avg_session_duration": int(round(float(avg_duration))) if avg_duration else None,
+                }
+            }
+
+        tasks.append(("overview", _run_overview))
+    want_ts = {
+        "sessions_ts": wanted("sessions_ts"),
+        "buffer_health_ts": wanted("buffer_health_ts") and has["bl"],
+        "bitrate_ts": wanted("bitrate_ts") and has["br"],
+        "throughput_ts": wanted("throughput_ts") and has["mtp"],
+        "startup_ts": wanted("startup_ts") and has["su"],
+    }
+    if any(want_ts.values()):
+
+        def _run_timeseries() -> dict[str, Any]:
+            ts_out: dict[str, Any] = {}
+            select = [f"{_BUCKET.format(column='ts')} AS bucket"]
+            if want_ts["sessions_ts"]:
+                select += [
+                    "uniqExact(sid) AS concurrent_sessions",
+                    "if(countIf(bs IS NOT NULL) = 0, NULL, "
+                    "uniqExactIf(sid, bs = 1) * 100.0 / nullIf(uniqExact(sid), 0)) AS rebuffer_session_pct",
+                ]
+            if want_ts["buffer_health_ts"]:
+                select += [
+                    f"quantileTDigestIf(0.5)(bl, {video}) AS p50_buffer",
+                    f"quantileTDigestIf(0.95)(bl, {video}) AS p95_buffer",
+                    "if(countIf(bs IS NOT NULL) = 0, NULL, countIf(bs = 1) * 100.0 / nullIf(count(), 0)) "
+                    "AS starvation_rate",
+                ]
+            if want_ts["bitrate_ts"]:
+                select += [
+                    f"avgIf(br, {video}) AS avg_bitrate",
+                    f"avgIf(br / tb, {video} AND tb > 0) AS utilization_ratio",
+                ]
+            if want_ts["throughput_ts"]:
+                select += [
+                    f"quantileTDigestIf(0.5)(mtp, {video}) AS p50_throughput",
+                    f"quantileTDigestIf(0.95)(mtp, {video}) AS p95_throughput",
+                    f"quantileTDigestIf(0.99)(mtp, {video}) AS p99_throughput",
+                ]
+            if want_ts["startup_ts"]:
+                select.append(
+                    "if(countIf(su IS NOT NULL) = 0, NULL, countIf(su = 1) * 100.0 / nullIf(count(), 0)) AS startup_ratio"
+                )
+            rows = execute(
+                f"/* cmcd:timeseries */ SELECT {', '.join(select)} FROM ({events}) GROUP BY bucket ORDER BY bucket",
+                params,
+            )
+            by_bucket = {str(row["bucket"]): row for row in rows}
+
+            def padded(field_map: dict[str, tuple[str, Any]], default: dict[str, Any]) -> list[dict[str, Any]]:
+                return _pad(
+                    start,
+                    end,
+                    int(req.bucket_seconds),
+                    {
+                        bucket: {out: convert(row.get(src)) for out, (src, convert) in field_map.items()}
+                        for bucket, row in by_bucket.items()
+                    },
+                    default,
+                )
+
+            if want_ts["sessions_ts"]:
+                first_seen = execute(
+                    "/* cmcd:new_sessions */ SELECT "
+                    f"{_BUCKET.format(column='first_ts')} AS bucket, count() AS new_sessions FROM ("
+                    f"SELECT sid, min(ts) AS first_ts FROM ({events}) GROUP BY sid) GROUP BY bucket",
+                    params,
+                )
+                new_sessions = {str(row["bucket"]): int(row["new_sessions"] or 0) for row in first_seen}
+                ts_out["sessions_ts"] = _pad(
+                    start,
+                    end,
+                    int(req.bucket_seconds),
+                    _sessions_ts(rows, new_sessions),
+                    {"concurrent_sessions": 0, "rebuffer_session_pct": None, "new_sessions": 0},
+                )
+            if want_ts["buffer_health_ts"]:
+                ts_out["buffer_health_ts"] = padded(
+                    {
+                        "p50_buffer": ("p50_buffer", _round),
+                        "p95_buffer": ("p95_buffer", _round),
+                        "starvation_rate": ("starvation_rate", _round),
+                    },
+                    {"p50_buffer": None, "p95_buffer": None, "starvation_rate": None},
+                )
+            if want_ts["bitrate_ts"]:
+                ts_out["bitrate_ts"] = padded(
+                    {"avg_bitrate": ("avg_bitrate", _round), "utilization_ratio": ("utilization_ratio", _round)},
+                    {"avg_bitrate": None, "utilization_ratio": None},
+                )
+            if want_ts["throughput_ts"]:
+                ts_out["throughput_ts"] = padded(
+                    {
+                        "p50": ("p50_throughput", _round),
+                        "p95": ("p95_throughput", _round),
+                        "p99": ("p99_throughput", _round),
+                    },
+                    {"p50": None, "p95": None, "p99": None},
+                )
+            if want_ts["startup_ts"]:
+                ts_out["startup_ts"] = padded(
+                    {"startup_ratio": ("startup_ratio", _round)},
+                    {"startup_ratio": None},
+                )
+            return ts_out
+
+        tasks.append(("timeseries", _run_timeseries))
+    if wanted("top_content") and has["cid"]:
+
+        def _run_top_content() -> dict[str, Any]:
+            rows = execute(
+                "/* cmcd:top_content */ SELECT cid AS content_id, count() AS session_count, "
+                "sum(had_rebuffer) * 100.0 / nullIf(count(), 0) AS rebuffer_rate, avg(avg_br) AS avg_br, "
+                "avg(avg_bl) AS avg_bl FROM ("
+                "SELECT cid, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
+                f"avgIf(br, {video}) AS avg_br, avgIf(bl, {video}) AS avg_bl "
+                f"FROM ({events}) WHERE cid != '' GROUP BY cid, sid) "
+                "GROUP BY cid ORDER BY session_count DESC, content_id LIMIT {top_n:UInt32}",
+                params,
+            )
+            return {
+                "top_content": [
+                    {
+                        "content_id": row["content_id"],
+                        "session_count": int(row["session_count"]),
+                        "rebuffer_rate": _round(row.get("rebuffer_rate")),
+                        "avg_bitrate": _round(row.get("avg_br")),
+                        "avg_buffer_length": _round(row.get("avg_bl")),
+                    }
+                    for row in rows
+                ]
+            }
+
+        tasks.append(("top_content", _run_top_content))
+    if wanted("rebuffer_by_country") and has_country and has["bs"]:
+
+        def _run_rebuffer_country() -> dict[str, Any]:
+            rows = execute(
+                "/* cmcd:rebuffer_by_country */ SELECT country, "
+                "sum(had_rebuffer) * 100.0 / nullIf(count(), 0) AS rebuffer_rate, count() AS session_count, "
+                "avg(median_mtp) AS median_mtp FROM ("
+                "SELECT country, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
+                f"quantileTDigestIf(0.5)(mtp, {video}) AS median_mtp "
+                f"FROM ({events}) WHERE country != '' GROUP BY country, sid) "
+                "GROUP BY country ORDER BY session_count DESC, country LIMIT {top_n:UInt32}",
+                params,
+            )
+            return {
+                "rebuffer_by_country": [
+                    {
+                        "country": row["country"],
+                        "rebuffer_rate": _round(row.get("rebuffer_rate")),
+                        "session_count": int(row["session_count"]),
+                        "median_throughput": _round(row.get("median_mtp")),
+                    }
+                    for row in rows
+                ]
+            }
+
+        tasks.append(("rebuffer_country", _run_rebuffer_country))
+    if wanted("rebuffer_by_asn") and has_asn and has["bs"]:
+
+        def _run_rebuffer_asn() -> dict[str, Any]:
+            rows = execute(
+                "/* cmcd:rebuffer_by_asn */ SELECT asn, "
+                "sum(had_rebuffer) * 100.0 / nullIf(count(), 0) AS rebuffer_rate, count() AS session_count, "
+                "avg(avg_br) AS avg_br, avg(avg_bl) AS avg_bl FROM ("
+                "SELECT asn, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
+                f"avgIf(br, {video}) AS avg_br, avgIf(bl, {video}) AS avg_bl "
+                f"FROM ({events}) WHERE asn IS NOT NULL GROUP BY asn, sid) "
+                "GROUP BY asn ORDER BY session_count DESC, asn LIMIT {top_n:UInt32}",
+                params,
+            )
+            return {
+                "rebuffer_by_asn": [
+                    {
+                        "asn": int(row["asn"]),
+                        "label": "",
+                        "rebuffer_rate": _round(row.get("rebuffer_rate")),
+                        "session_count": int(row["session_count"]),
+                        "avg_bitrate": _round(row.get("avg_br")),
+                        "avg_buffer_length": _round(row.get("avg_bl")),
+                    }
+                    for row in rows
+                ]
+            }
+
+        tasks.append(("rebuffer_asn", _run_rebuffer_asn))
+    if wanted("object_type_dist") and has["ot"]:
+
+        def _run_object_type() -> dict[str, Any]:
+            rows = execute(
+                "/* cmcd:object_type_dist */ SELECT ot AS object_type, count() AS request_count "
+                f"FROM ({events}) WHERE ot != '' GROUP BY ot ORDER BY request_count DESC, ot",
+                params,
+            )
+            return {
+                "object_type_dist": [
+                    {"object_type": row["object_type"], "request_count": int(row["request_count"])} for row in rows
+                ]
+            }
+
+        tasks.append(("object_type", _run_object_type))
+    if wanted("streaming_format_dist") and has["sf"]:
+
+        def _run_streaming_format() -> dict[str, Any]:
+            rows = execute(
+                "/* cmcd:streaming_format_dist */ SELECT sf AS streaming_format, uniqExact(sid) AS session_count "
+                f"FROM ({events}) WHERE sf != '' GROUP BY sf ORDER BY session_count DESC, sf",
+                params,
+            )
+            return {
+                "streaming_format_dist": [
+                    {"streaming_format": row["streaming_format"], "session_count": int(row["session_count"])}
+                    for row in rows
+                ]
+            }
+
+        tasks.append(("streaming_format", _run_streaming_format))
+    if wanted("session_duration_dist"):
+
+        def _run_session_duration() -> dict[str, Any]:
+            rows = execute(
+                "/* cmcd:session_duration_dist */ SELECT sort_order, count() AS session_count FROM ("
+                "SELECT multiIf(duration < 30, 1, duration < 120, 2, duration < 300, 3, duration < 600, 4, "
+                "duration < 1800, 5, duration < 3600, 6, 7) AS sort_order FROM ("
+                "SELECT (toUnixTimestamp64Milli(max(ts)) - toUnixTimestamp64Milli(min(ts))) / 1000.0 AS duration "
+                f"FROM ({events}) GROUP BY sid)) GROUP BY sort_order ORDER BY sort_order",
+                params,
+            )
+            return {
+                "session_duration_dist": [
+                    {
+                        "duration_bucket": _DURATION_BUCKETS[int(row["sort_order"])],
+                        "session_count": int(row["session_count"]),
+                    }
+                    for row in rows
+                ]
+            }
+
+        tasks.append(("session_duration", _run_session_duration))
+    for d in trace.run_parallel(tasks, source="projected_fact", max_workers=8).values():
+        result.update(d)
+    if "rebuffer_by_asn" in result:
+        # Metadata lookup/label assembly is overhead, not ClickHouse analytics.
+        # Run after the query tasks so its wall span does not overlap theirs.
+        def _label_asns() -> None:
+            rows = result["rebuffer_by_asn"]
+            names = _asn_names(service.service_id, [row["asn"] for row in rows])
+            for row in rows:
+                row["label"] = _asn_label(row["asn"], names)
+
+        trace.run("asn_labels", _label_asns, activity="overhead")
+    result["section_timings"] = trace.timings()
+    return result
+
+
+_QUERY_SERVICE_ALIASES = (
+    "query_router",
+    "decoder",
+    "query",
+    "clickhouse",
+    "insights",
+    "sessions",
+    "aggregate_query",
+    "performance",
+    "performance_projection",
+    "cmcd",
+)
+for _alias_name in _QUERY_SERVICE_ALIASES:
     sys.modules[f"backend.high_scale.{_alias_name}"] = _self_mod
 _hs_pkg = sys.modules.get("backend.high_scale")
 if _hs_pkg is not None:
-    for _alias_name in ("query_router", "decoder", "query", "clickhouse", "insights", "sessions", "aggregate_query"):
+    for _alias_name in _QUERY_SERVICE_ALIASES:
         setattr(_hs_pkg, _alias_name, _self_mod)
 _backend_pkg = sys.modules.get("backend")
 if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    for _alias_name in ("query_router", "decoder", "query", "clickhouse", "insights", "sessions", "aggregate_query"):
+    for _alias_name in _QUERY_SERVICE_ALIASES:
         _backend_pkg._MODULE_ALIASES[f"backend.high_scale.{_alias_name}"] = __name__

@@ -17,10 +17,8 @@ import {
   ShieldAlert,
 } from 'lucide-react'
 
-import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api'
-import { formatElapsed } from '@/lib/format'
-import { queryKeys } from '@/lib/query-keys'
+import { client, unwrapClient, queryKeys } from "@/lib/api";
+import { formatElapsed } from "@/lib/utils"
 import { useServiceStore } from '@/stores/filterStore'
 import type { components } from '@/types/api.generated'
 import { Badge } from '@/components/ui/badge'

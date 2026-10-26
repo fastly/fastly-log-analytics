@@ -668,9 +668,10 @@ def test_views_are_dropped_and_created_never_replaced_so_no_drop_table_privilege
 
 from types import SimpleNamespace
 
-from backend.high_scale import query as console
 from backend.high_scale.query import _reject_unsafe_functions, _table_filters, query_endpoint
 from backend.models.dashboard import QueryRequest
+
+from backend.high_scale import query as console
 
 START = "2026-09-15T00:00:00+00:00"
 END = "2026-09-15T01:00:00+00:00"
@@ -954,3 +955,1476 @@ def test_the_privileged_path_without_views_is_unchanged() -> None:
 
     assert "request_facts" in sql and "fla_cv_" not in sql
     assert "service_id" in settings["additional_table_filters"]
+
+
+# ── Merged from tests/high_scale/test_deletion.py ──
+
+import hashlib
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock, call
+
+import pytest
+from backend.high_scale.archive_models import (
+    ArchiveArtifact,
+    ArchiveManifest,
+    ArchiveSourceEntry,
+    ArchiveSourceObject,
+    ArchiveState,
+)
+from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
+from backend.high_scale.deletion import (
+    DeletionController,
+    DeletionSweepResult,
+    HighScaleDeletionSweeper,
+    PostgresDeletionLedger,
+)
+
+from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
+
+
+def test_source_deletion_requires_archive_and_owner_fence() -> None:
+    store = InMemoryObjectStore()
+    publication = ArchivePublication(store)
+    ledger = HighScaleLedger()
+    try:
+        source = ArchiveSourceObject("svc", "request", "raw/request/a.gz", "sha256:source", 4, "v1")
+        ledger.discover("svc", "request", source.object_key, source.checksum, size_bytes=4, version="v1")
+        claim = ledger.claim(source.service_id, source.object_key, "worker")
+        ledger.record_counts(source.service_id, source.object_key, accepted_rows=1, malformed_rows=0)
+        ledger.mark_appended(source.service_id, source.object_key, claim.lease_generation)
+        now = datetime(2026, 9, 4, tzinfo=UTC)
+        manifest = ArchiveManifest(
+            "manifest-1",
+            source,
+            ArchiveArtifact(
+                "s3://archive/artifacts/manifest-1.parquet",
+                _checksum(b"data"),
+                4,
+                1,
+                4,
+                "sha256:events",
+                "request.v1",
+                "normalize.v1",
+            ),
+            now - timedelta(days=3),
+            now - timedelta(days=2),
+            now - timedelta(days=1),
+            now - timedelta(hours=1),
+            3,
+        )
+        artifact = b"data"
+        store.put(source.object_key, b"raw")
+        publication.publish(manifest, artifact)
+        ledger.mark_archived(source.service_id, source.object_key, claim.lease_generation, manifest.manifest_id, 3)
+        ledger.acknowledge(source.service_id, source.object_key, manifest.manifest_id)
+
+        DeletionController(store, publication, ledger).delete_source(manifest, current_owner_epoch=3, now=now)
+
+        assert not store.exists(source.object_key)
+        ledger.mark_source_deleted(source.service_id, source.object_key, manifest.manifest_id)
+    finally:
+        ledger.close()
+
+
+def test_source_deletion_is_blocked_before_deadline() -> None:
+    store = InMemoryObjectStore()
+    publication = ArchivePublication(store)
+    ledger = HighScaleLedger()
+    try:
+        with pytest.raises(ValueError, match="grace period"):
+            DeletionController(store, publication, ledger).delete_source(
+                _manifest(), current_owner_epoch=3, now=datetime(2026, 9, 1, tzinfo=UTC)
+            )
+    finally:
+        ledger.close()
+
+
+def test_source_deletion_rejects_non_high_scale_owner() -> None:
+    ownership = OwnershipStore()
+    ledger = HighScaleLedger()
+    ownership.initialize("svc", owner="standard", source_cursor="cursor-0")
+    try:
+        with pytest.raises(ValueError, match="not authorized"):
+            DeletionController(
+                InMemoryObjectStore(),
+                ArchivePublication(InMemoryObjectStore()),
+                ledger,
+                ownership=ownership,
+            ).delete_source(_manifest(), current_owner_epoch=1)
+    finally:
+        ownership.close()
+        ledger.close()
+
+
+def _manifest() -> ArchiveManifest:
+    source = ArchiveSourceObject("svc", "request", "raw/request/a.gz", "sha256:source", 4, "v1")
+    return ArchiveManifest(
+        "manifest-1",
+        source,
+        ArchiveArtifact("s3://archive/artifacts/manifest-1.parquet", "sha256:x", 1, 1, 1, "sha256:e", "v1", "v1"),
+        datetime(2026, 9, 1, tzinfo=UTC),
+        datetime(2026, 9, 1, tzinfo=UTC),
+        datetime(2026, 9, 2, tzinfo=UTC),
+        datetime(2026, 9, 3, tzinfo=UTC),
+        3,
+    )
+
+
+def _checksum(value: bytes) -> str:
+    return f"sha256:{hashlib.sha256(value).hexdigest()}"
+
+
+# ── PostgresDeletionLedger ──────────────────────────────────────────────────
+#
+# PostgresControlPlane's authorize_source_delete/mark_source_deleted have a
+# different shape than HighScaleLedger's (manifest must already be
+# deletion_eligible; mark_source_deleted needs an owner epoch the
+# DeletionController call site never passes). This adapter bridges that gap
+# so DeletionController's tested grace-period/replay/ownership logic runs
+# unchanged against Postgres. These tests pin the adapter's own logic with a
+# fake control double — the real Postgres queries are covered separately in
+# tests/core/test_high_scale_postgres_control.py.
+
+
+@dataclass
+class _FakeControl:
+    owner_epoch_for_owner_call: int = 5
+    transition_error: Exception | None = None
+
+    def __post_init__(self) -> None:
+        self.transition_calls: list[tuple] = []
+        self.authorize_calls: list[tuple] = []
+        self.mark_deleted_calls: list[tuple] = []
+
+    def transition_archive_manifest(self, manifest_id, *, expected_state, next_state, expected_owner_epoch):
+        self.transition_calls.append((manifest_id, expected_state, next_state, expected_owner_epoch))
+        if self.transition_error is not None:
+            raise self.transition_error
+
+    def authorize_source_delete(self, service_id, object_key, *, manifest_id, expected_owner_epoch):
+        self.authorize_calls.append((service_id, object_key, manifest_id, expected_owner_epoch))
+        return "authorized"
+
+    def owner(self, service_id):
+        return MagicMock(owner_epoch=self.owner_epoch_for_owner_call)
+
+    def mark_source_deleted(self, service_id, object_key, *, manifest_id, expected_owner_epoch):
+        self.mark_deleted_calls.append((service_id, object_key, manifest_id, expected_owner_epoch))
+
+
+def test_postgres_deletion_ledger_satisfies_the_ownership_checker_protocol() -> None:
+    """DeletionController's OwnershipChecker protocol calls ``.get(service_id)``,
+    but PostgresControlPlane's equivalent method is named ``.owner(...)`` —
+    passing the control plane directly as ``ownership=`` fails at the first
+    real call (AttributeError), not at construction. This was caught live
+    against the real k8s worker before this test was added."""
+    control = _FakeControl()
+    adapter = PostgresDeletionLedger(control)
+
+    result = adapter.get("svc")
+
+    assert result.owner_epoch == control.owner_epoch_for_owner_call
+
+
+def test_postgres_deletion_ledger_promotes_manifest_then_authorizes() -> None:
+    control = _FakeControl()
+    adapter = PostgresDeletionLedger(control)
+
+    result = adapter.authorize_source_delete("svc", "raw/one.gz", "manifest-1", current_owner_epoch=3)
+
+    assert result == "authorized"
+    assert control.transition_calls == [
+        ("manifest-1", ArchiveState.MANIFEST_COMMITTED, ArchiveState.DELETION_ELIGIBLE, 3)
+    ]
+    assert control.authorize_calls == [("svc", "raw/one.gz", "manifest-1", 3)]
+
+
+def test_postgres_deletion_ledger_authorize_tolerates_an_already_promoted_manifest() -> None:
+    """A prior sweep tick (or a race) may have already promoted the
+    manifest to deletion_eligible — the promotion attempt then fails with
+    ValueError (not an adjacent-state transition), which must not stop the
+    real authorization call from proceeding."""
+    control = _FakeControl(transition_error=ValueError("archive manifest transition is not adjacent"))
+    adapter = PostgresDeletionLedger(control)
+
+    result = adapter.authorize_source_delete("svc", "raw/one.gz", "manifest-1", current_owner_epoch=3)
+
+    assert result == "authorized"
+    assert control.authorize_calls == [("svc", "raw/one.gz", "manifest-1", 3)]
+
+
+def test_postgres_deletion_ledger_mark_deleted_resolves_owner_epoch_itself() -> None:
+    """DeletionController's ledger-shaped call site never passes an owner
+    epoch to mark_source_deleted — the adapter must resolve one itself."""
+    control = _FakeControl(owner_epoch_for_owner_call=7)
+    adapter = PostgresDeletionLedger(control)
+
+    adapter.mark_source_deleted("svc", "raw/one.gz", "manifest-1")
+
+    assert control.mark_deleted_calls == [("svc", "raw/one.gz", "manifest-1", 7)]
+
+
+# ── HighScaleDeletionSweeper ─────────────────────────────────────────────────
+
+
+@dataclass
+class _ManifestRecord:
+    manifest: object
+    owner_epoch: int
+
+
+class _SweepControl:
+    def __init__(self, sources, manifests) -> None:
+        self._sources = sources
+        self._manifests = manifests
+
+    def deletable_sources(self, service_id, *, limit):
+        return self._sources
+
+    def archive_manifest(self, manifest_id):
+        return self._manifests[manifest_id]
+
+
+def test_sweeper_deletes_eligible_sources_and_skips_ineligible_ones() -> None:
+    """The sweeper itself does no grace-period math — DeletionController
+    does, and its own tests cover that. Here we pin only the sweeper's
+    looping/counting/defensive behavior against a mocked controller."""
+    now = datetime(2026, 9, 5, tzinfo=UTC)
+    first = _manifest_for("first", now=now)
+    second = _manifest_for("second", now=now)
+    control = _SweepControl(
+        sources=[
+            MagicMock(archive_manifest_id="first"),
+            MagicMock(archive_manifest_id="second"),
+            MagicMock(archive_manifest_id=None),  # defensive: no manifest yet, must be skipped not crashed
+        ],
+        manifests={
+            "first": _ManifestRecord(first, owner_epoch=3),
+            "second": _ManifestRecord(second, owner_epoch=3),
+        },
+    )
+    controller = MagicMock()
+    controller.delete_source.side_effect = [None, ValueError("source deletion grace period has not elapsed")]
+    sweeper = HighScaleDeletionSweeper(control=control, controller=controller)
+
+    result = sweeper.sweep(service_id="svc", now=now)
+
+    assert result == DeletionSweepResult(deleted=1, skipped=1)
+    assert controller.delete_source.call_args_list == [
+        call(first, current_owner_epoch=3, now=now),
+        call(second, current_owner_epoch=3, now=now),
+    ]
+
+
+def _manifest_for(manifest_id: str, *, now: datetime) -> ArchiveManifest:
+    source = ArchiveSourceObject("svc", "request", f"raw/{manifest_id}.gz", "sha256:source", 4, "v1")
+    return ArchiveManifest(
+        manifest_id,
+        source,
+        ArchiveArtifact(f"s3://archive/{manifest_id}.parquet", "sha256:x", 1, 1, 1, "sha256:e", "v1", "v1"),
+        now - timedelta(days=3),
+        now - timedelta(days=2),
+        now - timedelta(days=1),
+        now - timedelta(hours=1),
+        3,
+    )
+
+
+def test_delete_manifest_sources_multi_source() -> None:
+    store = InMemoryObjectStore()
+    publication = ArchivePublication(store)
+    ledger = HighScaleLedger()
+    try:
+        now = datetime(2026, 9, 10, tzinfo=UTC)
+        sources = [
+            ArchiveSourceEntry(
+                key=f"raw/request/part_{i}.gz",
+                checksum=f"sha256:source_{i}",
+                size_bytes=10,
+                row_start=i * 5,
+                row_count=5,
+                deletion_deadline=now - timedelta(hours=1) if i < 2 else now + timedelta(hours=1),
+            )
+            for i in range(3)
+        ]
+        manifest = ArchiveManifest(
+            "manifest-batch",
+            artifact=ArchiveArtifact(
+                "s3://archive/artifacts/manifest-batch.parquet",
+                _checksum(b"batch_data"),
+                10,
+                15,
+                10,
+                "sha256:events",
+                "request.v1",
+                "normalize.v1",
+            ),
+            coverage_start=now - timedelta(days=3),
+            coverage_end=now - timedelta(days=2),
+            retention_deadline=now - timedelta(days=1),
+            deletion_authorization_deadline=now - timedelta(hours=1),
+            archive_epoch=3,
+            service_id="svc",
+            domain="request",
+            sources=sources,
+        )
+
+        for s in sources:
+            store.put(s.key, b"raw_gz")
+            ledger.discover("svc", "request", s.key, s.checksum, size_bytes=s.size_bytes)
+            claim = ledger.claim("svc", s.key, "worker")
+            ledger.record_counts("svc", s.key, accepted_rows=s.row_count, malformed_rows=0)
+            ledger.mark_appended("svc", s.key, claim.lease_generation)
+            ledger.mark_archived("svc", s.key, claim.lease_generation, manifest.manifest_id, 3)
+            ledger.acknowledge("svc", s.key, manifest.manifest_id)
+
+        publication.publish(manifest, b"batch_data")
+
+        controller = DeletionController(store, publication, ledger)
+        deleted = controller.delete_manifest_sources(manifest, current_owner_epoch=3, now=now)
+
+        # First 2 sources had deletion_deadline in past -> deleted
+        assert set(deleted) == {"raw/request/part_0.gz", "raw/request/part_1.gz"}
+        assert not store.exists("raw/request/part_0.gz")
+        assert not store.exists("raw/request/part_1.gz")
+        # 3rd source had deletion_deadline in future -> preserved
+        assert store.exists("raw/request/part_2.gz")
+    finally:
+        ledger.close()
+
+
+def test_sweeper_groups_by_manifest_and_deletes_batch() -> None:
+    now = datetime(2026, 9, 10, tzinfo=UTC)
+    manifest = _manifest_for("m1", now=now)
+    control = MagicMock()
+    control.deletable_sources.return_value = [
+        MagicMock(archive_manifest_id="m1", object_key="raw/1.gz"),
+        MagicMock(archive_manifest_id="m1", object_key="raw/2.gz"),
+    ]
+    control.archive_manifest.return_value = MagicMock(manifest=manifest, owner_epoch=3)
+
+    controller = MagicMock(spec=DeletionController)
+    controller.delete_manifest_sources.return_value = ["raw/1.gz", "raw/2.gz"]
+
+    sweeper = HighScaleDeletionSweeper(control=control, controller=controller)
+    result = sweeper.sweep(service_id="svc", now=now)
+
+    assert result == DeletionSweepResult(deleted=2, skipped=0)
+    controller.delete_manifest_sources.assert_called_once_with(
+        manifest,
+        current_owner_epoch=3,
+        source_keys=["raw/1.gz", "raw/2.gz"],
+        now=now,
+    )
+
+
+# ── Merged from test_archive_only_recovery.py ────────────────────────
+
+import tempfile
+from dataclasses import replace
+from pathlib import Path
+
+from backend.high_scale.archive_writer import write_batch_archive_checkpoint
+from backend.high_scale.recovery import (
+    rebuild_origin_projections_from_fos,
+    rebuild_serving_state_from_fos,
+)
+from backend.high_scale.replay import replay_manifest, replay_origin_projections
+
+from backend.high_scale.publication import (
+    ClickHousePublication,
+    HighScaleBatch,
+    InMemoryBatchManifestStore,
+    InsertReceipt,
+    PublicationStatus,
+)
+
+
+class _MockClickHouseClient:
+    def __init__(self) -> None:
+        self.batches: list[HighScaleBatch] = []
+
+    def insert(self, batch: HighScaleBatch) -> InsertReceipt:
+        self.batches.append(batch)
+        return InsertReceipt(batch.batch_id, len(batch.rows), batch.digest)
+
+    @property
+    def request_rows(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for b in self.batches:
+            if b.domain == "request":
+                rows.extend(b.rows)
+        return rows
+
+
+class _InMemoryCatalog:
+    def __init__(self, manifests: tuple[ArchiveManifest, ...]) -> None:
+        self._manifests = manifests
+
+    def manifests_covering(
+        self, service_id: str, domain: str, start: datetime, end: datetime
+    ) -> tuple[ArchiveManifest, ...]:
+        return tuple(
+            m
+            for m in self._manifests
+            if m.service_id == service_id and m.domain == domain and m.coverage_end > start and m.coverage_start < end
+        )
+
+
+def _build_synthetic_batch_archive(
+    service_id: str,
+    output_dir: Path,
+    source_count: int = 5,
+    rows_per_source: int = 5,
+    now: datetime | None = None,
+) -> tuple[ArchiveManifest, bytes, list[dict[str, Any]]]:
+    observed = now or datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
+    source_batches: list[tuple[ArchiveSourceObject, tuple[dict[str, Any], ...]]] = []
+    all_events: list[dict[str, Any]] = []
+
+    for s_idx in range(source_count):
+        events_for_source: list[dict[str, Any]] = []
+        for r_idx in range(rows_per_source):
+            event = {
+                "event_id": f"evt-{service_id}-{s_idx}-{r_idx}",
+                "timestamp": (observed - timedelta(minutes=s_idx, seconds=r_idx * 10)).isoformat(),
+                "client_ip": f"198.51.100.{(s_idx * 5 + r_idx) % 250 + 1}",
+                "request_method": "GET" if r_idx % 2 == 0 else "POST",
+                "url": f"/api/v1/item/{s_idx}_{r_idx}",
+                "status": 200 if r_idx != 3 else 500,
+                "ost": 200 if r_idx != 3 else 500,
+                "ottfb": 45000.0,
+                "ttfb": 0.045,
+                "cache": "MISS",
+                "resp_bytes": 1024 * (r_idx + 1),
+                "pop": "JFK" if s_idx % 2 == 0 else "SFO",
+                "fastly_backend_name": "origin-primary",
+                "time_elapsed": 30000 + (r_idx * 500),
+            }
+            events_for_source.append(event)
+            all_events.append(event)
+
+        source_obj = ArchiveSourceObject(
+            service_id=service_id,
+            domain="request",
+            object_key=f"raw/request/year=2026/month=10/day=09/source_{s_idx:03d}.gz",
+            checksum=f"sha256:synth_{s_idx:04d}",
+            size_bytes=512,
+            version=f"v{s_idx}",
+        )
+        source_batches.append((source_obj, tuple(events_for_source)))
+
+    manifest = write_batch_archive_checkpoint(
+        output_dir,
+        service_id=service_id,
+        domain="request",
+        source_batches=source_batches,
+        archive_epoch=1,
+        schema_version="request.v1",
+        transform_version="normalize.v1",
+        coverage_start=observed - timedelta(hours=1),
+        coverage_end=observed,
+        retention_seconds=86400 * 30,
+        deletion_grace_seconds=86400 * 7,
+    )
+
+    artifact_path = Path(manifest.artifact.uri.removeprefix("file://"))
+    artifact_bytes = artifact_path.read_bytes()
+    normalized_manifest = replace(
+        manifest,
+        artifact=replace(
+            manifest.artifact,
+            uri=f"s3://archive/artifacts/{manifest.manifest_id}.parquet",
+        ),
+    )
+    return normalized_manifest, artifact_bytes, all_events
+
+
+def test_archive_only_recovery_rebuilds_all_events_without_raw_logs() -> None:
+    """Verifies that a lost ClickHouse table can be completely rebuilt directly
+    from FOS archive artifacts using the batch manifest format, without touching
+    or requiring the original raw Fastly .gz log files.
+    """
+    service_id = "recover-svc-001"
+    now = datetime(2026, 10, 9, 14, 0, tzinfo=UTC)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        manifest, artifact_bytes, expected_events = _build_synthetic_batch_archive(
+            service_id=service_id,
+            output_dir=Path(tmp_dir),
+            source_count=5,
+            rows_per_source=5,
+            now=now,
+        )
+
+    # 1. Publish to FOS archive store
+    object_store = InMemoryObjectStore()
+    archive = ArchivePublication(object_store)
+    pub_res = archive.publish(manifest, artifact_bytes)
+    assert archive.is_replayable(manifest.manifest_id)
+
+    # 2. Simulate complete absence/deletion of edge raw logs
+    # No raw .gz files exist or are referenced anywhere in the recovery path.
+
+    # 3. Simulate a fresh ClickHouse cluster after state wipe
+    ch_client = _MockClickHouseClient()
+    manifest_store = InMemoryBatchManifestStore()
+    publication = ClickHousePublication(manifest_store, ch_client)
+
+    # 4. Replay the batch manifest
+    replay_res = replay_manifest(manifest, archive, publication)
+
+    assert replay_res.manifest_id == manifest.manifest_id
+    assert replay_res.rows_read == 25
+    assert replay_res.publication.rows_visible == 25
+    assert replay_res.publication.status == PublicationStatus.VISIBLE
+    assert replay_res.publication.duplicate is False
+
+    # 5. Assert all 25 rows recovered with accurate attributes
+    recovered_rows = ch_client.request_rows
+    assert len(recovered_rows) == 25
+
+    recovered_ids = {r["event_id"] for r in recovered_rows}
+    expected_ids = {e["event_id"] for e in expected_events}
+    assert recovered_ids == expected_ids
+
+
+def test_archive_only_recovery_rebuilds_origin_projections() -> None:
+    """Verifies that origin projections (summary and dimensions) can be fully
+    rebuilt from an archived batch manifest.
+    """
+    service_id = "recover-svc-002"
+    now = datetime(2026, 10, 9, 14, 30, tzinfo=UTC)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        manifest, artifact_bytes, _ = _build_synthetic_batch_archive(
+            service_id=service_id,
+            output_dir=Path(tmp_dir),
+            source_count=5,
+            rows_per_source=5,
+            now=now,
+        )
+
+    object_store = InMemoryObjectStore()
+    archive = ArchivePublication(object_store)
+    archive.publish(manifest, artifact_bytes)
+
+    ch_client = _MockClickHouseClient()
+    manifest_store = InMemoryBatchManifestStore()
+    publication = ClickHousePublication(manifest_store, ch_client)
+
+    proj_res = replay_origin_projections(
+        manifest,
+        archive,
+        publication,
+        rebuild_id="drill-origin-001",
+    )
+
+    assert proj_res.rows_read == 25
+    assert proj_res.rows_published > 0
+
+    origin_batches = [b for b in ch_client.batches if b.domain in {"origin_summary", "origin_dimensions"}]
+    assert len(origin_batches) >= 1
+    total_proj_rows = sum(len(b.rows) for b in origin_batches)
+    assert total_proj_rows == proj_res.rows_published
+
+
+def test_archive_only_recovery_idempotency_and_rebuild_scopes() -> None:
+    """Verifies that:
+    1. A duplicate replay with default batch ID is correctly recognized as duplicate.
+    2. A disaster-recovery replay scoped with a fresh rebuild ID successfully re-inserts.
+    """
+    service_id = "recover-svc-003"
+    now = datetime(2026, 10, 9, 15, 0, tzinfo=UTC)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        manifest, artifact_bytes, _ = _build_synthetic_batch_archive(
+            service_id=service_id,
+            output_dir=Path(tmp_dir),
+            source_count=5,
+            rows_per_source=5,
+            now=now,
+        )
+
+    object_store = InMemoryObjectStore()
+    archive = ArchivePublication(object_store)
+    archive.publish(manifest, artifact_bytes)
+
+    inserted_batches: list[HighScaleBatch] = []
+
+    class CountingClient:
+        def insert(self, batch: HighScaleBatch) -> InsertReceipt:
+            inserted_batches.append(batch)
+            return InsertReceipt(batch.batch_id, len(batch.rows), batch.digest)
+
+    manifest_store = InMemoryBatchManifestStore()
+    publication = ClickHousePublication(manifest_store, CountingClient())
+
+    # First attempt: Fresh insert
+    res1 = replay_manifest(manifest, archive, publication)
+    assert res1.publication.duplicate is False
+    assert len(inserted_batches) == 1
+
+    # Second attempt: Duplicate with default batch ID
+    res2 = replay_manifest(manifest, archive, publication)
+    assert res2.publication.duplicate is True
+    assert len(inserted_batches) == 1
+
+    # Third attempt: Rebuild-scoped batch ID (disaster recovery after volume wipe)
+    rebuild_batch_id = f"rebuild:disaster-drill-99:{manifest.manifest_id}"
+    res3 = replay_manifest(manifest, archive, publication, batch_id=rebuild_batch_id)
+    assert res3.publication.duplicate is False
+    assert len(inserted_batches) == 2
+
+
+def test_archive_only_recovery_catalog_tiered_rebuild() -> None:
+    """Verifies full catalog recovery across recent and warm history tiers
+    using batch manifests and rebuild_serving_state_from_fos.
+    """
+    service_id = "recover-svc-004"
+    now = datetime(2026, 10, 9, 16, 0, tzinfo=UTC)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        recent_manifest, recent_bytes, _ = _build_synthetic_batch_archive(
+            service_id=service_id,
+            output_dir=Path(tmp_dir),
+            source_count=3,
+            rows_per_source=10,
+            now=now - timedelta(hours=2),
+        )
+        warm_manifest, warm_bytes, _ = _build_synthetic_batch_archive(
+            service_id=service_id,
+            output_dir=Path(tmp_dir),
+            source_count=4,
+            rows_per_source=10,
+            now=now - timedelta(days=5),
+        )
+
+    object_store = InMemoryObjectStore()
+    archive = ArchivePublication(object_store)
+    archive.publish(recent_manifest, recent_bytes)
+    archive.publish(warm_manifest, warm_bytes)
+
+    catalog = _InMemoryCatalog((recent_manifest, warm_manifest))
+    ch_client = _MockClickHouseClient()
+    manifest_store = InMemoryBatchManifestStore()
+    publication = ClickHousePublication(manifest_store, ch_client)
+
+    report = rebuild_serving_state_from_fos(
+        catalog,
+        archive,
+        publication,
+        service_id=service_id,
+        domain="request",
+        now=now,
+    )
+
+    assert report.full_rebuild_complete is True
+    assert report.manifests_replayed == 2
+    assert report.rows_replayed == 70  # (3*10) + (4*10)
+    assert report.triage_available is True
+    assert report.raw_query_available is True
+    assert report.warm_history_available is True
+    assert len(report.errors) == 0
+
+    # Also test origin projection catalog rebuild
+    proj_report = rebuild_origin_projections_from_fos(
+        catalog,
+        archive,
+        publication,
+        service_id=service_id,
+        now=now,
+    )
+    assert proj_report.full_rebuild_complete is True
+    assert proj_report.manifests_replayed == 2
+    assert proj_report.rows_replayed > 0
+
+
+# ── Merged from tests/high_scale/test_console_access_integration.py ──
+
+"""Opt-in gate against a REAL ClickHouse server (not ``clickhouse local``): users, grants, views and profiles.
+
+RUN_HS_CONSOLE_ACCESS_INTEGRATION=1 uv run pytest tests/high_scale/test_console_access_integration.py
+
+Starts a disposable ``clickhouse-server`` container on a loopback port, provisions per-service, per-mask-mode
+console identities with the production code, and drives every assertion through the production
+``ClickHouseClient`` so the exact settings the app sends are exercised. This is the test that proves the
+database, not the SQL guard, holds the boundary: the attacks below deliberately bypass the guard and talk to
+ClickHouse as the analyst's identity.
+"""
+
+
+import json
+import os
+import subprocess
+import uuid
+from collections.abc import Iterator
+
+import httpx
+import pytest
+
+from backend.core.clickhouse_client import ClickHouseClient, ClickHouseError
+from tests.high_scale.conftest import (
+    clickhouse_single_node_ddl as _ddl,
+)
+from tests.high_scale.conftest import (
+    free_loopback_port as _free_port,
+)
+from tests.high_scale.conftest import (
+    wait_for_clickhouse_ready,
+)
+
+# (scoped pytestmark) pytestmark = [
+# (scoped pytestmark)     pytest.mark.security_regression,
+# (scoped pytestmark)     pytest.mark.skipif(
+# (scoped pytestmark)         os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+# (scoped pytestmark)     ),
+# (scoped pytestmark) ]
+
+IMAGE = os.getenv("RUM_CLICKHOUSE_TEST_IMAGE", "clickhouse/clickhouse-server:25.8.4.13")
+DB = "fla_it"
+SECRET_console_access_integration = b"integration-secret-" + b"x" * 32
+NOW = datetime.now(UTC).replace(microsecond=0)
+BATCH_A = "11111111-1111-4111-8111-111111111111"
+BATCH_B = "22222222-2222-4222-8222-222222222222"
+BATCH_A_RUM = "33333333-3333-4333-8333-333333333333"
+
+
+class _Server:
+    def __init__(self, port: int) -> None:
+        self.port = port
+        self.base = f"http://127.0.0.1:{port}/"
+
+    def admin_sql(self, sql: str, body: str | None = None) -> str:
+        response = httpx.post(
+            self.base,
+            params=(
+                {"database": DB, "query": sql, "date_time_input_format": "best_effort"}
+                if body is not None
+                else {"database": DB}
+            ),
+            content=body if body is not None else sql,
+            auth=("admin", "adminpw"),
+            timeout=120,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"{sql[:80]} -> {response.text[:300]}")
+        return response.text
+
+    def client(self, user: str, password: str) -> ClickHouseClient:
+        return ClickHouseClient(
+            ClickHouseConfig(host="127.0.0.1", port=self.port, database=DB, user=user, password=password, secure=False)
+        )
+
+
+def _row(service: str, url: str, minutes_ago: int, batch: str, ip: str, session: str) -> dict:
+    when = NOW - timedelta(minutes=minutes_ago)
+    return {
+        "service_id": service,
+        "event_id": str(uuid.uuid4()),
+        "event_timestamp": when.isoformat(),
+        "ingest_timestamp": when.isoformat(),
+        "source_object_key": "raw/x.gz",
+        "source_object_version": "v1",
+        "line_ordinal": 0,
+        "transform_version": "t1",
+        "batch_id": batch,
+        "publication_state": "visible",
+        "country": "US",
+        "client_ip": ip,
+        "url": url,
+        "custom_fields": {
+            "status": "200",
+            "cookie_session": session,
+            "cid": ("client-" + session) if session else "",
+            "pop": "SJC",
+        },
+        "cmcd": {},
+    }
+
+
+@pytest.fixture(scope="module")
+def server() -> Iterator[_Server]:
+    port = _free_port()
+    name = f"fla-console-it-{uuid.uuid4().hex[:8]}"
+    subprocess.run(
+        [
+            "docker", "run", "-d", "--rm", "--name", name, "-p", f"127.0.0.1:{port}:8123",
+            "-e", "CLICKHOUSE_USER=admin", "-e", "CLICKHOUSE_PASSWORD=adminpw",
+            "-e", "CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1", IMAGE,
+        ],
+        check=True,
+        capture_output=True,
+    )  # fmt: skip
+    srv = _Server(port)
+    try:
+        wait_for_clickhouse_ready(srv.base)
+        httpx.post(srv.base, content=f"CREATE DATABASE {DB}", auth=("admin", "adminpw")).raise_for_status()
+        for statement in _ddl():
+            srv.admin_sql(statement)
+        srv.admin_sql("CREATE TABLE other_secret (x String) ENGINE = MergeTree ORDER BY x")
+        srv.admin_sql("INSERT INTO other_secret VALUES ('top-secret')")
+        rows = [_row("svc-a", f"/a/{i}", 10 + i, BATCH_A, f"203.0.113.{i + 1}", f"sess-a{i}") for i in range(5)]
+        rows += [_row("svc-a", "/a/old", 600, BATCH_A, "203.0.113.99", "sess-a-old")]
+        rows += [_row("svc-b", f"/b/{i}", 10 + i, BATCH_B, f"198.51.100.{i + 1}", f"sess-b{i}") for i in range(7)]
+        rows += [_row("svc-a", "/a/noip", 5, BATCH_A, "", "")]
+        srv.admin_sql("INSERT INTO request_facts FORMAT JSONEachRow", "\n".join(json.dumps(r) for r in rows))
+        rum = {
+            "service_id": "svc-a", "event_id": str(uuid.uuid4()), "event_timestamp": NOW.isoformat(),
+            "ingest_timestamp": NOW.isoformat(), "batch_id": BATCH_A_RUM, "publication_state": "visible",
+            "client_id": "rum-client-secret", "metric_name": "LCP", "pathname": "/a",
+        }  # fmt: skip
+        srv.admin_sql("INSERT INTO rum_vitals_facts FORMAT JSONEachRow", json.dumps(rum))
+        pubs = [
+            {"batch_id": batch, "service_id": sid, "domain": domain, "generation": "1", "batch_digest": "d",
+             "expected_rows": 1, "visible_rows": 1, "quorum_acked": 1, "publication_state": "visible",
+             "manifest_version": 2, "updated_at": NOW.isoformat()}
+            for batch, sid, domain in (
+                (BATCH_A, "svc-a", "request"), (BATCH_B, "svc-b", "request"), (BATCH_A_RUM, "svc-a", "rum_vitals"),
+            )
+        ]  # fmt: skip
+        srv.admin_sql(
+            "INSERT INTO high_scale_batch_publications FORMAT JSONEachRow", "\n".join(json.dumps(p) for p in pubs)
+        )
+        admin_client = srv.client("admin", "adminpw")
+        for sid in ("svc-a", "svc-b"):
+            access.provision_console_access(admin_client, DB, sid, SECRET_console_access_integration)
+        admin_client.close()
+        yield srv
+    finally:
+        subprocess.run(["docker", "stop", name], capture_output=True)
+
+
+@pytest.fixture
+def clients(server: _Server) -> Iterator[access.ConsoleClients]:
+    settings = ClickHouseConfig(host="127.0.0.1", port=server.port, database=DB, user="x", password="x", secure=False)
+    manager = access.ConsoleClients(settings=settings, secret=SECRET_console_access_integration)
+    yield manager
+    manager.close()
+
+
+def _identity(clients: access.ConsoleClients, service: str, masked: bool) -> access.ConsoleAccess:
+    granted = clients.client_for(service, masked=masked)
+    assert granted is not None
+    return granted
+
+
+def _count(granted: access.ConsoleAccess, table: str = "request_facts", where: str = "1") -> int:
+    view = granted.tables[table]
+    return int(granted.client.execute(f"SELECT count() AS n FROM {view} WHERE {where}")[0]["n"])
+
+
+# ── service isolation ──────────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+@pytest.mark.parametrize("masked", [True, False])
+def test_each_identity_sees_only_its_own_service(clients: access.ConsoleClients, masked: bool) -> None:
+    assert _count(_identity(clients, "svc-a", masked)) == 7  # 5 recent + 1 old + 1 without an ip
+    assert _count(_identity(clients, "svc-b", masked)) == 7
+    assert _count(_identity(clients, "svc-a", masked), where="service_id != 'svc-a'") == 0
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "SETTINGS additional_table_filters = {}",
+        "SETTINGS additional_table_filters = {'x': '1'}",
+        "WHERE 1 = 1 OR service_id = 'svc-b'",
+    ],
+)
+def test_no_query_text_or_settings_override_can_cross_the_service_boundary(
+    clients: access.ConsoleClients, tail: str
+) -> None:
+    # Talks to ClickHouse directly as the analyst's identity: the SQL guard is deliberately bypassed.
+    granted = _identity(clients, "svc-a", True)
+
+    rows = granted.client.execute(f"SELECT count() AS n FROM {granted.tables['request_facts']} {tail}")
+
+    assert int(rows[0]["n"]) == 7
+
+
+# ── masking happens in the data ────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+def test_a_masked_identity_never_receives_a_client_ip_session_or_client_id(clients: access.ConsoleClients) -> None:
+    granted = _identity(clients, "svc-a", True)
+    view = granted.tables["request_facts"]
+
+    rows = granted.client.execute(f"SELECT client_ip, custom_fields, url FROM {view} ORDER BY url")
+
+    by_url = {row["url"]: row for row in rows}
+    assert by_url["/a/0"]["client_ip"] == "[redacted]"
+    assert by_url["/a/noip"]["client_ip"] == "", "empty stays empty, as in the standard console"
+    for row in rows:
+        fields = row["custom_fields"]
+        if row["url"] == "/a/noip":
+            assert fields["cookie_session"] == "" and fields["cid"] == ""
+        else:
+            assert fields["cookie_session"] == "[redacted]" and fields["cid"] == "[redacted]"
+        assert fields["status"] == "200" and fields["pop"] == "SJC", "non-sensitive keys are kept"
+    assert "203.0.113" not in json.dumps(rows) and "sess-a" not in json.dumps(rows)
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "replaceAll(client_ip, '.', '-')",
+        "substring(client_ip, 1, 3)",
+        "splitByChar('.', client_ip)[1]",
+        "concat('x', client_ip)",
+        "reverse(client_ip)",
+        "toString(toIPv4OrZero(client_ip))",
+        "custom_fields['cookie_session']",
+        "mapValues(custom_fields)[1]",
+        "extract(client_ip, '[0-9]+')",
+    ],
+)
+def test_no_string_function_over_a_masked_view_can_recover_an_identifier(
+    clients: access.ConsoleClients, expression: str
+) -> None:
+    granted = _identity(clients, "svc-a", True)
+
+    rows = granted.client.execute(f"SELECT {expression} AS v FROM {granted.tables['request_facts']} WHERE url = '/a/0'")
+
+    assert re.search(r"203\.0\.113|sess-a|client-sess", json.dumps(rows)) is None
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+def test_a_masked_rum_view_redacts_the_client_id(clients: access.ConsoleClients) -> None:
+    granted = _identity(clients, "svc-a", True)
+
+    rows = granted.client.execute(f"SELECT client_id, metric_name FROM {granted.tables['rum_vitals_facts']}")
+
+    assert rows == [{"client_id": "[redacted]", "metric_name": "LCP"}]
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+def test_a_raw_identity_does_see_the_identifiers_its_invite_allows(clients: access.ConsoleClients) -> None:
+    granted = _identity(clients, "svc-a", False)
+
+    rows = granted.client.execute(
+        f"SELECT client_ip, custom_fields['cookie_session'] AS s FROM {granted.tables['request_facts']} "
+        "WHERE url = '/a/0'"
+    )
+
+    assert rows == [{"client_ip": "203.0.113.1", "s": "sess-a0"}]
+    rum = granted.client.execute(f"SELECT client_id FROM {granted.tables['rum_vitals_facts']}")
+    assert rum == [{"client_id": "rum-client-secret"}]
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+def test_the_masked_identity_has_no_path_to_the_raw_data(clients: access.ConsoleClients) -> None:
+    masked = _identity(clients, "svc-a", True)
+    raw_view = access.console_tables("svc-a", masked=False)["request_facts"]
+
+    for sql in (
+        f"SELECT client_ip FROM {raw_view}",
+        "SELECT client_ip FROM request_facts",
+        f"SELECT client_ip FROM {DB}.request_facts",
+        f"SELECT * FROM {access.console_tables('svc-b', masked=False)['request_facts']}",
+        f"SELECT * FROM {access.console_tables('svc-b', masked=True)['request_facts']}",
+    ):
+        with pytest.raises(ClickHouseError):
+            masked.client.execute(sql)
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+def test_a_masked_view_that_does_not_mask_is_refused_by_the_identity_check(clients: access.ConsoleClients) -> None:
+    raw = _identity(clients, "svc-a", False)
+
+    with pytest.raises(RuntimeError, match="masking"):
+        access.ConsoleClients._assert_isolated(raw, "svc-a", masked=True)
+
+
+# ── least privilege ────────────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM other_secret",
+        "SELECT * FROM high_scale_batch_publications",
+        "SELECT query FROM system.query_log LIMIT 1",
+        "SELECT name FROM system.users LIMIT 1",
+        "SELECT * FROM remote('127.0.0.1', fla_it.other_secret)",
+        "SELECT * FROM url('http://127.0.0.1:8123/?query=SELECT%201', 'CSV', 'x String')",
+        "SELECT * FROM file('/etc/passwd', 'CSV', 'x String')",
+        "INSERT INTO request_facts (service_id) VALUES ('svc-a')",
+        "CREATE TABLE t (x UInt8) ENGINE = Memory",
+        "DROP TABLE request_facts",
+        "ALTER TABLE request_facts DELETE WHERE 1",
+        "CREATE VIEW v AS SELECT 1",
+        "SELECT count() FROM request_facts SETTINGS max_memory_usage = 99999999999",
+        "SELECT count() FROM request_facts SETTINGS max_threads = 64",
+        "SELECT count() FROM request_facts SETTINGS readonly = 0",
+        "SELECT count() FROM request_facts SETTINGS max_execution_time = 100000",
+    ],
+)
+def test_the_database_itself_refuses_everything_outside_the_least_privilege_grant(
+    clients: access.ConsoleClients, sql: str
+) -> None:
+    with pytest.raises(ClickHouseError):
+        _identity(clients, "svc-a", True).client.execute(sql)
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+def test_the_apps_own_privileged_user_still_sees_every_service(server: _Server) -> None:
+    app_client = server.client("admin", "adminpw")
+    try:
+        assert int(app_client.execute("SELECT count() AS n FROM request_facts")[0]["n"]) == 14
+    finally:
+        app_client.close()
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+def test_the_per_user_and_result_size_ceilings_are_in_force_and_not_raisable(clients: access.ConsoleClients) -> None:
+    client = _identity(clients, "svc-a", True).client
+
+    limits = {
+        r["name"]: r["value"]
+        for r in client.execute(
+            "SELECT name, value FROM system.settings WHERE name IN ('max_result_bytes', 'max_memory_usage_for_user')"
+        )
+    }
+
+    assert limits == {"max_result_bytes": "67108864", "max_memory_usage_for_user": "2147483648"}
+    for override in ("max_result_bytes = 99999999999", "max_memory_usage_for_user = 99999999999"):
+        with pytest.raises(ClickHouseError):
+            client.execute(f"SELECT 1 SETTINGS {override}")
+
+
+# ── the whole console path ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+def test_the_whole_console_path_runs_end_to_end_as_the_masked_identity(clients: access.ConsoleClients) -> None:
+    granted = _identity(clients, "svc-a", True)
+    start, end = (NOW - timedelta(minutes=30)).isoformat(), (NOW + timedelta(minutes=1)).isoformat()
+
+    result = query_endpoint(
+        SimpleNamespace(service_id="svc-a", client=None),  # type: ignore[arg-type]
+        QueryRequest(sql="SELECT count(*) AS n FROM logs WHERE 1 = 1 OR country = 'XX'", max_rows=50),
+        start,
+        end,
+        True,
+        client=granted.client,
+        tables=granted.tables,
+    )
+
+    # 6 svc-a rows inside the window (5 recent + the one without an ip): not svc-b's 7, not the 600-minute-old row.
+    assert result["data"] == [{"n": 6}]
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+def test_an_analyst_ip_query_through_the_console_returns_only_redacted_values(clients: access.ConsoleClients) -> None:
+    granted = _identity(clients, "svc-a", True)
+    start, end = (NOW - timedelta(minutes=30)).isoformat(), (NOW + timedelta(minutes=1)).isoformat()
+
+    result = query_endpoint(
+        SimpleNamespace(service_id="svc-a", client=None),  # type: ignore[arg-type]
+        QueryRequest(sql="SELECT ip, cookie_session, url FROM logs WHERE url = '/a/0'", max_rows=5),
+        start,
+        end,
+        True,
+        client=granted.client,
+        tables=granted.tables,
+    )
+
+    row = result["data"][0]
+    assert row["url"] == "/a/0"
+    assert "203.0.113" not in json.dumps(result["data"]) and "sess-a" not in json.dumps(result["data"])
+
+
+# ── provisioning lifecycle ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+def test_provisioning_removes_a_pre_view_identity_with_base_table_grants(server: _Server) -> None:
+    legacy = access.console_identity("svc-legacy", SECRET_console_access_integration)[0].removesuffix("_m")
+    server.admin_sql(f"CREATE USER IF NOT EXISTS `{legacy}` IDENTIFIED WITH sha256_password BY 'pw'")
+    server.admin_sql(f"GRANT SELECT ON {DB}.request_facts TO `{legacy}`")
+    server.admin_sql(f"CREATE ROW POLICY IF NOT EXISTS `{legacy}_scope` ON {DB}.request_facts USING 1 TO `{legacy}`")
+
+    admin = server.client("admin", "adminpw")
+    try:
+        access.provision_console_access(admin, DB, "svc-legacy", SECRET_console_access_integration)
+        remaining = admin.execute(f"SELECT name FROM system.users WHERE name = '{legacy}'")
+    finally:
+        admin.close()
+
+    assert remaining == []
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+def test_a_tampered_view_is_repaired_by_the_next_provisioning_run(server: _Server) -> None:
+    view = access.console_tables("svc-b", masked=True)["request_facts"]
+    server.admin_sql(f"CREATE OR REPLACE VIEW {DB}.`{view}` AS SELECT * FROM {DB}.request_facts")  # silently leaky
+    leaky = server.client(*access.console_identity("svc-b", SECRET_console_access_integration, masked=True))
+    try:
+        assert int(leaky.execute(f"SELECT count() AS n FROM {view}")[0]["n"]) == 14, "sanity: the tamper leaks"
+    except ClickHouseError:
+        pass  # a non-definer view is denied for lack of base-table access: also safe, and repaired below
+    finally:
+        leaky.close()
+
+    admin = server.client("admin", "adminpw")
+    try:
+        access.provision_console_access(admin, DB, "svc-b", SECRET_console_access_integration)
+    finally:
+        admin.close()
+
+    repaired = server.client(*access.console_identity("svc-b", SECRET_console_access_integration, masked=True))
+    try:
+        assert int(repaired.execute(f"SELECT count() AS n FROM {view}")[0]["n"]) == 7
+        ips = repaired.execute(f"SELECT DISTINCT client_ip FROM {view}")
+        assert ips == [{"client_ip": "[redacted]"}]
+    finally:
+        repaired.close()
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+def test_provisioning_is_idempotent_and_rotating_the_secret_locks_out_the_old_credentials(server: _Server) -> None:
+    admin = server.client("admin", "adminpw")
+    new_secret = b"rotated-secret-" + b"y" * 32
+    try:
+        access.provision_console_access(admin, DB, "svc-a", SECRET_console_access_integration)  # second run: no error
+        access.provision_console_access(admin, DB, "svc-a", new_secret)
+    finally:
+        admin.close()
+    user, old_password = access.console_identity("svc-a", SECRET_console_access_integration, masked=True)
+    stale = server.client(user, old_password)
+    fresh = server.client(*access.console_identity("svc-a", new_secret, masked=True))
+    try:
+        with pytest.raises(ClickHouseError):
+            stale.execute("SELECT 1")
+        view = access.console_tables("svc-a", masked=True)["request_facts"]
+        assert int(fresh.execute(f"SELECT count() AS n FROM {view}")[0]["n"]) == 7
+    finally:
+        stale.close()
+        fresh.close()
+        restore = server.client("admin", "adminpw")
+        access.provision_console_access(
+            restore, DB, "svc-a", SECRET_console_access_integration
+        )  # later tests still authenticate
+        restore.close()
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+def test_the_probe_query_the_console_runs_first_is_allowed_for_the_identity(clients: access.ConsoleClients) -> None:
+    client = _identity(clients, "svc-a", True).client
+
+    rows = client.execute(
+        "SELECT count() AS n FROM system.one", settings={"additional_table_filters": "{'system.one': 'dummy = 1'}"}
+    )
+
+    assert rows == [{"n": 0}]
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+def test_a_column_added_to_a_base_table_later_is_invisible_to_both_identities_until_reprovisioning(
+    server: _Server, clients: access.ConsoleClients
+) -> None:
+    server.admin_sql("ALTER TABLE request_facts ADD COLUMN IF NOT EXISTS drift_probe String DEFAULT 'would-leak'")
+    try:
+        for masked in (True, False):
+            granted = _identity(clients, "svc-a", masked)
+            with pytest.raises(ClickHouseError):
+                granted.client.execute(f"SELECT drift_probe FROM {granted.tables['request_facts']} LIMIT 1")
+    finally:
+        server.admin_sql("ALTER TABLE request_facts DROP COLUMN IF EXISTS drift_probe")
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+def test_grants_a_pre_existing_identity_picked_up_elsewhere_are_revoked_on_the_next_provisioning(
+    server: _Server,
+) -> None:
+    user, _ = access.console_identity("svc-a", SECRET_console_access_integration, masked=True)
+    server.admin_sql(f"GRANT SELECT ON {DB}.other_secret TO `{user}`")
+    stale = server.client(*access.console_identity("svc-a", SECRET_console_access_integration, masked=True))
+    try:
+        assert stale.execute("SELECT x FROM other_secret") == [{"x": "top-secret"}], "sanity: the stray grant works"
+    finally:
+        stale.close()
+
+    admin = server.client("admin", "adminpw")
+    try:
+        access.provision_console_access(admin, DB, "svc-a", SECRET_console_access_integration)
+    finally:
+        admin.close()
+
+    after = server.client(*access.console_identity("svc-a", SECRET_console_access_integration, masked=True))
+    try:
+        with pytest.raises(ClickHouseError):
+            after.execute("SELECT x FROM other_secret")
+    finally:
+        after.close()
+
+
+# ── Merged from test_console_provisioner_chart_integration.py ───────────────
+
+import shutil
+
+import yaml
+
+CHART = "deploy/chart/clickhouse"
+CHART_SECRET = b"chart-secret-" + b"z" * 32
+
+
+def _render(*sets: str) -> list[dict]:
+    args = ["helm", "template", "t", CHART]
+    for item in sets:
+        args += ["--set", item]
+    rendered = subprocess.run(args, check=True, capture_output=True, text=True).stdout
+    return [doc for doc in yaml.safe_load_all(rendered) if doc]
+
+
+def _statefulset_env(docs: list[dict]) -> dict[str, str]:
+    sts = next(d for d in docs if d["kind"] == "StatefulSet")
+    env = sts["spec"]["template"]["spec"]["containers"][0]["env"]
+    return {e["name"]: e.get("value", "<from secret>") for e in env}
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm binary required")
+def test_the_chart_renders_unchanged_by_default() -> None:
+    docs = _render()
+
+    assert _statefulset_env(docs)["CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT"] == "1"
+    assert "CLICKHOUSE_PROVISIONER_PASSWORD" not in _statefulset_env(docs)
+    config_map = next(d for d in docs if d["kind"] == "ConfigMap" and "-config" in d["metadata"]["name"])
+    assert "provisioner-user.xml" not in config_map["data"]
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm binary required")
+@pytest.mark.parametrize(
+    "bad",
+    [
+        ["provisioner.enabled=true"],
+        ["provisioner.enabled=true", "provisioner.password=x", "provisioner.username=fla_user"],
+        ["provisioner.enabled=true", "provisioner.password=x", "provisioner.username=bad name; DROP"],
+    ],
+)
+def test_the_chart_refuses_an_unsafe_provisioner_configuration(bad: list[str]) -> None:
+    with pytest.raises(subprocess.CalledProcessError):
+        _render(*bad)
+
+
+@pytest.fixture(scope="module")
+def chart_server() -> Iterator[dict]:
+    docs = _render(
+        "provisioner.enabled=true",
+        "provisioner.password=provpw",
+        "auth.accessManagement=false",
+        f"auth.database={DB}",
+        "auth.username=fla_user",
+        "auth.password=apppw",
+    )
+    env = _statefulset_env(docs)
+    assert env["CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT"] == "0"
+    config_map = next(d for d in docs if d["kind"] == "ConfigMap" and "-config" in d["metadata"]["name"])
+    xml = config_map["data"]["provisioner-user.xml"]
+    workdir = Path(tempfile.mkdtemp(prefix="fla-prov-"))
+    xml_path = workdir / "provisioner-user.xml"
+    xml_path.write_text(xml)
+
+    port = _free_port()
+    name = f"fla-prov-it-{uuid.uuid4().hex[:8]}"
+    subprocess.run(
+        [
+            "docker", "create", "--rm", "--name", name, "-p", f"127.0.0.1:{port}:8123",
+            "-e", "CLICKHOUSE_USER=fla_user", "-e", "CLICKHOUSE_PASSWORD=apppw", "-e", f"CLICKHOUSE_DB={DB}",
+            "-e", f"CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT={env['CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT']}",
+            "-e", "CLICKHOUSE_PROVISIONER_PASSWORD=provpw", IMAGE,
+        ],
+        check=True,
+        capture_output=True,
+    )  # fmt: skip
+    subprocess.run(
+        ["docker", "cp", str(xml_path), f"{name}:/etc/clickhouse-server/users.d/provisioner-user.xml"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["docker", "start", name], check=True, capture_output=True)
+    base = f"http://127.0.0.1:{port}/"
+    try:
+        wait_for_clickhouse_ready(base)
+
+        def app_sql(sql: str) -> None:
+            response = httpx.post(base, params={"database": DB}, content=sql, auth=("fla_user", "apppw"), timeout=120)
+            assert response.status_code == 200, f"{sql[:60]} -> {response.text[:200]}"
+
+        for statement in _ddl():
+            app_sql(statement)  # the application user keeps full data-plane rights
+        yield {"port": port, "base": base}
+    finally:
+        subprocess.run(["docker", "stop", name], capture_output=True)
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _chart_client(chart_server: dict, user: str, password: str) -> ClickHouseClient:
+    return ClickHouseClient(
+        ClickHouseConfig(
+            host="127.0.0.1", port=chart_server["port"], database=DB, user=user, password=password, secure=False
+        )
+    )
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm binary required")
+def test_the_application_user_can_no_longer_mint_users_or_grants(chart_server: dict) -> None:
+    app = _chart_client(chart_server, "fla_user", "apppw")
+    try:
+        assert app.execute("SELECT currentUser() AS u") == [{"u": "fla_user"}], "it must log in first"
+        assert app.execute("SELECT count() AS n FROM request_facts") == [{"n": 0}], "data-plane access is intact"
+        for sql in (
+            "CREATE USER evil IDENTIFIED WITH sha256_password BY 'x'",
+            "GRANT ALL ON *.* TO fla_user",
+            "CREATE SETTINGS PROFILE evil SETTINGS readonly = 0",
+            "CREATE ROW POLICY p ON fla_it.request_facts USING 1 TO fla_user",
+        ):
+            with pytest.raises(ClickHouseError):
+                app.execute(sql)
+    finally:
+        app.close()
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm binary required")
+def test_the_chart_rendered_provisioner_privileges_are_sufficient_to_provision(chart_server: dict) -> None:
+    prov = _chart_client(chart_server, "fla_provisioner", "provpw")
+    try:
+        users = access.provision_console_access(prov, DB, "svc-chart", CHART_SECRET)
+    finally:
+        prov.close()
+
+    assert users == {
+        "masked": access.console_identity("svc-chart", CHART_SECRET, True)[0],
+        "raw": access.console_identity("svc-chart", CHART_SECRET, False)[0],
+    }
+    manager = access.ConsoleClients(
+        settings=ClickHouseConfig(
+            host="127.0.0.1", port=chart_server["port"], database=DB, user="x", password="x", secure=False
+        ),
+        secret=CHART_SECRET,
+    )
+    try:
+        for masked in (True, False):
+            granted = manager.client_for("svc-chart", masked=masked)
+            assert granted is not None
+            view = granted.tables["request_facts"]
+            assert granted.client.execute(f"SELECT count() AS n FROM {view}") == [{"n": 0}]
+    finally:
+        manager.close()
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm binary required")
+def test_the_provisioner_is_idempotent_and_the_app_user_still_cannot_read_what_it_created(chart_server: dict) -> None:
+    prov = _chart_client(chart_server, "fla_provisioner", "provpw")
+    try:
+        access.provision_console_access(prov, DB, "svc-chart", CHART_SECRET)
+        access.provision_console_access(prov, DB, "svc-chart", CHART_SECRET)
+    finally:
+        prov.close()
+
+
+@pytest.mark.security_regression
+@pytest.mark.skipif(
+    os.getenv("RUN_HS_CONSOLE_ACCESS_INTEGRATION") != "1", reason="explicit real ClickHouse server gate"
+)
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm binary required")
+def test_the_provisioner_has_no_privileges_outside_access_management_and_the_application_database(
+    chart_server: dict,
+) -> None:
+    prov = _chart_client(chart_server, "fla_provisioner", "provpw")
+    try:
+        assert prov.execute("SELECT currentUser() AS u") == [{"u": "fla_provisioner"}], "it must log in first"
+        with pytest.raises(ClickHouseError):
+            prov.execute("SELECT query FROM system.query_log LIMIT 1")
+        with pytest.raises(ClickHouseError):
+            prov.execute(f"INSERT INTO {DB}.request_facts (service_id) VALUES ('x')")
+        with pytest.raises(ClickHouseError):
+            prov.execute(f"CREATE TABLE {DB}.t (x UInt8) ENGINE = Memory")
+        with pytest.raises(ClickHouseError):
+            prov.execute("SELECT * FROM url('http://127.0.0.1:8123/?query=SELECT%201', 'CSV', 'x String')")
+    finally:
+        prov.close()

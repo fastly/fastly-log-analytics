@@ -6,15 +6,13 @@ import { client, unwrapClient } from '@/lib/api'
 import { useServiceQuery, useReportRangeAnchor, usePlotlyRangeZoom } from '@/hooks/useDashboardCards'
 import { useFilterStore } from '@/stores/filterStore'
 import type { FiltersPayload, PlotlyLayout, PlotlyTrace } from '@/types/api'
-import { resolveRangeWire } from '@/lib/utils'
+import { resolveRangeWire, formatDuration, formatDate, formatCountMaybe, CHART_COLORS } from "@/lib/utils";
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { AnalyticsCard, TimeSeriesChart, type AnalyticsCardError } from '@/components/AnalyticsCard'
-import { formatDuration, formatDate, formatCountMaybe } from '@/lib/format'
 import { Play, Users, Wifi, BarChart3, Gauge, Globe, Film, AlertTriangle, TrendingUp, Clock, UserPlus } from 'lucide-react'
 import { ReportLayout } from '@/components/ReportLayout'
 import { StatCard } from '@/components/ui/confirm-dialog'
 import { DataTable } from '@/components/DataTable'
-import { CHART_COLORS } from '@/lib/chart-helpers'
 
 export const OBJECT_TYPE_LABELS: Record<string, string> = {
   m: 'Manifest', a: 'Audio', v: 'Video', av: 'Muxed A/V',

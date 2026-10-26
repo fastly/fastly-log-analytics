@@ -5972,11 +5972,7 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /**
-         * ActiveClientItem
-         * @description Field order mirrors ``GET_ACTIVE_PROXY_CLIENTS`` (``asn`` is swapped for a
-         *     trailing ``asn_name`` by the repository).
-         */
+        /** ActiveClientItem */
         ActiveClientItem: {
             /** Ip */
             ip: string;
@@ -7036,10 +7032,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * BotEfficiencyRow
-         * @description Bot & crawler value vs. cost row (requests + bandwidth consumed vs. human referrals).
-         */
+        /** BotEfficiencyRow */
         BotEfficiencyRow: {
             /** Bot Name */
             bot_name: string;
@@ -7193,11 +7186,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * BucketCountRow
-         * @description Histogram bucket. Repository paths key the bucket as ``bucket``; the
-         *     high-scale path keys it as ``label``.
-         */
+        /** BucketCountRow */
         BucketCountRow: {
             /** Bucket */
             bucket?: string | null;
@@ -7208,22 +7197,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * BundleResponse
-         * @description Composite response for /api/dashboard/bundle (finding 013).
-         *
-         *     Without an explicit response_model the endpoint emitted an untyped dict
-         *     that bypassed the BaseResponse._strip_debug_when_disabled serializer,
-         *     leaking internal SQL queries + execution timings to clients regardless
-         *     of the DEBUG_RESPONSES flag. Declaring the shape with nested typed
-         *     sub-responses re-engages Pydantic's serialization lifecycle so the
-         *     same redaction rules apply here as on the dedicated /aggregates and
-         *     /top-bots endpoints.
-         *
-         *     Sub-responses are Optional so the selector (``sections=[...]``) can
-         *     omit a branch: a ``sections=['core']`` call returns ``top_bots: None``
-         *     instead of paying for the second pool connection + bot SQL.
-         */
+        /** BundleResponse */
         BundleResponse: {
             /** Debug Queries */
             _debug_queries?: components["schemas"]["DebugQuery"][];
@@ -12311,10 +12285,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * Ipv6AdoptionRow
-         * @description Repository paths emit ``time``/``pct``; the high-scale path emits ``version``/``count``.
-         */
+        /** Ipv6AdoptionRow */
         Ipv6AdoptionRow: {
             /** Time */
             time?: string | null;
@@ -16284,14 +16255,7 @@ export interface components {
              */
             explain: boolean;
         };
-        /**
-         * QueryResponse
-         * @description ``POST /api/query`` result.
-         *
-         *     Rows hold DuckDB-native values (Decimal, tz-aware datetimes, bytes) that
-         *     pydantic's JSON mode would encode differently from ``jsonable_encoder``
-         *     (the pre-typing wire path), so ``data`` is pre-encoded the same way.
-         */
+        /** QueryResponse */
         QueryResponse: {
             /** Columns */
             columns: string[];
@@ -17476,11 +17440,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * ScoringAnalyticsResponse
-         * @description Composite of the analyst-safe sub-reads (plus the two admin-only
-         *     evaluation blocks, present only on the admin path).
-         */
+        /** ScoringAnalyticsResponse */
         ScoringAnalyticsResponse: {
             top_flagged?: components["schemas"]["ScoringTopFlaggedResponse"] | null;
             score_distribution?: components["schemas"]["ScoringScoreDistributionResponse"] | null;
@@ -17557,10 +17517,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * ScoringConfigCompositeResponse
-         * @description ``GET /scoring/config``: the four token-free config reads in one body.
-         */
+        /** ScoringConfigCompositeResponse */
         ScoringConfigCompositeResponse: {
             status?: components["schemas"]["ScoringStatusResponse"] | null;
             threshold?: components["schemas"]["ScoringThresholdState"] | null;
@@ -17609,12 +17566,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * ScoringDashboardResponse
-         * @description Composite of the per-endpoint producers — each sub-block is the
-         *     byte-identical dict its standalone endpoint returns, so each nests the
-         *     same model that endpoint declares.
-         */
+        /** ScoringDashboardResponse */
         ScoringDashboardResponse: {
             /** Since Hours */
             since_hours?: number | null;
@@ -17646,13 +17598,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * ScoringEnforceStatusCodeBody
-         * @description Body for ``PUT /scoring/enforce-status-code``.
-         *
-         *     HTTP code returned by the enforce snippet when the scorer flags a
-         *     request. ``None`` resets to the default 429.
-         */
+        /** ScoringEnforceStatusCodeBody */
         ScoringEnforceStatusCodeBody: {
             /** Status Code */
             status_code?: number | null;
@@ -17744,12 +17690,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * ScoringExcludeRegexBody
-         * @description Body for ``PUT /scoring/exclude-regex`` and ``POST /scoring/exclude-regex/validate``.
-         *
-         *     Empty string resets to the bundled default regex.
-         */
+        /** ScoringExcludeRegexBody */
         ScoringExcludeRegexBody: {
             /**
              * Regex
@@ -17840,15 +17781,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * ScoringL2EnforceBody
-         * @description Body for ``PUT /scoring/l2-enforce``.
-         *
-         *     ``enabled`` is the operator's explicit opt-in: ``True`` makes edge Layer-2
-         *     join the *enforced* combined score (fading in over a few days from the moment
-         *     of consent); ``False`` keeps L2 observe-only. Default ``False`` so an empty
-         *     body is a no-op-toward-off rather than an accidental enable.
-         */
+        /** ScoringL2EnforceBody */
         ScoringL2EnforceBody: {
             /**
              * Enabled
@@ -17869,11 +17802,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * ScoringL2EnforceState
-         * @description Shape from _build_l2_enforce_block / _l2_enforce_unavailable —
-         *     also nested as ``l2_enforce`` in ScoringHealthResponse.
-         */
+        /** ScoringL2EnforceState */
         ScoringL2EnforceState: {
             /** Available */
             available: boolean;
@@ -17913,14 +17842,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * ScoringLabelCreate
-         * @description Body for ``POST /scoring/labels``.
-         *
-         *     ``sid`` and ``label`` are validated downstream by ``save_label``
-         *     (raises ValueError → ``invalid_label`` 400) so we keep this model
-         *     permissive on field content.
-         */
+        /** ScoringLabelCreate */
         ScoringLabelCreate: {
             /**
              * Sid
@@ -17997,13 +17919,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * ScoringLabelUpdate
-         * @description Body for ``PATCH /scoring/labels/{label_id}``.
-         *
-         *     Both fields are optional. ``label`` content is validated
-         *     downstream by ``update_label``.
-         */
+        /** ScoringLabelUpdate */
         ScoringLabelUpdate: {
             /** Label */
             label?: string | null;
@@ -18291,11 +18207,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * ScoringStatusResponse
-         * @description ``GET /scoring/status``: the secret-filtered ``cfg.scoring`` block plus
-         *     live-version and drift keys. Config-derived keys beyond these ride as extras.
-         */
+        /** ScoringStatusResponse */
         ScoringStatusResponse: {
             /** Enabled */
             enabled?: boolean | null;
@@ -18324,14 +18236,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * ScoringThresholdBody
-         * @description Body for ``PUT /scoring/threshold`` and ``PUT /scoring/enforce-threshold``.
-         *
-         *     ``threshold`` is the 0-100 risk score. ``None`` clears the operator's
-         *     chosen value (preview-only) or disables live enforcement, depending on
-         *     the endpoint.
-         */
+        /** ScoringThresholdBody */
         ScoringThresholdBody: {
             /** Threshold */
             threshold?: number | null;
@@ -18366,10 +18271,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * ScoringThresholdState
-         * @description GET and PUT /scoring/threshold both return this exact shape.
-         */
+        /** ScoringThresholdState */
         ScoringThresholdState: {
             /** Threshold */
             threshold: number | null;
@@ -18380,14 +18282,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * ScoringTokenBody
-         * @description Body for ``POST /scoring/enable`` and ``POST /scoring/disable``.
-         *
-         *     ``token`` falls back to the per-service ``fastly_api_key`` when
-         *     empty. Optional on the wire — callers can omit the body entirely
-         *     when the server has a stored token.
-         */
+        /** ScoringTokenBody */
         ScoringTokenBody: {
             /**
              * Token
@@ -18611,12 +18506,7 @@ export interface components {
              */
             ngwaf_bots: components["schemas"]["SecurityBotRow"][];
         };
-        /**
-         * SecurityBotRow
-         * @description One top-bot leaderboard row. UA-matched rows carry ``id``; NGWAF rows
-         *     don't (the rollup/direct-join variants only emit name/category/request_count,
-         *     the high-scale one adds the verification counters).
-         */
+        /** SecurityBotRow */
         SecurityBotRow: {
             /** Id */
             id?: string | null;
@@ -20080,11 +19970,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * TlsFingerprintRow
-         * @description Live and rollup paths emit ``fingerprint``/``ip_count``/``request_count``;
-         *     the high-scale ClickHouse path emits ``fingerprint``/``count``/``ips``.
-         */
+        /** TlsFingerprintRow */
         TlsFingerprintRow: {
             /** Fingerprint */
             fingerprint?: string | null;
@@ -20923,11 +20809,7 @@ export interface components {
             /** Delta */
             delta?: number | null;
         };
-        /**
-         * WellknownBotRow
-         * @description UA-matched bot with FCrDNS verification counters (``verification_coverage`` is
-         *     annotated last, after the counters).
-         */
+        /** WellknownBotRow */
         WellknownBotRow: {
             /** Id */
             id: string;

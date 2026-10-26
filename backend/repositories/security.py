@@ -1,5 +1,3 @@
-"""Security repository — TLS analysis, bot detection, and request anomalies."""
-
 from __future__ import annotations
 
 import hashlib as _hashlib
@@ -7,6 +5,7 @@ import json as _json
 import logging
 import os
 import re
+import sys
 import time as _time
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -29,7 +28,223 @@ from backend.repositories._base import (
     safe_iso,
     time_bucket_select,
 )
-from backend.repositories._sql import security as SQL
+
+TOP_UAS_BY_COUNT = """
+                    SELECT ua, count(*) AS cnt
+                    FROM {temp_table}
+                    WHERE ua IS NOT NULL
+                    GROUP BY ua
+                    ORDER BY cnt DESC
+                    LIMIT {limit}
+                """
+NGWAF_TOP_BOTS_JOIN = """
+                    SELECT nb.bot_name, nb.category, count(*) AS cnt
+                    FROM {temp_table} t
+                    INNER JOIN temp.ngwaf_top_ngwaf_bots nb USING (waf_req_id)
+                    WHERE nb.bot_name IS NOT NULL
+                    GROUP BY 1, 2
+                    ORDER BY 3 DESC
+                    LIMIT {n}
+                """
+NGWAF_TOP_BOTS_JOIN_DIRECT = " SELECT nb.bot_name, nb.category, count(*) AS cnt FROM ( SELECT waf_req_id FROM {table_name} WHERE {where_clause} AND waf_req_id IS NOT NULL ) t INNER JOIN temp.ngwaf_top_ngwaf_bots nb USING (waf_req_id) WHERE nb.bot_name IS NOT NULL GROUP BY 1, 2 ORDER BY 3 DESC LIMIT {n} "
+VERIFIED_BOTS_TS = """
+            SELECT
+                time_bucket(INTERVAL '{bucket_seconds} seconds', timestamp) AS bucket,
+                replace(tag, 'VERIFIED-BOT.', '') AS bot_type,
+                count(*) AS count
+            FROM (
+                SELECT timestamp, unnest(string_split(waf_sig, ',')) AS tag
+                FROM {temp_table}
+                WHERE waf_sig IS NOT NULL AND waf_sig ILIKE '%VERIFIED-BOT.%'
+            ) sub
+            WHERE tag LIKE 'VERIFIED-BOT.%'
+            GROUP BY 1, 2
+            ORDER BY 1, 2
+        """
+NGWAF_VERIFIED_BOTS = """
+                SELECT
+                    nb.bot_name,
+                    nb.wellknown_bot_name,
+                    nb.category,
+                    count(*) AS request_count
+                FROM {temp_table} t
+                INNER JOIN temp.ngwaf_cache_ngwaf_bots nb USING (waf_req_id)
+                WHERE nb.bot_name IS NOT NULL
+                GROUP BY 1, 2, 3
+                ORDER BY 4 DESC
+            """
+NGWAF_VERIFIED_BOTS_TS = """
+                SELECT
+                    time_bucket(INTERVAL '{bucket_seconds} seconds', t.timestamp) AS bucket,
+                    nb.bot_name,
+                    count(*) AS count
+                FROM {temp_table} t
+                INNER JOIN temp.ngwaf_cache_ngwaf_bots nb USING (waf_req_id)
+                WHERE nb.bot_name IS NOT NULL
+                GROUP BY 1, 2
+                ORDER BY 1, 2
+            """
+FINGERPRINT_TOP_N = """
+            SELECT "{col}",
+                   count(DISTINCT ip) as ip_count,
+                   count(*) as req_count
+            FROM {temp_table}
+            WHERE "{col}" IS NOT NULL AND "{col}" != ''
+            GROUP BY 1 ORDER BY 3 DESC LIMIT 20
+        """
+FINGERPRINT_COVERAGE_BULK = """
+            SELECT count(*) AS total_rows, {agg_cols}
+            FROM {temp_table}
+        """
+REQ_HEADER_SIZE_DIST = """
+            SELECT
+                CASE
+                    WHEN req_header_bytes <= 256 THEN '0-256B'
+                    WHEN req_header_bytes <= 512 THEN '256-512B'
+                    WHEN req_header_bytes <= 768 THEN '512-768B'
+                    WHEN req_header_bytes <= 1024 THEN '768B-1KB'
+                    WHEN req_header_bytes <= 1536 THEN '1-1.5KB'
+                    WHEN req_header_bytes <= 2048 THEN '1.5-2KB'
+                    WHEN req_header_bytes <= 3072 THEN '2-3KB'
+                    WHEN req_header_bytes <= 4096 THEN '3-4KB'
+                    WHEN req_header_bytes <= 6144 THEN '4-6KB'
+                    WHEN req_header_bytes <= 8192 THEN '6-8KB'
+                    WHEN req_header_bytes <= 12288 THEN '8-12KB'
+                    WHEN req_header_bytes <= 16384 THEN '12-16KB'
+                    WHEN req_header_bytes <= 24576 THEN '16-24KB'
+                    WHEN req_header_bytes <= 32768 THEN '24-32KB'
+                    ELSE '>32KB'
+                END as bucket,
+                count(*) as count,
+                MIN(req_header_bytes) as min_val
+            FROM {temp_table}
+            WHERE req_header_bytes IS NOT NULL
+            GROUP BY 1 ORDER BY min_val
+        """
+TOP_IPS_BY_MAX_HEADER = """
+            SELECT ip, MAX(req_header_bytes) as max_header
+            FROM {temp_table}
+            WHERE ip IS NOT NULL AND req_header_bytes IS NOT NULL
+            GROUP BY 1 ORDER BY 2 DESC LIMIT 10
+        """
+IPV6_ADOPTION_TS = " SELECT {time_bucket_select}, SUM(CASE WHEN is_ipv6 THEN 1 ELSE 0 END) * 100.0 / count(*) as ipv6_pct FROM {temp_table} GROUP BY 1 ORDER BY 1 "
+PROXY_TYPE_DIST = """
+            SELECT p_type, count(*) as count
+            FROM {temp_table}
+            WHERE p_type IS NOT NULL AND p_type != ''
+            GROUP BY 1 ORDER BY 2 DESC
+        """
+CONN_REUSE_DIST = """
+            SELECT
+                CASE
+                    WHEN conn_requests = 1 THEN '1 (None)'
+                    WHEN conn_requests <= 5 THEN '2-5'
+                    WHEN conn_requests <= 20 THEN '6-20'
+                    WHEN conn_requests <= 100 THEN '21-100'
+                    ELSE '>100'
+                END as bucket,
+                count(*) as count,
+                MIN(conn_requests) as min_val
+            FROM {temp_table}
+            WHERE conn_requests IS NOT NULL AND conn_requests > 0
+            GROUP BY 1 ORDER BY min_val
+        """
+WELLKNOWN_BOTS_UA_IP = """
+                SELECT ua, ip, count(*) AS cnt
+                FROM {temp_table}
+                {prefilter}
+                GROUP BY ua, ip
+                ORDER BY cnt DESC
+                LIMIT 10000
+            """
+
+
+class _DynamicPopSqlTemplate(str):
+    _raw_template: str
+
+    def __new__(cls, raw_template: str) -> _DynamicPopSqlTemplate:
+        from backend.utils.pop_utils import build_pop_haversine_case_sql, build_pop_lat_case_sql, build_pop_lon_case_sql
+
+        rendered = (
+            raw_template.replace("__POP_DISTANCE_CASE__", build_pop_haversine_case_sql())
+            .replace("__POP_LAT_CASE__", build_pop_lat_case_sql())
+            .replace("__POP_LON_CASE__", build_pop_lon_case_sql())
+        )
+        obj = super().__new__(cls, rendered)
+        obj._raw_template = raw_template
+        return obj
+
+    def format(self, *args: object, **kwargs: object) -> str:
+        from backend.utils.pop_utils import build_pop_haversine_case_sql, build_pop_lat_case_sql, build_pop_lon_case_sql
+
+        rendered = (
+            self._raw_template.replace("__POP_DISTANCE_CASE__", build_pop_haversine_case_sql())
+            .replace("__POP_LAT_CASE__", build_pop_lat_case_sql())
+            .replace("__POP_LON_CASE__", build_pop_lon_case_sql())
+        )
+        return rendered.format(*args, **kwargs)
+
+
+GET_SECURITY_PROXIES_COMBINED = _DynamicPopSqlTemplate(
+    " WITH geo_dist AS ( SELECT pop AS g_pop, lat AS g_lat, lon AS g_lon, __POP_DISTANCE_CASE__ AS distance_km FROM ( SELECT DISTINCT pop, lat, lon FROM {temp_table} WHERE lat IS NOT NULL AND lon IS NOT NULL ) ), metrics AS ( SELECT ip, pop, rtt_min, tcp_rtt, rtt_min / 1000.0 AS rtt_min_ms, tcp_rtt / 1000.0 AS tcp_rtt_ms, lat AS client_lat, lon AS client_lon, asn, __POP_LAT_CASE__ AS pop_lat, __POP_LON_CASE__ AS pop_lon, geo_dist.distance_km AS distance_km {select_country_city_inner} FROM {temp_table} LEFT JOIN geo_dist ON pop IS NOT DISTINCT FROM geo_dist.g_pop AND lat IS NOT DISTINCT FROM geo_dist.g_lat AND lon IS NOT DISTINCT FROM geo_dist.g_lon WHERE ip IS NOT NULL AND ip != '' ), stats_q AS ( SELECT 'stats' AS _kind, CAST(NULL AS VARCHAR) AS _s1, CAST(COUNT(DISTINCT CASE WHEN distance_km > (rtt_min_ms * 100.0 + 150.0) THEN ip WHEN tcp_rtt > 0 AND (CAST(rtt_min_ms * 1000.0 AS DOUBLE) / tcp_rtt) < 0.1 THEN ip ELSE NULL END) AS BIGINT) AS _i1, CAST(COUNT(CASE WHEN distance_km > (rtt_min_ms * 100.0 + 150.0) THEN 1 WHEN tcp_rtt > 0 AND (CAST(rtt_min_ms * 1000.0 AS DOUBLE) / tcp_rtt) < 0.1 THEN 1 ELSE NULL END) AS BIGINT) AS _i2, CAST(COUNT(DISTINCT CASE WHEN distance_km > (rtt_min_ms * 100.0 + 150.0) THEN ip ELSE NULL END) AS BIGINT) AS _i3, CAST(NULL AS DOUBLE) AS _d1, CAST(NULL AS DOUBLE) AS _d2, CAST(NULL AS DOUBLE) AS _d3, CAST(NULL AS VARCHAR) AS _s2, CAST(NULL AS DOUBLE) AS _d4, CAST(NULL AS DOUBLE) AS _d5, CAST(NULL AS DOUBLE) AS _d6, CAST(NULL AS DOUBLE) AS _d7, CAST(NULL AS BOOLEAN) AS _b1, CAST(NULL AS VARCHAR) AS _s3, CAST(NULL AS VARCHAR) AS _s4, CAST(NULL AS VARCHAR) AS _s5 FROM metrics ), quality_q AS ( SELECT 'quality' AS _kind, CAST(type AS VARCHAR) AS _s1, CAST(count AS BIGINT) AS _i1, CAST(NULL AS BIGINT) AS _i2, CAST(NULL AS BIGINT) AS _i3, CAST(NULL AS DOUBLE) AS _d1, CAST(NULL AS DOUBLE) AS _d2, CAST(NULL AS DOUBLE) AS _d3, CAST(NULL AS VARCHAR) AS _s2, CAST(NULL AS DOUBLE) AS _d4, CAST(NULL AS DOUBLE) AS _d5, CAST(NULL AS DOUBLE) AS _d6, CAST(NULL AS DOUBLE) AS _d7, CAST(NULL AS BOOLEAN) AS _b1, CAST(NULL AS VARCHAR) AS _s3, CAST(NULL AS VARCHAR) AS _s4, CAST(NULL AS VARCHAR) AS _s5 FROM ( SELECT CASE WHEN rtt_min IS NULL OR tcp_rtt IS NULL THEN 'Direct Connection' WHEN tcp_rtt > 0 AND (CAST(rtt_min AS DOUBLE) / tcp_rtt) < 0.1 THEN 'Active Tunnel / Proxy' WHEN tcp_rtt > 0 AND (CAST(rtt_min AS DOUBLE) / tcp_rtt) < 0.7 THEN 'WiFi / Mobile' ELSE 'Direct Connection' END AS type, COUNT(*) AS count FROM {temp_table} GROUP BY 1 ORDER BY count DESC ) ), isps_q AS ( SELECT 'isp' AS _kind, CAST(NULL AS VARCHAR) AS _s1, CAST(asn AS BIGINT) AS _i1, CAST(count AS BIGINT) AS _i2, CAST(NULL AS BIGINT) AS _i3, CAST(NULL AS DOUBLE) AS _d1, CAST(NULL AS DOUBLE) AS _d2, CAST(NULL AS DOUBLE) AS _d3, CAST(NULL AS VARCHAR) AS _s2, CAST(NULL AS DOUBLE) AS _d4, CAST(NULL AS DOUBLE) AS _d5, CAST(NULL AS DOUBLE) AS _d6, CAST(NULL AS DOUBLE) AS _d7, CAST(NULL AS BOOLEAN) AS _b1, CAST(NULL AS VARCHAR) AS _s3, CAST(NULL AS VARCHAR) AS _s4, CAST(NULL AS VARCHAR) AS _s5 FROM ( SELECT asn, COUNT(*) AS count FROM {temp_table} WHERE tcp_rtt > 0 AND (CAST(rtt_min AS DOUBLE) / tcp_rtt) < 0.1 GROUP BY 1 ORDER BY count DESC LIMIT 10 ) ), clients_q AS ( SELECT 'client' AS _kind, CAST(ip AS VARCHAR) AS _s1, CAST(asn AS BIGINT) AS _i1, CAST(NULL AS BIGINT) AS _i2, CAST(NULL AS BIGINT) AS _i3, CAST(ROUND(rtt_min_ms, 2) AS DOUBLE) AS _d1, CAST(ROUND(tcp_rtt_ms, 2) AS DOUBLE) AS _d2, CAST(ROUND(distance_km, 1) AS DOUBLE) AS _d3, CAST(pop AS VARCHAR) AS _s2, CAST(ROUND(client_lat, 4) AS DOUBLE) AS _d4, CAST(ROUND(client_lon, 4) AS DOUBLE) AS _d5, CAST(pop_lat AS DOUBLE) AS _d6, CAST(pop_lon AS DOUBLE) AS _d7, CAST(impossible_distance AS BOOLEAN) AS _b1, CAST(risk_level AS VARCHAR) AS _s3, CAST(country AS VARCHAR) AS _s4, CAST(city AS VARCHAR) AS _s5 FROM ( SELECT ip, asn, rtt_min_ms, tcp_rtt_ms, distance_km, pop, client_lat, client_lon, pop_lat, pop_lon, CASE WHEN distance_km > (rtt_min_ms * 100.0 + 150.0) THEN true ELSE false END AS impossible_distance, CASE WHEN distance_km > (rtt_min_ms * 100.0 + 150.0) THEN 'High' WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.1 THEN 'High' WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2 THEN 'Medium' ELSE 'Low' END AS risk_level {select_country_city_outer} FROM metrics WHERE rtt_min_ms IS NOT NULL AND ( (distance_km > (rtt_min_ms * 100.0 + 150.0)) OR (tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2) ) ORDER BY CASE risk_level WHEN 'High' THEN 3 WHEN 'Medium' THEN 2 ELSE 1 END DESC, distance_km DESC LIMIT 100 ) ) SELECT * FROM stats_q UNION ALL SELECT * FROM quality_q UNION ALL SELECT * FROM isps_q UNION ALL SELECT * FROM clients_q "
+)
+BOT_EFFICIENCY = " WITH site_totals AS ( SELECT 'site' AS kind, '' AS key, COUNT(*) AS cnt, CAST(COALESCE(SUM({resp_bytes_expr}), 0) AS BIGINT) AS resp_bytes FROM {temp_table} t ), ua_agg AS ( SELECT 'ua' AS kind, t.ua AS key, COUNT(*) AS cnt, CAST(COALESCE(SUM({resp_bytes_expr}), 0) AS BIGINT) AS resp_bytes FROM {temp_table} t WHERE t.ua IS NOT NULL AND t.ua != '' GROUP BY t.ua ORDER BY resp_bytes DESC, cnt DESC LIMIT 2000 ), ref_extracted AS ( SELECT t.ip, COALESCE( NULLIF(regexp_extract(lower(COALESCE(t.ua, '')), '([a-z0-9]+)-(user|externalfetcher)', 1), ''), NULLIF(regexp_extract(lower(COALESCE({referer_expr}, '')), 'http[s]*://(www\\.)*([^/.:;\\s]+)', 2), '') ) AS ref_stem FROM {temp_table} t WHERE t.ip IS NOT NULL AND t.ip != '' AND ( ({referer_expr} IS NOT NULL AND {referer_expr} != '' AND {referer_expr} != '-') OR lower(COALESCE(t.ua, '')) LIKE '%-user%' OR lower(COALESCE(t.ua, '')) LIKE '%-externalfetcher%' ) AND NOT regexp_matches( lower(COALESCE(t.ua, '')), '(bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|headless)' ) ), ref_agg AS ( SELECT 'ref' AS kind, ref_stem AS key, COUNT(DISTINCT ip) AS cnt, CAST(0 AS BIGINT) AS resp_bytes FROM ref_extracted WHERE ref_stem IS NOT NULL AND ref_stem != '' GROUP BY ref_stem ) SELECT kind, key, cnt, resp_bytes FROM site_totals UNION ALL SELECT kind, key, cnt, resp_bytes FROM ua_agg UNION ALL SELECT kind, key, cnt, resp_bytes FROM ref_agg "
+__all__ = [
+    "threat_intel_sql",
+    "TOP_UAS_BY_COUNT",
+    "NGWAF_TOP_BOTS_JOIN",
+    "NGWAF_TOP_BOTS_JOIN_DIRECT",
+    "VERIFIED_BOTS_TS",
+    "NGWAF_VERIFIED_BOTS",
+    "NGWAF_VERIFIED_BOTS_TS",
+    "FINGERPRINT_TOP_N",
+    "FINGERPRINT_COVERAGE_BULK",
+    "REQ_HEADER_SIZE_DIST",
+    "TOP_IPS_BY_MAX_HEADER",
+    "IPV6_ADOPTION_TS",
+    "PROXY_TYPE_DIST",
+    "CONN_REUSE_DIST",
+    "WELLKNOWN_BOTS_UA_IP",
+    "BOT_EFFICIENCY",
+    "GET_SECURITY_PROXIES_COMBINED",
+]
+
+
+def threat_intel_sql(table_name: str, cols: set[str]) -> str:
+    if "ja3" in cols:
+        fingerprint_col = "ja3"
+    elif "ja4" in cols:
+        fingerprint_col = "ja4"
+    else:
+        fingerprint_col = "CAST('Unknown' AS VARCHAR)"
+    proxy_col = "p_type" if "p_type" in cols else "CAST(NULL AS VARCHAR)"
+    waf_conditions = []
+    if "waf_logged_rules" in cols:
+        waf_conditions.append("waf_logged_rules IS NOT NULL")
+    if "waf_blocked_rules" in cols:
+        waf_conditions.append("waf_blocked_rules IS NOT NULL")
+    waf_col = f"COUNT(*) FILTER (WHERE {' OR '.join(waf_conditions)})" if waf_conditions else "CAST(0 AS BIGINT)"
+    bot_filter = "is_bot = true" if "is_bot" in cols else "FALSE"
+    country_col = "country" if "country" in cols else "CAST('Unknown' AS VARCHAR)"
+    time_filter = "WHERE timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)"
+    return f"""
+            SELECT
+                {fingerprint_col} AS tls_fingerprint,
+                COUNT(*) AS requests,
+                mode({country_col}) AS top_country,
+                {waf_col} AS matched_waf_rules_count,
+                ROUND(COUNT(*) FILTER (WHERE {bot_filter}) * 100.0 / COUNT(*), 2) AS bot_percentage,
+                MAX(CASE WHEN {proxy_col} IS NOT NULL AND {proxy_col} != '' THEN 1 ELSE 0 END) AS is_anonymized_proxy
+            FROM {table_name}
+            {time_filter} AND {fingerprint_col} IS NOT NULL AND {fingerprint_col} != ''
+            GROUP BY tls_fingerprint
+            ORDER BY requests DESC
+            LIMIT 50
+        """
+
+
+SQL = sys.modules[__name__]
+sys.modules["backend.repositories._sql.security"] = SQL
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
@@ -43,7 +258,6 @@ from backend.utils.date_utils import parse_window
 from backend.utils.sql_validator import escape_sql_literal
 
 _logger = logging.getLogger(__name__)
-
 _SECURITY_CACHE_TTL = float(os.getenv("SECURITY_CACHE_TTL_SECONDS", "30"))
 _memo = ResponseMemo(ttl=_SECURITY_CACHE_TTL, maxsize=128, prewarmer=False)
 CacheRegistry.register("security_aggregates_memo", _memo.cache)
@@ -80,7 +294,6 @@ def peek_security_aggregates(
     sections: set[str] | None = None,
     mask_ips: bool = False,
 ) -> dict | None:
-    """Return a cached security aggregates response without acquiring a DuckDB connection."""
     if _SECURITY_CACHE_TTL <= 0 or start_time is None or end_time is None:
         return None
     key = _security_memo_key(src, start_time, end_time, filters, bucket_seconds, sections, mask_ips)
@@ -90,7 +303,6 @@ def peek_security_aggregates(
 
 _ROLLUP_MIN_WINDOW_SECONDS = 86400
 _BOT_UA_CLASSIFY_LIMIT = int(os.getenv("BOT_UA_CLASSIFY_LIMIT", "2000"))
-
 _TEMP_COL_ORDER = (
     "timestamp",
     "ip",
@@ -113,7 +325,6 @@ _TEMP_COL_ORDER = (
     "country",
     "city",
 )
-
 _SECTION_DEFAULTS = (
     ("verified_bots_ts", True),
     ("ngwaf_verified_bots", True),
@@ -131,7 +342,6 @@ _SECTION_DEFAULTS = (
 
 
 def _window_eligible_for_rollup(start_time: str | None, end_time: str | None) -> bool:
-    """Return True when the request window is wide enough (>= 24h) for closed-hour rollup reads."""
     if not start_time or not end_time:
         return False
     try:
@@ -145,7 +355,6 @@ def _window_eligible_for_rollup(start_time: str | None, end_time: str | None) ->
 
 
 def _has_rollup_coverage(src: dict, field: str, start_time: str | None, end_time: str | None) -> bool:
-    """Check whether in-window closed-hour rollup data exists on disk for ``field``."""
     from backend.repositories.rollup_coverage import enumerate_closed_hour_field_rollups
 
     w = enumerate_closed_hour_field_rollups(src, field, start_time, end_time, stop_on_first=True)
@@ -160,7 +369,6 @@ def _ipv6_per_hour_from_rollups(
     *,
     actual_cols: list[str] | None = None,
 ) -> list[dict] | None:
-    """Compute the IPv6 adoption time series from per-hour count rollups plus active-hour slice."""
     from backend.core.rollups._common import _safe_table_for
     from backend.repositories.rollup_coverage import enumerate_closed_hour_field_rollups
 
@@ -171,7 +379,6 @@ def _ipv6_per_hour_from_rollups(
     per_field_paths = w.per_field_paths
     st_dt, et_dt = w.st_dt, w.et_dt
     active_dt, active_end_dt = w.active_dt, w.active_end_dt
-
     branches = [
         "SELECT hour, value, count FROM read_parquet(["
         + ", ".join("'" + escape_sql_literal(p) + "'" for p in paths)
@@ -179,23 +386,19 @@ def _ipv6_per_hour_from_rollups(
         for paths in (bundled_paths, per_field_paths)
         if paths
     ]
-
     q = "SELECT hour, value, SUM(count) AS c FROM (" + " UNION ALL ".join(branches) + ") GROUP BY hour, value"
     try:
         rows = runner.execute(q).fetchall()
     except Exception:
         return None
-
     per_hour: dict[str, dict[str, int]] = {}
     for hour, value, count in rows:
         b = per_hour.setdefault(hour, {"true": 0, "total": 0})
         b["total"] += int(count)
         if value == "true":
             b["true"] += int(count)
-
     if not per_hour:
         return None
-
     if et_dt > active_dt:
         live_start = max(active_dt, st_dt)
         live_end = min(active_end_dt, et_dt)
@@ -234,7 +437,6 @@ def _ipv6_per_hour_from_rollups(
                 finally:
                     if tmp and tmp != "__empty__" and hasattr(runner, "release_active_direct_temp"):
                         runner.release_active_direct_temp(tmp)
-
     result: list[dict] = []
     for hour in sorted(per_hour):
         b = per_hour[hour]
@@ -245,22 +447,11 @@ def _ipv6_per_hour_from_rollups(
 
 
 def _proxy_dist_from_rollups(
-    runner: QueryRunner,
-    start_time: str | None,
-    end_time: str | None,
-    *,
-    actual_cols: list[str] | None = None,
+    runner: QueryRunner, start_time: str | None, end_time: str | None, *, actual_cols: list[str] | None = None
 ) -> list[dict] | None:
-    """Compute PROXY_TYPE_DIST totals from the per-hour count rollup."""
     try:
         extra_kwargs: dict[str, Any] = {"actual_cols": actual_cols} if actual_cols is not None else {}
-        rolled, _ = runner.execute_top_n_rollups(
-            ["p_type"],
-            start_time,
-            end_time,
-            limit=500,
-            **extra_kwargs,
-        )
+        rolled, _ = runner.execute_top_n_rollups(["p_type"], start_time, end_time, limit=500, **extra_kwargs)
     except Exception:
         return None
     if not rolled:
@@ -276,7 +467,6 @@ def _proxy_dist_from_rollups(
 
 
 def classify_ua_counts(rows: list[tuple[str, int]], n: int) -> list[dict]:
-    """Match ``(ua, count)`` rows against the bot catalog; top ``n`` bots by request count."""
     from backend.utils.bot_sources import build_matcher
 
     match_ua = build_matcher()
@@ -301,18 +491,14 @@ _RDNS_ENQUEUE_LIMIT = int(os.getenv("SECURITY_RDNS_ENQUEUE_LIMIT", "500"))
 
 
 def summarize_wellknown_bot_rows(rows: list) -> list[dict]:
-    """Aggregate ``(ua, ip, count)`` rows into well-known bot rows with FCrDNS verification counters."""
     if not rows:
         return []
-
     from backend.utils.bot_sources import build_matcher
     from backend.utils.rdns_cache import classify, enqueue, get_hostnames
 
     match_ua = build_matcher()
     bot_agg: dict[str, dict] = {}
     new_ips: set[str] = set()
-
-    # 1. Deduplicate UA regex matching: evaluate match_ua once per unique UA string.
     ua_matches: dict[str, list[dict]] = {}
     matched_rows: list[tuple[list[dict], str, int]] = []
     ip_totals: dict[str, int] = {}
@@ -328,22 +514,15 @@ def summarize_wellknown_bot_rows(rows: list) -> list[dict]:
         cnt_int = int(cnt or 0)
         matched_rows.append((matches, ip_val, cnt_int))
         ip_totals[ip_val] = ip_totals.get(ip_val, 0) + cnt_int
-
     if not matched_rows:
         return []
-
-    # 2. Batch and bound rDNS lookups to the top distinct matched bot IPs by request count.
     if len(ip_totals) > _RDNS_LOOKUP_LIMIT:
         top_ips = [ip for ip, _ in sorted(ip_totals.items(), key=lambda kv: kv[1], reverse=True)[:_RDNS_LOOKUP_LIMIT]]
     else:
         top_ips = list(ip_totals)
     hostnames = get_hostnames(top_ips)
     top_ips_set = set(top_ips)
-
-    # 3. Cache per-(bot_id, ip) verification classification so repeated UAs from the same IP
-    # don't re-parse CIDR ranges.
     classify_cache: dict[tuple[str, str], str] = {}
-
     for matches, ip_val, cnt in matched_rows:
         hostname, status, fcrdns_verified = hostnames.get(ip_val, (None, "pending", False))
         if ip_val not in top_ips_set and ip_val not in hostnames and len(new_ips) < _RDNS_ENQUEUE_LIMIT:
@@ -358,7 +537,6 @@ def summarize_wellknown_bot_rows(rows: list) -> list[dict]:
                 verification_cidrs = tuple(verification.get("cidrs") or ())
                 state = classify(ip_val, hostname, status, fcrdns_verified, verification_domains, verification_cidrs)
                 classify_cache[cache_key] = state
-
             if bot_id not in bot_agg:
                 cats = entry.get("categories", [])
                 bot_agg[bot_id] = {
@@ -381,18 +559,13 @@ def summarize_wellknown_bot_rows(rows: list) -> list[dict]:
                 agg["pending_count"] += cnt
             else:
                 agg["unverified_count"] += cnt
-
-    # Enqueue any pending IPs we encountered for future enrichment
     if new_ips:
         enqueue(list(new_ips))
-
-    # Sort by request count, return top 50, annotate coverage
     sorted_bots = sorted(bot_agg.values(), key=lambda x: x["request_count"], reverse=True)[:50]
     for b in sorted_bots:
         total = b["request_count"]
         covered = b["verified_count"] + b["impersonator_count"]
         b["verification_coverage"] = round(covered / total, 3) if total else 0.0
-
     return sorted_bots
 
 
@@ -409,19 +582,11 @@ def _stems_match(bot_stem: str, ref_stem: str) -> bool:
 
 
 _GENERIC_BOT_RE = re.compile(
-    r"([a-z0-9_.-]*(?:bot|crawler|spider|slurp|archiver|scraper|externalagent|extended)[a-z0-9_.-]*)",
-    re.IGNORECASE,
+    r"([a-z0-9_.-]*(?:bot|crawler|spider|slurp|archiver|scraper|externalagent|extended)[a-z0-9_.-]*)", re.IGNORECASE
 )
 
 
-def summarize_bot_efficiency_rows(
-    rows: list[tuple[str, str, int, int]],
-) -> list[dict[str, Any]]:
-    """Aggregate tagged `(kind, key, cnt, resp_bytes)` rows into BotEfficiencyItem dicts.
-
-    Uses `well-known-bots.json` via `build_matcher()` and `extract_entry_referral_stems()`
-    plus generic bot token extraction — zero hardcoded bot or vendor names.
-    """
+def summarize_bot_efficiency_rows(rows: list[tuple[str, str, int, int]]) -> list[dict[str, Any]]:
     from backend.utils.bot_sources import (
         _BOT_TOKEN_SUFFIX_RE,
         build_well_known_bots_matcher,
@@ -439,11 +604,9 @@ def summarize_bot_efficiency_rows(
         vid = (entry.get("id") or "").split("-")[0].lower()
         if vid:
             vendor_stems.setdefault(vid, set()).update(extract_entry_referral_stems(entry))
-
     total_site_bytes = 0
     ref_counts: dict[str, int] = {}
     ua_rows: list[tuple[str, int, int]] = []
-
     for kind, key, cnt, r_bytes in rows:
         cnt_i = int(cnt or 0)
         bytes_i = int(r_bytes or 0)
@@ -453,7 +616,6 @@ def summarize_bot_efficiency_rows(
             ref_counts[key.lower()] = ref_counts.get(key.lower(), 0) + cnt_i
         elif kind == "ua" and key:
             ua_rows.append((key, cnt_i, bytes_i))
-
     bot_agg: dict[str, dict[str, Any]] = {}
     for ua, cnt_i, bytes_i in ua_rows:
         matches = matcher(ua)
@@ -475,21 +637,13 @@ def summarize_bot_efficiency_rows(
             category = "General Bot"
             stem = _BOT_TOKEN_SUFFIX_RE.sub("", raw_tok).strip("-_.")
             stems = {stem} if len(stem) >= 3 else set()
-
         bucket = bot_agg.get(bot_id)
         if bucket is None:
-            bucket = {
-                "bot_name": bot_name,
-                "category": category,
-                "request_count": 0,
-                "resp_bytes": 0,
-                "stems": set(),
-            }
+            bucket = {"bot_name": bot_name, "category": category, "request_count": 0, "resp_bytes": 0, "stems": set()}
             bot_agg[bot_id] = bucket
         bucket["request_count"] += cnt_i
         bucket["resp_bytes"] += bytes_i
         bucket["stems"].update(stems)
-
     denom_bytes = max(total_site_bytes, 1)
     results: list[dict[str, Any]] = []
     for b in bot_agg.values():
@@ -510,7 +664,6 @@ def summarize_bot_efficiency_rows(
                 "bytes_per_referral": round(resp_b * 1.0 / ref_denom, 1),
             }
         )
-
     results.sort(key=lambda x: (x["resp_bytes"], x["request_count"]), reverse=True)
     return results[:25]
 
@@ -525,12 +678,10 @@ def get_top_bots(
     shared_temp_table: str | None = None,
     parent_runner: QueryRunner | None = None,
 ) -> dict:
-    """Return top N bots from UA matching and (if available) the NGWAF bot cache."""
     from backend.repositories import dashboard as _dashboard_repo
 
     timer = SectionTimer()
     section_timings = timer.entries
-
     source_name = src["name"]
     cache_key: str | None = None
     if (
@@ -555,7 +706,6 @@ def get_top_bots(
             return cache_result(
                 cached_res, state="hit", ttl_seconds=_dashboard_repo._dashboard_cache.ttl, prewarmer=False
             )
-
     table_name = _safe_table(source_name)
     runner = parent_runner if parent_runner is not None else QueryRunner(con, src)
 
@@ -572,24 +722,15 @@ def get_top_bots(
     timer.mark("top_bots:get_schema_cols", _t)
     if not actual_cols:
         return _wrap_cache(empty_schema_response(bots=[], ngwaf_bots=[], **runner.telemetry()))
-
     _t = _time.perf_counter()
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
     timer.mark("top_bots:build_where_clause", _t)
-
     arcjet_bots: list[dict] = []
     ngwaf_bots: list[dict] = []
 
     def _bots_resp() -> dict:
-        return {
-            "bots": arcjet_bots,
-            "ngwaf_bots": ngwaf_bots,
-            "section_timings": section_timings,
-            **runner.telemetry(),
-        }
+        return {"bots": arcjet_bots, "ngwaf_bots": ngwaf_bots, "section_timings": section_timings, **runner.telemetry()}
 
-    # QueryRunner owns the durable-mode coverage gate. Keeping this path
-    # enabled lets ready high-scale services avoid a full-range UA scan.
     use_rollups = not filters
     if use_rollups:
         runner.begin_shared_active_hour_temps()
@@ -605,9 +746,7 @@ def get_top_bots(
             if window is not None:
                 observation.window_start, observation.window_end = window[0].isoformat(), window[1].isoformat()
         runner.reader_coverage.extend(skipped)
-
     try:
-        # ── Arcjet UA matching ──────────────────────────────────────────
         ua_rollup_rows: list[tuple[str, int]] | None = None
         if use_rollups and "ua" in actual_cols:
             try:
@@ -628,7 +767,6 @@ def get_top_bots(
             except Exception as e:
                 _logger.warning("[security] UA rollup read failed, falling back: %s", e)
                 ua_rollup_rows = None
-
         if ua_rollup_rows is not None:
             _t = _time.perf_counter()
             try:
@@ -636,15 +774,12 @@ def get_top_bots(
             except Exception as e:
                 _logger.error("[security] arcjet rollup match failed: %s", e)
             timer.mark("top_bots:arcjet_match", _t)
-
-        # ── NGWAF cache bot names + filtered-UA fallback ────────────────
         ngwaf_attached = False
         if "waf_req_id" in actual_cols:
             try:
                 ngwaf_attached = ensure_ngwaf_bots_materialized(con, "ngwaf_top")
             except Exception:
                 _logger.debug("get_top_bots: ensure_ngwaf_bots_materialized failed (ignored)", exc_info=True)
-
         needs_filtered_ua_scan = ua_rollup_rows is None and "ua" in actual_cols
         cols_needed: list[str] = []
         if needs_filtered_ua_scan:
@@ -729,17 +864,13 @@ def get_top_bots(
                         timer.mark("top_bots:arcjet_match", _t)
                     except Exception as e:
                         _logger.error("[security] arcjet top bots failed: %s", e)
-
                 if ngwaf_attached:
                     ngwaf_bots = _run_ngwaf_join(
-                        SQL.NGWAF_TOP_BOTS_JOIN.format(temp_table=temp_table, n=n),
-                        None,
-                        "top_bots:ngwaf_join",
+                        SQL.NGWAF_TOP_BOTS_JOIN.format(temp_table=temp_table, n=n), None, "top_bots:ngwaf_join"
                     )
     finally:
         if use_rollups:
             runner.end_shared_active_hour_temps()
-
     res_dict = _bots_resp()
     if cache_key is not None and (arcjet_bots or ngwaf_bots):
         _dashboard_repo._dashboard_cache[cache_key] = (_time.time(), res_dict.copy())
@@ -768,17 +899,11 @@ def get_security_aggregates(
             cached_inner = _memo.get_with_telemetry(memo_key)
             if cached_inner is not None:
                 return dict(cached_inner)
-
-        # Per-phase timings for /api/security/aggregates so the perf
-        # harness can attribute wall time across the ~14 sub-queries
-        # _build_security_response runs without ad-hoc instrumentation.
         timer = SectionTimer()
         section_timings = timer.entries
-
         source_name = src["name"]
         table_name = _safe_table(source_name)
         runner = QueryRunner(con, src)
-
         _t = _time.perf_counter()
         actual_cols = runner.get_schema_cols()
         timer.mark("get_schema_cols", _t, activity="overhead", current_execution=True)
@@ -792,18 +917,9 @@ def get_security_aggregates(
                 "section_timings": section_timings,
                 **runner.telemetry(),
             }
-
         _t = _time.perf_counter()
         params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
         timer.mark("build_where_clause", _t, activity="overhead", current_execution=True)
-
-        # The catalog temp is built section-aware inside _build_security_response:
-        # every section that can serve from a parquet rollup is served WITHOUT
-        # the temp, and the temp is then materialized for ONLY the columns the
-        # remaining live sections touch (or skipped entirely). This is the
-        # per-column form of the all-or-nothing materialize the origin/aggregates
-        # fix removed — so a 30d unfiltered request collapses the shared
-        # ``temp_table_create`` to the tiny NGWAF-flagged subset (or nothing).
         res = _build_security_response(
             runner,
             src,
@@ -854,13 +970,7 @@ def _build_security_response(
         _t0 = _time.perf_counter()
         try:
             tb = get_top_bots(
-                runner.con,
-                src,
-                start_time,
-                end_time,
-                filters or {},
-                shared_temp_table=shared_tmp,
-                parent_runner=runner,
+                runner.con, src, start_time, end_time, filters or {}, shared_temp_table=shared_tmp, parent_runner=runner
             )
             results["bots"] = tb.get("bots", [])
             results["ngwaf_bots"] = tb.get("ngwaf_bots", [])
@@ -869,7 +979,6 @@ def _build_security_response(
         timer.mark("top_bots", _t0, activity="overhead", scope="subtree", current_execution=True)
 
     results = {**runner.telemetry()}
-
     rollup_eligible = (
         not filters
         and start_time is not None
@@ -883,13 +992,10 @@ def _build_security_response(
     use_ipv6_rollup = _can_rollup("is_ipv6")
     use_proxy_rollup = _can_rollup("p_type")
     use_top_bots_rollup = _can_rollup("ua")
-
     if not filters:
         runner.begin_shared_active_hour_temps(
             seed_fields=("tls_ciphers_sha", "p_type", "is_ipv6", "ua", "waf_req_id", "waf_sig")
         )
-
-    # ── Pass 1: serve rollup-eligible sections and track live column needs ──
     needed_cols: set[str] = set()
     live_sections: set[str] = set()
 
@@ -903,7 +1009,6 @@ def _build_security_response(
             results["ngwaf_configured"] = bool(svcconfig.get_ngwaf_workspace_id(src.get("service_id", "")))
         except Exception:
             results["ngwaf_configured"] = False
-
     _ngwaf_attached = False
     if _want_ngwaf_bots and "waf_req_id" in actual_cols:
         try:
@@ -926,10 +1031,7 @@ def _build_security_response(
         if _want("ngwaf_verified_bots_ts"):
             _t = _time.perf_counter()
             rolled_nb_ts = runner.try_ngwaf_verified_bots_ts_from_rollup(
-                start_time,
-                end_time,
-                bucket_seconds=bucket_seconds,
-                has_filters=bool(filters),
+                start_time, end_time, bucket_seconds=bucket_seconds, has_filters=bool(filters)
             )
             if rolled_nb_ts is not None:
                 timer.mark("ngwaf_verified_bots_ts_rollup", _t)
@@ -939,20 +1041,17 @@ def _build_security_response(
     elif _want_ngwaf_bots:
         results["ngwaf_verified_bots"] = []
         results["ngwaf_verified_bots_ts"] = []
-
     if _want("verified_bots_ts"):
         if "waf_sig" in actual_cols:
             _need("verified_bots_ts", {"timestamp", "waf_sig"})
         else:
             results["verified_bots_ts"] = []
-
     _FP_RESULT_KEYS = (("tls_ciphers_sha", "tls_fingerprints"),)
     _wanted_fp_keys: set[str] = {result_key for _col, result_key in _FP_RESULT_KEYS if _want(result_key)}
     coverage_cols: list[str] = []
     schema_eligible_fp_cols = [
         c for c, rk in _FP_RESULT_KEYS if c in actual_cols and "ip" in actual_cols and rk in _wanted_fp_keys
     ]
-
     rollup_served_fp_cols: set[str] = set()
     if not filters and schema_eligible_fp_cols == ["tls_ciphers_sha"]:
         try:
@@ -988,19 +1087,15 @@ def _build_security_response(
                 current_execution=True,
                 outcome="read",
             )
-
             by_field: dict[str, list[tuple[str, int]]] = {}
             for field, value, count in top_n_rows:
                 if value == "__other__" or not isinstance(value, str):
                     continue
                 by_field.setdefault(field, []).append((value, int(count)))
-
             if by_field:
                 _t = _time.perf_counter()
                 ip_spread, _spread_meta = runner.execute_ip_spread_rollups(
-                    schema_eligible_fp_cols,
-                    start_time,
-                    end_time,
+                    schema_eligible_fp_cols, start_time, end_time
                 )
                 timer.mark(
                     "fingerprints_rollup_ip_spread",
@@ -1010,7 +1105,6 @@ def _build_security_response(
                     current_execution=True,
                     outcome="read",
                 )
-
                 for col, result_key in _FP_RESULT_KEYS:
                     if col not in by_field:
                         continue
@@ -1020,24 +1114,14 @@ def _build_security_response(
                         ip_count = int(ip_spread.get((col, value), 0))
                         if ip_count > 0:
                             has_nonzero_ip_count = True
-                        candidate_rows.append(
-                            {
-                                "fingerprint": value,
-                                "ip_count": ip_count,
-                                "request_count": count,
-                            }
-                        )
+                        candidate_rows.append({"fingerprint": value, "ip_count": ip_count, "request_count": count})
                     if not has_nonzero_ip_count:
                         continue
                     results[result_key] = candidate_rows
                     coverage_cols.append(col)
                     rollup_served_fp_cols.add(col)
         except Exception:
-            _logger.debug(
-                "[security] fingerprint rollup path failed; falling back to live SQL",
-                exc_info=True,
-            )
-
+            _logger.debug("[security] fingerprint rollup path failed; falling back to live SQL", exc_info=True)
     for col, result_key in _FP_RESULT_KEYS:
         if result_key not in _wanted_fp_keys or col in rollup_served_fp_cols:
             continue
@@ -1160,10 +1244,6 @@ def _build_security_response(
         "proxy_dist_rollup",
         "[security] proxy rollup pre-check passed but reader returned None; rendering empty card",
     )
-
-    # Well-Known Bots: pre-materialised (ua, ip, count) rollup (no temp);
-    # falls back to a live regex prefilter over the temp ({ua, ip}) on a
-    # rollup miss (active hour, missing file, stale pattern_set_version).
     _wk_active = False
     _wk_rows: list | None = None
     if _want("wellknown_bots") and "ua" in actual_cols and "ip" in actual_cols:
@@ -1185,7 +1265,6 @@ def _build_security_response(
             _need("wellknown_bots", {"ua", "ip"})
     elif _want("wellknown_bots"):
         results["wellknown_bots"] = []
-
     if _want("bot_efficiency") and "ua" in actual_cols and "ip" in actual_cols:
         _t = _time.perf_counter()
         be_rows = runner.try_security_bot_efficiency_from_rollup(start_time, end_time, has_filters=bool(filters))
@@ -1201,13 +1280,11 @@ def _build_security_response(
             _need("bot_efficiency", be_cols)
     elif _want("bot_efficiency"):
         results["bot_efficiency"] = []
-
     if _want("top_bots"):
         if use_top_bots_rollup:
             _populate_top_bots()
         else:
             _need("top_bots", {"ua", "waf_req_id"})
-
     if _want("proxies"):
         proxy_cols = {"ip", "pop", "rtt_min", "tcp_rtt", "lat", "lon", "asn"}
         px_rollup: dict | None = None
@@ -1228,16 +1305,8 @@ def _build_security_response(
             timer.mark("proxies_rollup", _t, source="rollup", activity="compute", current_execution=True)
         else:
             _need("proxies", proxy_cols | {"country", "city"})
-
-    # ── Build the (narrowed / NGWAF-only / skipped) catalog temp ──
     temp_table: str | None = None
     if needed_cols:
-        # When the ONLY live sections are the NGWAF bot pair, restrict the
-        # temp to NGWAF-flagged rows — both bot templates INNER JOIN on a
-        # non-null waf_req_id anyway, so this is semantically identical and
-        # collapses a full-window scan to the tiny flagged subset. Safe to
-        # append a literal predicate: inline_params means ``params`` is
-        # empty, so it can't desync bind parameters.
         ngwaf_pair = {"ngwaf_verified_bots", "ngwaf_verified_bots_ts"}
         ngwaf_only = bool(live_sections) and live_sections <= ngwaf_pair and "waf_req_id" in actual_cols
         vbts_only = live_sections == {"verified_bots_ts"} and "waf_sig" in actual_cols
@@ -1255,10 +1324,8 @@ def _build_security_response(
                 "security:temp_ngwaf_narrowed", _time.perf_counter(), activity="overhead", current_execution=True
             )
     else:
-        # Every requested section served from a rollup — no temp at all.
         timer.mark("security:temp_skipped", _time.perf_counter(), activity="skipped", current_execution=True)
 
-    # ── Pass 2: live SQL for the missed sections, against the narrowed temp ──
     def _live_fetch(q: str, mark_label: str, shape: Callable[[Any], dict]) -> list[dict]:
         _t0 = _time.perf_counter()
         res = runner.execute(q).fetchall()
@@ -1269,11 +1336,7 @@ def _build_security_response(
         if "verified_bots_ts" in live_sections and temp_table:
             _t = _time.perf_counter()
             rolled_vbts = runner.try_verified_bots_ts_from_rollup(
-                start_time,
-                end_time,
-                temp_table=temp_table,
-                bucket_seconds=bucket_seconds,
-                has_filters=bool(filters),
+                start_time, end_time, temp_table=temp_table, bucket_seconds=bucket_seconds, has_filters=bool(filters)
             )
             if rolled_vbts is not None:
                 timer.mark("verified_bots_ts_rollup", _t, source="rollup", activity="compute", current_execution=True)
@@ -1292,7 +1355,6 @@ def _build_security_response(
                 vbts_rows = runner.execute(q).fetchall()
                 timer.mark("verified_bots_ts", _t, source="live", activity="compute", current_execution=True)
             results["verified_bots_ts"] = [{"time": safe_iso(r[0]), "bot_type": r[1], "count": r[2]} for r in vbts_rows]
-
         if (
             _ngwaf_attached
             and temp_table
@@ -1310,7 +1372,6 @@ def _build_security_response(
                             "request_count": r[3],
                         },
                     )
-
                 if "ngwaf_verified_bots_ts" in live_sections:
                     results["ngwaf_verified_bots_ts"] = _live_fetch(
                         SQL.NGWAF_VERIFIED_BOTS_TS.format(bucket_seconds=bucket_seconds, temp_table=temp_table),
@@ -1323,9 +1384,6 @@ def _build_security_response(
                     results["ngwaf_verified_bots"] = []
                 if "ngwaf_verified_bots_ts" in live_sections:
                     results["ngwaf_verified_bots_ts"] = []
-
-        # Live FINGERPRINT_TOP_N for any fingerprint col the rollup didn't
-        # serve (cols absent from the schema were already defaulted above).
         for col, result_key in _FP_RESULT_KEYS:
             if result_key not in _wanted_fp_keys or col in rollup_served_fp_cols:
                 continue
@@ -1335,12 +1393,6 @@ def _build_security_response(
                     result_key,
                     lambda r: {"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]},
                 )
-
-        # One scan of the temp populates coverage for every fingerprint card
-        # that ran live (rollup-served coverage was already set from the
-        # security_cov counts in pass 1, so it's not in live_sections here).
-        # Column names come from the _FP_RESULT_KEYS safelist; no untrusted
-        # input reaches the aggregate.
         if "fingerprint_coverage" in live_sections and temp_table:
             fingerprint_coverage: dict[str, float] = {}
             agg_cols = ", ".join(
@@ -1359,13 +1411,11 @@ def _build_security_response(
                         populated = float(row[i + 1]) if row[i + 1] is not None else 0.0
                         fingerprint_coverage[c] = populated / total if total > 0 else 0.0
             except Exception:
-                # FE treats 0.0 as "no signal, show the existing emptyMessage".
                 for c in coverage_cols:
                     fingerprint_coverage[c] = 0.0
             results["fingerprint_coverage"] = fingerprint_coverage
         elif _want("fingerprint_coverage") and "fingerprint_coverage" not in results:
             results["fingerprint_coverage"] = {}
-
         if temp_table:
             for _sec, _sql, _mark, _shape in (
                 (
@@ -1388,10 +1438,7 @@ def _build_security_response(
                 ),
                 (
                     "ipv6_adoption",
-                    SQL.IPV6_ADOPTION_TS.format(
-                        time_bucket_select=time_bucket_select("1 hour"),
-                        temp_table=temp_table,
-                    ),
+                    SQL.IPV6_ADOPTION_TS.format(time_bucket_select=time_bucket_select("1 hour"), temp_table=temp_table),
                     "ipv6_adoption",
                     lambda r: {"time": safe_iso(r[0]), "pct": r[1]},
                 ),
@@ -1404,10 +1451,6 @@ def _build_security_response(
             ):
                 if _sec in live_sections:
                     results[_sec] = _live_fetch(_sql, _mark, _shape)
-
-        # Well-Known Bots (UA matching + FCrDNS verification). Rows come from
-        # the rollup (hit) or a live temp scan (miss); the Python enrichment
-        # below is identical either way.
         if _wk_active:
             try:
                 if _wk_rows is None and temp_table:
@@ -1423,7 +1466,6 @@ def _build_security_response(
                     q = SQL.WELLKNOWN_BOTS_UA_IP.format(temp_table=temp_table, prefilter=prefilter)
                     _wk_rows = runner.execute(q).fetchall()
                     timer.mark("wellknown_bots_query", _t, source="live", activity="compute", current_execution=True)
-
                 if _wk_rows is None:
                     results["wellknown_bots"] = []
                 else:
@@ -1433,16 +1475,13 @@ def _build_security_response(
             except Exception as e:
                 _logger.error("[security] well-known bots query failed: %s", e)
                 results["wellknown_bots"] = []
-
         if "bot_efficiency" in live_sections and temp_table:
             try:
                 _t = _time.perf_counter()
                 resp_bytes_expr = coalesce("t.resp_bytes", "0") if "resp_bytes" in actual_cols else "0"
                 referer_expr = "t.referer" if "referer" in actual_cols else "CAST(NULL AS VARCHAR)"
                 q = SQL.BOT_EFFICIENCY.format(
-                    temp_table=temp_table,
-                    resp_bytes_expr=resp_bytes_expr,
-                    referer_expr=referer_expr,
+                    temp_table=temp_table, resp_bytes_expr=resp_bytes_expr, referer_expr=referer_expr
                 )
                 res = runner.execute(q).fetchall()
                 timer.mark("bot_efficiency", _t, source="live", activity="compute", current_execution=True)
@@ -1452,10 +1491,8 @@ def _build_security_response(
             except Exception as e:
                 _logger.error("[security] bot_efficiency query failed: %s", e)
                 results["bot_efficiency"] = []
-
         if "top_bots" in live_sections and temp_table:
             _populate_top_bots(shared_tmp=temp_table)
-
         if "proxies" in live_sections and temp_table:
             _t = _time.perf_counter()
             try:
@@ -1478,21 +1515,14 @@ def _build_security_response(
     finally:
         runner.end_shared_active_hour_temps()
         _drop_temp_table(runner, temp_table, "_build_security_response")
-
-    # Any requested section left unset (e.g. the temp build failed) falls
-    # back to its empty default so the response stays well-formed. Only
-    # wanted sections get a key — the selector contract.
     for name, is_list in _SECTION_DEFAULTS:
         if _want(name) and name not in results:
             results[name] = [] if is_list else {}
-
     if _want("top_bots"):
         results.setdefault("bots", [])
         results.setdefault("ngwaf_bots", [])
-
     if _want("proxies") and "active_proxies_count" not in results:
         results.update(_empty_proxies_payload())
-
     if mask_ips and "top_ips_header" in results and results["top_ips_header"]:
         from backend.core.share_db.validation import mask_ip
 
@@ -1500,7 +1530,6 @@ def _build_security_response(
             {"ip": mask_ip(str(r["ip"])) if r.get("ip") else r.get("ip"), "max_header": r.get("max_header")}
             for r in results["top_ips_header"]
         ]
-
     results["section_timings"] = section_timings
     return results
 
@@ -1533,7 +1562,6 @@ def _finish_proxies(
     raw_clients: list[dict[str, Any]],
     mask_ips: bool,
 ) -> dict[str, Any]:
-    """Shape the proxies panels (quality %, ASN names, IP masking) from live or rollup rows."""
     traffic_quality = []
     if quality_rows:
         total_count = sum(int(r[1] or 0) for r in quality_rows)
@@ -1543,11 +1571,9 @@ def _finish_proxies(
                 item_count = float(row_count or 0)
                 value = round((item_count / total_count) * 100, 1)
                 traffic_quality.append({"label": label, "value": value})
-
     asns_to_resolve = {
         asn_int for row in (*raw_isps, *raw_clients) if (asn_int := _parse_asn_int(row.get("asn"))) is not None
     }
-
     from backend.core.duckdb import get_asn_names
 
     asn_names = get_asn_names(source_name, list(asns_to_resolve))
@@ -1563,7 +1589,6 @@ def _finish_proxies(
         }
         for row in raw_isps
     ]
-
     active_clients = []
     if mask_ips:
         from backend.core.share_db.validation import mask_ip
@@ -1598,17 +1623,13 @@ def get_security_proxies(
     source_name = src["name"]
     table_name = _safe_table(source_name)
     runner = parent_runner if parent_runner is not None else QueryRunner(con, src)
-
     actual_cols = runner.get_schema_cols()
     required = ["ip", "pop", "rtt_min", "tcp_rtt", "lat", "lon", "asn"]
     if not actual_cols or not all(col in actual_cols for col in required):
         return _empty_proxies_payload()
-
     params, where_clause = build_where_clause(start_time, end_time, filters or {}, actual_cols, inline_params=True)
-
     optional = ["country", "city"]
     cols_needed = [c for c in required + optional if c in actual_cols]
-
     ctx = (
         nullcontext(shared_temp_table)
         if shared_temp_table
@@ -1617,13 +1638,11 @@ def get_security_proxies(
     with ctx as temp_table:
         if temp_table is None:
             return _empty_proxies_payload()
-
         select_country_city_inner = "".join(
             f",\n            {col}" if col in cols_needed else f",\n            CAST(NULL AS VARCHAR) AS {col}"
             for col in optional
         )
         select_country_city_outer = ",\n                country,\n                city"
-
         combined_rows = runner.execute(
             SQL.GET_SECURITY_PROXIES_COMBINED.format(
                 temp_table=temp_table,
@@ -1631,12 +1650,10 @@ def get_security_proxies(
                 select_country_city_outer=select_country_city_outer,
             )
         ).fetchall()
-
         stats: dict[str, Any] = {}
         quality_rows: list[tuple[Any, Any]] = []
         raw_isps: list[dict[str, Any]] = []
         raw_clients: list[dict[str, Any]] = []
-
         for r in combined_rows:
             kind = r[0]
             if kind == "stats":
@@ -1668,12 +1685,10 @@ def get_security_proxies(
                         "city": r[16],
                     }
                 )
-
         return _finish_proxies(source_name, stats, quality_rows, raw_isps, raw_clients, mask_ips)
 
 
 def get_threat_intel_rows(con, src: dict, table_name: str, start: str, end: str) -> list[tuple]:
-    """Rows ``(tls_fingerprint, requests, top_country, waf_rule_count, bot_pct, is_proxy)`` for ``[start, end]``."""
     from backend.utils.telemetry import track_query
 
     cols = set(QueryRunner(con, src).get_schema_cols())

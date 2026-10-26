@@ -3,7 +3,7 @@ import { HydrationBoundary } from '@tanstack/react-query'
 import { fetchBootstrapServerSide } from '@/lib/ssr/upstream'
 import { fetchInsightsServerSide } from '@/lib/ssr/upstream'
 import { firstParam, resolveServerServiceId, seedDehydratedState } from '@/lib/ssr/upstream'
-import { queryKeys } from '@/lib/query-keys'
+import { queryKeys } from "@/lib/api"
 import InsightsClient from './_sections/InsightsClient'
 
 // Per-request RSC shell for /insights. Pre-fetches the DEFAULT insights

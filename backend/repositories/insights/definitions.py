@@ -18,7 +18,6 @@ def _reg(**kwargs: Any) -> None:
 
 import re
 
-# Plain alternation without inline (?i) so sql.count("?") binder heuristic stays accurate.
 NEW_PROBES = [
     "admin",
     ".env",
@@ -42,14 +41,6 @@ NEW_PROBES = [
     "debug",
 ]
 NEW_PROBE_REGEX = "|".join(re.escape(p) for p in NEW_PROBES)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# Templates from ``definitions.py`` — one per registered InsightDefinition
-# ════════════════════════════════════════════════════════════════════════════
-
-# ── 1. Error Spikes ───────────────────────────────────────────────────────────
-
 ERROR_SPIKES = f"""
         WITH base AS (
             SELECT "url", status,
@@ -67,8 +58,6 @@ ERROR_SPIKES = f"""
         HAVING w_total >= 3 AND w_rate >= 0.05 AND (b_total < 10 OR w_rate >= b_rate * 2 + 0.05)
         ORDER BY (w_rate - {coalesce("b_rate", "0")}) DESC LIMIT 15
     """
-
-# ── 2. Botnet Grouping ────────────────────────────────────────────────────────
 
 
 def _build_ip_spread_sql(col: str, *, include_ratio: bool = False) -> str:
@@ -123,8 +112,6 @@ BOTNET_GROUPING = """
         ORDER BY ip_ratio DESC LIMIT 10
     """
 
-# ── 4. New Country Traffic ────────────────────────────────────────────────────
-
 
 def _build_new_dim_traffic_sql(col: str, min_w_cnt: int) -> str:
     return f"""
@@ -138,9 +125,6 @@ def _build_new_dim_traffic_sql(col: str, min_w_cnt: int) -> str:
 
 
 NEW_COUNTRY_TRAFFIC = _build_new_dim_traffic_sql("country", 3)
-
-# ── 5. City Traffic Surges ────────────────────────────────────────────────────
-
 CITY_SURGES = f"""
         SELECT {{label_expr}} AS label, "city", {{region_sel}}, {{country_sel}},
             COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
@@ -152,9 +136,6 @@ CITY_SURGES = f"""
         HAVING w_cnt >= 20 AND w_cnt > {coalesce("b_cnt", "0")} / GREATEST({{baseline_hours}}, 1.0) * {{window_hours}} * 3
         ORDER BY spike_ratio DESC LIMIT 15
     """
-
-# ── 6. City Error Spikes ──────────────────────────────────────────────────────
-
 CITY_ERROR_SPIKES = f"""
         WITH base AS (
             SELECT {{loc_cols}}, {{label_expr}} AS label, status, "city", {{region_sel}} AS region, {{country_sel}} AS country,
@@ -172,9 +153,6 @@ CITY_ERROR_SPIKES = f"""
         HAVING w_total >= 10 AND w_rate >= 0.10 AND (b_total < 50 OR w_rate >= b_rate * 3 + 0.05)
         ORDER BY (w_rate - {coalesce("b_rate", "0")}) DESC LIMIT 15
     """
-
-# ── 7. City Latency Regressions ───────────────────────────────────────────────
-
 CITY_LATENCY_REGRESSIONS = """
         WITH base AS (
             SELECT {loc_cols}, {label_expr} AS label, elapsed, "city", {region_sel} AS region, {country_sel} AS country,
@@ -191,9 +169,6 @@ CITY_LATENCY_REGRESSIONS = """
         HAVING w_total >= 10 AND b_total >= 50 AND w_p95 >= b_p95 * 3.0 AND w_p95 - b_p95 >= 500
         ORDER BY (w_p95 / NULLIF(b_p95, 0)) DESC LIMIT 15
     """
-
-# ── 8. New City Traffic ───────────────────────────────────────────────────────
-
 NEW_CITY_TRAFFIC = """
         SELECT {label_expr} AS label, "city", {region_sel}, {country_sel},
             COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_cnt,
@@ -204,8 +179,6 @@ NEW_CITY_TRAFFIC = """
         HAVING w_cnt >= 5 AND b_cnt = 0
         ORDER BY w_cnt DESC LIMIT 20
     """
-
-# ── 9. User-Agent Monoculture ─────────────────────────────────────────────────
 
 
 def _build_monoculture_sql(col: str, share_floor: str, where_clause: str = "") -> str:
@@ -233,11 +206,6 @@ def _build_monoculture_sql(col: str, share_floor: str, where_clause: str = "") -
 
 
 UA_MONOCULTURE = _build_monoculture_sql("ua", "0.25")
-
-# ── 10. New Probe URLs ────────────────────────────────────────────────────────
-# Uses NEW_PROBE_REGEX (above). f-string-baked into the template at module
-# import time — the regex is a fixed literal, not user input.
-
 NEW_PROBE_URLS = f"""
         WITH probe_urls AS (
             SELECT "url"
@@ -254,9 +222,6 @@ NEW_PROBE_URLS = f"""
         HAVING w_cnt > 0 AND b_cnt = 0
         ORDER BY w_cnt DESC LIMIT 25
     """
-
-# ── 11. WAF Signal Spikes ─────────────────────────────────────────────────────
-
 WAF_SIGNAL_SPIKES = f"""
         WITH waf_combos AS (
             SELECT "waf_sig",
@@ -282,9 +247,6 @@ WAF_SIGNAL_SPIKES = f"""
         HAVING SUM(w_cnt) >= 3 AND SUM(w_cnt) > {coalesce("SUM(b_cnt)", "0")} * 1.0 / {{baseline_hours}} * {{window_hours}} * 2 + 2
         ORDER BY spike_ratio DESC LIMIT 15
     """
-
-# ── 12. Proxy / VPN Surge ─────────────────────────────────────────────────────
-
 PROXY_SURGE = f"""
         WITH all_p AS (
             SELECT "p_type",
@@ -306,13 +268,7 @@ PROXY_SURGE = f"""
           AND (t.w_proxy_total * 100.0 / NULLIF(t.w_total_all, 0)) >= 5
           AND (t.w_proxy_total * 100.0 / NULLIF(t.w_total_all, 0)) >= (t.b_proxy_total * 100.0 / NULLIF(t.b_total_all, 0)) * 2 + 5
     """
-
-# ── 13. ASN Concentration ─────────────────────────────────────────────────────
-
 ASN_CONCENTRATION = _build_monoculture_sql("asn", "0.20", '"asn" IS NOT NULL')
-
-# ── 14. ASN/Metro Performance Regressions ─────────────────────────────────────
-
 ASN_METRO_PERFORMANCE = """
         WITH base AS (
             SELECT "asn", "metro", tcp_rtt,
@@ -329,9 +285,6 @@ ASN_METRO_PERFORMANCE = """
         HAVING w_total >= 20 AND b_total >= 50 AND w_med >= b_med * 1.5 AND w_med - b_med >= 20
         ORDER BY (w_med - b_med) DESC LIMIT 15
     """
-
-# ── 15. Cache Efficiency Collapse ─────────────────────────────────────────────
-
 CACHE_COLLAPSE = f"""
         WITH base AS (
             SELECT "url", cache,
@@ -348,9 +301,6 @@ CACHE_COLLAPSE = f"""
         HAVING w_total >= 5 AND b_total >= 20 AND b_rate >= 0.40 AND w_rate <= b_rate - 0.20 AND w_rate <= b_rate * 0.6
         ORDER BY ({coalesce("b_rate", "0")} - w_rate) DESC LIMIT 15
     """
-
-# ── 15b. Cacheability Regression ──────────────────────────────────────────────
-
 CACHEABILITY_REGRESSION = f"""
         WITH base AS (
             SELECT "url", cache,
@@ -367,8 +317,6 @@ CACHEABILITY_REGRESSION = f"""
         HAVING w_total >= 10 AND b_total >= 50 AND b_rate <= 0.20 AND w_rate >= 0.50 AND w_rate >= b_rate + 0.30
         ORDER BY (w_rate - {coalesce("b_rate", "0")}) DESC LIMIT 15
     """
-
-# ── 16. Latency Regression ────────────────────────────────────────────────────
 
 
 def _build_p95_latency_regression_sql(
@@ -394,9 +342,6 @@ def _build_p95_latency_regression_sql(
 
 
 LATENCY_REGRESSION = _build_p95_latency_regression_sql("url", 5, 20, "2.0", 200)
-
-# ── 17. Impossible Distance / Spoofing ────────────────────────────────────────
-
 IMPOSSIBLE_DISTANCE = """
         WITH pop_coords(pop_code, pop_lat, pop_lon) AS (VALUES {pop_values}),
         flagged AS (
@@ -409,9 +354,6 @@ IMPOSSIBLE_DISTANCE = """
         SELECT fp, COUNT(*) AS hits, MAX(distance_km - max_km) AS worst_excess_km, MAX(distance_km) AS max_dist_km, MIN(max_km) AS min_allowed_km, ANY_VALUE(pop) AS pop, ANY_VALUE(ip) AS sample_ip, ANY_VALUE(client_lat), ANY_VALUE(client_lon), ANY_VALUE(pop_lat), ANY_VALUE(pop_lon), ANY_VALUE(tcp_rtt), ANY_VALUE(country), ANY_VALUE(city)
         FROM flagged WHERE distance_km > max_km GROUP BY fp HAVING COUNT(*) >= 2 ORDER BY worst_excess_km DESC LIMIT 15
     """
-
-# ── 18. Tail Latency Anomaly ──────────────────────────────────────────────────
-
 TAIL_LATENCY = """
         SELECT "url",
             ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY "elapsed") / 1000.0, 0) AS p99_ms,
@@ -423,12 +365,7 @@ TAIL_LATENCY = """
         GROUP BY "url" HAVING COUNT(*) >= 20 AND ratio > 5
         ORDER BY ratio DESC LIMIT 15
     """
-
-# ── 19. Cipher Fingerprint Clustering ─────────────────────────────────────────
-
 CIPHER_SPREAD = _build_ip_spread_sql("tls_ciphers_sha")
-
-# ── 20. Request Size Anomaly & 21. Connection Reuse Anomaly ───────────────────
 
 
 def _build_ip_max_vs_p95_sql(
@@ -467,9 +404,6 @@ REQUEST_SIZE_ANOMALY = _build_ip_max_vs_p95_sql("req_header_bytes", "bytes", 3)
 CONNECTION_ABUSE = _build_ip_max_vs_p95_sql(
     "conn_requests", "reqs", 5, " AND MAX(conn_requests) >= 50", " AND max_reqs >= 50"
 )
-
-# ── 22. Regional Latency Degradation ──────────────────────────────────────────
-
 REGION_LATENCY = """
         WITH base AS (
             SELECT server_region, elapsed, ottfb,
@@ -495,9 +429,6 @@ REGION_LATENCY = """
         FROM stats
         ORDER BY (w_p95 / NULLIF(b_p95, 0)) DESC LIMIT 15
     """
-
-# ── 23. Cache TTL Inefficiency ────────────────────────────────────────────────
-
 CACHE_TTL_MISMATCH = """
         SELECT {q_col} AS label,
             ROUND(AVG("ttl"), 0) AS avg_ttl,
@@ -509,9 +440,6 @@ CACHE_TTL_MISMATCH = """
         GROUP BY {q_col} HAVING sample_count >= 10 AND AVG("hits") < 2 AND AVG("ttl") > 60
         ORDER BY AVG("ttl") DESC LIMIT 20
     """
-
-# ── 24. Image Optimization Opportunities ──────────────────────────────────────
-
 IMAGE_OPTIMIZATION_OPPORTUNITIES = """
         WITH img_urls AS (
             SELECT "url"
@@ -528,9 +456,6 @@ IMAGE_OPTIMIZATION_OPPORTUNITIES = """
         GROUP BY t."url" HAVING total_bytes > 1024 * 512
         ORDER BY total_bytes DESC LIMIT 15
     """
-
-# ── 25. Origin Latency Spike ──────────────────────────────────────────────────
-
 ORIGIN_LATENCY_SPIKE = """
         WITH base AS (
             SELECT ottfb, {url_col} AS url,
@@ -554,9 +479,6 @@ ORIGIN_LATENCY_SPIKE = """
         WHERE o.w_p95 > o.b_p95 * 2
         ORDER BY u.p95_ms DESC LIMIT 10
     """
-
-# ── 26. Origin Error Rate ─────────────────────────────────────────────────────
-
 ORIGIN_ERROR_RATE = """
         WITH base AS (
             SELECT "ost" AS status,
@@ -582,9 +504,6 @@ ORIGIN_ERROR_RATE = """
         WHERE (t.w_5xx * 100.0 / NULLIF(t.w_total, 0)) >= 1.0
           AND (t.w_5xx * 100.0 / NULLIF(t.w_total, 0)) > (t.b_5xx * 100.0 / NULLIF(t.b_total, 0)) * 2
     """
-
-# ── 27. Origin Retries Elevated ───────────────────────────────────────────────
-
 ORIGIN_RETRIES = """
         SELECT {url_col}, COUNT(*) AS requests, ROUND(AVG("oretries"), 2) AS avg_retries, MAX("oretries") AS max_retries
         FROM {table_name}
@@ -592,9 +511,6 @@ ORIGIN_RETRIES = """
         GROUP BY {url_col} HAVING requests >= 5
         ORDER BY avg_retries DESC LIMIT 10
     """
-
-# ── 28. Specific Origin IP Failing ────────────────────────────────────────────
-
 ORIGIN_IP_FAILURE = """
         WITH base AS (
             SELECT "oip", "ost" AS status,
@@ -616,9 +532,6 @@ ORIGIN_IP_FAILURE = """
         WHERE s.error_pct > m.median_rate * 3 AND s.error_pct > 5
         ORDER BY s.error_pct DESC
     """
-
-# ── 29. Shield Path Degradation ───────────────────────────────────────────────
-
 SHIELD_PATH_DEGRADATION = f"""
         WITH logs AS (SELECT "rid", "prid", "pop", "ottfb", "edge", timestamp FROM {{table_name}} WHERE ottfb IS NOT NULL),
         edge_logs AS (SELECT rid, pop, ottfb, timestamp FROM logs WHERE edge = true),
@@ -634,9 +547,6 @@ SHIELD_PATH_DEGRADATION = f"""
         FROM joined GROUP BY 1, 2 HAVING w_cnt >= 5 AND w_p50 > b_p50 * 1.5
         ORDER BY (w_p50 / NULLIF(b_p50, 0)) DESC LIMIT 20
     """
-
-
-# ── 30. Scripted Traffic Patterns (repeated_patterns) ─────────────────────────
 _BOT_UA_TOKENS = [
     "googlebot",
     "bingbot",
@@ -665,13 +575,7 @@ REPEATED_BOT_UA_REGEX = "|".join(re.escape(t) for t in _BOT_UA_TOKENS)
 
 
 def _build_repeated_patterns_sql(
-    *,
-    key_col: str,
-    key_select: str,
-    key_where: str,
-    div_select: str,
-    div_col: str,
-    div_alias: str,
+    *, key_col: str, key_select: str, key_where: str, div_select: str, div_col: str, div_alias: str
 ) -> str:
     return f"""
     WITH win_rows AS (
@@ -742,8 +646,6 @@ REPEATED_PATTERNS = _build_repeated_patterns_sql(
     div_col="ua",
     div_alias="distinct_ua",
 )
-
-# ── 30b. Scripted Traffic Patterns by TLS Fingerprint (repeated_patterns_fp) ──
 REPEATED_PATTERNS_FP = _build_repeated_patterns_sql(
     key_col="entity",
     key_select=coalesce('"{fp_col}"', "''"),
@@ -752,9 +654,6 @@ REPEATED_PATTERNS_FP = _build_repeated_patterns_sql(
     div_col="ip",
     div_alias="distinct_ip",
 )
-
-
-# ── 31. Low-and-Slow Scans (low_and_slow) ─────────────────────────────────────
 LOW_AND_SLOW = f"""
         WITH base AS (
             SELECT "ip" AS ip, "url" AS url, epoch("timestamp")::BIGINT AS sec
@@ -777,8 +676,6 @@ LOW_AND_SLOW = f"""
         ORDER BY distinct_paths DESC, span_s DESC
         LIMIT 15
     """
-
-# ── 32. Credential Enumeration / Brute Force (credential_enumeration) ──────────
 _AUTH_PATHS = [
     "login",
     "signin",
@@ -804,7 +701,6 @@ _AUTH_PATHS = [
     "verify",
 ]
 AUTH_PATHS_REGEX = "|".join(re.escape(p) for p in _AUTH_PATHS)
-
 CREDENTIAL_ENUMERATION = f"""
         WITH base AS (
             SELECT "ip" AS ip, "url" AS url, status,
@@ -828,8 +724,6 @@ CREDENTIAL_ENUMERATION = f"""
         ORDER BY w_denied DESC
         LIMIT 15
     """
-
-# ── 33. Network Path (ASN) Health (network_asn_health) ─────────────────────────
 NETWORK_ASN_HEALTH = f"""
         WITH base AS (
             SELECT "asn" AS asn, ploss, rtt_var, retrans,
@@ -870,9 +764,6 @@ NETWORK_ASN_HEALTH = f"""
         ORDER BY {coalesce("w_ploss", "0")} DESC, w_jitter DESC
         LIMIT 15
     """
-
-
-# ── 34. 404 Content-Discovery Scanning (content_discovery) ─────────────────────
 CONTENT_DISCOVERY = """
         WITH base AS (
             SELECT "ip" AS ip, "url" AS url, status,
@@ -896,16 +787,7 @@ CONTENT_DISCOVERY = """
         ORDER BY w_404 DESC
         LIMIT 15
     """
-
-
-# ── 35. Referer Monoculture (referer_monoculture) ─────────────────────────────
-REFERER_MONOCULTURE = _build_monoculture_sql(
-    "referer",
-    "0.20",
-    '"referer" IS NOT NULL AND "referer" != \'\'',
-)
-
-# ── 36. HTTP Method Drift (method_drift) ──────────────────────────────────────
+REFERER_MONOCULTURE = _build_monoculture_sql("referer", "0.20", '"referer" IS NOT NULL AND "referer" != \'\'')
 METHOD_DRIFT = f"""
         WITH grp AS (
             SELECT "method",
@@ -927,11 +809,7 @@ METHOD_DRIFT = f"""
           AND (b_total = 0 OR w_cnt * 1.0 / w_total >= b_cnt * 1.0 / NULLIF(b_total, 0) * 2 + 0.05)
         ORDER BY w_cnt DESC LIMIT 10
     """
-
-# ── 37. New ASN Traffic (new_asn_traffic) ─────────────────────────────────────
 NEW_ASN_TRAFFIC = _build_new_dim_traffic_sql("asn", 20)
-
-# ── 37b. ASN Hosting Shift (asn_hosting_shift) ──────────────────────────────────
 ASN_HOSTING_SHIFT = """
         SELECT "asn",
             COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ) AND "p_type" = 'hosting') AS w_hosting,
@@ -947,8 +825,6 @@ ASN_HOSTING_SHIFT = """
             AND (b_total = 0 OR (CAST(w_hosting AS DOUBLE) / w_total) >= (CAST(b_hosting AS DOUBLE) / NULLIF(b_total, 0)) * 3 + 0.10)
         ORDER BY w_hosting DESC LIMIT 15
     """
-
-# ── 38. Metro Delivery-Rate Degradation (metro_delivery_degradation) ───────────
 METRO_DELIVERY_DEGRADATION = """
         WITH base AS (
             SELECT "metro" AS metro, delivery_rate,
@@ -966,8 +842,6 @@ METRO_DELIVERY_DEGRADATION = """
         HAVING w_total >= 20 AND b_total >= 50 AND w_med > 0 AND b_med > 0 AND w_med <= b_med * 0.5
         ORDER BY (b_med - w_med) DESC LIMIT 15
     """
-
-# ── 39. Connection-Type Mix Shift (connection_type_mix) ───────────────────────
 CONNECTION_TYPE_MIX = """
         WITH base AS (
             SELECT "c_type" AS c_type, "c_speed" AS c_speed,
@@ -997,13 +871,9 @@ CONNECTION_TYPE_MIX = """
                     >= b_cnt * 1.0 / NULLIF(b_total, 0) * 2 + 0.05)
         ORDER BY w_cnt DESC LIMIT 15
     """
-
-# ── 40. PoP Latency Regression (pop_latency_regression) ───────────────────────
 POP_LATENCY_REGRESSION = _build_p95_latency_regression_sql(
     "pop", 20, 50, "1.5", 100, '"pop" IS NOT NULL AND "pop" != \'\''
 )
-
-# ── 41. HTTP/3 → TCP Fallback Spike (http3_fallback) ──────────────────────────
 HTTP3_FALLBACK = """
         WITH base AS (
             SELECT lower("transport") AS transport,
@@ -1023,8 +893,6 @@ HTTP3_FALLBACK = """
             AND COUNT(*) FILTER (WHERE is_w AND transport = 'quic') * 1.0 / NULLIF(COUNT(*) FILTER (WHERE is_w), 0)
                 <= COUNT(*) FILTER (WHERE is_b AND transport = 'quic') * 1.0 / NULLIF(COUNT(*) FILTER (WHERE is_b), 0) - 0.20
     """
-
-# ── 42. Cache HIT-Ratio Cliff (cache_hit_cliff) ───────────────────────────────
 CACHE_HIT_CLIFF = """
         WITH base AS (
             SELECT cache,
@@ -1046,12 +914,8 @@ CACHE_HIT_CLIFF = """
             AND (b_hits * 1.0 / NULLIF(b_cacheable, 0)) >= 0.40
             AND (w_hits * 1.0 / NULLIF(w_cacheable, 0)) <= (b_hits * 1.0 / NULLIF(b_cacheable, 0)) - 0.15
     """
-
-
-# ── 43. Payload Compression Regression (payload_compression_regression) ────────
 _COMPRESSIBLE_EXTS = [".js", ".css", ".html", ".json", ".svg", ".xml", ".txt"]
 COMPRESSIBLE_REGEX = "|".join(re.escape(e) for e in _COMPRESSIBLE_EXTS)
-
 PAYLOAD_COMPRESSION_REGRESSION = f"""
         WITH comp_urls AS (
             SELECT "url"
@@ -1080,8 +944,6 @@ PAYLOAD_COMPRESSION_REGRESSION = f"""
         HAVING w_total >= 10 AND b_total >= 50 AND b_rate <= 0.20 AND w_rate >= 0.50 AND w_rate >= b_rate + 0.30
         ORDER BY (w_rate - {coalesce("b_rate", "0")}) DESC LIMIT 15
     """
-
-# ── 44. Session-ID Harvesting / Rotation (session_harvesting) ──────────────────
 SESSION_HARVESTING = f"""
         WITH base AS (
             SELECT "ip" AS ip, "cookie_session" AS cs,
@@ -1107,8 +969,6 @@ SESSION_HARVESTING = f"""
         WHERE w_sessions > {coalesce("b_sessions", "0")} * 2 + 10
         ORDER BY w_sessions DESC LIMIT 15
     """
-
-# ── 45. Origin Connect vs Read Timeout Split (timeout_split) ───────────────────
 TIMEOUT_SPLIT = """
         WITH base AS (
             SELECT
@@ -1135,10 +995,6 @@ TIMEOUT_SPLIT = """
             AND ((w_conn >= b_conn * 2 AND w_conn - b_conn >= 50)
                  OR (w_read >= b_read * 2 AND w_read - b_read >= 100))
     """
-
-
-# ── Coalesced city aggregates ────────────────────────────────────────────────
-
 COALESCED_CITY_AGGREGATES = """
     WITH base AS (
         SELECT
@@ -1168,11 +1024,6 @@ COALESCED_CITY_AGGREGATES = """
     GROUP BY "city", region, country
     HAVING COUNT(*) FILTER (WHERE is_w) >= 5
     """
-
-# ── Coalesced URL aggregates ─────────────────────────────────────────────────
-# ONE pass over the temp table that computes the superset for the URL-keyed
-# insights.
-
 _COALESCED_URL_CORE_COLS = """COUNT(*) FILTER (WHERE is_w) AS w_total,
         COUNT(*) FILTER (WHERE is_b) AS b_total,
         -- error_spikes: 5xx counters
@@ -1201,7 +1052,6 @@ _COALESCED_URL_CORE_COLS = """COUNT(*) FILTER (WHERE is_w) AS w_total,
               FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0, 0) AS w_p99,
         ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY elapsed)
               FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0, 0) AS w_p50"""
-
 COALESCED_URL_AGGREGATES = f"""
     WITH base AS (
         SELECT "url", status, cache, elapsed,
@@ -1214,7 +1064,6 @@ COALESCED_URL_AGGREGATES = f"""
         {_COALESCED_URL_CORE_COLS}
     FROM base GROUP BY "url" HAVING COUNT(*) FILTER (WHERE is_w) >= 3
     """
-
 COALESCED_URL_EXTENDED_AGGREGATES = f"""
     WITH url_flags AS (
         SELECT "url", is_probe, is_comp, is_img
@@ -1277,32 +1126,6 @@ COALESCED_URL_EXTENDED_AGGREGATES = f"""
     """
 
 
-# ── Coalesced IP-security aggregates ──────────────────────────────────────────
-# ONE ``GROUP BY ip`` pass over the temp table computing the superset for the
-# three IP-keyed security scans (low_and_slow, credential_enumeration,
-# content_discovery). Pre-coalesce each ran its own GROUP BY ip scan; §9.7 of the
-# design plan requires folding same-key insights into a shared pre-agg so
-# cold-path latency doesn't grow linearly with the number of IP scans. The Python
-# caller (``_coalesced_ip_security_aggregates``) demuxes the columns into each
-# insight's existing processor row-schema and applies each insight's
-# HAVING/ORDER/LIMIT in Python; on any exception the caller falls back to the
-# legacy per-insight scans transparently.
-#
-# Conditional-aggregate design (design plan Track A "CASE-counter idea"):
-#   - low_and_slow: sensitive/probe paths (NEW_PROBE_REGEX) over the WHOLE
-#     retained span (no window split) → probe hit-count, distinct paths, and
-#     epoch(sec) min/max for the span/rate. Mirrors the standalone LOW_AND_SLOW,
-#     whose ``base`` is pre-filtered to probe URLs.
-#   - credential_enumeration: auth paths (AUTH_PATHS_REGEX), window/baseline
-#     401/403 counters. Mirrors CREDENTIAL_ENUMERATION.
-#   - content_discovery: all URLs, window/baseline 404 counters. Mirrors
-#     CONTENT_DISCOVERY.
-# Both regexes are f-string-baked (``?``-free via re.escape, like LOW_AND_SLOW /
-# CREDENTIAL_ENUMERATION) so the only ``?`` in the text are the two window-start
-# binds the caller passes explicitly. ``{{table_name}}`` is escaped for runtime
-# hydration. The outer HAVING pre-filters to IPs touching at least one signal so
-# the returned set stays small; the caller further bounds memory with per-insight
-# top-K heaps.
 def _ip_sec_core_cols(ug: str = "") -> str:
     return f"""-- low_and_slow: probe paths over the WHOLE span (no window split)
         COUNT(*) FILTER (WHERE {ug}is_sensitive) AS ls_hits,
@@ -1351,7 +1174,6 @@ COALESCED_IP_SECURITY_AGGREGATES = f"""
         OR (COUNT(*) FILTER (WHERE is_auth AND is_w) > 0)
         OR (COUNT(*) FILTER (WHERE is_w AND status = 404) > 0)
     """
-
 COALESCED_IP_EXTENDED_AGGREGATES = f"""
     WITH url_flags AS (
         SELECT "url", is_sensitive, is_auth, is_deep
@@ -1407,13 +1229,6 @@ COALESCED_IP_EXTENDED_AGGREGATES = f"""
         OR (COUNT(*) FILTER (WHERE is_w AND req_header_bytes > 0) >= 3 AND MIN(req_header_bytes) FILTER (WHERE is_b AND req_header_bytes > 0) IS NOT NULL AND MAX(req_header_bytes) FILTER (WHERE is_w AND req_header_bytes > 0) > MIN(req_header_bytes) FILTER (WHERE is_b AND req_header_bytes > 0) * 3)
         OR (COUNT(*) FILTER (WHERE is_w AND conn_requests > 0) >= 5 AND MAX(conn_requests) FILTER (WHERE is_w AND conn_requests > 0) >= 50 AND MIN(conn_requests) FILTER (WHERE is_b AND conn_requests > 0) IS NOT NULL AND MAX(conn_requests) FILTER (WHERE is_w AND conn_requests > 0) > MIN(conn_requests) FILTER (WHERE is_b AND conn_requests > 0) * 3)
     """
-
-
-# ── Coalesced ASN aggregates ──────────────────────────────────────────────────
-# ONE ``GROUP BY asn`` pass over the temp table computing the superset for the
-# four ASN-keyed insights (asn_concentration, new_asn_traffic,
-# network_asn_health, asn_hosting_shift).
-
 COALESCED_ASN_AGGREGATES = """
     WITH base AS (
         SELECT
@@ -1443,12 +1258,6 @@ COALESCED_ASN_AGGREGATES = """
     FROM base
     GROUP BY asn
     """
-
-
-# ── Coalesced scalar aggregates ───────────────────────────────────────────────
-# ONE ungrouped table scan computing the service-wide counters for
-# http3_fallback and cache_hit_cliff.
-
 COALESCED_SCALAR_EXTENDED_AGGREGATES = f"""
     WITH base AS (
         SELECT
@@ -1481,7 +1290,6 @@ COALESCED_SCALAR_EXTENDED_AGGREGATES = f"""
         PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY ottfb) FILTER (WHERE is_b AND ottfb IS NOT NULL) / 1000.0 AS ols_b_p95
     FROM base
     """
-
 COALESCED_FP_AGGREGATES = """
     WITH base AS (
         SELECT
@@ -1515,7 +1323,6 @@ COALESCED_FP_AGGREGATES = """
     FROM base
     GROUP BY GROUPING SETS ((fp), (cipher))
     """
-
 COALESCED_DIM_AGGREGATES = """
     WITH base AS (
         SELECT
@@ -1553,7 +1360,6 @@ COALESCED_DIM_AGGREGATES = """
         (ua)
     )
     """
-
 COALESCED_GEO_LATENCY_AGGREGATES = """
     WITH base AS (
         SELECT
@@ -1585,8 +1391,6 @@ COALESCED_GEO_LATENCY_AGGREGATES = """
     FROM base
     GROUP BY GROUPING SETS ((pop), (server_region), (metro))
     """
-
-
 CRAWLER_DISPARITY = rf"""
         WITH ua_agg AS (
             SELECT
@@ -1749,8 +1553,6 @@ CRAWLER_DISPARITY = rf"""
           )
         ORDER BY crawls_per_referral DESC, c.w_bytes DESC LIMIT 10
     """
-
-
 STALE_BROWSER_VERSION = rf"""
         WITH distinct_uas AS (
             SELECT ua, lower(ua) AS l_ua
@@ -1801,8 +1603,6 @@ STALE_BROWSER_VERSION = rf"""
           AND w_reqs > {coalesce("b_reqs", "0")} / GREATEST({{baseline_hours}}, 1.0) * {{window_hours}} * 2.5
         ORDER BY surge_ratio DESC LIMIT 10
     """
-
-
 ORPHANED_DEEP_CRAWL = f"""
         WITH deep_requests AS (
             SELECT
@@ -1836,8 +1636,6 @@ ORPHANED_DEEP_CRAWL = f"""
         FROM agg
         ORDER BY w_reqs DESC LIMIT 15
     """
-
-
 RESIDENTIAL_FINGERPRINT_DISPERSION = f"""
         WITH fingerprint_asn_maps AS (
             SELECT
@@ -1873,12 +1671,9 @@ RESIDENTIAL_FINGERPRINT_DISPERSION = f"""
         FROM agg
         ORDER BY asn_expansion_ratio DESC LIMIT 10
     """
-
-
 __all__ = [
     "NEW_PROBES",
     "NEW_PROBE_REGEX",
-    # definitions.py templates
     "ERROR_SPIKES",
     "BOTNET_GROUPING",
     "NEW_COUNTRY_TRAFFIC",
@@ -1933,7 +1728,6 @@ __all__ = [
     "STALE_BROWSER_VERSION",
     "ORPHANED_DEEP_CRAWL",
     "RESIDENTIAL_FINGERPRINT_DISPERSION",
-    # repository.py templates
     "COALESCED_CITY_AGGREGATES",
     "COALESCED_URL_AGGREGATES",
     "COALESCED_URL_EXTENDED_AGGREGATES",
@@ -2058,12 +1852,7 @@ def _ip_max_vs_p95_processor(
     )
 
 
-# ── 1. Error Spikes ───────────────────────────────────────────────────────
-
-
 def error_spikes_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    """Process a row from the error_spikes query."""
-    # row schema: [url, w_rate, b_rate, w_errors, w_total, b_total]
     return _error_rate_spike_item(row[0] or "(empty)", row[1], row[2], row[3], row[4], "% 5xx", {"url": row[0]})
 
 
@@ -2077,12 +1866,8 @@ _reg(
     row_processor=error_spikes_processor,
 )
 
-# ── 2. Botnet Grouping ────────────────────────────────────────────────────
-
 
 def botnet_grouping_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    """Process a row from the botnet_grouping query."""
-    # row schema: [fp, w_ips, w_reqs, b_ips, ip_ratio]
     fp_col = context.get("fp_col", "ja4")
     return _item(
         row[0],
@@ -2104,8 +1889,6 @@ _reg(
     row_processor=botnet_grouping_processor,
 )
 
-# ── 4. New Country Traffic ────────────────────────────────────────────────
-
 
 def _city_filters(row: tuple) -> dict:
     return {"city": row[1], "region": row[2] if row[2] else None, "country": row[3]}
@@ -2116,7 +1899,6 @@ def _zero_baseline_count_item(label: str, count: int, meta: dict, warn_threshold
 
 
 def new_country_traffic_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: ["country", w_cnt, b_cnt]
     return _zero_baseline_count_item(format_city_label("", row[0]), row[1], {"filters": {"country": row[0]}}, 10)
 
 
@@ -2130,11 +1912,8 @@ _reg(
     row_processor=new_country_traffic_processor,
 )
 
-# ── 5. City Traffic Surges ───────────────────────────────────────────────
-
 
 def city_surges_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [label, city, region, country, w_cnt, b_cnt, spike_ratio]
     return _item(
         format_city_label(row[1], row[3], row[2]),
         row[4],
@@ -2155,11 +1934,8 @@ _reg(
     row_processor=city_surges_processor,
 )
 
-# ── 6. City Error Spikes ─────────────────────────────────────────────────
-
 
 def city_error_spikes_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [label, city, region, country, w_rate, b_rate, w_errors, w_total, b_total]
     return _error_rate_spike_item(
         format_city_label(row[1], row[3], row[2]), row[4], row[5], row[6], row[7], "% error", _city_filters(row)
     )
@@ -2175,11 +1951,8 @@ _reg(
     row_processor=city_error_spikes_processor,
 )
 
-# ── 7. City Latency Regressions ──────────────────────────────────────────
-
 
 def city_latency_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [label, city, region, country, w_p95, b_p95, w_total, b_total]
     return _p95_latency_item(
         format_city_label(row[1], row[3], row[2]), row[4], row[5], row[6], _city_filters(row), reqs_key="requests"
     )
@@ -2195,11 +1968,8 @@ _reg(
     row_processor=city_latency_processor,
 )
 
-# ── 8. New City Traffic ──────────────────────────────────────────────────
-
 
 def new_city_traffic_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [label, city, region, country, w_cnt, b_cnt]
     return _zero_baseline_count_item(
         format_city_label(row[1], row[3], row[2]), row[4], {"filters": _city_filters(row)}, 50
     )
@@ -2215,11 +1985,8 @@ _reg(
     row_processor=new_city_traffic_processor,
 )
 
-# ── 9. User-Agent Monoculture ─────────────────────────────────────────────
-
 
 def ua_monoculture_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [ua, w_cnt, b_cnt, b_total, w_total]
     return _monoculture_processor(row, "ua")
 
 
@@ -2233,11 +2000,8 @@ _reg(
     row_processor=ua_monoculture_processor,
 )
 
-# ── 10. New Probe URLs ─────────────────────────────────────────────────────
-
 
 def new_probe_urls_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [url, w_cnt, b_cnt, w_error_pct]
     return _item(
         row[0],
         row[1],
@@ -2258,11 +2022,8 @@ _reg(
     row_processor=new_probe_urls_processor,
 )
 
-# ── 11. WAF Signal Spikes ──────────────────────────────────────────────────
-
 
 def waf_signal_spikes_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [signal, w_cnt, b_cnt, spike_ratio]
     return _item(
         row[0],
         row[1],
@@ -2273,13 +2034,6 @@ def waf_signal_spikes_processor(row: tuple, definition: InsightDefinition, conte
     )
 
 
-# Reads from {waf_table} — the insights repo materialises a
-# second TEMP TABLE that pre-unnests "waf_sig" once per request
-# (trimmed, non-empty, excluding BOT-ANALYSIS). When the parent
-# temp table didn't get created or "waf_sig" isn't in schema,
-# {waf_table} substitutes back to the main {table_name} and the
-# inline COALESCE branch below picks up the slack via the legacy
-# all_signals CTE shape.
 _reg(
     id="waf_signal_spikes",
     category=InsightCategory.security,
@@ -2290,11 +2044,8 @@ _reg(
     row_processor=waf_signal_spikes_processor,
 )
 
-# ── 12. Proxy / VPN Surge ──────────────────────────────────────────────────
-
 
 def proxy_surge_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [p_type, w_cnt, b_cnt, w_total_all, b_total_all]
     p_type, w_cnt, _b_cnt, w_total_all, _b_total_all = row
     return _item(
         p_type,
@@ -2321,11 +2072,8 @@ _reg(
     severity_logic=proxy_surge_severity,
 )
 
-# ── 13. ASN Concentration ──────────────────────────────────────────────────
-
 
 def asn_concentration_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [asn, w_cnt, b_cnt, b_total, w_total]
     asn, w_cnt, b_cnt, b_total, w_total = row
     w_rate, b_rate = _traffic_share_rates(w_cnt, w_total, b_cnt, b_total)
     return _item(
@@ -2348,11 +2096,8 @@ _reg(
     row_processor=asn_concentration_processor,
 )
 
-# ── 14. ASN/Metro Performance Regressions ─────────────────────────────────
-
 
 def asn_metro_performance_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [asn, metro, w_med, b_med, w_total, b_total]
     asn, w_f, b_f = row[0], float(row[2] or 0), float(row[3] or 0)
     return _item(
         f"{_fmt_asn_label(asn, context)} in {_fmt_metro_label(row[1], context)}",
@@ -2378,12 +2123,8 @@ _reg(
     row_processor=asn_metro_performance_processor,
 )
 
-# ── 15. Cache Efficiency Collapse ─────────────────────────────────────────
-
 
 def cache_collapse_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [url, w_rate, b_rate, w_cacheable, b_cacheable]
-    # w_rate / b_rate are HIT/(HIT+MISS) — the cacheable hit ratio (PASS excluded).
     return _url_rate_regression_processor(
         row, "% HIT", is_critical=bool((row[1] or 0) <= 0.10 and (row[2] or 0) >= 0.60)
     )
@@ -2399,13 +2140,8 @@ _reg(
     row_processor=cache_collapse_processor,
 )
 
-# ── 15b. Cacheability Regression ──────────────────────────────────────────
-
 
 def cacheability_regression_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [url, w_pass_rate, b_pass_rate, w_total, b_total]
-    # w_pass_rate / b_pass_rate are PASS/total — share of requests that bypassed
-    # the cache entirely (uncacheable).
     return _url_rate_regression_processor(
         row, "% PASS", is_critical=bool((row[1] or 0) >= 0.80 and (row[2] or 0) <= 0.10)
     )
@@ -2421,11 +2157,8 @@ _reg(
     row_processor=cacheability_regression_processor,
 )
 
-# ── 16. Latency Regression ────────────────────────────────────────────────
-
 
 def latency_regression_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [url, w_p95, b_p95, w_total, b_total]
     return _p95_latency_item(row[0] or "(empty)", row[1], row[2], row[3], {"url": row[0]})
 
 
@@ -2439,11 +2172,8 @@ _reg(
     row_processor=latency_regression_processor,
 )
 
-# ── 17. Impossible Distance / Spoofing ────────────────────────────────────────
-
 
 def impossible_distance_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [fp, hits, worst_excess_km, max_dist_km, min_allowed_km, pop, sample_ip, client_lat, client_lon, pop_lat, pop_lon, tcp_rtt, country, city]
     sample_ip = _mask_ip_if_needed(row[6], context)
     meta = {
         "hits": row[1],
@@ -2470,9 +2200,6 @@ def impossible_distance_processor(row: tuple, definition: InsightDefinition, con
     )
 
 
-# NOTE: impossible_distance needs special hydration for {pop_values} and
-# {edge_filter} (InsightDefinition only supports simple placeholders); done in repository.py.
-
 _reg(
     id="impossible_distance",
     category=InsightCategory.security,
@@ -2483,11 +2210,8 @@ _reg(
     row_processor=impossible_distance_processor,
 )
 
-# ── 18. Tail Latency Anomaly ──────────────────────────────────────────────────
-
 
 def tail_latency_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [url, p99_ms, p50_ms, ratio, total]
     p99, p50, ratio = float(row[1]), float(row[2]), float(row[3])
     return _item(
         row[0] or "(empty)",
@@ -2510,11 +2234,8 @@ _reg(
     row_processor=tail_latency_processor,
 )
 
-# ── 19. Cipher Fingerprint Clustering ─────────────────────────────────────────
-
 
 def cipher_spread_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [tls_ciphers_sha, w_ips, w_reqs, b_ips]
     label = (row[0] or "")[:12] + "…" if row[0] and len(row[0]) > 12 else (row[0] or "(unknown)")
     return _item(
         label,
@@ -2536,11 +2257,8 @@ _reg(
     row_processor=cipher_spread_processor,
 )
 
-# ── 20. Request Size Anomaly ──────────────────────────────────────────────────
-
 
 def request_size_anomaly_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [ip, max_bytes, avg_bytes, w_total, b_p95]
     return _ip_max_vs_p95_processor(
         row, context, unit="bytes (max header)", max_key="max_bytes", avg_key="avg_bytes", crit_thresh=64000
     )
@@ -2556,11 +2274,8 @@ _reg(
     row_processor=request_size_anomaly_processor,
 )
 
-# ── 21. Connection Reuse Anomaly ──────────────────────────────────────────────
-
 
 def connection_abuse_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [ip, max_reqs, avg_reqs, w_total, b_p95]
     return _ip_max_vs_p95_processor(
         row, context, unit="reqs/conn (max)", max_key="max_conn_reqs", avg_key="avg_conn_reqs", crit_thresh=500
     )
@@ -2576,11 +2291,8 @@ _reg(
     row_processor=connection_abuse_processor,
 )
 
-# ── 22. Regional Latency Degradation ──────────────────────────────────────────
-
 
 def region_latency_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [server_region, w_p95, b_p95, w_total, b_total, ottfb_p95]
     item = _p95_latency_item(row[0] or "(unknown)", row[1], row[2], row[3], {"server_region": row[0]})
     if row[5] is not None:
         item["meta"]["ottfb_p95_ms"] = float(row[5])
@@ -2597,11 +2309,8 @@ _reg(
     row_processor=region_latency_processor,
 )
 
-# ── 23. Cache TTL Inefficiency ─────────────────────────────────────────────────
-
 
 def cache_ttl_mismatch_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [label, avg_ttl, avg_hits, avg_age, sample_count]
     return _item(
         str(row[0] or "(unknown)"),
         float(row[2]),
@@ -2628,11 +2337,8 @@ _reg(
     row_processor=cache_ttl_mismatch_processor,
 )
 
-# ── 24. Image Optimization Opportunities ──────────────────────────────────────
-
 
 def image_optimization_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [url, request_count, total_bytes, avg_kb, mobile_ratio]
     url, req_count, total_bytes, avg_kb, mob_ratio = row
     severity = (
         "critical"
@@ -2664,11 +2370,8 @@ _reg(
     row_processor=image_optimization_processor,
 )
 
-# ── 25. Origin Latency Spike ──────────────────────────────────────────────────
-
 
 def origin_latency_spike_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [url, p95_ms, w_p95, b_p95, requests]
     url, p95_ms, _w_p95, b_p95, requests = row
     return _item(
         url or "(unknown)",
@@ -2690,11 +2393,8 @@ _reg(
     row_processor=origin_latency_spike_processor,
 )
 
-# ── 26. Origin Error Rate ─────────────────────────────────────────────────────
-
 
 def origin_error_rate_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [status, w_cnt, w_total, b_total, w_5xx, b_5xx]
     status, w_cnt, w_total, _b_total, w_5xx, _b_5xx = row
     return _item(
         f"HTTP {status}",
@@ -2716,11 +2416,8 @@ _reg(
     row_processor=origin_error_rate_processor,
 )
 
-# ── 27. Origin Retries Elevated ───────────────────────────────────────────────
-
 
 def origin_retries_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [url, requests, avg_retries, max_retries]
     return _item(
         row[0] or "(unknown)",
         float(row[2]),
@@ -2741,11 +2438,8 @@ _reg(
     row_processor=origin_retries_processor,
 )
 
-# ── 28. Specific Origin IP Failing ────────────────────────────────────────────
-
 
 def origin_ip_failure_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [oip, requests, error_pct, median_rate]
     return _item(
         row[0],
         float(row[2]),
@@ -2766,11 +2460,8 @@ _reg(
     row_processor=origin_ip_failure_processor,
 )
 
-# ── 29. Shield Path Degradation ───────────────────────────────────────────────
-
 
 def shield_path_degradation_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [edge_pop, shield_pop, w_p50, b_p50, w_cnt]
     edge_pop, shield_pop, cur_p50, base_p50, reqs = row
     ratio = cur_p50 / base_p50 if base_p50 else 0
     return _item(
@@ -2793,8 +2484,6 @@ _reg(
     row_processor=shield_path_degradation_processor,
 )
 
-# ── 30. Scripted Traffic Patterns ─────────────────────────────────────────────
-
 
 def _process_repeated_patterns(
     row: tuple, *, key_field: str, diversity_key: str, mask_key: bool, context: dict
@@ -2806,16 +2495,7 @@ def _process_repeated_patterns(
     diversity_val, span_s = int(row[7] or 0), int(row[8] or 0)
     mode_gap = int(row[9]) if row[9] is not None else None
     rps = round(n_events / span_s, 4) if span_s else 0.0
-
-    # Regularity score 0-100 (higher = more machine-like). The final SQL
-    # (plan §5) surfaces only the two robust regularity signals — the
-    # Sheppard-corrected CV and the modal-dominance fraction; the optional
-    # Bowley term was dropped from the hot-path SQL, so the score renormalizes
-    # the CV/modal weights (0.5/0.3 → 0.625/0.375) to span the full 0-100 range.
     score = round(100 * (0.625 * (1 - min(cv, 1.0)) + 0.375 * modal_frac))
-
-    # Soft framing: this is a security *accusation* surfaced to a user, so prefer
-    # false negatives. critical only when dense AND near-perfectly regular.
     severity = "critical" if (score >= 90 and n_events >= 30) else ("warning" if score >= 70 else "info")
     meta = {
         "score": score,
@@ -2837,8 +2517,6 @@ def _process_repeated_patterns(
 
 
 def repeated_patterns_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [ip, n_gaps, n_events, avg_interval, stddev_interval, cv_corr,
-    #              modal_frac, distinct_ua, span_s, mode_gap]
     return _process_repeated_patterns(row, key_field="ip", diversity_key="distinct_ua", mask_key=True, context=context)
 
 
@@ -2861,12 +2539,8 @@ _reg(
     severity_logic=repeated_patterns_severity,
 )
 
-# ── 30b. Scripted Traffic Patterns (by TLS Fingerprint) ─────────────────────
-
 
 def repeated_patterns_fp_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [entity, n_gaps, n_events, avg_interval, stddev_interval,
-    #              cv_corr, modal_frac, distinct_ip, span_s, mode_gap]
     return _process_repeated_patterns(
         row, key_field=context.get("fp_col", "ja4"), diversity_key="distinct_ip", mask_key=False, context=context
     )
@@ -2883,12 +2557,8 @@ _reg(
     severity_logic=repeated_patterns_severity,
 )
 
-# ── 31. Low-and-Slow Scans ────────────────────────────────────────────────────
-# Phase-3: promotes the legacy low_and_slow stub to a computed insight.
-
 
 def low_and_slow_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [ip, hits, distinct_paths, span_s, rps]
     ip = _mask_ip_if_needed(row[0], context)
     hits, distinct_paths, span_s, rps = int(row[1] or 0), int(row[2] or 0), int(row[3] or 0), float(row[4] or 0)
     return _item(
@@ -2911,11 +2581,8 @@ _reg(
     row_processor=low_and_slow_processor,
 )
 
-# ── 32. Credential Enumeration / Brute Force ──────────────────────────────────
-
 
 def credential_enumeration_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [ip, w_denied, w_attempts, w_paths, b_denied]
     ip = _mask_ip_if_needed(row[0], context)
     w_denied, w_attempts, w_paths, b_denied = int(row[1] or 0), int(row[2] or 0), int(row[3] or 0), int(row[4] or 0)
     fail_rate = round(w_denied * 100.0 / w_attempts, 1) if w_attempts else 0.0
@@ -2946,12 +2613,8 @@ _reg(
     row_processor=credential_enumeration_processor,
 )
 
-# ── 33. Network Path (ASN) Health ─────────────────────────────────────────────
-# Phase-3: promotes the legacy network_asn_health stub to a computed insight.
-
 
 def network_asn_health_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [asn, w_ploss, b_ploss, w_jitter, b_jitter, w_retrans, b_retrans, w_total, b_total]
     asn, w_ploss, b_ploss = row[0], float(row[1] or 0), float(row[2] or 0)
     w_jitter, b_jitter, w_retrans, b_retrans, w_total = (
         float(row[3] or 0),
@@ -2991,12 +2654,8 @@ _reg(
     row_processor=network_asn_health_processor,
 )
 
-# ── 34. 404 Content-Discovery Scanning ────────────────────────────────────────
-# Track A: per-IP 404 enumeration (directory / endpoint brute-forcing).
-
 
 def content_discovery_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [ip, w_404, w_total, distinct_404, b_404]
     ip = _mask_ip_if_needed(row[0], context)
     w_404, w_total, distinct_404, b_404 = int(row[1] or 0), int(row[2] or 0), int(row[3] or 0), int(row[4] or 0)
     ratio = round(w_404 * 100.0 / w_total, 1) if w_total else 0.0
@@ -3027,12 +2686,8 @@ _reg(
     row_processor=content_discovery_processor,
 )
 
-# ── 35. Referer Monoculture ───────────────────────────────────────────────────
-# Track B: one Referer dominating window traffic (mirrors ua_monoculture).
-
 
 def referer_monoculture_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [referer, w_cnt, b_cnt, b_total, w_total]
     return _monoculture_processor(row, "referer")
 
 
@@ -3046,12 +2701,8 @@ _reg(
     row_processor=referer_monoculture_processor,
 )
 
-# ── 36. HTTP Method Drift ─────────────────────────────────────────────────────
-# Track B: a write/verb method surging vs a read-dominated baseline.
-
 
 def method_drift_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [method, w_cnt, b_cnt, w_total, b_total]
     method, w_cnt, b_cnt, w_total, b_total = row
     w_rate, b_rate = _traffic_share_rates(w_cnt, w_total, b_cnt, b_total)
     return _item(
@@ -3074,12 +2725,8 @@ _reg(
     row_processor=method_drift_processor,
 )
 
-# ── 37. New ASN Traffic ───────────────────────────────────────────────────────
-# Track B: zero-baseline ASN now sending traffic (mirrors new_country/new_city).
-
 
 def new_asn_traffic_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [asn, w_cnt, b_cnt]
     asn, w_cnt, _b_cnt = row
     return _zero_baseline_count_item(
         label=_fmt_asn_label(asn, context),
@@ -3099,12 +2746,8 @@ _reg(
     row_processor=new_asn_traffic_processor,
 )
 
-# ── 37b. ASN Hosting Shift ───────────────────────────────────────────────────
-# Track B: per-ASN consumer→datacenter hosting ratio shift.
-
 
 def asn_hosting_shift_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [asn, w_hosting, w_total, b_hosting, b_total]
     asn, w_hosting, w_total, b_hosting, b_total = row
     w_ratio = round(float(w_hosting * 100.0 / w_total), 1) if w_total else 0.0
     b_ratio = round(float(b_hosting * 100.0 / b_total), 1) if b_total else 0.0
@@ -3128,14 +2771,9 @@ _reg(
     row_processor=asn_hosting_shift_processor,
 )
 
-# ── 38. Metro Delivery-Rate Degradation ───────────────────────────────────────
-# Track B: per-US-metro kernel TCP delivery-rate drop (network last-mile).
-
 
 def metro_delivery_degradation_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [metro, w_med, b_med, w_total, b_total]
     metro = row[0]
-    # delivery_rate is bytes/sec; present as Mbps (×8 / 1e6).
     w_mbps, b_mbps = round(float(row[1] or 0) * 8 / 1e6, 1), round(float(row[2] or 0) * 8 / 1e6, 1)
     return _item(
         _fmt_metro_label(metro, context),
@@ -3157,12 +2795,8 @@ _reg(
     row_processor=metro_delivery_degradation_processor,
 )
 
-# ── 39. Connection-Type Mix Shift ─────────────────────────────────────────────
-# Track B: a client connection (type/speed) combo surging in share.
-
 
 def connection_type_mix_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [c_type, c_speed, w_cnt, b_cnt, w_total, b_total]
     c_type, c_speed, w_cnt, b_cnt, w_total, b_total = row
     w_rate, b_rate = _traffic_share_rates(w_cnt, w_total, b_cnt, b_total)
     return _item(
@@ -3185,12 +2819,8 @@ _reg(
     row_processor=connection_type_mix_processor,
 )
 
-# ── 40. PoP Latency Regression ────────────────────────────────────────────────
-# Track B: per-Fastly-PoP P95 edge latency regression (finer than region/city).
-
 
 def pop_latency_regression_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [pop, w_p95, b_p95, w_total, b_total]
     return _p95_latency_item(row[0] or "(unknown)", row[1], row[2], row[3], {"pop": row[0]})
 
 
@@ -3204,12 +2834,8 @@ _reg(
     row_processor=pop_latency_regression_processor,
 )
 
-# ── 41. HTTP/3 → TCP Fallback Spike ───────────────────────────────────────────
-# Track B: service-wide QUIC-share drop = clients falling back to TCP.
-
 
 def http3_fallback_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [w_quic, w_total, b_quic, b_total]
     w_quic, w_total, b_quic, b_total = row
     w_share, b_share = (
         (round(w_quic * 100.0 / w_total, 1) if w_total else 0.0),
@@ -3241,12 +2867,8 @@ _reg(
     row_processor=http3_fallback_processor,
 )
 
-# ── 42. Cache HIT-Ratio Cliff ─────────────────────────────────────────────────
-# Track B: service-wide edge HIT ratio cliff (headline edge card).
-
 
 def cache_hit_cliff_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [w_hits, w_cacheable, b_hits, b_cacheable]
     w_hits, w_cacheable, b_hits, b_cacheable = row
     w_rate, b_rate = (
         (round(w_hits * 100.0 / w_cacheable, 1) if w_cacheable else 0.0),
@@ -3276,17 +2898,8 @@ _reg(
     row_processor=cache_hit_cliff_processor,
 )
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Track C — field-gated insights (require the Phase-4 edge fields
-# resp_header_content_encoding / cookie_session / oconnect_ms; empty until a
-# service re-provisions to emit them AND history accrues).
-# ══════════════════════════════════════════════════════════════════════════════
-
-# ── 43. Payload Compression Regression ────────────────────────────────────────
-
 
 def payload_compression_regression_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [url, w_rate, b_rate, w_total, b_total]  (rates = uncompressed share)
     return _url_rate_regression_processor(row, "% uncompressed", is_critical=bool((row[1] or 0) >= 0.90))
 
 
@@ -3300,11 +2913,8 @@ _reg(
     row_processor=payload_compression_regression_processor,
 )
 
-# ── 44. Session-ID Harvesting / Rotation ──────────────────────────────────────
-
 
 def session_harvesting_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [ip, w_sessions, w_reqs, b_sessions]
     ip = _mask_ip_if_needed(row[0], context)
     w_sessions, w_reqs, b_sessions = int(row[1] or 0), int(row[2] or 0), int(row[3] or 0)
     return _item(
@@ -3333,15 +2943,11 @@ _reg(
     row_processor=session_harvesting_processor,
 )
 
-# ── 45. Origin Connect vs Read Timeout Split ──────────────────────────────────
-
 
 def timeout_split_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [w_conn, b_conn, w_read, b_read, w_total, b_total]  (ms P95)
     w_conn, b_conn, w_read, b_read = float(row[0] or 0), float(row[1] or 0), float(row[2] or 0), float(row[3] or 0)
     conn_regressed = w_conn >= b_conn * 2 and (w_conn - b_conn) >= 50
     read_regressed = w_read >= b_read * 2 and (w_read - b_read) >= 100
-    # Surface the dominant phase (larger absolute regression) as the headline.
     if conn_regressed and (not read_regressed or (w_conn - b_conn) >= (w_read - b_read)):
         phase, cur, base = "connect", round(w_conn, 1), round(b_conn, 1)
     else:
@@ -3370,13 +2976,7 @@ _reg(
 )
 
 
-# ── 46. Bot & Crawler Referral & Bandwidth Disparity ─────────────────────────
-
-
 def crawler_disparity_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [raw_tok, w_crawls, w_referrals, w_bytes, crawls_per_referral,
-    #              baseline_crawls_per_referral, bytes_per_referral,
-    #              baseline_bytes_per_referral, bandwidth_share_pct]
     from backend.utils.bot_sources import resolve_bot_display_name
 
     brand = resolve_bot_display_name(row[0], default="Other Bot")
@@ -3413,11 +3013,7 @@ _reg(
 )
 
 
-# ── 47. Stale Headless Browser version ──────────────────────────────────────
-
-
 def stale_browser_version_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [label, w_reqs, w_ips, surge_ratio]
     label, w_reqs, w_ips, surge = row[0] or "Unknown Chrome", int(row[1] or 0), int(row[2] or 0), float(row[3] or 0)
     return _item(
         label,
@@ -3441,11 +3037,7 @@ _reg(
 )
 
 
-# ── 48. Orphaned Deep Crawl ──────────────────────────────────────────────────
-
-
 def orphaned_deep_crawl_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [ip, w_reqs, w_distinct_urls, b_reqs, requests_per_url, surge_ratio]
     ip = _mask_ip_if_needed(row[0], context)
     w_reqs, w_distinct, b_reqs, reqs_per_url, surge = (
         int(row[1] or 0),
@@ -3481,11 +3073,7 @@ _reg(
 )
 
 
-# ── 49. Residential Fingerprint Dispersion ───────────────────────────────────
-
-
 def residential_fingerprint_dispersion_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
-    # row schema: [ja4, w_ips, w_asns, w_requests, b_ips, asn_expansion_ratio]
     ja4, w_ips, w_asns, w_requests, b_ips, asn_expansion = (
         row[0] or "(empty)",
         int(row[1] or 0),

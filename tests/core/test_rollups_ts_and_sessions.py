@@ -1,42 +1,60 @@
-"""Tests for the per-hour sessions bundle writer + its backfill driver.
-
-The writer COPIES (ip, ja4)-grouped aggregates from the service's live
-DuckDB view into ``rollups/hour_bundled/hour=H/sessions.parquet``.
-``/api/sessions`` reads this instead of re-scanning raw logs.
-
-Strategy: seed an in-memory DuckDB with the columns the COPY references,
-patch ``get_connection`` to return it, exercise the function, then
-inspect the written parquet.
-"""
+"""Tests for the per-hour sessions/time-series/RUM bundle writers and golden writer snapshots."""
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import os
 import re
+import sqlite3
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import backend.core.iceberg._ducklake as _dl
 import duckdb
 import pyarrow.parquet as pq
 import pytest
-
 from backend.core.rollups.rum import backfill_missing_rum_aggregates, recompute_rum_aggregates, table_exists
-from backend.repositories import rum as rum_repo
 from tests._helpers.rollups import noop_lock as _noop_lock
 from tests._helpers.rollups import past_hour as _past_hour
 from tests._helpers.rollups import writer_patches
 
+from backend.core import rollups
+from backend.core.rollups import (
+    day_bundles,
+    hour_bundles,
+    network_health_geo,
+    network_health_heatmap,
+    network_quality,
+    network_rtt,
+    network_speed,
+    network_summary,
+    ngwaf_bots,
+    origin_dims,
+    origin_latency_ts,
+    origin_summary,
+    overview,
+    perf_dims,
+    perf_latency,
+    pop_health,
+    security_dims,
+    sessions,
+    slow_urls,
+    time_series,
+    verified_bots_ts,
+    wellknown_bots,
+)
+from backend.cron.jobs import compaction
+from backend.repositories import rum as rum_repo
 
-# ── Merged from tests/core/test_rollups_sessions.py ──
+
+# ── Merged from tests/core/test_rollups_sessions.py & test_rollups_time_series.py ──
 def _seed_logs(con: duckdb.DuckDBPyConnection, table: str, rows: list[dict]) -> None:
-    """Create ``table`` and INSERT ``rows`` (dicts with keys matching
-    the column set the sessions writer reads)."""
     cols_sql = (
         "timestamp TIMESTAMPTZ, ip VARCHAR, ja4 VARCHAR, country VARCHAR, "
         "asn INTEGER, status INTEGER, resp_bytes BIGINT, tcp_rtt DOUBLE, "
@@ -62,16 +80,22 @@ def _seed_logs(con: duckdb.DuckDBPyConnection, table: str, rows: list[dict]) -> 
         )
 
 
+def _seed_logs_rollups_time_series(con: duckdb.DuckDBPyConnection, table: str, rows: list[dict]) -> None:
+    con.execute(
+        f"CREATE TABLE {table} (timestamp TIMESTAMPTZ, status INTEGER, cache VARCHAR, resp_bytes BIGINT, ttfb DOUBLE)"
+    )
+    for r in rows:
+        con.execute(
+            f"INSERT INTO {table} VALUES (?, ?, ?, ?, ?)",
+            [r["timestamp"], r.get("status"), r.get("cache"), r.get("resp_bytes"), r.get("ttfb")],
+        )
+
+
 @pytest.mark.usefixtures("frozen_clock")
 def test_build_sessions_writes_aggregates_for_closed_hour(tmp_path):
-    """Happy path: a closed hour with real (ip, ja4) traffic produces a
-    sessions.parquet with one row per group + the expected aggregates."""
-    from backend.core.rollups import sessions
-
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
     src = {"name": "svc-sess", "service_id": "svc-sess"}
-
     hour_token, hour_dt = _past_hour(2)
     con = duckdb.connect(":memory:")
     _seed_logs(
@@ -121,15 +145,11 @@ def test_build_sessions_writes_aggregates_for_closed_hour(tmp_path):
     )
 
     with writer_patches(cache_root, "logs_svc_sess", con):
-        n = sessions.build_session_bundles("svc-sess", src, [hour_token])
-
-    assert n == 1, f"expected 1 bundle written; got {n}"
+        assert sessions.build_session_bundles("svc-sess", src, [hour_token]) == 1
 
     bundle = cache_root / "rollups" / "hour_bundled" / f"hour={hour_token}" / "sessions.parquet"
-    assert bundle.exists(), f"sessions.parquet missing at {bundle}"
-
+    assert bundle.exists()
     t = pq.read_table(str(bundle))
-    cols = set(t.column_names)
     assert {
         "bucket",
         "ip",
@@ -148,148 +168,23 @@ def test_build_sessions_writes_aggregates_for_closed_hour(tmp_path):
         "shield_count",
         "ua_min",
         "edge_sid_max",
-    }.issubset(cols), f"missing columns: {cols}"
+    }.issubset(set(t.column_names))
 
     rows_by_ip = {r["ip"]: r for r in t.to_pylist()}
-    a = rows_by_ip["1.1.1.1"]
-    assert a["req_count"] == 2
-    assert a["reqs_4xx"] == 1  # status=404
-    assert a["reqs_5xx"] == 0
-    assert a["total_bytes"] == 600
-    assert a["edge_count"] == 2
-    assert a["shield_count"] == 0
-
-    b = rows_by_ip["2.2.2.2"]
-    assert b["req_count"] == 1
-    assert b["reqs_5xx"] == 1
-    assert b["edge_count"] == 0
-    assert b["shield_count"] == 1
-
-
-@pytest.mark.usefixtures("frozen_clock")
-def test_build_sessions_skips_active_hour(tmp_path):
-    """Active UTC hour must be skipped — its data is still in flight."""
-    from backend.core.rollups import sessions
-
-    cache_root = tmp_path / "cache"
-    cache_root.mkdir()
-    src = {"name": "svc-sess-active"}
-    active = datetime.now(UTC).strftime("%Y-%m-%d-%H")
-
-    con = duckdb.connect(":memory:")
-    _seed_logs(con, "logs_x", [])
-
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value="logs_x"),
-        patch("backend.core.duckdb.get_connection", return_value=con),
-    ):
-        n = sessions.build_session_bundles("svc-sess-active", src, [active])
-
-    assert n == 0
-    assert not (cache_root / "rollups" / "hour_bundled" / f"hour={active}" / "sessions.parquet").exists()
-
-
-@pytest.mark.usefixtures("frozen_clock")
-def test_build_sessions_no_hours_returns_zero(tmp_path):
-    from backend.core.rollups import sessions
-
-    assert sessions.build_session_bundles("svc", {"name": "svc"}, []) == 0
-
-
-@pytest.mark.usefixtures("frozen_clock")
-def test_build_sessions_malformed_hour_token_skipped(tmp_path):
-    """Bad hour token (not YYYY-MM-DD-HH) → logged + skipped, no crash."""
-    from backend.core.rollups import sessions
-
-    cache_root = tmp_path / "cache"
-    cache_root.mkdir()
-    con = duckdb.connect(":memory:")
-    _seed_logs(con, "logs_x", [])
-
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value="logs_x"),
-        patch("backend.core.duckdb.get_connection", return_value=con),
-    ):
-        n = sessions.build_session_bundles("svc", {"name": "svc"}, ["not-an-hour"])
-
-    assert n == 0
-
-
-@pytest.mark.usefixtures("frozen_clock")
-def test_build_sessions_no_safe_table_returns_zero(tmp_path):
-    from backend.core.rollups import sessions
-
-    cache_root = tmp_path / "cache"
-    cache_root.mkdir()
-    hour_token, _ = _past_hour(2)
-
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value=None),
-    ):
-        assert sessions.build_session_bundles("svc", {"name": "svc"}, [hour_token]) == 0
-
-
-@pytest.mark.usefixtures("frozen_clock")
-def test_build_sessions_missing_ip_column_returns_zero(tmp_path):
-    """Service whose schema has timestamp but no ip column → can't roll
-    up sessions, skip cleanly."""
-    from backend.core.rollups import sessions
-
-    cache_root = tmp_path / "cache"
-    cache_root.mkdir()
-    hour_token, hour_dt = _past_hour(2)
-    con = duckdb.connect(":memory:")
-    # Note: no ip column.
-    con.execute("CREATE TABLE logs_no_ip (timestamp TIMESTAMPTZ, status INTEGER)")
-
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value="logs_no_ip"),
-        patch("backend.core.duckdb.get_connection", return_value=con),
-        patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
-            side_effect=lambda c, _src, fn: fn(c),
-        ),
-    ):
-        n = sessions.build_session_bundles("svc", {"name": "svc"}, [hour_token])
-
-    assert n == 0
-
-
-@pytest.mark.usefixtures("frozen_clock")
-def test_build_sessions_describe_failure_returns_zero(tmp_path):
-    """If DESCRIBE blows up (stale view, corrupt table), the writer
-    logs + returns 0 instead of crashing the cron."""
-    from backend.core.rollups import sessions
-
-    cache_root = tmp_path / "cache"
-    cache_root.mkdir()
-    hour_token, _ = _past_hour(2)
-    con = duckdb.connect(":memory:")
-
-    def _boom(_c, _src, _fn):
-        raise duckdb.Error("synthetic describe failure")
-
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value="logs_x"),
-        patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=_boom),
-    ):
-        n = sessions.build_session_bundles("svc", {"name": "svc"}, [hour_token])
-
-    assert n == 0
+    a, b = rows_by_ip["1.1.1.1"], rows_by_ip["2.2.2.2"]
+    assert (a["req_count"], a["reqs_4xx"], a["reqs_5xx"], a["total_bytes"], a["edge_count"], a["shield_count"]) == (
+        2,
+        1,
+        0,
+        600,
+        2,
+        0,
+    )
+    assert (b["req_count"], b["reqs_5xx"], b["edge_count"], b["shield_count"]) == (1, 1, 0, 1)
 
 
 @pytest.mark.usefixtures("frozen_clock")
 def test_build_sessions_ja4_absent_writes_null(tmp_path):
-    """Schema without ja4 column → ja4 is written as NULL VARCHAR (the
-    parquet shape must stay uniform across services)."""
-    from backend.core.rollups import sessions
-
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
     src = {"name": "svc-no-ja4"}
@@ -300,44 +195,16 @@ def test_build_sessions_ja4_absent_writes_null(tmp_path):
     con.execute("INSERT INTO logs_x VALUES (?, ?)", [hour_dt + timedelta(minutes=3), "9.9.9.9"])
 
     with writer_patches(cache_root, "logs_x", con):
-        n = sessions.build_session_bundles("svc-no-ja4", src, [hour_token])
+        assert sessions.build_session_bundles("svc-no-ja4", src, [hour_token]) == 1
 
-    assert n == 1
     bundle = cache_root / "rollups" / "hour_bundled" / f"hour={hour_token}" / "sessions.parquet"
-    t = pq.read_table(str(bundle))
-    rows = t.to_pylist()
+    rows = pq.read_table(str(bundle)).to_pylist()
     assert len(rows) == 1
-    assert rows[0]["ja4"] is None
-    assert rows[0]["country"] is None  # no country column either
-    assert rows[0]["edge_count"] == 0  # no edge column → constant 0
-
-
-# ── Merged from tests/core/test_rollups_time_series.py ──
-def _seed_logs_rollups_time_series(con: duckdb.DuckDBPyConnection, table: str, rows: list[dict]) -> None:
-    """Create ``table`` with the column set the time_series writer reads
-    and INSERT rows."""
-    con.execute(
-        f"CREATE TABLE {table} (timestamp TIMESTAMPTZ, status INTEGER, cache VARCHAR, resp_bytes BIGINT, ttfb DOUBLE)"
-    )
-    for r in rows:
-        con.execute(
-            f"INSERT INTO {table} VALUES (?, ?, ?, ?, ?)",
-            [
-                r["timestamp"],
-                r.get("status"),
-                r.get("cache"),
-                r.get("resp_bytes"),
-                r.get("ttfb"),
-            ],
-        )
+    assert rows[0]["ja4"] is None and rows[0]["country"] is None and rows[0]["edge_count"] == 0
 
 
 @pytest.mark.usefixtures("frozen_clock")
 def test_build_time_series_writes_per_minute_buckets(tmp_path):
-    """Happy path: closed hour with rows in 3 distinct minutes produces
-    3 per-minute rows with the documented metric set."""
-    from backend.core.rollups import time_series
-
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
     src = {"name": "svc-ts"}
@@ -380,14 +247,11 @@ def test_build_time_series_writes_per_minute_buckets(tmp_path):
     )
 
     with writer_patches(cache_root, "logs_ts", con):
-        n = time_series.build_time_series_bundles("svc-ts", src, [hour_token])
+        assert time_series.build_time_series_bundles("svc-ts", src, [hour_token]) == 1
 
-    assert n == 1
     bundle = cache_root / "rollups" / "hour_bundled" / f"hour={hour_token}" / "time_series.parquet"
     assert bundle.exists()
-
     t = pq.read_table(str(bundle))
-    cols = set(t.column_names)
     assert {
         "bucket",
         "requests",
@@ -398,27 +262,23 @@ def test_build_time_series_writes_per_minute_buckets(tmp_path):
         "resp_bytes_sum",
         "ttfb_sum",
         "ttfb_count",
-    }.issubset(cols)
+    }.issubset(set(t.column_names))
 
     rows = sorted(t.to_pylist(), key=lambda r: r["bucket"])
-    assert len(rows) == 3, f"expected 3 minute buckets; got {len(rows)}"
-    # Minute 0: 2 requests, 1 in 4xx, both are HIT/HIT-STALE so hits=2
-    assert rows[0]["requests"] == 2
-    assert rows[0]["status_4xx"] == 1
-    assert rows[0]["status_5xx"] == 0
-    assert rows[0]["hits"] == 2
-    assert rows[0]["cache_total"] == 2
-    # Minute 1: 5xx
+    assert len(rows) == 3
+    assert (
+        rows[0]["requests"],
+        rows[0]["status_4xx"],
+        rows[0]["status_5xx"],
+        rows[0]["hits"],
+        rows[0]["cache_total"],
+    ) == (2, 1, 0, 2, 2)
     assert rows[1]["status_5xx"] == 1
-    # Minute 2: 200, HIT, ttfb=0.15
-    assert rows[2]["ttfb_count"] == 1
-    assert abs(rows[2]["ttfb_sum"] - 0.15) < 1e-9
+    assert rows[2]["ttfb_count"] == 1 and abs(rows[2]["ttfb_sum"] - 0.15) < 1e-9
 
 
 @pytest.mark.usefixtures("frozen_clock")
 def test_build_time_series_replaces_an_existing_hour_bundle(tmp_path):
-    from backend.core.rollups import time_series
-
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
     src = {"name": "svc-ts-rebuild"}
@@ -442,7 +302,6 @@ def test_build_time_series_replaces_an_existing_hour_bundle(tmp_path):
     bundle = cache_root / "rollups" / "hour_bundled" / f"hour={hour_token}" / "time_series.parquet"
     with writer_patches(cache_root, "logs_ts", con):
         assert time_series.build_time_series_bundles("svc-ts-rebuild", src, [hour_token]) == 1
-
     assert pq.read_table(str(bundle))["requests"].to_pylist() == [1]
 
     con = duckdb.connect(str(db_path))
@@ -452,97 +311,97 @@ def test_build_time_series_replaces_an_existing_hour_bundle(tmp_path):
     )
     with writer_patches(cache_root, "logs_ts", con):
         assert time_series.build_time_series_bundles("svc-ts-rebuild", src, [hour_token]) == 1
-
     assert pq.read_table(str(bundle))["requests"].to_pylist() == [2]
 
 
 @pytest.mark.usefixtures("frozen_clock")
-def test_build_time_series_skips_active_hour(tmp_path):
-    from backend.core.rollups import time_series
-
+def test_build_time_series_columns_absent_use_constant_zero(tmp_path):
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
-    active = datetime.now(UTC).strftime("%Y-%m-%d-%H")
+    src = {"name": "svc-bare"}
+    hour_token, hour_dt = _past_hour(2)
+
     con = duckdb.connect(":memory:")
-    _seed_logs_rollups_time_series(con, "logs_ts", [])
+    con.execute("CREATE TABLE logs_bare (timestamp TIMESTAMPTZ)")
+    con.execute("INSERT INTO logs_bare VALUES (?)", [hour_dt + timedelta(minutes=1)])
 
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value="logs_ts"),
-        patch("backend.core.duckdb.get_connection", return_value=con),
-    ):
-        n = time_series.build_time_series_bundles("svc", {"name": "svc"}, [active])
+    with writer_patches(cache_root, "logs_bare", con):
+        assert time_series.build_time_series_bundles("svc-bare", src, [hour_token]) == 1
 
-    assert n == 0
-
-
-@pytest.mark.usefixtures("frozen_clock")
-def test_build_time_series_empty_input_returns_zero():
-    from backend.core.rollups import time_series
-
-    assert time_series.build_time_series_bundles("svc", {"name": "svc"}, []) == 0
-
-
-@pytest.mark.usefixtures("frozen_clock")
-def test_build_time_series_malformed_hour_skipped(tmp_path):
-    from backend.core.rollups import time_series
-
-    cache_root = tmp_path / "cache"
-    cache_root.mkdir()
-    con = duckdb.connect(":memory:")
-    _seed_logs_rollups_time_series(con, "logs_ts", [])
-
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value="logs_ts"),
-        patch("backend.core.duckdb.get_connection", return_value=con),
-    ):
-        assert time_series.build_time_series_bundles("svc", {"name": "svc"}, ["bad"]) == 0
+    bundle = cache_root / "rollups" / "hour_bundled" / f"hour={hour_token}" / "time_series.parquet"
+    rows = pq.read_table(str(bundle)).to_pylist()
+    assert len(rows) == 1
+    r = rows[0]
+    assert (
+        r["requests"],
+        r["status_4xx"],
+        r["status_5xx"],
+        r["hits"],
+        r["cache_total"],
+        r["resp_bytes_sum"],
+        r["ttfb_count"],
+    ) == (1, 0, 0, 0, 0, 0, 0)
 
 
 @pytest.mark.usefixtures("frozen_clock")
-def test_build_time_series_no_safe_table_returns_zero(tmp_path):
-    from backend.core.rollups import time_series
-
-    hour_token, _ = _past_hour(2)
-    with patch("backend.core.rollups._common._safe_table_for", return_value=None):
-        assert time_series.build_time_series_bundles("svc", {"name": "svc"}, [hour_token]) == 0
-
-
-@pytest.mark.usefixtures("frozen_clock")
-def test_build_time_series_no_timestamp_column_returns_zero(tmp_path):
-    """Schema without timestamp column — the writer can't bucket; skip."""
-    from backend.core.rollups import time_series
-
-    cache_root = tmp_path / "cache"
-    cache_root.mkdir()
-    hour_token, _ = _past_hour(2)
-    con = duckdb.connect(":memory:")
-    con.execute("CREATE TABLE logs_no_ts (status INTEGER)")
-
-    with (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.rollups._common._safe_table_for", return_value="logs_no_ts"),
-        patch("backend.core.duckdb.get_connection", return_value=con),
-        patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
-            side_effect=lambda c, _src, fn: fn(c),
+@pytest.mark.parametrize(
+    ("writer_fn", "seed_fn", "missing_col_ddl"),
+    [
+        (
+            sessions.build_session_bundles,
+            _seed_logs,
+            "CREATE TABLE logs_missing (timestamp TIMESTAMPTZ, status INTEGER)",
         ),
-    ):
-        assert time_series.build_time_series_bundles("svc", {"name": "svc"}, [hour_token]) == 0
-
-
-@pytest.mark.usefixtures("frozen_clock")
-def test_build_time_series_describe_failure_returns_zero(tmp_path):
-    from backend.core.rollups import time_series
-
+        (
+            time_series.build_time_series_bundles,
+            _seed_logs_rollups_time_series,
+            "CREATE TABLE logs_missing (status INTEGER)",
+        ),
+    ],
+    ids=["sessions", "time_series"],
+)
+def test_rollup_writer_edge_cases_and_skips(tmp_path, writer_fn, seed_fn, missing_col_ddl):
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
+    src = {"name": "svc"}
+    active = datetime.now(UTC).strftime("%Y-%m-%d-%H")
     hour_token, _ = _past_hour(2)
-    con = duckdb.connect(":memory:")
 
+    # Empty input
+    assert writer_fn("svc", src, []) == 0
+
+    # Active hour & malformed hour skipped
+    con = duckdb.connect(":memory:")
+    seed_fn(con, "logs_x", [])
+    with (
+        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
+        patch("backend.core.rollups._common._safe_table_for", return_value="logs_x"),
+        patch("backend.core.duckdb.get_connection", return_value=con),
+    ):
+        assert writer_fn("svc", src, [active]) == 0
+        assert writer_fn("svc", src, ["not-an-hour"]) == 0
+
+    # No safe table
+    with (
+        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
+        patch("backend.core.rollups._common._safe_table_for", return_value=None),
+    ):
+        assert writer_fn("svc", src, [hour_token]) == 0
+
+    # Missing required column (ip for sessions, timestamp for time_series)
+    con_missing = duckdb.connect(":memory:")
+    con_missing.execute(missing_col_ddl)
+    with (
+        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
+        patch("backend.core.rollups._common._safe_table_for", return_value="logs_missing"),
+        patch("backend.core.duckdb.get_connection", return_value=con_missing),
+        patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=lambda c, _src, fn: fn(c)),
+    ):
+        assert writer_fn("svc", src, [hour_token]) == 0
+
+    # DESCRIBE failure returns 0 cleanly
     def _boom(_c, _src, _fn):
-        raise duckdb.Error("synthetic")
+        raise duckdb.Error("synthetic describe failure")
 
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
@@ -550,97 +409,35 @@ def test_build_time_series_describe_failure_returns_zero(tmp_path):
         patch("backend.core.duckdb.get_connection", return_value=con),
         patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=_boom),
     ):
-        assert time_series.build_time_series_bundles("svc", {"name": "svc"}, [hour_token]) == 0
-
-
-@pytest.mark.usefixtures("frozen_clock")
-def test_build_time_series_columns_absent_use_constant_zero(tmp_path):
-    """Schema missing status/cache/resp_bytes/ttfb → those columns
-    are written as constant 0 so the parquet shape stays uniform."""
-    from backend.core.rollups import time_series
-
-    cache_root = tmp_path / "cache"
-    cache_root.mkdir()
-    src = {"name": "svc-bare"}
-    hour_token, hour_dt = _past_hour(2)
-
-    con = duckdb.connect(":memory:")
-    # Only timestamp.
-    con.execute("CREATE TABLE logs_bare (timestamp TIMESTAMPTZ)")
-    con.execute("INSERT INTO logs_bare VALUES (?)", [hour_dt + timedelta(minutes=1)])
-
-    with writer_patches(cache_root, "logs_bare", con):
-        n = time_series.build_time_series_bundles("svc-bare", src, [hour_token])
-
-    assert n == 1
-    bundle = cache_root / "rollups" / "hour_bundled" / f"hour={hour_token}" / "time_series.parquet"
-    rows = pq.read_table(str(bundle)).to_pylist()
-    assert len(rows) == 1
-    assert rows[0]["requests"] == 1
-    assert rows[0]["status_4xx"] == 0
-    assert rows[0]["status_5xx"] == 0
-    assert rows[0]["hits"] == 0
-    assert rows[0]["cache_total"] == 0
-    assert rows[0]["resp_bytes_sum"] == 0
-    assert rows[0]["ttfb_count"] == 0
+        assert writer_fn("svc", src, [hour_token]) == 0
 
 
 # ── Merged from tests/core/test_rollups_rum.py ──
-def test_recompute_rum_aggregates_idempotency_and_correctness():
-    # 1. Setup in-memory DuckDB connection
-    con = duckdb.connect(":memory:")
-
-    # 2. Create raw client_vitals and client_errors tables
+def _create_rum_tables(con: duckdb.DuckDBPyConnection) -> None:
     con.execute("""
         CREATE TABLE client_vitals (
-            timestamp TIMESTAMPTZ,
-            metric_name VARCHAR,
-            metric_value DOUBLE,
-            metric_rating VARCHAR,
-            pathname VARCHAR,
-            browser VARCHAR,
-            os VARCHAR,
-            device VARCHAR,
-            cid VARCHAR,
-            req_id VARCHAR,
-            city VARCHAR,
-            region VARCHAR,
-            country VARCHAR,
-            pop VARCHAR,
-            tls VARCHAR,
-            ttfb DOUBLE
+            timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, metric_rating VARCHAR,
+            pathname VARCHAR, browser VARCHAR, os VARCHAR, device VARCHAR, cid VARCHAR, req_id VARCHAR,
+            city VARCHAR, region VARCHAR, country VARCHAR, pop VARCHAR, tls VARCHAR, ttfb DOUBLE
         )
     """)
     con.execute("""
         CREATE TABLE client_errors (
-            timestamp TIMESTAMPTZ,
-            error_message VARCHAR,
-            error_file VARCHAR,
-            error_line INT,
-            error_col INT,
-            pathname VARCHAR,
-            browser VARCHAR,
-            os VARCHAR,
-            device VARCHAR,
-            cid VARCHAR,
-            req_id VARCHAR,
-            city VARCHAR,
-            region VARCHAR,
-            country VARCHAR,
-            pop VARCHAR,
-            tls VARCHAR,
-            ttfb DOUBLE
+            timestamp TIMESTAMPTZ, error_message VARCHAR, error_file VARCHAR, error_line INT, error_col INT,
+            pathname VARCHAR, browser VARCHAR, os VARCHAR, device VARCHAR, cid VARCHAR, req_id VARCHAR,
+            city VARCHAR, region VARCHAR, country VARCHAR, pop VARCHAR, tls VARCHAR, ttfb DOUBLE
         )
     """)
 
-    # 3. Seed some RUM beacons
-    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-    hour1 = now - timedelta(hours=2)
-    hour2 = now - timedelta(hours=1)
 
-    # Beacons for hour1
-    con.execute(
-        "INSERT INTO client_vitals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+def test_recompute_rum_aggregates_idempotency_and_correctness():
+    con = duckdb.connect(":memory:")
+    _create_rum_tables(con)
+
+    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    hour1, hour2 = now - timedelta(hours=2), now - timedelta(hours=1)
+
+    for row in [
         [
             hour1,
             "LCP",
@@ -659,9 +456,6 @@ def test_recompute_rum_aggregates_idempotency_and_correctness():
             "TLS1.3",
             0.1,
         ],
-    )
-    con.execute(
-        "INSERT INTO client_vitals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             hour1,
             "LCP",
@@ -680,7 +474,27 @@ def test_recompute_rum_aggregates_idempotency_and_correctness():
             "TLS1.3",
             0.1,
         ],
-    )
+        [
+            hour2,
+            "CLS",
+            0.05,
+            "good",
+            "/about",
+            "Safari",
+            "iOS",
+            "mobile",
+            "user3",
+            "req3",
+            "NYC",
+            "NY",
+            "US",
+            "JFK",
+            "TLS1.3",
+            0.1,
+        ],
+    ]:
+        con.execute("INSERT INTO client_vitals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", row)
+
     con.execute(
         "INSERT INTO client_errors VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
@@ -704,72 +518,24 @@ def test_recompute_rum_aggregates_idempotency_and_correctness():
         ],
     )
 
-    # Beacons for hour2
-    con.execute(
-        "INSERT INTO client_vitals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            hour2,
-            "CLS",
-            0.05,
-            "good",
-            "/about",
-            "Safari",
-            "iOS",
-            "mobile",
-            "user3",
-            "req3",
-            "NYC",
-            "NY",
-            "US",
-            "JFK",
-            "TLS1.3",
-            0.1,
-        ],
-    )
-
-    # 4. Trigger recomputation
     recompute_rum_aggregates(con, "svc-rum-test")
-
-    # 5. Assertions: check table existence
     assert table_exists(con, "rum_vitals_aggregates")
     assert table_exists(con, "rum_error_aggregates")
 
-    # Check vitals aggregates
     v_rows = con.execute(
         "SELECT dimension, value, event_count, good_count, poor_count, p75_value, bucket_start FROM rum_vitals_aggregates ORDER BY dimension, value, bucket_start"
     ).fetchall()
-    # Expect:
-    # - 'browser' -> Chrome (2), Safari (1)
-    # - 'device' -> desktop (2), mobile (1)
-    # - 'metric_name' -> LCP (2, good=1, poor=1), CLS (1, good=1)
-    # - 'os' -> macOS (2), iOS (1)
-    # - 'pathname' -> /home (2), /about (1)
-    # - 'total' -> pageviews (2 + 1 = 3)
-    dimensions = [r[0] for r in v_rows]
-    assert "browser" in dimensions
-    assert "metric_name" in dimensions
-    assert "total" in dimensions
+    dimensions = {r[0] for r in v_rows}
+    assert {"browser", "metric_name", "total"}.issubset(dimensions)
 
-    # Check metric_name p75_value calculation
     lcp_row = [r for r in v_rows if r[0] == "metric_name" and r[1] == "LCP"][0]
-    assert lcp_row[2] == 2  # event_count
-    assert lcp_row[3] == 1  # good_count
-    assert lcp_row[4] == 1  # poor_count
-    assert lcp_row[5] == 4.0  # p75 of [2.5, 4.5] is exact 4.0 under PERCENTILE_CONT
+    assert lcp_row[2:6] == (2, 1, 1, 4.0)
 
-    # Check errors aggregates
     e_rows = con.execute(
         "SELECT dimension, value, error_count, bucket_start FROM rum_error_aggregates ORDER BY dimension, value, bucket_start"
     ).fetchall()
-    # Expect:
-    # - 'total' -> errors (1)
-    # - 'pathname' -> /home (1)
-    # - 'exception' -> ReferenceError|app.js|10|20 (1)
-    assert len(e_rows) == 3
-    assert e_rows[2][0] == "total"
-    assert e_rows[2][2] == 1
+    assert len(e_rows) == 3 and e_rows[2][0] == "total" and e_rows[2][2] == 1
 
-    # 6. Idempotency check: recompute again and verify no duplication
     recompute_rum_aggregates(con, "svc-rum-test")
     v_rows_after = con.execute(
         "SELECT dimension, value, event_count, good_count, poor_count, p75_value, bucket_start FROM rum_vitals_aggregates ORDER BY dimension, value, bucket_start"
@@ -778,58 +544,15 @@ def test_recompute_rum_aggregates_idempotency_and_correctness():
 
 
 def test_backfill_missing_rum_aggregates_heals_legacy_hour_without_total_beacons():
-    """Hours aggregated before 3fcbcd27 have LCP/pageviews rows in rum_vitals_aggregates
-    but lack a 'total_beacons' row. backfill_missing_rum_aggregates() must detect and
-    recompute those hours across the 30-day lookback window."""
-    from backend.core.rum_ingest import backfill_missing_rum_aggregates
-
     con = duckdb.connect(":memory:")
-    con.execute("""
-        CREATE TABLE client_vitals (
-            timestamp TIMESTAMPTZ,
-            metric_name VARCHAR,
-            metric_value DOUBLE,
-            metric_rating VARCHAR,
-            pathname VARCHAR,
-            browser VARCHAR,
-            os VARCHAR,
-            device VARCHAR,
-            cid VARCHAR,
-            req_id VARCHAR,
-            city VARCHAR,
-            region VARCHAR,
-            country VARCHAR,
-            pop VARCHAR,
-            tls VARCHAR,
-            ttfb DOUBLE
-        )
-    """)
-    con.execute("""
-        CREATE TABLE client_errors (
-            timestamp TIMESTAMPTZ,
-            error_message VARCHAR,
-            error_file VARCHAR,
-            error_line INT,
-            error_col INT,
-            pathname VARCHAR,
-            browser VARCHAR,
-            os VARCHAR,
-            device VARCHAR,
-            cid VARCHAR,
-            req_id VARCHAR,
-            city VARCHAR,
-            region VARCHAR,
-            country VARCHAR,
-            pop VARCHAR,
-            tls VARCHAR,
-            ttfb DOUBLE
-        )
-    """)
+    _create_rum_tables(con)
 
     now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-    legacy_hour = now - timedelta(days=12)
-    recent_hour = now - timedelta(hours=2)
-    beyond_lookback_hour = now - timedelta(days=40)
+    legacy_hour, recent_hour, beyond_lookback_hour = (
+        now - timedelta(days=12),
+        now - timedelta(hours=2),
+        now - timedelta(days=40),
+    )
 
     for hr, req_id in [
         (legacy_hour, "req-legacy-1"),
@@ -842,30 +565,25 @@ def test_backfill_missing_rum_aggregates_heals_legacy_hour_without_total_beacons
             [hr, req_id],
         )
 
-    # Initial recompute populates all rows including total_beacons
     recompute_rum_aggregates(con, "svc-rum-test")
-
-    # Simulate pre-3fcbcd27 state on legacy_hour and beyond_lookback_hour:
-    # LCP and pageviews rows exist in rum_vitals_aggregates, but total_beacons is missing.
     con.execute(
         "DELETE FROM rum_vitals_aggregates WHERE service_id = 'svc-rum-test' AND bucket_start IN (?, ?) AND value = 'total_beacons'",
         [legacy_hour, beyond_lookback_hour],
     )
 
-    # Confirm LCP aggregate row still exists for legacy_hour, while total_beacons does not
     lcp_cnt = con.execute(
         "SELECT event_count FROM rum_vitals_aggregates WHERE service_id = 'svc-rum-test' AND bucket_start = ? AND dimension = 'metric_name' AND value = 'LCP'",
         [legacy_hour],
     ).fetchone()
     assert lcp_cnt is not None and lcp_cnt[0] == 2
-    tb_before = con.execute(
-        "SELECT event_count FROM rum_vitals_aggregates WHERE service_id = 'svc-rum-test' AND bucket_start = ? AND dimension = 'total' AND value = 'total_beacons'",
-        [legacy_hour],
-    ).fetchone()
-    assert tb_before is None
+    assert (
+        con.execute(
+            "SELECT event_count FROM rum_vitals_aggregates WHERE service_id = 'svc-rum-test' AND bucket_start = ? AND dimension = 'total' AND value = 'total_beacons'",
+            [legacy_hour],
+        ).fetchone()
+        is None
+    )
 
-    # Run backfill with 30-day lookback: should detect and heal legacy_hour (12d ago),
-    # skip recent_hour (already has total_beacons), and ignore beyond_lookback_hour (40d ago).
     healed = backfill_missing_rum_aggregates(con, "svc-rum-test", lookback_days=30)
     assert len(healed) == 1
 
@@ -874,19 +592,10 @@ def test_backfill_missing_rum_aggregates_heals_legacy_hour_without_total_beacons
         [legacy_hour],
     ).fetchone()
     assert tb_after is not None and tb_after[0] == 2
-
-    # Second run is a clean no-op
-    healed_again = backfill_missing_rum_aggregates(con, "svc-rum-test", lookback_days=30)
-    assert healed_again == []
+    assert backfill_missing_rum_aggregates(con, "svc-rum-test", lookback_days=30) == []
 
 
 def test_rollup_hour_heal_invokes_rum_total_beacons_backfill(monkeypatch, tmp_path):
-    """_run_rollup_hour_heal triggers 30-day backfill_missing_rum_aggregates when RUM is enabled."""
-    from unittest.mock import MagicMock
-
-    import backend.core.iceberg._ducklake as _dl
-    from backend.cron.jobs import compaction
-
     sid = "svc-rum-heal-cron"
     src = {
         "name": "rum-heal-svc",
@@ -899,16 +608,18 @@ def test_rollup_hour_heal_invokes_rum_total_beacons_backfill(monkeypatch, tmp_pa
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *a, **k: False)
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda s: str(tmp_path))
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda *a, **k: 42)
-    monkeypatch.setattr("backend.core.duckdb.log_cron_run", lambda *a, **k: None)
-    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", lambda *a, **k: None)
-    monkeypatch.setattr("backend.cron_progress.start_progress", lambda *a, **k: None)
-    monkeypatch.setattr("backend.cron_progress.end_progress", lambda *a, **k: None)
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", lambda *a, **k: None)
-    monkeypatch.setattr("backend.cron.scheduler._log_and_add_progress", lambda *a, **k: None)
+    for target in (
+        "backend.core.duckdb.log_cron_run",
+        "backend.core.duckdb.finalize_cron_run_if_running",
+        "backend.cron_progress.start_progress",
+        "backend.cron_progress.end_progress",
+        "backend.cron_progress.cleanup_progress_and_reap",
+        "backend.cron.scheduler._log_and_add_progress",
+    ):
+        monkeypatch.setattr(target, lambda *a, **k: None)
     monkeypatch.setattr("backend.cron.scheduler._check_disk_space", lambda *a, **k: (True, ""))
     monkeypatch.setattr(
-        "backend.config.load_config",
-        lambda s: {"provisioning": {"cron_sync": {}}, "rum": {"enabled": True}},
+        "backend.config.load_config", lambda s: {"provisioning": {"cron_sync": {}}, "rum": {"enabled": True}}
     )
     monkeypatch.setattr("backend.config.is_durable_serving_mode", lambda s: False)
     monkeypatch.setattr(
@@ -918,14 +629,10 @@ def test_rollup_hour_heal_invokes_rum_total_beacons_backfill(monkeypatch, tmp_pa
     monkeypatch.setattr("backend.core.rollups._common._hour_bundled_root", lambda s: str(tmp_path / "hours"))
 
     fake_con = MagicMock()
-
     monkeypatch.setattr("backend.core.duckdb.rum_source_for", lambda s: dict(s))
     monkeypatch.setattr("backend.core.duckdb.get_connection", lambda *a, **k: fake_con)
     monkeypatch.setattr(_dl, "_ducklake_attach", lambda *a, **k: None)
-    monkeypatch.setattr(
-        "backend.core.iceberg.execute_with_stale_view_retry",
-        lambda con, s, fn, **kw: fn(con),
-    )
+    monkeypatch.setattr("backend.core.iceberg.execute_with_stale_view_retry", lambda con, s, fn, **kw: fn(con))
 
     backfill_calls: list[tuple[object, str, int]] = []
     monkeypatch.setattr(
@@ -942,13 +649,11 @@ def _seeded_file_db(path: Path, hours: int = 4) -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(str(path))
     con.execute(
         "CREATE TABLE client_vitals (timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
-        "metric_rating VARCHAR, pathname VARCHAR, browser VARCHAR, os VARCHAR, device VARCHAR, cid VARCHAR, "
-        "req_id VARCHAR)"
+        "metric_rating VARCHAR, pathname VARCHAR, browser VARCHAR, os VARCHAR, device VARCHAR, cid VARCHAR, req_id VARCHAR)"
     )
     con.execute(
         "CREATE TABLE client_errors (timestamp TIMESTAMPTZ, error_message VARCHAR, error_file VARCHAR, "
-        "error_line INT, error_col INT, pathname VARCHAR, browser VARCHAR, os VARCHAR, device VARCHAR, "
-        "cid VARCHAR, req_id VARCHAR)"
+        "error_line INT, error_col INT, pathname VARCHAR, browser VARCHAR, os VARCHAR, device VARCHAR, cid VARCHAR, req_id VARCHAR)"
     )
     now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     for h in range(hours):
@@ -962,21 +667,19 @@ def _seeded_file_db(path: Path, hours: int = 4) -> duckdb.DuckDBPyConnection:
 
 def _duplicate_keys(con: duckdb.DuckDBPyConnection) -> int:
     return con.execute(
-        "SELECT COUNT(*) FROM (SELECT 1 FROM rum_vitals_aggregates GROUP BY service_id, bucket_start, dimension, value "
-        "HAVING COUNT(*) > 1)"
+        "SELECT COUNT(*) FROM (SELECT 1 FROM rum_vitals_aggregates GROUP BY service_id, bucket_start, dimension, value HAVING COUNT(*) > 1)"
     ).fetchone()[0]
 
 
 def test_concurrent_recomputes_never_duplicate_aggregate_rows(tmp_path: Path):
     con = _seeded_file_db(tmp_path / "rum.duckdb")
     recompute_rum_aggregates(con, "svc")
-
     errors: list[BaseException] = []
 
     def run() -> None:
         try:
             recompute_rum_aggregates(con.cursor(), "svc")
-        except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion below
+        except BaseException as exc:  # noqa: BLE001
             errors.append(exc)
 
     for _ in range(10):
@@ -986,8 +689,7 @@ def test_concurrent_recomputes_never_duplicate_aggregate_rows(tmp_path: Path):
         for t in threads:
             t.join()
 
-    assert errors == []
-    assert _duplicate_keys(con) == 0
+    assert errors == [] and _duplicate_keys(con) == 0
 
 
 def test_heal_rebuilds_hours_whose_total_beacons_row_is_duplicated(tmp_path: Path):
@@ -997,9 +699,7 @@ def test_heal_rebuilds_hours_whose_total_beacons_row_is_duplicated(tmp_path: Pat
     assert _duplicate_keys(con) > 0
 
     healed = backfill_missing_rum_aggregates(con, "svc", lookback_days=30)
-
-    assert healed
-    assert _duplicate_keys(con) == 0
+    assert healed and _duplicate_keys(con) == 0
     assert (
         con.execute("SELECT SUM(event_count) FROM rum_vitals_aggregates WHERE value = 'total_beacons'").fetchone()[0]
         == 40
@@ -1010,27 +710,21 @@ def test_heal_rebuilds_hours_whose_total_beacons_row_is_duplicated(tmp_path: Pat
 def test_get_beacon_health_and_header_stats(in_memory_duckdb):
     con = in_memory_duckdb
     con.execute(
-        "CREATE TABLE client_vitals ("
-        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
+        "CREATE TABLE client_vitals (timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
         "metric_rating VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
     )
     con.execute(
-        "CREATE TABLE client_errors ("
-        "timestamp TIMESTAMPTZ, error_message VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
+        "CREATE TABLE client_errors (timestamp TIMESTAMPTZ, error_message VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
     )
-    now = datetime.now(UTC)
     con.execute(
         "INSERT INTO client_vitals (timestamp, metric_name, metric_value, cid, req_id) VALUES (?, 'LCP', 2.0, 'c1', 'r1')",
-        [now],
+        [datetime.now(UTC)],
     )
     recent_count, last_dt = rum_repo.get_beacon_health(con)
-    assert recent_count == 1
-    assert last_dt is not None
+    assert recent_count == 1 and last_dt is not None
 
     distinct_count, newest_dt = rum_repo.get_header_stats(con)
-    assert distinct_count == 1
-    assert newest_dt is not None
-
+    assert distinct_count == 1 and newest_dt is not None
     assert rum_repo.get_client_vitals_columns(con) == [
         "timestamp",
         "metric_name",
@@ -1044,9 +738,7 @@ def test_get_beacon_health_and_header_stats(in_memory_duckdb):
 
 # ── Merged from tests/core/test_rollup_writers_golden.py ──
 GOLDEN_PATH = Path(__file__).parent / "golden" / "rollup_writers.json"
-
 SERVICE = "svc_golden"
-
 TABLE = "logs_svc_golden"
 
 _LOG_TABLE_SQL = f"""
@@ -1101,21 +793,19 @@ FROM range(0, 2880) AS t(i)
 """
 
 _TMP_RE = re.compile(r"(\.tmp_[a-z0-9_]*?)[0-9a-f]{12}(\.parquet)")
-
 _RANDOM_NAME_RE = re.compile(r"(compacted_|part-|data_)[0-9a-f]{12,32}")
-
 _TMP_DIR_RE = re.compile(r"(rollups/tmp/[A-Za-z0-9_]+?)_[0-9a-f]{8}\b")
-
 _PATHS_RE = re.compile(r"read_parquet\(\[([^\]]*)\]")
+_SHAPE_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2})?|-\d{2})?")
+SCHEMAS: dict[str, list[str]] = {}
+_FIELDS = ["country", "url", "status", "pop", "ua", "cache"]
+_BOT_PATTERN = "Googlebot|curl"
+_BOT_VERSION = "v-golden"
 
 
 class _Recorder:
-    """Forwards to a DuckDB connection while recording every statement."""
-
     def __init__(self, con: duckdb.DuckDBPyConnection, log: list[str], close: bool) -> None:
-        self._con = con
-        self._log = log
-        self._close = close
+        self._con, self._log, self._close = con, log, close
 
     def execute(self, query: str, *args: Any, **kwargs: Any) -> Any:
         self._log.append(query)
@@ -1130,21 +820,9 @@ class _Recorder:
 
 
 def _normalise_sql(q: str, root: str) -> str:
-    q = q.replace(root, "<R>")
-    q = _TMP_RE.sub(r"\1<id>\2", q)
-    q = _RANDOM_NAME_RE.sub(r"\1<id>", q)
-    q = _TMP_DIR_RE.sub(r"\1_<id>", q)
-
-    def _sorted_paths(m: re.Match) -> str:
-        parts = sorted(p.strip() for p in m.group(1).split(","))
-        return "read_parquet([" + ", ".join(parts) + "]"
-
-    q = re.sub(r"\s+", " ", _PATHS_RE.sub(_sorted_paths, q)).strip()
-    # Whitespace next to parentheses is cosmetic too (a multi-line COPY vs the shared one-line helper).
-    return re.sub(r" ?([()]) ?", r"\1", q)
-
-
-_SHAPE_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2})?|-\d{2})?")
+    q = _TMP_DIR_RE.sub(r"\1_<id>", _RANDOM_NAME_RE.sub(r"\1<id>", _TMP_RE.sub(r"\1<id>\2", q.replace(root, "<R>"))))
+    q = _PATHS_RE.sub(lambda m: "read_parquet([" + ", ".join(sorted(p.strip() for p in m.group(1).split(","))) + "]", q)
+    return re.sub(r" ?([()]) ?", r"\1", re.sub(r"\s+", " ", q).strip())
 
 
 def _digest(text: str) -> str:
@@ -1152,11 +830,7 @@ def _digest(text: str) -> str:
 
 
 def _shape(q: str) -> str:
-    """The statement with date/hour literals blanked, for readable diagnostics."""
     return _SHAPE_RE.sub("<date>", q)
-
-
-SCHEMAS: dict[str, list[str]] = {}
 
 
 def _canon(v: Any) -> Any:
@@ -1170,8 +844,7 @@ def _canon(v: Any) -> Any:
 
 
 def _snapshot_tree(
-    root: Path,
-    file_cache: dict[Path, tuple[int, int, dict[str, Any], list[str]]] | None = None,
+    root: Path, file_cache: dict[Path, tuple[int, int, dict[str, Any], list[str]]] | None = None
 ) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for p in sorted(root.rglob("*")):
@@ -1195,11 +868,7 @@ def _snapshot_tree(
         schema = [f"{f.name}:{f.type}" for f in table.schema]
         schema_digest = _digest(json.dumps(schema))
         SCHEMAS[schema_digest] = schema
-        entry = {
-            "schema": schema_digest,
-            "rows": len(rows),
-            "sha": _digest("\n".join(rows)),
-        }
+        entry = {"schema": schema_digest, "rows": len(rows), "sha": _digest("\n".join(rows))}
         if file_cache is not None:
             file_cache[p] = (st.st_mtime_ns, st.st_size, entry, schema)
         out[rel] = entry
@@ -1207,28 +876,6 @@ def _snapshot_tree(
 
 
 def _writers() -> list[tuple[str, Callable[[str, dict, list[str]], int]]]:
-    from backend.core.rollups import (
-        network_health_geo,
-        network_health_heatmap,
-        network_quality,
-        network_rtt,
-        network_speed,
-        network_summary,
-        ngwaf_bots,
-        origin_dims,
-        origin_latency_ts,
-        origin_summary,
-        overview,
-        perf_dims,
-        perf_latency,
-        pop_health,
-        security_dims,
-        sessions,
-        slow_urls,
-        time_series,
-        verified_bots_ts,
-    )
-
     return [
         ("time_series", time_series.build_time_series_bundles),
         ("sessions", sessions.build_session_bundles),
@@ -1254,8 +901,7 @@ def _writers() -> list[tuple[str, Callable[[str, dict, list[str]], int]]]:
 
 
 def _compactors() -> list[tuple[str, Callable[..., int]]]:
-    from backend.core.rollups import day_bundles as d
-
+    d = day_bundles
     return [
         ("origin_summary", d.compact_origin_summary_closed_days_to_daily),
         ("network_rtt", d.compact_network_rtt_closed_days_to_daily),
@@ -1274,21 +920,11 @@ def _compactors() -> list[tuple[str, Callable[..., int]]]:
     ]
 
 
-_FIELDS = ["country", "url", "status", "pop", "ua", "cache"]
-
-_BOT_PATTERN = "Googlebot|curl"
-
-_BOT_VERSION = "v-golden"
-
-
 def _closed_hours() -> list[str]:
     return [f"2026-06-{d}-{h:02d}" for d in (13, 14) for h in range(24)]
 
 
 def _write_ngwaf_cache(path: Path) -> None:
-    """The SQLite ``ngwaf_bots`` cache the writer joins ``waf_req_id`` against."""
-    import sqlite3
-
     con = sqlite3.connect(path)
     con.execute("CREATE TABLE ngwaf_bots (waf_req_id TEXT, bot_name TEXT, category TEXT)")
     rows = [(f"req{i}", f"bot{i % 3}", None if i % 5 == 0 else f"cat{i % 2}") for i in range(0, 2880, 7)]
@@ -1299,7 +935,6 @@ def _write_ngwaf_cache(path: Path) -> None:
 
 
 def _write_data_partitions(shared: duckdb.DuckDBPyConnection, cache_root: Path, hours: list[str]) -> None:
-    """Committed raw partitions (``data/timestamp_hour=H``) the wellknown-bots writer reads."""
     for h in hours:
         d = cache_root / "data" / f"timestamp_hour={h}"
         d.mkdir(parents=True)
@@ -1312,7 +947,6 @@ def _write_data_partitions(shared: duckdb.DuckDBPyConnection, cache_root: Path, 
 
 
 def _plant_stale_wellknown(shared: duckdb.DuckDBPyConnection, cache_root: Path) -> None:
-    """One data-backed hour stamped with an old version, one orphaned stale hour with no raw data."""
     root = cache_root / "rollups" / "wellknown_bots"
     for hour, wipe in (("2026-06-13-05", True), ("2026-06-01-05", False)):
         d = root / f"hour={hour}"
@@ -1327,21 +961,17 @@ def _plant_stale_wellknown(shared: duckdb.DuckDBPyConnection, cache_root: Path) 
 
 
 def _run_pipeline(tmp_path: Path) -> tuple[dict[str, Any], dict[str, str]]:
-    from backend.core import rollups
-    from backend.core.rollups import day_bundles, hour_bundles, wellknown_bots
-
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
     root = str(cache_root)
     log: list[str] = []
 
-    shared = duckdb.connect(":memory:")
-    shared.execute("PRAGMA threads=1")
-    shared.execute("SET TimeZone='UTC'")
+    shared, mem_shared = duckdb.connect(":memory:"), duckdb.connect(":memory:")
+    for c in (shared, mem_shared):
+        c.execute("PRAGMA threads=1")
+        c.execute("SET TimeZone='UTC'")
     shared.execute(_LOG_TABLE_SQL)
-    mem_shared = duckdb.connect(":memory:")
-    mem_shared.execute("PRAGMA threads=1")
-    mem_shared.execute("SET TimeZone='UTC'")
+
     ngwaf_db = tmp_path / "ngwaf_bot_cache.db"
     _write_ngwaf_cache(ngwaf_db)
 
@@ -1440,8 +1070,6 @@ def test_writers_match_golden(tmp_path: Path) -> None:
     assert got.keys() == want.keys()
     for name in want:
         if got[name] != want[name]:
-            import difflib
-
             new = [h for h in got[name]["sql"] if h not in want[name]["sql"]]
             detail = "\n".join(f"new statement: {texts.get(h)}" for h in new[:3])
             lines = difflib.unified_diff(

@@ -13,7 +13,7 @@ import { DndContext, KeyboardSensor, MouseSensor, TouchSensor, closestCenter, us
 import { restrictToHorizontalAxis } from '@dnd-kit/modifiers'
 import { arrayMove, SortableContext, horizontalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { formatBytes, formatCount, formatCountMaybe } from '@/lib/format'
+import { formatBytes, formatCount, formatCountMaybe, cn, copyToClipboard, isIpFamilyField } from "@/lib/utils";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import {
   DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent,
@@ -29,7 +29,6 @@ import { TimeAgo } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { getApiBase } from '@/lib/api'
 import type { Schema } from '@/types/api'
 import type { components } from '@/types/api.generated'
-import { cn, copyToClipboard, isIpFamilyField } from '@/lib/utils'
 import { useFilterStore, usePopGeoStore } from '@/stores/filterStore'
 
 export interface DataTableBaseProps<TData, TValue> {

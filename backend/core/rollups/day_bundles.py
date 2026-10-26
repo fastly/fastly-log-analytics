@@ -1,8 +1,3 @@
-"""Per-day bundling: combine per-field day parquets into
-``rollups/day_bundled/day=D/all_fields.parquet``, plus the closed-day
-compactor that builds the per-field day parquets in the first place.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -16,12 +11,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from backend.utils.date_utils import parse_day_key_strict, parse_hour_key_strict
 from backend.utils.sql_validator import escape_sql_literal
+from backend.utils.telemetry import parse_day_key_strict, parse_hour_key_strict
 
 if TYPE_CHECKING:
     import duckdb
-
 from ._common import (
     DAY_BUNDLE_FILENAME,
     DAY_BUNDLE_TOP_K,
@@ -84,12 +78,6 @@ logger = logging.getLogger(__name__)
 
 
 def _link_day_bundle_alias(src_path: str, dst_path: str) -> None:
-    """Create a hardlink alias from src_path to dst_path, falling back to copy.
-
-    The alias is staged at ``dst_path + ".tmp"`` and renamed into place, so a
-    reader never sees ``dst_path`` missing and a failure leaves any existing
-    alias untouched.
-    """
     tmp_path = dst_path + ".tmp"
     Path(tmp_path).unlink(missing_ok=True)
     try:
@@ -108,27 +96,8 @@ def _link_day_bundle_alias(src_path: str, dst_path: str) -> None:
 
 
 def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
-    """Combine per-field day parquets into one bundled parquet per day.
-
-    For each day token, reads every per-field parquet under
-    ``rollups/day/field=*/day=DAY/*.parquet`` and writes a single
-    bundled file at
-    ``rollups/day_bundled/day=DAY/all_fields.parquet``.
-
-    Skips days where:
-      - No per-field files exist (nothing to bundle).
-      - A bundled file already exists and is fresh enough to skip
-        rebuild (per-field mtime <= bundle mtime).
-
-    Returns the count of days that were rebuilt.
-
-    Skip the active day — per-field day files for in-progress days
-    don't exist yet (compact_closed_days_to_daily skips them too).
-    Mirrors :func:`bundle_hours` in structure / lock semantics.
-    """
     if not days:
         return 0
-
     import duckdb
 
     day_per_field_root = _day_rollups_root(source)
@@ -138,10 +107,7 @@ def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
     os.makedirs(bundled_root, exist_ok=True)
     lock_key = source.get("name", "default")
     active_day = datetime.now(UTC).strftime("%Y-%m-%d")
-
     rebuilt = 0
-    # :memory: DuckDB — see bundle_hours for the rationale (avoid
-    # contention on the per-service .duckdb file held by uvicorn).
     from backend.core.duckdb import get_memory_connection
 
     con = get_memory_connection()
@@ -149,20 +115,16 @@ def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
         for day in days:
             if day == active_day:
                 continue
-            # Defensive: validate day token format.
             try:
                 parse_day_key_strict(day)
             except ValueError:
                 continue
-
             collected = collect_per_field_partition_parquets(day_per_field_root, f"day={day}")
             if collected is None:
                 continue
             per_field_paths, updated_fields, max_src_mtime = collected
-
             if not per_field_paths:
                 continue
-
             bundle_dir = os.path.join(bundled_root, f"day={day}")
             bundle_path = os.path.join(bundle_dir, DAY_BUNDLE_FILENAME)
             alias_dir_path = os.path.join(bundle_dir, f"day_bundle_{day}.parquet")
@@ -178,32 +140,10 @@ def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
                         continue
                 except OSError:
                     pass
-
             os.makedirs(bundle_dir, exist_ok=True)
             tmp_path = os.path.join(bundle_dir, f".tmp_{uuid.uuid4().hex[:12]}.parquet")
             paths_sql = quote_path_list(per_field_paths)
 
-            # Truncate to top-K per field at bundle-write time, plus an
-            # ``__other__`` synthetic row that aggregates everything
-            # beyond the cut. The dashboard top-N panel renders 10
-            # values; keeping top-K per (field, day) gives generous
-            # headroom for the global top-10 across a 30-day window
-            # while cutting bundle row count — most of the
-            # ``top_n_rollups:rolled_res`` cost on prod 30d.
-            #
-            # __other__ keeps ``field_totals[field]`` correct (the
-            # dashboard derives it via SUM across all rollup rows for
-            # the field; without __other__ the dashboard's "total"
-            # would undercount by ~90% for high-cardinality fields).
-            # The reader filters ``value = '__other__'`` from the
-            # displayed top-N rows but includes its count in the
-            # field totals — see execute_top_n_rollups.
-            #
-            # Also preserve existing bundle rows for fields NOT in
-            # ``updated_fields`` — because ``_cleanup_per_field_day_after_bundle``
-            # sweeps per-field files after bundling, a partial per-field
-            # update would otherwise drop every untouched field from the
-            # bundle.
             def _build_day_bundle_query(src_union_sql: str = "") -> str:
                 return (
                     f"COPY ("
@@ -268,7 +208,6 @@ def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
             rebuilt += 1
     finally:
         con.close()
-
     return rebuilt
 
 
@@ -278,21 +217,11 @@ def backfill_day_bundles(
     max_days: int | None = None,
     lookback_days: int | None = None,
 ) -> int:
-    """One-shot bulk bundling for all closed days that don't yet have a
-    per-day bundled file (or whose bundle is older than its source per-
-    field files).
-
-    Walks ``rollups/day/field=*/day=*/`` to discover candidate days and
-    calls :func:`bundle_days` on the subset that needs rebuilding.
-    Idempotent — bundle_days skips up-to-date days via mtime comparison.
-    """
     day_per_field_root = _day_rollups_root(source)
     bundled_root = _day_bundled_root(source)
     if not os.path.isdir(day_per_field_root):
         return 0
-
     active_day, cutoff_day = _closed_day_window(lookback_days)
-
     all_days: set[str] = set()
     try:
         for field_entry in os.listdir(day_per_field_root):
@@ -313,7 +242,6 @@ def backfill_day_bundles(
                 continue
     except OSError:
         return 0
-
     to_bundle: list[str] = []
     for day in sorted(all_days):
         if cutoff_day is not None and day < cutoff_day:
@@ -323,7 +251,6 @@ def backfill_day_bundles(
             to_bundle.append(day)
         if max_days and len(to_bundle) >= max_days:
             break
-
     if not to_bundle:
         return 0
     return bundle_days(service_id, source, to_bundle)
@@ -335,9 +262,6 @@ def _cleanup_per_field_day_after_bundle(
     bundle_path: str,
     service_id: str,
 ) -> None:
-    """Sweep per-field day parquet directories for ``day`` after
-    the day bundle has been published.
-    """
     cleanup_per_field_after_bundle(
         day_per_field_root,
         f"day={day}",
@@ -350,75 +274,20 @@ def _cleanup_per_field_day_after_bundle(
     )
 
 
-# ── Closed-day compaction (item 17 / RC-9) ──────────────────────────────────
-
-
 def compact_closed_days_to_daily(
     service_id: str,
     source: dict,
     lookback_days: int | None = None,
 ) -> int:
-    """Consolidate closed-day per-hour rollup parquet into per-day parquet.
-
-    For each (field, closed-day) tuple where either (a) no per-day parquet
-    exists, or (b) some constituent per-hour parquet has a newer mtime
-    than the per-day parquet, rebuild the per-day parquet by summing the
-    24 hour parquets into one. Active (current UTC) day is always skipped
-    — it's still being written.
-
-    The per-day file is written via DuckDB COPY to a temp path and
-    renamed into place under the per-service iceberg lock so concurrent
-    `execute_top_n_rollups` readers never see a half-written file. On
-    failure the per-day file is left in its previous state and the
-    reader transparently falls back to per-hour parquet.
-
-    Returns the count of (field, day) tuples that were rebuilt.
-
-    Operators can call this from a maintenance script or wire it into a
-    daily cron. The reader works whether or not this has ever run — when
-    a per-day file is missing, `execute_top_n_rollups` reads the source
-    per-hour files. When present, it reads ONE file per closed day per
-    field instead of 24, slashing the file-open overhead that dominates
-    dashboard cold-load wall time on 7-day queries (1,512 → 30-some
-    files per the local audit).
-    """
     import duckdb
 
     hour_root = _rollups_root(source)
     day_root = _day_rollups_root(source)
-    # Either source-of-truth is enough: per-field hour tree (live, pre-
-    # bundle) OR bundled-hour tree (post-bundle, after the per-field
-    # sweep). A service with neither has nothing to compact yet.
     if not os.path.isdir(hour_root) and not os.path.isdir(_hour_bundled_root(source)):
         return 0
-
     active_day, cutoff_day = _closed_day_window(lookback_days)
-
     lock_key = source.get("name", "default")
     rebuilt = 0
-
-    # In-memory DuckDB — we only need it to run COPY against parquet files
-    # on the local filesystem. Opening the per-service ``.duckdb`` file
-    # would contend with uvicorn's RW connection on the SAME file (held
-    # for view rebuilds), since DuckDB does not allow mixed RW+RO from
-    # one path. On the 2026-06-06 prod incident an RO ``get_connection``
-    # blocked 5+ minutes on that lock and the compaction never produced
-    # any per-day files. ``:memory:`` sidesteps the contention entirely
-    # — the compaction reads + writes parquet via DuckDB's I/O layer,
-    # never touching any persistent DuckDB database.
-    # Pre-pass: enumerate every closed hour that ``hour_bundled`` covers,
-    # bucketed by day. The bundler's ``_cleanup_per_field_after_bundle``
-    # sweep deletes ``rollups/hour/field=*/hour=H/`` once an hour-bundle
-    # is published, so the per-field per-hour tree the loop below walks
-    # is the WRONG source-of-truth for closed bundled hours — the data
-    # is in ``hour_bundled/hour=H/all_fields.parquet`` instead. Without
-    # this fallback the compactor wrote per-field-per-day files holding
-    # only the small sliver of hours that hadn't yet been bundled-and-
-    # cleaned-up, and the reader's day_covered_by_any_field check then
-    # treated the partial day as authoritative — silently dropping the
-    # bundled hours for every field whose per-field-per-day was thinner
-    # than the bundle. Surfaced 2026-06-15 as a 47k-row POST undercount
-    # on the dashboard's method panel.
     bundled_hour_root_path = _hour_bundled_root(source)
     hour_bundled_by_day: dict[str, list[str]] = {}
     if os.path.isdir(bundled_hour_root_path):
@@ -439,16 +308,10 @@ def compact_closed_days_to_daily(
                     hour_bundled_by_day.setdefault(day, []).append(bundle_path)
         except OSError:
             pass
-
     from backend.core.duckdb import get_memory_connection
 
     con = get_memory_connection()
     try:
-        # Field set spans both the per-field hour tree (live, not-yet-bundled
-        # hours) AND any field that appears in a bundled-hour file (which is
-        # every field with data on a closed-and-bundled day, even if its
-        # per-field hour dir has since been cleaned up). Union the two so the
-        # compactor doesn't miss fields whose entire window is bundled.
         field_set: set[str] = set()
         try:
             for entry in os.listdir(hour_root):
@@ -458,8 +321,6 @@ def compact_closed_days_to_daily(
                         field_set.add(f)
         except OSError:
             pass
-        # Discover fields present in any bundled-hour file via a single
-        # SELECT DISTINCT — cheap relative to the rest of the daily job.
         if hour_bundled_by_day:
             all_bundle_paths = sorted({p for paths in hour_bundled_by_day.values() for p in paths})
             try:
@@ -469,11 +330,9 @@ def compact_closed_days_to_daily(
                         field_set.add(f)
             except duckdb.Error:
                 pass
-
         for field in sorted(field_set):
             field_entry = f"field={field}"
             field_hour_dir = os.path.join(hour_root, field_entry)
-            # Bucket hour-dirs by their YYYY-MM-DD prefix.
             by_day: dict[str, list[str]] = {}
             try:
                 hour_entries = os.listdir(field_hour_dir) if os.path.isdir(field_hour_dir) else []
@@ -483,7 +342,6 @@ def compact_closed_days_to_daily(
                 if not hour_entry.startswith("hour="):
                     continue
                 hour = hour_entry[len("hour=") :]
-                # hour shape: YYYY-MM-DD-HH — first 10 chars are the day.
                 if len(hour) < 13:
                     continue
                 day = hour[:10]
@@ -498,8 +356,6 @@ def compact_closed_days_to_daily(
                             by_day.setdefault(day, []).append(os.path.join(hour_dir, fname))
                 except OSError:
                     continue
-
-            # Days touched by either per-field hour OR bundled-hour data.
             all_days = set(by_day.keys()) | set(hour_bundled_by_day.keys())
             for day in all_days:
                 if cutoff_day is not None and day < cutoff_day:
@@ -511,8 +367,6 @@ def compact_closed_days_to_daily(
                 day_dir = os.path.join(day_root, field_entry, f"day={day}")
                 day_file = os.path.join(day_dir, "compacted.parquet")
                 all_source_paths = hour_paths + bundled_paths
-                # Skip if the per-day file is newer than every source hour
-                # parquet — already up to date.
                 try:
                     day_mtime = os.path.getmtime(day_file)
                     max_hour_mtime = max(os.path.getmtime(p) for p in all_source_paths)
@@ -520,15 +374,8 @@ def compact_closed_days_to_daily(
                         continue
                 except OSError:
                     pass  # day file missing → rebuild
-
                 tmp_file = os.path.join(day_dir, f".tmp_{uuid.uuid4().hex[:12]}.parquet")
                 os.makedirs(day_dir, exist_ok=True)
-                # Per-field hour parquets have ``field`` in the hive path
-                # (hive_partitioning=1 supplies it); bundled-hour parquets
-                # have ``field`` as a regular column (hive_partitioning=0).
-                # SQL branches per source so the schemas match in UNION ALL.
-                # The outer WHERE filters bundled-hour rows down to JUST
-                # this field — the file contains every field's data.
                 branches = []
                 if hour_paths:
                     paths_sql = quote_path_list(hour_paths)
@@ -538,19 +385,12 @@ def compact_closed_days_to_daily(
                     )
                 if bundled_paths:
                     paths_sql = quote_path_list(bundled_paths)
-                    # Single-quote-escape the field name for the inline literal.
                     safe_field_sql = escape_sql_literal(field)
                     branches.append(
                         f"SELECT field, value, CAST(count AS BIGINT) AS count "
                         f"FROM read_parquet([{paths_sql}], hive_partitioning=0) "
                         f"WHERE field = '{safe_field_sql}'"
                     )
-                # CAST to BIGINT so the per-day file's count column matches
-                # the per-hour files (which are BIGINT). The reader's
-                # UNION ALL of day + hour requires matching column types
-                # per column; without this CAST, the day file lands as
-                # DOUBLE and the union breaks (and the dashboard top-N
-                # tabs go blank — 2026-06-06 incident).
                 copy_sql = (
                     f"COPY ("
                     f"SELECT field, value, CAST(SUM(count) AS BIGINT) AS count "
@@ -570,7 +410,6 @@ def compact_closed_days_to_daily(
                     )
                     unlink_quiet(tmp_file)
                     continue
-
                 try:
                     publish_temp_parquet(tmp_file, day_file, lock_key)
                     rebuilt += 1
@@ -578,11 +417,7 @@ def compact_closed_days_to_daily(
                     logger.warning("[rollups] %s: rename to %s failed: %s", service_id, day_file, e)
     finally:
         con.close()
-
     return rebuilt
-
-
-# ── origin_summary closed-day compaction ────────────────────────────────────
 
 
 def _make_day_compactor(
@@ -590,8 +425,6 @@ def _make_day_compactor(
     *,
     pre_hook: Callable[[dict], object] | None = None,
 ) -> Callable[..., int]:
-    """Build a ``compact_*_closed_days_to_daily`` function bound to ``jobs``."""
-
     def _compact(
         service_id: str,
         source: dict,
@@ -658,20 +491,16 @@ def _network_rtt_copy_sql(paths_sql: str, tmp_file: str) -> str:
 compact_network_rtt_closed_days_to_daily = _make_day_compactor(
     [(NETWORK_RTT_BUNDLE_FILENAME, ".tmp_nr_", _network_rtt_copy_sql)]
 )
-
 compact_network_speed_closed_days_to_daily = _make_day_compactor(
     [(NETWORK_SPEED_BUNDLE_FILENAME, ".tmp_ns_", _sum_count_copy_sql("asn, c_speed"))]
 )
-
 compact_ngwaf_bots_closed_days_to_daily = _make_day_compactor(
     [(NGWAF_BOTS_BUNDLE_FILENAME, ".tmp_nb_", _sum_count_copy_sql("bot_name, wellknown_bot_name, category"))],
     pre_hook=_purge_stale_ngwaf_bots_parquets,
 )
-
 compact_ngwaf_bots_ts_closed_days_to_daily = _make_day_compactor(
     [(NGWAF_BOTS_TS_BUNDLE_FILENAME, ".tmp_nbts_", _sum_count_copy_sql("bucket_ts, bot_name"))]
 )
-
 compact_verified_bots_ts_closed_days_to_daily = _make_day_compactor(
     [(VERIFIED_BOTS_TS_BUNDLE_FILENAME, ".tmp_vbts_", _sum_count_copy_sql("bucket_ts, bot_type"))]
 )
@@ -713,7 +542,7 @@ def _perf_latency_copy_sql(paths_sql: str, tmp_file: str) -> str:
         f"      CAST({wavg('p99_us', 'requests')} AS DOUBLE) AS p99_us, "
         f"      ROW_NUMBER() OVER ("
         f"        ORDER BY {wavg('p99_us', 'requests')} DESC"
-        f"      ) AS rn "
+        f") AS rn "
         f"    FROM read_parquet([{paths_sql}]) "
         f"    GROUP BY value"
         f"  ) WHERE rn <= {PERF_LATENCY_BUNDLE_TOP_K}"
@@ -845,7 +674,7 @@ def _security_bot_eff_copy_sql(paths_sql: str, tmp_file: str) -> str:
         f"  ), "
         f"  ranked AS ("
         f"    SELECT *, ROW_NUMBER() OVER (PARTITION BY kind ORDER BY resp_bytes DESC, cnt DESC) AS rn FROM merged"
-        f"  ) "
+        f") "
         f"  SELECT kind, key, cnt, resp_bytes FROM ranked "
         f"  WHERE kind != 'ua' OR rn <= {SECURITY_BOT_EFF_UA_TOP_K}"
         f") {parquet_zstd_target(tmp_file)}"
@@ -859,7 +688,6 @@ compact_security_proxies_closed_days_to_daily = _make_day_compactor(
         (SECURITY_BOT_EFF_BUNDLE_FILENAME, ".tmp_sp_", _security_bot_eff_copy_sql),
     ]
 )
-
 compact_perf_dims_closed_days_to_daily = _make_day_compactor(
     [(PERF_TTL_DIST_BUNDLE_FILENAME, ".tmp_pd_", _bucket_min_copy_sql("min_ttl"))]
 )
@@ -921,13 +749,6 @@ compact_time_series_closed_days_to_daily = _make_day_compactor(
 
 
 def rebuild_time_series_days(service_id: str, source: dict, days: list[str]) -> int:
-    """Repair only selected days from raw, including hours retired from disk.
-
-    All 24 hour writes (including empty hours) use one pinned source connection
-    and private staging, invisible to ordinary compactors. Publish only the
-    completed day; leave official hourly files untouched. Requires retained raw
-    history; this does not reconstruct expired request events.
-    """
     from contextlib import closing
     from tempfile import TemporaryDirectory
 
@@ -945,7 +766,6 @@ def rebuild_time_series_days(service_id: str, source: dict, days: list[str]) -> 
     active_day = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     if any(start >= active_day for start in starts):
         raise ValueError("rollup day is not closed")
-
     rebuilt = 0
     for day, start in zip(days, starts, strict=True):
         hours = [(start + timedelta(hours=h)).strftime("%Y-%m-%d-%H") for h in range(24)]
@@ -1019,16 +839,6 @@ def retire_compacted_hour_bundles(
     source: dict,
     lookback_days: int | None = 30,
 ) -> tuple[int, int]:
-    """Safely unlink the 24 hourly bundle files once the day bundle is verified.
-
-    For closed calendar days strictly before today and within lookback_days,
-    checks if a valid day bundle exists and passes read validation (non-zero row count).
-    If valid, safely unlinks constituent hour bundle files (all_fields.parquet)
-    under hour_bundled/hour=YYYY-MM-DD-HH/ and cleans up empty hour dirs.
-
-    Returns:
-        tuple[int, int]: (retired_files_count, retired_bytes_count)
-    """
     from backend.core.duckdb import get_memory_connection
     from backend.core.iceberg.view import _get_service_lock
 
@@ -1036,14 +846,11 @@ def retire_compacted_hour_bundles(
     hour_bundled_root = _hour_bundled_root(source)
     if not os.path.isdir(bundled_root) or not os.path.isdir(hour_bundled_root):
         return 0, 0
-
     active_day, cutoff_day = _closed_day_window(lookback_days)
-
     retired_files = 0
     retired_bytes = 0
     lock_key = source.get("name", "default")
     dry_run = os.environ.get("ROLLUP_CLEANUP_DRY_RUN") == "1"
-
     candidate_days: set[str] = set()
     try:
         for entry in os.listdir(bundled_root):
@@ -1057,7 +864,6 @@ def retire_compacted_hour_bundles(
                     candidate_days.add(d)
     except OSError:
         return 0, 0
-
     con = get_memory_connection()
     try:
         for day in sorted(candidate_days):
@@ -1075,8 +881,6 @@ def retire_compacted_hour_bundles(
             )
             if not valid_path:
                 continue
-
-            # Read validation: verify day bundle can be read and has rows
             try:
                 res = con.execute(f"SELECT count(*) FROM read_parquet('{valid_path}')").fetchone()
                 row_cnt = res[0] if res else 0
@@ -1090,8 +894,6 @@ def retire_compacted_hour_bundles(
                     e,
                 )
                 continue
-
-            # Candidate constituent hours for this day
             day_ip_spread_exists = os.path.isfile(os.path.join(bundled_root, f"day={day}", IP_SPREAD_BUNDLE_FILENAME))
             target_filenames = (
                 (DAY_BUNDLE_FILENAME, IP_SPREAD_BUNDLE_FILENAME) if day_ip_spread_exists else (DAY_BUNDLE_FILENAME,)
@@ -1118,7 +920,6 @@ def retire_compacted_hour_bundles(
                                 target_file,
                                 e,
                             )
-
                 if not dry_run and os.path.isdir(hour_dir):
                     try:
                         os.rmdir(hour_dir)
@@ -1126,13 +927,7 @@ def retire_compacted_hour_bundles(
                         pass
     finally:
         con.close()
-
     return retired_files, retired_bytes
-
-
-# ---------------------------------------------------------------------------
-# Per-hour bundling (formerly backend.core.rollups.hour_bundles)
-# ---------------------------------------------------------------------------
 
 
 def _bundle_per_field_hours_impl(
@@ -1149,17 +944,14 @@ def _bundle_per_field_hours_impl(
 ) -> int:
     if not hours:
         return 0
-
     import duckdb
 
     bundled_root = _hour_bundled_root(source)
     os.makedirs(bundled_root, exist_ok=True)
     lock_key = source.get("name", "default")
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
-
     if require_root_exists and not os.path.isdir(per_field_root):
         return 0
-
     rebuilt = 0
     from backend.core.duckdb import get_memory_connection
 
@@ -1170,15 +962,12 @@ def _bundle_per_field_hours_impl(
                 continue
             if parse_hour_token(hour) is None:
                 continue
-
             collected = collect_per_field_partition_parquets(per_field_root, f"hour={hour}")
             if collected is None:
                 continue
             per_field_paths, updated_fields, max_src_mtime = collected
-
             if not per_field_paths:
                 continue
-
             bundle_dir = os.path.join(bundled_root, f"hour={hour}")
             bundle_path = os.path.join(bundle_dir, bundle_filename)
             if os.path.exists(bundle_path):
@@ -1188,7 +977,6 @@ def _bundle_per_field_hours_impl(
                         continue
                 except OSError:
                     pass
-
             os.makedirs(bundle_dir, exist_ok=True)
             tmp_path = os.path.join(bundle_dir, f".tmp_{uuid.uuid4().hex[:12]}.parquet")
             paths_sql = quote_path_list(per_field_paths)
@@ -1223,7 +1011,6 @@ def _bundle_per_field_hours_impl(
                     logger.warning("[rollups] %s: %s COPY failed for hour=%s: %s", service_id, err_label, hour, e)
                     unlink_quiet(tmp_path)
                     continue
-
             publish_temp_parquet(
                 tmp_path,
                 bundle_path,
@@ -1233,12 +1020,10 @@ def _bundle_per_field_hours_impl(
             rebuilt += 1
     finally:
         con.close()
-
     return rebuilt
 
 
 def bundle_hours(service_id: str, source: dict, hours: list[str]) -> int:
-    """Combine per-field hour parquets into one bundled parquet per hour."""
     return _bundle_per_field_hours_impl(
         service_id,
         source,
@@ -1253,10 +1038,8 @@ def bundle_hours(service_id: str, source: dict, hours: list[str]) -> int:
 
 
 def stamp_empty_hour_sentinels(service_id: str, source: dict, hours: list[str]) -> int:
-    """Write an EMPTY sentinel bundle for closed hours that have NO rows."""
     if not hours:
         return 0
-
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -1266,7 +1049,6 @@ def stamp_empty_hour_sentinels(service_id: str, source: dict, hours: list[str]) 
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
     schema = pa.schema([("field", pa.string()), ("value", pa.string()), ("count", pa.int64())])
     empty_table = pa.table({"field": [], "value": [], "count": []}, schema=schema)
-
     stamped = 0
     for hour in hours:
         if hour >= active_hour:
@@ -1290,7 +1072,6 @@ def stamp_empty_hour_sentinels(service_id: str, source: dict, hours: list[str]) 
 
 
 def bundle_hours_ip_spread(service_id: str, source: dict, hours: list[str]) -> int:
-    """Combine per-field IP-spread hour parquets into one bundled parquet per hour."""
     return _bundle_per_field_hours_impl(
         service_id,
         source,
@@ -1312,9 +1093,6 @@ def _cleanup_per_field_after_bundle(
     bundle_path: str,
     service_id: str,
 ) -> None:
-    """Sweep the per-field per-hour parquet directories for ``hour`` after
-    a fresh hour bundle has been published.
-    """
     cleanup_per_field_after_bundle(
         hour_per_field_root,
         f"hour={hour}",
@@ -1333,9 +1111,6 @@ def _cleanup_ip_spread_per_field_after_bundle(
     bundle_path: str,
     service_id: str,
 ) -> None:
-    """Sweep the per-field IP-spread parquet directories for ``hour`` after
-    a fresh hour bundle has been published.
-    """
     cleanup_per_field_after_bundle(
         ip_spread_per_field_root,
         f"hour={hour}",
@@ -1346,11 +1121,6 @@ def _cleanup_ip_spread_per_field_after_bundle(
         cleanup_label="ip_spread cleanup",
         logger=logger,
     )
-
-
-# ---------------------------------------------------------------------------
-# Incremental partial-hour rollup (folded from backend.core.rollups.partial_hour)
-# ---------------------------------------------------------------------------
 
 
 def partial_hour_root(source: dict) -> str:
@@ -1446,8 +1216,6 @@ def read_partial_hour_all_fields(
 
 
 def read_partial_hour_total(source: dict, hour: str, con: duckdb.DuckDBPyConnection | None = None) -> int:
-    """Return the whole-merge request count for ``hour`` (0 if no partial
-    rollup exists yet, or if it somehow has no ``__total__`` row)."""
     path = _all_fields_path(source, hour)
     sql = f"SELECT count FROM read_parquet('{path}') WHERE field = '{TOTAL_FIELD}' AND value = '' LIMIT 1"
 
@@ -1459,21 +1227,16 @@ def read_partial_hour_total(source: dict, hour: str, con: duckdb.DuckDBPyConnect
 
 
 def _list_new_source_files(source: dict, hour: str, watermark: float) -> list[str]:
-    """Buffer + active-hour-partition parquets newer than ``watermark``."""
     from backend.core.duckdb import _cache_dir
 
     cache_dir = _cache_dir(source)
-    dirs = [
-        os.path.join(cache_dir, "buffer"),
-        os.path.join(cache_dir, "data", f"timestamp_hour={hour}"),
-    ]
+    dirs = [os.path.join(cache_dir, "buffer"), os.path.join(cache_dir, "data", f"timestamp_hour={hour}")]
     try:
         from backend.core.iceberg.buffer import _tombstoned_parquet_paths
 
         tombstoned = _tombstoned_parquet_paths(os.path.join(cache_dir, "buffer"))
     except Exception:
         tombstoned = set()
-
     out: list[str] = []
     for d in dirs:
         try:
@@ -1495,7 +1258,6 @@ def _list_new_source_files(source: dict, hour: str, watermark: float) -> list[st
 
 
 def merge_partial_hour(service_id: str, source: dict, fields: list[str]) -> dict:
-    """One incremental merge tick for the currently-active hour."""
     from backend.core.iceberg.view import _get_service_lock
 
     lock_key = source.get("name", service_id)
@@ -1508,7 +1270,6 @@ def _merge_partial_hour_locked(service_id: str, source: dict, fields: list[str])
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
     existing_path = _all_fields_path(source, active_hour)
     existing_corrupt = False
-
     from backend.core.duckdb import get_memory_connection
 
     if os.path.isfile(existing_path):
@@ -1527,40 +1288,32 @@ def _merge_partial_hour_locked(service_id: str, source: dict, fields: list[str])
             existing_corrupt = True
         finally:
             probe_con.close()
-
     watermark = 0.0 if existing_corrupt else read_partial_hour_watermark(source, active_hour)
     new_files = _list_new_source_files(source, active_hour, watermark)
     if not new_files:
         return {"hour": active_hour, "new_files": 0, "duration_ms": (time.perf_counter() - t0) * 1000}
-
     safe_fields = [f for f in fields if _is_safe_ident(f) and f != TOTAL_FIELD]
-
     con = get_memory_connection()
     try:
         con.execute("SET TimeZone='UTC';")
         paths_sql = quote_path_list(new_files)
         table_ident = f"read_parquet([{paths_sql}], union_by_name=true)"
-
         desc_rows = con.execute(f"DESCRIBE SELECT * FROM {table_ident} LIMIT 0").fetchall()
         actual_cols = {row[0] for row in desc_rows}
         available_fields = [f for f in safe_fields if f in actual_cols]
-
         hour_start = parse_hour_key_strict(active_hour)
         hour_end = hour_start + timedelta(hours=1)
         where_sql = (
             f"timestamp >= TIMESTAMP '{hour_start.isoformat()}' AND timestamp < TIMESTAMP '{hour_end.isoformat()}'"
         )
-
         existing_sql = ""
         if not existing_corrupt and os.path.isfile(existing_path):
             existing_sql = (
                 f" UNION ALL SELECT field, value, count FROM read_parquet({quote_path_list([existing_path])})"
             )
-
         total_select = (
             f"SELECT '{TOTAL_FIELD}' AS field, '' AS value, COUNT(*) AS count FROM {table_ident} WHERE {where_sql}"
         )
-
         if available_fields:
             per_field_selects = [_build_copy_query(table_ident, f, where_sql) for f in available_fields]
             increment_sql = " UNION ALL ".join(f"({s})" for s in per_field_selects)
@@ -1572,18 +1325,10 @@ def _merge_partial_hour_locked(service_id: str, source: dict, fields: list[str])
                 select_sources = f"{existing_clean} UNION ALL ({total_select})"
             else:
                 select_sources = f"{total_select}"
-
         merged_sql = f"""
-            SELECT field, value, CAST(count AS BIGINT) AS count FROM (
-                SELECT field, value, SUM(count) AS count,
-                       ROW_NUMBER() OVER (PARTITION BY field ORDER BY SUM(count) DESC) AS rn
-                FROM (
-                    {select_sources}
-                )
-                GROUP BY field, value
-            ) WHERE rn <= {TOP_K}
-        """
-
+        SELECT field, value, CAST(count AS BIGINT) AS count FROM ( SELECT field, value, SUM(count) AS count,
+        ROW_NUMBER() OVER (PARTITION BY field ORDER BY SUM(count) DESC) AS rn FROM ( {select_sources} ) GROUP BY field, value ) WHERE rn <= {TOP_K}
+    """
         d = partial_hour_dir(source, active_hour)
         os.makedirs(d, exist_ok=True)
         tmp_path = os.path.join(d, f".tmp_{uuid.uuid4().hex[:12]}.parquet")
@@ -1620,15 +1365,9 @@ def _merge_partial_hour_locked(service_id: str, source: dict, fields: list[str])
                         else:
                             select_sources = f"{total_select}"
                     merged_sql = f"""
-                        SELECT field, value, CAST(count AS BIGINT) AS count FROM (
-                            SELECT field, value, SUM(count) AS count,
-                                   ROW_NUMBER() OVER (PARTITION BY field ORDER BY SUM(count) DESC) AS rn
-                            FROM (
-                                {select_sources}
-                            )
-                            GROUP BY field, value
-                        ) WHERE rn <= {TOP_K}
-                    """
+        SELECT field, value, CAST(count AS BIGINT) AS count FROM ( SELECT field, value, SUM(count) AS count,
+        ROW_NUMBER() OVER (PARTITION BY field ORDER BY SUM(count) DESC) AS rn FROM ( {select_sources} ) GROUP BY field, value ) WHERE rn <= {TOP_K}
+    """
                     con.execute(f"COPY ({merged_sql}) {parquet_zstd_target(tmp_path)}")
                 else:
                     raise
@@ -1638,10 +1377,8 @@ def _merge_partial_hour_locked(service_id: str, source: dict, fields: list[str])
                 unlink_quiet(tmp_path)
     finally:
         con.close()
-
     max_mtime = max((os.path.getmtime(p) for p in new_files if os.path.exists(p)), default=watermark)
     _write_partial_hour_watermark(source, active_hour, max_mtime)
-
     duration_ms = (time.perf_counter() - t0) * 1000
     logger.debug(
         "[partial_hour] %s: merged %d new file(s) into hour=%s (%.1fms)",
@@ -1650,15 +1387,10 @@ def _merge_partial_hour_locked(service_id: str, source: dict, fields: list[str])
         active_hour,
         duration_ms,
     )
-    return {
-        "hour": active_hour,
-        "new_files": len(new_files),
-        "duration_ms": duration_ms,
-    }
+    return {"hour": active_hour, "new_files": len(new_files), "duration_ms": duration_ms}
 
 
 def gc_stale_partial_hours(source: dict, max_age_hours: int = 2) -> int:
-    """Delete partial-hour dirs older than ``max_age_hours``."""
     from backend.core.iceberg.view import _get_service_lock
 
     lock_key = source.get("name", source.get("service_id", "default"))

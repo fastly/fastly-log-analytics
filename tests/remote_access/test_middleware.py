@@ -9,16 +9,20 @@ import re
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
+from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS, _mask_ip_scalar, apply_pii_policy, mask_ip
+from backend.repositories.utils.filters import normalize_filter_key
+from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 from starlette.requests import Request as StarletteRequest
 
 from backend.core import share_db
-from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS, _mask_ip_scalar, apply_pii_policy, mask_ip
+from backend.core.request_context import build_request_context
 from backend.main import app as _main_app
-from backend.repositories.utils.filters import normalize_filter_key
-from backend.utils import tunnel
+from backend.routers import admin, provision, query, rum, services, share_admin, share_auth
+from backend.routers.session_scoring import _finalize_cached
+from backend.utils import telemetry, tunnel
 from backend.utils.remote_access import (
     _ANALYST_ALLOWED_WRITE_PREFIXES,
     _PII_FORBIDDEN_FILTER_COLS,
@@ -41,74 +45,44 @@ _ENVELOPE_PREFIXES = ("_debug", "debug_")
 
 
 def _build_test_app() -> FastAPI:
-    from backend.routers import share_admin, share_auth
-
     app = FastAPI()
     app.add_middleware(RemoteAccessMiddleware)
     app.include_router(share_auth.router)
     app.include_router(share_admin.router)
-
-    get_routes = [
-        "/api/dashboard",
-        "/api/cron/stream",
-        "/api/log-extents/stream",
-        "/api/usage/summary",
-        "/api/download",
-        "/api/download-all",
-        "/api/download-folder",
-        "/api/download-foo",
-        "/api/cron-schedule",
-    ]
-    for path in get_routes:
+    for path in (
+        "/api/dashboard /api/cron/stream /api/log-extents/stream /api/usage/summary /api/download "
+        "/api/download-all /api/download-folder /api/download-foo /api/cron-schedule"
+    ).split():
         app.add_api_route(path, lambda: {"ok": True}, methods=["GET"])
-
-    post_routes = ["/api/views", "/api/dashboard/aggregates", "/api/web-vitals", "/api/ux-events"]
-    for path in post_routes:
+    for path in "/api/views /api/dashboard/aggregates /api/web-vitals /api/ux-events".split():
         app.add_api_route(path, lambda: {"ok": True}, methods=["POST"])
-
-    @app.get("/api/cron-runs/{run_id}/stream")
-    def _cron_run_stream(run_id: str):
-        return {"ok": True}
-
-    svc_get_routes = [
-        "/api/services/{service_id}/scoring/status",
-        "/api/services/{service_id}/realtime-stream",
-        "/api/services/{service_id}/cost-governor-stream",
-        "/api/alerts/{service_id}",
-        "/api/custom-endpoint/{service_id}/data",
-        "/api/services/{service_id}/rum/status",
-        "/api/services/{service_id}/rum/versions",
-        "/api/services/{service_id}/rum/beacon-health",
-        "/api/services/{service_id}/rum/analytics",
-        "/api/services/{service_id}/rum/live-events",
-        "/api/services/{service_id}/lake-info",
-        "/api/services/{service_id}/scoring/config",
-        "/api/services/{service_id}/scoring/audit",
-        "/api/services/{service_id}/scoring/threshold",
-        "/api/services/{service_id}/scoring/exclude-regex",
-        "/api/services/{service_id}/scoring/enforce-status-code",
-        "/api/services/{service_id}/scoring/labels",
-        "/api/services/{service_id}/scoring/top-flagged",
-        "/api/services/{service_id}/scoring/threshold-preview",
-    ]
+    app.add_api_route("/api/cron-runs/{run_id}/stream", lambda run_id: {"ok": True}, methods=["GET"])
 
     def _svc_handler(service_id: str):
         return {"ok": True, "service_id": service_id}
 
-    for path in svc_get_routes:
+    rum_sub = "status versions beacon-health analytics live-events".split()
+    score_sub = (
+        "status config audit threshold exclude-regex enforce-status-code labels top-flagged threshold-preview".split()
+    )
+    svc_gets = [
+        "/api/services/{service_id}/realtime-stream",
+        "/api/services/{service_id}/cost-governor-stream",
+        "/api/alerts/{service_id}",
+        "/api/custom-endpoint/{service_id}/data",
+        "/api/services/{service_id}/lake-info",
+        *(f"/api/services/{{service_id}}/rum/{s}" for s in rum_sub),
+        *(f"/api/services/{{service_id}}/scoring/{s}" for s in score_sub),
+    ]
+    for path in svc_gets:
         app.add_api_route(path, _svc_handler, methods=["GET"])
-
-    for path in (
-        "/api/services/{service_id}/rum/enable",
-        "/api/services/{service_id}/rum/disable",
-        "/api/services/{service_id}/rum/upgrade",
-    ):
-        app.add_api_route(path, _svc_handler, methods=["POST"])
-
-    @app.get("/api/services/{service_id}/scoring/sessions/{sid}/events")
-    def _scoring_sess_events(service_id: str, sid: str):
-        return {"ok": True, "service_id": service_id, "sid": sid}
-
+    for s in ("enable", "disable", "upgrade"):
+        app.add_api_route(f"/api/services/{{service_id}}/rum/{s}", _svc_handler, methods=["POST"])
+    app.add_api_route(
+        "/api/services/{service_id}/scoring/sessions/{sid}/events",
+        lambda service_id, sid: {"ok": True, "service_id": service_id, "sid": sid},
+        methods=["GET"],
+    )
     return app
 
 
@@ -125,16 +99,10 @@ def client(app):
 
 def _seed_invite(service_ids=None, ip_whitelist=None, pii_policy=None) -> dict:
     invite = share_db.create_remote_invite(
-        name="Drew",
-        email="drew@example.com",
-        passcode="ocean-breeze-cabin-42",
-        expires_at_utc=None,
-        ip_whitelist=ip_whitelist,
-        service_ids=service_ids or ["svcA", "svcB"],
-        pii_policy=pii_policy,
-    )
-    tos = share_db.get_latest_tos()
-    if tos:
+        name="Drew", email="drew@example.com", passcode="ocean-breeze-cabin-42",
+        expires_at_utc=None, ip_whitelist=ip_whitelist, service_ids=service_ids or ["svcA", "svcB"], pii_policy=pii_policy,
+    )  # fmt: skip
+    if tos := share_db.get_latest_tos():
         share_db.mark_tos_accepted(invite["id"], tos["version"])
     return share_db.get_remote_invite(invite["id"])
 
@@ -155,26 +123,20 @@ def _login_analyst(client, invite, *, host="testserver") -> str:
     sid = ""
     for raw in r.headers.get_list("set-cookie"):
         name, _, val = raw.split(";", 1)[0].partition("=")
-        val = val.strip('"')
-        if name in ("analyst_pending_session_id", "analyst_session_id") and val:
-            sid = val
+        if name in ("analyst_pending_session_id", "analyst_session_id") and val.strip('"'):
+            sid = val.strip('"')
     client.cookies.set("analyst_session_id", sid)
     return sid
 
 
 def _as_analyst(client, service_ids=None, pii_policy=None) -> str:
     _start_share()
-    invite = _seed_invite(service_ids=service_ids, pii_policy=pii_policy)
-    return _login_analyst(client, invite)
-
-
-# ── DNS-rebinding & Local Pass-Through ─────────────────────────────────────
+    return _login_analyst(client, _seed_invite(service_ids=service_ids, pii_policy=pii_policy))
 
 
 def test_host_header_and_local_passthrough_rules(client, monkeypatch):
     r = client.get("/api/dashboard", headers={"Host": "evil.com"})
     assert r.status_code == 400 and r.json()["error"] == "host_not_allowed"
-
     assert client.get("/api/dashboard").status_code == 200
     assert client.get("/api/admin/share/status").status_code == 200
     assert client.post("/api/views").status_code == 200
@@ -185,35 +147,22 @@ def test_host_header_and_local_passthrough_rules(client, monkeypatch):
 
     monkeypatch.setattr(
         "backend.config.list_configs",
-        lambda: [
-            {
-                "service_id": "svc_test_rf",
-                "remote_frontend": {"service_id": "fastly_test_123", "domain_name": "fla-test.global.ssl.fastly.net"},
-            }
-        ],
+        lambda: [{"service_id": "svc_rf", "remote_frontend": {"service_id": "f_123", "domain_name": "fla.fastly.net"}}],
     )
-    r3 = client.get("/api/dashboard", headers={"X-Remote-Analyst": "1", "Host": "fla-test.global.ssl.fastly.net"})
+    r3 = client.get("/api/dashboard", headers={"X-Remote-Analyst": "1", "Host": "fla.fastly.net"})
     assert r3.status_code == 401 and r3.json()["error"] == "unauthenticated"
 
 
 @pytest.mark.security_regression
 @pytest.mark.parametrize(
-    "method,path",
-    [
-        ("GET", "/api/admin/clickhouse/status?service_id=svcA"),
-        ("POST", "/api/admin/clickhouse/replay"),
-    ],
+    "method,path", [("GET", "/api/admin/clickhouse/status?service_id=svcA"), ("POST", "/api/admin/clickhouse/replay")]
 )
 def test_clickhouse_controls_block_authenticated_analyst(client, method, path):
-    from backend.routers.admin import router
-
-    client.app.include_router(router)
+    client.app.include_router(admin.router)
     _as_analyst(client)
     assert client.get("/api/dashboard?service_id=svcA", headers=_WRITE_HEADERS).status_code == 200
-    response = client.request(
-        method, path, headers=_WRITE_HEADERS, json={"service_id": "svcA", "dataset_id": "dataset"}
-    )
-    assert response.status_code == 403 and response.json()["error"] == "admin_only"
+    r = client.request(method, path, headers=_WRITE_HEADERS, json={"service_id": "svcA", "dataset_id": "dataset"})
+    assert r.status_code == 403 and r.json()["error"] == "admin_only"
 
 
 @pytest.mark.security_regression
@@ -224,9 +173,6 @@ def test_gateway_required_keeps_authenticated_analyst_restrictions(client, monke
     assert client.get("/api/dashboard", headers=_HEADERS, params={"service_id": "svcA"}).status_code == 200
     denied = client.get("/api/admin/share/status", headers=_HEADERS)
     assert denied.status_code == 403 and denied.json()["error"] == "admin_only"
-
-
-# ── Analyst Path, SSE, Read-Only, and Scope Gates ──────────────────────────
 
 
 def test_analyst_without_session_blocked(client):
@@ -265,7 +211,6 @@ def test_analyst_read_only_blocks_writes_and_mutating_verbs(client):
     _as_analyst(client, service_ids=["svcA"])
     r = client.post("/api/views", headers=_WRITE_HEADERS)
     assert r.status_code == 403 and r.json()["error"] == "read_only"
-
     for method in ("put", "patch", "delete"):
         r2 = getattr(client, method)("/api/dashboard/some-mutating-endpoint?service=svcA", headers=_WRITE_HEADERS)
         assert r2.status_code == 403 and r2.json()["error"] == "read_only"
@@ -276,18 +221,14 @@ def test_analyst_service_scope_enforcement(client):
     r_unauth = client.get("/api/dashboard?service=svcZ", headers=_HEADERS)
     assert r_unauth.status_code == 403 and r_unauth.json()["error"] == "service_not_authorized"
     assert client.get("/api/dashboard?service=svcA", headers=_HEADERS).status_code == 200
-
     with patch("backend.config.get_active_service_id", return_value="svcB"):
         r_omitted = client.get("/api/dashboard", headers=_HEADERS)
     assert r_omitted.status_code == 403 and r_omitted.json()["error"] == "service_not_authorized"
-
     with patch("backend.config.get_active_service_id", return_value="svcA"):
         r_path = client.get("/api/services/svcB/scoring/labels", headers=_HEADERS)
     assert r_path.status_code == 403 and r_path.json()["service"] == "svcB"
-
     r_both = client.get("/api/services/svcB/scoring/labels?service=svcA", headers=_HEADERS)
     assert r_both.status_code == 403 and r_both.json()["error"] == "service_not_authorized"
-
     r_desync = client.get("/api/custom-endpoint/svcB/data?service=svcA", headers=_HEADERS)
     assert r_desync.status_code == 403 and r_desync.json()["error"] == "service_not_authorized"
     assert client.get("/api/custom-endpoint/svcA/data?service=svcA", headers=_HEADERS).status_code == 200
@@ -299,9 +240,7 @@ def test_analyst_path_param_service_allowed_when_authorized(client):
     assert r.status_code == 200 and r.json()["service_id"] == "svcB"
 
 
-@pytest.mark.parametrize(
-    "suffix", ["/config", "/status", "/audit", "/threshold", "/exclude-regex", "/enforce-status-code"]
-)
+@pytest.mark.parametrize("suffix", "/config /status /audit /threshold /exclude-regex /enforce-status-code".split())
 def test_analyst_blocked_from_scoring_admin_suffix(client, suffix):
     _as_analyst(client, service_ids=["svcA"])
     r = client.get(f"/api/services/svcA/scoring{suffix}", headers=_HEADERS)
@@ -310,16 +249,12 @@ def test_analyst_blocked_from_scoring_admin_suffix(client, suffix):
 
 @pytest.mark.parametrize(
     "path",
-    [
-        "/api/services/svcA/scoring/labels",
-        "/api/services/svcA/scoring/sessions/sess-1/events",
-        "/api/services/svcA/scoring/top-flagged",
-        "/api/services/svcA/scoring/threshold-preview",
-        "/api/services/svcA/rum/status",
-        "/api/services/svcA/rum/beacon-health",
-        "/api/services/svcA/rum/analytics",
-        "/api/services/svcA/rum/live-events",
-    ],
+    (
+        "/api/services/svcA/scoring/labels /api/services/svcA/scoring/sessions/sess-1/events "
+        "/api/services/svcA/scoring/top-flagged /api/services/svcA/scoring/threshold-preview "
+        "/api/services/svcA/rum/status /api/services/svcA/rum/beacon-health "
+        "/api/services/svcA/rum/analytics /api/services/svcA/rum/live-events"
+    ).split(),
 )
 def test_analyst_not_blocked_from_scoring_and_rum_reads_they_need(client, path):
     _as_analyst(client, service_ids=["svcA"])
@@ -343,9 +278,6 @@ def test_analyst_blocked_from_rum_admin_suffix(client, method, path):
     assert r.status_code == 403 and r.json()["error"] == "admin_only"
 
 
-# ── PII Lock & Masking ─────────────────────────────────────────────────────
-
-
 def _post_filter(client, *, filters):
     return client.post(
         "/api/dashboard/aggregates", json={"service_id": "svcA", "filters": filters}, headers=_WRITE_HEADERS
@@ -359,18 +291,7 @@ def _post_field(client, *, field):
 @pytest.mark.security_regression
 @pytest.mark.parametrize(
     "field",
-    [
-        "ip",
-        "ip.",
-        "ip ",
-        "client_ip.",
-        "cookie_session",
-        "cookie_session.",
-        "cookie_session ",
-        "IP",
-        "Cookie_Session",
-        "Client_IP",
-    ],
+    "ip|ip.|ip |client_ip.|cookie_session|cookie_session.|cookie_session |IP|Cookie_Session|Client_IP".split("|"),
 )
 def test_analyst_masking_blocks_pii_field_values_enumeration(client, field):
     _as_analyst(client, service_ids=["svcA"], pii_policy=_MASK)
@@ -385,7 +306,7 @@ def test_analyst_masking_allows_non_pii_field_values_enumeration(client):
 
 
 @pytest.mark.security_regression
-@pytest.mark.parametrize("key", ["ip", "filter_ip", "xfilter_ip", "ip_2", "client_ip"])
+@pytest.mark.parametrize("key", "ip filter_ip xfilter_ip ip_2 client_ip".split())
 def test_analyst_masking_blocks_ip_filter(client, key):
     _as_analyst(client, service_ids=["svcA"], pii_policy=_MASK)
     r = _post_filter(client, filters={key: {"mode": "include", "values": ["1.2.3.4"]}})
@@ -394,12 +315,13 @@ def test_analyst_masking_blocks_ip_filter(client, key):
 
 
 @pytest.mark.security_regression
-@pytest.mark.parametrize("key", ["cookie_session", "filter_cookie_session", "cookie_session_2"])
+@pytest.mark.parametrize("key", "cookie_session filter_cookie_session cookie_session_2".split())
 def test_analyst_masking_blocks_cookie_session_filter(client, key):
     _as_analyst(client, service_ids=["svcA"], pii_policy=_MASK)
     r = _post_filter(client, filters={key: {"mode": "include", "values": ["a1b2c3d4deadbeef"]}})
-    assert r.status_code == 403 and r.json()["error"] == "pii_policy_violation"
-    assert r.json()["field"] == "cookie_session"
+    assert (
+        r.status_code == 403 and r.json()["error"] == "pii_policy_violation" and r.json()["field"] == "cookie_session"
+    )
 
 
 @pytest.mark.security_regression
@@ -417,17 +339,9 @@ def test_analyst_masking_allows_oip_filter(client):
 @pytest.mark.security_regression
 @pytest.mark.parametrize(
     "key",
-    [
-        "cookie_session.",
-        "cookie_session ",
-        "cookie_session\t",
-        "cookie_session%",
-        "cookie_session-",
-        "filter_cookie_session.",
-        "ip.",
-        "ip ",
-        "client_ip.",
-    ],
+    "cookie_session.|cookie_session |cookie_session\t|cookie_session%|cookie_session-|filter_cookie_session.|ip.|ip |client_ip.".split(
+        "|"
+    ),
 )
 def test_analyst_masking_blocks_safecol_evasion_filter(client, key):
     _as_analyst(client, service_ids=["svcA"], pii_policy=_MASK)
@@ -438,9 +352,6 @@ def test_analyst_masking_blocks_safecol_evasion_filter(client, key):
 def test_analyst_without_masking_allows_ip_filter(client):
     _as_analyst(client, service_ids=["svcA"], pii_policy={"mask_ips": False})
     assert _post_filter(client, filters={"ip": {"mode": "include", "values": ["1.2.3.4"]}}).status_code == 200
-
-
-# ── Origin Gate, Login Rate Limiter, Hardening Headers, Idle Timer ─────────
 
 
 def test_origin_rate_limit_and_hardening_headers(client):
@@ -454,13 +365,10 @@ def test_origin_rate_limit_and_hardening_headers(client):
     assert r_origin.status_code == 403 and r_origin.json()["error"] == "origin_not_allowed"
 
     r_ok = client.post(
-        "/api/share/login",
-        json={"email": invite["email"], "passcode": "ocean-breeze-cabin-42"},
-        headers=_WRITE_HEADERS,
+        "/api/share/login", json={"email": invite["email"], "passcode": "ocean-breeze-cabin-42"}, headers=_WRITE_HEADERS
     )
     assert r_ok.headers.get("cache-control") == "private, no-store"
-    assert r_ok.headers.get("x-frame-options") == "DENY"
-    assert r_ok.headers.get("referrer-policy") == "no-referrer"
+    assert r_ok.headers.get("x-frame-options") == "DENY" and r_ok.headers.get("referrer-policy") == "no-referrer"
 
     for _ in range(tunnel.LOGIN_FAILURE_THRESHOLD):
         client.post(
@@ -482,9 +390,7 @@ def test_share_login_brute_force_lockout_shape_matches_e2e(client):
     statuses, first_429 = [], None
     for i in range(35):
         r = client.post(
-            "/api/share/login",
-            json={"email": "attacker@example.com", "passcode": f"wrong-{i}"},
-            headers=_WRITE_HEADERS,
+            "/api/share/login", json={"email": "attacker@example.com", "passcode": f"wrong-{i}"}, headers=_WRITE_HEADERS
         )
         statuses.append(r.status_code)
         if r.status_code == 429 and first_429 is None:
@@ -495,6 +401,9 @@ def test_share_login_brute_force_lockout_shape_matches_e2e(client):
     assert isinstance(first_429["retry_after_s"], int) and 0 < first_429["retry_after_s"] <= tunnel.LOGIN_LOCKOUT_S
 
 
+_BEACON_PAYLOAD = {"id": "x", "name": "LCP", "value": 1.0, "rating": "good"}
+
+
 @pytest.mark.parametrize(
     "method,path,extra_headers,body,expect_touch",
     [
@@ -502,20 +411,8 @@ def test_share_login_brute_force_lockout_shape_matches_e2e(client):
         ("GET", "/api/dashboard?service=svcA", {"X-User-Active": "1"}, None, True),
         ("GET", "/api/dashboard?service=svcA", {"X-User-Active": "0"}, None, False),
         ("GET", "/api/log-extents/stream?service=svcA", {}, None, False),
-        (
-            "POST",
-            "/api/web-vitals?service=svcA",
-            {"Origin": "https://testserver"},
-            {"id": "x", "name": "LCP", "value": 1.0, "rating": "good"},
-            False,
-        ),
-        (
-            "POST",
-            "/api/ux-events?service=svcA",
-            {"Origin": "https://testserver"},
-            {"id": "x", "name": "LCP", "value": 1.0, "rating": "good"},
-            False,
-        ),
+        ("POST", "/api/web-vitals?service=svcA", {"Origin": "https://testserver"}, _BEACON_PAYLOAD, False),
+        ("POST", "/api/ux-events?service=svcA", {"Origin": "https://testserver"}, _BEACON_PAYLOAD, False),
     ],
 )
 def test_session_touch_and_exemptions(client, monkeypatch, method, path, extra_headers, body, expect_touch):
@@ -532,8 +429,7 @@ def test_session_touch_and_exemptions(client, monkeypatch, method, path, extra_h
 @pytest.mark.security_regression
 def test_dispatch_idle_timeout_returns_401(client):
     sid = _as_analyst(client, service_ids=["svcA"])
-    mgr = tunnel.get_tunnel_manager()
-    session = mgr._sessions.get(sid)
+    session = tunnel.get_tunnel_manager()._sessions.get(sid)
     assert session is not None
     session.last_active_time = "2020-01-01T00:00:00Z"
     r = client.get("/api/dashboard?service=svcA", headers=_HEADERS)
@@ -559,33 +455,20 @@ def test_unauthenticated_telemetry_beacon_allowed_without_session(client):
         assert r.status_code == 200 and r.json().get("ok") is True
 
 
-# ── Merged from test_pii_policy_evasion.py & test_mask_ip_scalar_padding.py ─
-
-
 @pytest.mark.security_regression
-@pytest.mark.parametrize(
-    "field", ["ip", "ip.", "ip ", "ip\t", "client_ip.", "remote_addr.", "IP", "Ip", "Client_IP", "IP."]
-)
+@pytest.mark.parametrize("field", "ip|ip.|ip |ip\t|client_ip.|remote_addr.|IP|Ip|Client_IP|IP.".split("|"))
 def test_apply_pii_policy_masks_ip_field_values_despite_junk_suffix(field):
     obj = {"field": field, "values": [{"value": "203.0.113.7", "count": 9}]}
-    out = apply_pii_policy(copy.deepcopy(obj), _MASK)
-    got = out["values"][0]["value"]
+    got = apply_pii_policy(copy.deepcopy(obj), _MASK)["values"][0]["value"]
     assert got != "203.0.113.7" and got.endswith("xxx"), (field, got)
 
 
 @pytest.mark.security_regression
 @pytest.mark.parametrize(
     "field",
-    [
-        "cookie_session",
-        "cookie_session.",
-        "cookie_session ",
-        "cookie_session\t",
-        "cookie_session%",
-        "Cookie_Session",
-        "COOKIE_SESSION",
-        "Cookie_Session.",
-    ],
+    "cookie_session|cookie_session.|cookie_session |cookie_session\t|cookie_session%|Cookie_Session|COOKIE_SESSION|Cookie_Session.".split(
+        "|"
+    ),
 )
 def test_apply_pii_policy_redacts_session_field_values_despite_junk_suffix(field):
     obj = {"field": field, "values": [{"value": "a" * 64, "count": 9}]}
@@ -608,31 +491,16 @@ def test_apply_pii_policy_noop_without_mask_ips():
 @pytest.mark.security_regression
 @pytest.mark.parametrize(
     "key",
-    [
-        "ip",
-        "ip.",
-        "ip ",
-        "client_ip.",
-        "filter_ip",
-        "ip_2",
-        "cookie_session",
-        "cookie_session.",
-        ".cookie_session",
-        "filter_cookie_session.",
-        "IP",
-        "Ip",
-        "Client_IP",
-        "Cookie_Session",
-        "COOKIE_SESSION",
-        "filter_Cookie_Session.",
-    ],
+    "ip|ip.|ip |client_ip.|filter_ip|ip_2|cookie_session|cookie_session.|.cookie_session|filter_cookie_session.|IP|Ip|Client_IP|Cookie_Session|COOKIE_SESSION|filter_Cookie_Session.".split(
+        "|"
+    ),
 )
 def test_normalize_filter_key_resolves_junk_pii_keys_into_forbidden_set(key):
     assert normalize_filter_key(key) in _PII_FORBIDDEN_FILTER_COLS, key
 
 
 @pytest.mark.security_regression
-@pytest.mark.parametrize("key", ["url", "status", "country", "oip", "waf_sig_ind", "_bot_name"])
+@pytest.mark.parametrize("key", "url status country oip waf_sig_ind _bot_name".split())
 def test_normalize_filter_key_leaves_non_pii_keys_allowed(key):
     assert normalize_filter_key(key) not in _PII_FORBIDDEN_FILTER_COLS, key
     assert _PII_FORBIDDEN_FILTER_COLS == IP_FAMILY_KEYS | SESSION_ID_KEYS
@@ -658,22 +526,13 @@ def test_non_ip_values_keep_their_padding_verbatim():
     assert _mask_ip_scalar("1.2.3.4, not-an-ip ") == "1.2.3.4, not-an-ip "
 
 
-# ── Merged from test_admin_gateway.py ──────────────────────────────────────
-
-
 def _request(peer: str, headers: dict[str, str] | None = None) -> StarletteRequest:
-    return StarletteRequest(
-        {
-            "type": "http",
-            "method": "GET",
-            "path": "/api/bootstrap",
-            "headers": [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()],
-            "client": (peer, 1234),
-            "server": ("testserver", 80),
-            "scheme": "http",
-            "query_string": b"",
-        }
-    )
+    hdrs = [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
+    scope = {
+        "type": "http", "method": "GET", "path": "/api/bootstrap", "headers": hdrs,
+        "client": (peer, 1234), "server": ("testserver", 80), "scheme": "http", "query_string": b"",
+    }  # fmt: skip
+    return StarletteRequest(scope)
 
 
 @pytest.fixture
@@ -686,18 +545,9 @@ def gateway_client(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("backend.utils.remote_access.get_tunnel_manager", lambda: manager)
     app = FastAPI()
     app.add_middleware(RemoteAccessMiddleware)
-
-    @app.get("/api/admin/probe")
-    def probe(request: Request) -> dict[str, bool]:
-        return {"is_remote": request.state.is_remote}
-
-    @app.get("/api/health")
-    def health() -> dict[str, bool]:
-        return {"ok": True}
-
-    @app.post("/api/admin/probe")
-    def mutate() -> dict[str, bool]:
-        return {"ok": True}
+    app.add_api_route("/api/admin/probe", lambda request: {"is_remote": request.state.is_remote}, methods=["GET"])
+    app.add_api_route("/api/health", lambda: {"ok": True}, methods=["GET"])
+    app.add_api_route("/api/admin/probe", lambda: {"ok": True}, methods=["POST"])
 
     @app.get("/api/admin/recheck")
     def recheck(request: Request) -> dict[str, bool]:
@@ -759,10 +609,8 @@ def test_gateway_config_and_loopback_behaviors(monkeypatch, gateway_client):
     response = gateway_client.get("/api/admin/recheck", headers={HEADER: SECRET})
     assert response.status_code == 200 and response.json() == {"is_remote": False, "credential_visible": False}
     assert gateway_client.get("/api/health").json() == {"ok": True}
-    assert (
-        gateway_client.post("/api/admin/probe", headers={HEADER: SECRET, "Origin": "https://testserver"}).status_code
-        == 200
-    )
+    hdr = {HEADER: SECRET, "Origin": "https://testserver"}
+    assert gateway_client.post("/api/admin/probe", headers=hdr).status_code == 200
     assert gateway_client.post("/api/admin/probe", headers={HEADER: SECRET}).status_code == 200
 
 
@@ -803,39 +651,22 @@ def test_gateway_rejects_browser_cross_site_fetch_metadata(gateway_client):
     assert response.status_code == 403
 
 
-# ── Merged from test_route_table_tripwire.py ───────────────────────────────
-
 _HTTP_METHODS = ("get", "post", "put", "patch", "delete")
-_PATH_PARAM_SUBSTITUTIONS = {
-    "service_id": "svc1",
-    "domain": "rum_vitals",
-    "export_id": "export1",
-    "job_id": "job1",
-    "alert_id": "alert1",
-    "invite_id": "invite1",
-    "session_id": "sess1",
-    "quarantine_id": "quar1",
-    "source_id": "src1",
-    "qid": "q1",
-    "log_id": "1",
-    "run_id": "run1",
-    "field_name": "field1",
-    "label_id": "label1",
-    "item_id": "1",
-    "version": "v1",
-    "sid": "sid1",
-    "view_id": "view1",
-    "tab": "overview",
-    "token": "tok1",
-}
+_PATH_PARAM_SUBSTITUTIONS = dict(
+    kv.split("=")
+    for kv in (
+        "service_id=svc1 domain=rum_vitals export_id=export1 job_id=job1 alert_id=alert1 invite_id=invite1 "
+        "session_id=sess1 quarantine_id=quar1 source_id=src1 qid=q1 log_id=1 run_id=run1 field_name=field1 "
+        "label_id=label1 item_id=1 version=v1 sid=sid1 view_id=view1 tab=overview token=tok1"
+    ).split()
+)
 _PARAM_RE = re.compile(r"\{([^}]+)\}")
 
 
 def _substitute(path: str) -> str:
     def _rep(m: re.Match[str]) -> str:
         name = m.group(1)
-        if name not in _PATH_PARAM_SUBSTITUTIONS:
-            raise AssertionError(f"route path parameter {name!r} (from {path!r}) missing in _PATH_PARAM_SUBSTITUTIONS")
+        assert name in _PATH_PARAM_SUBSTITUTIONS, f"missing path param {name!r} in {path!r}"
         return _PATH_PARAM_SUBSTITUTIONS[name]
 
     return _PARAM_RE.sub(_rep, path)
@@ -846,117 +677,56 @@ def _real_routes() -> list[tuple[str, str]]:
     return sorted((m.upper(), p) for p in paths for m in _HTTP_METHODS if m in paths[p])
 
 
-_READ_ALLOWLIST: set[tuple[str, str]] = {
-    ("GET", "/api/health"),
-    ("GET", "/api/bootstrap"),
-    ("GET", "/api/share/auth-config"),
-    ("GET", "/api/share/heartbeat"),
-    ("GET", "/api/share/tos"),
-    ("GET", "/api/share/oauth/authorize"),
-    ("GET", "/api/share/oauth/callback"),
-    ("GET", "/js/rum.js"),
-    ("GET", "/js/faro-sdk.js"),
-    ("GET", "/api/log-fields/catalog"),
-    ("GET", "/api/presets"),
-    ("GET", "/api/schema"),
-    ("GET", "/api/services"),
-    ("GET", "/api/insight-availability"),
-    ("GET", "/api/views/{service_id}"),
-    ("GET", "/api/log-extents"),
-    ("GET", "/api/log-extents/stream"),
-    ("GET", "/api/services/{service_id}/scoring/analytics"),
-    ("GET", "/api/services/{service_id}/scoring/compliance-breakdown"),
-    ("GET", "/api/services/{service_id}/scoring/curves"),
-    ("GET", "/api/services/{service_id}/scoring/evaluation"),
-    ("GET", "/api/services/{service_id}/scoring/health"),
-    ("GET", "/api/services/{service_id}/scoring/labels"),
-    ("GET", "/api/services/{service_id}/scoring/latency-timeseries"),
-    ("GET", "/api/services/{service_id}/scoring/score-distribution"),
-    ("GET", "/api/services/{service_id}/scoring/sessions/{sid}/events"),
-    ("GET", "/api/services/{service_id}/scoring/threshold-preview"),
-    ("GET", "/api/services/{service_id}/scoring/top-flagged"),
-    ("GET", "/api/services/{service_id}/rum/status"),
-    ("GET", "/api/services/{service_id}/rum/beacon-health"),
-    ("GET", "/api/services/{service_id}/rum/analytics"),
-    ("GET", "/api/services/{service_id}/rum/live-events"),
-    ("GET", "/api/services/{service_id}/realtime-stream"),
-    ("GET", "/api/services/{service_id}/control-room/error-stream"),
-    ("GET", "/api/security/proxies/export"),
-    ("GET", "/api/assets/aggregates"),
-    ("GET", "/api/network/bundle"),
-    ("GET", "/api/network/pop-health"),
-    ("GET", "/api/security/bundle"),
-    ("GET", "/api/security/threat-intel"),
-    ("GET", "/api/query/schema/{service_id}"),
-    ("GET", "/api/high-scale/request-facts"),
-    ("GET", "/api/high-scale/services/{service_id}/exports/{export_id}"),
-    ("GET", "/api/high-scale/services/{service_id}/queries/{job_id}"),
-    ("GET", "/api/services/{service_id}/cmcd/status"),
-    ("GET", "/api/services/{service_id}/control-room/wizard/state"),
-    ("GET", "/api/services/{service_id}/control-room/{tab}"),
-    ("GET", "/api/services/{service_id}/realtime-seed"),
-}
+_SCORING_READS = (
+    "analytics compliance-breakdown curves evaluation health labels latency-timeseries "
+    "score-distribution sessions/{sid}/events threshold-preview top-flagged"
+).split()
+_READ_PATHS = (
+    "/api/health /api/bootstrap /api/share/auth-config /api/share/heartbeat /api/share/tos "
+    "/api/share/oauth/authorize /api/share/oauth/callback /js/rum.js /js/faro-sdk.js "
+    "/api/log-fields/catalog /api/presets /api/schema /api/services /api/insight-availability "
+    "/api/views/{service_id} /api/log-extents /api/log-extents/stream "
+    "/api/services/{service_id}/realtime-stream /api/services/{service_id}/control-room/error-stream "
+    "/api/security/proxies/export /api/assets/aggregates /api/network/bundle /api/network/pop-health "
+    "/api/security/bundle /api/security/threat-intel /api/query/schema/{service_id} "
+    "/api/high-scale/request-facts /api/high-scale/services/{service_id}/exports/{export_id} "
+    "/api/high-scale/services/{service_id}/queries/{job_id} /api/services/{service_id}/cmcd/status "
+    "/api/services/{service_id}/control-room/wizard/state /api/services/{service_id}/control-room/{tab} "
+    "/api/services/{service_id}/realtime-seed"
+).split() + [
+    *(f"/api/services/{{service_id}}/scoring/{s}" for s in _SCORING_READS),
+    *(f"/api/services/{{service_id}}/rum/{s}" for s in "status beacon-health analytics live-events".split()),
+]
+_READ_ALLOWLIST: set[tuple[str, str]] = {("GET", p) for p in _READ_PATHS}
 
-_WRITE_VERB_GATE_ROUTES: set[tuple[str, str]] = {
-    ("POST", "/api/share/acknowledge"),
-    ("POST", "/api/share/claim/{token}"),
-    ("POST", "/api/share/login"),
-    ("POST", "/api/share/logout"),
-    ("POST", "/api/assets/aggregates"),
-    ("POST", "/api/dashboard/aggregates"),
-    ("POST", "/api/dashboard/bundle"),
-    ("POST", "/api/dashboard/field-values"),
-    ("POST", "/api/dashboard/raw/csv"),
-    ("POST", "/api/security/aggregates"),
-    ("POST", "/api/origin/aggregates"),
-    ("POST", "/api/origin/ip-health"),
-    ("POST", "/api/origin/path-breakdown"),
-    ("POST", "/api/origin/pop-latency"),
-    ("POST", "/api/origin/shielding-analysis"),
-    ("POST", "/api/origin/slow-urls"),
-    ("POST", "/api/origin/status-codes"),
-    ("POST", "/api/origin/summary"),
-    ("POST", "/api/origin/timeseries"),
-    ("POST", "/api/performance/aggregates"),
-    ("POST", "/api/insights"),
-    ("POST", "/api/insights/cache-collapse-detail"),
-    ("POST", "/api/network-health"),
-    ("POST", "/api/network-quality"),
-    ("POST", "/api/network/bundle"),
-    ("POST", "/api/origin/drilldown"),
-    ("POST", "/api/query"),
-    ("POST", "/api/security/bundle"),
-    ("POST", "/api/sessions"),
-    ("POST", "/api/sessions/detail"),
-    ("POST", "/api/cmcd/aggregates"),
-    ("POST", "/api/value/summary"),
-    ("POST", "/api/web-vitals"),
-    ("POST", "/api/ux-events"),
-    ("POST", "/api/high-scale/request-facts"),
-    ("POST", "/api/high-scale/services/{service_id}/request-facts"),
-    ("POST", "/api/high-scale/services/{service_id}/rum-facts/{domain}"),
-    ("POST", "/api/high-scale/services/{service_id}/cmcd-facts"),
-    ("POST", "/api/high-scale/services/{service_id}/aggregates"),
-    ("POST", "/api/high-scale/services/{service_id}/queries"),
-    ("POST", "/api/high-scale/services/{service_id}/queries/{job_id}/cancel"),
-    ("POST", "/api/high-scale/services/{service_id}/exports"),
-    ("POST", "/api/high-scale/services/{service_id}/exports/{export_id}/cancel"),
-}
-
+_ORIGIN_WRITES = "aggregates ip-health path-breakdown pop-latency shielding-analysis slow-urls status-codes summary timeseries drilldown".split()
+_HS_WRITES = "request-facts rum-facts/{domain} cmcd-facts aggregates queries queries/{job_id}/cancel exports exports/{export_id}/cancel".split()
+_WRITE_PATHS = (
+    "/api/share/acknowledge /api/share/claim/{token} /api/share/login /api/share/logout "
+    "/api/assets/aggregates /api/dashboard/aggregates /api/dashboard/bundle /api/dashboard/field-values "
+    "/api/dashboard/raw/csv /api/security/aggregates /api/performance/aggregates /api/insights "
+    "/api/insights/cache-collapse-detail /api/network-health /api/network-quality /api/network/bundle "
+    "/api/query /api/security/bundle /api/sessions /api/sessions/detail /api/cmcd/aggregates "
+    "/api/value/summary /api/web-vitals /api/ux-events /api/high-scale/request-facts"
+).split() + [
+    *(f"/api/origin/{s}" for s in _ORIGIN_WRITES),
+    *(f"/api/high-scale/services/{{service_id}}/{s}" for s in _HS_WRITES),
+]
+_WRITE_VERB_GATE_ROUTES: set[tuple[str, str]] = {("POST", p) for p in _WRITE_PATHS}
 _ALL_INVENTORIED = _READ_ALLOWLIST | _WRITE_VERB_GATE_ROUTES
 
 
 def _is_unauth_path(path: str) -> bool:
-    return path in _UNAUTH_ANALYST_PATHS or path.startswith("/api/share/claim/") or path.startswith("/api/share/oauth/")
+    return path in _UNAUTH_ANALYST_PATHS or path.startswith(("/api/share/claim/", "/api/share/oauth/"))
 
 
 def _verb_gate_blocks(method: str, substituted_path: str) -> bool:
     if method in ("PUT", "PATCH", "DELETE"):
         return True
     if method == "POST":
-        if _is_unauth_path(substituted_path):
-            return False
-        return not any(substituted_path.startswith(pfx) for pfx in _ANALYST_ALLOWED_WRITE_PREFIXES)
+        return not _is_unauth_path(substituted_path) and not any(
+            substituted_path.startswith(pfx) for pfx in _ANALYST_ALLOWED_WRITE_PREFIXES
+        )
     return False
 
 
@@ -984,9 +754,8 @@ def test_inventory_has_no_stale_entries():
 @pytest.mark.security_regression
 def test_write_gate_routes_actually_rely_on_the_verb_gate():
     for method, path in _WRITE_VERB_GATE_ROUTES:
-        assert method == "POST"
         substituted = _substitute(path)
-        assert not _is_blocked_path(substituted)
+        assert method == "POST" and not _is_blocked_path(substituted)
         assert any(substituted.startswith(pfx) for pfx in _ANALYST_ALLOWED_WRITE_PREFIXES)
 
 
@@ -1001,28 +770,19 @@ def test_unclassified_route_fails_the_tripwire():
     _main_app.openapi_schema = None
     try:
         paths = _main_app.openapi()["paths"]
-        assert dummy_path in paths
-        found = any(
+        assert dummy_path in paths and any(
             m in paths[dummy_path]
             and not _is_blocked_path(dummy_path)
             and not _verb_gate_blocks(m.upper(), dummy_path)
             and (m.upper(), dummy_path) not in _ALL_INVENTORIED
             for m in _HTTP_METHODS
         )
-        assert found
     finally:
         _main_app.router.routes[:] = [r for r in _main_app.router.routes if getattr(r, "path", None) != dummy_path]
         _main_app.openapi_schema = None
 
 
-# ── Merged from test_rum_debug_envelope.py & test_debug_envelope_sites.py ──
-
-
 def _rum_app(*, with_telemetry: bool = False) -> FastAPI:
-    from backend.core.request_context import build_request_context
-    from backend.routers import rum, share_auth
-    from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware
-
     app = FastAPI()
     app.add_middleware(RemoteAccessMiddleware)
     if with_telemetry:
@@ -1083,19 +843,11 @@ def _analytics_no_data(client):
 
 def _analytics_success(client):
     db_res = {
-        "no_data": False,
-        "total_beacons": 7,
-        "pageviews": 5,
-        "interactions": 1,
-        "errors_count": 1,
-        "vitals_rows": [("LCP", 2100.0, 10, 8, 1, 1)],
-        "worst_pages_rows": [("/p", 4, 120.0, 2100.0, 0.05, 0.1)],
-        "errors_rows": [("boom", "app.js", 3, 4, 2)],
-        "trends_rows": [],
-        "browsers": {"Firefox": 7},
-        "os": {"macOS": 7},
-        "devices": {"desktop": 7},
-    }
+        "no_data": False, "total_beacons": 7, "pageviews": 5, "interactions": 1, "errors_count": 1,
+        "vitals_rows": [("LCP", 2100.0, 10, 8, 1, 1)], "worst_pages_rows": [("/p", 4, 120.0, 2100.0, 0.05, 0.1)],
+        "errors_rows": [("boom", "app.js", 3, 4, 2)], "trends_rows": [],
+        "browsers": {"Firefox": 7}, "os": {"macOS": 7}, "devices": {"desktop": 7},
+    }  # fmt: skip
     with (
         patch("backend.routers.rum.rum_source_for", return_value={"name": f"{_SVC}_rum"}),
         patch("backend.routers.rum._ConnectionHolder", _Holder),
@@ -1104,65 +856,43 @@ def _analytics_success(client):
         return client.get(f"/api/services/{_SVC}/rum/analytics", headers=_HEADERS)
 
 
+_DIST = {"good": 80, "needs_improvement": 15, "poor": 5}
 _HS_ANALYTICS = {
-    "is_mock": False,
-    "no_data": False,
-    "beacon_count": 3,
-    "pageview_count": 3,
-    "interaction_count": 0,
-    "error_count": 0,
+    "is_mock": False, "no_data": False, "beacon_count": 3, "pageview_count": 3, "interaction_count": 0, "error_count": 0,
     "vitals": {
-        "lcp": {"p75": 2.1, "distribution": {"good": 80, "needs_improvement": 15, "poor": 5}},
-        "cls": {"p75": 0.05, "distribution": {"good": 90, "needs_improvement": 8, "poor": 2}},
-        "inp": {"p75": 180, "distribution": {"good": 85, "needs_improvement": 10, "poor": 5}},
-        "fid": {"p75": 12.0, "fcp": 1.1, "ttfb": 0.4},
+        "lcp": {"p75": 2.1, "distribution": _DIST}, "cls": {"p75": 0.05, "distribution": _DIST},
+        "inp": {"p75": 180, "distribution": _DIST}, "fid": {"p75": 12.0, "fcp": 1.1, "ttfb": 0.4},
     },
-    "worst_pages": [],
-    "errors": [],
+    "worst_pages": [], "errors": [],
     "trends": {
-        "timestamps": ["2026-10-17T00:00:00Z"],
-        "lcp": [2.1],
-        "cls": [0.05],
-        "error_rate": [0.0],
-        "pageviews": [3],
-        "interactions": [0],
-        "errors": [0],
+        "timestamps": ["2026-10-17T00:00:00Z"], "lcp": [2.1], "cls": [0.05],
+        "error_rate": [0.0], "pageviews": [3], "interactions": [0], "errors": [0],
     },
     "environments": {"browsers": {}, "os": {}, "devices": {}},
-}
+}  # fmt: skip
 
 
 def _hs_beacon_health(client):
-    class _Client:
-        def execute(self, sql, params=None):
-            return [{"c": 3}]
-
-    class _Service:
-        service_id = _SVC
-        client = _Client()
-
-    with patch("backend.core.request_context.RequestContext.high_scale", new_callable=PropertyMock) as hs:
-        hs.return_value = _Service()
+    svc = MagicMock(service_id=_SVC)
+    svc.client.execute.return_value = [{"c": 3}]
+    with patch("backend.core.request_context.RequestContext.high_scale", new_callable=PropertyMock, return_value=svc):
         return client.get(f"/api/services/{_SVC}/rum/beacon-health", headers=_HEADERS)
 
 
 def _hs_analytics(client):
     with (
-        patch("backend.core.request_context.RequestContext.high_scale", new_callable=PropertyMock) as hs,
+        patch(
+            "backend.core.request_context.RequestContext.high_scale", new_callable=PropertyMock, return_value=object()
+        ),
         patch("backend.high_scale.rum.rum_analytics", return_value=dict(_HS_ANALYTICS)),
     ):
-        hs.return_value = object()
         return client.get(f"/api/services/{_SVC}/rum/analytics", headers=_HEADERS)
 
 
 _ROUTES = [
-    _beacon_health_disabled,
-    _beacon_health_check_failed,
-    _analytics_no_data,
-    _analytics_success,
-    _hs_beacon_health,
-    _hs_analytics,
-]
+    _beacon_health_disabled, _beacon_health_check_failed, _analytics_no_data,
+    _analytics_success, _hs_beacon_health, _hs_analytics,
+]  # fmt: skip
 
 
 def _envelope_keys(body: dict) -> list[str]:
@@ -1196,41 +926,26 @@ def test_admin_rum_response_still_carries_the_envelope() -> None:
     assert {"_debug_queries", "_debug_calls"} <= set(body)
 
 
-@pytest.mark.parametrize("audience", ["admin", "both", "query", "api", "disabled"])
+@pytest.mark.parametrize("audience", "admin both query api disabled".split())
 @pytest.mark.parametrize(
     ("master_enabled", "opt_in", "force_include"),
-    [
-        (False, False, False),
-        (False, True, False),
-        (False, False, True),
-        (True, False, False),
-        (True, True, False),
-        (True, False, True),
-    ],
+    [(m, o, f) for m in (False, True) for o, f in ((False, False), (True, False), (False, True))],
 )
 def test_rum_pre_attached_envelope_respects_master_switch(
     monkeypatch, audience: str, master_enabled: bool, opt_in: bool, force_include: bool
 ) -> None:
-    from backend.utils import telemetry
-
     monkeypatch.setenv("DEBUG_RESPONSES", "1" if master_enabled else "")
     monkeypatch.setenv("DEBUG_RESPONSES_FORCE_INCLUDE", "1" if force_include else "")
-    queries = [{"sql": "SELECT 1", "time_ms": 0.1}]
-    calls = [{"method": "GET", "path": "/example"}]
+    queries, calls = [{"sql": "SELECT 1", "time_ms": 0.1}], [{"method": "GET", "path": "/example"}]
     monkeypatch.setattr(telemetry, "get_queries", lambda: queries)
     monkeypatch.setattr(telemetry, "get_sqlite_queries", lambda: queries)
     monkeypatch.setattr(telemetry, "get_tracked_calls", lambda: calls)
     remote = audience != "admin"
-    query_visible = audience in ("admin", "both", "query")
-    api_visible = audience in ("admin", "both", "api")
+    query_visible, api_visible = audience in ("admin", "both", "query"), audience in ("admin", "both", "api")
     expected = {
-        "enabled": False,
-        "beacon_fire_rate": 0,
-        "recent_beacons": 0,
-        "last_beacon_time": None,
-        "setup_complete": False,
-        "message": "RUM not enabled for this service",
-    }
+        "enabled": False, "beacon_fire_rate": 0, "recent_beacons": 0,
+        "last_beacon_time": None, "setup_complete": False, "message": "RUM not enabled for this service",
+    }  # fmt: skip
     if master_enabled and (opt_in or force_include):
         if query_visible:
             expected.update(_debug_queries=queries, _debug_sqlite=queries)
@@ -1243,9 +958,7 @@ def test_rum_pre_attached_envelope_respects_master_switch(
             _as_analyst(client, service_ids=[_SVC])
             share_db.set_setting("query_debug_visibility", "analysts" if query_visible else "disabled")
             share_db.set_setting("api_call_debug_visibility", "analysts" if api_visible else "disabled")
-        headers = dict(_HEADERS) if remote else {}
-        if opt_in:
-            headers["x-debug-responses"] = "1"
+        headers = {**(_HEADERS if remote else {}), **({"x-debug-responses": "1"} if opt_in else {})}
         with patch("backend.routers.rum.svcconfig.load_config", return_value={}):
             response = client.get(f"/api/services/{_SVC}/rum/beacon-health", headers=headers)
 
@@ -1257,9 +970,6 @@ def test_rum_pre_attached_envelope_respects_master_switch(
 
 @pytest.mark.security_regression
 def test_analyst_high_scale_query_response_has_no_debug_envelope() -> None:
-    from backend.core.request_context import build_request_context
-    from backend.routers import query, share_auth
-
     app = FastAPI()
     app.add_middleware(RemoteAccessMiddleware)
     app.include_router(share_auth.router)
@@ -1267,31 +977,27 @@ def test_analyst_high_scale_query_response_has_no_debug_envelope() -> None:
     app.dependency_overrides[build_request_context] = override_request_context(
         source={"name": _SVC, "service_id": _SVC}
     )
+    q_dbg = [{"sql": "SELECT secret FROM ch_table", "time_ms": 1, "engine": "ClickHouse"}]
     hs_result = {
-        "columns": ["n"],
-        "data": [{"n": 1}],
-        "row_count": 1,
-        "total_rows": 1,
-        "truncated": False,
-        "elapsed_ms": 1,
-        "debug_queries": [{"sql": "SELECT secret FROM ch_table", "time_ms": 1, "engine": "ClickHouse"}],
-        "_debug_queries": [{"sql": "SELECT secret FROM ch_table", "time_ms": 1, "engine": "ClickHouse"}],
-        "debug_calls": [{"method": "GET", "path": "/internal"}],
-    }
+        "columns": ["n"], "data": [{"n": 1}], "row_count": 1, "total_rows": 1, "truncated": False, "elapsed_ms": 1,
+        "debug_queries": q_dbg, "_debug_queries": q_dbg, "debug_calls": [{"method": "GET", "path": "/internal"}],
+    }  # fmt: skip
 
     def _post(c):
         with (
-            patch("backend.core.request_context.RequestContext.high_scale", new_callable=PropertyMock) as hs,
+            patch(
+                "backend.core.request_context.RequestContext.high_scale",
+                new_callable=PropertyMock,
+                return_value=object(),
+            ),
             patch("backend.high_scale.query.query_endpoint", return_value=dict(hs_result)),
         ):
-            hs.return_value = object()
             return c.post(f"/api/query?service_id={_SVC}", json={"sql": "SELECT 1"}, headers=_WRITE_HEADERS)
 
     with TestClient(app) as c:
         _as_analyst(c, service_ids=[_SVC])
         resp = _post(c)
         assert resp.status_code == 200 and _envelope_keys(resp.json()) == [] and "ch_table" not in resp.text
-
         share_db.set_setting("query_debug_visibility", "analysts")
         body = _post(c).json()
         assert "_debug_queries" in body and "debug_calls" not in body and "_debug_calls" not in body
@@ -1299,41 +1005,29 @@ def test_analyst_high_scale_query_response_has_no_debug_envelope() -> None:
 
 @pytest.mark.security_regression
 def test_analyst_debug_aliases_are_stripped_when_master_switch_is_off(monkeypatch) -> None:
-    from backend.routers import share_auth
-    from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware
-
     monkeypatch.setenv("DEBUG_RESPONSES", "0")
     app = FastAPI()
     app.add_middleware(RemoteAccessMiddleware)
     app.add_middleware(TelemetryResponseBodyMiddleware)
     app.include_router(share_auth.router)
-    app.add_api_route(
-        f"/api/services/{_SVC}/debug-aliases",
-        lambda: {
-            "value": "preserved",
-            "debug_queries": [{"sql": "SELECT secret FROM logs"}],
-            "debug_calls": [{"path": "/internal"}],
-        },
-        methods=["GET"],
-    )
-
+    payload = {
+        "value": "preserved",
+        "debug_queries": [{"sql": "SELECT secret FROM logs"}],
+        "debug_calls": [{"path": "/internal"}],
+    }
+    app.add_api_route(f"/api/services/{_SVC}/debug-aliases", lambda: payload, methods=["GET"])
     with TestClient(app) as client:
         _as_analyst(client, service_ids=[_SVC])
         share_db.set_setting("query_debug_visibility", "analysts")
         share_db.set_setting("api_call_debug_visibility", "analysts")
         response = client.get(f"/api/services/{_SVC}/debug-aliases", headers={**_HEADERS, "x-debug-responses": "1"})
-
     assert response.status_code == 200 and response.json() == {"value": "preserved"}
 
 
 _ENVELOPE = {
-    "ok": True,
-    "_debug_queries": [{"sql": "SELECT secret FROM t"}],
-    "_debug_sqlite": [{"sql": "SELECT 1"}],
-    "_debug_postgres": [{"sql": "SELECT 2"}],
-    "_debug_calls": [{"path": "/service/abc"}],
-    "_is_cached": False,
-}
+    "ok": True, "_debug_queries": [{"sql": "SELECT secret FROM t"}], "_debug_sqlite": [{"sql": "SELECT 1"}],
+    "_debug_postgres": [{"sql": "SELECT 2"}], "_debug_calls": [{"path": "/service/abc"}], "_is_cached": False,
+}  # fmt: skip
 
 
 def _strip(payload: dict, *, query: str = "disabled", api: str = "disabled") -> dict:
@@ -1359,8 +1053,6 @@ def test_strip_removes_debug_data_but_preserves_cache_marker_when_visibility_is_
 @pytest.mark.security_regression
 def test_scoring_cache_contract_preserves_marker_for_analyst_when_debug_is_disabled(monkeypatch):
     monkeypatch.setenv("DEBUG_RESPONSES", "0")
-    from backend.routers.session_scoring import _finalize_cached
-
     assert _strip(_finalize_cached({"ok": True}, is_cached=True)) == {"ok": True, "_is_cached": True}
 
 
@@ -1381,9 +1073,6 @@ def test_strip_keeps_the_postgres_envelope_only_when_query_visibility_is_enabled
 
 
 def _admin_app() -> FastAPI:
-    from backend.core.request_context import build_request_context
-    from backend.routers import admin, provision, services, share_auth
-
     app = FastAPI()
     app.add_middleware(RemoteAccessMiddleware)
     for r in (share_auth.router, provision.router, services.router, admin.router):

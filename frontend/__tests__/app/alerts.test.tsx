@@ -7,21 +7,84 @@ import {
   stubResizeObserver,
   stubPointerCaptureAndScroll,
 } from '../helpers/page-smoke'
-import { describe, expect, it, test, vi, beforeAll, beforeEach } from 'vitest'
+import { describe, expect, it, test, vi, beforeAll, beforeEach, afterEach } from 'vitest'
 import React from 'react'
 import type { PlotlyLayout, PlotlyTrace } from '@/types/api'
 import type { components } from '@/types/api.generated'
+import {
+  INSIGHT_SECTIONS,
+  OTHER_SECTION,
+  categoryToSection,
+  sortInsights,
+  groupInsightsBySection,
+  summarizeSeverities,
+  pickInsightsDefault,
+  historyHoursFromExtents,
+  WINDOW_OPTIONS,
+  BASELINE_OPTIONS,
+} from '@/lib/utils'
 
-import AlertsClient from '@/app/alerts/_sections/AlertsClient'
-import { AlertPreview, CreateAlertForm } from '@/app/alerts/_sections/AlertEditor'
-import { useServiceStore } from '@/stores/filterStore'
-import { useFilterStore } from '@/stores/filterStore'
-import { useTimezoneStore } from '@/stores/filterStore'
+import AlertsClient, { AlertPreview, CreateAlertForm } from '@/app/alerts/_sections/AlertsClient'
+import InsightsClient from '@/app/insights/_sections/InsightsClient'
+import { useServiceStore, useFilterStore, useTimezoneStore, useSessionRoleStore } from '@/stores/filterStore'
 import { server } from '@/__tests__/helpers/msw/handlers'
 
 beforeAll(() => {
   stubResizeObserver()
   stubPointerCaptureAndScroll()
+})
+
+let useMockInsightsApi = false
+let useMockReportLayout = false
+
+type ApiResult = { data: unknown }
+type PostOpts = { body?: { window_size_hrs?: number; baseline_hours?: number; force_refresh?: boolean } }
+
+const { apiGet, apiPost } = vi.hoisted(() => ({
+  apiGet: vi.fn<(url: string, opts?: unknown) => Promise<ApiResult>>(),
+  apiPost: vi.fn<(url: string, opts?: PostOpts) => Promise<ApiResult>>(),
+}))
+
+vi.mock('@/components/Insights/InsightCard', () => ({
+  InsightCard: ({ insight }: { insight: { name?: string; title?: string } }) => (
+    <div data-testid="insight-card">{insight.name || insight.title}</div>
+  ),
+  SEVERITY_BADGE_CLASS: { clean: '', info: '', warning: '', critical: '', error: '' },
+}))
+
+vi.mock('@/components/ReportLayout', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/ReportLayout')>()
+  const mockMod = await (await import('../helpers/page-smoke')).reportLayoutModuleMock({
+    activeServiceId: 'test-svc',
+    startTime: null,
+    endTime: null,
+    filterPayload: {},
+  })
+  const Wrapped = (props: React.ComponentProps<typeof actual.ReportLayout>) =>
+    useMockReportLayout ? mockMod.ReportLayout(props as never) : actual.ReportLayout(props)
+  return {
+    ...actual,
+    default: Wrapped,
+    ReportLayout: Wrapped,
+  }
+})
+
+vi.mock('@/lib/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/api')>()
+  return {
+    ...actual,
+    client: new Proxy(actual.client, {
+      get(target, prop, receiver) {
+        if (useMockInsightsApi) {
+          if (prop === 'GET') return apiGet
+          if (prop === 'POST') return apiPost
+        }
+        return Reflect.get(target, prop, receiver)
+      },
+    }),
+    extractApiError: (e: unknown) => (useMockInsightsApi ? String(e) : actual.extractApiError(e)),
+    getApiBase: () => (useMockInsightsApi ? 'http://test' : actual.getApiBase()),
+  }
 })
 
 const plotlyChartCalls: Array<{ data: PlotlyTrace[]; layout: PlotlyLayout | undefined }> = []
@@ -565,5 +628,473 @@ describe('CreateAlertForm', () => {
       await new Promise((r) => setTimeout(r, 50))
       expect(posted.length).toBe(0)
     })
+  })
+})
+
+
+describe('InsightsClient', () => {
+  beforeEach(() => {
+    useMockInsightsApi = true
+    useMockReportLayout = true
+    useServiceStore.setState({ activeServiceId: 'test-svc', isInitialized: true })
+    useSessionRoleStore.setState({ isRemoteAnalyst: false })
+    queryClient.clear()
+  })
+
+  afterEach(() => {
+    useMockInsightsApi = false
+    useMockReportLayout = false
+  })
+
+  test('renders insights page and displays insight cards', async () => {
+    apiGet.mockResolvedValue({ data: { unavailable: [] } })
+    apiPost.mockResolvedValue({
+      data: {
+        insights: [
+          {
+            id: 'insight-1',
+            name: 'Global Latency Spike',
+            title: 'Global Latency Spike',
+            description: 'Latency is higher than usual',
+            category: 'edge',
+            severity: 'warning',
+            current_value: 150,
+            baseline_value: 100,
+            delta_percent: 50,
+            unit: 'ms',
+          },
+        ],
+        computed_at: new Date().toISOString(),
+      },
+    })
+
+    renderWithQuery(<InsightsClient />, { queryClient })
+
+    expect(screen.getByText('Anomaly Detection')).toBeInTheDocument()
+
+    await waitFor(() => {
+      expect(screen.getByTestId('insight-card')).toBeInTheDocument()
+      expect(screen.getByText('Global Latency Spike')).toBeInTheDocument()
+    })
+  })
+
+  test('adapts the default window/baseline to a service with ~2h of history', async () => {
+    apiGet.mockImplementation((url) =>
+      url === '/api/log-extents'
+        ? Promise.resolve({
+            data: {
+              earliest_log_at: new Date(Date.now() - 2 * 3600_000).toISOString(),
+              latest_log_at: new Date().toISOString(),
+            },
+          })
+        : Promise.resolve({ data: { unavailable: [] } }))
+    apiPost.mockResolvedValue({
+      data: { insights: [], computed_at: new Date().toISOString() },
+    })
+
+    renderWithQuery(<InsightsClient />, { queryClient })
+
+    await waitFor(
+      () => {
+        const sawAdaptive = apiPost.mock.calls.some(
+          ([, opts]) =>
+            opts?.body?.window_size_hrs === 1 && opts?.body?.baseline_hours === 1,
+        )
+        expect(sawAdaptive).toBe(true)
+      },
+      { timeout: 3000 },
+    )
+  })
+
+  test('uses the SSR service and adaptive seed before the service store hydrates', async () => {
+    useServiceStore.setState({ activeServiceId: null, isInitialized: false })
+    queryClient.setQueryData(['bootstrap'], { active_service_id: 'test-svc' })
+    queryClient.setQueryData(['log-extents', 'test-svc'], {
+      earliest_log_at: new Date(Date.now() - 36 * 3600_000).toISOString(),
+      latest_log_at: new Date().toISOString(),
+    })
+    queryClient.setQueryData(['insights', 'test-svc', '4', '24'], {
+      insights: [{
+        id: 'seeded-insight',
+        title: 'Seeded anomaly',
+        category: 'edge',
+        severity: 'warning',
+      }],
+      computed_at: new Date().toISOString(),
+    })
+    apiGet.mockResolvedValue({ data: { unavailable: [] } })
+
+    renderWithQuery(<InsightsClient />, { queryClient })
+
+    expect(screen.getByText('Seeded anomaly')).toBeInTheDocument()
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+
+  test('renders all 6 category tabs and enforces zero-CLS layout reservation classes', async () => {
+    apiGet.mockResolvedValue({ data: { unavailable: [] } })
+    apiPost.mockResolvedValue({
+      data: {
+        insights: [
+          {
+            id: 'insight-sec-1',
+            name: 'SQL Injection Spike',
+            title: 'SQL Injection Spike',
+            category: 'security',
+            severity: 'critical',
+          },
+        ],
+        computed_at: new Date().toISOString(),
+      },
+    })
+
+    renderWithQuery(<InsightsClient />, { queryClient })
+
+    await waitFor(() => {
+      expect(screen.getByRole('tab', { name: /all categories/i })).toBeInTheDocument()
+      expect(screen.getByRole('tab', { name: /security & threat detection/i })).toBeInTheDocument()
+      expect(screen.getByRole('tab', { name: /origin health & stability/i })).toBeInTheDocument()
+      expect(screen.getByRole('tab', { name: /edge & delivery performance/i })).toBeInTheDocument()
+      expect(screen.getByRole('tab', { name: /network & routing path/i })).toBeInTheDocument()
+      expect(screen.getByRole('tab', { name: /traffic & volumetrics/i })).toBeInTheDocument()
+      expect(screen.getByTestId('insights-grid')).toBeInTheDocument()
+    })
+
+    const grid = screen.getByTestId('insights-grid')
+    expect(grid.className).toContain('min-h-[300px]')
+    expect(grid.className).toContain('[contain-intrinsic-size:300px]')
+    expect(grid.className).toContain('[content-visibility:auto]')
+  })
+
+  test('displays unavailable insights alert with link to service-config', async () => {
+    apiGet.mockResolvedValue({
+      data: {
+        unavailable: [
+          { id: 'ja3_anomaly', name: 'JA3 Fingerprint Anomaly', missing_fields: ['ja3_md5'] },
+          { id: 'bot_spike', name: 'Bot Cluster Surge', missing_fields: ['bot_score'] },
+        ],
+      },
+    })
+    apiPost.mockResolvedValue({
+      data: { insights: [], computed_at: new Date().toISOString() },
+    })
+
+    renderWithQuery(<InsightsClient />, { queryClient })
+
+    await waitFor(() => {
+      expect(screen.getByText(/2 insights are unavailable/i)).toBeInTheDocument()
+      expect(screen.getByText(/Configure Service Log Fields/i)).toBeInTheDocument()
+    })
+
+    const link = screen.getByRole('link', { name: /configure service log fields/i })
+    expect(link).toHaveAttribute('href', '/service-config?service=test-svc')
+  })
+
+  test('renders Re-scan button for Admin and handles force_refresh', async () => {
+    useSessionRoleStore.setState({ isRemoteAnalyst: false })
+    apiGet.mockResolvedValue({ data: { unavailable: [] } })
+    apiPost.mockResolvedValue({
+      data: { insights: [], computed_at: new Date().toISOString() },
+    })
+
+    renderWithQuery(<InsightsClient />, { queryClient })
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /re-scan/i })).toBeInTheDocument()
+    })
+
+    const rescanBtn = screen.getByRole('button', { name: /re-scan/i })
+    fireEvent.click(rescanBtn)
+
+    await waitFor(() => {
+      const hasForceRefresh = apiPost.mock.calls.some(([, opts]) => opts?.body?.force_refresh === true)
+      expect(hasForceRefresh).toBe(true)
+    })
+  })
+
+  test('hides Re-scan button for Remote Analyst', async () => {
+    useSessionRoleStore.setState({ isRemoteAnalyst: true })
+    apiGet.mockResolvedValue({ data: { unavailable: [] } })
+    apiPost.mockResolvedValue({
+      data: { insights: [], computed_at: new Date().toISOString() },
+    })
+
+    renderWithQuery(<InsightsClient />, { queryClient })
+
+    await waitFor(() => {
+      expect(screen.getByText('Anomaly Detection')).toBeInTheDocument()
+    })
+
+    expect(screen.queryByRole('button', { name: /re-scan/i })).not.toBeInTheDocument()
+  })
+
+  test('displays clean pass state when a category has no anomalies', async () => {
+    apiGet.mockResolvedValue({ data: { unavailable: [] } })
+    apiPost.mockResolvedValue({
+      data: {
+        insights: [],
+        computed_at: new Date().toISOString(),
+      },
+    })
+
+    renderWithQuery(<InsightsClient initialTab="security" />, { queryClient })
+
+    await waitFor(() => {
+      expect(screen.getByTestId('insights-empty-pass')).toBeInTheDocument()
+      expect(screen.getByText(/no anomalies detected in security & threat detection/i)).toBeInTheDocument()
+    })
+
+    const emptyPass = screen.getByTestId('insights-empty-pass')
+    expect(emptyPass.className).toContain('min-h-[300px]')
+    expect(emptyPass.className).toContain('[contain-intrinsic-size:300px]')
+    expect(emptyPass.className).toContain('[content-visibility:auto]')
+  })
+})
+
+describe('categoryToSection', () => {
+  it('maps each known category to its section', () => {
+    expect(categoryToSection('security').key).toBe('security')
+    expect(categoryToSection('origin').key).toBe('origin')
+    expect(categoryToSection('edge').key).toBe('edge')
+    expect(categoryToSection('network').key).toBe('network')
+    expect(categoryToSection('traffic').key).toBe('traffic')
+  })
+
+  it('falls back to Other for unknown / missing category', () => {
+    expect(categoryToSection('does_not_exist').key).toBe(OTHER_SECTION.key)
+    expect(categoryToSection('').key).toBe(OTHER_SECTION.key)
+    expect(categoryToSection(null).key).toBe(OTHER_SECTION.key)
+    expect(categoryToSection(undefined).key).toBe(OTHER_SECTION.key)
+  })
+})
+
+describe('sortInsights', () => {
+  it('orders by severity (critical→error→warning→info→clean) then title', () => {
+    const cards = [
+      { title: 'Zeta', severity: 'clean' },
+      { title: 'Alpha', severity: 'warning' },
+      { title: 'Beta', severity: 'critical' },
+      { title: 'Gamma', severity: 'warning' },
+      { title: 'Delta', severity: 'error' },
+      { title: 'Epsilon', severity: 'info' },
+    ]
+    expect(sortInsights(cards).map((c) => c.title)).toEqual([
+      'Beta',
+      'Delta',
+      'Alpha',
+      'Gamma',
+      'Epsilon',
+      'Zeta',
+    ])
+  })
+
+  it('sorts unknown / missing severities last, then by title', () => {
+    const cards = [
+      { title: 'B', severity: undefined },
+      { title: 'A', severity: 'critical' },
+      { title: 'C', severity: 'mystery' },
+    ]
+    expect(sortInsights(cards).map((c) => c.title)).toEqual(['A', 'B', 'C'])
+  })
+
+  it('does not mutate its input', () => {
+    const cards = [
+      { title: 'B', severity: 'clean' },
+      { title: 'A', severity: 'critical' },
+    ]
+    const snapshot = [...cards]
+    sortInsights(cards)
+    expect(cards).toEqual(snapshot)
+  })
+})
+
+describe('groupInsightsBySection', () => {
+  it('returns sections in fixed order, dropping empty ones', () => {
+    const cards = [
+      { id: '1', title: 'T', severity: 'info', category: 'traffic' },
+      { id: '2', title: 'S', severity: 'critical', category: 'security' },
+    ]
+    const groups = groupInsightsBySection(cards)
+    expect(groups.map((g) => g.section.key)).toEqual(['security', 'traffic'])
+  })
+
+  it('files each card into its section and sorts within the section', () => {
+    const cards = [
+      { id: '1', title: 'Warn', severity: 'warning', category: 'edge' },
+      { id: '2', title: 'Crit', severity: 'critical', category: 'edge' },
+      { id: '3', title: 'Sec', severity: 'info', category: 'security' },
+    ]
+    const groups = groupInsightsBySection(cards)
+    const edge = groups.find((g) => g.section.key === 'edge')!
+    expect(edge.cards.map((c) => c.id)).toEqual(['2', '1'])
+    const sec = groups.find((g) => g.section.key === 'security')!
+    expect(sec.cards.map((c) => c.id)).toEqual(['3'])
+  })
+
+  it('files network-category cards into the Network section, in fixed order', () => {
+    const cards = [
+      { id: '1', title: 'Traf', severity: 'info', category: 'traffic' },
+      { id: '2', title: 'Net', severity: 'warning', category: 'network' },
+      { id: '3', title: 'Edge', severity: 'info', category: 'edge' },
+    ]
+    const groups = groupInsightsBySection(cards)
+    expect(groups.map((g) => g.section.key)).toEqual(['edge', 'network', 'traffic'])
+    const net = groups.find((g) => g.section.key === 'network')!
+    expect(net.cards.map((c) => c.id)).toEqual(['2'])
+    expect(net.section.label).toBe('Network & Routing Path')
+  })
+
+  it('buckets unknown / missing categories into the Other section, ordered last', () => {
+    const cards = [
+      { id: '1', title: 'Known', severity: 'info', category: 'security' },
+      { id: '2', title: 'Unknown', severity: 'info', category: 'does_not_exist' },
+      { id: '3', title: 'Missing', severity: 'info', category: null },
+    ]
+    const groups = groupInsightsBySection(cards)
+    expect(groups.map((g) => g.section.key)).toEqual(['security', OTHER_SECTION.key])
+    const other = groups.find((g) => g.section.key === OTHER_SECTION.key)!
+    expect(other.cards.map((c) => c.id).sort()).toEqual(['2', '3'])
+  })
+
+  it('groups skeleton-shaped entries (no severity) by title', () => {
+    const skeletons = [
+      { id: 'b', title: 'Beta', category: 'origin' },
+      { id: 'a', title: 'Alpha', category: 'origin' },
+    ]
+    const groups = groupInsightsBySection(skeletons)
+    expect(groups).toHaveLength(1)
+    expect(groups[0].section.key).toBe('origin')
+    expect(groups[0].cards.map((c) => c.id)).toEqual(['a', 'b'])
+  })
+
+  it('every declared section key is a distinct backend category', () => {
+    const keys = INSIGHT_SECTIONS.map((s) => s.key)
+    expect(new Set(keys).size).toBe(keys.length)
+    expect(keys).toEqual(['security', 'origin', 'edge', 'network', 'traffic'])
+  })
+})
+
+describe('summarizeSeverities', () => {
+  it('counts per severity, worst-first, omitting zero counts', () => {
+    const cards = [
+      { severity: 'warning' },
+      { severity: 'critical' },
+      { severity: 'warning' },
+      { severity: 'warning' },
+      { severity: 'critical' },
+      { severity: 'clean' },
+    ]
+    expect(summarizeSeverities(cards)).toEqual([
+      { severity: 'critical', count: 2 },
+      { severity: 'warning', count: 3 },
+      { severity: 'clean', count: 1 },
+    ])
+  })
+
+  it('orders chips by the severity ramp regardless of input order', () => {
+    const cards = [
+      { severity: 'clean' },
+      { severity: 'info' },
+      { severity: 'error' },
+      { severity: 'critical' },
+    ]
+    expect(summarizeSeverities(cards).map((s) => s.severity)).toEqual([
+      'critical',
+      'error',
+      'info',
+      'clean',
+    ])
+  })
+
+  it('ignores unknown and missing severities (skeleton entries → [])', () => {
+    expect(summarizeSeverities([{ severity: 'mystery' }, { severity: null }, {}])).toEqual([])
+    expect(summarizeSeverities([{ title: 'Alpha', category: 'origin' }])).toEqual([])
+  })
+
+  it('returns [] for an empty section', () => {
+    expect(summarizeSeverities([])).toEqual([])
+  })
+})
+
+const STATIC_DEFAULT = { window: '24', baseline: '168' } as const
+
+const WIN = new Set(WINDOW_OPTIONS.map((o) => o.value))
+const BASE = new Set(BASELINE_OPTIONS.map((o) => o.value))
+
+describe('pickInsightsDefault', () => {
+  it('returns the static default when history is null', () => {
+    expect(pickInsightsDefault(null)).toEqual({
+      window: STATIC_DEFAULT.window,
+      baseline: STATIC_DEFAULT.baseline,
+    })
+  })
+
+  it.each([
+    [0.5, '0.25', '1'],
+    [2, '1', '1'],
+    [12, '4', '1'],
+    [36, '4', '24'],
+    [96, '24', '24'],
+    [200, '24', '168'],
+    [800, '24', '168'],
+  ])('history %sh -> window %s / baseline %s', (h, w, b) => {
+    expect(pickInsightsDefault(h)).toEqual({ window: w, baseline: b })
+  })
+
+  it.each([
+    [0.999, '0.25', '1'],
+    [1, '1', '1'],
+    [3.999, '1', '1'],
+    [4, '4', '1'],
+    [23.999, '4', '1'],
+    [24, '4', '24'],
+    [47.999, '4', '24'],
+    [48, '24', '24'],
+    [167.999, '24', '24'],
+    [168, '24', '168'],
+    [719.999, '24', '168'],
+    [720, '24', '168'],
+  ])('boundary %sh -> %s / %s', (h, w, b) => {
+    expect(pickInsightsDefault(h)).toEqual({ window: w, baseline: b })
+  })
+
+  it('only ever returns real dropdown option values', () => {
+    for (const h of [null, 0, 0.5, 1, 2, 4, 12, 24, 36, 96, 168, 200, 720, 2000, NaN]) {
+      const r = pickInsightsDefault(h as number | null)
+      expect(WIN.has(r.window)).toBe(true)
+      expect(BASE.has(r.baseline)).toBe(true)
+    }
+  })
+
+  it('treats NaN as no-data (static default)', () => {
+    expect(pickInsightsDefault(NaN)).toEqual({
+      window: STATIC_DEFAULT.window,
+      baseline: STATIC_DEFAULT.baseline,
+    })
+  })
+})
+
+describe('historyHoursFromExtents', () => {
+  const NOW = Date.parse('2026-06-15T12:00:00.000Z')
+
+  it('returns null for null/undefined/empty earliest', () => {
+    expect(historyHoursFromExtents(null, NOW)).toBeNull()
+    expect(historyHoursFromExtents(undefined, NOW)).toBeNull()
+    expect(historyHoursFromExtents('', NOW)).toBeNull()
+  })
+
+  it('computes hours from a full ISO earliest', () => {
+    expect(historyHoursFromExtents('2026-06-15T10:00:00.000Z', NOW)).toBeCloseTo(2, 6)
+  })
+
+  it('widens a date-only earliest to UTC start-of-day', () => {
+    expect(historyHoursFromExtents('2026-06-14', NOW)).toBeCloseTo(36, 6)
+  })
+
+  it('returns null for an unparseable earliest', () => {
+    expect(historyHoursFromExtents('not-a-date', NOW)).toBeNull()
+  })
+
+  it('clamps a future earliest to 0 (never negative)', () => {
+    expect(historyHoursFromExtents('2026-06-15T13:00:00.000Z', NOW)).toBe(0)
   })
 })

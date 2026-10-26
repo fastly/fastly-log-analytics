@@ -17,11 +17,8 @@ import {
 } from 'lucide-react'
 import { useSSE } from '@/hooks/useSSE'
 import { SSEActionDialogShell, SSEExecutionSection } from '@/components/SSEModal'
-import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api'
-import { formatBytes, formatCount } from '@/lib/format'
-import { queryKeys } from '@/lib/query-keys'
-import { cn } from '@/lib/utils'
+import { client, unwrapClient, queryKeys } from "@/lib/api";
+import { formatBytes, formatCount, cn } from "@/lib/utils";
 import type { ServiceConfig } from '@/types/api'
 
 interface DeleteDataDialogProps {

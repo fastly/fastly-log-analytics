@@ -15,8 +15,7 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
-import { cn, isIpFamilyField } from '@/lib/utils'
-import { formatValue, calculateDelta, formatCount, formatCountMaybe } from '@/lib/format'
+import { cn, isIpFamilyField, formatValue, calculateDelta, formatCount, formatCountMaybe } from "@/lib/utils";
 import { PopLabel } from '@/components/DataTable'
 import {
   Tooltip,

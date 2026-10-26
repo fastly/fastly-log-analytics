@@ -100,68 +100,10 @@ vi.mock('@/hooks/useSSE', async (importOriginal) => ({
   cronCacheBust: vi.fn(),
 }))
 
-vi.mock('@/lib/format', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/lib/format')>()),
-  formatTimeAgo: (ts: string) => mocks.formatTimeAgo(ts),
-}))
-
 vi.mock('@/lib/utils', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/utils')>()),
+  formatTimeAgo: (ts: string) => mocks.formatTimeAgo(ts),
   showToast: mocks.showToast,
-}))
-
-vi.mock('@/app/logs/_state', () => ({
-  useLogsPageState: vi.fn(() => ({
-    activeServiceId: 'test-svc',
-    activeTab: 'cron',
-    handleTabChange: vi.fn(),
-    isAnalyst: false,
-    status: { idle: true, access_level: 'read_write' },
-    catalogMaps: {},
-    recentCrons: {},
-    cronLogs: {},
-    auditLogs: [],
-    ingestedFiles: [],
-    orderedSchedules: [],
-    isLoadingSchedule: false,
-    schemaData: { tables: [] },
-    consoleOpen: false,
-    setConsoleOpen: vi.fn(),
-    displayedJobs: [],
-    setDisplayedJobs: vi.fn(),
-    removeDisplayedJob: vi.fn(),
-    selectedConsoleJobId: null,
-    setSelectedConsoleJobId: vi.fn(),
-    eventFilter: '',
-    setEventFilter: vi.fn(),
-    isFetchingAudit: false,
-    isFetchingCron: false,
-    isLoadingAudit: false,
-    isLoadingCron: false,
-    isLoadingIngested: false,
-    isLoadingSchema: false,
-    isPurgeOpen: false,
-    setIsPurgeOpen: vi.fn(),
-    isSSEModalOpen: false,
-    setIsSSEModalOpen: vi.fn(),
-    isSyncModalOpen: false,
-    setIsSyncModalOpen: vi.fn(),
-    lines: [],
-    purgeMutation: { isPending: false, mutate: vi.fn() },
-    reset: vi.fn(),
-    setSseDescription: vi.fn(),
-    setSseTitle: vi.fn(),
-    setStatusFilter: vi.fn(),
-    setTaskFilter: vi.fn(),
-    sseDescription: '',
-    sseError: null,
-    sseStatus: 'idle',
-    sseTitle: '',
-    start: vi.fn(),
-    statusFilter: 'all',
-    stop: vi.fn(),
-    taskFilter: '',
-  })),
 }))
 
 vi.mock('@/components/SSEModal', () => ({
@@ -188,10 +130,9 @@ import { Sparkline } from '@/app/dashboard/_sections/DashboardClient'
 import { ServiceSwitcher, SyncStatusBadge, TimeAgo } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { TimezoneSwitcher } from '@/components/AppLayout'
 import { useDebugStore, useServiceStore, useTimezoneStore } from '@/stores/filterStore'
-import { getTimezoneAbbr } from '@/lib/format'
+import { getTimezoneAbbr, DEBUG_RESPONSES_COOKIE } from "@/lib/utils";
 import { DebugPanel } from '@/components/DebugPanel'
-import { DiagnosticsPanel } from '@/app/admin/_sections/GlobalSettings'
-import { DEBUG_RESPONSES_COOKIE } from '@/lib/utils'
+import { DiagnosticsPanel } from '@/app/admin/_sections/OperationsOverview'
 import { server } from '@/__tests__/helpers/msw/handlers'
 import { client, getApiBase } from '@/lib/api'
 import { LogSyncSection } from '@/components/CronSettingsModal/CronSettingsModal'
@@ -1015,6 +956,8 @@ describe('CronLiveLog, LogSyncSection & LogsClient', () => {
   })
 
   test('LogsClient mounts in cron mode, QuickActionsBar handles failures, and partial_hour_merge is registered', async () => {
+    useServiceStore.setState({ activeServiceId: 'test-svc' })
+    mocks.status.mockReturnValue({ data: { idle: true, access_level: 'read_write' } })
     const { unmount } = renderWithQuery(<LogsClient initialTab="cron" />)
     expect(screen.getByText('Data Management')).toBeInTheDocument()
     expect(errorSpy).not.toHaveBeenCalled()

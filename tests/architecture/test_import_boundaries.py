@@ -1,40 +1,59 @@
 from __future__ import annotations
 
+import ast
+import importlib.util
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).parents[2]
+import pytest
+import yaml
+
+from observability.docker_stats_exporter import _block_io_bytes
+from scripts import local_stack_processes as stack
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = str(_REPO_ROOT)
+ROUTERS = _REPO_ROOT / "backend" / "routers"
+SCRIPTS = _REPO_ROOT / "scripts"
+MAKEFILE = os.path.join(REPO_ROOT, "Makefile")
+CI_YML = os.path.join(REPO_ROOT, ".github", "workflows", "ci.yml")
+CANONICAL_DIR = os.path.join(REPO_ROOT, "observability")
+CHART_DIR = os.path.join(REPO_ROOT, "deploy", "chart", "fastly-log-analytics", "files", "observability")
+DATEPARSE = "check_no_raw_dateparse.sh"
+RETRY = "check_no_handrolled_retry.sh"
+COALESCE = "check_no_inline_metric_coalesce.sh"
+
+_spec = importlib.util.spec_from_file_location("analyze_web_vitals", SCRIPTS / "analyze_web_vitals.py")
+assert _spec and _spec.loader
+awv = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(awv)
 
 
 def test_capacity_and_recovery_contract_is_explicit() -> None:
     text = (_REPO_ROOT / "docs/runbooks/high-scale-capacity-and-recovery.md").read_text()
-    assert "2M request events/sec" in text
-    assert "5M/sec" in text
-    assert "500k RUM events/sec" in text
-    assert "1M/sec RUM bursts" in text
-    assert "15 minutes" in text
-    assert "never silently samples or discards" in text
-    assert "FOS is the durable source of truth" in text
-    assert "request, RUM vitals, RUM errors, and CMCD" in text
+    for needle in (
+        "2M request events/sec",
+        "5M/sec",
+        "500k RUM events/sec",
+        "1M/sec RUM bursts",
+        "15 minutes",
+        "never silently samples or discards",
+        "FOS is the durable source of truth",
+        "request, RUM vitals, RUM errors, and CMCD",
+    ):
+        assert needle in text
 
-
-# ── Merged from test_routers_have_no_inline_sql.py ──
-
-import re
-from pathlib import Path
-
-ROUTERS = Path(__file__).resolve().parents[2] / "backend" / "routers"
 
 _SQL_CALL = re.compile(
     r"\.execute\(|\.executemany\(|\.fetchall\(|\.fetchone\(|track_query\(|\bDESCRIBE\s+\{|"
     r"[\"'`]\s*(SELECT|INSERT INTO|DELETE FROM|UPDATE\s+\w+\s+SET|CREATE\s+(TEMP\s+)?TABLE|WITH\s+\w+\s+AS)\b"
 )
-
-
-_INLINE_SQL_EXEMPT_ROUTERS = {
-    "admin/log_accounting.py",
-    "control_room.py",
-    "high_scale.py",
-}
+_INLINE_SQL_EXEMPT_ROUTERS = {"admin/log_accounting.py", "control_room.py", "high_scale.py"}
 
 
 def test_no_inline_sql_in_routers() -> None:
@@ -43,36 +62,9 @@ def test_no_inline_sql_in_routers() -> None:
         if str(path.relative_to(ROUTERS)) in _INLINE_SQL_EXEMPT_ROUTERS:
             continue
         for lineno, line in enumerate(path.read_text().splitlines(), start=1):
-            if line.lstrip().startswith("#"):
-                continue
-            if _SQL_CALL.search(line):
+            if not line.lstrip().startswith("#") and _SQL_CALL.search(line):
                 offenders.append(f"{path.relative_to(ROUTERS.parent.parent)}:{lineno}: {line.strip()[:100]}")
     assert not offenders, "Move SQL into backend/repositories (+ _sql/):\n" + "\n".join(offenders)
-
-
-# ── Merged from tests/test_repo_and_ci_ratchets.py ──
-
-"""Consolidated tests for test_repo_and_ci_ratchets."""
-
-
-import os
-import re
-
-import pytest
-import yaml
-
-REPO_ROOT = str(Path(__file__).resolve().parents[2])
-MAKEFILE = os.path.join(REPO_ROOT, "Makefile")
-CI_YML = os.path.join(REPO_ROOT, ".github", "workflows", "ci.yml")
-
-# Intentional Make<->CI divergences this test deliberately does NOT flag, with
-# rationale (AGENTS.md: gate-for-gate parity is intentional; these are the few
-# documented exceptions):
-#   - `make test-ci` prefixes `nice -n 15` -- local dev ergonomics only; a
-#     no-op on CI's dedicated runner, and `-n auto` worker density is identical.
-#   - `make scorer-test` uses `--manifest-path compute/scorer/Cargo.toml` while
-#     the Scorer CI job sets working-directory and runs a bare `cargo test`.
-# These gates are therefore excluded from the byte-for-byte parity list below.
 
 
 def _read(path: str) -> str:
@@ -81,23 +73,16 @@ def _read(path: str) -> str:
 
 
 def _makefile_recipe(name: str) -> str:
-    """Return the tab-indented recipe body of a Makefile target as one string."""
-    text = _read(MAKEFILE)
-    lines = text.splitlines()
     out: list[str] = []
     in_target = False
-    for line in lines:
+    for line in _read(MAKEFILE).splitlines():
         if not in_target:
-            # Target header, e.g. "test-ci:" or "openapi-drift: gen-types"
             if re.match(rf"^{re.escape(name)}\s*:", line):
                 in_target = True
             continue
-        # Recipe lines are tab-indented; anything at column 0 ends the recipe.
         if line.startswith("\t"):
             out.append(line.lstrip("\t"))
-        elif line.strip() == "":
-            continue
-        else:
+        elif line.strip() != "":
             break
     if not out:
         raise AssertionError(f"Makefile target not found or empty: {name}")
@@ -105,7 +90,6 @@ def _makefile_recipe(name: str) -> str:
 
 
 def _ci_step_run(step_name: str) -> str:
-    """Return the ``run`` block of the ci.yml step whose name matches."""
     doc = yaml.safe_load(_read(CI_YML))
     for job in doc.get("jobs", {}).values():
         for step in job.get("steps", []):
@@ -118,11 +102,6 @@ def _ci_step_run(step_name: str) -> str:
 
 
 def _marker_set(expr: str) -> frozenset[str]:
-    """Normalise a pytest ``-m`` expression into its set of excluded markers.
-
-    Tolerant of ordering/spacing: ``not a and not b`` == ``not b and not a``.
-    Only the ``not X [and not Y ...]`` shape the CI gates use is handled.
-    """
     return frozenset(re.findall(r"not\s+(\w+)", expr))
 
 
@@ -135,68 +114,33 @@ def _vitest_thresholds(text: str) -> dict[str, int]:
 
 
 def _nonterraform_marker(text: str) -> str:
-    """Pull the ``-m`` expression from the pytest run that EXCLUDES terraform."""
     for m in re.findall(r'-m\s+"([^"]*)"', text):
         if "not terraform_cli" in m:
             return m
     raise AssertionError(f"no 'not terraform_cli' pytest marker found in:\n{text}")
 
 
-# ── Backend pytest: marker-expression parity ───────────────────────────────────
-
-
 def test_backend_pytest_marker_parity() -> None:
-    make = _makefile_recipe("test-ci")
-    ci = _ci_step_run("Tests (pytest with coverage)")
-
-    make_markers = _marker_set(_nonterraform_marker(make))
-    ci_markers = _marker_set(_nonterraform_marker(ci))
-
-    assert make_markers == ci_markers, (
-        "Backend pytest marker exclusions drifted between `make test-ci` and "
-        f"ci.yml.\n  make: {sorted(make_markers)}\n  ci:   {sorted(ci_markers)}\n"
-        "Reconcile both to the same `-m` expression."
-    )
-    # flaky_quarantine is registered as 'skipped in standard CI runs'; it MUST
-    # be excluded on both sides (the original S5 drift).
-    assert "flaky_quarantine" in make_markers
-    assert "terraform_cli" in make_markers
-
-
-# ── Backend coverage floor parity ──────────────────────────────────────────────
+    make_markers = _marker_set(_nonterraform_marker(_makefile_recipe("test-ci")))
+    ci_markers = _marker_set(_nonterraform_marker(_ci_step_run("Tests (pytest with coverage)")))
+    assert make_markers == ci_markers
+    assert "flaky_quarantine" in make_markers and "terraform_cli" in make_markers
 
 
 def test_backend_coverage_floor_parity() -> None:
     make_floors = _cov_floors(_makefile_recipe("test-ci"))
     ci_floors = _cov_floors(_ci_step_run("Tests (pytest with coverage)"))
-
-    assert make_floors == ci_floors, (
-        f"Backend --cov-fail-under drifted.\n  make: {sorted(make_floors)}\n  ci:   {sorted(ci_floors)}"
-    )
-    assert len(make_floors) == 1, f"expected exactly one backend coverage floor, got {make_floors}"
-    # Guard against anyone weakening the floor via this reconciliation.
-    assert min(make_floors) >= 85, f"backend coverage floor must not drop below 85, got {min(make_floors)}"
-
-
-# ── Frontend vitest threshold parity ───────────────────────────────────────────
+    assert make_floors == ci_floors and len(make_floors) == 1 and min(make_floors) >= 85
 
 
 def test_frontend_vitest_threshold_parity() -> None:
     make = _vitest_thresholds(_makefile_recipe("test-frontend-ci"))
     ci = _vitest_thresholds(_ci_step_run("Tests (vitest with coverage)"))
-
-    assert make, "no vitest thresholds parsed from `make test-frontend-ci`"
-    assert make == ci, f"Frontend vitest coverage thresholds drifted.\n  make: {make}\n  ci:   {ci}"
-    # Known floors must not be silently weakened.
-    expected = {"lines": 66, "statements": 65, "functions": 54, "branches": 52}
-    for key, floor in expected.items():
-        assert make.get(key, -1) >= floor, f"vitest {key} threshold weakened below {floor}: {make.get(key)}"
+    assert make and make == ci
+    for key, floor in {"lines": 66, "statements": 65, "functions": 54, "branches": 52}.items():
+        assert make.get(key, -1) >= floor
 
 
-# ── Shared single-command gates: byte-for-byte parity ──────────────────────────
-
-# (make target, ci.yml step name) pairs whose gate command is a single shell
-# line expected to be identical modulo surrounding whitespace.
 _SHARED_COMMAND_GATES = [
     ("lint", "Lint (ruff)", "uv run ruff check ."),
     ("format-check", "Format check (ruff)", "uv run ruff format --check ."),
@@ -207,25 +151,17 @@ _SHARED_COMMAND_GATES = [
         "Observability guard (no OTEL_EXPORTER=console in deploy files)",
         "bash scripts/check_no_console_otel.sh",
     ),
-    (
-        "urllib-guard",
-        "HTTP client guard (no raw urllib in backend app modules)",
-        "bash scripts/check_no_raw_urllib.sh",
-    ),
+    ("urllib-guard", "HTTP client guard (no raw urllib in backend app modules)", "bash scripts/check_no_raw_urllib.sh"),
     (
         "dateparse-guard",
         "Date-parsing guard (no new raw strptime/fromisoformat in core + repositories)",
-        "bash scripts/check_no_raw_dateparse.sh",
+        f"bash scripts/{DATEPARSE}",
     ),
-    (
-        "retry-guard",
-        "Retry-loop guard (no new hand-rolled retry loops in backend)",
-        "bash scripts/check_no_handrolled_retry.sh",
-    ),
+    ("retry-guard", "Retry-loop guard (no new hand-rolled retry loops in backend)", f"bash scripts/{RETRY}"),
     (
         "coalesce-guard",
         "Metric COALESCE guard (no new inline COALESCE in repositories + rollups)",
-        "bash scripts/check_no_inline_metric_coalesce.sh",
+        f"bash scripts/{COALESCE}",
     ),
     ("security-regression", "Security-regression count gate", "bash scripts/check_security_regression_count.sh"),
 ]
@@ -233,85 +169,13 @@ _SHARED_COMMAND_GATES = [
 
 @pytest.mark.parametrize("make_target,ci_step,expected_cmd", _SHARED_COMMAND_GATES)
 def test_shared_single_command_gate_parity(make_target: str, ci_step: str, expected_cmd: str) -> None:
-    make_body = _makefile_recipe(make_target)
-    ci_body = _ci_step_run(ci_step)
-
-    # The command must appear verbatim in both the Makefile recipe and the
-    # ci.yml run block (both may carry extra comments/wrappers around it).
-    assert expected_cmd in make_body, f"`make {make_target}` no longer runs `{expected_cmd}`:\n{make_body}"
-    assert expected_cmd in ci_body, f"ci.yml step '{ci_step}' no longer runs `{expected_cmd}`:\n{ci_body}"
-
-
-# ── Merged from test_ratchet_guards.py ──────────────────────────────────────────────
-
-import shutil
-import subprocess
-from pathlib import Path
-
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "check_no_raw_dateparse.sh"
-
-
-def _run_dateparse(root: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["bash", str(root / "scripts" / "check_no_raw_dateparse.sh")], capture_output=True, text=True)
-
-
-def _repo_dateparse(tmp_path: Path, files: dict[str, str]) -> Path:
-    (tmp_path / "scripts" / "lib").mkdir(parents=True)
-    shutil.copy(SCRIPT, tmp_path / "scripts" / SCRIPT.name)
-    shutil.copy(SCRIPT.parent / "lib" / "ratchet_common.sh", tmp_path / "scripts" / "lib" / "ratchet_common.sh")
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    for rel, body in files.items():
-        f = tmp_path / rel
-        f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(body)
-    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
-    return tmp_path
-
-
-def test_guard_passes_on_this_repo() -> None:
-    res = subprocess.run(["bash", str(SCRIPT)], capture_output=True, text=True)
-    assert res.returncode == 0, res.stderr
-
-
-def test_guard_flags_new_raw_site_in_new_file(tmp_path: Path) -> None:
-    root = _repo_dateparse(tmp_path, {"backend/repositories/new.py": 'x = datetime.strptime(s, "%Y-%m-%d-%H")\n'})
-    res = _run_dateparse(root)
-    assert res.returncode == 1
-    assert "backend/repositories/new.py" in res.stderr
-
-
-def test_guard_flags_count_above_baseline(tmp_path: Path) -> None:
-    body = "a = datetime.fromisoformat(x)\nb = datetime.fromisoformat(y)\n"
-    root = _repo_dateparse(tmp_path, {"backend/core/clickhouse_rows.py": body})
-    assert _run_dateparse(root).returncode == 1
-
-
-def test_guard_ignores_comments_and_tests(tmp_path: Path) -> None:
-    root = _repo_dateparse(
-        tmp_path,
-        {
-            "backend/core/ok.py": "# datetime.fromisoformat(x) was the bug\n",
-            "backend/utils/date_utils.py": "datetime.fromisoformat(s)\n",
-            "tests/test_x.py": "datetime.strptime(s, f)\n",
-        },
-    )
-    assert _run_dateparse(root).returncode == 0
-
-
-# ── Merged from test_retry_and_coalesce_guards.py ──
-
-from pathlib import Path
-
-import pytest
-
-SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
-RETRY = "check_no_handrolled_retry.sh"
-COALESCE = "check_no_inline_metric_coalesce.sh"
+    assert expected_cmd in _makefile_recipe(make_target)
+    assert expected_cmd in _ci_step_run(ci_step)
 
 
 def _repo(tmp_path: Path, files: dict[str, str]) -> Path:
     (tmp_path / "scripts" / "lib").mkdir(parents=True)
-    for name in (RETRY, COALESCE, "lib/ratchet_common.sh"):
+    for name in (DATEPARSE, RETRY, COALESCE, "lib/ratchet_common.sh"):
         shutil.copy(SCRIPTS / name, tmp_path / "scripts" / name)
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     for rel, body in files.items():
@@ -326,10 +190,29 @@ def _run(root: Path, script: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["bash", str(root / "scripts" / script)], capture_output=True, text=True)
 
 
-@pytest.mark.parametrize("script", [RETRY, COALESCE])
+@pytest.mark.parametrize("script", [DATEPARSE, RETRY, COALESCE])
 def test_guards_pass_on_this_repo(script: str) -> None:
     res = subprocess.run(["bash", str(SCRIPTS / script)], capture_output=True, text=True)
     assert res.returncode == 0, res.stderr
+
+
+def test_guard_flags_new_raw_site_in_new_file(tmp_path: Path) -> None:
+    res = _run(_repo(tmp_path, {"backend/repositories/new.py": 'x = datetime.strptime(s, "%Y-%m-%d-%H")\n'}), DATEPARSE)
+    assert res.returncode == 1 and "backend/repositories/new.py" in res.stderr
+
+
+def test_guard_flags_count_above_baseline(tmp_path: Path) -> None:
+    body = "a = datetime.fromisoformat(x)\nb = datetime.fromisoformat(y)\n"
+    assert _run(_repo(tmp_path, {"backend/core/clickhouse_rows.py": body}), DATEPARSE).returncode == 1
+
+
+def test_guard_ignores_comments_and_tests(tmp_path: Path) -> None:
+    files = {
+        "backend/core/ok.py": "# datetime.fromisoformat(x) was the bug\n",
+        "backend/utils/date_utils.py": "datetime.fromisoformat(s)\n",
+        "tests/test_x.py": "datetime.strptime(s, f)\n",
+    }
+    assert _run(_repo(tmp_path, files), DATEPARSE).returncode == 0
 
 
 RETRY_LOOP = """
@@ -345,10 +228,8 @@ def f(op):
 
 
 def test_retry_guard_flags_new_loop(tmp_path: Path) -> None:
-    root = _repo(tmp_path, {"backend/core/new_thing.py": RETRY_LOOP})
-    res = _run(root, RETRY)
-    assert res.returncode == 1
-    assert "backend/core/new_thing.py" in res.stderr
+    res = _run(_repo(tmp_path, {"backend/core/new_thing.py": RETRY_LOOP}), RETRY)
+    assert res.returncode == 1 and "backend/core/new_thing.py" in res.stderr
 
 
 def test_retry_guard_flags_while_loop(tmp_path: Path) -> None:
@@ -358,8 +239,7 @@ def test_retry_guard_flags_while_loop(tmp_path: Path) -> None:
 
 def test_retry_guard_ignores_sleep_without_handler_and_nested_functions(tmp_path: Path) -> None:
     body = (
-        "import time\n\n"
-        "def poll():\n    for _ in range(3):\n        time.sleep(1)\n\n"
+        "import time\n\ndef poll():\n    for _ in range(3):\n        time.sleep(1)\n\n"
         "def outer():\n    for _ in range(3):\n"
         "        def inner():\n            try:\n                pass\n            except OSError:\n                time.sleep(1)\n"
     )
@@ -367,49 +247,38 @@ def test_retry_guard_ignores_sleep_without_handler_and_nested_functions(tmp_path
 
 
 def test_retry_guard_exempts_retry_module_and_tests(tmp_path: Path) -> None:
-    root = _repo(tmp_path, {"backend/core/retry.py": RETRY_LOOP, "tests/test_x.py": RETRY_LOOP})
-    assert _run(root, RETRY).returncode == 0
+    assert (
+        _run(_repo(tmp_path, {"backend/core/retry.py": RETRY_LOOP, "tests/test_x.py": RETRY_LOOP}), RETRY).returncode
+        == 0
+    )
 
 
 def test_retry_guard_flags_count_above_baseline(tmp_path: Path) -> None:
-    root = _repo(tmp_path, {"backend/utils/telemetry.py": RETRY_LOOP + RETRY_LOOP.replace("def f", "def g")})
-    assert _run(root, RETRY).returncode == 1
+    body = RETRY_LOOP + RETRY_LOOP.replace("def f", "def g")
+    assert _run(_repo(tmp_path, {"backend/utils/telemetry.py": body}), RETRY).returncode == 1
 
 
 def test_coalesce_guard_flags_new_inline_site(tmp_path: Path) -> None:
-    root = _repo(tmp_path, {"backend/repositories/new.py": 'q = "SELECT COALESCE(SUM(x), 0) FROM t"\n'})
-    res = _run(root, COALESCE)
-    assert res.returncode == 1
-    assert "backend/repositories/new.py" in res.stderr
+    res = _run(_repo(tmp_path, {"backend/repositories/new.py": 'q = "SELECT COALESCE(SUM(x), 0) FROM t"\n'}), COALESCE)
+    assert res.returncode == 1 and "backend/repositories/new.py" in res.stderr
 
 
 def test_coalesce_guard_flags_rollup_writer(tmp_path: Path) -> None:
-    root = _repo(tmp_path, {"backend/core/rollups/new_rollup.py": 'q = "COALESCE(a, 0)"\n'})
-    assert _run(root, COALESCE).returncode == 1
+    assert (
+        _run(_repo(tmp_path, {"backend/core/rollups/new_rollup.py": 'q = "COALESCE(a, 0)"\n'}), COALESCE).returncode
+        == 1
+    )
 
 
 def test_coalesce_guard_ignores_comments_sql_templates_and_helpers(tmp_path: Path) -> None:
-    root = _repo(
-        tmp_path,
-        {
-            "backend/repositories/ok.py": "# COALESCE(x, 0) was inline here\n",
-            "backend/repositories/_sql/tpl.py": 'T = "COALESCE(a, 0)"\n',
-            "backend/core/metric_expressions.py": 'f"COALESCE({a}, {b})"\n',
-        },
-    )
-    assert _run(root, COALESCE).returncode == 0
+    files = {
+        "backend/repositories/ok.py": "# COALESCE(x, 0) was inline here\n",
+        "backend/repositories/_sql/tpl.py": 'T = "COALESCE(a, 0)"\n',
+        "backend/core/metric_expressions.py": 'f"COALESCE({a}, {b})"\n',
+    }
+    assert _run(_repo(tmp_path, files), COALESCE).returncode == 0
 
 
-# ── Merged from test_http_exception_envelope_shape.py ──
-
-import ast
-from pathlib import Path
-
-ROUTERS = Path(__file__).resolve().parents[2] / "backend" / "routers"
-
-# Explicit allowlist for HTTP-standard reason-phrase strings that callers may
-# want to return verbatim. Add sparingly — prefer the dict envelope where
-# possible so the frontend can pattern-match on a machine-readable code.
 ALLOWED_STRING_DETAILS: set[tuple[int, str]] = {
     (415, "Unsupported Media Type"),
     (403, "Read-only services cannot run log discovery."),
@@ -423,39 +292,22 @@ ALLOWED_STRING_DETAILS: set[tuple[int, str]] = {
     (403, "Read-only services cannot run RUM discovery."),
     (400, "RUM discovery is only supported under high-scale mode."),
 }
-
-# All four envelope helpers return the canonical `{"error": code, ...}`
-# shape; the test treats `HTTPException(detail=<helper>(...))` as the
-# preferred form. `make_error` was missed in the initial sweep
-# (commit f0f206b) — adding it here so the routers that wrap envelope-
-# bearing branches like `db_busy` / `db_locked` round-trip cleanly.
 HELPER_FUNCS = frozenset({"bad_request", "not_found", "validation_failed", "make_error"})
-
-
-def _iter_router_files() -> list[Path]:
-    return sorted(p for p in ROUTERS.rglob("*.py") if p.name != "__init__.py")
 
 
 def _detail_kw(call: ast.Call) -> ast.expr | None:
     for kw in call.keywords:
         if kw.arg == "detail":
             return kw.value
-    # detail could also be the second positional arg
-    if len(call.args) >= 2:
-        return call.args[1]
-    return None
+    return call.args[1] if len(call.args) >= 2 else None
 
 
 def _status_code_kw(call: ast.Call) -> int | None:
     for kw in call.keywords:
-        if kw.arg == "status_code" and isinstance(kw.value, ast.Constant):
-            value = kw.value.value
-            if isinstance(value, int):
-                return value
-    if call.args and isinstance(call.args[0], ast.Constant):
-        value = call.args[0].value
-        if isinstance(value, int):
-            return value
+        if kw.arg == "status_code" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, int):
+            return kw.value.value
+    if call.args and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, int):
+        return call.args[0].value
     return None
 
 
@@ -464,23 +316,17 @@ def _is_canonical_helper_call(node: ast.expr) -> bool:
 
 
 def _is_error_first_dict(node: ast.expr) -> bool:
-    """Accept dict literals that lead with ``"error"`` (canonical shape) OR
-    ``"errors"`` (legacy multi-message validation shape that extractApiError
-    joins for display). A future cleanup pass will migrate the ``errors``
-    sites onto ``validation_failed`` once the frontend's extractApiError is
-    taught the canonical ``{error, messages}`` shape from that helper."""
-    if not isinstance(node, ast.Dict):
-        return False
-    if not node.keys:
-        return False
-    first = node.keys[0]
-    return isinstance(first, ast.Constant) and first.value in {"error", "errors"}
+    return (
+        isinstance(node, ast.Dict)
+        and bool(node.keys)
+        and isinstance(node.keys[0], ast.Constant)
+        and node.keys[0].value in {"error", "errors"}
+    )
 
 
 def test_http_exception_envelope_shape() -> None:
     findings: list[str] = []
-
-    for path in _iter_router_files():
+    for path in sorted(p for p in ROUTERS.rglob("*.py") if p.name != "__init__.py"):
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -489,50 +335,29 @@ def test_http_exception_envelope_shape() -> None:
             name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
             if name != "HTTPException":
                 continue
-
             detail = _detail_kw(node)
-            if detail is None:
+            if detail is None or _is_canonical_helper_call(detail) or _is_error_first_dict(detail):
                 continue
-
-            # Helper calls and {"error": ...} dicts are fine.
-            if _is_canonical_helper_call(detail) or _is_error_first_dict(detail):
-                continue
-
-            # String constant: check the allowlist.
             if isinstance(detail, ast.Constant) and isinstance(detail.value, str):
                 status = _status_code_kw(node)
                 if status is not None and (status, detail.value) in ALLOWED_STRING_DETAILS:
                     continue
                 findings.append(
-                    f"{path.relative_to(ROUTERS.parent.parent)}:{node.lineno} — "
-                    f"HTTPException(detail={detail.value!r}); "
-                    "use bad_request/not_found/validation_failed or raise_internal"
+                    f"{path.relative_to(_REPO_ROOT)}:{node.lineno} — HTTPException(detail={detail.value!r})"
                 )
                 continue
-
-            # Anything else (f-strings, name references, complex exprs) is
-            # also suspect.
             findings.append(
-                f"{path.relative_to(ROUTERS.parent.parent)}:{node.lineno} — "
-                f"HTTPException(detail=<{type(detail).__name__}>); "
-                "use bad_request/not_found/validation_failed or raise_internal"
+                f"{path.relative_to(_REPO_ROOT)}:{node.lineno} — HTTPException(detail=<{type(detail).__name__}>)"
             )
-
     assert not findings, "Non-canonical HTTPException envelopes:\n  " + "\n  ".join(findings)
 
 
-# ── Merged from test_observability_config_drift.py ──────────────────────────────────────────────
-
-import os
-
-REPO_ROOT = str(Path(__file__).resolve().parents[2])
-CANONICAL_DIR = os.path.join(REPO_ROOT, "observability")
-CHART_DIR = os.path.join(REPO_ROOT, "deploy", "chart", "fastly-log-analytics", "files", "observability")
-
-# Scrape jobs the chart copy is allowed to drop vs. the canonical file, with
-# the reason. Anything NOT listed here must be present identically in both.
-CHART_OMITTED_PROMETHEUS_JOBS = {
-    "docker": ("docker-stats-exporter uses the Docker Engine API, absent in Kubernetes"),
+CHART_OMITTED_PROMETHEUS_JOBS = {"docker": "docker-stats-exporter uses the Docker Engine API, absent in Kubernetes"}
+CHART_EXEMPT_FILES = {
+    "docker_stats_exporter.py": "docker-compose-only sidecar",
+    "prometheus.yml": "compared structurally above",
+    "standard/prometheus.yml": "Standard host/shared-loopback receiver; minimal Helm config is rendered and tested in deploy suite",
+    "standard/tempo.yml": "Standard host/shared-loopback listeners cannot be copied to namespace-private Helm pods",
 }
 
 
@@ -545,60 +370,26 @@ def _load_yaml(path: str) -> dict:
 
 def test_grafana_datasources_chart_copy_matches_canonical() -> None:
     chart = _load_yaml(os.path.join(CHART_DIR, "grafana-datasources.yml"))
-    assert "datasources" in chart and isinstance(chart["datasources"], list), (
-        "deploy/chart/.../files/observability/grafana-datasources.yml must define datasources."
-    )
+    assert "datasources" in chart and isinstance(chart["datasources"], list)
 
 
 def test_prometheus_chart_copy_matches_canonical_minus_omitted_jobs() -> None:
     canonical = _load_yaml(os.path.join(CANONICAL_DIR, "prometheus.yml"))
     chart = _load_yaml(os.path.join(CHART_DIR, "prometheus.yml"))
-
-    # Non-scrape config (global, rule_files, ...) must match verbatim.
-    canonical_rest = {k: v for k, v in canonical.items() if k != "scrape_configs"}
-    chart_rest = {k: v for k, v in chart.items() if k != "scrape_configs"}
-    assert canonical_rest == chart_rest, (
-        "Prometheus chart copy drifted from canonical outside scrape_configs.\n"
-        f"  canonical: {canonical_rest}\n  chart:     {chart_rest}"
-    )
-
+    assert {k: v for k, v in canonical.items() if k != "scrape_configs"} == {
+        k: v for k, v in chart.items() if k != "scrape_configs"
+    }
     canonical_jobs = {j["job_name"]: j for j in canonical.get("scrape_configs", [])}
     chart_jobs = {j["job_name"]: j for j in chart.get("scrape_configs", [])}
-
-    # The chart may ONLY omit the documented jobs; no silent additions/renames.
-    missing = set(canonical_jobs) - set(chart_jobs)
-    assert missing == set(CHART_OMITTED_PROMETHEUS_JOBS), (
-        "Prometheus chart copy omits an UNDOCUMENTED set of scrape jobs.\n"
-        f"  omitted:    {sorted(missing)}\n"
-        f"  documented: {sorted(CHART_OMITTED_PROMETHEUS_JOBS)}\n"
-        "Reconcile the chart copy to the canonical observability/prometheus.yml "
-        "or record the intentional omission in CHART_OMITTED_PROMETHEUS_JOBS."
-    )
-    extra = set(chart_jobs) - set(canonical_jobs)
-    assert not extra, f"Prometheus chart copy has scrape jobs not in canonical: {sorted(extra)}"
-
-    # Every job the chart DOES carry must match the canonical definition.
+    assert set(canonical_jobs) - set(chart_jobs) == set(CHART_OMITTED_PROMETHEUS_JOBS)
+    assert not (set(chart_jobs) - set(canonical_jobs))
     for name, chart_job in chart_jobs.items():
-        assert chart_job == canonical_jobs[name], (
-            f"Prometheus scrape job '{name}' drifted between canonical and chart "
-            f"copy.\n  canonical: {canonical_jobs[name]}\n  chart:     {chart_job}"
-        )
-
-
-# Canonical files that are intentionally NOT byte-copied into the chart, with
-# the reason. prometheus.yml is compared structurally above.
-CHART_EXEMPT_FILES = {
-    "docker_stats_exporter.py": "docker-compose-only sidecar; needs the Docker Engine API",
-    "prometheus.yml": "compared structurally by the Prometheus test above (documented transform)",
-    "standard/prometheus.yml": "Standard host/shared-loopback receiver; minimal Helm config is rendered and tested in deploy suite",
-    "standard/tempo.yml": "Standard host/shared-loopback listeners cannot be copied to namespace-private Helm pods",
-}
+        assert chart_job == canonical_jobs[name]
 
 
 def _relative_files(root: str) -> set[str]:
     found: set[str] = set()
     for dirpath, dirs, names in os.walk(root):
-        # Bytecode caches appear whenever a test imports a script from these dirs.
         dirs[:] = [d for d in dirs if d != "__pycache__"]
         for name in names:
             found.add(os.path.relpath(os.path.join(dirpath, name), root))
@@ -608,35 +399,13 @@ def _relative_files(root: str) -> set[str]:
 def test_every_canonical_observability_file_is_guarded_in_the_chart() -> None:
     canonical = _relative_files(CANONICAL_DIR)
     chart = _relative_files(CHART_DIR)
-
-    missing = (canonical - set(CHART_EXEMPT_FILES)) - chart
-    assert not missing, (
-        f"chart copy is missing canonical observability files: {sorted(missing)}. "
-        "Copy them into deploy/chart/fastly-log-analytics/files/observability/ "
-        "or record the exemption in CHART_EXEMPT_FILES."
-    )
-    duplicate = (canonical - set(CHART_EXEMPT_FILES)) & chart
-    assert not duplicate, (
-        f"observability/ still holds duplicate copies of chart files: {sorted(duplicate)}. "
-        "Reference deploy/chart/fastly-log-analytics/files/observability/ directly."
-    )
+    assert not ((canonical - set(CHART_EXEMPT_FILES)) - chart)
+    assert not ((canonical - set(CHART_EXEMPT_FILES)) & chart)
 
 
 def test_chart_observability_copies_are_byte_identical() -> None:
     for rel in sorted(_relative_files(CANONICAL_DIR) - set(CHART_EXEMPT_FILES)):
-        with open(os.path.join(CANONICAL_DIR, rel), "rb") as fh:
-            canonical_bytes = fh.read()
-        with open(os.path.join(CHART_DIR, rel), "rb") as fh:
-            chart_bytes = fh.read()
-        assert chart_bytes == canonical_bytes, (
-            f"{rel} drifted from the canonical observability/{rel}. Re-copy it: "
-            f"cp observability/{rel} deploy/chart/fastly-log-analytics/files/observability/{rel}"
-        )
-
-
-# ── Merged from test_docker_stats_exporter.py ──
-
-from observability.docker_stats_exporter import _block_io_bytes
+        assert Path(CANONICAL_DIR, rel).read_bytes() == Path(CHART_DIR, rel).read_bytes()
 
 
 def test_block_io_bytes_sums_read_and_write_operations():
@@ -650,7 +419,6 @@ def test_block_io_bytes_sums_read_and_write_operations():
             ]
         }
     }
-
     assert _block_io_bytes(stats) == (1536, 2048)
 
 
@@ -661,14 +429,6 @@ def test_block_io_bytes_handles_missing_or_invalid_values():
     ) == (0, 0)
 
 
-# ── Merged from test_elevation_dashboard.py ──
-
-import json
-from pathlib import Path
-
-import pytest
-
-
 def _dashboard() -> dict:
     dashboard_path = Path("local-docs/fla-multipod-elevation.json")
     if not dashboard_path.exists():
@@ -677,32 +437,22 @@ def _dashboard() -> dict:
 
 
 def test_elevation_dashboard_includes_high_scale_operational_panels() -> None:
-    dashboard = _dashboard()
-    panels = dashboard["panels"]
+    panels = _dashboard()["panels"]
     panel_text = json.dumps(panels)
-
-    expected_metrics = (
+    assert len({panel["id"] for panel in panels}) == len(panels)
+    for metric in (
         "fla_high_scale_source_objects",
         "fla_high_scale_oldest_active_age_seconds",
         "fla_high_scale_publication_lag_seconds",
         "fla_high_scale_pending_manifests",
         "fla_high_scale_rows_published_total",
-    )
-
-    assert len({panel["id"] for panel in panels}) == len(panels)
-    for metric in expected_metrics:
+    ):
         assert metric in panel_text
 
 
 def test_elevation_dashboard_keeps_variable_based_promql() -> None:
-    dashboard = _dashboard()
-    panel_text = json.dumps(dashboard["panels"])
-
-    assert "$site" in panel_text
-    assert "$namespace" in panel_text
-
-
-# ── Merged from test_clickhouse_compose.py ──
+    panel_text = json.dumps(_dashboard()["panels"])
+    assert "$site" in panel_text and "$namespace" in panel_text
 
 
 def test_prometheus_preserves_requested_bytes_series_via_recording_alias():
@@ -717,25 +467,12 @@ def test_prometheus_preserves_requested_bytes_series_via_recording_alias():
         Path("deploy/chart/fastly-log-analytics/files/observability/clickhouse.rules.yml").read_text()
     )
     assert rules["groups"][0]["rules"] == [
-        {
-            "record": "app_clickhouse_bytes_read_bytes_total",
-            "expr": "app_clickhouse_bytes_read_total",
-        }
+        {"record": "app_clickhouse_bytes_read_bytes_total", "expr": "app_clickhouse_bytes_read_total"}
     ]
 
 
-# ── Merged from test_local_resource_governance.py ──────────────────────────────────────────────
-
-import os
-from pathlib import Path
-
-import pytest
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
 class _ComposeLoader(yaml.SafeLoader):
-    """SafeLoader that tolerates compose merge tags (``!override``/``!reset``)."""
+    pass
 
 
 def _passthrough_tag(loader, node):
@@ -751,7 +488,7 @@ for _tag in ("!override", "!reset"):
 
 
 def _load_compose(compose_rel: str) -> dict:
-    return yaml.load((REPO_ROOT / compose_rel).read_text(encoding="utf-8"), Loader=_ComposeLoader)
+    return yaml.load((_REPO_ROOT / compose_rel).read_text(encoding="utf-8"), Loader=_ComposeLoader)
 
 
 def _env_int(environment: list[str], key: str) -> int | None:
@@ -763,95 +500,43 @@ def _env_int(environment: list[str], key: str) -> int | None:
 
 
 def _service_env(compose_rel: str, service: str) -> list[str]:
-    compose = yaml.safe_load((REPO_ROOT / compose_rel).read_text(encoding="utf-8"))
-    return compose["services"][service]["environment"]
+    return yaml.safe_load((_REPO_ROOT / compose_rel).read_text(encoding="utf-8"))["services"][service]["environment"]
 
 
 def _duration_seconds(value: str) -> int:
     value = value.strip()
-    if value.endswith("ms"):
-        return int(float(value[:-2]) / 1000)
-    if value.endswith("m"):
-        return int(float(value[:-1]) * 60)
-    if value.endswith("h"):
-        return int(float(value[:-1]) * 3600)
-    if value.endswith("s"):
-        return int(float(value[:-1]))
+    for suffix, mult in (("ms", 0.001), ("m", 60), ("h", 3600), ("s", 1)):
+        if value.endswith(suffix):
+            return int(float(value[: -len(suffix)]) * mult)
     return int(float(value))
 
 
 def _service_healthcheck(compose_rel: str, service: str) -> dict:
-    compose = yaml.safe_load((REPO_ROOT / compose_rel).read_text(encoding="utf-8"))
-    return compose["services"][service]["healthcheck"]
+    return yaml.safe_load((_REPO_ROOT / compose_rel).read_text(encoding="utf-8"))["services"][service]["healthcheck"]
 
 
-def test_local_standard_backend_bounds_duckdb_parallelism():
-    env = _service_env("docker-compose.yml", "backend")
+@pytest.mark.parametrize(
+    ("compose_rel", "service", "max_threads", "max_pool"),
+    [
+        ("docker-compose.yml", "backend", 4, 4),
+        ("docker-compose.multipod.yml", "backend", 4, 4),
+        ("docker-compose.multipod.yml", "worker", 2, None),
+    ],
+)
+def test_compose_bounds_duckdb_parallelism(compose_rel: str, service: str, max_threads: int, max_pool: int | None):
+    env = _service_env(compose_rel, service)
     threads = _env_int(env, "DUCKDB_THREADS")
-    pool = _env_int(env, "DUCKDB_POOL_MAX_SIZE")
-    assert threads is not None and 1 <= threads <= 4, (
-        "docker-compose.yml backend must pin a bounded DUCKDB_THREADS (<=4) "
-        "so cron DuckDB ops don't monopolize all cores and starve serving"
-    )
-    assert pool is not None and 1 <= pool <= 4, (
-        "docker-compose.yml backend must pin a bounded DUCKDB_POOL_MAX_SIZE (<=4)"
-    )
-
-
-def test_multipod_backend_bounds_duckdb_parallelism():
-    env = _service_env("docker-compose.multipod.yml", "backend")
-    threads = _env_int(env, "DUCKDB_THREADS")
-    pool = _env_int(env, "DUCKDB_POOL_MAX_SIZE")
-    assert threads is not None and 1 <= threads <= 4, (
-        "docker-compose.multipod.yml backend must pin a bounded DUCKDB_THREADS (<=4)"
-    )
-    assert pool is not None and 1 <= pool <= 4, (
-        "docker-compose.multipod.yml backend must pin a bounded DUCKDB_POOL_MAX_SIZE (<=4)"
-    )
-
-
-def test_multipod_worker_bounds_duckdb_parallelism():
-    env = _service_env("docker-compose.multipod.yml", "worker")
-    threads = _env_int(env, "DUCKDB_THREADS")
-    assert threads is not None and 1 <= threads <= 2, (
-        "docker-compose.multipod.yml worker must pin a bounded DUCKDB_THREADS "
-        "(<=2); 6 celery procs x 6 default threads = 36 CPU-bound threads "
-        "that starve the backend serving loop on the shared host"
-    )
+    assert threads is not None and 1 <= threads <= max_threads
+    if max_pool is not None:
+        pool = _env_int(env, "DUCKDB_POOL_MAX_SIZE")
+        assert pool is not None and 1 <= pool <= max_pool
 
 
 def test_local_standard_backend_healthcheck_covers_cold_start():
-    """Base compose backend start_period must exceed the real cold-start time.
-
-    Importing ``backend.main`` pulls in the full iceberg/ducklake stack
-    (pyiceberg -> pyarrow -> pandas, s3fs/fsspec, duckdb); measured cold
-    start to "Application startup complete" is ~107s on an IDLE Colima host
-    and stretches well past that under the deploy's double-stack + build
-    load. The original 45s start_period was never realistic: compose marks
-    the still-importing backend ``unhealthy`` (start_period + retries x
-    interval) and aborts ``docker compose up`` because frontend/caddy
-    depend on ``service_healthy`` -- which under ``set -e`` kills the whole
-    deploy_test_all.sh run before verification. prod (docker-compose.prod.yml)
-    already uses a 25m start_period for the same reason; the base compose
-    must likewise cover the cold start with margin.
-    """
     hc = _service_healthcheck("docker-compose.yml", "backend")
-    start_period = _duration_seconds(hc["start_period"])
-    assert start_period >= 180, (
-        "docker-compose.yml backend healthcheck start_period must be >= 180s "
-        "to cover the measured ~107s cold start plus load margin, so compose "
-        f"doesn't falsely mark it unhealthy mid-startup (got {hc['start_period']})"
-    )
+    assert _duration_seconds(hc["start_period"]) >= 180
 
 
-# Long-lived Python processes that run as container PID 1. uvicorn/celery are
-# not init systems: an orphaned grandchild (scheduler watchdog subprocess, a
-# crashed cold-start helper, an ad-hoc py-spy/pip during debugging) becomes an
-# unreapable zombie under them. Docker then can't stop the container ("PID is
-# zombie and can not be killed. Use the --init option ..."), so the next
-# `docker compose up --force-recreate` fails non-zero and, under the deploy's
-# `set -e`, aborts the entire run. `init: true` inserts tini as PID 1 to
-# forward signals and reap zombies — Docker's own prescribed fix.
 _INIT_REQUIRED_SERVICES = {
     "docker-compose.yml": ["backend"],
     "docker-compose.multipod.yml": ["backend", "worker"],
@@ -860,17 +545,10 @@ _INIT_REQUIRED_SERVICES = {
 
 @pytest.mark.parametrize(
     ("compose_rel", "service"),
-    [(compose_rel, service) for compose_rel, services in _INIT_REQUIRED_SERVICES.items() for service in services],
+    [(c, s) for c, services in _INIT_REQUIRED_SERVICES.items() for s in services],
 )
 def test_long_lived_backend_services_run_an_init(compose_rel: str, service: str):
-    compose = _load_compose(compose_rel)
-    svc = compose["services"][service]
-    assert svc.get("init") is True, (
-        f"{compose_rel} service '{service}' runs a long-lived Python process as "
-        "PID 1 and must set `init: true` so tini reaps orphaned zombies; "
-        "without it a wedged child makes `docker stop`/force-recreate fail and "
-        "aborts deploy_test_all.sh under set -e"
-    )
+    assert _load_compose(compose_rel)["services"][service].get("init") is True
 
 
 def test_local_public_https_is_opt_in_and_published_by_namespace_owner():
@@ -906,29 +584,22 @@ def test_local_public_https_compose_merge_preserves_admin_and_http():
         "LOCAL_PUBLIC_LISTEN_IP": "127.0.0.1",
         "LOCAL_PUBLIC_PORT": "443",
     }
-    result = subprocess.run(
-        [
-            "docker",
-            "compose",
-            "--env-file",
-            os.devnull,
-            "-f",
-            "docker-compose.yml",
-            "-f",
-            "docker-compose.admin-mtls.yml",
-            "-f",
-            "docker-compose.public-https.yml",
-            "config",
-            "--format",
-            "json",
-        ],
-        cwd=REPO_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=30,
-    )
+    cmd = [
+        "docker",
+        "compose",
+        "--env-file",
+        os.devnull,
+        "-f",
+        "docker-compose.yml",
+        "-f",
+        "docker-compose.admin-mtls.yml",
+        "-f",
+        "docker-compose.public-https.yml",
+        "config",
+        "--format",
+        "json",
+    ]
+    result = subprocess.run(cmd, cwd=_REPO_ROOT, env=env, capture_output=True, text=True, check=True, timeout=30)
     services = json.loads(result.stdout)["services"]
     ports = services["backend"]["ports"]
     assert {(p.get("host_ip"), p["published"], p["target"]) for p in ports} == {
@@ -937,8 +608,7 @@ def test_local_public_https_compose_merge_preserves_admin_and_http():
         ("127.0.0.1", "9443", 8443),
     }
     for name in ("caddy", "frontend", "admin-gateway"):
-        assert services[name]["network_mode"] == "service:backend"
-        assert not services[name].get("ports")
+        assert services[name]["network_mode"] == "service:backend" and not services[name].get("ports")
     assert services["backend"]["environment"]["ADMIN_GATEWAY_REQUIRED"] == "1"
     assert services["frontend"]["environment"]["ADMIN_GATEWAY_REQUIRED"] == "1"
     mounts = {volume["target"]: volume for volume in services["caddy"]["volumes"]}
@@ -953,10 +623,8 @@ def test_local_public_https_compose_merge_preserves_admin_and_http():
 def test_local_public_https_adapts_separately_from_http_admin(tmp_path, required):
     if not shutil.which("caddy"):
         pytest.skip("Caddy binary unavailable for static configuration adaptation")
-    local = (REPO_ROOT / "caddy/Caddyfile.local").read_text()
-    snippet = REPO_ROOT / "caddy/local-public-https.caddy"
-    # The real container uses an optional glob mount. Expand only that import
-    # for static adaptation; no server, certificate issuance, or listener starts.
+    local = (_REPO_ROOT / "caddy/Caddyfile.local").read_text()
+    snippet = _REPO_ROOT / "caddy/local-public-https.caddy"
     config = tmp_path / "Caddyfile"
     config.write_text(local.replace("/etc/caddy/public-https/*.caddy", str(snippet)))
     result = subprocess.run(
@@ -968,40 +636,28 @@ def test_local_public_https_adapts_separately_from_http_admin(tmp_path, required
     )
     adapted = json.loads(result.stdout)
     servers = adapted["apps"]["http"]["servers"]
-    (public,) = [server for server in servers.values() if server["listen"] == [":443"]]
-    (http,) = [server for server in servers.values() if server["listen"] == [":80"]]
-    # IP-origin TLS clients send no SNI. Every handshake must select the
-    # supplied certificate, not fall through an empty catch-all TLS policy.
+    (public,) = [s for s in servers.values() if s["listen"] == [":443"]]
+    (http,) = [s for s in servers.values() if s["listen"] == [":80"]]
     (policy,) = public["tls_connection_policies"]
-    assert "match" not in policy
-    assert policy["certificate_selection"]["any_tag"]
-    assert '"host": ["127.0.0.1"]' in json.dumps(public)
-    public_json = json.dumps(public)
-    http_json = json.dumps(http)
-    assert "127.0.0.1:8000" in public_json and "127.0.0.1:3000" in public_json
-    assert '"X-Proxied-By-Caddy": ["true"]' in public_json
-    assert '"X-Forwarded-For": ["{http.request.remote.host}"]' in public_json
-    assert '"delete": ["X-Admin-Gateway-Token"]' in public_json
-    assert "X-Remote-Analyst" not in public_json
-    assert '"status_code": 503' in public_json
-    assert f'\\"{required}\\" != \\"1\\"' in public_json
-    assert "client_authentication" not in public_json
-    assert '"X-Forwarded-For": ["127.0.0.1"]' in http_json
-    assert "X-Proxied-By-Caddy" not in http_json
+    assert "match" not in policy and policy["certificate_selection"]["any_tag"]
+    public_json, http_json = json.dumps(public), json.dumps(http)
+    for expected in (
+        '"host": ["127.0.0.1"]',
+        "127.0.0.1:8000",
+        "127.0.0.1:3000",
+        '"X-Proxied-By-Caddy": ["true"]',
+        '"X-Forwarded-For": ["{http.request.remote.host}"]',
+        '"delete": ["X-Admin-Gateway-Token"]',
+        '"status_code": 503',
+        f'\\"{required}\\" != \\"1\\"',
+    ):
+        assert expected in public_json
+    assert "X-Remote-Analyst" not in public_json and "client_authentication" not in public_json
+    assert '"X-Forwarded-For": ["127.0.0.1"]' in http_json and "X-Proxied-By-Caddy" not in http_json
     (certificate,) = adapted["apps"]["tls"]["certificates"]["load_files"]
     assert certificate["certificate"] == "/certs/public/server.crt"
     assert certificate["key"] == "/certs/public/server.key"
 
-
-# ── Merged from test_local_stack_processes.py ──────────────────────────────────────────────
-
-import os
-import signal
-from pathlib import Path
-
-import pytest
-
-from scripts import local_stack_processes as stack
 
 ROOT = Path("/work/project [test]+")
 
@@ -1013,11 +669,8 @@ def process(pid, ppid=1, executable="python3", command=None, born="Mon Sep 7 12:
 class FakeSystem:
     def __init__(self, processes, cwd=None, listeners=None, holders=None):
         self.processes = {p.pid: p for p in processes}
-        self.cwd = cwd or {}
-        self.listeners = listeners or {}
-        self.holders = holders or {}
-        self.signals = []
-        self.time = 0
+        self.cwd, self.listeners, self.holders = cwd or {}, listeners or {}, holders or {}
+        self.signals, self.time = [], 0
         self.on_signal = lambda pid, sig: None
 
     def snapshot(self):
@@ -1073,8 +726,7 @@ def test_parse_ps_preserves_space_paths_and_birth_identity():
     ],
 )
 def test_root_selection_is_executable_aware_and_literal(executable, command, owned):
-    p = process(42, executable=executable, command=command)
-    system = FakeSystem([p])
+    system = FakeSystem([process(42, executable=executable, command=command)])
     assert stack.select_roots(system.snapshot(), ROOT, {}, set(), system, set()) == ({42} if owned else set())
 
 
@@ -1093,9 +745,10 @@ def test_node_next_launcher_is_selected_before_renamed_listener():
 
 
 def test_unrelated_listener_aborts_before_any_signal():
-    system = FakeSystem([process(42)], cwd={42: ROOT.parent / "other"})
-    other = process(43, executable="ssh", command="ssh -L 18002:localhost:8000 host")
-    system.processes[43] = other
+    system = FakeSystem(
+        [process(42), process(43, executable="ssh", command="ssh -L 18002:localhost:8000 host")],
+        cwd={42: ROOT.parent / "other"},
+    )
     with pytest.raises(stack.CleanupError, match="listener"):
         stack.select_roots(system.snapshot(), ROOT, {18002: {43}}, set(), system, set())
     assert system.signals == []
@@ -1113,9 +766,12 @@ def test_unrelated_runtime_listener_in_same_checkout_is_not_killed(executable, c
 
 
 def test_duckdb_holder_requires_python_executable():
-    python = process(42, command="python3 -c 'spawn_main()'")
-    shell = process(43, executable="bash", command="bash -c 'echo python3'")
-    system = FakeSystem([python, shell])
+    system = FakeSystem(
+        [
+            process(42, command="python3 -c 'spawn_main()'"),
+            process(43, executable="bash", command="bash -c 'echo python3'"),
+        ]
+    )
     assert stack.select_roots(system.snapshot(), ROOT, {}, {42, 43}, system, set()) == {42}
 
 
@@ -1186,11 +842,7 @@ def test_pid_reuse_between_snapshot_and_term_is_not_signalled():
 
 def test_permission_denied_is_not_silently_ignored():
     system = FakeSystem([process(42)])
-
-    def denied(pid, sig):
-        raise PermissionError("denied")
-
-    system.on_signal = denied
+    system.on_signal = lambda pid, sig: (_ for _ in ()).throw(PermissionError("denied"))
     with pytest.raises(stack.CleanupError, match="Permission denied"):
         stack.terminate(system, {42}, system.snapshot(), set(), grace=0.2)
 
@@ -1200,8 +852,7 @@ def test_system_uses_argument_arrays_for_ps_lsof_and_preserves_literal_paths(mon
     path = ROOT / "data/services/file [a]+.duckdb"
 
     def fake_run(args, **kwargs):
-        assert isinstance(args, list)
-        assert not kwargs.get("shell")
+        assert isinstance(args, list) and not kwargs.get("shell")
         commands.append(args)
         if args[0] == "ps":
             tail = "python3" if "comm=" in args[-1] else f"python3 {ROOT}/.venv/bin/uvicorn backend.main:app"
@@ -1252,26 +903,22 @@ def test_stop_only_inspects_exact_existing_service_databases(monkeypatch, tmp_pa
     (db_dir / "linked.duckdb").symlink_to(outside)
     system = FakeSystem([])
     calls = []
-
-    def holders(paths):
-        calls.append(paths)
-        return set()
-
-    system.holding_pids = holders
+    system.holding_pids = lambda paths: (calls.append(paths), set())[1]
     monkeypatch.setattr(stack, "System", lambda: system)
     assert stack.main(["stop", "--checkout", str(checkout), "--port", "18002"]) == 0
-    assert calls == [[expected], [expected]]
-    assert system.signals == []
+    assert calls == [[expected], [expected]] and system.signals == []
 
 
 def test_stop_detects_respawn_after_termination(monkeypatch, tmp_path):
     system = FakeSystem([])
     monkeypatch.setattr(stack, "System", lambda: system)
-
-    def respawn(*args):
-        system.processes[42] = process(42, command=f"python3 {tmp_path}/.venv/bin/uvicorn backend.main:app")
-
-    monkeypatch.setattr(stack, "terminate", respawn)
+    monkeypatch.setattr(
+        stack,
+        "terminate",
+        lambda *args: system.processes.update(
+            {42: process(42, command=f"python3 {tmp_path}/.venv/bin/uvicorn backend.main:app")}
+        ),
+    )
     assert stack.main(["stop", "--checkout", str(tmp_path), "--port", "18002"]) == 1
 
 
@@ -1302,23 +949,18 @@ def test_capture_rejects_unrelated_process(monkeypatch, tmp_path):
 
 def test_launcher_contains_no_name_or_group_termination():
     source = Path("run.sh").read_text()
-    assert "pkill" not in source
-    assert "killall" not in source
-    assert "PGID" not in source
-    assert "xargs kill" not in source
+    for banned in ("pkill", "killall", "PGID", "xargs kill"):
+        assert banned not in source
 
 
 @pytest.mark.parametrize("status", [0, 7])
 def test_run_stop_uses_helper_and_propagates_failure_without_startup(tmp_path, status):
     checkout = tmp_path / "checkout"
-    checkout.mkdir()
-    (checkout / "scripts").mkdir()
+    (checkout / "scripts").mkdir(parents=True)
     (checkout / "run.sh").write_text(Path("run.sh").read_text())
     (checkout / ".env").write_text("FRONTEND_PORT=13002\nBACKEND_PORT=18002\n")
     (checkout / "scripts/local_stack_processes.py").write_text(
-        "import json, pathlib, sys\n"
-        "pathlib.Path('called.json').write_text(json.dumps(sys.argv[1:]))\n"
-        f"sys.exit({status})\n"
+        f"import json, pathlib, sys\npathlib.Path('called.json').write_text(json.dumps(sys.argv[1:]))\nsys.exit({status})\n"
     )
     result = subprocess.run(["bash", "run.sh", "--stop"], cwd=checkout, capture_output=True, text=True, env=os.environ)
     assert result.returncode == status
@@ -1328,34 +970,18 @@ def test_run_stop_uses_helper_and_propagates_failure_without_startup(tmp_path, s
     assert ("Stack stopped." in result.stdout) == (status == 0)
 
 
-# ── Merged from test_analyze_web_vitals.py ──────────────────────────────────────────────
-
-import importlib.util
-from pathlib import Path
-
-import pytest
-
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "analyze_web_vitals.py"
-_spec = importlib.util.spec_from_file_location("analyze_web_vitals", _SCRIPT)
-assert _spec and _spec.loader
-awv = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(awv)
-
-
 def test_percentile_interpolates():
     assert awv._percentile([], 0.5) == 0.0
     assert awv._percentile([42.0], 0.95) == 42.0
     assert awv._percentile([0.0, 10.0], 0.5) == 5.0
-    # 0..100 step 10 → p50 == 50, p75 == 75 with linear interpolation.
     vals = [float(x) for x in range(0, 101, 10)]
-    assert awv._percentile(vals, 0.5) == 50.0
-    assert awv._percentile(vals, 0.75) == 75.0
+    assert awv._percentile(vals, 0.5) == 50.0 and awv._percentile(vals, 0.75) == 75.0
 
 
 def test_verdict_buckets_against_thresholds():
-    assert awv._verdict("LCP", 2000.0) == "good"  # <= 2500
-    assert awv._verdict("LCP", 3000.0) == "needs-improvement"  # 2500..4000
-    assert awv._verdict("LCP", 5000.0) == "poor"  # > 4000
+    assert awv._verdict("LCP", 2000.0) == "good"
+    assert awv._verdict("LCP", 3000.0) == "needs-improvement"
+    assert awv._verdict("LCP", 5000.0) == "poor"
     assert awv._verdict("CLS", 0.05) == "good"
     assert awv._verdict("UNKNOWN", 1.0) == "unknown"
 
@@ -1365,15 +991,12 @@ def test_aggregate_groups_by_route_and_metric():
         {"name": "LCP", "value": 1000.0, "rating": "good", "pathname": "/a"},
         {"name": "LCP", "value": 3000.0, "rating": "needs-improvement", "pathname": "/a"},
         {"name": "LCP", "value": 500.0, "rating": "good", "pathname": "/b"},
-        {"name": "BOGUS", "value": 1.0, "rating": "good", "pathname": "/a"},  # dropped: not a vital
+        {"name": "BOGUS", "value": 1.0, "rating": "good", "pathname": "/a"},
     ]
     stats = awv.aggregate(samples)
-    assert ("/a", "LCP") in stats
-    assert ("/b", "LCP") in stats
-    assert ("/a", "BOGUS") not in stats
-    a = stats[("/a", "LCP")]
-    assert a["count"] == 2
-    assert a["ratings"] == {"good": 1, "needs-improvement": 1, "poor": 0}
+    assert ("/a", "LCP") in stats and ("/b", "LCP") in stats and ("/a", "BOGUS") not in stats
+    assert stats[("/a", "LCP")]["count"] == 2
+    assert stats[("/a", "LCP")]["ratings"] == {"good": 1, "needs-improvement": 1, "poor": 0}
 
 
 def test_build_report_data_focus_excludes_good_and_honors_min_samples():
@@ -1405,10 +1028,7 @@ def test_build_report_data_focus_excludes_good_and_honors_min_samples():
     }
     report = awv.build_report_data(stats, min_samples=3)
     routes_in_focus = {r["route"] for r in report["focus"]}
-    assert "/slow" in routes_in_focus  # poor + enough samples
-    assert "/fast" not in routes_in_focus  # good verdict, never in focus
-    assert "/rare" not in routes_in_focus  # below min_samples
-    # /fast is still present in the full rows table.
+    assert routes_in_focus == {"/slow"}
     assert any(r["route"] == "/fast" for r in report["rows"])
 
 
@@ -1422,66 +1042,15 @@ def test_load_samples_filters_cohort_and_tolerates_torn_lines(tmp_path):
     )
     admin_only = awv.load_samples(p, since=None, cohort="admin")
     assert len(admin_only) == 1 and admin_only[0]["cohort"] == "admin"
-    all_valid = awv.load_samples(p, since=None, cohort="all")
-    assert len(all_valid) == 2  # torn line skipped
+    assert len(awv.load_samples(p, since=None, cohort="all")) == 2
 
 
 def test_main_no_file_is_a_clean_noop(tmp_path, capsys):
-    rc = awv.main(["--input", str(tmp_path / "missing.jsonl")])
-    assert rc == 0
+    assert awv.main(["--input", str(tmp_path / "missing.jsonl")]) == 0
     assert "No web-vitals data" in capsys.readouterr().err
 
 
-def test_main_purge_deletes_file_after_report(tmp_path, capsys):
-    p = tmp_path / "wv.jsonl"
-    lines = [
-        json.dumps(
-            {
-                "name": "LCP",
-                "value": v,
-                "rating": "poor",
-                "cohort": "admin",
-                "pathname": "/x",
-                "ts": "2026-06-19T00:00:00Z",
-            }
-        )
-        for v in (5000, 5100, 5200, 5300)
-    ]
-    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    rc = awv.main(["--input", str(p), "--min-samples", "1", "--purge"])
-    assert rc == 0
-    out = capsys.readouterr()
-    assert "Web Vitals Analysis" in out.out
-    assert "/x" in out.out
-    assert not p.exists()  # purged
-    assert "Purged" in out.err
-
-
-def test_main_purge_off_keeps_file(tmp_path):
-    p = tmp_path / "wv.jsonl"
-    p.write_text(
-        '{"name":"LCP","value":5000,"rating":"poor","cohort":"admin","pathname":"/x","ts":"2026-06-19T00:00:00Z"}\n',
-        encoding="utf-8",
-    )
-    awv.main(["--input", str(p), "--min-samples", "1"])
-    assert p.exists()  # not purged without the flag
-
-
-@pytest.mark.parametrize("fmt", ["md", "json"])
-def test_main_writes_to_out_file(tmp_path, fmt, capsys):
-    p = tmp_path / "wv.jsonl"
-    p.write_text(
-        '{"name":"LCP","value":5000,"rating":"poor","cohort":"admin","pathname":"/x","ts":"2026-06-19T00:00:00Z"}\n',
-        encoding="utf-8",
-    )
-    out = tmp_path / "report.out"
-    rc = awv.main(["--input", str(p), "--min-samples", "1", "--format", fmt, "--out", str(out)])
-    assert rc == 0
-    assert out.exists() and out.read_text(encoding="utf-8").strip()
-
-
-def _rec(value: float, route: str) -> str:
+def _rec(value: float, route: str = "/x") -> str:
     return json.dumps(
         {
             "name": "LCP",
@@ -1494,18 +1063,34 @@ def _rec(value: float, route: str) -> str:
     )
 
 
+def test_main_purge_deletes_file_after_report(tmp_path, capsys):
+    p = tmp_path / "wv.jsonl"
+    p.write_text("\n".join(_rec(v) for v in (5000, 5100, 5200, 5300)) + "\n", encoding="utf-8")
+    assert awv.main(["--input", str(p), "--min-samples", "1", "--purge"]) == 0
+    out = capsys.readouterr()
+    assert "Web Vitals Analysis" in out.out and "/x" in out.out and not p.exists() and "Purged" in out.err
+
+
+def test_main_purge_off_keeps_file(tmp_path):
+    p = tmp_path / "wv.jsonl"
+    p.write_text(_rec(5000) + "\n", encoding="utf-8")
+    awv.main(["--input", str(p), "--min-samples", "1"])
+    assert p.exists()
+
+
+@pytest.mark.parametrize("fmt", ["md", "json"])
+def test_main_writes_to_out_file(tmp_path, fmt):
+    p = tmp_path / "wv.jsonl"
+    p.write_text(_rec(5000) + "\n", encoding="utf-8")
+    out = tmp_path / "report.out"
+    assert awv.main(["--input", str(p), "--min-samples", "1", "--format", fmt, "--out", str(out)]) == 0
+    assert out.exists() and out.read_text(encoding="utf-8").strip()
+
+
 def test_main_reads_rotated_segment_and_purge_removes_both(tmp_path, capsys):
-    """The analyzer includes the rotated .1 backup in both the report and
-    the purge, so analysis spans the full retained window."""
-    active = tmp_path / "wv.jsonl"
-    rotated = tmp_path / "wv.jsonl.1"
+    active, rotated = tmp_path / "wv.jsonl", tmp_path / "wv.jsonl.1"
     rotated.write_text("\n".join(_rec(v, "/old") for v in (5000, 5100, 5200)) + "\n", encoding="utf-8")
     active.write_text("\n".join(_rec(v, "/new") for v in (4800, 4900, 5300)) + "\n", encoding="utf-8")
-
-    rc = awv.main(["--input", str(active), "--min-samples", "1", "--purge"])
-    assert rc == 0
+    assert awv.main(["--input", str(active), "--min-samples", "1", "--purge"]) == 0
     out = capsys.readouterr()
-    # Both segments contributed to the report.
-    assert "/old" in out.out and "/new" in out.out
-    # Both segments purged.
-    assert not active.exists() and not rotated.exists()
+    assert "/old" in out.out and "/new" in out.out and not active.exists() and not rotated.exists()

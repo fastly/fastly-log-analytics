@@ -37,7 +37,6 @@ from backend.high_scale.archive_publication import ArchivePublication, ObjectSto
 from backend.high_scale.orchestration import INITIAL_SOURCE_CURSOR, RUM_SOURCE_DOMAINS
 
 logger = logging.getLogger(__name__)
-
 SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS high_scale_ownership (
     service_id TEXT PRIMARY KEY, owner_epoch BIGINT NOT NULL CHECK (owner_epoch > 0),
@@ -1187,7 +1186,6 @@ def _observed_utc(now: datetime | None) -> datetime:
 
 
 # ── Least-Privilege ClickHouse Console Access (folded from console_access.py) ─
-
 FACT_DOMAINS = {"request_facts": "request", "rum_vitals_facts": "rum_vitals", "rum_error_facts": "rum_errors"}
 PUBLICATIONS_TABLE = "high_scale_batch_publications"
 PROFILE = "fla_console_ro"
@@ -1200,7 +1198,6 @@ MASKED_KEYS = tuple(
     )
 )
 _DATABASE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
-
 _PROFILE_SETTINGS = (
     "readonly = 1, additional_table_filters CHANGEABLE_IN_READONLY, "
     "max_result_rows = 10001 MAX 10001 CHANGEABLE_IN_READONLY, result_overflow_mode CHANGEABLE_IN_READONLY, "
@@ -1289,14 +1286,12 @@ def provision_console_access(admin: Any, database: str, service_id: str, secret:
     for table, columns in schemas.items():
         if not columns:
             raise RuntimeError(f"{table} has no columns; refusing to provision console access")
-
     legacy_user = f"fla_console_{_service_hash(service_id)}"
     legacy_tables = ", ".join(f"{db}.`{t}`" for t in (*FACT_DOMAINS, PUBLICATIONS_TABLE))
     admin.execute(f"DROP ROW POLICY IF EXISTS `{legacy_user}_scope` ON {legacy_tables}")
     admin.execute(f"DROP USER IF EXISTS `{legacy_user}`")
     admin.execute(f"CREATE SETTINGS PROFILE IF NOT EXISTS {PROFILE} SETTINGS {_PROFILE_SETTINGS}")
     admin.execute(f"ALTER SETTINGS PROFILE {PROFILE} SETTINGS {_PROFILE_SETTINGS}")
-
     users: dict[str, str] = {}
     for masked in (True, False):
         user, password = console_identity(service_id, secret, masked)
@@ -1469,8 +1464,6 @@ def close_console_clients() -> None:
 
 
 # ── Fenced Source-Object Deletion (folded from deletion.py) ───────────────────
-
-
 class ReplayLeaseChecker(Protocol):
     def active(self, manifest_id: str) -> bool: ...
 
@@ -1495,7 +1488,6 @@ class DeletionLedger(Protocol):
     def authorize_source_delete(
         self, service_id: str, object_key: str, archive_manifest_id: str, *, current_owner_epoch: int
     ) -> Any: ...
-
     def mark_source_deleted(self, service_id: str, object_key: str, archive_manifest_id: str) -> None: ...
 
 
@@ -1592,11 +1584,9 @@ class DeletionController:
         manifest.validate()
         service_id = manifest.service_id or (manifest.source.service_id if manifest.source else "")
         self._check_delete_fences(manifest, service_id, current_owner_epoch)
-
         target_keys = set(source_keys) if source_keys is not None else {s.key for s in manifest.sources}
         if not target_keys and manifest.source:
             target_keys = {manifest.source.object_key}
-
         eligible_keys: list[str] = []
         for key in target_keys:
             with contextlib.suppress(KeyError):
@@ -1604,7 +1594,6 @@ class DeletionController:
                     eligible_keys.append(key)
         if not eligible_keys:
             return []
-
         authorized_keys: list[str] = []
         for key in eligible_keys:
             with contextlib.suppress(ValueError):
@@ -1628,13 +1617,11 @@ class DeletionController:
             with ThreadPoolExecutor(max_workers=min(max_workers, len(authorized_keys))) as executor:
                 results = list(executor.map(_delete_from_store, authorized_keys))
         store_deleted = [k for k, ok in results if ok]
-
         deleted: list[str] = []
         for key in store_deleted:
             with contextlib.suppress(Exception):
                 self._mark_ledger_deleted(service_id, key, manifest.manifest_id, current_owner_epoch)
                 deleted.append(key)
-
         if source_keys is None and len(deleted) >= len(target_keys):
             self._verified_manifests.discard(manifest.manifest_id)
         return deleted
@@ -1716,13 +1703,11 @@ class HighScaleDeletionSweeper:
                 else:
                     deleted += 1
             return DeletionSweepResult(deleted, skipped)
-
         manifest_to_keys: dict[str, list[str]] = {}
         for source in self._control.deletable_sources(service_id, limit=limit):
             manifest_id = getattr(source, "archive_manifest_id", None)
             if manifest_id:
                 manifest_to_keys.setdefault(manifest_id, []).append(source.object_key)
-
         deleted = skipped = 0
         for manifest_id, keys in manifest_to_keys.items():
             record = self._control.archive_manifest(manifest_id)

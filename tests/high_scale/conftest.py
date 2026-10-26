@@ -667,3 +667,35 @@ class ReplayClickHouseClient:
             raise RuntimeError(f"simulated insert failure for {batch.batch_id}")
         self.insert_calls.append(batch.batch_id)
         return InsertReceipt(batch.batch_id, len(batch.rows), batch.digest)
+
+
+class _HighScaleTestAliasLoader:
+    _TARGETS = {
+        "tests.high_scale.test_security": "_security_cases",
+        "tests.high_scale.test_cmcd": "_cmcd_cases",
+    }
+
+    @classmethod
+    def find_spec(cls, fullname: str, path=None, target=None):
+        if fullname not in cls._TARGETS:
+            return None
+        import importlib.util
+
+        return importlib.util.spec_from_loader(fullname, cls)
+
+    @classmethod
+    def create_module(cls, spec):
+        import importlib
+
+        agg = importlib.import_module("tests.high_scale.test_aggregates")
+        return getattr(agg, cls._TARGETS[spec.name])
+
+    @classmethod
+    def exec_module(cls, module) -> None:
+        pass
+
+
+import sys as _sys  # noqa: E402
+
+if not any(getattr(f, "__name__", "") == "_HighScaleTestAliasLoader" for f in _sys.meta_path):
+    _sys.meta_path.insert(0, _HighScaleTestAliasLoader)

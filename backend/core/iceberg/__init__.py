@@ -82,8 +82,7 @@ del _k, _v
 _proxy.__path__ = _self.__path__  # type: ignore[attr-defined]
 _proxy.__file__ = _self.__file__
 _proxy.__spec__ = _self.__spec__
-from backend.core.iceberg import _ducklake as _ducklake_module
-from backend.core.iceberg._ducklake import (
+from backend.core.iceberg._core import (
     DUCKLAKE_WRITE_ADMISSION_TIMEOUT_S,
     DuckLakeAdmissionTimeout,
     _ducklake_attach,
@@ -94,7 +93,7 @@ from backend.core.iceberg._ducklake import (
     get_admission_stats,
 )
 
-_proxy.__dict__["_ducklake"] = _ducklake_module
+_proxy.__dict__["_ducklake"] = _core_module
 _proxy.__dict__["DUCKLAKE_WRITE_ADMISSION_TIMEOUT_S"] = DUCKLAKE_WRITE_ADMISSION_TIMEOUT_S
 _proxy.__dict__["DuckLakeAdmissionTimeout"] = DuckLakeAdmissionTimeout
 _proxy.__dict__["_ducklake_attach"] = _ducklake_attach
@@ -108,6 +107,7 @@ _proxy.__dict__["manifest"] = _proxy
 _proxy.__dict__["rum_schema"] = _proxy
 _proxy.__dict__["sync"] = _proxy
 _sys.modules[__name__] = _proxy
+_sys.modules[f"{__name__}._ducklake"] = _core_module
 _sys.modules[f"{__name__}.lake_info"] = _proxy
 _sys.modules[f"{__name__}.manifest"] = _proxy
 _sys.modules[f"{__name__}.rum_schema"] = _proxy

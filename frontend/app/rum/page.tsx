@@ -3,7 +3,7 @@ import { HydrationBoundary } from '@tanstack/react-query';
 import { fetchRumStatusServerSide } from '@/lib/ssr/upstream';
 import { resolvePageServiceId, seedDehydratedState } from '@/lib/ssr/upstream';
 import RumPageClient from './_sections/RumClient';
-import { queryKeys } from '@/lib/query-keys';
+import { queryKeys } from "@/lib/api";
 
 export const dynamic = 'force-dynamic';
 export const metadata = {

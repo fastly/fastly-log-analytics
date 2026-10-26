@@ -1,22 +1,665 @@
+import { useMemo } from 'react'
 import { clsx, type ClassValue } from "clsx"
 import { twMerge } from "tailwind-merge"
-import { subHours } from 'date-fns'
+import { differenceInSeconds, formatDistanceToNow, parseISO, subHours } from 'date-fns'
+import { formatInTimeZone, toDate } from 'date-fns-tz'
 import { ShieldAlert, ServerCrash, Zap, Network, Globe, LayoutGrid, type LucideIcon } from 'lucide-react'
-import { formatDate, toUTCDate } from '@/lib/format'
-import { CHART_COLORS, CHART_LAYOUT_DEFAULTS, densifyBarSeries, type BarSeriesPoint } from '@/lib/chart-helpers'
 import { useFilterStore } from '@/stores/filterStore'
 import type { components } from '@/types/api.generated'
 import type { FiltersPayload, PlotlyTrace } from '@/types/api'
-
-export { CHART_LAYOUT_DEFAULTS }
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+// ── Formatting Helpers ────────────────────────────────────────────────────────
+
+const _numFmtCache = new Map<string, Intl.NumberFormat>()
+function getNumberFormat(locale?: string, options?: Intl.NumberFormatOptions): Intl.NumberFormat {
+  const key = `${locale ?? ''}|${options ? JSON.stringify(options) : ''}`
+  let fmt = _numFmtCache.get(key)
+  if (!fmt) {
+    fmt = new Intl.NumberFormat(locale, options)
+    _numFmtCache.set(key, fmt)
+  }
+  return fmt
+}
+
+const _dtFmtCache = new Map<string, Intl.DateTimeFormat>()
+function getDateTimeFormat(locale: string | undefined, options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
+  const key = `${locale ?? ''}|${JSON.stringify(options)}`
+  let fmt = _dtFmtCache.get(key)
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat(locale, options)
+    _dtFmtCache.set(key, fmt)
+  }
+  return fmt
+}
+
+const _relFmt = typeof Intl !== 'undefined' && typeof Intl.RelativeTimeFormat === 'function'
+  ? new Intl.RelativeTimeFormat('en', { numeric: 'always', style: 'narrow' })
+  : null
+
+const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const
+
+export function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B'
+  let value = bytes
+  let i = 0
+  while (value >= 1000 && i < BYTE_UNITS.length - 1) {
+    value /= 1024
+    i++
+  }
+  return `${parseFloat(value.toFixed(2))} ${BYTE_UNITS[i]}`
+}
+
+export function formatBytesTiered(
+  bytes: number | null | undefined,
+  options: { maxUnit?: 'MB' | 'GB'; nullText?: string } = {},
+): string {
+  const { maxUnit = 'MB', nullText = '–' } = options
+  if (bytes == null) return nullText
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (maxUnit === 'MB' || bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+interface ElapsedOptions {
+  minutesFrom?: number
+  hoursFrom?: number
+  daysFrom?: number
+  rounding?: 'floor' | 'round'
+  fractionDigits?: { seconds?: number; minutes?: number; hours?: number; days?: number }
+  justNowBelow?: number
+  suffix?: string
+  fallback?: string
+}
+
+export function formatElapsed(seconds: number | null | undefined, options: ElapsedOptions = {}): string {
+  const {
+    minutesFrom = 60,
+    hoursFrom = 3600,
+    daysFrom = 86400,
+    rounding = 'floor',
+    fractionDigits = {},
+    justNowBelow,
+    suffix = '',
+    fallback = '—',
+  } = options
+  if (seconds == null || Number.isNaN(seconds)) return fallback
+  const r = rounding === 'round' ? Math.round : Math.floor
+  const unit = (value: number, digits: number | undefined, label: string) =>
+    `${digits ? value.toFixed(digits) : r(value)}${label}${suffix}`
+  if (justNowBelow !== undefined && seconds < justNowBelow) return 'just now'
+  if (seconds < minutesFrom) return unit(seconds, fractionDigits.seconds, 's')
+  if (seconds < hoursFrom) return unit(seconds / 60, fractionDigits.minutes, 'm')
+  if (seconds < daysFrom) return unit(seconds / 3600, fractionDigits.hours, 'h')
+  return unit(seconds / 86400, fractionDigits.days, 'd')
+}
+
+export const ELAPSED_RELATIVE_AGO_JUST_NOW: ElapsedOptions = { suffix: ' ago', justNowBelow: 120 }
+export const ELAPSED_RELATIVE_AGO: ElapsedOptions = { suffix: ' ago' }
+export const ELAPSED_AGE_COMPACT: ElapsedOptions = {
+  rounding: 'round',
+  minutesFrom: 90,
+  hoursFrom: 5400,
+  daysFrom: 172800,
+  fractionDigits: { hours: 1, days: 1 },
+}
+export const ELAPSED_FRESHNESS: ElapsedOptions = {
+  rounding: 'round',
+  daysFrom: Infinity,
+  fractionDigits: { hours: 1 },
+}
+
+export function resolveCountryName(code: string): string {
+  if (!code || code.length !== 2 || typeof Intl === 'undefined') return code
+  try {
+    return new Intl.DisplayNames(['en'], { type: 'region' }).of(code.toUpperCase()) || code
+  } catch {
+    return code
+  }
+}
+
+export function formatCompactCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, '')}k`
+  return String(n)
+}
+
+export function formatAbbreviatedCount(n: number, millionDecimals = 1): string {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(millionDecimals)}B`
+  if (n >= 1e6) return `${(n / 1e6).toFixed(millionDecimals)}M`
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`
+  return formatCount(n)
+}
+
+export function formatCount(n: number, options?: Intl.NumberFormatOptions): string {
+  return getNumberFormat(undefined, options).format(n)
+}
+
+export function formatCountMaybe(n: number | null | undefined, options?: Intl.NumberFormatOptions): string | undefined {
+  return n == null ? undefined : formatCount(n, options)
+}
+
+export function formatValue(field: string | undefined, value: string | number | null | undefined): string {
+  if (value === null || value === undefined) return 'null'
+  if (typeof value === 'number') {
+    return field?.includes('bytes') ? formatBytes(value) : formatCount(value)
+  }
+  const str = String(value)
+  if (field === 'country' && str.length === 2) return resolveCountryName(str)
+  if (field === 'pop' || field === 'region') return str.toUpperCase()
+  if (field === 'city') return str.toLowerCase().replace(/(^|[^\w])(\w)/g, (m) => m.toUpperCase())
+  if (field === 'proto' || field === 'tls') {
+    const num = Number(value)
+    if (!isNaN(num)) return parseFloat(num.toFixed(1)).toString()
+  }
+  return str
+}
+
+export function formatCurrency(amount: number): string {
+  if (amount >= 1000) return `$${(amount / 1000).toFixed(1).replace(/\.0$/, '')}k`
+  return `$${amount.toFixed(amount >= 1 ? 2 : 4)}`
+}
+
+export function formatUSD(n: number, options?: { subDollarDigits?: number }): string {
+  if (n >= 1000) return `$${getNumberFormat('en-US', { maximumFractionDigits: 0 }).format(Number(n.toFixed(0)))}`
+  return `$${n.toFixed(n >= 1 ? 2 : (options?.subDollarDigits ?? 4))}`
+}
+
+export function calculateDelta(current: number, previous: number | undefined): number | null {
+  return previous ? ((current - previous) / previous) * 100 : null
+}
+
+export function formatPercent(ratio: number, options?: { decimals?: number }): string {
+  return `${(ratio * 100).toFixed(options?.decimals ?? 1)}%`
+}
+
+export function formatPctValue(v: number | null | undefined, decimals?: number): string {
+  if (v == null) return '—'
+  return `${decimals != null ? v.toFixed(decimals) : v}%`
+}
+
+export function formatMs(v: number | null | undefined, decimals = 1, unit = ' ms'): string {
+  return v == null ? '—' : `${v.toFixed(decimals)}${unit}`
+}
+
+export function statusBadgeClass(
+  status: number | string | null | undefined,
+  variant: 'class' | 'traffic-light' = 'class',
+): string {
+  if (variant === 'traffic-light') {
+    const n = typeof status === 'number' ? status : status == null ? 0 : Number(status)
+    if (!n) return 'bg-muted text-muted-foreground'
+    if (n >= 200 && n < 300) return 'bg-green-500/10 text-green-500 border-green-500/20'
+    if (n >= 300 && n < 400) return 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20'
+    return 'bg-red-500/10 text-red-500 border-red-500/20'
+  }
+  const code = typeof status === 'number' ? status : parseInt(String(status), 10)
+  if (isNaN(code)) return 'bg-muted text-muted-foreground'
+  if (code >= 200 && code < 300) return 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/20'
+  if (code >= 300 && code < 400) return 'bg-sky-500/15 text-sky-700 dark:text-sky-400 border-sky-500/20'
+  if (code >= 400 && code < 500) return 'bg-amber-500/15 text-amber-800 dark:text-amber-400 border-amber-500/20'
+  if (code >= 500) return 'bg-destructive/15 text-destructive border-destructive/20 font-bold'
+  return 'bg-muted text-muted-foreground'
+}
+
+export function toUTCDate(date: string | Date): Date {
+  if (date instanceof Date) return date
+  if (!date) return new Date(NaN)
+  const hasTz = date.includes('Z') || /[+-]\d{2}:?\d{2}$/.test(date)
+  if (date.includes('T') && hasTz) return parseISO(date)
+  return parseISO(hasTz ? date.replace(' ', 'T') : `${date.replace(' ', 'T')}Z`)
+}
+
+export function formatForInput(date: string | Date, tz: string) {
+  try {
+    const d = toUTCDate(date)
+    return isNaN(d.getTime()) ? '' : formatInTimeZone(d, tz, "yyyy-MM-dd'T'HH:mm:ss")
+  } catch {
+    return ''
+  }
+}
+
+export function parseFromInput(dateStr: string, tz: string) {
+  try {
+    const d = toDate(dateStr, { timeZone: tz })
+    return isNaN(d.getTime()) ? null : d.toISOString()
+  } catch {
+    return null
+  }
+}
+
+export function formatDate(date: string | Date, tz: string, pattern: string = 'yyyy-MM-dd h:mm:ss a') {
+  try {
+    const d = toUTCDate(date)
+    return isNaN(d.getTime()) ? 'Invalid Date' : formatInTimeZone(d, tz, pattern)
+  } catch (e) {
+    console.error('Error formatting date:', date, e)
+    return 'Invalid Date'
+  }
+}
+
+export function formatRelative(date: string | Date) {
+  try {
+    const d = toUTCDate(date)
+    return isNaN(d.getTime()) ? 'Invalid Date' : formatDistanceToNow(d, { addSuffix: true })
+  } catch {
+    return 'Invalid Date'
+  }
+}
+
+export function formatTimeAgo(date: string | Date) {
+  const d = toUTCDate(date)
+  if (isNaN(d.getTime())) return ''
+  const diffSec = differenceInSeconds(new Date(), d)
+  if (diffSec < 0) return 'just now'
+  if (diffSec < 60) return _relFmt ? _relFmt.format(-diffSec, 'second') : `${diffSec}s ago`
+  const s = diffSec % 60
+  const m = Math.floor((diffSec % 3600) / 60)
+  if (diffSec < 3600) return `${m}m ${s}s ago`
+  const h = Math.floor((diffSec % 86400) / 3600)
+  if (diffSec < 86400) return `${h}h ${m}m ${s}s ago`
+  return `${Math.floor(diffSec / 86400)}d ${h}h ${m}m ago`
+}
+
+export function getTimezoneAbbr(date: Date, tz: string) {
+  return formatInTimeZone(date, tz, 'zzz')
+}
+
+export function formatLocalDateTime(
+  value: string | number | Date,
+  options?: Intl.DateTimeFormatOptions,
+): string {
+  const d = value instanceof Date ? value : new Date(value)
+  if (isNaN(d.getTime())) return d.toLocaleString(undefined, options)
+  return options ? getDateTimeFormat(undefined, options).format(d) : d.toLocaleString()
+}
+
+export function formatCompactDuration(seconds: number): string {
+  return seconds <= 0 ? 'any second' : formatElapsed(seconds)
+}
+
+export function formatDuration(seconds: number | null | undefined, options?: { round?: boolean }): string {
+  if (seconds == null || seconds < 0) return '—'
+  const rounded = (options?.round ?? true) ? Math.round(seconds) : seconds
+  if (rounded < 60) return `${rounded}s`
+  const m = Math.floor(rounded / 60)
+  const s = rounded % 60
+  if (m < 60) return s > 0 ? `${m}m ${s}s` : `${m}m`
+  const h = Math.floor(m / 60)
+  const mRem = m % 60
+  if (h < 24) return mRem > 0 ? `${h}h ${mRem}m` : `${h}h`
+  const d = Math.floor(h / 24)
+  const hRem = h % 24
+  return hRem > 0 ? `${d}d ${hRem}h` : `${d}d`
+}
+
+export function formatDeterministicUTC(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  try {
+    const d = new Date(iso)
+    if (isNaN(d.getTime())) return iso
+    const datePart = getDateTimeFormat('en-US', { timeZone: 'UTC', year: 'numeric', month: 'short', day: 'numeric' }).format(d)
+    const timePart = getDateTimeFormat('en-US', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' }).format(d)
+    return `${datePart}, ${timePart} UTC`
+  } catch {
+    return iso
+  }
+}
+
+export function formatBucket(iso: string, tz: string): string {
+  if (!iso) return ''
+  const utc = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso) ? iso : `${iso}Z`
+  const d = new Date(utc)
+  if (isNaN(d.getTime())) return iso
+  return getDateTimeFormat('en-US', {
+    timeZone: tz,
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  }).format(d)
+}
+
+export function parseExtentMs(value: unknown, edge: 'earliest' | 'latest'): number | null {
+  if (typeof value !== 'string' || value.length === 0) return null
+  const iso = value.length === 10
+    ? `${value}${edge === 'earliest' ? 'T00:00:00.000Z' : 'T23:59:59.999Z'}`
+    : value
+  const t = Date.parse(iso)
+  return Number.isNaN(t) ? null : t
+}
+
+export function toQueryDate(d: Date): string {
+  return `${d.toISOString().slice(0, 19)}Z`
+}
+
 export function formatDateTime(isoString: string | null | undefined, timeZone?: string): string {
   return isoString ? formatDate(isoString, timeZone || 'UTC', 'MMM d, yyyy h:mm:ss a') : 'Unknown'
 }
+
+// ── Chart Helpers ─────────────────────────────────────────────────────────────
+
+const CHART_LAYOUT_DEFAULTS = {
+  tickformatstops: [
+    { dtickrange: [0, 1000], value: '%H:%M:%S.%f' },
+    { dtickrange: [1000, 60000], value: '%H:%M:%S' },
+    { dtickrange: [60000, 3600000], value: '%H:%M' },
+    { dtickrange: [3600000, 86400000], value: '%H:%M<br>%b %d' },
+    { dtickrange: [86400000, 604800000], value: '%b %d' },
+    { dtickrange: [604800000, 'M1'], value: '%b %d' },
+    { dtickrange: ['M1', 'M12'], value: '%b %Y' },
+    { dtickrange: ['M12', null], value: '%Y' },
+  ],
+}
+
+export function makeTimeXAxis(
+  startTime: string | null | undefined,
+  endTime: string | null | undefined,
+  timezone: string,
+) {
+  return {
+    range: [
+      startTime ? formatDate(startTime, timezone, 'yyyy-MM-dd HH:mm:ss.SSS') : '',
+      endTime ? formatDate(endTime, timezone, 'yyyy-MM-dd HH:mm:ss.SSS') : '',
+    ],
+    nticks: 8,
+    tickangle: -45,
+    automargin: true,
+    type: 'date' as const,
+    tickformatstops: CHART_LAYOUT_DEFAULTS.tickformatstops,
+  }
+}
+
+export const TIME_HOVER_LAYOUT = {
+  hovermode: 'x unified' as const,
+  legend: {
+    orientation: 'h' as const,
+    y: 1.05,
+    x: 0.5,
+    xanchor: 'center' as const,
+    yanchor: 'bottom' as const,
+    font: { size: 9.5 },
+    bgcolor: 'transparent',
+  },
+}
+
+export function useTimeLayout(
+  startTime: string | null | undefined,
+  endTime: string | null | undefined,
+  timezone: string,
+) {
+  return useMemo(
+    () => ({ ...TIME_HOVER_LAYOUT, xaxis: makeTimeXAxis(startTime, endTime, timezone) }),
+    [startTime, endTime, timezone],
+  )
+}
+
+const MAX_DENSE_BUCKETS = 5000
+
+function parseUtcMs(t: string | number | null | undefined): number {
+  if (t == null) return NaN
+  if (typeof t === 'number') return Math.round(t / 1000) * 1000
+  const parsed = toUTCDate(t).getTime()
+  const raw = Number.isNaN(parsed) ? Date.parse(t) : parsed
+  return Number.isNaN(raw) ? NaN : Math.round(raw / 1000) * 1000
+}
+
+export function denseTimeGrid(
+  times: Array<string | number | null | undefined>,
+  intervalSeconds: number | undefined,
+  startTime?: string | null,
+  endTime?: string | null,
+): string[] | null {
+  if (!intervalSeconds || intervalSeconds <= 0) return null
+  const stepMs = intervalSeconds * 1000
+
+  const timesMs = [
+    ...new Set(times.map((t) => parseUtcMs(t)).filter((t) => !Number.isNaN(t))),
+  ].sort((a, b) => a - b)
+
+  let first = timesMs[0]
+  let last = timesMs[timesMs.length - 1]
+
+  if (startTime) {
+    const sMs = parseUtcMs(startTime)
+    if (!Number.isNaN(sMs)) {
+      const startBucket = sMs - (sMs % stepMs)
+      if (first === undefined || startBucket < first) first = startBucket
+    }
+  }
+  if (endTime) {
+    const eMs = parseUtcMs(endTime)
+    if (!Number.isNaN(eMs)) {
+      const endBucket = eMs - (eMs % stepMs)
+      if (last === undefined || endBucket > last) last = endBucket
+    }
+  }
+
+  if (first === undefined || last === undefined || first > last) return null
+
+  if (
+    !timesMs.every((t) => {
+      const rem = Math.abs((t - first) % stepMs)
+      return rem === 0 || rem < 1000 || Math.abs(rem - stepMs) < 1000
+    })
+  ) {
+    return null
+  }
+
+  const nBuckets = Math.round((last - first) / stepMs) + 1
+  if (nBuckets <= timesMs.length && !startTime && !endTime) return null
+  if (nBuckets > MAX_DENSE_BUCKETS) return null
+
+  const grid: string[] = []
+  for (let k = 0; k < nBuckets; k++) grid.push(new Date(first + k * stepMs).toISOString())
+  return grid
+}
+
+export interface BarSeriesPoint {
+  time: string
+  value: number
+  category?: string | number | null
+}
+
+export function densifyBarSeries(
+  time_series: BarSeriesPoint[],
+  intervalSeconds: number | undefined,
+  hasCategories: boolean,
+  startTime?: string | null,
+  endTime?: string | null,
+): BarSeriesPoint[] {
+  const grid = denseTimeGrid(
+    time_series.map((d) => d.time),
+    intervalSeconds,
+    startTime,
+    endTime,
+  )
+  if (!grid) return time_series
+
+  if (hasCategories) {
+    const categories: string[] = []
+    const seen = new Set<string>()
+    const byKey = new Map<string, number>()
+    for (const d of time_series) {
+      const ms = parseUtcMs(d.time)
+      if (Number.isNaN(ms)) continue
+      const cat = d.category != null ? String(d.category) : 'Other'
+      if (!seen.has(cat)) {
+        seen.add(cat)
+        categories.push(cat)
+      }
+      byKey.set(`${ms}|${cat}`, d.value)
+    }
+    const out: BarSeriesPoint[] = []
+    for (const iso of grid) {
+      const ms = parseUtcMs(iso)
+      for (const cat of categories) {
+        out.push({ time: iso, value: byKey.get(`${ms}|${cat}`) ?? 0, category: cat })
+      }
+    }
+    return out
+  }
+
+  const byMs = new Map<number, number>()
+  for (const d of time_series) {
+    const ms = parseUtcMs(d.time)
+    if (!Number.isNaN(ms)) byMs.set(ms, d.value)
+  }
+  return grid.map((iso) => ({ time: iso, value: byMs.get(parseUtcMs(iso)) ?? 0 }))
+}
+
+export const CHART_COLORS = {
+  success: '#10b981',
+  danger: '#ef4444',
+  warning: '#f59e0b',
+  info: '#3b82f6',
+  neutral: '#94a3b8',
+} as const
+
+export function statusHex(code: number): string {
+  if (code >= 500) return CHART_COLORS.danger
+  if (code >= 400) return CHART_COLORS.warning
+  if (code >= 300) return CHART_COLORS.info
+  return CHART_COLORS.success
+}
+
+export function denseBarTrace<R>(opts: {
+  name: string
+  rows: R[]
+  getTime: (row: R) => string | null | undefined
+  getValue: (row: R) => number | null | undefined
+  intervalSeconds: number
+  color: string
+  yaxis?: 'y2'
+  showlegend?: boolean
+  grid?: string[]
+}) {
+  const { name, rows, getTime, getValue, intervalSeconds, color, yaxis, showlegend, grid } = opts
+  const present: string[] = []
+  const byMs = new Map<number, number>()
+  for (const r of rows) {
+    const t = getTime(r)
+    if (t == null) continue
+    present.push(t)
+    byMs.set(Date.parse(t), getValue(r) ?? 0)
+  }
+  const x = grid ?? denseTimeGrid(present, intervalSeconds) ?? present
+  return {
+    type: 'bar' as const,
+    name,
+    x,
+    y: x.map((h) => byMs.get(Date.parse(h)) ?? 0),
+    ...(yaxis ? { yaxis } : {}),
+    marker: { color },
+    ...(showlegend !== undefined ? { showlegend } : {}),
+  }
+}
+
+export function lineTrace(opts: {
+  name: string
+  x: Array<string | null | undefined>
+  y: Array<number | null>
+  color: string
+  width?: number
+  dash?: 'dot' | 'dash'
+  yaxis?: 'y2'
+  connectgaps?: boolean
+}) {
+  const { name, x, y, color, width = 2, dash, yaxis, connectgaps } = opts
+  return {
+    type: 'scatter' as const,
+    mode: 'lines' as const,
+    name,
+    x,
+    y,
+    ...(yaxis ? { yaxis } : {}),
+    line: { color, width, dash },
+    ...(connectgaps !== undefined ? { connectgaps } : {}),
+  }
+}
+
+export function secondaryYAxis(
+  title: string,
+  extra: { ticksuffix?: string; rangemode?: 'tozero' | 'normal' | 'nonnegative'; showgrid?: boolean } = {},
+) {
+  return {
+    title,
+    overlaying: 'y' as const,
+    side: 'right' as const,
+    showgrid: false,
+    rangemode: 'tozero' as const,
+    ...extra,
+  }
+}
+
+export function withSecondaryAxis<L extends { margin?: { r?: number } }>(
+  layout: L,
+  title: string,
+  extra?: Parameters<typeof secondaryYAxis>[1],
+) {
+  return {
+    ...layout,
+    yaxis2: secondaryYAxis(title, extra),
+    margin: { ...layout.margin, r: 50 },
+  }
+}
+
+export interface TimeseriesDataPoint {
+  time?: string | null
+  ts?: string | null
+}
+
+interface TraceConfig {
+  key: string
+  name: string
+  color: string
+  stackgroup?: string
+  fill?: 'none' | 'tozeroy' | 'tonexty' | 'toself'
+  type?: 'scatter' | 'bar'
+}
+
+export function useTimeseriesToTraces(
+  data: readonly TimeseriesDataPoint[] | undefined,
+  configs: TraceConfig[],
+  timezone?: string,
+): PlotlyTrace[] {
+  return useMemo((): PlotlyTrace[] => {
+    if (!data?.length) return []
+
+    const sortedData = [...data]
+      .filter((d) => d && (d.time || d.ts))
+      .sort((a, b) => (a.time || a.ts || '').localeCompare(b.time || b.ts || ''))
+
+    const xValues = sortedData.map((d) => {
+      const t = d.time || d.ts || ''
+      return timezone ? formatDate(t, timezone, 'yyyy-MM-dd HH:mm:ss') : t
+    })
+
+    return configs.map((config) => {
+      const yValues = sortedData.map((d) => Number((d as Record<string, unknown>)[config.key]) || 0)
+      const isBar = config.type === 'bar'
+      return {
+        x: xValues,
+        y: yValues,
+        name: config.name,
+        type: config.type || 'scatter',
+        fill: config.fill || 'tozeroy',
+        ...(isBar
+          ? { marker: { color: config.color } }
+          : { mode: 'lines' as const, line: { width: 1.5, color: config.color } }),
+        ...(config.stackgroup ? { stackgroup: config.stackgroup } : {}),
+      }
+    })
+  }, [data, configs, timezone])
+}
+
+// ── General Utilities & UI Helpers ────────────────────────────────────────────
 
 export function downloadBlob(blob: Blob, filename: string) {
   const url = window.URL.createObjectURL(blob)
@@ -706,4 +1349,48 @@ export function buildTrafficData({
     }
   }
   return traces
+}
+
+// ── Insights Default Window & Baseline Selection ──────────────────────────────
+
+export const WINDOW_OPTIONS = [
+  { label: 'Last 15 Minutes', value: '0.25' },
+  { label: 'Last 1 Hour', value: '1' },
+  { label: 'Last 4 Hours', value: '4' },
+  { label: 'Last 24 Hours', value: '24' },
+]
+
+export const BASELINE_OPTIONS = [
+  { label: 'Previous 1 Hour', value: '1' },
+  { label: 'Last 24 Hours', value: '24' },
+  { label: 'Last 7 Days', value: '168' },
+  { label: 'Last 30 Days', value: '720' },
+]
+
+const STATIC_DEFAULT = { window: '24', baseline: '168' } as const
+
+export function historyHoursFromExtents(
+  earliest: string | null | undefined,
+  now: number = Date.now(),
+): number | null {
+  if (!earliest) return null
+  const iso = earliest.length === 10 ? earliest + 'T00:00:00.000Z' : earliest
+  const ms = Date.parse(iso)
+  if (!Number.isFinite(ms)) return null
+  return Math.max(0, (now - ms) / 3_600_000)
+}
+
+export function pickInsightsDefault(
+  historyHours: number | null,
+): { window: string; baseline: string } {
+  if (historyHours == null || !Number.isFinite(historyHours)) {
+    return { window: STATIC_DEFAULT.window, baseline: STATIC_DEFAULT.baseline }
+  }
+  const h = historyHours
+  if (h < 1) return { window: '0.25', baseline: '1' } // <1h: smallest pair; cards light up once 1h elapses
+  if (h < 4) return { window: '1', baseline: '1' } //  ~1–4h: this hour vs the previous hour
+  if (h < 24) return { window: '4', baseline: '1' } //  ~4–24h: last 4h vs previous hour
+  if (h < 48) return { window: '4', baseline: '24' } // ~1–2d: last 4h vs previous day
+  if (h < 168) return { window: '24', baseline: '24' } // ~2–7d: day over day
+  return { window: '24', baseline: '168' } //              ≥7d: prior 7 day period (24h vs 7d)
 }

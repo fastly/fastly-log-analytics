@@ -5,9 +5,17 @@ from __future__ import annotations
 import sys
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_serializer
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_serializer, model_validator
 
-from backend.models._base import JsonAny, JsonDict, JsonRows, PassthroughModel, WireSafeModel
+from backend.models._base import (
+    JsonAny,
+    JsonDict,
+    JsonRows,
+    PassthroughModel,
+    ScalarCell,
+    SchemaColumn,
+    WireSafeModel,
+)
 
 # ── Admin Action & Status Models (folded from admin_actions.py) ───────────────
 
@@ -273,6 +281,10 @@ sys.modules["backend.models.origin"] = _self_mod
 sys.modules["backend.models.network"] = _self_mod
 sys.modules["backend.models.performance"] = _self_mod
 sys.modules["backend.models.rum"] = _self_mod
+sys.modules["backend.models.session_scoring"] = _self_mod
+sys.modules["backend.models.dashboard"] = _self_mod
+sys.modules["backend.models.security"] = _self_mod
+sys.modules["backend.models.sessions"] = _self_mod
 _models_pkg = sys.modules.get("backend.models")
 if _models_pkg is not None:
     setattr(_models_pkg, "admin_actions", _self_mod)
@@ -280,6 +292,31 @@ if _models_pkg is not None:
     setattr(_models_pkg, "network", _self_mod)
     setattr(_models_pkg, "performance", _self_mod)
     setattr(_models_pkg, "rum", _self_mod)
+    setattr(_models_pkg, "session_scoring", _self_mod)
+    setattr(_models_pkg, "dashboard", _self_mod)
+    setattr(_models_pkg, "security", _self_mod)
+    setattr(_models_pkg, "sessions", _self_mod)
+_backend_pkg = sys.modules.get("backend")
+_aliases = getattr(_backend_pkg, "_MODULE_ALIASES", None)
+if isinstance(_aliases, dict):
+    _aliases.update(
+        {
+            "backend.models.session_scoring": "backend.models.analytics",
+            "backend.models.dashboard": "backend.models.analytics",
+            "backend.models.security": "backend.models.analytics",
+            "backend.models.sessions": "backend.models.analytics",
+            "backend.repositories._sql.rum": "backend.repositories.rum",
+            "backend.repositories._sql.security": "backend.repositories.security",
+            "backend.repositories._sql.alerts": "backend.repositories.assets",
+            "backend.repositories._sql.query": "backend.repositories.dashboard",
+            "backend.repositories.utils.filters": "backend.repositories._base",
+            "backend.repositories.query": "backend.repositories.dashboard",
+            "backend.repositories.alerts": "backend.repositories.assets",
+            "backend.repositories.audit": "backend.repositories.assets",
+            "backend.routers.alerts": "backend.routers.control_room",
+            "backend.routers.audit": "backend.routers.control_room",
+        }
+    )
 
 
 # ── Network & Origin Models (folded from network.py and origin.py) ────────────
@@ -290,8 +327,11 @@ from backend.models.common import (  # noqa: E402
     HasDataMixin,
     Limit100,
     Limit200,
+    Limit500,
     Limit1440,
     LimitedRequest,
+    LogExtentsMixin,
+    PaginationMixin,
     RangeKeyedRequest,
     ResponseCacheObservation,
     Seconds14400,
@@ -1333,3 +1373,1002 @@ class RumLiveEventItem(WireSafeModel):
     browser: str
     os: str
     raw_log: dict[str, Any] = {}
+
+
+# ── Session Scoring Models (folded from session_scoring.py) ───────────────────
+
+
+class ScoringThresholdBody(BaseModel):
+    threshold: int | None = None
+
+
+class ScoringL2EnforceBody(BaseModel):
+    enabled: bool = False
+
+
+class ScoringExcludeRegexBody(BaseModel):
+    regex: str = ""
+
+
+class ScoringEnforceStatusCodeBody(BaseModel):
+    status_code: int | None = None
+
+
+class ScoringTokenBody(BaseModel):
+    token: str = ""
+
+
+class ScoringLabelCreate(BaseModel):
+    sid: str = ""
+    label: str = ""
+    notes: str = ""
+    flagged_by: str = "admin"
+    sample_ip: str = ""
+    sample_ua: str = ""
+    sample_url: str = ""
+
+
+class ScoringLabelUpdate(BaseModel):
+    label: str | None = None
+    notes: str | None = None
+
+
+class ScoringTopFlaggedRow(PassthroughModel):
+    timestamp: str
+    edge_sid: str | None
+    edge_score: int
+    edge_score_l1: int | None = None
+    edge_score_l2: int | None = None
+    edge_cookie_compliance: str | None = None
+    edge_score_reason: str | None = None
+    ip: str | None = None
+    ua: str | None = None
+    url: str | None = None
+    status: int | None = None
+    country: str | None = None
+
+
+class ScoringTopFlaggedResponse(PassthroughModel):
+    rows: list[ScoringTopFlaggedRow] = []
+    since_hours: int | None = None
+
+
+class ScoringDistributionRow(PassthroughModel):
+    hour: str
+    bucket: str
+    count: int
+
+
+class ScoringScoreDistributionResponse(PassthroughModel):
+    rows: list[ScoringDistributionRow] = []
+    since_hours: int | None = None
+
+
+class ScoringComplianceRow(PassthroughModel):
+    hour: str
+    compliance: str
+    count: int
+
+
+class ScoringComplianceBreakdownResponse(PassthroughModel):
+    rows: list[ScoringComplianceRow] = []
+    since_hours: int | None = None
+
+
+class ScoringLatencyRow(PassthroughModel):
+    hour: str | None = None
+    scored_count: int | None = None
+    fail_open_count: int | None = None
+    total_count: int | None = None
+    rtt_p50_us: int | None = None
+    rtt_p95_us: int | None = None
+    rtt_p99_us: int | None = None
+    exec_p50_us: int | None = None
+    exec_p95_us: int | None = None
+
+
+class ScoringLatencyTimeseriesResponse(PassthroughModel):
+    rows: list[ScoringLatencyRow] = []
+    since_hours: int | None = None
+    has_latency: bool = False
+    granularity: str | None = None
+
+
+class ScoringReasonCount(PassthroughModel):
+    reason: str | None = None
+    count: int | None = None
+
+
+class ScoringLatencySnapshot(PassthroughModel):
+    available: bool = False
+    rtt_p50_us: int | None = None
+    rtt_p95_us: int | None = None
+    rtt_p99_us: int | None = None
+    rtt_max_us: int | None = None
+    exec_p50_us: int | None = None
+    exec_p95_us: int | None = None
+
+
+class ScoringMatrixStaleness(PassthroughModel):
+    l2_evaluated: int | None = None
+    l2_high_count: int | None = None
+    l2_high_pct: float | None = None
+    is_stale: bool | None = None
+    threshold_pct: float | None = None
+
+
+class ScoringL2EnforceState(PassthroughModel):
+    available: bool
+    enabled: bool
+    l2_enabled_at: int | None
+    days_since_optin: float | None
+    ramp_progress: float
+    fully_ramped: bool
+    warmup_days_remaining: float | None
+    scoring_enabled_at: int | None
+    deployment_age_days: float | None
+    ready: bool
+    ramp_days: float
+    readiness_days: float
+
+
+class ScoringPerReasonBucket(PassthroughModel):
+    reason: str | None = None
+    n_good: int | None = None
+    n_bad: int | None = None
+    min_per_class: int | None = None
+    has_min_samples: bool | None = None
+    auc: float | None = None
+    passed: bool | None = None
+    threshold: float | None = None
+
+
+class ScoringPerReasonResponse(PassthroughModel):
+    buckets: list[ScoringPerReasonBucket] = []
+    min_per_class: int | None = None
+    known_reasons: list[str] | None = None
+    has_min_samples_overall: bool | None = None
+    n_good: int | None = None
+    n_bad: int | None = None
+
+
+class ScoringHealthResponse(PassthroughModel):
+    since_hours: int | None = None
+    total_edge_rows: int | None = None
+    scored_rows: int | None = None
+    fire_rate_pct: float | None = None
+    distinct_sids: int | None = None
+    avg_score: float | None = None
+    p50_score: float | None = None
+    p95_score: float | None = None
+    max_score: int | None = None
+    scorer_errors: int | None = None
+    fail_open_rate_pct: float | None = None
+    top_reasons: list[ScoringReasonCount] = []
+    fail_open_breakdown: list[ScoringReasonCount] = []
+    latency: ScoringLatencySnapshot | None = None
+    matrix_staleness: ScoringMatrixStaleness | None = None
+    l2_enforce: ScoringL2EnforceState | None = None
+
+
+class ScoringEvaluationResponse(PassthroughModel):
+    has_min_samples: bool | None = None
+    min_per_class: int | None = None
+    n_good: int | None = None
+    n_bad: int | None = None
+    n_neutral: int | None = None
+    matrix_version: str | None = None
+    error: str | None = None
+    n_reconstructed: int | None = None
+    n_labels_total: int | None = None
+    auc: float | None = None
+    passed: bool | None = None
+    threshold: float | None = None
+    default_min_auc: float | None = None
+
+
+class ScoringCurvePoint(PassthroughModel):
+    threshold: int | None = None
+    fpr: float | None = None
+    tpr: float | None = None
+    precision: float | None = None
+    recall: float | None = None
+
+
+class ScoringCurvesResponse(PassthroughModel):
+    has_min_samples: bool | None = None
+    min_per_class: int | None = None
+    n_good: int | None = None
+    n_bad: int | None = None
+    note: str | None = None
+    n_labels_total: int | None = None
+    auc: float | None = None
+    average_precision: float | None = None
+    roc: list[ScoringCurvePoint] | None = None
+    pr: list[ScoringCurvePoint] | None = None
+
+
+class ScoringThresholdBucket(PassthroughModel):
+    total: int | None = None
+    good: int | None = None
+    bad: int | None = None
+    unlabeled: int | None = None
+
+
+class ScoringThresholdPreviewResponse(PassthroughModel):
+    threshold: int | None = None
+    since_hours: int | None = None
+    total_scored_sessions: int | None = None
+    flagged: ScoringThresholdBucket | None = None
+    passed: ScoringThresholdBucket | None = None
+    precision: float | None = None
+    recall: float | None = None
+
+
+class ScoringAnalyticsResponse(PassthroughModel):
+    top_flagged: ScoringTopFlaggedResponse | None = None
+    score_distribution: ScoringScoreDistributionResponse | None = None
+    compliance_breakdown: ScoringComplianceBreakdownResponse | None = None
+    latency_timeseries: ScoringLatencyTimeseriesResponse | None = None
+    health: ScoringHealthResponse | None = None
+    evaluation: ScoringEvaluationResponse | None = None
+    evaluation_per_reason: ScoringPerReasonResponse | None = None
+
+
+class ScoringLabelRow(WireSafeModel):
+    id: str
+    service_id: str | None = None
+    sid: str
+    label: Literal["good", "bad", "neutral"]
+    notes: str | None = None
+    flagged_by: str | None = None
+    sample_ip: str | None = None
+    sample_ua: str | None = None
+    sample_url: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class ScoringLabelCounts(WireSafeModel):
+    good: int
+    bad: int
+    neutral: int
+
+
+class ScoringLabelsListResponse(WireSafeModel):
+    labels: list[ScoringLabelRow]
+    counts: ScoringLabelCounts
+
+
+class ScoringRetrainRejected(PassthroughModel):
+    too_few_events: int | None = None
+    too_fast: int | None = None
+    kept: int | None = None
+    routes_seen: int | None = None
+
+
+class ScoringAucAgainstLabels(PassthroughModel):
+    auc: float | None = None
+    passed: bool | None = None
+    threshold: float | None = None
+    n_good: int | None = None
+    n_bad: int | None = None
+
+
+class ScoringRetrainResponse(PassthroughModel):
+    ok: bool | None = None
+    matrix_version: str | None = None
+    since_days: int | None = None
+    sessions_trained_on: int | None = None
+    transitions: int | None = None
+    vocab_size: int | None = None
+    rejected: ScoringRetrainRejected | None = None
+    auc_against_labels: ScoringAucAgainstLabels | None = None
+    default_min_auc: float | None = None
+    local_matrix_saved: bool | None = None
+    fos_matrix_published: bool | None = None
+    matrix_kv_written: bool | None = None
+    deploy_hint: str | None = None
+
+
+class ScoringSessionEvent(PassthroughModel):
+    ts: str | None = None
+    url: str | None = None
+    status: int | None = None
+    ip: str | None = None
+    ua: str | None = None
+    edge_score: int | None = None
+    edge_cookie_compliance: str | None = None
+    edge_score_reason: str | None = None
+
+
+class ScoringSessionEventsResponse(PassthroughModel):
+    sid: str | None = None
+    since_days: int | None = None
+    event_count: int | None = None
+    events: list[ScoringSessionEvent] = []
+
+
+class ScoringEnforceThresholdResponse(PassthroughModel):
+    threshold: int | None
+    enforced: bool
+    key: str
+
+
+class ScoringEnforceThresholdPutResponse(PassthroughModel):
+    ok: bool | None = None
+    threshold: int | None = None
+    enforced: bool | None = None
+    message: str | None = None
+
+
+class ScoringL2EnforcePutResponse(PassthroughModel):
+    ok: bool | None = None
+    enabled: bool | None = None
+    l2_enabled_at: int | None = None
+    message: str | None = None
+
+
+class ScoringExcludeRegexState(PassthroughModel):
+    current: str
+    is_default: bool
+    default: str
+    effective: str
+
+
+class ScoringExcludeRegexPutResponse(PassthroughModel):
+    ok: bool | None = None
+    effective_regex: str | None = None
+    is_default: bool | None = None
+    logging_service_active_version: int | None = None
+    lint_warnings: list[str] | None = None
+    message: str | None = None
+
+
+class ScoringExcludeRegexValidateResponse(PassthroughModel):
+    ok: bool | None = None
+    lint_warnings: list[str] | None = None
+    error: str | None = None
+    reason: str | None = None
+
+
+class ScoringEnforceStatusCodeState(PassthroughModel):
+    current: int | None
+    default: int
+    effective: int
+    min: int
+    max: int
+    is_default: bool
+
+
+class ScoringEnforceStatusCodePutResponse(PassthroughModel):
+    ok: bool | None = None
+    effective_status_code: int | None = None
+    is_default: bool | None = None
+    logging_service_active_version: int | None = None
+    message: str | None = None
+
+
+class ScoringMatrixVersion(PassthroughModel):
+    version: str | None = None
+    key: str | None = None
+    size_bytes: int | None = None
+    last_modified: str | None = None
+
+
+class ScoringMatrixVersionsResponse(PassthroughModel):
+    versions: list[ScoringMatrixVersion] = []
+    current_version: str | None = None
+
+
+class ScoringMatrixRestoreResponse(PassthroughModel):
+    ok: bool | None = None
+    restored_version: str | None = None
+    restored_at: str | None = None
+    matrix_kv_written: bool | None = None
+    deploy_hint: str | None = None
+
+
+class ScoringRotateKeyResponse(PassthroughModel):
+    ok: bool | None = None
+    rotated_at: str | None = None
+    previous_key_grace: bool | None = None
+    message: str | None = None
+
+
+class ScoringAuditRow(PassthroughModel):
+    id: int | None = None
+    timestamp: str | None = None
+    action: str | None = None
+    actor: str | None = None
+    details: Any = None
+
+
+class ScoringAuditListResponse(PassthroughModel):
+    audit: list[ScoringAuditRow] = []
+    limit: int | None = None
+
+
+class ScoringThresholdState(PassthroughModel):
+    threshold: int | None
+    set_at: str | None
+    enforced: bool
+
+
+class ScoringStatusResponse(PassthroughModel):
+    enabled: bool | None = None
+    scoring_service_id: str | None = None
+    scoring_service_name: str | None = None
+    scoring_domain: str | None = None
+    matrix_version: str | None = None
+    enabled_at: str | None = None
+    scoring_active_version: int | None = None
+    scoring_activated_at: str | None = None
+    scorer_drift: bool | None = None
+    drift_detail: str | None = None
+    drift_known: bool | None = None
+    preflight_pragmas_ready: bool | None = None
+
+
+class ScoringDashboardResponse(PassthroughModel):
+    since_hours: int | None = None
+    threshold: int | None = None
+    status: ScoringStatusResponse | None = None
+    evaluation: ScoringEvaluationResponse | None = None
+    evaluation_per_reason: ScoringPerReasonResponse | None = None
+    health: ScoringHealthResponse | None = None
+    top_flagged: ScoringTopFlaggedResponse | None = None
+    score_distribution: ScoringScoreDistributionResponse | None = None
+    compliance_breakdown: ScoringComplianceBreakdownResponse | None = None
+    curves: ScoringCurvesResponse | None = None
+    threshold_preview: ScoringThresholdPreviewResponse | None = None
+    config_threshold: ScoringThresholdState | None = None
+    exclude_regex: ScoringExcludeRegexState | None = None
+    enforce_status_code: ScoringEnforceStatusCodeState | None = None
+
+
+class ScoringConfigCompositeResponse(PassthroughModel):
+    status: ScoringStatusResponse | None = None
+    threshold: ScoringThresholdState | None = None
+    exclude_regex: ScoringExcludeRegexState | None = None
+    enforce_status_code: ScoringEnforceStatusCodeState | None = None
+
+
+class ScoringLabelDeleteResponse(PassthroughModel):
+    status: str | None = None
+    id: str | None = None
+
+
+# ── Dashboard, Security, Sessions & Query Models (folded from dashboard.py) ───
+
+
+class RollupPathCoverage(BaseModel):
+    bundle: Literal["security_conn_reuse", "all_fields", "ngwaf_bots"]
+    reason: Literal["unknown", "durable_unready", "no_bundled_root", "no_paths", "below_coverage_floor", "planned"] = (
+        "unknown"
+    )
+    minimum_coverage_fraction: float = Field(default=0.5, ge=0, le=1)
+    active_hour_start: str | None = None
+    closed_hours: int | None = Field(default=None, ge=0)
+    covered_hours: int | None = Field(default=None, ge=0)
+    coverage_fraction: float | None = Field(default=None, ge=0, le=1)
+    partial_start_skipped: bool | None = None
+    day_files: int | None = Field(default=None, ge=0)
+    hour_files: int | None = Field(default=None, ge=0)
+    done_markers: int | None = Field(default=None, ge=0)
+
+
+class HourlyRollupCoverage(BaseModel):
+    reason: Literal[
+        "unknown", "no_bundled_root", "durable_unready", "writer_behind", "no_paths", "old_gaps", "planned"
+    ] = "unknown"
+    window_start: str | None = None
+    window_end: str | None = None
+    active_hour_start: str | None = None
+    closed_hours: int | None = Field(default=None, ge=0)
+    bundle_hours: int | None = Field(default=None, ge=0)
+    verified_empty_hours: int | None = Field(default=None, ge=0)
+    missing_hours: int | None = Field(default=None, ge=0)
+    covered_hours: int | None = Field(default=None, ge=0)
+    coverage_fraction: float | None = Field(default=None, ge=0, le=1)
+    heal_horizon_hours: int | None = Field(default=None, ge=0)
+
+
+class ScalarRollupCoverage(BaseModel):
+    reason: Literal["unknown", "trailing_unavailable", "boundary_changed", "planned"] = "unknown"
+    window_start: str | None = None
+    window_end: str | None = None
+    active_hour_start: str | None = None
+    closed_hours: int | None = Field(default=None, ge=0)
+    prefix_hours: int = Field(default=0, ge=0)
+    day_time_series_files: int = Field(default=0, ge=0)
+    day_overview_files: int = Field(default=0, ge=0)
+    trailing_start: str | None = None
+    trailing: HourlyRollupCoverage | None = None
+    covered_hours: int | None = Field(default=None, ge=0)
+    coverage_fraction: float | None = Field(default=None, ge=0, le=1)
+
+
+class TopNRollupCoverage(BaseModel):
+    coverage_scope: Literal["any_field_file_presence"] = "any_field_file_presence"
+    active_hour_start: str | None = None
+    closed_hours: int | None = Field(default=None, ge=0)
+    any_field_covered_hours: int | None = Field(default=None, ge=0)
+    field_complete_hours: int | None = Field(default=None, ge=0)
+    bundled_day_files: int = Field(default=0, ge=0)
+    bundled_hour_files: int = Field(default=0, ge=0)
+    per_field_day_files: int = Field(default=0, ge=0)
+    per_field_hour_files: int = Field(default=0, ge=0)
+    heal_horizon_hours: int = Field(default=48, ge=0)
+    heal_candidates: int | None = Field(default=None, ge=0)
+    heal_missing_hours: int | None = Field(default=None, ge=0)
+    compacted_hours_skipped: int | None = Field(default=None, ge=0)
+    outside_heal_horizon_hours: int | None = Field(default=None, ge=0)
+    rolled_read: Literal["not_attempted", "used", "failed"] = "not_attempted"
+
+
+class HistoryObservation(BaseModel):
+    extent_source: Literal["unknown", "status_cache", "live_query", "count_only_query", "unavailable"] = "unknown"
+    extent_rows: int | None = Field(default=None, ge=0)
+    earliest_event_at: str | None = None
+    latest_event_at: str | None = None
+    window_start: str | None = None
+    window_end: str | None = None
+    raw_extent_reaches_window_start: bool | None = None
+    filters_requested: bool | None = None
+    window_rows: int | None = Field(default=None, ge=0)
+    window_count_source: Literal["unknown", "rollup", "raw", "filtered_temp"] = "unknown"
+
+
+class ReaderCoverage(BaseModel):
+    reader: Literal[
+        "dashboard.conn_requests_histogram",
+        "dashboard.ngwaf_bots",
+        "dashboard.count",
+        "dashboard.time_series",
+        "dashboard.top_n",
+        "dashboard.ua_bots",
+    ]
+    minimum_window_hours: int | None = Field(default=None, ge=0)
+    maximum_window_days: int | None = Field(default=366, ge=0)
+    scalar_plan: ScalarRollupCoverage | None = None
+    top_n_plan: TopNRollupCoverage | None = None
+    closed_hour_heal: Literal["not_attempted", "planned", "used", "unavailable", "failed"] = "not_attempted"
+    eligible: bool | None = None
+    eligibility_reason: Literal[
+        "unknown",
+        "filtered",
+        "bounds_missing",
+        "top_asns_empty",
+        "invalid_window",
+        "window_too_short",
+        "window_too_long",
+        "eligible",
+        "unsupported_metric",
+        "unsupported_interval",
+        "unsafe_fields",
+        "unsafe_service",
+        "durable_unready",
+        "rollups_missing",
+    ] = "unknown"
+    window_start: str | None = None
+    window_end: str | None = None
+    attempts: list[RollupPathCoverage] = Field(default_factory=list, max_length=2)
+    outcome: Literal["unknown", "ineligible", "no_coverage", "read_failed", "empty_result", "served"] = "unknown"
+    live_top_up: Literal[
+        "not_attempted",
+        "outside_window",
+        "missing_column",
+        "unavailable",
+        "empty",
+        "used",
+        "failed",
+        "view_fallback",
+        "unverified",
+    ] = "not_attempted"
+    live_start: str | None = None
+    live_end: str | None = None
+
+
+class ActiveClientItem(WireSafeModel):
+    ip: str
+    rtt_min_ms: float | None = None
+    tcp_rtt_ms: float | None = None
+    distance_km: float | None = None
+    pop: str | None = None
+    client_lat: float | None = None
+    client_lon: float | None = None
+    pop_lat: float | None = None
+    pop_lon: float | None = None
+    impossible_distance: bool = False
+    risk_level: str
+    country: str | None = None
+    city: str | None = None
+    asn_name: str | None = None
+
+
+class SecurityBotRow(WireSafeModel):
+    id: str | None = None
+    name: str
+    category: str | None = None
+    request_count: int
+    verified_count: int | None = None
+    impersonator_count: int | None = None
+    unverified_count: int | None = None
+    verification_coverage: float | None = None
+    pending_count: int | None = None
+
+
+class WellknownBotRow(WireSafeModel):
+    id: str
+    name: str
+    category: str
+    request_count: int
+    verified_count: int
+    impersonator_count: int
+    unverified_count: int
+    pending_count: int
+    verification_coverage: float
+
+
+class BotEfficiencyRow(WireSafeModel):
+    bot_name: str
+    category: str
+    request_count: int
+    resp_bytes: int = 0
+    bandwidth_pct: float = 0.0
+    referrals: int = 0
+    requests_per_referral: float = 0.0
+    bytes_per_referral: float = 0.0
+
+
+class TlsFingerprintRow(WireSafeModel):
+    fingerprint: str | None = None
+    ip_count: int | None = None
+    request_count: int | None = None
+    count: int | None = None
+    ips: int | None = None
+
+
+class BucketCountRow(WireSafeModel):
+    bucket: str | None = None
+    label: str | None = None
+    count: int
+
+
+class TopIpHeaderRow(WireSafeModel):
+    ip: str | None = None
+    max_header: int | None = None
+
+
+class Ipv6AdoptionRow(WireSafeModel):
+    time: str | None = None
+    pct: float | None = None
+    version: str | None = None
+    count: int | None = None
+
+
+class ProxyDistRow(WireSafeModel):
+    type: str | None = None
+    count: int
+
+
+class VerifiedBotsTsRow(WireSafeModel):
+    time: str
+    bot_type: str | None = None
+    count: int
+
+
+class NgwafVerifiedBotRow(WireSafeModel):
+    bot_name: str | None = None
+    wellknown_bot_name: str | None = None
+    category: str | None = None
+    request_count: int
+
+
+class NgwafVerifiedBotsTsRow(WireSafeModel):
+    time: str
+    bot_name: str | None = None
+    count: int
+
+
+class TrafficQualityRow(WireSafeModel):
+    label: str
+    value: float
+
+
+class SuspiciousIspRow(WireSafeModel):
+    isp: str
+    asn: int | None = None
+    count: int
+
+
+class SecurityAggregatesResponse(BaseResponse):
+    active_proxies_count: int = 0
+    tunnel_requests_count: int = 0
+    distance_mismatches_count: int = 0
+    traffic_quality: list[TrafficQualityRow] = []
+    suspicious_isps: list[SuspiciousIspRow] = []
+    active_clients: list[ActiveClientItem] = []
+    tls_fingerprints: list[TlsFingerprintRow] = []
+    fingerprint_coverage: dict[str, float] = {}
+    req_size_dist: list[BucketCountRow] = []
+    top_ips_header: list[TopIpHeaderRow] = []
+    ipv6_adoption: list[Ipv6AdoptionRow] = []
+    proxy_dist: list[ProxyDistRow] = []
+    conn_reuse_dist: list[BucketCountRow] = []
+    verified_bots_ts: list[VerifiedBotsTsRow] = []
+    ngwaf_configured: bool = False
+    ngwaf_verified_bots: list[NgwafVerifiedBotRow] = []
+    ngwaf_verified_bots_ts: list[NgwafVerifiedBotsTsRow] = []
+    wellknown_bots: list[WellknownBotRow] = []
+    bot_efficiency: list[BotEfficiencyRow] = []
+    bots: list[SecurityBotRow] = []
+    ngwaf_bots: list[SecurityBotRow] = []
+
+
+class SecurityTopBotsResponse(BaseResponse):
+    reader_coverage: list[ReaderCoverage] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("reader_coverage", "_reader_coverage"),
+        serialization_alias="_reader_coverage",
+        exclude_if=lambda value: value is None,
+    )
+    bots: list[SecurityBotRow] = []
+    ngwaf_bots: list[SecurityBotRow] = []
+
+
+SecuritySectionName = Literal[
+    "verified_bots_ts",
+    "ngwaf_verified_bots",
+    "ngwaf_verified_bots_ts",
+    "wellknown_bots",
+    "bot_efficiency",
+    "tls_fingerprints",
+    "fingerprint_coverage",
+    "req_size_dist",
+    "top_ips_header",
+    "ipv6_adoption",
+    "proxy_dist",
+    "conn_reuse_dist",
+    "proxies",
+    "top_bots",
+]
+
+
+class SecurityAggregatesRequest(RangeKeyedRequest):
+    bucket_seconds: int = 300
+    sections: list[SecuritySectionName] | None = None
+
+
+class ThreatIntelItem(WireSafeModel):
+    tls_fingerprint: str
+    requests: int
+    top_country: str
+    matched_waf_rules_count: int
+    bot_percentage: float
+    is_anonymized_proxy: bool
+
+
+class ThreatIntelListResponse(BaseResponse):
+    data: list[ThreatIntelItem]
+
+
+ChartMetric = Literal[
+    "requests",
+    "5xx",
+    "4xx",
+    "hit_rate",
+    "p50_latency",
+    "p95_latency",
+    "p99_latency",
+    "throughput",
+    "req_size",
+    "ttfb",
+]
+
+DashboardSectionName = Literal["core", "topten", "bots"]
+
+
+class AggregatesRequest(RangeKeyedRequest):
+    chart_interval: str = "1 minute"
+    chart_metric: ChartMetric = "requests"
+    fields: list[str] | None = None
+    include_time_series: bool | None = None
+    include_conn_requests: bool | None = None
+    include_map_data: bool | None = None
+    sections: list[DashboardSectionName] | None = None
+
+
+class FieldTopEntry(BaseModel):
+    value: Any
+    count: int
+    label: str | None = None
+
+
+class FieldAggregate(BaseModel):
+    top: list[FieldTopEntry]
+    total: int
+
+
+class TimeSeriesPoint(BaseModel):
+    time: str
+    value: float
+    category: str | None = None
+    baseline: float | None = None
+
+
+class MapPoint(BaseModel):
+    country: str
+    count: int
+
+
+class AggregatesResponse(BaseResponse, LogExtentsMixin):
+    history: HistoryObservation | None = Field(
+        default=None,
+        validation_alias=AliasChoices("history", "_history"),
+        serialization_alias="_history",
+        exclude_if=lambda value: value is None,
+    )
+    reader_coverage: list[ReaderCoverage] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("reader_coverage", "_reader_coverage"),
+        serialization_alias="_reader_coverage",
+        exclude_if=lambda value: value is None,
+    )
+    data: dict[str, FieldAggregate]
+    time_series: list[TimeSeriesPoint]
+    map_data: list[MapPoint]
+    where_clause: str
+    interval: str
+    metric: str
+    total_rows: int
+    total_rows_total: int
+
+
+class BundleResponse(BaseResponse):
+    aggregates: AggregatesResponse | None = None
+    top_bots: SecurityTopBotsResponse | None = None
+
+
+class RawRequest(FilteredRequest, PaginationMixin):
+    limit: Limit500 = 50
+    sort_col: str | None = None
+    columns: list[str] = []
+
+
+class FieldValuesRequest(FilteredRequest):
+    field: str
+    search: str = ""
+    limit: Limit500 = 100
+
+
+class FieldValuesResponse(BaseResponse):
+    values: list[FieldTopEntry]
+    field: str
+
+
+from backend.models.insights import InsightsResponse  # noqa: E402, F401
+
+
+class SessionsRequest(RangeKeyedRequest, PaginationMixin):
+    limit: Limit500 = 50
+    sort_by: str = "session_start"
+    flagged_only: bool = False
+    streaming_only: bool = False
+    min_reqs_flag: int | None = None
+    min_4xx_pct_flag: float | None = None
+
+
+class Session(BaseModel):
+    ip: str
+    ua: str | None = None
+    ja4: str | None = None
+    country: str | None = None
+    asn: int | None = None
+    session_start: str
+    session_end: str
+    req_count: int
+    edge_count: int | None = None
+    shield_count: int | None = None
+    unique_urls: int | None = None
+    reqs_4xx: int | None = None
+    reqs_5xx: int | None = None
+    total_bytes: int | None = None
+    median_rtt_ms: float | None = None
+    edge_sid: str | None = None
+    is_streaming: bool | None = None
+    flagged: bool
+    session_token: str | None = None
+
+
+class SessionsResponse(BaseResponse):
+    sessions: list[Session]
+    asn_names: dict[int, str] = {}
+    total: int
+    page: int
+    limit: int
+    has_rtt: bool
+    has_ja4: bool
+    has_edge: bool
+    has_edge_sid: bool = False
+    has_cmcd: bool = False
+    min_reqs_flag: int | None = None
+    min_4xx_pct_flag: float | None = None
+
+
+class SessionDetailRequest(BaseModel):
+    session_token: str | None = None
+    ip: str | None = None
+    ja4: str | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+
+
+class SessionDetailResponse(BaseResponse):
+    columns: list[str]
+    data: list[dict[str, ScalarCell]]
+
+
+QueryDataset = Literal["logs", "client_vitals", "client_errors"]
+
+
+class QueryRequest(BaseModel):
+    sql: str
+    dataset: QueryDataset = "logs"
+    max_rows: int = Field(default=500, ge=1, le=10_000)
+    explain: bool = False
+
+
+class QueryResponse(WireSafeModel):
+    columns: list[str]
+    data: JsonRows
+    row_count: int
+    total_rows: int
+    truncated: bool
+    elapsed_ms: int
+    explain_plan: str | None = None
+
+
+class PresetQuery(WireSafeModel):
+    name: str
+    description: str
+    sql: str
+
+
+class QuerySchemaResponse(BaseResponse):
+    model_config = ConfigDict(populate_by_name=True)
+
+    source: str | None = None
+    table_name: str = "logs"
+    service_id: str | None = None
+    schema_: list[SchemaColumn] = Field(default_factory=list, alias="schema", serialization_alias="schema")
+    columns: list[SchemaColumn] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sync_schema_and_columns(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            raw_cols = data.get("schema") if "schema" in data else data.get("columns", [])
+            cols = [
+                {
+                    **c,
+                    "column": c.get("column") or c.get("name") or "",
+                    "name": c.get("name") or c.get("column") or "",
+                    "type": c.get("type", ""),
+                    "min": c.get("min"),
+                    "max": c.get("max"),
+                    "approx_unique": c.get("approx_unique"),
+                    "null_percentage": c.get("null_percentage"),
+                    "count": c.get("count"),
+                }
+                if isinstance(c, dict)
+                else c
+                for c in (raw_cols or [])
+            ]
+            return {
+                **data,
+                "schema": cols,
+                "columns": data.get("columns") if "columns" in data else cols,
+            }
+        return data

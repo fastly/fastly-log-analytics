@@ -9,16 +9,491 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys as _sys
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from backend.core.iceberg import is_stale_view_error
 from backend.core.retry import retry_call
-from backend.repositories._sql import rum as sql_rum
 from backend.utils.date_utils import parse_iso_utc
 from backend.utils.telemetry import track_query
 
 logger = logging.getLogger(__name__)
+sql_rum = _sys.modules[__name__]
+
+BEACON_HEALTH_RECENT = (
+    "SELECT COUNT(*) FROM (SELECT timestamp FROM client_vitals UNION ALL SELECT timestamp FROM client_errors) "
+    "WHERE timestamp > ?"
+)
+
+BEACON_HEALTH_LAST = (
+    "SELECT MAX(timestamp) FROM (SELECT timestamp FROM client_vitals UNION ALL SELECT timestamp FROM client_errors)"
+)
+
+DISTINCT_ID = "hash(COALESCE(NULLIF(req_id, ''), concat(cid, '_', CAST(epoch(timestamp) AS BIGINT))))"
+
+RUM_TEMP_VITALS_CREATE = (
+    "CREATE OR REPLACE TEMP TABLE t_client_vitals AS "
+    "SELECT timestamp, req_id, cid, metric_name, metric_value, metric_rating, browser, os, device, pathname "
+    "FROM client_vitals WHERE {where_sql}"
+)  # str.format template: {where_sql}, {distinct_id}
+
+RUM_TEMP_ERRORS_CREATE = (
+    "CREATE OR REPLACE TEMP TABLE t_client_errors AS "
+    "SELECT timestamp, req_id, cid, pathname, error_message, error_file, error_line, error_col "
+    "FROM client_errors WHERE {where_sql}"
+)  # str.format template: {where_sql}, {distinct_id}
+
+RUM_ROLLUP_MAX_BUCKET = """
+SELECT MAX(bucket_start) FROM (
+    SELECT MAX(bucket_start) AS bucket_start FROM rum_vitals_aggregates WHERE service_id = ?
+    UNION ALL
+    SELECT MAX(bucket_start) AS bucket_start FROM rum_error_aggregates WHERE service_id = ?
+)
+"""
+
+RUM_TAIL_VITALS_CREATE = """
+CREATE OR REPLACE TEMP TABLE t_tail_vitals AS
+SELECT timestamp, req_id, cid, metric_name, metric_value, metric_rating, browser, os, device, pathname
+FROM (
+    SELECT
+        timestamp, req_id, cid, metric_name, metric_value, metric_rating, browser, os, device, pathname,
+        ROW_NUMBER() OVER (PARTITION BY timestamp, metric_name, pathname, cid, req_id ORDER BY timestamp) AS _rn
+    FROM client_vitals
+    WHERE timestamp >= ? AND timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)
+)
+WHERE _rn = 1
+"""
+
+RUM_TAIL_ERRORS_CREATE = """
+CREATE OR REPLACE TEMP TABLE t_tail_errors AS
+SELECT timestamp, req_id, cid, pathname, error_message, error_file, error_line, error_col
+FROM (
+    SELECT
+        timestamp, req_id, cid, pathname, error_message, error_file, error_line, error_col,
+        ROW_NUMBER() OVER (PARTITION BY timestamp, error_message, error_file, error_line, pathname, cid, req_id ORDER BY timestamp) AS _rn
+    FROM client_errors
+    WHERE timestamp >= ? AND timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)
+)
+WHERE _rn = 1
+"""
+
+RUM_TAIL_HAS_ROWS = "SELECT (SELECT COUNT(*) FROM t_tail_vitals) + (SELECT COUNT(*) FROM t_tail_errors)"
+
+RUM_EFF_VITALS_AGG_CREATE = """
+CREATE OR REPLACE TEMP TABLE t_eff_vitals_agg AS
+WITH tail_hours AS (
+    SELECT DISTINCT DATE_TRUNC('hour', timestamp) AS bucket_start FROM t_tail_vitals
+    UNION
+    SELECT DISTINCT DATE_TRUNC('hour', timestamp) AS bucket_start FROM t_tail_errors
+)
+SELECT
+    service_id, bucket_start, dimension, value,
+    event_count, value_sum, good_count, ni_count, poor_count,
+    p50_value, p75_value, p99_value
+FROM rum_vitals_aggregates
+WHERE service_id = ?
+  AND bucket_start >= CAST(? AS TIMESTAMPTZ)
+  AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+  AND bucket_start NOT IN (SELECT bucket_start FROM tail_hours)
+UNION ALL
+SELECT
+    ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'total' AS dimension,
+    CASE WHEN metric_name LIKE 'event_%' THEN 'interactions' ELSE 'pageviews' END AS value,
+    COUNT(DISTINCT {distinct_id}) AS event_count,
+    0.0 AS value_sum, 0 AS good_count, 0 AS ni_count, 0 AS poor_count,
+    0.0 AS p50_value, 0.0 AS p75_value, 0.0 AS p99_value
+FROM t_tail_vitals GROUP BY bucket_start, value
+UNION ALL
+SELECT
+    ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'metric_name' AS dimension,
+    metric_name AS value, COUNT(*) AS event_count,
+    CAST(IFNULL(SUM(metric_value), 0.0) AS DOUBLE) AS value_sum,
+    COUNT(*) FILTER (WHERE metric_rating = 'good') AS good_count,
+    COUNT(*) FILTER (WHERE metric_rating = 'needs_improvement') AS ni_count,
+    COUNT(*) FILTER (WHERE metric_rating = 'poor') AS poor_count,
+    CAST(MEDIAN(metric_value) AS DOUBLE) AS p50_value,
+    CAST(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE) AS p75_value,
+    CAST(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE) AS p99_value
+FROM t_tail_vitals GROUP BY bucket_start, metric_name
+UNION ALL
+SELECT
+    ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'browser' AS dimension,
+    IFNULL(browser, 'Unknown') AS value, COUNT(DISTINCT {distinct_id}) AS event_count,
+    0.0 AS value_sum, 0 AS good_count, 0 AS ni_count, 0 AS poor_count,
+    0.0 AS p50_value, 0.0 AS p75_value, 0.0 AS p99_value
+FROM t_tail_vitals GROUP BY bucket_start, browser
+UNION ALL
+SELECT
+    ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'os' AS dimension,
+    IFNULL(os, 'Unknown') AS value, COUNT(DISTINCT {distinct_id}) AS event_count,
+    0.0 AS value_sum, 0 AS good_count, 0 AS ni_count, 0 AS poor_count,
+    0.0 AS p50_value, 0.0 AS p75_value, 0.0 AS p99_value
+FROM t_tail_vitals GROUP BY bucket_start, os
+UNION ALL
+SELECT
+    ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'device' AS dimension,
+    IFNULL(device, 'Unknown') AS value, COUNT(DISTINCT {distinct_id}) AS event_count,
+    0.0 AS value_sum, 0 AS good_count, 0 AS ni_count, 0 AS poor_count,
+    0.0 AS p50_value, 0.0 AS p75_value, 0.0 AS p99_value
+FROM t_tail_vitals GROUP BY bucket_start, device
+UNION ALL
+SELECT
+    ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'pathname' AS dimension,
+    pathname AS value, COUNT(DISTINCT {distinct_id}) AS event_count,
+    0.0 AS value_sum, 0 AS good_count, 0 AS ni_count, 0 AS poor_count,
+    0.0 AS p50_value, 0.0 AS p75_value, 0.0 AS p99_value
+FROM t_tail_vitals WHERE pathname IS NOT NULL GROUP BY bucket_start, pathname
+UNION ALL
+SELECT
+    ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'path_metric_load' AS dimension,
+    pathname AS value, COUNT(*) AS event_count,
+    CAST(IFNULL(SUM(metric_value), 0.0) AS DOUBLE) AS value_sum,
+    0 AS good_count, 0 AS ni_count, 0 AS poor_count,
+    0.0 AS p50_value, 0.0 AS p75_value, 0.0 AS p99_value
+FROM t_tail_vitals
+WHERE pathname IS NOT NULL
+  AND metric_name IN ('duration', 'pageLoadTime', 'load_time', 'pageLoad', 'LCP', 'lcp', 'ttfb', 'TTFB', 'fcp', 'FCP')
+GROUP BY bucket_start, pathname
+UNION ALL
+SELECT
+    ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'path_metric_lcp' AS dimension,
+    pathname AS value, COUNT(*) AS event_count,
+    0.0 AS value_sum, 0 AS good_count, 0 AS ni_count, 0 AS poor_count, 0.0 AS p50_value,
+    CAST(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE) AS p75_value,
+    0.0 AS p99_value
+FROM t_tail_vitals WHERE pathname IS NOT NULL AND metric_name IN ('LCP', 'lcp')
+GROUP BY bucket_start, pathname
+UNION ALL
+SELECT
+    ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'path_metric_cls' AS dimension,
+    pathname AS value, COUNT(*) AS event_count,
+    0.0 AS value_sum, 0 AS good_count, 0 AS ni_count, 0 AS poor_count, 0.0 AS p50_value,
+    CAST(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE) AS p75_value,
+    0.0 AS p99_value
+FROM t_tail_vitals WHERE pathname IS NOT NULL AND metric_name IN ('CLS', 'cls')
+GROUP BY bucket_start, pathname
+UNION ALL
+SELECT
+    ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'total' AS dimension,
+    'total_beacons' AS value, COUNT(DISTINCT distinct_id) AS event_count,
+    0.0 AS value_sum, 0 AS good_count, 0 AS ni_count, 0 AS poor_count,
+    0.0 AS p50_value, 0.0 AS p75_value, 0.0 AS p99_value
+FROM (
+    SELECT timestamp, {distinct_id} AS distinct_id FROM t_tail_vitals
+    UNION ALL
+    SELECT timestamp, {distinct_id} AS distinct_id FROM t_tail_errors
+)
+GROUP BY bucket_start
+"""
+
+RUM_EFF_ERROR_AGG_CREATE = """
+CREATE OR REPLACE TEMP TABLE t_eff_error_agg AS
+WITH tail_hours AS (
+    SELECT DISTINCT DATE_TRUNC('hour', timestamp) AS bucket_start FROM t_tail_vitals
+    UNION
+    SELECT DISTINCT DATE_TRUNC('hour', timestamp) AS bucket_start FROM t_tail_errors
+)
+SELECT
+    service_id, bucket_start, dimension, value, error_count
+FROM rum_error_aggregates
+WHERE service_id = ?
+  AND bucket_start >= CAST(? AS TIMESTAMPTZ)
+  AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+  AND bucket_start NOT IN (SELECT bucket_start FROM tail_hours)
+UNION ALL
+SELECT
+    ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'total' AS dimension,
+    'errors' AS value, COUNT(DISTINCT {distinct_id}) AS error_count
+FROM t_tail_errors GROUP BY bucket_start
+UNION ALL
+SELECT
+    ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'pathname' AS dimension,
+    pathname AS value, COUNT(DISTINCT {distinct_id}) AS error_count
+FROM t_tail_errors WHERE pathname IS NOT NULL GROUP BY bucket_start, pathname
+UNION ALL
+SELECT
+    ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'exception' AS dimension,
+    concat(IFNULL(error_message, ''), '|', IFNULL(error_file, ''), '|', CAST(IFNULL(error_line, 0) AS VARCHAR), '|', CAST(IFNULL(error_col, 0) AS VARCHAR)) AS value,
+    COUNT(*) AS error_count
+FROM t_tail_errors GROUP BY bucket_start, value
+"""
+
+RUM_ROLLUP_ANY_DATA = "SELECT (SELECT COUNT(*) FROM {vitals_agg_table} WHERE service_id = ? AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)) + (SELECT COUNT(*) FROM {error_agg_table} WHERE service_id = ? AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ))"
+
+RUM_ROLLUP_COUNTS_VITALS = """
+SELECT
+    COALESCE(SUM(event_count) FILTER (WHERE dimension = 'total' AND value = 'pageviews'), 0) AS pageviews,
+    COALESCE(SUM(event_count) FILTER (WHERE dimension = 'total' AND value = 'interactions'), 0) AS interactions
+FROM {vitals_agg_table}
+WHERE service_id = ? AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+"""
+
+RUM_ROLLUP_COUNTS_ERRORS = """
+SELECT
+    COALESCE(SUM(error_count) FILTER (WHERE dimension = 'total' AND value = 'errors'), 0) AS errors_count
+FROM {error_agg_table}
+WHERE service_id = ? AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+"""
+
+RUM_ROLLUP_COUNTS_TOTAL_BEACONS = """
+SELECT
+    COALESCE(SUM(event_count) FILTER (WHERE dimension = 'total' AND value = 'total_beacons'), 0) AS total_beacons
+FROM {vitals_agg_table}
+WHERE service_id = ? AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+"""
+
+RUM_ROLLUP_VITALS_SUMMARY = """
+SELECT
+    value AS metric_name,
+    CASE WHEN SUM(event_count) > 0 THEN SUM(p75_value * event_count) / SUM(event_count) ELSE 0.0 END AS p75,
+    SUM(event_count) AS total_count,
+    SUM(good_count) AS good_count,
+    SUM(ni_count) AS ni_count,
+    SUM(poor_count) AS poor_count
+FROM {vitals_agg_table}
+WHERE service_id = ? AND dimension = 'metric_name' AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+GROUP BY value
+"""
+
+RUM_ROLLUP_BROWSERS = """
+SELECT value, SUM(event_count) AS count
+FROM {vitals_agg_table}
+WHERE service_id = ? AND dimension = 'browser' AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+GROUP BY value
+"""
+
+RUM_ROLLUP_OS = """
+SELECT value, SUM(event_count) AS count
+FROM {vitals_agg_table}
+WHERE service_id = ? AND dimension = 'os' AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+GROUP BY value
+"""
+
+RUM_ROLLUP_DEVICES = """
+SELECT value, SUM(event_count) AS count
+FROM {vitals_agg_table}
+WHERE service_id = ? AND dimension = 'device' AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+GROUP BY value
+"""
+
+RUM_ROLLUP_WORST_PAGES = """
+WITH page_metrics AS (
+    SELECT
+        value AS path,
+        COALESCE(SUM(event_count) FILTER (WHERE dimension = 'pathname'), 0) AS views,
+        CASE WHEN SUM(event_count) FILTER (WHERE dimension = 'path_metric_load') > 0 THEN SUM(value_sum) FILTER (WHERE dimension = 'path_metric_load') / SUM(event_count) FILTER (WHERE dimension = 'path_metric_load') ELSE 0.0 END AS avg_load_time,
+        CASE WHEN SUM(event_count) FILTER (WHERE dimension = 'path_metric_lcp') > 0 THEN SUM(p75_value * event_count) FILTER (WHERE dimension = 'path_metric_lcp') / SUM(event_count) FILTER (WHERE dimension = 'path_metric_lcp') ELSE 0.0 END AS lcp,
+        CASE WHEN SUM(event_count) FILTER (WHERE dimension = 'path_metric_cls') > 0 THEN SUM(p75_value * event_count) FILTER (WHERE dimension = 'path_metric_cls') / SUM(event_count) FILTER (WHERE dimension = 'path_metric_cls') ELSE 0.0 END AS cls
+    FROM {vitals_agg_table}
+    WHERE service_id = ?
+      AND dimension IN ('pathname', 'path_metric_load', 'path_metric_lcp', 'path_metric_cls')
+      AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+    GROUP BY value
+),
+page_errors AS (
+    SELECT value AS path, SUM(error_count) AS error_count
+    FROM {error_agg_table}
+    WHERE service_id = ? AND dimension = 'pathname' AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+    GROUP BY value
+)
+SELECT
+    m.path, m.views, m.avg_load_time, m.lcp, m.cls,
+    COALESCE(e.error_count, 0) * 100.0 / NULLIF(m.views, 0) AS error_rate
+FROM page_metrics m
+LEFT JOIN page_errors e ON m.path = e.path
+ORDER BY error_rate DESC, m.avg_load_time DESC
+LIMIT 5
+"""
+
+RUM_ROLLUP_TOP_EXCEPTIONS = """
+SELECT value AS serialized, SUM(error_count) AS count
+FROM {error_agg_table}
+WHERE service_id = ? AND dimension = 'exception' AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+GROUP BY value
+ORDER BY count DESC
+LIMIT 3
+"""
+
+RUM_ROLLUP_TRENDS = """
+WITH hourly_vitals AS (
+    SELECT
+        bucket_start AS hour,
+        CASE WHEN SUM(event_count) FILTER (WHERE dimension = 'metric_name' AND value = 'LCP') > 0 THEN SUM(p75_value * event_count) FILTER (WHERE dimension = 'metric_name' AND value = 'LCP') / SUM(event_count) FILTER (WHERE dimension = 'metric_name' AND value = 'LCP') ELSE 0.0 END AS lcp,
+        CASE WHEN SUM(event_count) FILTER (WHERE dimension = 'metric_name' AND value = 'CLS') > 0 THEN SUM(p75_value * event_count) FILTER (WHERE dimension = 'metric_name' AND value = 'CLS') / SUM(event_count) FILTER (WHERE dimension = 'metric_name' AND value = 'CLS') ELSE 0.0 END AS cls,
+        SUM(event_count) FILTER (WHERE dimension = 'pathname') AS views,
+        COALESCE(SUM(event_count) FILTER (WHERE dimension = 'total' AND value = 'pageviews'), 0) AS pageviews,
+        COALESCE(SUM(event_count) FILTER (WHERE dimension = 'total' AND value = 'interactions'), 0) AS interactions
+    FROM {vitals_agg_table}
+    WHERE service_id = ? AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+    GROUP BY hour
+),
+hourly_errors AS (
+    SELECT bucket_start AS hour, SUM(error_count) FILTER (WHERE dimension = 'total' AND value = 'errors') AS errors
+    FROM {error_agg_table}
+    WHERE service_id = ? AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+    GROUP BY hour
+)
+SELECT
+    COALESCE(v.hour, e.hour) AS hour_ts, v.lcp, v.cls,
+    COALESCE(v.pageviews, 0) AS pageviews,
+    COALESCE(v.interactions, 0) AS interactions,
+    COALESCE(e.errors, 0) AS errors,
+    COALESCE(e.errors, 0) * 100.0 / NULLIF(COALESCE(v.views, 0) + COALESCE(e.errors, 0), 0) AS error_rate
+FROM hourly_vitals v
+FULL OUTER JOIN hourly_errors e ON v.hour = e.hour
+ORDER BY hour_ts DESC
+"""
+
+RUM_CONSOLIDATED_COUNTS = """
+SELECT
+    COUNT(DISTINCT CASE WHEN src = 'vitals' AND metric_name NOT LIKE 'event_%' THEN distinct_id END) AS pageviews,
+    COUNT(DISTINCT CASE WHEN src = 'vitals' AND metric_name LIKE 'event_%' THEN distinct_id END) AS interactions,
+    COUNT(DISTINCT CASE WHEN src = 'errors' THEN distinct_id END) AS errors_count,
+    COUNT(DISTINCT distinct_id) AS total_beacons
+FROM (
+    SELECT 'vitals' AS src, metric_name, {distinct_id} AS distinct_id FROM t_client_vitals
+    UNION ALL
+    SELECT 'errors' AS src, CAST(NULL AS VARCHAR) AS metric_name, {distinct_id} AS distinct_id FROM t_client_errors
+)
+"""  # str.format template: {where_sql}, {distinct_id}
+
+RUM_VITALS_SUMMARY = """
+SELECT
+    metric_name,
+    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) AS p75,
+    COUNT(*) AS total_count,
+    COUNT(*) FILTER (WHERE metric_rating = 'good') AS good_count,
+    COUNT(*) FILTER (WHERE metric_rating = 'needs_improvement') AS ni_count,
+    COUNT(*) FILTER (WHERE metric_rating = 'poor') AS poor_count
+FROM t_client_vitals
+GROUP BY metric_name
+"""
+
+RUM_ENVIRONMENTS_CONSOLIDATED = """
+SELECT
+    COALESCE(browser, 'Unknown') AS browser,
+    COALESCE(os, 'Unknown') AS os,
+    COALESCE(device, 'Unknown') AS device,
+    COUNT(DISTINCT {distinct_id}) AS count,
+    grouping(browser) AS g_browser,
+    grouping(os) AS g_os,
+    grouping(device) AS g_device
+FROM t_client_vitals
+GROUP BY GROUPING SETS ((browser), (os), (device))
+"""  # str.format template: {where_sql}, {distinct_id}
+
+RUM_WORST_PAGES = """
+WITH page_metrics AS (
+    SELECT
+        pathname AS path,
+        COUNT(DISTINCT {distinct_id}) AS views,
+        COALESCE(AVG(metric_value) FILTER (WHERE metric_name IN ('duration', 'pageLoadTime', 'load_time', 'pageLoad', 'LCP', 'lcp', 'ttfb', 'TTFB', 'fcp', 'FCP')), 0.0) AS avg_load_time,
+        PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) FILTER (WHERE metric_name IN ('LCP', 'lcp')) AS lcp,
+        PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) FILTER (WHERE metric_name IN ('CLS', 'cls')) AS cls
+    FROM t_client_vitals
+    WHERE pathname IS NOT NULL
+    GROUP BY pathname
+),
+page_errors AS (
+    SELECT pathname AS path, COUNT(DISTINCT {distinct_id}) AS error_count
+    FROM t_client_errors
+    WHERE pathname IS NOT NULL
+    GROUP BY pathname
+)
+SELECT
+    m.path, m.views, m.avg_load_time, m.lcp, m.cls,
+    COALESCE(e.error_count, 0) * 100.0 / NULLIF(m.views, 0) AS error_rate
+FROM page_metrics m
+LEFT JOIN page_errors e ON m.path = e.path
+ORDER BY error_rate DESC, m.avg_load_time DESC
+LIMIT 5
+"""  # str.format template: {where_sql}, {distinct_id}
+
+RUM_TOP_EXCEPTIONS = """
+SELECT error_message, error_file, error_line, error_col, COUNT(*) AS count
+FROM t_client_errors
+GROUP BY error_message, error_file, error_line, error_col
+ORDER BY count DESC
+LIMIT 3
+"""
+
+RUM_HOURLY_TRENDS = """
+WITH hourly_vitals AS (
+    SELECT
+        DATE_TRUNC('hour', timestamp) AS hour,
+        PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) FILTER (WHERE metric_name IN ('LCP', 'lcp')) AS lcp,
+        PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) FILTER (WHERE metric_name IN ('CLS', 'cls')) AS cls,
+        COUNT(DISTINCT {distinct_id}) AS views,
+        COUNT(DISTINCT {distinct_id}) FILTER (WHERE metric_name NOT LIKE 'event_%') AS pageviews,
+        COUNT(DISTINCT {distinct_id}) FILTER (WHERE metric_name LIKE 'event_%') AS interactions
+    FROM t_client_vitals
+    GROUP BY hour
+),
+hourly_errors AS (
+    SELECT DATE_TRUNC('hour', timestamp) AS hour, COUNT(DISTINCT {distinct_id}) AS errors
+    FROM t_client_errors
+    GROUP BY hour
+)
+SELECT
+    COALESCE(v.hour, e.hour) AS hour_ts, v.lcp, v.cls,
+    COALESCE(v.pageviews, 0) AS pageviews,
+    COALESCE(v.interactions, 0) AS interactions,
+    COALESCE(e.errors, 0) AS errors,
+    COALESCE(e.errors, 0) * 100.0 / NULLIF(COALESCE(v.views, 0) + COALESCE(e.errors, 0), 0) AS error_rate
+FROM hourly_vitals v
+FULL OUTER JOIN hourly_errors e ON v.hour = e.hour
+ORDER BY hour_ts DESC
+"""  # str.format template: {where_sql}, {distinct_id}
+
+RUM_ANY_DATA = """
+SELECT CASE WHEN EXISTS (SELECT 1 FROM client_vitals) OR EXISTS (SELECT 1 FROM client_errors) THEN 1 ELSE 0 END
+"""
+
+RUM_LIVE_EVENTS = """
+WITH vitals_recent AS (
+    SELECT timestamp, pathname, metric_name, metric_value, metric_rating, browser, os, device, cid, req_id, city, region, country, pop, tls, ttfb
+    FROM client_vitals
+    WHERE {where_sql}
+    ORDER BY timestamp DESC
+    LIMIT 250
+),
+vitals_base AS (
+    SELECT 'pageview' AS type, timestamp, pathname, metric_name, metric_value, metric_rating, browser, os, device, cid, req_id, CAST(NULL AS VARCHAR) AS error_message, city, region, country, pop, tls, ttfb
+    FROM vitals_recent
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY timestamp, metric_name, pathname, cid, req_id ORDER BY timestamp) = 1
+),
+errors_recent AS (
+    SELECT timestamp, pathname, browser, os, device, cid, req_id, error_message, error_file, error_line, city, region, country, pop, tls, ttfb
+    FROM client_errors
+    WHERE {where_sql}
+    ORDER BY timestamp DESC
+    LIMIT 250
+),
+errors_base AS (
+    SELECT 'error' AS type, timestamp, pathname, CAST(NULL AS VARCHAR) AS metric_name, CAST(NULL AS DOUBLE) AS metric_value, CAST(NULL AS VARCHAR) AS metric_rating, browser, os, device, cid, req_id, error_message, city, region, country, pop, tls, ttfb
+    FROM errors_recent
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY timestamp, error_message, error_file, error_line, pathname, cid, req_id ORDER BY timestamp) = 1
+),
+combined AS (
+    SELECT * FROM vitals_base
+    UNION ALL
+    SELECT * FROM errors_base
+)
+SELECT type, timestamp, pathname, metric_name, metric_value, metric_rating, browser, os, device, cid, req_id, error_message, city, region, country, pop, tls, ttfb
+FROM combined
+ORDER BY timestamp DESC
+LIMIT 50
+"""  # str.format template: {where_sql}
+
+HEADER_STATS = (
+    f"SELECT COUNT(DISTINCT {DISTINCT_ID}), MAX(timestamp) FROM "
+    "(SELECT req_id, cid, timestamp FROM client_vitals UNION ALL SELECT req_id, cid, timestamp FROM client_errors)"
+)
+
+AGGREGATE_BUCKET_COUNT = "SELECT COUNT(DISTINCT bucket_start) FROM rum_vitals_aggregates WHERE service_id = ?"
+
+CLIENT_VITALS_SCHEMA_PROBE = "SELECT * FROM client_vitals LIMIT 0"
 
 _READ_PARQUET_LIST_RE = re.compile(r"read_parquet\(\s*(?:\[|(?:main\.)?list_value\()(.*?)(?:\]|\))", re.DOTALL)
 _QUOTED_PATH_RE = re.compile(r"'([^']+)'")
@@ -41,7 +516,6 @@ def _prune_missing_files_from_rum_views(con) -> None:
             paths = _QUOTED_PATH_RE.findall(inner)
             surviving = [p for p in paths if os.path.exists(p)]
             if not surviving and paths:
-                # Re-glob sibling batch_*.parquet files in the same buffer dir if any remain
                 buf_dir = os.path.dirname(paths[0])
                 if os.path.isdir(buf_dir):
                     surviving = sorted(
@@ -79,30 +553,18 @@ def _run_with_rum_view_retry(con, source: dict | None, fn):
             iceberg_view.update_iceberg_view(con, source, force=True)
         _prune_missing_files_from_rum_views(con)
 
-    return retry_call(
-        fn,
-        retry_on=is_stale_view_error,
-        attempts=3,
-        before_retry=_recover,
-    )
+    return retry_call(fn, retry_on=is_stale_view_error, attempts=3, before_retry=_recover)
 
 
 def get_beacon_health(con, *, source: dict | None = None) -> tuple[int, datetime | None]:
-    """``(beacons in the last hour, newest beacon timestamp)`` across vitals + errors.
-
-    Takes a raw connection (not a runner) because the caller wraps it in
-    ``execute_with_stale_view_retry``, which hands the retry closure the connection.
-    """
+    """``(beacons in the last hour, newest beacon timestamp)`` across vitals + errors."""
 
     def _run() -> tuple[int, datetime | None]:
         one_hour_ago = datetime.now(UTC) - timedelta(hours=1)
-
         with track_query(con, sql_rum.BEACON_HEALTH_RECENT, [one_hour_ago], "rum_health_recent") as cur_recent:
             recent_count = cur_recent.fetchone()[0] or 0
-
         with track_query(con, sql_rum.BEACON_HEALTH_LAST, [], "rum_health_last") as cur_last:
             last_dt = cur_last.fetchone()[0]
-
         return recent_count, last_dt
 
     return _run_with_rum_view_retry(con, source, _run)
@@ -120,12 +582,7 @@ def fetch_rum_analytics(
     raw_window_max_s: int,
     source: dict | None = None,
 ) -> dict[str, Any]:
-    """Raw aggregate rows for ``/rum/analytics`` (rollup tables when eligible, else raw scan).
-
-    Takes a raw connection because the caller wraps it in ``execute_with_stale_view_retry``.
-    Short windows and filtered requests always scan the raw beacon tables; otherwise the
-    cron-built ``rum_*_aggregates`` rollups serve the read. Never recomputes in-request.
-    """
+    """Raw aggregate rows for ``/rum/analytics`` (rollup tables when eligible, else raw scan)."""
     return _run_with_rum_view_retry(
         con,
         source,
@@ -156,10 +613,6 @@ def _fetch_rum_analytics_once(
     from backend.core.rollups.rum import table_exists
 
     use_rollup = False
-    # Check eligibility:
-    # 1. No filters allowed for rollups (same as standard rollups)
-    # 2. RUM aggregates tables must exist and have data
-
     prefer_raw_window = False
     try:
         st = parse_iso_utc(start_time)
@@ -170,13 +623,6 @@ def _fetch_rum_analytics_once(
         logger.debug("fetch_rum_analytics: step failed (ignored)", exc_info=True)
 
     if not parsed_filters and not prefer_raw_window:
-        # RUM reads are pure-read. Serve from cron-built rollups when they
-        # exist (even if the newest hour is slightly stale — the rum_commit
-        # cron refreshes it, exactly like request-log rollups); otherwise
-        # scan the raw tables directly. Never recompute aggregates in-request:
-        # opening a second read-write DuckLake connection competes for the
-        # process-wide attach lock and, under verify-phase concurrency, wedges
-        # the whole /api surface (120s pool-timeout on client_vitals).
         if table_exists(con, "rum_vitals_aggregates") and table_exists(con, "rum_error_aggregates"):
             use_rollup = True
 
@@ -185,10 +631,7 @@ def _fetch_rum_analytics_once(
         error_agg_table = "rum_error_aggregates"
         try:
             with track_query(
-                con,
-                sql_rum.RUM_ROLLUP_MAX_BUCKET,
-                [service_id, service_id],
-                "rum_rollup_max_bucket",
+                con, sql_rum.RUM_ROLLUP_MAX_BUCKET, [service_id, service_id], "rum_rollup_max_bucket"
             ) as cur_max:
                 row_max = cur_max.fetchone()
                 rollup_max_bucket = row_max[0] if row_max else None
@@ -210,12 +653,7 @@ def _fetch_rum_analytics_once(
                     "rum_tail_errors_create",
                 ):
                     pass
-                with track_query(
-                    con,
-                    sql_rum.RUM_TAIL_HAS_ROWS,
-                    [],
-                    "rum_tail_has_rows",
-                ) as cur_tail:
+                with track_query(con, sql_rum.RUM_TAIL_HAS_ROWS, [], "rum_tail_has_rows") as cur_tail:
                     tail_rows = (cur_tail.fetchone() or (0,))[0] or 0
 
                 if tail_rows > 0:
@@ -238,8 +676,6 @@ def _fetch_rum_analytics_once(
 
             if use_rollup:
                 logger.info("[rum_rollups] %s: Querying from precomputed RUM aggregates...", service_id)
-
-                # Check if we have any data
                 with track_query(
                     con,
                     sql_rum.RUM_ROLLUP_ANY_DATA.format(
@@ -251,18 +687,12 @@ def _fetch_rum_analytics_once(
                     if cur_any.fetchone()[0] == 0:
                         if not table_exists(con, "client_vitals") or not table_exists(con, "client_errors"):
                             return {"no_data": True}
-                        with track_query(
-                            con,
-                            sql_rum.RUM_ANY_DATA,
-                            [],
-                            "rum_any_data",
-                        ) as cur_raw_any:
+                        with track_query(con, sql_rum.RUM_ANY_DATA, [], "rum_any_data") as cur_raw_any:
                             if not cur_raw_any.fetchone()[0]:
                                 return {"no_data": True}
                         use_rollup = False
 
             if use_rollup:
-                # 1. Pageviews, interactions, errors, total beacons
                 with track_query(
                     con,
                     sql_rum.RUM_ROLLUP_COUNTS_VITALS.format(vitals_agg_table=vitals_agg_table),
@@ -289,7 +719,6 @@ def _fetch_rum_analytics_once(
                 ) as cur_t:
                     total_beacons = cur_t.fetchone()[0] or 0
 
-                # 2. Vitals summary
                 with track_query(
                     con,
                     sql_rum.RUM_ROLLUP_VITALS_SUMMARY.format(vitals_agg_table=vitals_agg_table),
@@ -298,7 +727,6 @@ def _fetch_rum_analytics_once(
                 ) as cur_vitals:
                     vitals_rows = cur_vitals.fetchall()
 
-                # 3. Environments
                 browsers = {}
                 os_dict = {}
                 devices = {}
@@ -330,7 +758,6 @@ def _fetch_rum_analytics_once(
                     for val, count in cur_d.fetchall():
                         devices[val] = count
 
-                # 4. Worst Pages
                 with track_query(
                     con,
                     sql_rum.RUM_ROLLUP_WORST_PAGES.format(
@@ -341,7 +768,6 @@ def _fetch_rum_analytics_once(
                 ) as cur_pages:
                     worst_pages_rows = cur_pages.fetchall()
 
-                # 5. Top Exceptions
                 errors_rows = []
                 with track_query(
                     con,
@@ -358,7 +784,6 @@ def _fetch_rum_analytics_once(
                         else:
                             errors_rows.append((serialized, "Unknown", 0, 0, count))
 
-                # 6. Trends Rows
                 with track_query(
                     con,
                     sql_rum.RUM_ROLLUP_TRENDS.format(
@@ -391,24 +816,15 @@ def _fetch_rum_analytics_once(
             con.execute("DROP TABLE IF EXISTS t_tail_errors")
 
     try:
-        # Create transient temporary tables pre-filtered for our bounds/filters to cut repeated parquet scans
         with track_query(
-            con,
-            sql_rum.RUM_TEMP_VITALS_CREATE.format(where_sql=where_sql),
-            params,
-            "rum_temp_vitals_create",
+            con, sql_rum.RUM_TEMP_VITALS_CREATE.format(where_sql=where_sql), params, "rum_temp_vitals_create"
+        ):
+            pass
+        with track_query(
+            con, sql_rum.RUM_TEMP_ERRORS_CREATE.format(where_sql=where_sql), params, "rum_temp_errors_create"
         ):
             pass
 
-        with track_query(
-            con,
-            sql_rum.RUM_TEMP_ERRORS_CREATE.format(where_sql=where_sql),
-            params,
-            "rum_temp_errors_create",
-        ):
-            pass
-
-        # B. Total match counts within bounds (Consolidated)
         with track_query(
             con,
             sql_rum.RUM_CONSOLIDATED_COUNTS.format(distinct_id=sql_rum.DISTINCT_ID),
@@ -419,33 +835,16 @@ def _fetch_rum_analytics_once(
             pageviews = pageviews or 0
             interactions = interactions or 0
             errors_count = errors_count or 0
-            # NOT pageviews + interactions + errors_count: those are
-            # separate distinct-id partitions and a single physical
-            # beacon event can appear in more than one (e.g. a vitals
-            # metric and an interaction event sharing one distinct_id).
             total_beacons = total_beacons or 0
 
-        # A. Check if any data exists at all (Deferred check ONLY if no matches in selected bounds)
         if total_beacons == 0:
-            with track_query(
-                con,
-                sql_rum.RUM_ANY_DATA,
-                [],
-                "rum_any_data",
-            ) as cur_any:
+            with track_query(con, sql_rum.RUM_ANY_DATA, [], "rum_any_data") as cur_any:
                 if not cur_any.fetchone()[0]:
                     return {"no_data": True}
 
-        # C. Vitals metrics, percentiles & distribution
-        with track_query(
-            con,
-            sql_rum.RUM_VITALS_SUMMARY,
-            [],
-            "rum_vitals_summary",
-        ) as cur_vitals:
+        with track_query(con, sql_rum.RUM_VITALS_SUMMARY, [], "rum_vitals_summary") as cur_vitals:
             vitals_rows = cur_vitals.fetchall()
 
-        # D. Environments (Consolidated using GROUPING SETS)
         browsers = {}
         os_dict = {}
         devices = {}
@@ -464,30 +863,16 @@ def _fetch_rum_analytics_once(
                 elif g_device == 0 and r_device:
                     devices[r_device] = count
 
-        # E. Worst pages
         with track_query(
-            con,
-            sql_rum.RUM_WORST_PAGES.format(distinct_id=sql_rum.DISTINCT_ID),
-            [],
-            "rum_worst_pages",
+            con, sql_rum.RUM_WORST_PAGES.format(distinct_id=sql_rum.DISTINCT_ID), [], "rum_worst_pages"
         ) as cur_pages:
             worst_pages_rows = cur_pages.fetchall()
 
-        # F. Top Exceptions
-        with track_query(
-            con,
-            sql_rum.RUM_TOP_EXCEPTIONS,
-            [],
-            "rum_top_exceptions",
-        ) as cur_errors:
+        with track_query(con, sql_rum.RUM_TOP_EXCEPTIONS, [], "rum_top_exceptions") as cur_errors:
             errors_rows = cur_errors.fetchall()
 
-        # G. Trend buckets
         with track_query(
-            con,
-            sql_rum.RUM_HOURLY_TRENDS.format(distinct_id=sql_rum.DISTINCT_ID),
-            [],
-            "rum_hourly_trends",
+            con, sql_rum.RUM_HOURLY_TRENDS.format(distinct_id=sql_rum.DISTINCT_ID), [], "rum_hourly_trends"
         ) as cur_trends:
             trends_rows = cur_trends.fetchall()
 
@@ -547,3 +932,6 @@ def get_client_vitals_columns(con) -> list[str] | None:
     except Exception:
         logger.debug("client_vitals schema probe failed", exc_info=True)
     return None
+
+
+_sys.modules.setdefault("backend.repositories._sql.rum", _sys.modules[__name__])

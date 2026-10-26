@@ -9,7 +9,7 @@ import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useBootstra
 import { useTimeRange } from '@/hooks/useDashboardCards'
 import { client, extractApiError } from '@/lib/api'
 import type { components } from '@/types/api.generated'
-import { ELAPSED_FRESHNESS, formatElapsed } from '@/lib/format'
+import { ELAPSED_FRESHNESS, formatElapsed } from "@/lib/utils"
 import { NoServiceSelected } from '@/components/ReportLayout'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'

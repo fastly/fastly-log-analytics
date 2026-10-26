@@ -1,5 +1,3 @@
-"""DuckDB connection management, FOS integration, sync-status, schema cache, ASN, and usage-log helpers."""
-
 from __future__ import annotations
 
 import json
@@ -22,21 +20,16 @@ from botocore import UNSIGNED
 from botocore.config import Config
 
 from backend import config as svcconfig
-from backend.core.retry import retry_call
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
-from backend.utils.date_utils import parse_iso_utc
-from backend.utils.date_utils import safe_iso as _safe_iso
 from backend.utils.telemetry import HyperLogLog as HyperLogLog
-from backend.utils.telemetry import log_once_per
+from backend.utils.telemetry import log_once_per, parse_iso_utc, retry_call
+from backend.utils.telemetry import safe_iso as _safe_iso
 
 logger = logging.getLogger(__name__)
-
-# Self-referencing module aliases for legacy callers/tests.
 _db_main = sys.modules[__name__]
 _duckdb_status = sys.modules[__name__]
 sys.modules["backend.core._duckdb_status"] = sys.modules[__name__]
-
 DUCKDB_MEMORY_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "4GB")
 DUCKDB_POOL_CONN_MEMORY_LIMIT = os.getenv("DUCKDB_POOL_CONN_MEMORY_LIMIT", "")
 DUCKDB_THREADS = os.getenv("DUCKDB_THREADS", "")
@@ -44,11 +37,9 @@ INGEST_CHUNK_SIZE = int(os.getenv("INGEST_CHUNK_SIZE", "500"))
 DUCKDB_PATH = "logs.duckdb"
 _STATUS_BUSY_WINDOW_MINS = 5
 _TASK_TO_CRON_KEY = {"sync": "cron_sync", "local_compact": "cron_compact"}
-
 _cached_n_threads: int | None = None
 _cached_mem_limit_gb: int | None = None
 _dma_map_cache: dict[str, str] | None = None
-
 _STALE_VIEW_ERR_MARKERS = (
     "No files found",
     "Catalog Error: Table with name",
@@ -74,11 +65,9 @@ def _exec_quietly(con: duckdb.DuckDBPyConnection, sql: str, msg: str = "con.exec
 
 
 def _get_dma_map() -> dict[str, str]:
-    """Load dma_geojson.json and return a mapping of DMA code (string) to DMA name."""
     global _dma_map_cache
     if _dma_map_cache is not None:
         return _dma_map_cache
-
     _dma_map_cache = {}
     for fname in ("data/system/dma_geojson.json", "data/system/dma.json"):
         if not os.path.exists(fname):
@@ -129,7 +118,6 @@ DUCKDB_PATH = _DEFAULT_SOURCE.get("duckdb_path") or DUCKDB_PATH
 
 
 def get_source_for_service(service_id: str) -> dict | None:
-    """Load the source dict for a specific service ID. Returns None if not found."""
     cfg = svcconfig.load_config(service_id)
     if cfg is not None:
         return _source_from_config(cfg)
@@ -140,7 +128,6 @@ def get_source_for_service(service_id: str) -> dict | None:
 
 
 def reload_default_source():
-    """Reload config from disk and refresh the in-memory default source."""
     global DUCKDB_PATH
     _DEFAULT_SOURCE.update(_build_default_source())
     DUCKDB_PATH = _DEFAULT_SOURCE.get("duckdb_path", "logs.duckdb")
@@ -187,7 +174,6 @@ def _proxy_target_for(source: dict) -> str:
 
 
 def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
-    """Configure FOS credentials routed through the local telemetry proxy."""
     _load_httpfs(con)
     from backend.utils import telemetry_proxy
     from backend.utils.telemetry import get_process_context
@@ -279,7 +265,6 @@ class _ProxyClientShim:
 
 
 def _get_fos_client(source: dict):
-    """Create or return a cached boto3 client for FOS routed through the local telemetry proxy."""
     source_key = (
         source.get("name", "default"),
         source.get("access_key_id", ""),
@@ -289,7 +274,6 @@ def _get_fos_client(source: dict):
     with _fos_client_lock:
         if source_key in _fos_client_cache:
             return _fos_client_cache[source_key]
-
         from backend.utils import telemetry_proxy
 
         telemetry_proxy.start_proxy_server()
@@ -316,7 +300,6 @@ def clear_fos_client(source_or_name) -> None:
 
 
 def fos_reachable(source: dict) -> dict:
-    """Best-effort FOS reachability probe for the admin health surface (SRE-13)."""
     try:
         client = _get_fos_client(source)
         client.list_objects_v2(Bucket=source.get("bucket"), Prefix=(source.get("prefix") or "").strip("/"), MaxKeys=1)
@@ -335,8 +318,6 @@ def _is_transient_query_error(exc: BaseException) -> bool:
 
 
 def _execute_query_with_retry(con: duckdb.DuckDBPyConnection, query: str, max_retries: int = 5):
-    """Execute a DuckDB query with retry on transient network failures."""
-
     def _attempt():
         try:
             return con.execute(query)
@@ -363,24 +344,20 @@ def _cache_dir(source: dict) -> str:
     return os.path.join("cache", (source.get("bucket") or source.get("fos_bucket") or "default").strip())
 
 
-def get_raw_tree_node(source, prefix_filter="", root="raw"):
-    """Return a single level of files in FOS under a root (up to 10,000 objects)."""
+def get_raw_tree_node(source: dict | None, prefix_filter: str = "", root: str = "raw") -> dict[str, Any]:
     src = source or _DEFAULT_SOURCE
     if not is_configured(src):
         return {"children": []}
-
     if prefix_filter and not prefix_filter.endswith("/"):
         prefix_filter += "/"
     prefix = src["prefix"].strip().rstrip("/")
     target_prefix = f"{prefix + '/' if prefix else ''}{root}/{prefix_filter}"
-
     children = []
     try:
         paginator = _get_fos_client(src).get_paginator("list_objects_v2")
         dirs_map: dict[str, dict[str, Any]] = {}
         files = []
         object_count = 0
-
         for page in paginator.paginate(Bucket=src["bucket"], Prefix=target_prefix):
             for obj in page.get("Contents", ()):
                 object_count += 1
@@ -407,7 +384,6 @@ def get_raw_tree_node(source, prefix_filter="", root="raw"):
                     dmeta["count"] += 1
             if object_count >= 10000:
                 break
-
         dirs = [
             {"name": dname, "type": "directory", "size": meta["size"], "prefix": meta["prefix"]}
             for dname, meta in sorted(dirs_map.items())
@@ -416,7 +392,6 @@ def get_raw_tree_node(source, prefix_filter="", root="raw"):
         children = dirs + files
     except Exception:
         logger.error("Error in get_raw_tree_node", exc_info=True)
-
     return {"children": children}
 
 
@@ -455,7 +430,6 @@ def _lock_context(source: dict, db_path: str, read_only: bool) -> dict[str, obje
 _LOCK_RETRY_INITIAL_DELAY = 0.05
 _LOCK_RETRY_MAX_DELAY = 0.5
 _LOCK_RETRY_MULTIPLIER = 2.0
-
 _recycle_barrier_cond = threading.Condition()
 _recycle_barrier_active: set[str] = set()
 _live_conns: dict[str, weakref.WeakSet] = {}
@@ -551,14 +525,12 @@ def _duckdb_connect(database: str, **kwargs: Any) -> duckdb.DuckDBPyConnection:
 
 
 def _ensure_threads(con: duckdb.DuckDBPyConnection, n_threads: int) -> None:
-    """Set the instance-global DuckDB thread count only when it differs (Trap #42)."""
     current = con.execute("SELECT current_setting('threads')").fetchone()
     if current is None or int(current[0]) != n_threads:
         con.execute(f"SET threads = {int(n_threads)};")
 
 
 def get_memory_connection(source: dict | None = None) -> duckdb.DuckDBPyConnection:
-    """Return a tracked DuckDB connection in memory."""
     con = _duckdb_connect(":memory:")
     _temp_dir = os.getenv("DUCKDB_TEMP_DIRECTORY", "/tmp/duckdb")
     os.makedirs(_temp_dir, exist_ok=True)
@@ -588,18 +560,15 @@ def open_serving_connection(
 def get_connection(
     source: dict | None = None, max_wait: float = 300.0, skip_view_update: bool = False, read_only: bool = False
 ) -> duckdb.DuckDBPyConnection:
-    """Create a configured DuckDB connection (must be called from a synchronous context)."""
     src = source or _DEFAULT_SOURCE
     durable_serving = svcconfig.is_durable_serving_mode(src)
     if durable_serving and not read_only:
         raise RuntimeError("durable serving mode only permits read-only DuckDB connections")
-
     db_path = db_path_for_source(src)
     connect_path = ":memory:" if durable_serving else db_path
     con = None
     delay = _LOCK_RETRY_INITIAL_DELAY
     deadline = time.monotonic() + max_wait
-
     _barrier_wait(db_path)
     while True:
         try:
@@ -623,10 +592,8 @@ def get_connection(
                         except Exception as rm_e:
                             logger.error(f"[duckdb] Failed to remove corrupted file {f}: {rm_e}")
                 continue
-
             if not ("conflict" in err_str or "locked" in err_str or "different configuration" in err_str):
                 raise e
-
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 context = _lock_context(src, db_path, read_only)
@@ -638,7 +605,6 @@ def get_connection(
                 ) from e
             time.sleep(min(delay, remaining))
             delay = min(delay * _LOCK_RETRY_MULTIPLIER, _LOCK_RETRY_MAX_DELAY)
-
     limit = (
         (DUCKDB_POOL_CONN_MEMORY_LIMIT or DUCKDB_MEMORY_LIMIT)
         if durable_serving
@@ -649,7 +615,6 @@ def get_connection(
     _exec_quietly(
         con, "SET preserve_insertion_order = false;", "get_connection: preserve_insertion_order failed (ignored)"
     )
-
     if durable_serving:
         _service_temp_dir = os.getenv("DUCKDB_TEMP_DIRECTORY", "/tmp/duckdb")
     elif db_path and db_path != ":memory:" and not db_path.startswith(":memory:"):
@@ -667,7 +632,6 @@ def get_connection(
                 logger.debug(f"[duckdb] Cannot switch temp_directory (already in use by active query): {e}")
             else:
                 logger.error(f"[duckdb] Failed to configure temp_directory: {e}")
-
     try:
         con.execute(f"SET max_temp_directory_size = '{os.getenv('DUCKDB_MAX_TEMP_DIRECTORY_SIZE', '10GB')}';")
     except Exception as e:
@@ -676,15 +640,12 @@ def get_connection(
             logger.debug(f"[duckdb] Cannot change max_temp_directory_size (already in use by active query): {e}")
         else:
             logger.error(f"[duckdb] Failed to configure max_temp_directory_size: {e}")
-
     for stmt in ("SET hive_partitioning = true;", "SET TimeZone='UTC';"):
         _exec_quietly(con, stmt, "get_connection: con.execute failed (ignored)")
-
     _configure_fos(con, src)
-
     try:
         from backend.core import iceberg
-        from backend.core.iceberg._ducklake import _ducklake_attach
+        from backend.core.iceberg._core import _ducklake_attach
 
         iceberg.configure_duckdb_s3(con)
         con.execute("SET unsafe_enable_version_guessing=true;")
@@ -696,9 +657,7 @@ def get_connection(
         except Exception:
             logger.debug("get_connection: con.close failed (ignored)", exc_info=True)
         raise
-
     con.execute("SET enable_http_metadata_cache=true; SET enable_object_cache=true;")
-
     global _cached_n_threads, _cached_mem_limit_gb
     if _cached_n_threads is None:
         _cached_n_threads = int(DUCKDB_THREADS) if DUCKDB_THREADS else min(multiprocessing.cpu_count(), 8)
@@ -706,7 +665,6 @@ def get_connection(
         _ensure_threads(con, _cached_n_threads)
     except Exception:
         logger.debug("get_connection: _ensure_threads failed (ignored)", exc_info=True)
-
     if not os.getenv("DUCKDB_MEMORY_LIMIT"):
         if _cached_mem_limit_gb is None:
             try:
@@ -716,7 +674,6 @@ def get_connection(
                 _cached_mem_limit_gb = 4
         con.execute(f"SET memory_limit = '{_cached_mem_limit_gb}GB';")
     con.execute("SET checkpoint_threshold = '512MB';")
-
     if not skip_view_update:
         try:
             from backend.core import iceberg
@@ -727,7 +684,6 @@ def get_connection(
                 con.close()
                 raise
             logger.debug("[duckdb] update_iceberg_view skipped on RO connection: %s", e)
-
     _initialized_paths.add(db_path)
     return con
 
@@ -781,10 +737,8 @@ def log_cron_run(
     prov = (svcconfig.load_config(service_id) or {}).get("provisioning", {})
     cron_key = _TASK_TO_CRON_KEY.get(task)
     log_enabled = prov.get(cron_key, {}).get("log_enabled", True) if cron_key else True
-
     if status == "success" and corrupt_rows and corrupt_rows > 0:
         status = "partial_success"
-
     if not log_enabled and status == "success":
         if run_id is not None:
             try:
@@ -792,7 +746,6 @@ def log_cron_run(
             except Exception:
                 logger.warning("log_cron_run: metadata_db.delete_cron_run failed (ignored)", exc_info=True)
         return
-
     try:
         metadata_db.log_cron_run(
             service_id,
@@ -838,8 +791,6 @@ def finalize_cron_run_if_running(
         return False
 
 
-# ── Sync-status / schema / ASN / usage-log helpers ────────────────────────
-
 _data_stats_cache: dict[str, tuple[tuple, int, Any, Any]] = {}
 _data_stats_cache_lock = threading.Lock()
 _top_values_cache: dict[str, tuple] = {}
@@ -849,7 +800,6 @@ _ducklake_stats_cache_lock = threading.Lock()
 
 
 def _data_stats_fingerprint(source: dict) -> tuple | None:
-    """Return a cheap `(mtime_ns_sum, count)` fingerprint of `cache/<bucket>/data/`."""
     data_dir = os.path.join(_cache_dir(source), "data")
     if not os.path.isdir(data_dir):
         return None
@@ -867,12 +817,11 @@ def _data_stats_fingerprint(source: dict) -> tuple | None:
 
 
 def _top_values_fingerprint(con: duckdb.DuckDBPyConnection, source: dict) -> tuple | None:
-    """Return data-dir fingerprint or DuckLake snapshot fingerprint for `update_top_values`."""
     fp = _data_stats_fingerprint(source)
     if fp is not None:
         return fp
     try:
-        from backend.core.iceberg._ducklake import ducklake_current_snapshot_id
+        from backend.core.iceberg._core import ducklake_current_snapshot_id
 
         snap_id = ducklake_current_snapshot_id(con)
         return ("ducklake", snap_id) if snap_id is not None else None
@@ -882,7 +831,6 @@ def _top_values_fingerprint(con: duckdb.DuckDBPyConnection, source: dict) -> tup
 
 
 def clear_ducklake_stats_cache(source_key: str | None = None) -> None:
-    """Clear DuckLake table stats cache for a source or globally."""
     with _ducklake_stats_cache_lock:
         if source_key is None:
             _ducklake_stats_cache.clear()
@@ -897,7 +845,6 @@ def clear_ducklake_stats_cache(source_key: str | None = None) -> None:
 
 
 def _query_buffer_stats(con, src) -> tuple[int, Any, Any]:
-    """Read `(count, min_ts, max_ts)` across live local buffer parquet files."""
     from backend.core import iceberg as _ice
     from backend.utils.sql_validator import escape_sql_literal as _esl
 
@@ -913,7 +860,6 @@ def _query_buffer_stats(con, src) -> tuple[int, Any, Any]:
 
 
 def _query_or_cache_lake_stats(con, src_name: str, lake_table: str, snap_id: Any) -> tuple[int, Any, Any]:
-    """Fetch `(count, min_ts, max_ts)` for `lake."{lake_table}"`, consulting and populating both caches."""
     cached = None
     if snap_id is not None:
         with _ducklake_stats_cache_lock:
@@ -941,13 +887,12 @@ def _query_or_cache_lake_stats(con, src_name: str, lake_table: str, snap_id: Any
 def _authoritative_direct_stats(
     con, src, *, buffer_stats: tuple[int, Any, Any] | None = None
 ) -> tuple[int, Any, Any] | None:
-    """Read `(count, min_ts, max_ts)` straight from the committed DuckLake table + live buffer."""
     counts: list[int] = []
     mins: list[Any] = []
     maxs: list[Any] = []
     src_name = src.get("name", "default")
     try:
-        from backend.core.iceberg._ducklake import ducklake_current_snapshot_id, ducklake_table_name
+        from backend.core.iceberg._core import ducklake_current_snapshot_id, ducklake_table_name
 
         lake_table = ducklake_table_name(src)
         exists = con.execute(
@@ -975,7 +920,6 @@ def _authoritative_direct_stats(
             maxs.append(b_max)
     except Exception as e:
         logger.debug("[sync-status] direct buffer stats unavailable: %s", e)
-
     total = sum(counts)
     return (total, min(mins) if mins else None, max(maxs) if maxs else None) if total > 0 else None
 
@@ -983,7 +927,6 @@ def _authoritative_direct_stats(
 def get_sync_status(
     con: duckdb.DuckDBPyConnection, source: dict | None = None, skip_fos: bool = False, force: bool = False
 ) -> dict:
-    """Check sync state for a source."""
     src = source or _DEFAULT_SOURCE
     if not is_configured(src):
         return {
@@ -994,14 +937,12 @@ def get_sync_status(
             "storage_mode": "cloud",
             "access_level": "read_write",
         }
-
     cached_status = svcconfig.get_status(src["name"])
     if cached_status and not force and skip_fos:
         cached_status["access_level"] = src.get("access_level", "read_write")
         cached_status["storage_mode"] = src.get("storage_mode", "cloud")
         cached_status["configured"] = True
         return cached_status
-
     table_name = _safe_table_name(src["name"])
     try:
         from backend.core import metadata as metadata_db
@@ -1016,28 +957,24 @@ def get_sync_status(
             "last_ingested": None,
             "latest_file_name": None,
         }
-
     file_count, local_rows_ingested = summary["file_count"], summary["total_rows"]
     last_ingested, latest_file_name = summary["last_ingested"], summary["latest_file_name"]
     total_bytes, count_with_bytes = summary["total_bytes"], summary["count_with_bytes"]
     avg_log_size_kb = (total_bytes / count_with_bytes / 1024.0) if count_with_bytes > 0 else None
-
     latest_ingested_file_at = None
     if latest_file_name:
         m = re.search(r"(\d{4}-\d{2}-\d{2})[T-](\d{2}[:.-]\d{2}[:.-]\d{2})", latest_file_name.split("/")[-1])
         if m:
             latest_ingested_file_at = f"{m.group(1)} {m.group(2).replace('-', ':').replace('.', ':')}"
-
     latest_log_at = earliest_log_at = None
     local_rows = local_rows_ingested
-
     try:
         stats = None
         data_fp = _data_stats_fingerprint(src)
         lake_table: str | None = None
         if data_fp is None:
             try:
-                from backend.core.iceberg._ducklake import ducklake_current_snapshot_id, ducklake_table_name
+                from backend.core.iceberg._core import ducklake_current_snapshot_id, ducklake_table_name
 
                 lt = ducklake_table_name(src)
                 exists = con.execute(
@@ -1049,7 +986,6 @@ def get_sync_status(
                         data_fp, lake_table = ("ducklake", snap_id), lt
             except Exception:
                 logger.debug("get_sync_status: step failed (ignored)", exc_info=True)
-
         cache_key = src["name"]
         direct_stats = None
         queried_buffer_stats: tuple[int, Any, Any] | None = None
@@ -1078,7 +1014,6 @@ def get_sync_status(
                         d_count, d_min, d_max = ((d_row[0] or 0), d_row[1], d_row[2]) if d_row else (0, None, None)
                         with _data_stats_cache_lock:
                             _data_stats_cache[cache_key] = (data_fp, d_count, d_min, d_max)
-
                 b_count, b_min, b_max = _query_buffer_stats(con, src)
                 queried_buffer_stats = (b_count, b_min, b_max)
                 mins = [m for m in (d_min, b_min) if m is not None]
@@ -1092,7 +1027,6 @@ def get_sync_status(
                 if _is_stale_view_error(split_err):
                     raise
                 logger.debug("[sync-status] split-stats query failed, falling back to view: %s", split_err)
-
         if stats is None:
             stats = con.execute(f"SELECT count(*), min(timestamp), max(timestamp) FROM {table_name}").fetchone()
         if stats:
@@ -1135,7 +1069,6 @@ def get_sync_status(
         else:
             logger.warning("[sync-status] Failed to get log stats from view: %s", e)
             local_rows = local_rows_ingested
-
     try:
         cron_stats = {}
         time_cutoff = (
@@ -1160,7 +1093,6 @@ def get_sync_status(
             }
     except Exception:
         busy, cron_stats = False, {}
-
     return {
         "busy": busy,
         "fos_total": file_count,
@@ -1184,18 +1116,15 @@ def get_sync_status(
 
 
 def refresh_config_status(service_id: str, include_top_values: bool = True):
-    """Fetch latest stats from DuckDB and write them into the service config JSON."""
     src = svcconfig.load_config(service_id)
     if not src:
         return
-
     source = svcconfig.config_to_source(src)
     from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
 
     if get_high_scale_service_registry().resolve(service_id) is not None:
         logger.info("[refresh_status] %s: high-scale service uses ClickHouse status", service_id)
         return
-
     durable_serving = svcconfig.is_durable_serving_mode(source)
     cached_status = src.get("status") or {}
     buf_bytes = None
@@ -1210,7 +1139,6 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
                 buf_bytes = _get_dir_size(buf_dir)
         except Exception:
             logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
-
     iceberg_bytes = iceberg_files = None
     if not include_top_values and "iceberg_bytes" in cached_status and "iceberg_files" in cached_status:
         iceberg_bytes, iceberg_files = cached_status.get("iceberg_bytes"), cached_status.get("iceberg_files")
@@ -1224,7 +1152,6 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
                 iceberg_files = int(info.get("data_files", 0) or 0)
         except Exception:
             logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
-
     con = None
     try:
         con = get_connection(source, skip_view_update=not durable_serving, read_only=True)
@@ -1235,7 +1162,6 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
             status["iceberg_bytes"] = iceberg_bytes
         if iceberg_files is not None:
             status["iceberg_files"] = iceberg_files
-
         if not include_top_values:
             if "edge_ratio" in cached_status:
                 status["edge_ratio"] = cached_status.get("edge_ratio")
@@ -1249,7 +1175,6 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
             except Exception:
                 logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
             status["schema"] = get_schema(con, source)
-
         rum_latest = rum_last_sync = request_last_sync = None
         rum_total = 0
         request_total, request_latest = status.get("local_rows", 0), status.get("latest_log_at")
@@ -1263,7 +1188,6 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
             )
         except Exception:
             logger.debug("refresh_config_status: cron_data.get failed (ignored)", exc_info=True)
-
         if svcconfig.is_rum_enabled(source):
             try:
                 persisted_rum = (src.get("status") or {}).get("rum") or {}
@@ -1273,7 +1197,6 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
                     rum_last_sync = persisted_rum.get("last_sync_at")
             except Exception:
                 logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
-
         status["rum"] = {"latest_log_at": rum_latest, "total_rows": rum_total, "last_sync_at": rum_last_sync}
         if not durable_serving:
             status["request"] = {
@@ -1286,7 +1209,6 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
             from backend.core.request_metrics import refresh_durable_request_metrics
 
             refresh_durable_request_metrics(source, extra_status=status)
-
         if include_top_values:
             logger.info("[refresh_status] %s: Updating top-values cache for filter suggestions...", service_id)
             update_top_values(con, source)
@@ -1305,7 +1227,6 @@ _TOP_VALUE_FIELDS = (
 
 
 def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
-    """Pre-calculate top values for filter suggestions from a 100k reservoir sample."""
     service_id = source["name"]
     table_name = _safe_table_name(service_id)
     cached_top_values_path = os.path.join(_cache_dir(source), "top_values.json")
@@ -1315,17 +1236,14 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
             prior_fp = _top_values_cache.get(service_id)
         if prior_fp == data_fp:
             return
-
     try:
         con.execute(f"SELECT 1 FROM {table_name} LIMIT 1")
     except Exception:
         return
-
     schema_cols = {f["name"] for f in get_schema(con, source, stats=False)}
     fields = [f for f in _TOP_VALUE_FIELDS if f in schema_cols or (f == "waf_sig_ind" and "waf_sig" in schema_cols)]
     if not fields:
         return
-
     select_parts = [
         f'"{"waf_sig" if f == "waf_sig_ind" else f}"'
         for f in fields
@@ -1337,7 +1255,6 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
     sample_sql = (
         f"CREATE TEMP TABLE {sample_table} AS SELECT {sel} FROM {table_name} USING SAMPLE reservoir(100000 ROWS)"
     )
-
     try:
         con.execute(f'DROP TABLE IF EXISTS "{sample_table}"')
         try:
@@ -1351,7 +1268,6 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
                 con.execute(sample_sql)
             else:
                 raise
-
         queries, field_order = [], []
         for f in fields:
             col = "waf_sig" if f == "waf_sig_ind" else f
@@ -1370,7 +1286,6 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
                     f'FROM {sample_table} WHERE "{col}" IS NOT NULL GROUP BY 1,2 ORDER BY 3 DESC LIMIT 200)'
                 )
             field_order.append(f)
-
         if queries:
             rows = con.execute(" UNION ALL ".join(queries)).fetchall()
             top_values = {fname: [] for fname in field_order}
@@ -1385,7 +1300,6 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
         except Exception:
             if log_once_per("update_top_values: DROP TABLE failed (ignored)", 60):
                 logger.debug("update_top_values: DROP TABLE failed (ignored)", exc_info=True)
-
     if top_values:
         cache_dir = _cache_dir(source)
         os.makedirs(cache_dir, exist_ok=True)
@@ -1398,7 +1312,6 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
 
 
 def get_ingested_files(con: duckdb.DuckDBPyConnection | None, source: dict | None = None) -> list[dict]:
-    """Return list of ingested files for a source from metadata storage."""
     from backend.core import metadata as metadata_db
 
     return metadata_db.list_ingested_files((source or _DEFAULT_SOURCE)["name"])
@@ -1409,7 +1322,6 @@ _schema_cache: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_SCHEM
 
 
 def _clear_schema_cache(source_name: str | None = None):
-    """Clear the schema cache globally or for a single `source_name`."""
     if source_name:
         for k in [k for k in _schema_cache.keys() if k[0] == source_name]:
             _schema_cache.pop(k, None)
@@ -1418,7 +1330,6 @@ def _clear_schema_cache(source_name: str | None = None):
 
 
 def get_schema(con: duckdb.DuckDBPyConnection, source: dict | None = None, stats: bool = True) -> list[dict]:
-    """Return column names and types (plus optional SUMMARIZE stats) for a source's table."""
     src = source or _DEFAULT_SOURCE
     source_name = src["name"]
     table_name = _safe_table_name(source_name)
@@ -1426,7 +1337,6 @@ def get_schema(con: duckdb.DuckDBPyConnection, source: dict | None = None, stats
     cached = _schema_cache.get(cache_key)
     if cached is not None:
         return cached
-
     try:
         row = con.execute(
             "SELECT count(*) FROM information_schema.tables WHERE table_name = ?", [table_name]
@@ -1435,7 +1345,6 @@ def get_schema(con: duckdb.DuckDBPyConnection, source: dict | None = None, stats
             raise RuntimeError("row is unexpectedly None")
         if row[0] <= 0:
             return []
-
         if not stats:
             result = con.execute(f"DESCRIBE {table_name}").fetchall()
             schema = [{"name": r[0], "type": r[1]} for r in result]
@@ -1471,20 +1380,17 @@ ASN_CACHE_TTL_DAYS = 30
 
 
 def get_asn_names(service_id: str, asns: list) -> dict:
-    """Return `{asn: name}` for all requested ASNs via metadata cache + Team Cymru WHOIS."""
     if not asns:
         return {}
     asns_clean = [int(a) for a in asns if a is not None]
     if not asns_clean or not service_id:
         return {}
-
     from backend.core import metadata as metadata_db
 
     try:
         cached = metadata_db.lookup_asn_names(service_id, asns_clean, max_age_days=ASN_CACHE_TTL_DAYS)
     except Exception:
         cached = {}
-
     need = [a for a in asns_clean if a not in cached]
     resolved: dict[int, str] = {}
     if need:
@@ -1518,7 +1424,6 @@ def get_asn_names(service_id: str, asns: list) -> dict:
                     resolved[asn_int] = raw_owner.split(" - ", 1)[1] if " - " in raw_owner else raw_owner
         except Exception as exc:
             logger.warning("ASN resolution failed: %s", type(exc).__name__)
-
         for asn in need:
             resolved.setdefault(asn, f"AS{asn}")
         if resolved:
@@ -1526,7 +1431,6 @@ def get_asn_names(service_id: str, asns: list) -> dict:
                 metadata_db.upsert_asn_names(service_id, resolved)
             except Exception:
                 logger.warning("get_asn_names: metadata_db.upsert_asn_names failed (ignored)", exc_info=True)
-
     result = {**cached, **resolved}
     for asn in need:
         result.setdefault(asn, f"AS{asn}")
@@ -1534,14 +1438,12 @@ def get_asn_names(service_id: str, asns: list) -> dict:
 
 
 def format_asn_label(asn: int, name: str) -> str:
-    """Format an ASN for display: `'Comcast Cable Communications (7922)'` or `'AS7922'`."""
     if not name or (name.startswith("AS") and name[2:].isdigit()):
         return f"AS{asn}"
     return f"{name} ({asn})"
 
 
 def enrich_asn_labels(values: list[dict], service_id: str) -> list[dict]:
-    """Resolve ASN names and set a `'label'` key on matching value dicts in-place."""
     asn_list = [int(v["value"]) for v in values if str(v["value"]).isdigit()]
     if not asn_list:
         return values
@@ -1553,7 +1455,6 @@ def enrich_asn_labels(values: list[dict], service_id: str) -> list[dict]:
 
 
 def update_cron_duration(source: dict, run_id: int, duration_s: float, log_output: str | None = None):
-    """Update the duration (and optional `log_output`) of a specific cron run record."""
     from backend.core import metadata as metadata_db
 
     service_id = _source_service_id(source)
@@ -1562,7 +1463,6 @@ def update_cron_duration(source: dict, run_id: int, duration_s: float, log_outpu
 
 
 def log_usage_calls(source: dict, calls: list[dict], process_context: str | None = None):
-    """Persist tracked calls to the per-service usage log via `metadata_db`."""
     if not svcconfig.is_usage_logging_enabled():
         return
     service_id = _source_service_id(source)
@@ -1573,7 +1473,6 @@ def log_usage_calls(source: dict, calls: list[dict], process_context: str | None
 
 
 def backfill_fastly_edge_writes(source: dict) -> int:
-    """Synthesise one Class A PUT_OBJECT row per ingested file in the usage log."""
     if not svcconfig.is_usage_logging_enabled():
         return 0
     service_id = _source_service_id(source)
@@ -1611,7 +1510,6 @@ def backfill_fastly_edge_writes(source: dict) -> int:
 
 
 def reconcile_fastly_stats(source: dict, hours_back: int = 12) -> int:
-    """Pull Fastly's hourly `/stats/aggregate` counts and write reconciliation rows into `usage_log`."""
     if not svcconfig.is_usage_logging_enabled():
         return 0
     service_id, logging_svc_id = _source_service_id(source), source.get("logging_service_id", "")
@@ -1630,7 +1528,6 @@ def reconcile_fastly_stats(source: dict, hours_back: int = 12) -> int:
             latest_dt = parse_iso_utc(latest_recon) if isinstance(latest_recon, str) else None
             if latest_dt is not None and (now_dt - latest_dt) < timedelta(hours=1):
                 return 0
-
         now = now_dt.replace(minute=0, second=0, microsecond=0)
         from_ts = int((now - timedelta(hours=hours_back)).timestamp())
         to_ts = int((now + timedelta(hours=1)).timestamp())
@@ -1651,7 +1548,6 @@ def reconcile_fastly_stats(source: dict, hours_back: int = 12) -> int:
 
 
 def purge_usage_log(source: dict):
-    """Delete usage logs older than the retention period via `metadata_db`."""
     retention_days = int(svcconfig.load_usage_logging_config().get("retention_days", 30))
     service_id = _source_service_id(source)
     if service_id:
@@ -1678,7 +1574,6 @@ def rum_duckdb_path(path: str) -> str:
 
 
 def rum_source_for(source: dict) -> dict:
-    """Return a shallow-copied RUM source dict (`name` suffixed with `::rum`, `.rum.duckdb` path)."""
     rum_source = dict(source)
     rum_source["name"] = f"{source.get('name') or source.get('service_id') or 'default'}::rum"
     if source.get("duckdb_path"):
@@ -1691,7 +1586,6 @@ _process_cid_salt: str | None = None
 
 
 def ensure_cid_salt(rum_cfg: dict) -> str:
-    """Return `rum_cfg["cid_salt"]`, generating and setting a fresh 32-byte hex salt if absent."""
     salt = rum_cfg.get("cid_salt")
     if not salt:
         salt = secrets.token_hex(32)
@@ -1700,7 +1594,6 @@ def ensure_cid_salt(rum_cfg: dict) -> str:
 
 
 def get_or_generate_cid_salt(service_id: str) -> str:
-    """Retrieve or generate a persistent 32-byte hex-encoded salt for `cid` pseudonymous hashing."""
     global _process_cid_salt
     from backend.config import load_config, mutate_config
 
@@ -1718,7 +1611,6 @@ def get_or_generate_cid_salt(service_id: str) -> str:
                 service_id,
             )
             return _process_cid_salt
-
     logger.warning("cid_salt_missing service_id=%s: generating and persisting under cross-process lock", service_id)
 
     def _set(c: dict) -> None:

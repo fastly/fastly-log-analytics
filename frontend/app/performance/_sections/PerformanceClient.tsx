@@ -1,8 +1,7 @@
 'use client'
 
 import React from 'react'
-import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api'
+import { client, unwrapClient } from "@/lib/api";
 import type { components } from '@/types/api'
 import { useAnalyticsReportQuery } from '@/hooks/useDashboardCards'
 import { useColumnVisibility } from '@/hooks/useSSE'
@@ -15,7 +14,7 @@ import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCa
 import { ColumnVisibilityDropdown } from '@/components/DataTable'
 import { makeLatencyColumns } from '@/components/DataTable'
 import { useFieldLabel } from '@/hooks/useBootstrap';
-import { CHART_COLORS } from '@/lib/chart-helpers'
+import { CHART_COLORS } from "@/lib/utils"
 import type { PlotlyLayout, PlotlyTrace } from '@/types/api'
 import type { FiltersPayload } from '@/types/api'
 

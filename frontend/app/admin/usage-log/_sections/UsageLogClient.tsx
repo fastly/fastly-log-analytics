@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation'
 import { ArrowLeft, Download, Database, Zap, Globe, DollarSign, Trash2, RefreshCw, AlertTriangle, Loader2 } from 'lucide-react'
 import type { ColumnDef } from '@tanstack/react-table'
 import { adminFetch, client, extractApiError, unwrapClient } from '@/lib/api'
-import { downloadBlob, buildServiceHref } from '@/lib/utils'
+import { downloadBlob, buildServiceHref, formatAbbreviatedCount, formatBytes, formatCount, toQueryDate, CHART_COLORS } from "@/lib/utils";
 import type { components } from '@/types/api'
 import { useServiceStore } from '@/stores/filterStore'
 import { DataTable } from '@/components/DataTable'
@@ -14,14 +14,12 @@ import { Button, buttonVariants } from '@/components/ui/button'
 import { PageHeader, StatCard, ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { useDateFormat } from '@/hooks/useSSE'
 import { useMounted } from '@/hooks/useBootstrap'
-import { formatAbbreviatedCount, formatBytes, formatCount, toQueryDate } from '@/lib/format'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { AnalyticsCard, TimeSeriesChart, type AnalyticsCardError } from '@/components/AnalyticsCard'
-import { CHART_COLORS } from '@/lib/chart-helpers'
 
 const LOG_ACCOUNTING_PRESETS = [
   { label: 'Last 1h', hours: 1, by: 'hour' as const },

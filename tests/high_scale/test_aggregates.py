@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-
 from backend.high_scale.aggregate_query import (
     AggregateRequest,
     query_clickhouse_aggregate,
@@ -310,7 +309,6 @@ def test_watermark_must_match_request_domain() -> None:
 from datetime import UTC, datetime
 
 import pytest
-
 from backend.high_scale.aggregate_batch_adapter import compute_dimension_counts
 
 
@@ -408,7 +406,6 @@ def test_unsupported_domain_is_rejected() -> None:
 # ── Merged from test_projections.py ──
 
 import pytest
-
 from backend.high_scale.cmcd import project_cmcd
 
 
@@ -484,7 +481,6 @@ def test_cmcd_projection_defaults_missing_country_to_empty() -> None:
 from datetime import UTC, datetime
 
 import pytest
-
 from backend.high_scale._common import bucket, finite_float, percentiles, range_value, text
 
 
@@ -567,7 +563,6 @@ import math
 import random
 
 import pytest
-
 from backend.high_scale._common import RELATIVE_ERROR, sketch
 
 
@@ -633,6 +628,7 @@ def test_merged_quantiles_stay_within_the_documented_relative_error(q: float) ->
 from uuid import UUID
 
 from backend.high_scale.aggregate_batch_adapter import AggregateBatchAdapter
+
 from backend.high_scale.publication import HighScaleBatch, PartialInsert, _batch_uuid
 
 
@@ -859,3 +855,1316 @@ def test_maps_performance_projection_domains_to_allowlisted_tables(domain, table
     assert inserted_table == table
     assert column in columns
     assert len(rows[0]) == len(columns)
+
+
+# ── Merged from tests/high_scale/test_security.py ──
+
+"""High-scale Security reads return real data under the standard response contract."""
+
+
+import re
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import patch
+
+import pytest
+from backend.high_scale.registry_bootstrap import HighScaleService
+
+from backend.high_scale import dashboard as hs_dashboard
+from backend.high_scale import security as hs
+
+START = "2026-10-18T00:00:00Z"
+END = "2026-10-19T00:00:00Z"
+_EPOCH = int(datetime(2026, 10, 18, 3, 0, tzinfo=UTC).timestamp())
+_TAG = re.compile(r"hs_security:(\w+)")
+
+
+class _Client:
+    """Routes each query to canned rows by its ``hs_security:<tag>`` marker and records every call."""
+
+    def __init__(self, rows: dict[str, list[dict[str, Any]]] | None = None, error: Exception | None = None):
+        self.rows = rows or {}
+        self.error = error
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        if self.error is not None:
+            raise self.error
+        match = _TAG.search(sql)
+        assert match, f"query is missing its hs_security tag: {sql[:120]}"
+        tag = match.group(1)
+        self.calls.append((tag, sql, params or {}))
+        return self.rows.get(tag, [])
+
+    def tags(self) -> list[str]:
+        return [tag for tag, _, _ in self.calls]
+
+    def call(self, tag: str) -> tuple[str, dict[str, Any]]:
+        return next((sql, params) for t, sql, params in self.calls if t == tag)
+
+
+def _service(client: _Client) -> HighScaleService:
+    return HighScaleService(
+        service_id="svc",
+        client=client,
+        cursor_secret=b"secret",
+        request_watermark=ServingWatermark(
+            service_id="svc",
+            domain="request",
+            owner_epoch=1,
+            coverage_start=None,
+            coverage_end=None,
+            last_accepted_cursor=None,
+            last_archived_event_id=None,
+            last_visible_event_id=None,
+            exact=True,
+        ),
+    )
+
+
+def _req(filters: dict[str, Any] | None = None, bucket_seconds: int = 3600) -> SimpleNamespace:
+    return SimpleNamespace(filters=filters or {}, bucket_seconds=bucket_seconds)
+
+
+_COUNTRY_US = {"country": {"mode": "include", "values": ["US"]}}
+_BOT_ENTRY = {"id": "googlebot", "categories": ["search-engine"], "verification": {"domains": ["googlebot.com"]}}
+
+
+def _match_googlebot(ua: str | None) -> tuple[dict[str, Any], ...]:
+    return (_BOT_ENTRY,) if "Googlebot" in (ua or "") else ()
+
+
+def test_every_section_uses_the_standard_contract_shapes():
+    client = _Client(
+        {
+            "tls_fingerprints": [{"fingerprint": "abc", "ip_count": "2", "request_count": "5"}],
+            "fingerprint_coverage": [{"total_rows": "10", "populated": "4"}],
+            "req_size_dist": [{"bucket": "0-256B", "count": "9", "min_val": "0"}],
+            "conn_reuse_dist": [{"bucket": "2-5", "count": "4", "min_val": "2"}],
+            "ipv6_adoption": [{"bucket_ts": _EPOCH, "pct": 40.0}],
+            "proxy_dist": [{"type": "vpn", "count": "7"}],
+            "verified_bots_ts": [{"bucket_ts": _EPOCH, "bot_type": "search-engine", "count": "3"}],
+            "top_ips_header": [{"ip": "10.0.1.5", "max_header": "9000"}],
+        }
+    )
+    res = hs.security_aggregates(
+        _service(client),
+        _req(),
+        START,
+        END,
+        sections={
+            "tls_fingerprints",
+            "fingerprint_coverage",
+            "req_size_dist",
+            "conn_reuse_dist",
+            "ipv6_adoption",
+            "proxy_dist",
+            "verified_bots_ts",
+            "top_ips_header",
+        },
+    ).model_dump(exclude_unset=True)
+
+    assert res["tls_fingerprints"] == [{"fingerprint": "abc", "ip_count": 2, "request_count": 5}]
+    assert res["fingerprint_coverage"] == {"tls_ciphers_sha": 0.4}
+    assert res["req_size_dist"] == [{"bucket": "0-256B", "count": 9}]
+    assert res["conn_reuse_dist"] == [{"bucket": "2-5", "count": 4}]
+    assert res["ipv6_adoption"] == [{"time": "2026-10-18T03:00:00Z", "pct": 40.0}]
+    assert res["proxy_dist"] == [{"type": "vpn", "count": 7}]
+    assert res["verified_bots_ts"] == [{"time": "2026-10-18T03:00:00Z", "bot_type": "search-engine", "count": 3}]
+    assert res["top_ips_header"] == [{"ip": "10.0.1.5", "max_header": 9000}]
+
+
+def test_fingerprint_coverage_is_computed_not_hardcoded():
+    client = _Client({"fingerprint_coverage": [{"total_rows": "0", "populated": "0"}]})
+    res = hs.security_aggregates(_service(client), _req(), START, END, sections={"fingerprint_coverage"})
+    assert res.fingerprint_coverage == {"tls_ciphers_sha": 0.0}
+
+
+def test_proxy_and_header_sections_read_the_standard_columns():
+    client = _Client()
+    hs.security_aggregates(
+        _service(client), _req(), START, END, sections={"proxy_dist", "req_size_dist", "ipv6_adoption"}
+    )
+    assert "custom_fields['p_type']" in client.call("proxy_dist")[0]
+    assert "req_header_bytes" in client.call("req_size_dist")[0]
+    assert "toStartOfHour" in client.call("ipv6_adoption")[0]
+
+
+def test_sections_selector_only_runs_requested_queries():
+    client = _Client()
+    res = hs.security_aggregates(_service(client), _req(), START, END, sections={"proxy_dist"})
+    assert client.tags() == ["proxy_dist"]
+    assert res.tls_fingerprints == []
+
+
+def test_no_sections_runs_every_section_including_bots_and_proxies():
+    client = _Client()
+    with (
+        patch("backend.utils.bot_sources.build_matcher", return_value=_match_googlebot),
+        patch("backend.core.duckdb.get_asn_names", return_value={}),
+    ):
+        hs.security_aggregates(_service(client), _req(), START, END)
+    assert set(client.tags()) >= {
+        "tls_fingerprints",
+        "fingerprint_coverage",
+        "req_size_dist",
+        "top_ips_header",
+        "ipv6_adoption",
+        "proxy_dist",
+        "conn_reuse_dist",
+        "verified_bots_ts",
+        "ngwaf_bots",
+        "ngwaf_verified_bots_ts",
+        "wellknown_bots",
+        "top_bots_ua",
+        "proxy_stats",
+        "traffic_quality",
+        "suspicious_isps",
+        "active_clients",
+    }
+
+
+def test_request_filters_are_bound_into_every_request_facts_query():
+    client = _Client()
+    with (
+        patch("backend.utils.bot_sources.build_matcher", return_value=_match_googlebot),
+        patch("backend.core.duckdb.get_asn_names", return_value={}),
+    ):
+        hs.security_aggregates(_service(client), _req(_COUNTRY_US), START, END)
+    assert client.calls
+    for tag, sql, params in client.calls:
+        assert params["filter_0_0"] == "US", tag
+        assert "country IN ({filter_0_0:String})" in sql, tag
+
+
+def test_unfiltered_ngwaf_sections_read_the_security_projection():
+    client = _Client(
+        {
+            "ngwaf_bots": [
+                {"bot_name": "bingbot", "wk_name": "bing", "bot_cat": "search", "request_count": "11"},
+                {"bot_name": "other", "wk_name": "", "bot_cat": "", "request_count": "2"},
+            ],
+            "ngwaf_verified_bots_ts": [{"bucket_ts": _EPOCH, "bot_name": "bingbot", "count": "4"}],
+        }
+    )
+    with patch("backend.config.get_ngwaf_workspace_id", return_value="ws-1"):
+        res = hs.security_aggregates(
+            _service(client), _req(), START, END, sections={"ngwaf_verified_bots", "ngwaf_verified_bots_ts"}
+        )
+    summary_sql = client.call("ngwaf_bots")[0]
+    assert "FROM security_minute_dimensions" in summary_sql
+    assert "dimension='ngwaf_bot'" in summary_sql
+    assert "request_facts" not in summary_sql
+    assert "FROM security_minute_dimensions" in client.call("ngwaf_verified_bots_ts")[0]
+    assert res.ngwaf_configured is True
+    assert [r.model_dump() for r in res.ngwaf_verified_bots] == [
+        {"bot_name": "bingbot", "wellknown_bot_name": "bing", "category": "search", "request_count": 11},
+        {"bot_name": "other", "wellknown_bot_name": None, "category": None, "request_count": 2},
+    ]
+    assert [r.model_dump() for r in res.ngwaf_verified_bots_ts] == [
+        {"time": "2026-10-18T03:00:00Z", "bot_name": "bingbot", "count": 4}
+    ]
+
+
+def test_filtered_ngwaf_sections_read_the_persisted_fact_keys():
+    client = _Client()
+    hs.security_aggregates(
+        _service(client),
+        _req(_COUNTRY_US),
+        START,
+        END,
+        sections={"ngwaf_verified_bots", "ngwaf_verified_bots_ts"},
+    )
+    for tag in ("ngwaf_bots", "ngwaf_verified_bots_ts"):
+        sql, params = client.call(tag)
+        assert "FROM request_facts" in sql
+        assert "custom_fields['ngwaf_bot']" in sql
+        assert "security_minute_dimensions" not in sql
+        assert params["filter_0_0"] == "US"
+
+
+def test_ngwaf_not_configured_is_reported_from_service_config():
+    with patch("backend.config.get_ngwaf_workspace_id", return_value=None):
+        res = hs.security_aggregates(
+            _service(_Client()), _req(), START, END, sections={"ngwaf_verified_bots", "ngwaf_verified_bots_ts"}
+        )
+    assert res.ngwaf_configured is False
+
+
+def test_wellknown_bots_carry_real_verification_counters():
+    client = _Client(
+        {
+            "wellknown_bots": [
+                {"ua": "Mozilla/5.0 (compatible; Googlebot/2.1)", "ip": "66.249.66.1", "cnt": "8"},
+                {"ua": "Mozilla/5.0 (compatible; Googlebot/2.1)", "ip": "203.0.113.9", "cnt": "2"},
+            ]
+        }
+    )
+    hostnames = {
+        "66.249.66.1": ("crawl-66-249-66-1.googlebot.com", "resolved", True),
+        "203.0.113.9": ("evil.example.net", "resolved", False),
+    }
+    with (
+        patch("backend.utils.bot_sources.build_matcher", return_value=_match_googlebot),
+        patch("backend.utils.bot_sources.get_bot_regex_pattern", return_value="(?i)googlebot"),
+        patch("backend.utils.rdns_cache.get_hostnames", return_value=hostnames),
+        patch("backend.utils.rdns_cache.enqueue"),
+    ):
+        res = hs.security_aggregates(_service(client), _req(), START, END, sections={"wellknown_bots"})
+    sql, params = client.call("wellknown_bots")
+    assert "match(custom_fields['ua'], {bot_pattern:String})" in sql
+    assert params["bot_pattern"] == "(?i)googlebot"
+    assert len(res.wellknown_bots) == 1
+    bot = res.wellknown_bots[0]
+    assert (bot.id, bot.request_count) == ("googlebot", 10)
+    assert bot.verified_count == 8
+    assert bot.impersonator_count == 2
+    assert bot.verification_coverage == 1.0
+
+
+def test_top_bots_classifies_user_agents_and_lists_ngwaf_bots():
+    client = _Client(
+        {
+            "top_bots_ua": [
+                {"ua": "Mozilla/5.0 (compatible; Googlebot/2.1)", "cnt": "30"},
+                {"ua": "curl/8", "cnt": "50"},
+            ],
+            "ngwaf_bots": [{"bot_name": "bingbot", "wk_name": "bing", "bot_cat": "search", "request_count": "11"}],
+        }
+    )
+    with patch("backend.utils.bot_sources.build_matcher", return_value=_match_googlebot):
+        res = hs.top_bots(_service(client), _req(), START, END)
+    assert [b.model_dump(exclude_unset=True) for b in res.bots] == [
+        {"id": "googlebot", "name": "Googlebot", "category": "search-engine", "request_count": 30}
+    ]
+    assert [b.model_dump(exclude_unset=True) for b in res.ngwaf_bots] == [
+        {"name": "bingbot", "category": "search", "request_count": 11}
+    ]
+    assert "LIMIT 10" in client.call("ngwaf_bots")[0]
+
+
+def test_top_bots_honours_request_filters():
+    client = _Client()
+    hs.top_bots(_service(client), _req(_COUNTRY_US), START, END)
+    assert all(params["filter_0_0"] == "US" for _, _, params in client.calls)
+
+
+_CLIENT_ROW = {
+    "ip": "198.51.100.77",
+    "asn": "15169",
+    "rtt_min_ms": 5.0,
+    "tcp_rtt_ms": 100.0,
+    "distance_km": 8800.4,
+    "pop": "SJC",
+    "client_lat": 51.5074,
+    "client_lon": -0.1278,
+    "pop_lat": 37.3382,
+    "pop_lon": -121.8863,
+    "impossible_distance": 1,
+    "risk_level": "High",
+    "country": "GB",
+    "city": "",
+}
+
+
+def _proxy_client() -> _Client:
+    return _Client(
+        {
+            "proxy_stats": [
+                {"active_proxies_count": "3", "total_requests_count": "40", "distance_mismatches_count": "2"}
+            ],
+            "traffic_quality": [
+                {"type": "Direct Connection", "count": "75"},
+                {"type": "Active Tunnel / Proxy", "count": "25"},
+            ],
+            "suspicious_isps": [{"asn": "15169", "count": "25"}, {"asn": None, "count": "1"}],
+            "active_clients": [_CLIENT_ROW],
+        }
+    )
+
+
+def test_proxies_report_real_counts_quality_isps_and_clients():
+    with patch("backend.core.duckdb.get_asn_names", return_value={15169: "Example Net"}):
+        res = hs.security_aggregates(_service(_proxy_client()), _req(), START, END, sections={"proxies"})
+    assert (res.active_proxies_count, res.tunnel_requests_count, res.distance_mismatches_count) == (3, 40, 2)
+    assert [(q.label, q.value) for q in res.traffic_quality] == [
+        ("Direct Connection", 75.0),
+        ("Active Tunnel / Proxy", 25.0),
+    ]
+    assert [(i.isp, i.asn, i.count) for i in res.suspicious_isps] == [
+        ("Example Net", 15169, 25),
+        ("Unknown ISP", None, 1),
+    ]
+    client = res.active_clients[0]
+    assert client.ip == "198.51.100.77"
+    assert client.asn_name == "Example Net"
+    assert client.impossible_distance is True
+    assert client.risk_level == "High"
+    assert client.city is None
+    assert client.country == "GB"
+    assert client.distance_km == 8800.4
+
+
+def test_proxies_mask_client_ips_for_analyst_sessions():
+    with patch("backend.core.duckdb.get_asn_names", return_value={}):
+        masked = hs.security_aggregates(
+            _service(_proxy_client()), _req(), START, END, sections={"proxies"}, mask_ips=True
+        )
+        clear = hs.security_aggregates(
+            _service(_proxy_client()), _req(), START, END, sections={"proxies"}, mask_ips=False
+        )
+    assert masked.active_clients[0].ip == "198.51.100.xxx"
+    assert clear.active_clients[0].ip == "198.51.100.77"
+
+
+def test_top_ips_header_masks_ips_for_analyst_sessions():
+    client = _Client({"top_ips_header": [{"ip": "10.0.1.5", "max_header": "9000"}]})
+    res = hs.security_aggregates(_service(client), _req(), START, END, sections={"top_ips_header"}, mask_ips=True)
+    assert res.top_ips_header[0].ip == "10.0.1.xxx"
+
+
+def test_proxies_section_is_served_inside_aggregates_with_masking():
+    with patch("backend.core.duckdb.get_asn_names", return_value={}):
+        res = hs.security_aggregates(_service(_proxy_client()), _req(), START, END, sections={"proxies"}, mask_ips=True)
+    assert res.active_proxies_count == 3
+    assert res.active_clients[0].ip == "198.51.100.xxx"
+
+
+def test_proxies_with_no_rows_report_zero_without_dividing_by_nothing():
+    with patch("backend.core.duckdb.get_asn_names", return_value={}):
+        res = hs.security_aggregates(_service(_Client()), _req(), START, END, sections={"proxies"})
+    assert res.active_proxies_count == 0
+    assert res.traffic_quality == []
+    assert res.active_clients == []
+
+
+def test_active_clients_list_high_risk_first():
+    client = _proxy_client()
+    with patch("backend.core.duckdb.get_asn_names", return_value={}):
+        hs.security_aggregates(_service(client), _req(), START, END, sections={"proxies"})
+    assert "ORDER BY multiIf(risk_level = 'High', 0, risk_level = 'Medium', 1, 2)" in client.call("active_clients")[0]
+
+
+def test_clickhouse_failures_propagate_instead_of_rendering_empty_cards():
+    client = _Client(error=RuntimeError("clickhouse unavailable"))
+    with pytest.raises(RuntimeError, match="clickhouse unavailable"):
+        hs.security_aggregates(_service(client), _req(), START, END, sections={"proxy_dist"})
+    with pytest.raises(RuntimeError, match="clickhouse unavailable"):
+        hs.top_bots(_service(client), _req(), START, END)
+
+
+def test_dashboard_bundle_serves_real_top_bots():
+    client = _Client(
+        {
+            "top_bots_ua": [{"ua": "Mozilla/5.0 (compatible; Googlebot/2.1)", "cnt": "30"}],
+            "ngwaf_bots": [{"bot_name": "bingbot", "wk_name": "", "bot_cat": "search", "request_count": "11"}],
+        }
+    )
+    request = SimpleNamespace(filters={}, bucket_seconds=3600, sections=None)
+    with (
+        patch("backend.utils.bot_sources.build_matcher", return_value=_match_googlebot),
+        patch.object(hs_dashboard, "aggregates", return_value="aggregates"),
+    ):
+        out = hs_dashboard.bundle(_service(client), request, START, END)
+    assert out["aggregates"] == "aggregates"
+    assert [b.name for b in out["top_bots"].bots] == ["Googlebot"]
+    assert [b.name for b in out["top_bots"].ngwaf_bots] == ["bingbot"]
+
+
+# ── Merged from test_security_ngwaf.py ───────────────────────────────
+
+import gzip
+from datetime import UTC, datetime
+
+from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
+from backend.high_scale.recovery import rebuild_security_projections_from_fos, replay_security_projections
+from backend.high_scale.source_discovery import SourceObjectDescriptor
+
+from backend.high_scale.ingest_controller import HighScaleIngestController, _enrich_high_scale_ngwaf_bots
+from backend.high_scale.publication import (
+    ClickHousePublication,
+    InMemoryBatchManifestStore,
+    InsertReceipt,
+)
+from backend.high_scale.publication import _extract_custom_fields as persisted_fact_fields
+from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
+
+NOW_security = datetime(2026, 9, 11, 20, 0, tzinfo=UTC)
+_PG_TARGET = "backend.core.metadata.pg_connection.get_pg_readonly_connection"
+_BOT_ROW = {"waf_req_id": "req-1", "bot_name": "bingbot", "category": "search", "wellknown_bot_name": "bing"}
+
+
+class _Pg:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+
+    def execute(self, sql: str, params: list[str]) -> _Pg:
+        return self
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return self.rows
+
+    def close(self) -> None:
+        return None
+
+
+class _ClickHouse:
+    def __init__(self) -> None:
+        self.batches: list[HighScaleBatch] = []
+
+    def insert(self, batch: HighScaleBatch) -> InsertReceipt:
+        self.batches.append(batch)
+        return InsertReceipt(batch.batch_id, len(batch.rows), batch.digest)
+
+    def rows(self, domain: str) -> list[dict[str, Any]]:
+        return [row for b in self.batches if b.domain == domain for row in b.rows]
+
+
+class _Catalog:
+    def __init__(self, *manifests: Any) -> None:
+        self._manifests = manifests
+
+    def manifests_covering(self, service_id: str, domain: str, start: datetime, end: datetime) -> tuple[Any, ...]:
+        return self._manifests
+
+
+def _event(waf_req_id: str | None) -> dict[str, Any]:
+    return {"timestamp": "2026-09-11T20:00:00Z", "url": "/ok", **({"waf_req_id": waf_req_id} if waf_req_id else {})}
+
+
+def test_enrichment_tags_events_whose_waf_req_id_is_in_the_bot_cache():
+    events = (_event("req-1"), _event("req-unknown"), _event(None))
+    with patch(_PG_TARGET, return_value=_Pg([_BOT_ROW])):
+        _enrich_high_scale_ngwaf_bots(events)
+    tagged, unknown, bare = events
+    assert tagged["_ngwaf_bot_name"] == "bingbot"
+    assert tagged["ngwaf_bot_verification_state"] == "verified"
+    assert persisted_fact_fields(tagged) == {
+        "ngwaf_bot": "bingbot",
+        "ngwaf_bot_category": "search",
+        "ngwaf_wellknown_bot": "bing",
+    }
+    for untouched in (unknown, bare):
+        assert not {k for k in untouched if "ngwaf" in k}
+
+
+def test_enrichment_never_invents_bots_for_synthetic_looking_ids():
+    events = (_event("waf-123"),)
+    with patch(_PG_TARGET, return_value=_Pg([])):
+        _enrich_high_scale_ngwaf_bots(events)
+    assert not {k for k in events[0] if "ngwaf" in k}
+
+
+def test_enrichment_failure_is_logged_not_silent(caplog: pytest.LogCaptureFixture):
+    events = (_event("req-1"),)
+    with patch(_PG_TARGET, side_effect=RuntimeError("pg down")), caplog.at_level("WARNING"):
+        _enrich_high_scale_ngwaf_bots(events)
+    assert "NGWAF bot enrichment failed" in caplog.text
+    assert "_ngwaf_bot_name" not in events[0]
+
+
+def _controller() -> tuple[HighScaleIngestController, InMemoryObjectStore, _ClickHouse, _ClickHouse]:
+    ownership = OwnershipStore()
+    ownership.initialize("svc", owner="high_scale", source_cursor="cursor-0")
+    objects = InMemoryObjectStore()
+    facts = _ClickHouse()
+    aggregates = _ClickHouse()
+    controller = HighScaleIngestController(
+        ownership=ownership,
+        ledger=HighScaleLedger(),
+        archive=ArchivePublication(objects),
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), facts),
+        aggregates=ClickHousePublication(InMemoryBatchManifestStore(), aggregates),
+        worker_id="worker-1",
+        deletion_grace_seconds=60,
+    )
+    return controller, objects, facts, aggregates
+
+
+def _ingest(controller: HighScaleIngestController) -> Any:
+    payload = gzip.compress((str(_event("req-1")).replace("'", '"') + "\n").encode())
+    desc = SourceObjectDescriptor("raw/request/one.gz", "sha256:source", len(payload), "v1")
+    return controller.ingest_batch(
+        service_id="svc",
+        domain="request",
+        sources_payloads=[(desc, payload)],
+        now=NOW_security,
+    )
+
+
+def test_ingest_persists_the_bot_on_the_fact_row_and_projects_it():
+    controller, _, facts, aggregates = _controller()
+    with patch(_PG_TARGET, return_value=_Pg([_BOT_ROW])):
+        _ingest(controller)
+
+    fact = facts.rows("request")[0]
+    assert persisted_fact_fields(fact)["ngwaf_bot"] == "bingbot"
+    projected = aggregates.rows("security_dimensions")
+    assert [(r["dimension"], r["value"], r["requests"], r["verified_count"]) for r in projected] == [
+        ("ngwaf_bot", "bingbot", 1, 1)
+    ]
+    assert projected[0]["wellknown_bot_name"] == "bing"
+    assert projected[0]["bot_category"] == "search"
+
+
+def test_archive_stays_raw_so_a_rebuild_can_enrich_against_the_current_cache():
+    controller, objects, _, aggregates = _controller()
+    with patch(_PG_TARGET, return_value=_Pg([])):
+        result = _ingest(controller)
+    assert aggregates.rows("security_dimensions") == []
+
+    archive = ArchivePublication(objects)
+    rebuilt = _ClickHouse()
+    publication = ClickHousePublication(InMemoryBatchManifestStore(), rebuilt)
+    with patch(_PG_TARGET, return_value=_Pg([_BOT_ROW])):
+        replayed = replay_security_projections(result.manifest, archive, publication, rebuild_id="drill-1")
+
+    assert (replayed.rows_read, replayed.rows_published) == (1, 1)
+    assert [b.domain for b in rebuilt.batches] == ["security_dimensions"]
+    assert rebuilt.batches[0].batch_id.startswith("rebuild-security:drill-1:")
+    assert rebuilt.rows("security_dimensions")[0]["value"] == "bingbot"
+
+
+def test_replay_publishes_nothing_when_no_event_resolves_to_a_bot():
+    controller, objects, _, _ = _controller()
+    with patch(_PG_TARGET, return_value=_Pg([])):
+        result = _ingest(controller)
+        replayed = replay_security_projections(
+            result.manifest,
+            ArchivePublication(objects),
+            ClickHousePublication(InMemoryBatchManifestStore(), _ClickHouse()),
+            rebuild_id="drill-2",
+        )
+    assert (replayed.rows_read, replayed.rows_published) == (1, 0)
+
+
+def test_rebuild_from_fos_replays_every_request_manifest_and_resumes_idempotently():
+    controller, objects, _, _ = _controller()
+    with patch(_PG_TARGET, return_value=_Pg([])):
+        result = _ingest(controller)
+    archive = ArchivePublication(objects)
+    rebuilt = _ClickHouse()
+    publication = ClickHousePublication(InMemoryBatchManifestStore(), rebuilt)
+
+    with patch(_PG_TARGET, return_value=_Pg([_BOT_ROW])):
+        first = rebuild_security_projections_from_fos(
+            _Catalog(result.manifest), archive, publication, service_id="svc", now=NOW_security + timedelta(hours=1)
+        )
+        second = rebuild_security_projections_from_fos(
+            _Catalog(result.manifest),
+            archive,
+            publication,
+            service_id="svc",
+            now=NOW_security + timedelta(hours=1),
+            rebuild_id=first.rebuild_id,
+        )
+
+    assert first.full_rebuild_complete is True
+    assert first.manifests_replayed == second.manifests_replayed == 1
+    assert first.rows_replayed == second.rows_replayed == 1
+    assert len(rebuilt.batches) == 1
+
+
+def test_rebuild_reports_a_failed_manifest_instead_of_hiding_it():
+    controller, objects, _, _ = _controller()
+    with patch(_PG_TARGET, return_value=_Pg([])):
+        result = _ingest(controller)
+    report = rebuild_security_projections_from_fos(
+        _Catalog(result.manifest),
+        ArchivePublication(InMemoryObjectStore()),
+        ClickHousePublication(InMemoryBatchManifestStore(), _ClickHouse()),
+        service_id="svc",
+        now=NOW_security + timedelta(hours=1),
+    )
+    assert report.full_rebuild_complete is False
+    assert report.manifests_replayed == 0
+    assert "failed to rebuild Security projections" in report.errors[0]
+
+
+def test_rebuild_rejects_a_non_positive_window():
+    with pytest.raises(ValueError, match="window must be positive"):
+        rebuild_security_projections_from_fos(
+            _Catalog(),
+            ArchivePublication(InMemoryObjectStore()),
+            ClickHousePublication(InMemoryBatchManifestStore(), _ClickHouse()),
+            service_id="svc",
+            window=timedelta(0),
+        )
+
+
+# ── Merged from tests/high_scale/test_cmcd.py ──
+
+"""High-scale CMCD analytics computed from ``cmcd_projection_facts`` (no hardcoded empty sections)."""
+
+
+import pytest
+from backend.core.high_scale_sections import current_clickhouse_scope
+from backend.core.query_attribution import Attribution, current_attribution
+from backend.high_scale.cmcd import cmcd_aggregates
+from backend.models.performance import CmcdAggregatesResponse, CmcdRequest
+
+from backend.high_scale import cmcd as hs_cmcd
+from backend.utils import telemetry
+
+START_cmcd = "2026-09-14T10:00:00Z"
+END_cmcd = "2026-09-14T10:15:00Z"
+ALL_SECTIONS = {
+    "overview",
+    "sessions_ts",
+    "buffer_health_ts",
+    "bitrate_ts",
+    "throughput_ts",
+    "top_content",
+    "rebuffer_by_country",
+    "rebuffer_by_asn",
+    "object_type_dist",
+    "streaming_format_dist",
+    "startup_ts",
+    "session_duration_dist",
+}
+_PRESENT = {
+    "events": 40,
+    "sessions": 4,
+    "has_bl": 1,
+    "has_br": 1,
+    "has_bs": 1,
+    "has_mtp": 1,
+    "has_ot": 1,
+    "has_sf": 1,
+    "has_su": 1,
+    "has_tb": 1,
+    "has_cid": 1,
+    "has_country": 1,
+    "has_asn": 1,
+}
+
+
+class _Client_cmcd:
+    def __init__(self, probe: dict[str, Any] | None = None) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self.scopes: list[dict] = []
+        self._probe = probe if probe is not None else _PRESENT
+
+    def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+        self.calls.append((sql, params or {}))
+        self.scopes.append(current_clickhouse_scope())
+        if "cmcd:probe" in sql:
+            return [self._probe]
+        if "cmcd:overview_peak" in sql:
+            return [{"peak_viewers": 4}]
+        if "cmcd:overview_duration" in sql:
+            return [{"avg_duration": 125.4}]
+        if "cmcd:overview" in sql:
+            return [
+                {
+                    "active_sessions": 4,
+                    "rebuffer_rate": 25.0,
+                    "avg_bitrate": 2500.126,
+                    "avg_buffer_length": 12.0,
+                    "median_throughput": 8000.0,
+                }
+            ]
+        if "cmcd:timeseries" in sql:
+            return [
+                {
+                    "bucket": "2026-09-14 10:05:00",
+                    "concurrent_sessions": 3,
+                    "rebuffer_session_pct": 33.333,
+                    "p50_buffer": 10.0,
+                    "p95_buffer": 20.0,
+                    "starvation_rate": 5.0,
+                    "avg_bitrate": 2400.0,
+                    "utilization_ratio": 0.51234,
+                    "p50_throughput": 7000.0,
+                    "p95_throughput": 9000.0,
+                    "p99_throughput": 9500.0,
+                    "startup_ratio": 2.5,
+                }
+            ]
+        if "cmcd:new_sessions" in sql:
+            return [{"bucket": "2026-09-14 10:05:00", "new_sessions": 2}]
+        if "cmcd:top_content" in sql:
+            return [
+                {"content_id": "movie-1", "session_count": 3, "rebuffer_rate": 33.33, "avg_br": 3000.0, "avg_bl": 9.5}
+            ]
+        if "cmcd:rebuffer_by_country" in sql:
+            return [{"country": "US", "rebuffer_rate": 10.0, "session_count": 3, "median_mtp": 7500.0}]
+        if "cmcd:rebuffer_by_asn" in sql:
+            return [{"asn": 7922, "rebuffer_rate": 50.0, "session_count": 2, "avg_br": 2000.0, "avg_bl": 8.0}]
+        if "cmcd:object_type_dist" in sql:
+            return [{"object_type": "v", "request_count": 30}, {"object_type": "a", "request_count": 10}]
+        if "cmcd:streaming_format_dist" in sql:
+            return [{"streaming_format": "h", "session_count": 4}]
+        if "cmcd:session_duration_dist" in sql:
+            return [{"sort_order": 2, "session_count": 1}, {"sort_order": 5, "session_count": 3}]
+        raise AssertionError(sql)
+
+
+def _request(**overrides: Any) -> CmcdRequest:
+    return CmcdRequest(**{"bucket_seconds": 300, "top_n": 10, **overrides})
+
+
+def _run(client: _Client_cmcd, req: CmcdRequest | None = None, sections: set[str] | None = None, **kwargs: Any):
+    service = SimpleNamespace(service_id="svc", client=client)
+    return cmcd_aggregates(
+        service, req or _request(), START_cmcd, END_cmcd, ALL_SECTIONS if sections is None else sections, False
+    )
+
+
+@pytest.fixture()
+def _asn_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(hs_cmcd, "_asn_names", lambda service_id, asns: {7922: "Comcast Cable Communications"})
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_probe_and_multicall_overview_share_explicit_projected_fact_ownership() -> None:
+    client = _Client_cmcd()
+    result = _run(client, sections={"overview"})
+    assert len(client.calls) == 4
+    assert [row["section"] for row in client.scopes] == [
+        "cmcd.probe",
+        "cmcd.overview",
+        "cmcd.overview",
+        "cmcd.overview",
+    ]
+    assert all(row["source"] == "projected_fact" and row["service_id"] == "svc" for row in client.scopes)
+    assert len({row["section_id"] for row in client.scopes[1:]}) == 1
+    assert len(result["section_timings"]) == 2
+    assert result["section_timings"][0]["section"] == "cmcd.probe"
+    hit = _run(client, sections={"overview"})
+    assert len(client.calls) == 4
+    assert hit["_response_cache"]["state"] == "hit"
+    assert "section_timings" not in hit
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_no_cmcd_events_in_the_window_reports_no_data_after_a_single_probe() -> None:
+    client = _Client_cmcd(probe={**_PRESENT, "events": 0, "sessions": 0})
+
+    result = _run(client)
+    timings = result.pop("section_timings")
+    assert len(timings) == 1
+    assert timings[0]["section"] == "cmcd.probe"
+    assert timings[0]["source"] == "projected_fact"
+    assert timings[0]["outcome"] == "success"
+
+    assert result == {
+        "available": True,
+        "has_data": False,
+        "is_cached": False,
+        "_response_cache": {"state": "miss", "ttl_seconds": 30.0, "prewarmer": False, "single_flight": "leader"},
+    }
+    hit = _run(client)
+    assert hit["_response_cache"]["state"] == "hit"
+    assert hit["is_cached"] is True
+    assert len(client.calls) == 1
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_every_section_is_computed_from_the_projection() -> None:
+    result = _run(_Client_cmcd())
+
+    assert result["available"] is True and result["has_data"] is True
+    assert result["overview"] == {
+        "active_sessions": 4,
+        "rebuffer_rate": 25.0,
+        "avg_bitrate": 2500.13,
+        "avg_buffer_length": 12.0,
+        "median_throughput": 8000.0,
+        "peak_viewers": 4,
+        "avg_session_duration": 125,
+    }
+    assert result["top_content"] == [
+        {
+            "content_id": "movie-1",
+            "session_count": 3,
+            "rebuffer_rate": 33.33,
+            "avg_bitrate": 3000.0,
+            "avg_buffer_length": 9.5,
+        }
+    ]
+    assert result["rebuffer_by_country"] == [
+        {"country": "US", "rebuffer_rate": 10.0, "session_count": 3, "median_throughput": 7500.0}
+    ]
+    assert result["rebuffer_by_asn"] == [
+        {
+            "asn": 7922,
+            "label": "Comcast Cable Communications (7922)",
+            "rebuffer_rate": 50.0,
+            "session_count": 2,
+            "avg_bitrate": 2000.0,
+            "avg_buffer_length": 8.0,
+        }
+    ]
+    assert result["object_type_dist"] == [
+        {"object_type": "v", "request_count": 30},
+        {"object_type": "a", "request_count": 10},
+    ]
+    assert result["streaming_format_dist"] == [{"streaming_format": "h", "session_count": 4}]
+    assert result["session_duration_dist"] == [
+        {"duration_bucket": "30s–2m", "session_count": 1},
+        {"duration_bucket": "10–30m", "session_count": 3},
+    ]
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_time_series_are_padded_to_every_bucket_in_the_window() -> None:
+    result = _run(_Client_cmcd())
+
+    buckets = [point["bucket"] for point in result["sessions_ts"]]
+    assert buckets == [
+        "2026-09-14 10:00:00",
+        "2026-09-14 10:05:00",
+        "2026-09-14 10:10:00",
+        "2026-09-14 10:15:00",
+    ]
+    assert result["sessions_ts"][1] == {
+        "bucket": "2026-09-14 10:05:00",
+        "concurrent_sessions": 3,
+        "rebuffer_session_pct": 33.33,
+        "new_sessions": 2,
+    }
+    assert result["sessions_ts"][0] == {
+        "bucket": "2026-09-14 10:00:00",
+        "concurrent_sessions": 0,
+        "rebuffer_session_pct": None,
+        "new_sessions": 0,
+    }
+    assert result["buffer_health_ts"][1] == {
+        "bucket": "2026-09-14 10:05:00",
+        "p50_buffer": 10.0,
+        "p95_buffer": 20.0,
+        "starvation_rate": 5.0,
+    }
+    assert result["bitrate_ts"][1]["utilization_ratio"] == 0.51
+    assert result["throughput_ts"][1] == {"bucket": "2026-09-14 10:05:00", "p50": 7000.0, "p95": 9000.0, "p99": 9500.0}
+    assert result["startup_ts"][1] == {"bucket": "2026-09-14 10:05:00", "startup_ratio": 2.5}
+    assert result["startup_ts"][3] == {"bucket": "2026-09-14 10:15:00", "startup_ratio": None}
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_the_four_time_series_share_one_scan() -> None:
+    client = _Client_cmcd()
+
+    _run(client, sections={"sessions_ts", "buffer_health_ts", "bitrate_ts", "throughput_ts", "startup_ts"})
+
+    assert [sql for sql, _ in client.calls if "cmcd:timeseries" in sql] != []
+    assert len([sql for sql, _ in client.calls if "cmcd:timeseries" in sql]) == 1
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_only_requested_sections_are_queried() -> None:
+    client = _Client_cmcd()
+
+    result = _run(client, sections={"object_type_dist"})
+
+    assert [sql.split("*/")[0].split("/*")[1].strip() for sql, _ in client.calls] == [
+        "cmcd:probe",
+        "cmcd:object_type_dist",
+    ]
+    assert "overview" not in result and "top_content" not in result
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_sections_that_need_an_absent_cmcd_key_are_omitted_like_the_standard_path() -> None:
+    client = _Client_cmcd(probe={**_PRESENT, "has_bs": 0, "has_br": 0, "has_cid": 0, "has_country": 0, "has_asn": 0})
+
+    result = _run(client)
+
+    assert "top_content" not in result
+    assert "rebuffer_by_country" not in result
+    assert "rebuffer_by_asn" not in result
+    assert "bitrate_ts" not in result
+    assert result["overview"]["rebuffer_rate"] is None
+    assert result["overview"]["avg_bitrate"] is None
+    assert result["overview"]["avg_buffer_length"] == 12.0
+    markers = " ".join(sql for sql, _ in client.calls)
+    assert "cmcd:top_content" not in markers and "cmcd:rebuffer_by_country" not in markers
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_all_queries_are_scoped_to_the_service_published_batches_and_window() -> None:
+    client = _Client_cmcd()
+
+    _run(client)
+
+    for sql, params in client.calls:
+        assert "FROM cmcd_projection_facts" in sql
+        assert "service_id={service_id:String}" in sql
+        assert "publication_state='visible'" in sql
+        assert "high_scale_batch_publications FINAL" in sql and "domain='cmcd'" in sql
+        assert params["service_id"] == "svc"
+        assert "event_timestamp >= {start:DateTime64(3)}" in sql
+        assert "event_timestamp <= {end:DateTime64(3)}" in sql
+    assert any(params.get("bucket_seconds") == 300 for _, params in client.calls)
+    assert any(params.get("top_n") == 10 for _, params in client.calls)
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_country_and_asn_filters_are_applied_not_dropped() -> None:
+    client = _Client_cmcd()
+    req = _request(
+        filters={
+            "country": {"mode": "include", "values": ["US", "CA"]},
+            "asn": {"mode": "exclude", "values": ["7922"]},
+        }
+    )
+
+    _run(client, req, sections={"overview"})
+
+    for sql, params in client.calls:
+        assert "country IN ({flt_0_0:String}, {flt_0_1:String})" in sql
+        assert "asn NOT IN ({flt_1_0:UInt32})" in sql
+        assert params["flt_0_0"] == "US" and params["flt_0_1"] == "CA"
+        assert params["flt_1_0"] == 7922
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_filters_the_projection_cannot_honour_raise_instead_of_being_ignored() -> None:
+    with pytest.raises(ValueError, match="url"):
+        _run(_Client_cmcd(), _request(filters={"url": {"mode": "include", "values": ["/a"]}}))
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_non_numeric_asn_filter_values_are_rejected() -> None:
+    with pytest.raises(ValueError, match="asn"):
+        _run(_Client_cmcd(), _request(filters={"asn": {"mode": "include", "values": ["AS7922"]}}))
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_output_validates_against_the_standard_response_model() -> None:
+    result = _run(_Client_cmcd())
+
+    model = CmcdAggregatesResponse.model_validate(result)
+
+    assert model.overview is not None and model.overview.peak_viewers == 4
+    assert model.rebuffer_by_asn[0].label.endswith("(7922)")
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_probe_failures_surface_instead_of_becoming_empty_charts() -> None:
+    class _Down(_Client_cmcd):
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            raise RuntimeError("clickhouse unavailable")
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        _run(_Down())
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_bucket_labels_use_the_clickhouse_minute_specifier() -> None:
+    client = _Client_cmcd()
+
+    _run(client, sections={"sessions_ts"})
+
+    timeseries = next(sql for sql, _ in client.calls if "cmcd:timeseries" in sql)
+    assert "'%Y-%m-%d %H:%i:%S'" in timeseries
+    assert "%M" not in timeseries
+
+
+# ── Merged from test_cmcd_projection_wiring.py ───────────────────────
+
+import json
+import logging
+from datetime import UTC, datetime
+from unittest.mock import MagicMock
+
+from backend.high_scale.archive_models import ArchiveState
+
+from backend.high_scale.publication import (
+    _rows_for_domain,
+    build_batch_id_from_manifest_id,
+    build_cmcd_projection_key,
+)
+
+
+class _ClickHouse_cmcd:
+    def __init__(self, *, fail_domains: tuple[str, ...] = ()) -> None:
+        self.batches: list[HighScaleBatch] = []
+        self._fail_domains = fail_domains
+
+    def insert(self, batch: HighScaleBatch) -> InsertReceipt:
+        if batch.domain in self._fail_domains:
+            raise RuntimeError(f"insert failed for {batch.domain}")
+        self.batches.append(batch)
+        return InsertReceipt(batch.batch_id, len(batch.rows), batch.digest)
+
+    def by_domain(self, domain: str) -> list[HighScaleBatch]:
+        return [b for b in self.batches if b.domain == domain]
+
+
+def _controller_cmcd(clickhouse: _ClickHouse_cmcd, *, control=None) -> HighScaleIngestController:
+    ownership = OwnershipStore()
+    ownership.initialize("svc", owner="high_scale", source_cursor="cursor-0")
+    return HighScaleIngestController(
+        ownership=ownership,
+        ledger=HighScaleLedger(),
+        archive=ArchivePublication(InMemoryObjectStore()),
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
+        control_plane=control,
+        worker_id="worker-1",
+        deletion_grace_seconds=60,
+    )
+
+
+def _payload(*lines: dict) -> bytes:
+    return gzip.compress("\n".join(json.dumps(line) for line in lines).encode())
+
+
+_CMCD_LINE = {"timestamp": "2026-09-11T20:00:00Z", "url": "/seg/1.m4s", "cmcd_br": "1200", "cmcd_sid": "sess-1"}
+_PLAIN_LINE = {"timestamp": "2026-09-11T20:00:01Z", "url": "/index.html"}
+
+
+def _ingest_cmcd(controller: HighScaleIngestController, *lines: dict, domain: str = "request"):
+    payload = _payload(*lines)
+    desc = SourceObjectDescriptor("raw/request/one.gz", "sha256:one", len(payload), "v1")
+    return controller.ingest_batch(
+        service_id="svc",
+        domain=domain,
+        sources_payloads=[(desc, payload)],
+        now=datetime(2026, 9, 11, 20, 0, tzinfo=UTC),
+    )
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_request_ingest_publishes_cmcd_projection_rows_for_cmcd_events_only() -> None:
+    clickhouse = _ClickHouse_cmcd()
+
+    result = _ingest_cmcd(_controller_cmcd(clickhouse), _CMCD_LINE, _PLAIN_LINE)
+
+    assert result.publication.rows_visible == 2
+    (request_batch,) = clickhouse.by_domain("request")
+    (cmcd_batch,) = clickhouse.by_domain("cmcd")
+    cmcd_event = next(row for row in request_batch.rows if row["cmcd"])
+    (projection,) = cmcd_batch.rows
+    assert projection["request_event_id"] == cmcd_event["event_id"]
+    assert projection["projection_key"] == build_cmcd_projection_key({"request_event_id": cmcd_event["event_id"]})
+    assert projection["fields"]["br"] == "1200"
+    assert projection["service_id"] == "svc"
+    assert cmcd_batch.generation == request_batch.generation
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_projection_rows_are_accepted_by_the_cmcd_fact_table_mapping() -> None:
+    clickhouse = _ClickHouse_cmcd()
+    _ingest_cmcd(_controller_cmcd(clickhouse), _CMCD_LINE)
+
+    (cmcd_batch,) = clickhouse.by_domain("cmcd")
+
+    (row,) = _rows_for_domain(cmcd_batch, "00000000-0000-0000-0000-000000000001")
+    assert row[0] == "svc"
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_requests_without_cmcd_fields_publish_no_projection_batch() -> None:
+    clickhouse = _ClickHouse_cmcd()
+
+    _ingest_cmcd(_controller_cmcd(clickhouse), _PLAIN_LINE)
+
+    assert clickhouse.by_domain("cmcd") == []
+    assert len(clickhouse.by_domain("request")) == 1
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_non_request_domains_do_not_project_cmcd() -> None:
+    clickhouse = _ClickHouse_cmcd()
+    line = {"timestamp": "2026-09-11T20:00:00Z", "metric_name": "LCP", "metric_value": 1.5, "cmcd_br": "1"}
+
+    _ingest_cmcd(_controller_cmcd(clickhouse), line, domain="rum_vitals")
+
+    assert clickhouse.by_domain("cmcd") == []
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_projection_failure_never_fails_the_request_ingest(caplog: pytest.LogCaptureFixture) -> None:
+    clickhouse = _ClickHouse_cmcd(fail_domains=("cmcd",))
+
+    with caplog.at_level(logging.ERROR, logger="backend.high_scale.ingest_controller"):
+        result = _ingest_cmcd(_controller_cmcd(clickhouse), _CMCD_LINE)
+
+    assert result.publication.rows_visible == 1
+    assert len(clickhouse.by_domain("request")) == 1
+    assert any("cmcd projection publish failed" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_republishing_the_same_batch_id_is_idempotent() -> None:
+    clickhouse = _ClickHouse_cmcd()
+    controller = _controller_cmcd(clickhouse)
+    events = [{"event_id": "evt-1", "service_id": "svc", "timestamp": "2026-09-11T20:00:00Z", "cmcd": {"br": "1"}}]
+
+    controller._publish_cmcd_projection("svc", "batch-1", 1, events)
+    controller._publish_cmcd_projection("svc", "batch-1", 1, events)
+
+    assert len(clickhouse.by_domain("cmcd")) == 1
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_malformed_events_are_skipped_without_losing_valid_ones(caplog: pytest.LogCaptureFixture) -> None:
+    clickhouse = _ClickHouse_cmcd()
+    controller = _controller_cmcd(clickhouse)
+    good = {"event_id": "evt-1", "service_id": "svc", "timestamp": "2026-09-11T20:00:00Z", "cmcd": {"br": "1"}}
+    not_a_mapping = {"event_id": "evt-2", "service_id": "svc", "timestamp": "2026-09-11T20:00:01Z", "cmcd": "br=1"}
+    no_event_id = {"service_id": "svc", "timestamp": "2026-09-11T20:00:02Z", "cmcd": {"br": "1"}}
+
+    with caplog.at_level(logging.WARNING, logger="backend.high_scale.ingest_controller"):
+        controller._publish_cmcd_projection("svc", "batch-2", 1, [good, not_a_mapping, no_event_id])
+
+    (cmcd_batch,) = clickhouse.by_domain("cmcd")
+    assert [row["request_event_id"] for row in cmcd_batch.rows] == ["evt-1"]
+    assert any(getattr(r, "skipped", None) == 2 for r in caplog.records)
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_batch_ingest_publishes_a_manifest_scoped_cmcd_batch() -> None:
+    control = MagicMock()
+    control.owner.return_value = MagicMock(current_owner="high_scale", owner_epoch=1)
+    control.register_archive_manifest.return_value = MagicMock(state=ArchiveState.ARTIFACT_UPLOADING)
+    control.archive_manifest.side_effect = KeyError("not found yet")
+    clickhouse = _ClickHouse_cmcd()
+    controller = _controller_cmcd(clickhouse, control=control)
+    sources = []
+    for index, line in enumerate((_CMCD_LINE, _PLAIN_LINE, {**_CMCD_LINE, "url": "/seg/2.m4s"})):
+        payload = _payload(line)
+        descriptor = MagicMock(object_key=f"raw/request/part_{index}.gz", checksum=f"sha256:{index}", version="v1")
+        descriptor.size_bytes = len(payload)
+        sources.append((descriptor, payload))
+
+    result = controller.ingest_batch(service_id="svc", domain="request", sources_payloads=sources, next_cursor="c-3")
+
+    (cmcd_batch,) = clickhouse.by_domain("cmcd")
+    assert cmcd_batch.batch_id == build_batch_id_from_manifest_id(f"{result.manifest.manifest_id}:cmcd")
+    assert len(cmcd_batch.rows) == 2
+    assert len(clickhouse.by_domain("request")[0].rows) == 3
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_probe_and_asn_enrichment_are_disjoint_overhead(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [0.0]
+    lookup_scopes: list[dict[str, Any]] = []
+    monkeypatch.setattr("backend.core.high_scale_sections.time.perf_counter", lambda: clock[0])
+
+    class TimedClient(_Client_cmcd):
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            clock[0] += 0.01 if "cmcd:probe" in sql else 0.02
+            return super().execute(sql, params)
+
+    def names(service_id: str, asns: list[int]) -> dict[int, str]:
+        assert service_id == "svc" and asns == [7922]
+        lookup_scopes.append(current_clickhouse_scope())
+        clock[0] += 0.03
+        return {7922: "Example Network"}
+
+    monkeypatch.setattr(hs_cmcd, "_asn_names", names)
+    client = TimedClient()
+    result = _run(client, sections={"rebuffer_by_asn"})
+    timings = {row["section"]: row for row in result["section_timings"]}
+    assert set(timings) == {"cmcd.probe", "cmcd.rebuffer_asn", "cmcd.asn_labels"}
+    assert timings["cmcd.probe"]["activity"] == "overhead"
+    assert timings["cmcd.probe"]["time_ms"] == pytest.approx(10)
+    assert timings["cmcd.rebuffer_asn"]["activity"] == "compute"
+    assert timings["cmcd.rebuffer_asn"]["time_ms"] == pytest.approx(20)
+    assert timings["cmcd.asn_labels"]["activity"] == "overhead"
+    assert timings["cmcd.asn_labels"]["time_ms"] == pytest.approx(30)
+    assert timings["cmcd.asn_labels"]["source"] == "unknown"
+    assert lookup_scopes[0]["section_id"] == timings["cmcd.asn_labels"]["section_id"]
+    assert all(row["parent_section_id"] is None for row in timings.values())
+    assert all(row["timing_kind"] == "client_section_wall" and row["server_cpu_ms"] is None for row in timings.values())
+    assert all(row["source"] == "projected_fact" for row in client.scopes)
+    assert {row["section_id"] for row in client.scopes} == {
+        timings["cmcd.probe"]["section_id"],
+        timings["cmcd.rebuffer_asn"]["section_id"],
+    }
+    assert result["rebuffer_by_asn"][0]["label"] == "Example Network (7922)"
+    assert result["_response_cache"]["state"] == "miss"
+    assert result["_response_cache"]["single_flight"] == "leader"
+    hit = _run(client, sections={"rebuffer_by_asn"})
+    assert hit["_response_cache"]["state"] == "hit"
+    assert hit["_response_cache"]["ttl_seconds"] == pytest.approx(hs_cmcd._memo.cache.ttl)
+    assert hit["_response_cache"]["prewarmer"] is False
+    assert "section_timings" not in hit
+    assert len(lookup_scopes) == 1 and len(client.calls) == 2
+    assert current_clickhouse_scope()["section_id"] is None
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_asn_enrichment_failure_is_overhead_and_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    observations: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "backend.core.high_scale_sections._logger.info", lambda event, **entry: observations.append(entry)
+    )
+
+    def fails(service_id: str, asns: list[int]) -> dict[int, str]:
+        raise RuntimeError("metadata unavailable")
+
+    monkeypatch.setattr(hs_cmcd, "_asn_names", fails)
+    client = _Client_cmcd()
+    with pytest.raises(RuntimeError, match="metadata unavailable"):
+        _run(client, sections={"rebuffer_by_asn"})
+    by_section = {row["section"]: row for row in observations}
+    assert by_section["cmcd.rebuffer_asn"]["outcome"] == "success"
+    assert by_section["cmcd.asn_labels"]["outcome"] == "error"
+    assert by_section["cmcd.asn_labels"]["activity"] == "overhead"
+    assert current_clickhouse_scope()["section_id"] is None
+    assert len(hs_cmcd._memo.cache) == 0
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_all_cmcd_tasks_preserve_request_and_page_correlation() -> None:
+    client = _Client_cmcd()
+    request_token = current_attribution.set(Attribution(kind="admin", request_id="request-cmcd"))
+    page_token = telemetry._PAGE_LOAD_ID.set("page-cmcd")
+    try:
+        result = _run(client)
+    finally:
+        telemetry._PAGE_LOAD_ID.reset(page_token)
+        current_attribution.reset(request_token)
+    timings = {row["section_id"]: row for row in result["section_timings"]}
+    assert {row["section"] for row in timings.values()} == {
+        "cmcd.probe",
+        "cmcd.overview",
+        "cmcd.timeseries",
+        "cmcd.top_content",
+        "cmcd.rebuffer_country",
+        "cmcd.rebuffer_asn",
+        "cmcd.object_type",
+        "cmcd.streaming_format",
+        "cmcd.session_duration",
+        "cmcd.asn_labels",
+    }
+    for scope in client.scopes:
+        section = timings[scope["section_id"]]
+        assert section["section"] == scope["section"]
+        assert section["request_id"] == scope["request_id"] == "request-cmcd"
+        assert section["page_load_id"] == scope["page_load_id"] == "page-cmcd"
+        assert section["service_id"] == scope["service_id"] == "svc"
+        assert section["source"] == scope["source"] == "projected_fact"
+        assert section["server_cpu_ms"] is None
+    assert (
+        timings[next(row["section_id"] for row in client.scopes if row["section"] == "cmcd.timeseries")][
+            "executor_dispatch"
+        ]
+        == "thread_pool"
+    )
+    assert current_clickhouse_scope()["section_id"] is None
+
+
+import sys as _sys  # noqa: E402
+
+_security_cases = SimpleNamespace(
+    START=START,
+    END=END,
+    _Client=_Client,
+    _service=_service,
+    _req=_req,
+)
+_cmcd_cases = SimpleNamespace(
+    START=START_cmcd,
+    END=END_cmcd,
+    _Client=_Client_cmcd,
+    _request=_request,
+    _run=_run,
+)
+_sys.modules.setdefault("tests.high_scale.test_security", _security_cases)  # type: ignore[arg-type]
+_sys.modules.setdefault("tests.high_scale.test_cmcd", _cmcd_cases)  # type: ignore[arg-type]

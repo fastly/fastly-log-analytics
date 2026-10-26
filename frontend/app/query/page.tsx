@@ -5,8 +5,7 @@ import { useQueryStates } from 'nuqs'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { useShallow } from 'zustand/react/shallow'
 import type { ColumnDef, SortingState } from '@tanstack/react-table'
-import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api'
+import { client, unwrapClient, queryKeys } from "@/lib/api";
 import { useFilterStore } from '@/stores/filterStore'
 import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useBootstrap'
 import { useDebouncedFilterPayload } from '@/hooks/useDashboardCards'
@@ -33,7 +32,6 @@ import {
   StructuredMode,
   ResultsTable,
 } from './_sections/QueryToolbar'
-import { queryKeys } from '@/lib/query-keys'
 import type { components } from '@/types/api.generated'
 
 type QueryResponse = components['schemas']['QueryResponse']

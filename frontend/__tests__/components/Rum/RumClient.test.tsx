@@ -27,8 +27,7 @@ import {
   createUseSSEMock,
 } from '../../helpers/page-smoke'
 import { server } from '@/__tests__/helpers/msw/handlers'
-import { getApiBase } from '@/lib/api'
-import { queryKeys } from '@/lib/query-keys'
+import { getApiBase, queryKeys } from "@/lib/api";
 import { useServiceStore } from '@/stores/filterStore'
 import RumPageClient, { RumFaroVersionCard, RumStatusPanel } from '@/app/rum/_sections/RumClient'
 import { RumSettingsDialog } from '@/components/Rum/RumSettingsDialog'

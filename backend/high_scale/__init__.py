@@ -1,7 +1,6 @@
 """Portable high-scale data-plane contracts and pure transformations."""
 
 import sys as _sys
-from pathlib import Path as _Path
 
 _backend_pkg = _sys.modules.get("backend")
 if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
@@ -16,6 +15,11 @@ if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
             "backend.high_scale.insights": "backend.high_scale.query_service",
             "backend.high_scale.sessions": "backend.high_scale.query_service",
             "backend.high_scale.aggregate_query": "backend.high_scale.query_service",
+            "backend.high_scale.performance": "backend.high_scale.query_service",
+            "backend.high_scale.performance_projection": "backend.high_scale.query_service",
+            "backend.high_scale.cmcd": "backend.high_scale.query_service",
+            "backend.high_scale._common": "backend.high_scale.ingest_controller",
+            "backend.high_scale._filters": "backend.high_scale.ingest_controller",
             "backend.high_scale.worker": "backend.high_scale.ingest_controller",
             "backend.high_scale.recovery": "backend.high_scale.ingest_controller",
             "backend.high_scale.assets": "backend.high_scale.ingest_controller",
@@ -23,11 +27,7 @@ if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
             "backend.high_scale.registry_bootstrap": "backend.high_scale.ingest_controller",
         }
     )
-    if (_Path(__file__).parent / "performance.py").exists():
-        _backend_pkg._MODULE_ALIASES.pop("backend.high_scale.performance", None)
-        _backend_pkg._MODULE_ALIASES["backend.high_scale.performance_projection"] = "backend.high_scale.performance"
 
-from backend.high_scale import _common as _common  # noqa: E402  # registers _filters alias
 from backend.high_scale import archive as archive  # noqa: E402
 from backend.high_scale import archive as archive_models  # noqa: E402
 from backend.high_scale import archive as archive_publication  # noqa: E402
@@ -35,6 +35,8 @@ from backend.high_scale import archive as archive_writer  # noqa: E402
 from backend.high_scale import archive as disk_sampler  # noqa: E402
 from backend.high_scale import archive as models  # noqa: E402
 from backend.high_scale import archive as retention_watermark  # noqa: E402
+from backend.high_scale import ingest_controller as _common  # noqa: E402
+from backend.high_scale import ingest_controller as _filters  # noqa: E402
 from backend.high_scale import ingest_controller as aggregate_batch_adapter  # noqa: E402
 from backend.high_scale import ingest_controller as assets  # noqa: E402
 from backend.high_scale import ingest_controller as ingest_controller  # noqa: E402
@@ -43,7 +45,10 @@ from backend.high_scale import ingest_controller as registry_bootstrap  # noqa: 
 from backend.high_scale import ingest_controller as worker  # noqa: E402
 from backend.high_scale import publication as schema  # noqa: E402
 from backend.high_scale import query_service as aggregate_query  # noqa: E402
+from backend.high_scale import query_service as cmcd  # noqa: E402
 from backend.high_scale import query_service as insights  # noqa: E402
+from backend.high_scale import query_service as performance  # noqa: E402
+from backend.high_scale import query_service as performance_projection  # noqa: E402
 from backend.high_scale import query_service as query_service  # noqa: E402
 from backend.high_scale import query_service as sessions  # noqa: E402
 from backend.high_scale.archive import (  # noqa: E402
@@ -81,6 +86,8 @@ __all__ = [
     "RetentionRecommendation",
     "ServiceProfile",
     "StorageProfile",
+    "_common",
+    "_filters",
     "aggregate_batch_adapter",
     "aggregate_query",
     "archive",
@@ -88,6 +95,7 @@ __all__ = [
     "archive_publication",
     "archive_writer",
     "assets",
+    "cmcd",
     "compute_dimension_counts",
     "disk_sampler",
     "get_high_scale_service_registry",
@@ -95,6 +103,8 @@ __all__ = [
     "insights",
     "install_clickhouse_schema",
     "models",
+    "performance",
+    "performance_projection",
     "query_service",
     "recommend_retention",
     "recovery",

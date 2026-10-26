@@ -23,10 +23,7 @@ from typing import Any
 # log filters in tests (and downstream parsers) keep working after
 # the carve. Every job module also imports this logger.
 logger = logging.getLogger("backend.scheduler")
-
-
 # ── Helpers / shared state & Decorators (folded from backend.cron.decorators) ─
-
 import concurrent.futures  # noqa: E402
 from functools import wraps  # noqa: E402
 from types import TracebackType  # noqa: E402
@@ -99,7 +96,6 @@ def dev_mode_no_crons() -> bool:
 # cannot safely kill a thread that owns DuckDB/FOS resources, and abandoning it
 # leaves those resources active while the next tick starts.
 _CRON_HARD_CAP_S = 300
-
 # Shared watchdog executor (see _watchdog_executor below). Sized >= APScheduler's
 # default pool (10) so concurrent cron bodies never queue behind each other here;
 # each job is max_instances=1 and the global_job crons don't use this path.
@@ -140,7 +136,6 @@ def cron_task(name: str, job_name: str | None = None):
                         flush_usage_log(service_id)
 
             cap = _CRON_HARD_CAP_S
-
             with CronHeartbeat(service_id, job_name):
                 fut = _get_watchdog_executor().submit(_body)
                 try:
@@ -250,7 +245,6 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
         self.progress_task = progress_task or task
         self.backstop_summary = backstop_summary
         self.backstop_error_message = backstop_error_message
-
         self.result: Any = None
         self.skipped: bool = False
         self.skip_reason: str | None = None
@@ -285,7 +279,6 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
                 self.skipped = True
                 self.skip_reason = "source not found"
                 return self
-
         if self._run_id is None:
             try:
                 self._run_id = start_cron_run(self._source, self.task)
@@ -294,7 +287,6 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
                 self.skip_reason = str(e)
                 self._log_skip(e)
                 return self
-
         self._start_time = time.time()
         try:
             from backend.cron_progress import cleanup_progress_and_reap, start_progress
@@ -327,7 +319,6 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
 
         if self._source is None:
             return
-
         log_output = _extract_log_text(self._run_id) if (self.include_log_output and self._run_id is not None) else None
         log_cron_run(
             self._source,
@@ -463,11 +454,9 @@ def _resolve_rum_sync_interval(rum_cfg: dict[str, Any], cfg: dict[str, Any], def
             return max(5, int(rum_cfg["sync_interval_seconds"]))
         except (ValueError, TypeError):
             pass
-
     rum_log_period = rum_cfg.get("log_period")
     if rum_log_period is None:
         rum_log_period = cfg.get("rum_log_period")
-
     if rum_log_period is not None:
         try:
             period_val = int(rum_log_period)
@@ -476,7 +465,6 @@ def _resolve_rum_sync_interval(rum_cfg: dict[str, Any], cfg: dict[str, Any], def
             return max(5, period_val)
         except (ValueError, TypeError):
             pass
-
     return max(5, int(default_request_interval))
 
 
@@ -572,8 +560,6 @@ def _extract_log_text(run_id: int | None) -> str:
 
 
 # ── Telemetry colors / icons ──────────────────────────────────────────────────
-
-
 JOB_COLORS = {
     "sync": "\x1b[94m",  # Bright Blue
     "commit": "\x1b[95m",  # Bright Magenta
@@ -586,7 +572,6 @@ JOB_COLORS = {
     "usage_log": "\x1b[32m",  # Green
 }
 RESET_COLOR = "\x1b[0m"
-
 TYPE_ICONS = {
     "error": "❌ ",  # Added trailing space to prevent terminal width collision
     "warning": "⚠️ ",
@@ -621,7 +606,6 @@ def _log_and_add_progress(
     msg = event.get("message")
     if msg:
         display = get_service_display_label(service_id)
-
         t = event.get("type", "info")
         # type="status" events are per-phase timing messages (e.g.
         # "1.8s usage_log phase: 43ms"). They power the cron-progress
@@ -631,20 +615,16 @@ def _log_and_add_progress(
         # logger emit is skipped for status. info/warning/error still log.
         if t == "status":
             return
-
         c = JOB_COLORS.get(job_name, "")
         c_end = RESET_COLOR if c else ""
-
         # If type is just 'info', see if the job_name has a specific icon
         if t == "info" and job_name in TYPE_ICONS:
             icon = TYPE_ICONS[job_name]
         else:
             icon = TYPE_ICONS.get(t, "ℹ️ ")
-
         display_job_name = job_name
         if display_job_name == "sync":
             display_job_name = "log_discovery"
-
         prefix = f"{icon}{c}[{display_job_name}]{c_end}"
         # Read the logger from module globals at call time so tests that
         # ``patch("backend.cron.scheduler.logger")`` intercept these calls.
@@ -658,8 +638,6 @@ def _log_and_add_progress(
 
 
 # ── Disk + buffer-backlog probes ──────────────────────────────────────────────
-
-
 # Hard threshold: below this, ingest will refuse to start. A typical
 # .gz raw log batch can land 50-200 MB on disk before commit drains it,
 # and the iceberg manifest cache adds more. 500 MB is conservative
@@ -751,8 +729,6 @@ def _check_buffer_backlog(src: dict, service_id: str, commit_interval_mins: int)
 
 
 # ── Scheduler class + global singleton ────────────────────────────────────────
-
-
 class Scheduler:
     """Thin wrapper around APScheduler's BackgroundScheduler."""
 
@@ -770,7 +746,6 @@ class Scheduler:
         self._job_ids: dict[str, str] = {}  # job_id -> job_id
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
-
     def start(self) -> None:
         """Start the scheduler and register jobs for all configured services."""
         if dev_mode_no_crons():
@@ -790,13 +765,11 @@ class Scheduler:
                 len(self._job_ids),
             )
             return
-
         from backend.cron.jobs.metadata import _run_metadata_sync
 
         self._sync_jobs()
         self._sched.start()
         logger.info("🟢 [scheduler] Started (pid: %d). %d job(s) registered.", os.getpid(), len(self._job_ids))
-
         # Initial metadata sync for analyst (read_only) services only.
         from backend import config as svcconfig
         from backend.core.duckdb import get_source_for_service, is_configured
@@ -808,15 +781,12 @@ class Scheduler:
 
         warm_enabled = _pool_warm_at_boot_enabled()
         warm_count = _pool_warm_at_boot_count() if warm_enabled else 0
-
         for cfg in svcconfig.list_configs():
             service_id = cfg.get("service_id")
             if not service_id:
                 continue
-
             prov = cfg.get("provisioning", {})
             sync_cfg = prov.get("cron_sync", {})
-
             # ONLY trigger initial sync if enabled and it's a read-only analyst service
             if cfg.get("access_level") == "read_only" and sync_cfg.get("enabled", True):
                 try:
@@ -826,7 +796,6 @@ class Scheduler:
                     )
                 except Exception:
                     pass
-
             # Optional: pre-acquire pool connections so the first request
             # per service finds warm slots. Gated by DUCKDB_POOL_WARM_AT_BOOT
             # (default off) so a slow cold-build can't show up as an
@@ -869,7 +838,6 @@ class Scheduler:
         logger.info("[scheduler] Stopped.")
 
     # ── Job management ────────────────────────────────────────────────────────
-
     def _register_once_job(
         self,
         job_id: str,
@@ -1012,7 +980,6 @@ class Scheduler:
         prov = cfg.get("provisioning", {})
         compact_cfg = prov.get("cron_compact", {})
         tag = "(dev-local) " if dev_local else ""
-
         lc_job_id = f"local_compact_{service_id}"
         lc_interval_mins = max(1, int(os.environ.get("LOCAL_COMPACT_INTERVAL_MIN", "2")))
         self._register_once_job(
@@ -1030,7 +997,6 @@ class Scheduler:
             args=[service_id],
             misfire_grace_time=60,
         )
-
         if partial_hour_merge_enabled():
             ph_job_id = f"partial_hour_merge_{service_id}"
             ph_interval_sec = partial_hour_merge_interval_sec()
@@ -1049,7 +1015,6 @@ class Scheduler:
                 args=[service_id],
                 misfire_grace_time=60,
             )
-
         if compact_cfg.get("enabled", True) and prov.get("access_level") != "read_only":
             rc_job_id = f"rollup_compact_{service_id}"
             self._register_once_job(
@@ -1066,7 +1031,6 @@ class Scheduler:
                 args=[service_id],
                 misfire_grace_time=3600,
             )
-
             rh_job_id = f"rollup_heal_{service_id}"
             self._register_once_job(
                 rh_job_id,
@@ -1090,7 +1054,6 @@ class Scheduler:
         if not dev_local_crons_enabled():
             logger.warning("🚫 [scheduler] FLA_DEV_LOCAL_CRONS=0 — no dev-local-safe jobs registered.")
             return
-
         from backend import config as svcconfig
         from backend.core.duckdb import get_source_for_service, is_configured
         from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
@@ -1108,11 +1071,9 @@ class Scheduler:
                     "⏭️  [scheduler] (dev-local) Skipping legacy local jobs for high-scale service %s.", service_id
                 )
                 continue
-
             prov = cfg.get("provisioning", {})
             self._sync_local_compaction_jobs(service_id, cfg, dev_local=True)
             self._register_insights_prewarmer_job(service_id, seen_ids, prov)
-
         self._register_metric_snapshot_job()
         self._register_recycle_job()
 
@@ -1135,22 +1096,18 @@ class Scheduler:
 
         configs = svcconfig.list_configs()
         seen_ids: set[str] = set()
-
         for cfg in configs:
             service_id = cfg.get("service_id", "")
             if not service_id:
                 continue
-
             src = get_source_for_service(service_id)
             if not src or not is_configured(src):
                 logger.warning("[scheduler] %s: service not fully configured, skipping jobs.", service_id)
                 continue
-
             prov = cfg.get("provisioning", {})
             sync_cfg = prov.get("cron_sync", {})
             if not sync_cfg.get("enabled", True):
                 continue
-
             log_period = int(cfg.get("log_period", 60))
             if sync_cfg.get("interval_mins"):
                 interval_seconds = max(5, int(sync_cfg["interval_mins"]) * 60)
@@ -1158,10 +1115,8 @@ class Scheduler:
                 interval_seconds = max(5, int(sync_cfg["interval_seconds"]))
             else:
                 interval_seconds = max(5, log_period // 2 if log_period >= 60 else log_period)
-
             commit_interval_mins = max(1, int(sync_cfg.get("commit_interval_mins", 5)))
             is_readonly = cfg.get("access_level") == "read_only"
-
             sync_metadata_id = f"sync_metadata_{service_id}"
             if is_readonly:
                 meta_cfg = prov.get("cron_metadata_sync", {})
@@ -1182,18 +1137,15 @@ class Scheduler:
                         args=[service_id],
                         misfire_grace_time=60,
                     )
-
                 alerts_cfg = prov.get("cron_alerts", {})
                 alerts_enabled = alerts_cfg.get("enabled", True)
                 alerts_seconds = int(alerts_cfg.get("interval_seconds") or interval_seconds)
                 self._register_alerts_evaluation_job(service_id, alerts_seconds, seen_ids, enabled=alerts_enabled)
                 self._register_insights_prewarmer_job(service_id, seen_ids, prov)
                 continue
-
             # ── Sync job (ingest raw files from FOS → local buffer) ───────────
             job_id = f"log_discovery_{service_id}"
             seen_ids.add(job_id)
-
             if job_id in self._job_ids:
                 try:
                     job = self._sched.get_job(job_id)
@@ -1219,7 +1171,6 @@ class Scheduler:
                 )
                 self._job_ids[job_id] = job_id
                 logger.info("🔄 [scheduler] Registered log_discovery job %s (every %ds).", job_id, interval_seconds)
-
             # ── Commit job (flush local buffer → Iceberg snapshot in FOS) ─────
             commit_job_id = f"commit_{service_id}"
             self._register_reschedulable_job(
@@ -1235,7 +1186,6 @@ class Scheduler:
                 args=[service_id],
                 misfire_grace_time=commit_interval_mins * 60,
             )
-
             # ── Ledger sweep (celery-mode crash net) ───────────────────────────
             if svcconfig.is_high_scale_mode(src):
                 from backend.cron.jobs.rum_sync import _run_ledger_sweep
@@ -1256,7 +1206,6 @@ class Scheduler:
                         args=[service_id],
                         misfire_grace_time=300,
                     )
-
             # ── RUM ingest jobs (ingest RUM beacons from FOS) ──────────────────
             rum_cfg = cfg.get("rum")
             rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
@@ -1278,7 +1227,6 @@ class Scheduler:
                     args=[service_id],
                     misfire_grace_time=60,
                 )
-
                 rum_sweep_cfg = prov.get("cron_ledger_rum_sweep") or prov.get("cron_rum_ledger_sweep") or {}
                 if rum_sweep_cfg.get("enabled", True):
                     rum_sweep_interval_mins = max(1, int(rum_sweep_cfg.get("interval_minutes", 15)))
@@ -1310,7 +1258,6 @@ class Scheduler:
                     args=[service_id],
                     misfire_grace_time=60,
                 )
-
                 rum_commit_interval_mins = max(1, int(rum_cfg.get("commit_interval_mins", 1)))
                 rum_commit_job_id = f"rum_commit_{service_id}"
                 self._register_reschedulable_job(
@@ -1325,13 +1272,11 @@ class Scheduler:
                     args=[service_id],
                     misfire_grace_time=60,
                 )
-
             # ── Alerts evaluation job (Per Service) ───────────────────────────
             alerts_cfg = prov.get("cron_alerts", {})
             alerts_enabled = alerts_cfg.get("enabled", True)
             alerts_seconds = int(alerts_cfg.get("interval_seconds") or log_period)
             self._register_alerts_evaluation_job(service_id, alerts_seconds, seen_ids, enabled=alerts_enabled)
-
             # ── Full-LIST sweep (catches late-arriving files, every 6h) ───────
             full_sweep_cfg = prov.get("cron_full_sweep", {})
             if full_sweep_cfg.get("enabled", True):
@@ -1352,7 +1297,6 @@ class Scheduler:
                     args=[service_id],
                     misfire_grace_time=3600,
                 )
-
             # ── Gap-heal evaluator (auto full_sweep on sustained loss) ────────
             heal_cfg = prov.get("cron_gap_heal", {})
             has_logging_svc = bool(cfg.get("logging_service_id") or cfg.get("service_id"))
@@ -1371,7 +1315,6 @@ class Scheduler:
                     args=[service_id],
                     misfire_grace_time=600,
                 )
-
             # ── Daily optimize job (Iceberg small-file compaction) ────────────
             compact_cfg = prov.get("cron_compact", {})
             if compact_cfg.get("enabled", True):
@@ -1388,11 +1331,9 @@ class Scheduler:
                     args=[service_id],
                     misfire_grace_time=3600,
                 )
-
             # ── Local-only compaction & rollup jobs + insights prewarmer ─────
             self._sync_local_compaction_jobs(service_id, cfg, seen_ids=seen_ids, dev_local=False)
             self._register_insights_prewarmer_job(service_id, seen_ids, prov)
-
             # ── expire-snapshots job (hourly by default) ───────────────────────
             if compact_cfg.get("enabled", True) and not dev_mode_no_crons():
                 exp_job_id = f"expire_{service_id}"
@@ -1427,7 +1368,6 @@ class Scheduler:
                                 exp_job_id,
                                 expire_interval_mins,
                             )
-
             # ── NGWAF bot sync job (per-service) ─────────────────────────────
             if svcconfig.get_ngwaf_workspace_id(service_id):
                 ngwaf_interval_mins = max(1, int(prov.get("cron_ngwaf", {}).get("interval_mins", 5)))
@@ -1446,7 +1386,6 @@ class Scheduler:
                     misfire_grace_time=300,
                     executor="maintenance",
                 )
-
             # ── Metadata retention cleanup (per service) ──────────────────────
             cleanup_cfg = prov.get("cron_metadata_cleanup", {})
             if cleanup_cfg.get("enabled", True) and not dev_mode_no_crons():
@@ -1467,7 +1406,6 @@ class Scheduler:
                     args=[service_id],
                     misfire_grace_time=3600,
                 )
-
         # ── Global maintenance jobs ───────────────────────────────────────────
         self._register_once_job(
             "bot_data_refresh",
@@ -1501,7 +1439,6 @@ class Scheduler:
         )
         self._register_metric_snapshot_job(seen_ids)
         self._register_recycle_job(seen_ids)
-
         # Cleanup: remove jobs from the live APScheduler when their service/config disappears.
         for jid in list(self._job_ids.keys()):
             if jid in seen_ids:
@@ -1543,7 +1480,6 @@ class Scheduler:
     def _add_job(self, func, trigger=None, **kwargs):
         job_id = kwargs.pop("id", None)
         args = kwargs.pop("args", [])
-
         if "executor" not in kwargs and job_id:
             jid = str(job_id)
             if jid.startswith(("log_discovery_", "rum_discovery_", "rum_sync_", "commit_", "sync_")):
@@ -1569,7 +1505,6 @@ class Scheduler:
                 kwargs["executor"] = "maintenance"
             else:
                 kwargs["executor"] = "default"
-
         self._sched.add_job(func, trigger, id=job_id, args=args, **kwargs)
         self._job_ids[job_id] = job_id
 
@@ -1606,7 +1541,6 @@ def get_scheduler() -> Scheduler:
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("cron.scheduler._last_heavy_refresh", _last_heavy_refresh)
-
 TASK_MAP = {
     "sync_metadata": "metadata_sync",
     "log_discovery": "log_discovery",
@@ -1650,7 +1584,6 @@ def build_cron_schedule_payload(source: dict) -> dict:
     except Exception:
         pass
     schedules = []
-
     # Pod-local APScheduler jobs — the ONLY source of cron jobs.
     for job in sched._sched.get_jobs():
         job_id = getattr(job, "id", "")
@@ -1670,7 +1603,6 @@ def build_cron_schedule_payload(source: dict) -> dict:
     for task, info in last_runs.items():
         if task not in existing and task in TASK_MAP.values():
             schedules.append({"task": task, "next_run_time": None, **info})
-
     try:
         if metadata_db.count_alerts(service_id) == 0:
             alerts_entry = next((s for s in schedules if s["task"] == "alerts"), None)
@@ -1686,12 +1618,10 @@ def build_cron_schedule_payload(source: dict) -> dict:
                 alerts_entry["disabled_reason"] = "no_alerts_configured"
     except Exception:
         pass
-
     return {"schedules": schedules}
 
 
 # ── In-memory cron progress tracking, SSE publisher & cached sync status (folded from cron_progress.py) ──
-
 from backend.celery_app import _InProcessPublisher  # noqa: E402
 from backend.config import SSE_BACKPLANE  # noqa: E402
 from backend.utils.dir_size import _get_dir_size  # noqa: E402
@@ -1700,7 +1630,6 @@ _progress: dict[int, list[dict]] = {}
 _last_update: dict[int, float] = {}
 _run_metadata: dict[int, dict] = {}
 _lock = threading.Lock()
-
 _terminal_run_ids: set[int] = set()
 _TERMINAL_CACHE_CAP = 4096
 
@@ -1736,7 +1665,6 @@ def list_active_runs() -> list[dict]:
             if now - last_update > _STALE_AFTER_SECONDS:
                 continue
             candidates.append((run_id, meta))
-
     out = []
     for run_id, meta in candidates:
         if run_id in _terminal_run_ids:
@@ -1830,10 +1758,8 @@ def get_latest_progress_for_service(service_id: str) -> dict | None:
                 if events and events[-1].get("type") in ("done", "error"):
                     continue
                 active_runs.append(run_id)
-
         if not active_runs:
             return None
-
         run_id = max(active_runs)
         if _progress[run_id]:
             latest = _progress[run_id][-1].copy()
@@ -1915,7 +1841,6 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
             from backend.core.metadata.cron_log import latest_cron_per_task
 
             latest_crons = latest_cron_per_task(service_id)
-
             req_sync = None
             for t in ("log_discovery", "commit", "ledger_sweep"):
                 if t in latest_crons and latest_crons[t].get("started_at"):
@@ -1924,7 +1849,6 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
                         req_sync = ts
             if req_sync and metrics.get("request"):
                 metrics["request"]["last_sync_at"] = req_sync
-
             rum_sync = None
             for t in ("rum_discovery", "rum_sync", "ledger_rum_sweep"):
                 if t in latest_crons and latest_crons[t].get("started_at"):
@@ -1935,7 +1859,6 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
                 metrics["rum"]["last_sync_at"] = rum_sync
         except Exception:
             pass
-
         return {
             "configured": True,
             **metrics,
@@ -1946,11 +1869,9 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
     cached_status = svcconfig.get_status(lookup_key) or (svcconfig.get_status(src["name"]) if "name" in src else {})
     if not cached_status:
         return None  # fall through to dedicated endpoint
-
     request_status = cached_status.get("request")
     if isinstance(request_status, dict):
         cached_status["latest_log_at"] = request_status.get("latest_log_at")
-
     try:
         import re
 
@@ -1961,7 +1882,6 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
             summary = metadata_db.get_ingested_files_status_summary(src["name"]) or summary
         latest_file_name = summary.get("latest_file_name")
         total_rows = summary.get("total_rows") or 0
-
         try:
             from backend.core.metadata.base import get_con as _get_meta_con
 
@@ -1981,7 +1901,6 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
                 latest_file_name = ledger_latest
         except Exception:
             pass
-
         if latest_file_name:
             fname = latest_file_name.split("/")[-1]
             m = re.search(r"(\d{4}-\d{2}-\d{2})[T-](\d{2}[:.-]\d{2}[:.-]\d{2})", fname)
@@ -1989,28 +1908,23 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
                 latest_ingested_file_at = f"{m.group(1)} {m.group(2).replace('-', ':').replace('.', ':')}"
                 cached_status["latest_ingested_file_at"] = latest_ingested_file_at
                 cached_status["latest_available_file_at"] = latest_ingested_file_at
-
         if request_status is None and total_rows > 0 and cached_status.get("local_rows") is None:
             cached_status["local_rows"] = total_rows
     except Exception as e:
         logger.debug("[compute_sync_status_cached] failed to overlay real-time SQLite metadata: %s", e)
-
     cached_status["access_level"] = src.get("access_level", "read_write")
     cached_status["storage_mode"] = src.get("storage_mode", "cloud")
     cached_status["configured"] = True
-
     db_path = src.get("duckdb_path") or svcconfig.duckdb_path(service_id)
     db_exists = os.path.exists(db_path)
     db_size = os.path.getsize(db_path) if db_exists else 0
     cache_size = _get_dir_size(_db._cache_dir(src))
     cached_status["duckdb_size_bytes"] = db_size + cache_size
     cached_status["duckdb_exists"] = db_exists
-
     active_run = get_latest_progress_for_service(service_id)
     if active_run:
         cached_status["active_run"] = active_run
         cached_status["busy"] = True
-
     cfg = svcconfig.load_config(service_id) or {}
     cached_status["ngwaf_workspace_id"] = cfg.get("ngwaf_workspace_id")
     return cached_status

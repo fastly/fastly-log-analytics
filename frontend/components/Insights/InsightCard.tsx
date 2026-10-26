@@ -22,10 +22,9 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Badge } from '@/components/ui/badge'
 import { InsightCardData } from '@/types/api'
 import { useServiceStore } from '@/stores/filterStore'
-import { cn, keyByOccurrence } from '@/lib/utils'
+import { cn, keyByOccurrence, formatCount, formatCountMaybe, formatDuration } from "@/lib/utils";
 import { AlertTriangle, Info, CheckCircle, AlertCircle, HelpCircle, Loader2, ScanSearch, Gauge, Timer, Activity, Repeat, Hash, Users, Clock, TrendingUp, TrendingDown, Minus, ArrowUpRight, MapIcon, LineChart } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { formatCount, formatCountMaybe, formatDuration } from '@/lib/format'
 import { CacheCollapseModal, BotFindingModal } from './InsightDetailModal'
 
 type CardOf<Id extends InsightCardData['id']> = Extract<InsightCardData, { id: Id }>

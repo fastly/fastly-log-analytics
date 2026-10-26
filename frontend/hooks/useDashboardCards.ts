@@ -13,14 +13,8 @@ import {
   useLogFieldsCatalog,
   useMounted,
 } from '@/hooks/useBootstrap'
-import { adminJsonResult, client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api'
-import { type ChartInterval, INTERVAL_SECONDS, INTERVALS } from '@/lib/utils'
-import { parseFromInput } from '@/lib/format'
-import { historyHoursFromExtents, pickInsightsDefault } from '@/lib/insights-defaults'
-import { queryKeys } from '@/lib/query-keys'
-import { quantizeAnchor, resolveRangeWire, type RangeWire, type RangeWireArgs } from '@/lib/utils'
-import { _resetUrlHydrationFlag, hydrateFilterStoreFromUrl, rangeLabelToHours } from '@/lib/utils'
+import { adminJsonResult, client, unwrapClient, queryKeys } from "@/lib/api";
+import { INTERVAL_SECONDS, INTERVALS, parseFromInput, historyHoursFromExtents, pickInsightsDefault, quantizeAnchor, resolveRangeWire, _resetUrlHydrationFlag, hydrateFilterStoreFromUrl, rangeLabelToHours, type ChartInterval, type RangeWire, type RangeWireArgs } from "@/lib/utils";
 import { useFilterStore } from '@/stores/filterStore'
 import type { Simplify, WithRequired, components } from '@/types/api'
 import type { PlotlyRelayoutEvent } from '@/types/api'

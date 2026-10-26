@@ -67,7 +67,7 @@ from backend.models.session_scoring import (
     ScoringTokenBody,
     ScoringTopFlaggedResponse,
 )
-from backend.provision.session_scoring_setup import (
+from backend.provision.session_scoring_orchestrator import (
     SCORING_ENABLED_AT_KEY as _SCORING_ENABLED_AT_KEY,
 )
 from backend.repositories import sessions as repo
@@ -135,7 +135,6 @@ def _cached(key: tuple, producer):
         if key_lock is None:
             key_lock = threading.Lock()
             _inflight[key] = key_lock
-
     with key_lock:
         try:
             with _analytics_cache_lock:
@@ -244,7 +243,6 @@ def _table_columns(service_id: str) -> set[str]:
         cached = _table_columns_cache.get(service_id)
         if cached is not None:
             return cached
-
     table = _safe_table_name(service_id)
     try:
         rows = _scoring_repo.describe_table(service_id, table)
@@ -305,7 +303,6 @@ def scoring_enable(
     resolved_token = _require_fastly_token(
         service_id, body, "Fastly API token required (pass in JSON body or set in service config)"
     )
-
     from backend import config as svcconfig
 
     existing_cfg = svcconfig.load_config(service_id) or {}
@@ -330,11 +327,9 @@ def scoring_enable(
                 )
 
             return sse_response(_missing_pragma_stream())
-
     svcconfig.mutate_config(
         service_id, lambda c: c.__setitem__("scoring", {**(c.get("scoring") or {}), "enabled": True})
     )
-
     safe_scoring_state: dict = {}
 
     def _done_event() -> dict:
@@ -358,7 +353,7 @@ def scoring_enable(
         )
 
     def _error_event(e: Exception) -> dict:
-        from backend.provision.session_scoring_setup import EntitlementError
+        from backend.provision.session_scoring_orchestrator import EntitlementError
 
         err_event: dict = {"type": "error", "message": str(e)}
         if isinstance(e, EntitlementError):
@@ -410,7 +405,6 @@ def scoring_disable(
 ):
     """Disable session scoring. Reverse of enable_scoring."""
     resolved_token = _require_fastly_token(service_id, body)
-
     from backend import config as svcconfig
 
     def _disable(c: dict) -> None:
@@ -418,7 +412,6 @@ def scoring_disable(
             c["scoring"]["enabled"] = False
 
     svcconfig.mutate_config(service_id, _disable)
-
     return stream_iac_reconcile(
         service_id,
         resolved_token,
@@ -441,7 +434,6 @@ def scoring_analytics_composite(
     """Composite of the analytics endpoints into a single round-trip."""
     _enforce_scoring_service_scope(request, service_id)
     sh = int(since_hours)
-
     result = {
         "top_flagged": scoring_top_flagged(request=request, service_id=service_id, since_hours=sh, limit=200),
         "score_distribution": scoring_score_distribution(request=request, service_id=service_id, since_hours=sh),
@@ -513,7 +505,6 @@ def scoring_status(
                 result["preflight_pragmas_ready"] = ready
         return result
     result = _safe_scoring_dict(scoring)
-
     scoring_svc = scoring.get("scoring_service_id")
     if scoring_svc and token:
         from backend.core.fastly.client import get_active_version_info
@@ -527,7 +518,6 @@ def scoring_status(
         if info:
             result["scoring_active_version"] = info.get("number")
             result["scoring_activated_at"] = info.get("updated_at")
-
     result["scorer_drift"] = False
     result["drift_detail"] = None
     result["drift_known"] = bool(scoring.get("deployed_package_sha")) and bool(scoring.get("deployed_vcl_sha"))
@@ -550,7 +540,6 @@ def scoring_status(
 
 
 # ── Labels (good / bad / neutral session tags) ──────────────────────────────
-
 _LABEL_PII_FIELDS = frozenset({"notes", "flagged_by", "sample_ip", "sample_ua", "sample_url"})
 
 
@@ -692,8 +681,6 @@ def scoring_labels_delete(
 
 
 # ── Summary queries (top-flagged, distributions) ────────────────────────────
-
-
 def _prepare_scoring_query(
     request: Request, service_id: str, since_hours: int
 ) -> tuple[str, set[str], str, str | None]:
@@ -791,7 +778,6 @@ def scoring_latency_timeseries(
     has_rtt = "edge_score_rtt_us" in cols
     has_exec = "edge_score_exec_us" in cols
     bucket = "minute" if int(since_hours) <= 1 else "hour"
-
     return _cached_scoring_rows(
         ("latency-timeseries", service_id, since_hours, win_disc),
         since_hours,
@@ -817,12 +803,10 @@ def scoring_health(
         total = int(row.get("total_edge_rows") or 0)
         scored = int(row.get("scored_rows") or 0)
         fire_rate_pct = (scored / total * 100.0) if total else 0.0
-
         l2_evaluated = int(row.get("l2_evaluated") or 0)
         l2_high = int(row.get("l2_high_count") or 0)
         l2_high_pct = (l2_high / l2_evaluated * 100.0) if l2_evaluated else 0.0
         matrix_stale = l2_evaluated >= 100 and l2_high_pct > 25.0
-
         latency = {
             "available": has_rtt or has_exec,
             **{
@@ -861,7 +845,6 @@ def scoring_health(
 
 
 # ── Matrix quality (ROC-AUC against accumulated labels) ─────────────────────
-
 _MIN_LABELS_PER_CLASS = 3
 
 
@@ -891,11 +874,9 @@ def scoring_evaluation(
 
         cfg = load_config(service_id) or {}
         matrix_version = (cfg.get("scoring") or {}).get("matrix_version") or "unknown"
-
         min_check = _check_min_samples(n_good, n_bad, n_neutral=n_neutral, matrix_version=matrix_version)
         if min_check is not None:
             return min_check
-
         matrix = _load_matrix(service_id)
         if matrix is None:
             return {
@@ -908,7 +889,6 @@ def scoring_evaluation(
                 "error": "Trained matrix is missing (no local compute/scorer/matrix_<service_id>.json "
                 "and no FOS copy). Run scripts/scoring/train.py to produce one.",
             }
-
         label_rows = _labels.list_labels(service_id)
         labeled_sessions = _reconstruct_labeled_sessions(service_id, label_rows)
         n_reconstructed = len(labeled_sessions)
@@ -935,8 +915,6 @@ def scoring_evaluation(
 
 
 # ── ROC + PR curves against accumulated labels ──────────────────────────────
-
-
 @router.get("/{service_id}/scoring/curves", response_model=ScoringCurvesResponse, response_model_exclude_unset=True)
 def scoring_curves(
     service_id: str = Path(...),
@@ -952,7 +930,6 @@ def scoring_curves(
         min_check = _check_min_samples(n_good, n_bad)
         if min_check is not None:
             return min_check
-
         label_rows = _labels.list_labels(service_id)
         labeled_sessions = _reconstruct_labeled_sessions(service_id, label_rows)
         scored = [
@@ -960,7 +937,6 @@ def scoring_curves(
             for session, label in labeled_sessions
             if label in ("good", "bad") and (score := session.get("max_edge_score")) is not None
         ]
-
         if not scored:
             return {
                 "has_min_samples": False,
@@ -969,10 +945,8 @@ def scoring_curves(
                 "n_bad": n_bad,
                 "note": "labels exist but none of their sids have landed in DuckDB yet",
             }
-
         total_pos = sum(1 for _, lbl in scored if lbl == "bad")
         total_neg = sum(1 for _, lbl in scored if lbl == "good")
-
         roc: list[dict] = []
         pr: list[dict] = []
         for t in range(100, -1, -1):
@@ -990,7 +964,6 @@ def scoring_curves(
 
         auc = _trapz([(p["fpr"], p["tpr"]) for p in roc])
         ap = _trapz([(p["recall"], p["precision"]) for p in pr])
-
         return {
             "has_min_samples": True,
             "min_per_class": _MIN_LABELS_PER_CLASS,
@@ -1007,8 +980,6 @@ def scoring_curves(
 
 
 # ── Threshold preview (counterfactual: at threshold X, what flips?) ─────────
-
-
 @router.get(
     "/{service_id}/scoring/threshold-preview",
     response_model=ScoringThresholdPreviewResponse,
@@ -1039,7 +1010,6 @@ def scoring_threshold_preview(
             if labeled_pairs
             else (0, 0, 0, 0)
         )
-
         flagged_unlabeled = max(0, flagged_total - (flagged_good + flagged_bad))
         passed_unlabeled = max(0, passed_total - (passed_good + passed_bad))
         flagged = flagged_good + flagged_bad + flagged_unlabeled
@@ -1047,7 +1017,6 @@ def scoring_threshold_preview(
         all_labeled_bad = flagged_bad + passed_bad
         precision = (flagged_bad / flagged_labeled) if flagged_labeled else None
         recall = (flagged_bad / all_labeled_bad) if all_labeled_bad else None
-
         return {
             "threshold": threshold_int,
             "since_hours": since_hours,
@@ -1063,12 +1032,10 @@ def scoring_threshold_preview(
 
 
 # ── Admin / training endpoints (folded from session_scoring_admin) ──────────
-
 _L2_ENABLED_AT_KEY = "l2_enabled_at"
 _L2_ENFORCE_ENABLED_KEY = "l2_enforce_enabled"
 _fetch_session_events = _scoring_repo.fetch_session_events
 _ENFORCE_THRESHOLD_KEY = "enforce_threshold"
-
 from backend.utils.bounded_cache import BoundedTTLCache as _BoundedTTLCache
 
 _ENFORCE_THRESHOLD_CACHE_TTL = 300.0
@@ -1115,13 +1082,11 @@ def _build_l2_enforce_block(
     enabled = (l2_enforce_raw or "").strip() == "1"
     scoring_enabled_at = _l2_parse_epoch(scoring_enabled_at_raw)
     l2_enabled_at = _l2_parse_epoch(l2_enabled_at_raw)
-
     deployment_age_days: float | None = None
     ready = False
     if scoring_enabled_at is not None:
         deployment_age_days = max(0.0, (now_epoch - scoring_enabled_at) / 86_400.0)
         ready = deployment_age_days >= _L2_READINESS_DAYS
-
     days_since_optin: float | None = None
     ramp_progress = 0.0
     fully_ramped = False
@@ -1132,7 +1097,6 @@ def _build_l2_enforce_block(
         ramp_progress = max(0.0, min(1.0, days / _L2_RAMP_DAYS))
         fully_ramped = days >= _L2_RAMP_DAYS
         warmup_days_remaining = max(0.0, _L2_RAMP_DAYS - days)
-
     return {
         "available": True,
         "enabled": enabled,
@@ -1202,7 +1166,7 @@ def _push_matrix_to_kv_if_configured(service_id: str, cfg: dict | None, matrix_d
     try:
         if matrix_dict is not None:
             from backend.core.fastly.client import fastly_raw
-            from backend.provision.session_scoring_setup import MATRIX_KEY_NAME
+            from backend.provision.session_scoring_orchestrator import MATRIX_KEY_NAME
             from backend.scoring.matrix import serialize_kv
 
             fastly_raw(
@@ -1265,7 +1229,6 @@ def scoring_retrain(
     cfg = svcconfig.load_config(service_id) or {}
     matrix_version = version or _matrix.default_version()
     start = _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=int(since_days))
-
     con = get_connection(source=src, max_wait=3, skip_view_update=True, read_only=True)
     try:
         sessions_iter = _fixtures.extract_traces(con, service_id=service_id, start=start)
@@ -1277,9 +1240,7 @@ def scoring_retrain(
             con.close()
         except Exception:
             logger.debug("scoring_retrain: con.close failed (ignored)", exc_info=True)
-
     matrix_dict = tmatrix.to_json_dict(version=matrix_version)
-
     auc_result = None
     label_rows = _labels.list_labels(service_id)
     n_good, n_bad, _ = _label_counts(service_id)
@@ -1294,7 +1255,6 @@ def scoring_retrain(
                 "n_good": er.n_good,
                 "n_bad": er.n_bad,
             }
-
     try:
         tenant_matrix_path = _tenant_matrix_path(service_id)
         tenant_matrix_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1306,7 +1266,6 @@ def scoring_retrain(
     except Exception as exc:
         local_saved = False
         logger.warning(f"Could not write matrix.json locally: {exc}")
-
     fos_published = False
     try:
         from backend.state_sync import publish_matrix_to_fos
@@ -1315,10 +1274,8 @@ def scoring_retrain(
         fos_published = True
     except Exception as exc:
         logger.warning(f"Could not publish matrix to FOS: {exc}")
-
     kv_written = _push_matrix_to_kv_if_configured(service_id, cfg, matrix_dict)
     _bust_analytics_cache(service_id)
-
     _record_scoring_audit(
         service_id,
         "matrix_retrained",
@@ -1331,7 +1288,6 @@ def scoring_retrain(
             "kv_written": kv_written,
         },
     )
-
     return {
         "ok": True,
         "matrix_version": matrix_version,
@@ -1366,8 +1322,6 @@ def scoring_retrain(
 
 
 # ── Session details (sid → page sequence) ────────────────────────────────────
-
-
 @router.get(
     "/{service_id}/scoring/sessions/{sid}/events",
     response_model=ScoringSessionEventsResponse,
@@ -1405,11 +1359,9 @@ def _require_scoring_config_store(service_id: str, token: str = "") -> tuple[dic
     config_store_id = scoring.get("scoring_config_store_id")
     if not config_store_id:
         raise HTTPException(status_code=400, detail={"error": "Scoring not enabled or config store missing"})
-
     resolved_token = resolve_fastly_token(service_id, token)
     if not resolved_token:
         raise HTTPException(status_code=400, detail={"error": "Fastly API token required"})
-
     return cfg, config_store_id, resolved_token
 
 
@@ -1445,18 +1397,15 @@ def scoring_enforce_threshold_get(
 ) -> dict:
     """Read the live enforce_threshold value from the scoring_config ConfigStore (None = disabled)."""
     _cfg, config_store_id, resolved_token = _require_scoring_config_store(service_id, token)
-
     cache_key = (service_id, config_store_id)
     cached = _enforce_threshold_cache.get(cache_key)
     if cached is not None:
         return {**cached, "_is_cached": True}
-
     try:
         raw = _l2_get_item(config_store_id, _ENFORCE_THRESHOLD_KEY, resolved_token)
     except RuntimeError as exc:
         raise_internal(logger, exc, code="enforce_threshold_read_failed", status=502)
     threshold: int | None = int(raw) if raw and raw.isdigit() else None
-
     result = {
         "threshold": threshold,
         "enforced": threshold is not None,
@@ -1493,14 +1442,12 @@ def scoring_enforce_threshold_put(
         _upsert_config_store_item(resolved_token, config_store_id, _ENFORCE_THRESHOLD_KEY, value)
     except Exception as e:
         raise_internal(logger, e, code="scoring_enforce_threshold_put_failed")
-
     _enforce_threshold_cache.pop((service_id, config_store_id), None)
     _record_scoring_audit(
         service_id,
         "threshold_enforce_disabled" if threshold is None else "threshold_enforced",
         details={"threshold": threshold},
     )
-
     return {
         "ok": True,
         "threshold": threshold,
@@ -1515,8 +1462,6 @@ def scoring_enforce_threshold_put(
 
 
 # ── L2 enforcement opt-in (operator decides when L2 joins the enforced score) ─
-
-
 @router.get(
     "/{service_id}/scoring/l2-enforce",
     response_model=ScoringL2EnforceState,
@@ -1553,7 +1498,6 @@ def scoring_l2_enforce_put(
 
     _cfg, config_store_id, resolved_token = _require_scoring_config_store(service_id, token)
     enabled = bool(body.enabled)
-
     try:
         l2_enabled_at: int | None
         if enabled:
@@ -1570,7 +1514,6 @@ def scoring_l2_enforce_put(
             l2_enabled_at = _l2_parse_epoch(_l2_get_item(config_store_id, _L2_ENABLED_AT_KEY, resolved_token))
     except Exception as e:
         raise_internal(logger, e, code="scoring_l2_enforce_put_failed")
-
     _l2_enforce_cache.pop((service_id, config_store_id), None)
     _bust_analytics_cache(service_id)
     _record_scoring_audit(
@@ -1578,7 +1521,6 @@ def scoring_l2_enforce_put(
         "l2_enforce_enabled" if enabled else "l2_enforce_disabled",
         details={"enabled": enabled, "l2_enabled_at": l2_enabled_at},
     )
-
     return {
         "ok": True,
         "enabled": enabled,
@@ -1594,8 +1536,6 @@ def scoring_l2_enforce_put(
 
 
 # ── Recv exclusion regex & Enforce response status code ──────────────────────
-
-
 @router.get(
     "/{service_id}/scoring/exclude-regex",
     response_model=ScoringExcludeRegexState,
@@ -1604,7 +1544,7 @@ def scoring_l2_enforce_put(
 )
 def scoring_exclude_regex_get(service_id: ServiceId) -> dict:
     """Return the operator-configured URL-exclusion regex for the recv snippet."""
-    from backend.provision.session_scoring_vcl import (
+    from backend.provision.session_scoring_orchestrator import (
         DEFAULT_ASSET_EXT_REGEX,
         resolve_exclude_url_regex,
     )
@@ -1631,7 +1571,7 @@ def _require_scoring_enabled_and_token(service_id: str, token: str = "") -> tupl
 
 
 def _validate_service_exclude_regex(service_id: str, raw: str):
-    from backend.provision.session_scoring_vcl import recv_snippet
+    from backend.provision.session_scoring_orchestrator import recv_snippet
     from backend.utils.vcl_validator import validate_recv_exclusion_regex_with_lint
 
     return validate_recv_exclusion_regex_with_lint(
@@ -1682,7 +1622,6 @@ def scoring_exclude_regex_put(
         cleaned, lint = _validate_service_exclude_regex(service_id, body.regex)
     except RegexValidationError as exc:
         raise HTTPException(status_code=400, detail={"error": exc.message, "reason": exc.reason})
-
     return _apply_vcl_snippet_update(
         service_id,
         lambda: update_recv_exclusion_regex(service_id, resolved_token, new_regex=cleaned),
@@ -1731,7 +1670,7 @@ def scoring_exclude_regex_validate(
 )
 def scoring_enforce_status_code_get(service_id: ServiceId) -> dict:
     """Return the operator-configured HTTP status code returned by the enforce snippet."""
-    from backend.provision.session_scoring_vcl import (
+    from backend.provision.session_scoring_orchestrator import (
         _ENFORCE_STATUS_CODE_MAX,
         _ENFORCE_STATUS_CODE_MIN,
         DEFAULT_ENFORCE_STATUS_CODE,
@@ -1767,10 +1706,10 @@ def scoring_enforce_status_code_put(
     _require_confirm(
         confirm, "Pass ?confirm=true to actually apply the change. This re-publishes the active VCL version."
     )
-    from backend.provision.session_scoring_orchestrator import update_enforce_status_code
-    from backend.provision.session_scoring_vcl import (
+    from backend.provision.session_scoring_orchestrator import (
         _ENFORCE_STATUS_CODE_MAX,
         _ENFORCE_STATUS_CODE_MIN,
+        update_enforce_status_code,
     )
 
     new_code = body.status_code
@@ -1781,7 +1720,6 @@ def scoring_enforce_status_code_put(
                 "error": f"status_code must be in {_ENFORCE_STATUS_CODE_MIN}-{_ENFORCE_STATUS_CODE_MAX} (HTTP 4xx/5xx)"
             },
         )
-
     _cfg, _scoring, resolved_token = _require_scoring_enabled_and_token(service_id, token)
     return _apply_vcl_snippet_update(
         service_id,
@@ -1802,8 +1740,6 @@ def scoring_enforce_status_code_put(
 
 
 # ── Matrix version history + rollback ──────────────────────────────────────
-
-
 @router.get(
     "/{service_id}/scoring/matrix-versions",
     response_model=ScoringMatrixVersionsResponse,
@@ -1839,7 +1775,6 @@ def scoring_matrix_versions_restore(
 ) -> dict:
     """Restore a historical matrix in FOS, clear the local shadow copy, and push to KV."""
     _require_confirm(confirm, "Pass ?confirm=true to actually restore. This will replace the current matrix.")
-
     from backend import config as svcconfig
     from backend.state_sync import restore_scoring_matrix_version
 
@@ -1849,14 +1784,12 @@ def scoring_matrix_versions_restore(
             status_code=404,
             detail={"error": f"Matrix version {version!r} not found in FOS history"},
         )
-
     tenant_matrix_path = _tenant_matrix_path(service_id)
     try:
         if tenant_matrix_path.exists():
             tenant_matrix_path.unlink()
     except Exception as exc:
         logger.warning(f"Could not remove local {tenant_matrix_path.name} after restore: {exc}")
-
     cfg = svcconfig.mutate_config(
         service_id, lambda c: c.setdefault("scoring", {}).__setitem__("matrix_version", version)
     )
@@ -1867,7 +1800,6 @@ def scoring_matrix_versions_restore(
         "matrix_restored",
         details={"restored_version": version, "restored_at": result["restored_at"], "kv_written": kv_written},
     )
-
     return {
         "ok": True,
         "restored_version": version,
@@ -1886,8 +1818,6 @@ def scoring_matrix_versions_restore(
 
 
 # ── AES key rotation ────────────────────────────────────────────────────────
-
-
 @router.post(
     "/{service_id}/scoring/rotate-key",
     response_model=ScoringRotateKeyResponse,
@@ -1900,11 +1830,10 @@ def scoring_rotate_key(
     token: str = Header(default=""),
 ) -> dict:
     """Rotate the AES-GCM cookie-state encryption key (preserving previous_key_hex grace slot)."""
-    from backend.provision.session_scoring_setup import rotate_aes_key
+    from backend.provision.session_scoring_orchestrator import rotate_aes_key
 
     load_service_config(service_id)
     _cfg, scoring, resolved_token = _require_scoring_enabled_and_token(service_id, token)
-
     scoring_keys_store_id = scoring.get("scoring_keys_store_id")
     if not scoring_keys_store_id:
         raise HTTPException(
@@ -1913,7 +1842,6 @@ def scoring_rotate_key(
                 "error": "Service has no scoring_keys_store_id (was scoring enabled before key rotation was supported?)"
             },
         )
-
     result = rotate_aes_key(scoring_keys_store_id, token=resolved_token)
     _record_scoring_audit(
         service_id,
@@ -1936,8 +1864,6 @@ def scoring_rotate_key(
 
 
 # ── Operator audit log ──────────────────────────────────────────────────────
-
-
 @router.get(
     "/{service_id}/scoring/audit",
     response_model=ScoringAuditListResponse,
@@ -1958,8 +1884,6 @@ def scoring_audit_list(
 
 
 # ── Operator's chosen threshold (persisted, not enforced) ───────────────────
-
-
 @router.get(
     "/{service_id}/scoring/threshold",
     response_model=ScoringThresholdState,
@@ -2015,7 +1939,6 @@ def scoring_threshold_put(
         _apply_threshold(cfg)
         updated_cfg = cfg
     scoring = updated_cfg.get("scoring", {})
-
     _bust_analytics_cache(service_id)
     return {
         "threshold": scoring.get("operator_threshold"),
@@ -2025,8 +1948,6 @@ def scoring_threshold_put(
 
 
 # ── Per-reason AUC breakdown ────────────────────────────────────────────────
-
-
 @router.get(
     "/{service_id}/scoring/evaluation/per-reason",
     response_model=ScoringPerReasonResponse,
@@ -2064,8 +1985,6 @@ def scoring_evaluation_per_reason(
 
 
 # ── Composite dashboard endpoint ────────────────────────────────────────────
-
-
 def _build_scoring_config_bundle(service_id: str) -> dict:
     return {
         "threshold": scoring_threshold_get(service_id),
@@ -2107,7 +2026,6 @@ def scoring_dashboard(
         cfg = svcconfig.load_config(service_id)
         status_block: dict = scoring_status(service_id=service_id) if cfg else {"enabled": False}
         _table_columns(service_id)
-
         tasks = {
             "evaluation": lambda: scoring_evaluation(service_id=service_id),
             "evaluation_per_reason": lambda: scoring_evaluation_per_reason(service_id=service_id),
@@ -2131,7 +2049,6 @@ def scoring_dashboard(
             futs = {k: pool.submit(contextvars.copy_context().run, fn) for k, fn in tasks.items()}
             for k, fut in futs.items():
                 results[k] = fut.result()
-
         return {
             "since_hours": since_hours,
             "threshold": threshold,
@@ -2156,10 +2073,7 @@ _CacheRegistry.register("session_scoring._scoring_pragma_cache", _scoring_pragma
 _CacheRegistry.register("session_scoring._scoring_svc_version_cache", _scoring_svc_version_cache)
 _CacheRegistry.register("session_scoring_admin._enforce_threshold_cache", _enforce_threshold_cache)
 _CacheRegistry.register("session_scoring_admin._l2_enforce_cache", _l2_enforce_cache)
-
-
 # ── Sessions endpoints (folded from backend.routers.sessions) ───────────────
-
 sessions_router = APIRouter(prefix="/api/sessions", tags=["sessions"], responses=DEFAULT_ERROR_RESPONSES)
 
 
@@ -2230,7 +2144,6 @@ def sessions_detail(
     with process_context_scope("sessions:detail"):
         ip, ja4 = req.ip, req.ja4
         start_raw, end_raw = req.start_time, req.end_time
-
         if req.session_token:
             try:
                 ip, ja4, start_raw, end_raw = open_session_token(req.session_token, service_id=ctx.service_id)
@@ -2244,7 +2157,6 @@ def sessions_detail(
                 ) from e
         elif mask_ips_for(ctx.analyst_session):
             raise HTTPException(status_code=403, detail={"error": "pii_policy_violation", "field": "ip"})
-
         if not ip or not start_raw or not end_raw:
             raise HTTPException(status_code=400, detail={"error": "ip, session_start, and session_end are required"})
         s_dt, e_dt = parse_iso_utc(start_raw), parse_iso_utc(end_raw)

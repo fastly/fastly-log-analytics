@@ -26,8 +26,8 @@ vi.mock('@/stores/filterStore', async () => (await import('../../helpers/page-sm
 vi.mock('next/navigation', async () => (await import('../../helpers/page-smoke')).navigationModuleMock('/security'))
 vi.mock('@/components/PlotlyChart', async () => (await import('../../helpers/page-smoke')).plotlyChartModuleMock(plotlyMock))
 vi.mock('@/components/DataTable', async () => (await import('../../helpers/page-smoke')).interactiveDataTableModuleMock(dataTableMock))
-vi.mock('@/lib/format', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/lib/format')>()),
+vi.mock("@/lib/utils", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/utils")>()),
   formatDate: (t: string) => t,
 }))
 vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
@@ -44,10 +44,12 @@ vi.mock('@/components/ReportLayout', async () =>
   }),
 )
 
-import SecurityClient from '@/app/security/_sections/SecurityClient'
-import { BotsSection } from '@/app/security/_sections/BotsSection'
-import { HeaderAnomaliesSection, NetworkSection } from '@/app/security/_sections/SecurityClient'
-import { ProxyWatchdogSection } from '@/app/security/_sections/ProxyWatchdogSection'
+import SecurityClient, {
+  BotsSection,
+  HeaderAnomaliesSection,
+  NetworkSection,
+  ProxyWatchdogSection,
+} from '@/app/security/_sections/SecurityClient'
 
 const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
 

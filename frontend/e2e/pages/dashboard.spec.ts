@@ -4,81 +4,22 @@
  * Insights, and High-Scale Request Facts.
  */
 
-import AxeBuilder from '@axe-core/playwright'
 import { expect, test, type Page } from '@playwright/test'
 import type { DebugQuery } from '../../types/api'
-import { getFirstServiceId, installClsObserver, measureWarmPaintAndCls, readClsScore } from '../helpers'
-
-type DebugResponse = {
-  _debug_queries?: DebugQuery[]
-  _debug_sqlite?: unknown[]
-  [key: string]: unknown
-}
-
-async function gotoHeading(page: Page, route: string, heading: string | RegExp) {
-  await page.goto(route)
-  await expect(page.getByRole('heading', { name: heading }).first()).toBeVisible({ timeout: 30_000 })
-}
-
-async function assertRouteAndFooter(page: Page, route: string, heading: string | RegExp) {
-  await gotoHeading(page, route, heading)
-  const footer = page.locator('footer')
-  await expect(footer).toBeVisible({ timeout: 10_000 })
-  expect(await footer.innerText()).toMatch(/Admin View|Analyst View/i)
-}
-
-async function assertIntrinsicCount(page: Page, minCount: number) {
-  const reserved = page.locator('[class*="contain-intrinsic-size"]')
-  expect(await reserved.count()).toBeGreaterThanOrEqual(minCount)
-}
-
-async function assertZeroErrorCards(page: Page, route: string, heading: string | RegExp) {
-  await gotoHeading(page, route, heading)
-  await expect(page.locator('[data-testid="error-card"], .alert-destructive')).toHaveCount(0)
-}
-
-async function assertTimePresetsNo500(page: Page, route: string, heading: string | RegExp) {
-  const consoleErrors: string[] = []
-  page.on('console', (msg) => {
-    if (msg.type() === 'error') consoleErrors.push(msg.text())
-  })
-  await gotoHeading(page, route, heading)
-  await expect(page.getByRole('button', { name: /24h|1h|7d|last/i }).first()).toBeVisible({ timeout: 10_000 })
-  expect(consoleErrors.filter((e) => e.includes('500') || e.includes('Internal Server Error'))).toHaveLength(0)
-}
-
-async function assertWarmPerfBudget(page: Page, route: string, settleMs = 1000, checkLcp = true) {
-  await page.goto(route, { waitUntil: 'domcontentloaded' })
-  await installClsObserver(page)
-  const start = Date.now()
-  await page.reload({ waitUntil: 'domcontentloaded' })
-  const totalTime = Date.now() - start
-  const metrics = await measureWarmPaintAndCls(page, settleMs)
-  console.log(`[PERF ${route}] Reload: ${totalTime}ms | FCP: ${Math.round(metrics.fcp)}ms | LCP: ${Math.round(metrics.lcp)}ms | CLS: ${metrics.cls.toFixed(3)}`)
-  expect(totalTime).toBeLessThan(10_000)
-  if (checkLcp && metrics.lcp > 0) expect(metrics.lcp).toBeLessThan(1500)
-  expect(metrics.cls).toBeLessThanOrEqual(0.05)
-}
-
-async function assertPostTelemetry(
-  page: Page,
-  endpoint: string,
-  data: Record<string, unknown>,
-  extraHeaders: Record<string, string> = {},
-  optionalQueries = false,
-): Promise<DebugResponse> {
-  const res = await page.request.post(endpoint, {
-    data,
-    headers: { 'x-debug-responses': '1', ...extraHeaders },
-  })
-  expect(res.ok()).toBeTruthy()
-  const json = (await res.json()) as DebugResponse
-  if (!optionalQueries || json._debug_queries) {
-    expect(json).toHaveProperty('_debug_queries')
-    expect((json._debug_queries ?? []).length).toBeGreaterThan(0)
-  }
-  return json
-}
+import {
+  assertIntrinsicCount,
+  assertNoWcagViolations,
+  assertPostTelemetry,
+  assertRouteAndFooter,
+  assertTimePresetsNo500,
+  assertWarmPerfBudget,
+  assertZeroErrorCards,
+  type DebugResponse,
+  getFirstServiceId,
+  gotoHeading,
+  installClsObserver,
+  readClsScore,
+} from '../helpers'
 
 // ---------------------------------------------------------------------------
 // Dashboard Page Contract (/dashboard)
@@ -471,7 +412,7 @@ test.describe('Alerts & Notifications Page Contract (/alerts)', () => {
   })
 
   test('6. Performance budget: FCP < 400ms and CLS <= 0.05 on warm load', async ({ page }) => {
-    await assertWarmPerfBudget(page, '/alerts', 800, false)
+    await assertWarmPerfBudget(page, '/alerts', { settleMs: 800, checkLcp: false })
   })
 
   test('7. Telemetry instrumentation & query attribution audit', async ({ page }) => {
@@ -676,18 +617,7 @@ test.describe('Streaming (CMCD) Page Contract (/streaming)', () => {
     await page.goto('/streaming')
     await expect(page.getByText('Total Sessions', { exact: true }).first()).toBeVisible({ timeout: 30_000 })
     await page.waitForTimeout(2_000)
-
-    const results = await new AxeBuilder({ page })
-      .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
-      .exclude('[data-testid="plotly-host"]')
-      .exclude('[data-empty-placeholder="true"]')
-      .exclude('[data-axe-ignore="true"]')
-      .exclude('.maplibregl-map')
-      .analyze()
-    expect(
-      results.violations,
-      results.violations.map((v) => `[${v.id}] ${v.help} (nodes: ${v.nodes.length}, first: ${v.nodes[0]?.target?.join(' > ')})`).join('\n'),
-    ).toEqual([])
+    await assertNoWcagViolations(page)
   })
 
   test('5. Layout stability: CLS <= 0.05 on a warm reload', async ({ page }) => {
@@ -749,27 +679,7 @@ for (const route of CLEAN_ROUTES) {
     await gotoSettled(page, route)
     await page.locator('main').first().waitFor({ state: 'visible', timeout: 30_000 })
     await page.waitForTimeout(3_000)
-
-    const results = await new AxeBuilder({ page })
-      .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
-      .exclude('.recharts-wrapper')
-      .exclude('[data-testid="plotly-host"]')
-      .exclude('[data-empty-placeholder="true"]')
-      .exclude('[data-axe-ignore="true"]')
-      .exclude('.maplibregl-map')
-      .analyze()
-
-    expect(
-      results.violations,
-      `axe found ${results.violations.length} WCAG 2.1 AA violation(s) on ${route}:\n` +
-        results.violations
-          .map(
-            (v) =>
-              `  - [${v.id}] ${v.help} (${v.impact ?? 'unknown'})\n    ${v.helpUrl}\n` +
-              `    nodes: ${v.nodes.length} (first: ${v.nodes[0]?.target?.join(' > ')})`,
-          )
-          .join('\n'),
-    ).toEqual([])
+    await assertNoWcagViolations(page, ['.recharts-wrapper'])
   })
 }
 

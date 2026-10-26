@@ -4,10 +4,9 @@ import type { PlotlyTrace } from '@/types/api'
 import React, { useMemo, useRef } from 'react'
 import { useInViewOnce } from '@/components/AnalyticsCard'
 import { useQuery } from '@tanstack/react-query'
-import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api'
+import { client, unwrapClient } from "@/lib/api";
 import { useIsDataReady } from '@/hooks/useBootstrap'
-import type { ChartInterval } from '@/lib/utils'
+import { cn, formatAbbreviatedCount, formatBytes, formatCountMaybe, formatUSD, buildServiceHref, CHART_COLORS, type ChartInterval } from "@/lib/utils";
 import type { ReportConfiguration } from '@/hooks/useDashboardCards'
 import { StatCard } from '@/components/ui/confirm-dialog'
 import { Button } from '@/components/ui/button'
@@ -24,8 +23,6 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { cn } from '@/lib/utils';
-import { formatAbbreviatedCount, formatBytes, formatCountMaybe, formatUSD } from '@/lib/format'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ReportLayout } from '@/components/ReportLayout'
 const FosOperationsHelp = ({ note }: { note?: string }) => (
@@ -51,8 +48,6 @@ const FosOperationsHelp = ({ note }: { note?: string }) => (
 
 import { useRouter } from 'next/navigation'
 import { useServiceStore } from '@/stores/filterStore'
-import { buildServiceHref } from '@/lib/utils'
-import { CHART_COLORS } from '@/lib/chart-helpers'
 
 export default function UsagePage() {
   return (

@@ -5,12 +5,10 @@ import { useQuery } from '@tanstack/react-query'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { Badge } from '@/components/ui/badge'
 import { Sparkline } from '@/app/dashboard/_sections/DashboardClient'
-import { ELAPSED_AGE_COMPACT, formatElapsed } from '@/lib/format'
+import { ELAPSED_AGE_COMPACT, formatElapsed } from "@/lib/utils"
 import { useMounted } from '@/hooks/useBootstrap'
-import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api'
+import { client, unwrapClient, queryKeys } from "@/lib/api";
 import type { components } from '@/types/api.generated'
-import { queryKeys } from '@/lib/query-keys'
 
 type TrendPoint = components['schemas']['MetricHistoryPoint']
 type TrendBatch = components['schemas']['MetricHistoryBatchResponse']

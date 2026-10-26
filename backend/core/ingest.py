@@ -34,14 +34,11 @@ from backend.core.duckdb import (
 from backend.core.field_registry import LOG_FIELD_CATALOG
 from backend.core.metadata import ingest_log as _quarantine_mod
 from backend.utils.active_requests import yield_to_api
-from backend.utils.date_utils import ensure_utc
 from backend.utils.sql_validator import escape_sql_literal
-from backend.utils.telemetry import log_once_per
+from backend.utils.telemetry import ensure_utc, log_once_per
 
 _core_pkg.quarantine = _quarantine_mod  # type: ignore[attr-defined]
-
 logger = logging.getLogger(__name__)
-
 _INGEST_OUTCOME_COUNTER_KEYS = (
     "valid_records", "malformed_records", "corrupt_containers", "quarantine_capture_failures",
     "source_delete_failures", "cap_evictions", "objects_processed", "objects_successful",
@@ -102,7 +99,7 @@ def _is_permission_error(err: Any) -> bool:
 
 
 def _parse_time_bounds(start_time: str | None, end_time: str | None) -> tuple[datetime | None, datetime | None]:
-    from backend.utils.date_utils import parse_iso_utc
+    from backend.utils.telemetry import parse_iso_utc
 
     return (parse_iso_utc(start_time) if start_time else None, parse_iso_utc(end_time) if end_time else None)
 
@@ -266,7 +263,6 @@ def _build_column_select_exprs(
     *,
     source_file_expr: str | None = None,
 ) -> list[str]:
-    """Build the canonical column SELECT expression list for raw-JSON ingest."""
     catalog_field_ids = get_catalog_field_ids(log_fields_config)
     svc_id = (src or {}).get("logging_service_id") or (src or {}).get("name", "")
     if svc_id:
@@ -274,7 +270,6 @@ def _build_column_select_exprs(
         backend_expr = f"regexp_replace(\"backend\", '^{escaped}--', '') AS \"backend\""
     else:
         backend_expr = '"backend"'
-
     field_selects: list[str] = []
     for fid in catalog_field_ids:
         if fid in ("backend", "_source_file"):
@@ -292,7 +287,6 @@ _EMPTY_VALUE_RE = re.compile(r":(?=[,}])")
 
 
 def _parse_fastly_filename_dt(fname: str) -> datetime | None:
-    """Parse the leading ``YYYY-MM-DDTHH-MM-SS`` of a Fastly raw log filename into a UTC datetime."""
     m = _FASTLY_FNAME_TS_RE.match(fname)
     if not m:
         return None
@@ -312,7 +306,6 @@ _DASH_KEY_RE = re.compile(r"/raw/(\d{4}-\d{2}-\d{2})/(\d{2})/")
 
 
 def _parse_key_layout_dt(key: str) -> tuple[str, datetime] | None:
-    """Classify a raw-log key's layout and extract its UTC timestamp."""
     for layout, pattern in (
         ("v3", _V3_MINUTE_KEY_RE),
         ("minute", _MINUTE_KEY_RE),
@@ -340,7 +333,6 @@ def _parse_key_layout_dt(key: str) -> tuple[str, datetime] | None:
 def _compute_incremental_start_after(
     already: set[str], lookback_hours: int = 4, prefix_subpath: str = "raw/request/"
 ) -> str | None:
-    """Derive an S3 ``StartAfter`` key from previously-ingested filenames."""
     norm_subpath = prefix_subpath.strip("/")
     parsed = [p for f in already if norm_subpath in f and (p := _parse_key_layout_dt(f)) is not None] or [
         p for f in already if "/raw/" in f and (p := _parse_key_layout_dt(f)) is not None
@@ -359,10 +351,8 @@ def _compute_incremental_start_after(
 
 
 def _delete_objects_robust_with_failures(fos_client, bucket: str, keys: list[str]) -> tuple[int, set[str]]:
-    """Delete objects and return the exact keys that could not be acknowledged."""
     if not keys:
         return 0, set()
-
     failed_keys: set[str] = set()
     try:
         batch_size, total_deleted = 500, 0
@@ -390,7 +380,6 @@ def _delete_objects_robust_with_failures(fos_client, bucket: str, keys: list[str
         if _is_permission_error(err_str):
             logger.warning("Delete failed due to missing permissions: %s", err_str.split(":", 1)[-1].strip() or err_str)
             return 0, set(keys)
-
         logger.warning("Bulk delete failed, falling back to individual", exc_info=True)
         deleted_count, individual_failures = 0, set()
         if len(keys) <= 4:
@@ -410,7 +399,6 @@ def _delete_objects_robust_with_failures(fos_client, bucket: str, keys: list[str
                     logger.warning("Failed to delete object %s", k, exc_info=True)
                     individual_failures.add(k)
             return deleted_count, individual_failures
-
         access_denied_event = threading.Event()
 
         def _delete_single_key(k: str) -> tuple[str, bool, str | None]:
@@ -444,12 +432,10 @@ def _delete_objects_robust_with_failures(fos_client, bucket: str, keys: list[str
 
 
 def _delete_objects_robust(fos_client, bucket: str, keys: list[str]) -> int:
-    """Delete multiple objects, retaining the historical deleted-count result."""
     return _delete_objects_robust_with_failures(fos_client, bucket, keys)[0]
 
 
 def _scan_invalid_gzip_lines(paths: list[str]) -> list[tuple[str, str]]:
-    """Find malformed request rows from downloaded gzip files without DuckDB."""
     invalid_rows: list[tuple[str, str]] = []
     for path in paths:
         with gzip.open(path, "rb") as compressed:
@@ -467,7 +453,6 @@ def _scan_invalid_gzip_lines(paths: list[str]) -> list[tuple[str, str]]:
 
 
 def _download_chunk_to_local(fos_client, s3_paths: list[str], tmpdir: str) -> tuple[dict[str, str], dict[str, str]]:
-    """Download each ``s3://bucket/key`` once into ``tmpdir``, returning ``(s3_to_local, local_to_s3)``."""
     from backend.utils.telemetry_proxy import _BOTO3_CALLER_HINT
 
     s3_to_local: dict[str, str] = {}
@@ -507,17 +492,14 @@ def _download_chunk_to_local(fos_client, s3_paths: list[str], tmpdir: str) -> tu
 
 
 def _deterministic_buffer_name(chunk: list[str]) -> str:
-    """Return ``batch_{sha256(sorted_chunk)[:16]}.parquet``."""
     return f"batch_{hashlib.sha256('\n'.join(sorted(chunk)).encode('utf-8')).hexdigest()[:16]}.parquet"
 
 
 def _recover_in_flight(source: dict, table_name: str = "logs") -> dict:
-    """Reconcile ``ingest_in_flight`` rows with on-disk buffer state."""
     source_name = source["name"]
     pending = metadata_db.list_in_flight(source_name, table_name=table_name)
     if not pending:
         return {"promoted": 0, "dropped": 0, "rows_recovered": 0}
-
     buf_dir = iceberg._buffer_dir(source, table_name=table_name)  # type: ignore[attr-defined]
     promoted = dropped = rows_recovered = 0
     for buffer_filename, file_rows in pending:
@@ -527,10 +509,7 @@ def _recover_in_flight(source: dict, table_name: str = "logs") -> dict:
             metadata_db.clear_in_flight(source_name, buffer_filename, table_name=table_name)
             promoted += 1
             rows_recovered += row_sum
-            logger.info(
-                "[ingest] %s: recovered in_flight buffer %s (%s) — promoted %d files (%d rows)",
-                source_name, buffer_filename, table_name, len(file_rows), row_sum,
-            )  # fmt: skip
+            logger.info("[ingest] %s: recovered in_flight buffer %s (%s) — promoted %d files (%d rows)", source_name, buffer_filename, table_name, len(file_rows), row_sum,)  # fmt: skip
         else:
             metadata_db.clear_in_flight(source_name, buffer_filename, table_name=table_name)
             dropped += 1
@@ -554,10 +533,8 @@ def list_fos_files(
     delete_after: bool = False,
     fos_client=None,
 ):
-    """List and discover new files in Fastly Object Storage."""
     if elapsed_fn is None:
         elapsed_fn = lambda: ""  # noqa: E731
-
     st_dt, et_dt = _parse_time_bounds(start_time, end_time)
     already = already_ingested or set()
     start_after_key = None
@@ -587,13 +564,11 @@ def list_fos_files(
     new_files: list[str] = []
     skipped_already = total_listed = 0
     stranded_already: list[str] = []
-
     try:
         prefix_path = src.get("prefix", "").strip("/")
         paginator = fos_client.get_paginator("list_objects_v2", caller_hint="ingest_scan")
         raw_prefix = f"{prefix_path}/{prefix_subpath}" if prefix_path else prefix_subpath
         yield {"type": "status", "message": f"{elapsed_fn()} Discovering new files in Fastly Object Storage..."}
-
         from backend.provision.log_paths import minute_list_prefix, rum_minute_list_prefix
 
         now_utc, norm_subpath = datetime.now(UTC), prefix_subpath.strip("/")
@@ -601,7 +576,6 @@ def list_fos_files(
         use_minute_prefixes = (
             incremental_only and not st_dt and not et_dt and norm_subpath in ("raw/request", "raw/rum") and has_v3_files
         )
-
         scan_batches: list[dict[str, Any]] = []
         if use_minute_prefixes:
             prefix_fn = rum_minute_list_prefix if norm_subpath == "raw/rum" else minute_list_prefix
@@ -610,14 +584,12 @@ def list_fos_files(
                 scan_batches.append(
                     {"Bucket": src["bucket"], "Prefix": f"{prefix_path}/{min_sub}" if prefix_path else min_sub}
                 )
-
         if not scan_batches:
             sak = _resolve_start_after_key()
             kwargs = {"Bucket": src["bucket"], "Prefix": raw_prefix}
             if sak:
                 kwargs["StartAfter"] = f"{prefix_path}/{sak}" if prefix_path else sak
             scan_batches.append(kwargs)
-
         seen_keys: set[str] = set()
         exclude_prefix = (
             (f"{prefix_path}/{exclude_prefix_subpath}" if prefix_path else exclude_prefix_subpath)
@@ -668,7 +640,6 @@ def list_fos_files(
         logger.exception("[ingest] Could not list FOS objects: %s", e)
         yield {"type": "error", "message": f"Could not list FOS objects: {e}"}
         return {"new_files": [], "file_sizes": {}, "skipped_already": 0, "stranded_already": []}
-
     return {
         "new_files": new_files,
         "file_sizes": file_sizes,
@@ -686,7 +657,6 @@ def ingest(
     end_time: str | None = None,
     incremental_only: bool = False,
 ):
-    """Ingest new raw log files from FOS into the local Parquet buffer."""
     start_time_exec = time.time()
 
     def elapsed() -> str:
@@ -701,11 +671,9 @@ def ingest(
     svc_name = src.get("service_name") or source_name
     display_name = f"{svc_name} ({svc_id})" if svc_name != svc_id else svc_id
     _ensure_source_registered(src)
-
     if not src.get("bucket"):
         yield {"type": "error", "message": "Fastly Object Storage bucket is not configured for this service."}
         return
-
     fos_client = _get_fos_client(src)
     try:
         recovery = _recover_in_flight(src)
@@ -714,16 +682,14 @@ def ingest(
                 "type": "status",
                 "message": (
                     f"Crash recovery: promoted {recovery['promoted']} buffer(s) "
-                    f"({recovery['rows_recovered']:,} rows), dropped {recovery['dropped']} stale row(s)."
+                    f"({recovery['rows_recovered']:} rows), dropped {recovery['dropped']} stale row(s)."
                 ),
             }
     except Exception as e:
         logger.warning("[ingest] %s: in_flight recovery sweep failed: %s", display_name, e)
-
     _parse_time_bounds(start_time, end_time)
     yield {"type": "status", "message": f"{elapsed()} Fetching ingestion history..."}
     already = metadata_db.get_ingested_filenames(source_name, limit=20_000 if incremental_only else None)
-
     list_res = yield from list_fos_files(
         src=src,
         prefix_subpath="raw/request/",
@@ -736,11 +702,9 @@ def ingest(
         delete_after=delete_after,
         fos_client=fos_client,
     )
-
     new_files, file_sizes = list_res["new_files"], list_res["file_sizes"]
     skipped_already, stranded_already = list_res["skipped_already"], list_res["stranded_already"]
     outcome_counters = _new_object_outcome(processed=0)
-
     reclaimed = 0
     if delete_after and stranded_already:
         throttled = False
@@ -750,19 +714,14 @@ def ingest(
                 throttled = True
             else:
                 _reconcile_last_attempt[source_name] = now
-
         if not throttled:
             try:
                 deletable = metadata_db.get_reclaimable_strand_filenames(
                     source_name, set(stranded_already), _RECONCILE_LEDGER_EPOCH
                 )
             except Exception as classify_err:
-                logger.warning(
-                    "[ingest] %s: could not classify reclaimable strands (%s) — skipping reclaim this run",
-                    display_name, classify_err,
-                )  # fmt: skip
+                logger.warning("[ingest] %s: could not classify reclaimable strands (%s) — skipping reclaim this run", display_name, classify_err,)  # fmt: skip
                 deletable = set()
-
             s3_pfx = f"s3://{src['bucket']}/"
             stranded_keys = [p[len(s3_pfx) :] for p in stranded_already if p in deletable and p.startswith(s3_pfx)]
             if stranded_keys:
@@ -776,11 +735,7 @@ def ingest(
                 try:
                     reclaimed = _delete_objects_robust(fos_client, src["bucket"], stranded_keys)
                 except Exception as recl_err:
-                    logger.warning(
-                        "[ingest] %s: stranded-delete reconcile failed (%s) — will retry next run",
-                        display_name, recl_err,
-                    )  # fmt: skip
-
+                    logger.warning("[ingest] %s: stranded-delete reconcile failed (%s) — will retry next run", display_name, recl_err,)  # fmt: skip
     if not new_files:
         msg = (
             f"No new files; reclaimed {reclaimed} raw file(s) left by an interrupted prior run."
@@ -797,7 +752,6 @@ def ingest(
             "message": msg,
         }
         return
-
     chunk_size = INGEST_CHUNK_SIZE
     total_inserted = total_corrupt = total_quarantined = processed_count = deleted = 0
     corrupt_containers = quarantine_capture_failures = cap_evictions = 0
@@ -807,7 +761,6 @@ def ingest(
     partial_paths: set[str] = set()
     capture_failed_paths: set[str] = set()
     touched_hours: set[str] = set()
-
     mem_con = None
     _delete_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="ingest_delete")
     _pending_deletes: list[tuple[concurrent.futures.Future, set[str]]] = []
@@ -827,7 +780,6 @@ def ingest(
     cfg = svcconfig.load_config(source.get("service_id") or source.get("name")) if source else None
     log_fields_config = cfg.get("log_fields", {}) if cfg else None
     columns_sql = get_ingest_columns_sql(log_fields_config)
-
     try:
         from backend.core.duckdb import get_memory_connection
 
@@ -837,7 +789,6 @@ def ingest(
             mem_con.execute("SET force_download = true;")
         except Exception as _fd_err:
             logger.debug("force_download not supported on this DuckDB build: %s", _fd_err)
-
         failed_paths: set[str] = set()
         for chunk_start in range(0, len(new_files), chunk_size):
             yield_to_api()
@@ -847,16 +798,14 @@ def ingest(
                     "message": f"{elapsed()} Time limit of {max_seconds}s reached. Stopping batch early.",
                 }
                 break
-
             chunk = new_files[chunk_start : chunk_start + chunk_size]
             outcome_counters["objects_processed"] += len(chunk)
             chunk_num = (chunk_start // chunk_size) + 1
             total_chunks = math.ceil(len(new_files) / chunk_size)
             yield {
                 "type": "status",
-                "message": f"{elapsed()} Processing {len(chunk)} files in batch {chunk_num}/{total_chunks} ({len(new_files):,} files total)...",
+                "message": f"{elapsed()} Processing {len(chunk)} files in batch {chunk_num}/{total_chunks} ({len(new_files):} files total)...",
             }
-
             count_map: dict[str, int] = {}
             chunk_tmpdir_obj = tempfile.TemporaryDirectory(prefix="ingest_chunk_")
             try:
@@ -867,10 +816,8 @@ def ingest(
                     yield {"type": "status", "message": "All files in batch failed to download."}
                     continue
                 read_paths = [s3_to_local[p] for p in read_paths_s3]
-
                 mem_con.execute("DROP TABLE IF EXISTS _ingest_staging")
                 paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in read_paths)
-
                 try:
                     _execute_query_with_retry(
                         mem_con,
@@ -879,7 +826,6 @@ def ingest(
                 except Exception as batch_err:
                     logger.error(f"Batch read failed: {batch_err}")
                     yield {"type": "status", "message": "Batch read failed, isolating problematic files..."}
-
                     valid_paths = []
                     for i, read_path in enumerate(read_paths):
                         try:
@@ -912,11 +858,9 @@ def ingest(
                                 if result["quarantine_capture_failures"]:
                                     capture_failed_paths.add(read_paths_s3[i])
                             yield {"type": "status", "message": f"Skipping unreadable file {f_name}: {err_msg}"}
-
                     if not valid_paths:
                         yield {"type": "status", "message": "All files in batch are unreadable."}
                         continue
-
                     try:
                         _execute_query_with_retry(
                             mem_con,
@@ -926,7 +870,6 @@ def ingest(
                         failed_paths.update(read_paths_s3)
                         yield {"type": "status", "message": f"Retry failed: {retry_err}"}
                         continue
-
                 if local_to_s3:
                     path_map_rows = ", ".join(
                         f"('{escape_sql_literal(local)}', '{escape_sql_literal(s3)}')"
@@ -940,12 +883,10 @@ def ingest(
                         "UPDATE _ingest_staging SET filename = COALESCE("
                         "(SELECT s3 FROM _ingest_path_map WHERE local = _ingest_staging.filename), filename)"
                     )
-
                 for fpath, rcount in mem_con.execute(
                     "SELECT filename, count(*) FROM _ingest_staging GROUP BY 1"
                 ).fetchall():
                     count_map[fpath] = rcount
-
                 field_selects = _build_column_select_exprs(src, log_fields_config, source_file_expr='"filename"')
                 where_clauses, where_params = [], []
                 if start_time:
@@ -955,19 +896,16 @@ def ingest(
                     where_clauses.append("timestamp <= ?::TIMESTAMPTZ")
                     where_params.append(end_time)
                 where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-
                 mem_con.execute(
                     f"CREATE TEMP TABLE _ingest_typed AS SELECT {', '.join(field_selects)} FROM _ingest_staging{where_sql}",
                     where_params,
                 )
                 mem_con.execute("DROP TABLE _ingest_staging")
                 mem_con.execute("ALTER TABLE _ingest_typed RENAME TO _ingest_staging")
-
                 yield {
                     "type": "status",
                     "message": f"{elapsed()} Batch {chunk_num}: Exporting to PyArrow and writing buffer...",
                 }
-
                 arrow_table = _export_staging_arrow(mem_con)
                 valid_rows = len(arrow_table)
                 if valid_rows > 0:
@@ -978,11 +916,9 @@ def ingest(
                         ).fetchall()
                         if r[0] is not None
                     )
-
                 _row = mem_con.execute("SELECT count(*) FROM _ingest_staging").fetchone()
                 total_rows_batch = _row[0] if _row else 0
                 corrupt_in_batch = total_rows_batch - valid_rows
-
                 repairs_made = False
                 _chunk_corrupt_s3_paths: list[str] = []
                 _chunk_truly_corrupt: list = []
@@ -999,12 +935,8 @@ def ingest(
                             try:
                                 bad_rows = _execute_query_with_retry(mem_con, q).fetchall()
                             except Exception as diagnostic_error:
-                                logger.warning(
-                                    "[sync] %s: DuckDB corrupt-line scan failed; scanning downloaded gzip files directly: %s",
-                                    source_name, diagnostic_error,
-                                )  # fmt: skip
+                                logger.warning("[sync] %s: DuckDB corrupt-line scan failed; scanning downloaded gzip files directly: %s", source_name, diagnostic_error,)  # fmt: skip
                                 bad_rows = _scan_invalid_gzip_lines(corrupt_read_paths)
-
                             repaired_by_fname: dict[str, list] = {}
                             truly_corrupt: list[tuple[str, str, str]] = []
                             for fname, raw_line in bad_rows:
@@ -1020,7 +952,6 @@ def ingest(
                                     truly_corrupt.append((fname, raw_line, "missing_timestamp"))
                                 except (json.JSONDecodeError, ValueError):
                                     truly_corrupt.append((fname, raw_line, "invalid_json"))
-
                             partial_paths.update(fname for fname, _raw_line, _reason in truly_corrupt)
                             if repaired_by_fname:
                                 repairs_made = True
@@ -1046,7 +977,6 @@ def ingest(
                                             os.unlink(tmp_path)
                                         except OSError:
                                             pass
-
                             if len(total_corrupt_details) < 100:
                                 for fname, raw_line, _reason in truly_corrupt[: 100 - len(total_corrupt_details)]:
                                     short_name = fname.split("?")[0].split("/")[-1]
@@ -1086,9 +1016,7 @@ def ingest(
                                 corrupt_in_batch = _corrupt_row[0] if _corrupt_row else 0
                         else:
                             total_corrupt_details.append(f"[Error extracting lines: {e}]")
-
                 total_corrupt += corrupt_in_batch
-
                 for corrupt_path in _chunk_corrupt_s3_paths:
                     local_file = s3_to_local.get(corrupt_path)
                     if local_file is None:
@@ -1120,7 +1048,6 @@ def ingest(
                         total_quarantined += 1
             finally:
                 chunk_tmpdir_obj.cleanup()
-
             good_files = [f for f in chunk if f not in failed_paths]
             try:
                 durable_files = {
@@ -1135,7 +1062,6 @@ def ingest(
             rows_to_track = [
                 (f, count_map.get(f, 0) if f in durable_files else 0, file_sizes.get(f)) for f in good_files
             ]
-
             if valid_rows > 0:
                 if repairs_made:
                     arrow_table = _export_staging_arrow(mem_con)
@@ -1149,7 +1075,6 @@ def ingest(
             elif rows_to_track:
                 metadata_db.insert_ingested_files(source_name, rows_to_track)
             successfully_processed_files.extend(good_files)
-
             if delete_after:
                 remaining_deletes = []
                 for future, keys in _pending_deletes:
@@ -1158,7 +1083,6 @@ def ingest(
                     else:
                         remaining_deletes.append((future, keys))
                 _pending_deletes = remaining_deletes
-
                 s3_pfx = f"s3://{src['bucket']}/"
                 chunk_keys = [f[len(s3_pfx) :] for f in chunk if f.startswith(s3_pfx) and f not in failed_paths]
                 if chunk_keys:
@@ -1172,10 +1096,7 @@ def ingest(
                             "message": f"{elapsed()} Batch {chunk_num}: Submitted deletion of {len(chunk_keys)} raw files (async)...",
                         }
                     except RuntimeError as submit_err:
-                        logger.warning(
-                            "[ingest] %s: delete executor submit failed (%s) — falling back to inline delete",
-                            source_name, submit_err,
-                        )  # fmt: skip
+                        logger.warning("[ingest] %s: delete executor submit failed (%s) — falling back to inline delete", source_name, submit_err,)  # fmt: skip
                         try:
                             inline_deleted, inline_failures = _delete_objects_robust_with_failures(
                                 fos_client, src["bucket"], chunk_keys
@@ -1188,15 +1109,11 @@ def ingest(
                             }
                         except Exception as inline_err:
                             delete_failed_paths.update(f"{s3_pfx}{key}" for key in chunk_keys)
-                            logger.error(
-                                "[ingest] %s: inline delete also failed for batch %d (%d files): %s",
-                                source_name, chunk_num, len(chunk_keys), inline_err,
-                            )  # fmt: skip
+                            logger.error("[ingest] %s: inline delete also failed for batch %d (%d files): %s", source_name, chunk_num, len(chunk_keys), inline_err,)  # fmt: skip
                             yield {
                                 "type": "status",
                                 "message": f"{elapsed()} Batch {chunk_num}: WARN — failed to delete {len(chunk_keys)} raw files: {inline_err}",
                             }
-
             total_inserted += valid_rows
             for file_path in chunk:
                 processed_count += 1
@@ -1222,7 +1139,6 @@ def ingest(
                 "[ingest] %s: timed out waiting for all async deletions to complete. Some files may still be deleting in the background.",
                 source_name,
             )
-
         _delete_executor.shutdown(wait=False)
         try:
             del arrow_table
@@ -1233,7 +1149,6 @@ def ingest(
                 mem_con.close()
             except Exception:
                 logger.debug("ingest: mem_con.close failed (ignored)", exc_info=True)
-
     total_deleted = deleted + reclaimed
     outcome_counters.update(
         {
@@ -1273,8 +1188,6 @@ def ingest(
     }
 
 
-# ─── Celery ingest data plane (v3) ────────────────────────────────────────────
-
 from backend.celery_app import app
 
 LEDGER_RECLAIM_AFTER_S = 20 * 60
@@ -1288,13 +1201,11 @@ _LEDGER_KEY_SLICE = 400
 
 
 def _iter_key_slices(keys: list[str]):
-    """Yield ``(key_slice, placeholders)`` in ``_LEDGER_KEY_SLICE``-sized chunks."""
     for key_slice in itertools.batched(keys, _LEDGER_KEY_SLICE):
         yield list(key_slice), ",".join("?" * len(key_slice))
 
 
 def _celery_ingest_scope(kind: str, service_id: str):
-    """Telemetry envelope for ledger tasks: process-context tagging, FOS call tracking, and usage-log flush."""
     from contextlib import contextmanager
 
     from backend.utils.telemetry import flush_usage_log, process_context_scope, start_call_tracking
@@ -1331,7 +1242,6 @@ def _discover_prefix_common(
     src = get_source_for_service(service_id)
     if src is None:
         return 0
-
     fos_result = _consume_generator(list_fos_files(src, **list_kwargs))
     if not fos_result:
         logger.warning("[ledger] %s: %sFOS LIST returned nothing (prefix=%s)", service_id, log_label, prefix_subpath)
@@ -1339,10 +1249,8 @@ def _discover_prefix_common(
     new_files = fos_result.get("new_files") or []
     if not new_files:
         return 0
-
     bucket = src.get("bucket", "")
     s3_prefix = f"s3://{bucket}/"
-
     con = get_con(service_id)
     cur = con.cursor()
     newly_discovered: list[str] = []
@@ -1363,7 +1271,6 @@ def _discover_prefix_common(
         )
         newly_discovered.extend(r[0] for r in cur.fetchall())
     con.commit()
-
     batches = 0
     for batch in itertools.batched(newly_discovered, LEDGER_CONVERT_BATCH_SIZE):
         dispatch_fn(service_id, list(batch))
@@ -1386,7 +1293,6 @@ def discover_prefix(
     run_id: int | None = None,
     originating_task: str = "log_discovery",
 ) -> int:
-    """Discover new request-log keys in FOS, insert into ``ingest_ledger``, and dispatch convert batches."""
     list_kwargs: dict[str, Any] = {"start_time": start_time}
     if prefix_subpath is not None:
         list_kwargs["prefix_subpath"] = prefix_subpath
@@ -1410,7 +1316,6 @@ def _ledger_record_failure(
     *,
     commit: bool = True,
 ) -> str:
-    """Record a convert failure and either requeue ('discovered') or quarantine after LEDGER_MAX_ATTEMPTS."""
     cur = con.cursor()
     row = con.execute(
         "SELECT attempts, status, lease_generation FROM ingest_ledger WHERE service_id=? AND object_key=?",
@@ -1463,7 +1368,6 @@ def _ledger_record_failure(
 def _ledger_mark_committed_batch(
     con, service_id: str, object_keys: list[str], claimed_generations: dict[str, int]
 ) -> set[str]:
-    """Mark claimed ledger rows as committed grouped by lease generation."""
     if not object_keys:
         return set()
     cur = con.cursor()
@@ -1486,7 +1390,6 @@ def _ledger_mark_committed_batch(
 
 
 def _is_permanent_s3_missing(fos: Any, bucket: str, object_key: str) -> bool:
-    """Return True if head_object confirms the object is permanently missing (404/NoSuchKey)."""
     try:
         fos.head_object(Bucket=bucket, Key=object_key)
     except Exception as head_err:
@@ -1498,7 +1401,6 @@ def _is_permanent_s3_missing(fos: Any, bucket: str, object_key: str) -> bool:
 def _ledger_mark_dead_letter_missing(
     con_meta: Any, service_id: str, object_key: str, lease_generation: int | None
 ) -> int:
-    """Mark a claimed ledger row as dead_letter when the object is missing from FOS."""
     cur = con_meta.cursor()
     cur.execute(
         "UPDATE ingest_ledger SET status='dead_letter', "
@@ -1512,7 +1414,6 @@ def _ledger_mark_dead_letter_missing(
 
 
 def _ledger_claim_batch(con, service_id: str, object_keys: list[str], worker_id: str) -> dict[str, int]:
-    """Claim every still-``discovered`` key in ``object_keys`` and return ``{key: lease_generation}``."""
     cur = con.cursor()
     now = time.time()
     won: dict[str, int] = {}
@@ -1532,7 +1433,6 @@ def _ledger_claim_batch(con, service_id: str, object_keys: list[str], worker_id:
 def _claim_and_resolve_batch_source(
     service_id: str, object_keys: list[str], worker_id: str
 ) -> tuple[dict[str, int], Any, dict[str, Any] | None, dict[str, int], list[str]]:
-    """Initialize batch summary, claim keys in ``ingest_ledger``, and resolve the service source."""
     from backend.core.duckdb import get_source_for_service
     from backend.core.metadata.base import get_con
 
@@ -1553,7 +1453,6 @@ def _claim_and_resolve_batch_source(
     summary["not_claimed"] = len(object_keys) - len(claimed_generations)
     if not claimed_generations:
         return summary, con_meta, None, claimed_generations, []
-
     src = get_source_for_service(service_id)
     if src is None:
         for object_key in claimed_keys:
@@ -1578,7 +1477,6 @@ def _download_and_classify_batch_files(
     batch_outcomes: dict[str, dict[str, int]],
     log_label: str = "",
 ) -> list[tuple[str, str, str]]:
-    """Download claimed keys to ``tmpdir`` and classify missing/transient failures."""
     s3_to_local, _ = _download_chunk_to_local(fos, [f"s3://{bucket}/{k}" for k in claimed_keys], tmpdir)
     files: list[tuple[str, str, str]] = []
     for object_key in claimed_keys:
@@ -1615,7 +1513,6 @@ def _handle_batch_convert_exception(
     summary: dict[str, int],
     exc: Exception,
 ) -> dict[str, int]:
-    """Record retryable failure on all still-active keys when a batch transaction fails."""
     for object_key in active:
         _ledger_record_failure(
             con_meta, service_id, object_key, str(exc), claimed_generations[object_key], commit=False
@@ -1630,8 +1527,7 @@ def _handle_batch_convert_exception(
 def _cleanup_batch_resources(
     admission_cm: Any, admission_entered: bool, duckdb_con: Any, service_id: str, caller_name: str
 ) -> None:
-    """Release DuckLake write admission lock and close in-memory DuckDB connection."""
-    from backend.core.iceberg._ducklake import _ducklake_detach
+    from backend.core.iceberg._core import _ducklake_detach
 
     if admission_entered:
         admission_cm.__exit__(None, None, None)
@@ -1652,7 +1548,6 @@ def _finalize_batch_convert(
     batch_outcomes: dict[str, dict[str, int]],
     summary: dict[str, int],
 ) -> dict[str, int]:
-    """Mark active keys committed in ``ingest_ledger`` and record batch outcomes."""
     committed_keys = _ledger_mark_committed_batch(con_meta, service_id, active, claimed_generations)
     for object_key in active:
         if object_key in committed_keys:
@@ -1673,17 +1568,15 @@ def _run_batch_convert_common(
     log_label: str = "",
     process_batch_fn: Any,
 ) -> dict[str, int]:
-    """Shared claim -> download -> process -> finalize scaffolding for request and RUM batch conversion."""
     from backend import config as svcconfig
     from backend.core.duckdb import get_memory_connection
-    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_write_admission
+    from backend.core.iceberg._core import _ducklake_attach, ducklake_write_admission
 
     summary, con_meta, src, claimed_generations, claimed_keys = _claim_and_resolve_batch_source(
         service_id, object_keys, worker_id
     )
     if not claimed_keys or src is None:
         return summary
-
     bucket = src.get("bucket", "")
     active: list[str] = list(claimed_keys)
     outcomes: dict[str, dict[str, int]] = {}
@@ -1733,14 +1626,12 @@ def _run_batch_convert_common(
         )
     finally:
         _cleanup_batch_resources(admission_cm, admission_entered, duckdb_con, service_id, cleanup_label)
-
     return _finalize_batch_convert(con_meta, service_id, active, claimed_generations, outcomes, batch_outcomes, summary)
 
 
 def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: str) -> dict:
-    """Claim N ledger rows, download them, and land every row in one DuckLake transaction."""
     from backend import config as svcconfig
-    from backend.core.iceberg._ducklake import ducklake_table_name
+    from backend.core.iceberg._core import ducklake_table_name
 
     def _process_request_batch(*, src, fos, duckdb_con, files, outcomes, enter_write_admission) -> None:
         table = ducklake_table_name(src)
@@ -1750,14 +1641,12 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
         local_files = [lf for lf, _s3, _k in files]
         file_list_sql = "[" + ", ".join(f"'{escape_sql_literal(lf)}'" for lf in local_files) + "]"
         read_expr = _read_json_auto_sql(file_list_sql, columns_sql, filename=True)
-
         duckdb_con.execute("DROP TABLE IF EXISTS temp.srcmap")
         duckdb_con.execute("CREATE TEMP TABLE srcmap(local VARCHAR, s3 VARCHAR)")
         duckdb_con.execute(
             "INSERT INTO temp.srcmap VALUES "
             + ", ".join(f"('{escape_sql_literal(lf)}', '{escape_sql_literal(s3)}')" for lf, s3, _k in files)
         )
-
         stats = duckdb_con.execute(
             "SELECT filename, count(*) FILTER (timestamp IS NOT NULL), count(*) FILTER (timestamp IS NULL) "
             f"FROM {read_expr} GROUP BY filename"
@@ -1767,7 +1656,6 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
         unmapped = set(valid_by_local) - set(local_files)
         if unmapped:
             raise RuntimeError(f"read_json_auto returned unmapped filename(s): {sorted(unmapped)[:3]}")
-
         clean_batch_expr = (
             f"(SELECT {', '.join(_build_column_select_exprs(src, log_fields_config))}, filename "
             f"FROM {read_expr} WHERE timestamp IS NOT NULL)"
@@ -1776,7 +1664,6 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
             "SELECT r.* EXCLUDE (filename), m.s3 AS _source_file "
             f"FROM {clean_batch_expr} r JOIN temp.srcmap m ON m.local = r.filename"
         )
-
         needs_insert = True
         if not _ducklake_table_exists(duckdb_con, table):
             try:
@@ -1785,7 +1672,6 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
             except Exception as e:
                 if "already exists" not in str(e):
                     raise
-
         if needs_insert:
             try:
                 existing_cols = {r[0] for r in duckdb_con.execute(f"DESCRIBE lake.{table}").fetchall()}
@@ -1799,7 +1685,6 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
             _ducklake_replace_source_rows(
                 duckdb_con, table, "SELECT s3 FROM temp.srcmap", select_sql, "convert_batch_objects"
             )
-
         file_sizes_by_local = {local_file: os.path.getsize(local_file) for local_file, _s3_path, _k in files}
         for local_file, _s3_path, object_key in files:
             outcome = _new_object_outcome()
@@ -1816,7 +1701,6 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
                 logger.exception("[ledger] %s: quarantine check failed for %s", service_id, object_key)
                 outcome["quarantine_capture_failures"] = max(1, outcome["quarantine_capture_failures"])
             outcomes[object_key] = _finalize_object_outcome(outcome)
-
         try:
             metadata_db.insert_ingested_files(
                 service_id,
@@ -1847,7 +1731,6 @@ def _quarantine_convert_corrupt_lines(
     local_file: str,
     object_key: str,
 ) -> dict[str, int]:
-    """Capture malformed request lines as exact-byte local evidence items."""
     from backend.core.quarantine import capture_evidence
 
     valid_count, corrupt_count = duckdb_con.execute(
@@ -1860,7 +1743,6 @@ def _quarantine_convert_corrupt_lines(
             "cap_evictions": 0,
             "quarantine_capture_failures": 0,
         }
-
     service_id = src.get("service_id") or src.get("name", "")
     prefix_path = src.get("prefix", "").strip("/")
     raw_prefix = f"{prefix_path}/raw/request/" if prefix_path else "raw/request/"
@@ -1874,7 +1756,6 @@ def _quarantine_convert_corrupt_lines(
             "cap_evictions": 0,
             "quarantine_capture_failures": int(corrupt_count or 0),
         }
-
     open_file = gzip.open if local_file.endswith(".gz") else open
     evidence_results = []
     offset = 0
@@ -1910,7 +1791,6 @@ def _quarantine_convert_corrupt_lines(
     except (gzip.BadGzipFile, EOFError, OSError) as exc:
         logger.warning("[ledger] %s: malformed request gzip %s: %s", service_id, object_key, exc)
         return _capture_corrupt_container(service_id, "request", object_key, local_file, exc, full_outcome=False)
-
     if len(evidence_results) != int(corrupt_count or 0):
         logger.error(
             "[ledger] %s: DuckDB/raw-line corruption count mismatch for %s (%d vs %d)",
@@ -1924,7 +1804,6 @@ def _quarantine_convert_corrupt_lines(
             "malformed_records": len(evidence_results),
             **_sum_evidence_counts(evidence_results, extra_failures=1),
         }
-
     for result in evidence_results:
         if int(result.get("quarantine_capture_failures", 0)):
             logger.error("[ledger] %s: request quarantine capture failed for %s", service_id, object_key)
@@ -1936,7 +1815,6 @@ def _quarantine_convert_corrupt_lines(
 
 
 def boto3_client_hot():
-    """S3 client for the hot-tier endpoint override (HOT_S3_*)."""
     import boto3
 
     from backend import config as svcconfig
@@ -1957,7 +1835,6 @@ def _redispatch_pending(
     label: str,
     queue_depths_fn: Callable[[], tuple[dict[str, int], bool]] | None = None,
 ) -> tuple[int, bool]:
-    """Re-dispatch reclaimed + stuck ledger keys in batches when queue depth indicates lost messages."""
     pending = len(stuck) + len(reclaimed)
     if not pending:
         return 0, True
@@ -2014,19 +1891,16 @@ def _redispatch_pending(
 def _sweep_ledger_common(
     service_id: str, lookback_hours: int = 4, run_id: int | None = None, *, is_rum: bool = False
 ) -> dict:
-    """Shared implementation for ``sweep_ledger_once`` and ``sweep_rum_ledger_once``."""
     from backend.core.duckdb import get_source_for_service
     from backend.core.metadata.base import get_con
 
     con = get_con(service_id)
     cur = con.cursor()
     now = time.time()
-
     src = get_source_for_service(service_id)
     prefix_path = (src.get("prefix", "") if src else "").strip("/")
     rum_like_pattern = f"{prefix_path}/raw/rum/%" if prefix_path else "raw/rum/%"
     like_op = "LIKE" if is_rum else "NOT LIKE"
-
     cur.execute(
         "UPDATE ingest_ledger SET status='discovered', claimed_by=NULL, claimed_at=NULL, next_attempt_at=? "
         f"WHERE service_id=? AND status='claimed' AND claimed_at < ? AND object_key {like_op} ? "
@@ -2035,7 +1909,6 @@ def _sweep_ledger_common(
     )
     reclaimed = [r[0] for r in cur.fetchall()]
     con.commit()
-
     stale_cutoff = now - LEDGER_REDISPATCH_AFTER_S
     reclaimed_set = set(reclaimed)
     stuck = [
@@ -2049,17 +1922,14 @@ def _sweep_ledger_common(
         ).fetchall()
         if r[0] not in reclaimed_set
     ]
-
     dispatch_fn = convert_batch_rum_files.delay if is_rum else convert_batch_files.delay
     label = "RUM " if is_rum else ""
     redispatched, broker_ok = _redispatch_pending(service_id, reclaimed, stuck, dispatch_fn, label)
-
     st = (datetime.now(UTC) - timedelta(hours=lookback_hours)).isoformat()
     discover_fn = discover_rum_prefix if is_rum else discover_prefix
     discovered = discover_fn(
         service_id, start_time=st, run_id=run_id, originating_task="ledger_rum_sweep" if is_rum else "ledger_sweep"
     )
-
     dead_letter_count = 0
     try:
         dead_letter_row = con.execute(
@@ -2070,7 +1940,6 @@ def _sweep_ledger_common(
         dead_letter_count = int(dead_letter_row[0]) if dead_letter_row else 0
     except Exception:
         dead_letter_count = 0
-
     return {
         "reclaimed": len(reclaimed),
         "redispatched": redispatched,
@@ -2081,11 +1950,7 @@ def _sweep_ledger_common(
 
 
 def sweep_ledger_once(service_id: str, lookback_hours: int = 4, run_id: int | None = None) -> dict:
-    """Reclaim stale claims, re-dispatch stuck request-log keys, and run lookback discovery."""
     return _sweep_ledger_common(service_id, lookback_hours, run_id, is_rum=False)
-
-
-# ── RUM ledger pipeline ──────────────────────────────────────────────────────
 
 
 def discover_rum_prefix(
@@ -2095,7 +1960,6 @@ def discover_rum_prefix(
     run_id: int | None = None,
     originating_task: str = "rum_discovery",
 ) -> int:
-    """RUM counterpart of ``discover_prefix``, scoped to ``raw/rum/``."""
     return _discover_prefix_common(
         service_id,
         list_kwargs={"start_time": start_time, "prefix_subpath": prefix_subpath or "raw/rum/"},
@@ -2108,7 +1972,6 @@ def discover_rum_prefix(
 
 
 def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[dict]] | None:
-    """Parse one decoded RUM beacon JSON object into ``(vitals_rows, errors_rows)``."""
     from backend.core.rum_ingest import extract_metrics_from_faro_payload, safe_float, safe_int
 
     log_service_id = log_data.get("service_id") or log_data.get("rum_service_id")
@@ -2120,7 +1983,6 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
         or log_data.get("path") in ("/health", "/ping", "/favicon.ico")
     ):
         return None
-
     received_at = log_data.get("timestamp")
     if not received_at:
         raise ValueError("missing_timestamp")
@@ -2128,7 +1990,6 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
         dt = ensure_utc(datetime.fromisoformat(received_at))
     except Exception as e:
         raise ValueError(f"invalid_timestamp: {e}") from e
-
     city_val = log_data.get("city") or log_data.get("geo_city") or ""
     region_val = log_data.get("region") or log_data.get("geo_region") or ""
     country_val = log_data.get("country") or log_data.get("geo_country_code") or ""
@@ -2201,7 +2062,6 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
                 extracted_metrics = extract_metrics_from_faro_payload(payload, log_data)
         except Exception:
             extracted_metrics = []
-
     if extracted_metrics:
         for metric in extracted_metrics:
             common = _common(
@@ -2229,7 +2089,6 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
         metric_rating = log_data.get("rum_metric_rating")
         cid_val = log_data.get("rum_cid") or log_data.get("cid") or ""
         pathname_val = log_data.get("rum_pathname")
-
         raw_url = log_data.get("url") or log_data.get("rum_raw_query") or ""
         if raw_url:
             try:
@@ -2243,13 +2102,11 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
             except Exception:
                 if log_once_per("_parse_rum_line: step failed (ignored)", 60):
                     logger.debug("_parse_rum_line: step failed (ignored)", exc_info=True)
-
         if metric_value is not None and isinstance(metric_value, str):
             try:
                 metric_value = float(metric_value) if "." in metric_value else int(metric_value)
             except ValueError:
                 pass
-
         if not pathname_val and log_data.get("referer"):
             try:
                 pathname_val = urlparse(log_data["referer"]).path
@@ -2257,7 +2114,6 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
                 if log_once_per("_parse_rum_line: urlparse failed (ignored)", 60):
                     logger.debug("_parse_rum_line: urlparse failed (ignored)", exc_info=True)
         pathname_val = (pathname_val or "/").replace("//", "/")
-
         common = _common(
             pathname_val,
             log_data.get("browser") or "Chrome",
@@ -2277,16 +2133,13 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
             metric_rating=metric_rating,
             common=common,
         )
-
     return vitals_rows, errors_rows
 
 
 def _parse_rum_beacon_file(local_path: str, service_id: str) -> tuple[list[dict], list[dict], list[tuple[str, str]]]:
-    """Decode and parse one ``raw/rum/*.gz`` beacon file into ``(vitals_rows, errors_rows, corrupt_lines)``."""
     vitals_rows: list[dict] = []
     errors_rows: list[dict] = []
     corrupt_lines: list[tuple[str, str]] = []
-
     with gzip.open(local_path, "rt", encoding="utf-8") as f:
         for line in f:
             stripped = line.strip()
@@ -2318,7 +2171,6 @@ def _parse_rum_beacon_file(local_path: str, service_id: str) -> tuple[list[dict]
                 continue
             vitals_rows.extend(v_rows)
             errors_rows.extend(e_rows)
-
     return vitals_rows, errors_rows, corrupt_lines
 
 
@@ -2331,7 +2183,6 @@ def _quarantine_rum_corrupt_lines(
     *,
     local_file: str,
 ) -> dict[str, int]:
-    """Capture malformed RUM lines as exact-byte local evidence items."""
     from backend.core.quarantine import capture_evidence
 
     service_id = src.get("service_id") or src.get("name", "")
@@ -2344,7 +2195,6 @@ def _quarantine_rum_corrupt_lines(
             "cap_evictions": 0,
             "quarantine_capture_failures": len(corrupt_lines),
         }
-
     occurrences: dict[str, list[str]] = {}
     for line, reason in corrupt_lines:
         occurrences.setdefault(line, []).append(reason)
@@ -2372,7 +2222,6 @@ def _quarantine_rum_corrupt_lines(
                     error_text=reason,
                 )
             )
-
     counts = _sum_evidence_counts(evidence_results, extra_failures=len(corrupt_lines) - len(evidence_results))
     if counts["quarantine_capture_failures"]:
         logger.error(
@@ -2392,7 +2241,6 @@ def _write_rum_arrow_table_batch(
     source_files_sql: str,
     schema: Any,
 ) -> None:
-    """Stage Arrow rows into DuckDB and upsert into ``lake.{table_name}``."""
     if not rows:
         return
     import pyarrow as pa
@@ -2416,14 +2264,11 @@ def _write_rum_arrow_table_batch(
 
 
 def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id: str) -> dict:
-    """Claim N RUM ledger rows, download them, and land every row in one DuckLake transaction per table."""
-    from backend.core.iceberg._core import CLIENT_ERRORS_ARROW_SCHEMA, CLIENT_VITALS_ARROW_SCHEMA
-    from backend.core.iceberg._ducklake import ducklake_table_name
+    from backend.core.iceberg._core import CLIENT_ERRORS_ARROW_SCHEMA, CLIENT_VITALS_ARROW_SCHEMA, ducklake_table_name
 
     def _process_rum_batch(*, src, fos, duckdb_con, files, outcomes, enter_write_admission) -> None:
         vitals_table = ducklake_table_name(src, table_name="client_vitals")
         errors_table = ducklake_table_name(src, table_name="client_errors")
-
         all_vitals: list[dict] = []
         vitals_sources: list[str] = []
         all_errors: list[dict] = []
@@ -2459,7 +2304,6 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
                     outcome["malformed_records"] = len(corrupt_lines)
                     outcome["quarantine_capture_failures"] = len(corrupt_lines)
             outcomes[object_key] = _finalize_object_outcome(outcome)
-
         source_files_sql = ", ".join(f"'{escape_sql_literal(s)}'" for s in source_files)
         enter_write_admission()
         _write_rum_arrow_table_batch(
@@ -2468,7 +2312,6 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
         _write_rum_arrow_table_batch(
             duckdb_con, errors_table, all_errors, errors_sources, source_files_sql, CLIENT_ERRORS_ARROW_SCHEMA
         )
-
         try:
             for count_idx, table_name in ((0, "client_vitals"), (1, "client_errors")):
                 metadata_db.insert_ingested_files(
@@ -2495,16 +2338,11 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
 
 
 def sweep_rum_ledger_once(service_id: str, lookback_hours: int = 4, run_id: int | None = None) -> dict:
-    """RUM counterpart of ``sweep_ledger_once``, scoped to ``raw/rum/`` object keys."""
     return _sweep_ledger_common(service_id, lookback_hours, run_id, is_rum=True)
-
-
-# ── Celery task wrappers ──────────────────────────────────────────────────────
 
 
 @app.task(name="backend.core.ingest.convert_batch_files", bind=True)
 def convert_batch_files(self, service_id: str, object_keys: list[str]):
-    """Batched convert — one DuckLake catalog commit for the whole batch."""
     with _celery_ingest_scope("ledger_convert_batch", service_id):
         return convert_batch_objects(service_id, object_keys, self.request.id or "sync-worker")
 
@@ -2520,7 +2358,6 @@ RAW_DELETE_CLAIM_LEASE_S = 15 * 60
 
 
 def _mark_ledger_published(service_id: str, *, rum: bool = False) -> int:
-    """Record that DuckLake has durably published the committed ledger rows."""
     from backend.core.metadata.base import get_con
 
     con = get_con(service_id)
@@ -2540,14 +2377,12 @@ def _mark_ledger_published(service_id: str, *, rum: bool = False) -> int:
 
 
 def finalize_committed_raw(service_id: str, batch_size: int = 10_000) -> dict:
-    """Delete raw .gz files whose rows are durably committed to the lake."""
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
     from backend.core.metadata.base import get_con
 
     cfg = svcconfig.load_config(service_id) or {}
     delete_after = svcconfig.resolve_raw_delete_after(cfg)
-
     con = get_con(service_id)
     cutoff = time.time() - RAW_DELETE_GRACE_S
     claim_expired = time.time() - RAW_DELETE_CLAIM_LEASE_S
@@ -2563,7 +2398,6 @@ def finalize_committed_raw(service_id: str, batch_size: int = 10_000) -> dict:
     ]
     if not delete_after or not eligible:
         return {"deleted": 0, "eligible": len(eligible), "delete_after": bool(delete_after)}
-
     claim_token = uuid.uuid4().hex
     claimed_at = time.time()
     claimed: list[str] = []
@@ -2581,13 +2415,11 @@ def finalize_committed_raw(service_id: str, batch_size: int = 10_000) -> dict:
     eligible = claimed
     if not eligible:
         return {"deleted": 0, "eligible": 0, "delete_after": True}
-
     src = get_source_for_service(service_id)
     if src is None:
         return {"deleted": 0, "eligible": len(eligible), "delete_after": True}
     fos = _get_fos_client(src)
     bucket = src.get("bucket", "")
-
     deleted = 0
     for chunk_tuple in itertools.batched(eligible, 1000):
         chunk = list(chunk_tuple)
@@ -2625,16 +2457,14 @@ def finalize_committed_raw(service_id: str, batch_size: int = 10_000) -> dict:
 
 
 def merge_lake_files(service_id: str) -> None:
-    """Flush inlined rows to parquet and compact adjacent small DuckLake data files for one service."""
     import duckdb as _duckdb
 
     from backend.core.duckdb import get_memory_connection, get_source_for_service
-    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_write_admission
+    from backend.core.iceberg._core import _ducklake_attach, ducklake_write_admission
 
     src = get_source_for_service(service_id)
     if src is None:
         raise RuntimeError(f"no source registered for {service_id}")
-
     con = get_memory_connection(src)
     try:
         with ducklake_write_admission(service_id):

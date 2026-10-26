@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import duckdb
 import pytest
 import time_machine
+from backend.utils.date_utils import iso_z, parse_iso_utc
 from backend.utils.time_window import resolve_window
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
@@ -26,7 +27,6 @@ from backend.main import app
 from backend.provision.rum_orchestrator_v2 import upgrade_faro_version
 from backend.routers import rum as rum_router
 from backend.routers.rum import router as _rum_api_router
-from backend.utils.date_utils import iso_z, parse_iso_utc
 from backend.utils.remote_access import TimeBounds, _is_blocked_path, get_analyst_time_bounds
 from tests._helpers.config_fakes import mutate_via_save
 from tests._helpers.rum import insert_rum_beacons as _insert_beacons
@@ -105,65 +105,48 @@ def _reset_faro_cache():
 # ── Section 1: RUM Status & Analyst Projection ───────────────────────────────
 
 
+def _rum_settings(
+    vitals: bool = True, perf: bool = False, errs: bool = True, evts: bool = False, cond: str = ""
+) -> dict[str, Any]:
+    return {
+        "capture_vitals": vitals,
+        "capture_performance": perf,
+        "capture_errors": errs,
+        "capture_events": evts,
+        "custom_condition": cond,
+    }
+
+
+def _status_cfg(sha: str | None, rum_extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    base: dict[str, Any] = {"rum_enabled": True, "rum_enabled_at": "2026-10-18T08:00:00Z"}
+    if sha is not None:
+        base["rum_vcl_sha"] = sha
+    if rum_extra is not None:
+        base["rum"] = {"enabled": True, **rum_extra}
+    return base
+
+
+_FULL_RUM_CFG = {
+    "enabled_at": "2026-10-18T08:00:00Z",
+    "deployed_vcl_sha": "sha-current",
+    **_rum_settings(cond='req.url.ext != "jpg"'),
+}
+
+
 @pytest.mark.parametrize(
     ("cfg", "cur_sha", "leg_sha", "expected_drift", "expected_deployed", "expect_save"),
     [
+        (_status_cfg("sha-current", _FULL_RUM_CFG), "sha-current", "sha-legacy", False, "sha-current", False),
         (
-            {
-                "rum_enabled": True,
-                "rum_enabled_at": "2026-10-18T08:00:00Z",
-                "rum_vcl_sha": "sha-current",
-                "rum": {
-                    "enabled": True,
-                    "enabled_at": "2026-10-18T08:00:00Z",
-                    "deployed_vcl_sha": "sha-current",
-                    "capture_vitals": True,
-                    "capture_performance": False,
-                    "capture_errors": True,
-                    "capture_events": False,
-                    "custom_condition": 'req.url.ext != "jpg"',
-                },
-            },
-            "sha-current",
-            "sha-legacy",
-            False,
-            "sha-current",
-            False,
-        ),
-        (
-            {
-                "rum_enabled": True,
-                "rum_enabled_at": "2026-10-18T08:00:00Z",
-                "rum_vcl_sha": "sha-old-deployed",
-                "rum": {"enabled": True},
-            },
+            _status_cfg("sha-old-deployed", {}),
             "sha-new-template",
             "sha-legacy-unrelated",
             True,
             "sha-old-deployed",
             False,
         ),
-        (
-            {
-                "rum_enabled": True,
-                "rum_enabled_at": "2026-10-18T08:00:00Z",
-                "rum_vcl_sha": "sha-legacy-match",
-                "rum": {"enabled": True},
-            },
-            "sha-new-v2",
-            "sha-legacy-match",
-            False,
-            "sha-new-v2",
-            True,
-        ),
-        (
-            {"rum_enabled": True, "rum_enabled_at": "2026-01-01T00:00:00Z"},
-            "freshsha123",
-            "sha-legacy",
-            False,
-            "freshsha123",
-            False,
-        ),
+        (_status_cfg("sha-legacy-match", {}), "sha-new-v2", "sha-legacy-match", False, "sha-new-v2", True),
+        (_status_cfg(None), "freshsha123", "sha-legacy", False, "freshsha123", False),
     ],
 )
 def test_admin_rum_status_variants(cfg, cur_sha, leg_sha, expected_drift, expected_deployed, expect_save):
@@ -223,22 +206,9 @@ def test_update_settings_reconcile_and_missing(custom_condition: str, expect_rec
     cfg = {
         "fastly_api_key": "tok-stored",
         "rum_enabled": True,
-        "rum": {
-            "enabled": True,
-            "capture_vitals": True,
-            "capture_performance": True,
-            "capture_errors": True,
-            "capture_events": True,
-            "custom_condition": "",
-        },
+        "rum": {"enabled": True, **_rum_settings(True, True, True, True)},
     }
-    payload = {
-        "capture_vitals": True,
-        "capture_performance": False,
-        "capture_errors": True,
-        "capture_events": False,
-        "custom_condition": custom_condition,
-    }
+    payload = _rum_settings(cond=custom_condition)
     with (
         patch("backend.config.load_config", return_value=cfg),
         patch("backend.config.mutate_config", side_effect=mutate_via_save(mock_save := MagicMock())),
@@ -266,13 +236,7 @@ def test_update_settings_rolls_back_on_failure(upload_err, reconcile_err, custom
         "rum": {"enabled": True, "capture_vitals": True, "custom_condition": ""},
     }
     test_client = TestClient(_make_app(analyst=False))
-    payload = {
-        "capture_vitals": False,
-        "capture_performance": False,
-        "capture_errors": False,
-        "capture_events": False,
-        "custom_condition": custom_condition,
-    }
+    payload = _rum_settings(False, False, False, False, cond=custom_condition)
     with (
         patch("backend.config.load_config", return_value=cfg),
         patch("backend.config.mutate_config", side_effect=mutate_via_save(mock_save := MagicMock())),
@@ -291,33 +255,17 @@ def test_update_settings_rolls_back_on_failure(upload_err, reconcile_err, custom
 
 @pytest.mark.usefixtures("_reset_faro_cache")
 @pytest.mark.parametrize(
-    ("svc_cfg", "fetched", "expected"),
+    ("faro_ver", "fetched", "exp_avail", "exp_latest", "exp_upd"),
     [
-        (
-            {"rum": {"faro_version": "2.8.2"}},
-            ["2.9.0", "2.8.2", "2.8.1"],
-            {"available": ["2.9.0", "2.8.2", "2.8.1"], "current": "2.8.2", "latest": "2.9.0", "update_available": True},
-        ),
-        (
-            {"rum": {"faro_version": "2.9.0"}},
-            ["2.9.0", "2.8.2"],
-            {"available": ["2.9.0", "2.8.2"], "current": "2.9.0", "latest": "2.9.0", "update_available": False},
-        ),
-        (
-            {},
-            ["2.9.0", "2.8.2"],
-            {"available": ["2.9.0", "2.8.2"], "current": None, "latest": "2.9.0", "update_available": False},
-        ),
-        (
-            {"rum": {"faro_version": "2.8.2"}},
-            ValueError("registry 503"),
-            {"available": [], "current": "2.8.2", "latest": None, "update_available": False},
-        ),
+        ("2.8.2", ["2.9.0", "2.8.2", "2.8.1"], ["2.9.0", "2.8.2", "2.8.1"], "2.9.0", True),
+        ("2.9.0", ["2.9.0", "2.8.2"], ["2.9.0", "2.8.2"], "2.9.0", False),
+        (None, ["2.9.0", "2.8.2"], ["2.9.0", "2.8.2"], "2.9.0", False),
+        ("2.8.2", ValueError("registry 503"), [], None, False),
     ],
 )
-def test_rum_versions_variants(with_config, monkeypatch, svc_cfg, fetched, expected):
+def test_rum_versions_variants(with_config, monkeypatch, faro_ver, fetched, exp_avail, exp_latest, exp_upd):
     svc = "TestRumVersionsUpgradeSvc"
-    with_config[svc] = {"service_id": svc, **svc_cfg}
+    with_config[svc] = {"service_id": svc, **({"rum": {"faro_version": faro_ver}} if faro_ver else {})}
 
     async def fake_fetch():
         if isinstance(fetched, Exception):
@@ -328,8 +276,8 @@ def test_rum_versions_variants(with_config, monkeypatch, svc_cfg, fetched, expec
     r = client.get(f"/api/services/{svc}/rum/versions")
     assert r.status_code == 200
     body = r.json()
-    for k, v in expected.items():
-        assert body.get(k) == v
+    assert body["available"] == exp_avail and body["current"] == faro_ver
+    assert body["latest"] == exp_latest and body["update_available"] is exp_upd
 
 
 @pytest.mark.parametrize(
@@ -457,6 +405,21 @@ class TestRumAdminRbacEnforcement:
 # ── Section 3: RUM Analytics, Vitals, Filters, Beacon Health & Goldens ───────
 
 
+def _b(
+    pathname: str,
+    load_time: float = 1.5,
+    lcp: float | None = None,
+    cls: float | None = None,
+    inp: float | None = None,
+    **kw,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {"pathname": pathname, "load_time": load_time, **kw}
+    for k, v in (("lcp", lcp), ("cls", cls), ("inp", inp)):
+        if v is not None:
+            out[k] = v
+    return out
+
+
 @pytest.mark.usefixtures("skip_view_update")
 def test_rum_analytics_fallback_and_live_events(setup_temp_rum_db) -> None:
     response = client.get("/api/services/svc-test-rum-fallback/rum/analytics")
@@ -468,16 +431,7 @@ def test_rum_analytics_fallback_and_live_events(setup_temp_rum_db) -> None:
 
     _insert_beacons(
         setup_temp_rum_db,
-        [
-            {
-                "pathname": "/live-test",
-                "load_time": 1.5,
-                "lcp": 1.7,
-                "cls": 0.01,
-                "inp": 100,
-                "meta": {"browser": "Chrome", "os": "macOS", "device": "Desktop"},
-            }
-        ],
+        [_b("/live-test", 1.5, 1.7, 0.01, 100, meta={"browser": "Chrome", "os": "macOS", "device": "Desktop"})],
     )
     events = client.get("/api/services/svc-test-rum-fallback/rum/live-events").json()
     assert len(events) == 4 and events[0]["path"] == "/live-test"
@@ -504,16 +458,16 @@ def test_rum_analytics_real_data(setup_temp_rum_db) -> None:
         ("/checkout", 3.0, 3.2, 0.10, 200, "Chrome", "macOS", "Desktop", err_ref, None),
     ]
     test_beacons = [
-        {
-            "pathname": p,
-            "load_time": lt,
-            "lcp": lcp,
-            "cls": cls,
-            "inp": inp,
-            "meta": {"browser": b, "os": o, "device": d},
+        _b(
+            p,
+            lt,
+            lcp,
+            cls,
+            inp,
+            meta={"browser": b, "os": o, "device": d},
             **({"exceptions": exc} if exc is not None else {}),
             **({"req_id": rid} if rid is not None else {}),
-        }
+        )
         for p, lt, lcp, cls, inp, b, o, d, exc, rid in rows
     ]
     _insert_beacons(setup_temp_rum_db, test_beacons)
@@ -541,14 +495,14 @@ def test_rum_analytics_serves_without_in_request_recompute(setup_temp_rum_db, wi
     _insert_beacons(
         setup_temp_rum_db,
         [
-            {
-                "pathname": f"/p_{i}",
-                "load_time": 1.4,
-                "lcp": 1.8,
-                "cls": 0.02,
-                "received_at": (now - datetime.timedelta(minutes=offset_mins + i)).isoformat(),
-                "req_id": f"rid_{i}",
-            }
+            _b(
+                f"/p_{i}",
+                1.4,
+                1.8,
+                0.02,
+                received_at=(now - datetime.timedelta(minutes=offset_mins + i)).isoformat(),
+                req_id=f"rid_{i}",
+            )
             for i in range(12)
         ],
     )
@@ -580,11 +534,7 @@ def test_rum_analytics_date_filtering_and_shared_distinct_id(setup_temp_rum_db) 
     _insert_beacons(
         setup_temp_rum_db,
         [
-            {
-                "pathname": f"/page_{i}",
-                "load_time": 1.5,
-                "received_at": "2026-08-05T10:00:00+00:00" if i < 10 else "2026-08-05T12:00:00+00:00",
-            }
+            _b(f"/page_{i}", 1.5, received_at="2026-08-05T10:00:00+00:00" if i < 10 else "2026-08-05T12:00:00+00:00")
             for i in range(20)
         ],
     )
@@ -598,68 +548,18 @@ def test_rum_analytics_date_filtering_and_shared_distinct_id(setup_temp_rum_db) 
         con.execute("DELETE FROM client_vitals; DELETE FROM client_errors;")
         shared_ts = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=5)
         other_ts = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=6)
+        env = ("/", "Chrome", "macOS", "Desktop")
+        geo = ("", "Austin", "TX", "US", "SIN", "1.3", 45.0)
         con.executemany(
             "INSERT INTO client_vitals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                (
-                    shared_ts,
-                    "lcp",
-                    2.1,
-                    "good",
-                    "/",
-                    "Chrome",
-                    "macOS",
-                    "Desktop",
-                    "shared",
-                    "",
-                    "Austin",
-                    "TX",
-                    "US",
-                    "SIN",
-                    "1.3",
-                    45.0,
-                ),
-                (
-                    shared_ts,
-                    "event_click",
-                    1.0,
-                    "",
-                    "/",
-                    "Chrome",
-                    "macOS",
-                    "Desktop",
-                    "shared",
-                    "",
-                    "Austin",
-                    "TX",
-                    "US",
-                    "SIN",
-                    "1.3",
-                    45.0,
-                ),
+                (shared_ts, "lcp", 2.1, "good", *env, "shared", *geo),
+                (shared_ts, "event_click", 1.0, "", *env, "shared", *geo),
             ],
         )
         con.execute(
             "INSERT INTO client_errors VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                other_ts,
-                "TypeError",
-                "main.js",
-                0,
-                0,
-                "/",
-                "Chrome",
-                "macOS",
-                "Desktop",
-                "other",
-                "",
-                "Austin",
-                "TX",
-                "US",
-                "SIN",
-                "1.3",
-                45.0,
-            ),
+            (other_ts, "TypeError", "main.js", 0, 0, *env, "other", *geo),
         )
     finally:
         con.close()
@@ -685,18 +585,18 @@ def test_rum_analytics_with_filters(
     _insert_beacons(
         setup_temp_rum_db,
         [
-            {
-                "pathname": f"/page_{i}",
-                "load_time": 2.0,
-                "lcp": 2.1,
-                "cls": 0.02,
-                "inp": 100,
-                "meta": {
+            _b(
+                f"/page_{i}",
+                2.0,
+                2.1,
+                0.02,
+                100,
+                meta={
                     "browser": "Chrome" if i < 8 else "Safari",
                     "os": "macOS" if i < 10 else "iOS",
                     "device": "Desktop" if i < 12 else "Mobile",
                 },
-            }
+            )
             for i in range(15)
         ],
     )
@@ -884,31 +784,33 @@ def test_rum_long_window_merges_live_active_hour_tail_without_double_counting(se
 
     service_id = "test_service_long_window_live_tail"
     now = datetime.datetime.now(datetime.UTC).replace(minute=30, second=0, microsecond=0)
-    three_hours_ago = now - datetime.timedelta(hours=3)
-    ten_mins_ago = now - datetime.timedelta(minutes=10)
-    five_secs_ago = now - datetime.timedelta(seconds=5)
+    three_hours_ago, ten_mins_ago, five_secs_ago = (
+        now - datetime.timedelta(hours=3),
+        now - datetime.timedelta(minutes=10),
+        now - datetime.timedelta(seconds=5),
+    )
 
     initial_beacons = [
-        {
-            "pathname": "/historical",
-            "load_time": 1.2,
-            "lcp": 1.5,
-            "cls": 0.01,
-            "received_at": (three_hours_ago + datetime.timedelta(minutes=i)).isoformat(),
-            "req_id": f"hist_{i}",
-            "cid": f"cid_hist_{i}",
-        }
+        _b(
+            "/historical",
+            1.2,
+            1.5,
+            0.01,
+            received_at=(three_hours_ago + datetime.timedelta(minutes=i)).isoformat(),
+            req_id=f"hist_{i}",
+            cid=f"cid_hist_{i}",
+        )
         for i in range(10)
     ] + [
-        {
-            "pathname": "/active-early",
-            "load_time": 1.4,
-            "lcp": 1.8,
-            "cls": 0.02,
-            "received_at": (ten_mins_ago + datetime.timedelta(minutes=i)).isoformat(),
-            "req_id": f"early_{i}",
-            "cid": f"cid_early_{i}",
-        }
+        _b(
+            "/active-early",
+            1.4,
+            1.8,
+            0.02,
+            received_at=(ten_mins_ago + datetime.timedelta(minutes=i)).isoformat(),
+            req_id=f"early_{i}",
+            cid=f"cid_early_{i}",
+        )
         for i in range(2)
     ]
     _insert_beacons(setup_temp_rum_db, initial_beacons)
@@ -919,16 +821,16 @@ def test_rum_long_window_merges_live_active_hour_tail_without_double_counting(se
     finally:
         con.close()
 
-    live_beacon = {
-        "pathname": "/live-5s-ago",
-        "load_time": 2.5,
-        "lcp": 2.9,
-        "cls": 0.04,
-        "received_at": five_secs_ago.isoformat(),
-        "req_id": "live_5s_req",
-        "cid": "cid_live_5s",
-        "exceptions": [{"value": "Error: live_5s_boom", "filename": "live.js", "lineno": 42, "colno": 7}],
-    }
+    live_beacon = _b(
+        "/live-5s-ago",
+        2.5,
+        2.9,
+        0.04,
+        received_at=five_secs_ago.isoformat(),
+        req_id="live_5s_req",
+        cid="cid_live_5s",
+        exceptions=[{"value": "Error: live_5s_boom", "filename": "live.js", "lineno": 42, "colno": 7}],
+    )
     _insert_beacons(setup_temp_rum_db, [live_beacon])
 
     start_1h, end_iso = iso_z(now - datetime.timedelta(hours=1)), iso_z(now)
@@ -1072,15 +974,7 @@ def test_beacon_health_states(
         delta = datetime.timedelta(minutes=5) if mode == "recent" else datetime.timedelta(hours=3)
         _insert_beacons(
             setup_temp_rum_db,
-            [
-                {
-                    "pathname": "/",
-                    "load_time": 1.5,
-                    "received_at": (now - delta).isoformat(),
-                    "cid": "cid1",
-                    "req_id": "req1",
-                }
-            ],
+            [_b("/", 1.5, received_at=(now - delta).isoformat(), cid="cid1", req_id="req1")],
         )
     elif mode == "db_failure":
         monkeypatch.setattr(
@@ -1108,18 +1002,18 @@ def _beacons() -> list[dict]:
         ("13:30:00", "/home", "Chrome", "macOS", "Desktop", 1.1, 2000.0, 0.04, 120.0, False),
     ]
     return [
-        {
-            "received_at": f"2026-08-05T{hms}+00:00",
-            "pathname": path,
-            "meta": {"browser": browser, "os": os_, "device": device},
-            "load_time": load,
-            "lcp": lcp,
-            "cls": cls,
-            "inp": inp,
-            "cid": f"cid_{i}",
-            "req_id": f"req_{i}",
+        _b(
+            path,
+            load,
+            lcp,
+            cls,
+            inp,
+            received_at=f"2026-08-05T{hms}+00:00",
+            meta={"browser": browser, "os": os_, "device": device},
+            cid=f"cid_{i}",
+            req_id=f"req_{i}",
             **({"exceptions": [{"value": f"Boom {i}", "filename": "app.js"}] * (2 if i == 2 else 1)} if err else {}),
-        }
+        )
         for i, (hms, path, browser, os_, device, load, lcp, cls, inp, err) in enumerate(specs)
     ]
 
@@ -1149,41 +1043,18 @@ def _check_golden(name: str, body: Any) -> None:
     ],
 )
 def test_rum_golden_contracts(setup_temp_rum_db, case: str) -> None:
-    import backend.core.duckdb_pool as duckdb_pool
     from backend.core.rollups.rum import recompute_rum_aggregates
+
+    import backend.core.duckdb_pool as duckdb_pool
 
     base = f"/api/services/{_GOLDEN_SERVICE_ID}/rum"
     if case == "analytics_empty":
         _check_golden(case, client.get(f"{base}/analytics?{WINDOW}").json())
-    elif case == "analytics_raw_long":
-        _insert_beacons(setup_temp_rum_db, _beacons())
-        _check_golden(case, client.get(f"{base}/analytics?{WINDOW}").json())
-    elif case == "analytics_raw_short":
-        _insert_beacons(setup_temp_rum_db, _beacons())
-        _check_golden(
-            case, client.get(f"{base}/analytics?start_time=2026-08-05T10:00:00Z&end_time=2026-08-05T11:30:00Z").json()
-        )
-    elif case == "analytics_filtered":
-        _insert_beacons(setup_temp_rum_db, _beacons())
-        flt = json.dumps({"browser": {"mode": "include", "values": ["Chrome"]}})
-        _check_golden(
-            case,
-            client.get(
-                f"{base}/analytics",
-                params={"start_time": "2026-08-05T00:00:00Z", "end_time": "2026-08-05T23:59:59Z", "filters": flt},
-            ).json(),
-        )
-    elif case == "analytics_rollup":
-        _insert_beacons(setup_temp_rum_db, _beacons())
-        duckdb_pool.shutdown_all()
-        con = duckdb.connect(str(setup_temp_rum_db), read_only=False)
-        try:
-            recompute_rum_aggregates(con, _GOLDEN_SERVICE_ID)
-            assert con.execute("SELECT COUNT(*) FROM rum_vitals_aggregates").fetchone()[0] > 0
-        finally:
-            con.close()
-        _check_golden(case, client.get(f"{base}/analytics?{WINDOW}").json())
-    elif case == "live_events":
+        return
+    if case == "beacon_health_disabled":
+        _check_golden(case, client.get(f"{base}/beacon-health").json())
+        return
+    if case == "live_events":
         beacons = []
         for i, b in enumerate(_beacons()):
             b_meta = {k: b[k] for k in ("pathname", "meta", "cid", "req_id")}
@@ -1198,8 +1069,33 @@ def test_rum_golden_contracts(setup_temp_rum_db, case: str) -> None:
                 )
         _insert_beacons(setup_temp_rum_db, beacons)
         _check_golden(case, {"events": client.get(f"{base}/live-events?{WINDOW}").json()})
-    elif case == "beacon_health_disabled":
-        _check_golden(case, client.get(f"{base}/beacon-health").json())
+        return
+
+    _insert_beacons(setup_temp_rum_db, _beacons())
+    if case == "analytics_raw_long":
+        _check_golden(case, client.get(f"{base}/analytics?{WINDOW}").json())
+    elif case == "analytics_raw_short":
+        _check_golden(
+            case, client.get(f"{base}/analytics?start_time=2026-08-05T10:00:00Z&end_time=2026-08-05T11:30:00Z").json()
+        )
+    elif case == "analytics_filtered":
+        flt = json.dumps({"browser": {"mode": "include", "values": ["Chrome"]}})
+        _check_golden(
+            case,
+            client.get(
+                f"{base}/analytics",
+                params={"start_time": "2026-08-05T00:00:00Z", "end_time": "2026-08-05T23:59:59Z", "filters": flt},
+            ).json(),
+        )
+    elif case == "analytics_rollup":
+        duckdb_pool.shutdown_all()
+        con = duckdb.connect(str(setup_temp_rum_db), read_only=False)
+        try:
+            recompute_rum_aggregates(con, _GOLDEN_SERVICE_ID)
+            assert con.execute("SELECT COUNT(*) FROM rum_vitals_aggregates").fetchone()[0] > 0
+        finally:
+            con.close()
+        _check_golden(case, client.get(f"{base}/analytics?{WINDOW}").json())
 
 
 @pytest.fixture
@@ -1212,6 +1108,10 @@ def captured(setup_temp_rum_db):
 
     with patch("backend.routers.rum.rum_repo.fetch_rum_analytics", fake):
         yield calls
+
+
+_WIN_FULL = ("2026-08-05T00:00:00Z", "2026-08-05T23:59:59Z")
+_WIN_1H = ("2026-08-05T00:00:00Z", "2026-08-05T01:00:00Z")
 
 
 @pytest.mark.usefixtures("skip_view_update")
@@ -1228,19 +1128,8 @@ def captured(setup_temp_rum_db):
             },
             resolve_window("1h", ANCHOR),
         ),
-        (
-            {"start_time": "2026-08-05T00:00:00Z", "end_time": "2026-08-05T23:59:59Z", "anchor": ANCHOR},
-            ("2026-08-05T00:00:00Z", "2026-08-05T23:59:59Z"),
-        ),
-        (
-            {
-                "range_token": "bogus",
-                "anchor": ANCHOR,
-                "start_time": "2026-08-05T00:00:00Z",
-                "end_time": "2026-08-05T01:00:00Z",
-            },
-            ("2026-08-05T00:00:00Z", "2026-08-05T01:00:00Z"),
-        ),
+        ({"start_time": _WIN_FULL[0], "end_time": _WIN_FULL[1], "anchor": ANCHOR}, _WIN_FULL),
+        ({"range_token": "bogus", "anchor": ANCHOR, "start_time": _WIN_1H[0], "end_time": _WIN_1H[1]}, _WIN_1H),
     ],
 )
 def test_token_window_resolution(captured, params: dict, expected_bounds: tuple[str, str]) -> None:
@@ -1288,24 +1177,17 @@ def test_analyst_token_window_is_clamped_to_invite(setup_temp_rum_db, captured) 
 # ── Section 6: Web Vitals, Page Telemetry & UX Events ────────────────────────
 
 
+def _vital(id_: str, name: str = "LCP", value: float = 1850.5, rating: str = "good", **kw) -> dict[str, Any]:
+    return {"id": id_, "name": name, "value": value, "rating": rating, **kw}
+
+
 @pytest.mark.parametrize(
     ("payload", "expected_status"),
     [
-        (
-            {
-                "id": "v1-1234",
-                "name": "LCP",
-                "value": 1850.5,
-                "rating": "good",
-                "pathname": "/dashboard",
-                "navigation_type": "navigate",
-                "delta": 1850.5,
-            },
-            200,
-        ),
-        ({"id": "v1-minimal", "name": "TTFB", "value": 220, "rating": "good"}, 200),
-        ({"id": "v1-bad", "name": "NOT_A_REAL_METRIC", "value": 0, "rating": "good"}, 422),
-        ({"id": "v1-bad-rating", "name": "CLS", "value": 0.05, "rating": "amazing"}, 422),
+        (_vital("v1-1234", pathname="/dashboard", navigation_type="navigate", delta=1850.5), 200),
+        (_vital("v1-minimal", "TTFB", 220), 200),
+        (_vital("v1-bad", "NOT_A_REAL_METRIC", 0), 422),
+        (_vital("v1-bad-rating", "CLS", 0.05, "amazing"), 422),
     ],
 )
 def test_web_vitals_payload_validation(payload: dict, expected_status: int):
@@ -1322,24 +1204,13 @@ def test_web_vitals_collection_and_page_telemetry(monkeypatch, tmp_path, caplog)
     sink = tmp_path / "web_vitals.jsonl"
     monkeypatch.setattr(web_vitals_store, "LOG_PATH", sink)
     monkeypatch.delenv("WEB_VITALS_COLLECT", raising=False)
-    r_off = client.post(
-        "/api/web-vitals",
-        json={"id": "off-1", "name": "LCP", "value": 1200, "rating": "good", "pathname": "/dashboard"},
-    )
+    r_off = client.post("/api/web-vitals", json=_vital("off-1", value=1200, pathname="/dashboard"))
     assert r_off.status_code == 200 and not sink.exists()
 
     monkeypatch.setenv("WEB_VITALS_COLLECT", "1")
     r_on = client.post(
         "/api/web-vitals",
-        json={
-            "id": "on-1",
-            "name": "LCP",
-            "value": 2412.0,
-            "rating": "good",
-            "pathname": "/dashboard",
-            "navigation_type": "navigate",
-            "delta": 2412.0,
-        },
+        json=_vital("on-1", value=2412.0, pathname="/dashboard", navigation_type="navigate", delta=2412.0),
     )
     assert r_on.status_code == 200
     rec = json.loads(sink.read_text(encoding="utf-8").strip().splitlines()[0])

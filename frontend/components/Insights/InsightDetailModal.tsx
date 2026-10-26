@@ -25,9 +25,7 @@ import {
   type BotFindingModalData, type ImpossibleDistanceData,
 } from '@/components/Insights/InsightCard'
 import { client, extractApiError, unwrapClient } from '@/lib/api'
-import { CHART_COLORS } from '@/lib/chart-helpers'
-import { formatBytes, formatCount, statusBadgeClass } from '@/lib/format'
-import { cn } from '@/lib/utils'
+import { CHART_COLORS, formatBytes, formatCount, statusBadgeClass, cn } from "@/lib/utils";
 import { useDateFormat } from '@/hooks/useSSE'
 import { useServiceStore } from '@/stores/filterStore'
 import type { components } from '@/types/api.generated'

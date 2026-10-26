@@ -11,7 +11,7 @@ import {
   useScoringQuery,
   useScoringLabels,
   type LabelValue,
-} from '@/components/SessionScoring/help-content'
+} from '@/components/SessionScoring/ScoringAdminPanels'
 import { DataTable, ColumnVisibilityDropdown, DateTimeCell, columnIdOf } from '@/components/DataTable'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -38,10 +38,8 @@ import {
 } from '@/components/ui/select'
 import { SkeletonGrid } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
-import { client, extractApiError, unwrapClient } from '@/lib/api'
-import { formatLocalDateTime } from '@/lib/format'
-import { queryKeys } from '@/lib/query-keys'
-import { keyByOccurrence } from '@/lib/utils'
+import { client, extractApiError, unwrapClient, queryKeys } from "@/lib/api";
+import { formatLocalDateTime, keyByOccurrence } from "@/lib/utils";
 import type { components } from '@/types/api.generated'
 
 interface FlagSessionPopoverProps {

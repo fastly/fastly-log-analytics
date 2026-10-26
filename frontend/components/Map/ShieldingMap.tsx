@@ -17,11 +17,9 @@ import {
   DialogTitle,
   DialogDescription,
 } from '@/components/ui/dialog'
-import { CHART_COLORS } from '@/lib/chart-helpers'
+import { CHART_COLORS, formatCount, formatCountMaybe, keyByOccurrence } from "@/lib/utils";
 import type { ShieldingRowInput } from '@/app/network/page'
 
-import { formatCount, formatCountMaybe } from '@/lib/format'
-import { keyByOccurrence } from '@/lib/utils'
 interface ShieldingMapProps {
   rows: ShieldingRowInput[]
   isLoading?: boolean

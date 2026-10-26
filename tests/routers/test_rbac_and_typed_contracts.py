@@ -28,24 +28,12 @@ from backend.core import log_fields as lf
 from backend.core import metadata as metadata_db
 from backend.core import share_db
 from backend.main import _APP_VERSION, app
-from backend.models import (
-    common as m_common,
-)
-from backend.models import (
-    provision as m_prov,
-)
-from backend.models import (
-    rum as rum_models,
-)
-from backend.models import (
-    security as m_sec,
-)
-from backend.models import (
-    services as m_svc,
-)
-from backend.models import (
-    session_scoring as m_scoring,
-)
+from backend.models import common as m_common
+from backend.models import provision as m_prov
+from backend.models import rum as rum_models
+from backend.models import security as m_sec
+from backend.models import services as m_svc
+from backend.models import session_scoring as m_scoring
 from backend.routers import alerts as alerts_router
 from backend.routers import session_scoring as session_scoring_router
 from backend.routers import session_scoring_admin as scoring_admin
@@ -72,24 +60,13 @@ def _roundtrip(obj: Any) -> Any:
     return json.loads(json.dumps(jsonable_encoder(obj)))
 
 
-def _make_analyst_session(session_id: str = "sess-analyst-1", **overrides: Any) -> AnalystSession:
-    defaults: dict[str, Any] = {
-        "session_id": session_id,
-        "invite_id": "inv-analyst-1",
-        "name": "Analyst B",
-        "email": "analyst@example.com",
-        "ip_address": "203.0.113.10",
-        "user_agent": "pytest-analyst",
-        "fingerprint_signature": "fp-analyst",
-        "pii_policy": {"mask_ips": True},
-        "query_window_hours": 24,
-        "query_start_time": None,
-        "query_end_time": None,
-        "login_time": "2026-01-01T00:00:00Z",
-        "last_active_time": "2026-01-01T00:05:00Z",
-        "service_ids": ["svc-1"],
-    }
-    return AnalystSession(**{**defaults, **overrides})
+def _make_analyst_session(session_id: str = "sess-analyst-1", **ov: Any) -> AnalystSession:
+    d: dict[str, Any] = {"session_id": session_id, "invite_id": "inv-analyst-1", "name": "Analyst B"}
+    d |= {"email": "analyst@example.com", "ip_address": "203.0.113.10", "user_agent": "pytest-analyst"}
+    d |= {"fingerprint_signature": "fp-analyst", "pii_policy": {"mask_ips": True}, "query_window_hours": 24}
+    d |= {"query_start_time": None, "query_end_time": None, "login_time": "2026-01-01T00:00:00Z"}
+    d |= {"last_active_time": "2026-01-01T00:05:00Z", "service_ids": ["svc-1"]}
+    return AnalystSession(**(d | ov))
 
 
 # ── Cross-tenant scope enforcement (alerts, views, custom fields, scoring labels) ──
@@ -110,10 +87,9 @@ def app_with_session():
     @mini.middleware("http")
     async def stamp_session(request: Request, call_next):
         sid = request.headers.get("x-test-session-services")
+        sids = [s for s in (sid or "").split(",") if s]
         request.state.analyst_session = (
-            SimpleNamespace(session_id="test", service_ids=[s for s in sid.split(",") if s], email="t@t")
-            if sid is not None
-            else None
+            SimpleNamespace(session_id="test", service_ids=sids, email="t@t") if sid is not None else None
         )
         return await call_next(request)
 
@@ -121,18 +97,9 @@ def app_with_session():
 
 
 def _fake_alert(aid: str, sid: str) -> dict:
-    return {
-        "id": aid,
-        "service_id": sid,
-        "name": "t",
-        "category": "reliability",
-        "metric": "5xx_rate",
-        "evaluation_type": "absolute",
-        "evaluation_scope": "all",
-        "operator": ">",
-        "threshold": 5.0,
-        "window_min": 5.0,
-    }
+    d = {"id": aid, "service_id": sid, "name": "t", "category": "reliability", "metric": "5xx_rate"}
+    d |= {"evaluation_type": "absolute", "evaluation_scope": "all", "operator": ">"}
+    return d | {"threshold": 5.0, "window_min": 5.0}
 
 
 _VALID_CF_BODY = {
@@ -140,11 +107,7 @@ _VALID_CF_BODY = {
     "label": "Test Field",
     "vcl_log_expression": "req.http.X-Test",
     "collection_stage": "deliver",
-    "duckdb_type": "VARCHAR",
-    "value_type": "string",
-    "bytes_estimate": 20,
-    "enabled": True,
-}
+} | {"duckdb_type": "VARCHAR", "value_type": "string", "bytes_estimate": 20, "enabled": True}
 
 
 def _scope_403(resp) -> bool:
@@ -179,17 +142,8 @@ def test_alerts_and_views_service_scope_checks(app_with_session, path: str, patc
 
 @pytest.mark.security_regression
 def test_views_list_admin_unrestricted(app_with_session):
-    row = {
-        "id": "v1",
-        "service_id": "svc-anything",
-        "name": "My view",
-        "filters_json": "[]",
-        "time_range_type": None,
-        "start_time": None,
-        "end_time": None,
-        "page": None,
-        "created_at": "2026-01-01 00:00:00",
-    }
+    row = {"id": "v1", "service_id": "svc-anything", "name": "My view", "filters_json": "[]", "time_range_type": None}
+    row |= {"start_time": None, "end_time": None, "page": None, "created_at": "2026-01-01 00:00:00"}
     with patch("backend.repositories.alerts.get_views", return_value=[row]), TestClient(app_with_session) as c:
         r = c.get("/api/views/svc-anything")
     assert r.status_code == 200 and r.json() == [row]
@@ -384,10 +338,12 @@ def _debug_keys(body: dict) -> list[str]:
 
 
 def _validate(client):
-    def _spy(method, path, **kw):
-        return {"id": "tok-1", "name": "T", "user_id": "u"} if "/tokens/self" in path else {"name": "Svc"}
-
-    with patch("backend.core.fastly.client.fastly", side_effect=_spy):
+    with patch(
+        "backend.core.fastly.client.fastly",
+        side_effect=lambda method, path, **kw: (
+            {"id": "tok-1", "name": "T", "user_id": "u"} if "/tokens/self" in path else {"name": "Svc"}
+        ),
+    ):
         return client.post("/api/provision/validate", json={"token": "tok", "service_id": "svc1"})
 
 
@@ -429,16 +385,8 @@ def _log_fields_get(client):
 
 
 def _generate_viewer_key(client):
-    invite = {
-        "service_id": "svc-1",
-        "name": "MyService",
-        "access_key_id": "AK",
-        "secret_key": "SK",
-        "fos_bucket": "b",
-        "fos_region": "us-east-1",
-        "fos_endpoint": "https://s3.us-east-1.amazonaws.com",
-        "fos_prefix": "",
-    }
+    invite = {"service_id": "svc-1", "name": "MyService", "access_key_id": "AK", "secret_key": "SK", "fos_bucket": "b"}
+    invite |= {"fos_region": "us-east-1", "fos_endpoint": "https://s3.us-east-1.amazonaws.com", "fos_prefix": ""}
     with patch("backend.provision.generate_analyst_invite", return_value=invite):
         return client.post(f"/api/services/{MOCK_SERVICE_ID}/generate-viewer-key")
 
@@ -580,7 +528,7 @@ def _assert_same_bytes(model_cls: type, payload: dict[str, Any]) -> None:
     )
 
 
-def test_admin_bot_sources_and_rdns_match_producer(client):
+def test_admin_bot_sources_rdns_and_duckdb_match_producer(client):
     meta = {"id": "arcjet", "entry_count": 42, "last_updated": "2026-10-11T00:00:00Z", "enabled": True}
     with patch("backend.utils.bot_sources.fetch_and_cache_source", return_value=meta):
         assert _body(client.post("/api/admin/bot-sources/arcjet/refresh")) == {"ok": True, "source": meta}
@@ -593,41 +541,29 @@ def test_admin_bot_sources_and_rdns_match_producer(client):
         assert _body(client.post("/api/admin/rdns/enrich?limit=100")) == {"ok": True, "summary": summary}
     enrich.assert_called_once_with(limit=100)
 
-
-def test_duckdb_recycle_and_status_match_producer(client):
     mb = 1024 * 1024
     with (
         patch("backend.core.duckdb.current_rss_bytes", return_value=100 * mb),
         patch("backend.core.duckdb_recycle._recycle_rss_threshold_bytes", return_value=500 * mb),
     ):
-        assert _body(client.post("/api/admin/duckdb/recycle")) == {
-            "ok": True,
-            "status": "skipped",
-            "reason": "RSS 100MB < threshold 500MB",
-            "rss_mb": 100.0,
-            "threshold_mb": 500.0,
-        }
+        assert _body(client.post("/api/admin/duckdb/recycle")) == dict(
+            ok=True, status="skipped", reason="RSS 100MB < threshold 500MB", rss_mb=100.0, threshold_mb=500.0
+        )
     with (
         patch("backend.core.duckdb.current_rss_bytes", side_effect=[300 * mb, 200 * mb]),
         patch("backend.core.duckdb_recycle._recycle_rss_threshold_bytes", return_value=500 * mb),
         patch("backend.core.duckdb_recycle.recycle_once", return_value="manual_admin: recycled 1/1"),
     ):
-        assert _body(client.post("/api/admin/duckdb/recycle?force=true")) == {
-            "ok": True,
-            "status": "recycled",
-            "detail": "manual_admin: recycled 1/1",
-            "rss_before_mb": 300.0,
-            "rss_after_mb": 200.0,
-            "freed_mb": 100.0,
-        }
+        exp_recycled = {"ok": True, "status": "recycled", "detail": "manual_admin: recycled 1/1"}
+        exp_recycled |= {"rss_before_mb": 300.0, "rss_after_mb": 200.0, "freed_mb": 100.0}
+        assert _body(client.post("/api/admin/duckdb/recycle?force=true")) == exp_recycled
     status_body = _body(client.get("/api/admin/duckdb/status"))
     assert set(status_body) == {"ok", "memory", "barrier", "pools", "retired_pools"}
-    assert set(status_body["memory"]) == {"current_rss_mb", "recycle_threshold_mb", "recycle_interval_min"} and set(
-        status_body["barrier"]
-    ) == {"is_active", "active_paths"}
+    assert set(status_body["memory"]) == {"current_rss_mb", "recycle_threshold_mb", "recycle_interval_min"}
+    assert set(status_body["barrier"]) == {"is_active", "active_paths"}
 
 
-def test_ngwaf_share_purge_and_calendar_match_producer(client, monkeypatch):
+def test_ngwaf_share_purge_calendar_vcl_health_and_telemetry_match_producer(client, monkeypatch):
     stats = {"total_cached_bots": 2, "workspaces": {"w": None}, "top_bots": {"bot": 2}}
     with (
         patch("backend.config.load_config", return_value={"service_id": "svc-n"}),
@@ -635,32 +571,20 @@ def test_ngwaf_share_purge_and_calendar_match_producer(client, monkeypatch):
         patch("backend.cron.jobs.metadata._run_ngwaf_bot_sync"),
         patch("backend.utils.ngwaf.get_cache_stats", return_value=stats),
     ):
-        assert _body(client.post("/api/admin/ngwaf/sync/svc-n")) == {
-            "ok": True,
-            "service_id": "svc-n",
-            "workspace_id": "ws-1",
-            "stats": stats,
-        }
+        exp_sync = {"ok": True, "service_id": "svc-n", "workspace_id": "ws-1", "stats": stats}
+        assert _body(client.post("/api/admin/ngwaf/sync/svc-n")) == exp_sync
     monkeypatch.setattr("backend.utils.ngwaf.get_cache_stats", lambda: dict(stats))
     assert _body(client.get("/api/admin/ngwaf/status")) == {"ok": True, **stats}
     monkeypatch.setattr("backend.utils.rdns_cache.get_stats", lambda: {"entries": 4, "hit_rate": 0.5})
     assert _body(client.get("/api/admin/rdns/stats")) == {"ok": True, "stats": {"entries": 4, "hit_rate": 0.5}}
-    purge_stats = {
-        "deleted_audit_logs": 3,
-        "deleted_expired_invites": 1,
-        "deleted_stale_sessions": 2,
-        "deleted_claim_tokens": 0,
-        "audit_retention_days": 90,
-        "max_idle_session_days": 30,
-    }
+    purge_stats = {"deleted_audit_logs": 3, "deleted_expired_invites": 1, "deleted_stale_sessions": 2}
+    purge_stats |= {"deleted_claim_tokens": 0, "audit_retention_days": 90, "max_idle_session_days": 30}
     with patch("backend.core.share_db.purge_all_share_records", return_value=purge_stats):
         assert _body(client.post("/api/admin/share/purge")) == {"ok": True, **purge_stats}
     calendar = {"2026-10-01": {"data_files": 4, "size_bytes": 0}, "2026-10-02": {"data_files": 9, "size_bytes": 0}}
     with patch("backend.core.iceberg.get_snapshot_calendar", return_value=calendar):
         assert _body(client.get("/api/admin/iceberg-calendar")) == calendar
 
-
-def test_vcl_health_page_telemetry_and_health_match_producer(client):
     Snippet = namedtuple("Snippet", "name")
     snippets = [Snippet("Fastly Log Analytics - capture"), Snippet("Fastly Log Analytics - scoring")]
     with (
@@ -668,36 +592,30 @@ def test_vcl_health_page_telemetry_and_health_match_producer(client):
         patch("backend.provision.declarative.fastly_integration.fetch_active_version", return_value=7),
         patch("backend.provision.declarative.fastly_integration.fetch_snippets", return_value=snippets),
     ):
-        assert _body(client.get("/api/admin/vcl-health?service_id=svc-a")) == {
-            "service_id": "svc-a",
-            "active_version": 7,
-            "legacy_snippets_found": 0,
-            "legacy_names": [],
+        exp_vcl = {"service_id": "svc-a", "active_version": 7, "legacy_snippets_found": 0, "legacy_names": []}
+        exp_vcl |= {
             "consolidated_snippets_found": 2,
             "consolidated_names": [s.name for s in snippets],
             "is_clean": True,
-            "recommendation": "✓ Clean state — VCL migration complete. Ready for production.",
         }
+        exp_vcl["recommendation"] = "✓ Clean state — VCL migration complete. Ready for production."
+        assert _body(client.get("/api/admin/vcl-health?service_id=svc-a")) == exp_vcl
     with patch("backend.config.load_config", return_value=None):
-        assert _body(client.get("/api/admin/vcl-health?service_id=nope")) == {
-            "service_id": "nope",
-            "error": "Service nope not configured",
-            "is_clean": False,
-        }
+        exp_nope = {"service_id": "nope", "error": "Service nope not configured", "is_clean": False}
+        assert _body(client.get("/api/admin/vcl-health?service_id=nope")) == exp_nope
+    call_row = {
+        "service": "FOS",
+        "method": "GET",
+        "path": "/b/k",
+        "status": "200",
+        "time_ms": 3.0,
+        "caller": "fn",
+        "bytes": 10,
+    }
     payload = {
         "queries": [{"engine": "duckdb", "sql_query": "SELECT 1", "duration_ms": 1.5}],
         "sections": [{"section_name": "summary", "duration_ms": 2.0}],
-        "calls": [
-            {
-                "service": "FOS",
-                "method": "GET",
-                "path": "/b/k",
-                "status": "200",
-                "time_ms": 3.0,
-                "caller": "fn",
-                "bytes": 10,
-            }
-        ],
+        "calls": [call_row],
     }
     with (
         patch("backend.config.get_active_service_id", return_value="svc-a"),
@@ -715,7 +633,7 @@ def test_vcl_health_page_telemetry_and_health_match_producer(client):
         assert _body(client.get("/api/health?deep=1")) == {"status": "ok", "version": _APP_VERSION, "services": []}
 
 
-def test_admin_ingest_actions_and_beacons_match_producer(client):
+def test_admin_ingest_actions_beacons_celery_and_control_room_match_producer(client, monkeypatch):
     for counters in (
         {"files_downloaded": 2, "rows_downloaded": 10, "files_removed": 0},
         {"error": "Could not load table: x", "files_downloaded": 0},
@@ -758,36 +676,27 @@ def test_admin_ingest_actions_and_beacons_match_producer(client):
         "ok": True
     }
 
-
-def test_celery_status_and_control_room_tabs_match_producer(client, monkeypatch):
     for payload in (
-        {
-            "broker_reachable": True,
-            "queues": {"q.ingest": 3},
-            "ledger": {"committed": 5},
-            "inprocess_schedules": [{"name": "job", "trigger": "interval[0:01:00]", "next_run_at": 1700000000.0}],
-            "workers": {
-                "active_tasks": {"w1": [{"id": "t1", "name": "n", "args": [1], "time_start": 2.5, "worker_pid": 7}]},
-                "stats": {"w1": {"started": dt.datetime(2026, 1, 1, tzinfo=dt.UTC)}},
-                "registered": {"w1": ["a.b"]},
-                "scheduled": {},
-                "count": 1,
-            },
-        },
-        {
-            "broker_reachable": False,
-            "workers": {
-                "active_tasks": {},
-                "stats": {},
-                "registered": {},
-                "scheduled": {},
-                "count": 0,
-                "error": "down",
-            },
-            "queues": {},
-            "inprocess_schedules": [],
-            "ledger": {},
-        },
+        dict(
+            broker_reachable=True,
+            queues={"q.ingest": 3},
+            ledger={"committed": 5},
+            inprocess_schedules=[{"name": "job", "trigger": "interval[0:01:00]", "next_run_at": 1700000000.0}],
+            workers=dict(
+                active_tasks={"w1": [{"id": "t1", "name": "n", "args": [1], "time_start": 2.5, "worker_pid": 7}]},
+                stats={"w1": {"started": dt.datetime(2026, 1, 1, tzinfo=dt.UTC)}},
+                registered={"w1": ["a.b"]},
+                scheduled={},
+                count=1,
+            ),
+        ),
+        dict(
+            broker_reachable=False,
+            queues={},
+            inprocess_schedules=[],
+            ledger={},
+            workers={"active_tasks": {}, "stats": {}, "registered": {}, "scheduled": {}, "count": 0, "error": "down"},
+        ),
     ):
         monkeypatch.setattr("backend.routers.admin.health.get_celery_status", lambda p=payload: p)
         assert _body(client.get("/api/admin/celery/status")) == _roundtrip(payload)
@@ -898,13 +807,13 @@ def test_scoring_models_and_routes_match_producers(client, monkeypatch):
 
     cfg: dict[str, Any] = {
         "service_id": "svc",
-        "scoring": {
-            "enabled": True,
-            "operator_threshold": 80,
-            "operator_threshold_set_at": "2026-01-01T00:00:00+00:00",
-            "exclude_url_regex": "\\.(png|css)$",
-            "enforce_status_code": 403,
-        },
+        "scoring": dict(
+            enabled=True,
+            operator_threshold=80,
+            operator_threshold_set_at="2026-01-01T00:00:00+00:00",
+            exclude_url_regex="\\.(png|css)$",
+            enforce_status_code=403,
+        ),
     }
     monkeypatch.setattr(svcconfig, "load_config", lambda sid: cfg)
     for model_cls, fn in (
@@ -941,10 +850,8 @@ def test_scoring_models_and_routes_match_producers(client, monkeypatch):
         mode="json"
     ) == {"status": "success", "id": "abc"}
 
-    ident_payload = {
-        "enabled": True,
-        "scoring_service_id": "svc",
-        "scoring_service_name": "n",
+    ident_payload = {"enabled": True, "scoring_service_id": "svc", "scoring_service_name": "n"}
+    ident_payload |= {
         "scoring_domain": "d.example",
         "matrix_version": "2026-01-01",
         "enabled_at": "2026-01-01T00:00:00+00:00",
@@ -955,36 +862,26 @@ def test_scoring_models_and_routes_match_producers(client, monkeypatch):
         == ident_payload
     )
 
-    rows = [
-        {
-            "id": "a1",
-            "service_id": MOCK_SERVICE_ID,
-            "sid": "s1",
-            "label": lbl,
-            "notes": "n",
-            "flagged_by": "admin",
-            "sample_ip": "",
-            "sample_ua": "",
-            "sample_url": "",
-            "created_at": "2026-01-01 00:00:00",
-            "updated_at": "2026-01-01 00:00:00",
-        }
-        for lbl in ("good", "bad", "neutral")
-    ]
+    base_row = {"id": "a1", "service_id": MOCK_SERVICE_ID, "sid": "s1", "notes": "n", "flagged_by": "admin"}
+    base_row |= {
+        "sample_ip": "",
+        "sample_ua": "",
+        "sample_url": "",
+        "created_at": "2026-01-01 00:00:00",
+        "updated_at": "2026-01-01 00:00:00",
+    }
+    rows = [{**base_row, "label": lbl} for lbl in ("good", "bad", "neutral")]
     counts = {"good": 1, "bad": 1, "neutral": 1}
     monkeypatch.setattr(_labels, "list_labels", lambda sid, limit=500: rows)
     monkeypatch.setattr(_labels, "counts_by_label", lambda sid: counts)
     lbl_resp = client.get(f"/api/services/{MOCK_SERVICE_ID}/scoring/labels")
-    assert _body(lbl_resp) == {"labels": rows, "counts": counts} and list(lbl_resp.json()["counts"]) == [
-        "good",
-        "bad",
-        "neutral",
-    ]
+    assert _body(lbl_resp) == {"labels": rows, "counts": counts}
+    assert list(lbl_resp.json()["counts"]) == ["good", "bad", "neutral"]
     assert m_scoring.ScoringLabelRow.model_validate({"id": "a", "sid": "s", "label": "good"}).label == "good"
     assert set(typing.get_args(m_scoring.ScoringLabelRow.model_fields["label"].annotation)) == set(ALLOWED_LABELS)
 
 
-def test_catalog_bootstrap_schema_audit_and_cmcd_contracts(client, monkeypatch):
+def test_catalog_bootstrap_schema_audit_cmcd_and_query_contracts(client, monkeypatch):
     payload = _compute_log_fields_catalog(None)
     assert payload["groups"] and payload["fields"] and payload["insights"] and payload["presets"]
     _assert_same_bytes(m_common.LogFieldsCatalogResponse, payload)
@@ -1007,14 +904,8 @@ def test_catalog_bootstrap_schema_audit_and_cmcd_contracts(client, monkeypatch):
     schema_payload = {"schema": [{"name": "ip", "type": "VARCHAR"}], "table_name": "logs_x"}
     assert m_svc.SchemaResponse.model_validate(schema_payload).model_dump(mode="json", by_alias=True) == schema_payload
 
-    entry = {
-        "id": 7,
-        "timestamp": "2026-01-01 00:00:00+00:00",
-        "event_type": "provision",
-        "details": {"bucket": "b", "log_fields": {"groups": ["A"]}},
-        "actor": "ui",
-        "source": "local",
-    }
+    entry = {"id": 7, "timestamp": "2026-01-01 00:00:00+00:00", "event_type": "provision"}
+    entry |= {"details": {"bucket": "b", "log_fields": {"groups": ["A"]}}, "actor": "ui", "source": "local"}
     dumped_audit = m_svc.AuditLogsResponse.model_validate(
         {"total": 1, "page": 1, "per_page": 50, "entries": [entry], "_debug_calls": []}
     ).model_dump(mode="json")
@@ -1026,20 +917,10 @@ def test_catalog_bootstrap_schema_audit_and_cmcd_contracts(client, monkeypatch):
     monkeypatch.setattr(svcconfig, "load_config", lambda sid: cmcd_cfg)
     assert _body(client.get(f"/api/services/{MOCK_SERVICE_ID}/cmcd/status")) == cmcd_cfg["cmcd"]
 
-
-def test_query_rows_and_optional_explain_plan(client):
-    base_result = {
-        "columns": ["ts", "tz_ts", "amount", "n"],
-        "data": [
-            {
-                "ts": dt.datetime(2026, 1, 2, 3, 4, 5),
-                "tz_ts": dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.UTC),
-                "amount": Decimal("12.50"),
-                "n": 7,
-            }
-        ],
-        "row_count": 1,
-        "total_rows": 1,
+    row_d = {"ts": dt.datetime(2026, 1, 2, 3, 4, 5), "tz_ts": dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.UTC)}
+    row_d |= {"amount": Decimal("12.50"), "n": 7}
+    base_result = {"columns": ["ts", "tz_ts", "amount", "n"], "data": [row_d], "row_count": 1, "total_rows": 1}
+    base_result |= {
         "truncated": False,
         "elapsed_ms": 3,
         "explain_plan": "plan",
@@ -1065,6 +946,20 @@ def test_query_rows_and_optional_explain_plan(client):
         )
 
 
+_RUM_EMPTY_VITALS = {
+    "lcp": {"p75": None, "distribution": None},
+    "cls": {"p75": None, "distribution": None},
+    "inp": {"p75": None, "distribution": None},
+    "fid": {"p75": None, "fcp": None, "ttfb": None},
+}
+_RUM_FULL_VITALS = {
+    "lcp": {"p75": 2.5, "distribution": {"good": 80, "needs_improvement": 15, "poor": 5}},
+    "cls": {"p75": 0.1, "distribution": {"good": 90, "needs_improvement": 10, "poor": 0}},
+    "inp": {"p75": 180, "distribution": {"good": 70, "needs_improvement": 20, "poor": 10}},
+    "fid": {"p75": 3.0, "fcp": 1.2, "ttfb": 0.4},
+}
+
+
 @pytest.mark.parametrize(
     "model_name,payload",
     [
@@ -1076,6 +971,8 @@ def test_query_rows_and_optional_explain_plan(client):
                 "enabled_at": "2026-01-01T00:00:00+00:00",
                 "deployed_vcl_sha": "a",
                 "current_vcl_sha": "b",
+            }
+            | {
                 "vcl_drift": True,
                 "capture_vitals": True,
                 "capture_performance": False,
@@ -1093,6 +990,8 @@ def test_query_rows_and_optional_explain_plan(client):
                 "recent_beacons": 3,
                 "last_beacon_time": None,
                 "setup_complete": True,
+            }
+            | {
                 "message": "x",
                 "_debug_queries": [{"sql": "s"}],
                 "_debug_sqlite": [],
@@ -1109,15 +1008,9 @@ def test_query_rows_and_optional_explain_plan(client):
                 "pageview_count": 0,
                 "interaction_count": 0,
                 "error_count": 0,
-                "message": "Waiting",
-                "vitals": {
-                    "lcp": {"p75": None, "distribution": None},
-                    "cls": {"p75": None, "distribution": None},
-                    "inp": {"p75": None, "distribution": None},
-                    "fid": {"p75": None, "fcp": None, "ttfb": None},
-                },
-                "worst_pages": [],
-                "errors": [],
+            }
+            | {"message": "Waiting", "vitals": _RUM_EMPTY_VITALS, "worst_pages": [], "errors": []}
+            | {
                 "trends": {"timestamps": [], "lcp": [], "cls": [], "error_rate": []},
                 "environments": {"browsers": {}, "os": {}, "devices": {}},
                 "_debug_queries": [],
@@ -1132,16 +1025,15 @@ def test_query_rows_and_optional_explain_plan(client):
                 "pageview_count": 10,
                 "interaction_count": 1,
                 "error_count": 1,
-                "vitals": {
-                    "lcp": {"p75": 2.5, "distribution": {"good": 80, "needs_improvement": 15, "poor": 5}},
-                    "cls": {"p75": 0.1, "distribution": {"good": 90, "needs_improvement": 10, "poor": 0}},
-                    "inp": {"p75": 180, "distribution": {"good": 70, "needs_improvement": 20, "poor": 10}},
-                    "fid": {"p75": 3.0, "fcp": 1.2, "ttfb": 0.4},
-                },
+                "vitals": _RUM_FULL_VITALS,
+            }
+            | {
                 "worst_pages": [
                     {"path": "/a", "views": 4, "avg_load_time": 1, "lcp_p75": None, "cls_p75": 0.05, "error_rate": 0.0}
-                ],
-                "errors": [{"message": "boom", "file": "a.js", "line": 3, "col": 4, "count": 2}],
+                ]
+            }
+            | {"errors": [{"message": "boom", "file": "a.js", "line": 3, "col": 4, "count": 2}]}
+            | {
                 "trends": {
                     "timestamps": ["2026-01-01T00:00:00+00:00"],
                     "lcp": [None],
@@ -1150,9 +1042,9 @@ def test_query_rows_and_optional_explain_plan(client):
                     "pageviews": [10],
                     "interactions": [1],
                     "errors": [1],
-                },
-                "environments": {"browsers": {"Chrome": 9}, "os": {"macOS": 9}, "devices": {"desktop": 9}},
-            },
+                }
+            }
+            | {"environments": {"browsers": {"Chrome": 9}, "os": {"macOS": 9}, "devices": {"desktop": 9}}},
         ),
     ],
 )
@@ -1166,14 +1058,17 @@ def test_rum_models_roundtrip(model_name, payload):
 # ── Remote share admin & frontend deployment ────────────────────────────────
 
 
-def _make_admin_app() -> FastAPI:
+@pytest.fixture
+def remote_share_client():
     mini = FastAPI()
     mini.add_middleware(RemoteAccessMiddleware)
     mini.include_router(share_admin.router)
-    return mini
+    with TestClient(mini) as c:
+        yield c
 
 
-def _make_analyst_dependency_app() -> FastAPI:
+@pytest.fixture
+def analyst_dep_client():
     class _StampAnalystMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
             request.state.analyst_session = _make_analyst_session()
@@ -1182,58 +1077,29 @@ def _make_analyst_dependency_app() -> FastAPI:
     mini = FastAPI()
     mini.add_middleware(_StampAnalystMiddleware)
     mini.include_router(share_admin.router)
-    return mini
-
-
-@pytest.fixture
-def remote_share_client():
-    with TestClient(_make_admin_app()) as c:
+    with TestClient(mini) as c:
         yield c
 
 
-@pytest.fixture
-def analyst_dep_client():
-    with TestClient(_make_analyst_dependency_app()) as c:
-        yield c
-
-
-def test_share_status_live_start_stop_and_settings(remote_share_client: TestClient):
-    assert {
-        "sharing_active",
-        "public_endpoint",
-        "public_url",
-        "active_session_count",
-        "max_concurrent_sessions",
-        "invites",
-        "sessions",
-        "audit_logs",
-        "services",
-        "rate_limits",
-        "telemetry",
-    } <= set(_body(remote_share_client.get("/api/admin/share/status")))
+def test_share_status_live_start_stop_settings_and_lifecycle(remote_share_client: TestClient):
+    status_keys = {"sharing_active", "public_endpoint", "public_url", "active_session_count", "max_concurrent_sessions"}
+    status_keys |= {"invites", "sessions", "audit_logs", "services", "rate_limits", "telemetry"}
+    assert status_keys <= set(_body(remote_share_client.get("/api/admin/share/status")))
     assert {"sharing_active", "public_url", "active_session_count", "rate_limits", "telemetry"} <= set(
         _body(remote_share_client.get("/api/admin/share/live"))
     )
 
     r_bad = remote_share_client.post("/api/admin/share/start", json={"public_endpoint": "http://insecure.example.com"})
     assert r_bad.status_code == 400 and r_bad.json()["detail"]["error"] == "invalid_request"
-    assert (
-        _body(
-            remote_share_client.post("/api/admin/share/start", json={"public_endpoint": "https://share.example.com"})
-        )["public_url"]
-        == "https://share.example.com"
-    )
+    r_start = remote_share_client.post("/api/admin/share/start", json={"public_endpoint": "https://share.example.com"})
+    assert _body(r_start)["public_url"] == "https://share.example.com"
 
     live_on = _body(remote_share_client.get("/api/admin/share/live"))
     assert live_on["sharing_active"] is True and live_on["public_url"] == "https://share.example.com"
     assert _body(remote_share_client.post("/api/admin/share/stop"))["ok"] is True
 
-    assert (
-        _body(remote_share_client.patch("/api/admin/share/settings", json={"max_concurrent_analyst_sessions": 15}))[
-            "max_concurrent_analyst_sessions"
-        ]
-        == 15
-    )
+    r_patch = remote_share_client.patch("/api/admin/share/settings", json={"max_concurrent_analyst_sessions": 15})
+    assert _body(r_patch)["max_concurrent_analyst_sessions"] == 15
     assert _body(remote_share_client.get("/api/admin/share/settings"))["max_concurrent_analyst_sessions"] == 15
     assert {"version", "text"} <= set(_body(remote_share_client.get("/api/admin/share/tos")))
 
@@ -1245,29 +1111,15 @@ def test_share_status_live_start_stop_and_settings(remote_share_client: TestClie
         assert res["version"] == ver and res["text"] == text
     assert remote_share_client.post("/api/admin/share/tos", json={"version": "   ", "text": ""}).status_code == 400
 
-
-def test_invite_session_and_audit_lifecycle(remote_share_client: TestClient):
-    invite = _body(
-        remote_share_client.post(
-            "/api/admin/share/invites",
-            json={
-                "name": "Alice Analyst",
-                "email": "alice@example.com",
-                "passcode": "ocean-breeze-cabin-42",
-                "duration_hours": 48,
-                "service_ids": ["svc-alpha"],
-                "pii_policy": {"mask_ips": True},
-            },
-        )
-    )
+    inv_req = {"name": "Alice Analyst", "email": "alice@example.com", "passcode": "ocean-breeze-cabin-42"}
+    inv_req |= {"duration_hours": 48, "service_ids": ["svc-alpha"], "pii_policy": {"mask_ips": True}}
+    invite = _body(remote_share_client.post("/api/admin/share/invites", json=inv_req))
     invite_id = invite["id"]
     assert invite["email"] == "alice@example.com" and invite["revoked"] == 0 and invite["service_ids"] == ["svc-alpha"]
     assert any(row["id"] == invite_id for row in _body(remote_share_client.get("/api/admin/share/invites"))["invites"])
 
-    assert (
-        _body(remote_share_client.post(f"/api/admin/share/invites/{invite_id}/revoke"))["ok"] is True
-        and share_db.get_remote_invite(invite_id)["revoked"] == 1
-    )
+    assert _body(remote_share_client.post(f"/api/admin/share/invites/{invite_id}/revoke"))["ok"] is True
+    assert share_db.get_remote_invite(invite_id)["revoked"] == 1
     reactivated = _body(remote_share_client.post(f"/api/admin/share/invites/{invite_id}/reactivate"))
     assert reactivated["id"] == invite_id and reactivated["revoked"] == 0
     assert remote_share_client.post("/api/admin/share/invites/nonexistent-id/reactivate").status_code == 404
@@ -1276,28 +1128,15 @@ def test_invite_session_and_audit_lifecycle(remote_share_client: TestClient):
     new_passcode = regen_body["passcode"]
     assert regen_body["ok"] is True and isinstance(new_passcode, str) and len(new_passcode) >= 16
     stored = share_db.get_remote_invite(invite_id)
-    assert not share_db.verify_passcode("ocean-breeze-cabin-42", stored["passcode"]) and share_db.verify_passcode(
-        new_passcode, stored["passcode"]
-    )
+    assert not share_db.verify_passcode("ocean-breeze-cabin-42", stored["passcode"])
+    assert share_db.verify_passcode(new_passcode, stored["passcode"])
     assert remote_share_client.post("/api/admin/share/invites/nonexistent-id/regenerate-passcode").status_code == 404
 
     mgr = get_tunnel_manager()
     for sid, action in (("sess-revoke-1", "revoke"), ("sess-boot-2", "boot")):
-        mgr._sessions[sid] = _make_analyst_session(
-            session_id=sid,
-            invite_id="inv-1",
-            name="Bob Analyst",
-            email="bob@example.com",
-            ip_address="198.51.100.7",
-            user_agent="Mozilla/5.0",
-            fingerprint_signature="fp-bob",
-            last_active_time="2026-01-01T00:01:00Z",
-            service_ids=["svc-alpha"],
-        )
-        assert (
-            _body(remote_share_client.post(f"/api/admin/share/sessions/{sid}/{action}"))["ok"] is True
-            and sid not in mgr._sessions
-        )
+        mgr._sessions[sid] = _make_analyst_session(session_id=sid, invite_id="inv-1", service_ids=["svc-alpha"])
+        assert _body(remote_share_client.post(f"/api/admin/share/sessions/{sid}/{action}"))["ok"] is True
+        assert sid not in mgr._sessions
         assert remote_share_client.post(f"/api/admin/share/sessions/missing-sess/{action}").status_code == 404
 
     share_db.log_share_audit_event(
@@ -1306,12 +1145,8 @@ def test_invite_session_and_audit_lifecycle(remote_share_client: TestClient):
     share_db.log_share_audit_event(
         event_type="LOGIN_FAIL", email="other-user@example.com", ip_address="192.0.2.2", details="Bad"
     )
-    rows = _body(
-        remote_share_client.get(
-            "/api/admin/share/audit-logs",
-            params={"event_type": "LOGIN_SUCCESS", "email": "filter-target@example.com", "limit": 50},
-        )
-    )["audit_logs"]
+    audit_params = {"event_type": "LOGIN_SUCCESS", "email": "filter-target@example.com", "limit": 50}
+    rows = _body(remote_share_client.get("/api/admin/share/audit-logs", params=audit_params))["audit_logs"]
     assert rows and all(
         r["event_type"] == "LOGIN_SUCCESS" and "filter-target@example.com" in (r.get("email") or "") for r in rows
     )
@@ -1411,28 +1246,17 @@ def test_deploy_frontend_token_resolution_and_options(
     )
 
 
-def test_deploy_frontend_config_persistence_and_error_paths(client):
-    base_payload = {
-        "service_name": "test-service",
-        "domain_name": "test-domain.global.ssl.fastly.net",
-        "origin_host": "203.0.113.10",
-    }
-    mock_res = {
-        "service_id": "service_remote_id",
-        "version": 1,
-        "domain_name": "test-domain.global.ssl.fastly.net",
-        "origin_host": "203.0.113.10",
-    }
+def test_deploy_and_teardown_frontend_persistence_and_errors(client):
+    dom = "test-domain.global.ssl.fastly.net"
+    base_payload = {"service_name": "test-service", "domain_name": dom, "origin_host": "203.0.113.10"}
+    mock_res = {"service_id": "service_remote_id", "version": 1, "domain_name": dom, "origin_host": "203.0.113.10"}
     with patch("backend.routers.share_admin.list_configs", return_value=[]), patch.dict(os.environ, {}, clear=True):
         r_no_tok = client.post("/api/sharing/deploy-frontend", json=base_payload)
         assert r_no_tok.status_code == 400 and "Token is required" in r_no_tok.json()["detail"]["message"]
-    assert (
-        client.post(
-            "/api/sharing/deploy-frontend",
-            json={"service_name": "s", "domain_name": "d.global.ssl.fastly.net", "token_override": "t"},
-        ).status_code
-        == 422
+    r_422 = client.post(
+        "/api/sharing/deploy-frontend", json={"service_name": "s", "domain_name": dom, "token_override": "t"}
     )
+    assert r_422.status_code == 422
     with patch("backend.routers.share_admin.deploy_remote_frontend", side_effect=RuntimeError("Fastly API error")):
         r_500 = client.post("/api/sharing/deploy-frontend", json={**base_payload, "token_override": "some-token"})
         assert r_500.status_code == 500 and r_500.json()["detail"]["error"] == "request_failed"
@@ -1449,34 +1273,18 @@ def test_deploy_frontend_config_persistence_and_error_paths(client):
         with patch("backend.config.mutate_config", side_effect=RuntimeError("filesystem full")):
             assert _body(client.post("/api/sharing/deploy-frontend", json=svc_payload)) == mock_res
 
-
-def test_teardown_frontend_variants_and_errors(client):
-    mock_config = {
-        "service_id": "service123",
-        "remote_frontend": {
-            "service_id": "remote_service_123",
-            "version": 1,
-            "domain_name": "remote-domain.global.ssl.fastly.net",
-            "origin_host": "203.0.113.10",
-        },
-    }
-    saved: dict = {}
+    rf = {"service_id": "remote_service_123", "version": 1, "domain_name": dom, "origin_host": "203.0.113.10"}
+    mock_config = {"service_id": "service123", "remote_frontend": rf}
+    saved_td: dict = {}
     with (
         patch("backend.utils.router_utils.load_service_config", return_value=dict(mock_config)),
         patch("backend.routers.share_admin.delete_remote_frontend") as mock_delete,
-        patch("backend.config.mutate_config", side_effect=fake_mutate_config(dict(mock_config), saved)),
+        patch("backend.config.mutate_config", side_effect=fake_mutate_config(dict(mock_config), saved_td)),
     ):
-        assert (
-            _body(
-                client.post(
-                    "/api/sharing/teardown-frontend",
-                    json={"service_id": "service123", "token_override": "teardown-token"},
-                )
-            )["ok"]
-            is True
-        )
+        td_req = {"service_id": "service123", "token_override": "teardown-token"}
+        assert _body(client.post("/api/sharing/teardown-frontend", json=td_req))["ok"] is True
         mock_delete.assert_called_once_with(remote_service_id="remote_service_123", token="teardown-token")
-        assert saved == {"service_id": "service123"}
+        assert saved_td == {"service_id": "service123"}
 
     with (
         patch("backend.utils.router_utils.load_service_config", return_value={"service_id": "service123"}),
@@ -1518,9 +1326,7 @@ def test_teardown_frontend_variants_and_errors(client):
             patch("backend.utils.router_utils.load_service_config", return_value=dict(mock_config)),
             patch("backend.routers.share_admin.delete_remote_frontend", side_effect=exc),
         ):
-            assert (
-                client.post(
-                    "/api/sharing/teardown-frontend", json={"service_id": "service123", "token_override": "t"}
-                ).status_code
-                == expected_status
+            r_err = client.post(
+                "/api/sharing/teardown-frontend", json={"service_id": "service123", "token_override": "t"}
             )
+            assert r_err.status_code == expected_status

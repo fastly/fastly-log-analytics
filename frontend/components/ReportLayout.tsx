@@ -12,19 +12,29 @@ import { useDebouncedFilterPayload } from '@/hooks/useDashboardCards'
 import { applySavedViewToStore } from '@/components/FilterBar/FilterBar'
 import { useFilterStore } from '@/stores/filterStore'
 import { useServiceStore } from '@/stores/filterStore'
-import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api'
-import { queryKeys } from '@/lib/query-keys'
+import { client, unwrapClient, queryKeys } from "@/lib/api";
 import { Button, buttonVariants } from '@/components/ui/button'
 import { ButtonGroup } from '@/components/ui/button-group'
-import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { PageHeader } from '@/components/ui/confirm-dialog'
-import { Skeleton, SkeletonGrid } from '@/components/ui/skeleton'
-import { INTERVALS, INTERVAL_SECONDS, type ChartInterval } from '@/lib/utils'
-import { cn } from '@/lib/utils'
+import {
+  DashboardSkeleton,
+  TableSkeleton,
+  FormSkeleton,
+  EditorSplitSkeleton,
+  AuthCardSkeleton,
+} from '@/components/ui/skeleton'
+import { INTERVALS, INTERVAL_SECONDS, cn, type ChartInterval } from "@/lib/utils";
 import { ArrowLeft, Loader2, type LucideIcon } from 'lucide-react'
 import type { components } from '@/types/api.generated'
 import type { FiltersPayload } from '@/types/api'
+
+export {
+  DashboardSkeleton,
+  TableSkeleton,
+  FormSkeleton,
+  EditorSplitSkeleton,
+  AuthCardSkeleton,
+}
 
 type ButtonVariant = 'default' | 'outline' | 'secondary' | 'ghost' | 'destructive' | 'link'
 
@@ -66,133 +76,6 @@ export function NoServiceSelected({
       <Icon className="h-10 w-10 text-muted-foreground mb-4" />
       <h2 className="text-xl font-semibold">{title}</h2>
       <p className="text-muted-foreground">{message}</p>
-    </div>
-  )
-}
-
-interface PageSkeletonHeaderProps {
-  title?: string
-  description?: string
-}
-
-/**
- * 4 stat cards over a wide chart + a table. Matches /dashboard,
- * /performance, /security, /origin layout shape.
- */
-export function DashboardSkeleton({ title, description }: PageSkeletonHeaderProps = {}) {
-  return (
-    <div className="space-y-4" data-testid="skeleton">
-      {title ? (
-        <PageHeader title={title} description={description} />
-      ) : (
-        <Skeleton className="h-7 w-48" />
-      )}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <Skeleton className="h-20 w-full" />
-        <Skeleton className="h-20 w-full" />
-        <Skeleton className="h-20 w-full" />
-        <Skeleton className="h-20 w-full" />
-      </div>
-      <Skeleton className="h-72 w-full" />
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-        <Skeleton className="h-56 w-full" />
-        <Skeleton className="h-56 w-full" />
-      </div>
-    </div>
-  )
-}
-
-/** Tall table with header row + N body rows — matches /logs, /sessions, /alerts. */
-export function TableSkeleton({ rows = 12, title, description }: PageSkeletonHeaderProps & { rows?: number } = {}) {
-  return (
-    <div className="space-y-4">
-      {title ? (
-        <PageHeader title={title} description={description} />
-      ) : (
-        <div className="flex items-center justify-between">
-          <Skeleton className="h-7 w-48" />
-          <Skeleton className="h-9 w-32" />
-        </div>
-      )}
-      <div className="border rounded-md overflow-hidden">
-        <Skeleton className="h-10 w-full rounded-none" />
-        <div className="divide-y">
-          <SkeletonGrid count={rows} height="3rem" className="rounded-none" />
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/** Two-column form / dialog-heavy layout — matches /admin pages. */
-export function FormSkeleton() {
-  return (
-    <div className="space-y-4">
-      <Skeleton className="h-7 w-56" />
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div className="space-y-3">
-          <Skeleton className="h-32 w-full" />
-          <Skeleton className="h-32 w-full" />
-        </div>
-        <div className="space-y-3">
-          <Skeleton className="h-32 w-full" />
-          <Skeleton className="h-32 w-full" />
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/** Two-pane (editor + results) — matches /query. */
-export function EditorSplitSkeleton() {
-  return (
-    <div className="space-y-4">
-      <Skeleton className="h-7 w-40" />
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_2fr] gap-3 min-h-[60vh]">
-        <Skeleton className="w-full h-full min-h-72" />
-        <Skeleton className="w-full h-full min-h-72" />
-      </div>
-    </div>
-  )
-}
-
-/**
- * Centered Card spinner for the unauthenticated share-login flow — the only
- * loading.tsx files that sit outside AppLayout (no header row / sidebar).
- */
-export function AuthCardSkeleton({
-  maxWidth = 'md',
-  verticalCenter = false,
-  topPad = false,
-}: {
-  maxWidth?: 'md' | 'xl'
-  verticalCenter?: boolean
-  topPad?: boolean
-}) {
-  const container = ['min-h-screen flex', verticalCenter ? 'items-center' : null, 'justify-center bg-muted/40 p-6', topPad ? 'pt-20' : null]
-    .filter(Boolean)
-    .join(' ')
-  return (
-    <div className={container} data-testid="auth-card-skeleton">
-      <Card className={`w-full ${maxWidth === 'xl' ? 'max-w-xl' : 'max-w-md'} min-h-[380px] [contain-intrinsic-size:auto_380px] [content-visibility:auto]`}>
-        <CardHeader className="space-y-2">
-          <div className="flex items-center gap-2">
-            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden="true" />
-            <span className="text-sm text-muted-foreground" role="status">
-              Verifying share session &amp; security policies...
-            </span>
-          </div>
-        </CardHeader>
-        <CardContent className="min-h-[240px] [contain-intrinsic-size:auto_240px] [content-visibility:auto]">
-          <div className="h-32 space-y-3" aria-hidden="true">
-            <Skeleton className="h-4 w-24" />
-            <Skeleton className="h-9 w-full" />
-            <Skeleton className="h-4 w-28" />
-            <Skeleton className="h-9 w-full" />
-            <Skeleton className="h-9 w-full" />
-          </div>
-        </CardContent>
-      </Card>
     </div>
   )
 }

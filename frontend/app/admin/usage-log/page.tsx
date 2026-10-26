@@ -2,7 +2,7 @@ import { HydrationBoundary } from '@tanstack/react-query'
 
 import { fetchUsageLogServerSide } from '@/lib/ssr/upstream'
 import { resolvePageServiceId, seedDehydratedState } from '@/lib/ssr/upstream'
-import { toQueryDate } from '@/lib/format'
+import { toQueryDate } from "@/lib/utils"
 import UsageLogClient from './_sections/UsageLogClient'
 
 // Per-request RSC shell for /admin/usage-log. Pre-fetches the

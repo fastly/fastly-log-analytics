@@ -3,11 +3,9 @@
 import React, { useState, useMemo } from 'react'
 import Link from 'next/link'
 import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
-import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api'
-import { queryKeys } from '@/lib/query-keys'
+import { client, unwrapClient, queryKeys } from "@/lib/api";
 import type { FiltersPayload } from '@/types/api'
-import { cn } from '@/lib/utils'
+import { cn, WINDOW_OPTIONS, BASELINE_OPTIONS, historyHoursFromExtents, normalizeTabKey, SECTION_LOADING_MESSAGES, groupInsightsBySection, summarizeSeverities, type InsightSectionGroup, type SectionableInsight, type SeveritySummary } from "@/lib/utils";
 import { useEffectiveServiceId } from '@/hooks/useBootstrap'
 import { useSessionRoleStore } from '@/stores/filterStore'
 import { InsightCard, SEVERITY_BADGE_CLASS } from '@/components/Insights/InsightCard'
@@ -32,18 +30,8 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { ReportLayout } from '@/components/ReportLayout'
-import { WINDOW_OPTIONS, BASELINE_OPTIONS, historyHoursFromExtents } from '@/lib/insights-defaults'
 import { useInsightsDefaults } from '@/hooks/useDashboardCards'
 import { useDebounce, useDebouncedFilterPayload } from '@/hooks/useDashboardCards'
-import {
-  normalizeTabKey,
-  SECTION_LOADING_MESSAGES,
-  groupInsightsBySection,
-  summarizeSeverities,
-  type InsightSectionGroup,
-  type SectionableInsight,
-  type SeveritySummary,
-} from '@/lib/utils'
 
 const STATUS_OPTIONS = [
   { label: 'All Statuses', value: 'all' },

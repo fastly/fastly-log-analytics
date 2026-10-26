@@ -5,19 +5,8 @@ import { useSearchParams } from 'next/navigation'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import {
-  Activity,
-  AlertTriangle,
-  BookOpen,
-  Cpu,
-  Eye,
-  Monitor,
-  PieChart,
-  Radio,
-  RefreshCw,
-  ShieldAlert,
-  Terminal,
-  TrendingUp,
-  TriangleAlert,
+  Activity, AlertTriangle, BookOpen, Cpu, Eye, Monitor, PieChart,
+  Radio, RefreshCw, ShieldAlert, Terminal, TrendingUp, TriangleAlert,
 } from 'lucide-react'
 import { AnalyticsCard, TimeSeriesChart } from '@/components/AnalyticsCard'
 import { DataTable, DataTableReadonly } from '@/components/DataTable'
@@ -32,11 +21,8 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useIsAnalyst } from '@/hooks/useBootstrap'
 import { useAnalyticsReportQuery, useReportRangeAnchor, useRumStatus } from '@/hooks/useDashboardCards'
 import { useTimezone } from '@/hooks/useSSE'
-import { adminJsonResult, client, unwrapClient } from '@/lib/api'
-import { CHART_COLORS } from '@/lib/chart-helpers'
-import { formatCount, formatDate, formatLocalDateTime } from '@/lib/format'
-import { queryKeys } from '@/lib/query-keys'
-import { arrayOrEmpty, cn, recordOrNull, type RangeWireArgs } from '@/lib/utils'
+import { adminJsonResult, client, unwrapClient, queryKeys } from "@/lib/api"
+import { CHART_COLORS, formatCount, formatDate, formatLocalDateTime, arrayOrEmpty, cn, recordOrNull, type RangeWireArgs } from "@/lib/utils"
 import { useServiceStore } from '@/stores/filterStore'
 import type { FiltersPayload, StripIndex, WithRequired, components } from '@/types/api'
 
@@ -47,9 +33,7 @@ type RumJsError = components['schemas']['RumJsError']
 type RumCwvDistribution = components['schemas']['RumCwvDistribution']
 type RumAnalytics = WithRequired<RumWire, 'beacon_count' | 'vitals' | 'worst_pages' | 'errors' | 'trends' | 'environments'>
 
-interface RumFaroVersionCardProps {
-  serviceId: string | null
-}
+interface RumFaroVersionCardProps { serviceId: string | null }
 
 export function RumFaroVersionCard({ serviceId }: RumFaroVersionCardProps) {
   const queryClient = useQueryClient()
@@ -60,25 +44,14 @@ export function RumFaroVersionCard({ serviceId }: RumFaroVersionCardProps) {
 
   const { data, isLoading: isVersionsLoading, isError, refetch, isFetching } = useQuery<RumVersionsResponse>({
     queryKey: queryKeys.rumVersions(serviceId),
-    queryFn: async ({ signal }) =>
-      unwrapClient(
-        client.GET('/api/services/{service_id}/rum/versions', {
-          params: { path: { service_id: serviceId as string } },
-          signal,
-        }),
-      ),
+    queryFn: ({ signal }) => unwrapClient(client.GET('/api/services/{service_id}/rum/versions', { params: { path: { service_id: serviceId as string } }, signal })),
     enabled: !!serviceId && rumEnabled && !isAnalyst,
     retry: false,
   })
 
   if (isAnalyst) return null
   if (!serviceId || isStatusLoading || (rumEnabled && isVersionsLoading)) {
-    return (
-      <div className="flex items-center gap-2 shrink-0">
-        <Skeleton className="h-8 w-32" />
-        <Skeleton className="h-8 w-24" />
-      </div>
-    )
+    return <div className="flex items-center gap-2 shrink-0"><Skeleton className="h-8 w-32" /><Skeleton className="h-8 w-24" /></div>
   }
   if (!rumEnabled) return null
 
@@ -87,25 +60,14 @@ export function RumFaroVersionCard({ serviceId }: RumFaroVersionCardProps) {
       <div className="flex items-center gap-2 text-xs text-destructive bg-destructive/10 px-2.5 py-1 rounded-md border border-destructive/20 shrink-0">
         <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
         <span>Versions offline</span>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => refetch()}
-          disabled={isFetching}
-          aria-label="Retry"
-          className="h-5 w-5 hover:bg-destructive/20 hover:text-destructive shrink-0"
-        >
+        <Button variant="ghost" size="icon" onClick={() => refetch()} disabled={isFetching} aria-label="Retry" className="h-5 w-5 hover:bg-destructive/20 hover:text-destructive shrink-0">
           <RefreshCw className={cn('h-2.5 w-2.5', isFetching && 'animate-spin')} />
         </Button>
       </div>
     )
   }
 
-  const available = data?.available ?? []
-  const current = data?.current ?? null
-  const latest = data?.latest ?? null
-  const updateAvailable = data?.update_available ?? false
-
+  const { available = [], current = null, latest = null, update_available: updateAvailable = false } = data ?? {}
   const handleComplete = () => {
     queryClient.invalidateQueries({ queryKey: queryKeys.rumVersions(serviceId) })
     queryClient.invalidateQueries({ queryKey: queryKeys.rumStatus(serviceId) })
@@ -116,38 +78,18 @@ export function RumFaroVersionCard({ serviceId }: RumFaroVersionCardProps) {
       <div className="flex items-center gap-2 shrink-0" data-testid="admin-rum-faro-version-card">
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground mr-1">
           <span className="font-semibold uppercase tracking-wider text-[10px]">Faro SDK:</span>
-          <span
-            className="font-mono font-medium text-foreground bg-muted/60 px-1.5 py-0.5 rounded border border-muted-foreground/10"
-            data-testid="admin-rum-faro-version"
-          >
+          <span className="font-mono font-medium text-foreground bg-muted/60 px-1.5 py-0.5 rounded border border-muted-foreground/10" data-testid="admin-rum-faro-version">
             {current ?? 'Not pinned'}
           </span>
-          {updateAvailable && (
-            <Badge variant="warning" className="text-[9px] py-0 px-1.5 h-4.5 font-medium ml-1 shrink-0">
-              Update available
-            </Badge>
-          )}
+          {updateAvailable && <Badge variant="warning" className="text-[9px] py-0 px-1.5 h-4.5 font-medium ml-1 shrink-0">Update available</Badge>}
         </div>
-
-        <Button
-          onClick={() => setIsUpgradeOpen(true)}
-          variant={updateAvailable ? 'default' : 'outline'}
-          size="sm"
-          className="h-8 text-xs font-semibold px-3"
-          data-testid="admin-rum-settings-btn"
-        >
+        <Button onClick={() => setIsUpgradeOpen(true)} variant={updateAvailable ? 'default' : 'outline'} size="sm" className="h-8 text-xs font-semibold px-3" data-testid="admin-rum-settings-btn">
           RUM Settings
         </Button>
       </div>
-
       <RumSettingsDialog
-        serviceId={serviceId}
-        open={isUpgradeOpen}
-        onOpenChange={setIsUpgradeOpen}
-        availableVersions={available}
-        currentVersion={current}
-        latestVersion={latest}
-        onComplete={handleComplete}
+        serviceId={serviceId} open={isUpgradeOpen} onOpenChange={setIsUpgradeOpen}
+        availableVersions={available} currentVersion={current} latestVersion={latest} onComplete={handleComplete}
       />
     </>
   )
@@ -161,9 +103,7 @@ export function RumStatusPanel() {
   const setActiveServiceId = useServiceStore((s) => s.setActiveServiceId)
 
   useEffect(() => {
-    if (queryServiceId && queryServiceId !== storeServiceId) {
-      setActiveServiceId(queryServiceId)
-    }
+    if (queryServiceId && queryServiceId !== storeServiceId) setActiveServiceId(queryServiceId)
   }, [queryServiceId, storeServiceId, setActiveServiceId])
 
   const { data: services, isLoading: isServicesLoading, refetch: refetchServices } = useQuery({
@@ -179,16 +119,10 @@ export function RumStatusPanel() {
   const [isEnableOpen, setIsEnableOpen] = useState(false)
   const [isDisableOpen, setIsDisableOpen] = useState(false)
 
-  const {
-    data: status,
-    isLoading: isStatusLoading,
-    isFetching: isStatusFetching,
-    refetch: refetchStatus,
-  } = useRumStatus(serviceId, { refetchInterval: 30_000 })
+  const { data: status, isLoading: isStatusLoading, isFetching: isStatusFetching, refetch: refetchStatus } =
+    useRumStatus(serviceId, { refetchInterval: 30_000 })
 
-  const currentService =
-    services?.services?.find((s: components['schemas']['ServiceConfig']) => s.service_id === serviceId) || null
-
+  const currentService = services?.services?.find((s: components['schemas']['ServiceConfig']) => s.service_id === serviceId) || null
   const isInitialLoading = (!serviceId && isServicesLoading) || (!!serviceId && isStatusLoading && !status)
   const isRefreshing = isStatusFetching && !isInitialLoading
 
@@ -207,9 +141,7 @@ export function RumStatusPanel() {
         <div className="flex flex-col items-center justify-center gap-4 py-16 text-center">
           <AlertTriangle className={cn('h-12 w-12', denied ? 'text-destructive' : 'text-muted-foreground')} />
           <div>
-            <h3 className={cn('text-lg font-medium', denied && 'text-destructive')}>
-              {denied ? 'Access Denied' : 'RUM not enabled'}
-            </h3>
+            <h3 className={cn('text-lg font-medium', denied && 'text-destructive')}>{denied ? 'Access Denied' : 'RUM not enabled'}</h3>
             <p className="text-sm text-muted-foreground mt-1">
               {denied
                 ? 'You are not authorized to view RUM data for this service. Please contact your administrator to grant access.'
@@ -239,8 +171,7 @@ export function RumStatusPanel() {
         <div className="flex items-center gap-3 min-w-0">
           <Badge
             variant={isInitialLoading ? 'secondary' : status?.enabled ? 'default' : 'outline'}
-            className="min-w-[152px] justify-center shrink-0"
-            data-testid="admin-rum-status-badge"
+            className="min-w-[152px] justify-center shrink-0" data-testid="admin-rum-status-badge"
           >
             {isInitialLoading ? 'Checking...' : status?.enabled ? 'Beacon Pipeline Active' : 'Beacon Pipeline Inactive'}
           </Badge>
@@ -251,41 +182,23 @@ export function RumStatusPanel() {
 
         <div className="flex items-center gap-2 shrink-0">
           <RumFaroVersionCard serviceId={serviceId} />
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleManualRefresh}
-            disabled={isStatusFetching || !serviceId}
-            data-testid="admin-rum-refresh-btn"
-            className="h-8 text-xs shrink-0"
-          >
+          <Button variant="outline" size="sm" onClick={handleManualRefresh} disabled={isStatusFetching || !serviceId} data-testid="admin-rum-refresh-btn" className="h-8 text-xs shrink-0">
             <RefreshCw className={cn('mr-2 h-3.5 w-3.5', isStatusFetching && 'animate-spin')} />
             Refresh
           </Button>
         </div>
       </div>
 
-      <div
-        className="min-h-[260px] [contain-intrinsic-size:auto_260px] [content-visibility:auto]"
-        data-testid="admin-rum-status-reservation"
-      >
-        <AnalyticsCard
-          title="RUM Status"
-          className={cn('space-y-4 min-h-[260px]', isRefreshing && 'opacity-40 pointer-events-none transition-opacity')}
-        >
+      <div className="min-h-[260px] [contain-intrinsic-size:auto_260px] [content-visibility:auto]" data-testid="admin-rum-status-reservation">
+        <AnalyticsCard title="RUM Status" className={cn('space-y-4 min-h-[260px]', isRefreshing && 'opacity-40 pointer-events-none transition-opacity')}>
           <div data-testid="admin-rum-status-card" className="space-y-4">
             {isInitialLoading ? (
               <div className="space-y-4" data-testid="admin-rum-status-skeleton">
                 <div className="space-y-2 min-h-[112px]">
                   <p className="text-xs text-muted-foreground">Inspecting RUM beacon pipeline...</p>
-                  <Skeleton className="h-4 w-48" />
-                  <Skeleton className="h-4 w-64" />
-                  <Skeleton className="h-4 w-40" />
+                  <Skeleton className="h-4 w-48" /><Skeleton className="h-4 w-64" /><Skeleton className="h-4 w-40" />
                 </div>
-                <div className="flex gap-2">
-                  <Skeleton className="h-9 w-28" />
-                  <Skeleton className="h-9 w-28" />
-                </div>
+                <div className="flex gap-2"><Skeleton className="h-9 w-28" /><Skeleton className="h-9 w-28" /></div>
               </div>
             ) : (
               <>
@@ -296,16 +209,14 @@ export function RumStatusPanel() {
                   {status?.enabled && (
                     <>
                       <p className="text-sm" data-testid="admin-rum-enabled-at">
-                        <strong>Enabled at:</strong>{' '}
-                        {status.enabled_at ? formatLocalDateTime(status.enabled_at) : 'Unknown'}
+                        <strong>Enabled at:</strong> {status.enabled_at ? formatLocalDateTime(status.enabled_at) : 'Unknown'}
                       </p>
                       <p className="text-sm" data-testid="admin-rum-vcl-drift">
                         <strong>VCL Drift:</strong> {status.vcl_drift ? '⚠️ Yes' : '✅ No'}
                       </p>
                       {!isAnalyst && (
                         <p className="text-sm" data-testid="admin-rum-capture-summary">
-                          <strong>Collectors:</strong>{' '}
-                          {enabledCollectors.length > 0 ? enabledCollectors.join(', ') : 'None'}
+                          <strong>Collectors:</strong> {enabledCollectors.length > 0 ? enabledCollectors.join(', ') : 'None'}
                           {status.custom_condition ? ` · VCL Condition: ${status.custom_condition}` : ''}
                         </p>
                       )}
@@ -314,20 +225,10 @@ export function RumStatusPanel() {
                 </div>
 
                 <div className="flex gap-2">
-                  <Button
-                    onClick={() => setIsEnableOpen(true)}
-                    disabled={status?.enabled}
-                    variant={status?.enabled ? 'secondary' : 'default'}
-                    data-testid="admin-rum-enable-btn"
-                  >
+                  <Button onClick={() => setIsEnableOpen(true)} disabled={status?.enabled} variant={status?.enabled ? 'secondary' : 'default'} data-testid="admin-rum-enable-btn">
                     Enable RUM
                   </Button>
-                  <Button
-                    onClick={() => setIsDisableOpen(true)}
-                    disabled={!status?.enabled}
-                    variant="destructive"
-                    data-testid="admin-rum-disable-btn"
-                  >
+                  <Button onClick={() => setIsDisableOpen(true)} disabled={!status?.enabled} variant="destructive" data-testid="admin-rum-disable-btn">
                     Disable RUM
                   </Button>
                 </div>
@@ -337,47 +238,21 @@ export function RumStatusPanel() {
         </AnalyticsCard>
       </div>
 
-      <EnableRumDialog
-        service={currentService}
-        open={isEnableOpen}
-        onOpenChange={setIsEnableOpen}
-        onComplete={async () => { await refetchStatus() }}
-      />
-
-      <DisableRumDialog
-        service={currentService}
-        open={isDisableOpen}
-        onOpenChange={setIsDisableOpen}
-        onComplete={async () => { await refetchStatus() }}
-      />
+      <EnableRumDialog service={currentService} open={isEnableOpen} onOpenChange={setIsEnableOpen} onComplete={async () => { await refetchStatus() }} />
+      <DisableRumDialog service={currentService} open={isDisableOpen} onOpenChange={setIsDisableOpen} onComplete={async () => { await refetchStatus() }} />
     </div>
   )
 }
 
 interface RumClientProps extends Pick<RangeWireArgs, 'relativeRange' | 'isAutoRange' | 'anchor'> {
-  serviceId: string | null
-  startTime: string | null
-  endTime: string | null
-  filterPayload: FiltersPayload
+  serviceId: string | null; startTime: string | null; endTime: string | null; filterPayload: FiltersPayload
 }
 
-interface CwvColors {
-  text: string
-  bg: string
-  label: string
-}
+interface CwvColors { text: string; bg: string; label: string }
 
 interface RumRawLog {
-  city?: string
-  region?: string
-  country?: string
-  pop?: string
-  tls?: string
-  ttfb?: number | string | null
-  faro_payload?: unknown
-  meta?: unknown
-  measurements?: unknown
-  events?: unknown
+  city?: string; region?: string; country?: string; pop?: string; tls?: string
+  ttfb?: number | string | null; faro_payload?: unknown; meta?: unknown; measurements?: unknown; events?: unknown
   [key: string]: unknown
 }
 
@@ -387,15 +262,11 @@ type RumLiveEvent = Omit<StripIndex<components['schemas']['RumLiveEventItem']>, 
   raw_log?: RumRawLog
 }
 
-function worstPageCol(
-  id: string,
-  header: string,
-  size: number,
+const worstPageCol = (
+  id: string, header: string, size: number,
   accessorFn: (p: RumWorstPage) => string | number,
   render: (p: RumWorstPage) => React.ReactNode,
-): ColumnDef<RumWorstPage> {
-  return { id, header, size, accessorFn, cell: ({ row }) => render(row.original) }
-}
+): ColumnDef<RumWorstPage> => ({ id, header, size, accessorFn, cell: ({ row }) => render(row.original) })
 
 const WORST_PAGE_COLUMNS: ColumnDef<RumWorstPage>[] = [
   worstPageCol('path', 'Path', 260, (p) => p.path, (p) => <span className="font-semibold font-mono text-xs">{p.path}</span>),
@@ -424,13 +295,16 @@ function getThresholdColors(p75: number | null | undefined, goodMax: number, poo
 
 function buildEnvPieData(envMap: Record<string, number> | undefined) {
   return [{
-    labels: Object.keys(envMap || {}),
-    values: Object.values(envMap || {}),
-    type: 'pie' as const,
-    hole: 0.4,
-    textinfo: 'label+percent' as const,
+    labels: Object.keys(envMap || {}), values: Object.values(envMap || {}),
+    type: 'pie' as const, hole: 0.4, textinfo: 'label+percent' as const,
   }]
 }
+
+const liveCol = (
+  id: string, label: string, cell: (r: RumLiveEvent) => React.ReactNode, accessorFn?: (r: RumLiveEvent) => unknown,
+): ColumnDef<RumLiveEvent> => ({
+  id, ...(accessorFn ? { accessorFn } : { accessorKey: id }), meta: { label }, header: label, cell: ({ row }) => cell(row.original),
+})
 
 const TREND_CHART_LAYOUT = {
   margin: { t: 30, b: 40, l: 30, r: 10 },
@@ -446,96 +320,38 @@ export function RumClient({
   const [selectedEvent, setSelectedEvent] = useState<RumLiveEvent | null>(null)
 
   const columns = React.useMemo<ColumnDef<RumLiveEvent>[]>(() => [
-    {
-      accessorKey: 'type', id: 'type', meta: { label: 'Status' }, header: 'Status',
-      cell: ({ row }) => {
-        const isErr = row.original.type === 'error'
-        return (
-          <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] font-bold ${
-            isErr ? 'bg-rose-500/10 text-rose-500 border border-rose-500/20' : 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20'
-          }`}>
-            <span className={`h-1.5 w-1.5 rounded-full ${isErr ? 'bg-rose-500' : 'bg-emerald-500'}`} />
-            {isErr ? 'Error' : 'Success'}
-          </span>
-        )
-      },
-    },
-    {
-      accessorKey: 'time', id: 'time', meta: { label: 'Time' }, header: 'Time',
-      cell: ({ row }) => (
-        <span className="font-mono text-xs text-muted-foreground whitespace-nowrap">
-          {formatDate(row.original.time, timezone, 'HH:mm:ss')}
+    liveCol('type', 'Status', (r) => {
+      const isErr = r.type === 'error'
+      return (
+        <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] font-bold ${
+          isErr ? 'bg-rose-500/10 text-rose-500 border border-rose-500/20' : 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20'
+        }`}>
+          <span className={`h-1.5 w-1.5 rounded-full ${isErr ? 'bg-rose-500' : 'bg-emerald-500'}`} />
+          {isErr ? 'Error' : 'Success'}
         </span>
-      ),
-    },
-    {
-      accessorKey: 'path', id: 'path', meta: { label: 'Page Path' }, header: 'Page Path',
-      cell: ({ row }) => (
-        <span className="font-semibold font-mono text-xs text-zinc-300 block max-w-[200px] truncate" title={row.original.path}>
-          {row.original.path}
-        </span>
-      ),
-    },
-    {
-      accessorKey: 'desc', id: 'desc', meta: { label: 'Description' }, header: 'Description',
-      cell: ({ row }) => (
-        <span className="text-muted-foreground text-xs block max-w-[250px] truncate" title={row.original.desc}>
-          {row.original.desc}
-        </span>
-      ),
-    },
-    {
-      id: 'environment',
-      accessorFn: (row) => `${envName(row.browser)} on ${envName(row.os)}`,
-      meta: { label: 'Environment' }, header: 'Environment',
-      cell: ({ row }) => {
-        const label = `${envName(row.original.browser)} on ${envName(row.original.os)}`
-        return <span className="text-muted-foreground text-xs block max-w-[150px] truncate" title={label}>{label}</span>
-      },
-    },
-    {
-      id: 'geo',
-      accessorFn: (row) => `${row.raw_log?.city || ''}, ${row.raw_log?.country || ''}`,
-      meta: { label: 'Location' }, header: 'Location',
-      cell: ({ row }) => {
-        const raw = row.original.raw_log || {}
-        const location = [raw.city, raw.region, raw.country].filter(Boolean).join(', ')
-        return <span className="text-muted-foreground text-xs block max-w-[150px] truncate" title={location}>{location || '—'}</span>
-      },
-    },
-    {
-      id: 'pop',
-      accessorFn: (row) => row.raw_log?.pop || '',
-      meta: { label: 'Edge POP' }, header: 'Edge POP',
-      cell: ({ row }) => <span className="font-mono text-xs text-muted-foreground uppercase">{row.original.raw_log?.pop || '—'}</span>,
-    },
-    {
-      id: 'tls',
-      accessorFn: (row) => row.raw_log?.tls || '',
-      meta: { label: 'TLS' }, header: 'TLS',
-      cell: ({ row }) => {
-        const tls = row.original.raw_log?.tls
-        return <span className="font-mono text-xs text-muted-foreground">{tls ? `TLS ${tls}` : '—'}</span>
-      },
-    },
-    {
-      id: 'ttfb',
-      accessorFn: (row) => (row.raw_log?.ttfb != null ? parseFloat(String(row.raw_log.ttfb)) : null),
-      meta: { label: 'TTFB (Edge)' }, header: 'TTFB (Edge)',
-      cell: ({ row }) => {
-        const ttfb = row.original.raw_log?.ttfb
-        return <span className="font-mono text-xs text-muted-foreground">{ttfb != null ? `${ttfb}ms` : '—'}</span>
-      },
-    },
+      )
+    }),
+    liveCol('time', 'Time', (r) => <span className="font-mono text-xs text-muted-foreground whitespace-nowrap">{formatDate(r.time, timezone, 'HH:mm:ss')}</span>),
+    liveCol('path', 'Page Path', (r) => <span className="font-semibold font-mono text-xs text-zinc-300 block max-w-[200px] truncate" title={r.path}>{r.path}</span>),
+    liveCol('desc', 'Description', (r) => <span className="text-muted-foreground text-xs block max-w-[250px] truncate" title={r.desc}>{r.desc}</span>),
+    liveCol('environment', 'Environment', (r) => {
+      const label = `${envName(r.browser)} on ${envName(r.os)}`
+      return <span className="text-muted-foreground text-xs block max-w-[150px] truncate" title={label}>{label}</span>
+    }, (r) => `${envName(r.browser)} on ${envName(r.os)}`),
+    liveCol('geo', 'Location', (r) => {
+      const raw = r.raw_log || {}
+      const location = [raw.city, raw.region, raw.country].filter(Boolean).join(', ')
+      return <span className="text-muted-foreground text-xs block max-w-[150px] truncate" title={location}>{location || '—'}</span>
+    }, (r) => `${r.raw_log?.city || ''}, ${r.raw_log?.country || ''}`),
+    liveCol('pop', 'Edge POP', (r) => <span className="font-mono text-xs text-muted-foreground uppercase">{r.raw_log?.pop || '—'}</span>, (r) => r.raw_log?.pop || ''),
+    liveCol('tls', 'TLS', (r) => <span className="font-mono text-xs text-muted-foreground">{r.raw_log?.tls ? `TLS ${r.raw_log.tls}` : '—'}</span>, (r) => r.raw_log?.tls || ''),
+    liveCol('ttfb', 'TTFB (Edge)', (r) => <span className="font-mono text-xs text-muted-foreground">{r.raw_log?.ttfb != null ? `${r.raw_log.ttfb}ms` : '—'}</span>, (r) => (r.raw_log?.ttfb != null ? parseFloat(String(r.raw_log.ttfb)) : null)),
     {
       id: 'actions',
       header: () => <span className="sr-only">Actions</span>,
       cell: ({ row }) => (
         <div className="text-right">
-          <Button
-            variant="outline" size="sm" className="h-8 text-xs font-medium"
-            onClick={(e) => { e.stopPropagation(); setSelectedEvent(row.original) }}
-          >
+          <Button variant="outline" size="sm" className="h-8 text-xs font-medium" onClick={(e) => { e.stopPropagation(); setSelectedEvent(row.original) }}>
             Details
           </Button>
         </div>
@@ -554,9 +370,7 @@ export function RumClient({
       if (!serviceId) return null
       const params = new URLSearchParams()
       for (const [k, v] of Object.entries(rangeBody)) if (v) params.append(k, v)
-      if (filterPayload && Object.keys(filterPayload).length > 0) {
-        params.append('filters', JSON.stringify(filterPayload))
-      }
+      if (filterPayload && Object.keys(filterPayload).length > 0) params.append('filters', JSON.stringify(filterPayload))
       const qs = params.toString()
       const res = await adminJsonResult<'/api/services/{service_id}/rum/analytics', RumAnalytics>(
         '/api/services/{service_id}/rum/analytics',
@@ -575,14 +389,8 @@ export function RumClient({
 
   const webVitalsTrendData = React.useMemo(
     () => [
-      {
-        x: formattedTimestamps, y: analytics?.trends?.lcp || [], name: 'LCP (s)',
-        type: 'scatter' as const, mode: 'lines+markers' as const, line: { color: CHART_COLORS.success },
-      },
-      {
-        x: formattedTimestamps, y: analytics?.trends?.cls || [], name: 'CLS',
-        type: 'scatter' as const, mode: 'lines+markers' as const, line: { color: CHART_COLORS.info },
-      },
+      { x: formattedTimestamps, y: analytics?.trends?.lcp || [], name: 'LCP (s)', type: 'scatter' as const, mode: 'lines+markers' as const, line: { color: CHART_COLORS.success } },
+      { x: formattedTimestamps, y: analytics?.trends?.cls || [], name: 'CLS', type: 'scatter' as const, mode: 'lines+markers' as const, line: { color: CHART_COLORS.info } },
     ],
     [formattedTimestamps, analytics?.trends?.lcp, analytics?.trends?.cls],
   )
@@ -642,7 +450,6 @@ export function RumClient({
           </div>
           <span className="text-xs opacity-85 font-medium">Waiting for real-time beacons…</span>
         </div>
-
         <AnalyticsCard title="Real User Monitoring Status">
           <div className="space-y-6 text-center py-12">
             <div>
@@ -682,10 +489,6 @@ export function RumClient({
     )
   }
 
-  const lcpColors = getThresholdColors(analytics.vitals.lcp.p75, 2.5, 4.0)
-  const clsColors = getThresholdColors(analytics.vitals.cls.p75, 0.1, 0.25)
-  const inpColors = getThresholdColors(analytics.vitals.inp.p75, 200, 500)
-
   const renderDistributionBar = (distribution: RumCwvDistribution | null) => {
     const dist = distribution ?? { good: 0, needs_improvement: 0, poor: 0 }
     return (
@@ -718,61 +521,38 @@ export function RumClient({
               <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">{label}</p>
               <p className={`text-2xl font-extrabold ${textClass}`}>{formatCount(value)}</p>
             </div>
-            <div className={`p-2.5 ${bgClass} rounded-lg`}>
-              <Icon className={`h-5 w-5 ${textClass}`} />
-            </div>
+            <div className={`p-2.5 ${bgClass} rounded-lg`}><Icon className={`h-5 w-5 ${textClass}`} /></div>
           </div>
         ))}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {[
-          {
-            title: 'Largest Contentful Paint (LCP)',
-            Icon: Activity,
-            colors: lcpColors,
-            formatted: analytics.vitals.lcp.p75 != null ? `${analytics.vitals.lcp.p75.toFixed(2)}s` : '—',
-            distribution: analytics.vitals.lcp.distribution,
-          },
-          {
-            title: 'Cumulative Layout Shift (CLS)',
-            Icon: Cpu,
-            colors: clsColors,
-            formatted: analytics.vitals.cls.p75 != null ? analytics.vitals.cls.p75.toFixed(2) : '—',
-            distribution: analytics.vitals.cls.distribution,
-          },
-          {
-            title: 'Interaction to Next Paint (INP)',
-            Icon: Monitor,
-            colors: inpColors,
-            formatted: analytics.vitals.inp.p75 != null ? `${analytics.vitals.inp.p75.toFixed(2)}ms` : '—',
-            distribution: analytics.vitals.inp.distribution,
-          },
-        ].map(({ title, Icon, colors, formatted, distribution }) => (
-          <AnalyticsCard
-            key={title}
-            title={<span className={colors.text}>{title}</span>}
-            icon={<Icon className={colors.text} />}
-            headerAction={
-              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${colors.bg} ${colors.text}`}>
-                {colors.label}
-              </span>
-            }
-          >
-            <div className="space-y-2">
-              <p className={`text-3xl font-extrabold ${colors.text}`}>{formatted}</p>
-              <p className={`text-xs ${colors.text} font-semibold uppercase tracking-wider`}>75th Percentile</p>
-              {renderDistributionBar(distribution)}
-            </div>
-          </AnalyticsCard>
-        ))}
+          { title: 'Largest Contentful Paint (LCP)', Icon: Activity, vital: analytics.vitals.lcp, good: 2.5, poor: 4.0, unit: 's' },
+          { title: 'Cumulative Layout Shift (CLS)', Icon: Cpu, vital: analytics.vitals.cls, good: 0.1, poor: 0.25, unit: '' },
+          { title: 'Interaction to Next Paint (INP)', Icon: Monitor, vital: analytics.vitals.inp, good: 200, poor: 500, unit: 'ms' },
+        ].map(({ title, Icon, vital, good, poor, unit }) => {
+          const colors = getThresholdColors(vital.p75, good, poor)
+          const formatted = vital.p75 != null ? `${vital.p75.toFixed(2)}${unit}` : '—'
+          return (
+            <AnalyticsCard
+              key={title} title={<span className={colors.text}>{title}</span>} icon={<Icon className={colors.text} />}
+              headerAction={<span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${colors.bg} ${colors.text}`}>{colors.label}</span>}
+            >
+              <div className="space-y-2">
+                <p className={`text-3xl font-extrabold ${colors.text}`}>{formatted}</p>
+                <p className={`text-xs ${colors.text} font-semibold uppercase tracking-wider`}>75th Percentile</p>
+                {renderDistributionBar(vital.distribution)}
+              </div>
+            </AnalyticsCard>
+          )
+        })}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <AnalyticsCard title="Web Vitals Trend" icon={<TrendingUp />}>
           <TimeSeriesChart data={webVitalsTrendData} layout={TREND_CHART_LAYOUT} startTime={startTime} endTime={endTime} timezone={timezone} height={250} />
         </AnalyticsCard>
-
         <AnalyticsCard title="JS Error Rate Trend" icon={<TrendingUp className="text-rose-500" />}>
           <TimeSeriesChart data={errorRateTrendData} layout={TREND_CHART_LAYOUT} startTime={startTime} endTime={endTime} timezone={timezone} height={250} />
         </AnalyticsCard>
@@ -840,9 +620,7 @@ export function RumClient({
               <Activity className={selectedEvent?.type === 'error' ? 'text-rose-500 h-5 w-5' : 'text-emerald-500 h-5 w-5'} />
               RUM Beacon Details
             </DialogTitle>
-            <DialogDescription>
-              Extracted client characteristics and complete raw payload captured at the Fastly edge.
-            </DialogDescription>
+            <DialogDescription>Extracted client characteristics and complete raw payload captured at the Fastly edge.</DialogDescription>
           </DialogHeader>
 
           {selectedEvent && (() => {
@@ -868,24 +646,14 @@ export function RumClient({
             return (
               <div className="space-y-4 my-2 text-xs">
                 <div className="grid grid-cols-2 gap-4 bg-muted/20 p-4 rounded-lg border border-border">
-                  <div>
-                    <span className="text-muted-foreground block mb-1">Timestamp</span>
-                    <span className="font-mono">{formatDate(selectedEvent.time, timezone, 'yyyy-MM-dd HH:mm:ss (zzz)')}</span>
-                  </div>
-                  <div>
-                    <span className="text-muted-foreground block mb-1">Event Type</span>
-                    <span className={`capitalize font-semibold ${selectedEvent.type === 'error' ? 'text-rose-500' : 'text-emerald-500'}`}>
-                      {selectedEvent.type}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-muted-foreground block mb-1">Url Path</span>
-                    <span className="font-mono font-semibold">{selectedEvent.path}</span>
-                  </div>
-                  <div>
-                    <span className="text-muted-foreground block mb-1">Client Platform</span>
-                    <span>{envName(selectedEvent.browser)} on {envName(selectedEvent.os)}</span>
-                  </div>
+                  {[
+                    ['Timestamp', <span key="t" className="font-mono">{formatDate(selectedEvent.time, timezone, 'yyyy-MM-dd HH:mm:ss (zzz)')}</span>],
+                    ['Event Type', <span key="e" className={`capitalize font-semibold ${selectedEvent.type === 'error' ? 'text-rose-500' : 'text-emerald-500'}`}>{selectedEvent.type}</span>],
+                    ['Url Path', <span key="p" className="font-mono font-semibold">{selectedEvent.path}</span>],
+                    ['Client Platform', <span key="c">{envName(selectedEvent.browser)} on {envName(selectedEvent.os)}</span>],
+                  ].map(([label, val]) => (
+                    <div key={String(label)}><span className="text-muted-foreground block mb-1">{label}</span>{val}</div>
+                  ))}
                   <div className="col-span-2">
                     <span className="text-muted-foreground block mb-1">Description</span>
                     <span className={`font-mono block p-2 rounded ${selectedEvent.type === 'error' ? 'bg-rose-500/10 text-rose-500 border border-rose-500/20' : 'bg-muted/40 text-foreground'}`}>
@@ -920,9 +688,7 @@ export function RumClient({
   )
 }
 
-interface RumPageClientProps {
-  initialServiceId?: string
-}
+interface RumPageClientProps { initialServiceId?: string }
 
 function ServiceSync({ serviceId, onSync }: { serviceId: string | null; onSync: (id: string | null) => void }) {
   useEffect(() => { onSync(serviceId) }, [serviceId, onSync])
@@ -982,16 +748,9 @@ export function RumPageClient({ initialServiceId }: RumPageClientProps) {
                 <div className="bg-muted rounded-md overflow-hidden border">
                   <div className="flex items-center justify-between px-3 py-2 border-b bg-muted/50">
                     <span className="text-[10px] font-mono text-muted-foreground">installation code</span>
-                    <CopyButton
-                      text={scriptTag}
-                      ariaLabel="Copy script tag"
-                      copiedAriaLabel="Copied script tag"
-                      className="h-6 w-6 hover:bg-muted-foreground/10"
-                    />
+                    <CopyButton text={scriptTag} ariaLabel="Copy script tag" copiedAriaLabel="Copied script tag" className="h-6 w-6 hover:bg-muted-foreground/10" />
                   </div>
-                  <div className="p-3 font-mono text-xs overflow-x-auto">
-                    <code>{scriptTag}</code>
-                  </div>
+                  <div className="p-3 font-mono text-xs overflow-x-auto"><code>{scriptTag}</code></div>
                 </div>
               </div>
 

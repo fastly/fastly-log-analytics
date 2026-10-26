@@ -12,15 +12,15 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 import vcr
+from backend.core.faro_versions import DEFAULT_FARO_VERSION
+from backend.provision.declarative.generators import generate_consolidated_snippet
+from backend.provision.declarative.state import FeatureState
 
 from backend import config as svcconfig
-from backend.core.faro_versions import DEFAULT_FARO_VERSION
 from backend.core.fastly.client import fastly as real_fastly
 from backend.core.log_fields import resolve_enabled_fields
 from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.provision import orchestrator, rum_assets
-from backend.provision.declarative.generators import generate_consolidated_snippet
-from backend.provision.declarative.state import FeatureState
 from backend.provision.orchestrator import _reject_unsafe_fos_component
 from backend.provision.session_scoring_orchestrator import _SCORING_FIELD_NAMES
 
@@ -1189,3 +1189,1434 @@ def test_provision_persists_config_before_cdn_and_logging_steps(tmp_path, monkey
             gen.close()
 
     assert calls_before_cdn is not None and calls_before_cdn >= 1
+
+
+# ── Merged from tests/provision/test_vcl_builder.py ──
+
+"""Tests for the VclBuilder VCL-assembly primitives (B15 consolidation)."""
+
+
+import inspect
+from datetime import UTC, datetime
+
+from backend.core.fastly.rum_provisioning import RUM_ASSET_FETCH_NAME, generate_rum_asset_fetch_vcl
+from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES, reconcile_cmcd_custom_fields
+from backend.provision.utils import (
+    ANALYTICS_LOG_LAYOUT,
+    VclBuilder,
+    analytics_log_path,
+    draft_version,
+    minute_list_prefix,
+    rum_log_path,
+    rum_minute_list_prefix,
+)
+
+from backend.provision import cmcd_fields as orch
+from backend.provision.fastly_api import delete_remote_frontend, deploy_remote_frontend
+
+
+# ── Merged from tests/provision/test_vcl_builder.py ──
+class TestLineMode:
+    def test_join_lines_static(self) -> None:
+        assert VclBuilder.join_lines(["a", "b", "c"]) == "a\nb\nc"
+
+
+class TestSectionMode:
+    def test_join_sections_static_matches_legacy_idiom(self) -> None:
+        sections = ["a", "", "  ", "b"]
+        assert VclBuilder.join_sections(sections) == "\n\n".join(s for s in sections if s.strip())
+
+
+def test_remove_custom_fields_strips_cmcd_fields_only():
+    cfg = {
+        "log_fields": {
+            "custom_fields": reconcile_cmcd_custom_fields([{"name": "mine"}], enabled=True),
+        }
+    }
+    names = {c["name"] for c in cfg["log_fields"]["custom_fields"]}
+    assert _CMCD_FIELD_NAMES <= names and "mine" in names
+
+    orch._remove_cmcd_custom_fields(cfg)
+    names = {c["name"] for c in cfg["log_fields"]["custom_fields"]}
+    assert not (_CMCD_FIELD_NAMES & names)
+    assert "mine" in names
+
+
+def test_remove_custom_fields_tolerates_missing_blocks():
+    for cfg in ({}, {"log_fields": {}}, {"log_fields": {"custom_fields": []}}):
+        orch._remove_cmcd_custom_fields(cfg)  # must not raise
+
+
+class TestAnalyticsLogPath:
+    def test_fixed_root(self):
+        assert analytics_log_path() == "raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/"
+
+
+class TestRumLogPath:
+    def test_fixed_root(self):
+        assert rum_log_path() == "raw/rum/year=%Y/month=%m/day=%d/hour=%H/minute=%M/"
+
+
+class TestMinuteListPrefix:
+    def test_no_prefix(self):
+        dt = datetime(2026, 8, 27, 16, 53, tzinfo=UTC)
+        assert minute_list_prefix(dt) == "raw/request/year=2026/month=08/day=27/hour=16/minute=53/"
+
+
+class TestRumMinuteListPrefix:
+    def test_no_prefix(self):
+        dt = datetime(2026, 8, 27, 16, 53, tzinfo=UTC)
+        assert rum_minute_list_prefix(dt) == "raw/rum/year=2026/month=08/day=27/hour=16/minute=53/"
+
+
+class TestProducersUseCanonicalLayout:
+    def test_declarative_generator_matches(self):
+        import backend.provision.declarative.generators as gen
+
+        src = inspect.getsource(gen)
+        assert "raw/%Y-%m-%d" not in src, "declarative generator must not use the dash layout"
+        assert "log_paths" in src, "declarative generator must build paths via log_paths"
+
+    def test_fastly_api_has_no_dash_layout_literal(self):
+        import backend.provision.fastly_api as fa
+
+        src = inspect.getsource(fa)
+        assert "raw/%Y-%m-%d" not in src, "add_logging_endpoint must use log_paths, not the dash layout"
+
+    def test_services_router_has_no_dash_layout_literal(self):
+        import backend.routers.services.core as sc
+
+        src = inspect.getsource(sc)
+        assert "raw/%Y-%m-%d" not in src, "logging-settings update must use log_paths, not the dash layout"
+
+    def test_layout_constant_matches_live_bucket_shape(self):
+        assert ANALYTICS_LOG_LAYOUT == "raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/"
+
+
+def _minimal_rum_state(*, faro_version: str | None) -> FeatureState:
+    return FeatureState(
+        service_id="svc_test",
+        log_period=60,
+        sample_rate=100,
+        edge_only=False,
+        custom_condition="",
+        fos_prefix="",
+        fos_endpoint="fos.example.com",
+        logging_enabled=False,
+        rum_enabled=True,
+        faro_version=faro_version,
+    )
+
+
+def test_vcl_recv_asset_routing_sourced_from_rum_provisioning_without_faro():
+    state = _minimal_rum_state(faro_version=None)
+    shipped_recv = generate_consolidated_snippet(state, "vcl_recv")
+    shared_copy = generate_rum_asset_fetch_vcl("iad-va-us")[RUM_ASSET_FETCH_NAME]
+    assert shared_copy in shipped_recv
+
+
+def test_vcl_recv_asset_routing_sourced_from_rum_provisioning_with_faro():
+    state = _minimal_rum_state(faro_version="2.9.0")
+    shipped_recv = generate_consolidated_snippet(state, "vcl_recv")
+    shared_copy = generate_rum_asset_fetch_vcl("iad-va-us", faro_version="2.9.0")[RUM_ASSET_FETCH_NAME]
+    assert shared_copy in shipped_recv
+
+
+# ── Merged from tests/provision/test_draft_version.py ──
+SID = "svc"
+
+
+class _Fastly:
+    def __init__(self, *, validate_ok=True, rollback_raises=False):
+        self.calls: list[tuple[str, str]] = []
+        self.validate_ok = validate_ok
+        self.rollback_raises = rollback_raises
+
+    def __call__(self, method, path, body=None, **kwargs):
+        self.calls.append((method, path))
+        if path.endswith("/clone"):
+            return {"number": 9}
+        if path.endswith("/validate"):
+            return {"status": "ok"} if self.validate_ok else {"status": "error", "errors": ["bad"]}
+        if self.rollback_raises and path == f"/service/{SID}/version/5/activate":
+            raise RuntimeError("rollback failed")
+        return {}
+
+
+def test_success_call_order_with_comment_and_status_messages():
+    fake = _Fastly()
+    msgs: list[str] = []
+    with draft_version(SID, "t", base_version=5, call=fake, comment="c", status_cb=msgs.append) as new_ver:
+        assert new_ver == 9
+        fake.calls.append(("BODY", "mutate"))
+    assert fake.calls == [
+        ("PUT", f"/service/{SID}/version/5/clone"),
+        ("PUT", f"/service/{SID}/version/9"),
+        ("BODY", "mutate"),
+        ("GET", f"/service/{SID}/version/9/validate"),
+        ("PUT", f"/service/{SID}/version/9/activate"),
+    ]
+    assert msgs == ["Validating draft version 9...", "Activating version 9..."]
+
+
+def test_no_comment_skips_the_comment_put():
+    fake = _Fastly()
+    with draft_version(SID, "t", base_version=5, call=fake):
+        pass
+    assert ("PUT", f"/service/{SID}/version/9") not in fake.calls
+
+
+def test_body_failure_rolls_back_to_base_and_never_validates():
+    fake = _Fastly()
+    with pytest.raises(ValueError, match="mutation boom"):
+        with draft_version(SID, "t", base_version=5, call=fake):
+            raise ValueError("mutation boom")
+    assert fake.calls[-1] == ("PUT", f"/service/{SID}/version/5/activate")
+    assert not any(p.endswith("/validate") for _, p in fake.calls)
+
+
+def test_validation_failure_raises_and_rolls_back_without_activating_draft():
+    fake = _Fastly(validate_ok=False)
+    with pytest.raises(RuntimeError, match="Validation failed"):
+        with draft_version(SID, "t", base_version=5, call=fake):
+            pass
+    assert ("PUT", f"/service/{SID}/version/9/activate") not in fake.calls
+    assert fake.calls[-1] == ("PUT", f"/service/{SID}/version/5/activate")
+
+
+def test_rollback_disabled_makes_no_rollback_call():
+    fake = _Fastly(validate_ok=False)
+    with pytest.raises(RuntimeError, match="Validation failed"):
+        with draft_version(SID, "t", base_version=5, call=fake, rollback=False):
+            pass
+    assert ("PUT", f"/service/{SID}/version/5/activate") not in fake.calls
+
+
+def test_failed_rollback_does_not_mask_the_original_error():
+    fake = _Fastly(rollback_raises=True)
+    with pytest.raises(ValueError, match="original"):
+        with draft_version(SID, "t", base_version=5, call=fake):
+            raise ValueError("original")
+
+
+def test_comment_before_activate_puts_comment_between_validate_and_activate():
+    fake = _Fastly()
+    with draft_version(SID, "t", base_version=5, call=fake, comment="c", comment_before_activate=True):
+        fake.calls.append(("BODY", "mutate"))
+    assert fake.calls == [
+        ("PUT", f"/service/{SID}/version/5/clone"),
+        ("BODY", "mutate"),
+        ("GET", f"/service/{SID}/version/9/validate"),
+        ("PUT", f"/service/{SID}/version/9"),
+        ("PUT", f"/service/{SID}/version/9/activate"),
+    ]
+
+
+def test_validate_false_skips_validation_entirely():
+    fake = _Fastly(validate_ok=False)
+    with draft_version(SID, "t", base_version=5, call=fake, validate=False):
+        pass
+    assert not any(p.endswith("/validate") for _, p in fake.calls)
+    assert fake.calls[-1] == ("PUT", f"/service/{SID}/version/9/activate")
+
+
+def test_expect_empty_activate_applies_to_the_draft_activation_only():
+    seen: list[tuple[str, dict]] = []
+
+    def call(method, path, body=None, **kwargs):
+        seen.append((path, kwargs))
+        if path.endswith("/clone"):
+            return {"number": 9}
+        return {"status": "ok"}
+
+    with draft_version(SID, "t", base_version=5, call=call, expect_empty_activate=True):
+        pass
+    activate = [kw for p, kw in seen if p.endswith("/version/9/activate")]
+    assert activate == [{"token": "t", "expect_empty": True}]
+
+
+def test_expect_empty_not_sent_by_default():
+    seen: list[dict] = []
+
+    def call(method, path, body=None, **kwargs):
+        if path.endswith("/activate"):
+            seen.append(kwargs)
+        if path.endswith("/clone"):
+            return {"number": 9}
+        return {"status": "ok"}
+
+    with draft_version(SID, "t", base_version=5, call=call):
+        pass
+    assert seen == [{"token": "t"}]
+
+
+def test_custom_status_messages_replace_the_defaults():
+    msgs: list[str] = []
+    with draft_version(
+        SID,
+        "t",
+        base_version=5,
+        call=_Fastly(),
+        status_cb=msgs.append,
+        validate_msg="V{ver}",
+        activate_msg="A{ver}",
+    ):
+        pass
+    assert msgs == ["V9", "A9"]
+
+
+def test_on_failure_runs_before_the_rollback_call():
+    fake = _Fastly()
+    seen_at: list[int] = []
+    with pytest.raises(ValueError, match="boom"):
+        with draft_version(
+            SID,
+            "t",
+            base_version=5,
+            call=fake,
+            on_failure=lambda exc: seen_at.append(len(fake.calls)),
+        ):
+            raise ValueError("boom")
+    assert seen_at == [1]
+    assert fake.calls[-1] == ("PUT", f"/service/{SID}/version/5/activate")
+
+
+def test_failed_rollback_is_logged_at_warning(caplog):
+    import logging
+
+    fake = _Fastly(rollback_raises=True)
+    with caplog.at_level(logging.WARNING, logger="backend.provision.draft_version"):
+        with pytest.raises(ValueError, match="original"):
+            with draft_version(SID, "t", base_version=5, call=fake):
+                raise ValueError("original")
+    assert any("rollback activation of version 5 failed" in r.getMessage() for r in caplog.records)
+
+
+def test_rollback_to_version_logs_and_swallows_runtime_error(caplog):
+    import logging
+
+    from backend.provision.utils import rollback_to_version
+
+    with caplog.at_level(logging.WARNING, logger="backend.provision.draft_version"):
+        rollback_to_version(SID, "t", 5, call=_Fastly(rollback_raises=True))
+    assert any("rollback activation of version 5 failed" in r.getMessage() for r in caplog.records)
+
+
+# ── Merged from tests/provision/test_sharing_domain.py ──
+def test_deploy_remote_frontend_success():
+    """deploy_remote_frontend issues the correct sequential calls via the shared fastly() client."""
+    service_name = "test-service"
+    domain_name = "test-domain.global.ssl.fastly.net"
+    origin_host = "1.2.3.4"
+    origin_port = 80
+    use_ssl = False
+    token = "fake-token"
+
+    # Sequential parsed-JSON responses returned by the shared client.
+    responses = [
+        {"id": "service123", "name": service_name},  # Create Service
+        {"number": 1, "service_id": "service123"},  # Verify Draft Version
+        {"name": domain_name},  # Attach Domain
+        {"name": "gce_vm_origin"},  # Attach Backend Origin
+        {"number": 1, "active": True},  # Activate Version
+    ]
+    calls: list[tuple] = []
+
+    def fake_fastly(method, path, body=None, *, token, **kwargs):
+        assert token == "fake-token"
+        calls.append((method, path, body))
+        return responses.pop(0)
+
+    with patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly):
+        res = deploy_remote_frontend(
+            service_name=service_name,
+            domain_name=domain_name,
+            origin_host=origin_host,
+            origin_port=origin_port,
+            use_ssl=use_ssl,
+            token=token,
+        )
+
+    assert res == {
+        "service_id": "service123",
+        "version": 1,
+        "domain_name": domain_name,
+        "origin_host": origin_host,
+    }
+    assert calls == [
+        ("POST", "/service", {"name": service_name, "type": "vcl"}),
+        ("POST", "/service/service123/version", None),
+        ("POST", "/service/service123/version/1/domain", {"name": domain_name}),
+        (
+            "POST",
+            "/service/service123/version/1/backend",
+            {
+                "name": "gce_vm_origin",
+                "address": origin_host,
+                "port": origin_port,
+                "use_ssl": use_ssl,
+                "ssl_check_cert": False,
+            },
+        ),
+        ("PUT", "/service/service123/version/1/activate", None),
+    ]
+
+
+@pytest.mark.parametrize(
+    "step_fail,client_err,expected_step",
+    [
+        (0, "HTTP 400 POST /service\n    Name already taken", "Create Service"),
+        (1, "HTTP 400 POST /service/service123/version\n    Failed to create version", "Verify Draft Version"),
+        (2, "HTTP 422 POST /service/service123/version/1/domain\n    Invalid domain name", "Attach Domain"),
+        (3, "HTTP 400 POST /service/service123/version/1/backend\n    Invalid backend config", "Attach Backend Origin"),
+        (4, "HTTP 500 PUT /service/service123/version/1/activate\n    Could not activate", "Activate Version"),
+    ],
+)
+def test_deploy_remote_frontend_failures(step_fail, client_err, expected_step):
+    """Any failed Fastly call is re-raised with the human-readable step name preserved."""
+    token = "fake-token"
+
+    ok_responses = [
+        {"id": "service123"},
+        {"number": 1},
+        {},
+        {},
+        {"active": True},
+    ]
+    state = {"i": 0}
+
+    def fake_fastly(method, path, body=None, *, token, **kwargs):
+        idx = state["i"]
+        state["i"] += 1
+        if idx == step_fail:
+            raise RuntimeError(client_err)
+        return ok_responses[idx]
+
+    with patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly):
+        with pytest.raises(RuntimeError) as exc_info:
+            deploy_remote_frontend(
+                service_name="test-service",
+                domain_name="test-domain.global.ssl.fastly.net",
+                origin_host="1.2.3.4",
+                origin_port=80,
+                use_ssl=False,
+                token=token,
+            )
+
+    msg = str(exc_info.value)
+    assert f"Fastly API error during {expected_step}:" in msg
+    # The underlying client error (HTTP code + body) is preserved.
+    assert client_err in msg
+
+
+def test_deploy_remote_frontend_missing_keys_in_json():
+    """Error raised when service_id is missing from the create-service response."""
+    with patch("backend.provision.fastly_api.fastly", return_value={"not_id": "service123"}):
+        with pytest.raises(RuntimeError) as exc_info:
+            deploy_remote_frontend(
+                service_name="test-service",
+                domain_name="test-domain.global.ssl.fastly.net",
+                origin_host="1.2.3.4",
+                origin_port=80,
+                use_ssl=False,
+                token="fake-token",
+            )
+    assert "Failed to retrieve service ID" in str(exc_info.value)
+
+
+def test_deploy_remote_frontend_missing_version_number():
+    """Error raised when the draft-version response has no number."""
+    responses = [{"id": "service123"}, {"service_id": "service123"}]
+
+    def fake_fastly(method, path, body=None, *, token, **kwargs):
+        return responses.pop(0)
+
+    with patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly):
+        with pytest.raises(RuntimeError) as exc_info:
+            deploy_remote_frontend(
+                service_name="test-service",
+                domain_name="test-domain.global.ssl.fastly.net",
+                origin_host="1.2.3.4",
+                origin_port=80,
+                use_ssl=False,
+                token="fake-token",
+            )
+    assert "Failed to retrieve version number" in str(exc_info.value)
+
+
+def test_deploy_remote_frontend_with_override_host_success():
+    """override_host adds override_host; SNI/cert fields only when use_ssl is True."""
+    service_name = "test-service"
+    domain_name = "test-domain.global.ssl.fastly.net"
+    origin_host = "1.2.3.4"
+    origin_port = 443
+    use_ssl = True
+    token = "fake-token"
+    override_host = "my-override.example.com"
+
+    responses = [
+        {"id": "service123", "name": service_name},
+        {"number": 1},
+        {"name": domain_name},
+        {"name": "gce_vm_origin"},
+        {"active": True},
+    ]
+    calls: list[tuple] = []
+
+    def fake_fastly(method, path, body=None, *, token, **kwargs):
+        calls.append((method, path, body))
+        return responses.pop(0)
+
+    with patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly):
+        res = deploy_remote_frontend(
+            service_name=service_name,
+            domain_name=domain_name,
+            origin_host=origin_host,
+            origin_port=origin_port,
+            use_ssl=use_ssl,
+            token=token,
+            override_host=override_host,
+        )
+
+    assert res["service_id"] == "service123"
+    backend_call = next(c for c in calls if c[1] == "/service/service123/version/1/backend")
+    backend_payload = backend_call[2]
+    assert backend_payload["override_host"] == override_host
+    assert backend_payload["ssl_sni_hostname"] == override_host
+    assert backend_payload["ssl_cert_hostname"] == override_host
+
+
+def test_delete_remote_frontend_deactivates_then_deletes():
+    """delete_remote_frontend deactivates active versions, then deletes the service."""
+    token = "fake-token"
+    remote_service_id = "remote123"
+    responses = [
+        [{"number": 2, "active": True}, {"number": 1, "active": False}],  # Get Versions
+        {},  # Deactivate Version 2
+        {"status": "ok"},  # Delete Service
+    ]
+    calls: list[tuple] = []
+
+    def fake_fastly(method, path, body=None, *, token, **kwargs):
+        calls.append((method, path))
+        return responses.pop(0)
+
+    with patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly):
+        delete_remote_frontend(remote_service_id=remote_service_id, token=token)
+
+    assert calls == [
+        ("GET", f"/service/{remote_service_id}/version"),
+        ("PUT", f"/service/{remote_service_id}/version/2/deactivate"),
+        ("DELETE", f"/service/{remote_service_id}"),
+    ]
+
+
+def test_delete_remote_frontend_no_active_versions():
+    """No deactivation call is issued when there are no active versions."""
+    token = "fake-token"
+    remote_service_id = "remote123"
+    responses = [
+        [{"number": 1, "active": False}],  # Get Versions
+        {"status": "ok"},  # Delete Service
+    ]
+    calls: list[tuple] = []
+
+    def fake_fastly(method, path, body=None, *, token, **kwargs):
+        calls.append((method, path))
+        return responses.pop(0)
+
+    with patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly):
+        delete_remote_frontend(remote_service_id=remote_service_id, token=token)
+
+    assert calls == [
+        ("GET", f"/service/{remote_service_id}/version"),
+        ("DELETE", f"/service/{remote_service_id}"),
+    ]
+
+
+def test_delete_remote_frontend_tolerates_404():
+    """A 404 during version lookup/delete is swallowed (service already gone)."""
+
+    def fake_fastly(method, path, body=None, *, token, **kwargs):
+        raise RuntimeError("Fastly API error during Get Versions: HTTP 404 GET /service/x/version\n    not found")
+
+    with patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly):
+        # Should not raise.
+        delete_remote_frontend(remote_service_id="remote123", token="fake-token")
+
+
+def test_delete_remote_frontend_reraises_non_404():
+    """A non-404 error during deletion propagates."""
+    responses = [[], RuntimeError("HTTP 500 DELETE /service/remote123\n    boom")]
+
+    def fake_fastly(method, path, body=None, *, token, **kwargs):
+        r = responses.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    with patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly):
+        with pytest.raises(RuntimeError) as exc_info:
+            delete_remote_frontend(remote_service_id="remote123", token="fake-token")
+    assert "500" in str(exc_info.value)
+
+
+# ── Merged from tests/provision/test_rum_orchestrator.py ──
+
+"""Tests for RUM asset management and RUM orchestrator v2 provisioning."""
+
+
+import copy
+import hashlib
+import logging
+import re
+from unittest.mock import AsyncMock
+
+import pytest
+
+from backend.cron.jobs import rum_sync as rum_sync_mod
+from backend.provision.rum_assets import (
+    cleanup_old_faro_versions,
+    detect_faro_version_change,
+    download_and_upload_faro,
+    faro_bundle_intact,
+    faro_tracker_ready,
+    generate_rum_tracker_js,
+    upload_rum_tracker_js,
+)
+from backend.provision.rum_orchestrator_v2 import (
+    disable_rum,
+    enable_rum,
+    rum_vcl_fingerprint,
+    upgrade_faro_version,
+)
+from tests._helpers.config_fakes import (
+    config_lock_held as _lock_held,
+)
+from tests._helpers.config_fakes import (
+    mutate_via_save,
+)
+from tests._helpers.config_fakes import (
+    read_persisted_config as _persisted,
+)
+
+FAKE_CFG = {
+    "service_id": "svc_test",
+    "fos_access_key_id": "AKIAFAKEEXAMPLE",
+    "fos_secret_access_key": "fakeSecretKeyExample",
+    "fos_bucket": "fake-test-bucket",
+    "fos_region": "us-east-1",
+}
+_FOS_CFG = {
+    "fos_bucket": "my-bucket",
+    "fos_region": "us-east-1",
+    "fos_access_key_id": "test_access_key",
+    "fos_secret_access_key": "test_secret_key",
+}
+SAMPLE_BUNDLE = b"!function(e){var GrafanaFaroWebSdk={initializeFaro:function(){}};e.Faro=GrafanaFaroWebSdk}(window);"
+OTHER_BUNDLE = b"!function(e){/* a different, re-released build */}(window);"
+_REAL_CLIENT = httpx.Client
+
+
+def _mock_client_factory(handler):
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return _REAL_CLIENT(*args, **kwargs)
+
+    return factory
+
+
+@pytest.fixture
+def mock_fos(monkeypatch):
+    def install(handler):
+        monkeypatch.setattr(httpx, "Client", _mock_client_factory(handler))
+
+    return install
+
+
+@pytest.fixture
+def mock_fetch_bundle(monkeypatch):
+    def install(bundle: bytes = SAMPLE_BUNDLE, *, raise_if_called: bool = False):
+        async def fake_fetch(version: str) -> bytes:
+            if raise_if_called:
+                raise AssertionError(f"fetch_faro_bundle must not be called for {version!r}")
+            return bundle
+
+        monkeypatch.setattr(rum_assets, "fetch_faro_bundle", fake_fetch)
+
+    return install
+
+
+def _config_pair(monkeypatch, cfg: dict):
+    saved: dict = {}
+    monkeypatch.setattr(rum_assets.svcconfig, "load_config", lambda service_id: dict(cfg))
+    monkeypatch.setattr(
+        rum_assets.svcconfig,
+        "mutate_config",
+        mutate_via_save(lambda sid, new_cfg: saved.update(service_id=sid, cfg=new_cfg)),
+    )
+    return saved
+
+
+def _seed(cfg: dict) -> None:
+    svcconfig.save_config(cfg["service_id"], dict(cfg))
+
+
+def _disk(service_id: str = "srv_test") -> dict:
+    return json.loads(svcconfig.config_path(service_id).read_text())
+
+
+# ─── Faro Asset Download, Upload, Change Detection & Cleanup ─────────────────
+
+
+async def test_download_and_upload_faro_flows(monkeypatch, mock_fos, mock_fetch_bundle):
+    # 1. Happy path + preserves existing rum keys
+    cfg = {**FAKE_CFG, "rum": {"sampling_rate": 0.5, "faro_version": "2.8.0", "faro_content_hash": "stale"}}
+    saved = _config_pair(monkeypatch, cfg)
+    mock_fetch_bundle(SAMPLE_BUNDLE)
+    seen: dict = {}
+    mock_fos(lambda req: (seen.update(method=req.method, url=str(req.url), body=req.content), httpx.Response(200))[1])
+
+    result = await download_and_upload_faro("svc_test", "2.9.0", "tok")
+    expected_hash = hashlib.sha256(SAMPLE_BUNDLE).hexdigest()
+    expected_md5 = hashlib.md5(SAMPLE_BUNDLE, usedforsecurity=False).hexdigest()
+    assert result["version"] == "2.9.0"
+    assert result["path"] == "rum/faro-web-sdk-v2.9.0.iife.js"
+    assert result["bytes_uploaded"] == len(SAMPLE_BUNDLE)
+    assert result["content_hash"] == expected_hash
+    assert result["fos_key"] == "s3://fake-test-bucket/rum/faro-web-sdk-v2.9.0.iife.js"
+    assert seen["method"] == "PUT" and seen["body"] == SAMPLE_BUNDLE
+    assert saved["cfg"]["rum"]["sampling_rate"] == 0.5
+    assert saved["cfg"]["rum"]["faro_version"] == "2.9.0"
+    assert saved["cfg"]["rum"]["faro_content_hash"] == expected_hash
+    assert saved["cfg"]["rum"]["faro_fos_etag_md5"] == expected_md5
+
+    # 2. Deleted service config is not resurrected
+    resurrected: list = []
+    monkeypatch.setattr(rum_assets.svcconfig, "load_config", lambda sid: dict(FAKE_CFG))
+    monkeypatch.setattr(rum_assets.svcconfig, "mutate_config", lambda *a, **k: None)
+    monkeypatch.setattr(rum_assets.svcconfig, "save_config", lambda *a, **k: resurrected.append(a))
+    await download_and_upload_faro("svc_test", "2.9.0", "tok")
+    assert resurrected == []
+
+    # 3. Upload failure raises RuntimeError and does not persist
+    saved_fail = _config_pair(monkeypatch, FAKE_CFG)
+    mock_fos(lambda req: httpx.Response(500, content=b"upstream error"))
+    with pytest.raises(RuntimeError):
+        await download_and_upload_faro("svc_test", "2.9.0", "tok")
+    assert saved_fail == {}
+
+
+@pytest.mark.parametrize(
+    ("concurrent_version", "expected_updated", "expected_stored_version"),
+    [
+        ("3.0.0", False, "3.0.0"),
+        ("2.9.0", True, "2.9.0"),
+    ],
+)
+async def test_download_and_upload_faro_compare_and_set(
+    monkeypatch, mock_fos, mock_fetch_bundle, concurrent_version, expected_updated, expected_stored_version
+):
+    store = {"svc_test": {**FAKE_CFG, "rum": {"faro_version": "2.9.0", "faro_content_hash": "old-hash"}}}
+    monkeypatch.setattr(rum_assets.svcconfig, "load_config", lambda sid: copy.deepcopy(store.get(sid)))
+    monkeypatch.setattr(
+        rum_assets.svcconfig,
+        "mutate_config",
+        mutate_via_save(lambda sid, new_cfg: store.__setitem__(sid, copy.deepcopy(new_cfg))),
+    )
+    mock_fetch_bundle(SAMPLE_BUNDLE)
+    mock_fos(lambda req: httpx.Response(200))
+
+    store["svc_test"]["rum"]["faro_version"] = concurrent_version
+    result = await download_and_upload_faro("svc_test", "2.9.0", "tok", expected_current_version="2.9.0")
+    assert result["config_updated"] is expected_updated
+    assert store["svc_test"]["rum"]["faro_version"] == expected_stored_version
+
+
+@pytest.mark.parametrize(
+    ("rum_block", "bundle_bytes", "raise_if_called", "expected"),
+    [
+        (None, SAMPLE_BUNDLE, True, True),
+        (
+            {"faro_version": "2.8.0", "faro_content_hash": hashlib.sha256(SAMPLE_BUNDLE).hexdigest()},
+            SAMPLE_BUNDLE,
+            True,
+            True,
+        ),
+        ({"faro_version": "2.9.0", "faro_content_hash": None}, SAMPLE_BUNDLE, True, True),
+        (
+            {"faro_version": "2.9.0", "faro_content_hash": hashlib.sha256(SAMPLE_BUNDLE).hexdigest()},
+            OTHER_BUNDLE,
+            False,
+            True,
+        ),
+        (
+            {"faro_version": "2.9.0", "faro_content_hash": hashlib.sha256(SAMPLE_BUNDLE).hexdigest()},
+            SAMPLE_BUNDLE,
+            False,
+            False,
+        ),
+    ],
+)
+async def test_detect_faro_version_change(
+    monkeypatch, mock_fetch_bundle, rum_block, bundle_bytes, raise_if_called, expected
+):
+    cfg = dict(FAKE_CFG)
+    if rum_block is not None:
+        cfg["rum"] = rum_block
+    _config_pair(monkeypatch, cfg)
+    mock_fetch_bundle(bundle_bytes, raise_if_called=raise_if_called)
+    assert await detect_faro_version_change("svc_test", "2.9.0") is expected
+
+
+_LIST_RESPONSE_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>fake-test-bucket</Name>
+  <Contents><Key>rum/faro-web-sdk-v2.8.0.iife.js</Key></Contents>
+  <Contents><Key>rum/faro-web-sdk-v2.9.0.iife.js</Key></Contents>
+  <Contents><Key>rum/faro-web-sdk-v2.10.0.iife.js</Key></Contents>
+</ListBucketResult>
+"""
+
+
+@pytest.mark.parametrize(
+    ("keep_current", "expected_deleted"),
+    [
+        (True, ["rum/faro-web-sdk-v2.8.0.iife.js", "rum/faro-web-sdk-v2.9.0.iife.js"]),
+        (
+            False,
+            [
+                "rum/faro-web-sdk-v2.10.0.iife.js",
+                "rum/faro-web-sdk-v2.8.0.iife.js",
+                "rum/faro-web-sdk-v2.9.0.iife.js",
+            ],
+        ),
+    ],
+)
+async def test_cleanup_old_faro_versions(monkeypatch, mock_fos, keep_current, expected_deleted):
+    _config_pair(monkeypatch, {**FAKE_CFG, "rum": {"faro_version": "2.10.0", "faro_content_hash": "irrelevant"}})
+    deleted_keys: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            assert "list-type=2" in str(request.url)
+            return httpx.Response(200, content=_LIST_RESPONSE_TEMPLATE.encode())
+        if request.method == "DELETE":
+            deleted_keys.append(request.url.path.split("/", 2)[-1])
+            return httpx.Response(204)
+        raise AssertionError(f"unexpected {request.method}")
+
+    mock_fos(handler)
+    await cleanup_old_faro_versions("svc_test", keep_current=keep_current)
+    assert sorted(deleted_keys) == expected_deleted
+
+
+async def test_cleanup_old_faro_versions_swallows_error(monkeypatch, mock_fos):
+    _config_pair(monkeypatch, {**FAKE_CFG, "rum": {"faro_version": "2.10.0"}})
+    mock_fos(lambda req: (_ for _ in ()).throw(httpx.ConnectError("FOS unreachable", request=req)))
+    assert await cleanup_old_faro_versions("svc_test") is None
+
+
+def test_generate_rum_tracker_js_invariants():
+    js = generate_rum_tracker_js("svc_test")
+    assert "Faro.ErrorsInstrumentation" in js
+    assert "if (Faro.ErrorInstrumentation)" not in js
+    assert "new Faro.ErrorInstrumentation()" not in js
+    assert "console.warn" in js and "no error instrumentation export found" in js
+    assert "script.src = '/js/faro-sdk.js';" in js
+    assert "cdn.jsdelivr.net" not in js and "unpkg.com" not in js
+    assert not re.search(r"https?://", js)
+
+
+def test_faro_tracker_readiness_and_upload_gates(monkeypatch, mock_fos, caplog):
+    etag_md5 = hashlib.md5(SAMPLE_BUNDLE, usedforsecurity=False).hexdigest()
+
+    # 1. No version pinned
+    ready, reason = faro_tracker_ready({**FAKE_CFG, "rum": {"enabled": True}})
+    assert ready is False and "no Faro version pinned" in reason
+
+    # 2. Bundle missing in FOS (404)
+    mock_fos(lambda req: httpx.Response(404))
+    ready, reason = faro_tracker_ready({**FAKE_CFG, "rum": {"faro_version": "2.9.0", "faro_fos_etag_md5": "deadbeef"}})
+    assert ready is False and "not present/intact in FOS" in reason
+
+    # 3. Intact bundle in FOS (200 + ETag match)
+    cfg_ready = {**FAKE_CFG, "rum": {"faro_version": "2.9.0", "faro_fos_etag_md5": etag_md5}}
+    mock_fos(lambda req: httpx.Response(200, headers={"ETag": f'"{etag_md5}"'}))
+    ready, reason = faro_tracker_ready(cfg_ready)
+    assert ready is True and reason == ""
+    assert faro_bundle_intact(cfg_ready, "2.9.0") is True
+
+    # 4. Transient HEAD error logs concisely without traceback
+    mock_fos(lambda req: (_ for _ in ()).throw(httpx.ConnectError("connection failed")))
+    with caplog.at_level(logging.WARNING):
+        assert faro_bundle_intact(cfg_ready, "2.9.0") is False
+    rec = next(r for r in caplog.records if "integrity HEAD check failed" in r.getMessage())
+    assert rec.exc_info is None and "ConnectError" in rec.getMessage()
+
+    # 5. upload_rum_tracker_js skips when unpinned or bundle missing, publishes when ready
+    monkeypatch.setattr(rum_assets.svcconfig, "mutate_config", lambda *a, **k: {})
+    monkeypatch.setattr(rum_assets.svcconfig, "load_config", lambda sid: {**FAKE_CFG, "rum": {"enabled": True}})
+    mock_fos(lambda req: (_ for _ in ()).throw(AssertionError(f"unexpected {req.method}")))
+    res_unpinned = upload_rum_tracker_js("svc_test", "tok")
+    assert res_unpinned["skipped"] is True and res_unpinned["bytes_uploaded"] == 0
+
+    monkeypatch.setattr(rum_assets.svcconfig, "load_config", lambda sid: dict(cfg_ready))
+    mock_fos(lambda req: httpx.Response(404) if req.method == "HEAD" else (_ for _ in ()).throw(AssertionError()))
+    assert upload_rum_tracker_js("svc_test", "tok")["skipped"] is True
+
+    put_bodies: dict[str, bytes] = {}
+
+    def _ready_handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "HEAD" and "faro-web-sdk-v" in req.url.path:
+            return httpx.Response(200, headers={"ETag": f'"{etag_md5}"'})
+        if req.method == "HEAD" and req.url.path.endswith("rum-tracker.js"):
+            return httpx.Response(404)
+        if req.method == "PUT" and req.url.path.endswith("rum-tracker.js"):
+            put_bodies["tracker"] = req.content
+            return httpx.Response(200)
+        raise AssertionError(f"unexpected {req.method} {req.url}")
+
+    mock_fos(_ready_handler)
+    res_pub = upload_rum_tracker_js("svc_test", "tok")
+    assert "skipped" not in res_pub and res_pub["bytes_uploaded"] > 0
+    assert "/js/faro-sdk.js" in put_bodies["tracker"].decode()
+
+
+# ─── End-to-End Integration & Self-Heal Cron ─────────────────────────────────
+
+
+@pytest.fixture
+def temp_config_dir(tmp_path, monkeypatch):
+    config_dir = Path(tmp_path) / "configs"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(svcconfig, "CONFIGS_DIR", config_dir)
+    return config_dir
+
+
+def test_faro_self_hosting_end_to_end_flows(monkeypatch, temp_config_dir, mock_fos, mock_fetch_bundle):
+    service_id = "test_service_id"
+    config_path = temp_config_dir / f"{service_id}.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "service_id": service_id,
+                "service_name": "Test Service",
+                "rum_enabled": False,
+                "last_activated_version": 1,
+                **_FOS_CFG,
+            }
+        )
+    )
+    chosen_version = "2.8.5"
+    mock_fetch_bundle(SAMPLE_BUNDLE)
+    uploads: dict[str, bytes] = {}
+    etag = hashlib.md5(SAMPLE_BUNDLE, usedforsecurity=False).hexdigest()
+
+    def _handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if req.method == "PUT" and "faro-web-sdk-v" in path:
+            uploads["bundle"] = req.content
+            return httpx.Response(200)
+        if req.method == "HEAD" and "faro-web-sdk-v" in path:
+            return httpx.Response(200, headers={"ETag": f'"{etag}"'})
+        if req.method == "HEAD" and path.endswith("rum-tracker.js"):
+            return httpx.Response(404)
+        if req.method == "PUT" and path.endswith("rum-tracker.js"):
+            uploads["tracker"] = req.content
+            return httpx.Response(200)
+        raise AssertionError(f"unexpected {req.method} {req.url}")
+
+    mock_fos(_handler)
+    status_messages: list[str] = []
+    with patch(
+        "backend.provision.rum_orchestrator_v2.reconcile_vcl_state",
+        return_value=MagicMock(activated_version=2, draft_version=None, changes_applied={}),
+    ) as mock_reconcile:
+        result = enable_rum(service_id, "test_token", status_cb=status_messages.append, faro_version=chosen_version)
+
+    cfg = json.loads(config_path.read_text())
+    assert cfg["rum_enabled"] is True and "rum_enabled_at" in cfg
+    assert cfg["rum"]["faro_version"] == chosen_version
+    assert uploads["bundle"] == SAMPLE_BUNDLE
+    tracker_js = uploads["tracker"].decode()
+    assert "/js/faro-sdk.js" in tracker_js and not re.search(r"https?://", tracker_js)
+    assert mock_reconcile.call_count == 1 and result["activated"] is True
+    assert any("Using FOS bucket" in m for m in status_messages)
+    assert any("Uploading RUM tracker JS" in m for m in status_messages)
+    assert any("Reconciling VCL state" in m for m in status_messages)
+
+    # Upgrade Faro version end-to-end
+    mock_fetch_bundle(OTHER_BUNDLE)
+    with (
+        patch(
+            "backend.provision.rum_orchestrator_v2.reconcile_vcl_state",
+            return_value=MagicMock(activated_version=3, draft_version=None, changes_applied={}),
+        ),
+        patch("backend.provision.rum_orchestrator_v2.cleanup_old_faro_versions", new_callable=AsyncMock) as mock_clean,
+    ):
+        up_res = upgrade_faro_version(service_id, "2.9.0", "test_token")
+    assert up_res["previous_version"] == chosen_version and up_res["version"] == "2.9.0"
+    assert json.loads(config_path.read_text())["rum"]["faro_version"] == "2.9.0"
+    mock_clean.assert_called_once_with(service_id, keep_current=True)
+
+    # Disable RUM end-to-end
+    with (
+        patch("backend.provision.rum_assets.delete_rum_tracker_js") as mock_del,
+        patch(
+            "backend.provision.rum_orchestrator_v2.reconcile_vcl_state",
+            return_value=MagicMock(activated_version=6, changes_applied={}),
+        ),
+    ):
+        dis_res = disable_rum(service_id, "test_token")
+    assert dis_res["deactivated"] is True and dis_res["logging_service_active_version"] == 6
+    assert json.loads(config_path.read_text())["rum_enabled"] is False
+    mock_del.assert_called_once()
+
+
+def test_reconcile_cron_self_heals_unpinned_service_without_thrashing(
+    monkeypatch, temp_config_dir, mock_fos, mock_fetch_bundle
+):
+    from backend.provision.declarative.generators import generate_consolidated_snippet
+    from backend.provision.declarative.state import FeatureState
+
+    service_id = "self_heal_service"
+    config_path = temp_config_dir / f"{service_id}.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "service_id": service_id,
+                "service_name": "Self Heal Service",
+                "rum_enabled": True,
+                "log_period": 60,
+                "fastly_api_key": "test_token",
+                "last_activated_version": 2,
+                "rum": {},
+                **_FOS_CFG,
+            }
+        )
+    )
+    mock_fetch_bundle(SAMPLE_BUNDLE)
+    expected_etag = hashlib.md5(SAMPLE_BUNDLE, usedforsecurity=False).hexdigest()
+    counts = {"put": 0, "head": 0}
+
+    def _handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "PUT" and f"faro-web-sdk-v{DEFAULT_FARO_VERSION}.iife.js" in req.url.path:
+            counts["put"] += 1
+            return httpx.Response(200)
+        if req.method == "HEAD" and f"faro-web-sdk-v{DEFAULT_FARO_VERSION}.iife.js" in req.url.path:
+            counts["head"] += 1
+            return httpx.Response(200, headers={"ETag": f'"{expected_etag}"'})
+        raise AssertionError(f"unexpected {req.method} {req.url}")
+
+    mock_fos(_handler)
+    monkeypatch.setattr(rum_sync_mod.time, "time", lambda: 1_800_000_000.0)
+    reconcile_calls: list[tuple] = []
+    purge_calls: list[tuple] = []
+    monkeypatch.setattr(
+        "backend.provision.declarative.reconciler.reconcile_vcl_state",
+        lambda sid, tok, *a, **kw: (
+            reconcile_calls.append((sid, tok)),
+            MagicMock(activated_version=3, draft_version=None),
+        )[1],
+    )
+    monkeypatch.setattr(
+        "backend.core.fastly.client.fastly",
+        lambda method, path, *, token, expect_empty=False, **kw: purge_calls.append((method, path, token)),
+    )
+
+    rum_sync_mod._reconcile_faro_bundle(service_id, None)
+    cfg = json.loads(config_path.read_text())
+    assert cfg["rum"]["faro_version"] == DEFAULT_FARO_VERSION
+    assert counts == {"put": 1, "head": 1}
+    assert reconcile_calls == [(service_id, "test_token")]
+    assert purge_calls == [("POST", f"/service/{service_id}/purge/rum-faro-sdk", "test_token")]
+    assert '"/js/faro-sdk.js"' in generate_consolidated_snippet(FeatureState.from_config(cfg), "vcl_recv")
+
+    # Second tick: converged, no re-upload or re-reconcile
+    rum_sync_mod._reconcile_faro_bundle(service_id, None)
+    assert counts["put"] == 1 and reconcile_calls == [(service_id, "test_token")]
+
+
+# ─── Orchestrator v2 Unit Tests (enable_rum / disable_rum / upgrade / sha) ───
+
+
+def test_enable_and_disable_rum_early_return_and_missing_config():
+    with (
+        patch(
+            "backend.config.load_config",
+            return_value={"service_id": "srv_test", "rum_enabled": True, "last_activated_version": 5},
+        ),
+        patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_rec,
+    ):
+        res = enable_rum("srv_test", "tok")
+        assert res["activated"] is False and res["logging_service_active_version"] == 5
+        mock_rec.assert_not_called()
+
+    with (
+        patch(
+            "backend.config.load_config",
+            return_value={"service_id": "srv_test", "rum_enabled": False, "last_activated_version": 5},
+        ),
+        patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_rec,
+    ):
+        res_dis = disable_rum("srv_test", "tok")
+        assert res_dis["deactivated"] is False and res_dis["logging_service_active_version"] == 5
+        mock_rec.assert_not_called()
+
+    with patch("backend.config.load_config", return_value=None):
+        with pytest.raises(RuntimeError, match="No config found"):
+            enable_rum("srv_nonexistent", "tok")
+
+
+@pytest.mark.parametrize("missing", ["fos_bucket", "fos_region", "fos_access_key_id", "fos_secret_access_key"])
+def test_enable_rum_missing_single_fos_setting_raises_before_any_save(missing):
+    cfg = {
+        "service_id": "srv_test",
+        "rum_enabled": False,
+        "rum": {"faro_version": "1.0.0"},
+        "last_activated_version": 1,
+        **_FOS_CFG,
+    }
+    del cfg[missing]
+    with (
+        patch("backend.config.load_config", return_value=cfg),
+        patch("backend.config.save_config") as mock_save,
+        patch("backend.provision.rum_orchestrator_v2.download_and_upload_faro", new_callable=AsyncMock) as mock_faro,
+    ):
+        with pytest.raises(RuntimeError, match="missing FOS configuration"):
+            enable_rum("srv_test", "test_token")
+    mock_save.assert_not_called()
+    mock_faro.assert_not_called()
+    assert cfg["rum_enabled"] is False and cfg["rum"] == {"faro_version": "1.0.0"}
+
+
+def test_enable_rum_ordering_and_non_blocking_tracker_upload():
+    service_id = "srv_test"
+    _seed({"service_id": service_id, "rum_enabled": False, "last_activated_version": 1, **_FOS_CFG})
+    call_order: list[str] = []
+
+    async def _upload_faro(*_a, **_kw):
+        call_order.append("upload_faro")
+        return {"version": "2.9.0", "bytes_uploaded": 5000}
+
+    def _reconcile(*_a, **_kw):
+        assert _disk(service_id)["rum"]["faro_version"] == "2.9.0"
+        call_order.append("reconcile")
+        return MagicMock(activated_version=2, draft_version=None)
+
+    def _upload_js(*_a, **_kw):
+        call_order.append("upload_js")
+        raise RuntimeError("FOS unreachable after activation")
+
+    with (
+        patch("backend.provision.rum_orchestrator_v2.download_and_upload_faro", side_effect=_upload_faro),
+        patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state", side_effect=_reconcile),
+        patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js", side_effect=_upload_js),
+    ):
+        result = enable_rum(service_id, "test_token", faro_version="2.9.0")
+
+    assert call_order == ["upload_faro", "reconcile", "upload_js"]
+    assert result["activated"] is True and _disk(service_id)["rum_enabled"] is True
+
+
+def test_enable_and_disable_rum_activate_false_and_non_blocking_delete():
+    service_id = "srv_test"
+    _seed({"service_id": service_id, "rum_enabled": False, "last_activated_version": 1, **_FOS_CFG})
+    with (
+        patch("backend.provision.rum_orchestrator_v2.download_and_upload_faro", new_callable=AsyncMock),
+        patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js") as mock_upload_js,
+        patch(
+            "backend.provision.rum_orchestrator_v2.reconcile_vcl_state",
+            return_value=MagicMock(activated_version=None, draft_version=3),
+        ) as mock_rec,
+    ):
+        res_en = enable_rum(service_id, "test_token", activate=False)
+        mock_rec.assert_called_once_with(service_id, "test_token", dry_run=False, status_cb=None, activate=False)
+        mock_upload_js.assert_not_called()
+        assert res_en["activated"] is False and res_en["logging_service_active_version"] == 3
+
+    _seed({"service_id": service_id, "rum_enabled": True, "last_activated_version": 5, **_FOS_CFG})
+    with (
+        patch("backend.provision.rum_assets.delete_rum_tracker_js", side_effect=RuntimeError("FOS unreachable")),
+        patch(
+            "backend.provision.rum_orchestrator_v2.reconcile_vcl_state",
+            return_value=MagicMock(activated_version=None, draft_version=6),
+        ) as mock_rec_dis,
+    ):
+        res_dis = disable_rum(service_id, "test_token", activate=False)
+        mock_rec_dis.assert_called_once_with(service_id, "test_token", dry_run=False, status_cb=None, activate=False)
+        assert res_dis["deactivated"] is False and res_dis["logging_service_active_version"] == 6
+        assert _disk(service_id)["rum_enabled"] is False
+
+
+def test_upgrade_faro_version_orchestration():
+    # Invalid version rejected before config load
+    with patch("backend.config.load_config") as mock_load:
+        with pytest.raises(ValueError, match="faro_version must be a plain"):
+            enable_rum("srv_test", "tok", faro_version="not-a-version")
+        with pytest.raises(ValueError, match="faro_version must be a plain"):
+            upgrade_faro_version("srv_test", "not-a-version", "tok")
+        mock_load.assert_not_called()
+
+    # Refused when RUM not enabled
+    with patch("backend.config.load_config", return_value={"service_id": "srv_test", "rum_enabled": False}):
+        with pytest.raises(RuntimeError, match="RUM is not enabled"):
+            upgrade_faro_version("srv_test", "2.0.0", "tok")
+
+    # Happy path + purge failure non-blocking + never calls upload_rum_tracker_js + activate=False skips cleanup
+    base_cfg = {
+        "service_id": "srv_test",
+        "rum_enabled": True,
+        "cdn_service_id": "cdn_test_service",
+        "rum": {"faro_version": "1.0.0", "faro_content_hash": "abc123"},
+        "last_activated_version": 5,
+        **_FOS_CFG,
+    }
+    call_order: list[str] = []
+    with (
+        patch("backend.config.load_config", return_value=dict(base_cfg)),
+        patch("backend.config.save_config"),
+        patch(
+            "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
+            side_effect=AsyncMock(side_effect=lambda *a, **k: (call_order.append("upload"), {"version": "2.0.0"})[1]),
+        ),
+        patch(
+            "backend.provision.rum_orchestrator_v2.reconcile_vcl_state",
+            side_effect=lambda *a, **k: (
+                call_order.append("reconcile"),
+                MagicMock(activated_version=7, draft_version=None),
+            )[1],
+        ),
+        patch(
+            "backend.provision.rum_orchestrator_v2._purge_faro_surrogate_key", side_effect=RuntimeError("purge down")
+        ),
+        patch(
+            "backend.provision.rum_orchestrator_v2.cleanup_old_faro_versions",
+            side_effect=AsyncMock(side_effect=lambda *a, **k: call_order.append("cleanup")),
+        ),
+        patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js") as mock_tracker,
+    ):
+        res = upgrade_faro_version("srv_test", "2.0.0", "tok")
+    assert call_order == ["upload", "reconcile", "cleanup"]
+    mock_tracker.assert_not_called()
+    assert res["previous_version"] == "1.0.0" and res["version"] == "2.0.0" and res["activated"] is True
+
+    # activate=False skips cleanup and sha update
+    with (
+        patch("backend.config.load_config", return_value=dict(base_cfg)),
+        patch("backend.config.save_config") as mock_save,
+        patch("backend.provision.rum_orchestrator_v2.download_and_upload_faro", new_callable=AsyncMock),
+        patch(
+            "backend.provision.rum_orchestrator_v2.reconcile_vcl_state",
+            return_value=MagicMock(activated_version=None, draft_version=8),
+        ),
+        patch("backend.provision.rum_orchestrator_v2._purge_faro_surrogate_key") as mock_purge,
+        patch("backend.provision.rum_orchestrator_v2.cleanup_old_faro_versions", new_callable=AsyncMock) as mock_clean,
+    ):
+        res_draft = upgrade_faro_version("srv_test", "2.0.0", "tok", activate=False)
+    mock_clean.assert_not_called()
+    mock_purge.assert_called_once()
+    mock_save.assert_not_called()
+    assert res_draft["activated"] is False and res_draft["logging_service_active_version"] == 8
+
+
+def test_rum_vcl_fingerprint_invariants(monkeypatch):
+    def _cfg(**overrides):
+        return {
+            "service_id": "srv_test",
+            "fos_region": "us-east-1",
+            "cdn_shield": "",
+            "rum": {"faro_version": "2.9.0"},
+            **overrides,
+        }
+
+    assert rum_vcl_fingerprint("srv_test", _cfg(rum={"faro_version": "2.9.0"})) != rum_vcl_fingerprint(
+        "srv_test", _cfg(rum={"faro_version": "3.0.0"})
+    )
+    assert rum_vcl_fingerprint("srv_test", _cfg(rum={})) != rum_vcl_fingerprint(
+        "srv_test", _cfg(rum={"faro_version": "2.9.0"})
+    )
+    c = _cfg()
+    assert rum_vcl_fingerprint("srv_test", c) == rum_vcl_fingerprint("srv_test", c)
+    assert rum_vcl_fingerprint("srv_test", _cfg(fos_region="us-east-1")) != rum_vcl_fingerprint(
+        "srv_test", _cfg(fos_region="uk-east-1")
+    )
+
+    disk_cfg = _cfg(rum={"faro_version": "1.2.3"})
+    monkeypatch.setattr("backend.config.load_config", lambda sid: disk_cfg)
+    assert rum_vcl_fingerprint("srv_test") == rum_vcl_fingerprint("srv_test", disk_cfg)
+
+
+# ─── Config Merge & Lock Hygiene (test_rum_orchestrator_v2_config_merge.py) ──
+
+SID_rum_orchestrator = "logsvc1"
+OLD_VERSION = "1.0.0"
+NEW_VERSION = "1.2.3"
+_FOS = {"fos_bucket": "bkt", "fos_region": "us-east-1", "fos_access_key_id": "AK", "fos_secret_access_key": "SK"}
+
+
+def _concurrent_writer(**top_level):
+    def _apply(c: dict) -> None:
+        c.update(top_level)
+        c.setdefault("rum", {})["concurrent_rum_key"] = "kept"
+
+    assert not _lock_held(), "config lock held across a Fastly/FOS call"
+    svcconfig.mutate_config(SID_rum_orchestrator, _apply)
+
+
+@pytest.fixture
+def disabled_cfg():
+    svcconfig.save_config(
+        SID_rum_orchestrator, {"service_id": SID_rum_orchestrator, "keep_me": 1, "rum_enabled": False, **_FOS}
+    )
+    return svcconfig.load_config(SID_rum_orchestrator)
+
+
+@pytest.fixture
+def enabled_cfg():
+    svcconfig.save_config(
+        SID_rum_orchestrator,
+        {
+            "service_id": SID_rum_orchestrator,
+            "keep_me": 1,
+            "rum_enabled": True,
+            "rum_vcl_sha": "stale",
+            "rum": {"faro_version": OLD_VERSION, "faro_content_hash": "oldhash", "faro_fos_etag_md5": "oldmd5"},
+            **_FOS,
+        },
+    )
+    return svcconfig.load_config(SID_rum_orchestrator)
+
+
+@pytest.fixture
+def stubs():
+    mod = "backend.provision.rum_orchestrator_v2"
+    with (
+        patch(f"{mod}.download_and_upload_faro", new_callable=AsyncMock) as upload,
+        patch(f"{mod}.reconcile_vcl_state") as reconcile,
+        patch(f"{mod}.upload_rum_tracker_js") as tracker,
+        patch(f"{mod}.cleanup_old_faro_versions", new_callable=AsyncMock),
+        patch(f"{mod}._purge_faro_surrogate_key"),
+        patch("backend.provision.rum_assets.delete_rum_tracker_js") as delete_js,
+    ):
+        reconcile.return_value = MagicMock(activated_version=7, draft_version=None)
+        yield MagicMock(upload=upload, reconcile=reconcile, tracker=tracker, delete_js=delete_js)
+
+
+def test_enable_and_disable_persist_owned_keys_without_holding_lock(disabled_cfg, stubs):
+    salt = disabled_cfg["rum"]["cid_salt"]
+    held: list[bool] = []
+
+    async def _upload(*_a, **_kw):
+        held.append(_lock_held())
+
+    def _reconcile(*_a, **_kw):
+        held.append(_lock_held())
+        return MagicMock(activated_version=7, draft_version=None)
+
+    stubs.upload.side_effect = _upload
+    stubs.reconcile.side_effect = _reconcile
+
+    out = enable_rum(SID_rum_orchestrator, "tok", faro_version=NEW_VERSION)
+    assert held == [False, False]
+    saved = _persisted()
+    assert saved["rum_enabled"] is True and saved["rum_enabled_at"] == out["enabled_at"]
+    assert saved["rum"]["faro_version"] == NEW_VERSION and saved["rum"]["cid_salt"] == salt
+    assert saved["rum_vcl_sha"] == rum_vcl_fingerprint(SID_rum_orchestrator, saved) and saved["keep_me"] == 1
+
+    # Now disable and check lock + owned keys
+    held.clear()
+    stubs.delete_js.side_effect = lambda *_a, **_kw: held.append(_lock_held())
+    stubs.reconcile.side_effect = lambda *_a, **_kw: (held.append(_lock_held()), MagicMock(activated_version=2))[1]
+    disable_rum(SID_rum_orchestrator, "tok")
+    assert held == [False, False]
+    saved_dis = _persisted()
+    assert saved_dis["rum_enabled"] is False and "rum_vcl_sha" not in saved_dis and saved_dis["keep_me"] == 1
+
+
+@pytest.mark.parametrize("fail_stage", ["upload", "reconcile"])
+def test_enable_rollback_keeps_concurrent_writes_and_restores_pin(disabled_cfg, stubs, fail_stage):
+    salt = disabled_cfg["rum"]["cid_salt"]
+    if fail_stage == "upload":
+
+        async def _boom(*_a, **_kw):
+            _concurrent_writer(concurrent_key="kept")
+            raise RuntimeError("upload failed")
+
+        stubs.upload.side_effect = _boom
+    else:
+
+        def _boom(*_a, **_kw):
+            _concurrent_writer(concurrent_key="kept")
+            raise RuntimeError("reconcile failed")
+
+        stubs.reconcile.side_effect = _boom
+
+    with pytest.raises(RuntimeError):
+        enable_rum(SID_rum_orchestrator, "tok", faro_version=NEW_VERSION)
+
+    saved = _persisted()
+    assert saved["rum_enabled"] is False and "rum_vcl_sha" not in saved
+    assert "faro_version" not in saved["rum"]
+    assert saved["concurrent_key"] == "kept" and saved["rum"]["concurrent_rum_key"] == "kept"
+    assert saved["rum"]["cid_salt"] == salt
+
+    # Also verify pre-existing pin restoration on reconcile failure
+    svcconfig.save_config(
+        SID_rum_orchestrator,
+        {"service_id": SID_rum_orchestrator, "rum_enabled": False, "rum": {"faro_version": OLD_VERSION}, **_FOS},
+    )
+    stubs.upload.side_effect = None
+    stubs.reconcile.side_effect = RuntimeError("nope")
+    with pytest.raises(RuntimeError):
+        enable_rum(SID_rum_orchestrator, "tok", faro_version=NEW_VERSION)
+    assert _persisted()["rum"]["faro_version"] == OLD_VERSION
+
+
+def test_upgrade_and_disable_concurrent_write_preservation(enabled_cfg, stubs):
+    # 1. Upgrade reconcile failure restores pin and keeps concurrent writes
+    async def _upload(*_a, **_kw):
+        svcconfig.mutate_config(
+            SID_rum_orchestrator,
+            lambda c: c["rum"].update(
+                faro_version=NEW_VERSION, faro_content_hash="newhash", faro_fos_etag_md5="newmd5"
+            ),
+        )
+
+    def _boom(*_a, **_kw):
+        _concurrent_writer(concurrent_key="kept")
+        raise RuntimeError("reconcile failed")
+
+    stubs.upload.side_effect = _upload
+    stubs.reconcile.side_effect = _boom
+    with pytest.raises(RuntimeError, match="reconcile failed"):
+        upgrade_faro_version(SID_rum_orchestrator, NEW_VERSION, "tok")
+
+    saved = _persisted()
+    assert saved["rum"]["faro_version"] == OLD_VERSION
+    assert saved["rum"]["faro_content_hash"] == "oldhash"
+    assert saved["rum"]["faro_fos_etag_md5"] == "oldmd5"
+    assert saved["rum"]["concurrent_rum_key"] == "kept" and saved["concurrent_key"] == "kept"
+
+    # 2. Upgrade success refreshes fingerprint and keeps concurrent writes
+    stubs.reconcile.side_effect = lambda *_a, **_kw: (
+        _concurrent_writer(concurrent_key="kept2"),
+        MagicMock(activated_version=9, draft_version=None),
+    )[1]
+    upgrade_faro_version(SID_rum_orchestrator, NEW_VERSION, "tok")
+    saved_ok = _persisted()
+    assert (
+        saved_ok["rum_vcl_sha"] == rum_vcl_fingerprint(SID_rum_orchestrator, saved_ok)
+        and saved_ok["rum_vcl_sha"] != "stale"
+    )
+    assert saved_ok["concurrent_key"] == "kept2"
+
+    # 3. Disable rollback restores enabled and keeps concurrent writes
+    stubs.reconcile.side_effect = _boom
+    with pytest.raises(RuntimeError, match="reconcile failed"):
+        disable_rum(SID_rum_orchestrator, "tok")
+    saved_dis = _persisted()
+    assert saved_dis["rum_enabled"] is True
+    assert saved_dis["rum_vcl_sha"] == rum_vcl_fingerprint(SID_rum_orchestrator, saved_dis)
+    assert saved_dis["concurrent_key"] == "kept"

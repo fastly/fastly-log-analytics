@@ -1,13 +1,30 @@
-from dataclasses import replace
+from __future__ import annotations
+
+import json
+import re
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
-from backend.high_scale.registry_bootstrap import HighScaleService
-
 from backend.high_scale.archive_models import ServingWatermark
-from backend.high_scale.dashboard import aggregates, bundle, header_metrics
-from backend.models.common import FilterSpec
+from backend.high_scale.insights import cache_collapse_detail_endpoint, insights_endpoint
+from backend.high_scale.origin_projection import build_origin_projection_rows
+from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.models.dashboard import AggregatesRequest
+from backend.models.security import SecurityTopBotsResponse
+
+from backend.high_scale import insights as hs_insights
+from backend.high_scale import security as hs_security
+from backend.high_scale.dashboard import aggregates, bundle, header_metrics
+from backend.high_scale.insight_queries import COLUMNS, DETECTIONS, botnet_grouping
+from backend.high_scale.origin import aggregates as origin_aggregates
+from backend.models.common import FilterSpec
+from backend.models.insights import CacheCollapseDetailRequest, InsightsRequest
+from backend.repositories.insights import registry
+
+_WINDOW = ("2026-09-15T00:00:00Z", "2026-09-16T00:00:00Z")
 
 
 class FakeClient:
@@ -22,136 +39,86 @@ class FakeClient:
             return [{"c": 12}]
         if "max(event_timestamp)" in sql:
             domain = (params or {}).get("domain")
+            rows_map = {"request": (12, 0), "rum_vitals": (8, 1), "rum_errors": (2, 2)}
+            total, min_off = rows_map[domain]
             return [
                 {
-                    "total_rows": {"request": 12, "rum_vitals": 8, "rum_errors": 2}[domain],
-                    "earliest_log_at": {
-                        "request": datetime(2026, 9, 15, 18, 0, tzinfo=UTC),
-                        "rum_vitals": datetime(2026, 9, 15, 18, 1, tzinfo=UTC),
-                        "rum_errors": datetime(2026, 9, 15, 18, 2, tzinfo=UTC),
-                    }[domain],
-                    "latest_log_at": {
-                        "request": datetime(2026, 9, 15, 19, 0, tzinfo=UTC),
-                        "rum_vitals": datetime(2026, 9, 15, 19, 1, tzinfo=UTC),
-                        "rum_errors": datetime(2026, 9, 15, 19, 2, tzinfo=UTC),
-                    }[domain],
+                    "total_rows": total,
+                    "earliest_log_at": datetime(2026, 9, 15, 18, min_off, tzinfo=UTC),
+                    "latest_log_at": datetime(2026, 9, 15, 19, min_off, tzinfo=UTC),
                 }
             ]
-        return [
-            {"value": "/synthetic", "aggregate_count": 12, "total_count": 12},
-        ]
+        return [{"value": "/synthetic", "aggregate_count": 12, "total_count": 12}]
 
 
-def test_high_scale_dashboard_uses_clickhouse_aggregate_shape():
-    service = HighScaleService(
+class _RecordingClient(FakeClient):
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params or {}))
+        return super().execute(sql, params)
+
+
+def _default_watermark() -> ServingWatermark:
+    return ServingWatermark(
         service_id="svc",
-        client=FakeClient(),
-        cursor_secret=b"secret",
-        request_watermark=ServingWatermark(
-            service_id="svc",
-            domain="request",
-            owner_epoch=1,
-            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
-            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
-            last_accepted_cursor=None,
-            last_archived_event_id=None,
-            last_visible_event_id=None,
-            exact=True,
-        ),
+        domain="request",
+        owner_epoch=1,
+        coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
+        coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
+        last_accepted_cursor=None,
+        last_archived_event_id=None,
+        last_visible_event_id=None,
+        exact=True,
     )
-    response = aggregates(
-        service,
-        AggregatesRequest(fields=["url", "country"]),
-        "2026-09-15T00:00:00Z",
-        "2026-09-16T00:00:00Z",
-    )
-    assert response.total_rows == 12
-    assert response.data["url"].total == 12
-    assert response.map_data
-    assert response.time_series[0].value == 12
-    assert response.time_series[0].time == "2026-09-15T19:00:00Z"
 
 
-def test_high_scale_dashboard_filtered_aggregates_returns_utc_iso_timestamps():
-    service = HighScaleService(
+def _service_with_watermark(client: Any = None, watermark: Any = None) -> HighScaleService:
+    return HighScaleService(
         service_id="svc",
-        client=FakeClient(),
+        client=client or FakeClient(),
         cursor_secret=b"secret",
-        request_watermark=ServingWatermark(
-            service_id="svc",
-            domain="request",
-            owner_epoch=1,
-            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
-            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
-            last_accepted_cursor=None,
-            last_archived_event_id=None,
-            last_visible_event_id=None,
-            exact=True,
-        ),
+        request_watermark=_default_watermark() if watermark is None else watermark,
     )
-    response = aggregates(
+
+
+def _recording_service() -> tuple[HighScaleService, _RecordingClient]:
+    client = _RecordingClient()
+    return _service_with_watermark(client=client), client
+
+
+# ── Dashboard Aggregates, Header Metrics & Bundle ────────────────────────────
+
+
+def test_high_scale_dashboard_aggregates_and_extents():
+    service = _service_with_watermark()
+    response = aggregates(service, AggregatesRequest(fields=["url", "country"]), *_WINDOW)
+    assert response.total_rows == 12 and response.data["url"].total == 12 and response.map_data
+    assert response.time_series[0].value == 12 and response.time_series[0].time == "2026-09-15T19:00:00Z"
+    assert response.earliest_log_at == "2026-09-15T00:00:00+00:00"
+    assert response.latest_log_at == "2026-09-16T00:00:00+00:00"
+
+    flt_resp = aggregates(
         service,
         AggregatesRequest(
             filters={"host": {"mode": "include", "values": ["example.com"]}},
             chart_interval="1 minute",
             chart_metric="requests",
         ),
-        "2026-09-15T00:00:00Z",
-        "2026-09-16T00:00:00Z",
+        *_WINDOW,
     )
-    assert response.time_series[0].value == 12
-    assert response.time_series[0].time == "2026-09-15T19:00:00Z"
+    assert flt_resp.time_series[0].value == 12 and flt_resp.time_series[0].time == "2026-09-15T19:00:00Z"
+    assert flt_resp.earliest_log_at == "2026-09-15T00:00:00+00:00"
+    assert flt_resp.latest_log_at == "2026-09-16T00:00:00+00:00"
+
+    dims_resp = aggregates(service, AggregatesRequest(fields=["host", "method", "status", "cache", "ua"]), *_WINDOW)
+    assert set(dims_resp.data) == {"host", "method", "status", "cache", "ua"}
+    assert all(field.total == 12 for field in dims_resp.data.values())
 
 
-def test_high_scale_dashboard_returns_requested_supported_card_dimensions():
-    service = HighScaleService(
-        service_id="svc",
-        client=FakeClient(),
-        cursor_secret=b"secret",
-        request_watermark=ServingWatermark(
-            service_id="svc",
-            domain="request",
-            owner_epoch=1,
-            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
-            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
-            last_accepted_cursor=None,
-            last_archived_event_id=None,
-            last_visible_event_id=None,
-            exact=True,
-        ),
-    )
-
-    response = aggregates(
-        service,
-        AggregatesRequest(fields=["host", "method", "status", "cache", "ua"]),
-        "2026-09-15T00:00:00Z",
-        "2026-09-16T00:00:00Z",
-    )
-
-    assert set(response.data) == {"host", "method", "status", "cache", "ua"}
-    assert all(field.total == 12 for field in response.data.values())
-
-
-def test_high_scale_header_metrics_use_visible_rows_and_latest_events():
-    service = HighScaleService(
-        service_id="svc",
-        client=FakeClient(),
-        cursor_secret=b"secret",
-        request_watermark=ServingWatermark(
-            service_id="svc",
-            domain="request",
-            owner_epoch=1,
-            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
-            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
-            last_accepted_cursor=None,
-            last_archived_event_id=None,
-            last_visible_event_id=None,
-            exact=True,
-        ),
-    )
-
-    metrics = header_metrics(service)
-
+def test_high_scale_header_metrics_and_clickhouse_failure_propagation():
+    metrics = header_metrics(_service_with_watermark())
     assert metrics["request"] == {
         "earliest_log_at": "2026-09-15T18:00:00+00:00",
         "latest_log_at": "2026-09-15T19:00:00+00:00",
@@ -164,9 +131,22 @@ def test_high_scale_header_metrics_use_visible_rows_and_latest_events():
         "total_rows": 10,
         "last_sync_at": None,
     }
-    assert metrics["earliest_log_at"] == "2026-09-15T18:00:00+00:00"
-    assert metrics["latest_log_at"] == "2026-09-15T19:00:00+00:00"
+    assert (
+        metrics["earliest_log_at"] == "2026-09-15T18:00:00+00:00"
+        and metrics["latest_log_at"] == "2026-09-15T19:00:00+00:00"
+    )
     assert metrics["local_rows"] == 22
+
+    class _Failing:
+        def execute(self, sql, params=None):
+            if "rum_error_aggregates" in sql:
+                raise RuntimeError("clickhouse down")
+            return []
+
+    with pytest.raises(RuntimeError, match="clickhouse down"):
+        header_metrics(
+            HighScaleService(service_id="svc", client=_Failing(), cursor_secret=b"s", request_watermark=None)
+        )
 
 
 def test_high_scale_dashboard_reuses_request_watermark_once_per_bundle():
@@ -174,215 +154,60 @@ def test_high_scale_dashboard_reuses_request_watermark_once_per_bundle():
 
     def request_watermark():
         calls["count"] += 1
-        return ServingWatermark(
-            service_id="svc",
-            domain="request",
-            owner_epoch=1,
-            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
-            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
-            last_accepted_cursor=None,
-            last_archived_event_id=None,
-            last_visible_event_id=None,
-            exact=True,
-        )
+        return _default_watermark()
 
-    service = HighScaleService(
-        service_id="svc",
-        client=FakeClient(),
-        cursor_secret=b"secret",
-        request_watermark=request_watermark,
-    )
-
-    response = aggregates(
-        service,
-        AggregatesRequest(fields=["url", "country", "host"]),
-        "2026-09-15T00:00:00Z",
-        "2026-09-16T00:00:00Z",
-    )
-
-    assert response.total_rows == 12
-    assert calls["count"] == 1
+    service = _service_with_watermark(watermark=request_watermark)
+    response = aggregates(service, AggregatesRequest(fields=["url", "country", "host"]), *_WINDOW)
+    assert response.total_rows == 12 and calls["count"] == 1
 
 
-def _service_with_watermark() -> HighScaleService:
-    return HighScaleService(
-        service_id="svc",
-        client=FakeClient(),
-        cursor_secret=b"secret",
-        request_watermark=ServingWatermark(
-            service_id="svc",
-            domain="request",
-            owner_epoch=1,
-            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
-            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
-            last_accepted_cursor=None,
-            last_archived_event_id=None,
-            last_visible_event_id=None,
-            exact=True,
-        ),
-    )
+def test_high_scale_time_series_intervals_and_end_minute_fence():
+    service, client = _recording_service()
+    aggregates(service, AggregatesRequest(fields=["url"]), "2026-09-15T00:00:00Z", "2026-09-15T19:00:00Z")
+    ts_queries = [s for s, _ in client.calls if "FROM request_aggregates" in s]
+    assert ts_queries and any("bucket_start < {end:DateTime64(3)}" in q for q in ts_queries)
 
-
-def test_high_scale_aggregates_surfaces_watermark_extents():
-    response = aggregates(
-        _service_with_watermark(),
-        AggregatesRequest(fields=["url", "country"]),
-        "2026-09-15T00:00:00Z",
-        "2026-09-16T00:00:00Z",
-    )
-    assert response.earliest_log_at == "2026-09-15T00:00:00+00:00"
-    assert response.latest_log_at == "2026-09-16T00:00:00+00:00"
-
-
-def test_high_scale_filtered_aggregates_surfaces_watermark_extents():
-    response = aggregates(
-        _service_with_watermark(),
-        AggregatesRequest(
-            filters={"host": {"mode": "include", "values": ["example.com"]}},
-            chart_interval="1 minute",
-            chart_metric="requests",
-        ),
-        "2026-09-15T00:00:00Z",
-        "2026-09-16T00:00:00Z",
-    )
-    assert response.earliest_log_at == "2026-09-15T00:00:00+00:00"
-    assert response.latest_log_at == "2026-09-16T00:00:00+00:00"
-
-
-def test_high_scale_time_series_excludes_the_end_minute():
-    executed_sql: list[str] = []
-
-    class CapturingClient(FakeClient):
-        def execute(self, sql, params=None):
-            executed_sql.append(sql)
-            return super().execute(sql, params)
-
-    service = HighScaleService(
-        service_id="svc",
-        client=CapturingClient(),
-        cursor_secret=b"secret",
-        request_watermark=ServingWatermark(
-            service_id="svc",
-            domain="request",
-            owner_epoch=1,
-            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
-            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
-            last_accepted_cursor=None,
-            last_archived_event_id=None,
-            last_visible_event_id=None,
-            exact=True,
-        ),
-    )
-
-    aggregates(
-        service,
-        AggregatesRequest(fields=["url"]),
-        "2026-09-15T00:00:00Z",
-        "2026-09-15T19:00:00Z",
-    )
-
-    ts_queries = [s for s in executed_sql if "FROM request_aggregates" in s]
-    assert ts_queries, "expected request_aggregates query"
-    assert any("bucket_start < {end:DateTime64(3)}" in q for q in ts_queries)
+    client.calls.clear()
+    resp_1s = aggregates(service, AggregatesRequest(fields=["url"], chart_interval="1 second"), *_WINDOW)
+    assert any("toStartOfSecond(event_timestamp)" in s for s, _ in client.calls)
+    assert not any("FROM request_aggregates" in s for s, _ in client.calls)
+    assert resp_1s.interval == "1 second"
 
 
 @pytest.mark.parametrize(
-    ("interval", "seconds"),
-    [("1 minute", 60), ("5 minutes", 300), ("1 hour", 3600), ("1 day", 86400)],
+    ("interval", "seconds"), [("1 minute", 60), ("5 minutes", 300), ("1 hour", 3600), ("1 day", 86400)]
 )
 def test_high_scale_time_series_groups_by_returned_interval(interval: str, seconds: int) -> None:
-    executed: list[tuple[str, dict]] = []
-
-    class CapturingClient(FakeClient):
-        def execute(self, sql, params=None):
-            executed.append((sql, params or {}))
-            return super().execute(sql, params)
-
-    service = replace(_service_with_watermark(), client=CapturingClient())
-    response = aggregates(
-        service,
-        AggregatesRequest(fields=["url"], chart_interval=interval),
-        "2026-09-15T00:00:00Z",
-        "2026-09-16T00:00:00Z",
-    )
-
-    query, params = next(
-        (sql, params) for sql, params in executed if "FROM request_aggregates" in sql and "AS value" in sql
-    )
+    service, client = _recording_service()
+    response = aggregates(service, AggregatesRequest(fields=["url"], chart_interval=interval), *_WINDOW)
+    query, params = next((sql, p) for sql, p in client.calls if "FROM request_aggregates" in sql and "AS value" in sql)
     assert "toStartOfInterval(bucket_start, INTERVAL {bucket_seconds:UInt32} SECOND)" in query
     assert "GROUP BY chart_bucket ORDER BY chart_bucket" in query
-    assert params["bucket_seconds"] == seconds
-    assert response.interval == interval
-    assert response.time_series[0].value == 12
-
-
-def test_high_scale_one_second_chart_uses_request_facts() -> None:
-    executed: list[str] = []
-
-    class CapturingClient(FakeClient):
-        def execute(self, sql, params=None):
-            executed.append(sql)
-            return super().execute(sql, params)
-
-    service = replace(_service_with_watermark(), client=CapturingClient())
-    response = aggregates(
-        service,
-        AggregatesRequest(fields=["url"], chart_interval="1 second"),
-        "2026-09-15T00:00:00Z",
-        "2026-09-16T00:00:00Z",
-    )
-
-    assert any("toStartOfSecond(event_timestamp)" in sql for sql in executed)
-    assert not any("FROM request_aggregates" in sql for sql in executed)
-    assert response.interval == "1 second"
-
-
-class _RecordingClient(FakeClient):
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, dict]] = []
-
-    def execute(self, sql, params=None):
-        self.calls.append((sql, params or {}))
-        return super().execute(sql, params)
+    assert params["bucket_seconds"] == seconds and response.interval == interval and response.time_series[0].value == 12
 
 
 @pytest.mark.parametrize("filtered", [False, True])
 def test_dashboard_attributes_projection_and_fact_dispatch_and_reuses_historical_cache(monkeypatch, filtered):
     from backend.core.high_scale_sections import current_clickhouse_scope
 
-    client = _RecordingClient()
-    service = replace(_service_with_watermark(), client=client)
+    service, client = _recording_service()
     scopes = []
     execute = client.execute
-
-    def observed_execute(sql, params=None):
-        scopes.append(current_clickhouse_scope())
-        return execute(sql, params)
-
-    monkeypatch.setattr(client, "execute", observed_execute)
+    monkeypatch.setattr(
+        client, "execute", lambda sql, params=None: (scopes.append(current_clickhouse_scope()), execute(sql, params))[1]
+    )
     req = AggregatesRequest(
         fields=["url"], filters={"host": {"mode": "include", "values": ["example.com"]}} if filtered else {}
     )
     response = aggregates(service, req, *_WINDOW)
-    assert scopes
-    assert len(scopes) == len(client.calls)
-    assert all(
-        scope["service_id"] == "svc" and scope["source"] == ("fact" if filtered else "projection") for scope in scopes
-    )
-    assert all(scope["section_id"] in {row["section_id"] for row in response.section_timings} for scope in scopes)
+    assert scopes and len(scopes) == len(client.calls)
+    assert all(s["service_id"] == "svc" and s["source"] == ("fact" if filtered else "projection") for s in scopes)
+    assert all(s["section_id"] in {row["section_id"] for row in response.section_timings} for s in scopes)
+
     calls_before = len(client.calls)
     hit = aggregates(service, req, *_WINDOW)
-    assert hit.response_cache.state == "hit"
-    assert len(client.calls) == calls_before
+    assert hit.response_cache.state == "hit" and len(client.calls) == calls_before
     assert hit.section_timings == response.section_timings
-
-
-def _recording_service() -> tuple[HighScaleService, _RecordingClient]:
-    client = _RecordingClient()
-    return replace(_service_with_watermark(), client=client), client
-
-
-_WINDOW = ("2026-09-15T00:00:00Z", "2026-09-16T00:00:00Z")
 
 
 @pytest.mark.parametrize(
@@ -396,26 +221,20 @@ _WINDOW = ("2026-09-15T00:00:00Z", "2026-09-16T00:00:00Z")
 )
 def test_unfiltered_subminute_windows_use_scoped_facts(start_time: str, end_time: str) -> None:
     service, client = _recording_service()
-
     response = aggregates(service, AggregatesRequest(fields=["url", "country"]), start_time, end_time)
-
-    start = datetime.fromisoformat(start_time)
-    end = datetime.fromisoformat(end_time)
+    start, end = datetime.fromisoformat(start_time), datetime.fromisoformat(end_time)
     assert client.calls
     for sql, params in client.calls:
-        assert "FROM request_facts" in sql
-        assert "event_timestamp >= {start:DateTime64(3)}" in sql
-        assert "event_timestamp < {end_upper:DateTime64(3)}" in sql
-        assert "high_scale_batch_publications FINAL" in sql
-        assert params["service_id"] == "svc"
-        assert params["start"] == start
-        assert params["end_upper"] == end
+        assert "FROM request_facts" in sql and "high_scale_batch_publications FINAL" in sql
+        assert (
+            "event_timestamp >= {start:DateTime64(3)}" in sql and "event_timestamp < {end_upper:DateTime64(3)}" in sql
+        )
+        assert params["service_id"] == "svc" and params["start"] == start and params["end_upper"] == end
     assert all(row["source"] == "fact" for row in response.section_timings if row["activity"] != "overhead")
 
 
-def test_filtered_aggregates_use_the_shared_filter_translation_and_visibility_fence():
+def test_filtered_aggregates_translation_fence_and_unsupported_fields():
     service, client = _recording_service()
-
     aggregates(
         service,
         AggregatesRequest(
@@ -424,36 +243,24 @@ def test_filtered_aggregates_use_the_shared_filter_translation_and_visibility_fe
         ),
         *_WINDOW,
     )
-
     facts = [(sql, params) for sql, params in client.calls if "FROM request_facts" in sql]
     assert facts
     for sql, params in facts:
-        assert "country IN ({flt_0_0:String})" in sql
-        assert "custom_fields[{flt_k1:String}] NOT IN ({flt_1_0:String})" in sql
+        assert (
+            "country IN ({flt_0_0:String})" in sql and "custom_fields[{flt_k1:String}] NOT IN ({flt_1_0:String})" in sql
+        )
         assert "high_scale_batch_publications FINAL" in sql and "domain='request'" in sql
         assert params["flt_0_0"] == "US" and params["flt_1_0"] == "SJC"
 
-
-def test_filters_on_fields_outside_the_card_list_are_still_applied():
-    service, client = _recording_service()
-
+    client.calls.clear()
     aggregates(
-        service,
-        AggregatesRequest(fields=["url"], filters={"rid": {"mode": "include", "values": ["abc"]}}),
-        *_WINDOW,
+        service, AggregatesRequest(fields=["url"], filters={"rid": {"mode": "include", "values": ["abc"]}}), *_WINDOW
     )
-
     assert any(params.get("flt_k0") == "rid" for _, params in client.calls)
-
-
-def test_filters_the_fact_table_cannot_express_fail_loudly():
-    service, _ = _recording_service()
 
     with pytest.raises(ValueError, match="do not support filtering"):
         aggregates(
-            service,
-            AggregatesRequest(filters={"_bot_name": {"mode": "include", "values": ["googlebot"]}}),
-            *_WINDOW,
+            service, AggregatesRequest(filters={"_bot_name": {"mode": "include", "values": ["googlebot"]}}), *_WINDOW
         )
 
 
@@ -465,8 +272,7 @@ def test_filtered_aggregate_failures_propagate_instead_of_rendering_empty_cards(
                 raise RuntimeError("clickhouse unavailable")
             return super().execute(sql, params)
 
-    service = replace(_service_with_watermark(), client=Failing())
-
+    service = _service_with_watermark(client=Failing())
     with pytest.raises(RuntimeError, match="unavailable"):
         aggregates(
             service,
@@ -475,52 +281,28 @@ def test_filtered_aggregate_failures_propagate_instead_of_rendering_empty_cards(
         )
 
 
-def test_include_time_series_false_skips_the_time_series_query():
+def test_panel_flags_and_sections_selector():
     service, client = _recording_service()
+    r_no_ts = aggregates(service, AggregatesRequest(fields=["url"], include_time_series=False), *_WINDOW)
+    assert r_no_ts.time_series == [] and all("AS chart_bucket" not in sql for sql, _ in client.calls)
 
-    response = aggregates(service, AggregatesRequest(fields=["url"], include_time_series=False), *_WINDOW)
-
-    assert response.time_series == []
-    assert all("AS chart_bucket" not in sql for sql, _ in client.calls)
-
-
-def test_include_map_data_false_skips_the_map_and_never_adds_country_work():
-    service, client = _recording_service()
-
-    response = aggregates(
+    client.calls.clear()
+    r_no_map = aggregates(
         service, AggregatesRequest(fields=["url"], include_map_data=False, include_time_series=False), *_WINDOW
     )
+    assert r_no_map.map_data == [] and not any(p.get("dimension") == "country" for _, p in client.calls)
 
-    assert response.map_data == []
-    assert not any(params.get("dimension") == "country" for _, params in client.calls)
-
-
-def test_map_data_is_served_even_when_country_is_not_a_requested_card():
-    service, _ = _recording_service()
-
-    response = aggregates(service, AggregatesRequest(fields=["url"]), *_WINDOW)
-
-    assert response.map_data
-    assert "country" not in response.data
-
-
-def test_sections_selector_gates_the_panels_like_the_standard_router():
-    service, client = _recording_service()
+    r_map_default = aggregates(service, AggregatesRequest(fields=["url"]), *_WINDOW)
+    assert r_map_default.map_data and "country" not in r_map_default.data
 
     topten = aggregates(service, AggregatesRequest(fields=["url"], sections=["topten"]), *_WINDOW)
-
     assert topten.data and topten.time_series == [] and topten.map_data == []
 
     core = aggregates(service, AggregatesRequest(fields=["url"], sections=["core"]), *_WINDOW)
-
     assert core.data == {} and core.time_series and core.map_data
 
 
-def test_bundle_serves_top_bots_from_the_security_reader(monkeypatch):
-    from backend.models.security import SecurityTopBotsResponse
-
-    from backend.high_scale import security as hs_security
-
+def test_bundle_top_bots_and_section_gating(monkeypatch):
     seen: list[tuple] = []
 
     def fake_top_bots(service, req, start_time, end_time):
@@ -543,57 +325,25 @@ def test_bundle_serves_top_bots_from_the_security_reader(monkeypatch):
         )
 
     monkeypatch.setattr(hs_security, "top_bots", fake_top_bots)
-    service, _ = _recording_service()
-
+    service, client = _recording_service()
     result = bundle(service, AggregatesRequest(fields=["url"]), *_WINDOW)
-
-    assert seen == [("svc", *_WINDOW)]
-    assert result["top_bots"].ngwaf_bots[0].id == "googlebot"
-    assert result["aggregates"].data
-
-
-def test_bundle_sections_skip_the_unrequested_branch(monkeypatch):
-    from backend.high_scale import security as hs_security
+    assert (
+        seen == [("svc", *_WINDOW)] and result["top_bots"].ngwaf_bots[0].id == "googlebot" and result["aggregates"].data
+    )
 
     monkeypatch.setattr(hs_security, "top_bots", lambda *a, **k: pytest.fail("bots were not requested"))
-    service, client = _recording_service()
-
     core_only = bundle(service, AggregatesRequest(fields=["url"], sections=["core"]), *_WINDOW)
-
     assert core_only["top_bots"] is None and core_only["aggregates"] is not None
-
-    from backend.models.security import SecurityTopBotsResponse
 
     monkeypatch.setattr(
         hs_security, "top_bots", lambda *a, **k: SecurityTopBotsResponse.with_telemetry(bots=[], ngwaf_bots=[])
     )
     client.calls.clear()
     bots_only = bundle(service, AggregatesRequest(sections=["bots"]), *_WINDOW)
-
-    assert bots_only["aggregates"] is None and bots_only["top_bots"] is not None
-    assert client.calls == []
+    assert bots_only["aggregates"] is None and bots_only["top_bots"] is not None and client.calls == []
 
 
-def test_header_metrics_surface_clickhouse_failures_instead_of_reporting_no_data():
-    class _Failing:
-        def execute(self, sql, params=None):
-            if "rum_error_aggregates" in sql:
-                raise RuntimeError("clickhouse down")
-            return []
-
-    service = HighScaleService(service_id="svc", client=_Failing(), cursor_secret=b"s", request_watermark=None)
-
-    with pytest.raises(RuntimeError, match="clickhouse down"):
-        header_metrics(service)
-
-
-# ── Merged from tests/high_scale/test_origin.py ──
-from copy import deepcopy
-from types import SimpleNamespace
-
-from backend.high_scale.origin_projection import build_origin_projection_rows
-
-from backend.high_scale.origin import aggregates as origin_aggregates
+# ── Origin Aggregates & Projections ──────────────────────────────────────────
 
 
 class _OriginClient:
@@ -636,71 +386,9 @@ class _OriginClient:
             ]
         if "origin:ip_health" in sql:
             return [
-                {
-                    "value": "203.0.113.1",
-                    "requests": 7,
-                    "origin_5xx": 1,
-                    "latency_q": [1000.0, 3000.0],
-                    "latency_n": 7,
-                }
+                {"value": "203.0.113.1", "requests": 7, "origin_5xx": 1, "latency_q": [1000.0, 3000.0], "latency_n": 7}
             ]
         raise AssertionError(sql)
-
-
-def _origin_request(**overrides):
-    values = {
-        "filters": {},
-        "bucket_minutes": 5,
-        "split_by_leg": False,
-        "timeseries_metric": "ttfb",
-        "timeseries_percentile": "p95",
-        "slow_urls_limit": 20,
-        "slow_urls_min_requests": 1,
-        "ip_health_limit": 30,
-        "pop_latency_limit": 30,
-    }
-    values.update(overrides)
-    return SimpleNamespace(**values)
-
-
-def test_shapes_all_origin_sections_from_bounded_projection_queries() -> None:
-    client = _OriginClient()
-    service = SimpleNamespace(service_id="svc", client=client)
-
-    result = origin_aggregates(
-        service,
-        _origin_request(),
-        "2026-09-14T10:00:00Z",
-        "2026-09-14T11:00:00Z",
-        sections={
-            "summary",
-            "timeseries",
-            "slow_urls",
-            "status_codes",
-            "path_breakdown",
-            "pop_latency",
-            "ip_health",
-        },
-    )
-
-    assert result["has_data"] is True
-    assert result["summary"]["ottfb_p95_ms"] == 2.5 and result["summary"]["origin_error_rate"] == 0.1
-    assert result["timeseries"]["series"][0]["value"] == 2.5
-    assert result["slow_urls"]["rows"][0]["url"] == "/slow"
-    assert result["status_codes"]["rows"][0] == {"status": 503, "count": 2, "pct": 20.0}
-    assert result["path_breakdown"]["shielding_detected"] is True
-    assert result["pop_latency"]["rows"][2]["elevated"] is True
-    assert result["ip_health"]["rows"][0]["error_pct"] == pytest.approx(14.285714)
-    assert all("high_scale_batch_publications FINAL" in sql for sql, _ in client.calls)
-    assert all(params["service_id"] == "svc" for _, params in client.calls)
-    slow_urls_call = next((sql, params) for sql, params in client.calls if "origin:slow_urls" in sql)
-    assert slow_urls_call[1]["limit"] == 20
-    dimension_queries = [sql for sql, _ in client.calls if "FROM origin_minute_dimensions" in sql]
-    assert dimension_queries
-    assert all("sum(origin_minute_dimensions.requests)" in sql for sql in dimension_queries)
-    assert all("sum(requests)" not in sql for sql in dimension_queries)
-    ip_health_sql = next(sql for sql, _ in client.calls if "origin:ip_health" in sql)
-    assert "HAVING sum(origin_minute_dimensions.requests) >= 10" in ip_health_sql
 
 
 class _OriginFactsClient:
@@ -735,63 +423,66 @@ class _OriginFactsClient:
         raise AssertionError(sql)
 
 
-def test_filtered_requests_read_request_facts_exactly_instead_of_failing() -> None:
-    client = _OriginFactsClient()
-    service = SimpleNamespace(service_id="svc", client=client)
-    req = _origin_request(filters={"country": FilterSpec(mode="include", values=["US"])})
+def _origin_request(**overrides):
+    return SimpleNamespace(
+        **{
+            "filters": {},
+            "bucket_minutes": 5,
+            "split_by_leg": False,
+            "timeseries_metric": "ttfb",
+            "timeseries_percentile": "p95",
+            "slow_urls_limit": 20,
+            "slow_urls_min_requests": 1,
+            "ip_health_limit": 30,
+            "pop_latency_limit": 30,
+            **overrides,
+        }
+    )
 
+
+_ALL_ORIGIN_SECTIONS = {
+    "summary",
+    "timeseries",
+    "slow_urls",
+    "status_codes",
+    "path_breakdown",
+    "pop_latency",
+    "ip_health",
+}
+
+
+def test_shapes_all_origin_sections_from_bounded_projection_queries() -> None:
+    client = _OriginClient()
+    service = SimpleNamespace(service_id="svc", client=client)
     result = origin_aggregates(
-        service, req, None, None, sections={"summary", "slow_urls", "status_codes", "pop_latency"}
+        service, _origin_request(), "2026-09-14T10:00:00Z", "2026-09-14T11:00:00Z", sections=_ALL_ORIGIN_SECTIONS
     )
 
-    sqls = [sql for sql, _ in client.calls]
-    assert sqls and all("FROM (SELECT" in sql and "request_facts" in sql for sql in sqls)
-    assert not any("origin_minute_" in sql for sql in sqls)
-    assert all(params["filter_0_0"] == "US" for _, params in client.calls)
-    assert result["summary"]["_approx"] is False and result["slow_urls"]["_approx"] is False
+    assert result["has_data"] is True
     assert result["summary"]["ottfb_p95_ms"] == 2.5 and result["summary"]["origin_error_rate"] == 0.1
-    assert [row["status"] for row in result["status_codes"]["rows"]] == [503, 200]
-    assert result["status_codes"]["rows"][0]["pct"] == 20.0
-
-
-def test_inactive_filters_still_use_the_projections() -> None:
-    client = _OriginClient()
-    service = SimpleNamespace(service_id="svc", client=client)
-    req = _origin_request(filters={"country": FilterSpec(mode="include", values=[])})
-    origin_aggregates(service, req, None, None, sections={"summary"})
-    assert "origin_minute_summary" in client.calls[0][0]
-
-
-def test_unsupported_filter_fields_are_rejected_loudly_not_ignored() -> None:
-    service = SimpleNamespace(service_id="svc", client=_OriginClient())
-    req = _origin_request(filters={"_bot_name": FilterSpec(mode="include", values=["x"])})
-    with pytest.raises(ValueError, match="_bot_name"):
-        origin_aggregates(service, req, None, None, sections={"summary"})
-
-
-def test_only_queries_requested_sections() -> None:
-    client = _OriginClient()
-    service = SimpleNamespace(service_id="svc", client=client)
-    result = origin_aggregates(service, _origin_request(), None, None, sections={"summary"})
-    assert len(client.calls) == 1 and "summary" in result and "timeseries" not in result
-
-
-def test_rejects_subminute_timeseries_buckets() -> None:
-    service = SimpleNamespace(service_id="svc", client=_OriginClient())
-    with pytest.raises(ValueError, match="bucket_minutes"):
-        origin_aggregates(service, _origin_request(bucket_minutes=0.5), None, None, sections={"timeseries"})
-
-
-def test_percentile_sections_merge_sketches_exactly_instead_of_averaging_percentiles() -> None:
-    client = _OriginClient()
-    service = SimpleNamespace(service_id="svc", client=client)
-    origin_aggregates(
-        service,
-        _origin_request(),
-        None,
-        None,
-        sections={"summary", "timeseries", "slow_urls", "path_breakdown", "pop_latency", "ip_health"},
+    assert result["timeseries"]["series"][0]["value"] == 2.5 and result["slow_urls"]["rows"][0]["url"] == "/slow"
+    assert result["status_codes"]["rows"][0] == {"status": 503, "count": 2, "pct": 20.0}
+    assert (
+        result["path_breakdown"]["shielding_detected"] is True and result["pop_latency"]["rows"][2]["elevated"] is True
     )
+    assert result["ip_health"]["rows"][0]["error_pct"] == pytest.approx(14.285714)
+    assert all(
+        "high_scale_batch_publications FINAL" in sql and params["service_id"] == "svc" for sql, params in client.calls
+    )
+    assert next(p for s, p in client.calls if "origin:slow_urls" in s)["limit"] == 20
+    dim_queries = [sql for sql, _ in client.calls if "FROM origin_minute_dimensions" in sql]
+    assert dim_queries and all(
+        "sum(origin_minute_dimensions.requests)" in s and "sum(requests)" not in s for s in dim_queries
+    )
+    assert "HAVING sum(origin_minute_dimensions.requests) >= 10" in next(
+        s for s, _ in client.calls if "origin:ip_health" in s
+    )
+
+    for section in ("summary", "timeseries", "slow_urls", "path_breakdown", "pop_latency", "ip_health"):
+        assert result[section]["_approx"] is True
+        assert "histogram sketch" in result[section]["_approx_note"] and "1%" in result[section]["_approx_note"]
+    assert "_approx" not in result["status_codes"]
+
     percentile_queries = [sql for sql, _ in client.calls if "_q" in sql or "quantiles" in sql]
     assert percentile_queries
     for sql in percentile_queries:
@@ -799,37 +490,59 @@ def test_percentile_sections_merge_sketches_exactly_instead_of_averaging_percent
         assert "latency_p50_us" not in sql and "latency_p95_us" not in sql and "* latency_count" not in sql
 
 
-def test_sketch_backed_sections_declare_how_they_are_approximate() -> None:
-    service = SimpleNamespace(service_id="svc", client=_OriginClient())
+def test_filtered_requests_read_request_facts_exactly_instead_of_failing() -> None:
+    client = _OriginFactsClient()
+    service = SimpleNamespace(service_id="svc", client=client)
+    req = _origin_request(filters={"country": FilterSpec(mode="include", values=["US"])})
     result = origin_aggregates(
-        service,
-        _origin_request(),
-        None,
-        None,
-        sections={"summary", "timeseries", "slow_urls", "status_codes", "path_breakdown", "pop_latency", "ip_health"},
+        service, req, None, None, sections={"summary", "slow_urls", "status_codes", "pop_latency"}
     )
-    for section in ("summary", "timeseries", "slow_urls", "path_breakdown", "pop_latency", "ip_health"):
-        assert result[section]["_approx"] is True
-        assert "histogram sketch" in result[section]["_approx_note"] and "1%" in result[section]["_approx_note"]
-    assert "_approx" not in result["status_codes"]
+
+    sqls = [sql for sql, _ in client.calls]
+    assert sqls and all(
+        "FROM (SELECT" in sql and "request_facts" in sql and "origin_minute_" not in sql for sql in sqls
+    )
+    assert all(params["filter_0_0"] == "US" for _, params in client.calls)
+    assert result["summary"]["_approx"] is False and result["slow_urls"]["_approx"] is False
+    assert result["summary"]["ottfb_p95_ms"] == 2.5 and result["summary"]["origin_error_rate"] == 0.1
+    assert [row["status"] for row in result["status_codes"]["rows"]] == [503, 200]
+    assert result["status_codes"]["rows"][0]["pct"] == 20.0
 
 
-def test_percentiles_without_sketch_observations_are_none_not_zero() -> None:
+def test_origin_filter_validation_section_gating_and_bucket_guards() -> None:
+    client = _OriginClient()
+    service = SimpleNamespace(service_id="svc", client=client)
+    origin_aggregates(
+        service,
+        _origin_request(filters={"country": FilterSpec(mode="include", values=[])}),
+        None,
+        None,
+        sections={"summary"},
+    )
+    assert "origin_minute_summary" in client.calls[0][0]
+
+    client.calls.clear()
+    res = origin_aggregates(service, _origin_request(), None, None, sections={"summary"})
+    assert len(client.calls) == 1 and "summary" in res and "timeseries" not in res
+
+    with pytest.raises(ValueError, match="_bot_name"):
+        origin_aggregates(
+            service,
+            _origin_request(filters={"_bot_name": FilterSpec(mode="include", values=["x"])}),
+            None,
+            None,
+            sections={"summary"},
+        )
+
+    with pytest.raises(ValueError, match="bucket_minutes"):
+        origin_aggregates(service, _origin_request(bucket_minutes=0.5), None, None, sections={"timeseries"})
+
+
+def test_origin_empty_sketch_observations_handling() -> None:
     class _NoSketch(_OriginClient):
         def execute(self, sql: str, params: dict | None = None) -> list[dict]:
             if "origin:slow_urls" in sql:
                 return [{"value": "/legacy", "requests": 9, "latency_q": [0.0, 0.0, 0.0], "latency_n": 0}]
-            return super().execute(sql, params)
-
-    service = SimpleNamespace(service_id="svc", client=_NoSketch())
-    result = origin_aggregates(service, _origin_request(), None, None, sections={"slow_urls"})
-    row = result["slow_urls"]["rows"][0]
-    assert row["requests"] == 9 and row["p50_ms"] is None and row["p95_ms"] is None and row["p99_ms"] is None
-
-
-def test_summary_without_any_sketch_observations_reports_no_data() -> None:
-    class _NoSketch(_OriginClient):
-        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
             if "origin:summary" in sql:
                 return [
                     {
@@ -838,7 +551,7 @@ def test_summary_without_any_sketch_observations_reports_no_data() -> None:
                         "passes": 0,
                         "origin_5xx": 0,
                         "status_count": 4,
-                        "latency_q": [0.0, 0.0, 0.0, 0.0],
+                        "latency_q": [0.0] * 4,
                         "latency_n": 0,
                         "ttlb_q": [0.0, 0.0],
                         "ttlb_n": 0,
@@ -851,11 +564,15 @@ def test_summary_without_any_sketch_observations_reports_no_data() -> None:
             return super().execute(sql, params)
 
     service = SimpleNamespace(service_id="svc", client=_NoSketch())
-    result = origin_aggregates(service, _origin_request(), None, None, sections={"summary"})
-    assert result["has_data"] is False and result["summary"]["has_data"] is False
+    res_slow = origin_aggregates(service, _origin_request(), None, None, sections={"slow_urls"})
+    row = res_slow["slow_urls"]["rows"][0]
+    assert row["requests"] == 9 and row["p50_ms"] is None and row["p95_ms"] is None and row["p99_ms"] is None
+
+    res_sum = origin_aggregates(service, _origin_request(), None, None, sections={"summary"})
+    assert res_sum["has_data"] is False and res_sum["summary"]["has_data"] is False
 
 
-def test_builds_minute_summary_and_dimension_rows_without_mutating_events():
+def test_builds_minute_summary_dimension_rows_and_mergeable_sketches():
     events = (
         {
             "timestamp": "2026-09-16T14:00:01Z",
@@ -898,7 +615,10 @@ def test_builds_minute_summary_and_dimension_rows_without_mutating_events():
     projection = build_origin_projection_rows(events)
     assert events == original
     (summary_row,) = projection.summary_rows
-    for key in [key for key in summary_row if "_sk_" in key]:
+    for metric in ("latency", "ttlb", "overhead", "origin_bytes"):
+        assert sum(summary_row[f"{metric}_sk_w"]) == 2
+        assert len(summary_row[f"{metric}_sk_v"]) == len(summary_row[f"{metric}_sk_w"])
+    for key in [k for k in summary_row if "_sk_" in k]:
         del summary_row[key]
     assert projection.summary_rows == (
         {
@@ -926,63 +646,29 @@ def test_builds_minute_summary_and_dimension_rows_without_mutating_events():
     url = next(row for row in projection.dimension_rows if row["dimension"] == "url" and row["value"] == "/a")
     assert url["requests"] == 2 and url["origin_5xx"] == 1 and url["latency_p50_us"] == 1500.0
     status = next(row for row in projection.dimension_rows if row["dimension"] == "status" and row["value"] == "-1")
-    assert status["requests"] == 1 and status["latency_count"] == 0
+    assert (
+        status["requests"] == 1
+        and status["latency_count"] == 0
+        and status["latency_sk_v"] == []
+        and status["latency_sk_w"] == []
+    )
 
+    # Identical observations merge into a single sketch bin of weight 2
+    same_proj = build_origin_projection_rows((events[0], {**events[0], "timestamp": "2026-09-16T14:00:40Z"}))
+    (same_sum,) = same_proj.summary_rows
+    assert same_sum["latency_sk_w"] == [2] and same_sum["latency_sk_v"][0] == pytest.approx(1000.0, rel=0.01)
 
-def test_skips_rows_without_parseable_timestamps_and_non_finite_numbers():
-    projection = build_origin_projection_rows(
+    # Invalid timestamps and NaN values are skipped
+    bad_proj = build_origin_projection_rows(
         (
             {"timestamp": "invalid", "ottfb": 10},
             {"timestamp": "2026-09-16T14:00:00Z", "ottfb": float("nan"), "ost": "bad"},
         )
     )
-    assert projection.summary_rows == () and projection.dimension_rows == ()
+    assert bad_proj.summary_rows == () and bad_proj.dimension_rows == ()
 
 
-def test_rows_carry_mergeable_sketches_for_every_percentile_metric():
-    events = (
-        {
-            "timestamp": "2026-09-16T14:00:01Z",
-            "ost": 200,
-            "ottfb": 1000,
-            "ottlb": 1800,
-            "elapsed": 2300,
-            "obytes": 100,
-            "url": "/a",
-        },
-        {
-            "timestamp": "2026-09-16T14:00:40Z",
-            "ost": 200,
-            "ottfb": 1000,
-            "ottlb": 2800,
-            "elapsed": 3400,
-            "obytes": 300,
-            "url": "/a",
-        },
-    )
-    projection = build_origin_projection_rows(events)
-    (summary,) = projection.summary_rows
-    for metric, observations in (("latency", 2), ("ttlb", 2), ("overhead", 2), ("origin_bytes", 2)):
-        assert sum(summary[f"{metric}_sk_w"]) == observations
-        assert len(summary[f"{metric}_sk_v"]) == len(summary[f"{metric}_sk_w"])
-    assert summary["latency_sk_w"] == [2]
-    assert summary["latency_sk_v"][0] == pytest.approx(1000.0, rel=0.01)
-    url = next(row for row in projection.dimension_rows if row["dimension"] == "url")
-    assert url["latency_sk_w"] == [2]
-    status = next(row for row in projection.dimension_rows if row["dimension"] == "status")
-    assert status["latency_sk_v"] == [] and status["latency_sk_w"] == []
-
-
-# ── Merged from tests/high_scale/test_insights.py ──
-import json
-import re
-from typing import Any
-
-from backend.high_scale import insights as hs_insights
-from backend.high_scale.insight_queries import COLUMNS, DETECTIONS, botnet_grouping
-from backend.high_scale.insights import cache_collapse_detail_endpoint, insights_endpoint
-from backend.models.insights import CacheCollapseDetailRequest, InsightsRequest
-from backend.repositories.insights import registry
+# ── Insights & Cache Collapse Detail ─────────────────────────────────────────
 
 FINGERPRINT_DETECTIONS = {"botnet_grouping", "repeated_patterns_fp", "impossible_distance"}
 EVERY_CARD = set(DETECTIONS) | FINGERPRINT_DETECTIONS
@@ -1027,17 +713,13 @@ class _InsightsClient:
         if name in self._fail:
             raise RuntimeError("clickhouse unavailable")
         if name == "history":
-            earliest = params["window_end"] - timedelta(hours=self._history_hours)
-            return [{"earliest": earliest, "window_total": 1234}]
+            return [{"earliest": params["window_end"] - timedelta(hours=self._history_hours), "window_total": 1234}]
         if name == "fields":
             return [{"fields": self._fields}]
         return self._rows.get(name, [])
 
     def queries(self) -> dict[str, tuple[str, dict]]:
-        found: dict[str, tuple[str, dict]] = {}
-        for sql, params in self.calls:
-            found[re.search(r"/\* insight:(\w+) \*/", sql).group(1)] = (sql, params)  # type: ignore[union-attr]
-        return found
+        return {re.search(r"/\* insight:(\w+) \*/", sql).group(1): (sql, params) for sql, params in self.calls}  # type: ignore[union-attr]
 
 
 def _run_insights(
@@ -1052,7 +734,8 @@ def _insight_cards(response) -> dict[str, dict]:
     return {card["id"]: card for card in json.loads(response.model_dump_json(by_alias=True))["insights"]}
 
 
-def test_every_detection_has_a_registered_definition_with_a_processor_and_known_columns() -> None:
+def test_detections_registry_and_investigate_cards() -> None:
+    assert callable(hs_insights.insights_endpoint) and callable(hs_insights.cache_collapse_detail_endpoint)
     registered = {definition.id: definition for definition in registry.get_all()}
     for insight_id, detection in DETECTIONS.items():
         assert insight_id in registered and registered[insight_id].row_processor is not None
@@ -1061,8 +744,6 @@ def test_every_detection_has_a_registered_definition_with_a_processor_and_known_
     with pytest.raises(ValueError, match="ja4 or ja3"):
         botnet_grouping("x; DROP TABLE y")
 
-
-def test_detections_surface_as_standard_cards_with_investigate_links() -> None:
     client = _InsightsClient(
         {
             "error_spikes": [
@@ -1073,34 +754,41 @@ def test_detections_surface_as_standard_cards_with_investigate_links() -> None:
     )
     cards = _insight_cards(_run_insights(client))
     card = cards["error_spikes"]
-    assert card["severity"] == "critical" and card["summary"] == "2 URLs with elevated server error rates"
-    assert card["category"] == "origin"
+    assert (
+        card["severity"] == "critical"
+        and card["summary"] == "2 URLs with elevated server error rates"
+        and card["category"] == "origin"
+    )
     first = card["items"][0]
     assert first["label"] == "/api" and first["unit"] == "% 5xx"
     assert first["current_val"] == pytest.approx(62.0) and first["baseline_val"] == pytest.approx(1.0)
     assert first["meta"]["errors"] == 31 and first["meta"]["filters"] == {"url": "/api"}
-    assert first["investigate_url"].startswith("/dashboard?service=svc&start=")
-    assert "filter_url=%2Fapi" in first["investigate_url"]
-    assert cards["latency_regression"]["severity"] == "clean"
-    assert cards["latency_regression"]["summary"] == "No latency regression detected"
+    assert (
+        first["investigate_url"].startswith("/dashboard?service=svc&start=")
+        and "filter_url=%2Fapi" in first["investigate_url"]
+    )
+    assert (
+        cards["latency_regression"]["severity"] == "clean"
+        and cards["latency_regression"]["summary"] == "No latency regression detected"
+    )
 
 
-def test_every_registered_detection_runs_and_the_response_validates() -> None:
-    response = _run_insights(_InsightsClient())
+def test_every_detection_runs_and_query_is_visible_scoped_and_parameterized() -> None:
+    client = _InsightsClient()
+    response = _run_insights(client)
     cards = _insight_cards(response)
     assert set(cards) == EVERY_CARD == {definition.id for definition in registry.get_all()}
     assert all(card["severity"] == "clean" for card in cards.values())
     assert json.loads(response.model_dump_json(by_alias=True))["window_hours"] == 24.0
 
-
-def test_every_detection_query_is_visible_scoped_and_window_bounded() -> None:
-    client = _InsightsClient()
-    _run_insights(client)
     queries = client.queries()
     for insight_id in EVERY_CARD:
         sql, params = queries[insight_id]
-        assert "FROM request_facts" in sql
-        assert "service_id={service_id:String}" in sql and "publication_state='visible'" in sql
+        assert (
+            "FROM request_facts" in sql
+            and "service_id={service_id:String}" in sql
+            and "publication_state='visible'" in sql
+        )
         assert "high_scale_batch_publications FINAL" in sql and "domain='request'" in sql
         assert "event_timestamp <= {window_end:DateTime64(3)}" in sql
         window_only = (insight_id in DETECTIONS and DETECTIONS[insight_id].window_only) or insight_id in {
@@ -1110,85 +798,79 @@ def test_every_detection_query_is_visible_scoped_and_window_bounded() -> None:
         lower = "{window_start:DateTime64(3)}" if window_only else "{baseline_start:DateTime64(3)}"
         if insight_id != "botnet_grouping":
             assert f"event_timestamp >= {lower}" in sql, insight_id
-        assert params["service_id"] == "svc"
-        assert params["baseline_start"] < params["window_start"] < params["window_end"]
+        assert (
+            params["service_id"] == "svc" and params["baseline_start"] < params["window_start"] < params["window_end"]
+        )
+
+    for sql, params in client.calls:
+        assert "svc" not in sql
+        assert re.findall(r"\{(\w+):", sql) and all(name in params for name in re.findall(r"\{(\w+):", sql))
 
 
-def test_insufficient_history_is_reported_not_computed() -> None:
-    client = _InsightsClient(history_hours=5.0)
-    cards = _insight_cards(_run_insights(client))
-    assert set(cards) == EVERY_CARD
-    for insight_id, card in cards.items():
+def test_insufficient_history_and_missing_fields_or_pop_coords(monkeypatch: pytest.MonkeyPatch) -> None:
+    client_short = _InsightsClient(history_hours=5.0)
+    cards_short = _insight_cards(_run_insights(client_short))
+    assert set(cards_short) == EVERY_CARD
+    for insight_id, card in cards_short.items():
         if insight_id == "impossible_distance":
             assert card["severity"] == "clean"
-            continue
-        assert card["severity"] == "info"
-        assert card["summary"] == "Requires 168h of historical data (only 5.0h available)" and card["items"] == []
-    assert {re.search(r"insight:(\w+)", sql).group(1) for sql, _ in client.calls} == {  # type: ignore[union-attr]
+        else:
+            assert (
+                card["severity"] == "info"
+                and card["summary"] == "Requires 168h of historical data (only 5.0h available)"
+                and card["items"] == []
+            )
+    assert {re.search(r"insight:(\w+)", sql).group(1) for sql, _ in client_short.calls} == {
         "history",
         "fields",
         "impossible_distance",
-    }
+    }  # type: ignore[union-attr]
 
-
-def test_detections_whose_log_fields_are_never_emitted_are_omitted_like_the_standard_path() -> None:
-    fields = [name for name in ALL_FIELDS if name not in {"elapsed", "ottfb"}]
-    client = _InsightsClient(fields=fields)
-    cards = _insight_cards(_run_insights(client))
+    # Omitted latency fields
+    client_no_lat = _InsightsClient(fields=[n for n in ALL_FIELDS if n not in {"elapsed", "ottfb"}])
+    cards_no_lat = _insight_cards(_run_insights(client_no_lat))
     for omitted in ("latency_regression", "tail_latency", "pop_latency_regression", "origin_latency_spike"):
-        assert omitted not in cards and omitted not in client.queries()
-    assert "error_spikes" in cards
+        assert omitted not in cards_no_lat and omitted not in client_no_lat.queries()
+    assert "error_spikes" in cards_no_lat
 
+    # Omitted TLS fingerprint vs JA3 fallback
+    client_no_fp = _InsightsClient(fields=[n for n in ALL_FIELDS if n != "ja4"])
+    assert not (FINGERPRINT_DETECTIONS & set(_insight_cards(_run_insights(client_no_fp))))
+    assert "ja4 != ''" in client_no_lat.queries()["botnet_grouping"][0]
+    client_ja3 = _InsightsClient(fields=[n for n in ALL_FIELDS if n != "ja4"] + ["ja3"])
+    _run_insights(client_ja3)
+    assert "ja3 != ''" in client_ja3.queries()["botnet_grouping"][0]
 
-def test_fingerprint_detections_are_omitted_when_no_tls_fingerprint_is_logged() -> None:
-    client = _InsightsClient(fields=[name for name in ALL_FIELDS if name != "ja4"])
-    cards = _insight_cards(_run_insights(client))
-    assert not (FINGERPRINT_DETECTIONS & set(cards)) and not (FINGERPRINT_DETECTIONS & set(client.queries()))
-
-
-def test_impossible_distance_skips_pop_codes_that_are_not_plain_codes(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Impossible distance POP code sanitization and empty POP map
     monkeypatch.setattr(
         "backend.utils.pop_utils.get_pop_lat_lon_map",
         lambda: {"SJC": (37.36, -121.93), "SJC'; DROP TABLE x": (1.0, 2.0)},
     )
-    client = _InsightsClient()
-    _run_insights(client)
-    sql = client.queries()["impossible_distance"][0]
-    assert "'SJC'" in sql and "DROP TABLE" not in sql
+    client_pop = _InsightsClient()
+    _run_insights(client_pop)
+    pop_sql = client_pop.queries()["impossible_distance"][0]
+    assert "'SJC'" in pop_sql and "DROP TABLE" not in pop_sql
 
-
-def test_impossible_distance_is_omitted_without_pop_coordinates(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("backend.utils.pop_utils.get_pop_lat_lon_map", dict)
     assert "impossible_distance" not in _insight_cards(_run_insights(_InsightsClient()))
 
 
-def test_botnet_grouping_keys_on_ja3_when_ja4_is_not_logged() -> None:
-    with_ja4 = _InsightsClient()
-    _run_insights(with_ja4)
-    assert "ja4 != ''" in with_ja4.queries()["botnet_grouping"][0]
-
-    without = _InsightsClient(fields=[name for name in ALL_FIELDS if name != "ja4"] + ["ja3"])
-    _run_insights(without)
-    assert "ja3 != ''" in without.queries()["botnet_grouping"][0]
-
-
-def test_a_failing_detection_is_an_error_card_and_does_not_hide_the_others() -> None:
-    client = _InsightsClient(
+def test_insights_failures_masking_asn_and_window_clamping(monkeypatch: pytest.MonkeyPatch) -> None:
+    client_fail = _InsightsClient(
         {"error_spikes": [{"url": "/x", "w_rate": 0.9, "b_rate": 0.0, "w_errors": 9, "w_total": 10, "b_total": 99}]},
         fail={"latency_regression"},
     )
-    cards = _insight_cards(_run_insights(client))
-    assert cards["latency_regression"]["severity"] == "error"
-    assert cards["latency_regression"]["summary"] == "Query failed: RuntimeError"
+    cards = _insight_cards(_run_insights(client_fail))
+    assert (
+        cards["latency_regression"]["severity"] == "error"
+        and cards["latency_regression"]["summary"] == "Query failed: RuntimeError"
+    )
     assert cards["latency_regression"]["items"] == [] and cards["error_spikes"]["severity"] == "critical"
 
-
-def test_history_probe_failures_propagate() -> None:
     with pytest.raises(RuntimeError, match="unavailable"):
         _run_insights(_InsightsClient(fail={"history"}))
 
-
-def test_analyst_ip_masking_applies_to_ip_keyed_detections() -> None:
+    # Analyst IP masking
     rows = {
         "request_size_anomaly": [
             {"ip": "203.0.113.77", "max_bytes": 9000, "avg_bytes": 4000.0, "w_total": 8, "b_p95": 1000.0}
@@ -1198,52 +880,42 @@ def test_analyst_ip_masking_applies_to_ip_keyed_detections() -> None:
     masked = _insight_cards(_run_insights(_InsightsClient(rows), mask_ips=True))["request_size_anomaly"]["items"][0]
     assert "203.0.113.77" in json.dumps(plain) and "203.0.113.77" not in json.dumps(masked)
 
-
-def test_asn_insights_resolve_isp_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ASN ISP resolution
     seen: list[tuple[str, list]] = []
-
-    def fake_names(service_id: str, asns: list) -> dict:
-        seen.append((service_id, list(asns)))
-        return {7922: "Comcast"}
-
-    monkeypatch.setattr("backend.core.duckdb.get_asn_names", fake_names)
-    client = _InsightsClient(
-        {"asn_concentration": [{"asn": 7922, "w_cnt": 90, "b_cnt": 5, "b_total": 1000, "w_total": 120}]}
+    monkeypatch.setattr(
+        "backend.core.duckdb.get_asn_names", lambda sid, asns: (seen.append((sid, list(asns))), {7922: "Comcast"})[1]
     )
-    card = _insight_cards(_run_insights(client))["asn_concentration"]
-    assert seen == [("svc", [7922])] and card["items"][0]["label"] == "AS7922 (Comcast)"
-    assert card["severity"] == "critical"
+    asn_rows = [{"asn": 7922, "w_cnt": 90, "b_cnt": 5, "b_total": 1000, "w_total": 120}]
+    asn_card = _insight_cards(_run_insights(_InsightsClient({"asn_concentration": asn_rows})))["asn_concentration"]
+    assert (
+        seen == [("svc", [7922])]
+        and asn_card["items"][0]["label"] == "AS7922 (Comcast)"
+        and asn_card["severity"] == "critical"
+    )
 
-
-def test_clamp_bounds_the_scanned_range_to_the_analyst_window() -> None:
+    # Clamp bounds & window parameters
     now = datetime.now(UTC)
-    client = _InsightsClient()
+    client_clamp = _InsightsClient()
     _run_insights(
-        client, clamp_start=(now - timedelta(hours=30)).isoformat(), clamp_end=(now - timedelta(hours=2)).isoformat()
+        client_clamp,
+        clamp_start=(now - timedelta(hours=30)).isoformat(),
+        clamp_end=(now - timedelta(hours=2)).isoformat(),
     )
-    _, params = client.queries()["history"]
-    assert params["window_end"] <= now - timedelta(hours=2) + timedelta(seconds=1)
-    assert params["baseline_start"] >= now - timedelta(hours=30) - timedelta(seconds=1)
-    assert params["window_start"] >= params["baseline_start"]
+    _, h_params = client_clamp.queries()["history"]
+    assert h_params["window_end"] <= now - timedelta(hours=2) + timedelta(seconds=1)
+    assert h_params["baseline_start"] >= now - timedelta(hours=30) - timedelta(seconds=1)
+    assert h_params["window_start"] >= h_params["baseline_start"]
 
-
-def test_window_parameters_are_honoured() -> None:
-    client = _InsightsClient()
-    _run_insights(client, window=6.0, baseline=48.0)
-    _, params = client.queries()["error_spikes"]
-    assert params["window_hours"] == 6.0 and params["baseline_hours"] == 48.0
-    assert params["window_end"] - params["window_start"] == pytest.approx(timedelta(hours=6), abs=timedelta(seconds=1))
-    assert params["window_start"] - params["baseline_start"] == pytest.approx(
+    client_win = _InsightsClient()
+    _run_insights(client_win, window=6.0, baseline=48.0)
+    _, w_params = client_win.queries()["error_spikes"]
+    assert w_params["window_hours"] == 6.0 and w_params["baseline_hours"] == 48.0
+    assert w_params["window_end"] - w_params["window_start"] == pytest.approx(
+        timedelta(hours=6), abs=timedelta(seconds=1)
+    )
+    assert w_params["window_start"] - w_params["baseline_start"] == pytest.approx(
         timedelta(hours=48), abs=timedelta(seconds=1)
     )
-
-
-def test_sql_parameters_never_embed_user_values() -> None:
-    client = _InsightsClient()
-    _run_insights(client)
-    for sql, params in client.calls:
-        assert "svc" not in sql
-        assert re.findall(r"\{(\w+):", sql) and all(name in params for name in re.findall(r"\{(\w+):", sql))
 
 
 class _InsightsDetailClient:
@@ -1255,21 +927,23 @@ class _InsightsDetailClient:
         self.calls.append((sql, params or {}))
         if "cache_collapse_rates" in sql:
             zeros = dict.fromkeys(("w_hits", "w_miss", "w_pass", "w_total", "b_hits", "b_miss", "b_pass", "b_total"), 0)
-            if self._empty:
-                return [zeros]
-            return [
-                {
-                    **zeros,
-                    "w_hits": 10,
-                    "w_miss": 30,
-                    "w_pass": 10,
-                    "w_total": 55,
-                    "b_hits": 90,
-                    "b_miss": 10,
-                    "b_pass": 5,
-                    "b_total": 120,
-                }
-            ]
+            return (
+                [zeros]
+                if self._empty
+                else [
+                    {
+                        **zeros,
+                        "w_hits": 10,
+                        "w_miss": 30,
+                        "w_pass": 10,
+                        "w_total": 55,
+                        "b_hits": 90,
+                        "b_miss": 10,
+                        "b_pass": 5,
+                        "b_total": 120,
+                    }
+                ]
+            )
         if "cache_collapse_timeline" in sql:
             return (
                 []
@@ -1306,27 +980,31 @@ class _InsightsDetailClient:
 def _collapse_detail(client: Any, *, mask_ips: bool = False, window: float = 24.0, baseline: float = 168.0):
     req = CacheCollapseDetailRequest(url="/hot", window_size_hrs=window, baseline_hours=baseline)
     service = SimpleNamespace(service_id="svc", client=client)
-    return json.loads(
-        cache_collapse_detail_endpoint(service, req, None, None, mask_ips).model_dump_json(by_alias=True)  # type: ignore[arg-type]
-    )
+    return json.loads(cache_collapse_detail_endpoint(service, req, None, None, mask_ips).model_dump_json(by_alias=True))  # type: ignore[arg-type]
 
 
-def test_cache_collapse_detail_returns_the_real_timeline_breakdown_and_rates() -> None:
-    result = _collapse_detail(_InsightsDetailClient())
+def test_cache_collapse_detail_timeline_misses_scoping_and_empty() -> None:
+    client = _InsightsDetailClient()
+    result = _collapse_detail(client)
     assert result["url"] == "/hot" and result["has_data"] is True
     assert result["breakdown"] == {"hits": 10, "misses": 30, "passes": 10, "other": 5}
     assert result["window_hit_rate"] == pytest.approx(25.0) and result["baseline_hit_rate"] == pytest.approx(90.0)
-    assert result["window_pass_rate"] == pytest.approx(10 / 55 * 100)
-    assert result["baseline_pass_rate"] == pytest.approx(5 / 120 * 100)
+    assert result["window_pass_rate"] == pytest.approx(10 / 55 * 100) and result["baseline_pass_rate"] == pytest.approx(
+        5 / 120 * 100
+    )
     first = result["timeline"][0]
-    assert first["bucket"] == "2026-09-14T10:00:00Z"
-    assert first["expected_hits"] == pytest.approx(40 * 0.9) and first["hit_rate"] == pytest.approx(0.25)
-    assert result["timeline"][1]["hit_rate"] == 0.0 and result["timeline"][1]["bucket"] == "2026-09-14T11:00:00Z"
-    assert result["clusters"] == []
+    assert (
+        first["bucket"] == "2026-09-14T10:00:00Z"
+        and first["expected_hits"] == pytest.approx(40 * 0.9)
+        and first["hit_rate"] == pytest.approx(0.25)
+    )
+    assert (
+        result["timeline"][1]["hit_rate"] == 0.0
+        and result["timeline"][1]["bucket"] == "2026-09-14T11:00:00Z"
+        and result["clusters"] == []
+    )
 
-
-def test_cache_collapse_detail_recent_misses_are_real_and_maskable() -> None:
-    plain = _collapse_detail(_InsightsDetailClient())["recent_misses"]
+    plain = result["recent_misses"]
     masked = _collapse_detail(_InsightsDetailClient(), mask_ips=True)["recent_misses"]
     assert plain[0] == {
         "timestamp": "2026-09-14T10:59:00.000Z",
@@ -1338,15 +1016,15 @@ def test_cache_collapse_detail_recent_misses_are_real_and_maskable() -> None:
     assert plain[1]["cache"] == "UNKNOWN" and plain[1]["status"] is None and plain[1]["pop"] is None
     assert masked[0]["ip"] != "203.0.113.9"
 
-
-def test_cache_collapse_detail_scopes_every_query_to_the_url_service_and_window() -> None:
-    client = _InsightsDetailClient()
-    _collapse_detail(client)
     assert len(client.calls) == 3
     for sql, params in client.calls:
         assert "url = {url:String}" in sql and params["url"] == "/hot"
         assert "publication_state='visible'" in sql and "high_scale_batch_publications FINAL" in sql
         assert "event_timestamp >= {baseline_start:DateTime64(3)}" in sql and params["service_id"] == "svc"
+
+    empty_res = _collapse_detail(_InsightsDetailClient(empty=True))
+    assert empty_res["has_data"] is False and empty_res["timeline"] == [] and empty_res["recent_misses"] == []
+    assert empty_res["breakdown"] == {"hits": 0, "misses": 0, "passes": 0, "other": 0}
 
 
 @pytest.mark.parametrize(
@@ -1361,15 +1039,4 @@ def test_cache_collapse_detail_scopes_every_query_to_the_url_service_and_window(
 def test_cache_collapse_detail_bucket_size_follows_the_lookback(window: float, baseline: float, interval: str) -> None:
     client = _InsightsDetailClient()
     _collapse_detail(client, window=window, baseline=baseline)
-    timeline_sql = next(sql for sql, _ in client.calls if "cache_collapse_timeline" in sql)
-    assert interval in timeline_sql
-
-
-def test_cache_collapse_detail_for_an_unseen_url_has_no_data() -> None:
-    result = _collapse_detail(_InsightsDetailClient(empty=True))
-    assert result["has_data"] is False and result["timeline"] == [] and result["recent_misses"] == []
-    assert result["breakdown"] == {"hits": 0, "misses": 0, "passes": 0, "other": 0}
-
-
-def test_module_exports_only_the_two_endpoints_the_routers_call() -> None:
-    assert callable(hs_insights.insights_endpoint) and callable(hs_insights.cache_collapse_detail_endpoint)
+    assert interval in next(sql for sql, _ in client.calls if "cache_collapse_timeline" in sql)

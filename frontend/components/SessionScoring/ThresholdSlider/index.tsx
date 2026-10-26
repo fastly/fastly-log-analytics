@@ -7,14 +7,13 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Check, Loader2, ShieldCheck, ShieldOff, SlidersHorizontal } from 'lucide-react'
 
 import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { ThresholdSliderHelp, useScoringQuery, scoringConfigCompositeKey } from '@/components/SessionScoring/help-content'
+import { ThresholdSliderHelp, useScoringQuery, scoringConfigCompositeKey } from '@/components/SessionScoring/ScoringAdminPanels'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Slider } from '@/components/ui/slider'
-import { client } from '@/lib/api'
-import { unwrapClient } from '@/lib/api'
-import { formatCount, formatPercent } from '@/lib/format'
+import { client, unwrapClient } from "@/lib/api";
+import { formatCount, formatPercent } from "@/lib/utils"
 import type { Expect, Simplify, WireParity, WithRequired, WithRequiredNullable, components } from '@/types/api'
 
 // ─── ThresholdSliderControls ─────────────────────────────────────────────────

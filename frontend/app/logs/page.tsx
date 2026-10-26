@@ -3,7 +3,7 @@ import { HydrationBoundary } from '@tanstack/react-query'
 import { fetchCronRunsServerSide, fetchCronScheduleServerSide } from '@/lib/ssr/upstream'
 import { firstParam, resolvePageServiceId, seedDehydratedState } from '@/lib/ssr/upstream'
 import LogsClient from './_sections/LogsClient'
-import { queryKeys } from '@/lib/query-keys'
+import { queryKeys } from "@/lib/api"
 
 // Per-request RSC shell for /logs. Pre-fetches the 500-row cron-runs slice
 // and the cron-schedule tile matrix server-side and dehydrates both into

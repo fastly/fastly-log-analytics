@@ -1,13 +1,9 @@
 import { cookies, headers } from 'next/headers'
 import { QueryClient, dehydrate } from '@tanstack/react-query'
 import type { DehydratedState, QueryKey } from '@tanstack/react-query'
-import {
-  historyHoursFromExtents,
-  pickInsightsDefault,
-} from '@/lib/insights-defaults'
+import { historyHoursFromExtents, pickInsightsDefault, quantizeAnchor } from "@/lib/utils";
 import type { Schema } from '@/types/api'
 import type { components } from '@/types/api.generated'
-import { quantizeAnchor } from '@/lib/utils'
 
 import { classifySsrRequest, parseSsrJson, registerSsrHeaders, ssrUpstreamGet } from '@/lib/api'
 

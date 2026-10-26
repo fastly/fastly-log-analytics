@@ -18,8 +18,8 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from backend.utils.date_utils import parse_hour_key, parse_hour_key_strict
 from backend.utils.sql_validator import escape_sql_literal, is_safe_ident
+from backend.utils.telemetry import parse_hour_key, parse_hour_key_strict
 
 if TYPE_CHECKING:
     import duckdb
